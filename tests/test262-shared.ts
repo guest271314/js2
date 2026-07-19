@@ -34,7 +34,7 @@ import {
   TEST_CATEGORIES,
   type Test262Scope,
 } from "./test262-runner.js";
-import { assembleOriginalHarness } from "./test262-original-harness.js";
+import { assembleOriginalHarness, assembleNativeHarness } from "./test262-original-harness.js";
 
 // Prevent unhandled Promise rejections from crashing the vitest fork.
 process.on("unhandledRejection", () => {});
@@ -171,6 +171,15 @@ const TEST262_ORACLE_MODE = process.env.TEST262_ORACLE_MODE;
 const IS_HOST_LANE = TEST262_TARGET === undefined;
 const ORACLE_LANE: "honest" | "fast-nativeharness" =
   TEST262_ORACLE_MODE === "fast" && IS_HOST_LANE ? "fast-nativeharness" : "honest";
+
+// (#3461) Fast native-harness oracle — the execution side of the fast lane that
+// #3462 stamps above. Active ONLY when `TEST262_ORACLE_MODE=fast` AND the run is
+// the HOST lane (`TEST262_TARGET` undefined — WasmGC + JS host). Standalone/
+// linear/wasi cannot host-execute the harness (they forbid host imports), so they
+// always use the honest whole-assembly v8 oracle regardless of the flag — exactly
+// the condition captured by `ORACLE_LANE === "fast-nativeharness"`. Absent flag ⇒
+// honest path, byte-identical to today (AC#2).
+const NATIVE_HARNESS_ORACLE = ORACLE_LANE === "fast-nativeharness";
 
 function getCachePaths(wrappedSource: string): { wasmPath: string; metaPath: string } {
   const hash = createHash("md5")
@@ -627,6 +636,14 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // conformance oracle: they can delete checks or turn top-level
             // globals into function locals.
             const harnessAssembly = assembleOriginalHarness(source, meta);
+            // (#3461) Fast native-harness oracle (host lane). When active, the
+            // worker path below compiles ONLY `bindingShim + body` and runs the
+            // harness prefix natively. The in-process FIXTURE path (rare, ~172
+            // multi-module tests) keeps the honest whole-assembly compile — it
+            // has no native runInContext step — so those rows stay honest even
+            // in a fast run. When the flag is off, `nativeAssembly` is null and
+            // nothing below diverges from the honest path (AC#2).
+            const nativeAssembly = NATIVE_HARNESS_ORACLE ? assembleNativeHarness(source, meta) : null;
             const inferModuleStrictArguments = isModuleGoal(category, meta, source);
             const isNegative =
               meta.negative &&
@@ -897,6 +914,20 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             // Every test is compiled and executed fresh each run.
             const wasmPath = "";
             const metaPath = "";
+            // (#3461) In fast native-harness mode the worker compiles ONLY
+            // `bindingShim + body` and runs `harnessPrefix` natively. The prefix
+            // is strict-neutral (identical for the primary and strict-rerun
+            // variants), so a single `nativeHarnessOpts` object carries it to all
+            // run sites, including the poison/timeout retries. When the flag is
+            // off, `nativeAssembly` is null → `nativeHarnessOpts` is empty and the
+            // opts objects are byte-identical to the honest path (AC#2).
+            const nativeHarnessOpts: { nativeHarness?: boolean; harnessPrefix?: string } = nativeAssembly
+              ? { nativeHarness: true, harnessPrefix: nativeAssembly.primary.harnessPrefix }
+              : {};
+            if (nativeAssembly) {
+              compileSource = nativeAssembly.primary.bindingShim + nativeAssembly.primary.body;
+              lineAdjustOffset = nativeAssembly.primary.bodyLineOffset;
+            }
             const runHarnessSource = (variantSource: string, label: string) =>
               pool!.runTest(
                 variantSource,
@@ -911,6 +942,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   label,
                   target: TEST262_TARGET,
                   inferModuleStrictArguments,
+                  ...nativeHarnessOpts,
                 },
                 30_000,
               );
@@ -919,8 +951,12 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             if (r.status === "pass" && harnessAssembly.strictRerun) {
               const primaryCompileMs = r.compileMs ?? 0;
               const primaryExecMs = r.execMs ?? 0;
-              compileSource = harnessAssembly.strictRerun.source;
-              lineAdjustOffset = harnessAssembly.strictRerun.bodyLineOffset;
+              compileSource = nativeAssembly?.strictRerun
+                ? nativeAssembly.strictRerun.bindingShim + nativeAssembly.strictRerun.body
+                : harnessAssembly.strictRerun.source;
+              lineAdjustOffset = nativeAssembly?.strictRerun
+                ? nativeAssembly.strictRerun.bodyLineOffset
+                : harnessAssembly.strictRerun.bodyLineOffset;
               const strictResult = await runHarnessSource(compileSource, `${relPath} [strict rerun]`);
               r = {
                 ...strictResult,
@@ -979,6 +1015,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       label: relPath + " [poison retry]",
                       target: TEST262_TARGET,
                       inferModuleStrictArguments,
+                      ...nativeHarnessOpts,
                     },
                     RETRY_TIMEOUT_MS,
                   ),
@@ -1050,6 +1087,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                       label: relPath + " [retry]",
                       target: TEST262_TARGET,
                       inferModuleStrictArguments,
+                      ...nativeHarnessOpts,
                     },
                     RETRY_TIMEOUT_MS,
                   ),
