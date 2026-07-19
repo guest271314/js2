@@ -2,11 +2,12 @@
 id: 2963
 title: "Reify builtins as first-class values: retire the `__get_builtin` dynamic-shape CE cluster (~400 compile errors)"
 status: in-progress
-assignee: ttraenkler/fable-identity
+assignee: ttraenkler/opus-dev-b
 sprint: current
 model: fable
+fable_role: spec
 created: 2026-07-02
-updated: 2026-07-09
+updated: 2026-07-18
 priority: high
 horizon: l
 feasibility: hard
@@ -17,6 +18,16 @@ language_feature: builtins
 goal: standalone-mode
 related: [1472, 2036, 2860, 2964]
 origin: "2026-07-02 July Fable audit §3 cluster 5 (biggest standalone CE family; #1472 Phase-C refusal successor)"
+# (#2963 Tier 2a) The reified Number.is* closure body REUSES the settled
+# `__unbox_number` native — the SAME unbox the direct `Number.is*(n)` call path
+# uses via `compileNumberIsPredicate` — to recover the f64 from the boxed arg
+# after the `__typeof_number` type guard. It is NOT a fresh hand-rolled
+# ToNumber/ToString/ToPrimitive matrix (the coercion engine is deliberately
+# bypassed here because §21.1.2.x requires NO coercion — a non-Number arg is
+# `false`), so the +2 __unbox_number growth in builtin-value-read.ts is a
+# reviewed, intentional reuse of an existing coercion primitive.
+coercion-sites-allow:
+  - src/codegen/builtin-value-read.ts
 ---
 
 # #2963 — reading a builtin as a value is a compile error standalone
@@ -71,19 +82,19 @@ which already retired much of the raw cluster. Re-probing current `main`
 **live** cluster splits into distinct sub-problems that must NOT be
 conflated:
 
-| Form (current main)                                   | Status on main | Owner / phase |
-| ----------------------------------------------------- | -------------- | ------------- |
-| `const f = Array.isArray` **identity** (`f === f`)    | **wrong (`false`)** — fresh `struct.new` per read | **Phase 1 (this PR)** |
-| `const r = Promise.resolve` as value                  | CE `#1907`     | Phase 2 — but Promise itself is host-backed (`Promise_resolve` import even for the DIRECT call), so reification cannot be host-free until Promise is native (#2867/#2905/#2959). |
-| `const f = Number.isInteger` (host-free predicate)    | CE `#1907`     | Phase 2 — **blocked** (see value-call-path blocker below). |
-| `const f = Array.of` as value                         | CE `#1907`     | Phase 2 — variadic; reified fixed-arity closure needs rest handling. |
-| `const k = Symbol.matchAll`                            | CE `#1907`     | Phase 2 — non-well-known Symbol value (well-known ones already fold, #2610). |
-| `X extends Object` constructor-object identity        | leaks `__new_Object` | **separate** — #2984 / sr-objsub. |
-| array-iterator `%ArrayIteratorPrototype%` identity     | leaks `__iterator`   | **separate** — opus-12b / #2965 cluster. |
-| `Object.defineProperty(globalThis, …)`                 | leaks `__get_globalThis` | **separate** — #2988. |
+| Form (current main)                                | Status on main                                    | Owner / phase                                                                                                                                                                    |
+| -------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `const f = Array.isArray` **identity** (`f === f`) | **wrong (`false`)** — fresh `struct.new` per read | **Phase 1 (this PR)**                                                                                                                                                            |
+| `const r = Promise.resolve` as value               | CE `#1907`                                        | Phase 2 — but Promise itself is host-backed (`Promise_resolve` import even for the DIRECT call), so reification cannot be host-free until Promise is native (#2867/#2905/#2959). |
+| `const f = Number.isInteger` (host-free predicate) | CE `#1907`                                        | Phase 2 — **blocked** (see value-call-path blocker below).                                                                                                                       |
+| `const f = Array.of` as value                      | CE `#1907`                                        | Phase 2 — variadic; reified fixed-arity closure needs rest handling.                                                                                                             |
+| `const k = Symbol.matchAll`                        | CE `#1907`                                        | Phase 2 — non-well-known Symbol value (well-known ones already fold, #2610).                                                                                                     |
+| `X extends Object` constructor-object identity     | leaks `__new_Object`                              | **separate** — #2984 / sr-objsub.                                                                                                                                                |
+| array-iterator `%ArrayIteratorPrototype%` identity | leaks `__iterator`                                | **separate** — opus-12b / #2965 cluster.                                                                                                                                         |
+| `Object.defineProperty(globalThis, …)`             | leaks `__get_globalThis`                          | **separate** — #2988.                                                                                                                                                            |
 
 The three "separate" rows are the sibling gaps three other devs found the
-same day — they share the *theme* (own-object identity) but each needs its
+same day — they share the _theme_ (own-object identity) but each needs its
 own receiver-class MOP (see `project_2984_2988_2992_convergent_reification_substrate`);
 they are **not** in #2963's lane.
 
@@ -102,7 +113,7 @@ behind an `if (ref.is_null) { struct.new; global.set }` guard emitted in the
 
 **Why body-lazy-init, NOT a const-init global** (the load-bearing design
 decision): the singleton's `struct.new` operand is `ref.func <closureIdx>`,
-and `closureIdx` is a *defined-function* index that shifts whenever a late
+and `closureIdx` is a _defined-function_ index that shifts whenever a late
 import lands (`addUnionImports` / `shiftLateImportIndices` / the string-import
 shifter). All three shifters walk function bodies **and nested
 `.then`/`.body`/`.else` arrays** (verified) but **do NOT walk
@@ -111,10 +122,10 @@ stale and point at the wrong function (a silent funcidx-desync regression, the
 family of `project_standalone_hostimport_gate_index_shift`). Emitting the
 `ref.func` inside an `if.then` in `fctx.body` keeps it in a shift-covered
 array. (The `$__hole` const-init singleton in `array-holes.ts` is safe only
-because it has *no* funcref operand.)
+because it has _no_ funcref operand.)
 
 The shared mutable `bfnstate` (delete-bits) field being one instance across
-all reads is *spec-correct*: `delete fn.name` through any reference mutates the
+all reads is _spec-correct_: `delete fn.name` through any reference mutates the
 same object.
 
 **Scope**: only the standalone static-method **value-read** site
@@ -144,7 +155,7 @@ value-call dispatch integration bug** found while prototyping `Number.isInteger`
   any-callable dispatch (`expressions/calls.ts` ~13230–13640,
   `__callable_param_*`) works for them.
 - A reified value stored in a `const f = …` widens to **`externref`** (its TS
-  type is a function), so the call site must *recover* the closure by
+  type is a function), so the call site must _recover_ the closure by
   `ref.test`/`ref.cast` against a candidate struct type. Candidate selection is
   keyed by **arity**, not exact param types — so a new **`f64`-param** closure
   (e.g. `Number.isInteger`) mis-selects among same-arity candidates and the
@@ -157,7 +168,7 @@ value-call dispatch integration bug** found while prototyping `Number.isInteger`
   funcs). Once that lands, the singleton substrate here wires every host-free
   method (`Number.is*`, `Math.*` unary/binary, `Object.is` scalar, …) trivially
   via the same `ensureStandaloneBuiltinStaticMethodClosure` switch.
-- **Promise.\*** (15 of the sampled refusals) is a *further* sub-case: even the
+- **Promise.\*** (15 of the sampled refusals) is a _further_ sub-case: even the
   DIRECT `Promise.resolve(5)` call leaks a `Promise_resolve` host import today,
   so reifying it host-free is gated on native Promise (#2867/#2905/#2959), not
   on this mechanism. Until then a reified `Promise.resolve` would reuse the same
@@ -239,3 +250,211 @@ routing; owner-chain now shared), `src/codegen/context/types.ts`
 **Still open (Phase 2, unchanged):** the builtin `__get_builtin` CE-cluster
 reduction remains blocked on the value-call-path dispatch fix documented
 above — this PR does not touch it.
+
+## Implementation Plan (Fable, 2026-07-18) — Phase 2 re-grounded: the dispatch "blocker" is OBSOLETE; wire real bodies under the all-externref convention
+
+### Verify-first state (current main)
+
+The Phase-1 note above (2026-07-02) is stale in three load-bearing ways:
+
+1. **The substrate moved and grew.** The value-read machinery now lives in
+   `src/codegen/builtin-value-read.ts` (`ensureStandaloneBuiltinStaticMethodClosure`,
+   `:820`), with reflective-descriptor support in `builtin-static-gopd.ts` and
+   identity singletons via `pushBuiltinFnSingletonValueInstrs`
+   (`builtin-fn-meta.ts:303`). The wired set is no longer "3 methods" — it is
+   `Array.isArray`, `Object.keys`, `Object.getOwnPropertyDescriptor`,
+   `Reflect.get/has/set/ownKeys`, `JSON.stringify`, and variadic
+   `Math.max`/`Math.min` (#2933).
+2. **The hard-CE cluster is already structurally retired (#2984 Phase 3).**
+   The `default` arm (`builtin-value-read.ts:921–942`) reifies EVERY method in
+   `BUILTIN_STATIC_METHOD_ARITY` as an identity-stable, spec-shaped
+   (`.name`/`.length` meta subtype) closure whose body throws a **catchable
+   TypeError**. So feature-detection reads, identity compares, and descriptor
+   reflection all pass today; only _invoking_ an unwired extracted value
+   throws. The remaining conformance lever is therefore "give real bodies to
+   the throw-body methods", not "stop CE-ing".
+3. **The value-call dispatch fix is NOT a prerequisite anymore.** The Phase-1
+   blocker ("f64-param closure mis-selects among same-arity candidates") is
+   solved by _convention_, not by a dispatcher change: every reified closure
+   already takes **all-externref params** (or the single
+   `(ref null $vec_externref)` variadic param) — exactly the shape the inline
+   dynamic dispatcher's #2939 pre-registration restricts itself to, and the
+   #820/#1543 funcref-signature discrimination handles soundly. **Design rule
+   (normative for Phase 2): a reified builtin closure NEVER carries a scalar
+   (f64/i32) param type in its wrapper signature. Coercion happens INSIDE the
+   body.** `Math.max` is the worked precedent (vec-of-externref →
+   `__any_to_f64` per element → `f64.max` → `__any_box_f64`). Do not touch
+   `tryEmitInlineDynamicCall`.
+
+### Phase 2 worklist (each entry: params all-externref; body = unbox → existing native → box)
+
+Ordered by cluster size and body availability. All are `switch (key)` arms in
+`ensureStandaloneBuiltinStaticMethodClosure` replacing the generic throw body;
+each reuses the SAME native the direct-call path uses (observational identity
+with the direct call is the acceptance bar, per the `Reflect.get` precedent).
+
+| Tier | Methods                                                                                                | Body sketch                                                                                                                                                                                                                                                                                                           |
+| ---- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2a   | `Number.isInteger/isFinite/isNaN/isSafeInteger`                                                        | `ref.test $BoxedNumber` on the arg (via `any.convert_extern` + the settled tag-3 peel — NOT ToNumber; a non-number arg answers `0` per §21.1.2); on hit, unbox f64 and run the existing direct-call predicate lowering                                                                                                |
+| 2b   | `Object.is`                                                                                            | two externref args → the standalone SameValue helper the direct call uses (`calls.ts` Object.is arm; includes the −0/NaN discrimination). NB SameValue ≠ `===`; reuse, don't re-derive                                                                                                                                |
+| 2c   | `Math.<unary/binary fixed-arity>` (`abs`, `floor`, `ceil`, `trunc`, `sign`, `sqrt`, `atan2`, `pow`, …) | arg(s) → `__any_to_f64` (spec ToNumber on the boxed value; non-number → NaN, which is §21.3 behavior) → the existing self-hosted `src/stdlib/math.ts` native → `__any_box_f64`. One table-driven arm, not N hand-written cases: key on `BUILTIN_STATIC_METHOD_ARITY.Math` + the direct-call lowering's dispatch table |
+| 2d   | `Number.parseFloat/parseInt`                                                                           | route to the existing native parse entries (the standalone direct-call path); parseInt keeps the NaN radix sentinel                                                                                                                                                                                                   |
+| 2e   | `Date.now`                                                                                             | 0-arg; the direct-call lowering's time source (verify which import/native serves it standalone — if it is host-only, leave the throw body and record why)                                                                                                                                                             |
+| 2f   | `Array.of` (variadic)                                                                                  | the `$vec_externref` variadic convention (Math.max precedent): build a `$__vec_externref` from the args vec — elements are already externref, no per-element coercion                                                                                                                                                 |
+| 2g   | `Array.from` (1-arg iterable subset)                                                                   | ONLY the array-like/vec fast shape the direct call supports standalone; other inputs keep the catchable throw (document per-shape)                                                                                                                                                                                    |
+
+**Explicitly OUT (keep throw bodies, with the recorded reason):**
+`Promise.*` (host-backed even for direct calls — gated on native Promise,
+#3178 family); `Symbol.*` non-well-known (needs Symbol identity substrate);
+`JSON.parse` (needs the anyref-boundary return work noted in the #2933
+comment); anything whose direct-call path is itself still a host import
+standalone (reification must never mint a NEW host dependency — dual-mode
+rule).
+
+### Mechanics every arm must follow (the settled discipline)
+
+- **Pre-register before minting** (the #2704 lesson, already in the Math.max
+  arm): `addUnionImports` / `ensureAnyHelpers` / any `ensure*` the body needs
+  run BEFORE `getOrCreateFuncRefWrapperTypes`/`mintDefinedFunc`.
+- **Identity**: nothing to do — the singleton substrate
+  (`pushBuiltinFnSingletonValueInstrs`) and the meta subtype
+  (`.name`/`.length`) apply automatically once the arm exists; keep
+  `STANDALONE_STATIC_METHOD_META` in sync for newly-wired entries (the file
+  header requires it).
+- **Fallback**: if a required native is unavailable in the current mode,
+  degrade to `genericThrowBody` (the Math.max arm's pattern at `:906–913`),
+  never `return null` (null re-opens the #1907 CE).
+- **Byte-inertness**: host/gc lanes untouched (all sites are
+  `ctx.standalone`-gated); `prove-emit-identity` corpus must stay IDENTICAL.
+
+### Acceptance / measurement
+
+- Probe file per tier under `.tmp/`: extract → store in `any` local → call →
+  compare against the direct call's result, `--target standalone`, run not
+  just compile.
+- The issue's headline metric is re-based: count **catchable-TypeError
+  invocations** flipping to correct results on the standalone lane (the CE
+  count is already ~retired by Phase 3); before/after via the standalone
+  shard's `net_per_test`.
+- `[1,2].map(Number)` and `const f = Number.isInteger; [1.5, 2].filter(f)`
+  as e2e rows (the dispatcher path end-to-end with a wired body).
+- Full `merge_group` (broad-impact: touches the reflective/value substrate).
+
+### Sizing / routing
+
+Tier 2a+2b+2d: one M PR (opus). Tier 2c: one M PR (table-driven; the risk is
+per-method ToNumber edge cases — cite §21.3 per method in tests). Tier
+2f/2g: S–M. 2e: S after the standalone time-source check. Independent of
+#2916/#2651 (different substrate); no coordination needed beyond ordinary
+merge hygiene.
+
+### Phase 2 progress log
+
+- **Tier 2a — `Number.is{Integer,Finite,NaN,SafeInteger}` — DONE** (opus-dev-b,
+  2026-07-18). Wired real bodies in `ensureStandaloneBuiltinStaticMethodClosure`
+  (`builtin-value-read.ts`): fixed 1-arg `[externref] -> i32` closure, body =
+  `__typeof_number` guard (no ToNumber; the settled guard already excludes the
+  #2979 UNDEF_F64-sentinel `$BoxedNumber`, so `Number.isNaN(undefined)` is
+  correctly `false`) -> `__unbox_number` -> the **shared** `numberIsPredicateOps`
+  (new leaf `src/codegen/number-is-predicate-ops.ts`, also adopted by the direct
+  `call-builtin-static.ts` path -> observational identity guaranteed, byte-inert
+  over the 56-entry emit-identity corpus). Both natives are standalone-DEFINED
+  (host-free). Meta rows added to `STANDALONE_STATIC_METHOD_META`. Test:
+  `tests/issue-2963-number-is-value.test.ts` (8 cases: per-method invocation,
+  no-coercion, undefined/null/bool -> false, identity, `.name`, direct-form
+  non-regression).
+  - **Pre-existing gap surfaced (NOT introduced here, orthogonal follow-up):**
+    `.name`/`.length` reflective reads on a reified builtin value have a
+    multi-value dispatch collision — co-extracting two statics that share a
+    wrapper signature (verified on `main` with `Object.keys` + `Reflect.ownKeys`,
+    both `externref -> externref`; also `Array.isArray` + any `Number.is*`, both
+    `externref -> i32`) makes the SECOND value's `.name` mis-resolve, and
+    `.length` reads 0 for EVERY wired static (Math.max included). Invocation and
+    per-single-value `.name` are correct. Worth a dedicated issue on the reified
+    builtin-fn meta reflective-read dispatch.
+- **Tier 2b — `Object.is` (SameValue, §20.1.2.13) — DONE** (opus-dev-b,
+  2026-07-18; stacked on the Tier 2a PR). Fixed 2-arg `[externref, externref] ->
+i32` closure. The direct standalone `Object.is` only backs compile-time
+  same-typed scalar args (the general boxed `__object_is` is a host import), so
+  the reified body composes host-free: BOTH boxes Number (`__typeof_number`) ->
+  the shared `sameValueNumberOps` (new leaf `src/codegen/same-value-number-ops.ts`,
+  also adopted by the direct `Object.is` both-Number fast path — the IEEE-754
+  bit-compare + both-NaN clause, the ONLY arm where SameValue diverges from `===`:
+  `+0`/`-0` unequal, `NaN`/`NaN` equal); else -> `__extern_strict_eq` (SameValue
+  coincides with `===` for every non-Number case — object identity via `ref.eq`,
+  strings by content, null/undefined/boolean by value). Byte-inert (56-entry
+  corpus IDENTICAL). Meta row `Object.is` added. Test:
+  `tests/issue-2963-object-is-value.test.ts` (6 cases). The pre-existing
+  reflective-read gap is filed as #3424 (rides this PR).
+- Remaining Phase 2 tiers: 2c (table-driven `Math.*`), 2d
+  (`Number.parseFloat/parseInt`), 2e (`Date.now`), 2f (`Array.of`), 2g
+  (`Array.from` subset). `Promise.*` stays throwing (out of scope).
+
+### Resumer guide — Tiers 2c–2g (start here after 2a #3359 + 2b #3361 land)
+
+**Sequencing.** 2a (#3359) and 2b (#3361) were stacked and PAUSED. Do the
+remaining tiers **off clean `main`** once BOTH have landed — do NOT stack
+further (the stack was capped at 2a+2b for queue hygiene). Each tier is an
+independent S–M PR off `origin/main`. Do them in order, one PR each (or
+regroup per the "Sizing / routing" note above), re-merging `origin/main`
+between them since they touch the same hot files.
+
+**Shared-file conflict surface (why tiers can't run in parallel off main).**
+Every tier edits the SAME three spots, so two open tier-PRs conflict:
+
+1. `src/codegen/builtin-value-read.ts` — add a `case "<Builtin>.<method>":`
+   (type setup + `addUnionImports` / `ensure*` pre-registration) **before
+   `default:`**, and an `else if (key === "<Builtin>.<method>" &&
+!genericThrowBody)` **body block before the `genericThrowBody` arm**. The
+   `&& !genericThrowBody` guard is REQUIRED (else the degrade path double-fires).
+2. `src/codegen/builtin-fn-meta.ts` — add a `STANDALONE_STATIC_METHOD_META`
+   row (byte-equal to the `BUILTIN_STATIC_METHOD_ARITY` fallback; keep in sync
+   per the file header).
+3. `src/codegen/expressions/call-builtin-static.ts` — if the tier factors a
+   shared ops leaf (like `number-is-predicate-ops.ts` / `same-value-number-ops.ts`),
+   refactor the DIRECT call arm to consume it too (byte-inert — same Instr seq).
+
+**The invariant pattern (copy Tier 2a/2b):** params ALL-externref (or the one
+`$vec_externref` variadic param for Tier 2f — see the Math.max arm), coercion
+INSIDE the body, reuse the EXACT native the direct standalone call uses, and on
+any missing native degrade to `genericThrowBody` — NEVER `return null` (null
+re-opens the #1907 CE). Pre-register imports BEFORE `mintDefinedFunc` (#2704).
+Reused coercion primitives (`__unbox_number` etc.) ride this issue's
+`coercion-sites-allow:` frontmatter (file-level for `builtin-value-read.ts`);
+keep that key so the `quality` coercion-sites gate stays green.
+
+**Per-tier native to reuse (verify host-free standalone first):**
+
+- 2c `Math.<unary/binary>`: args → `__any_to_f64` (ToNumber; non-number→NaN,
+  §21.3) → the self-hosted `src/stdlib/math.ts` native the direct-call dispatch
+  table uses → `__box_number`. One table-driven arm keyed on the Math dispatch
+  table, not N cases.
+- 2d `Number.parseFloat/parseInt`: the global `parseFloat`/`parseInt` funcMap
+  entries (parseInt keeps the NaN radix sentinel) — but CONFIRM they're defined
+  funcs standalone, not host imports (the direct arm at call-builtin-static.ts
+  `~L411` reads `ctx.funcMap.get("parseFloat"|"parseInt")`).
+- 2e `Date.now`: 0-arg; VERIFY the standalone time source — if host-only, leave
+  the throw body and record why.
+- 2f `Array.of`: variadic `$vec_externref` convention (Math.max precedent,
+  `ctx.variadicBuiltinClosure`); elements already externref, no per-elem coerce.
+- 2g `Array.from`: ONLY the array-like/vec fast shape the direct call supports
+  standalone; other inputs keep the throw (document per-shape).
+
+**Validation harness (every tier):**
+
+- Standalone probe: `WebAssembly.instantiate(binary, {})` (no imports). Return
+  type `: number` — NOT `: i32` (a bare `i32` export hands JS a BOXED ref, not a
+  number, which looks like a bug). Avoid array methods (`filter`/`map`) in probes
+  — they pull an `env` import the empty-imports harness lacks; use scalar loops.
+- Byte-inertness (host/gc lanes MUST NOT change): from CLEAN `main` run
+  `npx tsx scripts/prove-emit-identity.mjs write --baseline /tmp/golden.json`,
+  then on the branch `npx tsx scripts/prove-emit-identity.mjs check --baseline
+/tmp/golden.json` → must print `IDENTICAL — all 56 (file,target) emits match`.
+- `.name`/`.length` reflective reads: do NOT assert `.name` in a MULTI-value
+  module (two same-signature statics co-extracted mis-dispatch — that's the
+  PRE-EXISTING #3424 bug, reproduced on main). Assert `.name` per single-value
+  module only; `.length` returns 0 for every reified static today (also #3424).
+- Test file per tier: `tests/issue-2963-<method>-value.test.ts`, mirroring
+  `issue-2963-number-is-value.test.ts` / `issue-2963-object-is-value.test.ts`
+  (a `runStandalone` helper + per-case + observational-identity-vs-direct rows).
+- Full `merge_group` (broad-impact: touches the reflective/value substrate).

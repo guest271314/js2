@@ -10,8 +10,11 @@
 // chain. Moved verbatim: the emitted Wasm is byte-identical.
 import { ts } from "../../ts-api.js";
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
+import { integrityVarKey, widenedVarKeyFromDecl } from "../widened-var-key.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { resolveArrayInfo } from "../array-methods.js";
+import { numberIsPredicateOps } from "../number-is-predicate-ops.js";
+import { sameValueNumberOps } from "../same-value-number-ops.js";
 import {
   emitArrayIteratorPrototypeSingleton,
   emitFunctionPrototypeObjectSingleton,
@@ -37,6 +40,7 @@ import { allocLocal } from "../context/locals.js";
 import { rollbackSpeculative, snapshotSpeculative } from "../context/speculative.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js";
+import { dynamicProtoRootFor, dynamicProtoFieldIdx, reserveDynprotoNorm } from "../dynamic-proto.js"; // (#802)
 import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "../generators-native.js";
 import {
   addStringConstantGlobal,
@@ -353,59 +357,19 @@ export function compileBuiltinStaticCall(
     }
     if (method === "isNaN" && expr.arguments.length >= 1) {
       // NaN !== NaN is true; for any other number it's false.
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.ne" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isNaN", v));
     }
     if (method === "isInteger" && expr.arguments.length >= 1) {
       // n === trunc(n) && isFinite(n)
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.trunc" },
-        { op: "f64.eq" },
-        // finite: n - n === 0 (Infinity - Infinity = NaN, NaN !== 0)
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.sub" },
-        { op: "f64.const", value: 0 },
-        { op: "f64.eq" },
-        { op: "i32.and" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isInteger", v));
     }
     if (method === "isFinite" && expr.arguments.length >= 1) {
       // isFinite(n) → n - n === 0.0
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.sub" },
-        { op: "f64.const", value: 0 },
-        { op: "f64.eq" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isFinite", v));
     }
     if (method === "isSafeInteger" && expr.arguments.length >= 1) {
       // isSafeInteger(n) = isInteger(n) && abs(n) <= MAX_SAFE_INTEGER
-      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
-        // isInteger: n === trunc(n) && isFinite(n)
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.trunc" },
-        { op: "f64.eq" },
-        { op: "local.get", index: v },
-        { op: "local.get", index: v },
-        { op: "f64.sub" },
-        { op: "f64.const", value: 0 },
-        { op: "f64.eq" },
-        { op: "i32.and" },
-        // abs(n) <= MAX_SAFE_INTEGER
-        { op: "local.get", index: v },
-        { op: "f64.abs" },
-        { op: "f64.const", value: Number.MAX_SAFE_INTEGER },
-        { op: "f64.le" },
-        { op: "i32.and" },
-      ]);
+      return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => numberIsPredicateOps("isSafeInteger", v));
     }
     if ((method === "parseFloat" || method === "parseInt") && expr.arguments.length >= 1) {
       // Delegate to the global parseInt / parseFloat host import
@@ -1389,14 +1353,17 @@ export function compileBuiltinStaticCall(
       }
     };
     if (ts.isIdentifier(arg0)) {
-      markIntegrity(arg0.text);
+      // (#3403) per-declaration key (USE-site) so `Object.freeze(o)` in one
+      // function does not mark every other function's `o` frozen.
+      markIntegrity(integrityVarKey(ctx, arg0));
     } else if (
       // (#2012) `const/let o = Object.<freeze|seal|preventExtensions>(<expr>)`
       ts.isVariableDeclaration(expr.parent) &&
       ts.isIdentifier(expr.parent.name) &&
       expr.parent.initializer === expr
     ) {
-      markIntegrity(expr.parent.name.text);
+      // (#3403) DECLARATION-site key (matches integrityVarKey at any later use).
+      markIntegrity(widenedVarKeyFromDecl(expr.parent.name));
     }
 
     // Compile the argument — returns the object itself (freeze/seal return their arg)
@@ -1820,6 +1787,66 @@ export function compileBuiltinStaticCall(
 
     // For known class instances, return the class prototype singleton
     if (className && ctx.classSet.has(className)) {
+      // (#802 Slice C) Marked-hierarchy receiver (standalone): the instance's
+      // dynamic `$__proto__` field takes precedence over the compile-time
+      // singleton. Field null = never dynamically set → the singleton (the
+      // pre-#802 answer); the explicit-null sentinel reads as JS null
+      // (`__dynproto_norm`); any other stored value is returned as-is.
+      if (ctx.standalone) {
+        const dpRoot = dynamicProtoRootFor(ctx, className);
+        const dpRootTypeIdx = dpRoot !== undefined ? ctx.structMap.get(dpRoot) : undefined;
+        const dpFieldIdx = dpRoot !== undefined ? dynamicProtoFieldIdx(ctx, dpRoot) : undefined;
+        if (dpRoot !== undefined && dpRootTypeIdx !== undefined && dpFieldIdx !== undefined) {
+          const argType = compileExpression(ctx, fctx, arg0);
+          if (!argType) {
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
+          const recvStructName =
+            argType.kind === "ref" ? ctx.typeIdxToStructName.get((argType as { typeIdx: number }).typeIdx) : undefined;
+          if (recvStructName !== undefined && dynamicProtoRootFor(ctx, recvStructName) === dpRoot) {
+            // Non-null struct receiver: inline field read.
+            const normIdx = reserveDynprotoNorm(ctx);
+            fctx.body.push({ op: "struct.get", typeIdx: dpRootTypeIdx, fieldIdx: dpFieldIdx });
+            const fLocal = allocLocal(fctx, `__dp_proto_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.tee", index: fLocal });
+            fctx.body.push({ op: "ref.is_null" });
+            // Build the lazy-singleton instrs off to the side so they can live
+            // in the then-arm (emitLazyProtoGet appends to fctx.body).
+            const saved = pushBody(fctx);
+            const haveSingleton = emitLazyProtoGet(ctx, fctx, className);
+            const singletonInstrs = fctx.body;
+            popBody(fctx, saved);
+            if (!haveSingleton) {
+              singletonInstrs.length = 0;
+              singletonInstrs.push({ op: "ref.null.extern" });
+            }
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: singletonInstrs,
+              else: [
+                { op: "local.get", index: fLocal },
+                { op: "call", funcIdx: normIdx },
+              ],
+            });
+            return { kind: "externref" };
+          }
+          // Nullable / externref-typed receiver: route through the generic
+          // native `__getPrototypeOf`, whose prepended (#802) marked arm reads
+          // the struct field (finalize fill). No trap on a null receiver.
+          if (argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+          const gptIdx = ensureLateImport(ctx, "__getPrototypeOf", [{ kind: "externref" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (gptIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: gptIdx });
+          } else {
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return { kind: "externref" };
+        }
+      }
       // Compile and drop the argument (for side effects)
       const argType = compileExpression(ctx, fctx, arg0);
       if (argType) {
@@ -2128,7 +2155,14 @@ export function compileBuiltinStaticCall(
           if (!descType) {
             fctx.body.push({ op: "ref.null.extern" });
           } else if (descType.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
+            // (#3394) Use coerceType, not a bare extern.convert_any: a PRIMITIVE
+            // descriptors arg (e.g. `Object.create(o, 5n)` — a bigint, which is
+            // a TypeError at runtime but must still COMPILE to valid Wasm) is
+            // i64/i32/f64 on the stack, and extern.convert_any is illegal on a
+            // non-ref value ("extern.convert_any expected anyref, found i64").
+            // coerceType routes i64-bigint → __box_bigint, i32/f64 → __box_*,
+            // ref → extern.convert_any (mirrors the 1st-arg path above).
+            coerceType(ctx, fctx, descType, { kind: "externref" });
           }
           fctx.body.push({ op: "call", funcIdx: dpIdx });
         } else {
@@ -2185,6 +2219,18 @@ export function compileBuiltinStaticCall(
   ) {
     const arg0 = expr.arguments[0]!;
     const arg1 = expr.arguments[1]!;
+    // §10.4.1.1: in Script code, top-level `this` is the realm global object.
+    // It must stay on the host-MOP path here: the checker's global interface
+    // resolves to a large static struct, whose missing-property fast path would
+    // return undefined without consulting the property just created by sloppy
+    // unresolvable PutValue. This is deliberately gOPD-local; general Script
+    // `this` lowering belongs to the source-goal implementation (#3365).
+    const isScriptGlobalThisReceiver =
+      arg0.kind === ts.SyntaxKind.ThisKeyword &&
+      fctx.name === "__module_init" &&
+      !ts.isExternalModule(arg0.getSourceFile()) &&
+      !ctx.standalone &&
+      !ctx.wasi;
 
     // (#2874) Under standalone, register the native object runtime so the
     // typed-receiver fast path's `ensureLateImport("__create_descriptor", …)`
@@ -2206,7 +2252,7 @@ export function compileBuiltinStaticCall(
     // host import and already passes) — gated on ctx.standalone so host
     // bytes stay identical.
     const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
-    const structName = resolveStructName(ctx, arg0TsType);
+    const structName = isScriptGlobalThisReceiver ? undefined : resolveStructName(ctx, arg0TsType);
     const literalKeyText = (e: ts.Expression): string | undefined => {
       if (ts.isStringLiteral(e)) return e.text;
       if (!ctx.standalone) return undefined;
@@ -2262,7 +2308,9 @@ export function compileBuiltinStaticCall(
           const userFieldIdx = userFields.indexOf(entry);
           let flags = flagsArr && userFieldIdx >= 0 ? flagsArr[userFieldIdx]! : 0x07; // default WEC
           if (ts.isIdentifier(arg0)) {
-            const dpfKey = `${arg0.text}:${propLiteral}`;
+            // (#3403) per-declaration key so a foreign same-named var's flags
+            // don't leak into this receiver's gOPD.
+            const dpfKey = `${integrityVarKey(ctx, arg0)}:${propLiteral}`;
             const dpfFlags = ctx.definedPropertyFlags.get(dpfKey);
             if (dpfFlags !== undefined) flags = dpfFlags & 0x0f;
           }
@@ -2614,6 +2662,16 @@ export function compileBuiltinStaticCall(
       }
       fctx.body.push({ op: "call", funcIdx: getBuiltinFuncIdx });
       objType = { kind: "externref" };
+    } else if (isScriptGlobalThisReceiver) {
+      ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      const globalThisIdx = ctx.funcMap.get("__get_globalThis");
+      if (globalThisIdx === undefined) {
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+      fctx.body.push({ op: "call", funcIdx: globalThisIdx });
+      objType = { kind: "externref" };
     } else {
       objType = compileExpression(ctx, fctx, arg0, { kind: "externref" });
       if (!objType) {
@@ -2780,22 +2838,9 @@ export function compileBuiltinStaticCall(
         const yt = compileExpression(ctx, fctx, yArgEarly);
         if (yt && yt.kind !== "f64") coerceType(ctx, fctx, yt, { kind: "f64" });
         fctx.body.push({ op: "local.set", index: yLocal });
-        // bits(x) == bits(y)
-        fctx.body.push({ op: "local.get", index: xLocal });
-        fctx.body.push({ op: "i64.reinterpret_f64" });
-        fctx.body.push({ op: "local.get", index: yLocal });
-        fctx.body.push({ op: "i64.reinterpret_f64" });
-        fctx.body.push({ op: "i64.eq" });
-        // (x !== x) & (y !== y)  →  both NaN
-        fctx.body.push({ op: "local.get", index: xLocal });
-        fctx.body.push({ op: "local.get", index: xLocal });
-        fctx.body.push({ op: "f64.ne" });
-        fctx.body.push({ op: "local.get", index: yLocal });
-        fctx.body.push({ op: "local.get", index: yLocal });
-        fctx.body.push({ op: "f64.ne" });
-        fctx.body.push({ op: "i32.and" });
-        // bitsEqual | bothNaN
-        fctx.body.push({ op: "i32.or" });
+        // SameValue(Number, Number): (bits(x) == bits(y)) | bothNaN — shared with
+        // the reified `Object.is` value closure so the two never drift.
+        for (const instr of sameValueNumberOps(xLocal, yLocal)) fctx.body.push(instr);
         return { kind: "i32" };
       }
 

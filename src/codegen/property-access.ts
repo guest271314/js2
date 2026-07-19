@@ -21,7 +21,7 @@ import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys; (#2963) method-owner chain
 import { popBody, pushBody } from "./context/bodies.js";
-import { resolveWidenedVarKey } from "./widened-var-key.js";
+import { resolveWidenedVarKey, integrityVarKey } from "./widened-var-key.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
@@ -72,6 +72,7 @@ import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8
 import { tryEmitFnctorPrototypeRead } from "./expressions/fnctor-prototype.js";
 import { ensureNativeStringHelpers, stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
+import { emitIsUndefF64 } from "./value-tags.js";
 import {
   ensureRegExpNativeProtoGlue,
   tryCompileStandaloneRegExpMatchResultRead,
@@ -117,7 +118,11 @@ import {
   emitGeneratorPrototypeSingleton,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
-import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
+import {
+  externrefBackedOwnFieldBacking,
+  getOrRegisterErrorStructType,
+  isWasiErrorName,
+} from "./registry/error-types.js";
 import {
   addStringConstantGlobal,
   ensureExnTag,
@@ -489,10 +494,66 @@ export function runtimeAccessorDescriptorKey(
   propName: string,
 ): string | undefined {
   if (!ts.isIdentifier(receiver)) return undefined;
-  const key = `${receiver.text}:${propName}`;
-  const flags = ctx.definedPropertyFlags.get(key);
-  if (flags === undefined || (flags & DESCRIPTOR_FLAG_ACCESSOR) === 0) return undefined;
-  return ctx.sidecarDefinedPropertyKeys.has(key) ? key : undefined;
+  // (#3403) definedPropertyFlags is per-declaration keyed; sidecar stays bare.
+  const dpfKey = `${integrityVarKey(ctx, receiver)}:${propName}`;
+  const bareKey = `${receiver.text}:${propName}`;
+  const flags = ctx.definedPropertyFlags.get(dpfKey);
+  if (flags !== undefined && (flags & DESCRIPTOR_FLAG_ACCESSOR) !== 0 && ctx.sidecarDefinedPropertyKeys.has(bareKey)) {
+    return bareKey;
+  }
+
+  // The source fallback below exists for module globals whose function bodies
+  // are emitted before the second module-init pass rebuilds descriptor state.
+  // Function-local class instances are compiled in statement order and may use
+  // the native classAccessorSet path; forcing those through __extern_get would
+  // bypass their compiled getter/setter functions.
+  if (!ctx.moduleGlobals.has(receiver.text)) return undefined;
+
+  // (#3374) Function bodies can be emitted before the second module-init pass
+  // has rebuilt the descriptor bookkeeping above. Recognize the same static
+  // Object.defineProperty accessor shape from the source so a read following a
+  // rejected strict write still invokes the installed getter instead of reading
+  // the widened struct's placeholder slot.
+  const receiverSymbol = ctx.checker.getSymbolAtLocation(receiver);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "Object" &&
+      node.expression.name.text === "defineProperty" &&
+      node.arguments.length >= 3
+    ) {
+      const objectArg = skipTransparentExpressions(node.arguments[0]!);
+      const keyArg = skipTransparentExpressions(node.arguments[1]!);
+      const descriptorArg = skipTransparentExpressions(node.arguments[2]!);
+      const sameReceiver =
+        ts.isIdentifier(objectArg) &&
+        (receiverSymbol
+          ? ctx.checker.getSymbolAtLocation(objectArg) === receiverSymbol
+          : objectArg.text === receiver.text);
+      const definedKey =
+        ts.isStringLiteral(keyArg) || ts.isNumericLiteral(keyArg)
+          ? keyArg.text
+          : resolveComputedKeyExpression(ctx, keyArg);
+      const isAccessor =
+        ts.isObjectLiteralExpression(descriptorArg) &&
+        descriptorArg.properties.some((property) => {
+          if (!property.name) return false;
+          if (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name)) return false;
+          return property.name.text === "get" || property.name.text === "set";
+        });
+      if (sameReceiver && definedKey === propName && isAccessor) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(receiver.getSourceFile());
+  return found ? bareKey : undefined;
 }
 
 export function emitRuntimeDescriptorGet(
@@ -501,11 +562,12 @@ export function emitRuntimeDescriptorGet(
   receiver: ts.Expression,
   propName: string,
   accessNode: ts.Expression,
+  forceExternref = false,
 ): ValType | null {
   const accessType = ctx.checker.getTypeAtLocation(accessNode);
   const accessWasm = resolveWasmType(ctx, accessType);
   const resultType: ValType =
-    accessWasm.kind === "f64" || accessWasm.kind === "i32" ? accessWasm : { kind: "externref" };
+    !forceExternref && (accessWasm.kind === "f64" || accessWasm.kind === "i32") ? accessWasm : { kind: "externref" };
   const getIdx = ensureLateImport(
     ctx,
     "__extern_get",
@@ -1359,23 +1421,37 @@ export function emitCapturedBoxGlobalWrite(
  * Stack: [externref] -> [fieldType]
  */
 /**
- * (#2101a R5) Emit an own-field READ (`inst.code`) on an externref-backed Error
- * subclass, routing through the `$Error_struct.$props` (fieldIdx 5) open-`$Object`
- * backing instead of the vestigial `$A` struct (which the receiver is NOT).
+ * (#2101a R5) Emit an own-field READ (`inst.code`) on an externref-backed
+ * subclass instance. The storage location depends on the native backing
+ * representation (#2917 — `externrefBackedOwnFieldBacking`):
  *
- * Lowers to: `props = self.$props; props == null ? undefined :
- * __extern_get(props, "code")`, returning the value as externref. message/name/
- * stack never reach here — they are served by the Error fast-path upstream.
+ *   - Error family (`$Error_struct` backing): read through the
+ *     `$Error_struct.$props` (fieldIdx 5) open-`$Object` side-slot instead of
+ *     the vestigial `$A` struct (which the receiver is NOT). Lowers to:
+ *     `props = self.$props; props == null ? undefined : __extern_get(props,
+ *     "code")`. message/name/stack never reach here — they are served by the
+ *     Error fast-path upstream.
+ *   - `extends Object` (#3238, native `$Object` backing): the instance ITSELF
+ *     is the open property store — `__extern_get(self, "code")` directly.
+ *     Casting it to `$Error_struct` (the pre-#2917 behavior) traps.
  *
- * Returns the result ValType on success, or `undefined` when helpers are
- * unavailable (caller falls through to the legacy struct read).
+ * `className` selects the backing; when omitted (the SuppressedError builtin
+ * fast-path caller, whose native instances are `$Error_struct`s — #3234) the
+ * Error-struct arm is used.
+ *
+ * Returns the result ValType on success, or `undefined` when the backing is
+ * unknown / helpers are unavailable (caller falls through to the legacy
+ * struct read).
  */
 export function emitExternrefBackedOwnFieldRead(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.PropertyAccessExpression,
   propName: string,
+  className?: string,
 ): ValType | null | undefined {
+  const backing = className === undefined ? "error-struct" : externrefBackedOwnFieldBacking(ctx, className);
+  if (backing === undefined) return undefined;
   ensureObjectRuntime(ctx);
   const externGetIdx = ensureLateImport(
     ctx,
@@ -1385,6 +1461,30 @@ export function emitExternrefBackedOwnFieldRead(
   );
   flushLateImportShifts(ctx, fctx);
   if (externGetIdx === undefined) return undefined;
+
+  if (backing === "plain-object") {
+    // self IS the open `$Object` — `self == null ? undefined :
+    // __extern_get(self, propName)`.
+    const selfResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+    if (!selfResult) return null;
+    if (selfResult.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
+    const selfLocal = allocLocal(fctx, `__ownf_rself_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.tee", index: selfLocal });
+    addStringConstantGlobal(ctx, propName);
+    fctx.body.push({ op: "ref.is_null" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [{ op: "ref.null.extern" }],
+      else: [
+        { op: "local.get", index: selfLocal },
+        ...stringConstantExternrefInstrs(ctx, propName),
+        { op: "call", funcIdx: externGetIdx },
+      ],
+    });
+    return { kind: "externref" };
+  }
+
   const errStructIdx = getOrRegisterErrorStructType(ctx);
 
   const selfResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
@@ -2678,6 +2778,27 @@ export function compilePropertyAccess(
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
 
+  // Descriptor accessors are runtime state even when shape analysis widened
+  // the receiver with a same-named field. Consult them before any struct-field
+  // fast path so the getter remains observable after a rejected assignment.
+  if (runtimeAccessorDescriptorKey(ctx, expr.expression, propName) !== undefined) {
+    const runtimeResult = emitRuntimeDescriptorGet(ctx, fctx, expr.expression, propName, expr);
+    if (runtimeResult !== null) return runtimeResult;
+  }
+
+  // (#3366 follow-up) A dynamic destructuring member write records its
+  // identifier/property pair in the sidecar set. Read that value before any
+  // static receiver-family shortcut can infer a field from the default
+  // initializer's type; the destructured source may instead be any callable or
+  // host object and must stay externref.
+  if (ts.isIdentifier(expr.expression)) {
+    const sidecarKey = `${expr.expression.text}:${propName}`;
+    if (ctx.sidecarDefinedPropertyKeys.has(sidecarKey)) {
+      const runtimeResult = emitRuntimeDescriptorGet(ctx, fctx, expr.expression, propName, expr, true);
+      if (runtimeResult !== null) return runtimeResult;
+    }
+  }
+
   {
     const __r = tryDynamicReceiverRuntimeDispatchReads(ctx, fctx, expr, propName, objType);
     if (__r !== PA_FALLTHROUGH) return __r;
@@ -3029,6 +3150,16 @@ function emitPlainArrayUndefinedOobGet(
   fctx.body.push({ op: "local.get", index: arrLocal });
   fctx.body.push({ op: "local.get", index: idxLocal });
   emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType, ctx, false);
+  let elementIsUndefinedLocal: number | undefined;
+  if (ctx.usesArrayHoles && elementType.kind === "f64") {
+    const rawValueLocal = allocLocal(fctx, `__oobu_raw_${fctx.locals.length}`, { kind: "f64" });
+    elementIsUndefinedLocal = allocLocal(fctx, `__oobu_hole_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.set", index: rawValueLocal });
+    fctx.body.push({ op: "local.get", index: rawValueLocal });
+    emitIsUndefF64(fctx.body);
+    fctx.body.push({ op: "local.set", index: elementIsUndefinedLocal });
+    fctx.body.push({ op: "local.get", index: rawValueLocal });
+  }
   // The value on the stack has the STORAGE kind (`elementType`, i8/i16 widened
   // to i32 by the read). Box it via the SEMANTIC `boxType` (which carries the
   // boolean/symbol brand) — its `.kind` agrees with the stack value's kind
@@ -3047,6 +3178,11 @@ function emitPlainArrayUndefinedOobGet(
 
   // (4) result = inBounds ? boxedValue : undefined. Pure local.get branches.
   fctx.body.push({ op: "local.get", index: inBoundsLocal });
+  if (elementIsUndefinedLocal !== undefined) {
+    fctx.body.push({ op: "local.get", index: elementIsUndefinedLocal });
+    fctx.body.push({ op: "i32.eqz" });
+    fctx.body.push({ op: "i32.and" });
+  }
   fctx.body.push({
     op: "if",
     blockType: { kind: "val" as const, type: { kind: "externref" } },
@@ -4394,8 +4530,17 @@ export function compileElementAccessBody(
           }
         }
 
-        if (runtimeAccessorDescriptorKey(ctx, expr.expression, fieldName) !== undefined) {
-          const runtimeResult = emitRuntimeDescriptorGet(ctx, fctx, expr.expression, fieldName, expr);
+        const sidecarKey = ts.isIdentifier(expr.expression) ? `${expr.expression.text}:${fieldName}` : undefined;
+        const isDynamicSidecarRead = sidecarKey !== undefined && ctx.sidecarDefinedPropertyKeys.has(sidecarKey);
+        if (runtimeAccessorDescriptorKey(ctx, expr.expression, fieldName) !== undefined || isDynamicSidecarRead) {
+          const runtimeResult = emitRuntimeDescriptorGet(
+            ctx,
+            fctx,
+            expr.expression,
+            fieldName,
+            expr,
+            isDynamicSidecarRead,
+          );
           if (runtimeResult !== null) return runtimeResult;
         }
 

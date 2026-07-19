@@ -40,6 +40,7 @@ import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
+import { elideDeadTopLevelBindings } from "./deadcode-elide.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -854,8 +855,16 @@ function runPipeline(input: PipelineInput): CompileResult {
   // (always `allowJs: true`) depends on it to reject e.g. `export` in eval code.
   if (!options.allowJs || input.runEarlyErrorsOnAllowJs) {
     const earlyErrors: CompileError[] = [];
+    // #3419 — module-goal signal for rules where Script vs Module top level
+    // genuinely differ (duplicate top-level function declarations). The test262
+    // runner passes `inferModuleStrictArguments` as an EXPLICIT boolean — `true`
+    // exactly for `flags: [module]` tests (whose sources often carry no
+    // syntactic import/export the checker could infer module-ness from), `false`
+    // for script tests. Product compiles leave it undefined and are covered by
+    // the real `ts.isExternalModule` indicator inside the rule.
+    const moduleGoal = options.inferModuleStrictArguments === true;
     for (const sf of userSourceFiles) {
-      earlyErrors.push(...detectEarlyErrors(sf));
+      earlyErrors.push(...detectEarlyErrors(sf, { moduleGoal }));
     }
     errors.push(...earlyErrors);
     if (hasNewError(earlyErrors)) {
@@ -1205,7 +1214,7 @@ export function compileSourceSync(
   // respective module, so it's byte-neutral elsewhere.
   const { rawWasi: wasiRawImports, memAccessors: wasiMemAccessors } = detectRawWasiImports(cjsRewritten);
   const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
-  const processedSource = preprocessed.source;
+  let processedSource = preprocessed.source;
   // Composed map: processedSource → original source. Pipeline output order is
   // define → stdin-prelude → cjs → (eval/super, identity) → imports, so compose
   // outermost-first.
@@ -1233,6 +1242,22 @@ export function compileSourceSync(
   // ScriptKind-only override; the `.js`-derived semantics (lenient checking)
   // stay intact. Byte-neutral when no prelude was injected.
   const forceTsGrammar = stdinResult.injected || iterStaticsResult.injected;
+
+  // Step 1a: #3418 — host-free targets only: elide provably-dead top-level
+  // pure bindings BEFORE the parse, so never-invoked function bodies (e.g. the
+  // test262 harness shim's `var print = function () { console.log(...) }` /
+  // `var $262 = { detachArrayBuffer: ... structuredClone ... }` when the
+  // program never mentions them) don't register host imports in the unified
+  // collector. Strictly same-length whitespace blanking → identity map, no
+  // positionMap composition needed; bails (source untouched) on any syntax
+  // error. Host `gc`/`linear` targets are excluded and stay byte-identical.
+  if (options.target === "standalone" || options.target === "wasi") {
+    processedSource = elideDeadTopLevelBindings(
+      processedSource,
+      isJsMode && !forceTsGrammar ? ts.ScriptKind.JS : ts.ScriptKind.TS,
+    ).source;
+  }
+
   let ast: TypedAST;
   if (languageService) {
     // Incremental path: reuse cached lib files via the language service

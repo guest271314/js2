@@ -21,7 +21,6 @@ import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
 import {
-  bodyHasNewTryRegionAcrossYield,
   compileNativeGeneratorFunction,
   isNativeGeneratorCandidate,
   registerNativeGenerator,
@@ -806,32 +805,27 @@ export function compileNestedFunctionDeclaration(
     // the call site's existing `nestedFuncCaptures` prepend supplies them —
     // no call-site changes.
     //
-    // Lane split (#3032 W3):
-    //   - STANDALONE/WASI: candidate-gated ONLY (`isNativeGeneratorCandidate`
-    //     has no try-region requirement in this lane), matching the
-    //     no-captures branch above. TDZ-flagged captures are now threaded:
-    //     their flag boxes ride as additional leading `ref $cell<i32>` params
-    //     (`tdzFlagFor` entries below), restoring §27.5 suspend-at-start —
-    //     the eager-buffer path ran the WHOLE body at generator creation
-    //     (EvaluateGeneratorBody suspends before the first body statement;
-    //     nothing may run until the first `next()`), which is the root of the
-    //     tag-5 comparator vacuity (#2141 S2 / #2626).
-    //   - JS HOST: byte-identical to #3050 — try-region shapes only (the
-    //     eager buffer PROVABLY cannot express `.throw()` into a try-region:
-    //     GeneratorPrototype/throw/try-*), no TDZ-flagged captures (the
-    //     host-lane A/B for the wider population is a separate wave; see
-    //     plan/issues/3032). `isNativeGeneratorCandidate` additionally
-    //     requires FunctionDeclaration + use-site safety under a JS host.
+    // Lane handling (#3032 W3 → W6):
+    //   - STANDALONE/WASI: candidate-gated ONLY since W3, TDZ-flag boxes
+    //     threaded as additional leading `ref $cell<i32>` params (`tdzFlagFor`
+    //     entries below), restoring §27.5 suspend-at-start — the eager-buffer
+    //     path ran the WHOLE body at generator creation (EvaluateGeneratorBody
+    //     suspends before the first body statement; nothing may run until the
+    //     first `next()`), which is the root of the tag-5 comparator vacuity
+    //     (#2141 S2 / #2626).
+    //   - JS HOST (#3032 W6): now candidate-gated only as well — the #3050-era
+    //     `tdz === 0 && try-region` restriction is dropped in lockstep with
+    //     the host arm of `isNativeGeneratorCandidate` (which still requires
+    //     FunctionDeclaration + resolvable identifiers + allowlisted use
+    //     sites under a JS host). The W3 TDZ-flag threading is lane-agnostic,
+    //     so host-lane capturing generators ride the same leading flag-box
+    //     params. This retires the eager buffer for the dominant test262
+    //     shape (named capturing generator inside the `test()` wrapper) on
+    //     the HOST lane: creation becomes lazy and `next(v)` two-way works.
     // Other bails (both lanes): async generators; anything the plan builder
     // rejects (isNativeGeneratorCandidate → buildNativeGeneratorPlan).
     let capturingNativeGen: ReturnType<typeof registerNativeGenerator> = null;
-    const capGenStandaloneLane = ctx.standalone || ctx.wasi;
-    if (
-      isGenerator &&
-      !isAsync &&
-      (capGenStandaloneLane || (tdzFlaggedCaptures.length === 0 && bodyHasNewTryRegionAcrossYield(stmt))) &&
-      isNativeGeneratorCandidate(ctx, stmt)
-    ) {
+    if (isGenerator && !isAsync && isNativeGeneratorCandidate(ctx, stmt)) {
       const leadingCaptures: NativeGeneratorCaptureParam[] = captures.map((c, i) => {
         const t = valueCaptureParamTypes[i]!;
         if (c.mutable && (t.kind === "ref" || t.kind === "ref_null")) {
@@ -864,7 +858,7 @@ export function compileNestedFunctionDeclaration(
       // value cells: `boxed` stays unset so they never enter the resume
       // fctx's `boxedCaptures`; `tdzFlagFor` routes them into
       // `boxedTdzFlags`/`tdzFlagLocals` instead (registerNativeGenerator →
-      // resume prelude). Empty on the JS-host lane (gated tdz===0 above).
+      // resume prelude). Since #3032 W6 the JS-host lane threads them too.
       for (const c of tdzFlaggedCaptures) {
         leadingCaptures.push({ name: `__tdz_box_${c.name}`, tdzFlagFor: c.name });
       }
@@ -1673,9 +1667,26 @@ export function hoistFunctionDeclarations(
   for (const stmt of stmts) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) siblingFuncNames.add(stmt.name.text);
   }
+  // (#3419) Last-wins for duplicate sibling function declarations. Duplicate
+  // `function f(){} function f(){}` at the top level of a function body (or in
+  // a sloppy-mode block, Annex B §B.3.2.1) is legal JS: FunctionDeclarationInstantiation
+  // (§10.2.11 step 14) walks declarations in REVERSE order keeping only the
+  // last per name, so earlier duplicates are never observable — no binding ever
+  // references them and they cannot be called before the (hoisted) rebinding.
+  // Skip them entirely in BOTH the Phase-0 reservation (so the reserved slot is
+  // typed from the surviving declaration's signature) and the compile loop
+  // below (so the surviving body fills the slot). Without this, the first
+  // declaration filled the slot and the later ones were dropped (first-wins).
+  const lastSiblingDeclForName = new Map<string, ts.FunctionDeclaration>();
+  for (const stmt of stmts) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) lastSiblingDeclForName.set(stmt.name.text, stmt);
+  }
+  const isShadowedDuplicate = (stmt: ts.FunctionDeclaration): boolean =>
+    lastSiblingDeclForName.get(stmt.name!.text) !== stmt;
   if (siblingFuncNames.size > 1) {
     for (const stmt of stmts) {
       if (!ts.isFunctionDeclaration(stmt) || !stmt.name || !stmt.body) continue;
+      if (isShadowedDuplicate(stmt)) continue;
       const funcName = stmt.name.text;
       if (ctx.funcMap.has(funcName)) continue;
       if (ctx.hoistFailedFuncs?.has(funcName)) continue;
@@ -1755,6 +1766,10 @@ export function hoistFunctionDeclarations(
 
   for (const stmt of stmts) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) {
+      // (#3419) Earlier duplicate of a later same-name sibling — never
+      // instantiated (last-wins, §10.2.11 step 14). Skip: the surviving
+      // declaration owns the funcMap slot and the Annex B bookkeeping.
+      if (isShadowedDuplicate(stmt)) continue;
       const funcName = stmt.name.text;
       // (#2200 Phase 1) Annex B B.3.3 cancellation: if this block-nested function
       // is ineligible for a web-compat outer var-binding (intervening lexical

@@ -23,6 +23,7 @@
 // lands in follow-up PRs. See plan/issues/backlog/1042-async-await-state-machine-lowering.md.
 
 import type { TypeOracle } from "../checker/oracle.js";
+import { awaitIsStaticallyResolved, staticPromiseResolveSettledExpr } from "./async-static.js";
 import { isPromiseType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { forEachChild, ts } from "../ts-api.js";
@@ -171,135 +172,11 @@ export function analyzeAsyncBody(_ctx: CodegenContext, fn: ts.FunctionLikeDeclar
   };
 }
 
-/**
- * Conservative compile-time predicate: is the operand of an `await` already a
- * *settled* value, so that `await operand` performs no observable suspension?
- *
- * Per §27.7.5.3, `await V` ≡ `PromiseResolve(%Promise%, V)` then a job. When `V`
- * is not a thenable the resumption is a single microtask carrying `V` unchanged;
- * when `V` is `Promise.resolve(x)` with a non-thenable `x` it likewise settles
- * to `x`. In both cases the *value* is statically known to be the operand (or
- * its resolve-argument); only the scheduling differs. js2wasm's synchronous
- * model already collapses that scheduling, so these awaits are safe to treat as
- * pass-through.
- *
- * Recognised static forms (intentionally narrow — over-approximating here would
- * mis-elide a genuinely-suspending await):
- *   - numeric / string / boolean / null literals
- *   - `void`-prefixed, unary `+`/`-`/`!` over a static operand
- *   - binary arithmetic / comparison where BOTH operands are static
- *   - parenthesised / `as`-cast wrappers around a static operand
- *   - `Promise.resolve(<static>)` and `Promise.resolve()` (settles to undefined)
- *
- * Everything else — a call result, a member access, a bare identifier (which may
- * hold a pending Promise) — returns `false`.
- */
-export function awaitIsStaticallyResolved(operand: ts.Expression): boolean {
-  // Unwrap transparent wrappers first.
-  let expr: ts.Expression = operand;
-  while (
-    ts.isParenthesizedExpression(expr) ||
-    ts.isAsExpression(expr) ||
-    ts.isTypeAssertionExpression(expr) ||
-    ts.isNonNullExpression(expr)
-  ) {
-    expr = expr.expression;
-  }
-
-  // Literals: numeric / string / no-substitution template / true / false / null.
-  if (
-    ts.isNumericLiteral(expr) ||
-    ts.isStringLiteral(expr) ||
-    ts.isNoSubstitutionTemplateLiteral(expr) ||
-    expr.kind === ts.SyntaxKind.TrueKeyword ||
-    expr.kind === ts.SyntaxKind.FalseKeyword ||
-    expr.kind === ts.SyntaxKind.NullKeyword
-  ) {
-    return true;
-  }
-
-  // `undefined` as an identifier is a settled value too.
-  if (ts.isIdentifier(expr) && expr.text === "undefined") return true;
-
-  // Unary `+x` / `-x` / `!x` / `void x` over a static operand.
-  if (ts.isPrefixUnaryExpression(expr)) {
-    return awaitIsStaticallyResolved(expr.operand);
-  }
-  if (ts.isVoidExpression(expr)) {
-    return awaitIsStaticallyResolved(expr.expression);
-  }
-
-  // Binary arithmetic/comparison where both sides are static.
-  if (ts.isBinaryExpression(expr)) {
-    return awaitIsStaticallyResolved(expr.left) && awaitIsStaticallyResolved(expr.right);
-  }
-
-  // `Promise.resolve(<static?>)` — settles to the (static) argument, or undefined.
-  if (
-    ts.isCallExpression(expr) &&
-    ts.isPropertyAccessExpression(expr.expression) &&
-    ts.isIdentifier(expr.expression.expression) &&
-    expr.expression.expression.text === "Promise" &&
-    expr.expression.name.text === "resolve"
-  ) {
-    if (expr.arguments.length === 0) return true; // resolves to undefined
-    if (expr.arguments.length === 1) return awaitIsStaticallyResolved(expr.arguments[0]!);
-    return false;
-  }
-
-  return false;
-}
-
-/**
- * (#3227 S2) When an awaited operand is the `Promise.resolve(...)` form that
- * {@link awaitIsStaticallyResolved} recognises, return the expression the
- * `await` actually settles to: the single resolve argument, or `"undefined"`
- * for the zero-arg form. Unwraps transparent wrappers and NESTED
- * `Promise.resolve(Promise.resolve(x))` chains (PromiseResolve is idempotent:
- * resolving a promise returns it, so `await` settles to the innermost value).
- *
- * Returns `null` when the operand is not a `Promise.resolve` call — callers
- * then compile the operand itself.
- *
- * Why this exists: the JS-host legacy await passthrough compiled the OPERAND
- * for statically-resolved awaits, but `Promise.resolve(7)` compiles to a host
- * call returning the Promise OBJECT (externref) — not the settled value — so
- * a numeric consumer's externref→f64 coercion read NaN (the await-NaN cluster
- * behind ~875 honest fails in the #3227 S1 census). Substituting the resolve
- * argument delivers the settled value (§27.7.5.3 Await + §27.2.4.7
- * Promise.resolve: for non-thenable x, `await Promise.resolve(x)` ≡ x up to
- * scheduling, which js2wasm's synchronous model collapses).
- */
-export function staticPromiseResolveSettledExpr(operand: ts.Expression): ts.Expression | "undefined" | null {
-  let expr: ts.Expression = operand;
-  let settled: ts.Expression | "undefined" | null = null;
-  for (;;) {
-    while (
-      ts.isParenthesizedExpression(expr) ||
-      ts.isAsExpression(expr) ||
-      ts.isTypeAssertionExpression(expr) ||
-      ts.isNonNullExpression(expr)
-    ) {
-      expr = expr.expression;
-    }
-    if (
-      ts.isCallExpression(expr) &&
-      ts.isPropertyAccessExpression(expr.expression) &&
-      ts.isIdentifier(expr.expression.expression) &&
-      expr.expression.expression.text === "Promise" &&
-      expr.expression.name.text === "resolve"
-    ) {
-      if (expr.arguments.length === 0) return "undefined";
-      if (expr.arguments.length === 1) {
-        settled = expr.arguments[0]!;
-        expr = settled;
-        continue; // keep unwrapping nested Promise.resolve(Promise.resolve(x))
-      }
-      return settled; // >1 args: not the recognised form; keep last match (or null)
-    }
-    return settled;
-  }
-}
+// (#1373b C-1) `awaitIsStaticallyResolved` + `staticPromiseResolveSettledExpr`
+// moved to the leaf module `async-static.ts` so the IR front-end can import
+// them without an import cycle (this file imports codegen/index.ts, which
+// imports ir/select.ts). Re-exported here for existing callers.
+export { awaitIsStaticallyResolved, staticPromiseResolveSettledExpr } from "./async-static.js";
 
 /** Promise static combinators whose call result is already a real Promise. */
 const PROMISE_COMBINATOR_NAMES = new Set(["all", "race", "any", "allSettled"]);
@@ -1018,6 +895,20 @@ export type AsyncCfgTerminator =
       /** Yield `SENT_FIELD` directly (`yield await P` — the awaited value). */
       readonly fromSent: boolean;
       /** State entered on the next `next()` kick after this yield. */
+      readonly resumeState: number;
+    }
+  | {
+      // (#3389) Async-generator `return E` completion: fulfil the CURRENT
+      // `next()`-promise with an IteratorResult `{value: E, done: true}`
+      // (§27.6.3.8 with a return completion — distinct from `settleDone`'s
+      // `{value: undefined, done: true}`), set STATE=resumeState (a trailing
+      // `settleDone` state), and `return`. Every SUBSEQUENT `next()` kick then
+      // re-dispatches at that `settleDone`, giving `{value: undefined, done:
+      // true}` on a completed frame.
+      readonly kind: "settleReturn";
+      /** The returned value. `null` ⇒ bare `return;` (value undefined). */
+      readonly value: AsyncCfgOperand | null;
+      /** State entered on the next `next()` kick (the trailing settleDone). */
       readonly resumeState: number;
     }
   | { readonly kind: "settleDone" }; // async-gen body end — fulfil `{value: undefined, done: true}`
@@ -1789,6 +1680,15 @@ export function planForAwaitCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
  *  async-gen for-await CONSUMER's `chk` state, before its fields are unpacked. */
 const FORAWAIT_ARESULT = "__forawait_aresult";
 
+/** (#2570) Reserved synthetic locals of the `yield*` DELEGATE pump: the awaited
+ *  inner IteratorResult (the chk state's resume binding) and its unpacked
+ *  done/value. Transient within one dispatch (bound at resume, consumed by the
+ *  chk/yield states before the next suspend), so never spilled; shared across a
+ *  body's delegate segments (only one delegation is active per dispatch). */
+const YIELDSTAR_RESULT = "__yieldstar_result";
+const YIELDSTAR_DONE = "__yieldstar_done";
+const YIELDSTAR_VALUE = "__yieldstar_value";
+
 /**
  * (#2906 slice 3d-ii) If `source` is a direct call `g(...)` to a host-free async
  * GENERATOR whose per-gen `next()` driver is ALREADY registered, return that
@@ -2141,13 +2041,60 @@ function asyncGenBodyHasPatternLocals(fn: ts.FunctionLikeDeclaration): boolean {
   const walk = (n: ts.Node): void => {
     if (found || isNestedFunctionScope(n)) return;
     if (ts.isVariableDeclaration(n) && !ts.isIdentifier(n.name)) {
-      found = true;
-      return;
+      // (#3387) EXEMPT a `for await (const <pattern> of …)` HEAD binding. It is
+      // NOT a frame-spilled own local: the whole for-await statement rides the
+      // driven body as a suspend-free LEAD (compiled by the sync for-await
+      // lowering — loops.ts step loop + for-of-destructuring.ts pattern bind —
+      // entirely within one dispatch, no suspend crosses it), so the pattern
+      // names are ordinary per-iteration locals of the resume fn, never spill
+      // fields. Identifier heads already ride this exact lead arm on main;
+      // this admits the destructuring-head twin (the test262
+      // `async-gen-dstr-*` cohort). Any OTHER pattern local (body `const {a} =
+      // …`, catch-clause patterns, sync for-of heads) still rejects —
+      // correct-or-legacy.
+      if (!isForAwaitHeadDecl(n) || !forAwaitHeadPatternAdmissible(n.name)) {
+        found = true;
+        return;
+      }
     }
     forEachChild(n, walk);
   };
   forEachChild(body, walk);
   return found;
+}
+
+/** (#3387) Is `n` the head binding of a `for await (const … of …)` statement? */
+function isForAwaitHeadDecl(n: ts.VariableDeclaration): boolean {
+  const list = n.parent;
+  if (!ts.isVariableDeclarationList(list)) return false;
+  const stmt = list.parent;
+  return ts.isForOfStatement(stmt) && stmt.awaitModifier !== undefined;
+}
+
+/**
+ * (#3387) Admissible for-await HEAD pattern shapes for the driven async-gen
+ * lead arm. Everything is admitted EXCEPT a NESTED sub-pattern binding element
+ * that carries an initializer (`[[x] = [7]]`, `{ w: { x } = {…} }`): the sync
+ * for-await destructure deliberately skips nested defaults under
+ * `awaitModifier` (the #2692 capture-box / #2566 iterator-over-consume guard
+ * in for-of-destructuring.ts), so admitting those shapes would run with the
+ * default NOT applied — a wrong-value run instead of the legacy refusal
+ * (probe-verified: `for await (const [[x,y,z] = [4,5,6]] of [[]])` binds
+ * nothing). Leaf identifier defaults (incl. call defaults), elisions, rest
+ * elements, renamed/string-keyed props, empty patterns, and nested patterns
+ * WITHOUT initializers are probe-verified correct and admitted.
+ */
+function forAwaitHeadPatternAdmissible(name: ts.BindingName): boolean {
+  if (ts.isIdentifier(name)) return true;
+  for (const el of name.elements) {
+    if (!ts.isBindingElement(el)) continue; // OmittedExpression (elision) — fine
+    const isNestedPattern = ts.isObjectBindingPattern(el.name) || ts.isArrayBindingPattern(el.name);
+    if (isNestedPattern) {
+      if (el.initializer !== undefined) return false; // nested default — unsupported under awaitModifier
+      if (!forAwaitHeadPatternAdmissible(el.name)) return false;
+    }
+  }
+  return true;
 }
 
 /** One bounded async-gen yield statement: `yield await <awaited>` OR `yield <plain>`
@@ -2162,6 +2109,99 @@ interface AsyncGenYield {
   readonly leads: ts.Statement[];
   readonly awaited: ts.Expression | null;
   readonly plain: ts.Expression | null;
+  /**
+   * (#2570) `yield* inner(...)` DELEGATION over another driven async-gen
+   * producer: the (paren-stripped) call whose result frame is pumped lazily —
+   * one inner `next()` per outer `next()` — by the 4-state delegate loop
+   * {@link planAsyncGenCfg} plans. Mutually exclusive with `awaited`/`plain`
+   * (both null on a delegate segment; `yield;` is distinguished by this field
+   * being undefined).
+   */
+  readonly delegate?: ts.CallExpression;
+  /**
+   * (#3388) `yield* <expr>` RUNTIME DELEGATION over an ARBITRARY async/sync
+   * iterable operand — an identifier, member access, string, element access, or
+   * a call the #2570 driven-gen delegate arm did NOT accept. Lowered by
+   * {@link planAsyncGenCfg} as a 5-state runtime loop: `GetAsyncIterator` →
+   * `__iterator_next` sync step → per-element `await value` (AsyncFromSync
+   * §27.1.4.4) → `settleYield` back-edge. The producer-side dual of
+   * {@link planForAwaitCfg}. Mutually exclusive with `delegate`/`awaited`/`plain`
+   * (all null/undefined on an rtDelegate segment). Statement position only
+   * (`yield*`'s completion value is discarded).
+   */
+  readonly rtDelegate?: ts.Expression;
+}
+
+/**
+ * (#2570) Delegation admission for `yield* <call>` segments in a driven
+ * async-generator body. `accept` is the STATIC admission (must be deterministic
+ * pre-body vs emit-time — it may read the checker/AST but NOT emit-order state
+ * like `funcMap`/`asyncGenProducers`, because `asyncGenDrivableUnderCarrier`
+ * feeds the pre-body `widenAsyncGenFallback` carrier decision with it);
+ * `helperNameFor` is the EMIT-time resolution of the inner producer's
+ * registered `__async_gen_next_<stem>` driver (registry-backed — only the
+ * planner/emit path provides it). `null` delegates mode rejects every
+ * `yield* <call>` (the pre-#2570 behavior).
+ */
+export interface AsyncGenDelegates {
+  readonly accept: (call: ts.CallExpression) => boolean;
+  readonly helperNameFor?: (call: ts.CallExpression) => string | null;
+}
+
+/**
+ * (#2570) The top-level `yield* <call>(...)` statements of an async-gen body,
+ * in source order — the syntactic delegate-segment candidates. Purely
+ * syntactic (no admission check): used to NUMBER the per-segment
+ * `__yieldstar_iter_<i>` frame spills consistently between the spill layout
+ * (`computeAsyncSpills`) and the CFG planner, which both walk the same
+ * statement list. Array-literal `yield*` operands (#3132 S1 static unroll) are
+ * not CallExpressions, so they never appear here.
+ */
+export function listTopLevelYieldStarCalls(fn: ts.FunctionLikeDeclaration): ts.CallExpression[] {
+  const out: ts.CallExpression[] = [];
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return out;
+  for (const st of body.statements) {
+    const e = ts.isExpressionStatement(st) ? st.expression : null;
+    if (e === null || !ts.isYieldExpression(e) || e.asteriskToken === undefined) continue;
+    let src = e.expression;
+    while (src !== undefined && ts.isParenthesizedExpression(src)) src = src.expression;
+    if (src !== undefined && ts.isCallExpression(src)) out.push(src);
+  }
+  return out;
+}
+
+/**
+ * (#3388) The top-level `yield* <expr>` statements whose operand is NOT a
+ * driven-async-gen call (#2570) and NOT an array literal (#3132 S1) — i.e. the
+ * RUNTIME-DELEGATION operands (identifier/member/element-access/string, or a
+ * call the driven arm rejects). Used to NUMBER the per-segment
+ * `__yieldstar_rtiter_<i>` frame spills consistently between the spill layout
+ * (`computeAsyncSpills`) and the CFG planner, which both walk the same
+ * statement list. Purely syntactic — the driven/array-literal admission that
+ * `analyzeAsyncGen` applies is a REFINEMENT (a call the driven arm accepts is
+ * excluded here because it is a CallExpression handled by
+ * `listTopLevelYieldStarCalls`), so the two lists partition the `yield*` calls:
+ * this returns the operands that will become `rtDelegate` segments.
+ */
+export function listTopLevelRtDelegateYieldStars(fn: ts.FunctionLikeDeclaration): ts.Expression[] {
+  const out: ts.Expression[] = [];
+  const body = fn.body;
+  if (body === undefined || !ts.isBlock(body)) return out;
+  for (const st of body.statements) {
+    const e = ts.isExpressionStatement(st) ? st.expression : null;
+    if (e === null || !ts.isYieldExpression(e) || e.asteriskToken === undefined) continue;
+    let src = e.expression;
+    while (src !== undefined && ts.isParenthesizedExpression(src)) src = src.expression;
+    if (src === undefined) continue;
+    // A driven-gen delegate CALL is numbered by listTopLevelYieldStarCalls; an
+    // array-literal unrolls statically (no spill). Everything else — including a
+    // NON-drivable call — is an rtDelegate operand.
+    if (ts.isArrayLiteralExpression(src)) continue;
+    if (ts.isCallExpression(src)) continue; // driven-gen call → __yieldstar_iter_<i>
+    out.push(src);
+  }
+  return out;
 }
 
 /**
@@ -2215,6 +2255,17 @@ function yieldOperandIsPromiseTyped(oracle: TypeOracle, operand: ts.Expression):
 interface AsyncGenShape {
   readonly segments: AsyncGenYield[];
   readonly tailLeads: ts.Statement[];
+  /**
+   * (#3389) A top-level `return` completion terminating the body:
+   *   - `undefined` — no top-level return (fall-through ⇒ `settleDone`,
+   *     `{value: undefined, done: true}`);
+   *   - `null` — bare `return;` (also `{value: undefined, done: true}`, but via
+   *     a return completion — observable only with `finally`, which stays
+   *     bailed, so slice 1 emits it identically to fall-through);
+   *   - `ts.Expression` — `return E` ⇒ `settleReturn(E)`, `{value: E, done: true}`.
+   * `tailLeads` are the statements before the return (they run before it settles).
+   */
+  readonly returnExpr?: ts.Expression | null;
 }
 
 /** Recognise the bounded async-gen body; return its segment list, or `null`
@@ -2240,6 +2291,7 @@ interface AsyncGenShape {
 function analyzeAsyncGen(
   fn: ts.FunctionLikeDeclaration,
   implicitYieldAwait: ImplicitYieldAwaitMode,
+  delegates: AsyncGenDelegates | null = null,
 ): AsyncGenShape | null {
   const body = fn.body;
   if (body === undefined || !ts.isBlock(body)) return null;
@@ -2250,6 +2302,26 @@ function analyzeAsyncGen(
     const e = ts.isExpressionStatement(st) ? st.expression : null;
     if (e !== null && ts.isYieldExpression(e)) {
       if (e.asteriskToken !== undefined) {
+        // (#2570) `yield* inner(...)` DELEGATION over another driven async-gen
+        // producer (paren-stripped call operand). Admitted only when the
+        // caller's delegates mode statically accepts the call (a resolvable,
+        // earlier-declared, itself-drivable top-level async gen — see
+        // `resolveAsyncGenDelegateDecl` in async-frame.ts) and the args are
+        // suspend-free (they compile inside the delegate INIT state of the
+        // resume fn). Everything else falls through to the array-literal
+        // static-unroll arm below, or rejects (correct-or-legacy).
+        {
+          let src: ts.Expression | undefined = e.expression;
+          while (src !== undefined && ts.isParenthesizedExpression(src)) src = src.expression;
+          if (src !== undefined && ts.isCallExpression(src)) {
+            if (delegates === null) return null;
+            if (src.arguments.some((a) => containsAwaitOrYield(a))) return null;
+            if (!delegates.accept(src)) return null;
+            segments.push({ leads, awaited: null, plain: null, delegate: src });
+            leads = [];
+            continue;
+          }
+        }
         // (#3132 S1) `yield* [e1, e2, …]` over an ARRAY LITERAL statically
         // unrolls into per-element plain-yield segments — §27.5.3 delegation
         // over an array forwards exactly the `done:false` element values, and
@@ -2262,24 +2334,42 @@ function analyzeAsyncGen(
         // the admitted bodies drop their `__gen_*` host-import leak in
         // lockstep with the native emit.
         const src = e.expression;
-        if (src === undefined || !ts.isArrayLiteralExpression(src)) return null;
-        for (const el of src.elements) {
-          if (ts.isSpreadElement(el)) return null; // spread — runtime drain, S3
-          if (ts.isOmittedExpression(el)) {
-            segments.push({ leads, awaited: null, plain: null }); // hole → yield undefined
+        if (src !== undefined && ts.isArrayLiteralExpression(src)) {
+          for (const el of src.elements) {
+            if (ts.isSpreadElement(el)) return null; // spread — runtime drain, S3
+            if (ts.isOmittedExpression(el)) {
+              segments.push({ leads, awaited: null, plain: null }); // hole → yield undefined
+              leads = [];
+              continue;
+            }
+            if (containsAwaitOrYield(el)) return null; // nested suspend — S3
+            // (#3120) Promise-typed elements: yield* delegation does NOT apply
+            // the implicit AsyncGeneratorYield await to the *inner* iterator's
+            // values on the carrier lane distinction we model here — route them
+            // through the same mode check as a plain `yield el` for consistency.
+            if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, el)) {
+              segments.push({ leads, awaited: el, plain: null });
+            } else {
+              segments.push({ leads, awaited: null, plain: el });
+            }
             leads = [];
-            continue;
           }
-          if (containsAwaitOrYield(el)) return null; // nested suspend — S3
-          // (#3120) Promise-typed elements: yield* delegation does NOT apply
-          // the implicit AsyncGeneratorYield await to the *inner* iterator's
-          // values on the carrier lane distinction we model here — route them
-          // through the same mode check as a plain `yield el` for consistency.
-          if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, el)) {
-            segments.push({ leads, awaited: el, plain: null });
-          } else {
-            segments.push({ leads, awaited: null, plain: el });
-          }
+          continue;
+        }
+        // (#3388) `yield* <expr>` over an ARBITRARY iterable operand
+        // (identifier / member / element-access / string / a call the #2570
+        // driven-gen arm above did NOT accept). Lowered as a RUNTIME DELEGATION
+        // loop (GetAsyncIterator + __iterator_next sync-step + per-element
+        // await + settleYield back-edge) by `planAsyncGenCfg`. Reject only when
+        // the operand itself contains a nested suspend (await/yield inside the
+        // operand expr — the iterator would have to be produced across a
+        // suspend; banked follow-up) or is missing. Statement position only,
+        // guaranteed by the enclosing ExpressionStatement match.
+        if (src === undefined || containsAwaitOrYield(src)) return null;
+        {
+          let rtSrc: ts.Expression = src;
+          while (ts.isParenthesizedExpression(rtSrc)) rtSrc = rtSrc.expression;
+          segments.push({ leads, awaited: null, plain: null, rtDelegate: rtSrc });
           leads = [];
         }
         continue;
@@ -2304,6 +2394,25 @@ function analyzeAsyncGen(
       leads = [];
       continue;
     }
+    // (#3389) A TOP-LEVEL `return E` / bare `return;` — a return completion that
+    // terminates the body. Admitted as a `settleReturn` terminator (below). Only
+    // a DIRECT top-level statement (a return nested in control flow is still
+    // caught by `containsOwnScopeReturn` on a LEAD and bails — correct-or-legacy).
+    // The operand must be suspend-free; a Promise-typed operand on the CARRIER
+    // lane bails (the §27.6.3.8 return-value Await is deferred, same policy as
+    // `yield await` / #3120 — carrier-off admits it with the documented
+    // promise-return value gap). Statements after a top-level return are
+    // unreachable, so we stop here (`leads` become the return state's tail).
+    if (ts.isReturnStatement(st)) {
+      const operand = st.expression;
+      if (operand !== undefined) {
+        if (containsAwaitOrYield(operand)) return null; // `return await P` / nested — follow-up
+        if (implicitYieldAwait !== null && yieldOperandIsPromiseTyped(implicitYieldAwait.oracle, operand)) {
+          return null; // Promise-typed return on the carrier lane — deferred
+        }
+      }
+      return { segments, tailLeads: leads, returnExpr: operand ?? null };
+    }
     // A LEAD statement: must be suspend-free (a yield/await nested in control
     // flow needs expression-level suspend numbering) and return-free.
     if (containsAwaitOrYield(st)) return null;
@@ -2315,8 +2424,11 @@ function analyzeAsyncGen(
 
 /** True when `fn` is a bounded 3d-i async-generator body drivable host-free.
  *  Acceptance is (#3120-)mode-neutral, so no checker is needed here. */
-export function isBoundedAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
-  return analyzeAsyncGen(fn, null) !== null;
+export function isBoundedAsyncGenBody(
+  fn: ts.FunctionLikeDeclaration,
+  delegates: AsyncGenDelegates | null = null,
+): boolean {
+  return analyzeAsyncGen(fn, null, delegates) !== null;
 }
 
 /**
@@ -2335,9 +2447,17 @@ export function isBoundedAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
  * byte-identical) rather than demoting the body to the legacy #680 CE — see
  * {@link ImplicitYieldAwaitMode}.
  */
-export function isAwaitFreeAsyncGenBody(fn: ts.FunctionLikeDeclaration): boolean {
-  const shape = analyzeAsyncGen(fn, null);
+export function isAwaitFreeAsyncGenBody(
+  fn: ts.FunctionLikeDeclaration,
+  delegates: AsyncGenDelegates | null = null,
+): boolean {
+  const shape = analyzeAsyncGen(fn, null, delegates);
   if (shape === null) return false;
+  // (#2570) Delegate segments count as await-free: their suspends await
+  // promises minted by the INNER producer's own `__async_gen_next_<stem>`
+  // driver — always a native `$Promise` regardless of the carrier gate (the
+  // same carrier-independence argument as `asyncGenConsumerNeedsDrive`). The
+  // inner body's own await-freeness is checked by the delegates mode.
   return shape.segments.every((y) => y.awaited === null);
 }
 
@@ -2396,13 +2516,261 @@ export function asyncGenOwnLocalDecls(fn: ts.FunctionLikeDeclaration): Map<strin
 export function planAsyncGenCfg(
   fn: ts.FunctionLikeDeclaration,
   implicitYieldAwait: ImplicitYieldAwaitMode,
+  delegates: AsyncGenDelegates | null = null,
 ): AsyncCfgPlan | null {
-  const shape = analyzeAsyncGen(fn, implicitYieldAwait);
+  const shape = analyzeAsyncGen(fn, implicitYieldAwait, delegates);
   if (shape === null) return null;
   const asLead = (stmts: readonly ts.Statement[]): AsyncCfgStmt[] => stmts.map((stmt) => ({ stmt, handler: 0 }));
   const states: AsyncCfgState[] = [];
   let id = 0;
+  let delegateIdx = 0;
+  let rtDelegateIdx = 0;
   for (const y of shape.segments) {
+    if (y.rtDelegate !== undefined) {
+      // (#3388) `yield* <expr>` RUNTIME DELEGATION over an arbitrary iterable
+      // operand (identifier / member / string / non-drivable call) — the
+      // producer-side dual of `planForAwaitCfg`. A 3-state loop, one element
+      // per outer `next()` kick:
+      //
+      //   init(k)  : [leads] iter := GetAsyncIterator(operand)   (frame spill —
+      //              lazy: runs on the kick that REACHES the yield*) → goto pump
+      //   pump(k+1): {done,value} = __iterator_next(iter)   (sync IteratorStep;
+      //              transient done/value locals) → condGoto(done, after, yieldOut)
+      //   yield(k+2): settleYield(value, resume→pump)   ← the BACK-EDGE: the NEXT
+      //              outer kick re-enters pump and steps the iterator again
+      //   after(k+3): the next segment's first state (or settleDone)
+      //
+      // Slice 1 (#3388) does NOT re-await inner element values (consistent with
+      // the #3120 mode routing — the operand's element type is unknown, so a
+      // raw forward matches the #2570 delegate's behaviour). A rejected
+      // GetIterator / next() (TypeError per §27.6.3.7) surfaces through the
+      // native `__iterator` / `__iterator_next` USER arms → the outer driven
+      // `next()` promise rejection (never a trap). `.throw()`/`.return()`
+      // forwarding into the delegate is #3389. The completion value (done
+      // result's value) is discarded — `yield*` is accepted in STATEMENT
+      // position only.
+      const iterSpillName = `__yieldstar_rtiter_${rtDelegateIdx}`;
+      rtDelegateIdx += 1;
+      const operand = y.rtDelegate;
+      const initId = id;
+      const pumpId = id + 1;
+      const yieldId = id + 2;
+      const afterId = id + 3;
+
+      // Transient (same-dispatch) done/value locals — recomputed each pump,
+      // never crossing the settleYield suspend (settleYield reads `value` in the
+      // SAME dispatch as the pump that set it).
+      const RT_DONE = "__yieldstar_rtdone";
+      const RT_VALUE = "__yieldstar_rtvalue";
+
+      // init: iter := GetAsyncIterator(operand) into the persisted frame spill.
+      const initEmit: AsyncCfgStepEmit = (ctx, fctx) => {
+        const iterSlot = fctx.localMap.get(iterSpillName) ?? allocLocal(fctx, iterSpillName, { kind: "externref" });
+        const srcType = compileExpression(ctx, fctx, operand);
+        if (srcType !== null && srcType !== undefined) {
+          coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        const iterIdx = ensureAsyncIterator(ctx, fctx);
+        if (iterIdx === undefined) {
+          // Native iterator runtime unavailable (not the standalone/wasi drive
+          // lane this plan runs on) — leave iter null; pump faults done=1.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: iterSlot });
+          return;
+        }
+        fctx.body.push({ op: "call", funcIdx: iterIdx });
+        fctx.body.push({ op: "local.set", index: iterSlot });
+      };
+
+      // pump: {done, value} = __iterator_next(iter). The native helper returns
+      // (i32 done, externref value) — value on top, done below.
+      const pumpEmit: AsyncCfgStepEmit = (ctx, fctx) => {
+        const iterSlot = fctx.localMap.get(iterSpillName) ?? allocLocal(fctx, iterSpillName, { kind: "externref" });
+        const doneSlot = fctx.localMap.get(RT_DONE) ?? allocLocal(fctx, RT_DONE, { kind: "i32" });
+        const valueSlot = fctx.localMap.get(RT_VALUE) ?? allocLocal(fctx, RT_VALUE, { kind: "externref" });
+        const nextIdx = ctx.funcMap.get("__iterator_next");
+        if (nextIdx === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: valueSlot });
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "local.set", index: doneSlot });
+          return;
+        }
+        fctx.body.push({ op: "local.get", index: iterSlot });
+        fctx.body.push({ op: "call", funcIdx: nextIdx });
+        fctx.body.push({ op: "local.set", index: valueSlot }); // value (top)
+        fctx.body.push({ op: "local.set", index: doneSlot }); // done (below)
+      };
+
+      const doneCond: AsyncCfgValueEmit = (_ctx, fctx) => {
+        fctx.body.push({ op: "local.get", index: fctx.localMap.get(RT_DONE)! });
+        return { kind: "i32" };
+      };
+
+      const yieldValue: AsyncCfgValueEmit = (_ctx, fctx) => {
+        fctx.body.push({ op: "local.get", index: fctx.localMap.get(RT_VALUE)! });
+        return { kind: "externref" };
+      };
+
+      states.push(
+        {
+          id: initId,
+          resumeFrom: null,
+          lead: asLead(y.leads),
+          emit: initEmit,
+          terminator: { kind: "goto", target: pumpId },
+        },
+        {
+          id: pumpId,
+          resumeFrom: null,
+          lead: [],
+          emit: pumpEmit,
+          terminator: { kind: "condGoto", cond: { emit: doneCond }, whenTrue: afterId, whenFalse: yieldId, handler: 0 },
+        },
+        {
+          id: yieldId,
+          resumeFrom: null,
+          lead: [],
+          terminator: { kind: "settleYield", value: { emit: yieldValue }, fromSent: false, resumeState: pumpId },
+        },
+      );
+      id += 3;
+      continue;
+    }
+    if (y.delegate !== undefined) {
+      // (#2570) `yield* inner(...)` DELEGATION — the lazy 4-state pump loop.
+      // One OUTER `next()` kick pumps the inner driven gen exactly ONE step:
+      //
+      //   init(k)  : [leads] iter := inner(...)   (frame spill — lazy: runs on
+      //              the kick that REACHES the yield*, not at outer())
+      //              → goto pump
+      //   pump(k+1): suspend(await __async_gen_next_<inner>(iter), resume→chk)
+      //   chk(k+2) : (binds SENT = IteratorResult; a rejected inner next()
+      //              re-throws via the MODE_THROW prelude → outer's current
+      //              next()-promise rejects, §27.6.4.2.5.g)
+      //              unpack {done,value} → condGoto(done, after, yieldOut)
+      //   yield(k+3): settleYield(value, resume→pump)   ← the BACK-EDGE: the
+      //              NEXT outer kick re-enters pump and pumps inner again
+      //   after(k+4): the next segment's first state (or settleDone)
+      //
+      // The inner next()-promise is a native `$Promise` minted by the inner's
+      // own driver (carrier-independent), so the stock suspend arm classifies
+      // it: a sync-settling inner yield advances in the same dispatch; a
+      // genuinely-pending one (inner `yield await P`) suspends the OUTER frame
+      // and the microtask drain resumes it — genuine two-level suspension.
+      // `.throw()`/`.return()`/sent-value forwarding into the delegate are out
+      // of scope (driven gens do not support them yet — #2906 3d-iii).
+      const call = y.delegate;
+      const helperName = delegates?.helperNameFor?.(call) ?? null;
+      if (helperName === null) return null; // registry miss — gate/plan drift (unreachable post-gate)
+      const iterSpillName = `__yieldstar_iter_${delegateIdx}`;
+      delegateIdx += 1;
+      const initId = id;
+      const pumpId = id + 1;
+      const chkId = id + 2;
+      const yieldId = id + 3;
+      const afterId = id + 4;
+
+      // init: iter := inner(...) into the persisted per-delegate frame spill.
+      const initEmit: AsyncCfgStepEmit = (ctx, fctx) => {
+        const iterSlot = fctx.localMap.get(iterSpillName) ?? allocLocal(fctx, iterSpillName, { kind: "externref" });
+        const srcType = compileExpression(ctx, fctx, call);
+        if (srcType !== null && srcType !== undefined) {
+          coerceType(ctx, fctx, srcType as ValType, { kind: "externref" });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        fctx.body.push({ op: "local.set", index: iterSlot });
+      };
+
+      // pump operand: push __async_gen_next_<inner>(iter) — the next()-promise.
+      // funcIdx resolved fresh by NAME at emit (late imports shift defined idxs).
+      const pumpOperand: AsyncCfgValueEmit = (ctx, fctx) => {
+        const iterSlot = fctx.localMap.get(iterSpillName) ?? allocLocal(fctx, iterSpillName, { kind: "externref" });
+        const nextIdx = ctx.funcMap.get(helperName);
+        if (nextIdx === undefined) {
+          // Unreachable: the drive gate required the helper to be registered.
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "local.get", index: iterSlot });
+        fctx.body.push({ op: "call", funcIdx: nextIdx });
+        return { kind: "externref" };
+      };
+
+      // chk: unpack the delivered IteratorResult (the resume binding local)
+      // into transient done/value locals (same-dispatch use only — no spill).
+      const unpackResult: AsyncCfgStepEmit = (ctx, fctx) => {
+        const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
+        const resSlot = fctx.localMap.get(YIELDSTAR_RESULT);
+        const doneSlot = fctx.localMap.get(YIELDSTAR_DONE) ?? allocLocal(fctx, YIELDSTAR_DONE, { kind: "i32" });
+        const valueSlot =
+          fctx.localMap.get(YIELDSTAR_VALUE) ?? allocLocal(fctx, YIELDSTAR_VALUE, { kind: "externref" });
+        if (resSlot === undefined) {
+          // Unreachable: chk is the pump-suspend's resumeState, so the binding
+          // local exists. Deliver done=1 so the loop exits rather than traps.
+          fctx.body.push({ op: "i32.const", value: 1 });
+          fctx.body.push({ op: "local.set", index: doneSlot });
+          fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: valueSlot });
+          return;
+        }
+        fctx.body.push({ op: "local.get", index: resSlot });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx });
+        fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_DONE_FIELD });
+        fctx.body.push({ op: "local.set", index: doneSlot });
+        fctx.body.push({ op: "local.get", index: resSlot });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "ref.cast", typeIdx: resultTypeIdx });
+        fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD });
+        fctx.body.push({ op: "local.set", index: valueSlot });
+      };
+
+      const doneCond: AsyncCfgValueEmit = (_ctx, fctx) => {
+        fctx.body.push({ op: "local.get", index: fctx.localMap.get(YIELDSTAR_DONE)! });
+        return { kind: "i32" };
+      };
+
+      const yieldValue: AsyncCfgValueEmit = (_ctx, fctx) => {
+        fctx.body.push({ op: "local.get", index: fctx.localMap.get(YIELDSTAR_VALUE)! });
+        return { kind: "externref" };
+      };
+
+      states.push(
+        {
+          id: initId,
+          resumeFrom: null,
+          lead: asLead(y.leads),
+          emit: initEmit,
+          terminator: { kind: "goto", target: pumpId },
+        },
+        {
+          id: pumpId,
+          resumeFrom: null,
+          lead: [],
+          terminator: { kind: "suspend", awaited: { emit: pumpOperand }, resumeState: chkId, handler: 0 },
+        },
+        {
+          id: chkId,
+          resumeFrom: { binding: { name: YIELDSTAR_RESULT, type: undefined }, handler: 0 },
+          lead: [],
+          emit: unpackResult,
+          terminator: { kind: "condGoto", cond: { emit: doneCond }, whenTrue: afterId, whenFalse: yieldId, handler: 0 },
+        },
+        {
+          id: yieldId,
+          resumeFrom: null,
+          lead: [],
+          terminator: { kind: "settleYield", value: { emit: yieldValue }, fromSent: false, resumeState: pumpId },
+        },
+      );
+      id += 4;
+      continue;
+    }
     if (y.awaited !== null) {
       // await-suspend state → yield-from-sent state.
       states.push({
@@ -2427,6 +2795,23 @@ export function planAsyncGenCfg(
       });
       id += 1;
     }
+  }
+  // (#3389) A top-level `return E` terminates with `settleReturn(E)` — the tail
+  // state runs the pre-return leads then fulfils `{value: E, done: true}` and
+  // suspends into a TRAILING `settleDone` state, so the first settling `next()`
+  // delivers E-with-done and every subsequent `next()` on the completed frame
+  // delivers `{value: undefined, done: true}`. A bare `return;` (returnExpr ===
+  // null) carries a `null` value ⇒ `{value: undefined, done: true}` directly.
+  if (shape.returnExpr !== undefined) {
+    const value: AsyncCfgOperand | null = shape.returnExpr === null ? null : shape.returnExpr;
+    states.push({
+      id,
+      resumeFrom: null,
+      lead: asLead(shape.tailLeads),
+      terminator: { kind: "settleReturn", value, resumeState: id + 1 },
+    });
+    states.push({ id: id + 1, resumeFrom: null, lead: [], terminator: { kind: "settleDone" } });
+    return { states, handlers: [] };
   }
   states.push({ id, resumeFrom: null, lead: asLead(shape.tailLeads), terminator: { kind: "settleDone" } });
   return { states, handlers: [] };

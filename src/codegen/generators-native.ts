@@ -27,7 +27,13 @@
  */
 import { ts } from "../ts-api.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
-import { isBooleanType, isNumberType, isStringType } from "../checker/type-mapper.js";
+import {
+  isBooleanType,
+  isNumberType,
+  isStringType,
+  isUndefWidenedBindingElement,
+  resolveBindingElementType,
+} from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import { ensureNativeIteratorRuntime } from "./iterator-native.js";
@@ -48,7 +54,6 @@ import { UNDEF_F64_BITS } from "./value-tags.js";
 import { addUnionImports } from "./index.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
-import { destructureParamArray, destructureParamObject } from "./destructuring-params.js";
 import { resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
 // (#2895 PR1) The frame ABI (state-struct field offsets + resume modes) and the
@@ -77,7 +82,6 @@ import {
   statementContainsYield,
   statementNeedsStructuralLowering,
   nodeContainsYield,
-  collectPatternBindingIdentifiers,
   spillSafeValType,
   bodyDeclaresBinding,
   loopBodyHasUnsupportedJump,
@@ -85,7 +89,6 @@ import {
   methodBodyUsesSuper,
   fnExprBodyReferencesThis,
   bodyReferencesOwnName,
-  bodyHasNewTryRegionAcrossYield,
   isFunctionLikeScope,
 } from "./generators-native-ast-scan.js";
 
@@ -296,6 +299,19 @@ interface NativeGeneratorPlan {
    * emitter so no late import fires mid-trampoline.
    */
   hasThrowRoutes: boolean;
+  /**
+   * (#3386) Names bound by a destructuring PARAM pattern. Their values are
+   * produced by the emit site's eager (call-time) param destructure into
+   * factory locals; `compileNativeGeneratorFunction` packs those locals into
+   * the matching spill fields at `struct.new` (instead of the inert default).
+   */
+  patternParamBindings: Set<string>;
+  /**
+   * (#3315/#3386) Subset of `patternParamBindings` whose spill type was
+   * undefined-preservation-widened to externref; marked `undefWidenedLocals`
+   * in the resume fctx so identifier reads keep undefined observable.
+   */
+  undefWidenedPatternBindings: Set<string>;
 }
 
 function noJsHostTarget(ctx: CodegenContext): boolean {
@@ -418,12 +434,17 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // (#2864 F1b) The variable declaration that introduced each spilled name, so
   // the spill's wasm type can be resolved at its actual ValType.
   const spillDecls = new Map<string, ts.VariableDeclaration>();
-  // (#2920) Types for names bound by a destructuring PARAM pattern. These names
-  // are not introduced by a body `VariableDeclaration` (so `resolveSpillLocalValType`
-  // cannot type them) — they are destructured from the raw arg in the resume
-  // function's state-0 prelude. Registering them as spills persists them across
-  // yields; this map supplies their ValType in the spill-typing loop.
+  // (#2920/#3386) Types for names bound by a destructuring PARAM pattern. These
+  // names are not introduced by a body `VariableDeclaration` (so
+  // `resolveSpillLocalValType` cannot type them) — their VALUES are produced by
+  // the emit site's eager (call-time) param destructure and packed into the
+  // spill fields at `struct.new` (`compileNativeGeneratorFunction`).
+  // Registering them as spills persists them across yields; this map supplies
+  // their ValType in the spill-typing loop.
   const patternParamSpillTypes = new Map<string, ValType>();
+  // (#3315/#3386) Pattern-bound names whose spill was undefined-preservation-
+  // widened to externref; the resume fctx marks them `undefWidenedLocals`.
+  const undefWidenedPatternBindings = new Set<string>();
   const addSpill = (name: string, decl?: ts.VariableDeclaration): void => {
     if (decl !== undefined && !spillDecls.has(name)) spillDecls.set(name, decl);
     if (spillSet.has(name)) return;
@@ -1238,75 +1259,99 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // spill regardless of which state declared it).
   collectSpillsIn(decl.body);
 
-  // (#2920) Register each destructuring-PARAM binding name as a spill, typed at
-  // its declared ValType. The raw arg is stored in the state struct (a
-  // `param_*` field) and destructured into these spill locals once, on first
-  // entry (state 0), by the resume function; spilling persists them across
-  // yields. If ANY bound name has no struct-storable type, bail to host so the
-  // candidate gate and registration agree (no undefined-funcidx module).
+  // (#2920/#3386) Register each destructuring-PARAM binding name as a spill.
+  //
+  // TIMING (#3386): parameter destructuring is EAGER — per §10.2.11
+  // FunctionDeclarationInstantiation (step 23-25, IteratorBindingInitialization)
+  // it runs at CALL time for generators too; the test262 dstr templates assert
+  // `assert.throws(..., function() { f(g); })` with NO `.next()`. Every native-
+  // generator emit site already destructures pattern params into factory locals
+  // BEFORE `compileNativeGeneratorFunction` (function-body.ts:988,
+  // class-bodies.ts:2301, literals.ts:2931, closures.ts
+  // emitClosureParamDestructuring, nested-declarations.ts:650/:1074) using the
+  // SAME corpus-proven emitters ordinary functions use — iterator protocol via
+  // the standalone-native `__array_from_iter_n` (#2904), null guards, elision,
+  // element defaults. The factory packs those bound locals into the spill
+  // fields at `struct.new` (see `compileNativeGeneratorFunction`), and the
+  // resume function reads them back via the ordinary spill-load loop. The old
+  // state-0 resume-prelude RE-destructure is retired: it both violated the
+  // call-time spec timing and would double-drive one-shot iterators for the
+  // shapes admitted here (it was only safe for the previously-admitted
+  // idempotent reads — typed vec indexing / object property gets).
+  //
+  // Each bound name spills at the type `ensureBindingLocals` gives the emit
+  // site's factory local (`resolveBindingElementType`, incl. the #3315
+  // undefined-preserving externref widening) so the packed value round-trips
+  // the state struct unchanged. If ANY bound name has no struct-storable type,
+  // bail to host so the candidate gate and registration agree (no
+  // undefined-funcidx module).
+  //
+  // Still bailed (follow-up slices, #3386 residual):
+  //  • rest ELEMENTS (`[a, ...r]` / `{a, ...r}`) — the emit-site destructure
+  //    binds them, but the rest local's type (a fresh `__vec_externref` /
+  //    rest `$Object`) is minted inside the destructure helpers, not via
+  //    `resolveBindingElementType`, so the spill typing is not yet reconciled.
+  // Whole-param defaults (`[x] = []`) ARE admitted now: the emit site's
+  // param-default machinery evaluates the initializer into the param local at
+  // call time (before the destructure + factory pack), exactly as for ordinary
+  // functions. The #2938 `struct.new[k] expected i32, found externref`
+  // mis-typing was the class-bodies COLLECTION-phase param typing diverging
+  // from the emit phase (no binding-pattern widening in collection) — fixed in
+  // lockstep with this admission (class-bodies.ts collection now applies the
+  // identical widen predicate). Object-literal methods keep their #2581
+  // default/optional bail in the candidate gate (trampoline argc gap).
   for (const param of decl.parameters) {
     if (ts.isIdentifier(param.name)) continue;
     const pat = param.name;
     if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
-    // (#2938) A WHOLE-PARAM default on a binding pattern (`{} = undefined`,
-    // `{x} = {}`) evaluates the initializer when the argument is `undefined`.
-    // The resume-prelude destructure has no defaulted-raw-arg arm yet — on the
-    // no-yield corpus this shape mis-typed the state struct
-    // (`struct.new[k] expected i32, found externref`,
-    // gen-meth-dflt-obj-init-undefined.js + static variant) — so bail to the
-    // host path, same policy as the element-default bail below.
-    if (param.initializer) return null;
-    // Slice-1 conservative gate (correct-or-legacy — no regressions):
-    //  • FLAT patterns only — every element binds an identifier (a nested
-    //    array/object sub-pattern is a follow-up; bail so it stays on host).
-    //  • NO rest element — object rest needs `__extern_rest_object`, array rest
-    //    needs the host iterator drain; both are host imports, so bail.
-    //  • ARRAY patterns require a CONCRETE typed param (a `ref`/`ref_null` vec or
-    //    tuple). An untyped array pattern widens the param to `externref`, whose
-    //    host-free element extraction is a pre-existing fragile path (a numeric
-    //    vec reads back null — normal functions have the same gap), so bail to
-    //    the host path rather than risk turning a passing test null. Object
-    //    patterns extract host-free & correctly regardless of typing.
-    for (const el of pat.elements) {
-      if (ts.isOmittedExpression(el)) continue;
-      if (el.dotDotDotToken) return null;
-      if (!ts.isIdentifier(el.name)) return null;
-      // (#2920) A default initializer on a pattern element (`{a = expr}`,
-      // `{a: b = expr}`) evaluates `expr` when the property is `undefined`. The
-      // resume-prelude destructure lowering of that default is not yet correct
-      // for all shapes — a throwing / function-valued default produced invalid
-      // modules on the corpus — so bail to the host path (a follow-up slice can
-      // widen this once the defaulted-destructure lowering is hardened).
-      if (el.initializer) return null;
-    }
-    // (#2920) ARRAY patterns are native-eligible ONLY when TYPED (`param.type`
-    // present) and the resolved type is a concrete vec/tuple ref. This is the
-    // gate-consistency + correctness guard:
-    //  • `param.type` present ⇒ BOTH callers — the free-function path
-    //    (`bindingPatternParamNeedsWiden` returns false when `p.type` is set) and
-    //    the class-method path (class-bodies.ts) — type the param via
-    //    `resolveWasmType(getTypeAtLocation(param))`, IDENTICAL to this gate. So
-    //    `isNativeGeneratorCandidate` and `registerNativeGenerator` (both routed
-    //    through this one plan builder) AND the resume-prelude destructure all
-    //    observe the SAME `paramTypes[i]` — no divergence, no invalid module, no
-    //    externref/concrete miscompile.
-    //  • An UNTYPED array pattern is widened to `externref` (and may be
-    //    call-site-inferred) by the free-function caller — that diverges from a
-    //    plain `getTypeAtLocation` resolution AND hits the pre-existing
-    //    externref-array null-readback rep gap (a numeric vec reads back null;
-    //    normal functions share it). So BAIL to the host path (a later slice with
-    //    its own honest yield can widen this once that rep gap is closed).
-    // Object patterns extract correctly for externref OR concrete, so they carry
-    // no such guard — accepted regardless of typing.
-    if (ts.isArrayBindingPattern(pat)) {
-      if (!param.type) return null;
-      const pt = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(param));
-      if (pt.kind !== "ref" && pt.kind !== "ref_null") return null;
-    }
-    for (const id of collectPatternBindingIdentifiers(pat)) {
-      const safe = spillSafeValType(resolveWasmType(ctx, ctx.checker.getTypeAtLocation(id)));
+    const elements: ts.BindingElement[] = [];
+    let hasRest = false;
+    const walk = (p: ts.BindingPattern): void => {
+      for (const el of p.elements) {
+        if (ts.isOmittedExpression(el)) continue;
+        if (el.dotDotDotToken) {
+          hasRest = true;
+          continue;
+        }
+        if (ts.isIdentifier(el.name)) elements.push(el);
+        else walk(el.name);
+      }
+    };
+    walk(pat);
+    if (hasRest) return null;
+    for (const el of elements) {
+      const id = el.name as ts.Identifier;
+      // (#3386) FUNCTION-VALUED element defaults (`[g = function(){}]`,
+      // `[g = () => 1]`, `[g = function*(){}]`) still bail. The emit-site
+      // destructure compiles the default into a closure/native-gen-state ref
+      // whose wasm rep does not cleanly round-trip the spill field in every
+      // lane — the class-method lane in particular emits an "illegal cast" at
+      // runtime (the `#3164` host-mix fixture, `*method([gen = function*(){}]
+      // = [])`). This is the documented W3 "throwing / function-valued
+      // default" exclusion; the dominant `dflt-*` cohort uses numeric / object
+      // / call-expression defaults, which are admitted (throwing defaults are
+      // CallExpressions and lower correctly). A later slice can widen this
+      // once the closure-valued spill round-trip is proven in all lanes.
+      if (
+        el.initializer &&
+        (ts.isFunctionExpression(el.initializer) ||
+          ts.isArrowFunction(el.initializer) ||
+          ts.isClassExpression(el.initializer))
+      ) {
+        return null;
+      }
+      const elemTsType = ctx.checker.getTypeAtLocation(el);
+      const bindType = resolveBindingElementType(el, elemTsType, (t) => resolveWasmType(ctx, t));
+      const safe = spillSafeValType(bindType);
       if (!safe) return null;
       patternParamSpillTypes.set(id.text, safe);
+      // (#3315) Mirror ensureBindingLocals' undef-widened marking so identifier
+      // reads in the RESUME function skip the checker-type unbox narrowing
+      // (which would degrade a runtime `undefined` to NaN before it can be
+      // observed). Threaded into the resume fctx via the info.
+      if (isUndefWidenedBindingElement(el, resolveWasmType(ctx, elemTsType))) {
+        undefWidenedPatternBindings.add(id.text);
+      }
       addSpill(id.text);
     }
   }
@@ -1418,6 +1463,8 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     iterableDelegationSites,
     needsPending,
     hasThrowRoutes,
+    patternParamBindings: new Set(patternParamSpillTypes.keys()),
+    undefWidenedPatternBindings,
   };
 }
 
@@ -1437,11 +1484,13 @@ export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration | ts.F
  * with the closure `__self` param threaded as a leading synthetic capture, and
  * the lifted body emits the native state-struct factory instead of the
  * eager-buffer host path. This is the fn-expr-specific shape gate consumed by
- * `isNativeGeneratorCandidate` — slice 1 (#3164):
- *   - identifier-only params, no default/optional/rest (the closure trampoline's
- *     argc/default machinery is NOT threaded through the state struct; a param
- *     default's evaluation is a CALL-time observable per §27.5/EvaluateGeneratorBody,
- *     which the resume-time model cannot honor);
+ * `isNativeGeneratorCandidate` — slice 1 (#3164), pattern params added (#3386):
+ *   - identifier or binding-pattern params, no default/optional/rest (the
+ *     closure trampoline's argc/default machinery is NOT threaded; a param
+ *     default's evaluation is a CALL-time observable per
+ *     §27.5/EvaluateGeneratorBody). Pattern params destructure eagerly in the
+ *     lifted factory (emitClosureParamDestructuring) and pack into spill
+ *     fields (#3386);
  *   - no `arguments` (the eager path builds the arguments vec; the state struct
  *     has no slot for it);
  *   - no `this` (a bare function expression's `this` is call-site dependent; the
@@ -1454,7 +1503,20 @@ export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration | ts.F
 function isNativeGeneratorExpressionShape(ctx: CodegenContext, decl: ts.FunctionExpression): boolean {
   if (!decl.body) return false;
   for (const param of decl.parameters) {
-    if (!ts.isIdentifier(param.name)) return false;
+    // (#3386) Binding-pattern params are admitted: the closure's lifted body
+    // eagerly destructures them (emitClosureParamDestructuring, running before
+    // the factory emit — call-time per §10.2.11) and the factory packs the
+    // bound values into the spill fields; pattern legality itself is decided
+    // by `buildNativeGeneratorPlan` (which `isNativeGeneratorCandidate` calls
+    // last). Whole-param defaults/optionals and rest still bail — the closure
+    // trampoline's argc/default machinery is not threaded here (#2581-adjacent).
+    if (
+      !ts.isIdentifier(param.name) &&
+      !ts.isArrayBindingPattern(param.name) &&
+      !ts.isObjectBindingPattern(param.name)
+    ) {
+      return false;
+    }
     if (param.initializer || param.questionToken || param.dotDotDotToken) return false;
   }
   if (bodyUsesArguments(decl.body)) return false;
@@ -1515,6 +1577,56 @@ function bodyReferencesUnresolvableIdentifier(ctx: CodegenContext, decl: Generat
 }
 
 /**
+ * (#3032 W6) HOST-lane shape bails for the native routing, covering the two
+ * body shapes the state machine still miscompiles (verified pre-existing on
+ * the standalone lane, where they are baseline-accounted; the host lane must
+ * not INHERIT them as pass→fail flips — it keeps the eager path instead):
+ *
+ *   - `yield (… yield …)` — a yield nested in another yield's operand. The
+ *     plan builder collapses the two suspends (first `next()` returns the
+ *     OUTER operand instead of the inner yield's value —
+ *     `generators/yield-as-yield-operand.js` returns 0 for `yield yield 1`).
+ *   - `yield*` delegation — the host-lane resume fn routes the delegate
+ *     through the `__iterator` chain, which traps (`illegal cast`) when the
+ *     delegate is a host-side generator object (an eager-lowered inner —
+ *     `generators/yield-star-before-newline.js`). Standalone delegates
+ *     native→native and is unaffected.
+ *
+ * Both scans stop at nested function boundaries (a nested generator's yields
+ * are its own).
+ */
+function bodyHasHostUnsupportedYieldShape(decl: GeneratorDecl): boolean {
+  if (!decl.body) return false;
+  let found = false;
+  const containsYield = (node: ts.Node): boolean => {
+    if (ts.isYieldExpression(node)) return true;
+    if (isFunctionLikeScope(node)) return false;
+    let hit = false;
+    ts.forEachChild(node, (c) => {
+      if (!hit && containsYield(c)) hit = true;
+    });
+    return hit;
+  };
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (isFunctionLikeScope(node)) return;
+    if (ts.isYieldExpression(node)) {
+      if (node.asteriskToken) {
+        found = true; // yield* delegation
+        return;
+      }
+      if (node.expression && containsYield(node.expression)) {
+        found = true; // yield nested in a yield operand
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(decl.body, visit);
+  return found;
+}
+
+/**
  * (#3050) Conservative HOST-lane use-site safety walk. The native generator
  * state struct is a WasmGC ref the JS host cannot iterate, so it must never
  * escape to a host-iterating context. Walks every `<name>(…)` call in the
@@ -1553,14 +1665,117 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
     );
   };
 
-  /** A reference/result value consumed in an allowlisted, host-safe position? */
-  const useIsSafe = (node: ts.Node): boolean => {
+  /**
+   * (#3032 W6) The `{value, done}` RESULT of a `.next()/.return()/.throw()`
+   * call on a native generator is ALSO a raw WasmGC struct. Reflection on it
+   * (`Object.getPrototypeOf(result)`, passing it as a call argument like
+   * `hasOwnProperty.call(result, …)`) sees the struct, not a plain object —
+   * `GeneratorPrototype/next/result-prototype.js` regressed exactly there. So
+   * a result value must itself stay in allowlisted consumers: property reads
+   * (`r.value`/`r.done`), `typeof`, statement-drop, or a binding whose every
+   * use is again allowlisted.
+   */
+  const resultConsumptionIsSafe = (call: ts.Node): boolean => {
+    const p = call.parent;
+    if (ts.isPropertyAccessExpression(p) && p.expression === call) return true; // .value/.done chains
+    if (ts.isExpressionStatement(p)) return true; // result dropped
+    if (ts.isTypeOfExpression(p)) return true;
+    if (ts.isParenthesizedExpression(p)) return resultConsumptionIsSafe(p);
+    if (ts.isVariableDeclaration(p) && p.initializer === call && ts.isIdentifier(p.name)) {
+      return resultBindingUsesAreSafe(p.name);
+    }
+    if (
+      ts.isBinaryExpression(p) &&
+      p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      p.right === call &&
+      ts.isIdentifier(p.left)
+    ) {
+      if (!resultBindingUsesAreSafe(p.left)) return false;
+      // The assignment expression's own value is the result too.
+      return ts.isExpressionStatement(p.parent) ? true : resultConsumptionIsSafe(p);
+    }
+    return false;
+  };
+
+  /** Every reference of a RESULT binding is an allowlisted result consumer? */
+  const resultBindingUsesAreSafe = (bindingName: ts.Identifier): boolean => {
+    const sym = checker.getSymbolAtLocation(bindingName);
+    if (!sym) return false;
+    let safe = true;
+    const visitRef = (node: ts.Node): void => {
+      if (!safe) return;
+      if (ts.isIdentifier(node) && node.text === bindingName.text && node !== bindingName) {
+        if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
+        if (ts.isPropertyAssignment(node.parent) && node.parent.name === node) return;
+        if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
+        const refSym = checker.getSymbolAtLocation(node);
+        if (refSym !== sym) return;
+        const p = node.parent;
+        if (ts.isPropertyAccessExpression(p) && p.expression === node) return; // r.value / r.done
+        if (ts.isTypeOfExpression(p)) return;
+        // Reassignment target — the RHS is checked at its own call site.
+        if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === node) {
+          return;
+        }
+        safe = false;
+      }
+      ts.forEachChild(node, visitRef);
+    };
+    ts.forEachChild(sf, visitRef);
+    return safe;
+  };
+
+  /**
+   * A reference/result value consumed in an allowlisted, host-safe position?
+   *
+   * `viaBinding` distinguishes the TWO ways this walk reaches a consumer:
+   *
+   *   - `false` — the node is the generator CALL expression itself
+   *     (`for (x of g())`, `[...g()]`, `Array.from(g())`, `g().next()`). The
+   *     for-of driver / spread-drain / Array.from-drain all see the call's
+   *     native state-struct ValType directly, so they lower to the WasmGC
+   *     native path (`tryCompileNativeGeneratorForOf` / `emitNativeGeneratorToVec`).
+   *
+   *   - `true` — the node is a REFERENCE to a `var/let iter = g()` binding
+   *     (`for (x of iter)`, `[...iter]`, `Array.from(iter)`). The binding's
+   *     inferred TS type is `Generator<T>`, which resolves to **externref**, so
+   *     the generator result is `extern.convert_any`-coerced on assignment and
+   *     the state-struct type is LOST at the reference. An iteration/drain
+   *     consumer over that externref falls to the JS-host iterator protocol,
+   *     which cannot drive a raw WasmGC struct — `next()` reports `done` on the
+   *     first call and the loop body is silently skipped (#3468: for-of
+   *     break/continue/return-label tests over `var it = values()` regressed to
+   *     "unreachable following for..of"). Only `.next()/.throw()/.return()`
+   *     member CALLS have a native-aware lowering that recognises the struct
+   *     through the externref; every host-protocol iteration consumer of a
+   *     binding is unsafe and keeps the generator on the eager host path.
+   */
+  const useIsSafe = (node: ts.Node, viaBinding: boolean): boolean => {
     const p = node.parent;
-    if (ts.isPropertyAccessExpression(p) && p.expression === node) return true; // .next()/.throw()/.value…
-    if (ts.isForOfStatement(p) && p.expression === node && !p.awaitModifier) return true;
-    if (ts.isSpreadElement(p)) return true;
-    if (isArrayFromArg(node)) return true;
-    if (ts.isParenthesizedExpression(p)) return useIsSafe(p);
+    if (ts.isPropertyAccessExpression(p) && p.expression === node) {
+      // (#3032 W6) A resume-method CALL (`it.next()/…`) produces a raw result
+      // struct — its consumption must be allowlisted too (see
+      // resultConsumptionIsSafe). Non-call member reads (`.value`, `.length`)
+      // and other member names keep the original terminal-safe answer.
+      const memberName = p.name.text;
+      if (
+        (memberName === "next" || memberName === "return" || memberName === "throw") &&
+        ts.isCallExpression(p.parent) &&
+        p.parent.expression === p
+      ) {
+        return resultConsumptionIsSafe(p.parent);
+      }
+      return true;
+    }
+    // Iteration / drain consumers are native-safe ONLY over the direct call
+    // expression (state-struct ValType visible), NOT over an externref binding
+    // reference (#3468).
+    if (!viaBinding) {
+      if (ts.isForOfStatement(p) && p.expression === node && !p.awaitModifier) return true;
+      if (ts.isSpreadElement(p)) return true;
+      if (isArrayFromArg(node)) return true;
+    }
+    if (ts.isParenthesizedExpression(p)) return useIsSafe(p, viaBinding);
     return false;
   };
 
@@ -1579,23 +1794,30 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
         if (ts.isVariableDeclaration(node.parent) && node.parent.name === node) return;
         const refSym = checker.getSymbolAtLocation(node);
         if (refSym !== sym) return;
+        // (#3032 W6) A RE-ENTRANT use — the instance binding referenced INSIDE
+        // the generator's own body (`function* g() { iter.return(42); }`,
+        // GeneratorPrototype/{return,throw}/from-state-executing) — is unsafe:
+        // inside the resume fn the binding rides an any/externref capture cell,
+        // so the member call dynamic-dispatches to the host shim with a raw
+        // state struct (`gen.return` reads `undefined`). Keep such generators
+        // on the eager host path.
+        if (node.getStart() >= decl.getStart() && node.getEnd() <= decl.getEnd()) {
+          safe = false;
+          return;
+        }
         const p = node.parent;
-        if (useIsSafe(node)) return;
+        if (useIsSafe(node, /* viaBinding */ true)) return;
         // Reassignment target (`iter = g()` again) — the RHS call is checked
         // at its own call site.
         if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.left === node) {
           return;
         }
-        // Array-destructuring SOURCE: `[a] = iter` / `const [a] = iter`.
-        if (ts.isVariableDeclaration(p) && p.initializer === node && !ts.isIdentifier(p.name)) return;
-        if (
-          ts.isBinaryExpression(p) &&
-          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-          p.right === node &&
-          ts.isArrayLiteralExpression(p.left)
-        ) {
-          return;
-        }
+        // (#3468) Array-destructuring SOURCE over a binding (`[a] = iter` /
+        // `const [a] = iter`) is NOT native-safe: the binding is externref, so
+        // the destructure drain falls to the host protocol (yields NaN/defaults).
+        // Only the DIRECT-call destructuring form (`[a] = g()`) drains natively;
+        // it is admitted at the call site below, not here. So a binding used as a
+        // destructuring source keeps the generator on the eager host path.
         safe = false;
       }
       ts.forEachChild(node, visitRef);
@@ -1607,6 +1829,28 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
   let allSafe = true;
   const visit = (node: ts.Node): void => {
     if (!allSafe) return;
+    // (#2662) A NON-CALL value reference of the generator name (`const h = g`,
+    // `obj.fn = g`, `g.prototype…`, a call argument `f(g)`) aliases or escapes
+    // the FUNCTION itself; calls through the alias are invisible to this walk,
+    // so the state struct could reach a host-iterating context unchecked. Only
+    // references that RESOLVE to this declaration bail (a shadowing same-named
+    // binding is someone else's value; symbol-less resolution failures bail
+    // conservatively). The declaration's own name and pure property NAMES are
+    // not value references.
+    if (
+      ts.isIdentifier(node) &&
+      node.text === genName &&
+      node !== decl.name &&
+      !(ts.isCallExpression(node.parent) && node.parent.expression === node) &&
+      !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) &&
+      !(ts.isPropertyAssignment(node.parent) && node.parent.name === node) &&
+      !(ts.isVariableDeclaration(node.parent) && node.parent.name === node) &&
+      !(ts.isBindingElement(node.parent) && node.parent.name === node) &&
+      (checker.getSymbolAtLocation(node)?.declarations?.includes(decl) ?? true)
+    ) {
+      allSafe = false;
+      return;
+    }
     if (
       ts.isCallExpression(node) &&
       ts.isIdentifier(node.expression) &&
@@ -1616,7 +1860,7 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
       (checker.getSymbolAtLocation(node.expression)?.declarations?.includes(decl) ?? true)
     ) {
       const p = node.parent;
-      if (useIsSafe(node)) {
+      if (useIsSafe(node, /* viaBinding */ false)) {
         // safe direct consumer
       } else if (ts.isVariableDeclaration(p) && p.initializer === node) {
         if (ts.isIdentifier(p.name)) {
@@ -1649,17 +1893,35 @@ function hostLaneGeneratorUsesAreSafe(ctx: CodegenContext, decl: GeneratorDecl):
 
 export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   if (!noJsHostTarget(ctx)) {
-    // (#3050) JS-HOST lane: the eager-buffer lowering evaluates the whole body
-    // at creation, so it PROVABLY cannot express a `.throw()`/abrupt resumption
-    // into a try-region (statements after a suspended yield already ran —
-    // GeneratorPrototype/throw/try-{catch,finally}-*). Route exactly those
-    // shapes — a free `function*` DECLARATION whose body has a catch across a
-    // yield or a yielding finally — through the native state machine even under
-    // the JS host. Every other host-lane generator keeps the eager path
-    // unchanged (zero behavior delta), and non-plannable shapes still fall back
-    // via the plan gate below.
+    // (#3050 → #3032 W6) JS-HOST lane: the eager-buffer lowering evaluates the
+    // whole body at creation, which violates §27.5 EvaluateGeneratorBody
+    // (GeneratorStart SUSPENDS at start-of-body; nothing runs until the first
+    // `next()`), cannot express a `.throw()`/abrupt resumption into a
+    // try-region (GeneratorPrototype/throw/try-{catch,finally}-*), and cannot
+    // deliver a `next(v)` sent value into the body (the buffer replays
+    // pre-computed yields). #3050 scoped host-lane native routing to exactly
+    // the try-region shapes; #3032 W6 drops that restriction — every free
+    // `function*` DECLARATION that passes the conservative safety walks below
+    // (resolvable identifiers + allowlisted use sites) now routes through the
+    // native state machine under the JS host too, making creation lazy and
+    // `next(v)` two-way for the dominant test262 shape. Non-plannable shapes
+    // still fall back to the eager buffer via the plan gate below; generator
+    // EXPRESSIONS and METHODS keep their host-lane lowerings (thunk / eager)
+    // for now — separate W6 slices.
     if (!ts.isFunctionDeclaration(decl)) return false;
-    if (!bodyHasNewTryRegionAcrossYield(decl)) return false;
+    // (#3032 W6) An EXPORTED generator declaration keeps the eager host path:
+    // its factory is called directly from JS (`instance.exports.g().next()`),
+    // and the native factory returns a raw WasmGC state struct the host
+    // cannot invoke `.next()` on. The use-site safety walk below cannot see
+    // host-side consumers — the export boundary is the one escape it cannot
+    // model — so gate on the export modifier itself. (In-module callers of an
+    // exported generator are unaffected: they ride the eager host object,
+    // exactly the pre-W6 behavior.)
+    if (ts.getModifiers(decl)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return false;
+    // (#3032 W6) Body shapes the native machine still miscompiles (nested
+    // yield operands, `yield*` delegation) keep the eager host path — see
+    // bodyHasHostUnsupportedYieldShape.
+    if (bodyHasHostUnsupportedYieldShape(decl)) return false;
     // Conservative: a body referencing an UNRESOLVABLE identifier (e.g.
     // `try { yield test262unresolvable } catch (e) {…}`) keeps the eager path —
     // its host-lane semantics ride #928's deferred-pending-throw (the eager
@@ -1711,11 +1973,13 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
     return false;
   }
   for (const param of decl.parameters) {
-    // (#2920) Rest params (`...args`) still bail — a separate follow-up. Array /
-    // object binding-pattern params are now natively lowered: the raw
-    // (externref/vec-widened) arg is stored in the state struct and destructured
-    // in the resume function's state-0 prelude (see `emitPatternParamDestructure`
-    // + `collectPatternBindingIdentifiers`). Identifier params stay byte-identical.
+    // (#2920/#3386) Rest params (`...args`) still bail — a separate follow-up.
+    // Array / object binding-pattern params are natively lowered: the emit
+    // site destructures the raw arg EAGERLY (call time, §10.2.11) into factory
+    // locals and `compileNativeGeneratorFunction` packs the bound values into
+    // spill fields; the plan builder decides pattern legality (rest elements /
+    // unstorable binding types bail there). Identifier params stay
+    // byte-identical.
     if (param.dotDotDotToken) return false;
     if (
       !ts.isIdentifier(param.name) &&
@@ -2148,9 +2412,41 @@ export function registerNativeGenerator(
     stateFields.push({ name: "pending", type: { kind: "i32" }, mutable: true });
   }
 
+  // (#3032 W6) NOMINAL BRAND for the state struct. Two generators with the
+  // same shape (e.g. `function* g1() { yield; }` and `function* g2() {
+  // yield 1; }`) mint structurally IDENTICAL state structs, which WasmGC
+  // iso-recursive canonicalization merges — `ref.test $__GenState_g1` then
+  // MATCHES a g2 instance, and every state-type dispatch chain
+  // (buildNativeGeneratorDispatch, the iterator-carrier GENSTATE step) resumes
+  // the FIRST-registered generator's resume fn on the other's state
+  // (`iter = g2(); iter.next().value` returned g1's `undefined` —
+  // generators/yield-as-statement.js, BOTH lanes). Defeat canonicalization
+  // structurally: each state struct declares a DISTINCT empty supertype from a
+  // per-module brand CHAIN (`__GenBrand_0` open no-parent, `__GenBrand_n` sub
+  // of `__GenBrand_{n-1}` — each distinct by ancestry depth). Type-level only:
+  // no field/layout/operand changes, and every `ref.test`/`ref.cast` site
+  // becomes nominally precise for free.
+  const brandName = `__GenBrand_${ctx.nativeGenerators.size}`;
+  const brandTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: brandName,
+    fields: [],
+    superTypeIdx: ctx.genStateBrandTipIdx ?? -1, // -1 = open, no parent (the __vec_base convention)
+  });
+  ctx.structMap.set(brandName, brandTypeIdx);
+  ctx.typeIdxToStructName.set(brandTypeIdx, brandName);
+  ctx.genStateBrandTipIdx = brandTypeIdx;
+
   const stateName = `__GenState_${sanitizeTypeName(functionName)}`;
   const stateTypeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({ kind: "struct", name: stateName, fields: stateFields });
+  ctx.mod.types.push({
+    kind: "struct",
+    name: stateName,
+    fields: stateFields,
+    superTypeIdx: brandTypeIdx,
+    final: true,
+  });
   ctx.structMap.set(stateName, stateTypeIdx);
   ctx.typeIdxToStructName.set(stateTypeIdx, stateName);
   ctx.structFields.set(stateName, stateFields);
@@ -2171,6 +2467,12 @@ export function registerNativeGenerator(
     spillNames: bodySpills,
     spillTypes,
     spillFieldOffset,
+    // (#3386) Pattern-param binding names (values packed from the emit site's
+    // eagerly-destructured factory locals at struct.new) + the undef-widened
+    // subset (marked `undefWidenedLocals` in the resume fctx).
+    patternParamBindings: plan.patternParamBindings.size > 0 ? plan.patternParamBindings : undefined,
+    undefWidenedPatternBindings:
+      plan.undefWidenedPatternBindings.size > 0 ? plan.undefWidenedPatternBindings : undefined,
     yieldCount,
     doneState: plan.states.length - 1, // the final `done` state id
     elemValType,
@@ -3448,52 +3750,24 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
     resumeFctx.body.push({ op: "local.set", index: localIdx });
   }
 
-  // (#2920) Destructure binding-pattern params ONCE, on first entry (state 0).
-  // The raw arg was rehydrated into its `param_*` local above; each bound name
-  // is a spill local (loaded above, persisted across yields) that this
-  // overwrites on first entry. Guarding on `state == 0` keeps it
-  // side-effect-safe — a default initializer / getter in the pattern must not
-  // re-run on resume (the spilled value is authoritative then). The bound-name
-  // spill locals are already in `localMap`, so the destructure helper's
-  // `ensureBindingLocals` reuses them (no double-alloc, no re-type).
-  // (#3050) Leading synthetic params (`this` OR capture params) offset the
-  // user-param indices in paramNames/paramTypes.
-  const thisOffset = info.synthesizedThis ? 1 : (info.leadingCaptureCount ?? 0);
-  const patternParams = info.decl.parameters.filter((p) => !ts.isIdentifier(p.name));
-  if (patternParams.length > 0) {
-    // (#2920 funcIdx-shift fix) `destructureParamObject`/`destructureParamArray`
-    // may add a late/union import (string helpers, `__get_undefined`, …), which
-    // shifts every function index. The shifter rewrites `ctx.currentFunc.body`,
-    // so `ctx.currentFunc` MUST point at the resume fctx during this emit — else
-    // the shift is applied to the OUTER caller's body and the resume prelude's
-    // own `call` indices (and already-emitted helpers like `__str_flat`) desync,
-    // producing an invalid module (only visible at harness scale, where a late
-    // import actually fires). Mirror the `emitTrampoline` wrapping below.
-    const savedFunc = ctx.currentFunc;
-    ctx.currentFunc = resumeFctx;
-    try {
-      const saved = pushBody(resumeFctx);
-      for (let k = 0; k < info.decl.parameters.length; k++) {
-        const p = info.decl.parameters[k]!;
-        if (ts.isIdentifier(p.name)) continue;
-        const nameIdx = k + thisOffset;
-        const rawLocal = resumeFctx.localMap.get(info.paramNames[nameIdx]!);
-        if (rawLocal === undefined) continue;
-        const rawType = info.paramTypes[nameIdx]!;
-        if (ts.isArrayBindingPattern(p.name)) {
-          destructureParamArray(ctx, resumeFctx, rawLocal, p.name, rawType);
-        } else if (ts.isObjectBindingPattern(p.name)) {
-          destructureParamObject(ctx, resumeFctx, rawLocal, p.name, rawType);
-        }
-      }
-      const destrInstrs = resumeFctx.body;
-      popBody(resumeFctx, saved);
-      resumeFctx.body.push({ op: "local.get", index: 0 });
-      resumeFctx.body.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD });
-      resumeFctx.body.push({ op: "i32.eqz" });
-      resumeFctx.body.push({ op: "if", blockType: { kind: "empty" }, then: destrInstrs, else: [] });
-    } finally {
-      ctx.currentFunc = savedFunc;
+  // (#2920/#3386) Pattern-param bindings need NO state-0 re-destructure here:
+  // parameter destructuring is EAGER (call time, §10.2.11
+  // FunctionDeclarationInstantiation) and already ran in the FACTORY — the emit
+  // site destructured the raw arg into factory locals, and
+  // `compileNativeGeneratorFunction` packed those bound values into the spill
+  // fields at `struct.new`. The spill-load loop above rehydrated them into
+  // same-named locals, so body reads resolve exactly as before. (The historic
+  // state-0 prelude re-destructure both mistimed GetIterator/default side
+  // effects to first-`.next()` — the corpus asserts they throw at `f(g)` — and
+  // would double-drive one-shot iterators now that iterator-protocol shapes
+  // are admitted.)
+  //
+  // (#3315/#3386) Mark undef-widened pattern bindings in the resume fctx so
+  // identifier reads skip the checker-type unbox narrowing (mirrors
+  // ensureBindingLocals' marking in the factory).
+  if (info.undefWidenedPatternBindings) {
+    for (const name of info.undefWidenedPatternBindings) {
+      (resumeFctx.undefWidenedLocals ??= new Set()).add(name);
     }
   }
 
@@ -3589,8 +3863,33 @@ export function compileNativeGeneratorFunction(
   // (numeric, unchanged), `i32`/`i64` 0, a null ref for object/string spills, or
   // a null externref for boxed-any spills — so the `struct.new` typechecks before
   // the body's declaration overwrites the slot on first entry.
+  //
+  // (#3386) EXCEPT pattern-param bindings: their values were just produced by
+  // the emit site's eager (call-time per §10.2.11) param destructure into
+  // factory locals of the same name — pack the bound VALUE into the spill
+  // field so the resume function's ordinary spill-load loop rehydrates the
+  // binding on every entry. Coerce when the destructure lane's local type
+  // differs from the spill type (e.g. an f64 struct-field bind into an
+  // undef-widened externref spill). A name missing from the factory localMap
+  // (defensive) keeps the inert default.
   for (let i = 0; i < info.spillNames.length; i++) {
-    fctx.body.push(defaultSpillInstr(info.spillTypes[i]!));
+    const spillName = info.spillNames[i]!;
+    const spillType = info.spillTypes[i]!;
+    const bindLocal = info.patternParamBindings?.has(spillName) ? fctx.localMap.get(spillName) : undefined;
+    if (bindLocal !== undefined) {
+      const localType = getLocalType(fctx, bindLocal);
+      fctx.body.push({ op: "local.get", index: bindLocal });
+      if (localType && !valTypesMatch(localType, spillType)) {
+        // ref → ref_null of the same struct is a pure subtype widening — no
+        // instruction needed; anything else routes through the coercion engine
+        // (which handles its own late-import bookkeeping against fctx.body).
+        const pureWiden =
+          localType.kind === "ref" && spillType.kind === "ref_null" && localType.typeIdx === spillType.typeIdx;
+        if (!pureWiden) coerceType(ctx, fctx, localType, spillType);
+      }
+    } else {
+      fctx.body.push(defaultSpillInstr(spillType));
+    }
   }
   // (#2170) `yield*` delegation slots start null — the inner generator is
   // materialized lazily on first entry into the yield-star state.
@@ -3638,8 +3937,3 @@ export {
   tryCompileNativeGeneratorForOf,
   emitNativeGeneratorToVec,
 } from "./generators-native-consumer.js";
-
-// (#3271) `bodyHasNewTryRegionAcrossYield` moved to the AST-scan module; it is
-// imported back above for local use and re-exported here so external importers
-// (statements/nested-declarations.ts) are unaffected by the move.
-export { bodyHasNewTryRegionAcrossYield };

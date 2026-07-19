@@ -43,6 +43,7 @@ export function createCodegenContext(
   const ctx: CodegenContext = {
     mod,
     checker,
+    sourceIsModule: false,
     // (#1930) THE type-query boundary. New codegen code MUST prefer
     // `ctx.oracle` over raw `ctx.checker` access — the oracle-ratchet CI gate
     // (`pnpm run check:oracle-ratchet`) fails on any growth of direct checker
@@ -102,12 +103,18 @@ export function createCodegenContext(
     usesNewTarget: false, // (#2023) set by the pre-scan in generateModule
     newTargetGlobalIdx: undefined, // (#2023)
     classNewTargetIds: new Map(), // (#2023) className → stable 1-based i32 id
+    usesDynamicProto: false, // (#802) set by the scanForDynamicProto pre-scan
+    dynamicProtoClasses: new Set(), // (#802) hierarchy-ROOT class names receiving proto mutation (Slice B)
+    dynamicProtoLiteralNodes: new WeakSet(), // (#802) object-literal proto receivers (Slice A)
+    dynProtoSentinelGlobalIdx: undefined, // (#802) "explicit null proto" sentinel global
     usesArrayHoles: false, // (#2001 S1) set by the scanForArrayHoles pre-scan
     arrayProtoIndexDirty: false, // (#2001 S2) set by scanForArrayHoles: Array.prototype index write ⇒ HOF hole-skip disabled
     usesVecValue: false, // (#2083) flipped by genuine getOrRegisterVecType usage
     suppressVecUsageFlag: false, // (#2083) true only during the two prereg calls below
     holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
     holeGlobalIdx: undefined, // (#2001 S1) $__hole singleton global
+    importMetaTypeIdx: undefined, // (#2970) shared $ImportMeta struct type
+    importMetaGlobals: new Map(), // (#2970) per-source-file import.meta object globals
     inModuleInitFlagReads: undefined, // (#2800) recorded __in_module_init flag reads
     inModuleInitGlobalIdx: undefined, // (#2800) __in_module_init flag global (set at finalize)
     usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
@@ -299,9 +306,13 @@ export function createCodegenContext(
     // reduced literal-substring backend; broader QuickJS libregexp ABI linking
     // remains the follow-up path for near-JS parity.
     standaloneRegExpEngine: options?.standalone ? nativeLiteralRegExpEngineConfig() : null,
-    // (#1373b Slice 1) Scaffolding only — hardcoded false. Future slices
-    // expose a CLI/option flag once the CPS lowering is parity-tested.
-    supportsAsyncIr: false,
+    // (#1373b C-1) ON by default. The gate is narrow by construction: the IR
+    // claims an async fn ONLY when the ONE async engine declines it
+    // (`asyncEngineClaims` — sync-pass-through population), it is a top-level
+    // declaration with an explicit `Promise<T>` annotation, and its body
+    // passes the normal Phase-1 shape checks. Set JS2WASM_IR_ASYNC=0 to
+    // disable (rollback lever).
+    supportsAsyncIr: process.env.JS2WASM_IR_ASYNC !== "0",
     wasiFdWriteIdx: -1,
     wasiProcExitIdx: -1,
     wasiPathOpenIdx: -1,

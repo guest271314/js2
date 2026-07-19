@@ -1,19 +1,48 @@
 ---
 id: 1378
-title: "spec gap: try/catch/finally — error type fidelity, finally completion override, dstr-binding (~85 fails)"
+title: "spec gap: try/catch/finally — RESCOPED to error-type fidelity only (Error-subclass own-field/prototype substrate)"
 status: ready
 created: 2026-05-08
-updated: 2026-06-19
+updated: 2026-07-17
 priority: medium
-feasibility: medium
-reasoning_effort: medium
+feasibility: hard
+reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: control-flow
 goal: spec-completeness
 sprint: Backlog
+disposition: "senior-dev/Fable — deep externref-backed Error-subclass substrate (#2101/#1366). Sub-issues A (finally completion override) + C (catch destructure) are DONE on main; only B remains and it is NOT a try/catch bug."
 ---
 # #1378 — try/catch/finally: completion values + error type fidelity
+
+## RESCOPE (2026-07-17, re-validation against current main)
+
+Re-validated all sub-issues against current `main` (dev-conform). **The only
+remaining bug is sub-issue B (error-type fidelity), and it is NOT a try/catch
+bug** — it is the deep externref-backed Error-subclass own-field/prototype
+substrate. Re-tagged `feasibility: hard` + `disposition` (senior-dev/Fable);
+kept out of the contained conformance fallback pool.
+
+- **Sub-issue A (finally completion override) — VERIFIED FIXED on main.** All
+  probes pass today: `(function(){ try{return 1}finally{return 2} })()` → 2;
+  `try{return 1}finally{}` → 1; `try{throw 0}catch{return 2}finally{return 3}`
+  → 3; finally-`break` override in a loop → correct. No work remaining.
+- **Sub-issue C (catch destructure iterator semantics) — DONE** (merged earlier;
+  `tests/issue-1378.test.ts` 4/4, see "Implementation Notes — sub-issue C").
+- **Sub-issue B (error-type fidelity) — REMAINS, and is mis-filed as try/catch.**
+  A user class `extends Error` yields, after `throw`/`catch`, a value with
+  `typeof e === "string"`, `e.message`/`e.name` `undefined`, and `String(e)`
+  TypeError-ing. Crucially it reproduces **with NO try/catch at all**:
+  `new MyErr().name` (where `class MyErr extends Error { constructor(){ super();
+  this.name = "MyErr"; } }`) already throws. Contrast: a plain class own-field
+  (`class C{ x=42 }; throw new C()` → `e.x === 42`) and a builtin
+  (`throw new RangeError("x")` → `e.name === "RangeError"`) both WORK. So the
+  fault is the **externref-backed Error-subclass representation** — own fields
+  set in the subclass constructor aren't persisted/readable, and the prototype
+  chain isn't preserved (`e instanceof MyErr` → false). This is #2101 / #1366
+  territory (subclass prototype chain + externref-backed own-field read), a
+  hard substrate change, not the try/catch lowering this issue was filed under.
 
 ## Problem
 
@@ -184,6 +213,71 @@ Empty-pattern `catch ([])` short-circuits with no materialisation per
   Likely shares machinery with #1366 (subclass prototype chain).
 - `completion-values-fn-finally-normal.js` null_deref: needs separate
   investigation of the `assert_throws` host shim.
+
+## Sub-issue B — PRECISE ROOT CAUSE (fable-dev-5, 2026-07-18, re-validated on current main)
+
+Smoke-tested sub-issue B against current main and narrowed the vague
+"error-type fidelity" down to **one property**: the `name` field on an Error
+subclass. Probe matrix (standalone lane, `new MyErr("boom")` where
+`class MyErr extends Error`):
+
+| read | result | verdict |
+| --- | --- | --- |
+| `e instanceof MyErr` (throw/catch) | 1 | ✅ works (the #2188 `$userClassId` brand) |
+| `e instanceof Error` | 1 | ✅ works |
+| `e.message === "boom"` | 1 | ✅ works |
+| custom own field `e.code === 42` | 1 | ✅ works (routed via `$Error_struct.$props`) |
+| base `new Error("boom").name === "Error"` | 1 | ✅ works |
+| **`e.name` after `this.name = "MyErr"` in ctor** | **0** | ❌ **BUG** |
+| **`e.name` after class field `name = "MyErr"`** | **0** | ❌ **BUG** |
+
+**It is NOT a throw/catch bug and NOT a prototype-chain bug** (both those work).
+It is a **read/write-lane split on the `name` property specifically**:
+
+- `$Error_struct` (registry/types.ts:~627) lays out
+  `[tag(0), message(1, MUT), name(2, **immutable**), stack(3, MUT),
+  userClassId(4, MUT), props(5, MUT)]`.
+- **`name` is declared `mutable: false`** (registry/types.ts:633). A standalone
+  user Error subclass instance IS a `$Error_struct` (not a distinct struct —
+  see `emitSetSubclassUserBrand`, class-bodies.ts:501), so `this.name = "MyErr"`
+  / the `name = "MyErr"` class-field initializer has NOWHERE to write: the
+  struct's `name` field is immutable, so the write is dropped (or silently
+  routed to the `$props` overflow store), while the READ path
+  (property-access-dispatch.ts:~1083 — "Error LHS so `.message`/`.name`/`.stack`
+  read the struct field directly") reads fieldIdx 2, returning the
+  constructor-baked default (`"Error"` / the parent name). This is exactly why
+  `message` works (fieldIdx 1 is mutable) and custom fields work (they use
+  `$props`, which the read path DOES consult for non-name/message/stack keys).
+
+### Fix direction (for the implementer — NOT done here)
+
+1. Make `$Error_struct.name` **`mutable: true`** (registry/types.ts:633). Check
+   why it was pinned immutable — likely an interning/dedup assumption that a
+   built-in Error's name is constant; a user subclass violates that.
+2. Route `.name` WRITES on an `$Error_struct` receiver to `struct.set fieldIdx 2`
+   (the member-set dispatch — grep `$Error_struct` in member-set-dispatch.ts /
+   the property-write path that currently handles `.message`/`.stack` writes;
+   `.name` must join them). Cover BOTH `this.name = v` in the ctor AND the
+   class-field `name = "..."` initializer (class-bodies field-init emit).
+3. The READ path already reads fieldIdx 2 — no change needed once the write
+   lands there. Verify `$props` doesn't also shadow it.
+
+### Regression surface + measurement
+
+- The immutable-name assumption may be load-bearing for the 8 built-in
+  `__new_<Error>` constructors (they bake the canonical name). Making the field
+  mutable must not let a plain `new TypeError()` mutate its shared name — but
+  since each `struct.new` produces a fresh instance, mutability is per-instance
+  and safe. Confirm with the existing Error suites.
+- Acceptance still needs the full test262 `language/statements/try/` +
+  `built-ins/NativeErrors/` harness measurement (+60 net target) — run in CI,
+  not locally.
+- Repro to promote into `tests/issue-1378.test.ts`: the 7-row matrix above
+  (standalone lane), asserting the two ❌ rows flip to 1.
+
+This stays `feasibility: hard` / `status: ready` — the substrate change (mutable
+field + write-routing + regression sweep) is a proper slice, not a one-liner,
+but it is now precisely located.
 
 ## Frontmatter reconcile (2026-06-12)
 

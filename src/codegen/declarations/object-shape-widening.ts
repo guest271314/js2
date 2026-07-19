@@ -38,11 +38,14 @@ export function collectEmptyObjectWidening(
 
           // Found `var X = {}` — now scan siblings for `X.prop = val`
           const varName = decl.name.text;
+          // (#3403) per-declaration key for `widenedDefinePropertyKeys`; matches
+          // what `integrityVarKey` yields at the USE sites in object-ops.ts.
+          const varKey = widenedVarKeyFromDecl(decl.name);
           const extraProps: { name: string; type: ValType }[] = [];
           const seenProps = new Set<string>();
 
           // Scan all following statements in the same block for property assignments
-          collectPropsFromStatements(checker, ctx, stmts, varName, extraProps, seenProps);
+          collectPropsFromStatements(checker, ctx, stmts, varName, varKey, extraProps, seenProps);
 
           // (#2584/#2849/#2944) If this var is ALSO the subject of any
           // `$Object`-hash-only consumer (bracket read/write, `in`, Object.keys
@@ -106,6 +109,41 @@ export function collectEmptyObjectWidening(
           if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
             for (const s of stmts) {
               markStandaloneAccessorDefineTargets(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
+          // (#739 S1 — HOST-lane representation pinning, the store-unification)
+          // Any `Object.defineProperty` / `Object.defineProperties` on this
+          // receiver whose application lands in the RUNTIME STORE — the native
+          // `$Object` open hash or the `_wasmPropDescs`/`_wasmStructProps`
+          // sidecar — rather than a widened-struct `struct.set` fast path makes
+          // a widened struct UNSOUND: every later dot-read `obj.p` lowers to
+          // `struct.get` (a defined getter never fires; a runtime-store value
+          // reads the struct default) and every dot-write `obj.p = X` to
+          // `struct.set` (a defined setter is bypassed). The two stores never
+          // see each other, and `_structFieldWriteback` mirrors only data
+          // VALUES back into the field — accessors cannot be mirrored (a
+          // `struct.get` can never invoke a getter). #3230 measured both bounded
+          // point-fixes (read-reroute net −7; read-reroute + runtime fallback
+          // still fails) and proved the field-vs-sidecar choice is
+          // widening-sensitive — the only sound fix is to keep the receiver on
+          // the ONE native store. Standalone already ships this via
+          // `dynamicDescriptorWidenVars` (checked at :123) +
+          // `markStandaloneAccessorDefineTargets` (above); the host lane was
+          // exempted on the (disproved) assumption the live-mirror writeback
+          // bridges the gap. Pin here by marking the var an
+          // `objectHashConsumerVar` so the suppression branch below (a) skips
+          // widening and (b) — load-bearing — records the var's EVOLVED checker
+          // type in `objectHashConsumerTypes` (the #2944 escape discipline;
+          // without it the checker re-registers a colliding `__anon` struct at
+          // the var's escape positions and compiled-acorn null-derefs, #2937).
+          // The now-pinned `$Object` rides the extern-lane MOP ops the
+          // bracket-form (`obj["p"]`) already proves correct on main. Host-gated
+          // so standalone stays byte-identical (also avoids colliding with
+          // in-flight #2042); WASI is standalone (no host MOP).
+          if (!ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markRuntimeStoreDefineTargets(s, varName, ctx.objectHashConsumerVars);
             }
           }
 
@@ -640,6 +678,138 @@ function descriptorHasAccessorKey(descArg: ts.Expression): boolean {
   return false;
 }
 
+/**
+ * (#739 S1, HOST-lane caller) Poison `varName` when it is the receiver of any
+ * `Object.defineProperty` / `Object.defineProperties` call whose application
+ * lands in the RUNTIME STORE (native `$Object` open hash or the
+ * `_wasmPropDescs`/`_wasmStructProps` sidecar) rather than a widened-struct
+ * `struct.set` fast path. Such receivers must stay a `$Object` so define →
+ * read → write → delete → for-in → hasOwnProperty → gOPD all target the ONE
+ * native store — see the block comment at the call site. This is the host-lane
+ * generalization of `markStandaloneAccessorDefineTargets` (which only covers
+ * accessor descriptors, standalone-gated); the host lane must additionally pin
+ * for dynamic descriptors, explicit-undefined / no-value literals, dynamic
+ * keys, and every `defineProperties` shape.
+ *
+ * Name-based, matching the widening pre-pass (aliasing is a shared documented
+ * limitation — see the issue's "Edge cases").
+ */
+function markRuntimeStoreDefineTargets(node: ts.Node, varName: string, poisonSet: Set<string>): void {
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === "Object" &&
+      ts.isIdentifier(n.expression.name)
+    ) {
+      const method = n.expression.name.text;
+      const recv = n.arguments[0];
+      if (recv && ts.isIdentifier(recv) && recv.text === varName) {
+        if (method === "defineProperty" && n.arguments.length >= 3) {
+          if (definePropertyRoutesToRuntimeStore(n.arguments[1]!, n.arguments[2]!)) {
+            poisonSet.add(varName);
+          }
+        } else if (method === "defineProperties" && n.arguments.length >= 2) {
+          // Every `Object.defineProperties(varName, …)` shape lands in the
+          // runtime store: the static per-entry expansion still routes each
+          // inner define through the runtime applier, and the dynamic route
+          // (`__defineProperties`) is entirely native. A widened struct is
+          // unsound for all of them.
+          poisonSet.add(varName);
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
+/**
+ * (#739 S1) Does a single `Object.defineProperty(varName, key, desc)` route its
+ * APPLICATION to the runtime store (native `$Object` / `_wasmPropDescs`
+ * sidecar) rather than the widened-struct `struct.set` fast path? True for
+ * every shape EXCEPT a pure data-descriptor object literal (`value` key
+ * present, no `get`/`set`, no explicit-`undefined` field) on a string/numeric
+ * literal key. Mirrors the routing in `object-ops.ts`: dynamic descriptor
+ * (`:1580` → `__defineProperty_desc`), explicit-`undefined` fields (`:1608`),
+ * the accessor path (`emitExternDefinePropertyNoValue` → `__defineProperty_accessor`),
+ * and the no-`value` path (also `emitExternDefinePropertyNoValue`). The pure
+ * data-literal family is deliberately KEPT on the struct fast path + flag
+ * side-channel — it already passes (`15.2.3.6-4-*` static rows) and must not be
+ * disturbed in S1.
+ */
+function definePropertyRoutesToRuntimeStore(keyArg: ts.Expression, descArg: ts.Expression): boolean {
+  // Dynamic key (not a string/numeric literal) can never be a widened field.
+  if (!ts.isStringLiteral(keyArg) && !ts.isNumericLiteral(keyArg)) return true;
+  // Non-inline-literal descriptor → runtime `__defineProperty_desc` (:1580).
+  if (!ts.isObjectLiteralExpression(descArg)) return true;
+  // Accessor descriptor (`get`/`set` key present, any value incl. `undefined`)
+  // → runtime accessor path.
+  if (descriptorHasAccessorKey(descArg)) return true;
+  // Explicit-`undefined` descriptor field (`{ value: undefined }`,
+  // `{ writable: undefined }`, …) → runtime path so the presence bit is
+  // recorded per ToPropertyDescriptor (:1608, host-only).
+  if (descriptorHasExplicitUndefinedField(descArg)) return true;
+  // No `value` key → `emitExternDefinePropertyNoValue` → runtime sidecar.
+  if (!descriptorHasValueKey(descArg)) return true;
+  return false;
+}
+
+/** (#739 S1) Recognized descriptor field names, per §6.2.5 ToPropertyDescriptor. */
+const S1_DESCRIPTOR_FIELD_NAMES = new Set(["value", "writable", "enumerable", "configurable", "get", "set"]);
+
+/** (#739 S1) Is `expr` `undefined` / `void <x>` (an explicit-undefined field
+ * value)? Mirrors `object-ops.ts`'s `isUndefinedLikeExpression`, unwrapping
+ * transparent `as` / `!` / parenthesized wrappers. */
+function isS1UndefinedLikeExpression(expr: ts.Expression): boolean {
+  let inner: ts.Expression = expr;
+  while (
+    ts.isAsExpression(inner) ||
+    ts.isTypeAssertionExpression(inner) ||
+    ts.isNonNullExpression(inner) ||
+    ts.isParenthesizedExpression(inner) ||
+    ts.isSatisfiesExpression(inner)
+  ) {
+    inner = inner.expression;
+  }
+  return (
+    inner.kind === ts.SyntaxKind.UndefinedKeyword ||
+    (ts.isIdentifier(inner) && inner.text === "undefined") ||
+    ts.isVoidExpression(inner)
+  );
+}
+
+/** (#739 S1) Does the descriptor literal carry a recognized field explicitly
+ * set to `undefined` (`{ value: undefined }`, `{ configurable: void 0 }`, …)?
+ * Mirrors `object-ops.ts`'s `descriptorUndefinedFields(...).length > 0`. */
+function descriptorHasExplicitUndefinedField(descArg: ts.ObjectLiteralExpression): boolean {
+  for (const prop of descArg.properties) {
+    if (!ts.isPropertyAssignment(prop)) continue;
+    const name = prop.name;
+    if (!ts.isIdentifier(name) && !ts.isStringLiteral(name)) continue;
+    if (S1_DESCRIPTOR_FIELD_NAMES.has(name.text) && isS1UndefinedLikeExpression(prop.initializer)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** (#739 S1) Does the descriptor literal have a (non-undefined-guaranteed)
+ * `value` key present? A property-assignment or shorthand `value` counts; an
+ * explicit-`undefined` `value` is caught earlier by
+ * {@link descriptorHasExplicitUndefinedField}. */
+function descriptorHasValueKey(descArg: ts.ObjectLiteralExpression): boolean {
+  for (const prop of descArg.properties) {
+    if (!ts.isPropertyAssignment(prop) && !ts.isShorthandPropertyAssignment(prop)) continue;
+    const name = prop.name;
+    if ((ts.isIdentifier(name) || ts.isStringLiteral(name)) && name.text === "value") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<string>): void {
   const isVarRef = (n: ts.Node): boolean => ts.isIdentifier(n) && n.text === varName;
 
@@ -678,6 +848,35 @@ function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<
     else if (ts.isForInStatement(n) && isVarRef(n.expression)) {
       poisonSet.add(varName);
     }
+    // (#3366 follow-up) A destructuring member target such as
+    // `[obj.value = fallback()] = source` is an open-property write. The
+    // extracted value is not bounded by the default initializer's checker
+    // type, so widening an empty `{}` receiver to a closed struct can select a
+    // colliding anonymous shape and leave the runtime receiver null. Keep this
+    // receiver on the same `$Object`/externref representation used by the
+    // dynamic member setter and subsequent sidecar read.
+    else if (
+      ts.isBinaryExpression(n) &&
+      n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      (ts.isArrayLiteralExpression(n.left) || ts.isObjectLiteralExpression(n.left))
+    ) {
+      const visitTarget = (target: ts.Node): void => {
+        if (ts.isBinaryExpression(target) && target.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+          visitTarget(target.left);
+          return;
+        }
+        if (
+          ts.isPropertyAccessExpression(target) &&
+          ts.isIdentifier(target.expression) &&
+          target.expression.text === varName
+        ) {
+          poisonSet.add(varName);
+          return;
+        }
+        ts.forEachChild(target, visitTarget);
+      };
+      visitTarget(n.left);
+    }
     ts.forEachChild(n, visit);
   };
 
@@ -694,7 +893,9 @@ function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<
 function recordDefinePropertyWiden(
   ctx: CodegenContext,
   checker: ts.TypeChecker,
-  varName: string,
+  // (#3403) the per-declaration key (`name@declStart`), NOT the bare name, so a
+  // same-named `{}` var in another function does not share this entry.
+  varKey: string,
   propName: string,
   descArg: ts.Expression,
   extraProps: { name: string; type: ValType }[],
@@ -714,7 +915,7 @@ function recordDefinePropertyWiden(
       }
     }
     extraProps.push({ name: propName, type: wasmType });
-    ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
+    ctx.widenedDefinePropertyKeys.add(`${varKey}:${propName}`);
   }
 }
 
@@ -723,6 +924,10 @@ export function collectPropsFromStatements(
   ctx: CodegenContext,
   stmts: readonly ts.Statement[],
   varName: string,
+  // (#3403) per-declaration key for `widenedDefinePropertyKeys` (threaded to
+  // `recordDefinePropertyWiden`); `varName` stays bare for the `objArg.text ===
+  // varName` receiver match below.
+  varKey: string,
   extraProps: { name: string; type: ValType }[],
   seenProps: Set<string>,
 ): void {
@@ -780,7 +985,7 @@ export function collectPropsFromStatements(
           if (ctx.standalone && !ts.isObjectLiteralExpression(descArg)) {
             ctx.dynamicDescriptorWidenVars.add(varName);
           }
-          recordDefinePropertyWiden(ctx, checker, varName, propName, descArg, extraProps, seenProps);
+          recordDefinePropertyWiden(ctx, checker, varKey, propName, descArg, extraProps, seenProps);
         }
       }
     }
@@ -802,7 +1007,7 @@ export function collectPropsFromStatements(
             const descArg = call.arguments[2]!;
             if (ts.isIdentifier(objArg) && objArg.text === varName && ts.isStringLiteral(propArg)) {
               const propName = propArg.text;
-              recordDefinePropertyWiden(ctx, checker, varName, propName, descArg, extraProps, seenProps);
+              recordDefinePropertyWiden(ctx, checker, varKey, propName, descArg, extraProps, seenProps);
             }
           }
         }
@@ -810,24 +1015,32 @@ export function collectPropsFromStatements(
     }
     // Recurse into compound statement bodies to find property assignments
     if (ts.isBlock(s)) {
-      collectPropsFromStatements(checker, ctx, s.statements, varName, extraProps, seenProps);
+      collectPropsFromStatements(checker, ctx, s.statements, varName, varKey, extraProps, seenProps);
     }
     if (ts.isIfStatement(s)) {
       if (ts.isBlock(s.thenStatement)) {
-        collectPropsFromStatements(checker, ctx, s.thenStatement.statements, varName, extraProps, seenProps);
+        collectPropsFromStatements(checker, ctx, s.thenStatement.statements, varName, varKey, extraProps, seenProps);
       }
       if (s.elseStatement && ts.isBlock(s.elseStatement)) {
-        collectPropsFromStatements(checker, ctx, s.elseStatement.statements, varName, extraProps, seenProps);
+        collectPropsFromStatements(checker, ctx, s.elseStatement.statements, varName, varKey, extraProps, seenProps);
       }
     }
     // Recurse into try/catch/finally blocks (wrapTest wraps test bodies in try blocks)
     if (ts.isTryStatement(s)) {
-      collectPropsFromStatements(checker, ctx, s.tryBlock.statements, varName, extraProps, seenProps);
+      collectPropsFromStatements(checker, ctx, s.tryBlock.statements, varName, varKey, extraProps, seenProps);
       if (s.catchClause) {
-        collectPropsFromStatements(checker, ctx, s.catchClause.block.statements, varName, extraProps, seenProps);
+        collectPropsFromStatements(
+          checker,
+          ctx,
+          s.catchClause.block.statements,
+          varName,
+          varKey,
+          extraProps,
+          seenProps,
+        );
       }
       if (s.finallyBlock) {
-        collectPropsFromStatements(checker, ctx, s.finallyBlock.statements, varName, extraProps, seenProps);
+        collectPropsFromStatements(checker, ctx, s.finallyBlock.statements, varName, varKey, extraProps, seenProps);
       }
     }
     // Recurse into for/while/do-while/switch bodies
@@ -839,12 +1052,12 @@ export function collectPropsFromStatements(
       ts.isDoStatement(s)
     ) {
       if (ts.isBlock(s.statement)) {
-        collectPropsFromStatements(checker, ctx, s.statement.statements, varName, extraProps, seenProps);
+        collectPropsFromStatements(checker, ctx, s.statement.statements, varName, varKey, extraProps, seenProps);
       }
     }
     if (ts.isSwitchStatement(s)) {
       for (const clause of s.caseBlock.clauses) {
-        collectPropsFromStatements(checker, ctx, clause.statements, varName, extraProps, seenProps);
+        collectPropsFromStatements(checker, ctx, clause.statements, varName, varKey, extraProps, seenProps);
       }
     }
   }

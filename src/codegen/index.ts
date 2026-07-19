@@ -29,6 +29,8 @@ import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js"
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
+import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
+import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { collectLocalCallEdges, irFirstBodyIsProvenLowerable, type ValueDomain } from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
@@ -49,6 +51,7 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
+import { scanForDynamicProto, fillDynamicProtoHelpers } from "./dynamic-proto.js"; // (#802)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { hoistedVarRetypesToConcreteRef, usageInferredLocalType } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate; (#684) usage-based any-local f64 override
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
@@ -65,7 +68,17 @@ import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
+import { fillVecOverlayHelpers } from "./vec-overlay.js"; // (#3251 S1)
 import { fillDisposableStackDisposeDriver } from "./disposable-runtime.js";
+import {
+  sourceContainsClass,
+  sourceContainsDelete,
+  sourceHasDynamicTaConstruct,
+  sourceContainsBindingPattern,
+  sourceOverridesArrayIterator,
+} from "./source-scan-predicates.js"; // (#3104) whole-program AST pre-scan predicates
+// Re-exported for existing external consumers (e.g. tests/issue-1719-s1.test.ts).
+export { sourceOverridesArrayIterator } from "./source-scan-predicates.js";
 import {
   fillApplyClosure,
   fillBindDynHelper,
@@ -120,6 +133,7 @@ import {
   getRunLoopFuncIdxForWasiStart,
   shiftAsyncSideChannelFuncIdxs,
 } from "./async-scheduler.js";
+import { ensureUnhandledRejectionReporter } from "./unhandled-rejection.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3) stable handles never shift
 import {
   brandExternMethodResult,
@@ -355,7 +369,24 @@ const TYPED_ARRAY_PACKED_STORAGE: Readonly<Record<string, { key: string; type: V
   Uint32Array: { key: "i32_elem", type: { kind: "i32" } },
 };
 
+/**
+ * (#838) The two BigInt typed-array views. Unlike the numeric views these can
+ * NOT fall back to `f64` element storage — an f64 cannot hold an arbitrary
+ * 64-bit BigInt. They always use a dedicated `i64` element vec in BOTH the
+ * host/gc and standalone/WASI lanes (BigInt is represented as a first-class
+ * `{ kind: "i64", bigint: true }` value throughout the compiler, so `array.get`/
+ * `array.set` on the i64 backing array need no packing/unpacking). `BigInt64Array`
+ * stores signed 64-bit two's-complement; `BigUint64Array` stores the same 64 raw
+ * bits interpreted unsigned — the wasm i64 element holds identical bits either
+ * way (ToBigInt64/ToBigUint64 both reduce mod 2^64, which i64 arithmetic already
+ * does), so both map to the same `i64` storage.
+ */
+export const BIGINT_TYPED_ARRAY_NAMES: ReadonlySet<string> = new Set(["BigInt64Array", "BigUint64Array"]);
+
 export function typedArrayVecStorage(ctx: CodegenContext, name: string): { key: string; type: ValType } {
+  // (#838) BigInt views always use i64 storage, independent of target mode —
+  // f64 cannot represent a 64-bit BigInt.
+  if (BIGINT_TYPED_ARRAY_NAMES.has(name)) return { key: "i64", type: { kind: "i64" } };
   if (ctx.wasi || ctx.standalone) {
     const packed = TYPED_ARRAY_PACKED_STORAGE[name];
     if (packed) return packed;
@@ -421,241 +452,6 @@ export function classifyTypedArrayType(
   const name = sym?.name;
   if (!name || !TYPED_ARRAY_NAMES.has(name)) return "other";
   return name === "Uint8Array" ? "uint8array" : "typed-array";
-}
-
-function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
-  let found = false;
-  function walk(node: ts.Node): void {
-    if (found) return;
-    if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
-      found = true;
-      return;
-    }
-    forEachChild(node, walk);
-  }
-  walk(sourceFile);
-  return found;
-}
-
-/**
- * (#2179) True when the source contains a `delete` operating on a property or
- * element access (`delete o.a` / `delete o[k]`). `delete x` of a bare
- * identifier and `delete <other expr>` (no-op deletes) do NOT count — only
- * member deletes can leave a runtime tombstone that the inline struct.get
- * read fast-path would bypass. Used to gate the tombstone-aware read routing
- * so delete-free modules emit byte-identical wasm.
- */
-function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
-  let found = false;
-  function walk(node: ts.Node): void {
-    if (found) return;
-    if (
-      ts.isDeleteExpression(node) &&
-      (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
-    ) {
-      found = true;
-      return;
-    }
-    forEachChild(node, walk);
-  }
-  walk(sourceFile);
-  return found;
-}
-
-/**
- * (#3057) True when the source dynamically constructs a `$__ta_dyn_view` —
- * `new <ctorExpr>(bufferArg[, off[, len]])` where `<ctorExpr>` is an IDENTIFIER
- * that is NOT a statically-named TA constructor (so it's a TA constructor held in
- * a variable / array element, type `any` or a TA-ctor union — test262
- * `for (ctor of ctors) new ctor(rab, …)` / `CreateRabForTest`) and NOT a user
- * class. Mirrors the runtime dynamic-construct gate in `new-super.ts` (buffer-typed
- * first arg, non-numeric-literal). Used to enable the runtime-kind element byte
- * codec on the generic index path for helper functions compiled BEFORE the
- * construct (the `$__ta_dyn_view` type registers lazily). Byte-inert: modules
- * without this pattern never set the flag, so they never emit the codec arm.
- */
-function sourceHasDynamicTaConstruct(checker: ts.TypeChecker, sourceFile: ts.SourceFile): boolean {
-  // (#3272) Reuse the module-level TYPED_ARRAY_NAMES set — identical 9 names.
-  const TA_NAMES = TYPED_ARRAY_NAMES;
-  let found = false;
-  function walk(node: ts.Node): void {
-    if (found) return;
-    if (ts.isNewExpression(node)) {
-      let callee: ts.Expression = node.expression;
-      while (ts.isParenthesizedExpression(callee) || ts.isAsExpression(callee) || ts.isNonNullExpression(callee)) {
-        callee = callee.expression;
-      }
-      if (ts.isIdentifier(callee)) {
-        // Static TA name (`new Uint8Array(buf)`) is handled by the static view
-        // ctor path, never the dynamic one — skip it.
-        if (!TA_NAMES.has(callee.text)) {
-          // A user class callee resolves to a ClassDeclaration value — skip; only
-          // a value-bound ctor (variable / param / any) reaches the dynamic path.
-          const sym = checker.getSymbolAtLocation(callee);
-          const decl = sym?.valueDeclaration;
-          const isUserClass = decl !== undefined && ts.isClassDeclaration(decl);
-          if (!isUserClass) {
-            const arg0 = node.arguments && node.arguments.length >= 1 ? node.arguments[0]! : undefined;
-            // Buffer-typed first arg gates the dynamic TA construct (the #3054 D
-            // buffer form) — excludes `new fn(x)` on unrelated identifiers.
-            if (arg0 !== undefined && !ts.isNumericLiteral(arg0)) {
-              let arg0Sym: string | undefined;
-              try {
-                arg0Sym = checker.getTypeAtLocation(arg0).getSymbol?.()?.name;
-              } catch {
-                arg0Sym = undefined;
-              }
-              if (arg0Sym === "ArrayBuffer" || arg0Sym === "SharedArrayBuffer" || arg0Sym === "DataView") {
-                found = true;
-                return;
-              }
-            }
-            // (#2872) General dynamic-ctor forms — `new TA(3)`, `new TA([…])`,
-            // `new TA(otherTA)`, `new TA()` on a GENUINELY-dynamic callee (an
-            // `any`/`unknown`-typed param / variable / binding element declared
-            // in real source — the `testWithTypedArrayConstructors(TA => …)`
-            // harness shape). Mirrors `resolvesToDynamicAnyCtorValue`
-            // (new-super.ts): declaration-file symbols (ambient globals) and
-            // typed function/class bindings never set the flag, so ordinary
-            // `new F(...)` function-ctor modules stay byte-identical.
-            if (
-              decl !== undefined &&
-              !decl.getSourceFile().isDeclarationFile &&
-              (ts.isParameter(decl) || ts.isVariableDeclaration(decl) || ts.isBindingElement(decl))
-            ) {
-              try {
-                const calleeType = checker.getTypeAtLocation(callee);
-                if ((calleeType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
-                  found = true;
-                  return;
-                }
-              } catch {
-                /* type resolution failure — leave the flag unset */
-              }
-            }
-          }
-        }
-      }
-    }
-    forEachChild(node, walk);
-  }
-  walk(sourceFile);
-  return found;
-}
-
-/**
- * #1623 — true when the source contains any object/array binding pattern
- * (destructuring) in a parameter, variable declaration, or assignment target.
- * Used to decide whether to pre-emit the WASI/standalone TypeError constructor
- * before user functions compile, so the destructuring null-throw guard's
- * `emitWasiErrorConstructor` call doesn't run mid-prologue and clobber a
- * reserved user-function slot.
- */
-function sourceContainsBindingPattern(sourceFile: ts.SourceFile): boolean {
-  let found = false;
-  function walk(node: ts.Node): void {
-    if (found) return;
-    if (ts.isObjectBindingPattern(node) || ts.isArrayBindingPattern(node)) {
-      found = true;
-      return;
-    }
-    forEachChild(node, walk);
-  }
-  walk(sourceFile);
-  return found;
-}
-
-/**
- * (#1719 S1) Whole-program pre-scan for the `ITER_OVERRIDDEN` brand of the
- * array object-value representation track. Returns true iff the source may
- * monkeypatch `Array.prototype`'s iterator surface, i.e. it contains:
- *   (i)  an assignment `Array.prototype[Symbol.iterator] = …` or
- *        `Array.prototype.values = …` (any element/property access whose
- *        object is `Array.prototype`), OR
- *   (ii) `Object.defineProperty(Array.prototype, …)` /
- *        `Object.defineProperties(Array.prototype, …)`.
- *
- * When this returns false (the overwhelming common case), the array
- * destructuring / spread / for-of fast paths are provably unaffected by any
- * prototype override and stay byte-identical (see `arrayDstrNeedsIdentity`).
- * When true, the S2 slice routes a branded array RHS through the host-Array
- * reflection + host `GetIterator` so the override's `@@iterator` is observed
- * (§7.4.2 GetIterator, §8.5.2 IteratorBindingInitialization).
- *
- * Reused verbatim from the dev-a `issue-1719-impl` scaffolding (the front-end
- * half the architecture spec endorses keeping). Conservative by design: it
- * over-approximates (a false positive only costs the S2 slow path, never
- * correctness) and never under-approximates a literal `Array.prototype` LHS.
- */
-export function sourceOverridesArrayIterator(sourceFile: ts.SourceFile): boolean {
-  let found = false;
-  // Strip `as`/`!`/type-assertion/paren wrappers so `(Array.prototype as any)[…]`
-  // and `(Array.prototype)[…]` match the same as the bare form.
-  function unwrap(e: ts.Expression): ts.Expression {
-    let cur = e;
-    while (
-      ts.isParenthesizedExpression(cur) ||
-      ts.isAsExpression(cur) ||
-      ts.isNonNullExpression(cur) ||
-      ts.isTypeAssertionExpression(cur)
-    ) {
-      cur = ts.isParenthesizedExpression(cur)
-        ? cur.expression
-        : ts.isAsExpression(cur)
-          ? cur.expression
-          : ts.isNonNullExpression(cur)
-            ? cur.expression
-            : (cur as ts.TypeAssertion).expression;
-    }
-    return cur;
-  }
-  // `e` is the object being assigned INTO: match `Array.prototype[...]`
-  // (element access) or `Array.prototype.values` (property access).
-  function isArrayProtoLHS(e: ts.Expression): boolean {
-    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
-      const obj = unwrap(e.expression);
-      return (
-        ts.isPropertyAccessExpression(obj) &&
-        obj.name.text === "prototype" &&
-        ts.isIdentifier(obj.expression) &&
-        obj.expression.text === "Array"
-      );
-    }
-    return false;
-  }
-  function walk(node: ts.Node): void {
-    if (found) return;
-    // (i) assignment: Array.prototype[Symbol.iterator] = … / Array.prototype.values = …
-    if (
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      isArrayProtoLHS(node.left)
-    ) {
-      found = true;
-      return;
-    }
-    // (ii) Object.defineProperty(Array.prototype, …) / Object.defineProperties(Array.prototype, …)
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const callee = node.expression;
-      const arg0 = node.arguments[0];
-      if (
-        ts.isIdentifier(callee.expression) &&
-        callee.expression.text === "Object" &&
-        (callee.name.text === "defineProperty" || callee.name.text === "defineProperties") &&
-        arg0 !== undefined &&
-        ts.isPropertyAccessExpression(arg0) &&
-        arg0.name.text === "prototype" &&
-        ts.isIdentifier(arg0.expression) &&
-        arg0.expression.text === "Array"
-      ) {
-        found = true;
-        return;
-      }
-    }
-    forEachChild(node, walk);
-  }
-  walk(sourceFile);
-  return found;
 }
 
 /**
@@ -1964,6 +1760,12 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
       jsHostExterns,
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
+      // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
+      // async engine ($AsyncFrame drive / host-drive) declines it — the
+      // legacy sync-pass-through population. Engine-activated functions keep
+      // byte-identical routing.
+      supportsAsyncIr: ctx.supportsAsyncIr,
+      asyncEngineClaims: (fn) => asyncEngineWouldActivate(ctx, fn),
     },
     typeMap,
   );
@@ -2027,15 +1829,25 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
       // — `Generator<T>` doesn't resolve as `IrType.object` and
       // would otherwise drop the generator from `safeSelection`.
       const isGenerator = !!fn.asteriskToken;
+      // (#1373b C-1) IR-claimed async fns (sync-pass-through model) register
+      // the raw `T` unwrapped from the `Promise<T>` annotation — matching
+      // the declaration pre-pass's `unwrapPromiseType` result type, so the
+      // IR-lowered signature equals the legacy-registered one (the #1796
+      // call-site contract stays intact). The selector only claims asyncs
+      // with an explicit `Promise<T>` annotation, so the unwrap is non-null
+      // for every claimed async fn.
+      const isAsyncFn = !isGenerator && hasAsyncModifier(fn);
+      const asyncUnwrapped = isAsyncFn ? unwrapPromiseTypeNode(fn.type) : null;
+      const effectiveReturnNode = isAsyncFn ? (asyncUnwrapped ?? undefined) : fn.type;
       // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
       // (it has no representation for void in IrType) and set returnType
       // to null. The lowerer treats null returnType as "no result".
-      const isVoidReturn = !isGenerator && fn.type?.kind === ts.SyntaxKind.VoidKeyword;
+      const isVoidReturn = !isGenerator && effectiveReturnNode?.kind === ts.SyntaxKind.VoidKeyword;
       const returnType: IrType | null = isGenerator
         ? ({ kind: "val", val: { kind: "externref" } } as IrType)
         : isVoidReturn
           ? null
-          : resolvePositionType(fn.type, entry?.returnType, ctx, classShapes);
+          : resolvePositionType(effectiveReturnNode, entry?.returnType, ctx, classShapes);
       const params: IrType[] = [];
       for (let i = 0; i < fn.parameters.length; i++) {
         const p = fn.parameters[i]!;
@@ -2130,6 +1942,8 @@ export function generateModule(
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  const sourceFileInternal = ast.sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node };
+  ctx.sourceIsModule = sourceFileInternal.externalModuleIndicator !== undefined;
   // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
   // whose legacy body emission was skipped (IR owns the slot). Declared out
   // here so the return statement below (outside the try) can surface it.
@@ -2451,6 +2265,12 @@ export function generateModule(
     // class-ids and `new`/comparison sites emit the threading global. Off by
     // default — programs without `new.target` are byte-identical.
     scanForNewTarget(ctx, ast.sourceFile);
+
+    // (#802) Detect proto-mutation receivers up front so class collection can
+    // append the conditional standalone-only `$__proto__` field to marked
+    // hierarchy roots. Off by default — programs without proto mutation are
+    // byte-identical.
+    scanForDynamicProto(ctx, ast.sourceFile);
 
     // (#2001 S1) Detect any array-literal elision up front so externref-element
     // vec reads / joins emit the `$Hole → undefined` read-boundary guard.
@@ -2985,6 +2805,17 @@ export function generateModule(
     // only (no-op otherwise).
     fillDynamicForinVecArms(ctx);
 
+    // (#3251 S1) Array-descriptor overlay: fill the reserved
+    // `__vec_dp_value` / `__vec_dp_accessor` / `__vec_gopd` bodies (companion
+    // `$Object` per vec receiver, delegating ValidateAndApply/merge/gOPD to
+    // the `$Object` natives + vec value write-back) and splice the overlay
+    // read prologues into `__extern_get_idx` / `__extern_get`. Runs AFTER the
+    // vec fills above (needs every carrier + `__obj_index_of_key`) and BEFORE
+    // `fillTaDynViewMopArms` below so the TypedArray dyn-view arm keeps the
+    // front slot (TA receivers must exit before the overlay consult).
+    // Standalone only (no-op otherwise).
+    fillVecOverlayHelpers(ctx);
+
     // (#3177) `$__ta_dyn_view` §10.4.5 MOP arms — AFTER every vec fill above
     // (each fill prepends at body[0]; last fill wins the front slot, and the
     // dyn-view arm must beat the generic `$__vec_base` arms it subtypes).
@@ -3006,6 +2837,16 @@ export function generateModule(
     // doc in registry/error-types.ts). No-op unless the module constructs
     // native errors (standalone/wasi only) — byte-identical otherwise.
     fillExternGetErrorProps(ctx);
+
+    // (#802 Slices B+C) Mint the struct-proto natives and prepend the
+    // marked-root dispatch arms into `__object_setPrototypeOf` /
+    // `__getPrototypeOf` / `__extern_get`, so `Object.setPrototypeOf(
+    // classInstance, proto)` records the link in the conditional appended
+    // `$__proto__` field and inherited dynamic reads walk it. Mints DEFINED
+    // funcs only (no import shifts). No-op unless standalone AND the
+    // scanForDynamicProto prescan marked a class hierarchy — byte-identical
+    // otherwise.
+    fillDynamicProtoHelpers(ctx);
 
     // (#2358 #10) Fill the reserved `__array_to_primitive_string` body now that
     // `__extern_length`/`__extern_get_idx` (filled just above) and the native
@@ -3148,32 +2989,31 @@ export function generateModule(
 }
 
 /**
- * (#2094) Post-link import-section scan — the emit-time backstop for the
- * `addImport` gate.
+ * (#2094) Post-link import-section scan — emit-time backstop for the `addImport`
+ * gate. A host import that survived dead-import elimination bypassed the per-call
+ * gate (stale funcMap index / direct `mod.imports.push`) and would fail
+ * instantiation in a hostless runtime (#2073/#2075); this turns that into a clean
+ * `success: false` CE.
  *
- * Gated on `ctx.strictNoHostImports` ONLY, deliberately matching the per-call
- * `addImport` gate's trigger (`src/codegen/registry/imports.ts`). Under strict
- * mode (auto-on for `--target wasi`, opt-in via `--no-host-imports`) the build
- * contract is "no JS-host imports", so a host import that survived dead-import
- * elimination bypassed the gate (stale funcMap index / direct `mod.imports.push`)
- * and would fail instantiation in a hostless runtime (#2073/#2075). This scan
- * turns that into a clean `success: false` CE instead.
- *
- * It does NOT fire on plain `--target standalone` (which is NOT strict by
- * default): standalone builds today still tolerate a set of `env` imports that
- * the test harness satisfies, and rejecting them here would regress thousands
- * of currently-passing standalone tests. The scan is a backstop for the strict
- * contract, not a new policy — when standalone is run strictly
- * (`strictNoHostImports`) it is covered. No-op for host/WasmGC builds.
+ * Severity by target: wasi / explicit `--no-host-imports` (`strictNoHostImports`)
+ * → **error** (fails the build). Plain `--target standalone` → **warning**
+ * (#2961 phase 1): every leak gets a source-located advisory but the binary is
+ * emitted UNCHANGED (the addImport gate stays strict-only, nothing dropped), so
+ * the `host_free_pass` floor cannot move. #2961 ratchets standalone to a hard
+ * error once the allowlist stabilizes; `JS2WASM_STANDALONE_LEAK_SCAN=0` disables
+ * the standalone scan for A/B. No-op for host/WasmGC builds.
  */
 function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
-  if (!ctx.strictNoHostImports) return;
-  // #2783 — pass `ctx.linkedNamespaces` so an arbitrary `--link`'d namespace's
-  // imports survive the strict gate (left as link-time imports for a preloaded
-  // provider) instead of being rejected as leaked host imports.
+  const severity: "error" | "warning" | null = ctx.strictNoHostImports
+    ? "error"
+    : ctx.standalone && process.env.JS2WASM_STANDALONE_LEAK_SCAN !== "0"
+      ? "warning"
+      : null;
+  if (severity === null) return;
+  // #2783 — `--link`'d namespaces survive as link-time imports, not leaks.
   const leaks = scanForLeakedHostImports(mod.imports, ctx.linkedNamespaces);
   for (const leak of leaks) {
-    reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
+    reportErrorNoNode(ctx, buildLeakedHostImportError(leak, severity), severity);
   }
 }
 
@@ -3363,6 +3203,14 @@ function addWasiStartExport(ctx: CodegenContext): void {
     ensureWasiStartExnPrinter(ctx);
   }
 
+  // (#2958) Pre-emit the unhandled-rejection reporter (a no-op unless the native
+  // $Promise carrier registered its tracking substrate AND fd_write/proc_exit
+  // exist). Emitting it here — before any funcidx below is computed — keeps the
+  // index space stable, mirroring the exn-printer discipline above. `_start`
+  // calls it at the tail (after the drain/run-loop), so a still-unhandled
+  // rejection is reported to stderr and the program exits nonzero.
+  const unhandledReporterIdx = ctx.wasi ? ensureUnhandledRejectionReporter(ctx) : -1;
+
   // Choose the WASI program entry that `_start` wraps.
   //
   // #1411 regression: #1978 correctly stopped splicing the module-init body
@@ -3439,6 +3287,14 @@ function addWasiStartExport(ctx: CodegenContext): void {
       if (drainFuncIdx !== null) {
         body.push({ op: "call", funcIdx: drainFuncIdx });
       }
+    }
+
+    // (#2958) After the microtask/event-loop drain has fully quiesced, surface
+    // any promise that rejected without ever getting a handler (Node parity:
+    // report to stderr + exit nonzero). No-op function body when nothing was
+    // tracked; only emitted at all when the reporter exists.
+    if (unhandledReporterIdx >= 0) {
+      body.push({ op: "call", funcIdx: unhandledReporterIdx });
     }
 
     // (#2968) If the uncaught-exception printer was emitted (throwing WASI
@@ -4530,6 +4386,8 @@ export function generateMultiModule(
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
+  // Multi-file compilation is linked through import/export module records.
+  ctx.sourceIsModule = true;
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -4637,6 +4495,12 @@ export function generateMultiModule(
     // (#2023) Whole-realm new.target detection — OR across all source files.
     for (const sf of multiAst.sourceFiles) {
       scanForNewTarget(ctx, sf);
+    }
+
+    // (#802) Whole-realm proto-mutation receiver detection — OR across all
+    // source files (marked roots must be known before class collection).
+    for (const sf of multiAst.sourceFiles) {
+      scanForDynamicProto(ctx, sf);
     }
 
     // (#2001 S1) Whole-realm array-hole detection — OR across all source files.
@@ -5472,7 +5336,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // storage; other typed arrays keep the legacy f64 representation.
     // Covers: Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
     //         Int32Array, Uint32Array, Float32Array, Float64Array
-    if (sym?.name && TYPED_ARRAY_NAMES.has(sym.name)) {
+    // (#838) BigInt64Array/BigUint64Array resolve to an i64-element vec (they are
+    // deliberately kept OUT of `TYPED_ARRAY_NAMES` so the f64-assuming host
+    // marshalling classifier treats them as "other"; `typedArrayVecStorage`
+    // returns i64 for them).
+    // (#838 gate — fable-dev-5) Only in standalone/wasi: in js-host the BigInt
+    // views stay host globals (externref) so SharedArrayBuffer/Atomics interop
+    // works — the native i64-vec has no js-host Atomics bridge yet (see the
+    // construction-path notes in new-builtin-globals.ts / new-super.ts). Numeric
+    // views map to a native vec in js-host too, but their Atomics bridge exists.
+    const isBigIntView838 = sym?.name !== undefined && BIGINT_TYPED_ARRAY_NAMES.has(sym.name);
+    if (sym?.name && (TYPED_ARRAY_NAMES.has(sym.name) || (isBigIntView838 && (ctx.wasi || ctx.standalone)))) {
       const storage = typedArrayVecStorage(ctx, sym.name);
       const vecIdx = getOrRegisterVecType(ctx, storage.key, storage.type);
       return { kind: "ref_null", typeIdx: vecIdx };
@@ -6329,6 +6203,13 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     // resolveStructNameForExpr sees the override at every later access.
     let initForcesExternref = false;
     if (decl.initializer && ts.isObjectLiteralExpression(decl.initializer)) {
+      // (#802 Slice A) A proto-receiver object literal is built as an open
+      // `$Object` (externref, standalone-only) in compileObjectLiteral; the
+      // hoisted `var` slot must be externref to match (mirrors the let/const path
+      // in statements/variables.ts via ctx.dynamicProtoLiteralNodes).
+      if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(decl.initializer)) {
+        initForcesExternref = true;
+      }
       for (const p of decl.initializer.properties) {
         if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) {
           initForcesExternref = true;
@@ -6977,11 +6858,25 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
             (spreadCtxType.flags & ts.TypeFlags.NonPrimitive) !== 0 ||
             spreadCtxType.getProperties().length === 0;
         }
-        if (initIsAccessorLiteral || initIsHostSpreadLiteral) {
+        // (#802 Slice A) A proto-receiver object literal is promoted to an open
+        // `$Object` (externref) by compileObjectLiteral. This pre-hoist allocator
+        // is the AUTHORITATIVE let/const slot-typer, so the externref override
+        // MUST be applied here too — otherwise the slot is the inferred struct and
+        // the promoted `$Object` externref is ref.cast to it at runtime (cast
+        // fails → the receiver goes null and `o.x`/inherited reads return NaN).
+        // Registers the name in externrefAccessorVars so reads route through the
+        // dynamic `__extern_get` path. Standalone-only (gc/host keeps its existing
+        // closed-struct + host-sidecar path unchanged).
+        const initIsProtoReceiverLiteral =
+          ctx.standalone &&
+          decl.initializer !== undefined &&
+          ts.isObjectLiteralExpression(decl.initializer) &&
+          ctx.dynamicProtoLiteralNodes.has(decl.initializer);
+        if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral) {
           ctx.externrefAccessorVars.add(name);
         }
         let wasmType: ValType =
-          initIsAccessorLiteral || initIsHostSpreadLiteral
+          initIsAccessorLiteral || initIsHostSpreadLiteral || initIsProtoReceiverLiteral
             ? { kind: "externref" }
             : isI32Coerced
               ? { kind: "i32" }

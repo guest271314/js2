@@ -771,6 +771,23 @@ export function compileRegExpLiteral(ctx: CodegenContext, fctx: FunctionContext,
   const flagsResult = compileStringLiteral(ctx, fctx, flagsStr, expr);
   if (!flagsResult) return null;
 
+  // (#3301) Ensure a minimal `externClasses` "RegExp" entry BEFORE the import:
+  // the manifest resolver routes `RegExp_new` to the real RegExp constructor
+  // only when "RegExp" is in `ctx.externClasses`, else it falls to the "builtin"
+  // intent — a no-op returning `undefined`. The pre-codegen scan sets this for a
+  // real-AST regex literal, but an eval-spliced regex (`eval("/abc/i")`, #1163)
+  // is a FOREIGN node it never walks. Mirrors the calls.ts eval-concat peephole.
+  if (!ctx.externClasses.has("RegExp")) {
+    ctx.externClasses.set("RegExp", {
+      importPrefix: "RegExp",
+      namespacePath: [],
+      className: "RegExp",
+      constructorParams: [{ kind: "externref" }, { kind: "externref" }],
+      methods: new Map(),
+      properties: new Map(),
+    });
+  }
+
   // Call RegExp_new(pattern, flags) -> externref
   let funcIdx = ctx.funcMap.get("RegExp_new");
   if (funcIdx === undefined) {
@@ -1324,6 +1341,25 @@ export function compileTypeofExpression(
       }
       const sym = ctx.checker.getSymbolAtLocation(ident);
       const hasValueDecl = !!sym?.valueDeclaration;
+      // (#3436) In standalone / WASI mode `structuredClone` is deliberately NOT
+      // provided — its host import is skipped in extern-declarations, so the
+      // global genuinely does not exist and `typeof structuredClone` must be
+      // "undefined" (§13.5.3: typeof of an unresolvable Reference). The TS lib
+      // gives it an ambient `valueDeclaration`, so the static fold below would
+      // otherwise wrongly yield "function", defeating the universal test262
+      // prelude's own `typeof structuredClone !== "function"` guard (which must
+      // throw the honest "$262.detachArrayBuffer is unsupported by this host"
+      // error). Restricted to standalone/WASI + the exact unprovided name +
+      // an ambient-lib-only symbol (a user-declared `structuredClone` lives in a
+      // non-declaration file and keeps "function"), so host mode is byte-inert.
+      if (
+        (ctx.standalone || ctx.wasi) &&
+        ident.text === "structuredClone" &&
+        !!sym?.declarations?.length &&
+        sym.declarations.every((d) => d.getSourceFile().isDeclarationFile)
+      ) {
+        return compileStringLiteral(ctx, fctx, "undefined");
+      }
       if (!hasValueDecl) {
         return compileStringLiteral(ctx, fctx, "undefined");
       }
@@ -1523,6 +1559,24 @@ export function compileTypeofComparison(
       }
       const sym = ctx.checker.getSymbolAtLocation(ident);
       if (!sym?.valueDeclaration) {
+        const matches = "undefined" === stringLiteral;
+        const result = isEq ? (matches ? 1 : 0) : matches ? 0 : 1;
+        fctx.body.push({ op: "i32.const", value: result });
+        return { kind: "i32" };
+      }
+      // (#3436) standalone/WASI: `structuredClone` is deliberately unprovided
+      // (host import skipped in extern-declarations), so `typeof structuredClone`
+      // is "undefined". The lib's ambient `valueDeclaration` would otherwise fold
+      // it to "function" below, defeating the universal test262 prelude's own
+      // `$262.detachArrayBuffer` guard (which must throw the honest "unsupported
+      // by this host"). Ambient-lib-only symbol + exact name + standalone/WASI,
+      // so a user-declared `structuredClone` and host mode are byte-inert.
+      if (
+        (ctx.standalone || ctx.wasi) &&
+        ident.text === "structuredClone" &&
+        !!sym.declarations?.length &&
+        sym.declarations.every((d) => d.getSourceFile().isDeclarationFile)
+      ) {
         const matches = "undefined" === stringLiteral;
         const result = isEq ? (matches ? 1 : 0) : matches ? 0 : 1;
         fctx.body.push({ op: "i32.const", value: result });
