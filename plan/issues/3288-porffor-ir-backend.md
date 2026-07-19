@@ -1,9 +1,10 @@
 ---
 id: 3288
 title: "Optional Porffor IR backend: prove the target-neutral JS2 linear-memory plan"
-status: in-progress
+status: done
 created: 2026-07-16
 updated: 2026-07-17
+completed: 2026-07-17
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -258,31 +259,83 @@ backend's semantic emitter.
 
 ## Acceptance criteria
 
-- [ ] A fourth backend lowers real JS2 IR through the five-part backend
+- [x] A fourth backend lowers real JS2 IR through the five-part backend
       contract; there is no parallel AST-to-Porffor front end.
-- [ ] Core install, build, typecheck, and non-Porffor tests pass when
+- [x] Core install, build, typecheck, and non-Porffor tests pass when
       `vendor/Porffor` is absent/uninitialized.
-- [ ] The pinned Porffor compatibility test validates the node enum, value
+- [x] The pinned Porffor compatibility test validates the node enum, value
       types, effects, function record, and module record before invoking the
       renderer.
-- [ ] Scalar/control-flow functions render to C, compile, and produce the same
+- [x] Scalar/control-flow functions render to C, compile, and produce the same
       results under JavaScript, JS2 linear-Wasm, and Porffor-C.
-- [ ] `LinearMemoryPlan` is the single owner of allocation class, layout,
+- [x] `LinearMemoryPlan` is the single owner of allocation class, layout,
       pointer-map, root, and barrier decisions consumed by the initial two
       backends without exposing Porffor or C concepts.
-- [ ] Removing or disabling the optional Porffor adapter requires no changes to
+- [x] Removing or disabling the optional Porffor adapter requires no changes to
       `LinearMemoryPlan`, its analyses, or the production linear-Wasm backend.
-- [ ] Migrating today's linear-Wasm backend to the default plan is byte-identical
+- [x] Migrating today's linear-Wasm backend to the default plan is byte-identical
       on the established emit-identity corpus and has no conformance regression.
-- [ ] The heap proof covers allocation, reads/writes, aliasing, identity, and
+- [x] The heap proof covers allocation, reads/writes, aliasing, identity, and
       vector bounds through both backends.
-- [ ] At least two allocation policies consume the same plan; switching policy
+- [x] At least two allocation policies consume the same plan; switching policy
       requires no changes to `LinearEmitter` or `PorfforEmitter` semantic-op
       implementations.
-- [ ] Unsupported IR produces localized `porffor backend does not support ...`
+- [x] Unsupported IR produces localized `porffor backend does not support ...`
       legality diagnostics before emission. No silent fallback to raw C.
-- [ ] A measurement note records code size, runtime, peak memory, allocation
+- [x] A measurement note records code size, runtime, peak memory, allocation
       count, supported IR families, and the exact Porffor commit.
+
+## Completion record (2026-07-17)
+
+All dependency-ordered slices merged before this umbrella was closed:
+
+| Slice | Issue | PR    |
+| ----- | ----- | ----- |
+| P0    | #3295 | #3109 |
+| P1    | #3296 | #3166 |
+| P2    | #3297 | #3198 |
+| P3    | #3298 | #3257 |
+| P4    | #3299 | #3263 |
+| P5    | #3300 | #3287 |
+
+The completed optional path is JS2 typed SSA IR through the shared
+`LinearMemoryPlan` into Porffor IR, with Porffor's pinned renderer available as
+an experimental C artifact consumer. The supported proof surface covers scalar
+numeric/control flow, stable symbolic calls, fixed numeric records, and dense
+f64 vectors. Unsupported families still fail during backend legality checking;
+there is no public canonical Porffor/C target and no raw-C fallback.
+
+The shared planner owns layouts, allocation classes, pointer maps, roots,
+barriers, and symbolic runtime operations. Its default `arena-v1` policy stays
+byte-identical for the established 56-record corpus. The alternative
+`analysis-stack-arena-v1` policy promotes only owned, local, fixed-size sites
+and preserves the complete baseline decision for every fallback, including
+managed roots/safepoints/barriers where applicable.
+
+The fixed 200,000-invocation benchmark reduced backing allocations from
+400,000 to one per round and reduced peak memory from 9,633,792 to 131,072
+bytes for linear-Wasm and from 10,911,744 to 1,310,720 RSS bytes for Porffor-C.
+Recorded median kernel time changed from 10.856 to 6.382 ms and from 1.858 to
+1.075 ms, respectively, with artifact growth of 177 Wasm bytes and 1,173 C /
+296 native bytes. These results prove shared-policy leverage, not universal
+superiority. Exact methodology and the Porffor pin
+`60a1d41d60580ff4faa38ffd5f7783d23df68bad` are recorded in
+`docs/ir/porffor-allocation-policy-proof.md`.
+
+Final validation:
+
+- The P0 compatibility suite passed 8 tests, and the P1-P5/backend-contract
+  corpus passed 62 tests with allocation verification enabled.
+- Five broader cross-backend/equivalence files passed 55 tests.
+- All 56 `(file, target)` emit-identity outcomes matched a clean
+  `origin/main` control after the P5 main catch-up.
+- In a detached worktree with an empty `vendor/Porffor`, typecheck and the
+  production build passed; 22 core tests passed and only the optional
+  Porffor-C execution test skipped. PR quality also completed
+  `pnpm install --frozen-lockfile` without submodule initialization.
+- P5 PR CI passed quality, linear tests, all eight equivalence shards and their
+  gate, cross-backend parity, CLA, and test262 relevance before merge-queue
+  entry.
 
 ## Tests and gates
 
@@ -290,7 +343,9 @@ backend's semantic emitter.
 - Porffor schema-fingerprint and renderer-input tests at the pinned commit.
 - IR-node mapping tests that assert operand order and `FX` propagation.
 - Three-way scalar differential tests: JS vs linear-Wasm vs Porffor-C.
-- Heap alias/identity/bounds tests and managed-allocation stress tests.
+- Heap alias/identity/bounds tests plus repeated stack-frame reuse and arena
+  overflow stress. Mixed managed-collection execution remains explicitly
+  unsupported; non-promoted managed planning retains the baseline contract.
 - Existing `prove-emit-identity` coverage for the linear-Wasm default policy.
 - Full IR/equivalence suites and merge-group conformance validation for any
   slice that changes shared planning or the production linear backend.
@@ -340,12 +395,12 @@ backend's semantic emitter.
   through the backend contract so the allocation plan and legality hooks remain
   available; an out-of-tree adapter can consume serialized IR after T3/T5 land.
 
-## Slice execution record
+## Historical slice execution record
 
 ### P1 - backend-neutral generic lowering result (2026-07-16)
 
-Status: complete in this PR. The umbrella remains `in-progress`; P2-P5 were not
-started on this branch.
+Status at the P1 merge: complete. At that point the umbrella remained
+`in-progress`; P2-P5 had not started on that branch.
 
 #### Acceptance status
 

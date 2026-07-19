@@ -1,10 +1,11 @@
 ---
 id: 3299
 title: "Porffor backend P4: heap and layout proof through shared planning"
-status: in-review
+status: done
 sprint: porffor-backend
 created: 2026-07-16
 updated: 2026-07-17
+completed: 2026-07-17
 priority: high
 horizon: l
 feasibility: hard

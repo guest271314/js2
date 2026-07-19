@@ -2,6 +2,8 @@
 id: 1378
 title: "spec gap: try/catch/finally — RESCOPED to error-type fidelity only (Error-subclass own-field/prototype substrate)"
 status: ready
+model: fable
+fable_role: spec
 created: 2026-05-08
 updated: 2026-07-17
 priority: medium
@@ -12,6 +14,7 @@ area: codegen
 language_feature: control-flow
 goal: spec-completeness
 sprint: Backlog
+model: fable
 disposition: "senior-dev/Fable — deep externref-backed Error-subclass substrate (#2101/#1366). Sub-issues A (finally completion override) + C (catch destructure) are DONE on main; only B remains and it is NOT a try/catch bug."
 ---
 # #1378 — try/catch/finally: completion values + error type fidelity

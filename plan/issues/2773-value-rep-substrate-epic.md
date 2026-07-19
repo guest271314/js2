@@ -3,10 +3,11 @@ id: 2773
 title: "[EPIC][ARCH] Value-rep substrate: consistent native dispatch for reconstructed-struct field access + DCE/finalize-stable typeIdx"
 status: in-progress
 assignee: ttraenkler/fable-2773t
-sprint: current
+sprint: fable-final
 model: fable
+fable_role: implement
 created: 2026-06-28
-updated: 2026-07-09
+updated: 2026-07-17
 priority: high
 horizon: xl
 feasibility: hard

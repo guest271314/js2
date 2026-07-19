@@ -4,10 +4,12 @@ model: fable
 fable_role: spec
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
 status: in-progress
+model: fable
+fable_role: spec
 assignee: ttraenkler/opus-regexp
-sprint: current
+sprint: fable-final
 created: 2026-06-11
-updated: 2026-06-26
+updated: 2026-07-17
 s1_note: "S1 (standalone tag-1 $undefined singleton) NOT COMPLETE — PR #2025 was AUTO-PARKED in merge_group (2026-06-24): standalone high-water floor breached (pass 23729 vs mark 24956), NET −1245 test262 rows (1654 regressed / 409 gained). Root cause (diagnosed by sdev-s1fix 2026-06-25, see '## S1 merge_group regression — diagnosis'): S1.1 flipped the CONSUMER __extern_is_undefined to singleton-only but did NOT flip the matching PRODUCERS (notably __extern_get's missing-key return at object-runtime.ts:856, still ref.null.extern), so destructuring/param defaults stop firing. This is the architect-spec's full ~40-site producer+consumer sweep done as a partial subset — there is NO narrow floor-saving fix. RESOLUTION 2026-06-25: S1.1+S1.2 behavioral flips REVERTED on the branch (kept inert S1.0); PR #2025 re-targets to a floor-neutral revert. S1 to be re-landed as a fully-scoped complete sweep (architect re-spec). REMAINING slices unchanged: S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object."
 priority: high
 feasibility: hard

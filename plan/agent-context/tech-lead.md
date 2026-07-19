@@ -59,7 +59,7 @@ No context summaries were written by agents. State captured here instead:
 
 ### Tooling shipped this session
 - `scripts/statusline-sprint.mjs` — sprint progress script (used by statusline-command.sh)
-- `scripts/next-issue-id.mjs` — reliably returns next free issue number
+- `scripts/next-issue-id.mjs` — read-only PREVIEW of the next free issue number (`pnpm run preview:issue-id`); does NOT reserve. To ALLOCATE an id, use the atomic reserver `node scripts/claim-issue.mjs --allocate` (`pnpm run new:issue-id`).
 - `.claude/statusline-command.sh` — updated with sprint bar + days-left bar
 - `.claude/settings.json` — statusLine wired to statusline-command.sh with 30s refresh
 
