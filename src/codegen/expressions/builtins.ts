@@ -10,9 +10,10 @@ import { resolveArrayInfo } from "../array-methods.js";
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { emitToString } from "../coercion-engine.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
 import { addFuncType, ensureWasiWriteAnyStringHelper } from "../index.js";
-import { ensureNativeStringExternBridge } from "../native-strings.js";
+import { ensureAnyToStringHelper, ensureNativeStringExternBridge } from "../native-strings.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
@@ -32,22 +33,76 @@ function compileConsoleCall(
     return compileConsoleCallWasi(ctx, fctx, expr, method);
   }
 
-  // (#3436) Standalone mode: no JS host to receive console output, and the
-  // `env.console_*` imports are deliberately NOT registered (import-collector
-  // finalize). Lower to a native no-op sink: evaluate each argument for its
-  // side effects, then drop the produced value so the stack stays balanced.
-  // test262 verdicts come from thrown exceptions, not printed output, so
-  // discarding the output is behaviourally faithful for the conformance lane.
+  // (#3436/#3469) Standalone mode: no JS host to receive console output, and the
+  // `env.console_*` imports are deliberately NOT registered (keeps #2961's
+  // import-leak gate green); there is also no `fd_write` sink (unlike WASI).
+  // Instead of the original pure no-op (#3436), render each argument to a native
+  // string and append it to the in-module `__stdout_acc` rope (space-separated,
+  // trailing newline). The runner reads that back host-free via
+  // `__stdout_prepare`/`__stdout_char`, so the test262 async completion marker
+  // (`$DONE → print → console.log("Test262:AsyncTestComplete")`) is observable.
   if (ctx.standalone) {
+    const appendName = "__stdout_append";
+    // Re-read the append funcidx BY NAME at every emission point: `emitToString`
+    // / `compileExpression` below can insert a late import that shifts every
+    // function index (#2642) — a cached idx would resolve to the wrong function.
+    const emitAppend = (): void => {
+      const idx = ctx.funcMap.get(appendName);
+      if (idx !== undefined) fctx.body.push({ op: "call", funcIdx: idx });
+    };
+    if (ctx.funcMap.get(appendName) === undefined) {
+      // The sink helper was not minted (native strings unavailable, or the
+      // pre-body flag was not set) — fall back to the original no-op drop.
+      for (const arg of expr.arguments) {
+        const res = compileExpression(ctx, fctx, arg);
+        if (res !== null) fctx.body.push({ op: "drop" });
+      }
+      return VOID_RESULT;
+    }
+    let first = true;
     for (const arg of expr.arguments) {
-      const res = compileExpression(ctx, fctx, arg);
-      // `compileExpression` returns `null` for a void expression (nothing
-      // pushed) and a ValType otherwise — mirror the expression-statement
-      // discard convention (statements.ts) and only drop when a value landed.
-      if (res !== null) {
+      if (!first) {
+        compileStringLiteral(ctx, fctx, " ");
+        emitAppend();
+      }
+      first = false;
+      const tsType = ctx.checker.getTypeAtLocation(arg);
+      const valType = compileExpression(ctx, fctx, arg);
+      // Render the argument to a native `$AnyString` HOST-FREE. The test262 async
+      // marker reaches `console.log` through `any`-typed harness params
+      // (`$DONE → __consolePrintHandle__(msg) → print(value) → console.log(value)`),
+      // so at THIS call site the arg is statically `any`, compiled to an
+      // `externref` — NOT string-typed. A static-type gate would drop it.
+      let producedString: boolean;
+      if (valType !== null && valType.kind === "externref") {
+        // externref → anyref → `__any_to_string` (the native, IMPORT-FREE
+        // stringifier the exn-render path uses). emitToString's externref arm
+        // would instead register the `__extern_toString` HOST import and trip the
+        // #2961 import-leak gate — that is exactly what we must avoid here.
+        fctx.body.push({ op: "any.convert_extern" });
+        const anyToStrIdx = ensureAnyToStringHelper(ctx);
+        flushLateImportShifts(ctx, fctx);
+        const idx = ctx.funcMap.get("__any_to_string") ?? anyToStrIdx;
+        fctx.body.push({ op: "call", funcIdx: idx });
+        producedString = true;
+      } else {
+        // string / number / boolean / struct-ref / void — every `emitToString`
+        // arm reachable here is host-free (string pass-through, native
+        // `number_toString`/bool, or the `__any_to_string` struct arm). The
+        // importing externref arm is unreachable (handled above).
+        const st = emitToString(ctx, fctx, valType, tsType, "string");
+        producedString = st.kind === "ref" || st.kind === "ref_null";
+      }
+      if (producedString) {
+        emitAppend();
+      } else {
+        // emitToString declined (e.g. `number_toString` not registered) and left
+        // a scalar on the stack — drop it to keep the stack balanced.
         fctx.body.push({ op: "drop" });
       }
     }
+    compileStringLiteral(ctx, fctx, "\n");
+    emitAppend();
     return VOID_RESULT;
   }
 

@@ -185,10 +185,12 @@ import {
 } from "./destructuring-params.js";
 import {
   emitExceptionRenderExports,
+  emitStdoutSinkExports,
   emitTestRuntimeStringHelpers,
   ensureAnyToStringHelper,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
+  ensureStandaloneStdoutSink,
   flatStringType,
   nativeStringType,
   nativeStringTypeNullable,
@@ -2203,6 +2205,17 @@ export function generateModule(
     // scan adding `eval` / `parseInt`) do not shift defined-func entries.
     emitDeferredWasiHelpers(ctx);
 
+    // (#3469) Mint the standalone host-free `console.log`/`print` sink
+    // (`__stdout_acc` global + `__stdout_append` helper) in the same
+    // post-import-registration / pre-body window as the WASI helpers, so the
+    // `__stdout_append` funcidx is final for every `console.*` call site that
+    // bakes it (no mid-body index-shift hazard). No-op unless the source uses
+    // `console.*` in standalone mode (`ctx.usesStandaloneConsoleSink`). Readout
+    // exports (`__stdout_prepare`/`__stdout_char`) are emitted at finalize.
+    if (ctx.usesStandaloneConsoleSink) {
+      ensureStandaloneStdoutSink(ctx);
+    }
+
     // #1886 Slice B — emit the `__lin_u8_alloc` bump-allocator FUNCTION here,
     // in the same post-import-registration window as emitToUint32Helper /
     // emitDeferredWasiHelpers and for the same reason: all the eager import
@@ -2622,6 +2635,12 @@ export function generateModule(
     // nativeStrings && the `$exc` tag was registered (i.e. the module can
     // actually throw).
     emitExceptionRenderExports(ctx);
+
+    // (#3469) Emit __stdout_prepare / __stdout_char so the runner can read the
+    // standalone host-free `console.log`/`print` output (the test262 async
+    // completion marker) with zero host imports. No-op unless the standalone
+    // stdout sink was minted (ctx.stdoutAccGlobalIdx >= 0).
+    emitStdoutSinkExports(ctx);
 
     // Emit __call_fn_0 export for calling zero-arg closures from JS (#851)
     emitClosureCallExport(ctx);
@@ -4661,6 +4680,12 @@ export function generateMultiModule(
     // nativeStrings && the `$exc` tag was registered (i.e. the module can
     // actually throw).
     emitExceptionRenderExports(ctx);
+
+    // (#3469) Emit __stdout_prepare / __stdout_char so the runner can read the
+    // standalone host-free `console.log`/`print` output (the test262 async
+    // completion marker) with zero host imports. No-op unless the standalone
+    // stdout sink was minted (ctx.stdoutAccGlobalIdx >= 0).
+    emitStdoutSinkExports(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
