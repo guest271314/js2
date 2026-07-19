@@ -56,7 +56,7 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
-import { compileExternSetFallback } from "./assignment.js";
+import { compileExternSetFallback, isStrictContext } from "./assignment.js";
 
 /**
  * Compile logical assignment operators: ??=, ||=, &&=
@@ -536,10 +536,17 @@ function compilePropertyLogicalAssignmentExternref(
   );
   if (getIdx === undefined) return null;
 
-  // Ensure __extern_set is available
+  // Ensure __extern_set is available. (#3430) PutValue's strict-Reference
+  // throw (§13.15.2 → §6.2.5.6 step 3.e) applies here exactly as it does for
+  // plain `=` assignment (assignment.ts's `compileExternSetFallback`) — a
+  // strict `obj.prop ??= v` that fails [[Set]] (non-writable data property /
+  // new key on a non-extensible object) must throw TypeError, not silently
+  // no-op. Select the strict sidecar terminal accordingly; sloppy keeps the
+  // legacy silent refusal.
+  const setName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    setName,
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );
@@ -803,9 +810,13 @@ function compileElementLogicalAssignmentExternref(
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "externref" }],
   );
+  // (#3430) Strict `arr[i] ??= v` (etc.) mirrors the property-access sidecar:
+  // a failed [[Set]] must throw under a strict Reference. See the property
+  // arm above for the full rationale.
+  const elemSetName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    elemSetName,
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );
@@ -2481,9 +2492,17 @@ function compilePropertyCompoundAssignmentExternref(
     fctx.body.push({ op: "local.set", index: anyResultLocal });
 
     // Write back — same pinned-dispatch/bare-host split as the numeric arm.
+    // (#3430) The BARE (non-pinned) fallback is the general `obj.prop += v`
+    // path for a plain externref/host-object receiver — select the strict
+    // sidecar terminal there so a failed [[Set]] (non-writable data property /
+    // new key on a non-extensible object) throws under a strict Reference,
+    // matching plain `=` assignment (assignment.ts, #3374). The PINNED
+    // dispatcher branch below keeps its existing NON-strict wiring unchanged
+    // (see its own comment) — this only affects the bare sidecar write.
+    const anySetName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
     const setAnyIdx = ensureLateImport(
       ctx,
-      "__extern_set",
+      anySetName,
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
     );
@@ -2545,9 +2564,13 @@ function compilePropertyCompoundAssignmentExternref(
   // forever → infinite loop). Emit the SYMMETRIC struct.set dispatch first so
   // the slot is written when the receiver owns `propName` as a real field;
   // fall back to `__extern_set` for genuine host externrefs / sidecar-only props.
+  // (#3430) The bare fallback selects the strict sidecar terminal for a
+  // strict Reference — see the `+=` string-concat arm above for rationale;
+  // this is the numeric-op mirror of the same fix.
+  const cmpdSetName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    cmpdSetName,
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );
@@ -2712,13 +2735,20 @@ function compileElementCompoundAssignment(
     });
     fctx.body.push({ op: "local.set", index: boxedLocal });
 
-    // Write back: __extern_set(obj, key, boxed_result)
+    // Write back: __extern_set(obj, key, boxed_result). (#3430) Select the
+    // strict sidecar terminal for a strict Reference — `arr[i] op= v` (etc.)
+    // on a plain host-object/externref receiver must throw TypeError when
+    // [[Set]] fails (non-writable data property / new key on a
+    // non-extensible object), mirroring plain `=` assignment (#3374).
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });
+    const elemCmpdSetName = isStrictContext(target, ctx.inferModuleStrictArguments)
+      ? "__extern_set_strict"
+      : "__extern_set";
     const setIdx = ensureLateImport(
       ctx,
-      "__extern_set",
+      elemCmpdSetName,
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
     );
@@ -2810,13 +2840,20 @@ function compileElementCompoundAssignment(
     });
     fctx.body.push({ op: "local.set", index: boxedLocal });
 
-    // Write back: __extern_set(obj, key, boxed_result)
+    // Write back: __extern_set(obj, key, boxed_result). (#3430) Select the
+    // strict sidecar terminal for a strict Reference — `arr[i] op= v` (etc.)
+    // on a plain host-object/externref receiver must throw TypeError when
+    // [[Set]] fails (non-writable data property / new key on a
+    // non-extensible object), mirroring plain `=` assignment (#3374).
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });
+    const elemCmpdSetName = isStrictContext(target, ctx.inferModuleStrictArguments)
+      ? "__extern_set_strict"
+      : "__extern_set";
     const setIdx = ensureLateImport(
       ctx,
-      "__extern_set",
+      elemCmpdSetName,
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
     );
