@@ -40,6 +40,93 @@ import {
 } from "./runtime/legacy-regexp.js";
 export { buildWasiPolyfill } from "./runtime/wasi-polyfill.js";
 
+// ES2026 RegExp.prototype[@@replace] derives `global` and full-Unicode mode
+// from Get(rx, "flags") for a non-callable replacement. Older host engines
+// instead read rx.global and (only for global regexps) rx.unicode directly.
+// Test once so current engines stay completely on their native path.
+const _nativeRegExpReplace = RegExp.prototype[Symbol.replace];
+const _nativeRegExpReplaceReadsFlags = (() => {
+  try {
+    const probe = /./;
+    let read = false;
+    Object.defineProperty(probe, "flags", {
+      configurable: true,
+      get() {
+        read = true;
+        return "";
+      },
+    });
+    (_nativeRegExpReplace as any).call(probe, "", "");
+    return read;
+  } catch {
+    return false;
+  }
+})();
+
+/**
+ * Run current @@replace flag collection on hosts that still implement the
+ * older global/unicode property protocol. Temporary data properties feed the
+ * already-coerced flag values to the legacy native algorithm without invoking
+ * user accessors a second time. Ordinary and configurable RegExp instances
+ * take this path; exotic non-configurable receivers fall back to native after
+ * the required flags read rather than changing their descriptors.
+ */
+function _callRegExpReplaceWithCurrentFlags(
+  fn: (this: any, input: string, replacement: string) => any,
+  regex: any,
+  input: any,
+  replacement: any,
+): any {
+  const string = String(input);
+  const replacementString = String(replacement);
+  const flags = String(regex.flags);
+  const flagValues: Record<"global" | "unicode", boolean> = {
+    global: flags.includes("g"),
+    unicode: flags.includes("u") || flags.includes("v"),
+  };
+  const saved = new Map<"global" | "unicode", PropertyDescriptor | undefined>();
+  const changed: Array<"global" | "unicode"> = [];
+
+  for (const key of ["global", "unicode"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(regex, key);
+    saved.set(key, descriptor);
+    const canShadow =
+      descriptor === undefined ||
+      descriptor.configurable === true ||
+      (Object.prototype.hasOwnProperty.call(descriptor, "value") && descriptor.writable === true);
+    if (
+      !canShadow ||
+      !Reflect.defineProperty(regex, key, {
+        ...(descriptor?.configurable === false
+          ? descriptor
+          : { configurable: true, enumerable: descriptor?.enumerable }),
+        value: flagValues[key],
+        writable: descriptor?.configurable === false ? descriptor.writable : true,
+      })
+    ) {
+      for (let i = changed.length - 1; i >= 0; i--) {
+        const changedKey = changed[i]!;
+        const prior = saved.get(changedKey);
+        if (prior) Reflect.defineProperty(regex, changedKey, prior);
+        else Reflect.deleteProperty(regex, changedKey);
+      }
+      return fn.call(regex, string, replacementString);
+    }
+    changed.push(key);
+  }
+
+  try {
+    return fn.call(regex, string, replacementString);
+  } finally {
+    for (let i = changed.length - 1; i >= 0; i--) {
+      const key = changed[i]!;
+      const descriptor = saved.get(key);
+      if (descriptor) Reflect.defineProperty(regex, key, descriptor);
+      else Reflect.deleteProperty(regex, key);
+    }
+  }
+}
+
 /**
  * Portable require() for loading Node.js builtin modules (#1044).
  * Works in both CJS (require is global) and ESM (createRequire from node:module).
@@ -4790,6 +4877,46 @@ function _iteratorRecordForHost(
   const wrapStep = (r: any): any =>
     r != null && typeof r === "object" && _isWasmStruct(r) ? _wrapForHost(r, exports) : r;
   const shim: any = Object.create(base);
+  // (#3470) A statically typed generator is a native Wasm state struct. It has
+  // no host-visible `next`, but the compiler exports its already-existing
+  // iterator-helper steppers on demand. Present those as a normal Iterator
+  // record so Node's original `%Iterator.prototype%` helper performs argument
+  // validation and the helper algorithm while each IteratorStep resumes Wasm.
+  const bridgeOpen = exports?.__j2w_iter_helper_open as ((recv: any) => any) | undefined;
+  const bridgeNext = exports?.__j2w_iter_helper_next as ((recv: any) => [number, any]) | undefined;
+  const bridgeClose = exports?.__j2w_iter_helper_close as ((recv: any) => void) | undefined;
+  let bridgeHandle: any;
+  if (_isWasmStruct(v) && typeof bridgeOpen === "function" && typeof bridgeNext === "function") {
+    try {
+      bridgeHandle = bridgeOpen(v);
+    } catch {
+      bridgeHandle = undefined;
+    }
+  }
+  if (bridgeHandle != null) {
+    const stepBridge = bridgeNext!;
+    Object.defineProperties(shim, {
+      next: {
+        value() {
+          const [done, value] = stepBridge(bridgeHandle);
+          return { value, done: Boolean(done) };
+        },
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      },
+      return: {
+        value(value?: any) {
+          bridgeClose?.(bridgeHandle);
+          return { value, done: true };
+        },
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      },
+    });
+    return shim;
+  }
   // LAZY accessors, resolved only when the helper itself performs the spec
   // `Get(iterator, "next")` — an EAGER read here fired user getter effects
   // BEFORE the helper's own argument validation, breaking the
@@ -5574,7 +5701,31 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       }
       return val;
     },
-    set(_t, key, val) {
+    set(_t, key, val, receiver) {
+      // When this mirror is installed as another object's [[Prototype]] (for
+      // example by Object.create), OrdinarySet reaches the prototype Proxy's
+      // set trap with the CHILD as `receiver`. Writing the raw prototype here
+      // would turn the child's own assignment into an inherited sidecar write,
+      // leaving Reflect.ownKeys(child) empty. Apply OrdinarySetWithOwnDescriptor
+      // to the receiver instead: inherited accessors/non-writable data retain
+      // their semantics, while an absent or writable data property becomes an
+      // ordinary own data property on the child.
+      if (receiver !== proxy) {
+        const ownDesc = _readOwnDescriptor(obj, _normalizeDescKey(key), exports);
+        if (ownDesc?.get !== undefined || ownDesc?.set !== undefined) {
+          const setter = _maybeWrapCallableUnknownArity(ownDesc.set, { getExports: () => exports });
+          if (typeof setter !== "function") return false;
+          Reflect.apply(setter, receiver, [val]);
+          return true;
+        }
+        if (ownDesc?.writable === false) return false;
+        return Reflect.defineProperty(receiver, key, {
+          value: val,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+      }
       _safeSet(obj, key, val, exports);
       return true;
     },
@@ -8936,7 +9087,12 @@ assert._isSameValue = isSameValue;
           }
         };
       }
-      if (name === "__object_create") return (proto: any) => Object.create(proto);
+      if (name === "__object_create")
+        return (proto: any) => {
+          const exports = callbackState?.getExports();
+          const hostProto = _isWasmStruct(proto) ? _wrapForHost(proto, exports) : proto;
+          return Object.create(hostProto);
+        };
       if (name === "__new_plain_object") return (): any => ({});
       if (name === "__register_prototype")
         return (proto: any, csv: any): void => {
@@ -10207,7 +10363,16 @@ assert._isSameValue = isSameValue;
               if (drained !== null) wrappedArgs[1] = [drained, ...wrappedArgs[1].slice(1)];
             }
           }
-          const fn = wrappedObj[method];
+          let fn = wrappedObj[method];
+          // (#3470) A native generator frame is opaque to JavaScript and has
+          // no prototype-visible Iterator helpers. Resolve the real host
+          // helper explicitly; `_iteratorRecordForHost` below adapts only the
+          // receiver representation, leaving the helper algorithm untouched.
+          if (typeof fn !== "function" && _isWasmStruct(obj)) {
+            const iteratorProto = (globalThis as any).Iterator?.prototype;
+            const candidate = iteratorProto?.[method];
+            if (typeof candidate === "function" && _isIteratorHelperFn(candidate)) fn = candidate;
+          }
           // (#1320) Some chained `Array.from.call(C, items)` shapes lower as a
           // generic `method="from"` dispatch on `Array`. Drain Wasm-closure
           // iterables before the native Array.from performs GetMethod(items,
@@ -10633,8 +10798,11 @@ assert._isSameValue = isSameValue;
             // Treat missing arg1 (null from ref.null.extern padding) as
             // undefined → ToString gives "undefined" per spec, matching
             // `regex[Symbol.replace](str)` with no replaceValue.
-            if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
-            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+            const replacement = arg1 == null ? undefined : wrapCallable(arg1);
+            if (!_nativeRegExpReplaceReadsFlags && fn === _nativeRegExpReplace && typeof replacement !== "function") {
+              return _callRegExpReplaceWithCurrentFlags(fn, regex, wrappedArg0, replacement);
+            }
+            return fn.call(regex, wrappedArg0, replacement);
           }
           if (symbolId === 10) {
             // split: missing limit (null padding) → call without second arg
@@ -12616,8 +12784,15 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__gen_result_value")
         return (result: any) => {
-          let val = result.value;
-          if (val !== undefined) return val;
+          // (#3470) Presence, not value, decides whether the host result owns
+          // the field. Iterator Helper exhaustion deliberately stores
+          // `value: undefined`; treating that as a miss fell through to the
+          // Wasm struct getter, whose shape-miss sentinel is null, and changed
+          // the observable IteratorResult from undefined to null.
+          if (result != null && (typeof result === "object" || typeof result === "function") && "value" in result) {
+            return result.value;
+          }
+          let val: any;
           val = _sidecarGet(result, "value");
           if (val !== undefined) return val;
           const exports = callbackState?.getExports();
@@ -12625,8 +12800,13 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__gen_result_value_f64")
         return (result: any) => {
-          let val = result.value ?? _sidecarGet(result, "value");
-          if (val === undefined) {
+          let val: any;
+          if (result != null && (typeof result === "object" || typeof result === "function") && "value" in result) {
+            val = result.value;
+          } else {
+            val = _sidecarGet(result, "value");
+          }
+          if (val === undefined && !(result != null && "value" in Object(result))) {
             const exports = callbackState?.getExports();
             val = exports?.__sget_value?.(result);
           }
