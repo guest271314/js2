@@ -319,13 +319,17 @@ export interface CompileOptions {
    */
   honestAnyBoxing?: boolean;
   /**
-   * (#745 S2) Known-union `$AnyValue` representation — heterogeneous primitive
+   * (#745) Known-union `$AnyValue` representation — heterogeneous primitive
    * unions (`number | string`, …) resolve to the universal `$AnyValue` tagged
    * carrier instead of externref, so narrowed reads become tag-checked
-   * `struct.get`s with no box/unbox helper round-trip. Default false (legacy,
-   * byte-identical — the mapping only fires on such union types). EXPERIMENTAL
-   * opt-in until the consumer migration (#745 S3: strict-eq / truthiness /
-   * string-concat / call boundaries; coordinate #2141) makes it lane-default.
+   * `struct.get`s with no box/unbox helper round-trip. **Default derived from
+   * the lane** (#745 S4.5): ON for native-string lanes (standalone / wasi /
+   * fast / strictNoHostImports / explicit `nativeStrings`) now that the S3
+   * (strict-eq / truthiness / string-concat) and S4 (params / returns /
+   * any-boundary) consumer sweeps landed; the JS-host lane stays default-OFF
+   * until S5 (hard-gated on #2141). Setting this option explicitly overrides
+   * the lane default; the env kill-switch `JS2WASM_UNION_ANYREP=0` forces the
+   * legacy externref regime for A/B control.
    */
   unionAnyRep?: boolean;
   /**

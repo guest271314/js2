@@ -95,15 +95,18 @@ export interface CodegenOptions {
    */
   honestAnyBoxing?: boolean;
   /**
-   * (#745 S2) Known-union `$AnyValue` representation — heterogeneous primitive
+   * (#745) Known-union `$AnyValue` representation — heterogeneous primitive
    * unions (`number | string`, …) resolve to the universal `$AnyValue` tagged
-   * carrier instead of externref. Default OFF: byte-identical to the legacy
-   * regime (the mapping in `resolveWasmType` is the only behaviour keyed on
-   * it, and it only fires on such union types). Flips to default-on for
-   * standalone/nativeStrings in a later slice, after the consumer migration
-   * (strict-eq / truthiness / string-concat / call-boundary operands — see
-   * #745 `## Slice plan` S3) makes those paths carrier-agnostic. Coordinate
-   * with #2141 (tag-5 ABI untangle).
+   * carrier instead of externref. **Default is derived from the lane**
+   * (#745 S4.5): ON for native-string lanes (the computed `nativeStrings`
+   * const — standalone / wasi / fast / strictNoHostImports / explicit
+   * `nativeStrings`) now that the S3 (strict-eq / truthiness / string-concat)
+   * and S4 (params / returns / any-boundary) consumer sweeps landed and made
+   * those paths carrier-agnostic; the JS-host lane stays default-OFF until S5
+   * (hard-gated on #2141). Explicit option wins over the lane default; set the
+   * env kill-switch `JS2WASM_UNION_ANYREP=0` to force the legacy externref
+   * union regime for A/B control (mirrors `JS2WASM_UNDEF_SINGLETON`, #2106).
+   * Coordinate with #2141 (tag-5 ABI untangle).
    */
   unionAnyRep?: boolean;
   /**
@@ -391,7 +394,11 @@ export interface NativeGeneratorInfo {
    * `boxedCaptures` so identifier reads/writes inside resume states deref the
    * shared cell — writes propagate to the enclosing frame.
    */
-  leadingCaptureCells?: { name: string; refCellTypeIdx: number; valType: ValType }[];
+  leadingCaptureCells?: {
+    name: string;
+    refCellTypeIdx: number;
+    valType: ValType;
+  }[];
   /**
    * (#3032 W3) TDZ-flag boxes riding as leading synthetic params. Each entry
    * names a TDZ-flagged capture (`name` = the ORIGINAL captured binding) and
@@ -1483,7 +1490,12 @@ export interface CodegenContext {
    */
   memberGetMethodArms?: Map<
     string,
-    { receiverStructTypeIdx: number; methodFullName: string; closureStructTypeIdx: number; depth: number }[]
+    {
+      receiverStructTypeIdx: number;
+      methodFullName: string;
+      closureStructTypeIdx: number;
+      depth: number;
+    }[]
   >;
   /**
    * (#2831) Per-target-vec-type host-externref → wasm-vec materializer helpers.
@@ -1910,16 +1922,19 @@ export interface CodegenContext {
   /** Fast mode: default number to i32, promote to f64 only when needed */
   fast: boolean;
   /**
-   * (#745 S2) When true, statically-known heterogeneous primitive unions
+   * (#745) When true, statically-known heterogeneous primitive unions
    * (`number | string`, `string | boolean`, … — see
    * `isHeterogeneousPrimitiveUnion`) resolve to the universal `$AnyValue`
    * tagged carrier instead of externref, eliminating per-op box/unbox/typeof
-   * helper round-trips. Currently OPT-IN (default false, see
-   * `CodegenOptions.unionAnyRep`): narrowed reads/writes work through the
-   * existing `$AnyValue` coercion arms, but strict-eq / truthiness /
-   * string-concat / call-boundary consumers are not yet carrier-agnostic
-   * (S3, coordinate with #2141). Modules with no such union emit
-   * byte-identical wasm regardless of this flag.
+   * helper round-trips. **Default derived from the lane** (#745 S4.5): ON for
+   * native-string lanes (the computed `nativeStrings` const) now that the S3
+   * (strict-eq / truthiness / string-concat) and S4 (params / returns /
+   * any-boundary) consumer sweeps made those paths carrier-agnostic; the
+   * JS-host lane stays default-OFF until S5 (hard-gated on #2141). Explicit
+   * `CodegenOptions.unionAnyRep` wins; env kill-switch `JS2WASM_UNION_ANYREP=0`
+   * forces the legacy externref regime for A/B. Modules with no such union
+   * (and that never emit `__any_unbox_bool`) emit byte-identical wasm
+   * regardless — see #745 S4.5 decision 4 for the two intended drift classes.
    */
   unionAnyRep: boolean;
   /** Use WasmGC-native strings instead of wasm:js-string imports */

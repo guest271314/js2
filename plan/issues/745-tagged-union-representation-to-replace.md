@@ -5,7 +5,7 @@ horizon: xl
 status: in-progress
 assignee: ttraenkler/fable-gamma
 created: 2026-03-22
-updated: 2026-07-16
+updated: 2026-07-19
 priority: high
 feasibility: hard
 model: fable
@@ -20,6 +20,7 @@ related: [1624, 2104, 2105, 2106, 2107, 2141, 2949, 1852, 1471, 1917, 743, 744]
 # site in these budgeted modules.)
 loc-budget-allow:
   - src/codegen/context/types.ts
+  - src/codegen/context/create-context.ts
   - src/codegen/index.ts
   - src/compiler.ts
   - src/codegen/binary-ops.ts
@@ -52,6 +53,12 @@ files:
 # #745 — Tagged union representation to replace externref boxing
 
 ## Status: in-progress — design decided 2026-07-16, see `## Design Decision` below
+
+**S4.5 landed (2026-07-19):** `unionAnyRep` lane-default flipped **ON** for
+native-string lanes (standalone / wasi / fast / strictNoHostImports /
+`nativeStrings`) at `create-context.ts`; host (JS-host) lane stays default-OFF
+until S5 (hard-gated on #2141). Explicit option > `JS2WASM_UNION_ANYREP=0`
+kill-switch > lane default. Epic remains in-progress (S5/S6 pending).
 
 ## Problem
 
