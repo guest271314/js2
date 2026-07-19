@@ -1282,19 +1282,51 @@ function compileNativeStringCompoundAssignment(
   const capturedIdx = ctx.capturedGlobals.get(name);
   const moduleIdx = ctx.moduleGlobals.get(name);
 
-  // Load current value as ref $AnyString
+  // Load current value. The store slot for a statically-`string` binding is a
+  // native-string ref (`ref $AnyString`), which `__str_concat` accepts as-is.
+  // But an `any`/untyped binding routed here via `hasStringAssignment` (e.g. an
+  // unannotated param `msg` that is also assigned a string literal in some
+  // branch) has an EXTERNREF slot: a bare `local.get`/`global.get` leaves an
+  // externref where `__str_concat` expects `(ref null $AnyString)` →
+  // `call[0] expected (ref null $AnyString), found externref` CompileError, i.e.
+  // an INVALID module (#3472 — the RHS below is coerced, only the current-value
+  // load was not). Under no-JS-host (standalone / WASI) coerce the loaded
+  // externref to a native `ref $AnyString` via ToString (§7.1.17) — the same
+  // `__extern_toString` path `compileNativeConcatOperand` uses for a dynamic
+  // externref `+` operand — so a runtime number / undefined / object stringifies
+  // correctly instead of trapping an unconditional `ref.cast`. `__extern_toString`
+  // is a NATIVE defined function here (OBJECT_RUNTIME_HELPER_NAMES), so
+  // registering it adds no import and shifts no function index (`concatIdx` above
+  // stays valid). In JS-host `nativeStrings` mode `__extern_toString` is a host
+  // import (adding it mid-body would shift indices, #1175), so that path is left
+  // byte-identical and out of scope.
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+  let slotType: ValType | undefined;
   if (localIdx !== undefined) {
     fctx.body.push({ op: "local.get", index: localIdx });
+    slotType = getLocalType(fctx, localIdx);
   } else if (capturedIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: capturedIdx });
+    slotType = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)]?.type;
   } else if (moduleIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: moduleIdx });
+    slotType = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)]?.type;
   } else {
     // Graceful fallback: compile RHS for side effects, return null AnyString.
     const rhsFallback = compileExpression(ctx, fctx, expr.right);
     if (rhsFallback) fctx.body.push({ op: "drop" });
     fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx });
     return anyStrTypeNullable;
+  }
+  if (noJsHost && slotType?.kind === "externref") {
+    const externToStr = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (externToStr !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: externToStr });
+    }
+    // externref → ref $AnyString (mirrors emitNativeStringRefFromExternref).
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
   }
 
   // Compile RHS
