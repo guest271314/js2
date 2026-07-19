@@ -12,19 +12,23 @@ feasibility: hard
 reasoning_effort: high
 goal: property-model
 sprint: current
-# (#3102) Intended god-file growth for the #802 Slice B+C dynamic-proto wiring:
-# the conditional $__proto__ field append (class-bodies), the typed
-# getPrototypeOf field-read arm (call-builtin-static), the scanForDynamicProto
-# + fillDynamicProtoHelpers invocations (index), the context fields (types), and
-# the INITIAL_CAP export (object-runtime). The bulk of the new logic lives in the
-# NEW src/codegen/dynamic-proto.ts (not a god-file); these are the minimal edits
-# to the existing subsystem modules.
+# (#3102) Intended god-file growth for the #802 dynamic-proto wiring across all
+# slices. Slice B+C (landed): the conditional $__proto__ field append
+# (class-bodies), the typed getPrototypeOf field-read arm (call-builtin-static),
+# the scanForDynamicProto + fillDynamicProtoHelpers invocations (index), the
+# context fields (types), the INITIAL_CAP export (object-runtime). Slice A: the
+# object-literal → $Object promotion gate (literals) + the representation-lockstep
+# variable-local slot-typers (statements/variables + index). All are integration
+# points INSIDE existing functions; the bulk of the new logic lives in the NEW
+# src/codegen/dynamic-proto.ts (not a god-file).
 loc-budget-allow:
   - src/codegen/expressions/call-builtin-static.ts
   - src/codegen/class-bodies.ts
   - src/codegen/index.ts
   - src/codegen/context/types.ts
   - src/codegen/object-runtime.ts
+  - src/codegen/literals.ts
+  - src/codegen/statements/variables.ts
 ---
 # #802 -- Dynamic prototype support (Object.setPrototypeOf, Object.create with dynamic proto)
 
@@ -270,6 +274,25 @@ wrong-field write at scale → −2,788.
   getPrototypeOf, for-in) already handles `$Object`. **No struct-layout change.**
 - Ship + measure. This alone should move the `Object.setPrototypeOf` /
   `Object.prototype.__proto__` test262 buckets in standalone.
+
+> **Slice A — LANDED (PR #3318).** New `src/codegen/dynamic-proto.ts`
+> (`scanForDynamicProto`) detects object-literal receivers of
+> `Object.setPrototypeOf` / `Reflect.setPrototypeOf` / `o.__proto__ =` (unwrapping
+> `(o as any)`, resolving a `const/let/var` binding to its object-literal
+> initializer by lexical-scope walk; `Object.create` excluded). Marked receivers
+> lower to the open `$Object` via `compileObjectLiteralAsExternref` — zero
+> struct-layout change. Representation lockstep: the let/const pre-hoist
+> slot-typer + `compileVariableStatement` + the `var`-hoist path consult the same
+> `ctx.dynamicProtoLiteralNodes` set, so the receiver's local is `externref` and
+> reads route through `__extern_get` (a WAT probe during dev showed a missing
+> pre-hoist slot-type override was casting the promoted `$Object` back to the
+> inferred struct and nulling the receiver). **Standalone-only** (spec §0: the
+> dropped-link gap is standalone-specific; gc/host stays byte-for-byte unchanged).
+> Tests: `tests/issue-802-slice-a.test.ts` (14, all pass — 10 standalone incl.
+> inherited field/method reads, shadowing, null proto, `setPrototypeOf` return,
+> direct-literal & `__proto__=` & `Reflect` receivers; 4 gc/host regression
+> guards). `dynamicProtoClasses` is added but left unpopulated for Slice B.
+> **Slices B/C/D remain outstanding**; issue stays `status: ready`.
 
 **Slice B — class-instance proto receivers → conditional `$__proto__` field. (HIGHER risk, gated.)**
 - Prescan populates `dynamicProtoClasses` (§2), promoting marks to roots.

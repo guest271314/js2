@@ -1,9 +1,9 @@
 ---
 id: 3407
 title: "test262 fixture runner emits duplicate and contradictory verdict rows; enforce one canonical result per file"
-status: ready
+status: in-review
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 priority: high
 horizon: m
 feasibility: medium
