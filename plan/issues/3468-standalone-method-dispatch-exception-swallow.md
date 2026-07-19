@@ -329,3 +329,46 @@ is **A/front-end-routing territory** (deferred by this task's "C-core only"
 scope) and its blast radius is NOT ≈0 — it changes how every function-value
 member access lowers, so it needs full test262, not a canary. **Scope decision
 pending with the tech-lead/stakeholder.** #3468 stays `blocked`.
+
+## MEASUREMENT (2026-07-19) — routing is correct but BLOCKED by a pre-existing string-codegen bug
+
+Ran a strided standalone before(`origin/main`)/after(branch) subset (730 files,
+assert-heavy). Result — DO NOT read the raw flip count as the floor delta:
+
+| | before(main) | after(branch) |
+|---|---|---|
+| pass | 446 | 55 |
+| fail | 179 | 570 |
+| compile_error | 26 | 26 |
+
+- `pass → fail`: **391** · `pass → compile_error`: **0** · `fail → pass`: 0 ·
+  `compile_error` unchanged (26 = 26, so #3468 adds ZERO new js2wasm CEs).
+
+**The 391 `pass→fail` are NOT the intended floor-lowering.** Sampling them shows
+they fail with a **WebAssembly.instantiate CompileError** (invalid Wasm), not an
+assertion throw: `call[0] expected type (ref null 6=$AnyString), found externref`
+in a harness closure. The routing makes the test262 harness (`sta.js`+`assert.js`)
+COMPILE its `assert`/`assert.sameValue` function bodies — and those bodies hit a
+**pre-existing standalone codegen bug** that produces invalid Wasm.
+
+**Root cause (minimal, PRE-EXISTING, independent of #3468):** a function
+EXPRESSION whose externref param is reassigned to a native-string literal in one
+branch and then string-concatenated:
+```js
+const f = function (msg) { if (msg === undefined) { msg = ''; } else { msg += ' '; } msg += 'x'; return msg; };
+```
+compiled `--target standalone` produces invalid Wasm (`__str_concat` called with
+an externref where `(ref null $AnyString)` is expected) on **BOTH origin/main and
+this branch** — no expando, no routing, no C-core involved. `assert.sameValue`'s
+message-building (`if (message === undefined) { message = ''; } else { message += ' '; }
+message += 'Expected…'`) is exactly this shape. A plain function DECLARATION with
+the same body is VALID — the bug is specific to function EXPRESSIONS / closures.
+
+**Implication:** #3468's C-core + routing are correct for their scope, but the
+routing cannot be net-positive until this pre-existing string-codegen bug is
+fixed — otherwise the harness compiles (correct) → hits the string bug → invalid
+Wasm → ~391 assert-using tests flip from vacuous-pass to fail-to-instantiate (a
+regression, not the truthful correction). The string bug is a SEPARATE issue
+(function-expression externref-param reassign-to-native-string type unification),
+a prerequisite for landing #3468's routing. #3468 stays `blocked`; PR held; not
+merged.
