@@ -190,6 +190,10 @@ export function resolveSpillLocalValType(ctx: CodegenContext, decl: ts.VariableD
   const init = decl.initializer;
   if (init) {
     if (ts.isObjectLiteralExpression(init)) {
+      // (#802 Slice A) A proto-receiver literal is promoted to an open `$Object`
+      // (externref, standalone-only) in compileObjectLiteral — the spill slot
+      // must match.
+      if (ctx.standalone && ctx.dynamicProtoLiteralNodes.has(init)) return { kind: "externref" };
       const forcesHostObject = init.properties.some(
         (p) =>
           ts.isGetAccessorDeclaration(p) ||
@@ -1053,7 +1057,18 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       ts.isObjectLiteralExpression(decl.initializer) &&
       ts.isIdentifier(decl.name) &&
       ctx.growableObjectLiteralVars.has(decl.name.text);
-    if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral) {
+    // (#802 Slice A) A proto-receiver object literal is built as an open `$Object`
+    // (externref) in compileObjectLiteral so `Object.setPrototypeOf(o, p)` &
+    // inherited reads work; the local must be externref so reads/writes route
+    // through `__extern_get`/`__extern_set` (via the `externrefAccessorVars` hook)
+    // and the store isn't ref.cast to the closed struct TS infers (which would
+    // trap — the value is a `$Object`, not that struct).
+    const initIsProtoReceiverLiteral =
+      ctx.standalone &&
+      decl.initializer !== undefined &&
+      ts.isObjectLiteralExpression(decl.initializer) &&
+      ctx.dynamicProtoLiteralNodes.has(decl.initializer);
+    if (initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral || initIsProtoReceiverLiteral) {
       ctx.externrefAccessorVars.add(name);
     }
 
@@ -1093,6 +1108,10 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       decl.initializer !== undefined &&
       ts.isObjectLiteralExpression(decl.initializer) &&
       !(ts.isIdentifier(decl.name) && ctx.growableObjectLiteralVars.has(decl.name.text)) &&
+      // (#802 Slice A) A proto receiver keeps the externref carrier (below), not
+      // the tag-6 `ref $Object` carrier — its reads/setPrototypeOf go through the
+      // externref `__extern_*` path.
+      !initIsProtoReceiverLiteral &&
       objectLiteralIsStandaloneAnyObjectCarrier(ctx, decl.initializer);
     const anyObjectCarrierTypeIdx = initIsAnyObjectCarrier ? ensureObjectRuntime(ctx).objectTypeIdx : -1;
     const wasmType: ValType =
@@ -1103,7 +1122,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       // plain-fn capture and does not fire for uncaptured bindings).
       fctx.fnctorWidenedLocals?.has(name)
         ? { kind: "externref" as const }
-        : initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral
+        : initIsAccessorLiteral || initIsHostSpreadLiteral || initIsGrowableObjectLiteral || initIsProtoReceiverLiteral
           ? { kind: "externref" as const }
           : initIsAnyObjectCarrier && anyObjectCarrierTypeIdx >= 0
             ? { kind: "ref_null" as const, typeIdx: anyObjectCarrierTypeIdx }
@@ -1272,7 +1291,24 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
     // already-emitted initialization code:
     // - ref/ref_null → primitive: earlier struct.new would become invalid
     // - externref → ref/ref_null: hoisted __get_undefined() can't be cast (#962)
-    if ((isVar || isHoistedLetConst) && existingIdx !== undefined && existingIdx >= fctx.params.length) {
+    //
+    // (#3396) SKIP the whole re-type when the variable is a boxed mutable
+    // capture: a closure constructed BEFORE this declaration (forward/TDZ
+    // reference — `var pf = function () { return x; }; let x = "o";`) re-aimed
+    // `localMap[name]` at the `__boxed_<name>` REF-CELL local, so `existingIdx`
+    // here is the CELL slot, not the value slot. Re-typing it to the declared
+    // VALUE type made every already-emitted and later cell-typed use disagree
+    // with the slot (`struct.set[0] expected (ref null <cell>), found local.get
+    // of (ref null <value>)` — invalid Wasm, the #3396 closure-env family).
+    // The box write below (`boxedForInitStore`) is already cell-aware; the
+    // slot must keep its ref-cell type. Mirrors the explicit `boxedCaptures`
+    // skips in the #3037 carrier and #3097 TA-view arms.
+    if (
+      (isVar || isHoistedLetConst) &&
+      existingIdx !== undefined &&
+      existingIdx >= fctx.params.length &&
+      !(fctx.boxedCaptures?.has(name) ?? false)
+    ) {
       const localSlot = fctx.locals[existingIdx - fctx.params.length];
       if (
         localSlot &&
@@ -1428,10 +1464,28 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           // then threw "bind called on non-callable" (~1.8k TypedArray tests).
           // Skip the destructive recast whenever the slot stays externref; the
           // externref-callee dispatch handles calls on it in both lanes.
+          //
+          // (#3432 follow-up — the +107 null_deref merge_group cluster) The
+          // skip is NOT free: the recast also NORMALIZED the stored value to
+          // "matched-closure-struct or null", and the #1941 gate
+          // (`calleeMayBeHostCallable`) relies on that invariant to omit the
+          // #1712 `__call_function` fallback arm at direct-call sites of
+          // ordinary locals. With the value left as a raw externref, a
+          // FOREIGN callable (a bridge-wrapped wasm closure read back off a
+          // property — test262's `var format = compareArray.format;` — or a
+          // bound/host function) reaches the closure-struct dispatch, where
+          // the guarded root cast nulls and `struct.get` traps
+          // "dereferencing a null pointer" (previously the recast nulled the
+          // value at the DECL, so the call threw a catchable TypeError
+          // instead). Record the decl so `calleeMayBeHostCallable` emits the
+          // host-dispatch arm for calls of exactly these variables.
           const slotTypeForCast =
             localIdx < fctx.params.length
               ? fctx.params[localIdx]?.type
               : fctx.locals[localIdx - fctx.params.length]?.type;
+          if (matchedClosureInfo && slotTypeForCast?.kind === "externref") {
+            (ctx.skippedClosureRecastDecls ??= new Set()).add(decl);
+          }
           if (matchedClosureInfo && slotTypeForCast?.kind !== "externref") {
             // Convert externref back to closure struct ref (guarded to avoid illegal cast)
             fctx.body.push({ op: "any.convert_extern" });

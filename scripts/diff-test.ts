@@ -28,7 +28,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { compile } from "../src/index.ts";
 import { buildImports, instantiateWasm } from "../src/runtime.ts";
@@ -151,8 +151,27 @@ function runV8(file: string): { stdout: string; error?: string; ms: number } {
   }
 }
 
-/** Compile a JS file with js2wasm, instantiate, capture console.log output. */
-async function runJs2wasm(file: string): Promise<{
+/**
+ * #2787 — Let the microtask + macrotask job queue drain so that asynchronous
+ * `console.log` side-effects (Promise `.then`, `async`/`await`) fire while the
+ * capture is still installed. Each `setTimeout(0)` boundary flushes the entire
+ * microtask queue that precedes it; a small loop lets promise chains that
+ * re-schedule (`.then().then()`, sequential `await`s) fully settle. Bounded so a
+ * pathological unresolved chain can't hang the harness — the V8 lane has its own
+ * 5s process timeout, and the corpus promise programs settle in ≤3 ticks.
+ */
+async function drainAsync(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await new Promise<void>((res) => setTimeout(res, 0));
+  }
+}
+
+/**
+ * Compile a JS file with js2wasm, instantiate, capture console.log output.
+ * Exported so the scoped regression test (tests/issue-2787.test.ts) can assert
+ * that asynchronous side-effects are captured (the #2787 drain).
+ */
+export async function runJs2wasm(file: string): Promise<{
   stdout: string;
   error?: string;
   ms: number;
@@ -227,6 +246,18 @@ async function runJs2wasm(file: string): Promise<{
     // emits no `__module_init` export, so this is a no-op for those.
     const moduleInit = (instance.exports as Record<string, unknown>).__module_init;
     if (typeof moduleInit === "function") (moduleInit as () => void)();
+    // #2787 — Drain asynchronous side-effects BEFORE restoring console.log.
+    // Top-level code may schedule callbacks (`Promise.resolve().then(...)`,
+    // `async`/`await`) that invoke the host `console.log` import *after*
+    // `__module_init()` returns. Without draining the job queue inside the
+    // capture window, those late writes fire once console.log has already been
+    // restored — so they leak to the real stdout (the "42"/"4"/"30" pollution)
+    // AND the program spuriously records EMPTY output (a false `mismatch`). V8
+    // runs the full job queue before the process exits, so the js2wasm lane
+    // must too. A `setTimeout(0)` boundary flushes the entire preceding
+    // microtask queue; looping a few ticks lets promise chains that re-schedule
+    // settle.
+    await drainAsync();
   } catch (e: unknown) {
     console.log = origLog;
     console.error = origError;
@@ -366,7 +397,11 @@ async function main(): Promise<void> {
   process.exit(summary.match === summary.total ? 0 : 1);
 }
 
-main().catch((e) => {
-  console.error("Fatal:", e);
-  process.exit(2);
-});
+// Only run the full corpus when invoked as a script (not when imported by the
+// scoped regression test, which imports `runJs2wasm` directly).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    console.error("Fatal:", e);
+    process.exit(2);
+  });
+}

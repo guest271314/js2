@@ -301,6 +301,24 @@ export interface NativeGeneratorInfo {
   spillTypes: ValType[];
   /** Field index where spilled locals start in the state struct. */
   spillFieldOffset: number;
+  /**
+   * (#3386) Names bound by a destructuring PARAM pattern (a subset of
+   * `spillNames`). Parameter destructuring is EAGER per §10.2.11
+   * FunctionDeclarationInstantiation: every emit site destructures the pattern
+   * into factory locals BEFORE the factory emit, and
+   * `compileNativeGeneratorFunction` packs those locals into the matching
+   * spill fields at `struct.new` (instead of the inert default). The resume
+   * function then reads the bindings back through the ordinary spill-load
+   * loop — no state-0 re-destructure (which would double-drive one-shot
+   * iterators and mistime default/GetIterator side effects to first-`.next()`).
+   */
+  patternParamBindings?: Set<string>;
+  /**
+   * (#3315/#3386) Subset of `patternParamBindings` whose spill type was
+   * undefined-preservation-widened to externref; the resume fctx marks them in
+   * `undefWidenedLocals` so identifier reads keep `undefined` observable.
+   */
+  undefWidenedPatternBindings?: Set<string>;
   /** Number of top-level yield suspension points. */
   yieldCount: number;
   /** Terminal state value. */
@@ -1139,7 +1157,9 @@ export interface CodegenContext {
    * standalone-only `$__proto__` externref struct field (Slice B; the #799a
    * unconditional-append regression is avoided by this gating).
    * `dynamicProtoLiteralNodes` marks object-literal AST nodes that are proto
-   * receivers (Slice A consumes it: promote the literal to a native `$Object`).
+   * receivers (Slice A consumes it: promote the literal to a native `$Object`,
+   * standalone-only, via `compileObjectLiteral` + the matching variable-local
+   * typing in statements/variables.ts + index.ts — zero struct-layout change).
    * `dynProtoSentinelGlobalIdx` is the lazily-reserved mutable externref global
    * holding the "explicitly null prototype" sentinel `$Object` (distinguishes
    * `setPrototypeOf(o, null)` from "never dynamically set" in the appended
@@ -1607,6 +1627,24 @@ export interface CodegenContext {
    * allSettled harness class). Every other closure compile is unaffected.
    */
   widenTupleCallbackParams?: boolean;
+  /**
+   * (#3432 follow-up) Variable declarations whose callable-typed initializer
+   * compiled to externref and whose slot STAYED externref — i.e. the decl
+   * SKIPPED the closure match-and-recast (the #3432 guard in
+   * `compileVariableStatement`). Before #3432 the recast normalized such
+   * values to "matched-closure-struct or null", which is the invariant the
+   * #1941 host-call-fallback gate (`calleeMayBeHostCallable`) relies on to
+   * omit the `__call_function` arm for ordinary locals. A skipped-recast var
+   * can legitimately hold a FOREIGN callable (a host bridge-wrapped wasm
+   * closure read back off a property/array, a bound function, a host
+   * builtin), so direct calls of these vars MUST emit the #1712 host
+   * fallback arm — otherwise the closure-struct dispatch does
+   * `struct.get` on the nulled guarded cast and traps "dereferencing a
+   * null pointer" (the +107 null_deref merge_group cluster on PR #3370:
+   * test262 harness `assert.compareArray`'s `var format = compareArray.format;
+   * … format(actual)`).
+   */
+  skippedClosureRecastDecls?: Set<ts.Node>;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
   closureMap: Map<string, ClosureInfo>;
   /** Map from closure struct type index → closure metadata (for anonymous closures) */
@@ -2557,17 +2595,18 @@ export interface CodegenContext {
    *  must stay on the explicit #1474 refusal path. */
   standaloneRegExpEngine: StandaloneRegExpEngineConfig | null;
   /**
-   * (#1373b) When true, async functions flow through the IR's CPS lowering
-   * (Phase C). When false (default), the IR selector buckets async functions
-   * into the `"async-function"` fallback reason and they take the legacy
-   * direct-codegen path. The first scaffolding slice (#1373b Slice 1)
-   * keeps this hardcoded `false`; subsequent slices (Slice 2: PENDING-path
-   * CPS continuations, Slice 3: gate-flip) wire it on incrementally once
-   * the lowering is parity-tested against the legacy path.
+   * (#1373b C-1) When true (default; JS2WASM_IR_ASYNC=0 disables), the IR
+   * selector may claim SYNC-PASS-THROUGH async function declarations — the
+   * population the ONE async engine (#2906 $AsyncFrame drive / host-drive,
+   * `decideAsyncActivation`) declines. Engine-activated (genuinely
+   * suspending) functions are NEVER IR-claimed: the `asyncEngineClaims`
+   * predicate threaded into `planIrCompilation` keeps their routing
+   * byte-identical. Claimed asyncs compile on the raw-`T` sync model
+   * (`await` = per-lane unwrap/identity, returns unwrapped; the #1796
+   * call-site consumption contract owns Promise wrapping).
    *
-   * Read by `src/ir/select.ts`'s `isAsyncIrReady(ctx)` helper; threaded
-   * through `src/ir/integration.ts` into the selector via the
-   * `IrPlanOptions.supportsAsyncIr` field.
+   * Read by `src/ir/select.ts` `isAsyncIrReady`; threaded via
+   * `planIrOverlay` (codegen/index.ts) into `IrSelectionOptions`.
    */
   supportsAsyncIr: boolean;
   /**
