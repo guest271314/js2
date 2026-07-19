@@ -1,7 +1,9 @@
 ---
 id: 3471
-title: "Host lane: strict-mode assignment to a non-writable host property throws but isn't caught as instanceof TypeError inside compiled try/catch (~433-541 test262 tests)"
-status: ready
+title: "Host lane: polymorphic comparator (isSameValue) param unsoundly narrowed to f64, corrupting string compares → false isWritable revert → uncaught TypeError (~433 test262 name/length tests)"
+status: done
+assignee: ttraenkler/senior-dev
+completed: 2026-07-19
 sprint: current
 created: 2026-07-19
 priority: high
@@ -205,3 +207,80 @@ instanceof TypeError }` returns `true` in a harness-bundle-shaped
   signature-based, not a guaranteed flip count per the usual caution).
 - No regressions in the existing exception/try-catch/strict-mode test
   suites.
+
+---
+
+## RESOLUTION (senior-dev, 2026-07-19) — the reported premise was WRONG
+
+**The bug is NOT in try/catch / `instanceof TypeError` / the readonly-write
+throw.** Verified on current `origin/main` by running ONLY the strict-rerun
+variant of the real harness (fresh realm, so the sloppy phase's `delete
+obj[name]` #3470 masking does not apply — that masking is why the *same-process*
+`runTest262File` shows `should have an own property`; in the CI sharded pool the
+two phases land on different forks so #3471's signature is the dominant one, as
+the analysis above predicted). Instrumenting `isWritable` inside the real bundle
+showed:
+
+1. The strict readonly write **is** caught correctly — `e instanceof TypeError`
+   is `true`. The `catch` fires. So the issue's stated mechanism does not occur.
+2. The real defect: `writeSucceeded = isSameValue(obj[verifyProp || name],
+   newValue)` returns **`true`** after a *failed* write (`obj[name]` is still
+   `"slice"`, `newValue` is `"unlikelyValue"` — clearly unequal).
+3. That wrong `true` runs `isWritable`'s **revert** (`obj[name] = oldValue`) — a
+   SECOND strict write to the non-writable property — which throws **outside any
+   try** → the uncaught `Cannot assign to read only property` that fails the test.
+
+### Root cause: unsound f64 parameter narrowing
+
+`isSameValue(a, b)` — `if (a === 0 && b === 0) return 1/a === 1/b; if (a !== a &&
+b !== b) return true; return a === b;` — was compiled with **`(param f64 f64)`**
+(confirmed in the WAT of a genuinely-reproducing module). Both string args
+coerce to `NaN` at the call boundary, so `a !== a && b !== b` becomes `true &&
+true` → `isSameValue("slice","unlikelyValue") === true`.
+
+The f64 came from `inferParamTypeFromBody` (`src/codegen/declarations/param-
+return-inference.ts`), which narrows an untyped param to f64 on a **single**
+numeric body use (`1 / a`). It was invoked as a fallback whenever
+`inferParamTypeFromCallSites` returned `null` — but `null` conflates **"no call
+sites"** (an exported/host-only entrypoint; body is the only signal — sound)
+with **"called internally with `any`/polymorphic args"** (unsound: one numeric
+use does not prove the param is always a number). `isSameValue` has 8 internal
+call sites, all passing `any` args (`obj[name]`, `desc.value`, …) → call-site
+inference `null` → body fallback misfired → f64.
+
+### Fix (Option C — advisor-reviewed)
+
+`inferParamTypeFromCallSites` now also reports `sawCallSite`; the caller
+(`declarations.ts` `lowerParamType`) runs the body-usage fallback **only when
+`!sawCallSite`** (a genuinely-uncalled function). A polymorphic helper keeps its
+boxed `externref` params, so non-number args survive.
+
+- Rejected "bail on all non-ToNumber-invariant uses" — regresses `return n`
+  numeric entrypoints.
+- Rejected "bail on `===`/`!==`" — regresses `n === 0` base-case kernels.
+- Option C fixes `isSameValue` (has any-arg call sites) while keeping `fib`/
+  `fact` (recursive → numeric call sites → f64) and host-only numeric
+  entrypoints (zero call sites → body fallback → f64). Verified: `fact` param
+  stays f64 (result 120); `dbl` (host-only) stays f64; polymorphic comparator
+  called with strings is now `externref` and compares by value.
+
+### Verification
+
+- `isSameValue` in the real strict harness: `(param f64 f64)` → shared-type
+  boxed `externref` params after the fix.
+- All 5 sample repro files pass via the strict-only harness runner.
+- New `tests/issue-3471.test.ts` (7 cases): minimal reproducer returns 1 (BUG)
+  on `origin/main`, 0 (CORRECT) with the fix; numeric-kernel guards; the
+  isWritable-shape false-revert case.
+- No regressions in `#684`, `#2795`, `#3055` (isSameValue numeric), ir-numeric-
+  bool-equivalence, function-name-length, comparison/equality suites.
+- Full test262 delta measured on CI (broad-impact: param inference touches every
+  function). Local same-process `runTest262File` still shows the #3470 masking
+  until #3470 also lands; #3470 and #3471 are complementary.
+
+### Files
+
+- `src/codegen/declarations/param-return-inference.ts` — `inferParamTypeFromCallSites`
+  returns `{ type, sawCallSite }`.
+- `src/codegen/declarations.ts` — gate body fallback on `!sawCallSite`.
+- `tests/issue-3471.test.ts` — regression tests.
