@@ -99,11 +99,7 @@ export {
 } from "./declarations/object-shape-widening.js";
 export { inferNumericReturnTypes } from "./declarations/param-return-inference.js";
 // Import-back: symbols the declaration trunk still calls internally.
-import {
-  inferParamTypeFromBody,
-  inferParamTypeFromCallSites,
-  resolveGenericCallSiteTypes,
-} from "./declarations/param-return-inference.js";
+import { inferImplicitAnyParamType, resolveGenericCallSiteTypes } from "./declarations/param-return-inference.js";
 import {
   collectInterface,
   collectObjectType,
@@ -210,18 +206,9 @@ function lowerParamType(
     (wasmType.kind === "externref" ||
       (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
   ) {
-    const callSites = inferParamTypeFromCallSites(ctx, funcName, index, sourceFile);
-    let inferred = callSites.type;
-    // (#3471) The body-usage fallback is sound ONLY for a function with no
-    // internal call sites (an exported/host-only entrypoint). When the function
-    // IS called internally but call sites are inconclusive (all-`any` args /
-    // conflict → callSites.type === null yet callSites.sawCallSite), the param
-    // is polymorphic: a single numeric body use (`1 / a`) does NOT prove it is
-    // always a number, and narrowing it to f64 would coerce non-number args to
-    // NaN at the call boundary (corrupting `a !== a`, `a === b` — the root of
-    // #3471's isSameValue miscompile). Only fall back to body usage when the
-    // function is genuinely uncalled.
-    if (!inferred && !callSites.sawCallSite) inferred = inferParamTypeFromBody(ctx, stmt, index);
+    // (#3471) Call-site inference first; body-usage fallback ONLY for a
+    // genuinely-uncalled function (see inferImplicitAnyParamType).
+    const inferred = inferImplicitAnyParamType(ctx, funcName, index, sourceFile, stmt);
     if (inferred) wasmType = inferred;
   }
   return wasmType;

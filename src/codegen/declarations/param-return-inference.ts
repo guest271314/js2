@@ -245,6 +245,32 @@ export function inferParamTypeFromBody(
 }
 
 /**
+ * (#3471) Resolve a concrete wasm type for an implicit-`any` parameter, combining
+ * both inference sources with the correct precedence and soundness gate:
+ *  1. Call-site inference — if every conclusive call site agrees, use that type.
+ *  2. Body-usage fallback — ONLY when the function has **zero** internal call
+ *     sites (`!sawCallSite`), i.e. an exported/host-only entrypoint whose body is
+ *     the sole signal. A function that IS called internally with `any`/
+ *     polymorphic args (call-site inference inconclusive) is NOT body-narrowed:
+ *     a single numeric use (`1 / a`) does not prove the param is always a number,
+ *     and narrowing it to f64 would coerce non-number args to NaN at the call
+ *     boundary — the isSameValue miscompile behind #3471.
+ * Returns null to leave the param on its resolved (`externref`) type.
+ */
+export function inferImplicitAnyParamType(
+  ctx: CodegenContext,
+  funcName: string,
+  paramIndex: number,
+  sourceFile: ts.SourceFile,
+  decl: ts.FunctionLikeDeclaration,
+): ValType | null {
+  const callSites = inferParamTypeFromCallSites(ctx, funcName, paramIndex, sourceFile);
+  if (callSites.type) return callSites.type;
+  if (callSites.sawCallSite) return null;
+  return inferParamTypeFromBody(ctx, decl, paramIndex);
+}
+
+/**
  * #1121: Infer numeric (f64) return types for functions whose body is a
  * purely-numeric kernel even when TypeScript reports the return as
  * `any`/`unknown` (e.g. unannotated recursive helpers like
