@@ -11,6 +11,16 @@ parents: [3417]
 refs: [2860, 3178, 3428, 3436]
 created: 2026-07-19
 completed: 2026-07-19
+# (#3102) LOC-regrowth allowance — the host-free stdout sink lives in the
+# cohesive native-strings subsystem next to __exn_render_* (its natural home),
+# with small wirings in the console call site, finalize pipeline, ctx type, and
+# import collector. No new god-file/barrel growth beyond these adds.
+loc-budget-allow:
+  - src/codegen/native-strings.ts
+  - src/codegen/expressions/builtins.ts
+  - src/codegen/index.ts
+  - src/codegen/context/types.ts
+  - src/codegen/declarations/import-collector.ts
 ---
 
 ## Problem
