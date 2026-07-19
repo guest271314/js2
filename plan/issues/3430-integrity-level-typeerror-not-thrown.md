@@ -17,6 +17,8 @@ es_edition: multi
 goal: test262-conformance
 related: [3370, 1629, 3475]
 origin: "2026-07-18 oracle-v8 harvest (fable harvest agent): host `other` sub-bucket @ oracle 8; likely newly honest (v7 wrapper's stripUndefinedThrowGuards hid these)."
+loc-budget-allow:
+  - src/codegen/expressions/operator-assignment.ts
 ---
 
 # #3430 — Integrity-level operations do not throw expected TypeError
