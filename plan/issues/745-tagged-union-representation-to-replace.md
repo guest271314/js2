@@ -7,7 +7,7 @@ model: fable
 fable_role: implement
 assignee: ttraenkler/fable-gamma
 created: 2026-03-22
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: hard
 model: fable
@@ -22,6 +22,7 @@ related: [1624, 2104, 2105, 2106, 2107, 2141, 2949, 1852, 1471, 1917, 743, 744]
 # site in these budgeted modules.)
 loc-budget-allow:
   - src/codegen/context/types.ts
+  - src/codegen/context/create-context.ts
   - src/codegen/index.ts
   - src/compiler.ts
   - src/codegen/binary-ops.ts
@@ -54,6 +55,12 @@ files:
 # #745 — Tagged union representation to replace externref boxing
 
 ## Status: in-progress — design decided 2026-07-16, see `## Design Decision` below
+
+**S4.5 landed (2026-07-19):** `unionAnyRep` lane-default flipped **ON** for
+native-string lanes (standalone / wasi / fast / strictNoHostImports /
+`nativeStrings`) at `create-context.ts`; host (JS-host) lane stays default-OFF
+until S5 (hard-gated on #2141). Explicit option > `JS2WASM_UNION_ANYREP=0`
+kill-switch > lane default. Epic remains in-progress (S5/S6 pending).
 
 ## Problem
 
@@ -379,3 +386,171 @@ green). Three flag-gated fixes:
 
 Remaining #745 ladder: S5 (default-lane flip, HARD-GATED on #2141) and S6
 (endgame import retirement). The flag itself stays opt-in until S5.
+
+---
+
+## Implementation Plan — Slice S4.5 (Fable, lane-default flip)
+
+**One PR, Opus-buildable, zero design decisions left.** Flip `unionAnyRep`
+**default ON for native-string lanes** (standalone / wasi / fast /
+strictNoHostImports / explicit `nativeStrings`); the default (JS-host) lane
+stays default-OFF until S5. This is the issue's own designated next rung
+("Flip `unionAnyRep` lane-default-on for standalone/nativeStrings only after
+BOTH [S3+S4]" — both landed 2026-07-16), and the highest-leverage step: it
+turns three landed-but-dormant opt-in slices into live production behavior,
+puts the carrier under full test262 standalone-floor scrutiny, and produces
+the empirical gap list S5 (host lane, gated on #2141 — still in-progress as
+of this spec) needs. Verified against main `871c0e0d3`.
+
+### Design decisions (resolved — do not re-litigate)
+
+1. **Lane predicate = the computed `nativeStrings` const**
+   (`create-context.ts:34-36`), NOT `standalone` alone. Rationale: the S3
+   truthiness fix (`any-boxing-helpers.ts:335`) already keys on native-string
+   machinery; #2106 `undefinedSingleton` flipped the SAME lane set and the
+   carrier regime must stay lockstep with the undefined-singleton regime.
+   Documented fallback if `merge_group` shows fast/wasi-ONLY regressions:
+   narrow the predicate to `!!(options?.standalone || options?.wasi)`
+   (one-line change; say so in the PR body). Do not start narrow.
+2. **Precedence: explicit option > env kill-switch > lane default.** Exact
+   #2106/`undefinedSingleton` pattern (`create-context.ts:301`); kill-switch
+   env var name: `JS2WASM_UNION_ANYREP` (`=0` forces legacy for A/B).
+3. **No exported-function carve-out.** Union-typed params/returns on EXPORTED
+   functions flip to `ref_null $AnyValue` uniformly. Precedent: `ctx.fast`
+   has mapped `any` — including exported-fn params — to `$AnyValue` for a
+   long time (`index.ts:5513`); native-lane harness entry points are
+   top-level/nullary, so no runner calls union-param exports with raw JS
+   values. A carve-out would create a MIXED rep inside one module, and the
+   consumer gates are TS-type-keyed, not ValType-keyed
+   (`binary-ops.ts:791-802` routes on `isHeterogeneousPrimitiveUnion` of the
+   static/declared type) — an externref-repped union operand would then be
+   routed into `$AnyValue` machinery, strictly worse than uniformity.
+4. **The S2 neutrality invariant is REVISED, not preserved.** After the flip,
+   byte-identity to legacy holds for native-lane modules that are union-free
+   AND do not emit `__any_unbox_bool`. Two **intended** drift classes go
+   default-live module-wide (not just in union-bearing code):
+   - `__any_unbox_bool` tag-5 truthiness arm (`any-boxing-helpers.ts:335`):
+     ToBoolean("") correctly false for tag-5 string carriers (spec-correct;
+     was a flag-gated latent-bug fix).
+   - Honest tag-4 boolean boxing (`value-tags.ts:188`,
+     `coercion-engine.ts:488`): boolean-branded i32 `boxToAny` emits the
+     canonical JsTag boolean tag instead of tag-2. Both are steps toward the
+     #2104/#2141 canonical-tag regime.
+
+### Changes
+
+**File: `src/codegen/context/create-context.ts`** (~line 171-173) — the core
+one-liner. Replace:
+
+```ts
+// (#745 S2) union→$AnyValue rep: opt-in while consumers are made
+// carrier-agnostic (S3); flips lane-default later (see types.ts doc).
+unionAnyRep: options?.unionAnyRep ?? false,
+```
+
+with:
+
+```ts
+// (#745 S4.5 default-flip) union→$AnyValue rep — default ON in
+// native-string lanes now that the S3 (eq/truthiness/concat) and S4
+// (params/returns/any-boundary) consumer sweeps landed. Host (JS-host)
+// lane stays default-OFF until S5 (hard-gated on #2141). Explicit option
+// wins; set JS2WASM_UNION_ANYREP=0 to force the legacy externref union
+// regime for A/B control (mirrors JS2WASM_UNDEF_SINGLETON, #2106).
+unionAnyRep: options?.unionAnyRep ?? (nativeStrings && process.env.JS2WASM_UNION_ANYREP !== "0"),
+```
+
+(`nativeStrings` is the already-computed const at line 34 — it is in scope.)
+
+**File: `src/codegen/context/types.ts`** — update the two doc comments
+(line ~108 `CodegenOptions.unionAnyRep` and the ~1918-1924 block) from
+"opt-in / flips lane-default later" to "default derived from lane
+(nativeStrings); host lane opt-in until S5; env kill-switch
+JS2WASM_UNION_ANYREP=0". No code change.
+
+**File: `src/index.ts`** (~line 330) — same doc-comment update on the public
+`CompileOptions.unionAnyRep`.
+
+**File: `plan/issues/745-tagged-union-representation-to-replace.md`** —
+frontmatter `loc-budget-allow`: add `src/codegen/context/create-context.ts`
+(not currently on the list; the flip's one-liner lives there).
+
+**File: `tests/issue-745.test.ts`** — rework the gates to the new regime:
+
+1. Keep unchanged: "union-bearing input, default lane: explicit false ===
+   unset" (host default is still OFF — this test must stay green as-is).
+2. REPLACE "union-bearing input, standalone lane: explicit false === unset"
+   (now false by design) with three tests:
+   - `standalone lane: unset === explicit true (default-on proof)` —
+     byte-compare `{target:"standalone"}` vs
+     `{target:"standalone", unionAnyRep:true}` on `HET_UNION_SRC`.
+   - `standalone lane: explicit false !== unset on union-bearing input
+     (opt-out is live)` — byte-inequality of the same pair with
+     `unionAnyRep:false`.
+   - `env kill-switch: JS2WASM_UNION_ANYREP=0 ≡ explicit false` — set
+     `process.env.JS2WASM_UNION_ANYREP = "0"` in a try/finally (delete
+     after; the env is read per-compile at ctx creation, so no cross-test
+     bleed), compile unset-standalone, byte-compare to `unionAnyRep:false`.
+3. "flag ON, union-free input stays byte-identical" suite: unchanged (still
+   must hold — the mapping and every consumer gate require a het-union type;
+   `UNION_FREE_SRC` does not emit `__any_unbox_bool`). Add a guard comment
+   noting the revised invariant (decision 4) so a future union-free-but-
+   any-truthiness-using fixture isn't added here by mistake.
+4. S2/S3/S4 behavior suites: change each `run()` helper to DROP
+   `unionAnyRep: true` (they now prove the DEFAULT), and keep exactly one
+   explicit `unionAnyRep: true` case per suite (option still honored). The
+   host-import-free instantiation tests likewise run flag-unset.
+5. ADD a wasi smoke: compile `HET_UNION_SRC` with `{wasi: true}`; assert
+   success and that no `env.__box_*`/`__unbox_*`/`__typeof_*` import remains
+   (execution under a WASI shim not required).
+
+### Edge cases
+
+- **Host lane + explicit `unionAnyRep: true`**: unchanged semantics
+  (pre-S5 preview; unsupported until #2141 — same as today).
+- **Env var read**: once per compile at context creation — no caching across
+  compiles; safe for in-process A/B (the vitest env test relies on this).
+- **`fast` lane**: `any` is already `$AnyValue` there; the flip only adds
+  het-union locals onto the same carrier/helpers. Covered by the dedicated
+  fast suites (`i32-fast-mode`, `fast-arrays`, `gradual-typing`) in
+  `quality`.
+- **`process.env` access**: `create-context.ts` already reads `process.env`
+  at the adjacent lines (`JS2WASM_TAG5_CLASSIFIER`,
+  `JS2WASM_UNDEF_SINGLETON`) — same exposure, no new hazard.
+
+### Test plan
+
+1. `npm test -- tests/issue-745.test.ts` — full reworked suite green.
+2. Scoped adjacents: any-helpers/JsTag-adjacent suites (#2104/#2106/#2107
+   test files), the fast suites above, and the #2040 dstr canaries
+   (tag-classifier-adjacent, see risk 2).
+3. `prove-emit-identity` (playground corpus): drift expected ONLY in
+   standalone/wasi/fast emits of files containing het unions or
+   any-truthiness; host-lane emits byte-identical. Paste the drift list in
+   the PR body and check each file against the two intended drift classes.
+4. **Full `merge_group` + standalone-floor — broad-impact; NEVER a scoped
+   sweep.** Net ≥ 0, no bucket > 50; watch the standalone-floor signature.
+5. If the floor regresses: re-run locally with `JS2WASM_UNION_ANYREP=0` to
+   confirm attribution to the flip before touching anything.
+
+### Regression risks (ranked) + rollback
+
+1. `__any_unbox_bool` truthiness drift on NON-union any-code (most likely
+   unexpected-flip source; a regression there is fixed in the tag-5 arm of
+   `any-boxing-helpers.ts`, not by re-gating the flag).
+2. Tag-4 boolean-boxing honesty vs. consumers expecting legacy tag-2 boxed
+   booleans — the #2040 dstr canaries are the tripwire.
+3. Playground/standalone examples that EXECUTE union-param exports with raw
+   JS values would TypeError at the JS↔Wasm boundary (decision 3); emit-only
+   corpus checks are unaffected. If the floor flags one, report it — do not
+   carve out exports.
+4. wasi-lane thin coverage — mitigated by the wasi smoke test.
+
+**Rollback**: one-line revert of the default expression (all flag machinery
+stays); `JS2WASM_UNION_ANYREP=0` gives a no-revert field kill-switch.
+
+### Future slices (context only — NOT in this PR)
+
+- **S5**: host-lane default flip — HARD-GATED on #2141 landing.
+- **S6**: retire `__box_number`/`__unbox_number`/`__typeof_*` imports from
+  modules that no longer reference them; simplify `addUnionImports`.
