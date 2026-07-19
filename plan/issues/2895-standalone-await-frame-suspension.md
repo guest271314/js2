@@ -3,14 +3,15 @@ id: 2895
 title: "Standalone: genuinely-pending await needs true frame suspension (AG1 / PATH B) — await-on-$Frame + microtask resume"
 status: ready
 model: fable
+fable_role: implement
 created: 2026-06-30
-updated: 2026-07-08
+updated: 2026-07-17
 priority: medium
 feasibility: hard
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: fable-final
 horizon: xl
 related: [2864, 2865, 2867, 2367]
 umbrella: 2860

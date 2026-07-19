@@ -2,10 +2,12 @@
 id: 3053
 title: "Unified dynamic-reader carrier substrate — one __dyn_member_get primitive under #3037 CS3 (identity) AND #2949 S5.4 (IR claim-rate)"
 status: in-progress
+model: fable
+fable_role: spec
 assignee: ttraenkler/opus-u2-flip
-sprint: current
+sprint: fable-final
 created: 2026-07-05
-updated: 2026-07-05
+updated: 2026-07-17
 priority: high
 feasibility: hard
 model: fable

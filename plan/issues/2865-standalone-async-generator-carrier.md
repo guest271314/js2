@@ -4,14 +4,15 @@ title: "Standalone: no Wasm-native async-generator / for-await carrier — leaks
 status: in-progress
 assignee: ttraenkler/fable-2865
 model: fable
+fable_role: implement
 created: 2026-06-30
-updated: 2026-07-09
+updated: 2026-07-17
 priority: high
 feasibility: hard
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: fable-final
 horizon: xl
 related: [2860, 2864, 2867]
 umbrella: 2860

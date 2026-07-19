@@ -1,9 +1,9 @@
 ---
 id: 741
 title: "Split index.ts (13,282 lines) into smaller modules"
-status: ready
+status: done
 created: 2026-03-22
-updated: 2026-04-28
+updated: 2026-07-17
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -47,3 +47,7 @@ Target: index.ts → ~7,600 lines (42% reduction)
 - Tests must pass after each split
 
 ## Complexity: L
+
+## Closure note (2026-07-17)
+
+Satisfied by incremental extraction; index.ts 7,267 < 7,600 target; live re-split tracked by #3104.
