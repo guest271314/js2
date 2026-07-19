@@ -1789,6 +1789,20 @@ jobs:
           # The heal-poison step below reads exactly these two files.
           test -s shard-artifacts/test262-results-merged.jsonl
           test -s shard-artifacts/test262-standalone-results-merged.jsonl
+          # #3448 fail-SAFE guard at ingestion: reject a truncated/corrupt group
+          # artifact BEFORE it can reach the promote/commit steps. One JSONL row
+          # per test, so a full run is ~43k rows; a floor of 40000 mirrors the
+          # existing TOTAL>=40000 sanity check in the baselines-push step. A
+          # short artifact fails HERE (job red, old baseline retained) rather
+          # than promoting a partial baseline — the whole point of this change is
+          # to stay strictly no-worse than the full-matrix path.
+          HOST_ROWS=$(wc -l < shard-artifacts/test262-results-merged.jsonl)
+          SA_ROWS=$(wc -l < shard-artifacts/test262-standalone-results-merged.jsonl)
+          echo "Group artifact rows: host=${HOST_ROWS}, standalone=${SA_ROWS}."
+          if [ "$HOST_ROWS" -lt 40000 ] || [ "$SA_ROWS" -lt 40000 ]; then
+            echo "::error::#3448 group artifact ${ART_NAME} looks truncated (host=${HOST_ROWS}, standalone=${SA_ROWS}, floor=40000). Refusing to promote from it; re-run the push or dispatch a full-matrix workflow_dispatch."
+            exit 1
+          fi
           echo "Promoting from merge_group artifact ${ART_NAME} (id=${ART_ID}); skipped the 114-job rerun (#3448)."
 
       # #2099 — heal poison-classified rows BEFORE promotion. A phantom
