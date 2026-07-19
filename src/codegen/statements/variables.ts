@@ -1450,7 +1450,43 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             }
           }
 
-          if (matchedClosureInfo) {
+          // (#3432) The match-and-recast below is only sound when the LOCAL SLOT
+          // actually takes the narrowed closure type. When the slot is (or must
+          // stay) externref — the #962 guard already refuses to narrow it — the
+          // sequence was `any.convert_extern` + guarded cast to ONE
+          // signature-matched closure struct + widen back to externref: a pure
+          // round-trip whose else-arm NULLS the value. Closure wrapper structs
+          // are sibling `sub final` types with creation-ORDER-dependent RTTs
+          // (see reference #2873), and `closureInfoByTypeIdx` iteration picks an
+          // arbitrary first match, so a perfectly good closure of a SIBLING
+          // wrapper type read out of an array (`var f = factories[k]`) was
+          // destroyed to null — testTypedArray.js's `argFactory.bind(...)`
+          // then threw "bind called on non-callable" (~1.8k TypedArray tests).
+          // Skip the destructive recast whenever the slot stays externref; the
+          // externref-callee dispatch handles calls on it in both lanes.
+          //
+          // (#3432 follow-up — the +107 null_deref merge_group cluster) The
+          // skip is NOT free: the recast also NORMALIZED the stored value to
+          // "matched-closure-struct or null", and the #1941 gate
+          // (`calleeMayBeHostCallable`) relies on that invariant to omit the
+          // #1712 `__call_function` fallback arm at direct-call sites of
+          // ordinary locals. With the value left as a raw externref, a
+          // FOREIGN callable (a bridge-wrapped wasm closure read back off a
+          // property — test262's `var format = compareArray.format;` — or a
+          // bound/host function) reaches the closure-struct dispatch, where
+          // the guarded root cast nulls and `struct.get` traps
+          // "dereferencing a null pointer" (previously the recast nulled the
+          // value at the DECL, so the call threw a catchable TypeError
+          // instead). Record the decl so `calleeMayBeHostCallable` emits the
+          // host-dispatch arm for calls of exactly these variables.
+          const slotTypeForCast =
+            localIdx < fctx.params.length
+              ? fctx.params[localIdx]?.type
+              : fctx.locals[localIdx - fctx.params.length]?.type;
+          if (matchedClosureInfo && slotTypeForCast?.kind === "externref") {
+            (ctx.skippedClosureRecastDecls ??= new Set()).add(decl);
+          }
+          if (matchedClosureInfo && slotTypeForCast?.kind !== "externref") {
             // Convert externref back to closure struct ref (guarded to avoid illegal cast)
             fctx.body.push({ op: "any.convert_extern" });
             emitGuardedRefCast(fctx, matchedClosureInfo.structTypeIdx);

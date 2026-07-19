@@ -1,8 +1,10 @@
 ---
 id: 3432
 title: "Top-level function-declaration closures stored in array literals read back host-non-callable inside nested functions (testTypedArray harness, ~1.8k tests)"
-status: ready
+status: done
 created: 2026-07-18
+completed: 2026-07-18
+assignee: ttraenkler/fable-5
 priority: high
 feasibility: hard
 task_type: bugfix
@@ -12,6 +14,16 @@ model: fable
 sprint: current
 horizon: m
 related: [3419, 3417, 3370]
+# Site-required: the skip-gate + rationale live at the exact match-and-recast
+# arm in variables.ts (mostly comment lines documenting the #2873 RTT hazard).
+loc-budget-allow:
+  - src/codegen/statements/variables.ts
+  # Follow-up (CI-FIX #16): the skipped-recast decl registry field doc lives
+  # with the other closure maps in context/types.ts, and the per-decl gate
+  # check belongs inside calleeMayBeHostCallable (calls.ts) next to the #1941
+  # rationale it amends — mostly comment lines.
+  - src/codegen/context/types.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3432 — `argFactory.bind` non-callable: declaration-closures in arrays lose host callability
@@ -67,7 +79,57 @@ probe files `fake-bind5.js` / `fake-bind6.js` shapes are embedded there.
 ~1,800 tests (the residual of the 2,050 bucket) in `built-ins/TypedArray*` —
 the single largest post-#3419 recovery lever in the host lane.
 
-## Suggested starting points
+## Root cause (verified 2026-07-18, fable-5) — NOT a host-bridge bug
+
+The nulls appear at the **`var f = fs[k]` assignment**, not at `.bind` and not
+in the array. WAT of the failing `probe()`:
+
+```
+array.get 1            ;; element (externref)
+any.convert_extern
+ref.test (ref 30)      ;; ONE signature-matched closure wrapper type
+(if (then ref.cast null 30) (else ref.null 30))   ;; ← sibling wrappers NULLED
+extern.convert_any
+local.set $f           ;; f is an externref slot — the narrow was pointless
+```
+
+Emitter: `src/codegen/statements/variables.ts` "initializer returned externref
+but the type is callable" arm — it signature-matches ONE entry from
+`ctx.closureInfoByTypeIdx` (map-iteration order = creation order) and
+`emitGuardedRefCast`s to that struct. Closure wrapper structs are sibling
+`sub final` types whose RTTs are creation-ORDER-dependent (#2873 —
+`reference_2873_funcref_wrapper_chain_rtt_order`), so every stored closure of a
+sibling wrapper nulls out. Because the slot is externref (var-hoisted), the
+narrowed value was immediately widened BACK to externref — the cast had zero
+upside and destroyed values. Position-dependence explained: include-position vs
+body-position changes wrapper creation order, which flips WHICH elements
+survive (k3-only vs k0-2+k4).
+
+At top level the same read works because module-global slots take the plain
+externref path (no matched-cast) — confirmed by an all-8-elements-visible
+top-level dump of the identical array.
+
+## Fix
+
+`variables.ts`: skip the match-and-recast whenever the local slot is (stays)
+externref — the #962 guard already refused to narrow such slots, so the cast
+could never help there; the closure value now survives verbatim and
+`.bind`/calls dispatch via the externref-callee path. Slots that genuinely
+narrow keep the old behavior (follow-up hazard note: that residual cast still
+targets an arbitrary first-match wrapper — the #2873 root-cast pattern would be
+the full fix; no corpus hit once the externref-slot case is fixed).
+
+Result: all 8 `typedArrayCtorArgFactories` elements bind (`k0..k7:ok`); the
+40-file bucket sample progresses past the bind blocker into heterogeneous
+next-layer TypedArray substrate gaps (dynamic `new TA()` extern-class dependency,
+`ta.constructor` property reads) — filed observations in the sample table below.
+
+Post-fix sample error distribution (40 files, was 34× bind-non-callable):
+`No dependency provided for extern class "TA"` ×10 · `Cannot access property on
+null or undefined` (ta.constructor / TA.prototype reads) ×12 · assorted ×13 ·
+pass 5.
+
+## Suggested starting points (original hypothesis — superseded by root cause above)
 
 - Host bridge: `_wrapForHost` / `__make_callback` / wasmClosureDynamicBridge in
   `src/runtime.ts` — what does `__extern_method_call` receive for a closure
@@ -77,3 +139,25 @@ the single largest post-#3419 recovery lever in the host lane.
   closure struct where the dynamic read path expects a host-bridged value?).
 - Compare the top-level read path (works) vs nested-function aliased read
   (fails) to find where the bridging diverges.
+
+## Follow-up (merge_group park fix, CI-FIX #16 — 2026-07-19)
+
+The skip-recast guard over-applied at DIRECT-CALL sites: skipping also dropped
+the "matched-closure-struct or null" normalization that the #1941 gate
+(`calleeMayBeHostCallable`) relies on to omit the #1712 `__call_function`
+fallback arm. A foreign callable left raw in the externref slot (host builtin,
+bound function, bridge-wrapped closure read off a property — harness
+`var format = compareArray.format; … format(actual)`) reached the
+closure-struct dispatch, where the guarded root cast nulls and `struct.get`
+traps "dereferencing a null pointer" → the +107 `null_deref` merge_group
+bucket on PR #3370 (those files were already `fail` on main with a catchable
+TypeError; the skip converted them to uncatchable traps).
+
+Fix: record each decl taking the skip path in
+`ctx.skippedClosureRecastDecls` (context/types.ts) and return true from
+`calleeMayBeHostCallable` for exactly those decls, so their direct-call
+sites emit the host-dispatch arm. Verified: regressed cluster files
+(concat/copyWithin/flat) no longer trap (back to catchable Test262Error);
+TypedArray bind behavior byte-identical to PR head; #1941 dual-mode guard
+test still green; new unit test in `tests/issue-3432.test.ts` (host builtin
+in a skipped-recast var direct-called → PASS, was null-deref trap).
