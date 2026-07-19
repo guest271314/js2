@@ -3,7 +3,7 @@ id: 3270
 title: "refactor(codegen): break down + DRY closures.ts god-file (behaviour-preserving)"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

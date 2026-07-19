@@ -2,7 +2,7 @@
 id: 3448
 title: "ci(test262): promote push:main baseline from the merge_group's own artifacts (skip the 114-job rerun)"
 status: done
-sprint: current
+sprint: 72
 priority: high
 horizon: m
 task_type: ci

@@ -2,7 +2,7 @@
 id: 3469
 title: "Standalone async tests: originalHarness completion marker unobservable host-free (channel + drain gate)"
 status: done
-sprint: current
+sprint: 72
 priority: high
 horizon: l
 area: tooling

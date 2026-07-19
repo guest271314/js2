@@ -4,7 +4,7 @@ title: "Six TypedArray/set/BigInt failures worsened catchable-error → uncatcha
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/opus-3335
-sprint: current
+sprint: 72
 priority: high
 horizon: m
 feasibility: medium

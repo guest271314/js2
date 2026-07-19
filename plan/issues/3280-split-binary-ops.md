@@ -2,7 +2,7 @@
 id: 3280
 title: "Decompose compileBinaryExpression — extract typed-operand dispatch + `in` operator into sibling modules"
 status: done
-sprint: current
+sprint: 72
 priority: high
 feasibility: hard
 model: opus

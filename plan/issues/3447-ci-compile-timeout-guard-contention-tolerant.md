@@ -3,7 +3,7 @@ id: 3447
 title: "ci(test262): make the #1942 compile-timeout count guard contention-tolerant"
 status: done
 completed: 2026-07-19
-sprint: current
+sprint: 72
 priority: high
 horizon: s
 task_type: ci

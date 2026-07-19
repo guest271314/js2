@@ -6,7 +6,7 @@ updated: 2026-07-17
 model: fable
 fable_role: implement
 assignee: ttraenkler/fable-dev-1
-sprint: fable-final
+sprint: current
 created: 2026-06-25
 priority: high
 feasibility: hard

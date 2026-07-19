@@ -10,7 +10,7 @@ feasibility: easy
 task_type: bug
 area: ci-infra
 goal: test-infrastructure
-sprint: current
+sprint: 72
 related: [3303, 3202, 3189, 3104]
 ---
 

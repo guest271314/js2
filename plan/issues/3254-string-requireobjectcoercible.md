@@ -5,7 +5,7 @@ title: "Standalone: RequireObjectCoercible + ToString for borrowed String.protot
 status: done
 completed: 2026-07-13
 assignee: opus-tabrand
-sprint: current
+sprint: 72
 priority: high
 horizon: m
 feasibility: hard

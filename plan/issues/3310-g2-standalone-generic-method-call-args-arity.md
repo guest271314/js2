@@ -13,7 +13,7 @@ task_type: feature
 area: codegen, standalone
 language_feature: dynamic-dispatch
 goal: runtime-eval
-sprint: current
+sprint: 72
 parent: 2927
 related: [2928, 1584, 2151, 1888, 3098]
 # (#3102/#3131) The arity lift adds a small named-constant + comment to the

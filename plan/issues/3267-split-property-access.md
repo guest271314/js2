@@ -3,7 +3,7 @@ id: 3267
 title: "Split property-access.ts — extract builtin static/prototype VALUE-read subsystem into builtin-value-read.ts"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

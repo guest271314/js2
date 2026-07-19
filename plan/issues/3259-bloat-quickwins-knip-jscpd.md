@@ -3,7 +3,7 @@ id: 3259
 title: "Bloat quick-wins: knip dead-export sweep + jscpd duplication scan of src/codegen"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 horizon: s
 feasibility: easy

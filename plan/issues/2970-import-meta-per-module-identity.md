@@ -5,7 +5,7 @@ status: done
 assignee: ttraenkler/dev-perf
 completed: 2026-07-17
 priority: medium
-sprint: current
+sprint: 72
 created: 2026-07-02
 feasibility: medium
 task_type: bug

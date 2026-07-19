@@ -4,7 +4,7 @@ title: "standalone: BigInt.asIntN / asUintN (20 __get_builtin CEs)"
 status: done
 completed: 2026-07-14
 assignee: ttraenkler/senior-dev-3148
-sprint: current
+sprint: 72
 priority: medium
 horizon: m
 feasibility: medium

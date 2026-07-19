@@ -7,9 +7,9 @@ completed: 2026-07-16
 assignee: ttraenkler/fable-epsilon
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
-sprint: current
+sprint: 72
 created: 2026-06-03
-updated: 2026-07-16
+updated: 2026-07-19
 priority: high
 feasibility: hard
 reasoning_effort: high

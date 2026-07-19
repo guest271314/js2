@@ -4,9 +4,9 @@ title: "standalone: native sync-generator DESTRUCTURING-pattern params — metho
 status: done
 assignee: ttraenkler/fable-dev-4
 completed: 2026-07-18
-sprint: current
+sprint: 72
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 horizon: l
 feasibility: hard

@@ -3,7 +3,7 @@ id: 3272
 title: "refactor(codegen): break up src/codegen/index.ts god-file + DRY cleanup (behaviour-preserving)"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

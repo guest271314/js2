@@ -3,7 +3,7 @@ id: 3008
 title: "process gap: tests/issue-*.test.ts are not uniformly wired into required CI (silent regressions)"
 status: done
 completed: 2026-07-17
-sprint: current
+sprint: 72
 priority: low
 assignee: ttraenkler/fable-s2
 created: 2026-07-03

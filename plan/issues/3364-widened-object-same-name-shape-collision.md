@@ -4,7 +4,7 @@ title: "Widened empty-object struct shape clobbered by a same-named var in an un
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/dev-i
-sprint: current
+sprint: 72
 created: 2026-07-17
 priority: high
 horizon: m

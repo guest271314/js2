@@ -2,9 +2,9 @@
 id: 3107
 title: "Cast-debt codemod: eliminate 10,678 'as Instr' + 129 'as unknown as Instr' + shrink 579 'as any'"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-09
-updated: 2026-07-14
+updated: 2026-07-19
 completed: 2026-07-14
 priority: high
 # 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.

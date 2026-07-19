@@ -3,9 +3,9 @@ id: 2903
 title: "standalone: residual env.__make_callback leak is host-backed builtin methods (Promise.then/.catch, Iterator helpers), NOT a callback-representation gap"
 status: done
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-06-30
-updated: 2026-07-16
+updated: 2026-07-19
 priority: high
 feasibility: hard
 reasoning_effort: max

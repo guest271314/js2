@@ -14,7 +14,7 @@ es_edition: multi
 language_feature: generators
 goal: standalone-mode
 umbrella: 3178
-sprint: current
+sprint: 72
 horizon: m
 related: [3178, 3164, 3032, 2864, 2566, 2662]
 # (#3302) Intended growth at the canonical subsystem sites: capturing fn-expr

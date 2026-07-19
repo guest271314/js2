@@ -3,7 +3,7 @@ id: 3275
 title: "Decompose ensureNativeStringHelpers — extract String.prototype method helpers (search/trim/transform/rewrite) into sibling modules (slice 1)"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: hard
 model: opus

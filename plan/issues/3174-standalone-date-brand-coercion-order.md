@@ -4,7 +4,7 @@ title: "standalone: Date receiver brand checks + ToPrimitive coercion order (get
 status: done
 assignee: ttraenkler/sendev-date-3174
 created: 2026-07-12
-updated: 2026-07-16
+updated: 2026-07-19
 completed: 2026-07-16
 priority: high
 feasibility: hard
@@ -14,7 +14,7 @@ es_edition: multi
 language_feature: date
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 72
 horizon: m
 related: [2860, 2671, 2891, 3171]
 loc-budget-allow:

@@ -5,7 +5,7 @@ status: in-progress
 model: fable
 fable_role: spec
 assignee: ttraenkler/opus-u2-flip
-sprint: fable-final
+sprint: current
 created: 2026-07-05
 updated: 2026-07-17
 priority: high

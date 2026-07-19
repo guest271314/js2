@@ -12,7 +12,7 @@ task_type: feature
 area: ci-infra
 goal: test-infrastructure
 model: fable
-sprint: current
+sprint: 72
 related: [3104, 3286, 3202, 3003, 3086, 1668, 1897]
 ---
 

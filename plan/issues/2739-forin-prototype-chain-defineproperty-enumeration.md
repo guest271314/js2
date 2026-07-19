@@ -3,7 +3,7 @@ id: 2739
 title: "for-in does not enumerate setPrototypeOf / constructor-prototype-chain properties; Object.defineProperty ordering"
 horizon: l
 status: done
-sprint: current
+sprint: 72
 goal: test262-conformance
 feasibility: hard
 depends_on: []
@@ -12,7 +12,7 @@ es_edition: ES5
 language_feature: for-in
 task_type: bug
 created: 2026-06-27
-updated: 2026-07-16
+updated: 2026-07-19
 completed: 2026-07-16
 assignee: ttraenkler/fable-delta
 loc-budget-allow:

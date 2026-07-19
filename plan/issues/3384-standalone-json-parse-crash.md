@@ -4,9 +4,9 @@ title: "standalone/wasi: member access on a wrapped JSON.parse() call crashes co
 status: done
 completed: 2026-07-17
 assignee: dev-2961
-sprint: current
+sprint: 72
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 priority: medium
 horizon: s
 feasibility: easy

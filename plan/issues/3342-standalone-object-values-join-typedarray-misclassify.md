@@ -4,7 +4,7 @@ title: "standalone: Object.values(o).join / Object.getOwnPropertyNames(o).join m
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/opus-e
-sprint: current
+sprint: 72
 created: 2026-07-17
 priority: medium
 horizon: s

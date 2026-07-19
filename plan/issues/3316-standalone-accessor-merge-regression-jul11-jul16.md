@@ -4,7 +4,7 @@ title: "standalone: 4/18 accessor-merge tests regressed between main 026f40f771 
 status: done
 assignee: ttraenkler/fable-3316
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: high
 feasibility: medium

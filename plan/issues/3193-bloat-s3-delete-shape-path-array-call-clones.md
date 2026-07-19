@@ -5,7 +5,7 @@ status: done
 assignee: dev-3193
 completed: 2026-07-17
 created: 2026-07-12
-updated: 2026-07-17
+updated: 2026-07-19
 priority: medium
 feasibility: medium
 task_type: refactor
@@ -13,7 +13,7 @@ area: codegen
 es_edition: n/a
 language_feature: array-methods
 goal: maintainability
-sprint: current
+sprint: 72
 horizon: m
 umbrella: 3182
 related: [3029, 3102, 3185]

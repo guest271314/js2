@@ -4,7 +4,7 @@ title: "tests/issue-2036.test.ts: 7 'refuses loudly' expectations are stale — 
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/opus-e
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: low
 feasibility: trivial

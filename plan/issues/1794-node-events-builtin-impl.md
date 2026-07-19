@@ -4,9 +4,9 @@ title: "node:events / EventEmitter — host class + closure-callback contract"
 status: done
 completed: 2026-07-16
 assignee: ttraenkler/fable-s2
-sprint: current
+sprint: 72
 created: 2026-06-03
-updated: 2026-07-16
+updated: 2026-07-19
 loc-budget-allow:
   - src/runtime.ts
   - src/import-resolver.ts

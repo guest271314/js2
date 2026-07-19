@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen-closures
 goal: test262-conformance
 model: fable
-sprint: current
+sprint: 72
 horizon: m
 related: [3419, 3417, 3370]
 # Site-required: the skip-gate + rationale live at the exact match-and-recast
