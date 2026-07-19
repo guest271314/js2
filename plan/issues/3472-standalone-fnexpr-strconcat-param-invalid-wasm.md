@@ -15,6 +15,8 @@ goal: standalone
 related: [2860, 3468]
 blocks: [3468]
 loc-budget-allow: [src/codegen/expressions/operator-assignment.ts]
+coercion-sites-allow:
+  - src/codegen/expressions/operator-assignment.ts
 ---
 
 ## Problem
