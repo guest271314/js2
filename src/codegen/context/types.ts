@@ -1627,6 +1627,24 @@ export interface CodegenContext {
    * allSettled harness class). Every other closure compile is unaffected.
    */
   widenTupleCallbackParams?: boolean;
+  /**
+   * (#3432 follow-up) Variable declarations whose callable-typed initializer
+   * compiled to externref and whose slot STAYED externref — i.e. the decl
+   * SKIPPED the closure match-and-recast (the #3432 guard in
+   * `compileVariableStatement`). Before #3432 the recast normalized such
+   * values to "matched-closure-struct or null", which is the invariant the
+   * #1941 host-call-fallback gate (`calleeMayBeHostCallable`) relies on to
+   * omit the `__call_function` arm for ordinary locals. A skipped-recast var
+   * can legitimately hold a FOREIGN callable (a host bridge-wrapped wasm
+   * closure read back off a property/array, a bound function, a host
+   * builtin), so direct calls of these vars MUST emit the #1712 host
+   * fallback arm — otherwise the closure-struct dispatch does
+   * `struct.get` on the nulled guarded cast and traps "dereferencing a
+   * null pointer" (the +107 null_deref merge_group cluster on PR #3370:
+   * test262 harness `assert.compareArray`'s `var format = compareArray.format;
+   * … format(actual)`).
+   */
+  skippedClosureRecastDecls?: Set<ts.Node>;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
   closureMap: Map<string, ClosureInfo>;
   /** Map from closure struct type index → closure metadata (for anonymous closures) */
@@ -2037,6 +2055,16 @@ export interface CodegenContext {
    * the #329 native-string finalize-shift hazard. `undefined` until reserved.
    */
   undefinedGlobalIdx?: number;
+  /**
+   * (#3032 W6) Type index of the TIP of the per-module `__GenBrand_n` chain —
+   * the empty supertype structs that make each native generator's state
+   * struct NOMINALLY distinct (same-shape state structs otherwise merge under
+   * WasmGC iso-recursive canonicalization, cross-matching every
+   * `ref.test $__GenState_*` dispatch arm). Each `registerNativeGenerator`
+   * mints the next brand as a subtype of this tip and advances it.
+   * `undefined` until the first native generator registers.
+   */
+  genStateBrandTipIdx?: number;
   /**
    * (#3032 / #2141-S2) Global index of the `mut i32` `__gen_eager_mode` flag
    * for LAZY generator-expression creation. 0 (default) = a zero-param
