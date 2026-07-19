@@ -14,6 +14,14 @@ goal: standalone
 sprint: current
 horizon: l
 related: [2860, 3417]
+# (#3102) C-core keeps the bulk of its logic in the NEW leaf module
+# src/codegen/closure-props.ts; these three touches are the unavoidable minimum:
+# the three dead arms live in object-runtime.ts, the reserve/fill ctx flags in
+# context/types.ts, and the finalize call in index.ts.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)
