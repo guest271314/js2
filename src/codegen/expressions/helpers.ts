@@ -11,10 +11,13 @@
 import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
-import { getLocalType } from "../context/locals.js";
+import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { funcSignatureOf } from "../func-space.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { addStringConstantGlobal } from "../registry/imports.js";
 import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
+import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 
 // (#3191 — bloat S1) The JS-error-throw lowering was hoisted into the
 // layering-safe leaf module `../js-errors.ts` so runtime modules (dataview-
@@ -466,4 +469,96 @@ export function emitCoercedLocalSet(
     }
   }
   fctx.body.push({ op: "local.set", index: localIdx });
+}
+
+/**
+ * (#3429) Resolve the static declared name of an argument expression that is
+ * a bare Identifier bound to a USER-COMPILED, named FunctionDeclaration /
+ * FunctionExpression / ClassDeclaration — i.e. a genuine js2wasm closure/
+ * class value, never an ambient `declare`d builtin (those cross the host
+ * boundary as real native functions already, unaffected by the bug this
+ * fixes). Returns `undefined` for anything else (computed values, aliases
+ * through a variable, anonymous functions, ambient declarations, …) — the
+ * caller leaves such arguments untouched.
+ *
+ * KNOWN LIMITATION (documented on purpose, not a target for this fix): this
+ * is a pure static, per-call-site fold. It only fires when the argument
+ * expression is DIRECTLY the identifier bound to the declaration. An
+ * indirection (`const E = MyError; assert.throws(E, fn)`) or a computed
+ * value (`assert.throws(getCtor(), fn)`) does not statically resolve and is
+ * left unstamped — the value still crosses as the generic
+ * `wasmClosureDynamicBridge`-named bridge. This is acceptable: the #3429
+ * 544-record failure class is exclusively the direct-identifier idiom
+ * (`function MyError(){}; assert.throws(MyError, fn)`), which test262 uses
+ * pervasively to disambiguate exception provenance in order-of-evaluation /
+ * custom-behavior tests.
+ */
+function resolveCompiledFunctionArgName(ctx: CodegenContext, argExpr: ts.Expression): string | undefined {
+  if (!ts.isIdentifier(argExpr)) return undefined;
+  const sym = ctx.checker.getSymbolAtLocation(argExpr);
+  const decl = sym?.valueDeclaration;
+  if (!decl) return undefined;
+  const isNamedFunctionDecl =
+    (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) && !!decl.body && !!decl.name;
+  const isNamedClassDecl = (ts.isClassDeclaration(decl) || ts.isClassExpression(decl)) && !!decl.name;
+  if (!isNamedFunctionDecl && !isNamedClassDecl) return undefined;
+  return (decl.name as ts.Identifier).text || undefined;
+}
+
+/**
+ * (#3429) Stamp the real declared `.name` onto a compiled-closure/class
+ * argument BEFORE it crosses the host boundary, when {@link
+ * resolveCompiledFunctionArgName} can resolve it statically. Without this, a
+ * user-defined constructor value (e.g. `Test262Error`, or a per-test
+ * `function MyError(){}`) crossing into a host-delegated call
+ * (`__extern_method_call` / a static-method dispatch / a super method call)
+ * gets wrapped by the runtime's generic unknown-arity closure bridge
+ * (`_wrapWasmClosureUnknownArity`, runtime.ts), which presents `.name ===
+ * "wasmClosureDynamicBridge"` (the bridge's own literal function name)
+ * instead of the wrapped closure's real name. The stamp writes into the
+ * value's `_wasmStructProps` sidecar via `__extern_set(val, "name", ...)`,
+ * which `_wrapWasmClosureUnknownArity` already consults (mirrors the
+ * existing `.name`/`.length` sidecar stamp in `_wrapCallableForHost`).
+ *
+ * Call this AFTER the argument has been compiled and coerced onto the stack
+ * as an externref (the top-of-stack value). If a name is resolved, the value
+ * is moved into a fresh local, stamped, and reloaded — net stack effect is
+ * unchanged (`[... val] -> [... val]`), so callers that don't check the
+ * return value keep working: the emitted bytes for a non-matching argument
+ * are byte-identical to the pre-#3429 path (this function is a no-op).
+ *
+ * Returns `true` when a stamp was emitted (informational only — the caller
+ * doesn't need to branch on it since the stack effect is always `[val]`).
+ */
+export function maybeStampCompiledFunctionArgName(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  argExpr: ts.Expression,
+): boolean {
+  // (#3429) JS-host only. `wasmClosureDynamicBridge` — the bug this fixes —
+  // is a JS-host runtime.ts construct; standalone/WASI have no JS host to
+  // bridge into, so the bug this fixes cannot occur there. Gate strictly to
+  // avoid any behavioral change to standalone/WASI codegen (out of scope).
+  if (ctx.standalone || ctx.wasi) return false;
+  const constName = resolveCompiledFunctionArgName(ctx, argExpr);
+  if (constName === undefined) return false;
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (setIdx === undefined) return false;
+  addStringConstantGlobal(ctx, "name");
+  addStringConstantGlobal(ctx, constName);
+
+  const argLocal = allocLocal(fctx, `__argname_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: argLocal });
+  fctx.body.push({ op: "local.get", index: argLocal });
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, "name"));
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, constName));
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__extern_set") ?? setIdx });
+  fctx.body.push({ op: "local.get", index: argLocal });
+  return true;
 }

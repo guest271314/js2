@@ -1312,6 +1312,36 @@ function _wrapWasmClosureUnknownArity(
     const padded = _denseOwnArgs(args, arity);
     return marshalNew(callFn(closure, ...padded));
   };
+  // (#3429) Surface the closure's real declared `.name`/`.length` (codegen's
+  // sidecar stamp) on the bridge, mirroring the same stamp in
+  // `_wrapCallableForHost` (used when a closure "carries own props"). Without
+  // this, a compiled function value crossing to host code as a first-class
+  // value (e.g. a user-defined error constructor passed as
+  // `assert.throws(Test262Error, fn)`) presents `.name ===
+  // "wasmClosureDynamicBridge"` (the bridge's own literal function name)
+  // instead of the wrapped closure's real name — corrupting any host-side
+  // constructor-identity / `.name` read (assert.throws' message construction,
+  // `err.constructor.name`, etc). Best-effort: absent metadata leaves the
+  // bridge's default name untouched.
+  if (closure != null && typeof closure === "object") {
+    const meta = _wasmStructProps.get(closure);
+    if (meta) {
+      if (typeof meta.name === "string") {
+        try {
+          Object.defineProperty(wrapped, "name", { value: meta.name, configurable: true });
+        } catch {
+          /* Function.name redefinition is best-effort. */
+        }
+      }
+      if (typeof meta.length === "number") {
+        try {
+          Object.defineProperty(wrapped, "length", { value: meta.length, configurable: true });
+        } catch {
+          /* Function.length redefinition is best-effort. */
+        }
+      }
+    }
+  }
   try {
     if (wrapped.prototype && closure != null) {
       Object.defineProperty(wrapped.prototype, "constructor", {
