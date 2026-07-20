@@ -77,10 +77,9 @@ an unannotated dynamic signature and is rejected before IR lowering.
 
 ## Implementation plan
 
-1. Centralize effective parameter/return type-node lookup at the selector
-   boundary using TypeScript's own effective annotation APIs. Prefer explicit
-   TypeScript syntax and accept only the same primitive/function-type nodes the
-   selector already accepts.
+1. Centralize parameter/return type-node lookup at the selector boundary using
+   TypeScript's public JSDoc APIs. Prefer explicit TypeScript syntax and accept
+   only the same primitive/function-type nodes the selector already accepts.
 2. Reuse that lookup in the shared AST-to-IR signature resolver so a function
    selected from JSDoc receives the same IR parameter/result types during
    lowering. Do not parse comment text, synthesize annotations, rewrite source,
@@ -108,6 +107,12 @@ an unannotated dynamic signature and is rejected before IR lowering.
       run is performed.
 
 ## Test results
+
+CI initially exposed that TypeScript's public declarations do not include the
+internal `getEffectiveTypeAnnotationNode` / `getEffectiveReturnTypeNode`
+helpers. The fix-forward uses `param.type ?? ts.getJSDocType(param)` and
+`fn.type ?? ts.getJSDocReturnType(fn)`, preserving explicit annotation
+precedence and the tested selector behavior.
 
 - `pnpm exec vitest run tests/issue-3497-linear-jsdoc-landing-signatures.test.ts`
   — 6/6 passed.
@@ -146,11 +151,10 @@ engine.
 
 ## Implementation summary
 
-- Added one shared effective-signature lookup in `src/ir/select.ts` using
-  TypeScript's `getEffectiveTypeAnnotationNode` and
-  `getEffectiveReturnTypeNode` APIs. These APIs preserve ordinary TypeScript
-  annotations and expose standard JavaScript JSDoc without parsing comments or
-  mutating the AST.
+- Added one shared effective-signature lookup in `src/ir/select.ts`, preferring
+  ordinary TypeScript annotation nodes and falling back to TypeScript's public
+  `getJSDocType` / `getJSDocReturnType` APIs. This exposes standard JavaScript
+  JSDoc without parsing comments or mutating the AST.
 - Routed the selector's existing primitive/object/dynamic classification
   through the effective nodes. Existing `any`, union, and unsupported type
   handling remains unchanged.

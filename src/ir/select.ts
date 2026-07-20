@@ -1248,14 +1248,13 @@ type ResolvedKind = "f64" | "bool" | "string" | "object" | "void" | "closure" | 
  *
  * For TypeScript this is the ordinary `param.type`. For JavaScript, the TS
  * parser/checker boundary exposes a standard `@param {T}` annotation through
- * `getEffectiveTypeAnnotationNode` while deliberately leaving `param.type`
- * unset. Keeping this lookup in one helper prevents the selector and the
- * shared AST-to-IR signature resolver from disagreeing about the same source
- * declaration. No comment text is parsed and no synthetic annotation is
- * attached to the AST.
+ * `getJSDocType` while deliberately leaving `param.type` unset. Keeping this
+ * lookup in one helper prevents the selector and the shared AST-to-IR
+ * signature resolver from disagreeing about the same source declaration. No
+ * comment text is parsed and no synthetic annotation is attached to the AST.
  */
 export function effectiveIrParamTypeNode(param: ts.ParameterDeclaration): ts.TypeNode | undefined {
-  return ts.getEffectiveTypeAnnotationNode(param);
+  return param.type ?? ts.getJSDocType(param);
 }
 
 /**
@@ -1269,7 +1268,7 @@ export function effectiveIrParamTypeNode(param: ts.ParameterDeclaration): ts.Typ
 export function effectiveIrReturnTypeNode(
   fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
 ): ts.TypeNode | undefined {
-  return ts.getEffectiveReturnTypeNode(fn);
+  return fn.type ?? ts.getJSDocReturnType(fn);
 }
 
 /**
