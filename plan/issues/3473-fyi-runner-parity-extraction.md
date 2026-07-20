@@ -1,7 +1,7 @@
 ---
 id: 3473
 title: Extract fyi-runner parity plumbing from stale #3415
-status: in-progress
+status: done
 sprint: current
 priority: medium
 horizon: m
@@ -69,3 +69,10 @@ current `main`:
 - Issue-link, hard-error, and coercion-site quality sub-gates.
 - Final diff against `origin/main` limited to this plan and the four assigned
   runner-plumbing files.
+
+## Completion
+
+The current-main extraction is integrated with #3489–#3496. The authoritative
+historical gap rerun completes at 970/970 in `gc` and 3,471/3,472 in
+standalone; the sole remaining row is the explicit #3494 dynamic-module
+capability boundary rather than a shared-worker parity failure.

@@ -1,7 +1,7 @@
 ---
 id: 3491
 title: "Test262 FYI original-harness lane must link static _FIXTURE module graphs"
-status: in-progress
+status: done
 created: 2026-07-20
 updated: 2026-07-20
 priority: high
