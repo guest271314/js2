@@ -12,6 +12,7 @@ import { execFileSync, fork } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverTestPaths, loadOriginalHarnessTests } from "./test262-fyi-reader.mjs";
+import { enforceTest262FyiRuntime } from "./test262-fyi-runtime.mjs";
 
 export { loadOriginalHarnessTests } from "./test262-fyi-reader.mjs";
 
@@ -41,12 +42,15 @@ Options:
   --workers <n>         Parallel source workers, 1-${MAX_WORKERS} (default: ${DEFAULT_WORKERS})
   --target <target>     gc (default), standalone, or wasi
   --json <path>         Write the complete result document to path
+  --non-authoritative-smoke
+                        Allow a runtime mismatch and mark the report non-comparable
   --list                List selected files without compiling
   --help                Show this help
 
 Examples:
   git submodule update --init --checkout test262-fyi/data
   pnpm run test:262:fyi -- --filter built-ins/Array --limit 20
+  pnpm run test:262:fyi:smoke -- --filter built-ins/Array --limit 20
 `);
 }
 
@@ -66,6 +70,10 @@ export function parseArgs(argv) {
     if (arg === "--help" || arg === "-h") return { ...options, help: true };
     if (arg === "--list") {
       options.list = true;
+      continue;
+    }
+    if (arg === "--non-authoritative-smoke") {
+      options.nonAuthoritativeSmoke = true;
       continue;
     }
     if (arg === "--filter") {
@@ -295,6 +303,13 @@ async function main() {
     return;
   }
 
+  const runtimeContract = enforceTest262FyiRuntime({ authoritative: !options.nonAuthoritativeSmoke });
+  if (!runtimeContract.authoritative) {
+    console.warn(
+      "NON-AUTHORITATIVE SMOKE: runtime contract enforcement is disabled; this run cannot be compared with CI baselines.",
+    );
+  }
+
   const allPaths = discoverTestPaths();
   const requestedPaths = options.pathsFile
     ? fs
@@ -355,6 +370,7 @@ async function main() {
     executor: "project-test262-worker",
     workers: executors.length,
     target: options.target,
+    runtimeContract,
     host: {
       runtime: "node",
       version: process.version,
