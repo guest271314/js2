@@ -199,6 +199,10 @@ const BUCKETS = {
   "body-shape-rejected": ["unintended", "from-ast.ts handles every statement in the body"],
   "external-call": ["unintended", "Math.\\* / parseInt / Console wired through IR (#1371)"],
   "call-graph-closure": ["unintended", "Callees of claimed funcs all claimable themselves"],
+  "recursive-type-evidence": [
+    "unintended",
+    "Recursive SCC has one checker-backed scalar ABI across parameters, returns, and call edges (#3500)",
+  ],
   "param-shape-rejected": ["unintended", "Destructuring params supported (#1372)"],
   "param-type-not-resolvable": ["unintended", "TypeMap propagation reaches the param"],
   "return-type-not-resolvable": ["unintended", "TypeMap propagation reaches the return"],
