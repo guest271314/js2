@@ -85,6 +85,33 @@ export function effectiveBaselineTrapTolerance(
     : configured;
 }
 
+async function sendBaselineFreezeAlert(failures: string[]): Promise<void> {
+  const url = process.env.NTFY_URL;
+  if (!url) return;
+  const { GITHUB_SERVER_URL, GITHUB_REPOSITORY, GITHUB_RUN_ID } = process.env;
+  const runUrl =
+    GITHUB_SERVER_URL && GITHUB_REPOSITORY && GITHUB_RUN_ID
+      ? `${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}`
+      : "(run URL unavailable)";
+  const body =
+    "Baseline promote BLOCKED by the trap-growth gate (#3335): " +
+    failures.join(" | ") +
+    ". The landing-page test262 number will FREEZE until this is acknowledged " +
+    "(repo var BASELINE_TRAP_GROWTH_ALLOW=1 for ONE cycle) or the regression is fixed. " +
+    runUrl;
+  try {
+    await fetch(url, {
+      method: "POST",
+      headers: { Title: "js2wasm baseline FROZEN (trap-growth #3335)", Priority: "high", Tags: "warning" },
+      body,
+      signal: AbortSignal.timeout(10000),
+    });
+    console.log("[trap-growth] freeze alert sent to NTFY_URL.");
+  } catch (err) {
+    console.log(`[trap-growth] freeze alert send failed (non-fatal): ${(err as Error).message}`);
+  }
+}
+
 async function main(): Promise<void> {
   const baselinePath = arg("--baseline");
   const candidatePath = arg("--candidate");
@@ -145,6 +172,14 @@ async function main(): Promise<void> {
         "reclassification — declare a bounded trap-growth-allow in the oracle-bump issue, or use\n" +
         "BASELINE_TRAP_GROWTH_ALLOW only as an emergency one-cycle valve. See #3370/#3335.",
     );
+    // (#3487) Surface the freeze immediately. A trap-gate refusal FROZE the
+    // landing-page baseline for ~7h on 2026-07-19/20, invisible because a
+    // low-velocity freeze (~4-6 merges) stays under the 25-commit
+    // baseline-floor-staleness-alert threshold. Emit a loud alert (best-effort;
+    // never changes the exit-1 behavior below) so a human acknowledges within
+    // one push. Alert-only — deliberately NOT auto-force-heal: a forced refresh
+    // bypasses this gate and would re-legalize the very growth it refused.
+    await sendBaselineFreezeAlert(growth.failures);
     process.exit(1);
   }
   console.log("[trap-growth] OK — no trap-category growth beyond tolerance.");
