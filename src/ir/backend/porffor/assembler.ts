@@ -547,10 +547,7 @@ export class PorfforModuleAssembler
     if (operation === "mark") {
       retType = "ptr";
       const initialize = [
-        assign(
-          global(globals.base),
-          node("Alloc", "ptr", PORFFOR_FX.call, constant(LINEAR_STACK_ARENA_BYTES), 0, [-1, false]),
-        ),
+        assign(global(globals.base), allocNode(constant(LINEAR_STACK_ARENA_BYTES))),
         assign(global(globals.pointer), global(globals.base)),
       ];
       const condition = binary("==", "i32", global(globals.pointer), constant(0, "ptr"), true);
@@ -574,7 +571,7 @@ export class PorfforModuleAssembler
       );
       const limit = binary("+", "ptr", global(globals.base), constant(LINEAR_STACK_ARENA_BYTES));
       const overflow = binary(">", "i32", local(nextName, "ptr"), limit, true);
-      const fallback = node("Alloc", "ptr", PORFFOR_FX.call, local(bytesName, "u32"), 0, [-2, false]);
+      const fallback = allocNode(local(bytesName, "u32"));
       body = [
         assign(local(retName, "ptr"), global(globals.pointer)),
         assign(local(nextName, "ptr"), aligned),
@@ -728,10 +725,7 @@ export class PorfforModuleAssembler
         constant(layout.elementsOffset, "u32"),
         binary("*", "u32", local(capacityName, "u32"), constant(layout.elementStride, "u32")),
       );
-      const allocationNode = node("Alloc", "ptr", bytes[2] | PORFFOR_FX.call, bytes, 0, [
-        allocation.id as number,
-        false,
-      ]);
+      const allocationNode = allocNode(bytes);
       body = [
         assign(local(lenName, "u32"), load("u32", "u32", local(ptrName, "ptr"), layout.lengthOffset)),
         assign(
@@ -1158,7 +1152,7 @@ export class PorfforModuleAssembler
           if (!this.stackGlobals) throw new Error("porffor assembler: stack allocation has no runtime");
           return node("Call", "ptr", bytes[2] | PORFFOR_FX.call, "#js2_stack_allocate", [bytes], 0);
         }
-        return node("Alloc", "ptr", bytes[2] | PORFFOR_FX.call, bytes, expression.typeId, [expression.siteId, false]);
+        return allocNode(bytes, expression.typeId);
       }
       case "load": {
         const pointer = this.assembleExpr(expression.pointer, locals);
@@ -1332,6 +1326,17 @@ function node(
   const kindOrdinal = PORFFOR_KIND_NAMES.indexOf(kind);
   if (kindOrdinal < 0) throw new Error(`porffor assembler: unknown node kind '${kind}'`);
   return [kindOrdinal, typeOrdinal(type), effects, a, b, c];
+}
+
+/**
+ * Assemble the exact upstream Alloc node shape.
+ *
+ * Allocation-site provenance and class selection remain in LinearMemoryPlan
+ * and are consumed before this boundary; pre-alpha 9 no longer carries JS2's
+ * former [siteId, raw] adapter metadata in slot C.
+ */
+function allocNode(bytes: PorfforNode, typeId = 0): PorfforNode {
+  return node("Alloc", "ptr", bytes[2] | PORFFOR_FX.call, bytes, typeId, 0);
 }
 
 function typeOrdinal(type: PorfforValueSlot | "none"): number {

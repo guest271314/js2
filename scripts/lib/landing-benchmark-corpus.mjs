@@ -18,7 +18,7 @@ export const LANDING_BENCHMARK_PROGRAMS = Object.freeze([
     runtimeArg: 20_000_000,
     fixedInputs: Object.freeze([0, 1, 5_000, 20_000_000]),
     expectedFixedOutputs: Object.freeze([0, 1, -1_846_256_875, -1_821_818_939]),
-    plainPorfforCliCBytes: 182_500,
+    plainPorfforCliCBytes: 183_170,
   }),
   Object.freeze({
     id: "fib-recursive",
@@ -32,7 +32,7 @@ export const LANDING_BENCHMARK_PROGRAMS = Object.freeze([
     runtimeArg: 30,
     fixedInputs: Object.freeze([0, 1, 10, 30]),
     expectedFixedOutputs: Object.freeze([0, 1, 55, 832_040]),
-    plainPorfforCliCBytes: 183_257,
+    plainPorfforCliCBytes: 183_927,
   }),
   Object.freeze({
     id: "array-sum",
@@ -46,7 +46,7 @@ export const LANDING_BENCHMARK_PROGRAMS = Object.freeze([
     runtimeArg: 1_000_000,
     fixedInputs: Object.freeze([0, 1, 2_000, 1_000_000]),
     expectedFixedOutputs: Object.freeze([0, 0, 1_018_392, 511_492_320]),
-    plainPorfforCliCBytes: 211_942,
+    plainPorfforCliCBytes: 212_612,
   }),
   Object.freeze({
     id: "string-hash",
@@ -60,7 +60,7 @@ export const LANDING_BENCHMARK_PROGRAMS = Object.freeze([
     runtimeArg: 20_000,
     fixedInputs: Object.freeze([0, 1, 100, 20_000]),
     expectedFixedOutputs: Object.freeze([0, 96_500, 36_729_899, 862_771_296]),
-    plainPorfforCliCBytes: 188_200,
+    plainPorfforCliCBytes: 188_870,
   }),
 ]);
 
