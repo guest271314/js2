@@ -1,7 +1,7 @@
 ---
 id: 2620
 title: "Standalone `class X extends Set/Map` — synthetic accessor late-import index-shift (-1 global) + host-import leak"
-status: done
+status: ready
 sprint: Backlog
 created: 2026-06-22
 completed: 2026-06-22
@@ -141,3 +141,7 @@ Test: `tests/issue-2620-extends-set-standalone-refusal.test.ts`.
 native iteration + `instanceof` discrimination) → the real +7
 subclass-receiver-methods rows. Value-rep / collection-runtime lane (#2162/#2580
 M2).
+
+## Reopened 2026-07-20 (stale false-done review)
+
+Marked `done` but live test262 shows: class extends WeakSet still 'not yet supported in --target standalone'. Reopened as `ready`. See #3474 (done-status integrity).
