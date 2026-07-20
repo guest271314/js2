@@ -168,22 +168,19 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect((instance.exports as { test(): number }).test()).toBe(1);
   });
 
-  it("refuses opaque RegExp receivers not created by the standalone backend", async () => {
+  it("runtime-brand-checks opaque RegExp receivers without host imports", async () => {
     const r = await compile(`export function test(re: RegExp): boolean { return re.test("abc"); }`, {
       fileName: "issue-682.ts",
       target: "standalone",
     });
 
-    expect(r.success).toBe(false);
-    expect(
-      r.errors.some(
-        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#1539/.test(e.message),
-      ),
-    ).toBe(true);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect(() => (instance.exports as { test(re: RegExp): number }).test(/abc/)).toThrow();
   });
 
-  it("refuses mutable RegExp receivers after an opaque overwrite", async () => {
+  it("runtime-brand-checks mutable RegExp receivers after an opaque overwrite", async () => {
     const r = await compile(
       `
         export function test(other: RegExp): boolean {
@@ -198,13 +195,10 @@ describe("#682 standalone RegExp literal-substring backend", () => {
       },
     );
 
-    expect(r.success).toBe(false);
-    expect(
-      r.errors.some(
-        (e) => /RegExp values not created by this standalone backend/.test(e.message) && /#1539/.test(e.message),
-      ),
-    ).toBe(true);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect(() => (instance.exports as { test(re: RegExp): number }).test(/abc/)).toThrow();
   });
 
   it("RegExp-consuming string methods (String.prototype.replace) compile standalone (no host import)", async () => {
