@@ -1039,15 +1039,6 @@ function hasFixtureGraph(fixtureFiles) {
   );
 }
 
-function hasDynamicFixtureGraph(dynamicFixtureFiles) {
-  return (
-    dynamicFixtureFiles &&
-    typeof dynamicFixtureFiles === "object" &&
-    !Array.isArray(dynamicFixtureFiles) &&
-    Object.keys(dynamicFixtureFiles).length > 0
-  );
-}
-
 // #3506 — the 5 resolution-phase paths in this slice import Test262's
 // `ensure-linking-error_FIXTURE.js`, whose deliberate self-import of an
 // unexported binding is reported by TypeScript as TS2459. Requiring that
@@ -1056,7 +1047,6 @@ function hasDynamicFixtureGraph(dynamicFixtureFiles) {
 // narrow: other resolution populations remain on their existing policy until
 // their own compiler support is verified (the #3491 TS2308 control).
 const FYI_NEGATIVE_FIXTURE_RESOLUTION_CODES = new Set([2459]);
-
 async function doCompile(
   source,
   sourceMapUrl,
@@ -1466,23 +1456,12 @@ process.on("message", async (msg) => {
   const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
   const compileStart = performance.now();
 
-  // #3492 — A literal dynamic Test262 fixture import is a real module-loader
-  // dependency, not a static compileMulti edge. The standalone backend has no
-  // host loader yet (#3494), so reject it explicitly instead of dropping the
-  // fixture and allowing the entry's `$DONE` to manufacture a false pass.
-  // Parse/early/resolution-negative sources must still reach the compiler:
-  // their import expression is never evaluated, and rejecting it here would
-  // replace the expected syntax verdict with an unrelated loader failure.
-  if (target === "standalone" && !isNegative && hasDynamicFixtureGraph(msg.dynamicFixtureFiles)) {
-    sendResult({
-      id,
-      status: "compile_error",
-      error: "standalone literal dynamic fixture import is unsupported (#3494)",
-      compileMs: performance.now() - compileStart,
-      reachedTest: false,
-    });
-    return;
-  }
+  // #3492/#3508 — Dynamic fixture discovery is transport metadata, not proof
+  // that a loader is needed during this test. Let the compiler distinguish an
+  // eager import (fatal #3494) from an ordinary deferred closure (host-free
+  // runtime trap, #3508). A blanket graph guard false-failed syntax-valid tests
+  // whose arrow was never invoked. No dynamic fixture is promoted to a static
+  // compileMulti edge here.
 
   let result;
   try {
