@@ -4,7 +4,12 @@ import type { IrBinop, IrInstr, IrType, IrUnop } from "../../nodes.js";
 import { asVal } from "../../nodes.js";
 import type { LinearAllocationSitePlan } from "../../analysis/linear-memory-plan.js";
 import type { BlockType, Instr } from "../../types.js";
-import type { BackendEmitter } from "../emitter.js";
+import type {
+  BackendEmitter,
+  BackendI32BitwiseOp,
+  BackendNumericConversionOp,
+  BackendScalarConstType,
+} from "../emitter.js";
 import type {
   IrClassLowering,
   IrClosureLowering,
@@ -398,6 +403,78 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
         return;
       case "ref.is_null":
         throw new Error(`porffor backend does not support unary op '${op}'`);
+    }
+  }
+
+  emitScalarConst(type: BackendScalarConstType, value: number, out: PorfforSink): void {
+    out.push({ kind: "const", type, effects: PORFFOR_FX.none, value });
+  }
+
+  emitNumericConversion(op: BackendNumericConversionOp, out: PorfforSink): void {
+    const value = out.pop(`numeric conversion ${op}`);
+    switch (op) {
+      case "i32.trunc_sat_f64_u":
+        // The shared ToInt32 expansion has already reduced the f64 modulo
+        // 2^32. Keep rangeKnown clear so NaN/Infinity still use Porffor's
+        // defined saturating helper and become zero rather than a raw C cast.
+        out.push(convertExpr("u32", value, 0));
+        return;
+      case "f64.convert_i32_s":
+        out.push(convertExpr("f64", convertExpr("i32", value, 1), 1));
+        return;
+      case "f64.convert_i32_u":
+        out.push(convertExpr("f64", convertExpr("u32", value, 0), 0));
+        return;
+    }
+  }
+
+  emitI32Bitwise(op: BackendI32BitwiseOp, out: PorfforSink): void {
+    let [left, right] = out.popMany(2, `i32 bitwise ${op}`);
+    if ((left!.effects | right!.effects) !== PORFFOR_FX.none) [left, right] = out.sequence([left!, right!]);
+
+    const signed = (value: PorfforExpr): PorfforExpr => convertExpr("i32", value, 1);
+    const unsigned = (value: PorfforExpr): PorfforExpr => convertExpr("u32", value, 0);
+    const binary = (type: "i32" | "u32", operator: string, lhs: PorfforExpr, rhs: PorfforExpr): PorfforExpr => ({
+      kind: "binary",
+      type,
+      effects: lhs.effects | rhs.effects,
+      op: operator,
+      left: lhs,
+      right: rhs,
+      comparison: false,
+    });
+    const maskedShift = (): PorfforExpr =>
+      binary("u32", "&", unsigned(right!), {
+        kind: "const",
+        type: "u32",
+        effects: PORFFOR_FX.none,
+        value: 31,
+      });
+
+    switch (op) {
+      case "i32.and":
+        out.push(binary("i32", "&", signed(left!), signed(right!)));
+        return;
+      case "i32.or":
+        out.push(binary("i32", "|", signed(left!), signed(right!)));
+        return;
+      case "i32.xor":
+        out.push(binary("i32", "^", signed(left!), signed(right!)));
+        return;
+      case "i32.shl": {
+        // C signed left shift can overflow or shift a negative value. Perform
+        // the bit movement as u32, with the ECMAScript/Wasm 0x1f mask, then
+        // recover the signed i32 result.
+        const shifted = binary("u32", "<<", unsigned(left!), maskedShift());
+        out.push(convertExpr("i32", shifted, 1));
+        return;
+      }
+      case "i32.shr_s":
+        out.push(binary("i32", ">>", signed(left!), maskedShift()));
+        return;
+      case "i32.shr_u":
+        out.push(binary("u32", ">>", unsigned(left!), maskedShift()));
+        return;
     }
   }
 

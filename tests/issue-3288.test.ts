@@ -206,7 +206,7 @@ describe("#3288 P1 Porffor legality", () => {
     );
   });
 
-  it("rejects composite JS bitwise lowering instead of reaching pushRaw", () => {
+  it("admits composite JS bitwise lowering through typed emitter operations", () => {
     const binary: IrInstr = {
       kind: "binary",
       op: "js.bitand",
@@ -223,8 +223,18 @@ describe("#3288 P1 Porffor legality", () => {
       ],
       valueCount: 3,
     };
-    expect(verifyIrBackendLegality(fn, "porffor")[0]?.message).toMatch(
-      /porffor backend does not support binary op 'js\.bitand'/,
+    expect(verifyIrBackendLegality(fn, "porffor")).toEqual([]);
+
+    const lowered = lowerIrFunctionBody(fn, resolver(), new StubEmitter("porffor"), new PorfforTypeConverter());
+    expect(lowered.body).toEqual(
+      expect.arrayContaining([
+        "unary:f64.trunc",
+        "scalar.const:f64:4294967296",
+        "numeric.convert:i32.trunc_sat_f64_u",
+        "i32.bitwise:i32.and",
+        "numeric.convert:f64.convert_i32_s",
+      ]),
     );
+    expect(lowered.body.some((op) => op.startsWith("raw:"))).toBe(false);
   });
 });
