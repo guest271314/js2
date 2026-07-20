@@ -22,6 +22,7 @@ parent: 2855
 related: [1376, 1131, 2138, 2135, 2134]
 loc-budget-allow:
   - src/ir/lower.ts
+  - src/ir/select.ts
 ---
 
 # #2856 — IR: `body-shape-rejected` → 0
