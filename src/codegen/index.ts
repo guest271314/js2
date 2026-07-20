@@ -4494,6 +4494,17 @@ export function generateMultiModule(
     // (#1483) Emit deferred WASI helper functions for the same reason.
     emitDeferredWasiHelpers(ctx);
 
+    // (#3496) Mirror the single-source pre-body step for standalone console
+    // output. The FYI harness defines `print` in the entry source and reaches
+    // it through `$DONE`; compileMulti's collector correctly marks the console
+    // use, but without minting the sink before bodies compile, `console.log`
+    // deliberately lowers to a no-op and the runner cannot observe the async
+    // completion marker. The helper remains host-free and is only emitted when
+    // a source actually uses a console method.
+    if (ctx.usesStandaloneConsoleSink) {
+      ensureStandaloneStdoutSink(ctx);
+    }
+
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
 
@@ -4635,9 +4646,8 @@ export function generateMultiModule(
     }
 
     // (#2831) Reserve the host-externref → wasm-vec materializers before the
-    // `__sset_*` setters bake their value coercions (mirrors the generateModule
-    // path). No member-set-dispatch in this multi-source path, so only the
-    // `__sset_*` (b) enumeration contributes; no-op without a vec write target.
+    // `__sset_*` setters and deferred member dispatchers bake their value
+    // coercions (mirrors the generateModule path).
     reserveVecFieldMaterializers(ctx);
 
     // Emit exported struct field getter helpers for the runtime (mirrors
@@ -4645,6 +4655,41 @@ export function generateMultiModule(
     // were missing these export emits).
     emitStructFieldGetters(ctx);
     emitStructFieldSetters(ctx);
+
+    // (#3468) Multi-source compilation can reserve the closure own-property
+    // side-table helpers too. Fill their placeholders only after every source
+    // has registered its closure types, matching the single-source pipeline.
+    fillClosurePropHelpers(ctx);
+
+    // (#3496) A multi-source entry can reserve a closed method dispatcher just
+    // like a single source can. The literal Test262 harness does so for
+    // `assert.compareArray(...)`: the property assignment registers a closure
+    // candidate and the later call reserves `__call_m_compareArray_2`.
+    // Finalize those placeholders only after every source has contributed its
+    // object shapes and closure methods, matching the single-source pipeline.
+    // The fill is read-only over the function map because its dependencies are
+    // registered when the dispatcher is reserved.
+    fillClosedMethodDispatch(ctx);
+
+    // (#3493) compileMulti shares the same property-access lowering as the
+    // single-source path, so a dynamic property write/read can reserve one of
+    // these deferred dispatchers here too. Leaving its placeholder body as
+    // `unreachable` made an otherwise-valid top-level `globalThis.x = value`
+    // trap as soon as #3493 stopped eliding that statement. Fill both sides
+    // after every source file has registered its struct types, exactly as the
+    // single-source finalizer does. Their dependencies were registered by the
+    // reserve phase, so these fills do not mutate function indices.
+    fillMemberSetDispatch(ctx);
+    fillMemberGetDispatch(ctx);
+
+    // (#3495) `__extern_get_idx` is reserved while compiling standalone
+    // numeric reads through an externref (for example `globalThis.logs[i]`).
+    // Its eager body only knows `$Object`/`$ObjVec`; splice the per-element-kind
+    // compiler-vec arms after every source has registered its array carriers,
+    // exactly as the single-source finalizer does. Without this multi-source
+    // fill, the backing vec contains the right values but every indexed read
+    // silently returns the undefined sentinel.
+    fillExternGetIdxVecArms(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback.
     emitVecAccessExports(ctx);

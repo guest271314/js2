@@ -2063,6 +2063,7 @@ jobs:
           # normally 0 (strict); raise via repo Actions variable for ONE
           # intentional-reclassification refresh, then reset.
           BASELINE_TRAP_GROWTH_ALLOW: ${{ vars.BASELINE_TRAP_GROWTH_ALLOW || '0' }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
         run: |
           PASS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('shard-artifacts/test262-report-merged.json','utf8')).summary.pass)")
           TOTAL=$(node -e "console.log(JSON.parse(require('fs').readFileSync('shard-artifacts/test262-report-merged.json','utf8')).summary.total)")
@@ -2872,6 +2873,7 @@ jobs:
           # (#3335) Trap-growth tolerance — normally 0 (strict). Raise via repo
           # Actions variable for ONE intentional-reclassification refresh cycle.
           BASELINE_TRAP_GROWTH_ALLOW: ${{ vars.BASELINE_TRAP_GROWTH_ALLOW || '0' }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
           SA: ${{ steps.group.outputs.sa }}
         run: |
           set -uo pipefail

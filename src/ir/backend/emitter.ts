@@ -51,6 +51,7 @@ import type {
   IrVecLowering,
   LinearVecLowering,
 } from "./handles.js";
+import type { StringBackendEmitter } from "./string-contract.js";
 
 // #1714: the vec primitives accept either backend's vec-layout handle. WasmGc
 // uses IrVecLowering (typeIdx-based); Linear uses LinearVecLowering
@@ -86,7 +87,7 @@ export type BackendI32BitwiseOp = "i32.and" | "i32.or" | "i32.xor" | "i32.shl" |
  *    not-yet-migrated boundary, surfaced loudly). As each family migrates
  *    (§2a), its sites move from `pushRaw` to a typed primitive.
  */
-export interface BackendEmitter<S = Instr[]> {
+export interface BackendEmitter<S = Instr[]> extends StringBackendEmitter<S> {
   /** Backend identity used by the IR legality verifier at the emit boundary. */
   readonly backend: IrBackendKind;
 

@@ -3659,6 +3659,26 @@ function compilePropertyAssignment(
     }
   }
 
+  // (#3496) `globalThis.<name> = value` is always a write to the realm's
+  // intrinsic global object, never a field write on a compiler-generated
+  // structural type. A bare `globalThis` captured in an object literal (the
+  // standard `$262 = { global: globalThis }` harness shape) makes TypeScript's
+  // enormous `typeof globalThis` type reachable and therefore registerable as
+  // a Wasm struct. Letting the generic resolution below see that struct makes
+  // later global-property writes cast the native standalone `$Object`
+  // singleton to the unrelated structural type; the guarded cast yields null
+  // and module initialization throws before the property can be installed.
+  //
+  // Mirror the dedicated `globalThis` read path: keep the receiver on its
+  // externref/native-object representation regardless of which structural
+  // types happen to have been registered elsewhere in the program. The
+  // ordinary runtime setter preserves strictness and remains dual-mode for
+  // host/GC versus standalone/WASI.
+  if (ts.isIdentifier(target.expression) && target.expression.text === "globalThis") {
+    const propName = ts.isPrivateIdentifier(target.name) ? `__priv_${target.name.text.slice(1)}` : target.name.text;
+    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, propName);
+  }
+
   // Handle externref property set
   if (isExternalDeclaredClass(objType, ctx.checker)) {
     const externSetResult = compileExternPropertySet(ctx, fctx, target, value, objType);

@@ -56,6 +56,9 @@ export const LINEAR_VECTOR_ELEMENTS_OFFSET = 16;
 export const LINEAR_VECTOR_MINIMUM_CAPACITY = 16;
 export const LINEAR_STRING_LENGTH_OFFSET = 8;
 export const LINEAR_STRING_ELEMENTS_OFFSET = 12;
+export const LINEAR_STRING_PAYLOAD_SIZE_OFFSET = LINEAR_RECORD_PAYLOAD_SIZE_OFFSET;
+/** Bytes between the record header and the first string element (the length field). */
+export const LINEAR_STRING_PAYLOAD_PREFIX_BYTES = LINEAR_STRING_ELEMENTS_OFFSET - LINEAR_RECORD_HEADER_BYTES;
 
 /** Storage vocabulary independent of a machine instruction set. */
 export type LinearStorageKind = "i8" | "i16" | "i32" | "i64" | "f32" | "f64" | "bytes16" | "pointer";
@@ -122,6 +125,8 @@ export interface LinearVectorLayoutPlan extends LinearLayoutBase {
 
 export interface LinearStringLayoutPlan extends LinearLayoutBase {
   readonly kind: "string";
+  readonly payloadSizeOffset: number;
+  readonly payloadPrefixBytes: number;
   readonly lengthOffset: number;
   readonly elementsOffset: number;
   readonly elementStorage: "i8" | "i16";
@@ -598,6 +603,8 @@ export function planLinearStringLayout(): LinearStringLayoutPlan {
     alignment: LINEAR_RECORD_ALIGNMENT,
     size: { kind: "elements", baseBytes: LINEAR_STRING_ELEMENTS_OFFSET, strideBytes: 1, minimumElements: 0 },
     pointerMap: { kind: "none" },
+    payloadSizeOffset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET,
+    payloadPrefixBytes: LINEAR_STRING_PAYLOAD_PREFIX_BYTES,
     lengthOffset: LINEAR_STRING_LENGTH_OFFSET,
     elementsOffset: LINEAR_STRING_ELEMENTS_OFFSET,
     elementStorage: "i8",

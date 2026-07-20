@@ -3088,10 +3088,7 @@ function expressionTouchesBooleanModuleBinding(expr: ts.Expression): boolean {
   let touched = false;
   const visit = (node: ts.Node): void => {
     if (touched) return;
-    if (
-      ts.isIdentifier(node) &&
-      (isDirectBooleanModuleBinding(node) || moduleScalarAliasFamily(node) === "boolean")
-    ) {
+    if (ts.isIdentifier(node) && (isDirectBooleanModuleBinding(node) || moduleScalarAliasFamily(node) === "boolean")) {
       touched = true;
       return;
     }

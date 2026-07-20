@@ -425,6 +425,7 @@ jobs:
           BASELINE_DEPLOY_KEY: ${{ secrets.BASELINE_DEPLOY_KEY }}
           # (#3335) Trap-growth gate tolerance — see check-baseline-trap-growth.ts.
           BASELINE_TRAP_GROWTH_ALLOW: ${{ vars.BASELINE_TRAP_GROWTH_ALLOW || '0' }}
+          NTFY_URL: ${{ secrets.NTFY_URL }}
         run: |
           PASS=${{ steps.sanity.outputs.pass }}
           TOTAL=${{ steps.sanity.outputs.total }}

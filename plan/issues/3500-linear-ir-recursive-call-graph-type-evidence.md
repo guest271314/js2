@@ -15,7 +15,7 @@ language_feature: recursive-call-graph-type-evidence
 es_edition: multi
 goal: backend-agnostic-ir
 depends_on: [3497]
-related: [1131, 2956, 3297, 3478, 3497]
+related: [1131, 2956, 3297, 3478, 3497, 3498]
 origin: "2026-07-20 explicit user request: exact fib-recursive landing source through shared IR, linear Wasm, and Porffor native"
 files:
   - src/ir/type-evidence.ts
@@ -155,3 +155,10 @@ option, selector behavior is unchanged.
 The `src/ir/select.ts` LOC allowance covers the minimal option, fallback enum,
 and stable-detail plumbing in an already-grandfathered file. The certification
 algorithm itself lives in the new focused module. No baseline file is changed.
+
+## Allocation note
+
+This issue was allocated from #3498's post-#3497 exact `fib-recursive.js`
+native-route probe, where the unannotated recursive `fib` was rejected and
+`run` closed with `select:call-graph-closure`. The implementation above resolves
+that backend-neutral evidence gap without benchmark-specific type guesses.

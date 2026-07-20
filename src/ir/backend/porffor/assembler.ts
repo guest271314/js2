@@ -11,6 +11,11 @@ import {
   type LinearStorageKind,
 } from "../../analysis/linear-memory-plan.js";
 import {
+  bindLinearStringRuntime as bindSharedLinearStringRuntime,
+  type LinearStringRuntimeBinding,
+  type LinearStringRuntimeRequest,
+} from "../../analysis/linear-string-runtime.js";
+import {
   irVal,
   type AllocSiteId,
   type IrFunction,
@@ -132,6 +137,11 @@ export class PorfforModuleAssembler
     if (plan.allocations.some((allocation) => this.hasStackFrameOperations(allocation))) {
       this.ensureStackRuntime();
     }
+  }
+
+  bindLinearStringRuntime(request: LinearStringRuntimeRequest): LinearStringRuntimeBinding {
+    if (!this.memoryPlan) throw new Error("porffor assembler: string lowering requires a shared LinearMemoryPlan");
+    return bindSharedLinearStringRuntime(this.memoryPlan, request);
   }
 
   private plannedAllocationClass(allocation: LinearAllocationSitePlan): LinearAllocationClass {
@@ -373,6 +383,10 @@ export class PorfforModuleAssembler
     const handle = this.lookupType(ref.name);
     if (handle === undefined) throw new Error(`porffor assembler: unresolved type '${ref.name}'`);
     return handle;
+  }
+
+  resolveString(): ValType {
+    return { kind: "i32" };
   }
 
   internFuncType(_type: FuncTypeDef): number {
@@ -1048,6 +1062,22 @@ export class PorfforModuleAssembler
               false,
               value,
             ]),
+          );
+          break;
+        }
+        case "mem-copy": {
+          const destination = this.assembleExpr(statement.destination, locals);
+          const source = this.assembleExpr(statement.source, locals);
+          const bytes = this.assembleExpr(statement.bytes, locals);
+          out.push(
+            node(
+              "MemCopy",
+              "none",
+              destination[2] | source[2] | bytes[2] | PORFFOR_FX.readMem | PORFFOR_FX.writeMem,
+              destination,
+              source,
+              [bytes, statement.mayOverlap],
+            ),
           );
           break;
         }

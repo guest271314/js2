@@ -42,11 +42,15 @@ function isNumberArrayOrUint8ArrayUnionText(text: string): boolean {
   return parts.length === 2 && parts.includes("number[]") && parts.some(isUint8ArrayTypeText);
 }
 
-function sourceUsesStringCharCodeAt(sourceFile: ts.SourceFile): boolean {
+function sourceMayUseLinearIrStringRuntime(sourceFile: ts.SourceFile): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
-    if (ts.isPropertyAccessExpression(node) && node.name.text === "charCodeAt") {
+    if (ts.isPropertyAccessExpression(node) && (node.name.text === "charAt" || node.name.text === "charCodeAt")) {
+      found = true;
+      return;
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken) {
       found = true;
       return;
     }
@@ -116,7 +120,7 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     addLinearIrVecRuntime(mod);
     // The UTF-16 decoder is sizeable and only the charCodeAt plan needs it.
     // Register before user-slot assignment when the source can request it.
-    if (sourceUsesStringCharCodeAt(ast.sourceFile)) addLinearIrStringRuntime(mod);
+    if (sourceMayUseLinearIrStringRuntime(ast.sourceFile)) addLinearIrStringRuntime(mod);
   }
 
   // Add __closure_env global (mutable i32, init 0) for closure support

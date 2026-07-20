@@ -126,6 +126,8 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     case "string.concat":
     case "string.eq":
     case "string.len":
+    case "string.char_at":
+    case "string.char_code_at":
     case "object.new":
     case "vec.new_fixed": // #1804 — fresh vec allocation, pure (like object.new)
     case "refcell.new":

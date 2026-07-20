@@ -22,7 +22,8 @@
 // The stub is NOT a compilation path. Nothing in the compiler imports it.
 // ---------------------------------------------------------------------------
 
-import type { IrFunction, IrInstr, IrType } from "../nodes.js";
+import type { AllocSiteId, IrFunction, IrInstr, IrType } from "../nodes.js";
+import type { IrStringConcatMode, IrStringEncoding } from "../string-runtime.js";
 import type { BlockType, FuncHandle, FuncTypeDef, GlobalHandle, Instr, TypeHandle, ValType } from "../types.js";
 import type { ModuleLayout } from "../../emit/resolve-layout.js";
 import {
@@ -89,6 +90,24 @@ export class StubEmitter implements BackendEmitter<StubSink> {
   }
   pushRaw(out: StubSink, instr: Instr): void {
     out.push(`raw:${instr.op}`);
+  }
+  emitStringConst(value: string, _alloc: AllocSiteId | undefined, out: StubSink): void {
+    out.push(`string.const:${value}`);
+  }
+  emitStringConcat(_alloc: AllocSiteId | undefined, mode: IrStringConcatMode, out: StubSink): void {
+    out.push(`string.concat:${mode}`);
+  }
+  emitStringEquals(negate: boolean, out: StubSink): void {
+    out.push(`string.eq:${negate}`);
+  }
+  emitStringLength(_inputEncoding: IrStringEncoding | undefined, out: StubSink): void {
+    out.push("string.length");
+  }
+  emitStringCharAt(_alloc: AllocSiteId | undefined, inputEncoding: IrStringEncoding, out: StubSink): void {
+    out.push(`string.char_at:${inputEncoding}`);
+  }
+  emitStringCharCodeAt(inputEncoding: IrStringEncoding, out: StubSink): void {
+    out.push(`string.char_code_at:${inputEncoding}`);
   }
   emitVecLen(_layout: StubVecLayout, out: StubSink): void {
     out.push("vec.len");

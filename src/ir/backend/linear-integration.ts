@@ -41,7 +41,9 @@ import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
 import { LINEAR_GENERIC_OBJECT_TAG } from "../../codegen-linear/layout.js";
 import {
+  LINEAR_IR_STRING_CHAR_AT_FN,
   LINEAR_IR_STRING_CHAR_CODE_AT_FN,
+  LINEAR_IR_STRING_APPEND_ASCII_FN,
   LINEAR_IR_VEC_INIT_F64_FN,
   linearStringLiteralInstrs,
 } from "../../codegen-linear/runtime.js";
@@ -62,6 +64,8 @@ import {
   type LinearRuntimeOperation,
   type LinearStorageKind,
 } from "../analysis/linear-memory-plan.js";
+import { bindLinearStringRuntime } from "../analysis/linear-string-runtime.js";
+import type { IrStringConcatMode, IrStringEncoding } from "../string-runtime.js";
 import {
   asVal,
   irVal,
@@ -341,6 +345,7 @@ export function compileLinearIrFunctions(
     try {
       const emitter = new LinearEmitter({
         resolveRuntimeOperation: (operation) => resolveLinearRuntimeOperation(ctx, operation),
+        stringRuntime: resolver,
       });
       const body = lowerIrFunctionBody(main, resolver, emitter, linearValueTypeConverter(resolver, main.name));
       const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
@@ -541,7 +546,12 @@ function makeLinearIrResolver(
       // #2956 L3: from-ast keeps string comparison/method choice abstract.
       // Resolve those names onto the canonical linear UTF-8 runtime here.
       if (ref.name === IR_STRING_COMPARE_FN) return resolveRuntimeFunc("__str_cmp");
-      if (ref.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN || ref.name === "__str_slice") {
+      if (
+        ref.name === LINEAR_IR_STRING_CHAR_AT_FN ||
+        ref.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN ||
+        ref.name === LINEAR_IR_STRING_APPEND_ASCII_FN ||
+        ref.name === "__str_slice"
+      ) {
         return resolveRuntimeFunc(ref.name);
       }
       // (#2956 L2) Vec MUTATION rides from-ast's element-store helper call
@@ -627,10 +637,11 @@ function makeLinearIrResolver(
       if (!plan || !allocation?.dataSegmentId) {
         throw new Error("linear-ir: string literal is absent from the completed memory plan");
       }
+      bindLinearStringRuntime(plan, { intrinsic: "constant", alloc });
       const segment = plan.requireDataSegment(allocation.dataSegmentId);
       return linearStringLiteralInstrs(ctx, value, resolveLinearRuntimeOperation(ctx, operation), segment.bytes);
     },
-    emitStringConcat(alloc?: AllocSiteId): readonly Instr[] {
+    emitStringConcat(alloc?: AllocSiteId, mode: IrStringConcatMode = "immutable"): readonly Instr[] {
       const layout = memoryPlan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
       if (layout.kind !== "string") throw new Error("linear-ir: invalid string layout");
       const allocation = allocationFor(layout.id, alloc);
@@ -640,13 +651,30 @@ function makeLinearIrResolver(
         (candidate) => candidate.family === "string" && candidate.operation === "concatenate",
         "string concatenation",
       );
+      if (!memoryPlan) throw new Error("linear-ir: string concatenation has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "concat", alloc });
+      if (mode === "owned-append") {
+        return [{ op: "call", funcIdx: resolveRuntimeFunc(LINEAR_IR_STRING_APPEND_ASCII_FN) }];
+      }
       return [{ op: "call", funcIdx: resolveLinearRuntimeOperation(ctx, operation) }];
     },
     emitStringEquals(): readonly Instr[] {
       return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_eq") }];
     },
-    emitStringLen(): readonly Instr[] {
+    emitStringLen(inputEncoding?: IrStringEncoding): readonly Instr[] {
+      if (!memoryPlan) throw new Error("linear-ir: string length has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "length", inputEncoding });
       return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_length_utf16") }];
+    },
+    emitStringCharAt(alloc?: AllocSiteId, inputEncoding?: IrStringEncoding): readonly Instr[] {
+      if (!memoryPlan) throw new Error("linear-ir: string charAt has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "char-at", alloc, inputEncoding });
+      return [{ op: "call", funcIdx: resolveRuntimeFunc(LINEAR_IR_STRING_CHAR_AT_FN) }];
+    },
+    emitStringCharCodeAt(inputEncoding?: IrStringEncoding): readonly Instr[] {
+      if (!memoryPlan) throw new Error("linear-ir: string charCodeAt has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "char-code-at", inputEncoding });
+      return [{ op: "call", funcIdx: resolveRuntimeFunc(LINEAR_IR_STRING_CHAR_CODE_AT_FN) }];
     },
     resolveObject(shape: IrObjectShape, alloc?: AllocSiteId): LinearObjectLowering | null {
       const layout = memoryPlan?.layoutForObjectShape(shape);
