@@ -137,6 +137,7 @@ function testWorkerOptions(test) {
     expectedErrorType: negative === true ? undefined : negative?.type,
     originalHarness: true,
     asyncTest: Boolean(test.flags?.async),
+    inferModuleStrictArguments: test.flags?.module === true,
   };
 }
 
