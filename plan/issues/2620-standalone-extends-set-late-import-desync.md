@@ -2,7 +2,7 @@
 id: 2620
 title: "Standalone `class X extends Set/Map` — synthetic accessor late-import index-shift (-1 global) + host-import leak"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-06-22
 completed: 2026-06-22
 assignee: sendev-flatten
