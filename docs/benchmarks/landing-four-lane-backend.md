@@ -41,8 +41,11 @@ Porffor cell with a sanitizer finding may retain its correctly validated
 optimized output, but it is always `unsafe-non-authoritative`; its optimized
 timing cannot be used. A JS2 native cell is supported only when its separate
 ASan/UBSan executable is clean. Missing cells, skipped-success records, source
-substitution, wrong output, and numeric-zero timing sentinels fail schema
-validation.
+substitution, wrong output, synthetic expected-output injection without a
+retained observation command, and numeric-zero timing sentinels fail schema
+validation. In benchmark mode every executable cell must carry all 5 warmup
+plus 21 measured samples for every phase; a support-only document cannot
+masquerade as a benchmark.
 
 ## Running the probe
 
@@ -61,9 +64,46 @@ The probe records source identity, commands and versions, compile phase wall
 times, artifact hashes and sizes, native peak RSS, output vectors, and sanitizer
 classification. Its measurement phases are deliberately null with an explicit
 `support-probe-only` reason. It does not relabel build or process-startup time as
-warm steady-state. A canonical Ubuntu performance capture must retain raw
-interleaved 5-warmup/21-measured samples and separate build, startup, cold, and
-warm phases before any timing is accepted.
+warm steady-state.
+
+## Capturing measurements
+
+Run a full noncanonical local capture with:
+
+```sh
+pnpm run benchmark:landing-four-lane -- --benchmark --output .tmp/landing-four-lane
+pnpm run benchmark:landing-four-lane -- --validate-result .tmp/landing-four-lane/latest.json
+```
+
+The runner interleaves every executable kernel/lane cell in a rotating order
+for 5 warmup and 21 measured outer rounds. Every sample retains positive wall
+time and peak RSS, CPU time where the method exposes it, exact invocations, and
+an observed output tied to one of those invocations. `latest.json` retains the
+raw samples and is authoritative. `summary.md` is a convenience view containing
+measured-round-only median wall milliseconds; it does not rank lanes. Unsafe
+plain-Porffor medians are marked UB-contaminated and non-authoritative.
+
+The four phases remain distinct:
+
+- **Build:** V8 syntax checking; a fresh worker process for each exact-source
+  JS2/Wasm + Binaryen + Cranelift build; or a fresh Porffor/JS2 worker followed
+  by Clang. Fresh workers keep compiler caches and peak RSS sample-local.
+- **Startup + first call:** a fresh Node, Wasmtime, or native process that
+  executes and validates `run(runtimeArg)`. No lane uses a call-free startup
+  surrogate.
+- **Cold:** V8's established warm-process/fresh-`vm.Context` method,
+  `benchmarks/wasmtime-cold-host` with a warm Engine/Module and fresh
+  Store/Instance, or native fresh-process initialization plus one call. The
+  cold host reports the actual call result alongside its timing.
+- **Warm:** the existing warmed V8 child; Wasmtime's appended in-module
+  5-warmup/40-measured minimum-time driver plus a retained `landing_validate`
+  invocation that returns the actual result; or one native process with six
+  warmups and nine individually timed calls whose median is retained. Repeated
+  `wasmtime run` process wall time is never presented as warm runtime.
+
+The manual Ubuntu x64 workflow invokes `--benchmark --canonical-ubuntu`, has no
+performance threshold, and uploads the complete output directory. Pull-request
+CI continues to run the faster support/correctness/sanitizer probe.
 
 ## Interpretation boundary
 

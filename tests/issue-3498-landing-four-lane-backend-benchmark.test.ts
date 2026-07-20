@@ -11,6 +11,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { LANDING_BENCHMARK_PROGRAMS } from "../scripts/lib/landing-benchmark-corpus.mjs";
 import {
   LANDING_FOUR_LANE_IDS,
+  LANDING_FOUR_LANE_MEASURED_ROUNDS,
+  LANDING_FOUR_LANE_WARMUP_ROUNDS,
   validateLandingFourLaneResult,
   verifyLandingBenchmarkCorpus,
   type LandingFourLaneResult,
@@ -108,7 +110,7 @@ describe("#3498 landing four-lane backend benchmark", () => {
     60_000,
   );
 
-  coreIt("rejects source substitution, omission, output drift, skipped success, and zero timing", () => {
+  coreIt("rejects source substitution, omission, output drift, skipped success, and invalid timing", () => {
     if (!coreAvailable) throw new Error("LANDING_FOUR_LANE_REQUIRED=1 but Wasmtime/wasm-opt are unavailable");
     coreResult ??= runProbe(coreOutput, true);
     validateLandingFourLaneResult(coreResult);
@@ -140,12 +142,67 @@ describe("#3498 landing four-lane backend benchmark", () => {
           wallNs: 0,
           cpuNs: 0,
           peakRssBytes: 0,
-          output: 0,
-          command: ["false-success"],
+          validatedOutput: null,
+          outputObservation: null,
+          commands: [["false-success"]],
         },
       ],
     };
     expect(() => validateLandingFourLaneResult(zeroTiming)).toThrow(/wallNs invalid/);
+
+    const nullBenchmark = clone(coreResult);
+    nullBenchmark.capture = {
+      kind: "benchmark",
+      canonical: false,
+      warmupRounds: LANDING_FOUR_LANE_WARMUP_ROUNDS,
+      measuredRounds: LANDING_FOUR_LANE_MEASURED_ROUNDS,
+    };
+    expect(() => validateLandingFourLaneResult(nullBenchmark)).toThrow(
+      /executable benchmark cell must carry timing samples/,
+    );
+
+    const completeBenchmark = clone(coreResult);
+    completeBenchmark.capture = nullBenchmark.capture;
+    const executableCells = completeBenchmark.cells.filter((cell: any) => cell.status !== "unsupported");
+    for (const [order, cell] of executableCells.entries()) {
+      const program = completeBenchmark.programs.find((candidate: any) => candidate.id === cell.programId)!;
+      for (const phase of ["build", "startup", "cold", "warm"] as const) {
+        cell.measurements[phase] = {
+          reason: null,
+          samples: Array.from(
+            { length: LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS },
+            (_, round) => ({
+              phase: round < LANDING_FOUR_LANE_WARMUP_ROUNDS ? "warmup" : "measured",
+              round,
+              order,
+              wallNs: 1_000 + round,
+              cpuNs: 900 + round,
+              peakRssBytes: 4_096,
+              validatedOutput: phase === "build" ? null : program.expectedFixedOutputs[3],
+              outputObservation: phase === "build" ? null : { commandIndex: 0, mechanism: "stdout-json" },
+              commands: [["synthetic-schema-fixture", phase, String(round)]],
+            }),
+          ),
+        };
+      }
+    }
+    expect(() => validateLandingFourLaneResult(completeBenchmark)).not.toThrow();
+
+    const syntheticOutput = clone(completeBenchmark);
+    const wasmCold = syntheticOutput.cells.find(
+      (cell: any) => cell.programId === "fib" && cell.laneId === "js2-wasmgc-wasmtime-cranelift",
+    );
+    wasmCold.measurements.cold.samples[0].outputObservation = null;
+    expect(() => validateLandingFourLaneResult(syntheticOutput)).toThrow(/outputObservation must be an object/);
+  });
+
+  it("keeps the manual canonical workflow in real benchmark mode", () => {
+    const workflow = readFileSync(resolve(repoRoot, ".github/workflows/landing-four-lane-backend.yml"), "utf8");
+    expect(workflow).toContain("--benchmark --canonical-ubuntu");
+    expect(workflow).not.toContain("--probe --canonical-ubuntu");
+    expect(workflow).toContain('"benchmarks/wasmtime-cold-host/**"');
+    expect(workflow).toContain('"scripts/wasmtime-bench-child-js.mjs"');
+    expect(workflow.match(/timeout-minutes: 90/g)).toHaveLength(2);
   });
 
   nativeIt(
@@ -243,6 +300,9 @@ function runProbe(output: string, withoutPorffor: boolean): LandingFourLaneResul
   });
   expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
   const latest = JSON.parse(readFileSync(join(output, "latest.json"), "utf8")) as LandingFourLaneResult;
+  const summary = readFileSync(join(output, "summary.md"), "utf8");
+  expect(summary).toContain("`latest.json` is the authoritative artifact");
+  expect(summary).toContain("UB-contaminated, non-authoritative");
   validateLandingFourLaneResult(latest);
   return latest;
 }

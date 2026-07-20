@@ -67,8 +67,12 @@ export interface LandingSample {
   readonly wallNs: number;
   readonly cpuNs: number | null;
   readonly peakRssBytes: number;
-  readonly output: number;
-  readonly command: readonly string[];
+  readonly validatedOutput: number | null;
+  readonly outputObservation: {
+    readonly commandIndex: number;
+    readonly mechanism: "stdout-json" | "stdout-number" | "in-process-return";
+  } | null;
+  readonly commands: readonly (readonly string[])[];
 }
 
 export interface LandingMeasuredPhase {
@@ -218,7 +222,15 @@ export function validateLandingFourLaneResult(value: unknown): asserts value is 
     if (!(["supported", "unsupported", "unsafe-non-authoritative"] as const).includes(cell.status as never)) {
       throw new Error(`${key} has invalid support status`);
     }
-    validateMeasurements(cell.measurements, key, capture.kind, warmupRounds, measuredRounds);
+    validateMeasurements(
+      cell.measurements,
+      key,
+      program,
+      cell.status !== "unsupported",
+      capture.kind,
+      warmupRounds,
+      measuredRounds,
+    );
     const sanitizer = record(cell.sanitizer, `${key}.sanitizer`);
     if (cell.status === "unsupported") {
       if (cell.validation !== null) throw new Error(`${key} unsupported cell must not carry successful validation`);
@@ -257,6 +269,27 @@ export function validateLandingFourLaneResult(value: unknown): asserts value is 
   }
   for (const key of expectedKeys) if (!seen.has(key)) throw new Error(`missing support cell ${key}`);
 
+  if (capture.kind === "benchmark") {
+    const executableCells = cells
+      .map((cell) => record(cell, "benchmark cell"))
+      .filter((cell) => cell.status !== "unsupported");
+    for (const phase of ["build", "startup", "cold", "warm"] as const) {
+      for (let round = 0; round < warmupRounds + measuredRounds; round++) {
+        const orders = executableCells.map((cell) => {
+          const measurement = record(record(cell.measurements, "measurements")[phase], phase);
+          const samples = array(measurement.samples, `${phase}.samples`);
+          const sample = samples.find((candidate) => record(candidate, "sample").round === round);
+          if (!sample) throw new Error(`${phase} is missing benchmark round ${round}`);
+          return nonnegativeInteger(record(sample, "sample").order, `${phase}.order`);
+        });
+        const sorted = [...orders].sort((left, right) => left - right);
+        if (sorted.some((order, index) => order !== index)) {
+          throw new Error(`${phase} round ${round} is not a complete interleaved executable-cell order`);
+        }
+      }
+    }
+  }
+
   const serialized = JSON.stringify(value);
   if (/\bskipped\b/i.test(serialized)) throw new Error("skipped is not a valid #3498 support outcome");
 }
@@ -264,6 +297,8 @@ export function validateLandingFourLaneResult(value: unknown): asserts value is 
 function validateMeasurements(
   value: unknown,
   key: string,
+  program: (typeof LANDING_BENCHMARK_PROGRAMS)[number],
+  executable: boolean,
   captureKind: unknown,
   warmupRounds: number,
   measuredRounds: number,
@@ -275,8 +310,12 @@ function validateMeasurements(
       if (typeof measurement.reason !== "string" || measurement.reason.length === 0) {
         throw new Error(`${key}.${phase} null measurement needs a reason`);
       }
+      if (captureKind === "benchmark" && executable) {
+        throw new Error(`${key}.${phase} executable benchmark cell must carry timing samples`);
+      }
       continue;
     }
+    if (!executable) throw new Error(`${key}.${phase} unsupported cell must not carry timing samples`);
     if (measurement.reason !== null) throw new Error(`${key}.${phase} measured data must use reason:null`);
     const samples = array(measurement.samples, `${key}.${phase}.samples`);
     for (const sampleValue of samples) {
@@ -288,9 +327,45 @@ function validateMeasurements(
       if (typeof sample.peakRssBytes !== "number" || sample.peakRssBytes <= 0) {
         throw new Error(`${key}.${phase} peak RSS invalid`);
       }
+      const commands = array(sample.commands, `${key}.${phase}.commands`);
+      if (
+        commands.length === 0 ||
+        commands.some(
+          (command) =>
+            !Array.isArray(command) ||
+            command.length === 0 ||
+            command.some((argument) => typeof argument !== "string" || argument.length === 0),
+        )
+      ) {
+        throw new Error(`${key}.${phase} commands must retain one or more exact invocations`);
+      }
+      if (sample.phase !== (sample.round < warmupRounds ? "warmup" : "measured")) {
+        throw new Error(`${key}.${phase} warmup/measured label does not match its round`);
+      }
+      const expectedOutput = phase === "build" ? null : program.expectedFixedOutputs[3];
+      if (sample.validatedOutput !== expectedOutput) {
+        throw new Error(`${key}.${phase} validated output does not match the Node runtime oracle`);
+      }
+      if (expectedOutput === null) {
+        if (sample.outputObservation !== null) {
+          throw new Error(`${key}.${phase} output-free phase must not claim an output observation`);
+        }
+      } else {
+        const observation = record(sample.outputObservation, `${key}.${phase}.outputObservation`);
+        const commandIndex = nonnegativeInteger(
+          observation.commandIndex,
+          `${key}.${phase}.outputObservation.commandIndex`,
+        );
+        if (commandIndex >= commands.length) {
+          throw new Error(`${key}.${phase} output observation does not reference a retained command`);
+        }
+        if (!("stdout-json stdout-number in-process-return".split(" ") as unknown[]).includes(observation.mechanism)) {
+          throw new Error(`${key}.${phase} output observation mechanism is invalid`);
+        }
+      }
     }
     if (captureKind === "support-probe") throw new Error(`${key}.${phase} probe must not masquerade as timing data`);
-    const expected = phase === "warm" ? warmupRounds + measuredRounds : measuredRounds;
+    const expected = warmupRounds + measuredRounds;
     if (samples.length !== expected) throw new Error(`${key}.${phase} sample count mismatch`);
   }
 }

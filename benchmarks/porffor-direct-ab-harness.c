@@ -20,6 +20,12 @@ static uint64_t js2_ab_process_cpu_ns(void) {
   return (uint64_t)value.tv_sec * 1000000000ull + (uint64_t)value.tv_nsec;
 }
 
+static uint64_t js2_ab_monotonic_ns(void) {
+  struct timespec value;
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0) return UINT64_MAX;
+  return (uint64_t)value.tv_sec * 1000000000ull + (uint64_t)value.tv_nsec;
+}
+
 static uint64_t js2_ab_peak_rss_bytes(void) {
   struct rusage usage;
   if (getrusage(RUSAGE_SELF, &usage) != 0) return UINT64_MAX;
@@ -33,6 +39,66 @@ static uint64_t js2_ab_peak_rss_bytes(void) {
 int main(int argc, char **argv) {
   volatile int stack_anchor = 0;
   js2_ab_init(argc, argv, (void *)&stack_anchor);
+
+  if (argc == 3 && strcmp(argv[1], "--landing-once") == 0) {
+    const double input = strtod(argv[2], NULL);
+    const uint64_t wall_started = js2_ab_monotonic_ns();
+    const uint64_t cpu_started = js2_ab_process_cpu_ns();
+    const double output = js2_ab_kernel(input);
+    const uint64_t cpu_finished = js2_ab_process_cpu_ns();
+    const uint64_t wall_finished = js2_ab_monotonic_ns();
+    if (wall_started == UINT64_MAX || wall_finished == UINT64_MAX || cpu_started == UINT64_MAX ||
+        cpu_finished == UINT64_MAX)
+      return 4;
+    printf(
+        "{\"output\":%.17g,\"runtimeWallNs\":%llu,\"runtimeCpuNs\":%llu,\"peakRssBytes\":%llu}\n",
+        output, (unsigned long long)(wall_finished - wall_started), (unsigned long long)(cpu_finished - cpu_started),
+        (unsigned long long)js2_ab_peak_rss_bytes());
+    return 0;
+  }
+
+  // Mirror the landing V8 child: six in-process warmups followed by nine
+  // individually timed calls. Return the median as one outer raw sample.
+  if (argc == 3 && strcmp(argv[1], "--landing-warm") == 0) {
+    const double input = strtod(argv[2], NULL);
+    for (int index = 0; index < 6; index++) (void)js2_ab_kernel(input);
+    uint64_t wall_samples[9];
+    uint64_t cpu_samples[9];
+    volatile double output = 0.0;
+    for (int index = 0; index < 9; index++) {
+      const uint64_t wall_started = js2_ab_monotonic_ns();
+      const uint64_t cpu_started = js2_ab_process_cpu_ns();
+      output = js2_ab_kernel(input);
+      const uint64_t cpu_finished = js2_ab_process_cpu_ns();
+      const uint64_t wall_finished = js2_ab_monotonic_ns();
+      if (wall_started == UINT64_MAX || wall_finished == UINT64_MAX || cpu_started == UINT64_MAX ||
+          cpu_finished == UINT64_MAX)
+        return 5;
+      wall_samples[index] = wall_finished - wall_started;
+      cpu_samples[index] = cpu_finished - cpu_started;
+    }
+    for (int left = 1; left < 9; left++) {
+      uint64_t wall_value = wall_samples[left];
+      uint64_t cpu_value = cpu_samples[left];
+      int right = left - 1;
+      while (right >= 0 && wall_samples[right] > wall_value) {
+        wall_samples[right + 1] = wall_samples[right];
+        right--;
+      }
+      wall_samples[right + 1] = wall_value;
+      right = left - 1;
+      while (right >= 0 && cpu_samples[right] > cpu_value) {
+        cpu_samples[right + 1] = cpu_samples[right];
+        right--;
+      }
+      cpu_samples[right + 1] = cpu_value;
+    }
+    printf(
+        "{\"output\":%.17g,\"medianWallNs\":%llu,\"medianCpuNs\":%llu,\"peakRssBytes\":%llu}\n",
+        output, (unsigned long long)wall_samples[4], (unsigned long long)cpu_samples[4],
+        (unsigned long long)js2_ab_peak_rss_bytes());
+    return 0;
+  }
 
   // #3498 reuses the exact #3482 ABI/harness object for correctness probes.
   // Arguments select four deterministic oracle inputs; the no-argument path

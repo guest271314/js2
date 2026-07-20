@@ -10,6 +10,7 @@ on:
     paths:
       - ".github/workflows/landing-four-lane-backend.yml"
       - "benchmarks/porffor-direct-ab-harness.c"
+      - "benchmarks/wasmtime-cold-host/**"
       - "docs/benchmarks/landing-four-lane-backend.md"
       - "package.json"
       - "scripts/benchmark-landing-four-lane.mts"
@@ -17,9 +18,11 @@ on:
       - "scripts/generate-wasmtime-hot-runtime.mjs"
       - "scripts/lib/landing-benchmark-corpus.mjs"
       - "scripts/lib/landing-four-lane-benchmark.mts"
+      - "scripts/lib/landing-runtime-timing.mjs"
       - "scripts/lib/landing-wasmtime-runtime.mjs"
       - "scripts/lib/porffor-direct-ab.mts"
       - "scripts/lib/porffor-direct-source-adapter.mts"
+      - "scripts/wasmtime-bench-child-js.mjs"
       - "src/ir/**"
       - "tests/issue-3498*.test.ts"
       - "vendor/Porffor"
@@ -35,7 +38,7 @@ env:
 jobs:
   correctness-support-sanitizers:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
@@ -93,7 +96,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: correctness-support-sanitizers
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
         with:
@@ -121,11 +124,11 @@ jobs:
           curl -L "https://github.com/bytecodealliance/wasmtime/releases/download/${WASMTIME_VERSION}/wasmtime-${WASMTIME_VERSION}-x86_64-linux.tar.xz" | tar xJ
           echo "$PWD/wasmtime-${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
 
-      - name: Capture canonical Ubuntu support evidence
+      - name: Capture canonical Ubuntu benchmark evidence
         env:
           CC: clang
           JS2WASM_PORFFOR_ROOT: vendor/Porffor
-        run: pnpm run benchmark:landing-four-lane -- --probe --canonical-ubuntu --output .tmp/landing-four-lane-canonical
+        run: pnpm run benchmark:landing-four-lane -- --benchmark --canonical-ubuntu --output .tmp/landing-four-lane-canonical
 
       - name: Validate the machine-readable matrix
         run: pnpm run benchmark:landing-four-lane -- --validate-result .tmp/landing-four-lane-canonical/latest.json

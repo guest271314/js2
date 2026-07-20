@@ -96,10 +96,16 @@ import { Script, createContext } from "node:vm";
 import { compile } from "./compiler-bundle.mjs";
 import { LANDING_BENCHMARK_PROGRAMS } from "./lib/landing-benchmark-corpus.mjs";
 import {
+  landingNodeVmFreshCompileSample,
+  landingNodeWarmSample,
+  landingWasmtimeFreshInstanceSamples,
+  landingWasmtimeWarmSample,
+} from "./lib/landing-runtime-timing.mjs";
+import {
   LANDING_WASMTIME_COMPILE_OPTIONS,
   LANDING_WASM_OPT_ARGS,
   landingWasmtimeCompileArgs,
-  landingWasmtimeRunArgs,
+  landingWasmtimeWarmDriverSource,
 } from "./lib/landing-wasmtime-runtime.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
@@ -155,23 +161,7 @@ const MEASURED_RUNS = 7;
 // `__sink` keeps `run()`'s result observable so the body isn't DCE'd.
 const WARM_ITERS_WARMUP = 5;
 const WARM_ITERS_MEASURED = 40;
-const WARM_DRIVER_SOURCE = `
-/** @param {number} __n @returns {number} */
-export function warm(__n) {
-  for (let __w = 0; __w < ${WARM_ITERS_WARMUP}; __w++) { run(__n); }
-  let __best = 1e18;
-  let __sink = 0;
-  for (let __m = 0; __m < ${WARM_ITERS_MEASURED}; __m++) {
-    const __t0 = performance.now();
-    const __r = run(__n);
-    const __dt = performance.now() - __t0;
-    __sink = (__sink + __r) | 0;
-    if (__dt < __best) __best = __dt;
-  }
-  if (__sink === 0x7fffffff) return -1;
-  return __best;
-}
-`;
+const WARM_DRIVER_SOURCE = landingWasmtimeWarmDriverSource(WARM_ITERS_WARMUP, WARM_ITERS_MEASURED);
 
 // Javy + StarlingMonkey verified warm numbers (2026-04-27 wasmtime 44.0.0,
 // aarch64-linux) — see labs benchmarks/compare-runtimes.ts.
@@ -484,16 +474,9 @@ function makeVmScriptSource(sourcePath) {
  * A vm Context is lighter than a true isolate, so this is a lower bound.
  */
 function timeNodeVmContextFreshCompile(sourcePath, arg, runs) {
-  const scriptSource = makeVmScriptSource(sourcePath);
   const samplesMs = [];
   for (let i = 0; i < runs; i++) {
-    const t0 = performance.now();
-    const context = createContext({ __runtimeArg__: arg });
-    const script = new Script(scriptSource, { filename: sourcePath });
-    const result = script.runInContext(context);
-    const ms = performance.now() - t0;
-    void result;
-    samplesMs.push(ms);
+    samplesMs.push(landingNodeVmFreshCompileSample(sourcePath, arg).wallMs);
   }
   return samplesMs;
 }
@@ -525,27 +508,7 @@ function timeNodeVmContextCompiledOnce(sourcePath, arg, runs) {
  * startup and measure Wasmtime/Cranelift instantiation, not Node WebAssembly.
  */
 function timeWasmtimeFreshInstance(hostPath, wasmPath, arg, runs, options = {}) {
-  const args = [];
-  if (options.component) args.push("--component");
-  for (const preload of options.preloads ?? []) {
-    args.push("--preload", `${preload.name}=${preload.path}`);
-  }
-  args.push(wasmPath, String(arg), String(runs));
-  const r = spawnSync(hostPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-  if (r.status !== 0) {
-    throw new Error(`wasmtime cold host failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 800)}`);
-  }
-  const out = (r.stdout ?? "").toString().trim().split("\n").pop();
-  const parsed = JSON.parse(out);
-  if (!Array.isArray(parsed?.samplesMs) || parsed.samplesMs.length !== runs) {
-    throw new Error(`wasmtime cold host did not return ${runs} samples: ${out}`);
-  }
-  for (const sample of parsed.samplesMs) {
-    if (typeof sample !== "number" || !Number.isFinite(sample) || sample <= 0) {
-      throw new Error(`wasmtime cold host returned invalid sample: ${out}`);
-    }
-  }
-  return parsed.samplesMs;
+  return landingWasmtimeFreshInstanceSamples(hostPath, wasmPath, arg, runs, options).samplesMs;
 }
 
 /**
@@ -560,22 +523,9 @@ function timeWasmtimeFreshInstance(hostPath, wasmPath, arg, runs, options = {}) 
  * by subtracting two noisy full-process wall-times).
  */
 function timeWasmtimeWarmIter(cwasmPath, arg, outerRuns) {
-  const cmdArgs = landingWasmtimeRunArgs(cwasmPath, "warm", arg);
   const samplesMs = [];
   for (let i = 0; i < outerRuns; i++) {
-    const r = spawnSync("wasmtime", cmdArgs, { stdio: ["ignore", "pipe", "pipe"] });
-    if (r.status !== 0) {
-      throw new Error(`wasmtime warm failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 400)}`);
-    }
-    // `--invoke` prints the f64 return value (the min per-call ms) on stdout.
-    // It also emits experimental-feature warnings to stderr; parse the last
-    // non-empty stdout line as the numeric result.
-    const out = (r.stdout ?? "").toString().trim().split("\n").pop();
-    const perCallMs = Number(out);
-    if (!Number.isFinite(perCallMs) || perCallMs <= 0) {
-      throw new Error(`wasmtime warm did not return a positive per-call ms: ${JSON.stringify(out)}`);
-    }
-    samplesMs.push(perCallMs);
+    samplesMs.push(landingWasmtimeWarmSample(cwasmPath, arg).perCallMs);
   }
   return samplesMs;
 }
@@ -587,19 +537,9 @@ function timeWasmtimeWarmIter(cwasmPath, arg, outerRuns) {
  * outer-sample value. Returns per-outer-sample milliseconds.
  */
 function timeNodeWarmIter(sourcePath, arg, outerRuns) {
-  const cmdArgs = [CHILD_JS_PATH, "--mode=warm", sourcePath, String(arg)];
   const samplesMs = [];
   for (let i = 0; i < outerRuns; i++) {
-    const r = spawnSync(process.execPath, cmdArgs, { stdio: ["ignore", "pipe", "pipe"] });
-    if (r.status !== 0) {
-      throw new Error(`node warm failed (exit ${r.status}): ${(r.stderr ?? "").toString().slice(0, 400)}`);
-    }
-    const out = (r.stdout ?? "").toString().trim().split("\n").pop();
-    const parsed = JSON.parse(out);
-    if (typeof parsed?.medianMs !== "number") {
-      throw new Error(`node warm did not return medianMs: ${out}`);
-    }
-    samplesMs.push(parsed.medianMs);
+    samplesMs.push(landingNodeWarmSample(CHILD_JS_PATH, sourcePath, arg).medianMs);
   }
   return samplesMs;
 }

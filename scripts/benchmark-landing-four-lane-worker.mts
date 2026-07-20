@@ -11,6 +11,11 @@ import { lowerIrModuleToPorffor } from "../src/ir/backend/porffor/integration.js
 import { loadOptionalPorffor } from "../src/ir/backend/porffor/loader.js";
 import { landingBenchmarkProgram } from "./lib/landing-benchmark-corpus.mjs";
 import {
+  LANDING_WASMTIME_COMPILE_OPTIONS,
+  LANDING_WASM_OPT_ARGS,
+  landingWasmtimeCompileArgs,
+} from "./lib/landing-wasmtime-runtime.mjs";
+import {
   findExactFunction,
   normalizePinnedPorfforCForClang,
   porfforType,
@@ -21,7 +26,7 @@ import {
 } from "./lib/porffor-direct-ab.mjs";
 import { compileDirectPorfforProgram } from "./lib/porffor-direct-source-adapter.mjs";
 
-type WorkerLane = "js2" | "plain";
+type WorkerLane = "wasm" | "js2" | "plain";
 
 interface WorkerArguments {
   readonly lane: WorkerLane;
@@ -44,7 +49,9 @@ function parseArguments(argv: readonly string[]): WorkerArguments {
     values.set(flag, value);
   }
   const lane = values.get("--lane");
-  if (lane !== "js2" && lane !== "plain") throw new Error(`unknown native lane ${String(lane)}`);
+  if (lane !== "wasm" && lane !== "js2" && lane !== "plain") {
+    throw new Error(`unknown benchmark worker lane ${String(lane)}`);
+  }
   return {
     lane,
     programId: values.get("--program")!,
@@ -58,6 +65,11 @@ async function run(options: WorkerArguments): Promise<void> {
   const source = readExactSource(sourcePath, program.sha256);
   if (source.bytes !== program.bytes) throw new Error(`${program.id} source byte count changed`);
   mkdirSync(options.outputDirectory, { recursive: true });
+
+  if (options.lane === "wasm") {
+    await writeWasmBuild(options, source);
+    return;
+  }
 
   const porfforRoot = resolve(process.env.JS2WASM_PORFFOR_ROOT || "vendor/Porffor");
   const renderedPath = join(options.outputDirectory, "rendered.c");
@@ -280,6 +292,89 @@ async function run(options: WorkerArguments): Promise<void> {
   });
 }
 
+async function writeWasmBuild(options: WorkerArguments, source: ReturnType<typeof readExactSource>): Promise<void> {
+  const compileOptions = {
+    fileName: source.path,
+    ...LANDING_WASMTIME_COMPILE_OPTIONS,
+    experimentalIR: false,
+  } as const;
+  const compileStarted = performance.now();
+  const compiled = await compile(source.source, compileOptions);
+  const js2CompileMs = performance.now() - compileStarted;
+  if (!compiled.success || !compiled.binary || (compiled.imports ?? []).length > 0) {
+    throw new Error(
+      `measured JS2-Wasm build failed: ${compiled.errors.map((error) => error.message).join("; ")}; imports=${JSON.stringify(compiled.imports ?? [])}`,
+    );
+  }
+
+  const rawPath = join(options.outputDirectory, "program.wasm");
+  const normalizedPath = join(options.outputDirectory, "program.wasmtime.wasm");
+  const cwasmPath = join(options.outputDirectory, "program.cwasm");
+  writeFileSync(rawPath, compiled.binary);
+  const wasmOptCommand = [
+    resolve("node_modules/.bin/wasm-opt"),
+    ...LANDING_WASM_OPT_ARGS,
+    rawPath,
+    "-o",
+    normalizedPath,
+  ];
+  const normalized = runRequiredCommand("wasm-opt", wasmOptCommand);
+  const precompileCommand = ["wasmtime", ...landingWasmtimeCompileArgs(normalizedPath, cwasmPath)];
+  const precompiled = runRequiredCommand("Wasmtime precompile", precompileCommand);
+
+  writeFileSync(
+    join(options.outputDirectory, "worker.json"),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        lane: options.lane,
+        programId: options.programId,
+        source: { path: source.path, sha256: source.sha256, bytes: source.bytes },
+        status: "supported",
+        compilePhasesMs: {
+          js2Compile: js2CompileMs,
+          wasmOpt: normalized.wallMs,
+          wasmtimePrecompile: precompiled.wallMs,
+        },
+        compilerResourceUsage: compilerResourceUsage(),
+        commandProvenance: {
+          js2Compile: ["JS2.compile", JSON.stringify(compileOptions), source.path],
+          wasmOpt: wasmOptCommand,
+          wasmtimePrecompile: precompileCommand,
+        },
+        artifacts: {
+          rawWasm: artifactRecord(rawPath),
+          normalizedWasm: artifactRecord(normalizedPath),
+          cwasm: artifactRecord(cwasmPath),
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+function runRequiredCommand(label: string, command: readonly string[]): { readonly wallMs: number } {
+  const started = performance.now();
+  const executed = spawnSync(command[0]!, command.slice(1), {
+    cwd: resolve("."),
+    encoding: "utf8",
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  const wallMs = performance.now() - started;
+  if (executed.status !== 0) {
+    throw new Error(
+      `${label} failed (${String(executed.status)}): ${(executed.stderr || String(executed.error ?? "")).slice(0, 2_000)}`,
+    );
+  }
+  return { wallMs };
+}
+
+function artifactRecord(path: string): Readonly<Record<string, unknown>> {
+  const contents = readFileSync(path);
+  return { path: basename(path), bytes: contents.byteLength, sha256: sha256Hex(contents) };
+}
+
 function writeSupported(context: {
   readonly options: WorkerArguments;
   readonly source: ReturnType<typeof readExactSource>;
@@ -353,5 +448,5 @@ function followUpForNativeBlock(reason: string | undefined, evidence: readonly s
 }
 
 function usage(): string {
-  return "usage: benchmark-landing-four-lane-worker.mts --lane <js2|plain> --program <id> --output <dir>";
+  return "usage: benchmark-landing-four-lane-worker.mts --lane <wasm|js2|plain> --program <id> --output <dir>";
 }
