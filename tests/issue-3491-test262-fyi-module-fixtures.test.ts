@@ -85,20 +85,16 @@ describe("#3491 — FYI static Test262 fixture graphs", () => {
     );
   });
 
-  it(
-    "links the circular namespace graph in standalone and gc",
-    { timeout: 60_000 },
-    async () => {
-      const [test] = await loadOriginalHarnessTests([CIRCULAR_PATH]);
-      const [standalone, gc] = await Promise.all([runTest(test, "standalone"), runTest(test, "gc")]);
+  it("links the circular namespace graph in standalone and gc", { timeout: 60_000 }, async () => {
+    const [test] = await loadOriginalHarnessTests([CIRCULAR_PATH]);
+    const [standalone, gc] = await Promise.all([runTest(test, "standalone"), runTest(test, "gc")]);
 
-      expect(standalone).toMatchObject({ pass: true, phase: "runtime" });
-      // #3493 preserves graph setup and fills the multi-source member
-      // dispatchers, so the former pre-setExports `unreachable` frontier is
-      // gone. Both lanes must now execute the real circular graph.
-      expect(gc).toMatchObject({ pass: true, phase: "runtime" });
-    },
-  );
+    expect(standalone).toMatchObject({ pass: true, phase: "runtime" });
+    // #3493 preserves graph setup and fills the multi-source member
+    // dispatchers, so the former pre-setExports `unreachable` frontier is
+    // gone. Both lanes must now execute the real circular graph.
+    expect(gc).toMatchObject({ pass: true, phase: "runtime" });
+  });
 
   it(
     "does not false-pass a resolution-negative test because its fixture graph was absent",
