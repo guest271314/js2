@@ -69,6 +69,7 @@ import {
   type IrFuncRef,
   type IrFunction,
   type IrGlobalRef,
+  type IrModule,
   type IrObjectShape,
   type IrType,
   type IrTypeRef,
@@ -105,6 +106,8 @@ export interface LinearIrResult {
   readonly rejected: readonly LinearIrRejection[];
   /** Deferred helpers appended only after every pre-assigned user slot. */
   readonly helpers: readonly LinearIrHelper[];
+  /** Exact verified source-derived module consumed by the memory planner. */
+  readonly irModule: IrModule;
   /** Canonical middle-end allocation/layout decisions for this IR module. */
   readonly memoryPlan: LinearMemoryPlan;
 }
@@ -148,7 +151,8 @@ export function compileLinearIrFunctions(
   const compiled: string[] = [];
   const rejected: LinearIrRejection[] = [];
   const allocRegistry = new AllocSiteRegistry();
-  let memoryPlan = planLinearMemory({ functions: [] }, allocRegistry, allocationPolicy);
+  let irModule: IrModule = { functions: [] };
+  let memoryPlan = planLinearMemory(irModule, allocRegistry, allocationPolicy);
   let helperStartFuncIdx = 0;
   for (const funcIdx of ctx.funcMap.values()) helperStartFuncIdx = Math.max(helperStartFuncIdx, funcIdx + 1);
   const { resolver, helpers, bindMemoryPlan } = makeLinearIrResolver(ctx, helperStartFuncIdx);
@@ -157,6 +161,9 @@ export function compileLinearIrFunctions(
     compiled,
     rejected,
     helpers,
+    get irModule() {
+      return irModule;
+    },
     get memoryPlan() {
       return memoryPlan;
     },
@@ -293,7 +300,8 @@ export function compileLinearIrFunctions(
     const fn = built.get(name);
     return fn ? [fn] : [];
   });
-  memoryPlan = planLinearMemory({ functions: plannedFunctions }, allocRegistry, allocationPolicy);
+  irModule = { functions: plannedFunctions };
+  memoryPlan = planLinearMemory(irModule, allocRegistry, allocationPolicy);
   bindMemoryPlan(memoryPlan);
 
   // Lower only after the module-wide plan is complete. Every allocation-site
