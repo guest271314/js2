@@ -19,16 +19,8 @@ import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import { rollbackSpeculative } from "../context/speculative.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
-import {
-  addStringConstantGlobal,
-  ensureExnTag,
-  getArrTypeIdxFromVec,
-  getOrRegisterVecType,
-  hoistLetConstWithTdz,
-  resolveWasmType,
-} from "../index.js";
+import { getArrTypeIdxFromVec, getOrRegisterVecType, hoistLetConstWithTdz, resolveWasmType } from "../index.js";
 import { objectLiteralTakesStandaloneAnyObjectPath, resolveComputedKeyExpression } from "../literals.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import { tryCompileStandaloneRegExpSymbolCall } from "../regexp-standalone.js";
 import type { InnerResult } from "../shared.js";
@@ -44,7 +36,13 @@ import {
   pushParamSentinel,
 } from "../type-coercion.js";
 import { compileCallableElementAccessCall, compileClosureCall } from "./calls-closures.js";
-import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
+import {
+  buildThrowJsErrorInstrs,
+  getFuncParamTypes,
+  getWasmFuncReturnType,
+  isEffectivelyVoidReturn,
+  wasmFuncReturnsVoid,
+} from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall } from "./new-super.js";
@@ -1047,17 +1045,16 @@ export function compileTailDispatch(
           fctx.body.push({ op: "i32.or" });
           {
             const rangeErrMsg = "RangeError: toString() radix must be between 2 and 36";
-            // (#2029 family C) Dual-mode message push — the raw
-            // `global.get stringGlobalMap.get(msg)!` baked the -1 sentinel
-            // under standalone/nativeStrings (`5["toString"](2)` emit-crashed
-            // with "global index out of range — -1"); the dot-access twin of
-            // this site already uses the helper. Host mode is byte-identical.
-            addStringConstantGlobal(ctx, rangeErrMsg);
-            const tagIdx = ensureExnTag(ctx);
+            // (#3477) Throw a real RangeError INSTANCE via buildThrowJsErrorInstrs
+            // so the authentic-harness `assert.throws(RangeError, …)` /
+            // `e instanceof RangeError` guard passes — matches the dot-access twin
+            // (call-receiver-method.ts). Formerly a bare-string throw (only
+            // `e === "RangeError: …"`). buildThrowJsErrorInstrs handles the dual
+            // -mode message push + tag internally (the #2029 sentinel concern).
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
+              then: buildThrowJsErrorInstrs(ctx, "RangeError", rangeErrMsg, { flush: fctx }),
               else: [],
             });
           }
@@ -1082,15 +1079,13 @@ export function compileTailDispatch(
           fctx.body.push({ op: "i32.or" });
           {
             const rangeErrMsg = "RangeError: toFixed() digits argument must be between 0 and 100";
-            // (#2029 family C) Dual-mode message push — see the toString()
-            // radix twin above (`1["toFixed"](5)` was the standalone
-            // emit-crash repro for property-accessors/S11.2.1_A3_T2).
-            addStringConstantGlobal(ctx, rangeErrMsg);
-            const tagIdx = ensureExnTag(ctx);
+            // (#3477) Real RangeError INSTANCE via buildThrowJsErrorInstrs — see
+            // the toString() radix twin above; matches the dot-access twin so
+            // `assert.throws(RangeError, …)` passes.
             fctx.body.push({
               op: "if",
               blockType: { kind: "empty" },
-              then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx }],
+              then: buildThrowJsErrorInstrs(ctx, "RangeError", rangeErrMsg, { flush: fctx }),
               else: [],
             });
           }
