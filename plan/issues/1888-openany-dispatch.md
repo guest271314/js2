@@ -1,7 +1,7 @@
 ---
 id: 1888
 title: "standalone open-any method dispatch + built-ins-as-static-globals (prototype vtable)"
-status: done
+status: ready
 pr: 1273
 created: 2026-06-05
 updated: 2026-06-11
@@ -983,3 +983,7 @@ Validation:
 
 PR #1273 remains the review vehicle; status stays `in-review` until the PR
 status poller marks it done after merge.
+
+## Reopened 2026-07-20 (stale false-done review)
+
+Marked `done` but live test262 shows: BigUint64Array built-in static property value read still unsupported (standalone). Reopened as `ready`. See #3474 (done-status integrity).

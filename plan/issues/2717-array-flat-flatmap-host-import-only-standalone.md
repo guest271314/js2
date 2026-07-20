@@ -1,7 +1,7 @@
 ---
 id: 2717
 title: "Array flat/flatMap are host-import-only — no standalone native arm, no ctx.standalone guard"
-status: done
+status: ready
 sprint: 67
 created: 2026-06-26
 updated: 2026-06-26
@@ -78,3 +78,7 @@ host `flat()` → 4, `flatMap()` → 6 unchanged. Existing `flatmap-closure` /
 
 **Follow-up (not in scope):** a Wasm-native flat/flatMap arm (and the linear
 backend lowering) to turn the compile-error into compile+run in standalone.
+
+## Reopened 2026-07-20 (stale false-done review)
+
+Marked `done` but live test262 shows: Array.prototype.flatMap() still 'not yet supported in --target standalone'. Reopened as `ready`. See #3474 (done-status integrity).
