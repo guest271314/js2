@@ -13,7 +13,7 @@ task_type: feat
 area: codegen, runtime
 language_feature: objects, prototype chain, method dispatch, built-ins
 goal: host-independence
-sprint: 61
+sprint: current
 related: [1472, 2177, 1629, 1104, 1539, 1103]
 parent: 1472
 claimed_by: codex-developer
