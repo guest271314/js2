@@ -4645,6 +4645,15 @@ export function generateMultiModule(
     fillMemberSetDispatch(ctx);
     fillMemberGetDispatch(ctx);
 
+    // (#3495) `__extern_get_idx` is reserved while compiling standalone
+    // numeric reads through an externref (for example `globalThis.logs[i]`).
+    // Its eager body only knows `$Object`/`$ObjVec`; splice the per-element-kind
+    // compiler-vec arms after every source has registered its array carriers,
+    // exactly as the single-source finalizer does. Without this multi-source
+    // fill, the backing vec contains the right values but every indexed read
+    // silently returns the undefined sentinel.
+    fillExternGetIdxVecArms(ctx);
+
     // Emit __vec_get / __vec_len exports for runtime iterator fallback.
     emitVecAccessExports(ctx);
 
