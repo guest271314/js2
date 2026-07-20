@@ -37,6 +37,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 
+import { TsCheckerOracle } from "../checker/oracle.js";
 import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call of the shared exact-fmod helper
 // (#1373b C-1) Leaf-module async helpers (no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
@@ -46,6 +47,11 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
+import {
+  EmptyArrayElementInference,
+  emptyArrayInferenceDiagnostic,
+  inferEmptyArrayElementTypes,
+} from "./array-element-inference.js";
 import {
   assertNotDeferred,
   binaryOpCapability,
@@ -707,6 +713,10 @@ export function lowerFunctionAstToIr(
   const lifted: IrFunction[] = [];
   const liftedCounter = { value: 0 };
   const mutatedLets = collectMutatedLetNames(fn);
+  const emptyArrayInference = inferEmptyArrayElementTypes(
+    fn,
+    options.checker ? new TsCheckerOracle(options.checker) : undefined,
+  );
   const cx: LowerCtx = {
     builder,
     scope,
@@ -718,6 +728,7 @@ export function lowerFunctionAstToIr(
     lifted,
     liftedCounter,
     mutatedLets,
+    emptyArrayInference,
     // (#2972) statically-known literal string lengths — proven-in-bounds
     // string element reads (`hex[(n >> 4) & 0xf]`) consult this.
     stringLiteralLens: collectStringLiteralLens(fn),
@@ -1327,6 +1338,11 @@ interface LowerCtx {
    */
   readonly mutatedLets: ReadonlySet<string>;
   /**
+   * #3501 function-wide may-alias/evidence closure for unannotated `[]`.
+   * It is analysis-only: allocation remains the ordinary vec.new_fixed site.
+   */
+  readonly emptyArrayInference: EmptyArrayElementInference;
+  /**
    * (#2972) Locals bound once to a string literal and never reassigned
    * (incl. nested-function writes) → the literal's code-unit length. Feeds
    * the proven-in-bounds string element read in `lowerElementAccess`.
@@ -1560,10 +1576,29 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         },
       );
     }
+    let inferredEmptyArrayHint: IrType | undefined;
+    if (annotated === undefined && ts.isArrayLiteralExpression(d.initializer) && d.initializer.elements.length === 0) {
+      const inference = cx.emptyArrayInference.resultForLiteral(d.initializer);
+      if (inference?.kind === "rejected") {
+        throw new Error(emptyArrayInferenceDiagnostic(inference, cx.funcName));
+      }
+      if (inference?.kind === "resolved") {
+        const vec = cx.resolver?.resolveVecForElement?.(inference.elementValType);
+        if (!vec) {
+          throw new Error(`ir/from-ast: resolver cannot register inferred number[] vec for '${name}' (${cx.funcName})`);
+        }
+        inferredEmptyArrayHint = irVal(
+          cx.resolver?.resolveVecValueTypeForElement?.(inference.elementValType) ?? {
+            kind: "ref",
+            typeIdx: vec.vecStructTypeIdx,
+          },
+        );
+      }
+    }
     // (#3142 Slice 2) A module binding's hint is its GLOBAL's type — the
     // storage slot is fixed by the legacy allocation, so the initializer
     // must land on exactly that representation (checked below).
-    const hint: IrType = annotated ?? moduleBinding?.type ?? irVal({ kind: "f64" });
+    const hint: IrType = annotated ?? inferredEmptyArrayHint ?? moduleBinding?.type ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
     const inferred = cx.builder.typeOf(value);
     if (annotated) {
@@ -1592,7 +1627,9 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // No checker → unchanged (#2780 / #2781's no-checker arm). `inferred` is the
     // bound representation here (an `annotated` mismatch already threw above),
     // and `d.name` is an Identifier (non-identifier decls threw earlier).
-    const scalarVecValue = cx.resolver?.isVecValueExpression?.(d.initializer) === true;
+    const scalarVecValue =
+      cx.resolver?.isVecValueExpression?.(d.initializer) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(d.initializer);
     if (!scalarVecValue && !proveUnboxedNumberLocal(d.name, inferred, cx)) {
       const boundKind = asVal(inferred)?.kind === "i32" ? "i32" : "f64";
       throw new Error(
@@ -2719,11 +2756,21 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
   // branch only fires for `.length`. Method dispatch (`arr.push(...)`,
   // `arr.map(...)`, etc.) is handled in `lowerMethodCall`.
   const recvVal = asVal(recvType);
-  const scalarVecReceiver = recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(expr.expression) === true;
+  const scalarVecReceiver =
+    recvVal?.kind === "i32" &&
+    (cx.resolver?.isVecValueExpression?.(expr.expression) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(expr.expression));
   if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null" || scalarVecReceiver)) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
     if (vec) {
       if (propName === "length") {
+        // A growable linear vec may have forwarded its original header after
+        // an indexed write. The direct runtime reader chases that chain;
+        // vec.len's raw planned load intentionally remains unchanged for
+        // fixed vectors and WasmGC refs.
+        if (scalarVecReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression)) {
+          return emitForwardingAwareLinearVecLen(recv, cx);
+        }
         return cx.builder.emitVecLen(recv);
       }
       throw new Error(`ir/from-ast: .${propName} on vec not in slice 13 (${cx.funcName})`);
@@ -2870,6 +2917,14 @@ function isProvenInBoundsIr(expr: ts.ElementAccessExpression, cx: LowerCtx): boo
  *     bounds-checks all element kinds (returns the type-default, never traps), so
  *     the demote is still trap-free.
  */
+function emitForwardingAwareLinearVecLen(recv: IrValueId, cx: LowerCtx): IrValueId {
+  const lenI32 = cx.builder.emitCall({ kind: "func", name: "__arr_len" }, [recv], irVal({ kind: "i32" }));
+  if (lenI32 === null) {
+    throw new Error(`ir/from-ast: forwarding-aware vec length produced no value (${cx.funcName})`);
+  }
+  return cx.builder.emitUnary("f64.convert_i32_s", lenI32, irVal({ kind: "f64" }));
+}
+
 function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType, cx: LowerCtx): IrValueId {
   const elemIr = irVal(elemValType);
   let makeOobDefault: (() => IrValueId) | null = null;
@@ -2964,7 +3019,9 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   // (`scalarVecReceiver` at the `.length` / element-access arms). The
   // WasmGC lane is unaffected: its vec receivers always lower as refs.
   const scalarVecStoreReceiver =
-    recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(lhs.expression) === true;
+    recvVal?.kind === "i32" &&
+    (cx.resolver?.isVecValueExpression?.(lhs.expression) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(lhs.expression));
   if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null" && !scalarVecStoreReceiver)) {
     throw new Error(`ir/from-ast: element store on ${describeIrType(recvType)} not in IR scope (${cx.funcName})`);
   }
@@ -3058,7 +3115,10 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   // sharpest hybrid-invariant violation (strictly worse than legacy, which at
   // least bounds-checks and returns a sentinel).
   const recvVal = asVal(recvType);
-  const scalarVecReceiver = recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(expr.expression) === true;
+  const scalarVecReceiver =
+    recvVal?.kind === "i32" &&
+    (cx.resolver?.isVecValueExpression?.(expr.expression) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(expr.expression));
   if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null" || scalarVecReceiver)) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
     if (vec) {
@@ -3088,6 +3148,22 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
         );
       }
       const elemIr = irVal(vec.elementValType);
+      if (scalarVecReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression)) {
+        // The direct linear runtime historically uses a backend-specific zero
+        // sentinel for OOB array reads, while the shared f64 vec path uses NaN
+        // as the numeric image of JS `undefined`. Do not let inferred arrays
+        // silently pick one representation: until shared IR has an explicit
+        // undefined carrier, only lower reads covered by the existing counted-
+        // loop bounds proof.
+        if (!isProvenInBoundsIr(expr, cx)) {
+          throw new Error(`ir/from-ast: inferred linear vector read is not proven in bounds (${cx.funcName})`);
+        }
+        const value = cx.builder.emitCall({ kind: "func", name: "__arr_get" }, [recv, idxI32], elemIr);
+        if (value === null) {
+          throw new Error(`ir/from-ast: forwarding-aware vec read produced no value (${cx.funcName})`);
+        }
+        return value;
+      }
       // FAST path — proven in-bounds (counted-loop proof) → unchecked read.
       if (isProvenInBoundsIr(expr, cx)) {
         return cx.builder.emitVecGet(recv, idxI32, elemIr);
@@ -3989,7 +4065,8 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     const scalarVecPushReceiver =
       vecRecvVal?.kind === "i32" &&
       ts.isPropertyAccessExpression(expr.expression) &&
-      cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true;
+      (cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true ||
+        cx.emptyArrayInference.isResolvedVectorExpression(expr.expression.expression));
     if (methodName === "push" && vecRecvVal && (vecRecvVal.kind === "ref" || scalarVecPushReceiver)) {
       const vec = cx.resolver?.resolveVec?.(vecRecvVal);
       if (vec) {
@@ -4003,7 +4080,10 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
           throw new Error(`ir/from-ast: .push into '${elem.kind}' vec not in IR scope (${cx.funcName})`);
         }
         // Old length — the store index. `emitVecLen` yields the f64 JS length.
-        const lenF64 = cx.builder.emitVecLen(recv);
+        const lenF64 =
+          scalarVecPushReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression.expression)
+            ? emitForwardingAwareLinearVecLen(recv, cx)
+            : cx.builder.emitVecLen(recv);
         const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
         const valRaw = lowerExpr(expr.arguments[0]!, cx, irVal(elem));
         let val: IrValueId;
@@ -7141,10 +7221,12 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    emptyArrayInference: inferEmptyArrayElementTypes(fn, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — nested function decls are NEVER generators
     // in slice 7a (the selector rejects `function*` nesting via
     // `isPhase1NestedFunc`).
     funcKind: "regular",
+    checker: cx.checker,
     allocRegistry: cx.allocRegistry,
   };
   if (!fn.body) {
@@ -7219,9 +7301,11 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    emptyArrayInference: inferEmptyArrayElementTypes(expr, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — closures are never generator/async in 7a
     // (the selector rejects them in `isPhase1ClosureLiteral`).
     funcKind: "regular",
+    checker: cx.checker,
     allocRegistry: cx.allocRegistry,
   };
 

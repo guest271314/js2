@@ -36,6 +36,20 @@ export const LINEAR_RECORD_HEADER_BYTES = 8;
 export const LINEAR_RECORD_FIELD_SLOT_BYTES = 8;
 export const LINEAR_RECORD_TAG_OFFSET = 0;
 export const LINEAR_RECORD_PAYLOAD_SIZE_OFFSET = 4;
+/**
+ * Shared forwarding-record representation for relocated linear arrays.
+ *
+ * A grown array rewrites its old record header to this tag plus the pointer
+ * to the replacement record. Keep this contract beside the canonical linear
+ * layout offsets so every artifact adapter and the direct linear runtime read
+ * and write the same representation.
+ */
+export const LINEAR_ARRAY_FORWARDING = Object.freeze({
+  tag: 0x06,
+  tagOffset: LINEAR_RECORD_TAG_OFFSET,
+  pointerOffset: LINEAR_RECORD_PAYLOAD_SIZE_OFFSET,
+  pointerBytes: LINEAR_POINTER_BYTES,
+});
 export const LINEAR_VECTOR_LENGTH_OFFSET = 8;
 export const LINEAR_VECTOR_CAPACITY_OFFSET = 12;
 export const LINEAR_VECTOR_ELEMENTS_OFFSET = 16;

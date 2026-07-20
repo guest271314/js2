@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import type { FuncTypeDef, GlobalDef, Instr, ValType, WasmModule } from "../ir/types.js";
+import { LINEAR_ARRAY_FORWARDING } from "../ir/analysis/linear-memory-plan.js";
 import type { LinearContext } from "./context.js";
 import { hashProbeAdvanceInstrs } from "./emit-idioms.js";
 
@@ -489,9 +490,6 @@ export function addUint8ArrayRuntime(mod: WasmModule): void {
   );
 }
 
-/** Tag byte marking a relocated (grown) array header — see addArrayResolveRuntime (#1977). */
-const ARR_FORWARDED_TAG = 0x06;
-
 /**
  * Register the array forwarding resolver (#1977) — idempotent; called by
  * every runtime builder whose functions touch array memory
@@ -499,9 +497,10 @@ const ARR_FORWARDED_TAG = 0x06;
  *
  * When __arr_push outgrows capacity it relocates the array to a fresh
  * allocation and rewrites the OLD header into a forwarding record:
- * tag ARR_FORWARDED_TAG at +0, the new pointer at +4. Aliased locals/fields
+ * the shared forwarding tag at its planned tag offset, and the new pointer at
+ * its planned pointer offset. Aliased locals/fields
  * still hold the old pointer, so every accessor first chases the forwarding
- * chain: while (tag == ARR_FORWARDED_TAG) ptr = *(ptr+4).
+ * chain described by `LINEAR_ARRAY_FORWARDING`.
  */
 function ensureArrayResolveRuntime(mod: WasmModule): void {
   if (mod.functions.some((f) => f.name === "__arr_resolve")) return;
@@ -514,15 +513,15 @@ function ensureArrayResolveRuntime(mod: WasmModule): void {
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            // if tag != ARR_FORWARDED_TAG, break
+            // If this is not a forwarding record, break.
             { op: "local.get", index: 0 },
-            { op: "i32.load8_u", align: 0, offset: 0 },
-            { op: "i32.const", value: ARR_FORWARDED_TAG },
+            { op: "i32.load8_u", align: 0, offset: LINEAR_ARRAY_FORWARDING.tagOffset },
+            { op: "i32.const", value: LINEAR_ARRAY_FORWARDING.tag },
             { op: "i32.ne" },
             { op: "br_if", depth: 1 },
-            // ptr = *(ptr+4)
+            // ptr = forwarding replacement pointer
             { op: "local.get", index: 0 },
-            { op: "i32.load", align: 2, offset: 4 },
+            { op: "i32.load", align: 2, offset: LINEAR_ARRAY_FORWARDING.pointerOffset },
             { op: "local.set", index: 0 },
             { op: "br", depth: 0 },
           ],
@@ -598,7 +597,7 @@ export function addArrayRuntime(mod: WasmModule): void {
   // __arr_grow(ptr, minCap) → newPtr (#1977)
   // Relocate the array to a fresh allocation with cap = max(cap*2, minCap, 4),
   // copy len elements, and rewrite the old header into a forwarding record
-  // (tag ARR_FORWARDED_TAG at +0, newPtr at +4) so stale aliases resolve.
+  // using the shared forwarding contract so stale aliases resolve.
   // Caller must pass an already-resolved ptr.
   addRuntimeFunc(
     mod,
@@ -703,13 +702,13 @@ export function addArrayRuntime(mod: WasmModule): void {
             },
           ],
         },
-        // Forward the old header: tag ARR_FORWARDED_TAG, newPtr at +4
+        // Forward the old header with the shared tag and pointer offsets.
         { op: "local.get", index: 0 },
-        { op: "i32.const", value: ARR_FORWARDED_TAG },
-        { op: "i32.store8", align: 0, offset: 0 },
+        { op: "i32.const", value: LINEAR_ARRAY_FORWARDING.tag },
+        { op: "i32.store8", align: 0, offset: LINEAR_ARRAY_FORWARDING.tagOffset },
         { op: "local.get", index: 0 },
         { op: "local.get", index: newPtrLocal },
-        { op: "i32.store", align: 2, offset: 4 },
+        { op: "i32.store", align: 2, offset: LINEAR_ARRAY_FORWARDING.pointerOffset },
         // Return newPtr
         { op: "local.get", index: newPtrLocal },
       ];
