@@ -1,10 +1,11 @@
 ---
 id: 3499
 title: "Lower typed JavaScript bitwise composites through the Porffor backend"
-status: in-progress
+status: in-review
 sprint: current
 created: 2026-07-20
 updated: 2026-07-20
+pr: 3447
 priority: high
 horizon: m
 complexity: L
@@ -161,3 +162,5 @@ The native process exits zero with empty sanitizer stderr under
 No benchmark, website, selector, JSDoc, native harness, or benchmark-runner
 source is changed by #3499; #3497 is present solely through the landed
 `origin/main` merge.
+
+Implementation PR: https://github.com/loopdive/js2/pull/3447
