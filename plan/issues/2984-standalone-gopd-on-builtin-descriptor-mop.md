@@ -3,7 +3,7 @@ id: 2984
 title: "Standalone gOPD-on-builtin descriptor MOP (~178: getOwnPropertyDescriptor on builtin objects / proto receivers)"
 status: in-progress
 updated: 2026-07-17
-sprint: fable-final
+sprint: current
 priority: high
 horizon: xl
 feasibility: hard

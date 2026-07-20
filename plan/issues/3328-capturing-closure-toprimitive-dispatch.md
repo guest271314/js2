@@ -4,7 +4,7 @@ title: "standalone: `+=` on a captured string inside a closure compiles to f64.a
 status: done
 assignee: ttraenkler/sendev-date-3174
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: high
 feasibility: hard
@@ -15,7 +15,7 @@ es_edition: multi
 language_feature: closures
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 72
 horizon: m
 related: [3306, 3174, 795, 2120, 2873]
 origin: "root-caused during #3306 (toString-only ToNumber); initially presumed to be the #2873 funcref-RTT dispatch class — WAT tracing disproved that"

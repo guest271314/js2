@@ -4,9 +4,9 @@ title: "Standalone: unhandled-rejection tracking — report rejected promises wi
 status: done
 assignee: dev-2958
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-07-02
-updated: 2026-07-17
+updated: 2026-07-19
 priority: low
 horizon: m
 feasibility: medium

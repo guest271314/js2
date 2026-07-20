@@ -4,7 +4,7 @@ title: "refactor: decompose compileNewExpression mega-function (WAVE-C)"
 status: done
 completed: 2026-07-14
 assignee: ttraenkler/Dev-WaveC-New
-sprint: current
+sprint: 72
 priority: high
 horizon: l
 feasibility: hard

@@ -2,7 +2,7 @@
 id: 3264
 title: "Split array-methods.ts — extract Array.prototype-borrow subsystem into array-prototype-borrow.ts"
 status: done
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

@@ -56,7 +56,7 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
-import { compileExternSetFallback } from "./assignment.js";
+import { compileExternSetFallback, isStrictContext } from "./assignment.js";
 
 /**
  * Compile logical assignment operators: ??=, ||=, &&=
@@ -536,10 +536,17 @@ function compilePropertyLogicalAssignmentExternref(
   );
   if (getIdx === undefined) return null;
 
-  // Ensure __extern_set is available
+  // Ensure __extern_set is available. (#3430) PutValue's strict-Reference
+  // throw (§13.15.2 → §6.2.5.6 step 3.e) applies here exactly as it does for
+  // plain `=` assignment (assignment.ts's `compileExternSetFallback`) — a
+  // strict `obj.prop ??= v` that fails [[Set]] (non-writable data property /
+  // new key on a non-extensible object) must throw TypeError, not silently
+  // no-op. Select the strict sidecar terminal accordingly; sloppy keeps the
+  // legacy silent refusal.
+  const setName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    setName,
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );
@@ -803,9 +810,13 @@ function compileElementLogicalAssignmentExternref(
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "externref" }],
   );
+  // (#3430) Strict `arr[i] ??= v` (etc.) mirrors the property-access sidecar:
+  // a failed [[Set]] must throw under a strict Reference. See the property
+  // arm above for the full rationale.
+  const elemSetName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    elemSetName,
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );
@@ -1282,19 +1293,51 @@ function compileNativeStringCompoundAssignment(
   const capturedIdx = ctx.capturedGlobals.get(name);
   const moduleIdx = ctx.moduleGlobals.get(name);
 
-  // Load current value as ref $AnyString
+  // Load current value. The store slot for a statically-`string` binding is a
+  // native-string ref (`ref $AnyString`), which `__str_concat` accepts as-is.
+  // But an `any`/untyped binding routed here via `hasStringAssignment` (e.g. an
+  // unannotated param `msg` that is also assigned a string literal in some
+  // branch) has an EXTERNREF slot: a bare `local.get`/`global.get` leaves an
+  // externref where `__str_concat` expects `(ref null $AnyString)` →
+  // `call[0] expected (ref null $AnyString), found externref` CompileError, i.e.
+  // an INVALID module (#3472 — the RHS below is coerced, only the current-value
+  // load was not). Under no-JS-host (standalone / WASI) coerce the loaded
+  // externref to a native `ref $AnyString` via ToString (§7.1.17) — the same
+  // `__extern_toString` path `compileNativeConcatOperand` uses for a dynamic
+  // externref `+` operand — so a runtime number / undefined / object stringifies
+  // correctly instead of trapping an unconditional `ref.cast`. `__extern_toString`
+  // is a NATIVE defined function here (OBJECT_RUNTIME_HELPER_NAMES), so
+  // registering it adds no import and shifts no function index (`concatIdx` above
+  // stays valid). In JS-host `nativeStrings` mode `__extern_toString` is a host
+  // import (adding it mid-body would shift indices, #1175), so that path is left
+  // byte-identical and out of scope.
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+  let slotType: ValType | undefined;
   if (localIdx !== undefined) {
     fctx.body.push({ op: "local.get", index: localIdx });
+    slotType = getLocalType(fctx, localIdx);
   } else if (capturedIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: capturedIdx });
+    slotType = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)]?.type;
   } else if (moduleIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: moduleIdx });
+    slotType = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)]?.type;
   } else {
     // Graceful fallback: compile RHS for side effects, return null AnyString.
     const rhsFallback = compileExpression(ctx, fctx, expr.right);
     if (rhsFallback) fctx.body.push({ op: "drop" });
     fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx });
     return anyStrTypeNullable;
+  }
+  if (noJsHost && slotType?.kind === "externref") {
+    const externToStr = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (externToStr !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: externToStr });
+    }
+    // externref → ref $AnyString (mirrors emitNativeStringRefFromExternref).
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
   }
 
   // Compile RHS
@@ -2481,9 +2524,17 @@ function compilePropertyCompoundAssignmentExternref(
     fctx.body.push({ op: "local.set", index: anyResultLocal });
 
     // Write back — same pinned-dispatch/bare-host split as the numeric arm.
+    // (#3430) The BARE (non-pinned) fallback is the general `obj.prop += v`
+    // path for a plain externref/host-object receiver — select the strict
+    // sidecar terminal there so a failed [[Set]] (non-writable data property /
+    // new key on a non-extensible object) throws under a strict Reference,
+    // matching plain `=` assignment (assignment.ts, #3374). The PINNED
+    // dispatcher branch below keeps its existing NON-strict wiring unchanged
+    // (see its own comment) — this only affects the bare sidecar write.
+    const anySetName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
     const setAnyIdx = ensureLateImport(
       ctx,
-      "__extern_set",
+      anySetName,
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
     );
@@ -2545,9 +2596,13 @@ function compilePropertyCompoundAssignmentExternref(
   // forever → infinite loop). Emit the SYMMETRIC struct.set dispatch first so
   // the slot is written when the receiver owns `propName` as a real field;
   // fall back to `__extern_set` for genuine host externrefs / sidecar-only props.
+  // (#3430) The bare fallback selects the strict sidecar terminal for a
+  // strict Reference — see the `+=` string-concat arm above for rationale;
+  // this is the numeric-op mirror of the same fix.
+  const cmpdSetName = isStrictContext(target, ctx.inferModuleStrictArguments) ? "__extern_set_strict" : "__extern_set";
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    cmpdSetName,
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );
@@ -2712,13 +2767,20 @@ function compileElementCompoundAssignment(
     });
     fctx.body.push({ op: "local.set", index: boxedLocal });
 
-    // Write back: __extern_set(obj, key, boxed_result)
+    // Write back: __extern_set(obj, key, boxed_result). (#3430) Select the
+    // strict sidecar terminal for a strict Reference — `arr[i] op= v` (etc.)
+    // on a plain host-object/externref receiver must throw TypeError when
+    // [[Set]] fails (non-writable data property / new key on a
+    // non-extensible object), mirroring plain `=` assignment (#3374).
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });
+    const elemCmpdSetName = isStrictContext(target, ctx.inferModuleStrictArguments)
+      ? "__extern_set_strict"
+      : "__extern_set";
     const setIdx = ensureLateImport(
       ctx,
-      "__extern_set",
+      elemCmpdSetName,
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
     );
@@ -2810,13 +2872,20 @@ function compileElementCompoundAssignment(
     });
     fctx.body.push({ op: "local.set", index: boxedLocal });
 
-    // Write back: __extern_set(obj, key, boxed_result)
+    // Write back: __extern_set(obj, key, boxed_result). (#3430) Select the
+    // strict sidecar terminal for a strict Reference — `arr[i] op= v` (etc.)
+    // on a plain host-object/externref receiver must throw TypeError when
+    // [[Set]] fails (non-writable data property / new key on a
+    // non-extensible object), mirroring plain `=` assignment (#3374).
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "local.get", index: keyLocal });
     fctx.body.push({ op: "local.get", index: boxedLocal });
+    const elemCmpdSetName = isStrictContext(target, ctx.inferModuleStrictArguments)
+      ? "__extern_set_strict"
+      : "__extern_set";
     const setIdx = ensureLateImport(
       ctx,
-      "__extern_set",
+      elemCmpdSetName,
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
     );

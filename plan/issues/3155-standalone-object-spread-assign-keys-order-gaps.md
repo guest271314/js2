@@ -3,9 +3,9 @@ id: 3155
 title: "standalone: object spread / Object.assign / Object.keys-values order + object→primitive gaps (unmasked by the #86 vacuous-standalone audit)"
 status: done
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-07-11
-updated: 2026-07-17
+updated: 2026-07-19
 priority: medium
 horizon: m
 feasibility: medium

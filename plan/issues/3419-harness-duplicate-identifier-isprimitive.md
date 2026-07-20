@@ -11,7 +11,7 @@ task_type: bugfix
 area: compiler-early-errors
 goal: test262-conformance
 model: fable
-sprint: current
+sprint: 72
 horizon: m
 related: [3370, 3417, 3188]
 # Small, site-required growth: last-wins skips must live in the exact

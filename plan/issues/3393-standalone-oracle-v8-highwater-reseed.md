@@ -9,7 +9,7 @@ feasibility: trivial
 task_type: ci-infra
 area: test-infrastructure
 goal: test-infrastructure
-sprint: current
+sprint: 72
 horizon: s
 assignee: "loopdive/porffor-scrum"
 related: [2097, 2961, 3288, 3370]

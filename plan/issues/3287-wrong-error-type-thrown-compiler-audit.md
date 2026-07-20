@@ -3,7 +3,7 @@ id: 3287
 title: "Compiler throws the wrong error type in multiple builtins — revealed by #3285 slice-1's assert.throws tightening"
 status: done
 completed: 2026-07-15
-sprint: current
+sprint: 72
 created: 2026-07-15
 priority: high
 feasibility: medium

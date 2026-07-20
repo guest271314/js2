@@ -2,7 +2,7 @@
 id: 3314
 title: "scripts/lib/change-scope.mjs frontmatter parser silently drops allow-list items after a leading comment line"
 status: done
-sprint: current
+sprint: 72
 created: 2026-07-16
 completed: 2026-07-16
 priority: high

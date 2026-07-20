@@ -4,14 +4,14 @@ title: "eval-inlined regex literal: dynamic property read of .flags returns unde
 status: done
 assignee: ttraenkler/dev-conform
 created: 2026-07-16
-updated: 2026-07-17
+updated: 2026-07-19
 completed: 2026-07-17
 priority: medium
 feasibility: medium
 task_type: bug
 language_feature: eval
 goal: runtime-eval
-sprint: current
+sprint: 72
 es_edition: ES5
 # (#3102) The externClasses "RegExp" guard in compileRegExpLiteral (the correct
 # home for regex-literal lowering) grows typeof-delete.ts a few LOC; net across

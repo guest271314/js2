@@ -4,7 +4,7 @@ title: "wrapTest()'s synthetic harness silently deletes/weakens real test262 ass
 status: done
 assignee: ttraenkler/sendev-3303
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-07-15
 priority: high
 feasibility: medium

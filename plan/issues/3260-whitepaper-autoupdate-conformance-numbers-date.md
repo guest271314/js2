@@ -4,7 +4,7 @@ title: "Whitepaper: auto-update Test262 numbers + date AND surface the JS-host v
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-s2
-sprint: current
+sprint: 72
 priority: medium
 horizon: s
 feasibility: easy

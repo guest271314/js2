@@ -128,10 +128,12 @@ function isIssueFile(file) {
   const name = basename(file);
   if (NON_ISSUE_BASENAMES.has(name)) return false;
   if (EXPLICIT_ISSUE_BASENAMES.has(name)) return true;
-  // Sprint docs are `plan/issues/sprints/<N>.md` directly under SPRINTS_ROOT
-  // (flattened from the legacy `sprints/<N>/sprint.md`). They look like
-  // numbered issue files but are planning docs — never treat them as issues.
-  if (dirname(file) === SPRINTS_ROOT && /^\d+\.md$/.test(name)) return false;
+  // Sprint docs are `plan/issues/sprints/<N>.md` (frozen retrospective) or
+  // `<N>-<slug>.md` (e.g. `73-plan.md`, a pre-freeze forward plan) directly
+  // under SPRINTS_ROOT (flattened from the legacy `sprints/<N>/sprint.md`).
+  // They look like numbered issue files but are planning docs — never treat
+  // them as issues (a bare `<N>-plan.md` would otherwise collide with issue #N).
+  if (dirname(file) === SPRINTS_ROOT && /^\d+(?:-[\w-]+)?\.md$/.test(name)) return false;
   // Accept: 1234.md  1234a.md  1234-slug.md  1234__slug_title.md
   return /^\d+[a-z]?(?:[-_].+)?\.md$/i.test(name);
 }

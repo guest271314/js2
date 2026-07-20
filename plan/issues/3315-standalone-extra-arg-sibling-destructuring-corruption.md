@@ -11,7 +11,7 @@ reasoning_effort: max
 task_type: bug
 area: codegen-standalone
 goal: standalone
-sprint: current
+sprint: 72
 related: [3285, 3104, 2379, 2873]
 # (#3102/#3131) Intended growth: the fix lands in the modules that own the
 # broken logic (rep decision, coercion arm, destructure conversion loop,

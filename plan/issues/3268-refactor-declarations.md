@@ -3,7 +3,7 @@ id: 3268
 title: "Break up god-file src/codegen/declarations.ts (extractions + DRY dedup)"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 model: opus

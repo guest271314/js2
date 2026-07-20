@@ -3,7 +3,7 @@ id: 3274
 title: "Decompose ensureObjectRuntime into cohesive sibling modules (WAVE-B, slices 1-3)"
 status: done
 created: 2026-07-14
-updated: 2026-07-14
+updated: 2026-07-19
 completed: 2026-07-14
 priority: high
 feasibility: hard
@@ -12,7 +12,7 @@ reasoning_effort: max
 task_type: refactor
 area: codegen
 goal: maintainability
-sprint: current
+sprint: 72
 subtask_of: 3182
 assignee: ttraenkler/Dev-WaveB-ObjRuntime
 related: [3182, 742, 808]

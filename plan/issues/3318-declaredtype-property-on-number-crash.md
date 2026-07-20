@@ -4,7 +4,7 @@ title: 'Compiler crash: "Cannot create property ''declaredType'' on number ''1''
 status: done
 completed: 2026-07-17
 assignee: ttraenkler/fable-s2
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: high
 feasibility: medium

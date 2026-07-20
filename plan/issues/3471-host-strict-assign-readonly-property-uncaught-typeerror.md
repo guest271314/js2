@@ -4,7 +4,7 @@ title: "Host lane: polymorphic comparator (isSameValue) param unsoundly narrowed
 status: done
 assignee: ttraenkler/senior-dev
 completed: 2026-07-19
-sprint: current
+sprint: 72
 created: 2026-07-19
 priority: high
 feasibility: hard

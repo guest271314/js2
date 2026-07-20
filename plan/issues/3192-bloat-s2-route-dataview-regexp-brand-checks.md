@@ -4,7 +4,7 @@ title: "bloat S2: route DataView + RegExp brand checks through receiver-brand.ts
 status: done
 completed: 2026-07-14
 created: 2026-07-12
-updated: 2026-07-14
+updated: 2026-07-19
 priority: high
 feasibility: medium
 task_type: refactor
@@ -12,7 +12,7 @@ area: codegen
 es_edition: n/a
 language_feature: brand-check
 goal: maintainability
-sprint: current
+sprint: 72
 horizon: m
 umbrella: 3182
 depends_on: [3191]

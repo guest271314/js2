@@ -6,12 +6,12 @@ status: done
 completed: 2026-07-17
 assignee: ttraenkler/opus-b
 created: 2026-04-11
-updated: 2026-07-17
+updated: 2026-07-19
 priority: high
 feasibility: medium
 reasoning_effort: high
 goal: async-model
-sprint: current
+sprint: 72
 parent: 1032
 depends_on: [1041]
 required_by: [1032, 1058]

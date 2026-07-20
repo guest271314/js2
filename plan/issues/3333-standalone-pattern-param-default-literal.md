@@ -8,7 +8,7 @@ assignee: ttraenkler/fable-s2
 loc-budget-allow:
   - src/codegen/closures.ts
   - src/codegen/function-body.ts
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 task_type: bugfix

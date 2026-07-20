@@ -3,7 +3,7 @@ id: 3276
 title: "refactor: decompose compilePropertyAccess (property-access.ts mega-function)"
 status: done
 completed: 2026-07-14
-sprint: current
+sprint: 72
 priority: medium
 horizon: l
 feasibility: hard

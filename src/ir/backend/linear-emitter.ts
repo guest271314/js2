@@ -51,7 +51,12 @@ import { emitConstInstr } from "../lower.js";
 import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
 import type { BlockType, Instr, ValType } from "../types.js";
 import type { LinearRuntimeOperation } from "../analysis/linear-memory-plan.js";
-import type { BackendEmitter } from "./emitter.js";
+import type {
+  BackendEmitter,
+  BackendI32BitwiseOp,
+  BackendNumericConversionOp,
+  BackendScalarConstType,
+} from "./emitter.js";
 import type {
   IrClassLowering,
   IrObjectStructLowering,
@@ -279,6 +284,18 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   }
 
   emitUnary(op: IrUnop, out: Instr[]): void {
+    out.push({ op });
+  }
+
+  emitScalarConst(type: BackendScalarConstType, value: number, out: Instr[]): void {
+    out.push(type === "f64" ? { op: "f64.const", value } : { op: "i32.const", value });
+  }
+
+  emitNumericConversion(op: BackendNumericConversionOp, out: Instr[]): void {
+    out.push({ op });
+  }
+
+  emitI32Bitwise(op: BackendI32BitwiseOp, out: Instr[]): void {
     out.push({ op });
   }
 

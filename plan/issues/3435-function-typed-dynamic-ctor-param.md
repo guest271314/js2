@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen-new
 goal: test262-conformance
 model: fable
-sprint: current
+sprint: 72
 horizon: s
 related: [3432, 3419, 3087, 3074]
 # Site-required: the builtin:Function acceptance + rationale live inside the

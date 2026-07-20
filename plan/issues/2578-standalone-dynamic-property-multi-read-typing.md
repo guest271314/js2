@@ -4,7 +4,7 @@ title: "standalone dynamic property multi-read mangles inferred-typed values (wr
 status: done
 assignee: dev-refactor
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-06-21
 priority: medium
 feasibility: medium

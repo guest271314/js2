@@ -62,6 +62,7 @@ import type { IrClosureSignature, IrType } from "./nodes.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
+import type { RecursiveTypeEvidence } from "./type-evidence.js";
 
 /**
  * #1169q telemetry — record why a top-level FunctionDeclaration didn't make
@@ -93,6 +94,7 @@ export type IrFallbackReason =
   | "body-shape-rejected"
   | "external-call" // calls a non-local identifier (parseInt, etc.)
   | "call-graph-closure" // local caller/callee not claimed
+  | "recursive-type-evidence" // recursive SCC failed conservative ABI certification
   | "type-resolution-failure" // overrideMap couldn't be built (set externally)
   // #1370 Phase A — class method / constructor of a shape the IR selector
   // doesn't yet handle. Examples: methods on a class with an `extends`
@@ -248,6 +250,13 @@ export interface IrSelectionOptions {
    *  along with the reason it was rejected. Off by default — populating
    *  this list adds a small per-function overhead. */
   readonly trackFallbacks?: boolean;
+  /**
+   * Checker-backed certification for recursive call-graph components. A
+   * rejected component is kept on the direct path even when optimistic
+   * propagation found a scalar-looking signature. Accepted components still
+   * pass every ordinary selector shape and closure gate.
+   */
+  readonly recursiveTypeEvidence?: RecursiveTypeEvidence;
   /**
    * (#1373b Slice 1) When true, async functions (no `*`) are eligible to
    * flow through the IR's CPS lowering (Phase C). When false (default),
@@ -492,16 +501,24 @@ export function planIrCompilation(
       continue;
     }
     declByName.set(stmt.name.text, stmt);
-    const reason = trackFallbacks
-      ? whyNotIrClaimable(stmt, typeMap, localClasses)
-      : isIrClaimable(stmt, typeMap, localClasses)
-        ? null
-        : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
+    const recursiveDecision = options?.recursiveTypeEvidence?.decisions.get(stmt.name.text);
+    const reason =
+      recursiveDecision?.accepted === false
+        ? "recursive-type-evidence"
+        : trackFallbacks
+          ? whyNotIrClaimable(stmt, typeMap, localClasses)
+          : isIrClaimable(stmt, typeMap, localClasses)
+            ? null
+            : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
     if (reason === null) {
       individuallyClaimed.add(stmt.name.text);
     } else if (trackFallbacks) {
       fallbackReasons.set(stmt.name.text, reason);
-      captureShapeDetail(stmt.name.text, reason);
+      if (reason === "recursive-type-evidence" && recursiveDecision?.detail) {
+        fallbackDetails.set(stmt.name.text, recursiveDecision.detail);
+      } else {
+        captureShapeDetail(stmt.name.text, reason);
+      }
     }
   }
 
@@ -1244,6 +1261,34 @@ function isIrClaimable(
 type ResolvedKind = "f64" | "bool" | "string" | "object" | "void" | "closure" | "dynamic" | null;
 
 /**
+ * Return the declaration's effective parameter type node.
+ *
+ * For TypeScript this is the ordinary `param.type`. For JavaScript, the TS
+ * parser/checker boundary exposes a standard `@param {T}` annotation through
+ * `getJSDocType` while deliberately leaving `param.type` unset. Keeping this
+ * lookup in one helper prevents the selector and the shared AST-to-IR
+ * signature resolver from disagreeing about the same source declaration. No
+ * comment text is parsed and no synthetic annotation is attached to the AST.
+ */
+export function effectiveIrParamTypeNode(param: ts.ParameterDeclaration): ts.TypeNode | undefined {
+  return param.type ?? ts.getJSDocType(param);
+}
+
+/**
+ * Return the declaration's effective return type node, including a JavaScript
+ * JSDoc `@returns {T}` annotation when present.
+ *
+ * The caller still applies the existing narrow primitive/object/dynamic
+ * mapping. In particular, this helper does not turn an unannotated, `any`,
+ * union, or otherwise unsupported signature into a primitive claim.
+ */
+export function effectiveIrReturnTypeNode(
+  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
+): ts.TypeNode | undefined {
+  return fn.type ?? ts.getJSDocReturnType(fn);
+}
+
+/**
  * #2859 — build an `IrClosureSignature` from an explicit function-type
  * annotation (`(a: number, b: string) => number`), or return `null` when the
  * annotation is outside the expressible surface. The primitive mapping MUST
@@ -1279,10 +1324,11 @@ export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode
 }
 
 function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | undefined): ResolvedKind {
-  if (p.type) {
-    if (p.type.kind === ts.SyntaxKind.NumberKeyword) return "f64";
-    if (p.type.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
-    if (p.type.kind === ts.SyntaxKind.StringKeyword) return "string";
+  const effectiveType = effectiveIrParamTypeNode(p);
+  if (effectiveType) {
+    if (effectiveType.kind === ts.SyntaxKind.NumberKeyword) return "f64";
+    if (effectiveType.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
+    if (effectiveType.kind === ts.SyntaxKind.StringKeyword) return "string";
     // (#2949 slice 3b) `any` IS the dynamic type. The historical #1228
     // mapping ("any" kind → externref override) claimed EVERY any-param
     // function unconditionally and relied on from-ast throwing for
@@ -1292,13 +1338,13 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     // routes any-params through the SAME move-only scan + carrier as
     // unannotated dynamics: non-move uses now reject PRE-claim (no
     // demotion), and the claimed ones share legacy's ABI in both modes.
-    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
+    if (effectiveType.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
     // #2859 — function-typed param (`fn: () => number`). Accepted when the
     // signature is expressible with the slice-3 closure surface; the param
     // lowers to the closure supertype struct and `fn()` dispatches through
     // `lowerClosureCall`. Inexpressible function types stay rejected.
-    if (ts.isFunctionTypeNode(p.type)) {
-      return irClosureSignatureFromFunctionTypeNode(p.type) ? "closure" : null;
+    if (ts.isFunctionTypeNode(effectiveType)) {
+      return irClosureSignatureFromFunctionTypeNode(effectiveType) ? "closure" : null;
     }
     // Slice 2 (#1169b) — accept TypeLiteral / TypeReference at the
     // selector level. The actual shape resolution happens in
@@ -1311,7 +1357,12 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     // Slice 6 part 2 (#1181) — accept ArrayTypeNode (`T[]`) too.
     // `Array<T>` already resolves via TypeReferenceNode. Both shapes
     // route to a vec ref in `resolvePositionType`.
-    if (ts.isTypeLiteralNode(p.type) || ts.isTypeReferenceNode(p.type) || ts.isArrayTypeNode(p.type)) return "object";
+    if (
+      ts.isTypeLiteralNode(effectiveType) ||
+      ts.isTypeReferenceNode(effectiveType) ||
+      ts.isArrayTypeNode(effectiveType)
+    )
+      return "object";
     return null;
   }
   if (mapped?.kind === "f64") return "f64";
@@ -1357,8 +1408,9 @@ function resolveReturnType(
   fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.GetAccessorDeclaration,
   mapped: LatticeType | undefined,
 ): ResolvedKind {
-  if (fn.type) {
-    return resolveReturnTypeNode(fn.type);
+  const effectiveType = effectiveIrReturnTypeNode(fn);
+  if (effectiveType) {
+    return resolveReturnTypeNode(effectiveType);
   }
   if (mapped?.kind === "f64") return "f64";
   if (mapped?.kind === "bool") return "bool";

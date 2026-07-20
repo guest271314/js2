@@ -4,9 +4,9 @@ title: "Harness-assembly compile error: Duplicate identifier 'isPrimitive' at L1
 status: done
 completed: 2026-07-18
 assignee: ttraenkler/opus-dev-b
-sprint: current
+sprint: 72
 created: 2026-07-18
-updated: 2026-07-18
+updated: 2026-07-19
 priority: high
 horizon: s
 feasibility: medium

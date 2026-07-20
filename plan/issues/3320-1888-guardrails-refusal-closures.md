@@ -4,7 +4,7 @@ title: "stale #1888 S6/S6-b guardrails: builtin value-read compile-refusal contr
 status: done
 assignee: ttraenkler/fable-3316
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: medium
 horizon: s

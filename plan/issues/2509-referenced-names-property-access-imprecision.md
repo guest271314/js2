@@ -4,9 +4,9 @@ title: "referencedNames over-collects property-access names → spurious env.<na
 status: done
 assignee: dev-builtins
 completed: 2026-07-17
-sprint: current
+sprint: 72
 created: 2026-06-19
-updated: 2026-07-17
+updated: 2026-07-19
 priority: low
 feasibility: medium
 reasoning_effort: low

@@ -4,7 +4,7 @@ title: "standalone: Atomics.* on non-shared views (the non-SAB subset — ~29 __
 status: done
 completed: 2026-07-14
 assignee: ttraenkler/senior-dev-a7a4
-sprint: current
+sprint: 72
 priority: medium
 horizon: m
 feasibility: medium

@@ -4,7 +4,7 @@ title: "tests/issue-1917-coercion-plan.test.ts: 1 failure — unexpected ref.cas
 status: done
 assignee: ttraenkler/fable-3317
 completed: 2026-07-16
-sprint: current
+sprint: 72
 created: 2026-07-16
 priority: low
 feasibility: medium

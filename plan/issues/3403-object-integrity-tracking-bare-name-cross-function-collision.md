@@ -3,7 +3,7 @@ id: 3403
 title: "Object-integrity tracking maps (frozenVars/sealedVars/nonExtensibleVars/definedPropertyFlags/widenedDefinePropertyKeys) keyed by BARE variable name → cross-function collision (same archetype as #3364)"
 status: done
 completed: 2026-07-18
-sprint: current
+sprint: 72
 priority: high
 feasibility: medium
 reasoning_effort: medium

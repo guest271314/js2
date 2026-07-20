@@ -13,7 +13,7 @@ task_type: bugfix
 area: codegen, standalone
 language_feature: collections
 goal: runtime-eval
-sprint: current
+sprint: 72
 parent: 2927
 related: [2928, 1584, 2151, 1103, 2162, 3171, 3098]
 # (#3102/#3131) intended growth: the standalone refusal must live in the
