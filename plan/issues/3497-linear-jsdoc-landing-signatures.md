@@ -1,10 +1,11 @@
 ---
 id: 3497
 title: "Resolve exact-source JSDoc signatures for the linear IR landing benchmarks"
-status: in-progress
+status: in-review
 sprint: current
 created: 2026-07-20
 updated: 2026-07-20
+pr: 3446
 priority: high
 horizon: s
 feasibility: medium
@@ -162,3 +163,5 @@ engine.
 
 No benchmark source, runner, backend adapter, workflow, package script,
 website file, fallback baseline, or #3498 artifact changed.
+
+Implementation PR: https://github.com/loopdive/js2/pull/3446
