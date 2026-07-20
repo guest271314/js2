@@ -2008,7 +2008,7 @@ function isPhase1TryStatement(
   // loop is claimable (the lowerer inlines crossed finallys before the br).
   inLoop: boolean = false,
 ): boolean {
-  if (!stmt.catchClause && !stmt.finallyBlock) return false;
+  if (!stmt.catchClause && !stmt.finallyBlock) return shapeNo("try-missing-handler", stmt);
 
   // (#2856 C1) try/catch/finally bodies are early-return BARRIERS: a Wasm
   // `return` inside them would skip the inlined finally blocks. (#2952 s2's
@@ -2019,7 +2019,7 @@ function isPhase1TryStatement(
     // Try body: must be a Phase-1 body statement list.
     const tryScope = new Set(scope);
     for (const s of stmt.tryBlock.statements) {
-      if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return false;
+      if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return shapeNo("try-body-stmt", s);
     }
 
     if (stmt.catchClause) {
@@ -2028,18 +2028,18 @@ function isPhase1TryStatement(
         const v = stmt.catchClause.variableDeclaration;
         // Slice 9 only accepts identifier bindings. Destructuring catch
         // (`catch ({message})`) defers to slice 9.5.
-        if (!ts.isIdentifier(v.name)) return false;
+        if (!ts.isIdentifier(v.name)) return shapeNo("try-catch-binding", v.name);
         catchScope.add(v.name.text);
       }
       for (const s of stmt.catchClause.block.statements) {
-        if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return false;
+        if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return shapeNo("try-catch-body-stmt", s);
       }
     }
 
     if (stmt.finallyBlock) {
       const finallyScope = new Set(scope);
       for (const s of stmt.finallyBlock.statements) {
-        if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return false;
+        if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return shapeNo("try-finally-body-stmt", s);
       }
     }
 
@@ -2160,7 +2160,7 @@ function isPhase1ForStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   // Cond must be present (no infinite loops in slice 12).
-  if (!stmt.condition) return false;
+  if (!stmt.condition) return shapeNo("for-missing-cond", stmt);
 
   const innerScope = new Set(scope);
 
@@ -2169,40 +2169,46 @@ function isPhase1ForStatement(
   if (stmt.initializer) {
     if (ts.isVariableDeclarationList(stmt.initializer)) {
       const flags = stmt.initializer.flags;
-      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return false;
+      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const))
+        return shapeNo("for-init-var-kind", stmt.initializer);
       for (const d of stmt.initializer.declarations) {
-        if (!ts.isIdentifier(d.name)) return false;
-        if (!d.initializer) return false;
-        if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return false;
+        if (!ts.isIdentifier(d.name)) return shapeNo("for-init-name", d.name);
+        if (!d.initializer) return shapeNo("for-init-noinit", d);
+        if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return shapeNo("for-init-expr", d.initializer);
         // (#2856) A name a SIBLING for-init leaked into the flat scope set is
         // NOT a genuine duplicate — from-ast scopes each for-init in its own
         // innerCx copy, so `for (let i...) {} for (let i...) {}` builds fine.
         // Genuine outer bindings still reject (build-side redeclaration).
-        if (innerScope.has(d.name.text) && !forInitLeakedNames.has(d.name.text)) return false; // duplicate
+        if (innerScope.has(d.name.text) && !forInitLeakedNames.has(d.name.text))
+          return shapeNo("for-init-shadow", d.name); // duplicate
         innerScope.add(d.name.text);
       }
     } else {
       // Expression init.
-      if (!isPhase1Expr(stmt.initializer, innerScope, localClasses)) return false;
+      if (!isPhase1Expr(stmt.initializer, innerScope, localClasses)) return shapeNo("for-init-expr", stmt.initializer);
     }
   }
 
   // Cond: must be a Phase-1 expression in the inner scope.
-  if (!isPhase1Expr(stmt.condition, innerScope, localClasses)) return false;
+  if (!isPhase1Expr(stmt.condition, innerScope, localClasses)) return shapeNo("for-cond", stmt.condition);
 
   // Update: optional. When present, must be a Phase-1 expression OR a
   // postfix `i++` / `i--` (which `isPhase1Expr` doesn't accept on its
   // own because postfix mutates state — but it's the canonical for-loop
   // update so we accept it explicitly here).
   if (stmt.incrementor) {
-    if (!isPhase1ForUpdateExpr(stmt.incrementor, innerScope, localClasses)) return false;
+    if (!isPhase1ForUpdateExpr(stmt.incrementor, innerScope, localClasses))
+      return shapeNo("for-update", stmt.incrementor);
   }
 
   // Body: single Phase-1 body statement.
   // (#2856 C1) for bodies admit the early-return arm.
   earlyReturnLoopDepth++;
   try {
-    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+    return (
+      isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true) ||
+      shapeNo("for-body", stmt.statement)
+    );
   } finally {
     earlyReturnLoopDepth--;
   }
@@ -2674,19 +2680,21 @@ function isPhase1ClosureLiteral(
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
 ): boolean {
-  if (ts.isFunctionExpression(expr) && expr.name) return false; // named func expr — defer
-  if ("asteriskToken" in expr && expr.asteriskToken) return false; // generator
-  if (expr.modifiers && expr.modifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return false;
-  if (expr.typeParameters && expr.typeParameters.length > 0) return false;
+  if (ts.isFunctionExpression(expr) && expr.name) return shapeNo("closure-named-fnexpr", expr.name); // named func expr — defer
+  if ("asteriskToken" in expr && expr.asteriskToken) return shapeNo("closure-generator", expr); // generator
+  if (expr.modifiers && expr.modifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))
+    return shapeNo("closure-async", expr);
+  if (expr.typeParameters && expr.typeParameters.length > 0) return shapeNo("closure-type-params", expr);
 
-  if (!expr.type || annotationToResolvedKind(expr.type) === null) return false;
+  if (!expr.type || annotationToResolvedKind(expr.type) === null)
+    return shapeNo("closure-return-type", expr.type ?? expr);
 
   const inner = new Set(scope);
   for (const p of expr.parameters) {
-    if (!ts.isIdentifier(p.name)) return false;
-    if (p.questionToken || p.dotDotDotToken || p.initializer) return false;
-    if (!p.type || annotationToResolvedKind(p.type) === null) return false;
-    if (inner.has(p.name.text)) return false;
+    if (!ts.isIdentifier(p.name)) return shapeNo("closure-param-name", p.name);
+    if (p.questionToken || p.dotDotDotToken || p.initializer) return shapeNo("closure-param-shape", p);
+    if (!p.type || annotationToResolvedKind(p.type) === null) return shapeNo("closure-param-type", p.type ?? p);
+    if (inner.has(p.name.text)) return shapeNo("closure-param-shadow", p.name);
     inner.add(p.name.text);
   }
 
@@ -2694,10 +2702,10 @@ function isPhase1ClosureLiteral(
   // ArrowFunction / FunctionExpression with block body: Phase-1 tail
   // statement list.
   if (ts.isArrowFunction(expr) && !ts.isBlock(expr.body)) {
-    return isPhase1Expr(expr.body, inner, localClasses);
+    return isPhase1Expr(expr.body, inner, localClasses) || shapeNo("closure-concise-body", expr.body);
   }
-  if (!ts.isBlock(expr.body)) return false;
-  return isPhase1StatementList(expr.body.statements, inner, localClasses);
+  if (!ts.isBlock(expr.body)) return shapeNo("closure-body-kind", expr.body);
+  return isPhase1StatementList(expr.body.statements, inner, localClasses) || shapeNo("closure-body", expr.body);
 }
 
 /**
@@ -2872,11 +2880,14 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // excluded for symmetry with the legacy user-class-shadows-extern rule
     // (#1284).
     if (scope.has(expr.text)) return true;
-    return (
+    if (
       currentHostGlobalResolver !== null &&
       !localClasses.has(expr.text) &&
       currentHostGlobalResolver(expr) !== undefined
-    );
+    ) {
+      return true;
+    }
+    return shapeNo("expr-ident-not-in-scope", expr);
   }
   // #1370 Phase A — `this` reference inside a method or constructor body.
   // The selector marks `this` as an in-scope binding for class members
@@ -3073,13 +3084,14 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class shape; slice 10 against `getExternClassInfo`'s
   // constructorParams).
   if (ts.isNewExpression(expr)) {
-    if (!ts.isIdentifier(expr.expression)) return false;
+    if (!ts.isIdentifier(expr.expression)) return shapeNo("expr-new-callee-nonident", expr.expression);
     const ctorName = expr.expression.text;
-    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName)) return false;
-    if (expr.typeArguments && expr.typeArguments.length > 0) return false; // defer generics
+    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName))
+      return shapeNo("expr-new-ctor-unknown", expr.expression);
+    if (expr.typeArguments && expr.typeArguments.length > 0) return shapeNo("expr-new-type-args", expr); // defer generics
     if (!expr.arguments) return true;
     for (const arg of expr.arguments) {
-      if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      if (!isPhase1Expr(arg, scope, localClasses)) return shapeNo("expr-new-arg", arg);
     }
     return true;
   }
@@ -3234,28 +3246,30 @@ function isPhase1ObjectLiteral(
   // objects don't form a usable IrType.object shape) — but accepting
   // them at the selector level wouldn't cause a regression: the
   // overrides pass would skip them when shape resolution failed.
-  if (expr.properties.length === 0) return false;
+  if (expr.properties.length === 0) return shapeNo("objectlit-empty", expr);
 
   const seen = new Set<string>();
   for (const prop of expr.properties) {
     if (ts.isPropertyAssignment(prop)) {
       const name = phase1PropertyName(prop.name);
-      if (name === null) return false;
-      if (seen.has(name)) return false; // duplicate key — defer
+      if (name === null) return shapeNo("objectlit-computed-key", prop.name);
+      if (seen.has(name)) return shapeNo("objectlit-duplicate-key", prop.name); // duplicate key — defer
       seen.add(name);
-      if (!isPhase1Expr(prop.initializer, scope, localClasses)) return false;
+      if (!isPhase1Expr(prop.initializer, scope, localClasses))
+        return shapeNo("objectlit-property-init", prop.initializer);
       continue;
     }
     if (ts.isShorthandPropertyAssignment(prop)) {
       const name = prop.name.text;
-      if (seen.has(name)) return false;
-      if (!scope.has(name)) return false;
+      if (seen.has(name)) return shapeNo("objectlit-duplicate-key", prop.name);
+      if (!scope.has(name)) return shapeNo("objectlit-shorthand-not-in-scope", prop.name);
       seen.add(name);
       continue;
     }
     // SpreadAssignment, MethodDeclaration, GetAccessorDeclaration,
     // SetAccessorDeclaration → reject.
-    return false;
+    if (ts.isSpreadAssignment(prop)) return shapeNo("objectlit-spread", prop);
+    return shapeNo("objectlit-property-kind", prop);
   }
   return true;
 }
