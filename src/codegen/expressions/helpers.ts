@@ -473,36 +473,43 @@ export function emitCoercedLocalSet(
 
 /**
  * (#3429) Resolve the static declared name of an argument expression that is
- * a bare Identifier bound to a USER-COMPILED, named FunctionDeclaration /
- * FunctionExpression / ClassDeclaration — i.e. a genuine js2wasm closure/
- * class value, never an ambient `declare`d builtin (those cross the host
- * boundary as real native functions already, unaffected by the bug this
- * fixes). Returns `undefined` for anything else (computed values, aliases
- * through a variable, anonymous functions, ambient declarations, …) — the
- * caller leaves such arguments untouched.
+ * a bare Identifier bound to a USER-COMPILED, top-level named
+ * FunctionDeclaration — i.e. a genuine js2wasm closure value, never an
+ * ambient `declare`d builtin (those cross the host boundary as real native
+ * functions already, unaffected by the bug this fixes). Returns `undefined`
+ * for anything else (computed values, aliases through a variable, anonymous
+ * functions, ambient declarations, class values, …) — the caller leaves such
+ * arguments untouched.
  *
- * KNOWN LIMITATION (documented on purpose, not a target for this fix): this
- * is a pure static, per-call-site fold. It only fires when the argument
- * expression is DIRECTLY the identifier bound to the declaration. An
- * indirection (`const E = MyError; assert.throws(E, fn)`) or a computed
- * value (`assert.throws(getCtor(), fn)`) does not statically resolve and is
- * left unstamped — the value still crosses as the generic
- * `wasmClosureDynamicBridge`-named bridge. This is acceptable: the #3429
- * 544-record failure class is exclusively the direct-identifier idiom
- * (`function MyError(){}; assert.throws(MyError, fn)`), which test262 uses
- * pervasively to disambiguate exception provenance in order-of-evaluation /
- * custom-behavior tests.
+ * Deliberately does NOT consult the raw TS checker (`ctx.checker.*`) — the
+ * membership test is `ctx.topLevelFunctionNames` (`src/codegen/index.ts` /
+ * `declarations.ts`), the SAME hoisting-time registry `class-member-keys.ts`
+ * and `call-builtin-static.ts` already use to answer "is this identifier a
+ * real compiled top-level function". It is populated purely from AST
+ * declaration collection (never from an ambient `.d.ts`), so membership
+ * alone proves the value is a genuine js2wasm-compiled closure — no
+ * `ts.Type`/symbol query needed. (Routing through `ctx.oracle` instead was
+ * considered: `typeFactOf` classifies both `TypeError` — ambient, callable —
+ * and a user `function MyError(){}` as the SAME `{ kind: "function" }` fact,
+ * so it cannot make the ambient/compiled distinction this stamp depends on
+ * for safety — stamping a REAL native builtin's `.name` via `__extern_set`
+ * would touch it unnecessarily. `topLevelFunctionNames` makes the distinction
+ * for free.)
+ *
+ * KNOWN LIMITATIONS (documented on purpose, not targets for this fix):
+ * - Pure static, per-call-site fold — only fires when the argument
+ *   expression is DIRECTLY the identifier bound to the declaration. An
+ *   indirection (`const E = MyError; assert.throws(E, fn)`) or a computed
+ *   value (`assert.throws(getCtor(), fn)`) is left unstamped.
+ * - FunctionDeclaration only (not function expressions / classes) — narrower
+ *   than the original checker-based version, but matches every confirmed
+ *   #3429 sample (`function Test262Error(){}`, `function MyError(){}`,
+ *   `function DummyError(){}` — test262's pervasive marker-error idiom).
  */
 function resolveCompiledFunctionArgName(ctx: CodegenContext, argExpr: ts.Expression): string | undefined {
   if (!ts.isIdentifier(argExpr)) return undefined;
-  const sym = ctx.checker.getSymbolAtLocation(argExpr);
-  const decl = sym?.valueDeclaration;
-  if (!decl) return undefined;
-  const isNamedFunctionDecl =
-    (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) && !!decl.body && !!decl.name;
-  const isNamedClassDecl = (ts.isClassDeclaration(decl) || ts.isClassExpression(decl)) && !!decl.name;
-  if (!isNamedFunctionDecl && !isNamedClassDecl) return undefined;
-  return (decl.name as ts.Identifier).text || undefined;
+  const name = argExpr.text;
+  return name && ctx.topLevelFunctionNames.has(name) ? name : undefined;
 }
 
 /**
