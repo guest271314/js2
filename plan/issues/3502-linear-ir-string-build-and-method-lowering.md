@@ -17,6 +17,14 @@ depends_on: [3497, 3499, 3501]
 related: [2956, 3498]
 assignee: ttraenkler/codex-3502-shared-string-build-method-lowering
 origin: "#3498 post-#3497 exact string-hash native-route probe"
+loc-budget-allow:
+  - src/codegen-linear/index.ts
+  - src/codegen-linear/runtime.ts
+  - src/ir/builder.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
+  - src/ir/lower.ts
+  - src/ir/nodes.ts
 ---
 
 # #3502 — Shared string build and character methods
@@ -108,26 +116,71 @@ untouched benchmark through the source-derived Porffor route.
 
 ## Acceptance criteria
 
-- [ ] Exact `string-hash.js` reaches Node-equal, sanitizer-clean native
+- [x] Exact `string-hash.js` reaches Node-equal, sanitizer-clean native
       execution from shared source-derived IR with no source rewrite.
-- [ ] Node, JS2 WasmGC, shared linear Wasm, and JS2 IR/plan → Porffor IR → C
+- [x] Node, JS2 WasmGC, shared linear Wasm, and JS2 IR/plan → Porffor IR → C
       agree for representative inputs including `0`, `1`, `100`, and `20000`.
-- [ ] Typed string append, `charAt`, `charCodeAt`, bounds, omitted indices, and
+- [x] Typed string append, `charAt`, `charCodeAt`, bounds, omitted indices, and
       UTF-16 code units are explicit in the semantic IR contract. The first
       backend claim is proven ASCII; broader encodings reject stably unless
       exercised through both linear Wasm and Porffor native.
-- [ ] Linear allocation/layout decisions come only from `LinearMemoryPlan`.
-- [ ] Porffor remains optional; no RawC, benchmark-name special case, second
+- [x] Linear allocation/layout decisions come only from `LinearMemoryPlan`.
+- [x] Porffor remains optional; no RawC, benchmark-name special case, second
       parser, or Porffor-specific planner vocabulary is introduced.
-- [ ] Existing string, linear-memory, WasmGC, and Porffor tests remain green.
+- [x] Existing string, linear-memory, WasmGC, and Porffor tests remain green.
+
+## Implementation outcome
+
+- Checker and producer facts now prove semantic string values independently of
+  their `i32` linear carrier. Proven non-coercive `+=`, `charAt`, and
+  `charCodeAt` lower to typed shared IR; unresolved or dynamic cases retain the
+  established conservative fallback/rejection behavior.
+- `StringBackendEmitter` carries the shared operations through WasmGC, linear
+  Wasm, and Porffor. Porffor lowers them to ordinary typed allocation,
+  load/store, copy, and control-flow nodes without `RawC`.
+- Both linear consumers bind the existing `string:utf8-bytes-v1` layout from
+  the source-derived `LinearMemoryPlan`. The header keeps its payload-size
+  meaning; owned append adds geometric capacity without changing the public
+  representation or invalidating aliases.
+- The backend execution claim is gated by `analysis/encoding.ts` evidence.
+  Proven ASCII executes; broader UTF-8/non-ASCII inputs reject with the stable
+  diagnostic `ir/linear-string: ASCII encoding proof required for constant
+  result (got utf8-guaranteed)`. The semantic reference contract remains
+  UTF-16-code-unit correct for indexing, omitted indices, and bounds.
+
+## Runner integration
+
+The landing four-lane runner from #3498 is the origin and downstream consumer
+of this issue, so that relationship remains explicit in frontmatter. Final
+validation is based on `origin/main@f26fb333510137fee6b0108d2ff94a1f80326e83`,
+which merged runner PR #3452, while retaining the landed #3499 bitwise and
+#3501 array/shared-file dependencies. The exact-source acceptance test here
+proves the formerly blocked string cell independently of benchmark timing.
 
 ## Test results
 
-Disjoint contract checkpoint:
-
-- `pnpm exec vitest run tests/issue-3502-string-contract.test.ts` — 4 passed.
-- `pnpm run typecheck` — passed.
-- Prettier write/check over the six checkpoint files — passed.
-
-Production wiring remains blocked on #3499 bitwise lowering and #3501
-ownership/integration release for `from-ast.ts` and Porffor `assembler.ts`.
+- Untouched source identity: 601 bytes, SHA-256
+  `66a15148fdd960dcbe5d87c25a28d870e8db9d00865483d708f0ca4e6e6e335c`.
+  Node, JS2 WasmGC, shared linear Wasm, and source-derived Porffor native agree
+  for inputs `[0, 1, 100, 20000]` with outputs
+  `[0, 96500, 36729899, 862771296]`.
+- `JS2WASM_PORFFOR_ROOT=<this-worktree>/vendor/Porffor
+  PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run
+  tests/issue-3502-string-hash-four-lane.test.ts` — 3/3 passed. Clang used
+  combined ASan/UBSan; both exact-source and ASCII method executables exited
+  zero with no sanitizer diagnostics.
+- ASCII method execution agrees across Node, WasmGC, linear Wasm, and native C
+  for indices `[-1, 0, 1, 2]` plus omitted index, producing
+  `[777, 1065, 1122, 777, 1065]` and covering empty-string versus `NaN` bounds.
+- `tests/issue-3502-string-contract.test.ts` — 6/6 passed, including semantic
+  producer evidence, UTF-16 reference behavior, the plan/layout binding,
+  stable non-ASCII rejection, and alias-observed immutable concatenation.
+- Focused #3502 plus native-string regressions — 100/100 passed. Adjacent
+  backend-contract, linear, layout, encoding, and #2134 coverage — 58/58
+  passed.
+- `pnpm run typecheck`, touched-file formatting, `pnpm run lint`,
+  `check:pushraw`, `check:ir-fallbacks`, `check:linear-ir`,
+  `check:stack-balance`, and `check:issue-spec-coverage` passed before the final
+  runner-base merge. The same focused acceptance and repository gates are
+  rerun on the merged head before publication; no full local Test262 run is
+  required for this issue.
