@@ -819,6 +819,35 @@ function isWasmException(e: unknown): boolean {
   );
 }
 
+const STANDALONE_DYNAMIC_IMPORT_ERROR =
+  "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects";
+
+/**
+ * #3494 — catch import() before codegen for every source position, including
+ * top-level await paths that the flattened module initializer may not lower
+ * through compileCallExpression. A standalone binary cannot satisfy the host
+ * loader, and compileMulti has no honest internal module-record substitute yet.
+ */
+function detectStandaloneDynamicImports(sourceFile: ts.SourceFile): CompileError[] {
+  const errors: CompileError[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+      errors.push({
+        message: STANDALONE_DYNAMIC_IMPORT_ERROR,
+        line: line + 1,
+        column: character + 1,
+        severity: "error",
+        file: sourceFile.fileName,
+      });
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return errors;
+}
+
 /**
  * #1927 — the single, shared front-end pipeline core. Owns everything from ES
  * early-error detection down through binary/WAT/dts/WIT emit. It is SYNCHRONOUS
@@ -870,6 +899,16 @@ function runPipeline(input: PipelineInput): CompileResult {
     if (hasNewError(earlyErrors)) {
       return failResult(errors);
     }
+  }
+
+  // Step 1a-ii: target-capability validation. This is deliberately independent
+  // of allowJs: Test262 module fixtures use JavaScript source, and silently
+  // skipping this gate there produced a success result with no runnable import
+  // semantics for top-level `await import(...)`.
+  if (options.target === "standalone") {
+    const dynamicImportErrors = userSourceFiles.flatMap(detectStandaloneDynamicImports);
+    errors.push(...dynamicImportErrors);
+    if (dynamicImportErrors.length > 0) return failResult(errors);
   }
 
   // Step 1b: Safe mode validation for all user source files.
