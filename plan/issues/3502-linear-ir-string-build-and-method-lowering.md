@@ -13,8 +13,8 @@ reasoning_effort: max
 task_type: feature
 area: ir, strings, codegen-linear, porffor
 goal: backend-agnostic-ir
-depends_on: [3497]
-related: [2956, 3498, 3501]
+depends_on: [3497, 3499, 3501]
+related: [2956, 3498]
 assignee: ttraenkler/codex-3502-shared-string-build-method-lowering
 origin: "#3498 post-#3497 exact string-hash native-route probe"
 ---
@@ -128,9 +128,6 @@ Disjoint contract checkpoint:
 - `pnpm exec vitest run tests/issue-3502-string-contract.test.ts` — 4 passed.
 - `pnpm run typecheck` — passed.
 - Prettier write/check over the six checkpoint files — passed.
-- `pnpm run check:issues` — passed.
 
-Production wiring remains blocked on #3501 ownership release for
-`from-ast.ts` and Porffor `assembler.ts`. #3501 remains `related` rather than
-`depends_on` until its issue file lands on this branch; the issue audit rejects
-dangling dependencies.
+Production wiring remains blocked on #3499 bitwise lowering and #3501
+ownership/integration release for `from-ast.ts` and Porffor `assembler.ts`.
