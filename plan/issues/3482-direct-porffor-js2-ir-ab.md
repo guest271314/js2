@@ -711,48 +711,77 @@ The implementation must fail loudly if any invariant is false:
   exact argv are retained in that artifact; schema revalidation passes through
   the package runner.
 
+### Complete local optimized capture
+
+Command:
+`pnpm run benchmark:porffor-direct-ab -- --output .tmp/porffor-direct-ab-darwin-20260720`.
+The clean run at `d7386a1a2179b4160cd058c2df5c3651a8f232c7` completed five
+warmups and 21 measured fresh-process samples per row, each with 200,000 calls,
+fixed outputs `[-535, 235, 675, 3645]`, and checksum `46965020`.
+
+This is **noncanonical Darwin/arm64 evidence only**: Apple M1 Pro, Darwin
+25.3.0, Node 22.16.0, pnpm 10.30.2, and Apple Clang 17.0.0. It has no workflow
+URL and must not be compared with another machine. Raw JSON SHA-256 is
+`f87ceaaae547a2d7adbed87916e25019b2190db5d23becef9a9fd5b08d66376c`.
+
+| Row | Authority | CPU ms Q1 / median / Q3 | RSS Q1 / median / Q3 | Total build ms Q1 / median / Q3 | C / object / executable bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| direct GC | UB-contaminated, non-authoritative | 17.925 / 18.521 / 19.900 | 27,639,808 / 27,639,808 / 27,656,192 | 1716.508 / 1730.566 / 1748.980 | 187,238 / 127,984 / 108,568 |
+| direct bump | UB-contaminated, non-authoritative | 12.061 / 12.405 / 12.746 | 23,773,184 / 23,773,184 / 23,773,184 | 1395.607 / 1408.487 / 1427.896 | 105,860 / 75,968 / 73,736 |
+| JS2 arena | within-capture informational | 1.457 / 1.484 / 1.523 | 10,911,744 / 10,911,744 / 10,911,744 | 1536.207 / 1574.960 / 1594.309 | 28,818 / 2,280 / 34,056 |
+| JS2 stack/arena | within-capture informational | 0.727 / 0.731 / 0.748 | 1,310,720 / 1,310,720 / 1,310,720 | 1551.339 / 1570.830 / 1604.284 | 29,991 / 3,880 / 34,056 |
+
+No direct-vs-JS2 speed winner is valid because both direct rows have known UB
+and the end-to-end ABI/layout/frontend confounders remain. Only the
+sanitizer-clean JS2 policy pair isolates allocation policy on this same
+machine: its stack/arena median CPU was 0.731 ms versus 1.484 ms for arena
+(50.74% lower), and median whole-process RSS was 1,310,720 versus 10,911,744
+bytes (87.99% lower). Those directions are local microbenchmark observations,
+not universal or cross-machine claims. The complete raw samples and generated
+table are retained under `benchmarks/results/porffor-direct-ab/`.
+
 ## Acceptance criteria
 
 - [ ] #3478 / PR #3432 is merged, and main contains exact green head
       `4c7e3a01d` plus reachable patch-equivalent Ubuntu fix `559109b723d8`.
-- [ ] One checked-in `.ts` byte sequence and SHA feed all four rows and a Node
+- [x] One checked-in `.ts` byte sequence and SHA feed all four rows and a Node
       oracle; no `.js` twin or hand-built replacement IR exists.
-- [ ] Pinned direct Porffor accepts the file through the exact
+- [x] Pinned direct Porffor accepts the file through the exact
       `porf c --module -O1` path, and the programmatic adapter suppresses only
       generated `main` before render; apart from the asserted `%lld` cast, its
       object-entry C remains plain and independently hashed.
-- [ ] Every direct internal assumption is commit-fingerprinted and
+- [x] Every direct internal assumption is commit-fingerprinted and
       structurally asserted before its value is used.
-- [ ] JS2 rows consume the exact #3478 source-derived `IrModule` and
+- [x] JS2 rows consume the exact #3478 source-derived `IrModule` and
       `LinearMemoryPlan` with no re-lowering or re-planning.
-- [ ] The four required rows are present and honestly report boxed `jsval` vs
+- [x] The four required rows are present and honestly report boxed `jsval` vs
       raw `f64`, approximately 56-byte dynamic vs 24-byte fixed records, global
       Porffor policies vs JS2 per-site promotion, and allocator names.
-- [ ] All rows use one separate-object lane ABI/harness, one Clang version,
+- [x] All rows use one separate-object lane ABI/harness, one Clang version,
       identical optimized compile/link flags, no LTO, and init outside timing.
-- [ ] The benchmark records five warmup and 21 interleaved fresh-process
+- [x] The benchmark records five warmup and 21 interleaved fresh-process
       measured rounds, 200,000 calls/checksum per sample, CPU time, Q1/median/Q3,
       RSS, C/object/executable size, and compile phases.
-- [ ] Every output/checksum matches the Node oracle before a sample enters the
+- [x] Every output/checksum matches the Node oracle before a sample enters the
       result; all 21 raw samples and actual orders are retained.
-- [ ] ASan/UBSan runs separately for all four rows, records both exact expected
+- [x] ASan/UBSan runs separately for all four rows, records both exact expected
       plain-direct misalignment failures, requires both JS2 rows clean, and is
       advisory CI rather than an optimized performance input.
-- [ ] Every direct optimized timing is labelled UB-contaminated and
+- [x] Every direct optimized timing is labelled UB-contaminated and
       non-authoritative in raw JSON, generated Markdown, and methodology docs.
-- [ ] Performance CI is `workflow_dispatch` artifact-only, has no noisy speed
+- [x] Performance CI is `workflow_dispatch` artifact-only, has no noisy speed
       thresholds, initializes Porffor with explicit `update=checkout`, and
       cannot pass with a skipped row.
-- [ ] `latest.json`, generated `latest.md`, and the methodology document contain
+- [x] `latest.json`, generated `latest.md`, and the methodology document contain
       provenance, exact commands, the required caveat, and the policy-isolating
       pair; if canonical Ubuntu is unavailable before merge, a complete local
       capture is retained with an unmistakable noncanonical Darwin label and
       no cross-machine claim.
-- [ ] The existing #3300 note is explicitly labelled a hand-built-IR policy
+- [x] The existing #3300 note is explicitly labelled a hand-built-IR policy
       proof, not the direct compiler comparison.
-- [ ] New commands use a declared lockfile-backed runner; no undeclared
+- [x] New commands use a declared lockfile-backed runner; no undeclared
       `npx --yes tsx` is introduced.
-- [ ] No public Porffor target, second parser, JS2 planner vocabulary change,
+- [x] No public Porffor target, second parser, JS2 planner vocabulary change,
       allocation-policy change, or production compiler change lands unless a
       separately demonstrated blocker makes it necessary.
 
