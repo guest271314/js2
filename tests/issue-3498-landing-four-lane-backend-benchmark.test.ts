@@ -553,25 +553,20 @@ describe("#3498 landing four-lane backend benchmark", () => {
           });
         }
       } else {
-        // Post-#3497 body/lowering gaps, verified at PR #3446 head 383d6b146.
+        // #3499 and #3500 are now landed prerequisites; arrays and strings
+        // retain their independently allocated backend gaps.
         expect(js2Cells).toMatchObject([
           {
             programId: "fib",
-            status: "unsupported",
-            diagnostic: {
-              phase: "js2-porffor-legality",
-              code: "typed-composite-bitwise-not-lowered",
-              followUpIssue: 3499,
-            },
+            status: "supported",
+            diagnostic: null,
+            sanitizer: { status: "clean", authority: "authoritative" },
           },
           {
             programId: "fib-recursive",
-            status: "unsupported",
-            diagnostic: {
-              phase: "js2-linear-ir-selection",
-              code: "select:call-graph-closure",
-              followUpIssue: 3500,
-            },
+            status: "supported",
+            diagnostic: null,
+            sanitizer: { status: "clean", authority: "authoritative" },
           },
           {
             programId: "array-sum",
@@ -584,6 +579,9 @@ describe("#3498 landing four-lane backend benchmark", () => {
             diagnostic: { phase: "js2-linear-ir-build", code: "build", followUpIssue: 3502 },
           },
         ]);
+        for (const [index, cell] of js2Cells.slice(0, 2).entries()) {
+          expect(cell.validation?.actualOutputs).toEqual(result.programs[index]!.expectedFixedOutputs);
+        }
       }
       for (const [index, cell] of plainCells.entries()) {
         const program = result.programs[index]!;
