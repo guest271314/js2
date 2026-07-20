@@ -16,6 +16,11 @@ es_edition: multi
 goal: test262-conformance
 related: [3370, 1104, 3474]
 origin: "2026-07-18 oracle-v8 harvest (fable harvest agent): host `other` sub-bucket @ oracle 8."
+loc-budget-allow:
+  - src/runtime.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/new-super.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3429 — assert.throws constructor identity leaks internal 'wasmClosureDynamicBridge'
