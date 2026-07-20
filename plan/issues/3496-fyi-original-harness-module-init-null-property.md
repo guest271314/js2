@@ -15,12 +15,14 @@ lane: A
 related: [3491, 3492, 3493, 3495]
 files:
   - src/codegen/expressions/assignment.ts
+  - src/codegen/expressions/operator-assignment.ts
   - src/codegen/index.ts
   - tests/test262-shared.ts
   - tests/issue-3492-test262-fyi-top-level-await-parity.test.ts
   - tests/issue-3496-fyi-original-harness-module-init.test.ts
 loc-budget-allow:
   - src/codegen/expressions/assignment.ts
+  - src/codegen/expressions/operator-assignment.ts
 ---
 
 # #3496 — FYI original harness must initialize module fixtures without null global properties
@@ -91,6 +93,12 @@ the in-process fixture executor consume the same host-free output contract as
 the worker. No harness source, fixture source, property name, expected value, or
 Test262 path is rewritten or special-cased.
 
+The merge-queue corpus exposed the compound form of the same receiver bug in
+`dfs-invariant.js`: `globalThis.test262 += ...` resolved `typeof globalThis` as
+a Wasm struct before either dedicated realm-object lowering ran. Compound
+property writes now force `globalThis` through the externref read/write path,
+matching plain property reads and `=` assignments.
+
 ## Acceptance criteria
 
 - Reduce the FYI-only failure to the smallest literal prelude/fixture
@@ -108,7 +116,7 @@ Test262 path is rewritten or special-cased.
 
 ## Validation
 
-- Reduced and exact original-harness regression: 8/8 pass in
+- Reduced and exact original-harness regression: 9/9 pass in
   `tests/issue-3496-fyi-original-harness-module-init.test.ts`.
 - Layered #3492–#3496 plus standalone harness/stdout regressions: 50 pass,
   1 existing todo.

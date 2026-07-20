@@ -3,8 +3,10 @@
 import { describe, expect, it } from "vitest";
 import { loadOriginalHarnessTests } from "../scripts/test262-fyi-reader.mjs";
 import { compileMulti } from "../src/index.js";
+import { buildImports } from "../src/runtime.js";
 
 const PENDING_CYCLE_PATH = "language/module-code/top-level-await/pending-async-dep-from-cycle.js";
+const DFS_INVARIANT_PATH = "language/module-code/top-level-await/dfs-invariant.js";
 
 const fixtures = {
   "./setup.js": `globalThis.logs = [];`,
@@ -127,4 +129,37 @@ describe("#3496 — FYI harness initialization with module fixtures", () => {
     for (let i = 0; i < length; i++) output += String.fromCharCode(char(i));
     expect(output).toContain("Test262:AsyncTestComplete");
   });
+
+  it(
+    "keeps the official DFS fixture graph's globalThis string compound writes on the realm object",
+    { timeout: 60_000 },
+    async () => {
+      const [test] = await loadOriginalHarnessTests([DFS_INVARIANT_PATH]);
+      expect(test).toBeDefined();
+
+      const result = await compileMulti(
+        {
+          ...test!.fixtureFiles,
+          [test!.entryFile]: `
+            import "./dfs-invariant-direct-1_FIXTURE.js";
+            import "./dfs-invariant-direct-2_FIXTURE.js";
+            import "./dfs-invariant-indirect_FIXTURE.js";
+            export function score() {
+              return globalThis.test262 === "async:direct-1:direct-2:indirect" ? 1 : 0;
+            }
+          `,
+        },
+        test!.entryFile,
+        { allowJs: true, skipSemanticDiagnostics: true, target: "gc" },
+      );
+      expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+
+      const imports = buildImports(result.imports, undefined, result.stringPool);
+      const { instance } = await WebAssembly.instantiate(result.binary, imports as WebAssembly.Imports);
+      if (typeof imports.setExports === "function") {
+        imports.setExports(instance.exports as Record<string, Function>);
+      }
+      expect((instance.exports.score as () => number)()).toBe(1);
+    },
+  );
 });
