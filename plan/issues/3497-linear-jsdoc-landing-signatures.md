@@ -22,6 +22,9 @@ files:
   - src/ir/select.ts
   - src/ir/from-ast.ts
   - tests/issue-3497-linear-jsdoc-landing-signatures.test.ts
+loc-budget-allow:
+  - src/ir/select.ts
+  - src/ir/from-ast.ts
 ---
 
 # #3497 — Exact-source JSDoc signatures for linear IR landing benchmarks
