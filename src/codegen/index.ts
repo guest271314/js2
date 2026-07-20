@@ -4624,9 +4624,8 @@ export function generateMultiModule(
     }
 
     // (#2831) Reserve the host-externref → wasm-vec materializers before the
-    // `__sset_*` setters bake their value coercions (mirrors the generateModule
-    // path). No member-set-dispatch in this multi-source path, so only the
-    // `__sset_*` (b) enumeration contributes; no-op without a vec write target.
+    // `__sset_*` setters and deferred member dispatchers bake their value
+    // coercions (mirrors the generateModule path).
     reserveVecFieldMaterializers(ctx);
 
     // Emit exported struct field getter helpers for the runtime (mirrors
@@ -4634,6 +4633,17 @@ export function generateMultiModule(
     // were missing these export emits).
     emitStructFieldGetters(ctx);
     emitStructFieldSetters(ctx);
+
+    // (#3493) compileMulti shares the same property-access lowering as the
+    // single-source path, so a dynamic property write/read can reserve one of
+    // these deferred dispatchers here too. Leaving its placeholder body as
+    // `unreachable` made an otherwise-valid top-level `globalThis.x = value`
+    // trap as soon as #3493 stopped eliding that statement. Fill both sides
+    // after every source file has registered its struct types, exactly as the
+    // single-source finalizer does. Their dependencies were registered by the
+    // reserve phase, so these fills do not mutate function indices.
+    fillMemberSetDispatch(ctx);
+    fillMemberGetDispatch(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback.
     emitVecAccessExports(ctx);
