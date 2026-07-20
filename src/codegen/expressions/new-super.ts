@@ -2115,6 +2115,28 @@ function emitDynamicNewFallback(
     return true;
   }
 
+  // Runtime argv may need externref→vec coercion, whose reader path registers
+  // several helpers. Do that as one batch BEFORE evaluating the callee or any
+  // argument. Registering them lazily while visiting a later spread shifts
+  // defined-function indices, which can leave an earlier positional call (for
+  // example `mark(1)`) targeting the wrong function. The checker can represent
+  // `any` with an internal ref type even though expression codegen produces an
+  // externref, so gate on the runtime-argv shape itself rather than trying to
+  // predict the expression representation. Static and literal-spread `new`
+  // remain unchanged.
+  if (useRuntimeArgv) {
+    ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+    ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+    ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+    ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+    if (noJsHost(ctx)) {
+      ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+    } else {
+      ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+    }
+    flushLateImportShifts(ctx, fctx);
+  }
+
   // (#3087) When the value-bound ctor is an `any`/`unknown`-typed dynamic value
   // (most importantly a callback PARAMETER receiving a real constructor — the
   // TypedArray harness `function (TA) { new TA(buffer, 0, 4) }`), a genuine host
@@ -2126,8 +2148,9 @@ function emitDynamicNewFallback(
   // ("No dependency provided for extern class 'TA'"). Ensure the bridge imports
   // up-front and flush ONCE here so the funcIdx is stable before any body
   // emission (the #608/#794 late-import index-shift hazard). Scoped to the
-  // fixed-arity (`!useRuntimeArgv`) form — the dominant harness shape.
-  const useConstructClosureBase = !noJsHost(ctx) && !useRuntimeArgv && resolvesToDynamicAnyCtorValue(ctx, calleeExpr);
+  // Runtime argv is supported too: its no-match arm copies the materialized
+  // argv into the bridge's JS array without re-evaluating any source expression.
+  const useConstructClosureBase = !noJsHost(ctx) && resolvesToDynamicAnyCtorValue(ctx, calleeExpr);
   let ccArrNewIdx: number | undefined = -1;
   let ccArrPushIdx: number | undefined = -1;
   let ccBridgeIdx: number | undefined = -1;
@@ -2198,19 +2221,43 @@ function emitDynamicNewFallback(
     argvLocal = allocLocal(fctx, `__dynnew_argv_${fctx.locals.length}`, { kind: "ref", typeIdx: objVecArrTypeIdx });
     argcLocal = allocLocal(fctx, `__dynnew_argc_${fctx.locals.length}`, { kind: "i32" });
 
-    // Pass 1 — evaluate every spread source ONCE into a vec local (so arg
-    // expressions run exactly once) and compute the argv capacity = (#non-spread
-    // args) + Σ(spread source len). `vecTypeIdx` is captured per spread so we can
-    // re-read its {len,data} fields without re-deriving the type.
-    const spreadVecs: { local: number; vecTypeIdx: number; arrTypeIdx: number; elemType: ValType }[] = [];
-    let staticCount = 0;
-    fctx.body.push({ op: "i32.const", value: 0 }); // capacity accumulator on stack
+    // Pass 1 — evaluate EVERY argument exactly once, in source order, and retain
+    // either its boxed value or its normalized vec. The old two-pass shape only
+    // evaluated spread sources here and deferred positional expressions until
+    // pass 2, so `new K(mark(1), ...markArray(2), mark(3))` observed 2,1,3.
+    //
+    // A JS/untyped helper parameter (the Test262 temporalHelpers.js shape) has
+    // static type `externref` even when its runtime value is a boxed Wasm vec.
+    // Normalize that carrier through the established externref→canonical-vec
+    // coercion before reading `{length,data}`. In standalone/WASI this uses the
+    // native `__extern_length` / `__extern_get_idx` readers, so it introduces no
+    // `env` imports and preserves the original element values as externrefs.
+    type MaterializedRuntimeArg =
+      | { kind: "value"; local: number }
+      | { kind: "spread"; local: number; vecTypeIdx: number; arrTypeIdx: number; elemType: ValType };
+    const materializedArgs: MaterializedRuntimeArg[] = [];
+    const capacityLocal = allocLocal(fctx, `__dynnew_capacity_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: capacityLocal });
     for (const arg of rawArgs) {
       if (!ts.isSpreadElement(arg)) {
-        staticCount++;
+        const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+        if (aTy && aTy.kind !== "externref") coerceType(ctx, fctx, aTy, { kind: "externref" });
+        else if (aTy === null) fctx.body.push({ op: "ref.null.extern" });
+        const valueLocal = allocLocal(fctx, `__dynnew_value_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: valueLocal });
+        materializedArgs.push({ kind: "value", local: valueLocal });
+        bumpI32Local(fctx, capacityLocal);
         continue;
       }
-      const vecTy = compileExpression(ctx, fctx, arg.expression);
+
+      let vecTy = compileExpression(ctx, fctx, arg.expression);
+      if (vecTy?.kind === "externref") {
+        const canonicalVecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+        const canonicalVecTy: ValType = { kind: "ref_null", typeIdx: canonicalVecTypeIdx };
+        coerceType(ctx, fctx, vecTy, canonicalVecTy);
+        vecTy = canonicalVecTy;
+      }
       if (!vecTy || (vecTy.kind !== "ref" && vecTy.kind !== "ref_null")) {
         // Spread source is not an array-like vec (e.g. a non-iterable). Bail
         // loudly rather than emit a wrong value. (Full iterator-protocol drive
@@ -2223,43 +2270,52 @@ function emitDynamicNewFallback(
           "Dynamic `new K(...x)` spread source is not an array-like value (#2026 #53): " +
             "only array spreads are supported in the value-bound constructor path.",
         );
-        fctx.body.push({ op: "drop" }); // drop the capacity accumulator
+        fctx.body.push({ op: "ref.null.extern" });
+        return true;
+      }
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTy.typeIdx);
+      if (arrTypeIdx < 0) {
+        fctx.body.push({ op: "drop" });
+        reportError(
+          ctx,
+          expr,
+          "Dynamic `new K(...x)` spread source is not an array-like value (#2026 #53): " +
+            "only array spreads are supported in the value-bound constructor path.",
+        );
         fctx.body.push({ op: "ref.null.extern" });
         return true;
       }
       const vecLocal = allocLocal(fctx, `__dynnew_svec_${fctx.locals.length}`, vecTy);
-      fctx.body.push({ op: "local.tee", index: vecLocal });
-      // capacity += vec.len (vec struct field 0)
+      fctx.body.push({ op: "local.set", index: vecLocal });
+      // capacity += vec.length (vec struct field 0)
+      fctx.body.push({ op: "local.get", index: capacityLocal });
+      fctx.body.push({ op: "local.get", index: vecLocal });
       fctx.body.push({ op: "struct.get", typeIdx: vecTy.typeIdx, fieldIdx: 0 });
       fctx.body.push({ op: "i32.add" });
-      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTy.typeIdx);
+      fctx.body.push({ op: "local.set", index: capacityLocal });
       const arrDef = arrTypeIdx >= 0 ? ctx.mod.types[arrTypeIdx] : undefined;
       const elemType: ValType = arrDef && arrDef.kind === "array" ? arrDef.element : { kind: "f64" };
-      spreadVecs.push({ local: vecLocal, vecTypeIdx: vecTy.typeIdx, arrTypeIdx, elemType });
+      materializedArgs.push({ kind: "spread", local: vecLocal, vecTypeIdx: vecTy.typeIdx, arrTypeIdx, elemType });
     }
-    fctx.body.push({ op: "i32.const", value: staticCount });
-    fctx.body.push({ op: "i32.add" }); // total capacity
+    fctx.body.push({ op: "local.get", index: capacityLocal });
     fctx.body.push({ op: "array.new_default", typeIdx: objVecArrTypeIdx });
     fctx.body.push({ op: "local.set", index: argvLocal });
     fctx.body.push({ op: "i32.const", value: 0 });
     fctx.body.push({ op: "local.set", index: argcLocal });
 
-    // Pass 2 — append every arg into argv in source order.
-    let spreadIdx = 0;
-    for (const arg of rawArgs) {
-      if (!ts.isSpreadElement(arg)) {
-        // argv[argc++] = box(arg)
+    // Pass 2 — append the retained values/vec elements in source order. No
+    // source expression is re-evaluated in this pass.
+    for (const materialized of materializedArgs) {
+      if (materialized.kind === "value") {
+        // argv[argc++] = retained boxed positional value
         fctx.body.push({ op: "local.get", index: argvLocal });
         fctx.body.push({ op: "local.get", index: argcLocal });
-        const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
-        if (aTy && aTy.kind !== "externref") coerceType(ctx, fctx, aTy, { kind: "externref" });
-        else if (aTy === null) fctx.body.push({ op: "ref.null.extern" });
+        fctx.body.push({ op: "local.get", index: materialized.local });
         fctx.body.push({ op: "array.set", typeIdx: objVecArrTypeIdx });
         bumpI32Local(fctx, argcLocal);
         continue;
       }
-      const sv = spreadVecs[spreadIdx++]!;
-      if (sv.arrTypeIdx < 0) continue;
+      const sv = materialized;
       // len = svec.len ; data = svec.data ; j = 0
       const jLocal = allocLocal(fctx, `__dynnew_j_${fctx.locals.length}`, { kind: "i32" });
       const lenLocal = allocLocal(fctx, `__dynnew_slen_${fctx.locals.length}`, { kind: "i32" });
@@ -2460,10 +2516,37 @@ function emitDynamicNewFallback(
     fctx.body.push({ op: "call", funcIdx: finalArrNew });
     const ccArgvLocal = allocLocal(fctx, `__dynnew_ccargv_${fctx.locals.length}`, { kind: "externref" });
     fctx.body.push({ op: "local.set", index: ccArgvLocal });
-    for (const aLocal of argLocals) {
-      fctx.body.push({ op: "local.get", index: ccArgvLocal });
-      fctx.body.push({ op: "local.get", index: aLocal });
-      fctx.body.push({ op: "call", funcIdx: finalArrPush });
+    if (useRuntimeArgv) {
+      const ccIdxLocal = allocLocal(fctx, `__dynnew_ccidx_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "i32.const", value: 0 });
+      fctx.body.push({ op: "local.set", index: ccIdxLocal });
+      const copyLoop: Instr[] = [
+        { op: "local.get", index: ccIdxLocal },
+        { op: "local.get", index: argcLocal },
+        { op: "i32.ge_s" },
+        { op: "br_if", depth: 1 },
+        { op: "local.get", index: ccArgvLocal },
+        { op: "local.get", index: argvLocal },
+        { op: "local.get", index: ccIdxLocal },
+        { op: "array.get", typeIdx: objVecArrTypeIdx },
+        { op: "call", funcIdx: finalArrPush },
+        { op: "local.get", index: ccIdxLocal },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.set", index: ccIdxLocal },
+        { op: "br", depth: 0 },
+      ];
+      fctx.body.push({
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [{ op: "loop", blockType: { kind: "empty" }, body: copyLoop }],
+      });
+    } else {
+      for (const aLocal of argLocals) {
+        fctx.body.push({ op: "local.get", index: ccArgvLocal });
+        fctx.body.push({ op: "local.get", index: aLocal });
+        fctx.body.push({ op: "call", funcIdx: finalArrPush });
+      }
     }
     // The callee descriptor (anyref) → externref for the bridge's first param.
     fctx.body.push({ op: "local.get", index: descLocal });
@@ -2496,6 +2579,17 @@ function emitDynamicNewFallback(
     const savedBase = fctx.body;
     fctx.body = base;
     emitTaDynCtorConstructFromLocals(ctx, fctx, descLocal, argLocals);
+    fctx.body = savedBase;
+    noMatchBase = base;
+  } else if (noJsHost(ctx) && useRuntimeArgv) {
+    // A runtime value that matches no compiled class tag has no [[Construct]].
+    // Throw a real, catchable TypeError in host-free targets instead of
+    // silently returning null. The host lane reaches the bridge above, whose
+    // Reflect.construct probe provides the same IsConstructor semantics.
+    const base: Instr[] = [];
+    const savedBase = fctx.body;
+    fctx.body = base;
+    emitThrowTypeError(ctx, fctx, "is not a constructor");
     fctx.body = savedBase;
     noMatchBase = base;
   } else {
