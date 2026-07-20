@@ -94,6 +94,13 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { dirname, resolve } from "node:path";
 import { Script, createContext } from "node:vm";
 import { compile } from "./compiler-bundle.mjs";
+import { LANDING_BENCHMARK_PROGRAMS } from "./lib/landing-benchmark-corpus.mjs";
+import {
+  LANDING_WASMTIME_COMPILE_OPTIONS,
+  LANDING_WASM_OPT_ARGS,
+  landingWasmtimeCompileArgs,
+  landingWasmtimeRunArgs,
+} from "./lib/landing-wasmtime-runtime.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PROGRAMS_DIR = resolve(ROOT, "website", "public", "benchmarks", "competitive", "programs");
@@ -113,19 +120,12 @@ const WASMTIME_COLD_HOST_BIN = resolve(
 const RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "wasm-host-wasmtime-hot-runtime.json");
 const PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "wasm-host-wasmtime-hot-runtime.json");
 
-// `object-ops` excluded: js2wasm emits the modern exception-handling
-// proposal for object literal lookups, which Cranelift in wasmtime 35
-// parses but doesn't yet compile.
-const PROGRAMS = [
-  { id: "fib", label: "Fibonacci loop" },
-  { id: "fib-recursive", label: "Fibonacci recursion" },
-  { id: "array-sum", label: "Array fill + sum" },
-  { id: "string-hash", label: "String build + hash" },
-];
+// The shared manifest deliberately excludes object-ops: it is not landing
+// scope, and the existing Wasmtime compatibility path cannot compile its
+// modern exception-handling use.
 
 const WARMUP_RUNS = 2;
 const MEASURED_RUNS = 7;
-const WASMTIME_FEATURES = ["-W", "gc=y", "-W", "function-references=y"];
 
 // #1760: in-process repeated-measure warm driver.
 //
@@ -302,7 +302,7 @@ async function compileProgram(id) {
   // (instead of the previous Interpreter-class ~63ms). The optimizer is also
   // a no-op when wasm-opt isn't available — `compile` returns the unoptimized
   // binary plus a warning we surface below.
-  const result = await compile(source, { fileName: `${id}.js`, target: "wasi", nativeStrings: true, optimize: 3 });
+  const result = await compile(source, { fileName: `${id}.js`, ...LANDING_WASMTIME_COMPILE_OPTIONS });
   if (!result.success) {
     throw new Error(`Failed to compile ${id}: ${result.errors?.[0]?.message ?? "unknown error"}`);
   }
@@ -332,9 +332,7 @@ async function compileProgram(id) {
   const warmSource = programBody + "\n" + WARM_DRIVER_SOURCE;
   const warmResult = await compile(warmSource, {
     fileName: `${id}-warm.js`,
-    target: "wasi",
-    nativeStrings: true,
-    optimize: 3,
+    ...LANDING_WASMTIME_COMPILE_OPTIONS,
   });
   if (!warmResult.success) {
     throw new Error(`Failed to compile ${id} warm driver: ${warmResult.errors?.[0]?.message ?? "unknown error"}`);
@@ -360,7 +358,7 @@ async function compileProgram(id) {
 
 function precompile(wasmPath, label) {
   const cwasmPath = resolve(ARTIFACT_DIR, `${label}.cranelift.cwasm`);
-  const args = ["compile", ...WASMTIME_FEATURES, wasmPath, "-o", cwasmPath];
+  const args = landingWasmtimeCompileArgs(wasmPath, cwasmPath);
   execFileSync("wasmtime", args, { stdio: ["ignore", "pipe", "pipe"] });
   return cwasmPath;
 }
@@ -368,11 +366,9 @@ function precompile(wasmPath, label) {
 function normalizeWasmForWasmtime(wasmPath, label) {
   const normalizedPath = resolve(ARTIFACT_DIR, `${label}.wasmtime.wasm`);
   try {
-    execFileSync(
-      WASM_OPT_PATH,
-      ["--all-features", "--disable-custom-descriptors", "-O3", wasmPath, "-o", normalizedPath],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
+    execFileSync(WASM_OPT_PATH, [...LANDING_WASM_OPT_ARGS, wasmPath, "-o", normalizedPath], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     return normalizedPath;
   } catch (err) {
     const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr).slice(0, 400) : String(err);
@@ -564,7 +560,7 @@ function timeWasmtimeFreshInstance(hostPath, wasmPath, arg, runs, options = {}) 
  * by subtracting two noisy full-process wall-times).
  */
 function timeWasmtimeWarmIter(cwasmPath, arg, outerRuns) {
-  const cmdArgs = ["run", "--allow-precompiled", ...WASMTIME_FEATURES, "--invoke", "warm", cwasmPath, String(arg)];
+  const cmdArgs = landingWasmtimeRunArgs(cwasmPath, "warm", arg);
   const samplesMs = [];
   for (let i = 0; i < outerRuns; i++) {
     const r = spawnSync("wasmtime", cmdArgs, { stdio: ["ignore", "pipe", "pipe"] });
@@ -688,7 +684,7 @@ async function main() {
 
   const rows = [];
 
-  for (const program of PROGRAMS) {
+  for (const program of LANDING_BENCHMARK_PROGRAMS) {
     process.stdout.write(`\n[${program.id}] compiling... `);
     const { sourcePath, wasmPath, warmWasmPath } = await compileProgram(program.id);
     const runtimeArg = readRuntimeArg(sourcePath);

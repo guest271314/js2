@@ -13,8 +13,8 @@ reasoning_effort: max
 task_type: performance
 area: benchmarking, ir, codegen-linear, website, ci
 goal: backend-agnostic-ir
-depends_on: [3482]
-related: [1760, 1764, 3288, 3336, 3482]
+depends_on: [3482, 3497]
+related: [1760, 1764, 3288, 3336, 3482, 3497]
 assignee: ttraenkler/sendev-3498
 origin: "2026-07-20 user request to implement the landing-page four-lane backend benchmark"
 ---
@@ -69,18 +69,18 @@ skipped-success, empty-success, and numeric-zero sentinel cells are invalid.
 
 ## Acceptance criteria
 
-- [ ] The four canonical source files are the sole corpus, with asserted bytes,
+- [x] The four canonical source files are the sole corpus, with asserted bytes,
       hashes, Node oracles, and no source substitution or silent omission.
-- [ ] Node/V8 and JS2 WasmGC/Wasmtime execute all four kernels correctly.
-- [ ] Both Porffor routes execute `fib` and `fib-recursive`, or a concrete
+- [x] Node/V8 and JS2 WasmGC/Wasmtime execute all four kernels correctly.
+- [x] Both Porffor routes execute `fib` and `fib-recursive`, or a concrete
       compiler defect is represented by an explicit blocked cell and planned
       follow-up after any safe minimal fix is considered.
-- [ ] Arrays and strings are probed through both Porffor routes and are either
+- [x] Arrays and strings are probed through both Porffor routes and are either
       correct measurements or explicit evidence-backed blocked cells with
       follow-up issues.
-- [ ] Focused `tests/issue-3498*.test.ts` cover schema completeness, exact-source
+- [x] Focused `tests/issue-3498*.test.ts` cover schema completeness, exact-source
       identity, output equality, unsupported semantics, and sanitizer authority.
-- [ ] Documentation discloses frontend, ABI, runtime, optimizer, allocator, and
+- [x] Documentation discloses frontend, ABI, runtime, optimizer, allocator, and
       measurement confounders; the manual workflow retains full artifacts and
       applies no speed threshold.
 
@@ -92,5 +92,43 @@ slice, branch/claim workflow, and non-draft upstream PR handoff.
 
 ## Implementation notes
 
-Pending current-main probes. Record root causes, safe generalizations, support
-evidence, tests, and follow-up issue IDs here before handoff.
+Current-main legality and implementation evidence:
+
+- Exact Node oracles match the pinned hashes, byte counts, cold inputs, runtime
+  inputs, and additional fixed inputs in the shared corpus descriptor.
+- JS2 WasmGC executes all four sources under Wasmtime/Cranelift when the
+  existing landing compatibility path is selected consistently with
+  `experimentalIR:false`. The helper shared with
+  `generate-wasmtime-hot-runtime.mjs` records the feature, normalization,
+  precompile, and run commands.
+- `compile(target:"linear", allocator:"analysis-stack", fileName:<exact path>)`
+  selects no `run` function on current main. `fib`, `array-sum`, and
+  `string-hash` reject `run` as `select:return-type-not-resolvable`;
+  `fib-recursive` rejects both `fib` and `run` with the same code.
+  `string-hash` additionally reports direct-codegen unsupported `.charAt()` and
+  `.charCodeAt()` diagnostics. The first backend-neutral gap is JSDoc
+  `@returns {number}` recovery, exclusively owned by #3497; this issue does not
+  edit `src/ir/select.ts` or duplicate that fix.
+- #3497 is proposed in PR #3446 (reported head `383d6b146`). Its current probe
+  enables exact-source `fib` selection; `fib-recursive` then remains blocked by
+  the unannotated internal `fib`, `array-sum` reaches empty-array element
+  inference, and `string-hash` reaches the existing string-method gaps. #3498
+  remains based on current-main behavior until that PR lands, then re-probes
+  the landed code rather than cherry-picking the dependency.
+- Pinned plain `porf c --module -O1` succeeds for all four exact files. Untouched
+  C sizes are respectively 182500, 183257, 211942, and 188200 bytes. Optimized
+  Clang executables match all Node outputs. Separate ASan/UBSan probes reproduce
+  a misaligned `f64` store in every plain-Porffor row, so all optimized values
+  are classified UB-contaminated and non-authoritative.
+- The additive generic #3482 adapter parameterizes only the exported unary
+  function and source parameter. The canary wrapper retains its exact index,
+  ABI assertions, safety checks, command model, hashes, and tests.
+
+Why the native JS2 cells are blocked instead of patched here: without a
+selected source-derived function there is no typed SSA or shared
+`LinearMemoryPlan` to lower. Fabricating or reparsing one in the benchmark
+would silently change the requested lane and duplicate #3497. The 16-cell
+schema therefore retains each rejection and points to #3497. Arrays and strings
+are still probed through both native routes; any post-#3497 legality gaps will
+be allocated from those concrete follow-on diagnostics rather than guessed in
+this PR.

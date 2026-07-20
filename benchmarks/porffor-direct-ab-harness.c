@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/resource.h>
 #include <time.h>
 
@@ -31,6 +33,21 @@ static uint64_t js2_ab_peak_rss_bytes(void) {
 int main(int argc, char **argv) {
   volatile int stack_anchor = 0;
   js2_ab_init(argc, argv, (void *)&stack_anchor);
+
+  // #3498 reuses the exact #3482 ABI/harness object for correctness probes.
+  // Arguments select four deterministic oracle inputs; the no-argument path
+  // below remains byte-for-byte equivalent in behavior for #3482.
+  if (argc == 6 && strcmp(argv[1], "--landing-probe") == 0) {
+    const double input0 = strtod(argv[2], NULL);
+    const double input1 = strtod(argv[3], NULL);
+    const double input2 = strtod(argv[4], NULL);
+    const double input3 = strtod(argv[5], NULL);
+    printf(
+        "{\"fixedOutputs\":[%.17g,%.17g,%.17g,%.17g],\"peakRssBytes\":%llu}\n",
+        js2_ab_kernel(input0), js2_ab_kernel(input1), js2_ab_kernel(input2), js2_ab_kernel(input3),
+        (unsigned long long)js2_ab_peak_rss_bytes());
+    return 0;
+  }
 
   const double fixed0 = js2_ab_kernel(-7.0);
   const double fixed1 = js2_ab_kernel(0.0);
