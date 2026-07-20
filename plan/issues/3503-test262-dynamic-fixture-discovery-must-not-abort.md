@@ -1,5 +1,5 @@
 ---
-id: 3497
+id: 3503
 title: "Test262 dynamic fixture discovery must not abort the corpus"
 status: done
 completed: 2026-07-20
@@ -22,7 +22,7 @@ files:
   - tests/test262-oracle-version.ts
 ---
 
-# #3497 — Test262 dynamic fixture discovery must not abort the corpus
+# #3503 — Test262 dynamic fixture discovery must not abort the corpus
 
 ## Problem
 

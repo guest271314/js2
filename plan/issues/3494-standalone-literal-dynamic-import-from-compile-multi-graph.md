@@ -17,6 +17,9 @@ files:
   - src/compiler.ts
   - src/codegen/expressions/calls.ts
   - tests/issue-3494-standalone-literal-dynamic-import.test.ts
+loc-budget-allow:
+  - src/compiler.ts
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3494 — Standalone `compileMulti` must resolve literal dynamic imports from its module graph
