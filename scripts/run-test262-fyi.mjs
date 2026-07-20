@@ -151,6 +151,7 @@ function normalizeWorkerResult(result) {
     pass: result.status === "pass",
     phase: resultPhase(result),
     ...(result.status === "pass" ? {} : { detail: result.error ?? result.status }),
+    reachedTest: result.reachedTest === true,
     output: [],
   };
 }
@@ -270,6 +271,7 @@ export class FyiSourceExecutor {
         target,
         ...options,
         ...(test.entryFile && test.fixtureFiles ? { entryFile: test.entryFile, fixtureFiles: test.fixtureFiles } : {}),
+        ...(test.dynamicFixtureFiles ? { dynamicFixtureFiles: test.dynamicFixtureFiles } : {}),
       });
     });
 

@@ -3,7 +3,7 @@
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, fixtureFiles?, entryFile? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
@@ -1039,6 +1039,15 @@ function hasFixtureGraph(fixtureFiles) {
   );
 }
 
+function hasDynamicFixtureGraph(dynamicFixtureFiles) {
+  return (
+    dynamicFixtureFiles &&
+    typeof dynamicFixtureFiles === "object" &&
+    !Array.isArray(dynamicFixtureFiles) &&
+    Object.keys(dynamicFixtureFiles).length > 0
+  );
+}
+
 async function doCompile(
   source,
   sourceMapUrl,
@@ -1436,6 +1445,21 @@ process.on("message", async (msg) => {
   const target = compileTargetFromMessage(msg.target);
   const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
   const compileStart = performance.now();
+
+  // #3492 — A literal dynamic Test262 fixture import is a real module-loader
+  // dependency, not a static compileMulti edge. The standalone backend has no
+  // host loader yet (#3494), so reject it explicitly instead of dropping the
+  // fixture and allowing the entry's `$DONE` to manufacture a false pass.
+  if (target === "standalone" && hasDynamicFixtureGraph(msg.dynamicFixtureFiles)) {
+    sendResult({
+      id,
+      status: "compile_error",
+      error: "standalone literal dynamic fixture import is unsupported (#3494)",
+      compileMs: performance.now() - compileStart,
+      reachedTest: false,
+    });
+    return;
+  }
 
   let result;
   try {
