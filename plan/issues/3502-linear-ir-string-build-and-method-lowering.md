@@ -1,7 +1,7 @@
 ---
 id: 3502
 title: "Lower landing string construction and char methods through shared IR"
-status: in-progress
+status: in-review
 sprint: current
 created: 2026-07-20
 updated: 2026-07-20
@@ -166,9 +166,10 @@ proves the formerly blocked string cell independently of benchmark timing.
   `[0, 96500, 36729899, 862771296]`.
 - `JS2WASM_PORFFOR_ROOT=<this-worktree>/vendor/Porffor
   PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run
-  tests/issue-3502-string-hash-four-lane.test.ts` — 3/3 passed. Clang used
-  combined ASan/UBSan; both exact-source and ASCII method executables exited
-  zero with no sanitizer diagnostics.
+  tests/issue-3502-string-hash-four-lane.test.ts` — 3/3 passed on merged HEAD
+  `10a01a0d1` in 11.98 seconds. The native assertion passed in 2.179 seconds.
+  Clang used combined ASan/UBSan; both exact-source and ASCII method
+  executables exited zero with no sanitizer diagnostics.
 - ASCII method execution agrees across Node, WasmGC, linear Wasm, and native C
   for indices `[-1, 0, 1, 2]` plus omitted index, producing
   `[777, 1065, 1122, 777, 1065]` and covering empty-string versus `NaN` bounds.
@@ -178,9 +179,20 @@ proves the formerly blocked string cell independently of benchmark timing.
 - Focused #3502 plus native-string regressions — 100/100 passed. Adjacent
   backend-contract, linear, layout, encoding, and #2134 coverage — 58/58
   passed.
-- `pnpm run typecheck`, touched-file formatting, `pnpm run lint`,
-  `check:pushraw`, `check:ir-fallbacks`, `check:linear-ir`,
-  `check:stack-balance`, and `check:issue-spec-coverage` passed before the final
-  runner-base merge. The same focused acceptance and repository gates are
-  rerun on the merged head before publication; no full local Test262 run is
-  required for this issue.
+- The landed #3498 native-route support probe passes with all four JS2 native
+  cells supported and sanitizer-clean after updating its formerly-blocked
+  #3502 expectation. The full adjacent runner file otherwise passes 11/12
+  locally; its capture-resume case stops at the intentional toolchain guard
+  because local Rust is 1.93.1 while the runner pins 1.94.1.
+- `pnpm run typecheck`, `pnpm run lint`, and `pnpm run format:check` passed on
+  the merged head.
+- `check:pushraw`, `check:ir-fallbacks`, `check:linear-ir`,
+  `check:stack-balance`, `check:issue-spec-coverage`, `check:issues`,
+  `check:issue-ids:against-main`, and `check:loc-budget` passed. Linear IR
+  improved to 10 compiled units from the baseline 8; pushRaw has six fewer
+  call sites and no additions.
+- `check:godfiles` reports five landed-main regressions in
+  `src/codegen/expressions/calls.ts`, `src/codegen/index.ts`,
+  `src/codegen/object-runtime.ts`, and `src/codegen/array-methods.ts`. None of
+  those files differs in the #3502 change set versus `origin/main`; the issue
+  does not refresh the shared profile. No full local Test262 run was required.

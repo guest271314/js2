@@ -553,8 +553,7 @@ describe("#3498 landing four-lane backend benchmark", () => {
           });
         }
       } else {
-        // #3499, #3500, and #3501 are now landed prerequisites; strings retain
-        // their independently allocated backend gap.
+        // #3499, #3500, #3501, and #3502 are now landed prerequisites.
         expect(js2Cells).toMatchObject([
           {
             programId: "fib",
@@ -576,11 +575,12 @@ describe("#3498 landing four-lane backend benchmark", () => {
           },
           {
             programId: "string-hash",
-            status: "unsupported",
-            diagnostic: { phase: "js2-linear-ir-build", code: "build", followUpIssue: 3502 },
+            status: "supported",
+            diagnostic: null,
+            sanitizer: { status: "clean", authority: "authoritative" },
           },
         ]);
-        for (const [index, cell] of js2Cells.slice(0, 3).entries()) {
+        for (const [index, cell] of js2Cells.entries()) {
           expect(cell.validation?.actualOutputs).toEqual(result.programs[index]!.expectedFixedOutputs);
         }
       }
