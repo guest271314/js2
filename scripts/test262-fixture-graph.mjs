@@ -92,7 +92,7 @@ export function dynamicFixtureSpecifiers(source) {
   return [...new Set(specifiers)];
 }
 
-function resolveFixture(testRoot, importerPath, specifier) {
+function resolveFixture(testRoot, importerPath, specifier, required = true) {
   if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
     throw new Error(`fixture specifier must be relative in ${importerPath}: ${specifier}`);
   }
@@ -104,10 +104,11 @@ function resolveFixture(testRoot, importerPath, specifier) {
   if (!fixturePath.endsWith("_FIXTURE.js")) {
     throw new Error(`invalid Test262 fixture path in ${importerPath}: ${specifier}`);
   }
-  if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) {
+  const exists = fs.existsSync(absolute) && fs.statSync(absolute).isFile();
+  if (required && !exists) {
     throw new Error(`missing Test262 fixture imported by ${importerPath}: ${specifier}`);
   }
-  return { absolute, fixturePath };
+  return { absolute, fixturePath, exists };
 }
 
 /**
@@ -125,8 +126,13 @@ export function discoverFixtureGraph(testPath, entrySource) {
 
   const visit = (importerPath, source) => {
     for (const specifier of dynamicFixtureSpecifiers(source)) {
-      const { absolute, fixturePath } = resolveFixture(testRoot, importerPath, specifier);
-      dynamicFixtureFiles[`./${fixturePath}`] = fs.readFileSync(absolute, "utf8");
+      const { absolute, fixturePath, exists } = resolveFixture(testRoot, importerPath, specifier, false);
+      // Dynamic imports are runtime edges, not eager compileMulti inputs. Some
+      // parse-negative Test262 cases intentionally name a conventional
+      // `empty_FIXTURE.js` which is absent because evaluation must never be
+      // reached. Preserve the edge for standalone's honest #3494 verdict, but
+      // do not let an unevaluated target abort discovery of the whole corpus.
+      dynamicFixtureFiles[`./${fixturePath}`] = exists ? fs.readFileSync(absolute, "utf8") : null;
     }
 
     for (const specifier of staticFixtureSpecifiers(source)) {

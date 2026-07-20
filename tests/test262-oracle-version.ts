@@ -201,7 +201,9 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "now share recursive static fixture discovery. Literal dynamic fixture " +
       "imports are inventoried separately and fail explicitly on standalone " +
       "until #3494 supplies an in-module loader; they are never promoted to eager " +
-      "static edges. Rows whose missing fixtures manufactured passes are " +
+      "static edges. Parse-negative dynamic imports reach syntax checking before " +
+      "that loader policy, including conventional absent targets which evaluation " +
+      "must never reach. Rows whose missing fixtures manufactured passes are " +
       "intentionally reclassified and require an ORACLE_REBASE baseline refresh.",
   },
 ];

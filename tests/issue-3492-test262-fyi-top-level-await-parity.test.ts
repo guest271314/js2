@@ -14,6 +14,8 @@ import { loadOriginalHarnessTests } from "../scripts/test262-fyi-reader.mjs";
 const TEST_ROOT = join(import.meta.dirname, "..", "test262", "test");
 const DYNAMIC_TLA_PATH = "language/module-code/top-level-await/module-graphs-does-not-hang.js";
 const PENDING_CYCLE_PATH = "language/module-code/top-level-await/pending-async-dep-from-cycle.js";
+const MISSING_DYNAMIC_PARSE_PATH =
+  "language/expressions/dynamic-import/import-attributes/2nd-param-yield-ident-invalid.js";
 
 function upstreamSource(path: string): string {
   return readFileSync(join(TEST_ROOT, path), "utf8");
@@ -57,6 +59,24 @@ describe("#3492 — honest Test262 fixture graph parity", () => {
     expect(Object.keys(graph.dynamicFixtureFiles)).toEqual([
       "./language/module-code/top-level-await/module-graphs-grandparent-tla_FIXTURE.js",
     ]);
+  });
+
+  it("inventories an absent dynamic target without aborting corpus discovery", () => {
+    const graph = discoverFixtureGraph(MISSING_DYNAMIC_PARSE_PATH, upstreamSource(MISSING_DYNAMIC_PARSE_PATH));
+
+    expect(graph.fixtureFiles).toEqual({});
+    expect(graph.dynamicFixtureFiles).toEqual({
+      "./language/expressions/dynamic-import/import-attributes/empty_FIXTURE.js": null,
+    });
+  });
+
+  it("scores a parse-negative dynamic import before standalone loader policy", { timeout: 60_000 }, async () => {
+    const [test] = await loadOriginalHarnessTests([MISSING_DYNAMIC_PARSE_PATH]);
+    const results = await Promise.all([runTest(test, "gc"), runTest(test, "standalone")]);
+
+    for (const result of results) {
+      expect(result).toMatchObject({ pass: true, phase: "compile", reachedTest: false });
+    }
   });
 
   it("executes a bare-import fixture side effect before accepting completion", { timeout: 60_000 }, async () => {

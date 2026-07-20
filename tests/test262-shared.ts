@@ -646,7 +646,11 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
             // Multi-file compilation for FIXTURE imports (handled in-process)
             const fixtureGraph = resolveFixtureGraph(source, filePath);
-            if (TEST262_TARGET === "standalone" && Object.keys(fixtureGraph.dynamicFixtureFiles).length > 0) {
+            if (
+              TEST262_TARGET === "standalone" &&
+              !isNegative &&
+              Object.keys(fixtureGraph.dynamicFixtureFiles).length > 0
+            ) {
               recordResult(
                 relPath,
                 category,

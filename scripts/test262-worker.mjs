@@ -1450,7 +1450,10 @@ process.on("message", async (msg) => {
   // dependency, not a static compileMulti edge. The standalone backend has no
   // host loader yet (#3494), so reject it explicitly instead of dropping the
   // fixture and allowing the entry's `$DONE` to manufacture a false pass.
-  if (target === "standalone" && hasDynamicFixtureGraph(msg.dynamicFixtureFiles)) {
+  // Parse/early/resolution-negative sources must still reach the compiler:
+  // their import expression is never evaluated, and rejecting it here would
+  // replace the expected syntax verdict with an unrelated loader failure.
+  if (target === "standalone" && !isNegative && hasDynamicFixtureGraph(msg.dynamicFixtureFiles)) {
     sendResult({
       id,
       status: "compile_error",
