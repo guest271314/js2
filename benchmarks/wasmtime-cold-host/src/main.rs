@@ -51,12 +51,17 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    if env::args().nth(1).as_deref() == Some("--version") {
+        println!("wasmtime {}", wasmtime_environ::VERSION);
+        return Ok(());
+    }
     let options = parse_args()?;
     let arg_i32: i32 = options.arg_text.parse()?;
     let arg_f64: f64 = options.arg_text.parse()?;
 
     let mut config = Config::new();
     config.wasm_component_model(true);
+    config.wasm_exceptions(true);
     config.wasm_function_references(true);
     config.wasm_gc(true);
 

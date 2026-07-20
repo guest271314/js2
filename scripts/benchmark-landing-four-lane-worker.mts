@@ -32,18 +32,19 @@ interface WorkerArguments {
   readonly lane: WorkerLane;
   readonly programId: string;
   readonly outputDirectory: string;
+  readonly mode: "support-probe" | "measured-build";
 }
 
 const args = parseArguments(process.argv.slice(2));
 await run(args);
 
 function parseArguments(argv: readonly string[]): WorkerArguments {
-  if (argv.length !== 6) throw new Error(usage());
+  if (argv.length !== 6 && argv.length !== 8) throw new Error(usage());
   const values = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index]!;
     const value = argv[index + 1]!;
-    if (!["--lane", "--program", "--output"].includes(flag) || values.has(flag) || value.startsWith("--")) {
+    if (!["--lane", "--program", "--output", "--mode"].includes(flag) || values.has(flag) || value.startsWith("--")) {
       throw new Error(usage());
     }
     values.set(flag, value);
@@ -52,10 +53,15 @@ function parseArguments(argv: readonly string[]): WorkerArguments {
   if (lane !== "wasm" && lane !== "js2" && lane !== "plain") {
     throw new Error(`unknown benchmark worker lane ${String(lane)}`);
   }
+  const mode = values.get("--mode") ?? "support-probe";
+  if (mode !== "support-probe" && mode !== "measured-build") {
+    throw new Error(`unknown benchmark worker mode ${mode}`);
+  }
   return {
     lane,
     programId: values.get("--program")!,
     outputDirectory: resolve(values.get("--output")!),
+    mode,
   };
 }
 
@@ -78,21 +84,34 @@ async function run(options: WorkerArguments): Promise<void> {
   const started = performance.now();
 
   if (options.lane === "plain") {
-    const rawCliPath = join(options.outputDirectory, "porffor-cli-raw.c");
-    const rawCliCommand = [join(porfforRoot, "porf"), "c", "--module", "-O1", source.path, rawCliPath];
-    const rawCli = spawnSync(rawCliCommand[0], rawCliCommand.slice(1), {
-      cwd: resolve("."),
-      encoding: "utf8",
-      maxBuffer: 128 * 1024 * 1024,
-    });
-    if (rawCli.status !== 0) {
-      throw new Error(`plain Porffor CLI failed: ${rawCli.stderr || String(rawCli.error ?? "")}`);
-    }
-    const rawCliBytes = statSync(rawCliPath).size;
-    if (rawCliBytes !== program.plainPorfforCliCBytes) {
-      throw new Error(
-        `${program.id} plain Porffor CLI C size changed: expected ${program.plainPorfforCliCBytes}, received ${rawCliBytes}`,
-      );
+    let porfforCompilationCount = 0;
+    let exactCliProvenance: Readonly<Record<string, unknown>> = {};
+    if (options.mode === "support-probe") {
+      const rawCliPath = join(options.outputDirectory, "porffor-cli-raw.c");
+      const rawCliCommand = [join(porfforRoot, "porf"), "c", "--module", "-O1", source.path, rawCliPath];
+      const rawCli = spawnSync(rawCliCommand[0], rawCliCommand.slice(1), {
+        cwd: resolve("."),
+        encoding: "utf8",
+        maxBuffer: 128 * 1024 * 1024,
+      });
+      if (rawCli.status !== 0) {
+        throw new Error(`plain Porffor CLI failed: ${rawCli.stderr || String(rawCli.error ?? "")}`);
+      }
+      porfforCompilationCount++;
+      const rawCliBytes = statSync(rawCliPath).size;
+      if (rawCliBytes !== program.plainPorfforCliCBytes) {
+        throw new Error(
+          `${program.id} plain Porffor CLI C size changed: expected ${program.plainPorfforCliCBytes}, received ${rawCliBytes}`,
+        );
+      }
+      exactCliProvenance = {
+        exactCliCommand: rawCliCommand,
+        exactCliArtifact: {
+          path: basename(rawCliPath),
+          bytes: rawCliBytes,
+          sha256: sha256Hex(readFileSync(rawCliPath)),
+        },
+      };
     }
     const direct = await compileDirectPorfforProgram({
       sourcePath: source.path,
@@ -103,6 +122,10 @@ async function run(options: WorkerArguments): Promise<void> {
       functionName: program.functionName,
       sourceParameterName: program.sourceParameterName,
     });
+    porfforCompilationCount++;
+    if (options.mode === "measured-build" && porfforCompilationCount !== 1) {
+      throw new Error(`measured plain Porffor build compiled ${porfforCompilationCount} times`);
+    }
     const wrapperC = wrapperForDirectRow({
       gc: true,
       functionSymbol: direct.functionSymbol,
@@ -118,16 +141,15 @@ async function run(options: WorkerArguments): Promise<void> {
       compilePhasesMs: direct.compilePhasesMs,
       commandProvenance: {
         frontend: "pinned-plain-porffor",
+        workerMode: options.mode,
+        porfforCompilationCount,
         directPorfforArgumentModel: direct.commandModel,
-        exactCliCommand: rawCliCommand,
-        exactCliArtifact: {
-          path: basename(rawCliPath),
-          bytes: rawCliBytes,
-          sha256: sha256Hex(readFileSync(rawCliPath)),
-        },
+        ...exactCliProvenance,
         compatibilityNormalizations: direct.compatibilityNormalizations,
         generatedAccesses:
-          "untouched CLI C is retained; the link adapter suppresses only main before render, preserves generated accesses, and changes only the disclosed LP64 printf compatibility cast",
+          options.mode === "support-probe"
+            ? "untouched CLI C is retained; the link adapter suppresses only main before render, preserves generated accesses, and changes only the disclosed LP64 printf compatibility cast"
+            : "single measured compiler+adapter invocation suppresses only main before render, preserves generated accesses, and changes only the disclosed LP64 printf compatibility cast; evidence-only CLI compilation is excluded",
       },
       renderedPath,
       wrapperPath,
@@ -448,5 +470,5 @@ function followUpForNativeBlock(reason: string | undefined, evidence: readonly s
 }
 
 function usage(): string {
-  return "usage: benchmark-landing-four-lane-worker.mts --lane <wasm|js2|plain> --program <id> --output <dir>";
+  return "usage: benchmark-landing-four-lane-worker.mts --lane <wasm|js2|plain> --program <id> --output <dir> [--mode <support-probe|measured-build>]";
 }

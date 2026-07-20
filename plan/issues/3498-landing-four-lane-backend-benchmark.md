@@ -13,8 +13,8 @@ reasoning_effort: max
 task_type: performance
 area: benchmarking, ir, codegen-linear, website, ci
 goal: backend-agnostic-ir
-depends_on: [3482, 3497]
-related: [1760, 1764, 3288, 3336, 3482, 3497, 3499, 3500, 3501, 3502]
+depends_on: [3482, 3497, 3499, 3500, 3501, 3502]
+related: [1760, 1764, 3288, 3336]
 assignee: ttraenkler/sendev-3498
 origin: "2026-07-20 user request to implement the landing-page four-lane backend benchmark"
 ---

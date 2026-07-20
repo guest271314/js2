@@ -1,22 +1,29 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
+import { validatePartialSampleSets } from "../scripts/benchmark-landing-four-lane.mjs";
 import { LANDING_BENCHMARK_PROGRAMS } from "../scripts/lib/landing-benchmark-corpus.mjs";
 import {
   LANDING_FOUR_LANE_IDS,
   LANDING_FOUR_LANE_MEASURED_ROUNDS,
   LANDING_FOUR_LANE_WARMUP_ROUNDS,
+  classifyLandingSanitizerExecution,
   validateLandingFourLaneResult,
   verifyLandingBenchmarkCorpus,
   type LandingFourLaneResult,
 } from "../scripts/lib/landing-four-lane-benchmark.mjs";
+import {
+  LANDING_FOUR_LANE_INNER_MEASURED_CALLS,
+  LANDING_FOUR_LANE_INNER_WARMUP_CALLS,
+  landingFourLaneWasmtimeMedianWarmDriverSource,
+} from "../scripts/lib/landing-wasmtime-runtime.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = mkdtempSync(join(tmpdir(), "js2-3498-"));
@@ -156,6 +163,8 @@ describe("#3498 landing four-lane backend benchmark", () => {
       canonical: false,
       warmupRounds: LANDING_FOUR_LANE_WARMUP_ROUNDS,
       measuredRounds: LANDING_FOUR_LANE_MEASURED_ROUNDS,
+      fingerprint: { algorithm: "sha256", digest: "a".repeat(64), inputs: { fixture: true } },
+      environment: coreResult.capture.environment,
     };
     expect(() => validateLandingFourLaneResult(nullBenchmark)).toThrow(
       /executable benchmark cell must carry timing samples/,
@@ -198,11 +207,236 @@ describe("#3498 landing four-lane backend benchmark", () => {
 
   it("keeps the manual canonical workflow in real benchmark mode", () => {
     const workflow = readFileSync(resolve(repoRoot, ".github/workflows/landing-four-lane-backend.yml"), "utf8");
+    const runner = readFileSync(resolve(repoRoot, "scripts/benchmark-landing-four-lane.mts"), "utf8");
     expect(workflow).toContain("--benchmark --canonical-ubuntu");
     expect(workflow).not.toContain("--probe --canonical-ubuntu");
     expect(workflow).toContain('"benchmarks/wasmtime-cold-host/**"');
     expect(workflow).toContain('"scripts/wasmtime-bench-child-js.mjs"');
     expect(workflow.match(/timeout-minutes: 90/g)).toHaveLength(2);
+    expect(workflow.match(/runs-on: ubuntu-24\.04/g)).toHaveLength(2);
+    expect(workflow.match(/node-version: "25\.7\.0"/g)).toHaveLength(2);
+    expect(workflow).toContain('WASMTIME_VERSION: "46.0.1"');
+    expect(readFileSync(resolve(repoRoot, "benchmarks/wasmtime-cold-host/Cargo.toml"), "utf8")).toContain(
+      'wasmtime = "=46.0.1"',
+    );
+    expect(readFileSync(resolve(repoRoot, "benchmarks/wasmtime-cold-host/src/main.rs"), "utf8")).toContain(
+      'println!("wasmtime {}", wasmtime_environ::VERSION)',
+    );
+    expect(runner).toContain('mkdtempSync(join(tmpdir(), "js2-3498-wasmtime-cold-host-")');
+    expect(runner).toContain("rmSync(setup.coldHostTemporaryDirectory, { recursive: true, force: true })");
+    expect(runner).not.toContain('join(setupRoot, "wasmtime-cold-host-target")');
+    expect(runner).toContain("artifacts: collectArtifactIdentities(cell.provenance)");
+    expect(runner).toContain("compilerRepository: gitRepositoryFingerprint(repoRoot, compilerPaths)");
+    expect(runner).toContain("expectedFixedOutputs: program.expectedFixedOutputs");
+    expect(runner).toContain('["diff", "--binary", "--no-ext-diff", "HEAD"');
+    expect(runner).toContain('["ls-files", "--others", "--exclude-standard"');
+    expect(runner).toContain("Wasmtime CLI/host engine mismatch");
+    expect(runner).toContain('osRelease: existsSync("/etc/os-release")');
+    expect(runner).toContain("runnerImageVersion: process.env.ImageVersion");
+    const setupIndex = runner.indexOf("const setup = await prepareCaptureSetup");
+    const fingerprintIndex = runner.indexOf("const captureFingerprint = createCaptureFingerprint", setupIndex);
+    const resumeIndex = runner.indexOf("const samples = loadPartialMeasurements", fingerprintIndex);
+    expect(setupIndex).toBeGreaterThan(0);
+    expect(fingerprintIndex).toBeGreaterThan(setupIndex);
+    expect(resumeIndex).toBeGreaterThan(fingerprintIndex);
+    expect(runner).toContain("binary: setup.coldHostBinary");
+    expect(runner).toContain("rustc: setup.rustcVersion");
+    expect(runner).toContain("cargo: setup.cargoVersion");
+  });
+
+  it("uses the same six-plus-nine median warm estimator for the Wasmtime lane", () => {
+    const source = landingFourLaneWasmtimeMedianWarmDriverSource();
+    expect(LANDING_FOUR_LANE_INNER_WARMUP_CALLS).toBe(6);
+    expect(LANDING_FOUR_LANE_INNER_MEASURED_CALLS).toBe(9);
+    expect(source.match(/const __started\d = performance\.now\(\);/g)).toHaveLength(9);
+    expect(source.match(/if \(__t\d > __t\d\)/g)).toHaveLength(36);
+    expect(source).toContain("return __t4;");
+    expect(source).not.toContain("__best");
+    const runner = readFileSync(resolve(repoRoot, "scripts/benchmark-landing-four-lane.mts"), "utf8");
+    expect(runner).toContain("landingFourLaneWasmtimeMedianWarmDriverSource()");
+    expect(runner).not.toContain("landingWasmtimeWarmDriverSource(5, 40)");
+  });
+
+  it("distinguishes sanitizer findings from infrastructure failures", () => {
+    expect(classifyLandingSanitizerExecution(0, "")).toBe("clean");
+    expect(classifyLandingSanitizerExecution(1, "runtime error: store to misaligned address")).toBe("finding");
+    expect(classifyLandingSanitizerExecution(1, "ERROR: AddressSanitizer: heap-use-after-free")).toBe("finding");
+    expect(() => classifyLandingSanitizerExecution(1, "dyld: missing library")).toThrow(/infrastructure error/);
+    expect(() => classifyLandingSanitizerExecution(0, "runtime error: recovered unexpectedly")).toThrow(
+      /infrastructure error/,
+    );
+  });
+
+  it("rejects structurally or semantically corrupt partial samples", async () => {
+    const program = (await verifyLandingBenchmarkCorpus(repoRoot))[0]!;
+    const cell = {
+      programId: program.id,
+      laneId: "v8-node-exact-source",
+      sourceSha256: program.sha256,
+    } as any;
+    const makeSamples = () => {
+      const build = Array.from(
+        { length: LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS },
+        (_, round) => ({
+          phase: round < LANDING_FOUR_LANE_WARMUP_ROUNDS ? "warmup" : "measured",
+          round,
+          order: 0,
+          wallNs: 1_000 + round,
+          cpuNs: null,
+          peakRssBytes: 4_096,
+          validatedOutput: null,
+          outputObservation: null,
+          commands: [[process.execPath, "--check", resolve(repoRoot, program.sourcePath)]],
+        }),
+      );
+      const startup = [
+        {
+          phase: "warmup",
+          round: 0,
+          order: 0,
+          wallNs: 2_000,
+          cpuNs: null,
+          peakRssBytes: 8_192,
+          validatedOutput: program.expectedFixedOutputs[3],
+          outputObservation: { commandIndex: 0, mechanism: "stdout-json" },
+          commands: [
+            [
+              process.execPath,
+              resolve(repoRoot, "scripts/wasmtime-bench-child-js.mjs"),
+              "--mode=single",
+              resolve(repoRoot, program.sourcePath),
+              String(program.runtimeArg),
+            ],
+          ],
+        },
+      ];
+      return new Map([[`${program.id}:v8-node-exact-source`, { build, startup, cold: [], warm: [] }]]) as any;
+    };
+    const validate = (samples: any) =>
+      validatePartialSampleSets(repoRoot, temporaryRoot, [program], [cell], samples, "startup", 0);
+    expect(() => validate(makeSamples())).not.toThrow();
+
+    const duplicateRound = makeSamples();
+    duplicateRound.values().next().value.build[1].round = 0;
+    expect(() => validate(duplicateRound)).toThrow(/unique contiguous prefix/);
+
+    const nonpositive = makeSamples();
+    nonpositive.values().next().value.build[0].wallNs = 0;
+    expect(() => validate(nonpositive)).toThrow(/wallNs must be positive finite/);
+
+    const synthetic = makeSamples();
+    synthetic.values().next().value.build[0].commands = [["synthetic-schema-fixture"]];
+    expect(() => validate(synthetic)).toThrow(/malformed or synthetic/);
+
+    const wrongOracle = makeSamples();
+    wrongOracle.values().next().value.startup[0].validatedOutput = 123;
+    expect(() => validate(wrongOracle)).toThrow(/runtime oracle/);
+
+    const detachedObservation = makeSamples();
+    detachedObservation.values().next().value.startup[0].outputObservation.commandIndex = 1;
+    expect(() => validate(detachedObservation)).toThrow(/not tied to the expected command/);
+  });
+
+  it("times native cold initialization plus its first call without changing warm/default setup", () => {
+    const harness = readFileSync(resolve(repoRoot, "benchmarks/porffor-direct-ab-harness.c"), "utf8");
+    const onceStart = harness.indexOf('strcmp(argv[1], "--landing-once")');
+    const warmStart = harness.indexOf('strcmp(argv[1], "--landing-warm")');
+    const onceBlock = harness.slice(onceStart, warmStart);
+    expect(onceStart).toBeGreaterThan(0);
+    expect(warmStart).toBeGreaterThan(onceStart);
+    expect(onceBlock.indexOf("wall_started")).toBeLessThan(onceBlock.indexOf("js2_ab_init"));
+    expect(onceBlock.indexOf("js2_ab_init")).toBeLessThan(onceBlock.indexOf("js2_ab_kernel"));
+    expect(harness).toContain("Keep warm, correctness-probe, and default #3482 timing behavior unchanged.");
+    expect(readFileSync(resolve(repoRoot, "scripts/benchmark-landing-four-lane.mts"), "utf8")).toContain(
+      'cold: "native-init-plus-call-wasmtime-46-fresh-store-v3"',
+    );
+  });
+
+  coreIt(
+    "refuses a partial capture whose fingerprint changed",
+    async () => {
+      if (!coreAvailable) throw new Error("LANDING_FOUR_LANE_REQUIRED=1 but Wasmtime/wasm-opt are unavailable");
+      coreResult ??= runProbe(coreOutput, true);
+      const executable = coreResult.cells.filter((cell) => cell.status !== "unsupported");
+      writeFileSync(
+        join(coreOutput, "partial-measurements.json"),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          phaseMethodology: {
+            build: "fresh-process-single-compiler-build-v2",
+            startup: "fresh-process-init-plus-first-call-v1",
+            cold: "native-init-plus-call-wasmtime-46-fresh-store-v3",
+            warm: "uniform-six-warmup-nine-call-median-v2",
+          },
+          captureFingerprint: { algorithm: "sha256", digest: "0".repeat(64), inputs: {} },
+          samples: Object.fromEntries(
+            executable.map((cell) => [
+              `${cell.programId}:${cell.laneId}`,
+              { build: [], startup: [], cold: [], warm: [] },
+            ]),
+          ),
+        })}\n`,
+      );
+      const executed = await spawnAsync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "scripts/benchmark-landing-four-lane.mts",
+          "--benchmark",
+          "--without-porffor",
+          "--output",
+          coreOutput,
+        ],
+        { cwd: repoRoot },
+      );
+      expect(executed.status).not.toBe(0);
+      expect(executed.stderr).toContain("partial capture fingerprint mismatch; refusing resume");
+      expect(executed.stderr).not.toContain("failed to build Wasmtime cold host");
+      rmSync(join(coreOutput, "partial-measurements.json"), { force: true });
+    },
+    240_000,
+  );
+
+  nativeIt("measures one plain-Porffor compiler invocation without the evidence-only CLI compile", () => {
+    if (!nativeAvailable) throw new Error("LANDING_FOUR_LANE_REQUIRED=1 but Porffor/Clang are unavailable");
+    const output = join(temporaryRoot, "plain-measured-worker");
+    const executed = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "scripts/benchmark-landing-four-lane-worker.mts",
+        "--lane",
+        "plain",
+        "--program",
+        "fib",
+        "--output",
+        output,
+        "--mode",
+        "measured-build",
+      ],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        maxBuffer: 128 * 1024 * 1024,
+        env: { ...process.env, JS2WASM_PORFFOR_ROOT: resolve(repoRoot, "vendor/Porffor") },
+      },
+    );
+    expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
+    const manifest = JSON.parse(readFileSync(join(output, "worker.json"), "utf8"));
+    expect(manifest).toMatchObject({
+      status: "supported",
+      source: { sha256: LANDING_BENCHMARK_PROGRAMS[0]!.sha256, bytes: LANDING_BENCHMARK_PROGRAMS[0]!.bytes },
+      commandProvenance: {
+        workerMode: "measured-build",
+        porfforCompilationCount: 1,
+        directPorfforArgumentModel: ["porf", "c", "--module", "-O1", expect.any(String), expect.any(String)],
+      },
+    });
+    expect(manifest.commandProvenance.exactCliCommand).toBeUndefined();
+    expect(existsSync(join(output, "porffor-cli-raw.c"))).toBe(false);
+    expect(existsSync(join(output, manifest.artifacts.laneC))).toBe(true);
   });
 
   nativeIt(
@@ -309,4 +543,26 @@ function runProbe(output: string, withoutPorffor: boolean): LandingFourLaneResul
 
 function clone(value: LandingFourLaneResult): any {
   return JSON.parse(JSON.stringify(value));
+}
+
+function spawnAsync(
+  command: string,
+  args: readonly string[],
+  options: { readonly cwd: string },
+): Promise<{ readonly status: number | null; readonly stdout: string; readonly stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { cwd: options.cwd, env: process.env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolvePromise({ status, stdout, stderr }));
+  });
 }

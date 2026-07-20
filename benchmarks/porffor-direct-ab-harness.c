@@ -38,12 +38,13 @@ static uint64_t js2_ab_peak_rss_bytes(void) {
 
 int main(int argc, char **argv) {
   volatile int stack_anchor = 0;
-  js2_ab_init(argc, argv, (void *)&stack_anchor);
 
+  // Native cold is init + first call, matching the fresh-context/store lanes.
   if (argc == 3 && strcmp(argv[1], "--landing-once") == 0) {
-    const double input = strtod(argv[2], NULL);
     const uint64_t wall_started = js2_ab_monotonic_ns();
     const uint64_t cpu_started = js2_ab_process_cpu_ns();
+    js2_ab_init(argc, argv, (void *)&stack_anchor);
+    const double input = strtod(argv[2], NULL);
     const double output = js2_ab_kernel(input);
     const uint64_t cpu_finished = js2_ab_process_cpu_ns();
     const uint64_t wall_finished = js2_ab_monotonic_ns();
@@ -56,6 +57,9 @@ int main(int argc, char **argv) {
         (unsigned long long)js2_ab_peak_rss_bytes());
     return 0;
   }
+
+  // Keep warm, correctness-probe, and default #3482 timing behavior unchanged.
+  js2_ab_init(argc, argv, (void *)&stack_anchor);
 
   // Mirror the landing V8 child: six in-process warmups followed by nine
   // individually timed calls. Return the median as one outer raw sample.

@@ -53,6 +53,8 @@ export interface LandingSanitizerRecord {
   readonly authority: "authoritative" | "ub-contaminated-non-authoritative" | "not-applicable" | "pending";
   readonly diagnostic: string | null;
   readonly command: readonly string[] | null;
+  readonly environment: Readonly<Record<string, string>> | null;
+  readonly scope: string;
 }
 
 export interface LandingNullMeasurement {
@@ -107,6 +109,12 @@ export interface LandingFourLaneResult {
     readonly canonical: boolean;
     readonly warmupRounds: number;
     readonly measuredRounds: number;
+    readonly fingerprint: {
+      readonly algorithm: "sha256";
+      readonly digest: string;
+      readonly inputs: Readonly<Record<string, unknown>>;
+    } | null;
+    readonly environment: Readonly<Record<string, string>>;
   };
   readonly programs: readonly LandingProgramRecord[];
   readonly cells: readonly LandingSupportCell[];
@@ -175,6 +183,19 @@ export function validateLandingFourLaneResult(value: unknown): asserts value is 
   const capture = record(result.capture, "capture");
   if (capture.kind !== "support-probe" && capture.kind !== "benchmark") throw new Error("capture.kind is invalid");
   if (typeof capture.canonical !== "boolean") throw new Error("capture.canonical must be boolean");
+  const environment = record(capture.environment, "capture.environment");
+  for (const [key, value] of Object.entries(environment)) {
+    if (!key || typeof value !== "string" || !value) throw new Error("capture.environment entries must be strings");
+  }
+  if (capture.kind === "support-probe") {
+    if (capture.fingerprint !== null) throw new Error("support probes must not carry a benchmark fingerprint");
+  } else {
+    const fingerprint = record(capture.fingerprint, "capture.fingerprint");
+    if (fingerprint.algorithm !== "sha256" || !/^[0-9a-f]{64}$/.test(fingerprint.digest)) {
+      throw new Error("capture.fingerprint must carry a SHA-256 digest");
+    }
+    record(fingerprint.inputs, "capture.fingerprint.inputs");
+  }
   const warmupRounds = nonnegativeInteger(capture.warmupRounds, "capture.warmupRounds");
   const measuredRounds = nonnegativeInteger(capture.measuredRounds, "capture.measuredRounds");
   if (
@@ -232,6 +253,22 @@ export function validateLandingFourLaneResult(value: unknown): asserts value is 
       measuredRounds,
     );
     const sanitizer = record(cell.sanitizer, `${key}.sanitizer`);
+    if (typeof sanitizer.scope !== "string" || !sanitizer.scope) {
+      throw new Error(`${key} sanitizer scope must be disclosed`);
+    }
+    if (cell.laneId === "js2-shared-plan-porffor-c-native" || cell.laneId === "plain-porffor-c-native") {
+      if (sanitizer.status === "clean" || sanitizer.status === "finding") {
+        const environment = record(sanitizer.environment, `${key}.sanitizer.environment`);
+        if (
+          environment.ASAN_OPTIONS !== "detect_leaks=0:halt_on_error=1:abort_on_error=1" ||
+          environment.UBSAN_OPTIONS !== "halt_on_error=1:print_stacktrace=1"
+        ) {
+          throw new Error(`${key} sanitizer environment is not the disclosed ASan/UBSan probe configuration`);
+        }
+      }
+    } else if (sanitizer.environment !== null) {
+      throw new Error(`${key} non-native lane must not claim sanitizer environment`);
+    }
     if (cell.status === "unsupported") {
       if (cell.validation !== null) throw new Error(`${key} unsupported cell must not carry successful validation`);
       const diagnostic = record(cell.diagnostic, `${key}.diagnostic`);
@@ -320,11 +357,20 @@ function validateMeasurements(
     const samples = array(measurement.samples, `${key}.${phase}.samples`);
     for (const sampleValue of samples) {
       const sample = record(sampleValue, `${key}.${phase}.sample`);
-      if (typeof sample.wallNs !== "number" || sample.wallNs <= 0) throw new Error(`${key}.${phase} wallNs invalid`);
-      if (sample.cpuNs !== null && (typeof sample.cpuNs !== "number" || sample.cpuNs <= 0)) {
+      if (typeof sample.wallNs !== "number" || !Number.isFinite(sample.wallNs) || sample.wallNs <= 0) {
+        throw new Error(`${key}.${phase} wallNs invalid`);
+      }
+      if (
+        sample.cpuNs !== null &&
+        (typeof sample.cpuNs !== "number" || !Number.isFinite(sample.cpuNs) || sample.cpuNs <= 0)
+      ) {
         throw new Error(`${key}.${phase} cpuNs invalid`);
       }
-      if (typeof sample.peakRssBytes !== "number" || sample.peakRssBytes <= 0) {
+      if (
+        typeof sample.peakRssBytes !== "number" ||
+        !Number.isFinite(sample.peakRssBytes) ||
+        sample.peakRssBytes <= 0
+      ) {
         throw new Error(`${key}.${phase} peak RSS invalid`);
       }
       const commands = array(sample.commands, `${key}.${phase}.commands`);
@@ -393,4 +439,13 @@ function array(value: unknown, label: string): any[] {
 function nonnegativeInteger(value: unknown, label: string): number {
   if (!Number.isInteger(value) || Number(value) < 0) throw new Error(`${label} must be a nonnegative integer`);
   return Number(value);
+}
+
+export function classifyLandingSanitizerExecution(status: number | null, stderr: string): "clean" | "finding" {
+  const recognized = /ERROR: AddressSanitizer|runtime error:|UndefinedBehaviorSanitizer/.test(stderr);
+  if (status === 0 && !recognized) return "clean";
+  if (status !== null && status !== 0 && recognized) return "finding";
+  throw new Error(
+    `sanitizer infrastructure error: status=${String(status)}, recognizedSignature=${String(recognized)}`,
+  );
 }

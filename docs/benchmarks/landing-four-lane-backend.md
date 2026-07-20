@@ -82,28 +82,64 @@ an observed output tied to one of those invocations. `latest.json` retains the
 raw samples and is authoritative. `summary.md` is a convenience view containing
 measured-round-only median wall milliseconds; it does not rank lanes. Unsafe
 plain-Porffor medians are marked UB-contaminated and non-authoritative.
+Completed outer rounds are checkpointed in `partial-measurements.json`; a
+restart accepts that checkpoint only after rebuilding the cold host and
+validating exact cell keys, contiguous phase/round sets, interleave orders,
+positive finite resource fields, warmup labels, lane-specific command
+identities, observed-output command links, and runtime oracles. Arbitrary or
+synthetic sample descriptors are rejected. The checkpoint fingerprint covers the
+canonical source bytes and oracles, executable support/sanitizer statuses and
+compiled artifact hashes, compile/capture options, per-phase methodology,
+relevant runner/harness/host/lockfile hashes, tool and pinned-Porffor versions,
+the rebuilt cold-host binary hash/size and Rust/Cargo versions, and dirty-aware
+compiler/Porffor repository state (tracked diff plus untracked relevant-file
+content). Missing or changed fingerprints refuse resume. These checks guard
+accidental or corrupt local checkpoints; they are not cryptographic
+authentication against a malicious editor. Canonical Actions starts from an
+empty output directory, and the uploaded Actions artifact is the attestation
+boundary. The native cold phase is `js2_ab_init` plus the first `runtimeArg`
+call, not call-only.
 
 The four phases remain distinct:
 
 - **Build:** V8 syntax checking; a fresh worker process for each exact-source
-  JS2/Wasm + Binaryen + Cranelift build; or a fresh Porffor/JS2 worker followed
-  by Clang. Fresh workers keep compiler caches and peak RSS sample-local.
+  JS2/Wasm + Binaryen + Cranelift build; or one Porffor/JS2 compiler+adapter
+  invocation followed by Clang. The plain-Porffor support probe separately
+  retains untouched `porf c --module -O1` output, but that evidence-only CLI
+  compilation is excluded from measured build rounds. Fresh workers keep
+  compiler caches and peak RSS sample-local.
 - **Startup + first call:** a fresh Node, Wasmtime, or native process that
   executes and validates `run(runtimeArg)`. No lane uses a call-free startup
   surrogate.
 - **Cold:** V8's established warm-process/fresh-`vm.Context` method,
   `benchmarks/wasmtime-cold-host` with a warm Engine/Module and fresh
   Store/Instance, or native fresh-process initialization plus one call. The
-  cold host reports the actual call result alongside its timing.
-- **Warm:** the existing warmed V8 child; Wasmtime's appended in-module
-  5-warmup/40-measured minimum-time driver plus a retained `landing_validate`
-  invocation that returns the actual result; or one native process with six
-  warmups and nine individually timed calls whose median is retained. Repeated
-  `wasmtime run` process wall time is never presented as warm runtime.
+  cold host reports the actual call result alongside its timing. Its Cargo
+  target is built in a temporary directory outside the uploaded result tree
+  and removed after capture; the report retains the host version, binary
+  hash/size, build command, build environment, and Rust/Cargo versions instead
+  of the Cargo target. The embedded crate and CLI must report the same exact
+  Wasmtime engine version (`46.0.1` canonically), or capture aborts.
+- **Warm:** every lane uses six in-process warmups followed by nine measured
+  calls and retains their median. Wasmtime uses a scalar compare/swap median
+  driver plus a separate `landing_validate` invocation that returns the actual
+  result. Repeated `wasmtime run` process wall time is never presented as warm
+  runtime.
 
-The manual Ubuntu x64 workflow invokes `--benchmark --canonical-ubuntu`, has no
-performance threshold, and uploads the complete output directory. Pull-request
-CI continues to run the faster support/correctness/sanitizer probe.
+Native sanitizer probes use a combined ASan+UBSan executable with
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`. Leak detection is disabled
+because this short-lived probe classifies memory and undefined behavior, not
+leak ownership. Exit zero without a sanitizer signature is clean; nonzero with
+a recognized ASan/UBSan signature is a finding; every other result aborts as
+infrastructure failure.
+
+The manual workflow pins `ubuntu-24.04`, Node `25.7.0`, and Wasmtime `46.0.1`,
+invokes `--benchmark --canonical-ubuntu`, has no performance threshold, and
+uploads the complete output directory. Results record Actions image metadata
+when present, `/etc/os-release`, kernel, CPU model, Node, Clang, Rust, Cargo,
+Wasmtime, Binaryen, and the pinned Porffor commit. Pull-request CI continues to
+run the faster support/correctness/sanitizer probe.
 
 ## Interpretation boundary
 

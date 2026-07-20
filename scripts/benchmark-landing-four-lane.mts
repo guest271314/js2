@@ -1,9 +1,10 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { arch, platform } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { arch, platform, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { compile } from "../src/index.js";
 import { LANDING_BENCHMARK_PROGRAMS } from "./lib/landing-benchmark-corpus.mjs";
@@ -11,6 +12,7 @@ import {
   LANDING_FOUR_LANE_IDS,
   LANDING_FOUR_LANE_MEASURED_ROUNDS,
   LANDING_FOUR_LANE_WARMUP_ROUNDS,
+  classifyLandingSanitizerExecution,
   nullMeasurements,
   validateLandingFourLaneResult,
   verifyLandingBenchmarkCorpus,
@@ -31,9 +33,9 @@ import {
   LANDING_WASMTIME_COMPILE_OPTIONS,
   LANDING_WASMTIME_WARM_VALIDATION_EXPORT,
   LANDING_WASM_OPT_ARGS,
+  landingFourLaneWasmtimeMedianWarmDriverSource,
   landingWasmtimeCompileArgs,
   landingWasmtimeRunArgs,
-  landingWasmtimeWarmDriverSource,
 } from "./lib/landing-wasmtime-runtime.mjs";
 import { readExactSource, sha256Hex } from "./lib/porffor-direct-ab.mjs";
 
@@ -81,13 +83,60 @@ interface WasmBuildWorkerManifest {
   };
 }
 
-const args = parseArguments(process.argv.slice(2));
-if (args.validatePath) {
-  const result: unknown = JSON.parse(readFileSync(args.validatePath, "utf8"));
-  validateLandingFourLaneResult(result);
-  process.stdout.write(`${args.validatePath}: valid #3498 result\n`);
-} else {
-  await runProbe(args);
+interface CaptureFingerprint {
+  readonly algorithm: "sha256";
+  readonly digest: string;
+  readonly inputs: Readonly<Record<string, unknown>>;
+}
+
+type CapturePhase = "build" | "startup" | "cold" | "warm";
+
+const CAPTURE_PHASE_METHODOLOGY: Readonly<Record<CapturePhase, string>> = Object.freeze({
+  build: "fresh-process-single-compiler-build-v2",
+  startup: "fresh-process-init-plus-first-call-v1",
+  cold: "native-init-plus-call-wasmtime-46-fresh-store-v3",
+  warm: "uniform-six-warmup-nine-call-median-v2",
+});
+
+const CAPTURE_CONFIGURATION = Object.freeze({
+  rounds: {
+    warmup: LANDING_FOUR_LANE_WARMUP_ROUNDS,
+    measured: LANDING_FOUR_LANE_MEASURED_ROUNDS,
+  },
+  wasm: {
+    compile: { ...LANDING_WASMTIME_COMPILE_OPTIONS, experimentalIR: false },
+    normalize: LANDING_WASM_OPT_ARGS,
+    warmDriver: { warmup: 5, measured: 40, aggregation: "minimum" },
+  },
+  js2Native: { target: "linear", allocator: "analysis-stack" },
+  plainPorffor: {
+    supportEvidence: ["porf", "c", "--module", "-O1", "plus additive adapter probe"],
+    measuredBuild: ["single compiler/index.js adapter invocation", "Clang compile/link"],
+  },
+  native: {
+    optimized: ["-O3", "-DNDEBUG", "-fno-lto"],
+    sanitizer: ["-O1", "-fno-omit-frame-pointer", "-fsanitize=address,undefined"],
+    warmDriver: { warmup: 6, measured: 9, aggregation: "median" },
+  },
+  v8WarmDriver: { warmup: 6, measured: 9, aggregation: "median" },
+});
+
+const SANITIZER_ENVIRONMENT = Object.freeze({
+  ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1:abort_on_error=1",
+  UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1",
+});
+const SANITIZER_SCOPE =
+  "combined AddressSanitizer+UndefinedBehaviorSanitizer executable; leak detection disabled because this probe classifies memory/undefined behavior in one short-lived invocation, not leak ownership";
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  const args = parseArguments(process.argv.slice(2));
+  if (args.validatePath) {
+    const result: unknown = JSON.parse(readFileSync(args.validatePath, "utf8"));
+    validateLandingFourLaneResult(result);
+    process.stdout.write(`${args.validatePath}: valid #3498 result\n`);
+  } else {
+    await runProbe(args);
+  }
 }
 
 function parseArguments(argv: readonly string[]): Arguments {
@@ -180,10 +229,12 @@ async function runProbe(options: Arguments): Promise<void> {
   );
   if (orderedCells.some((cell) => !cell)) throw new Error("internal #3498 support matrix omission");
   const supportCells = orderedCells as LandingSupportCell[];
-  const capturedCells =
+  const captured =
     options.captureKind === "benchmark"
-      ? await captureBenchmarkMeasurements(repoRoot, options.outputDirectory, programs, supportCells)
-      : supportCells;
+      ? await captureBenchmarkMeasurements(repoRoot, options.outputDirectory, programs, supportCells, versions, options)
+      : { cells: supportCells, fingerprint: null };
+  const captureFingerprint = captured.fingerprint;
+  const capturedCells = captured.cells;
 
   const result: LandingFourLaneResult = {
     schemaVersion: 1,
@@ -193,6 +244,8 @@ async function runProbe(options: Arguments): Promise<void> {
       canonical: options.canonicalUbuntu,
       warmupRounds: options.captureKind === "benchmark" ? LANDING_FOUR_LANE_WARMUP_ROUNDS : 0,
       measuredRounds: options.captureKind === "benchmark" ? LANDING_FOUR_LANE_MEASURED_ROUNDS : 0,
+      fingerprint: captureFingerprint,
+      environment: versions,
     },
     programs,
     cells: capturedCells,
@@ -206,7 +259,7 @@ async function runProbe(options: Arguments): Promise<void> {
         "allocator: V8 GC, Wasm GC, shared LinearMemoryPlan, or Porffor default GC",
       ],
       wasmtimeCompatibilityMethod:
-        "exact source uses the existing landing options and compatibility fallback; capture uses benchmarks/wasmtime-cold-host for warm-engine/fresh-store cold samples and the existing appended in-module warm driver for startup-independent steady state",
+        "exact source uses the existing landing options and compatibility fallback; capture uses benchmarks/wasmtime-cold-host for warm-engine/fresh-store cold samples and a four-lane-only appended 6-warmup/9-measured median driver for startup-independent steady state",
     },
   };
   validateLandingFourLaneResult(result);
@@ -267,11 +320,15 @@ function escapeMarkdownCell(value: string): string {
   return value.replaceAll("|", "\\|");
 }
 
-type CapturePhase = "build" | "startup" | "cold" | "warm";
-
 interface CaptureSetup {
   readonly coldHostPath: string;
   readonly coldHostBuild: TimedSpawnWithRssResult;
+  readonly coldHostBuildEnvironment: Readonly<Record<string, string>>;
+  readonly coldHostBinary: { readonly bytes: number; readonly sha256: string };
+  readonly coldHostVersion: string;
+  readonly cargoVersion: string;
+  readonly rustcVersion: string;
+  readonly coldHostTemporaryDirectory: string;
   readonly warmCwasmByProgram: ReadonlyMap<string, string>;
   readonly warmBuildCommandsByProgram: ReadonlyMap<string, readonly (readonly string[])[]>;
 }
@@ -281,18 +338,50 @@ async function captureBenchmarkMeasurements(
   outputRoot: string,
   programs: readonly LandingProgramRecord[],
   supportCells: readonly LandingSupportCell[],
-): Promise<LandingSupportCell[]> {
-  const setup = await prepareCaptureSetup(repoRoot, outputRoot, programs, supportCells);
-  const executableCells = supportCells.filter((cell) => cell.status !== "unsupported");
-  const samples = new Map<string, Record<CapturePhase, LandingSample[]>>();
-  for (const cell of executableCells) {
-    samples.set(cellKey(cell), { build: [], startup: [], cold: [], warm: [] });
+  versions: Readonly<Record<string, string>>,
+  options: Arguments,
+): Promise<{ readonly cells: LandingSupportCell[]; readonly fingerprint: CaptureFingerprint }> {
+  const setup = await prepareCaptureSetup(repoRoot, outputRoot, programs, supportCells, versions);
+  try {
+    const captureFingerprint = createCaptureFingerprint(repoRoot, programs, supportCells, versions, options, setup);
+    const samples = loadPartialMeasurements(repoRoot, outputRoot, programs, supportCells, captureFingerprint);
+    const cells = await captureBenchmarkMeasurementsWithSetup(
+      repoRoot,
+      outputRoot,
+      programs,
+      supportCells,
+      setup,
+      samples,
+      captureFingerprint,
+    );
+    return { cells, fingerprint: captureFingerprint };
+  } finally {
+    rmSync(setup.coldHostTemporaryDirectory, { recursive: true, force: true });
   }
+}
+
+async function captureBenchmarkMeasurementsWithSetup(
+  repoRoot: string,
+  outputRoot: string,
+  programs: readonly LandingProgramRecord[],
+  supportCells: readonly LandingSupportCell[],
+  setup: CaptureSetup,
+  samples: Map<string, Record<CapturePhase, LandingSample[]>>,
+  captureFingerprint: CaptureFingerprint,
+): Promise<LandingSupportCell[]> {
+  const executableCells = supportCells.filter((cell) => cell.status !== "unsupported");
   const phases: readonly CapturePhase[] = ["build", "startup", "cold", "warm"];
   const rounds = LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS;
 
   for (const [phaseIndex, capturePhase] of phases.entries()) {
     for (let round = 0; round < rounds; round++) {
+      if (
+        executableCells.every((cell) =>
+          samples.get(cellKey(cell))![capturePhase].some((sample) => sample.round === round),
+        )
+      ) {
+        continue;
+      }
       const rotation = (round + phaseIndex) % executableCells.length;
       const ordered = executableCells.map((_, index) => executableCells[(index + rotation) % executableCells.length]!);
       for (const [order, cell] of ordered.entries()) {
@@ -317,6 +406,8 @@ async function captureBenchmarkMeasurements(
         `${JSON.stringify(
           {
             schemaVersion: 1,
+            phaseMethodology: CAPTURE_PHASE_METHODOLOGY,
+            captureFingerprint,
             completedPhase: capturePhase,
             completedRound: round,
             samples: Object.fromEntries(samples),
@@ -342,10 +433,522 @@ async function captureBenchmarkMeasurements(
       },
       provenance: {
         ...cell.provenance,
+        captureFingerprint: captureFingerprint.digest,
         captureMethodology: captureMethodology(cell.laneId, setup, cell.programId),
       },
     };
   });
+}
+
+function loadPartialMeasurements(
+  repoRoot: string,
+  outputRoot: string,
+  programs: readonly LandingProgramRecord[],
+  supportCells: readonly LandingSupportCell[],
+  expectedFingerprint: CaptureFingerprint,
+): Map<string, Record<CapturePhase, LandingSample[]>> {
+  const executableCells = supportCells.filter((cell) => cell.status !== "unsupported");
+  const empty = () => ({ build: [], startup: [], cold: [], warm: [] }) satisfies Record<CapturePhase, LandingSample[]>;
+  const samples = new Map(executableCells.map((cell) => [cellKey(cell), empty()]));
+  const partialPath = join(outputRoot, "partial-measurements.json");
+  if (!existsSync(partialPath)) return samples;
+  const partial = JSON.parse(readFileSync(partialPath, "utf8")) as {
+    schemaVersion?: unknown;
+    phaseMethodology?: Partial<Record<CapturePhase, unknown>>;
+    captureFingerprint?: unknown;
+    completedPhase?: unknown;
+    completedRound?: unknown;
+    samples?: unknown;
+  };
+  if (partial.schemaVersion !== 1 || !partial.samples || typeof partial.samples !== "object") {
+    throw new Error("invalid #3498 partial measurement document");
+  }
+  if (JSON.stringify(partial.captureFingerprint) !== JSON.stringify(expectedFingerprint)) {
+    throw new Error("#3498 partial capture fingerprint mismatch; refusing resume");
+  }
+  const records = partial.samples as Record<string, unknown>;
+  const expectedKeys = new Set(samples.keys());
+  if (Object.keys(records).length !== expectedKeys.size || Object.keys(records).some((key) => !expectedKeys.has(key))) {
+    throw new Error("#3498 partial measurement cell set does not match the executable support matrix");
+  }
+  for (const [key, phases] of Object.entries(records)) {
+    if (!phases || typeof phases !== "object") throw new Error(`${key} partial measurements are invalid`);
+    const phaseRecord = phases as Record<CapturePhase, unknown>;
+    for (const phase of ["build", "startup", "cold", "warm"] as const) {
+      if (!Array.isArray(phaseRecord[phase])) throw new Error(`${key}.${phase} partial samples are invalid`);
+      const storedMethodology = partial.phaseMethodology?.[phase];
+      if (storedMethodology !== CAPTURE_PHASE_METHODOLOGY[phase]) {
+        throw new Error(`${key}.${phase} partial methodology fingerprint mismatch; refusing resume`);
+      }
+      samples.get(key)![phase] = phaseRecord[phase] as LandingSample[];
+    }
+  }
+  validatePartialSampleSets(
+    repoRoot,
+    outputRoot,
+    programs,
+    executableCells,
+    samples,
+    partial.completedPhase,
+    partial.completedRound,
+  );
+  process.stdout.write(`[capture resume] loaded ${partialPath}\n`);
+  return samples;
+}
+
+export function validatePartialSampleSets(
+  repoRoot: string,
+  outputRoot: string,
+  programs: readonly LandingProgramRecord[],
+  cells: readonly LandingSupportCell[],
+  samples: ReadonlyMap<string, Record<CapturePhase, LandingSample[]>>,
+  completedPhase: unknown,
+  completedRound: unknown,
+): void {
+  const phases: readonly CapturePhase[] = ["build", "startup", "cold", "warm"];
+  const rounds = LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS;
+  let previousComplete = true;
+  let derivedPhase: CapturePhase | null = null;
+  let derivedRound = -1;
+  for (const phase of phases) {
+    const lengths = cells.map((cell) => samples.get(cellKey(cell))![phase].length);
+    if (new Set(lengths).size !== 1) throw new Error(`#3498 partial ${phase} sample counts differ across cells`);
+    const length = lengths[0]!;
+    if (!Number.isInteger(length) || length < 0 || length > rounds) {
+      throw new Error(`#3498 partial ${phase} sample count is out of range`);
+    }
+    if (!previousComplete && length !== 0)
+      throw new Error(`#3498 partial ${phase} starts before the prior phase completed`);
+    if (length > 0) {
+      derivedPhase = phase;
+      derivedRound = length - 1;
+    }
+    previousComplete = previousComplete && length === rounds;
+
+    for (const cell of cells) {
+      const program = programs.find((candidate) => candidate.id === cell.programId)!;
+      const phaseSamples = samples.get(cellKey(cell))![phase];
+      const seenRounds = new Set<number>();
+      for (const [index, sample] of phaseSamples.entries()) {
+        validatePartialSample(repoRoot, outputRoot, program, cell, phase, sample, cells.length, rounds);
+        if (sample.round !== index || seenRounds.has(sample.round)) {
+          throw new Error(`${cellKey(cell)}.${phase} partial rounds must be a unique contiguous prefix`);
+        }
+        seenRounds.add(sample.round);
+      }
+    }
+    for (let round = 0; round < length; round++) {
+      const orders = cells.map((cell) => samples.get(cellKey(cell))![phase][round]!.order).sort((a, b) => a - b);
+      if (orders.some((order, index) => order !== index)) {
+        throw new Error(`#3498 partial ${phase} round ${round} has duplicate or missing interleave order`);
+      }
+    }
+  }
+  if (derivedPhase === null || completedPhase !== derivedPhase || completedRound !== derivedRound) {
+    throw new Error("#3498 partial completed phase/round does not match its sample arrays");
+  }
+}
+
+function validatePartialSample(
+  repoRoot: string,
+  outputRoot: string,
+  program: LandingProgramRecord,
+  cell: LandingSupportCell,
+  phase: CapturePhase,
+  sample: LandingSample,
+  cellCount: number,
+  roundCount: number,
+): void {
+  const key = `${cellKey(cell)}.${phase}`;
+  if (!sample || typeof sample !== "object" || Array.isArray(sample))
+    throw new Error(`${key} sample must be an object`);
+  const expectedKeys = [
+    "commands",
+    "cpuNs",
+    "order",
+    "outputObservation",
+    "peakRssBytes",
+    "phase",
+    "round",
+    "validatedOutput",
+    "wallNs",
+  ];
+  if (Object.keys(sample).sort().join("\0") !== expectedKeys.join("\0")) {
+    throw new Error(`${key} sample fields are invalid`);
+  }
+  if (!Number.isInteger(sample.round) || sample.round < 0 || sample.round >= roundCount) {
+    throw new Error(`${key} round is out of range`);
+  }
+  if (!Number.isInteger(sample.order) || sample.order < 0 || sample.order >= cellCount) {
+    throw new Error(`${key} order is out of range`);
+  }
+  if (sample.phase !== (sample.round < LANDING_FOUR_LANE_WARMUP_ROUNDS ? "warmup" : "measured")) {
+    throw new Error(`${key} warmup/measured label is inconsistent`);
+  }
+  if (!Number.isFinite(sample.wallNs) || sample.wallNs <= 0) throw new Error(`${key} wallNs must be positive finite`);
+  if (sample.cpuNs !== null && (!Number.isFinite(sample.cpuNs) || sample.cpuNs <= 0)) {
+    throw new Error(`${key} cpuNs must be null or positive finite`);
+  }
+  if (!Number.isFinite(sample.peakRssBytes) || sample.peakRssBytes <= 0) {
+    throw new Error(`${key} peakRssBytes must be positive finite`);
+  }
+  if (
+    !Array.isArray(sample.commands) ||
+    sample.commands.length === 0 ||
+    sample.commands.some(
+      (command) =>
+        !Array.isArray(command) ||
+        command.length === 0 ||
+        command.some((argument) => typeof argument !== "string" || !argument || /synthetic/i.test(argument)),
+    )
+  ) {
+    throw new Error(`${key} commands are malformed or synthetic`);
+  }
+  validatePartialCommandIdentity(repoRoot, outputRoot, program, cell, phase, sample);
+  const expectedOutput = phase === "build" ? null : program.expectedFixedOutputs[3];
+  if (!Object.is(sample.validatedOutput, expectedOutput)) {
+    throw new Error(`${key} validated output does not match the runtime oracle`);
+  }
+  if (phase === "build") {
+    if (sample.outputObservation !== null) throw new Error(`${key} build must not claim an output observation`);
+    return;
+  }
+  if (!sample.outputObservation || typeof sample.outputObservation !== "object") {
+    throw new Error(`${key} must retain an output observation`);
+  }
+  const expectedObservation = expectedPartialObservation(cell.laneId, phase);
+  if (
+    sample.outputObservation.commandIndex !== expectedObservation.commandIndex ||
+    sample.outputObservation.mechanism !== expectedObservation.mechanism ||
+    sample.outputObservation.commandIndex >= sample.commands.length
+  ) {
+    throw new Error(`${key} output observation is not tied to the expected command`);
+  }
+}
+
+function expectedPartialObservation(
+  laneId: LandingSupportCell["laneId"],
+  phase: Exclude<CapturePhase, "build">,
+): NonNullable<LandingSample["outputObservation"]> {
+  if (laneId === "v8-node-exact-source") {
+    return { commandIndex: 0, mechanism: phase === "cold" ? "in-process-return" : "stdout-json" };
+  }
+  if (laneId === "js2-wasmgc-wasmtime-cranelift") {
+    return { commandIndex: phase === "warm" ? 1 : 0, mechanism: phase === "cold" ? "stdout-json" : "stdout-number" };
+  }
+  return { commandIndex: 0, mechanism: "stdout-json" };
+}
+
+function validatePartialCommandIdentity(
+  repoRoot: string,
+  outputRoot: string,
+  program: LandingProgramRecord,
+  cell: LandingSupportCell,
+  phase: CapturePhase,
+  sample: LandingSample,
+): void {
+  const commands = sample.commands.map((command) => [...command]);
+  const primary = unwrapTimeCommand(commands[0]!);
+  const sourcePath = resolve(repoRoot, program.sourcePath);
+  const runtimeArg = String(program.runtimeArg);
+  const assertExact = (actual: readonly string[], expected: readonly string[], label: string) => {
+    if (actual.length !== expected.length || actual.some((value, index) => value !== expected[index])) {
+      throw new Error(`${cellKey(cell)}.${phase} ${label} command identity mismatch`);
+    }
+  };
+  if (phase === "build") {
+    if (cell.laneId === "v8-node-exact-source") {
+      if (commands.length !== 1) throw new Error(`${cellKey(cell)}.build V8 command count mismatch`);
+      assertExact(primary, [process.execPath, "--check", sourcePath], "V8 build");
+      return;
+    }
+    const lane =
+      cell.laneId === "plain-porffor-c-native"
+        ? "plain"
+        : cell.laneId === "js2-shared-plan-porffor-c-native"
+          ? "js2"
+          : "wasm";
+    const directory = join(outputRoot, "capture-build", "build", String(sample.round), `${program.id}-${cell.laneId}`);
+    assertExact(
+      primary,
+      [
+        process.execPath,
+        "--import",
+        "tsx",
+        "scripts/benchmark-landing-four-lane-worker.mts",
+        "--lane",
+        lane,
+        "--program",
+        program.id,
+        "--output",
+        directory,
+        "--mode",
+        "measured-build",
+      ],
+      "build worker",
+    );
+    if (lane === "wasm") {
+      if (
+        commands.length !== 4 ||
+        commands[1]?.[0] !== "JS2.compile" ||
+        basename(commands[2]?.[0] ?? "") !== "wasm-opt" ||
+        commands[3]?.[0] !== "wasmtime" ||
+        commands[3]?.[1] !== "compile"
+      ) {
+        throw new Error(`${cellKey(cell)}.build Wasm nested command identity mismatch`);
+      }
+    } else if (
+      commands.length !== 4 ||
+      commands.slice(1).some((command) => command[0] !== (process.env.CC || "clang"))
+    ) {
+      throw new Error(`${cellKey(cell)}.build native Clang command identity mismatch`);
+    }
+    return;
+  }
+  if (phase === "startup") {
+    if (commands.length !== 1) throw new Error(`${cellKey(cell)}.startup command count mismatch`);
+    if (cell.laneId === "v8-node-exact-source") {
+      assertExact(
+        primary,
+        [
+          process.execPath,
+          resolve(repoRoot, "scripts/wasmtime-bench-child-js.mjs"),
+          "--mode=single",
+          sourcePath,
+          runtimeArg,
+        ],
+        "V8 startup",
+      );
+    } else if (cell.laneId === "js2-wasmgc-wasmtime-cranelift") {
+      const cwasm = join(outputRoot, "artifacts", program.id, "wasmtime", `${program.id}.cranelift.cwasm`);
+      assertExact(primary, ["wasmtime", ...landingWasmtimeRunArgs(cwasm, "run", program.runtimeArg)], "Wasm startup");
+    } else {
+      assertExact(
+        primary,
+        [nativeExecutablePath(outputRoot, program.id, cell.laneId), "--landing-once", runtimeArg],
+        "native startup",
+      );
+    }
+    return;
+  }
+  if (phase === "cold") {
+    if (commands.length !== 1) throw new Error(`${cellKey(cell)}.cold command count mismatch`);
+    if (cell.laneId === "v8-node-exact-source") {
+      assertExact(primary, [process.execPath, "node:vm.Script+createContext", sourcePath, runtimeArg], "V8 cold");
+    } else if (cell.laneId === "js2-wasmgc-wasmtime-cranelift") {
+      const wasm = join(outputRoot, "artifacts", program.id, "wasmtime", `${program.id}.wasmtime.wasm`);
+      if (basename(primary[0] ?? "") !== "wasmtime-cold-host") {
+        throw new Error(`${cellKey(cell)}.cold host command identity mismatch`);
+      }
+      assertExact(primary.slice(1), [wasm, runtimeArg, "1"], "Wasm cold arguments");
+    } else {
+      assertExact(
+        primary,
+        [nativeExecutablePath(outputRoot, program.id, cell.laneId), "--landing-once", runtimeArg],
+        "native cold",
+      );
+    }
+    return;
+  }
+  if (cell.laneId === "v8-node-exact-source") {
+    if (commands.length !== 1) throw new Error(`${cellKey(cell)}.warm V8 command count mismatch`);
+    assertExact(
+      primary,
+      [
+        process.execPath,
+        resolve(repoRoot, "scripts/wasmtime-bench-child-js.mjs"),
+        "--mode=warm",
+        sourcePath,
+        runtimeArg,
+      ],
+      "V8 warm",
+    );
+  } else if (cell.laneId === "js2-wasmgc-wasmtime-cranelift") {
+    if (commands.length !== 2) throw new Error(`${cellKey(cell)}.warm Wasm command count mismatch`);
+    const cwasm = join(outputRoot, "capture-setup", "wasmtime-warm", program.id, `${program.id}-warm.cranelift.cwasm`);
+    assertExact(primary, ["wasmtime", ...landingWasmtimeRunArgs(cwasm, "warm", program.runtimeArg)], "Wasm warm");
+    assertExact(
+      unwrapTimeCommand(commands[1]!),
+      ["wasmtime", ...landingWasmtimeRunArgs(cwasm, LANDING_WASMTIME_WARM_VALIDATION_EXPORT, program.runtimeArg)],
+      "Wasm warm validation",
+    );
+  } else {
+    if (commands.length !== 1) throw new Error(`${cellKey(cell)}.warm native command count mismatch`);
+    assertExact(
+      primary,
+      [nativeExecutablePath(outputRoot, program.id, cell.laneId), "--landing-warm", runtimeArg],
+      "native warm",
+    );
+  }
+}
+
+function unwrapTimeCommand(command: readonly string[]): readonly string[] {
+  if (command[0] === "/usr/bin/time" && (command[1] === "-l" || command[1] === "-v")) return command.slice(2);
+  return command;
+}
+
+function createCaptureFingerprint(
+  repoRoot: string,
+  programs: readonly LandingProgramRecord[],
+  cells: readonly LandingSupportCell[],
+  versions: Readonly<Record<string, string>>,
+  options: Arguments,
+  setup: CaptureSetup,
+): CaptureFingerprint {
+  const relevantFiles = [
+    "scripts/benchmark-landing-four-lane.mts",
+    "scripts/benchmark-landing-four-lane-worker.mts",
+    "scripts/lib/landing-benchmark-corpus.mjs",
+    "scripts/lib/landing-four-lane-benchmark.mts",
+    "scripts/lib/landing-runtime-timing.mjs",
+    "scripts/lib/landing-wasmtime-runtime.mjs",
+    "scripts/wasmtime-bench-child-js.mjs",
+    "benchmarks/porffor-direct-ab-harness.c",
+    "benchmarks/wasmtime-cold-host/src/main.rs",
+    "benchmarks/wasmtime-cold-host/Cargo.toml",
+    "benchmarks/wasmtime-cold-host/Cargo.lock",
+    "pnpm-lock.yaml",
+  ];
+  const compilerPaths = [
+    "src",
+    "scripts/benchmark-landing-four-lane.mts",
+    "scripts/benchmark-landing-four-lane-worker.mts",
+    "scripts/lib",
+    "scripts/wasmtime-bench-child-js.mjs",
+    "benchmarks/porffor-direct-ab-harness.c",
+    "benchmarks/wasmtime-cold-host",
+    "package.json",
+    "pnpm-lock.yaml",
+    "tsconfig.json",
+  ];
+  const inputs = {
+    phaseMethodology: CAPTURE_PHASE_METHODOLOGY,
+    captureConfiguration: {
+      ...CAPTURE_CONFIGURATION,
+      canonicalUbuntu: options.canonicalUbuntu,
+      withoutPorffor: options.withoutPorffor,
+      nodeExecutable: process.execPath,
+      clangExecutable: process.env.CC || "clang",
+    },
+    canonicalSources: programs.map((program) => ({
+      id: program.id,
+      label: program.label,
+      sourcePath: program.sourcePath,
+      bytes: program.bytes,
+      sha256: program.sha256,
+      coldArg: program.coldArg,
+      runtimeArg: program.runtimeArg,
+      fixedInputs: program.fixedInputs,
+      expectedFixedOutputs: program.expectedFixedOutputs,
+    })),
+    executableCells: cells
+      .filter((cell) => cell.status !== "unsupported")
+      .map((cell) => ({
+        key: cellKey(cell),
+        sourceSha256: cell.sourceSha256,
+        status: cell.status,
+        sanitizerStatus: cell.sanitizer.status,
+        sanitizerAuthority: cell.sanitizer.authority,
+        artifacts: collectArtifactIdentities(cell.provenance),
+      })),
+    supportCells: cells.map((cell) => ({
+      key: cellKey(cell),
+      status: cell.status,
+      diagnostic:
+        cell.diagnostic === null
+          ? null
+          : { phase: cell.diagnostic.phase, code: cell.diagnostic.code, followUpIssue: cell.diagnostic.followUpIssue },
+    })),
+    relevantFiles: relevantFiles.map((path) => {
+      const contents = readFileSync(resolve(repoRoot, path));
+      return { path, bytes: contents.byteLength, sha256: sha256Hex(contents) };
+    }),
+    compilerRepository: gitRepositoryFingerprint(repoRoot, compilerPaths),
+    porfforRepository: existsSync(resolve(repoRoot, "vendor/Porffor/.git"))
+      ? gitRepositoryFingerprint(resolve(repoRoot, "vendor/Porffor"))
+      : { status: "unavailable" },
+    toolVersions: versions,
+    coldHost: {
+      binary: setup.coldHostBinary,
+      engineVersion: setup.coldHostVersion,
+      rustc: setup.rustcVersion,
+      cargo: setup.cargoVersion,
+    },
+  } satisfies Readonly<Record<string, unknown>>;
+  return { algorithm: "sha256", digest: sha256Hex(JSON.stringify(inputs)), inputs };
+}
+
+function collectArtifactIdentities(value: unknown): readonly Readonly<Record<string, unknown>>[] {
+  const identities: Readonly<Record<string, unknown>>[] = [];
+  const visit = (candidate: unknown, role: string): void => {
+    if (!candidate || typeof candidate !== "object") return;
+    if (Array.isArray(candidate)) {
+      candidate.forEach((entry, index) => visit(entry, `${role}[${index}]`));
+      return;
+    }
+    const entry = candidate as Record<string, unknown>;
+    if (
+      typeof entry.bytes === "number" &&
+      Number.isInteger(entry.bytes) &&
+      entry.bytes > 0 &&
+      typeof entry.sha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(entry.sha256)
+    ) {
+      identities.push({ role, bytes: entry.bytes, sha256: entry.sha256 });
+    }
+    for (const key of Object.keys(entry).sort()) {
+      if (key.endsWith("Sha256") && typeof entry[key] === "string" && /^[0-9a-f]{64}$/.test(entry[key])) {
+        const stem = key.slice(0, -"Sha256".length);
+        const bytes = entry[`${stem}Bytes`];
+        if (typeof bytes === "number" && Number.isInteger(bytes) && bytes > 0) {
+          identities.push({ role: `${role}.${stem}`, bytes, sha256: entry[key] });
+        }
+      }
+      visit(entry[key], `${role}.${key}`);
+    }
+  };
+  visit(value, "provenance");
+  return identities.sort((left, right) => String(left.role).localeCompare(String(right.role)));
+}
+
+function gitRepositoryFingerprint(
+  repositoryRoot: string,
+  paths: readonly string[] = [],
+): Readonly<Record<string, unknown>> {
+  const separator = paths.length > 0 ? ["--", ...paths] : [];
+  const head = checkedCommandOutput("git", ["rev-parse", "HEAD"], repositoryRoot).trim();
+  const status = checkedCommandOutput(
+    "git",
+    ["status", "--short", "--untracked-files=all", ...separator],
+    repositoryRoot,
+  );
+  const diff = checkedCommandOutput("git", ["diff", "--binary", "--no-ext-diff", "HEAD", ...separator], repositoryRoot);
+  const untracked = checkedCommandOutput(
+    "git",
+    ["ls-files", "--others", "--exclude-standard", ...separator],
+    repositoryRoot,
+  )
+    .split("\n")
+    .filter(Boolean)
+    .sort()
+    .map((path) => {
+      const contents = readFileSync(resolve(repositoryRoot, path));
+      return { path, bytes: contents.byteLength, sha256: sha256Hex(contents) };
+    });
+  return {
+    head,
+    status: status.trimEnd(),
+    trackedDiff: { bytes: Buffer.byteLength(diff), sha256: sha256Hex(diff) },
+    untracked,
+  };
+}
+
+function checkedCommandOutput(command: string, args: readonly string[], cwd: string): string {
+  const executed = timedSpawn(command, args, cwd);
+  if (executed.status !== 0) {
+    throw new Error(`capture fingerprint command failed: ${JSON.stringify(executed.command)}: ${executed.stderr}`);
+  }
+  return executed.stdout;
 }
 
 async function prepareCaptureSetup(
@@ -353,70 +956,104 @@ async function prepareCaptureSetup(
   outputRoot: string,
   programs: readonly LandingProgramRecord[],
   cells: readonly LandingSupportCell[],
+  versions: Readonly<Record<string, string>>,
 ): Promise<CaptureSetup> {
   const setupRoot = join(outputRoot, "capture-setup");
-  const cargoTarget = join(setupRoot, "wasmtime-cold-host-target");
+  const coldHostTemporaryDirectory = mkdtempSync(join(tmpdir(), "js2-3498-wasmtime-cold-host-"));
+  const cargoTarget = join(coldHostTemporaryDirectory, "target");
   mkdirSync(setupRoot, { recursive: true });
-  const coldHostManifest = resolve(repoRoot, "benchmarks/wasmtime-cold-host/Cargo.toml");
-  const coldHostBuild = timedSpawnWithRss(
-    "cargo",
-    ["build", "--release", "--manifest-path", coldHostManifest],
-    repoRoot,
-    { CARGO_TARGET_DIR: cargoTarget },
-  );
-  if (coldHostBuild.status !== 0) {
-    throw new Error(`failed to build Wasmtime cold host: ${coldHostBuild.stderr.slice(0, 2_000)}`);
-  }
-  const coldHostPath = join(
-    cargoTarget,
-    "release",
-    process.platform === "win32" ? "wasmtime-cold-host.exe" : "wasmtime-cold-host",
-  );
-  const warmCwasmByProgram = new Map<string, string>();
-  const warmBuildCommandsByProgram = new Map<string, readonly (readonly string[])[]>();
-  const wasmOpt = resolve(repoRoot, "node_modules/.bin/wasm-opt");
-
-  for (const program of programs) {
-    const wasmCell = cells.find(
-      (cell) => cell.programId === program.id && cell.laneId === "js2-wasmgc-wasmtime-cranelift",
+  try {
+    const coldHostManifest = resolve(repoRoot, "benchmarks/wasmtime-cold-host/Cargo.toml");
+    const coldHostBuildEnvironment = { CARGO_TARGET_DIR: cargoTarget };
+    const coldHostBuild = timedSpawnWithRss(
+      "cargo",
+      ["build", "--release", "--manifest-path", coldHostManifest],
+      repoRoot,
+      coldHostBuildEnvironment,
     );
-    if (!wasmCell || wasmCell.status === "unsupported") continue;
-    const directory = join(setupRoot, "wasmtime-warm", program.id);
-    mkdirSync(directory, { recursive: true });
-    const source = readExactSource(resolve(repoRoot, program.sourcePath), program.sha256);
-    const programBody = source.source.replace(/export const benchmark[\s\S]*?};\n/, "");
-    const warmSource = `${programBody}\n${landingWasmtimeWarmDriverSource(5, 40)}`;
-    const warmSourcePath = join(directory, `${program.id}-warm-adapter.js`);
-    writeFileSync(warmSourcePath, warmSource);
-    const compileOptions = {
-      fileName: `${program.id}-warm.js`,
-      ...LANDING_WASMTIME_COMPILE_OPTIONS,
-      experimentalIR: false,
-    } as const;
-    const compiled = await compile(warmSource, compileOptions);
-    if (!compiled.success || !compiled.binary || (compiled.imports ?? []).length > 0) {
+    if (coldHostBuild.status !== 0) {
+      throw new Error(`failed to build Wasmtime cold host: ${coldHostBuild.stderr.slice(0, 2_000)}`);
+    }
+    const coldHostPath = join(
+      cargoTarget,
+      "release",
+      process.platform === "win32" ? "wasmtime-cold-host.exe" : "wasmtime-cold-host",
+    );
+    const coldHostArtifact = artifact(coldHostPath);
+    const coldHostBinary = {
+      bytes: Number(coldHostArtifact.bytes),
+      sha256: String(coldHostArtifact.sha256),
+    };
+    const coldHostVersion = commandVersion(coldHostPath, ["--version"], repoRoot);
+    const rustcVersion = commandVersion("rustc", ["--version", "--verbose"], repoRoot);
+    const cargoVersion = commandVersion("cargo", ["--version", "--verbose"], repoRoot);
+    const cliEngineVersion = parseWasmtimeEngineVersion(versions.wasmtime);
+    const hostEngineVersion = parseWasmtimeEngineVersion(coldHostVersion);
+    if (cliEngineVersion !== hostEngineVersion) {
       throw new Error(
-        `${program.id} warm timing adapter failed: ${compiled.errors.map((error) => error.message).join("; ")}`,
+        `Wasmtime CLI/host engine mismatch: CLI ${cliEngineVersion}, embedded host ${hostEngineVersion}; refusing capture`,
       );
     }
-    const rawPath = join(directory, `${program.id}-warm.wasm`);
-    const normalizedPath = join(directory, `${program.id}-warm.wasmtime.wasm`);
-    const cwasmPath = join(directory, `${program.id}-warm.cranelift.cwasm`);
-    writeFileSync(rawPath, compiled.binary);
-    const normalizeArgs = [...LANDING_WASM_OPT_ARGS, rawPath, "-o", normalizedPath];
-    const normalized = timedSpawnWithRss(wasmOpt, normalizeArgs, repoRoot);
-    if (normalized.status !== 0) throw new Error(`${program.id} warm wasm-opt failed: ${normalized.stderr}`);
-    const precompileArgs = landingWasmtimeCompileArgs(normalizedPath, cwasmPath);
-    const precompiled = timedSpawnWithRss("wasmtime", precompileArgs, repoRoot);
-    if (precompiled.status !== 0) throw new Error(`${program.id} warm precompile failed: ${precompiled.stderr}`);
-    warmCwasmByProgram.set(program.id, cwasmPath);
-    warmBuildCommandsByProgram.set(program.id, [
-      ["JS2.compile", JSON.stringify(compileOptions), warmSourcePath],
-      normalized.command,
-      precompiled.command,
-    ]);
+    const warmCwasmByProgram = new Map<string, string>();
+    const warmBuildCommandsByProgram = new Map<string, readonly (readonly string[])[]>();
+    const wasmOpt = resolve(repoRoot, "node_modules/.bin/wasm-opt");
+
+    for (const program of programs) {
+      const wasmCell = cells.find(
+        (cell) => cell.programId === program.id && cell.laneId === "js2-wasmgc-wasmtime-cranelift",
+      );
+      if (!wasmCell || wasmCell.status === "unsupported") continue;
+      const directory = join(setupRoot, "wasmtime-warm", program.id);
+      mkdirSync(directory, { recursive: true });
+      const source = readExactSource(resolve(repoRoot, program.sourcePath), program.sha256);
+      const programBody = source.source.replace(/export const benchmark[\s\S]*?};\n/, "");
+      const warmSource = `${programBody}\n${landingFourLaneWasmtimeMedianWarmDriverSource()}`;
+      const warmSourcePath = join(directory, `${program.id}-warm-adapter.js`);
+      writeFileSync(warmSourcePath, warmSource);
+      const compileOptions = {
+        fileName: `${program.id}-warm.js`,
+        ...LANDING_WASMTIME_COMPILE_OPTIONS,
+        experimentalIR: false,
+      } as const;
+      const compiled = await compile(warmSource, compileOptions);
+      if (!compiled.success || !compiled.binary || (compiled.imports ?? []).length > 0) {
+        throw new Error(
+          `${program.id} warm timing adapter failed: ${compiled.errors.map((error) => error.message).join("; ")}`,
+        );
+      }
+      const rawPath = join(directory, `${program.id}-warm.wasm`);
+      const normalizedPath = join(directory, `${program.id}-warm.wasmtime.wasm`);
+      const cwasmPath = join(directory, `${program.id}-warm.cranelift.cwasm`);
+      writeFileSync(rawPath, compiled.binary);
+      const normalizeArgs = [...LANDING_WASM_OPT_ARGS, rawPath, "-o", normalizedPath];
+      const normalized = timedSpawnWithRss(wasmOpt, normalizeArgs, repoRoot);
+      if (normalized.status !== 0) throw new Error(`${program.id} warm wasm-opt failed: ${normalized.stderr}`);
+      const precompileArgs = landingWasmtimeCompileArgs(normalizedPath, cwasmPath);
+      const precompiled = timedSpawnWithRss("wasmtime", precompileArgs, repoRoot);
+      if (precompiled.status !== 0) throw new Error(`${program.id} warm precompile failed: ${precompiled.stderr}`);
+      warmCwasmByProgram.set(program.id, cwasmPath);
+      warmBuildCommandsByProgram.set(program.id, [
+        ["JS2.compile", JSON.stringify(compileOptions), warmSourcePath],
+        normalized.command,
+        precompiled.command,
+      ]);
+    }
+    return {
+      coldHostPath,
+      coldHostBuild,
+      coldHostBuildEnvironment,
+      coldHostBinary,
+      coldHostVersion,
+      cargoVersion,
+      rustcVersion,
+      coldHostTemporaryDirectory,
+      warmCwasmByProgram,
+      warmBuildCommandsByProgram,
+    };
+  } catch (error) {
+    rmSync(coldHostTemporaryDirectory, { recursive: true, force: true });
+    throw error;
   }
-  return { coldHostPath, coldHostBuild, warmCwasmByProgram, warmBuildCommandsByProgram };
 }
 
 async function measureCaptureSample(context: {
@@ -489,6 +1126,8 @@ async function measureBuild(context: Parameters<typeof measureCaptureSample>[0])
         context.program.id,
         "--output",
         directory,
+        "--mode",
+        "measured-build",
       ];
       const worker = timedSpawnWithRss(workerCommand[0]!, workerCommand.slice(1), context.repoRoot);
       assertCommandSuccess("fresh-process measured JS2-Wasm build", worker);
@@ -520,6 +1159,8 @@ async function measureBuild(context: Parameters<typeof measureCaptureSample>[0])
       context.program.id,
       "--output",
       directory,
+      "--mode",
+      "measured-build",
     ];
     const started = performance.now();
     const worker = timedSpawnWithRss(workerCommand[0]!, workerCommand.slice(1), context.repoRoot, {
@@ -839,8 +1480,12 @@ function captureMethodology(
         "fresh worker process per sample: JS2 exact-source compile + Binaryen normalization + Wasmtime Cranelift precompile; worker-process peak RSS",
       startup: "fresh wasmtime run process using the precompiled exact-source artifact",
       cold: "benchmarks/wasmtime-cold-host warm Engine/Module + fresh Store/Instance + runtimeArg call; host-emitted result validated",
-      warm: "existing appended in-module driver: five in-process warmups, minimum of forty timed calls; paired landing_validate invocation validates run(runtimeArg)",
+      warm: "four-lane appended in-module driver: six in-process warmups, median of nine timed calls; paired landing_validate invocation validates run(runtimeArg)",
       coldHostBuildCommand: setup.coldHostBuild.command,
+      coldHostBuildEnvironment: setup.coldHostBuildEnvironment,
+      coldHostBinary: setup.coldHostBinary,
+      coldHostVersion: setup.coldHostVersion,
+      coldHostTargetRetention: "temporary directory outside the result tree; deleted after capture",
       warmAdapterBuildCommands: setup.warmBuildCommandsByProgram.get(programId),
     };
   }
@@ -1056,23 +1701,28 @@ async function nativeCell(
 
   const sanitized = compileAndLinkNative(clang, laneCPath, harnessPath, directory, "sanitize", repoRoot);
   if (sanitized.diagnostic) return unsupportedCell(program, laneId, sanitized.diagnostic);
-  const sanitizerExecuted = timedSpawn(sanitized.executable!, optimizedArgs, repoRoot, {
-    ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1:abort_on_error=1",
-    UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1",
-  });
-  const sanitizerFinding = sanitizerExecuted.status !== 0;
+  const sanitizerExecuted = timedSpawn(sanitized.executable!, optimizedArgs, repoRoot, SANITIZER_ENVIRONMENT);
+  const sanitizerOutcome = classifyLandingSanitizerExecution(
+    sanitizerExecuted.status ?? (sanitizerExecuted.signal ? 1 : null),
+    sanitizerExecuted.stderr,
+  );
+  const sanitizerFinding = sanitizerOutcome === "finding";
   const sanitizer: LandingSanitizerRecord = sanitizerFinding
     ? {
         status: "finding",
         authority: lane === "plain" ? "ub-contaminated-non-authoritative" : "pending",
         diagnostic: firstSanitizerLine(sanitizerExecuted.stderr),
         command: [sanitized.executable!, ...optimizedArgs],
+        environment: SANITIZER_ENVIRONMENT,
+        scope: SANITIZER_SCOPE,
       }
     : {
         status: "clean",
         authority: "authoritative",
         diagnostic: null,
         command: [sanitized.executable!, ...optimizedArgs],
+        environment: SANITIZER_ENVIRONMENT,
+        scope: SANITIZER_SCOPE,
       };
   if (!sanitizerFinding) {
     const sanitizerOutput = parseNativeOutput(sanitizerExecuted.stdout);
@@ -1122,6 +1772,8 @@ async function nativeCell(
       },
       compilerResourceUsage: manifest.compilerResourceUsage,
       runtimePeakRssBytes: nativeOutput.peakRssBytes,
+      sanitizerEnvironment: SANITIZER_ENVIRONMENT,
+      sanitizerScope: SANITIZER_SCOPE,
       artifacts: {
         generatedCBytes: manifest.artifacts.combinedCBytes,
         renderedCBytes: manifest.artifacts.renderedCBytes,
@@ -1204,6 +1856,8 @@ function unsupportedCell(
       authority: "pending",
       diagnostic: "lane did not reach an executable sanitizer probe",
       command: null,
+      environment: null,
+      scope: "sanitizer not run because the lane was not executable",
     },
     measurements: nullMeasurements(`unsupported at ${diagnostic.phase}:${diagnostic.code}`),
     provenance,
@@ -1224,7 +1878,14 @@ function validation(
 }
 
 function notApplicableSanitizer(): LandingSanitizerRecord {
-  return { status: "not-applicable", authority: "not-applicable", diagnostic: null, command: null };
+  return {
+    status: "not-applicable",
+    authority: "not-applicable",
+    diagnostic: null,
+    command: null,
+    environment: null,
+    scope: "sanitizers are not applicable to this non-native lane",
+  };
 }
 
 function assertOutputs(program: LandingProgramRecord, actual: readonly number[], lane: string): void {
@@ -1265,18 +1926,55 @@ function environmentVersions(repoRoot: string): Readonly<Record<string, string>>
   return {
     platform: `${platform()}-${arch()}`,
     node: process.version,
+    nodeExecutable: process.execPath,
     wasmtime: commandVersion("wasmtime", ["--version"], repoRoot),
     clang: commandVersion(process.env.CC || "clang", ["--version"], repoRoot),
+    rustc: commandVersion("rustc", ["--version", "--verbose"], repoRoot),
+    cargo: commandVersion("cargo", ["--version", "--verbose"], repoRoot),
     wasmOpt: commandVersion(resolve(repoRoot, "node_modules/.bin/wasm-opt"), ["--version"], repoRoot),
+    osRelease: existsSync("/etc/os-release") ? readFileSync("/etc/os-release", "utf8").trim() : "unavailable",
+    kernel: commandVersion("uname", ["-a"], repoRoot),
+    cpuModel: cpuModel(repoRoot),
+    runnerImageOS: process.env.ImageOS ?? "not-github-actions",
+    runnerImageVersion: process.env.ImageVersion ?? "not-github-actions",
+    runnerOS: process.env.RUNNER_OS ?? "not-github-actions",
+    runnerArch: process.env.RUNNER_ARCH ?? "not-github-actions",
     porfforCommit: existsSync(resolve(repoRoot, "vendor/Porffor/.git"))
       ? commandVersion("git", ["-C", resolve(repoRoot, "vendor/Porffor"), "rev-parse", "HEAD"], repoRoot)
       : "unavailable",
   };
 }
 
+function cpuModel(repoRoot: string): string {
+  if (process.platform === "linux" && existsSync("/proc/cpuinfo")) {
+    return (
+      readFileSync("/proc/cpuinfo", "utf8")
+        .split("\n")
+        .find((line) => /^model name\s*:/.test(line))
+        ?.split(":")
+        .slice(1)
+        .join(":")
+        .trim() ?? "unavailable"
+    );
+  }
+  if (process.platform === "darwin") {
+    return commandVersion("sysctl", ["-n", "machdep.cpu.brand_string"], repoRoot);
+  }
+  return "unavailable";
+}
+
+function parseWasmtimeEngineVersion(value: string): string {
+  const match = value.match(/(?:^|\n)wasmtime\s+(\d+\.\d+\.\d+)\b/);
+  if (!match) throw new Error(`could not parse Wasmtime engine version from ${JSON.stringify(value)}`);
+  return match[1]!;
+}
+
 function commandVersion(command: string, args: readonly string[], cwd: string): string {
   const result = timedSpawn(command, args, cwd);
-  return result.status === 0 ? lastNonemptyLine(result.stdout) : `unavailable: ${firstNonemptyLine(result.stderr)}`;
+  if (result.status !== 0) return `unavailable: ${firstNonemptyLine(result.stderr)}`;
+  const output = result.stdout.trim() || result.stderr.trim();
+  if (!output) throw new Error(`${command} version command produced no output`);
+  return output;
 }
 
 function commandFailureDiagnostic(phase: string, result: TimedSpawnResult): LandingDiagnostic {
