@@ -533,10 +533,15 @@ export interface TrapCategoryGrowth {
   failures: string[];
   /** baseline population per trap category. */
   baseCounts: Record<TrapCategory, number>;
-  /** candidate population per trap category (noise-filtered). */
+  /** candidate population per trap category (noise/unknown-filtered). */
   newCounts: Record<TrapCategory, number>;
   /** files that newly entered each trap category (weren't trapping there in baseline). */
   newlyTrapping: Record<TrapCategory, string[]>;
+  /**
+   * Candidate traps whose baseline never reached runtime because compilation
+   * timed out. They are unknown baseline outcomes, not observed trap growth.
+   */
+  unknownBaselineTimeouts: Record<TrapCategory, string[]>;
 }
 
 /**
@@ -553,12 +558,18 @@ export interface TrapCategoryGrowth {
  * Pure (no I/O) so the unit test drives it with fixture maps, mirroring
  * `evaluateRegressionThresholds` (#1943).
  *
- * Noise discipline: a trap category is a STATIC miscompile signal — a
+ * Evidence discipline: a trap category is a STATIC miscompile signal — a
  * byte-identical binary (same `wasm_sha`) cannot newly trap — so a candidate row
  * whose wasm hash is unchanged from a baseline row of the same file is excluded
  * as CI runner noise, exactly like the `net_per_test` gate's `wasmUnchanged`
  * filter (#1222). This prevents a flaky pass→trap flip on an identical binary
  * from tripping the ratchet.
+ *
+ * A baseline `compile_timeout` is also not an observed runtime outcome. If the
+ * candidate compiles that file and exposes a trap, the ratchet must not claim a
+ * new trap: the predecessor run did not establish that the file was trap-free.
+ * Such rows stay visible in the compile-time recovery diagnostics, while the
+ * hard ratchet remains unchanged for every baseline row that reached runtime.
  */
 export function evaluateTrapCategoryGrowth(
   baseline: Map<string, TrapRatchetRow>,
@@ -579,17 +590,28 @@ export function evaluateTrapCategoryGrowth(
     TrapCategory,
     string[]
   >;
+  const unknownBaselineTimeouts = Object.fromEntries(TRAP_ERROR_CATEGORIES.map((c) => [c, [] as string[]])) as Record<
+    TrapCategory,
+    string[]
+  >;
 
   const isTrap = (cat: string | undefined): cat is TrapCategory =>
     !!cat && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(cat);
 
   for (const row of baseline.values()) {
-    if (isTrap(row.error_category)) baseCounts[row.error_category]++;
+    if (row.status !== "compile_timeout" && isTrap(row.error_category)) baseCounts[row.error_category]++;
   }
 
   for (const [file, row] of newer) {
-    if (!isTrap(row.error_category)) continue;
+    if (row.status === "compile_timeout" || !isTrap(row.error_category)) continue;
     const base = baseline.get(file);
+    // A compile timeout never observed the baseline's runtime behavior. A
+    // subsequent trap is therefore unknown, not evidence that this change
+    // introduced one. Keep it out of category growth and report it separately.
+    if (base?.status === "compile_timeout") {
+      unknownBaselineTimeouts[row.error_category].push(file);
+      continue;
+    }
     // Wasm-identical noise: a trap can't appear on a byte-identical binary, so a
     // same-`wasm_sha` flip is runner noise — don't let it inflate the count.
     if (base && base.wasm_sha && row.wasm_sha && base.wasm_sha === row.wasm_sha) continue;
@@ -613,7 +635,7 @@ export function evaluateTrapCategoryGrowth(
       );
     }
   }
-  return { failures, baseCounts, newCounts, newlyTrapping };
+  return { failures, baseCounts, newCounts, newlyTrapping, unknownBaselineTimeouts };
 }
 
 interface TestResult {
@@ -1462,6 +1484,38 @@ async function run(
     }
   }
 
+  // A baseline compile_timeout is an UNKNOWN runtime outcome. When the
+  // candidate compiles the same test, classify that recovery by the candidate
+  // compile cost so timeout noise remains visible without pretending the
+  // predecessor established a pass/fail/trap result. This is output-only; the
+  // #1942 timeout-population guard remains the compile-time gate.
+  const baselineTimeoutRecoveries = [...newer].flatMap(([file, current]) => {
+    const base = baseline.get(file);
+    if (base?.status !== "compile_timeout" || current.status === "compile_timeout") return [];
+    return [{ file, current }];
+  });
+  const ctFlakeRecoveries = baselineTimeoutRecoveries.filter(
+    ({ current }) => typeof current.compile_ms === "number" && current.compile_ms <= CT_FLAKE_THRESHOLD_MS,
+  );
+  const ctSuspectRecoveries = baselineTimeoutRecoveries.filter(
+    ({ current }) => !(typeof current.compile_ms === "number" && current.compile_ms <= CT_FLAKE_THRESHOLD_MS),
+  );
+  console.log(
+    `=== ct_flake recoveries (baseline compile_timeout → observed, candidate ≤${CT_FLAKE_THRESHOLD_MS}ms): ${ctFlakeRecoveries.length} ===`,
+  );
+  console.log(
+    `=== ct_suspect recoveries (baseline compile_timeout → observed, candidate >${CT_FLAKE_THRESHOLD_MS}ms or unknown): ${ctSuspectRecoveries.length} ===`,
+  );
+  if (!quiet) {
+    for (const { file, current } of ctFlakeRecoveries) {
+      console.log(`  ct_flake recovery ${file} (candidate compile ${Math.round(current.compile_ms!)}ms)`);
+    }
+    for (const { file, current } of ctSuspectRecoveries) {
+      const ms = typeof current.compile_ms === "number" ? `${Math.round(current.compile_ms)}ms` : "unknown";
+      console.log(`  ct_suspect recovery ${file} (candidate compile ${ms})`);
+    }
+  }
+
   // #1942: compile-time regression signals. `pass → compile_timeout` is
   // excluded from every regression gate (it's runner-load flake — see the
   // #1192 split above), which leaves a blind spot: a PR that pathologically
@@ -1780,6 +1834,17 @@ async function run(
       TRAP_ERROR_CATEGORIES.map((c) => `${c} ${trapGrowth.baseCounts[c]}→${trapGrowth.newCounts[c]}`).join(", ") +
       ` (#3189 ratchet) ===`,
   );
+  const trapTimeoutUnknowns = TRAP_ERROR_CATEGORIES.flatMap((category) =>
+    trapGrowth.unknownBaselineTimeouts[category].map((file) => ({ category, file })),
+  );
+  if (trapTimeoutUnknowns.length > 0) {
+    console.log(
+      `=== Trap baseline unknowns (compile_timeout → trap; excluded from #3189, retained in CT recovery diagnostics): ${trapTimeoutUnknowns.length} ===`,
+    );
+    for (const { category, file } of trapTimeoutUnknowns) {
+      console.log(`  ${category}: ${file}`);
+    }
+  }
   for (const reason of trapGrowth.failures) {
     console.log(`=== GATE FAIL: ${reason} ===`);
     gateFailed = true;
