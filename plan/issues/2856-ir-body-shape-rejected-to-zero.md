@@ -1119,14 +1119,14 @@ fix.
 
 ### The 14, verified today
 
-| # | Arm | Functions |
-| --- | --- | --- |
-| 8 | `nontail-callstmt:CallExpression` | the `main`s of benchmarks.ts, benchmarks/{array,dom,fib,loop,string,style}.ts, js/builtins.ts |
-| 1 | `expr-unhandled:ArrowFunction` | benchmarks/helpers.ts `addBenchCard` |
-| 1 | `nontail-if-cond:BinaryExpression` | calendar `renderCal` (cond reads module-scope `selStart`/`selEnd`) |
-| 1 | `nontail-unhandled-stmt:IfStatement` | calendar `onDay` (if/else-if chain writing module globals) |
-| 1 | `nontail-assign-nonprop-lhs:BinaryExpression` | calendar `main` (`gridEl = …` module-global write) |
-| 2 | `unattributed-arm:helper-internal` | calendar `updFoot`, async `delay` |
+| #   | Arm                                           | Functions                                                                                     |
+| --- | --------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 8   | `nontail-callstmt:CallExpression`             | the `main`s of benchmarks.ts, benchmarks/{array,dom,fib,loop,string,style}.ts, js/builtins.ts |
+| 1   | `expr-unhandled:ArrowFunction`                | benchmarks/helpers.ts `addBenchCard`                                                          |
+| 1   | `nontail-if-cond:BinaryExpression`            | calendar `renderCal` (cond reads module-scope `selStart`/`selEnd`)                            |
+| 1   | `nontail-unhandled-stmt:IfStatement`          | calendar `onDay` (if/else-if chain writing module globals)                                    |
+| 1   | `nontail-assign-nonprop-lhs:BinaryExpression` | calendar `main` (`gridEl = …` module-global write)                                            |
+| 2   | `unattributed-arm:helper-internal`            | calendar `updFoot`, async `delay`                                                             |
 
 Plus the **moduleLevel** bucket (2: calendar 9 stmts, algorithms 1 stmt) —
 same roots (module-scope bindings + DOM chains at module level), tracked in
@@ -1145,6 +1145,36 @@ Instrument the `return false` sites inside `isPhase1ObjectLiteral` /
 (byte-inert off, first-wins). Expected outcome: `updFoot` attributes to the
 module-global root (capability C), `delay` to the closure/type-args root
 (capability B). Confirms slice boundaries before C/B start; ~1 day.
+
+#### Step 0 result (2026-07-20) — complete
+
+Instrumented the remaining bare rejection sites in the Phase-1 object-literal,
+try, closure, and C-style-for helpers with stable first-wins `shapeNo(...)`
+labels. The identifier and `new`-expression leaves were also attributed so the
+two corpus unknowns resolve at their deepest failing subcheck. This is
+diagnostic-only: no selector acceptance, IR lowering, claim behavior, or
+fallback count changed.
+
+Fresh exact histogram:
+
+| Count | Reject detail                                 | Functions                                                                |
+| ----: | --------------------------------------------- | ------------------------------------------------------------------------ |
+|    10 | `expr-ident-not-in-scope:Identifier`          | eight benchmark/builtins mains, calendar `renderCal`, calendar `updFoot` |
+|     1 | `expr-unhandled:ArrowFunction`                | benchmark helper `addBenchCard`                                          |
+|     1 | `nontail-unhandled-stmt:IfStatement`          | calendar `onDay`                                                         |
+|     1 | `nontail-assign-nonprop-lhs:BinaryExpression` | calendar `main`                                                          |
+|     1 | `expr-new-type-args:NewExpression`            | async `delay`                                                            |
+
+Result: **14 total rejections, 14 attributed, zero
+`unattributed-arm:helper-internal`**. In particular, `updFoot` is confirmed as
+capability C's module-binding root and `delay` as capability B's generic
+Promise/closure root. First-wins leaf attribution also refines the previous
+eight enclosing `nontail-callstmt` labels to their missing-identifier cause.
+
+Validation: focused attribution tests 2/2; diagnostics-off gate unchanged at
+function-level `body-shape-rejected: 14`, module-level
+`body-shape-rejected: 2`, and zero post-claim demotions; Prettier and typecheck
+clean. The epic remains in progress; capabilities C/A/B are unchanged.
 
 ### Capability C (M–L) — module-scope mutable bindings (calendar 4 + moduleLevel 2)
 
@@ -1197,13 +1227,13 @@ Root: the gate compiles each corpus file as its own program
 (`scripts/check-ir-fallbacks.ts:217`), but module resolution still pulls the
 sibling source (e.g. `helpers.ts`) in, and legacy compiles imported functions
 into the same module via the import-resolver. The IR selector only claims
-callees that are *local* FunctionDeclarations, so `el(…)`/`addBenchCard(…)`
+callees that are _local_ FunctionDeclarations, so `el(…)`/`addBenchCard(…)`
 reject at `nontail-callstmt`.
 
 Design (mirror the extern-in-IR split — selection runs early, from-ast late):
 
 - **Selector**: thread `resolveImportedFunction(node: ts.Identifier) →
-  { name: string } | undefined` via `IrSelectionOptions` — checker-backed
+{ name: string } | undefined` via `IrSelectionOptions` — checker-backed
   (symbol → import specifier → resolved FunctionDeclaration in a compiled-in
   sibling module). Accept a call whose callee resolves this way and whose args
   are Phase-1.
@@ -1261,8 +1291,8 @@ dictate an unshippable capability.
 ### Ordering and landability
 
 1. Step 0 (S) → 2. Capability C (M–L, self-contained, −4 likely) →
-3. Capability A (M) → 4. Capability B (L; A+B together if A alone is
-net-zero) → 5. `delay` decision.
+2. Capability A (M) → 4. Capability B (L; A+B together if A alone is
+   net-zero) → 5. `delay` decision.
 
 Each slice: prove claims via byte-diff/`irFirstSkipped` (anti-vacuity, the
 established pattern), zero post-claim demotions, bank via
