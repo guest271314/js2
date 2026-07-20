@@ -1,5 +1,5 @@
 ---
-id: 3474
+id: 3486
 title: "Host: caught custom-exception instance's .constructor resolves to Array, not its real constructor"
 status: ready
 sprint: current
@@ -17,7 +17,7 @@ related: [3429, 3430]
 origin: "Found while implementing #3429 (assert.throws expected-constructor name-mangling fix) — isolated repro traced to a separate, deeper bug unrelated to the #3429 fix."
 ---
 
-# #3474 — caught custom-exception `.constructor` resolves to `Array`, not the real constructor
+# #3486 — caught custom-exception `.constructor` resolves to `Array`, not the real constructor
 
 ## Problem
 

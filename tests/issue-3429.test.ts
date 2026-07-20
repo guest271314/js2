@@ -30,7 +30,7 @@
 // super-extern-method dispatch).
 //
 // KNOWN LIMITATION (documented, not a regression target for THIS fix): a
-// SEPARATE, pre-existing bug (#3474) means a caught custom-exception
+// SEPARATE, pre-existing bug (#3486) means a caught custom-exception
 // instance's `.constructor` resolves to a generic "Array"-named mirror
 // rather than the real constructor — so `assert.throws(MyError, () => {
 // throw new MyError() })` does not fully PASS yet even after this fix (it

@@ -14,7 +14,7 @@ area: test262-runner, codegen
 language_feature: error-constructors
 es_edition: multi
 goal: test262-conformance
-related: [3370, 1104, 3474]
+related: [3370, 1104, 3486]
 origin: "2026-07-18 oracle-v8 harvest (fable harvest agent): host `other` sub-bucket @ oracle 8."
 loc-budget-allow:
   - src/runtime.ts
@@ -199,7 +199,7 @@ minting a per-declaration struct subtype for every named function
 declaration, a much larger change; discussed and scoped down with the tech
 lead before implementation).
 
-**Known limitation, NOT fixed here**: a separate, pre-existing bug (**#3474**,
+**Known limitation, NOT fixed here**: a separate, pre-existing bug (**#3486**,
 filed alongside this fix) means a *caught* custom-exception instance's
 `.constructor` resolves to a generic `"Array"`-named mirror instead of its
 real constructor — so `assert.throws(MyError, () => { throw new MyError() })`
@@ -207,7 +207,7 @@ still does not fully PASS end-to-end after this fix; it fails with a
 correctly-named message instead of the `wasmClosureDynamicBridge` one. This
 is why the practical pass-flip count on the 544-record class is smaller than
 a naive reading suggests — most records reclassify (correct constructor name,
-still failing for the #3474 reason) rather than flip to pass outright. This
+still failing for the #3486 reason) rather than flip to pass outright. This
 matches the acceptance criteria as written ("remaining genuine no-throw
 failures reclassify to their real cause").
 
@@ -226,7 +226,7 @@ the string `wasmClosureDynamicBridge` in their verdict message (verified via
 | `language/expressions/compound-assignment/S11.13.2_A7.8_T3.js` | (bridge name) | `Expected a DummyError but got a Array` |
 
 All 5 still FAIL — none of them were the trivial "identity actually matches"
-case; each reclassifies to a real cause (mostly #3474's caught-exception
+case; each reclassifies to a real cause (mostly #3486's caught-exception
 `.constructor` bug, resolving to `"Array"`). New regression test
 `tests/issue-3429.test.ts` (4 cases) verifies: (1) the native-builtin control
 case (`assert.throws(TypeError, ...)`) stays green, (2)/(3) a user-defined
@@ -240,6 +240,6 @@ new regressions — pre-existing failures on `optional-direct-closure-call.test.
 and `tdz-reference-error.test.ts` were confirmed present on a clean
 `origin/main` checkout (unrelated to this change) via A/B testing.
 
-Follow-up filed: **#3474** — caught custom-exception `.constructor` resolves
+Follow-up filed: **#3486** — caught custom-exception `.constructor` resolves
 to `Array`, not the real constructor (the blocker for full end-to-end pass on
 the majority of this record class).
