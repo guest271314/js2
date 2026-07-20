@@ -84,14 +84,14 @@ effect sequencing, and sanitizer-visible conversion helpers.
       lower through typed backend operations only.
 - [x] Mixed f64/i32 operands and narrowed i32 chains preserve JavaScript
       coercion and signedness, including unsigned `>>>` results.
-- [x] Shift counts are masked and native left shift avoids signed C overflow;
-      focused generated C is clean under ASan/UBSan.
+- [x] Every generated C shift is unsigned and count-masked; left shift avoids
+      signed overflow and signed right shift uses an explicit sign-fill mask.
 - [x] WasmGC and linear instruction streams remain identical and bytecode's
       unsupported-op boundary remains unchanged.
-- [ ] The exact checked-in landing `fib.js` reaches JS2 linear IR/shared
+- [x] The exact checked-in landing `fib.js` reaches JS2 linear IR/shared
       `LinearMemoryPlan`, Porffor IR, and native C after landed #3497 is merged;
       native outputs equal Node under ASan/UBSan.
-- [ ] Focused tests, typecheck, lint, format, IR fallback, and linear-IR checks
+- [x] Focused tests, typecheck, lint, format, IR fallback, and linear-IR checks
       pass on the final landed-main merge.
 
 ## Implementation notes
@@ -112,15 +112,52 @@ C's implementation-defined `negative_i32 >> count`. Every generated C shift
 therefore has u32 operands, and every dynamic shift count is masked by `0x1f`;
 counts such as 0, 32, and 63 are defined without relying on target behavior.
 
-Current pre-prerequisite validation:
+## Exact-source evidence
 
-- `pnpm exec vitest run tests/issue-3288.test.ts tests/issue-3499-porffor-typed-bitwise-composites.test.ts`
-  — 11 passed, 1 native test skipped without an explicit Porffor root.
+PR #3446 landed on `origin/main` as
+`e78ef504f0b62d339d994181d5a27981124d1d6a` and was merged into this branch
+before the source-derived proof was added. The test reads
+`website/public/benchmarks/competitive/programs/fib.js` directly as bytes and
+asserts 348 bytes plus SHA-256
+`910ab9ef86bf7ed4c6b7e55c0fe20d93b653dd8bfdb5d48de6ef906778943a73`.
+It performs no source rewrite or substitution.
+
+Compiling those bytes with `target: "linear"`,
+`allocator: "analysis-stack"`, and the exact path selects only `run`, reports
+no rejection, and publishes the source-derived typed module plus its
+`analysis-stack-arena-v1` `LinearMemoryPlan`. The module contains both expected
+`js.bitor` composites. That same module and plan are passed to
+`lowerIrModuleToPorffor`; the resulting `run` is rendered by pinned Porffor and
+compiled with Clang `-fsanitize=address,undefined -fno-omit-frame-pointer`.
+
+Node, linear Wasm, and sanitized Porffor-C agree exactly:
+
+| Input | 0 | 1 | 2 | 10 | 31 | 5000 | 20000000 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Output | 0 | 1 | 1 | 55 | 1346269 | -1846256875 | -1821818939 |
+
+The native process exits zero with empty sanitizer stderr under
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`.
+
+## Final validation
+
 - `JS2WASM_PORFFOR_ROOT=<pinned Porffor> PORFFOR_NATIVE_REQUIRED=1 pnpm exec vitest run tests/issue-3499-porffor-typed-bitwise-composites.test.ts`
-  — 4/4 passed, including Clang `-fsanitize=address,undefined` over conversion
-  edges, all operators, both mixed operand directions, and narrowed chains.
+  — 6/6 passed, including all operators/coercion edges and the exact-source
+  fixed/cold/runtime native sanitizer oracle.
+- Applicable backend regression command covering backend contract, bytecode
+  proof, verifier, linear integration, Porffor scalar/native canaries, #3497,
+  #3288, and #3499 — 72/72 passed across 9 files with
+  `PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1`.
 - `pnpm run typecheck` — passed.
+- `pnpm run lint` — passed.
+- `pnpm run format:check` — passed.
+- `pnpm run check:stack-balance` — passed with zero bucket deltas.
+- `pnpm run check:pushraw` — passed; no new call sites and 18 removed.
+- `pnpm run check:ir-fallbacks` — passed with zero gated deltas.
+- `pnpm run check:linear-ir` — passed (`compiled=8`, baseline `8`).
+- `pnpm run check:loc-budget` and `pnpm run check:issues` — passed.
 
-#3497 is currently open as PR #3446 with green checks and has not been copied
-or cherry-picked. Exact-source validation intentionally waits for that change
-to land on `origin/main`, per the dependency boundary.
+No benchmark, website, selector, JSDoc, native harness, or benchmark-runner
+source is changed by #3499; #3497 is present solely through the landed
+`origin/main` merge.

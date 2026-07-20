@@ -1,13 +1,16 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { compile } from "../src/index.js";
+import { getLastLinearIrReport } from "../src/ir/backend/linear-integration.js";
 import { LinearEmitter } from "../src/ir/backend/linear-emitter.js";
 import {
   PORFFOR_KIND_NAMES,
@@ -20,6 +23,7 @@ import { lowerIrModuleToPorffor } from "../src/ir/backend/porffor/integration.js
 import { loadOptionalPorffor } from "../src/ir/backend/porffor/loader.js";
 import { WasmGcEmitter } from "../src/ir/backend/wasmgc-emitter.js";
 import {
+  forEachInstrDeep,
   IrFunctionBuilder,
   irVal,
   lowerIrFunctionBody,
@@ -34,6 +38,10 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const porfforRoot = process.env.JS2WASM_PORFFOR_ROOT ?? join(here, "../vendor/Porffor");
+const fibPath = join(here, "../website/public/benchmarks/competitive/programs/fib.js");
+const fibSha256 = "910ab9ef86bf7ed4c6b7e55c0fe20d93b653dd8bfdb5d48de6ef906778943a73";
+const fibBytes = 348;
+const fixedFibArgs = [0, 1, 2, 10, 31] as const;
 const hasOptionalPorffor = existsSync(join(porfforRoot, "compiler/ir.js"));
 const nativeRequired = process.env.PORFFOR_NATIVE_REQUIRED === "1";
 const cCompiler = findCCompiler();
@@ -190,6 +198,21 @@ describe("#3499 backend-neutral typed bitwise composites", () => {
     expect(collectNodes(returnValue).some((node) => nodeName(node) === "Convert")).toBe(true);
   });
 
+  it("feeds the exact checked-in fib.js bytes through shared linear IR and its memory plan", async () => {
+    const proof = await compileExactFib();
+
+    expect(proof.sourceBytes).toBe(fibBytes);
+    expect(proof.sourceSha256).toBe(fibSha256);
+    expect(proof.report.compiled).toStrictEqual(["run"]);
+    expect(proof.report.rejected).toStrictEqual([]);
+    expect(proof.report.memoryPlan.policy).toBe("analysis-stack-arena-v1");
+    expect(proof.report.memoryPlan.allocations).toStrictEqual([]);
+    expect(proof.report.irModule.functions.map((func) => func.name)).toStrictEqual(["run"]);
+    expect(proof.bitwiseOps).toStrictEqual(["js.bitor", "js.bitor"]);
+    expect(proof.porfforInput.funcs.filter(Boolean).map((func) => func!.name)).toStrictEqual(["run"]);
+    expect(proof.linearValues).toStrictEqual(proof.nodeValues);
+  });
+
   const nativeIt = hasOptionalPorffor && cCompiler ? it : nativeRequired ? it : it.skip;
   nativeIt(
     "matches JavaScript for coercion edges and masked shifts under ASan/UBSan",
@@ -219,7 +242,78 @@ describe("#3499 backend-neutral typed bitwise composites", () => {
     },
     120_000,
   );
+
+  nativeIt(
+    "matches Node for exact fib.js fixed/cold/runtime inputs under ASan/UBSan",
+    async () => {
+      if (!hasOptionalPorffor) throw new Error(`PORFFOR_NATIVE_REQUIRED=1 but ${porfforRoot} is not initialized`);
+      if (!cCompiler) throw new Error("PORFFOR_NATIVE_REQUIRED=1 but no C compiler is available");
+
+      const proof = await compileExactFib();
+      const porffor = await loadOptionalPorffor({ root: porfforRoot });
+      const rendered = normalizePinnedPorfforC(porfforRendererOutputText(porffor.render(proof.porfforInput)));
+      const nativeValues = compileAndRunExactFibSanitizedC(cCompiler, rendered, proof.porfforInput, proof.args);
+
+      expect(proof.sourceBytes).toBe(fibBytes);
+      expect(proof.sourceSha256).toBe(fibSha256);
+      expect(nativeValues).toStrictEqual(proof.nodeValues);
+    },
+    120_000,
+  );
 });
+
+async function compileExactFib() {
+  const sourceBuffer = readFileSync(fibPath);
+  const source = sourceBuffer.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(sourceBuffer)) {
+    throw new Error(`exact fib.js bytes are not round-trippable UTF-8: ${fibPath}`);
+  }
+  const sourceSha256 = createHash("sha256").update(sourceBuffer).digest("hex");
+  const imported = (await import(pathToFileURL(fibPath).href)) as {
+    readonly benchmark: { readonly coldArg: number; readonly runtimeArg: number };
+    readonly run: (n: number) => number;
+  };
+  const args = [...fixedFibArgs, imported.benchmark.coldArg, imported.benchmark.runtimeArg];
+  const nodeValues = args.map((arg) => imported.run(arg));
+
+  const compiled = await compile(source, {
+    target: "linear",
+    allocator: "analysis-stack",
+    fileName: fibPath,
+  });
+  expect(compiled.success, compiled.errors.map((error) => error.message).join("\n")).toBe(true);
+  const report = getLastLinearIrReport();
+  if (!report) throw new Error("exact fib.js compile did not publish a shared linear IR report");
+
+  const bitwiseOps: IrBinop[] = [];
+  for (const func of report.irModule.functions) {
+    for (const block of func.blocks) {
+      for (const instr of block.instrs) {
+        forEachInstrDeep(instr, (nested) => {
+          if (nested.kind === "binary" && nested.op.startsWith("js.bit")) bitwiseOps.push(nested.op);
+        });
+      }
+    }
+  }
+  const porfforInput = lowerIrModuleToPorffor(report.irModule, {
+    memoryPlan: report.memoryPlan,
+    prefs: { gc: false },
+  });
+  const { instance } = await WebAssembly.instantiate(compiled.binary, compiled.importObject ?? {});
+  const linearRun = (instance.exports as Record<string, (n: number) => number>).run;
+  if (!linearRun) throw new Error("exact fib.js linear-Wasm export run is absent");
+
+  return {
+    args,
+    bitwiseOps,
+    linearValues: args.map((arg) => linearRun(arg)),
+    nodeValues,
+    porfforInput,
+    report,
+    sourceBytes: sourceBuffer.length,
+    sourceSha256,
+  };
+}
 
 function collectNodes(value: unknown, out: PorfforNode[] = []): PorfforNode[] {
   if (!Array.isArray(value)) return out;
@@ -285,34 +379,76 @@ int main(int argc, char** argv) {
   const binaryPath = join(directory, "bitwise");
   try {
     writeFileSync(sourcePath, rendered + harness);
-    const result = spawnSync(
-      compiler,
-      [
-        "-std=gnu11",
-        "-O1",
-        "-g",
-        "-Werror",
-        "-Wno-unused-function",
-        "-fsanitize=address,undefined",
-        "-fno-omit-frame-pointer",
-        sourcePath,
-        "-lm",
-        "-o",
-        binaryPath,
-      ],
-      { encoding: "utf8" },
-    );
+    const result = compileSanitizedC(compiler, sourcePath, binaryPath);
     expect(result.status, `C compiler failed:\n${result.stdout}\n${result.stderr}`).toBe(0);
-    const stdout = execFileSync(binaryPath, {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1:abort_on_error=1",
-        UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1",
-      },
-    });
-    return stdout.trim().split("\n").map(Number);
+    return runSanitizedBinary(binaryPath);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+function compileAndRunExactFibSanitizedC(
+  compiler: string,
+  rendered: string,
+  input: PorfforRendererInput,
+  args: readonly number[],
+): number[] {
+  const func = input.funcs.find((candidate) => candidate?.name === "run");
+  if (!func) throw new Error("missing exact fib.js Porffor function run");
+  const symbol = `p${func.index}_${func.name}`;
+  const calls = args.map((arg) => `  printf("%.17g\\n", ${symbol}(${arg}.0));`).join("\n");
+  const harness = `
+int main(int argc, char** argv) {
+  porf_init(argc, argv);
+  porf_data_init();
+${calls}
+  return 0;
+}
+`;
+  const directory = mkdtempSync(join(tmpdir(), "js2-porffor-3499-fib-"));
+  const sourcePath = join(directory, "fib.c");
+  const binaryPath = join(directory, "fib");
+  try {
+    writeFileSync(sourcePath, rendered + harness);
+    const result = compileSanitizedC(compiler, sourcePath, binaryPath);
+    expect(result.status, `C compiler failed:\n${result.stdout}\n${result.stderr}`).toBe(0);
+    return runSanitizedBinary(binaryPath);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+function compileSanitizedC(compiler: string, sourcePath: string, binaryPath: string) {
+  return spawnSync(
+    compiler,
+    [
+      "-std=gnu11",
+      "-O1",
+      "-g",
+      "-Werror",
+      "-Wno-unused-function",
+      "-fsanitize=address,undefined",
+      "-fno-omit-frame-pointer",
+      sourcePath,
+      "-lm",
+      "-o",
+      binaryPath,
+    ],
+    { encoding: "utf8" },
+  );
+}
+
+function runSanitizedBinary(binaryPath: string): number[] {
+  const result = spawnSync(binaryPath, [], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1:abort_on_error=1",
+      UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1",
+    },
+  });
+  expect(result.status, `sanitized native execution failed:\n${result.stdout}\n${result.stderr}`).toBe(0);
+  expect(result.signal).toBeNull();
+  expect(result.stderr).toBe("");
+  return result.stdout.trim().split("\n").map(Number);
 }
