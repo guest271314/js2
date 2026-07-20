@@ -16,8 +16,10 @@ import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 import { ts } from "../src/ts-api.js";
 import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
+import { isModuleGoal } from "../scripts/test262-module-goal.mjs";
 import { restoreHostBuiltins } from "./test262-restore-builtins.js";
 import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-original-harness.js";
+import { SANDBOX_GLOBAL_NAMES } from "../scripts/test262-sandbox-globals.mjs";
 
 // #1310: per-shard global isolation for test262.
 //
@@ -40,57 +42,12 @@ import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-
 // vm realm's built-ins as properties on it — `ctx.Array` is `undefined`.
 // We therefore use `vm.runInContext("...")` to extract the realm's
 // built-ins explicitly and copy the references onto the sandbox object.
-const SANDBOX_GLOBAL_NAMES: ReadonlyArray<string> = [
-  "Array",
-  "Object",
-  "Function",
-  "String",
-  "Number",
-  "Boolean",
-  "Symbol",
-  "Promise",
-  "Map",
-  "Set",
-  "WeakMap",
-  "WeakSet",
-  "Date",
-  "RegExp",
-  "Error",
-  "TypeError",
-  "RangeError",
-  "SyntaxError",
-  "ReferenceError",
-  "Math",
-  "JSON",
-  "Reflect",
-  // (#3419) The TypedArray cluster + binary-data builtins. The oracle-v8
-  // literal harness (testTypedArray.js) reads these as VALUES off globalThis
-  // (`Object.getPrototypeOf(Int8Array)`, `[Int8Array, Uint8Array, …]`); before
-  // this list included them, `__extern_get(globalThis, "Int8Array")` returned
-  // undefined in the sandbox and the whole TypedArray harness died at
-  // `Object.getPrototypeOf(undefined)` — ~2k tests. Same vm realm as the rest
-  // of the sandbox, so intra-sandbox identities hold.
-  "ArrayBuffer",
-  "SharedArrayBuffer",
-  "DataView",
-  "Int8Array",
-  "Uint8Array",
-  "Uint8ClampedArray",
-  "Int16Array",
-  "Uint16Array",
-  "Int32Array",
-  "Uint32Array",
-  "Float16Array",
-  "Float32Array",
-  "Float64Array",
-  "BigInt64Array",
-  "BigUint64Array",
-  "BigInt",
-  "EvalError",
-  "URIError",
-  "AggregateError",
-  "Proxy",
-];
+//
+// (#3441) The name list itself now lives in the single shared source
+// scripts/test262-sandbox-globals.mjs (imported above as SANDBOX_GLOBAL_NAMES),
+// so this runner lane and the sharded-CI worker (scripts/test262-worker.mjs)
+// can never drift again — the #3419 TypedArray cluster (+ Atomics) is applied
+// to both by construction.
 
 const SENTINEL_KEYS: ReadonlyArray<readonly string[]> = [
   ["Array", "prototype", "push"],
@@ -3672,14 +3629,7 @@ export function standaloneHostImportError(target: string | undefined, imports: r
 /** Default per-test timeout in milliseconds (prevents infinite-loop hangs) */
 const TEST_TIMEOUT_MS = 15000;
 
-export function isModuleGoal(category: string, meta: Test262Meta, source: string): boolean {
-  if (category === "language/module-code") return true;
-  if (category === "language/import") return true;
-  if (category === "language/export") return true;
-  if (meta.flags?.includes("module")) return true;
-  if (/\b(?:import|export)\b/.test(source)) return true;
-  return false;
-}
+export { isModuleGoal };
 
 export function buildNegativeCompileSource(source: string, meta: Test262Meta, category: string): string {
   const strippedSource = source.replace(/\/\*---[\s\S]*?---\*\//, "");
@@ -4533,6 +4483,7 @@ export async function runSyntheticTest262File(
 
   // Wrap the test
   const { source: wrappedSource, bodyLineOffset } = wrapTest(source, meta, target);
+  const moduleGoal = isModuleGoal(category, meta, source);
 
   /** Adjust error line numbers to refer to the original source file.
    *  The wrapped source has a variable preamble and stripped comments,
@@ -4582,7 +4533,7 @@ export async function runSyntheticTest262File(
       // only genuine module-goal tests infer module-strictness; script tests
       // keep mapped `arguments` despite the synthetic `export function test()`
       // wrapper. Matches `test262-shared.ts`.
-      inferModuleStrictArguments: isModuleGoal(category, meta, source),
+      inferModuleStrictArguments: moduleGoal,
       // (#2095) standalone lane for the baseline validator (default host/gc).
       // (#3049 C1 / #3123) Host lane defers top-level init (export
       // `__module_init`, no wasm `(start)` section) so top-level code runs
@@ -4595,7 +4546,7 @@ export async function runSyntheticTest262File(
       // one binary — V8 rejects it ("Duplicate export name '__module_init'"),
       // which is exactly the 6-file `language/module-code/*` regression that
       // parked the stack PR #2835/#2839 in the merge queue.
-      ...(target ? { target } : isModuleGoal(category, meta, source) ? {} : { deferTopLevelInit: true }),
+      ...(target ? { target } : moduleGoal ? {} : { deferTopLevelInit: true }),
       // #1251: align with the sharded runner — both `scripts/compiler-fork-worker.mjs`
       // (the production path that records the committed JSONL) and `tests/test262-vitest.test.ts`
       // FIXTURE multi-compile pass `skipSemanticDiagnostics: true`. Without this flag,

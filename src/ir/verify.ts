@@ -768,6 +768,9 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.lhs, instr.rhs];
     case "string.len":
       return [instr.value];
+    case "string.char_at":
+    case "string.char_code_at":
+      return [instr.value, instr.index];
     case "object.new":
       return instr.values;
     case "object.get":
@@ -1257,10 +1260,42 @@ function verifyInstrTypeRules(func: IrFunction, typeOf: ReadonlyMap<IrValueId, I
         break;
       }
       case "string.const":
-      case "string.concat": {
+      case "string.concat":
+      case "string.char_at": {
         if (instr.result !== null && instr.resultType && instr.resultType.kind !== "string") {
           errors.push({
             message: `${instr.kind} resultType must be string, got ${instr.resultType.kind}`,
+            func: func.name,
+            block: blockId,
+          });
+        }
+        if (instr.kind === "string.char_at") {
+          const indexKind = valKindOf(typeOf, instr.index);
+          if (indexKind !== null && indexKind !== "i32") {
+            errors.push({
+              message: `${instr.kind} index must be i32, got ${indexKind}`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        break;
+      }
+      case "string.char_code_at": {
+        if (instr.result !== null && instr.resultType) {
+          const got = asVal(instr.resultType)?.kind ?? null;
+          if (got !== null && got !== "f64") {
+            errors.push({
+              message: `${instr.kind} resultType must be f64, got ${got}`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        const indexKind = valKindOf(typeOf, instr.index);
+        if (indexKind !== null && indexKind !== "i32") {
+          errors.push({
+            message: `${instr.kind} index must be i32, got ${indexKind}`,
             func: func.name,
             block: blockId,
           });

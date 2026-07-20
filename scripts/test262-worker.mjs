@@ -3,7 +3,7 @@
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, wasmPath?, metaPath? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
@@ -14,10 +14,11 @@ import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext, runInContext } from "node:vm";
-import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
+import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bundle.mjs";
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
+import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -44,30 +45,13 @@ function computeBundleHash() {
 }
 const BUNDLE_HASH = computeBundleHash();
 
-const ORIGINAL_HARNESS_SANDBOX_GLOBALS = [
-  "Array",
-  "Object",
-  "Function",
-  "String",
-  "Number",
-  "Boolean",
-  "Symbol",
-  "Promise",
-  "Map",
-  "Set",
-  "WeakMap",
-  "WeakSet",
-  "Date",
-  "RegExp",
-  "Error",
-  "TypeError",
-  "RangeError",
-  "SyntaxError",
-  "ReferenceError",
-  "Math",
-  "JSON",
-  "Reflect",
-];
+// (#3441) The sandbox-globals list is now the single shared source in
+// scripts/test262-sandbox-globals.mjs — imported by BOTH this worker and
+// tests/test262-runner.ts so the two lanes can never drift again. It formerly
+// stopped at "Reflect" here (missing the #3419 TypedArray cluster + Atomics),
+// stranding ~2,069 default-lane TypedArray-ctor tests at "Cannot convert null
+// to object [in __module_init()]".
+const ORIGINAL_HARNESS_SANDBOX_GLOBALS = SANDBOX_GLOBAL_NAMES;
 
 function buildOriginalHarnessSandbox(consoleProxy) {
   const sandbox = Object.create(null);
@@ -102,6 +86,7 @@ let compileCount = 0;
 const GC_INTERVAL = 25;
 const RECREATE_INTERVAL = 100;
 const WORKER_RECYCLE_INTERVAL = Math.max(0, parseInt(process.env.TEST262_WORKER_RECYCLE_INTERVAL || "0", 10) || 0);
+let runtimeIntrinsicCanarySnapshot = null;
 
 let incrementalCompiler = null;
 function createFreshCompiler() {
@@ -1045,7 +1030,34 @@ function makeWorkerRecycleError(reason) {
   return err;
 }
 
-async function doCompile(source, sourceMapUrl, target, inferModuleStrictArguments, originalHarness) {
+function hasFixtureGraph(fixtureFiles) {
+  return (
+    fixtureFiles &&
+    typeof fixtureFiles === "object" &&
+    !Array.isArray(fixtureFiles) &&
+    Object.keys(fixtureFiles).length > 0
+  );
+}
+
+function hasDynamicFixtureGraph(dynamicFixtureFiles) {
+  return (
+    dynamicFixtureFiles &&
+    typeof dynamicFixtureFiles === "object" &&
+    !Array.isArray(dynamicFixtureFiles) &&
+    Object.keys(dynamicFixtureFiles).length > 0
+  );
+}
+
+async function doCompile(
+  source,
+  sourceMapUrl,
+  target,
+  inferModuleStrictArguments,
+  originalHarness,
+  fixtureFiles,
+  entryFile,
+  isNegative,
+) {
   // Defence-in-depth: restore any poisoned builtins BEFORE each compile.
   // postCompileCleanup runs after the previous test, but under rare worker
   // interruption scenarios it may not have completed. Doing a cheap pre-
@@ -1075,6 +1087,28 @@ async function doCompile(source, sourceMapUrl, target, inferModuleStrictArgument
   // CompileError, the 6-file `language/module-code/*` regression that parked
   // the stack PR #2835/#2839.
   const deferOpt = target || (!originalHarness && inferModuleStrictArguments) ? {} : { deferTopLevelInit: true };
+  if (hasFixtureGraph(fixtureFiles)) {
+    if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
+      throw new Error("fixture graph requires an original-harness entryFile");
+    }
+    if (Object.prototype.hasOwnProperty.call(fixtureFiles, entryFile)) {
+      throw new Error(`fixture graph collides with entry file: ${entryFile}`);
+    }
+
+    // Preserve the literal FYI entry as its own Module and link the pinned
+    // fixture sources beside it. Like the project runner's #2932 path, the
+    // graph deliberately omits deferTopLevelInit: compileMulti synthesizes
+    // one init schedule for the entire graph, including circular exports.
+    return compileMulti({ ...fixtureFiles, [entryFile]: source }, entryFile, {
+      allowJs: !isNegative,
+      sourceMap: true,
+      sourceMapUrl: sourceMapUrl || "test.wasm.map",
+      emitWat: false,
+      skipSemanticDiagnostics: true,
+      target,
+      inferModuleStrictArguments,
+    });
+  }
   if (originalHarness) {
     return compile(source, {
       allowJs: true,
@@ -1398,6 +1432,7 @@ async function buildInvalidBinaryError(source, sourceMapUrl, result, target) {
 }
 
 process.on("message", async (msg) => {
+  runtimeIntrinsicCanarySnapshot = null;
   const { id, source, execute, isNegative, isRuntimeNegative, expectedErrorType, originalHarness, asyncTest } = msg;
   // (#3461) Fast native-harness oracle (host lane). When set, `source` is the
   // body-only `bindingShim + body` unit (the harness was NOT concatenated into
@@ -1408,11 +1443,39 @@ process.on("message", async (msg) => {
   const nativeHarness = originalHarness && msg.nativeHarness === true && typeof msg.harnessPrefix === "string";
   const harnessPrefix = nativeHarness ? msg.harnessPrefix : "";
   const target = compileTargetFromMessage(msg.target);
+  const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
   const compileStart = performance.now();
+
+  // #3492 — A literal dynamic Test262 fixture import is a real module-loader
+  // dependency, not a static compileMulti edge. The standalone backend has no
+  // host loader yet (#3494), so reject it explicitly instead of dropping the
+  // fixture and allowing the entry's `$DONE` to manufacture a false pass.
+  // Parse/early/resolution-negative sources must still reach the compiler:
+  // their import expression is never evaluated, and rejecting it here would
+  // replace the expected syntax verdict with an unrelated loader failure.
+  if (target === "standalone" && !isNegative && hasDynamicFixtureGraph(msg.dynamicFixtureFiles)) {
+    sendResult({
+      id,
+      status: "compile_error",
+      error: "standalone literal dynamic fixture import is unsupported (#3494)",
+      compileMs: performance.now() - compileStart,
+      reachedTest: false,
+    });
+    return;
+  }
 
   let result;
   try {
-    result = await doCompile(source, msg.sourceMapUrl, target, msg.inferModuleStrictArguments, originalHarness);
+    result = await doCompile(
+      source,
+      msg.sourceMapUrl,
+      target,
+      msg.inferModuleStrictArguments,
+      originalHarness,
+      msg.fixtureFiles,
+      msg.entryFile,
+      isNegative,
+    );
   } catch (err) {
     // Thrown exception may have poisoned the incremental compiler's internal
     // state.  Recreate immediately so subsequent compilations don't cascade-fail.
@@ -1435,7 +1498,11 @@ process.on("message", async (msg) => {
       return;
     }
     const errMsg = err?.message ?? String(err);
-    if (execute && isNegative && negativeCompileErrorMatches(expectedErrorType, [], errMsg)) {
+    // A thrown compiler exception while linking a supplied fixture graph is an
+    // infrastructure/compiler failure, never proof of Test262's requested
+    // SyntaxError. In particular, do not turn an absent/malformed dependency
+    // graph into a false resolution-negative pass.
+    if (execute && isNegative && !fixtureGraph && negativeCompileErrorMatches(expectedErrorType, [], errMsg)) {
       sendResult({
         id,
         status: "pass",
@@ -1507,7 +1574,10 @@ process.on("message", async (msg) => {
     // rejection is a static/syntax rejection => pass; a future wrong-type
     // negative rejected with an unrelated diagnostic now fails.
     if (execute && isNegative) {
-      const matched = negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
+      const missingFixtureDiagnostic =
+        fixtureGraph &&
+        (errorCodes.includes(2307) || errorCodes.includes(2792) || /cannot find module|module not found/i.test(errMsg));
+      const matched = !missingFixtureDiagnostic && negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
       if (matched) {
         sendResult({ id, status: "pass", compileMs, errorCodes, ...compileMetadata });
       } else {
@@ -1659,6 +1729,9 @@ process.on("message", async (msg) => {
       result.stringPool,
       originalHarness ? { globalSandbox: harnessSandbox } : undefined,
     );
+    if (REALM_CANARY_MODE) {
+      runtimeIntrinsicCanarySnapshot = snapshotRuntimeIntrinsicSurface(importObj);
+    }
 
     try {
       const wasmResult = await WebAssembly.instantiate(result.binary, importObj);
@@ -2152,6 +2225,11 @@ function collectIntrinsicSurface() {
   add("Atomics", globalThis.Atomics);
   add("Intl", globalThis.Intl);
   add("Temporal", globalThis.Temporal);
+  // propertyHelper tests mutate the properties of this nested namespace
+  // object without replacing Array.prototype's @@unscopables descriptor.
+  // Treat it as its own intrinsic surface so a strict rerun never inherits
+  // deletions such as copyWithin/findLast/toReversed from the sloppy variant.
+  add("Array.prototype[Symbol.unscopables]", Array.prototype[Symbol.unscopables]);
   add("globalThis", globalThis);
   try {
     const arrIter = Object.getPrototypeOf([][Symbol.iterator]());
@@ -2160,14 +2238,20 @@ function collectIntrinsicSurface() {
     add("%StringIteratorPrototype%", Object.getPrototypeOf(""[Symbol.iterator]()));
     add("%MapIteratorPrototype%", Object.getPrototypeOf(new Map()[Symbol.iterator]()));
     add("%SetIteratorPrototype%", Object.getPrototypeOf(new Set()[Symbol.iterator]()));
+    add("%RegExpStringIteratorPrototype%", Object.getPrototypeOf("x".matchAll(/x/g)));
     const genFn = function* () {};
     add("%GeneratorFunctionPrototype%", Object.getPrototypeOf(genFn));
-    add("%GeneratorPrototype%", genFn.prototype ? Object.getPrototypeOf(genFn()) : undefined);
+    const generatorInstancePrototype = genFn.prototype ? Object.getPrototypeOf(genFn()) : undefined;
+    const generatorPrototype = Object.getPrototypeOf(generatorInstancePrototype);
+    add("%GeneratorInstancePrototype%", generatorInstancePrototype);
+    add("%GeneratorPrototype%", generatorPrototype);
     const asyncGenFn = async function* () {};
     add("%AsyncGeneratorFunctionPrototype%", Object.getPrototypeOf(asyncGenFn));
-    const asyncGenProto = Object.getPrototypeOf(asyncGenFn());
-    add("%AsyncGeneratorPrototype%", asyncGenProto);
-    add("%AsyncIteratorPrototype%", Object.getPrototypeOf(asyncGenProto));
+    const asyncGeneratorInstancePrototype = Object.getPrototypeOf(asyncGenFn());
+    const asyncGeneratorPrototype = Object.getPrototypeOf(asyncGeneratorInstancePrototype);
+    add("%AsyncGeneratorInstancePrototype%", asyncGeneratorInstancePrototype);
+    add("%AsyncGeneratorPrototype%", asyncGeneratorPrototype);
+    add("%AsyncIteratorPrototype%", Object.getPrototypeOf(asyncGeneratorPrototype));
     add("%TypedArrayPrototype%", Object.getPrototypeOf(Uint8Array.prototype));
   } catch {
     // best-effort — a missing exotic prototype shrinks coverage, never breaks
@@ -2241,9 +2325,9 @@ function appendFunctionMetadataDrift(drift, label, expected, current) {
   }
 }
 
-function snapshotRealmSurface() {
+function snapshotSurface(roots) {
   const snap = new Map();
-  for (const [label, obj] of collectIntrinsicSurface()) {
+  for (const [label, obj] of roots) {
     try {
       snap.set(label, {
         obj,
@@ -2256,6 +2340,47 @@ function snapshotRealmSurface() {
     }
   }
   return snap;
+}
+
+function snapshotRealmSurface() {
+  return snapshotSurface(collectIntrinsicSurface());
+}
+
+function snapshotRuntimeIntrinsicSurface(importObj) {
+  const roots = new Map();
+  const add = (label, obj) => {
+    if (obj && (typeof obj === "object" || typeof obj === "function")) roots.set(label, obj);
+  };
+  const env = importObj?.env ?? {};
+  const callGetter = (name) => {
+    try {
+      return typeof env[name] === "function" ? env[name]() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const generatorFunctionPrototype = callGetter("__get_generator_function_prototype");
+  const generatorInstancePrototype = callGetter("__get_generator_prototype");
+  const generatorPrototype =
+    generatorFunctionPrototype?.prototype ??
+    (generatorInstancePrototype ? Object.getPrototypeOf(generatorInstancePrototype) : undefined);
+  add("%RuntimeGeneratorFunctionPrototype%", generatorFunctionPrototype);
+  add("%RuntimeGeneratorInstancePrototype%", generatorInstancePrototype);
+  add("%RuntimeGeneratorPrototype%", generatorPrototype);
+
+  const asyncGeneratorFunctionPrototype = callGetter("__get_async_generator_function_prototype");
+  const asyncGeneratorInstancePrototype = callGetter("__get_async_generator_prototype");
+  const asyncGeneratorPrototype =
+    asyncGeneratorFunctionPrototype?.prototype ??
+    (asyncGeneratorInstancePrototype ? Object.getPrototypeOf(asyncGeneratorInstancePrototype) : undefined);
+  const asyncIteratorPrototype = asyncGeneratorPrototype ? Object.getPrototypeOf(asyncGeneratorPrototype) : undefined;
+  add("%RuntimeAsyncGeneratorFunctionPrototype%", asyncGeneratorFunctionPrototype);
+  add("%RuntimeAsyncGeneratorInstancePrototype%", asyncGeneratorInstancePrototype);
+  add("%RuntimeAsyncGeneratorPrototype%", asyncGeneratorPrototype);
+  add("%RuntimeAsyncIteratorPrototype%", asyncIteratorPrototype);
+
+  return snapshotSurface(roots);
 }
 
 const REALM_CANARY_MAX_DRIFT = 24;
@@ -2309,9 +2434,13 @@ let realmCanaryChecks = 0;
 let realmCanaryCheckMsTotal = 0;
 
 function realmDriftRecycleReason(payload) {
-  if (!realmCanarySnapshot) return undefined;
+  if (!realmCanarySnapshot && !runtimeIntrinsicCanarySnapshot) return undefined;
   const t0 = performance.now();
-  const drift = diffRealmSurface(realmCanarySnapshot).filter((d) => !realmCanaryIgnored(d));
+  const drift = [
+    ...(realmCanarySnapshot ? diffRealmSurface(realmCanarySnapshot) : []),
+    ...(runtimeIntrinsicCanarySnapshot ? diffRealmSurface(runtimeIntrinsicCanarySnapshot) : []),
+  ].filter((d) => !realmCanaryIgnored(d));
+  runtimeIntrinsicCanarySnapshot = null;
   realmCanaryCheckMsTotal += performance.now() - t0;
   realmCanaryChecks++;
   if (REALM_CANARY_MODE === "log" && realmCanaryChecks % 200 === 0) {

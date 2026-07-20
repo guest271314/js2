@@ -1667,7 +1667,20 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           }
         }
         const targetName = getAssignmentRootIdentifier(expr.left);
-        if (targetName && ctx.moduleGlobals.has(targetName)) {
+        // (#3493) A top-level write through `globalThis` is observable realm
+        // state just like a write to one of our module globals. In particular,
+        // fixture modules commonly initialise shared state with
+        // `globalThis.x = value` and a later module reads it. Dropping the
+        // setter leaves the reader seeing `undefined`; if the checker inferred
+        // a concrete use (for example `.push`), that missing value is then
+        // cast to the concrete WasmGC representation and traps with
+        // `illegal cast` during `__module_init`.
+        //
+        // Keep every property name and every assignment operator rooted at
+        // the intrinsic global object. The property write itself already uses
+        // the normal native-object/externref bridge, so the stored value keeps
+        // one representation across all source files in the shared realm.
+        if (targetName && (targetName === "globalThis" || ctx.moduleGlobals.has(targetName))) {
           ctx.moduleInitStatements.push(stmt);
         }
       }

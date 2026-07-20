@@ -47,11 +47,17 @@
 // SAME IR `vec.len`/`vec.get` node → two completely different op sequences,
 // selected by which emitter `lower.ts` was handed. That is the proof.
 
-import { emitConstInstr } from "../lower.js";
-import type { IrBinop, IrInstr, IrUnop } from "../nodes.js";
+import { emitConstInstr, type IrLowerResolver } from "../lower.js";
+import type { AllocSiteId, IrBinop, IrInstr, IrUnop } from "../nodes.js";
+import type { IrStringConcatMode, IrStringEncoding } from "../string-runtime.js";
 import type { BlockType, Instr, ValType } from "../types.js";
 import type { LinearRuntimeOperation } from "../analysis/linear-memory-plan.js";
-import type { BackendEmitter } from "./emitter.js";
+import type {
+  BackendEmitter,
+  BackendI32BitwiseOp,
+  BackendNumericConversionOp,
+  BackendScalarConstType,
+} from "./emitter.js";
 import type {
   IrClassLowering,
   IrObjectStructLowering,
@@ -65,6 +71,7 @@ import type {
 export interface LinearEmitterOptions {
   /** Bind a semantic plan operation only after module functions are registered. */
   readonly resolveRuntimeOperation?: (operation: LinearRuntimeOperation) => number;
+  readonly stringRuntime?: IrLowerResolver;
 }
 
 /** The `<t>.load` op matching a linear element ValType. */
@@ -157,6 +164,43 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   }
   pushRaw(out: Instr[], instr: Instr): void {
     out.push(instr);
+  }
+
+  emitStringConst(value: string, alloc: AllocSiteId | undefined, out: Instr[]): void {
+    const ops = this.options.stringRuntime?.emitStringConst?.(value, alloc);
+    if (!ops) throw new Error("LinearEmitter: string.const runtime is unavailable");
+    out.push(...ops);
+  }
+
+  emitStringConcat(alloc: AllocSiteId | undefined, mode: IrStringConcatMode, out: Instr[]): void {
+    const ops = this.options.stringRuntime?.emitStringConcat?.(alloc, mode);
+    if (!ops) throw new Error("LinearEmitter: string.concat runtime is unavailable");
+    out.push(...ops);
+  }
+
+  emitStringEquals(negate: boolean, out: Instr[]): void {
+    const ops = this.options.stringRuntime?.emitStringEquals?.();
+    if (!ops) throw new Error("LinearEmitter: string.eq runtime is unavailable");
+    out.push(...ops);
+    if (negate) out.push({ op: "i32.eqz" });
+  }
+
+  emitStringLength(_inputEncoding: IrStringEncoding | undefined, out: Instr[]): void {
+    const ops = this.options.stringRuntime?.emitStringLen?.(_inputEncoding);
+    if (!ops) throw new Error("LinearEmitter: string.len runtime is unavailable");
+    out.push(...ops, { op: "f64.convert_i32_s" });
+  }
+
+  emitStringCharAt(_alloc: AllocSiteId | undefined, _inputEncoding: IrStringEncoding, out: Instr[]): void {
+    const ops = this.options.stringRuntime?.emitStringCharAt?.(_alloc, _inputEncoding);
+    if (!ops) throw new Error("LinearEmitter: string.char_at runtime is unavailable");
+    out.push(...ops);
+  }
+
+  emitStringCharCodeAt(_inputEncoding: IrStringEncoding, out: Instr[]): void {
+    const ops = this.options.stringRuntime?.emitStringCharCodeAt?.(_inputEncoding);
+    if (!ops) throw new Error("LinearEmitter: string.char_code_at runtime is unavailable");
+    out.push(...ops);
   }
 
   // ---- vec (array) — the #1714 proof surface ------------------------------
@@ -279,6 +323,18 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
   }
 
   emitUnary(op: IrUnop, out: Instr[]): void {
+    out.push({ op });
+  }
+
+  emitScalarConst(type: BackendScalarConstType, value: number, out: Instr[]): void {
+    out.push(type === "f64" ? { op: "f64.const", value } : { op: "i32.const", value });
+  }
+
+  emitNumericConversion(op: BackendNumericConversionOp, out: Instr[]): void {
+    out.push({ op });
+  }
+
+  emitI32Bitwise(op: BackendI32BitwiseOp, out: Instr[]): void {
     out.push({ op });
   }
 

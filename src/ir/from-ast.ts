@@ -37,6 +37,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 
+import { TsCheckerOracle } from "../checker/oracle.js";
 import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call of the shared exact-fmod helper
 // (#1373b C-1) Leaf-module async helpers (no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
@@ -46,6 +47,13 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
+import { classifyLiteral, joinEncoding, type Encoding } from "./analysis/encoding.js";
+import { proveTypedStringAppend, proveTypedStringMethod, type TypedValueEvidence } from "./analysis/string-evidence.js";
+import {
+  EmptyArrayElementInference,
+  emptyArrayInferenceDiagnostic,
+  inferEmptyArrayElementTypes,
+} from "./array-element-inference.js";
 import {
   assertNotDeferred,
   binaryOpCapability,
@@ -55,7 +63,7 @@ import {
   stringIndexProvenBelow,
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
-import { mathUnaryToIrOp } from "./select.js";
+import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, mathUnaryToIrOp } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
   asVal,
@@ -578,8 +586,12 @@ export function lowerFunctionAstToIr(
     !isCtor &&
     ts.isFunctionDeclaration(fn) &&
     !!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
-  const asyncUnwrappedReturn = isAsync ? unwrapPromiseTypeNode(fn.type) : null;
-  const effectiveReturnTypeNode = isAsync ? (asyncUnwrappedReturn ?? undefined) : fn.type;
+  const declaredReturnTypeNode =
+    ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn) || ts.isGetAccessorDeclaration(fn)
+      ? effectiveIrReturnTypeNode(fn)
+      : undefined;
+  const asyncUnwrappedReturn = isAsync ? unwrapPromiseTypeNode(declaredReturnTypeNode) : null;
+  const effectiveReturnTypeNode = isAsync ? (asyncUnwrappedReturn ?? undefined) : declaredReturnTypeNode;
   const isVoidReturn =
     !isGenerator &&
     !isCtor &&
@@ -606,7 +618,7 @@ export function lowerFunctionAstToIr(
     if (ts.isObjectBindingPattern(p.name) || ts.isArrayBindingPattern(p.name)) {
       return {
         name: `__pattern_param_${idx}`,
-        type: resolveIrType(p.type, override, `pattern param #${idx} of ${name}`),
+        type: resolveIrType(effectiveIrParamTypeNode(p), override, `pattern param #${idx} of ${name}`),
       };
     }
     if (!ts.isIdentifier(p.name)) {
@@ -625,7 +637,7 @@ export function lowerFunctionAstToIr(
     }
     return {
       name: p.name.text,
-      type: resolveIrType(p.type, override, `param ${p.name.text} of ${name}`),
+      type: resolveIrType(effectiveIrParamTypeNode(p), override, `param ${p.name.text} of ${name}`),
     };
   });
 
@@ -703,6 +715,11 @@ export function lowerFunctionAstToIr(
   const lifted: IrFunction[] = [];
   const liftedCounter = { value: 0 };
   const mutatedLets = collectMutatedLetNames(fn);
+  const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
+  const emptyArrayInference = inferEmptyArrayElementTypes(
+    fn,
+    options.checker ? new TsCheckerOracle(options.checker) : undefined,
+  );
   const cx: LowerCtx = {
     builder,
     scope,
@@ -714,6 +731,8 @@ export function lowerFunctionAstToIr(
     lifted,
     liftedCounter,
     mutatedLets,
+    ownedStringAppendSymbols,
+    emptyArrayInference,
     // (#2972) statically-known literal string lengths — proven-in-bounds
     // string element reads (`hex[(n >> 4) & 0xf]`) consult this.
     stringLiteralLens: collectStringLiteralLens(fn),
@@ -956,7 +975,9 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
           }
           // Then-arm taken but non-terminating: run its side effects, then
           // fall through to the rest in the same block / scope.
-          lowerStmt(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+          const takenCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+          lowerStmt(s.thenStatement, takenCx);
+          joinScopeStringEncodingFacts(cx.scope, [takenCx.scope]);
           continue;
         }
         // Then-arm dead: skip it and continue with the remaining statements
@@ -1002,15 +1023,17 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       });
 
       cx.builder.openReservedBlock(thenId);
-      lowerStmt(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+      const thenCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+      lowerStmt(s.thenStatement, thenCx);
       cx.builder.terminate({ kind: "br", branch: { target: contId, args: [] } });
 
       cx.builder.openReservedBlock(contId);
+      const continuationScope = joinedStringEncodingScope(cx.scope, [cx.scope, thenCx.scope]);
       if (rest.length === 0) {
         // No trailing statements — the function's implicit void return.
         cx.builder.terminate({ kind: "return", values: [] });
       } else {
-        lowerStatementList(rest, { ...cx, scope: new Map(cx.scope) });
+        lowerStatementList(rest, { ...cx, scope: continuationScope });
       }
       return;
     }
@@ -1225,7 +1248,7 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
  *     semantics without requiring SSA phi nodes.
  */
 type ScopeBinding =
-  | { kind: "local"; value: IrValueId; type: IrType }
+  | { kind: "local"; value: IrValueId; type: IrType; stringEncoding?: Encoding }
   | {
       /**
        * (#3142 Slice 2) A module-scope binding inside the `<module-init>`
@@ -1237,6 +1260,7 @@ type ScopeBinding =
       kind: "moduleGlobal";
       globalName: string;
       type: IrType;
+      stringEncoding?: Encoding;
     }
   | {
       kind: "nestedFunc";
@@ -1269,6 +1293,7 @@ type ScopeBinding =
        * native mode — so this is purely a type-system rewrite.
        */
       asType?: IrType;
+      stringEncoding?: Encoding;
     };
 
 /**
@@ -1322,6 +1347,18 @@ interface LowerCtx {
    * `lowerFunctionAstToIr` via `collectMutatedLetNames`.
    */
   readonly mutatedLets: ReadonlySet<string>;
+  /**
+   * #3502 conservative ownership proof for string builders. Each symbol is a
+   * fresh empty-string `let` whose loop-local uses are discarded `+=` writes
+   * only. Linear backends may therefore reuse its current allocation without
+   * exposing mutation through a JavaScript string alias.
+   */
+  readonly ownedStringAppendSymbols: ReadonlySet<ts.Symbol>;
+  /**
+   * #3501 function-wide may-alias/evidence closure for unannotated `[]`.
+   * It is analysis-only: allocation remains the ordinary vec.new_fixed site.
+   */
+  readonly emptyArrayInference: EmptyArrayElementInference;
   /**
    * (#2972) Locals bound once to a string literal and never reassigned
    * (incl. nested-function writes) → the literal's code-unit length. Feeds
@@ -1394,6 +1431,222 @@ interface LowerCtx {
   readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
 }
 
+/** Conservative producer-side encoding evidence for the typed string slice. */
+function inferStringEncoding(expr: ts.Expression, cx: LowerCtx): Encoding | undefined {
+  if (ts.isParenthesizedExpression(expr)) return inferStringEncoding(expr.expression, cx);
+  if (ts.isStringLiteral(expr) || expr.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral) {
+    return classifyLiteral((expr as ts.StringLiteral | ts.NoSubstitutionTemplateLiteral).text);
+  }
+  if (ts.isIdentifier(expr)) {
+    const binding = cx.scope.get(expr.text);
+    return binding && "stringEncoding" in binding ? binding.stringEncoding : undefined;
+  }
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = inferStringEncoding(expr.left, cx);
+    const right = inferStringEncoding(expr.right, cx);
+    return left && right ? joinEncoding(left, right) : undefined;
+  }
+  if (
+    ts.isCallExpression(expr) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    expr.expression.name.text === "charAt"
+  ) {
+    const receiver = inferStringEncoding(expr.expression.expression, cx);
+    return receiver === "ascii" ? "ascii" : receiver ? "wtf16" : undefined;
+  }
+  return undefined;
+}
+
+type StringEncodingScopeBinding = Exclude<ScopeBinding, { kind: "nestedFunc" }>;
+
+function isStringEncodingScopeBinding(binding: ScopeBinding): binding is StringEncodingScopeBinding {
+  if (binding.kind === "nestedFunc") return false;
+  return (binding.kind === "slot" ? (binding.asType ?? binding.type) : binding.type).kind === "string";
+}
+
+function sameScopeStorage(a: StringEncodingScopeBinding, b: ScopeBinding | undefined): boolean {
+  if (!b || b.kind !== a.kind) return false;
+  switch (a.kind) {
+    case "local":
+      return b.kind === "local" && b.value === a.value;
+    case "moduleGlobal":
+      return b.kind === "moduleGlobal" && b.globalName === a.globalName;
+    case "slot":
+      return b.kind === "slot" && b.slotIndex === a.slotIndex;
+  }
+}
+
+/**
+ * Join optional encoding evidence at a control-flow merge. Absence is the
+ * conservative top fact: one unproven predecessor invalidates a narrower
+ * claim. Proven predecessors use the existing encoding lattice.
+ */
+function joinStringEncodingFacts(left: Encoding | undefined, right: Encoding | undefined): Encoding | undefined {
+  return left === undefined || right === undefined ? undefined : joinEncoding(left, right);
+}
+
+/**
+ * Merge mutable string facts from every reachable predecessor into `target`.
+ * Only bindings that still name the same storage participate; a child-scope
+ * shadow leaves the outer binding unchanged on that predecessor.
+ */
+function joinScopeStringEncodingFacts(
+  target: Map<string, ScopeBinding>,
+  predecessors: readonly ReadonlyMap<string, ScopeBinding>[],
+): void {
+  for (const [name, binding] of target) {
+    if (!isStringEncodingScopeBinding(binding) || predecessors.length === 0) continue;
+    let joined: Encoding | undefined = binding.stringEncoding;
+    let first = true;
+    for (const predecessor of predecessors) {
+      const candidate = predecessor.get(name);
+      const fact = sameScopeStorage(binding, candidate)
+        ? (candidate as StringEncodingScopeBinding).stringEncoding
+        : binding.stringEncoding;
+      joined = first ? fact : joinStringEncodingFacts(joined, fact);
+      first = false;
+    }
+    target.set(name, { ...binding, stringEncoding: joined });
+  }
+}
+
+function joinedStringEncodingScope(
+  base: ReadonlyMap<string, ScopeBinding>,
+  predecessors: readonly ReadonlyMap<string, ScopeBinding>[],
+): Map<string, ScopeBinding> {
+  const joined = new Map(base);
+  joinScopeStringEncodingFacts(joined, predecessors);
+  return joined;
+}
+
+type PotentialStringEncodingWrite = {
+  readonly name: string;
+  readonly rhs?: ts.Expression;
+  readonly append: boolean;
+};
+
+/** Collect possible writes in evaluation order, excluding nested functions. */
+function collectPotentialStringEncodingWrites(root: ts.Node): readonly PotentialStringEncodingWrite[] {
+  const writes: PotentialStringEncodingWrite[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (node !== root && (ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node))) return;
+
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      // Assignment-expression side effects in the RHS happen before the outer
+      // identifier write, so record them first for the abstract transfer.
+      visit(node.right);
+      if (ts.isIdentifier(node.left)) {
+        const op = node.operatorToken.kind;
+        writes.push({
+          name: node.left.text,
+          ...(op === ts.SyntaxKind.EqualsToken || op === ts.SyntaxKind.PlusEqualsToken ? { rhs: node.right } : {}),
+          append: op === ts.SyntaxKind.PlusEqualsToken,
+        });
+      } else {
+        visit(node.left);
+      }
+      return;
+    }
+
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+      visit(node.initializer);
+      writes.push({ name: node.name.text, rhs: node.initializer, append: false });
+      return;
+    }
+
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      ts.isIdentifier(node.operand) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      writes.push({ name: node.operand.text, append: false });
+      return;
+    }
+
+    // `for (outerBinding of iterable)` performs a write on every iteration.
+    // The element encoding is not represented by this syntax-level summary,
+    // so kill any matching outer string fact conservatively.
+    if (ts.isForOfStatement(node) && ts.isIdentifier(node.initializer)) {
+      visit(node.expression);
+      writes.push({ name: node.initializer.text, append: false });
+      visit(node.statement);
+      return;
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(root);
+  return writes;
+}
+
+/**
+ * Compute the least conservative encoding environment after zero or more
+ * executions of every possible write in `root`. Each transfer joins with the
+ * incoming fact, preserving the path where the write is skipped. Iteration to
+ * stability is required for loop-carried dependencies such as
+ * `text = other; other = input`: the second write widens `other` on pass one,
+ * and the first write must then widen `text` on pass two.
+ */
+function conservativeStringEncodingScope(root: ts.Node, cx: LowerCtx): Map<string, ScopeBinding> {
+  const scope = new Map(cx.scope);
+  const writes = collectPotentialStringEncodingWrites(root);
+
+  let changed: boolean;
+  do {
+    changed = false;
+    for (const write of writes) {
+      const binding = scope.get(write.name);
+      if (!binding || !isStringEncodingScopeBinding(binding)) continue;
+      const current = binding.stringEncoding;
+      const rhsEncoding = write.rhs ? inferStringEncoding(write.rhs, { ...cx, scope }) : undefined;
+      const written = write.append ? joinStringEncodingFacts(current, rhsEncoding) : rhsEncoding;
+      const widened = joinStringEncodingFacts(current, written);
+      if (widened === current) continue;
+      scope.set(write.name, { ...binding, stringEncoding: widened });
+      changed = true;
+    }
+  } while (changed);
+
+  return scope;
+}
+
+/** Compute the conservative loop-header fixed point without emitting IR. */
+function conservativeLoopStringEncodingScope(loop: ts.IterationStatement, cx: LowerCtx): Map<string, ScopeBinding> {
+  return conservativeStringEncodingScope(loop, cx);
+}
+
+function typedValueEvidence(
+  expr: ts.Expression,
+  carrierType: IrType,
+  stringEncoding: Encoding | undefined,
+  cx: LowerCtx,
+  producerSemanticType: IrType = carrierType,
+): TypedValueEvidence {
+  const checkerProof = cx.checker ? classifyPrimitiveProof(cx.checker.getTypeAtLocation(expr)) : "unprovable";
+  if (checkerProof === "string" || checkerProof === "number") {
+    return {
+      semanticType: checkerProof,
+      carrierType,
+      semanticSource: "checker",
+      ...(checkerProof === "string" && stringEncoding ? { stringEncoding } : {}),
+    };
+  }
+  const producerCarrier = asVal(producerSemanticType);
+  return {
+    semanticType:
+      producerSemanticType.kind === "string" ? "string" : producerCarrier?.kind === "f64" ? "number" : "other",
+    carrierType,
+    semanticSource: "producer",
+    ...(producerSemanticType.kind === "string" && stringEncoding ? { stringEncoding } : {}),
+  };
+}
+
 /**
  * Slice 6 part 2 (#1181): walk a function body to collect every `let`
  * name that is reassigned somewhere — `<id> = <expr>`, `<id> +=/-=/*=/`/=`
@@ -1452,6 +1705,114 @@ function collectMutatedLetNamesFromBlock(body: ts.Block): Set<string> {
   };
   forEachChild(body, visit);
   return writes;
+}
+
+/**
+ * Prove the narrow, backend-neutral string-builder shape used by the linear
+ * append optimization:
+ *
+ *   let value = "";
+ *   for (...) {
+ *     value += part;
+ *   }
+ *
+ * The declaration and loop must be adjacent. Within the loop every reference
+ * to the exact checker symbol must be the direct LHS of a discarded `+=`;
+ * nested-function references are rejected. Later reads are allowed, but later
+ * writes are not. This keeps the semantic IR operation `string.concat` while
+ * proving that a linear backend may mutate/reallocate the current carrier.
+ */
+function collectOwnedStringAppendSymbols(body: ts.Block, checker: ts.TypeChecker | undefined): Set<ts.Symbol> {
+  const proven = new Set<ts.Symbol>();
+  if (!checker) return proven;
+
+  const statements = body.statements;
+  for (let statementIndex = 0; statementIndex + 1 < statements.length; statementIndex++) {
+    const declarationStatement = statements[statementIndex]!;
+    const loopStatement = statements[statementIndex + 1]!;
+    if (!ts.isVariableStatement(declarationStatement)) continue;
+    if (!(declarationStatement.declarationList.flags & ts.NodeFlags.Let)) continue;
+    if (declarationStatement.declarationList.declarations.length !== 1) continue;
+    if (!isIterationStatement(loopStatement)) continue;
+
+    const declaration = declarationStatement.declarationList.declarations[0]!;
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+    if (!isEmptyStringLiteral(declaration.initializer)) continue;
+    const symbol = checker.getSymbolAtLocation(declaration.name);
+    if (!symbol) continue;
+
+    let appendCount = 0;
+    let loopUsesAreOwnedAppends = true;
+    const visitLoop = (node: ts.Node, nestedFunction = false): void => {
+      const entersNestedFunction =
+        nestedFunction ||
+        (node !== loopStatement &&
+          (ts.isFunctionDeclaration(node) ||
+            ts.isFunctionExpression(node) ||
+            ts.isArrowFunction(node) ||
+            ts.isMethodDeclaration(node)));
+      if (ts.isIdentifier(node) && checker.getSymbolAtLocation(node) === symbol) {
+        const parent = node.parent;
+        const isDiscardedAppend =
+          !entersNestedFunction &&
+          ts.isBinaryExpression(parent) &&
+          parent.left === node &&
+          parent.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
+          ts.isExpressionStatement(parent.parent);
+        if (!isDiscardedAppend) loopUsesAreOwnedAppends = false;
+        else appendCount++;
+      }
+      forEachChild(node, (child) => visitLoop(child, entersNestedFunction));
+    };
+    visitLoop(loopStatement);
+    if (!loopUsesAreOwnedAppends || appendCount === 0) continue;
+
+    let laterWrite = false;
+    const visitLater = (node: ts.Node): void => {
+      if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left)) {
+        const op = node.operatorToken.kind;
+        if (
+          checker.getSymbolAtLocation(node.left) === symbol &&
+          (op === ts.SyntaxKind.EqualsToken ||
+            (op >= ts.SyntaxKind.PlusEqualsToken && op <= ts.SyntaxKind.CaretEqualsToken))
+        ) {
+          laterWrite = true;
+        }
+      }
+      if (
+        (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+        ts.isIdentifier(node.operand) &&
+        checker.getSymbolAtLocation(node.operand) === symbol
+      ) {
+        laterWrite = true;
+      }
+      forEachChild(node, visitLater);
+    };
+    for (let laterIndex = statementIndex + 2; laterIndex < statements.length; laterIndex++) {
+      visitLater(statements[laterIndex]!);
+    }
+    if (!laterWrite) proven.add(symbol);
+  }
+  return proven;
+}
+
+function isIterationStatement(statement: ts.Statement): boolean {
+  return (
+    ts.isForStatement(statement) ||
+    ts.isForInStatement(statement) ||
+    ts.isForOfStatement(statement) ||
+    ts.isWhileStatement(statement) ||
+    ts.isDoStatement(statement)
+  );
+}
+
+function isEmptyStringLiteral(expression: ts.Expression): boolean {
+  const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression;
+  return (
+    (ts.isStringLiteral(unwrapped) || unwrapped.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral) &&
+    (unwrapped as ts.StringLiteral | ts.NoSubstitutionTemplateLiteral).text.length === 0
+  );
 }
 
 function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
@@ -1556,12 +1917,32 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         },
       );
     }
+    let inferredEmptyArrayHint: IrType | undefined;
+    if (annotated === undefined && ts.isArrayLiteralExpression(d.initializer) && d.initializer.elements.length === 0) {
+      const inference = cx.emptyArrayInference.resultForLiteral(d.initializer);
+      if (inference?.kind === "rejected") {
+        throw new Error(emptyArrayInferenceDiagnostic(inference, cx.funcName));
+      }
+      if (inference?.kind === "resolved") {
+        const vec = cx.resolver?.resolveVecForElement?.(inference.elementValType);
+        if (!vec) {
+          throw new Error(`ir/from-ast: resolver cannot register inferred number[] vec for '${name}' (${cx.funcName})`);
+        }
+        inferredEmptyArrayHint = irVal(
+          cx.resolver?.resolveVecValueTypeForElement?.(inference.elementValType) ?? {
+            kind: "ref",
+            typeIdx: vec.vecStructTypeIdx,
+          },
+        );
+      }
+    }
     // (#3142 Slice 2) A module binding's hint is its GLOBAL's type — the
     // storage slot is fixed by the legacy allocation, so the initializer
     // must land on exactly that representation (checked below).
-    const hint: IrType = annotated ?? moduleBinding?.type ?? irVal({ kind: "f64" });
+    const hint: IrType = annotated ?? inferredEmptyArrayHint ?? moduleBinding?.type ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
     const inferred = cx.builder.typeOf(value);
+    const stringEncoding = inferred.kind === "string" ? inferStringEncoding(d.initializer, cx) : undefined;
     if (annotated) {
       // Slice 1 (#1169a): the IrType discriminator includes a `string` arm
       // alongside `val`, so use `irTypeEquals` for a structural match
@@ -1588,7 +1969,9 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // No checker → unchanged (#2780 / #2781's no-checker arm). `inferred` is the
     // bound representation here (an `annotated` mismatch already threw above),
     // and `d.name` is an Identifier (non-identifier decls threw earlier).
-    const scalarVecValue = cx.resolver?.isVecValueExpression?.(d.initializer) === true;
+    const scalarVecValue =
+      cx.resolver?.isVecValueExpression?.(d.initializer) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(d.initializer);
     if (!scalarVecValue && !proveUnboxedNumberLocal(d.name, inferred, cx)) {
       const boundKind = asVal(inferred)?.kind === "i32" ? "i32" : "f64";
       throw new Error(
@@ -1617,7 +2000,12 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         const one = cx.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
         cx.builder.emitGlobalSet({ kind: "global", name: moduleBinding.tdzGlobalName }, one);
       }
-      cx.scope.set(name, { kind: "moduleGlobal", globalName: moduleBinding.globalName, type: moduleBinding.type });
+      cx.scope.set(name, {
+        kind: "moduleGlobal",
+        globalName: moduleBinding.globalName,
+        type: moduleBinding.type,
+        ...(stringEncoding ? { stringEncoding } : {}),
+      });
       continue;
     }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
@@ -1638,7 +2026,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       if (slotValType !== null && slotValType.kind !== "ref" && slotValType.kind !== "ref_null") {
         const slotIndex = cx.builder.declareSlot(name, slotValType);
         cx.builder.emitSlotWrite(slotIndex, value);
-        cx.scope.set(name, { kind: "slot", slotIndex, type: inferred });
+        cx.scope.set(name, { kind: "slot", slotIndex, type: inferred, ...(stringEncoding ? { stringEncoding } : {}) });
         continue;
       }
       // String let in native-strings mode: slot ValType is the
@@ -1654,6 +2042,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
             slotIndex,
             type: irVal(stringValType),
             asType: { kind: "string" },
+            ...(stringEncoding ? { stringEncoding } : {}),
           });
           continue;
         }
@@ -1662,7 +2051,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       // the lowerer will catch any subsequent assignment and throw,
       // landing the function back on the legacy path.
     }
-    cx.scope.set(name, { kind: "local", value, type: inferred });
+    cx.scope.set(name, { kind: "local", value, type: inferred, ...(stringEncoding ? { stringEncoding } : {}) });
   }
 }
 
@@ -2635,7 +3024,7 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
     if (propName !== "length") {
       throw new Error(`ir/from-ast: .${propName} on string is not in slice 2 (${cx.funcName})`);
     }
-    return cx.builder.emitStringLen(recv);
+    return cx.builder.emitStringLen(recv, inferStringEncoding(expr.expression, cx));
   }
 
   if (recvType.kind === "object") {
@@ -2715,11 +3104,21 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
   // branch only fires for `.length`. Method dispatch (`arr.push(...)`,
   // `arr.map(...)`, etc.) is handled in `lowerMethodCall`.
   const recvVal = asVal(recvType);
-  const scalarVecReceiver = recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(expr.expression) === true;
+  const scalarVecReceiver =
+    recvVal?.kind === "i32" &&
+    (cx.resolver?.isVecValueExpression?.(expr.expression) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(expr.expression));
   if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null" || scalarVecReceiver)) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
     if (vec) {
       if (propName === "length") {
+        // A growable linear vec may have forwarded its original header after
+        // an indexed write. The direct runtime reader chases that chain;
+        // vec.len's raw planned load intentionally remains unchanged for
+        // fixed vectors and WasmGC refs.
+        if (scalarVecReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression)) {
+          return emitForwardingAwareLinearVecLen(recv, cx);
+        }
         return cx.builder.emitVecLen(recv);
       }
       throw new Error(`ir/from-ast: .${propName} on vec not in slice 13 (${cx.funcName})`);
@@ -2866,6 +3265,14 @@ function isProvenInBoundsIr(expr: ts.ElementAccessExpression, cx: LowerCtx): boo
  *     bounds-checks all element kinds (returns the type-default, never traps), so
  *     the demote is still trap-free.
  */
+function emitForwardingAwareLinearVecLen(recv: IrValueId, cx: LowerCtx): IrValueId {
+  const lenI32 = cx.builder.emitCall({ kind: "func", name: "__arr_len" }, [recv], irVal({ kind: "i32" }));
+  if (lenI32 === null) {
+    throw new Error(`ir/from-ast: forwarding-aware vec length produced no value (${cx.funcName})`);
+  }
+  return cx.builder.emitUnary("f64.convert_i32_s", lenI32, irVal({ kind: "f64" }));
+}
+
 function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType, cx: LowerCtx): IrValueId {
   const elemIr = irVal(elemValType);
   let makeOobDefault: (() => IrValueId) | null = null;
@@ -2960,7 +3367,9 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   // (`scalarVecReceiver` at the `.length` / element-access arms). The
   // WasmGC lane is unaffected: its vec receivers always lower as refs.
   const scalarVecStoreReceiver =
-    recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(lhs.expression) === true;
+    recvVal?.kind === "i32" &&
+    (cx.resolver?.isVecValueExpression?.(lhs.expression) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(lhs.expression));
   if (!recvVal || (recvVal.kind !== "ref" && recvVal.kind !== "ref_null" && !scalarVecStoreReceiver)) {
     throw new Error(`ir/from-ast: element store on ${describeIrType(recvType)} not in IR scope (${cx.funcName})`);
   }
@@ -3054,7 +3463,10 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   // sharpest hybrid-invariant violation (strictly worse than legacy, which at
   // least bounds-checks and returns a sentinel).
   const recvVal = asVal(recvType);
-  const scalarVecReceiver = recvVal?.kind === "i32" && cx.resolver?.isVecValueExpression?.(expr.expression) === true;
+  const scalarVecReceiver =
+    recvVal?.kind === "i32" &&
+    (cx.resolver?.isVecValueExpression?.(expr.expression) === true ||
+      cx.emptyArrayInference.isResolvedVectorExpression(expr.expression));
   if (recvVal && (recvVal.kind === "ref" || recvVal.kind === "ref_null" || scalarVecReceiver)) {
     const vec = cx.resolver?.resolveVec?.(recvVal);
     if (vec) {
@@ -3084,6 +3496,22 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
         );
       }
       const elemIr = irVal(vec.elementValType);
+      if (scalarVecReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression)) {
+        // The direct linear runtime historically uses a backend-specific zero
+        // sentinel for OOB array reads, while the shared f64 vec path uses NaN
+        // as the numeric image of JS `undefined`. Do not let inferred arrays
+        // silently pick one representation: until shared IR has an explicit
+        // undefined carrier, only lower reads covered by the existing counted-
+        // loop bounds proof.
+        if (!isProvenInBoundsIr(expr, cx)) {
+          throw new Error(`ir/from-ast: inferred linear vector read is not proven in bounds (${cx.funcName})`);
+        }
+        const value = cx.builder.emitCall({ kind: "func", name: "__arr_get" }, [recv, idxI32], elemIr);
+        if (value === null) {
+          throw new Error(`ir/from-ast: forwarding-aware vec read produced no value (${cx.funcName})`);
+        }
+        return value;
+      }
       // FAST path — proven in-bounds (counted-loop proof) → unchecked read.
       if (isProvenInBoundsIr(expr, cx)) {
         return cx.builder.emitVecGet(recv, idxI32, elemIr);
@@ -3116,7 +3544,7 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   if (recvType.kind === "string" && ts.isIdentifier(expr.expression)) {
     const litLen = cx.stringLiteralLens?.get(expr.expression.text);
     if (litLen !== undefined && stringIndexProvenBelow(arg, litLen)) {
-      const r = lowerStringMethodCall("charAt", recv, ts.factory.createNodeArray([arg]), cx);
+      const r = lowerStringMethodCall("charAt", recv, expr.expression, ts.factory.createNodeArray([arg]), cx);
       if (r !== null) return r;
       throw new Error(`ir/from-ast: internal — charAt delegation produced no value in ${cx.funcName}`);
     }
@@ -3897,7 +4325,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // the active string backend. Returns null when the method isn't supported
   // by Phase 1 (caller falls through to the existing `string` arm below).
   if (recvType.kind === "string") {
-    const r = lowerStringMethodCall(methodName, recv, expr.arguments, cx);
+    const r = lowerStringMethodCall(methodName, recv, expr.expression.expression, expr.arguments, cx);
     if (r !== null) return r;
     // Method not in slice 13c table — fall through to the recvType.kind !== "class"
     // check below, which throws the clean "not in slice 4" error and routes this
@@ -3985,7 +4413,8 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     const scalarVecPushReceiver =
       vecRecvVal?.kind === "i32" &&
       ts.isPropertyAccessExpression(expr.expression) &&
-      cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true;
+      (cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true ||
+        cx.emptyArrayInference.isResolvedVectorExpression(expr.expression.expression));
     if (methodName === "push" && vecRecvVal && (vecRecvVal.kind === "ref" || scalarVecPushReceiver)) {
       const vec = cx.resolver?.resolveVec?.(vecRecvVal);
       if (vec) {
@@ -3999,7 +4428,10 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
           throw new Error(`ir/from-ast: .push into '${elem.kind}' vec not in IR scope (${cx.funcName})`);
         }
         // Old length — the store index. `emitVecLen` yields the f64 JS length.
-        const lenF64 = cx.builder.emitVecLen(recv);
+        const lenF64 =
+          scalarVecPushReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression.expression)
+            ? emitForwardingAwareLinearVecLen(recv, cx)
+            : cx.builder.emitVecLen(recv);
         const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
         const valRaw = lowerExpr(expr.arguments[0]!, cx, irVal(elem));
         let val: IrValueId;
@@ -4167,7 +4599,7 @@ export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
   toUpperCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   toLowerCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   trim: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
-  charAt: { hostArgs: [{ kind: "f64" }], result: { kind: "string" }, requiredArgs: 1 },
+  charAt: { hostArgs: [{ kind: "f64" }], result: { kind: "string" }, requiredArgs: 0 },
   slice: {
     hostArgs: [{ kind: "f64" }, { kind: "f64" }],
     result: { kind: "string" },
@@ -4227,6 +4659,7 @@ export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
 function lowerStringMethodCall(
   methodName: string,
   recv: IrValueId,
+  receiverExpr: ts.Expression,
   args: ts.NodeArray<ts.Expression>,
   cx: LowerCtx,
 ): IrValueId | null {
@@ -4237,6 +4670,45 @@ function lowerStringMethodCall(
     throw new Error(
       `ir/from-ast: String.${methodName}(...) arg count ${args.length} not in [${sig.requiredArgs}, ${sig.hostArgs.length}] (${cx.funcName})`,
     );
+  }
+
+  if (methodName === "charAt" || methodName === "charCodeAt") {
+    const receiverEncoding = inferStringEncoding(receiverExpr, cx);
+    const receiverEvidence = typedValueEvidence(receiverExpr, cx.builder.typeOf(recv), receiverEncoding, cx);
+    // Without encoding evidence, preserve the established helper-call path
+    // below. Internal stdlib string parameters intentionally have no source
+    // producer proof, while literal/slot chains in the shared linear slice do.
+    if (receiverEvidence.semanticType === "string" && receiverEvidence.stringEncoding !== undefined) {
+      let index: IrValueId;
+      let indexType: IrType | null = null;
+      if (args.length === 0) {
+        index = cx.builder.emitConst({ kind: "i32", value: 0 }, irVal({ kind: "i32" }));
+      } else {
+        const indexExpr = args[0]!;
+        const semantic = proveAdditiveOperand(indexExpr, cx);
+        if (semantic !== "number" && semantic !== "no-checker") {
+          throw new Error(
+            `ir/from-ast: String.${methodName} index is not provably numeric (${semantic}) in ${cx.funcName}`,
+          );
+        }
+        const numeric = lowerExpr(indexExpr, cx, irVal({ kind: "f64" }));
+        indexType = cx.builder.typeOf(numeric);
+        index =
+          asVal(indexType)?.kind === "i32"
+            ? numeric
+            : cx.builder.emitUnary("i32.trunc_sat_f64_s", numeric, irVal({ kind: "i32" }));
+      }
+      const evidence = proveTypedStringMethod(receiverEvidence, methodName, indexType === null ? [] : [indexType]);
+      if (!evidence) {
+        throw new Error(
+          `ir/from-ast: String.${methodName} requires typed string receiver/encoding evidence (${cx.funcName})`,
+        );
+      }
+      if (evidence.intrinsic === "char-at") {
+        return cx.builder.emitStringCharAt(recv, index, evidence.receiverEncoding, evidence.resultEncoding ?? "wtf16");
+      }
+      return cx.builder.emitStringCharCodeAt(recv, index, evidence.receiverEncoding);
+    }
   }
 
   // (#2955 slice 2) The mode decision — target name, index-arg rep, and the
@@ -4312,7 +4784,7 @@ function lowerStringMethodCall(
       // native-mode omission already returned a null plan (demote) above.
       if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
         // emitStringLen returns f64; truncate to i32 for native helpers
-        const f64Len = cx.builder.emitStringLen(recv);
+        const f64Len = cx.builder.emitStringLen(recv, inferStringEncoding(receiverExpr, cx));
         const i32Len = cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Len, irVal({ kind: "i32" }));
         loweredArgs.push(i32Len);
         continue;
@@ -4327,7 +4799,7 @@ function lowerStringMethodCall(
       // spec SWAPS to `substring(0, start)` (§22.1.3.24 step 6-8). All other
       // missing optional args fall back to the generic sentinel.
       if ((methodName === "slice" || methodName === "substring") && i === 1 && expectedHost.kind === "f64") {
-        const lenVal = cx.builder.emitStringLen(recv);
+        const lenVal = cx.builder.emitStringLen(recv, inferStringEncoding(receiverExpr, cx));
         loweredArgs.push(lenVal);
         continue;
       }
@@ -4845,12 +5317,13 @@ function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "whi
 }
 
 function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
+  const loopCx: LowerCtx = { ...cx, scope: conservativeLoopStringEncodingScope(stmt, cx) };
   // Capture the value id `lowerExpr` returns rather than the cond buffer's
   // last instruction result — the latter is fragile (e.g. a trailing store
   // produces no value). (#1980)
   let condResult: IrValueId | null = null;
-  const condInstrs = cx.builder.collectBodyInstrs(() => {
-    const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+  const condInstrs = loopCx.builder.collectBodyInstrs(() => {
+    const raw = lowerExpr(stmt.expression, loopCx, irVal({ kind: "i32" }));
     // #2136 — an f64 (numeric-truthiness) condition was previously bailed to
     // legacy (#1980) because the lowerer's unconditional `i32.eqz` on an f64
     // emitted invalid Wasm. Instead, coerce it to an i32 bool via ToBoolean
@@ -4858,24 +5331,25 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
     // the coerced value as `condValue`. Non-numeric, non-bool conditions
     // (ref/string) still bail — those need a different ToBoolean path (#2136
     // scopes to numeric).
-    condResult = coerceLoopCondToBool(raw, cx, "while");
+    condResult = coerceLoopCondToBool(raw, loopCx, "while");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
   }
   // #2952 slice 2 — synthesise the loop's label and thread it as the
   // innermost loop for the body, so unlabeled break/continue resolve here.
-  const loopLabel = cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope), loopLabel };
-  const bodyInstrs = cx.builder.collectBodyInstrs(() => {
+  const loopLabel = loopCx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel };
+  const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
-  cx.builder.emitWhileLoop({
+  loopCx.builder.emitWhileLoop({
     cond: condInstrs,
     condValue: condResult,
     body: bodyInstrs,
     loopLabel,
   });
+  joinScopeStringEncodingFacts(cx.scope, [loopCx.scope]);
 }
 
 /**
@@ -4893,33 +5367,35 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
  * multi-exit-free subset and never reaches a demote channel post-claim.
  */
 function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
+  const loopCx: LowerCtx = { ...cx, scope: conservativeLoopStringEncodingScope(stmt, cx) };
   // Body first (buffer built exactly as `while`, just emitted before cond
   // at lower time). Scope mirrors the while path. (#2952 slice 2) The
   // synthesised label makes this loop the innermost break/continue target;
   // a continue falls through to the cond (post-test semantics).
-  const loopLabel = cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope), loopLabel };
-  const bodyInstrs = cx.builder.collectBodyInstrs(() => {
+  const loopLabel = loopCx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel };
+  const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
 
   // Cond buffer — re-evaluated each iteration (after the body).
   let condResult: IrValueId | null = null;
-  const condInstrs = cx.builder.collectBodyInstrs(() => {
-    const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
-    condResult = coerceLoopCondToBool(raw, cx, "do");
+  const condInstrs = loopCx.builder.collectBodyInstrs(() => {
+    const raw = lowerExpr(stmt.expression, bodyCx, irVal({ kind: "i32" }));
+    condResult = coerceLoopCondToBool(raw, bodyCx, "do");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: do-while cond produced no SSA value (${cx.funcName})`);
   }
 
-  cx.builder.emitWhileLoop({
+  loopCx.builder.emitWhileLoop({
     cond: condInstrs,
     condValue: condResult,
     body: bodyInstrs,
     postCond: true,
     loopLabel,
   });
+  joinScopeStringEncodingFacts(cx.scope, [loopCx.scope]);
 }
 
 /**
@@ -5030,16 +5506,18 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
     }
   }
 
+  const loopCx: LowerCtx = { ...innerCx, scope: conservativeLoopStringEncodingScope(stmt, innerCx) };
+
   // 2. Cond — collect its IR into a buffer.
   // Capture the value id `lowerExpr` returns rather than the buffer's last
   // instruction result (fragile — see #1980).
   let condResult: IrValueId | null = null;
-  const condInstrs = innerCx.builder.collectBodyInstrs(() => {
-    const raw = lowerExpr(stmt.condition!, innerCx, irVal({ kind: "i32" }));
+  const condInstrs = loopCx.builder.collectBodyInstrs(() => {
+    const raw = lowerExpr(stmt.condition!, loopCx, irVal({ kind: "i32" }));
     // #2136 — coerce a numeric-truthiness `for` cond (e.g. `for (...; k; ...)`
     // with f64 `k`) to an i32 bool via ToBoolean inside the cond buffer,
     // instead of bailing to legacy (#1980). Mirrors the while-loop arm.
-    condResult = coerceLoopCondToBool(raw, innerCx, "for");
+    condResult = coerceLoopCondToBool(raw, loopCx, "for");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: for cond produced no SSA value (${cx.funcName})`);
@@ -5055,28 +5533,35 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   const provenPair = detectCountedLoopSafeIndex(stmt);
   // #2952 slice 2 — synthesise the loop's label; the body cx carries it as
   // the innermost break/continue target (a continue jumps to the update).
-  const loopLabel = innerCx.builder.freshLoopLabel();
+  const loopLabel = loopCx.builder.freshLoopLabel();
+  const bodyScope = new Map(loopCx.scope);
   const bodyCx: LowerCtx = provenPair
-    ? { ...innerCx, safeIndexedArrays: new Set([...(innerCx.safeIndexedArrays ?? []), provenPair]), loopLabel }
-    : { ...innerCx, loopLabel };
-  const bodyInstrs = innerCx.builder.collectBodyInstrs(() => {
+    ? {
+        ...loopCx,
+        scope: bodyScope,
+        safeIndexedArrays: new Set([...(loopCx.safeIndexedArrays ?? []), provenPair]),
+        loopLabel,
+      }
+    : { ...loopCx, scope: bodyScope, loopLabel };
+  const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
 
   // 4. Update — collect into a buffer (or empty if absent).
   const updateInstrs: IrInstr[] = stmt.incrementor
-    ? innerCx.builder.collectBodyInstrs(() => {
-        lowerForUpdateExpr(stmt.incrementor!, innerCx);
+    ? loopCx.builder.collectBodyInstrs(() => {
+        lowerForUpdateExpr(stmt.incrementor!, { ...loopCx, scope: new Map(bodyCx.scope) });
       })
     : [];
 
-  innerCx.builder.emitForLoop({
+  loopCx.builder.emitForLoop({
     cond: condInstrs,
     condValue: condResult,
     body: bodyInstrs,
     update: updateInstrs,
     loopLabel,
   });
+  joinScopeStringEncodingFacts(cx.scope, [loopCx.scope]);
 }
 
 /**
@@ -5138,7 +5623,8 @@ function lowerForOfIterFromExternrefValue(
   const elementSlot = cx.builder.declareSlot("__forof_elem", { kind: "externref" });
 
   const elemIrT: IrType = irVal({ kind: "externref" });
-  const bodyScope = new Map(cx.scope);
+  const loopScope = conservativeLoopStringEncodingScope(stmt, cx);
+  const bodyScope = new Map(loopScope);
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
   // #2952 slice 2 — this loop is the innermost break/continue target.
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
@@ -5157,6 +5643,7 @@ function lowerForOfIterFromExternrefValue(
     body,
     loopLabel,
   });
+  joinScopeStringEncodingFacts(cx.scope, [loopScope]);
 }
 
 /**
@@ -5197,7 +5684,8 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
   // underlying Wasm op is unchanged — `slot.read` against the
   // externref-or-ref slot — only the SSA type tag is rewritten.
   const elemIrT: IrType = irVal(strRef);
-  const bodyScope = new Map(cx.scope);
+  const loopScope = conservativeLoopStringEncodingScope(stmt, cx);
+  const bodyScope = new Map(loopScope);
   bodyScope.set(loopVarName, {
     kind: "slot",
     slotIndex: elementSlot,
@@ -5222,6 +5710,7 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
     body,
     loopLabel,
   });
+  joinScopeStringEncodingFacts(cx.scope, [loopScope]);
 }
 
 /**
@@ -5268,7 +5757,8 @@ function lowerForOfVec(
   const dataSlot = cx.builder.declareSlot("__forof_data", dataValType);
   const elementSlot = cx.builder.declareSlot("__forof_elem", elemValType);
 
-  const bodyScope = new Map(cx.scope);
+  const loopScope = conservativeLoopStringEncodingScope(stmt, cx);
+  const bodyScope = new Map(loopScope);
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
   // #2952 slice 2 — this loop is the innermost break/continue target.
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
@@ -5290,6 +5780,7 @@ function lowerForOfVec(
     body,
     loopLabel,
   });
+  joinScopeStringEncodingFacts(cx.scope, [loopScope]);
 }
 
 /**
@@ -5365,6 +5856,7 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
       // dead code — skip them rather than emit unreachable instrs.
       if (ts.isBreakStatement(s) || ts.isContinueStatement(s)) break;
     }
+    joinScopeStringEncodingFacts(cx.scope, [childCx.scope]);
     return;
   }
   if (ts.isVariableStatement(stmt)) {
@@ -5512,12 +6004,14 @@ function lowerIfBodyStatement(stmt: ts.IfStatement, cx: LowerCtx): void {
   const thenInstrs = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.thenStatement, thenCx);
   });
+  const elseCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
   const elseInstrs = stmt.elseStatement
     ? cx.builder.collectBodyInstrs(() => {
-        lowerStmt(stmt.elseStatement!, { ...cx, scope: new Map(cx.scope) });
+        lowerStmt(stmt.elseStatement!, elseCx);
       })
     : [];
   cx.builder.emitIfStmt({ cond, then: thenInstrs, else: elseInstrs });
+  joinScopeStringEncodingFacts(cx.scope, [thenCx.scope, elseCx.scope]);
 }
 
 /**
@@ -5594,6 +6088,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
       );
     }
     cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, newValue);
+    cx.scope.set(id.text, { ...binding, stringEncoding: inferStringEncoding(rhs, cx) });
     return;
   }
   if (binding.kind !== "slot") {
@@ -5616,6 +6111,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
     );
   }
   cx.builder.emitSlotWrite(binding.slotIndex, newValue);
+  cx.scope.set(id.text, { ...binding, stringEncoding: inferStringEncoding(rhs, cx) });
 }
 
 /**
@@ -5634,6 +6130,34 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
     throw new Error(
       `ir/from-ast: compound assign to non-slot binding "${id.text}" — mutation pre-pass should have detected it (${cx.funcName})`,
     );
+  }
+  const logicalType = binding.kind === "slot" ? (binding.asType ?? binding.type) : binding.type;
+  if (compoundOp === ts.SyntaxKind.PlusEqualsToken && logicalType.kind === "string") {
+    const lhs =
+      binding.kind === "moduleGlobal"
+        ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, logicalType)
+        : cx.builder.emitSlotReadAs(binding.slotIndex, logicalType);
+    const rhsValue = lowerExpr(rhs, cx, logicalType);
+    const rhsType = cx.builder.typeOf(rhsValue);
+    const proof = proveTypedStringAppend(
+      typedValueEvidence(id, binding.type, binding.stringEncoding, cx, logicalType),
+      typedValueEvidence(rhs, rhsType, inferStringEncoding(rhs, cx), cx),
+    );
+    if (!proof) {
+      throw new Error(
+        `ir/from-ast: typed string += requires checker/producer string and encoding evidence for "${id.text}" (${cx.funcName})`,
+      );
+    }
+    const symbol = cx.checker?.getSymbolAtLocation(id);
+    const concatMode = symbol && cx.ownedStringAppendSymbols.has(symbol) ? "owned-append" : "immutable";
+    const result = cx.builder.emitStringConcat(lhs, rhsValue, proof.resultEncoding, concatMode);
+    if (binding.kind === "moduleGlobal") {
+      cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+    } else {
+      cx.builder.emitSlotWrite(binding.slotIndex, result);
+    }
+    cx.scope.set(id.text, { ...binding, stringEncoding: proof.resultEncoding });
+    return;
   }
   const slotValType = asVal(binding.type);
   if (!slotValType || slotValType.kind !== "f64") {
@@ -5743,17 +6267,20 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
   // `n <= 1 ? 1 : n * fact(n - 1)` recursed at the base case → non-termination).
   // Lower each arm into its own body buffer and combine with `IrInstrIf`, so
   // the lowerer emits a structured `if`/`else` that runs exactly one arm.
+  const branchScope = new Map(cx.scope);
+  const thenCx: LowerCtx = { ...cx, scope: new Map(branchScope) };
   let whenTrue!: IrValueId;
   const thenBody = cx.builder.collectBodyInstrs(() => {
-    whenTrue = lowerExpr(expr.whenTrue, cx, irVal({ kind: "f64" }));
+    whenTrue = lowerExpr(expr.whenTrue, thenCx, irVal({ kind: "f64" }));
   });
   const ttype = cx.builder.typeOf(whenTrue);
 
   // Hint the false arm with the true arm's type so both land on the same
   // carrier (matches the `lowerNullish` convention).
+  const elseCx: LowerCtx = { ...cx, scope: new Map(branchScope) };
   let whenFalse!: IrValueId;
   const elseBody = cx.builder.collectBodyInstrs(() => {
-    whenFalse = lowerExpr(expr.whenFalse, cx, ttype);
+    whenFalse = lowerExpr(expr.whenFalse, elseCx, ttype);
   });
   const ftype = cx.builder.typeOf(whenFalse);
 
@@ -5771,6 +6298,8 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
       );
     }
   }
+
+  joinScopeStringEncodingFacts(cx.scope, [thenCx.scope, elseCx.scope]);
 
   return cx.builder.emitIfElse({
     cond,
@@ -6250,7 +6779,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
     switch (op) {
       case ts.SyntaxKind.PlusToken:
-        return cx.builder.emitStringConcat(lhs, rhs);
+        return cx.builder.emitStringConcat(lhs, rhs, inferStringEncoding(expr, cx));
       case ts.SyntaxKind.EqualsEqualsEqualsToken:
       case ts.SyntaxKind.EqualsEqualsToken:
         return cx.builder.emitStringEq(lhs, rhs, false);
@@ -6502,9 +7031,11 @@ function lowerNullish(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): Ir
   const cond = cx.builder.emitRefIsNull(lhs);
 
   // then-arm (lhs IS null/undefined) → evaluate and yield rhs.
+  const skippedScope = new Map(cx.scope);
+  const rhsCx: LowerCtx = { ...cx, scope: new Map(skippedScope) };
   let thenValue!: IrValueId;
   const thenBody = cx.builder.collectBodyInstrs(() => {
-    thenValue = lowerExpr(expr.right, cx, resultType);
+    thenValue = lowerExpr(expr.right, rhsCx, resultType);
   });
   const rhsType = cx.builder.typeOf(thenValue);
   if (!irTypeEquals(rhsType, resultType)) {
@@ -6512,6 +7043,7 @@ function lowerNullish(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): Ir
       `ir/from-ast: '??' arm type mismatch (lhs ${describeIrType(resultType)} vs rhs ${describeIrType(rhsType)}) is not supported in IR (${cx.funcName})`,
     );
   }
+  joinScopeStringEncodingFacts(cx.scope, [rhsCx.scope, skippedScope]);
 
   // else-arm (lhs is non-null) → yield `lhs` directly. The lowerer records
   // `elseValue` as a cross-block use (lower.ts:479 `recordUse(elseValue, -1)`)
@@ -6556,13 +7088,16 @@ function lowerLogicalAndOr(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Low
 
   // Lower the right operand into its own buffer so it executes only on the
   // branch that needs it.
+  const skippedScope = new Map(cx.scope);
+  const rhsCx: LowerCtx = { ...cx, scope: new Map(skippedScope) };
   let rhs!: IrValueId;
   const rhsBody = cx.builder.collectBodyInstrs(() => {
-    rhs = lowerExpr(expr.right, cx, resultType);
+    rhs = lowerExpr(expr.right, rhsCx, resultType);
   });
   if (asVal(cx.builder.typeOf(rhs))?.kind !== "i32") {
     throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
   }
+  joinScopeStringEncodingFacts(cx.scope, [rhsCx.scope, skippedScope]);
 
   // `cond = lhs`. For `&&`, the rhs is the then-arm (lhs truthy) and lhs is the
   // else-arm value. For `||`, lhs is the then-arm value and rhs is the
@@ -7137,10 +7672,13 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    ownedStringAppendSymbols: fn.body ? collectOwnedStringAppendSymbols(fn.body, cx.checker) : new Set<ts.Symbol>(),
+    emptyArrayInference: inferEmptyArrayElementTypes(fn, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — nested function decls are NEVER generators
     // in slice 7a (the selector rejects `function*` nesting via
     // `isPhase1NestedFunc`).
     funcKind: "regular",
+    checker: cx.checker,
     allocRegistry: cx.allocRegistry,
   };
   if (!fn.body) {
@@ -7215,9 +7753,14 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    ownedStringAppendSymbols: ts.isBlock(expr.body)
+      ? collectOwnedStringAppendSymbols(expr.body, cx.checker)
+      : new Set<ts.Symbol>(),
+    emptyArrayInference: inferEmptyArrayElementTypes(expr, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — closures are never generator/async in 7a
     // (the selector rejects them in `isPhase1ClosureLiteral`).
     funcKind: "regular",
+    checker: cx.checker,
     allocRegistry: cx.allocRegistry,
   };
 
@@ -7437,6 +7980,11 @@ function lowerThrowStatement(stmt: ts.ThrowStatement, cx: LowerCtx): void {
  * Wasm-emit side, not the IR layer.
  */
 function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
+  // A catch/finally entry may observe state from any preceding throw point,
+  // not only the normal end of the try body. Summarize all possible writes so
+  // stale ASCII evidence cannot cross an exceptional edge.
+  const tryMayWriteScope = conservativeStringEncodingScope(stmt.tryBlock, cx);
+
   // ── Try body ────────────────────────────────────────────────────────
   const tryScope = new Map(cx.scope);
   const tryCx: LowerCtx = { ...cx, scope: tryScope, noEarlyReturn: true };
@@ -7448,9 +7996,10 @@ function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
 
   // ── Catch handler ───────────────────────────────────────────────────
   let catchClause: { payloadSlot: number; body: readonly IrInstr[] } | undefined;
+  let catchScopeOut: Map<string, ScopeBinding> | undefined;
   if (stmt.catchClause) {
     let payloadSlot = -1;
-    const catchScope = new Map(cx.scope);
+    const catchScope = new Map(tryMayWriteScope);
     if (stmt.catchClause.variableDeclaration && ts.isIdentifier(stmt.catchClause.variableDeclaration.name)) {
       // Allocate an externref slot to receive the caught exception. The
       // lowerer prepends a `local.set` at handler entry to pop the
@@ -7474,19 +8023,31 @@ function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
         lowerStmt(s, catchCx);
       }
     });
+    // Include writes on catch paths that throw before normal completion;
+    // those paths still enter `finally` and must not retain narrower facts.
+    catchScopeOut = conservativeStringEncodingScope(stmt.catchClause.block, {
+      ...catchCx,
+      scope: new Map(tryMayWriteScope),
+    });
     catchClause = { payloadSlot, body: catchBody };
   }
 
+  const joinedTryScope = catchScopeOut
+    ? joinedStringEncodingScope(cx.scope, [tryScope, catchScopeOut])
+    : joinedStringEncodingScope(cx.scope, [tryScope, tryMayWriteScope]);
+
   // ── Finally body ────────────────────────────────────────────────────
   let finallyBody: readonly IrInstr[] | undefined;
+  let continuationScope = joinedTryScope;
   if (stmt.finallyBlock) {
-    const finallyScope = new Map(cx.scope);
+    const finallyScope = new Map(joinedTryScope);
     const finallyCx: LowerCtx = { ...cx, scope: finallyScope, noEarlyReturn: true };
     finallyBody = cx.builder.collectBodyInstrs(() => {
       for (const s of stmt.finallyBlock!.statements) {
         lowerStmt(s, finallyCx);
       }
     });
+    continuationScope = finallyScope;
   }
 
   cx.builder.emitTry({
@@ -7494,4 +8055,5 @@ function lowerTryStatement(stmt: ts.TryStatement, cx: LowerCtx): void {
     catchClause,
     finallyBody,
   });
+  joinScopeStringEncodingFacts(cx.scope, [continuationScope]);
 }

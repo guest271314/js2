@@ -792,11 +792,13 @@ export function registerClosureBindingInfo(
   arrowParams: ValType[],
 ): void {
   // 8. Register closure info so call sites can emit call_ref
+  const structDef = ctx.mod.types[structTypeIdx];
   const closureInfo: ClosureInfo = {
     structTypeIdx,
     funcTypeIdx: liftedFuncTypeIdx,
     returnType: closureReturnType,
     paramTypes: arrowParams,
+    hasCaptures: structDef?.kind === "struct" && structDef.fields.length > 1,
   };
 
   // Always register by struct type index (for valueOf coercion and anonymous closures)

@@ -2147,6 +2147,17 @@ function compilePropertyCompoundAssignment(
   const objType = ctx.checker.getTypeAtLocation(target.expression);
   const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
 
+  // (#3496 merge-queue follow-up) `globalThis.<name> op= value` must keep the
+  // receiver on the realm-object externref path for both its read and write.
+  // The generic compound path resolves TypeScript's structural
+  // `typeof globalThis` as a Wasm struct before compiling the receiver, then
+  // casts the real host/native global object to that unrelated struct. The
+  // cast traps before the dedicated globalThis read/write lowerings can run.
+  // Plain reads and `=` writes already force this same externref route.
+  if (ts.isIdentifier(target.expression) && target.expression.text === "globalThis") {
+    return compilePropertyCompoundAssignmentExternref(ctx, fctx, target, rhs, op, propName);
+  }
+
   // #1456: Private methods and getter-only accessors throw TypeError on write
   if (ts.isPrivateIdentifier(target.name)) {
     const privateMember = classifyPrivateMember(ctx, target.name);

@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 8;
+export const ORACLE_VERSION = 9;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -190,6 +190,21 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "Negative failures must also occur in their declared phase and match the " +
       "expected type; wrong-phase compiler/runtime failures no longer pass. This " +
       "version requires an ORACLE_REBASE baseline refresh when landed.",
+  },
+  {
+    version: 9,
+    note:
+      "#3492 fixture-graph honesty. The project runner previously recognized " +
+      "only `import ... from` fixture declarations, so bare side-effect imports " +
+      "and their transitive dependencies were silently omitted while successful " +
+      "single-source execution stamped `reached_test: true`. Both verdict lanes " +
+      "now share recursive static fixture discovery. Literal dynamic fixture " +
+      "imports are inventoried separately and fail explicitly on standalone " +
+      "until #3494 supplies an in-module loader; they are never promoted to eager " +
+      "static edges. Parse-negative dynamic imports reach syntax checking before " +
+      "that loader policy, including conventional absent targets which evaluation " +
+      "must never reach. Rows whose missing fixtures manufactured passes are " +
+      "intentionally reclassified and require an ORACLE_REBASE baseline refresh.",
   },
 ];
 
