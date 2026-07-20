@@ -122,12 +122,6 @@ function testWorkerOptions(test) {
   const negative = test.negative;
   const isRuntimeNegative = negative !== true && negative?.phase === "runtime";
   const isNegative = negative === true || (Boolean(negative) && !isRuntimeNegative);
-  const moduleGoal =
-    Boolean(test.flags?.module) ||
-    test.file.startsWith("language/module-code/") ||
-    test.file.startsWith("language/import/") ||
-    test.file.startsWith("language/export/") ||
-    /\b(?:import|export)\b/.test(test.contents);
   return {
     execute: true,
     isNegative,
@@ -135,7 +129,6 @@ function testWorkerOptions(test) {
     expectedErrorType: negative === true ? undefined : negative?.type,
     originalHarness: true,
     asyncTest: Boolean(test.flags?.async),
-    inferModuleStrictArguments: moduleGoal,
   };
 }
 

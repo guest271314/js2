@@ -18,6 +18,7 @@ import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
+import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
 // Each cache entry written below carries a `bundle_hash` field. When the
@@ -44,30 +45,13 @@ function computeBundleHash() {
 }
 const BUNDLE_HASH = computeBundleHash();
 
-const ORIGINAL_HARNESS_SANDBOX_GLOBALS = [
-  "Array",
-  "Object",
-  "Function",
-  "String",
-  "Number",
-  "Boolean",
-  "Symbol",
-  "Promise",
-  "Map",
-  "Set",
-  "WeakMap",
-  "WeakSet",
-  "Date",
-  "RegExp",
-  "Error",
-  "TypeError",
-  "RangeError",
-  "SyntaxError",
-  "ReferenceError",
-  "Math",
-  "JSON",
-  "Reflect",
-];
+// (#3441) The sandbox-globals list is now the single shared source in
+// scripts/test262-sandbox-globals.mjs — imported by BOTH this worker and
+// tests/test262-runner.ts so the two lanes can never drift again. It formerly
+// stopped at "Reflect" here (missing the #3419 TypedArray cluster + Atomics),
+// stranding ~2,069 default-lane TypedArray-ctor tests at "Cannot convert null
+// to object [in __module_init()]".
+const ORIGINAL_HARNESS_SANDBOX_GLOBALS = SANDBOX_GLOBAL_NAMES;
 
 function buildOriginalHarnessSandbox(consoleProxy) {
   const sandbox = Object.create(null);

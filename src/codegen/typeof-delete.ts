@@ -11,7 +11,6 @@ import type { Instr, ValType } from "../ir/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { buildThrowJsErrorInstrs, type JsErrorKind } from "./js-errors.js";
 import { isStrictContext } from "./expressions/assignment.js";
 import { EVAL_SOURCE_FILENAME } from "./expressions/eval-inline.js";
 import {
@@ -23,6 +22,7 @@ import {
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, parseRegExpLiteral, resolveWasmType } from "./index.js";
 import { emitExternrefDestructureGuard } from "./destructuring-params.js";
+import { buildThrowJsErrorInstrs, type JsErrorKind } from "./js-errors.js";
 import { compileStandaloneRegExpLiteral } from "./regexp-standalone.js";
 import { addImport } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
@@ -38,21 +38,23 @@ import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./wi
 const NON_CONFIGURABLE_GLOBALS = new Set(["NaN", "Infinity", "undefined"]);
 
 /**
- * (#2703/#3434) Emit an unconditional `throw` of a branded Error instance, used for
- * the spec error cases of `delete` (§13.5.1.2): a super reference, a null/
- * undefined base, or a strict-mode non-configurable property. The literal
- * upstream propertyHelper checks `error instanceof TypeError`, so a bare
- * "TypeError: ..." string is not sufficient. Use the shared dual-mode error
- * constructor so JS-host and standalone catches see the correct brand. After
- * the throw the rest of the enclosing expression is unreachable, so the
- * `delete` expression's nominal i32 result is supplied stack-polymorphically.
+ * (#2703, #3422) Terminal `throw` for `delete`'s spec error cases (§13.5.1.2):
+ * super reference → ReferenceError; null/undefined base or strict-mode
+ * non-configurable refusal → TypeError. Emits a REAL error instance via
+ * `buildThrowJsErrorInstrs` (host `__new_<Kind>` / standalone in-module ctor),
+ * NOT a bare string: the authentic harness (#3370)
+ * `propertyHelper.js::isConfigurable()` rethrows unless `e instanceof TypeError`,
+ * so the pre-#3422 bare-string throw broke ~313 strict reruns (the `delete`
+ * counterpart of #3471). `message` carries no "Kind:" prefix (the ctor adds it);
+ * `opts.flush` = fctx applies the late `__new_<Kind>` funcIdx shift to the
+ * already-emitted body (#1839). The throw is terminal / stack-polymorphic.
  */
 function deleteThrowInstrs(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): Instr[] {
   return buildThrowJsErrorInstrs(ctx, kind, message, { flush: fctx });
 }
 
 function emitDeleteThrow(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): void {
-  for (const instr of deleteThrowInstrs(ctx, fctx, kind, message)) fctx.body.push(instr);
+  fctx.body.push(...deleteThrowInstrs(ctx, fctx, kind, message));
 }
 
 /**
