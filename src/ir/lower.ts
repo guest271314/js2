@@ -43,7 +43,7 @@
 // #1713: BackendEmitter trait seam. The layout-handle types this file
 // historically declared now live in `backend/handles.js` and are re-exported
 // below for backwards compatibility.
-import type { BackendEmitter } from "./backend/emitter.js";
+import type { BackendEmitter, BackendI32BitwiseOp } from "./backend/emitter.js";
 import type { TypeConverter } from "./backend/contract.js";
 import { type IrBackendKind, verifyIrBackendLegality } from "./backend/legality.js";
 import type {
@@ -1161,14 +1161,14 @@ export function lowerIrFunctionBody<S, Slot>(
           // domain. No ToInt32 needed; emit native i32.* directly.
           emitValue(instr.lhs, out);
           emitValue(instr.rhs, out);
-          emitter.pushRaw(out, { op: jsBitwiseToI32(instr.op) });
+          emitter.emitI32Bitwise(jsBitwiseToI32(instr.op), out);
           if (!resultIsI32) {
             // Convert i32 → f64 to honour the legacy js.bit* result-type
             // contract. `>>>` is unsigned, others signed.
             if (instr.op === "js.shr_u") {
-              emitter.pushRaw(out, { op: "f64.convert_i32_u" });
+              emitter.emitNumericConversion("f64.convert_i32_u", out);
             } else {
-              emitter.pushRaw(out, { op: "f64.convert_i32_s" });
+              emitter.emitNumericConversion("f64.convert_i32_s", out);
             }
           }
           return;
@@ -1199,23 +1199,23 @@ export function lowerIrFunctionBody<S, Slot>(
         if (isJsBitwise) {
           const { rhs: rhsSlot, tmp: tmpSlot } = ensureJsBitwiseScratch(rhsIsI32);
           // Stack: [lhs, rhs]
-          emitter.pushRaw(out, { op: "local.set", index: rhsSlot });
+          emitter.emitLocalSet(rhsSlot, out);
           // Stack: [lhs]; rhsSlot holds rhs.
           if (!lhsIsI32) emitJsToInt32(emitter, out, tmpSlot);
           // Stack: [lhs_i32]
-          emitter.pushRaw(out, { op: "local.get", index: rhsSlot });
+          emitter.emitLocalGet(rhsSlot, out);
           // Stack: [lhs_i32, rhs]
           if (!rhsIsI32) emitJsToInt32(emitter, out, tmpSlot);
           // Stack: [lhs_i32, rhs_i32]
-          emitter.pushRaw(out, { op: jsBitwiseToI32(instr.op) });
+          emitter.emitI32Bitwise(jsBitwiseToI32(instr.op), out);
           // `>>>` returns a Uint32; everything else is Int32. Convert
           // back to f64 with the matching signedness — UNLESS the IR
           // result type was already narrowed to i32 by Stage 3.
           if (!resultIsI32) {
             if (instr.op === "js.shr_u") {
-              emitter.pushRaw(out, { op: "f64.convert_i32_u" });
+              emitter.emitNumericConversion("f64.convert_i32_u", out);
             } else {
-              emitter.pushRaw(out, { op: "f64.convert_i32_s" });
+              emitter.emitNumericConversion("f64.convert_i32_s", out);
             }
           }
           return;
@@ -3585,7 +3585,7 @@ function describeIrTypeShallow(t: IrType): string {
  */
 function jsBitwiseToI32(
   op: "js.bitand" | "js.bitor" | "js.bitxor" | "js.shl" | "js.shr_s" | "js.shr_u",
-): "i32.and" | "i32.or" | "i32.xor" | "i32.shl" | "i32.shr_s" | "i32.shr_u" {
+): BackendI32BitwiseOp {
   switch (op) {
     case "js.bitand":
       return "i32.and";
@@ -3602,26 +3602,26 @@ function jsBitwiseToI32(
   }
 }
 
-// #1584 (a0-tail): generic over the sink `S` so the js-bitwise ToInt32 dance
-// flows through the same `emitter.pushRaw` escape hatch as its caller. On
-// WasmGC (`S = Instr[]`) the emitted stream is byte-identical to the prior
-// direct pushes; the js-bitwise family is out of the bytecode subset, so on a
-// bytecode sink `pushRaw` throws (the not-yet-migrated boundary, §2a a6).
+// #3499: generic over the sink `S` and expressed only through typed scalar
+// emitter primitives. WasmGC/linear still receive the byte-identical Instr
+// stream, while non-Wasm sinks can represent the same composite semantics
+// without observing raw Wasm instructions. Bytecode legality continues to
+// reject the js.bitwise family before any of these primitives are called.
 function emitJsToInt32<S>(emitter: BackendEmitter<S>, out: S, tmpLocalIdx: number): void {
   // Stack: [f64]
-  emitter.pushRaw(out, { op: "f64.trunc" });
+  emitter.emitUnary("f64.trunc", out);
   // Stack: [f64_trunc]
-  emitter.pushRaw(out, { op: "local.tee", index: tmpLocalIdx });
-  emitter.pushRaw(out, { op: "local.get", index: tmpLocalIdx });
+  emitter.emitLocalTee(tmpLocalIdx, out);
+  emitter.emitLocalGet(tmpLocalIdx, out);
   // Stack: [f64_trunc, f64_trunc]
-  emitter.pushRaw(out, { op: "f64.const", value: 4294967296 });
-  emitter.pushRaw(out, { op: "f64.div" });
-  emitter.pushRaw(out, { op: "f64.floor" });
-  emitter.pushRaw(out, { op: "f64.const", value: 4294967296 });
-  emitter.pushRaw(out, { op: "f64.mul" });
-  emitter.pushRaw(out, { op: "f64.sub" });
+  emitter.emitScalarConst("f64", 4294967296, out);
+  emitter.emitBinary("f64.div", out);
+  emitter.emitUnary("f64.floor", out);
+  emitter.emitScalarConst("f64", 4294967296, out);
+  emitter.emitBinary("f64.mul", out);
+  emitter.emitBinary("f64.sub", out);
   // Stack: [f64_in_range]
-  emitter.pushRaw(out, { op: "i32.trunc_sat_f64_u" });
+  emitter.emitNumericConversion("i32.trunc_sat_f64_u", out);
   // Stack: [i32]
 }
 
