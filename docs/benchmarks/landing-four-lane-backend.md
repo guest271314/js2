@@ -52,8 +52,8 @@ masquerade as a benchmark.
 Initialize the optional pinned Porffor gitlink, then run:
 
 ```sh
-pnpm run benchmark:landing-four-lane -- --probe --output .tmp/landing-four-lane
-pnpm run benchmark:landing-four-lane -- --validate-result .tmp/landing-four-lane/latest.json
+pnpm run benchmark:landing-four-lane --probe --output .tmp/landing-four-lane
+pnpm run benchmark:landing-four-lane --validate-result .tmp/landing-four-lane/latest.json
 ```
 
 Use `--without-porffor` only for the core V8/Wasmtime probe. It still emits all
@@ -71,8 +71,8 @@ warm steady-state.
 Run a full noncanonical local capture with:
 
 ```sh
-pnpm run benchmark:landing-four-lane -- --benchmark --output .tmp/landing-four-lane
-pnpm run benchmark:landing-four-lane -- --validate-result .tmp/landing-four-lane/latest.json
+pnpm run benchmark:landing-four-lane --benchmark --output .tmp/landing-four-lane
+pnpm run benchmark:landing-four-lane --validate-result .tmp/landing-four-lane/latest.json
 ```
 
 The runner interleaves every executable kernel/lane cell in a rotating order
