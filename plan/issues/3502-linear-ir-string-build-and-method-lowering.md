@@ -129,6 +129,30 @@ untouched benchmark through the source-derived Porffor route.
       parser, or Porffor-specific planner vocabulary is introduced.
 - [x] Existing string, linear-memory, WasmGC, and Porffor tests remain green.
 
+## P1 audit correction — control-flow soundness
+
+The initial production wiring read identifier encoding evidence from mutable
+scope metadata, but branch and loop lowering did not conservatively merge that
+metadata. An ASCII-initialized local could therefore retain stale `ascii`
+evidence after a conditional assignment from an unproven string parameter.
+Both linear consumers would then accept the same invalid typed operation.
+
+- Structured statement, expression, loop, and exceptional-flow bodies now
+  lower against independent scope snapshots. Every reachable continuation
+  joins encoding facts with the existing lattice; an unproven predecessor is
+  conservative top and therefore kills narrower ASCII evidence.
+- Loop headers compute a real finite-lattice fixed point over possible writes.
+  This covers loop-carried cross-variable dependencies such as
+  `text = other; other = input`, where widening `other` on one pass must widen
+  `text` on the next. Nested functions remain separate scopes.
+- Ternary, nullish, and logical short-circuit RHS/arms use the same independent
+  snapshots and joins. Current selection conservatively rejects the audited
+  else/ternary/short-circuit source shapes; the lowering is sound when those
+  shapes are admitted later.
+- The exact benchmark remains provably ASCII because every loop-carried write
+  is an append of ASCII-proven producers. This correction does not broaden the
+  Porffor Unicode claim or replace the established linear string layout.
+
 ## Implementation outcome
 
 - Checker and producer facts now prove semantic string values independently of
@@ -173,9 +197,19 @@ proves the formerly blocked string cell independently of benchmark timing.
 - ASCII method execution agrees across Node, WasmGC, linear Wasm, and native C
   for indices `[-1, 0, 1, 2]` plus omitted index, producing
   `[777, 1065, 1122, 777, 1065]` and covering empty-string versus `NaN` bounds.
-- `tests/issue-3502-string-contract.test.ts` — 6/6 passed, including semantic
-  producer evidence, UTF-16 reference behavior, the plan/layout binding,
-  stable non-ASCII rejection, and alias-observed immutable concatenation.
+- Required final command with `JS2WASM_PORFFOR_ROOT=$PWD/vendor/Porffor`,
+  `PORFFOR_NATIVE_REQUIRED=1`, and `PORFFOR_NATIVE_SANITIZERS=1` — both #3502
+  files passed, 10/10 tests in 16.63 seconds. The native Porffor C assertion
+  passed in 2.783 seconds with combined ASan/UBSan and no diagnostics.
+- `tests/issue-3502-string-contract.test.ts` — 7/7 passed. The added P1 audit
+  regression proves the conditional and loop-carried cases contain no stale
+  typed ASCII character instruction and return the JavaScript result `1` for
+  input `"é"` through shared linear Wasm. Source-derived Porffor lowering
+  rejects the unresolved general helper instead of consuming invalid ASCII
+  evidence; else, ternary, and short-circuit shapes reject at selection.
+- The focused native/linear string regression set passed 118/118. Adjacent
+  backend-contract, linear-IR, encoding-analysis, and #2134 coverage passed
+  44/44.
 - Focused #3502 plus native-string regressions — 100/100 passed. Adjacent
   backend-contract, linear, layout, encoding, and #2134 coverage — 58/58
   passed.
@@ -184,6 +218,8 @@ proves the formerly blocked string cell independently of benchmark timing.
   #3502 expectation. The full adjacent runner file otherwise passes 11/12
   locally; its capture-resume case stops at the intentional toolchain guard
   because local Rust is 1.93.1 while the runner pins 1.94.1.
+- The focused #3498 native support probe was rerun after the P1 correction and
+  passed 1/1 (11 unrelated tests filtered) in 55.79 seconds.
 - `pnpm run typecheck`, `pnpm run lint`, and `pnpm run format:check` passed on
   the merged head.
 - `check:pushraw`, `check:ir-fallbacks`, `check:linear-ir`,
@@ -191,7 +227,7 @@ proves the formerly blocked string cell independently of benchmark timing.
   `check:issue-ids:against-main`, and `check:loc-budget` passed. Linear IR
   improved to 10 compiled units from the baseline 8; pushRaw has six fewer
   call sites and no additions.
-- `check:godfiles` reports five landed-main regressions in
+- `check:godfiles` reports six landed-main regressions in
   `src/codegen/expressions/calls.ts`, `src/codegen/index.ts`,
   `src/codegen/object-runtime.ts`, and `src/codegen/array-methods.ts`. None of
   those files differs in the #3502 change set versus `origin/main`; the issue

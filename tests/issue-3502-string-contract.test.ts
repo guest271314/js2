@@ -10,7 +10,13 @@ import {
   bindLinearStringRuntime,
   LINEAR_STRING_ASCII_PROOF_REQUIRED,
 } from "../src/ir/analysis/linear-string-runtime.js";
-import { planLinearMemory } from "../src/ir/analysis/linear-memory-plan.js";
+import {
+  LINEAR_STRING_ELEMENTS_OFFSET,
+  LINEAR_STRING_LENGTH_OFFSET,
+  LINEAR_STRING_PAYLOAD_PREFIX_BYTES,
+  LINEAR_STRING_PAYLOAD_SIZE_OFFSET,
+  planLinearMemory,
+} from "../src/ir/analysis/linear-memory-plan.js";
 import {
   proveTypedStringAppend,
   proveTypedStringMethod,
@@ -37,6 +43,14 @@ const numberEvidence: TypedValueEvidence = {
   carrierType: F64,
   semanticSource: "checker",
 };
+
+function writeLinearUtf8String(memory: WebAssembly.Memory, pointer: number, value: string): void {
+  const bytes = new TextEncoder().encode(value);
+  const view = new DataView(memory.buffer);
+  view.setUint32(pointer + LINEAR_STRING_PAYLOAD_SIZE_OFFSET, LINEAR_STRING_PAYLOAD_PREFIX_BYTES + bytes.length, true);
+  view.setUint32(pointer + LINEAR_STRING_LENGTH_OFFSET, bytes.length, true);
+  new Uint8Array(memory.buffer, pointer + LINEAR_STRING_ELEMENTS_OFFSET, bytes.length).set(bytes);
+}
 
 describe("#3502 backend-neutral string contract", () => {
   it("claims the untouched landing source with typed append and character IR", async () => {
@@ -253,5 +267,113 @@ describe("#3502 backend-neutral string contract", () => {
     const { instance } = await WebAssembly.instantiate(compiled.binary, compiled.importObject ?? {});
     const observedAppend = (instance.exports as Record<string, (n: number) => number>).observedAppend;
     expect(observedAppend(3)).toBe(2);
+  });
+
+  it("kills stale ASCII evidence at statement, expression, and loop-carried joins", async () => {
+    const executableSource = `
+      /** @param {number} take @param {string} input @returns {number} */
+      export function conditionalJoin(take, input) {
+        let text = "A";
+        if (take > 0) text = input;
+        return text.charCodeAt(0) === input.charCodeAt(0) ? 1 : 0;
+      }
+
+      /** @param {number} count @param {string} input @returns {number} */
+      export function loopCarriedJoin(count, input) {
+        let text = "A";
+        let other = "B";
+        let observed = 0;
+        let i = 0;
+        while (i < count) {
+          observed = text.charCodeAt(0);
+          text = other;
+          other = input;
+          i++;
+        }
+        return observed === input.charCodeAt(0) ? 1 : 0;
+      }
+    `;
+
+    const compiled = await compile(executableSource, {
+      fileName: "issue-3502-encoding-joins.js",
+      target: "linear",
+      allocator: "bump",
+    });
+    const report = getLastLinearIrReport();
+    expect(compiled.success, compiled.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(report?.compiled).toStrictEqual(["conditionalJoin", "loopCarriedJoin"]);
+    expect(report?.rejected).toStrictEqual([]);
+
+    const instructions: IrInstr[] = [];
+    for (const func of report!.irModule.functions) {
+      for (const block of func.blocks) {
+        for (const instruction of block.instrs) {
+          forEachInstrDeep(instruction, (nested) => instructions.push(nested));
+        }
+      }
+    }
+    expect(instructions.some((instruction) => instruction.kind === "string.char_code_at")).toBe(false);
+    expect(
+      instructions.filter(
+        (instruction) => instruction.kind === "call" && instruction.target.name === "__linear_ir_str_char_code_at",
+      ),
+    ).not.toHaveLength(0);
+    expect(() =>
+      lowerIrModuleToPorffor(report!.irModule, {
+        memoryPlan: report!.memoryPlan,
+        prefs: { gc: false },
+      }),
+    ).toThrow("porffor assembler: unresolved function '__linear_ir_str_char_code_at'");
+
+    const { instance } = await WebAssembly.instantiate(compiled.binary, compiled.importObject ?? {});
+    const exports = instance.exports as Record<string, WebAssembly.ExportValue>;
+    const memory = exports.memory;
+    if (!(memory instanceof WebAssembly.Memory)) throw new Error("linear memory export is absent");
+    const inputPointer = 60_000;
+    writeLinearUtf8String(memory, inputPointer, "é");
+    const call = (name: string, first: number): number => {
+      const fn = exports[name];
+      if (typeof fn !== "function") throw new Error(`linear export ${name} is absent`);
+      return (fn as (value: number, input: number) => number)(first, inputPointer);
+    };
+
+    expect(call("conditionalJoin", 1)).toBe(1);
+    expect(call("loopCarriedJoin", 3)).toBe(1);
+
+    const expressionSource = `
+      /** @param {number} take @param {string} input @returns {number} */
+      export function elseJoin(take, input) {
+        let text = "A";
+        if (take > 0) text = "B";
+        else text = input;
+        return text.charCodeAt(0) === input.charCodeAt(0) ? 1 : 0;
+      }
+
+      /** @param {number} take @param {string} input @returns {number} */
+      export function ternaryJoin(take, input) {
+        let text = "A";
+        take > 0 ? (text = input) : text;
+        return text.charCodeAt(0) === input.charCodeAt(0) ? 1 : 0;
+      }
+
+      /** @param {number} take @param {string} input @returns {number} */
+      export function shortCircuitJoin(take, input) {
+        let text = "A";
+        take > 0 && (text = input) === input;
+        return text.charCodeAt(0) === input.charCodeAt(0) ? 1 : 0;
+      }
+    `;
+    await compile(expressionSource, {
+      fileName: "issue-3502-expression-joins.js",
+      target: "linear",
+      allocator: "bump",
+    });
+    const expressionReport = getLastLinearIrReport();
+    expect(expressionReport?.compiled).toStrictEqual([]);
+    expect(expressionReport?.rejected).toStrictEqual([
+      { func: "elseJoin", reason: "select:body-shape-rejected", detail: undefined },
+      { func: "ternaryJoin", reason: "select:body-shape-rejected", detail: undefined },
+      { func: "shortCircuitJoin", reason: "select:body-shape-rejected", detail: undefined },
+    ]);
   });
 });
