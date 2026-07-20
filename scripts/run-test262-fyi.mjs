@@ -142,7 +142,7 @@ function testWorkerOptions(test) {
 
 function resultPhase(result) {
   if (result.status === "compile_timeout") return "timeout";
-  if (result.status === "compile_error" || result.reachedTest === false) return "compile";
+  if (result.status === "compile_error" || (result.reachedTest === false && !result.isException)) return "compile";
   return "runtime";
 }
 
@@ -264,7 +264,13 @@ export class FyiSourceExecutor {
       child.on("message", onMessage);
       child.on("error", onError);
       child.on("exit", onExit);
-      child.send({ id, source, target, ...options });
+      child.send({
+        id,
+        source,
+        target,
+        ...options,
+        ...(test.entryFile && test.fixtureFiles ? { entryFile: test.entryFile, fixtureFiles: test.fixtureFiles } : {}),
+      });
     });
 
     return normalizeWorkerResult(workerResult);

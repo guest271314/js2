@@ -3,7 +3,7 @@
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, wasmPath?, metaPath? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, fixtureFiles?, entryFile? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createContext, runInContext } from "node:vm";
-import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
+import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bundle.mjs";
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
@@ -1030,7 +1030,25 @@ function makeWorkerRecycleError(reason) {
   return err;
 }
 
-async function doCompile(source, sourceMapUrl, target, inferModuleStrictArguments, originalHarness) {
+function hasFixtureGraph(fixtureFiles) {
+  return (
+    fixtureFiles &&
+    typeof fixtureFiles === "object" &&
+    !Array.isArray(fixtureFiles) &&
+    Object.keys(fixtureFiles).length > 0
+  );
+}
+
+async function doCompile(
+  source,
+  sourceMapUrl,
+  target,
+  inferModuleStrictArguments,
+  originalHarness,
+  fixtureFiles,
+  entryFile,
+  isNegative,
+) {
   // Defence-in-depth: restore any poisoned builtins BEFORE each compile.
   // postCompileCleanup runs after the previous test, but under rare worker
   // interruption scenarios it may not have completed. Doing a cheap pre-
@@ -1060,6 +1078,28 @@ async function doCompile(source, sourceMapUrl, target, inferModuleStrictArgument
   // CompileError, the 6-file `language/module-code/*` regression that parked
   // the stack PR #2835/#2839.
   const deferOpt = target || (!originalHarness && inferModuleStrictArguments) ? {} : { deferTopLevelInit: true };
+  if (hasFixtureGraph(fixtureFiles)) {
+    if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
+      throw new Error("fixture graph requires an original-harness entryFile");
+    }
+    if (Object.prototype.hasOwnProperty.call(fixtureFiles, entryFile)) {
+      throw new Error(`fixture graph collides with entry file: ${entryFile}`);
+    }
+
+    // Preserve the literal FYI entry as its own Module and link the pinned
+    // fixture sources beside it. Like the project runner's #2932 path, the
+    // graph deliberately omits deferTopLevelInit: compileMulti synthesizes
+    // one init schedule for the entire graph, including circular exports.
+    return compileMulti({ ...fixtureFiles, [entryFile]: source }, entryFile, {
+      allowJs: !isNegative,
+      sourceMap: true,
+      sourceMapUrl: sourceMapUrl || "test.wasm.map",
+      emitWat: false,
+      skipSemanticDiagnostics: true,
+      target,
+      inferModuleStrictArguments,
+    });
+  }
   if (originalHarness) {
     return compile(source, {
       allowJs: true,
@@ -1394,11 +1434,21 @@ process.on("message", async (msg) => {
   const nativeHarness = originalHarness && msg.nativeHarness === true && typeof msg.harnessPrefix === "string";
   const harnessPrefix = nativeHarness ? msg.harnessPrefix : "";
   const target = compileTargetFromMessage(msg.target);
+  const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
   const compileStart = performance.now();
 
   let result;
   try {
-    result = await doCompile(source, msg.sourceMapUrl, target, msg.inferModuleStrictArguments, originalHarness);
+    result = await doCompile(
+      source,
+      msg.sourceMapUrl,
+      target,
+      msg.inferModuleStrictArguments,
+      originalHarness,
+      msg.fixtureFiles,
+      msg.entryFile,
+      isNegative,
+    );
   } catch (err) {
     // Thrown exception may have poisoned the incremental compiler's internal
     // state.  Recreate immediately so subsequent compilations don't cascade-fail.
@@ -1421,7 +1471,11 @@ process.on("message", async (msg) => {
       return;
     }
     const errMsg = err?.message ?? String(err);
-    if (execute && isNegative && negativeCompileErrorMatches(expectedErrorType, [], errMsg)) {
+    // A thrown compiler exception while linking a supplied fixture graph is an
+    // infrastructure/compiler failure, never proof of Test262's requested
+    // SyntaxError. In particular, do not turn an absent/malformed dependency
+    // graph into a false resolution-negative pass.
+    if (execute && isNegative && !fixtureGraph && negativeCompileErrorMatches(expectedErrorType, [], errMsg)) {
       sendResult({
         id,
         status: "pass",
@@ -1493,7 +1547,10 @@ process.on("message", async (msg) => {
     // rejection is a static/syntax rejection => pass; a future wrong-type
     // negative rejected with an unrelated diagnostic now fails.
     if (execute && isNegative) {
-      const matched = negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
+      const missingFixtureDiagnostic =
+        fixtureGraph &&
+        (errorCodes.includes(2307) || errorCodes.includes(2792) || /cannot find module|module not found/i.test(errMsg));
+      const matched = !missingFixtureDiagnostic && negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
       if (matched) {
         sendResult({ id, status: "pass", compileMs, errorCodes, ...compileMetadata });
       } else {

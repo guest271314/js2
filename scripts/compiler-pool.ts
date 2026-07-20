@@ -202,6 +202,10 @@ export class CompilerPool {
       originalHarness?: boolean;
       /** Wait for the upstream doneprintHandle completion marker. */
       asyncTest?: boolean;
+      /** Static Test262 module dependencies, keyed by pinned virtual path. */
+      fixtureFiles?: Record<string, string>;
+      /** Virtual entry path used to resolve `fixtureFiles` imports. */
+      entryFile?: string;
       wasmPath?: string;
       metaPath?: string;
       label?: string;
@@ -227,6 +231,8 @@ export class CompilerPool {
         expectedErrorType: opts.expectedErrorType,
         originalHarness: opts.originalHarness || false,
         asyncTest: opts.asyncTest || false,
+        fixtureFiles: opts.fixtureFiles,
+        entryFile: opts.entryFile,
         wasmPath: opts.wasmPath,
         metaPath: opts.metaPath,
         target: opts.target,
