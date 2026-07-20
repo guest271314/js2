@@ -127,10 +127,11 @@ exact-source native validation below ran only after merging that commit.
 
 - Final implementation base: merged `origin/main@946ec0e8` (#3499) in branch
   merge `aedc71500` with no conflicts or edits to #3499-owned files.
-- Queue syncs: merged `origin/main@0f1a599e8` (#3448) in `e0d9a5521`, then
-  `origin/main@2c68ef348` (#3437) in `8c7bf544e`; neither sync conflicted with
-  or changed the seven-file #3501 delta, and the exact acceptance suite,
-  typecheck, lint, and formatting checks remained green.
+- Queue syncs: merged `origin/main@0f1a599e8` (#3448) in `e0d9a5521`,
+  `origin/main@2c68ef348` (#3437) in `8c7bf544e`, and
+  `origin/main@f5ce10d05` (#3450) in `7c2414713`; none conflicted with or
+  changed the seven-file #3501 delta, and the exact acceptance suite remained
+  green after the final adjacent IR-selection change.
 - `JS2WASM_PORFFOR_ROOT=../3482-direct-porffor-ab/vendor/Porffor
 PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run
 tests/issue-3501-empty-array-element-inference.test.ts --pool=forks
