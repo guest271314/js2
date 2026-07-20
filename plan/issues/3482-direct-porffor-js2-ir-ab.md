@@ -1,10 +1,11 @@
 ---
 id: 3482
 title: "Benchmark direct Porffor against JS2 typed SSA and shared-plan Porffor IR"
-status: in-progress
+status: done
 sprint: Backlog
 created: 2026-07-20
 updated: 2026-07-20
+completed: 2026-07-20
 priority: high
 horizon: l
 feasibility: hard
@@ -14,7 +15,7 @@ area: ir, codegen-linear, backend, benchmarking, ci
 language_feature: compiler-internals
 es_edition: n/a
 goal: backend-agnostic-ir
-blocked_by: "final PR publication waits for issue #3478 / PR #3432 to merge"
+depends_on: [3478]
 related: [3288, 3295, 3297, 3298, 3299, 3300, 3336, 3478]
 origin: "2026-07-20 explicit user request: fair plain/direct Porffor vs JS2 source-to-typed-SSA/shared-plan/Porffor-IR/native-C A/B"
 ---
@@ -677,6 +678,11 @@ The implementation must fail loudly if any invariant is false:
 
 ## Implementation notes (2026-07-20)
 
+- Prerequisite PR #3432 merged as
+  `eb661196016e06306d51cd39fb72294730eba535`. The implementation branch then
+  merged that exact latest `origin/main`; it contains required green head
+  `4c7e3a01d31275163ec9940e864c7292f6961b20` and the reachable
+  patch-equivalent Ubuntu fix `559109b723d8c08c0469594db9591f40b1fdfad0`.
 - The branch was created from exact green prerequisite head
   `4c7e3a01d31275163ec9940e864c7292f6961b20`, then planning commit
   `f891b3e0f4327c9f0c3ac2394bb95d48f5821cfc` was cherry-picked. No source
@@ -742,7 +748,7 @@ table are retained under `benchmarks/results/porffor-direct-ab/`.
 
 ## Acceptance criteria
 
-- [ ] #3478 / PR #3432 is merged, and main contains exact green head
+- [x] #3478 / PR #3432 is merged, and main contains exact green head
       `4c7e3a01d` plus reachable patch-equivalent Ubuntu fix `559109b723d8`.
 - [x] One checked-in `.ts` byte sequence and SHA feed all four rows and a Node
       oracle; no `.js` twin or hand-built replacement IR exists.
