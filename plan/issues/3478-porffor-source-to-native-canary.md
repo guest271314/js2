@@ -1,5 +1,6 @@
 ---
-id: 3476
+id: 3478
+renumbered_from: 3476
 title: "Porffor source-to-native canary: real TypeScript through shared linear-memory planning"
 status: done
 sprint: porffor-backend
@@ -22,7 +23,7 @@ related: [3288, 3297, 3298, 3299, 3300, 3336]
 origin: "2026-07-20 user directive: prove a real .ts source through JS2 typed SSA and the shared LinearMemoryPlan to linear-Wasm and optional Porffor-C/native"
 ---
 
-# #3476 - Porffor source-to-native canary over the shared linear-memory plan
+# #3478 - Porffor source-to-native canary over the shared linear-memory plan
 
 ## Objective
 
@@ -86,6 +87,15 @@ all open `loopdive/js2` pull requests found no Porffor, source-to-native, or
 shared-plan canary work. The fresh ID was then reserved and claimed atomically
 with `scripts/claim-issue.mjs --allocate`; its open-PR scan completed without
 degradation.
+
+### Collision recovery (2026-07-20)
+
+Immediately before publication, `origin/main` advanced to `01862f8a8` and
+landed an unrelated issue file using #3476. Main owns a landed ID, so this
+branch followed the repository collision protocol: atomically reserve+claim
+#3478 with a complete open-PR scan, release the obsolete #3476 claim, rename
+the issue and dedicated test, and record `renumbered_from: 3476`. No compiler,
+fixture, allocator, or workflow behavior changed during the renumber.
 
 ## Root cause
 
@@ -168,7 +178,7 @@ public entry point.
 - Add exactly the fixture above. Keep it free of imports, host APIs, strings,
   dynamic values, classes, arrays, and unsupported composite operations.
 
-**File: `tests/issue-3476-porffor-source-to-native-canary.test.ts` (new)**
+**File: `tests/issue-3478-porffor-source-to-native-canary.test.ts` (new)**
 
 - Read the checked-in fixture as source text. Execute its transpiled JavaScript
   directly (following the `ts.transpileModule` oracle pattern in
@@ -213,7 +223,7 @@ public entry point.
 
 ### 3. Validate native memory safety under both plans
 
-**File: `tests/issue-3476-porffor-source-to-native-canary.test.ts`**
+**File: `tests/issue-3478-porffor-source-to-native-canary.test.ts`**
 
 - Compile each rendered C artifact with Clang using:
 
@@ -254,7 +264,7 @@ public entry point.
   `git -C vendor/Porffor rev-parse HEAD` equals both the superproject gitlink
   (`git rev-parse HEAD:vendor/Porffor`) and `PORFFOR_IR_COMMIT` before testing.
 - Use the repository's current Node/Corepack/pnpm setup, set `CC=clang`, install
-  with `pnpm install --frozen-lockfile`, and run the focused #3476 test with the
+  with `pnpm install --frozen-lockfile`, and run the focused #3478 test with the
   sanitizer mode enabled. A missing pin, renderer incompatibility, sanitizer
   finding, output mismatch, or skipped Porffor execution must fail this
   optional workflow.
@@ -378,7 +388,7 @@ Core/submodule-absent validation:
 
 ```bash
 JS2WASM_PORFFOR_ROOT=tests/fixtures/porffor-intentionally-absent \
-  pnpm exec vitest run tests/issue-3476-porffor-source-to-native-canary.test.ts --reporter=dot
+  pnpm exec vitest run tests/issue-3478-porffor-source-to-native-canary.test.ts --reporter=dot
 pnpm exec vitest run tests/issue-3300.test.ts tests/issue-3299.test.ts tests/issue-3298.test.ts --reporter=dot
 pnpm run typecheck
 pnpm run build
@@ -394,7 +404,7 @@ test "$(git -C vendor/Porffor rev-parse HEAD)" = "$(git rev-parse HEAD:vendor/Po
 CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_REQUIRED=1 \
   PORFFOR_NATIVE_SANITIZERS=1 \
   pnpm exec vitest run \
-    tests/issue-3476-porffor-source-to-native-canary.test.ts \
+    tests/issue-3478-porffor-source-to-native-canary.test.ts \
     tests/issue-3295-porffor-compat.test.ts \
     tests/issue-3297.test.ts \
     tests/issue-3299.test.ts \
@@ -446,9 +456,9 @@ adding coordinate metadata would require an out-of-scope source-builder change.
 
 ## Test Results
 
-- `JS2WASM_PORFFOR_ROOT=tests/fixtures/porffor-intentionally-absent pnpm exec vitest run tests/issue-3476-porffor-source-to-native-canary.test.ts --reporter=dot` — 1 passed, 1 skipped (native optional), file passed.
-- `CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run tests/issue-3476-porffor-source-to-native-canary.test.ts --reporter=dot` — 2/2 passed under ASan/UBSan.
-- Focused #3476/#3295/#3297/#3299/#3300 matrix — 5 files, 22/22 tests passed with the pinned checkout.
+- `JS2WASM_PORFFOR_ROOT=tests/fixtures/porffor-intentionally-absent pnpm exec vitest run tests/issue-3478-porffor-source-to-native-canary.test.ts --reporter=dot` — 1 passed, 1 skipped (native optional), file passed.
+- `CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run tests/issue-3478-porffor-source-to-native-canary.test.ts --reporter=dot` — 2/2 passed under ASan/UBSan.
+- Focused #3478/#3295/#3297/#3299/#3300 matrix — 5 files, 22/22 tests passed with the pinned checkout.
 - `pnpm run typecheck`, `pnpm run build`, `pnpm run lint`, `pnpm run format:check`, `pnpm run check:linear-ir`, `pnpm run check:ir-fallbacks`, `pnpm run check:loc-budget`, `pnpm run check:dead-exports`, `pnpm run check:issues`, `pnpm run check:issue-ids`, and `GATE_BASE=origin/main pnpm run check:issue-ids:against-main` passed.
 - Workflow parsing/semantics, the `update=checkout` submodule override, gitlink
   pin equality, and `git diff --check` passed. Local test262 was intentionally

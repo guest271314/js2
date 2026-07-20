@@ -98,7 +98,7 @@ beforeAll(async () => {
   rows = compiledRows;
 }, 120_000);
 
-describe("#3476 real source to shared linear-memory plan", () => {
+describe("#3478 real source to shared linear-memory plan", () => {
   it("feeds the exact source-derived typed SSA and plan to both backend adapters", () => {
     expect(directValues).toStrictEqual(expectedFixedValues);
     expect(directChecksum).toBe(expectedStressChecksum);
@@ -280,7 +280,7 @@ ${fixedCalls}
   return 0;
 }
 `;
-  const directory = mkdtempSync(join(tmpdir(), "js2-porffor-3476-"));
+  const directory = mkdtempSync(join(tmpdir(), "js2-porffor-3478-"));
   const sourcePath = join(directory, "canary.c");
   const binaryPath = join(directory, "canary");
   try {

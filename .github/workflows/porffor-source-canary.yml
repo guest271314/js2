@@ -12,7 +12,7 @@ on:
       - "src/compiler.ts"
       - "src/index.ts"
       - "tests/fixtures/porffor-source-to-native-canary.ts"
-      - "tests/issue-3476-porffor-source-to-native-canary.test.ts"
+      - "tests/issue-3478-porffor-source-to-native-canary.test.ts"
       - "vendor/Porffor"
       - ".github/workflows/porffor-source-canary.yml"
 
@@ -58,5 +58,5 @@ jobs:
           PORFFOR_NATIVE_REQUIRED: "1"
           PORFFOR_NATIVE_SANITIZERS: "1"
         run: |
-          pnpm exec vitest run tests/issue-3476-porffor-source-to-native-canary.test.ts \
+          pnpm exec vitest run tests/issue-3478-porffor-source-to-native-canary.test.ts \
             --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism --reporter=dot
