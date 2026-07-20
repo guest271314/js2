@@ -209,3 +209,32 @@ Expected: the ~2,069 `Cannot convert null to object [in __module_init()]`
 default-lane bucket (+90 Atomics) collapses; the honest fail→pass flip is a
 fraction of that (residuals reclassify to real TypedArray-semantics fails). This
 is an intended large baseline change — not a regression.
+
+## Accepted trap-growth collateral + one-cycle #3189 override (2026-07-20)
+
+Landing this fix required a **one-cycle** widening of the #3189 uncatchable-trap
+ratchet. It is NOT a silent floor raise — the rationale and the fix-forward are
+recorded here so the override is auditable and provably transitional.
+
+**What happened.** The sandbox-parity fix lets the TypedArray harness run PAST
+`__module_init` for the first time. 28 tests that previously died there (catchable
+"Cannot convert null to object") now execute their body and hit PRE-EXISTING
+compiler trap-gaps: `null_deref` +19 (166→185), `oob` +9 (48→57). All 28
+`include: [testTypedArray.js]` and were ALREADY failing before this PR — a
+failure-MODE change (catchable → uncatchable), **zero pass-loss**. Net host delta
+is **+647** (656 improvements − 9 non-timeout regressions), measured in the #3430
+merge_group run 29711072322.
+
+**The override (both reset to 0 after #3430 lands + baseline promotes).**
+- merge_group gate (`scripts/diff-test262.ts`, per-category): `TRAP_RATCHET_TOLERANCE=25`
+  — covers null_deref +19 and oob +9.
+- promote-baseline gate (`scripts/check-baseline-trap-growth.ts`): `BASELINE_TRAP_GROWTH_ALLOW=25`.
+
+The change-scoped `trap-growth-allow:` frontmatter mechanism was NOT usable here:
+both gates read it only in rebase mode (forward oracle bump, `diff-test262.ts:1766`),
+and this is a same-oracle runner-only change, so the frontmatter is inert. The
+repo-var valves are the only effective lever.
+
+**Fix-forward:** #3488 tracks IMPLEMENTING the unmasked TypedArray trap-gaps
+(`.set` arg-coercion / bounds, `bit-precision` codecs, `*-invoked-as-func`
+reflective null-receiver guards) so the ratchet tightens back to its prior floor.
