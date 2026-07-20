@@ -78,6 +78,12 @@ import {
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
+import {
+  buildClosurePropGetMissArm,
+  buildClosurePropMethodCallElseArm,
+  buildClosurePropSetMissArm,
+  reserveClosurePropHelpers,
+} from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
 import { ensureSymbolCarrier } from "./symbol-native.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
@@ -828,6 +834,17 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     return funcIdx;
   };
 
+  // (#3468 C-core) Reserve the closure-own-property side-table helpers + register
+  // the `$ClosurePropEntry` struct / `$__closure_prop_head` global BEFORE the
+  // `__extern_get`/`__extern_set`/`__extern_method_call` arms below bake their
+  // `call <idx>`. Filled at FINALIZE (`fillClosurePropHelpers`) once every
+  // closure root + `__extern_get`/`_set` funcIdx is known. Standalone/wasi only:
+  // in gc/host mode the `env::__extern_*` imports own the dynamic-property path,
+  // these defined arms are not emitted, and nothing here is reserved.
+  if (ctx.standalone || ctx.wasi) {
+    reserveClosurePropHelpers(ctx);
+  }
+
   // ── __extern_is_array(externref v) -> i32 ────────────────────────────────
   //
   // Placeholder reserved with the object runtime and filled at FINALIZE by
@@ -1455,13 +1472,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 4 },
-      // if !ref.test $Object → not one of our objects → miss (undefined)
+      // if !ref.test $Object → not one of our objects → miss (undefined), OR
+      // (#3468 C-core) a closure receiver whose own property lives in the side
+      // table — `__closure_prop_get` resolves it, or returns `getMiss` too.
       { op: "ref.test", typeIdx: objectTypeIdx },
       { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [...getMiss(), { op: "return" }],
+        then: buildClosurePropGetMissArm(ctx, getMiss),
       },
       // o = cast<$Object>(any)
       { op: "local.get", index: 4 },
@@ -2028,13 +2047,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 6 },
-      // if !ref.test $Object → silently no-op (host import is lenient too)
+      // if !ref.test $Object → silently no-op (host import is lenient too), OR
+      // (#3468 C-core) route a closure receiver's write into the side table.
       { op: "ref.test", typeIdx: objectTypeIdx },
       { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [{ op: "return" }],
+        then: buildClosurePropSetMissArm(ctx),
       },
       // o = cast<$Object>(any)
       { op: "local.get", index: 6 },
@@ -3993,7 +4013,6 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   if (S2_OPENANY_DISPATCH_WIRED) {
     const applyClosureIdx = reserveApplyClosure(ctx);
     const externGetIdx = ctx.funcMap.get("__extern_get")!;
-
     const body: Instr[] = [
       // any = any.convert_extern(recv); if null → return undefined
       { op: "local.get", index: 0 },
@@ -4026,9 +4045,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "local.get", index: 2 },
           { op: "call", funcIdx: applyClosureIdx },
         ],
-        // Non-$Object receiver: brand arms ($Vec/string/Map/Set) are Slice 4;
-        // return undefined for now (never invalid Wasm).
-        else: [{ op: "ref.null.extern" }],
+        // Non-$Object receiver: (#3468 C-core) a closure carries own properties
+        // in the side table — mirror the $Object dispatch for it; other brands
+        // ($Vec/string/Map/Set) are the Slice-4 arms → undefined for now (never
+        // invalid Wasm).
+        else: buildClosurePropMethodCallElseArm(ctx, externGetIdx, applyClosureIdx),
       },
     ];
     registerNative(
