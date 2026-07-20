@@ -114,6 +114,8 @@ function linearInstrError(instr: IrInstr): string | null {
     case "string.concat":
     case "string.eq":
     case "string.len":
+    case "string.char_at":
+    case "string.char_code_at":
     // #2956 L2: aggregates and primitive ref-cells use i32 arena pointers,
     // with field access emitted as typed linear-memory loads/stores.
     case "object.new":
@@ -242,6 +244,11 @@ function porfforInstrError(instr: IrInstr): string | null {
     case "if.stmt":
     case "while.loop":
     case "for.loop":
+    case "string.const":
+    case "string.concat":
+    case "string.len":
+    case "string.char_at":
+    case "string.char_code_at":
       return null;
     default:
       return `porffor backend does not support IR instruction '${instr.kind}' before typed Porffor lowering`;
@@ -272,6 +279,15 @@ function porfforBinopLegal(op: IrBinop): boolean {
     case "i32.le_u":
     case "i32.gt_u":
     case "i32.ge_u":
+    // #3499: lower.ts expands these through backend-neutral typed scalar
+    // primitives (ToInt32, native i32 bitwise op, and signed/unsigned result
+    // conversion). No raw Wasm instruction reaches the Porffor sink.
+    case "js.bitand":
+    case "js.bitor":
+    case "js.bitxor":
+    case "js.shl":
+    case "js.shr_s":
+    case "js.shr_u":
       return true;
     default:
       return false;
@@ -300,6 +316,7 @@ function backendTypeError(backend: IrBackendKind, type: IrType): string | null {
     return bytecodeValTypeError(v);
   }
   if (type.kind === "object") return porfforAggregateTypeError(type);
+  if (type.kind === "string") return null;
   const v = asVal(type);
   if (!v) return `porffor backend does not support IR type '${type.kind}'`;
   return porfforValTypeError(v);

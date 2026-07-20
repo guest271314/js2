@@ -47,6 +47,33 @@ export interface DirectSourceAdapterOptions {
   readonly gc: boolean;
 }
 
+/**
+ * Additive generic form of the #3482 adapter. The source and Porffor command
+ * model are unchanged; callers only identify the exported unary function that
+ * the common native boundary should invoke. Keeping this API here prevents
+ * benchmark-specific copies of Porffor's process-global callback protocol.
+ */
+export interface DirectProgramAdapterOptions extends DirectSourceAdapterOptions {
+  readonly functionName: string;
+  readonly sourceParameterName: string;
+}
+
+export interface DirectProgramAdapterResult {
+  readonly renderedC: string;
+  readonly input: PorfforRendererInput;
+  readonly functionIndex: number;
+  readonly functionSymbol: string;
+  readonly entrySymbol: "p0__23main";
+  readonly renderedParameterCount: 3;
+  readonly compilePhasesMs: {
+    readonly porfforParseMs: number;
+    readonly porfforCodegenMs: number;
+    readonly porfforRenderMs: number;
+  };
+  readonly commandModel: readonly string[];
+  readonly compatibilityNormalizations: readonly string[];
+}
+
 export interface DirectSourceAdapterResult {
   readonly renderedC: string;
   readonly input: PorfforRendererInput;
@@ -67,6 +94,32 @@ export interface DirectSourceAdapterResult {
 export async function compileDirectPorfforSource(
   options: DirectSourceAdapterOptions,
 ): Promise<DirectSourceAdapterResult> {
+  const generic = await compileDirectPorfforProgram({
+    ...options,
+    functionName: PORFFOR_DIRECT_AB_FUNCTION,
+    sourceParameterName: "seed",
+  });
+  if (generic.functionIndex !== 1) {
+    throw new Error(`direct Porffor canary function index changed: received ${generic.functionIndex}`);
+  }
+  const safetyFinding = assertPinnedDirectObjectEntries(generic.renderedC, options.gc, PORFFOR_IR_COMMIT);
+  assertPinnedCanaryC(generic.renderedC);
+  return {
+    ...generic,
+    functionIndex: 1,
+    safetyFinding,
+  };
+}
+
+export async function compileDirectPorfforProgram(
+  options: DirectProgramAdapterOptions,
+): Promise<DirectProgramAdapterResult> {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(options.functionName)) {
+    throw new Error(`direct Porffor function name is not a pinned-safe C identifier: ${options.functionName}`);
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(options.sourceParameterName)) {
+    throw new Error(`direct Porffor parameter name is not a pinned-safe identifier: ${options.sourceParameterName}`);
+  }
   const actualCommit = execFileSync("git", ["-C", options.porfforRoot, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
@@ -113,20 +166,20 @@ export async function compileDirectPorfforSource(
       throw new Error("direct Porffor top-level entry ABI changed from pinned #main index 0 / () -> jsval");
     }
 
-    const func = findExactFunction(input);
+    const func = findExactFunction(input, options.functionName);
     const jsval = porfforJsvalType();
     const parameterNames = func.params.map((param) => param.name);
     if (
-      func.index !== 1 ||
+      func.index <= 0 ||
       func.retType !== jsval ||
       func.params.length !== 3 ||
       parameterNames[0] !== "#newtarget" ||
       parameterNames[1] !== "#this" ||
-      parameterNames[2] !== "seed" ||
+      parameterNames[2] !== options.sourceParameterName ||
       !func.params.every((param) => param.type === jsval)
     ) {
       throw new Error(
-        `direct Porffor benchmark ABI changed: expected index 1 (#newtarget,#this,seed) jsval -> jsval, received ${JSON.stringify(
+        `direct Porffor benchmark ABI changed: expected positive index (#newtarget,#this,${options.sourceParameterName}) jsval -> jsval, received ${JSON.stringify(
           {
             index: func.index,
             parameterNames,
@@ -177,13 +230,14 @@ export async function compileDirectPorfforSource(
 
     const rawC = porfforRendererOutputText(readFileSync(options.rawOutputPath, "utf8"));
     const renderedC = normalizePinnedPorfforCForClang(rawC, actualCommit);
-    const safetyFinding = assertPinnedDirectObjectEntries(renderedC, options.gc, actualCommit);
-    assertPinnedRenderedC(renderedC);
+    const capturedFunction = findExactFunction(captured, options.functionName);
+    const functionSymbol = `p${capturedFunction.index}_${options.functionName}`;
+    assertPinnedRenderedC(renderedC, functionSymbol);
     return {
       renderedC,
       input: captured,
-      functionIndex: 1,
-      functionSymbol: `p1_${PORFFOR_DIRECT_AB_FUNCTION}`,
+      functionIndex: capturedFunction.index,
+      functionSymbol,
       entrySymbol: "p0__23main",
       renderedParameterCount: 3,
       compilePhasesMs: {
@@ -193,7 +247,6 @@ export async function compileDirectPorfforSource(
       },
       commandModel,
       compatibilityNormalizations: ["single pinned LP64 i64 printf vararg cast"],
-      safetyFinding,
     };
   } finally {
     process.argv = savedArgv;
@@ -230,7 +283,7 @@ function assertPinnedDirectObjectEntries(
   };
 }
 
-function assertPinnedRenderedC(renderedC: string): void {
+function assertPinnedRenderedC(renderedC: string, functionSymbol: string): void {
   const assertions = [
     [!/(?:^|\n)int main\s*\(/.test(renderedC), "generated main was not suppressed"],
     [renderedC.includes("static void porf_init(int argc, char** argv)"), "porf_init declaration changed"],
@@ -238,14 +291,21 @@ function assertPinnedRenderedC(renderedC: string): void {
     [renderedC.includes("static void* porf_c_stack_top = NULL;"), "GC stack anchor declaration changed"],
     [renderedC.includes("static inline jsval porf_box_num(f64 d)"), "number boxing helper changed"],
     [renderedC.includes("static inline int porf_jv_is_num(jsval v)"), "number predicate helper changed"],
+    [renderedC.includes("jsval p0__23main(void);"), "suppressed entry symbol changed"],
+    [renderedC.includes(`jsval ${functionSymbol}(jsval, jsval, jsval);`), "benchmark C declaration changed"],
+  ] as const;
+  for (const [condition, message] of assertions) if (!condition) throw new Error(message);
+}
+
+function assertPinnedCanaryC(renderedC: string): void {
+  const assertions = [
     [
       renderedC.includes("obj = porf_box(porf_alloc((i32)(16u + (u32)capacity * 20u), 7u), 7);"),
       "pinned approximately-56-byte dynamic object allocation changed",
     ],
-    [renderedC.includes("jsval p0__23main(void);"), "suppressed entry symbol changed"],
     [
       renderedC.includes(`jsval p1_${PORFFOR_DIRECT_AB_FUNCTION}(jsval, jsval, jsval);`),
-      "benchmark C declaration changed",
+      "canary C declaration changed",
     ],
   ] as const;
   for (const [condition, message] of assertions) if (!condition) throw new Error(message);

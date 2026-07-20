@@ -62,6 +62,7 @@ import type { IrClosureSignature, IrType } from "./nodes.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
+import type { RecursiveTypeEvidence } from "./type-evidence.js";
 
 /**
  * #1169q telemetry — record why a top-level FunctionDeclaration didn't make
@@ -93,6 +94,7 @@ export type IrFallbackReason =
   | "body-shape-rejected"
   | "external-call" // calls a non-local identifier (parseInt, etc.)
   | "call-graph-closure" // local caller/callee not claimed
+  | "recursive-type-evidence" // recursive SCC failed conservative ABI certification
   | "type-resolution-failure" // overrideMap couldn't be built (set externally)
   // #1370 Phase A — class method / constructor of a shape the IR selector
   // doesn't yet handle. Examples: methods on a class with an `extends`
@@ -248,6 +250,13 @@ export interface IrSelectionOptions {
    *  along with the reason it was rejected. Off by default — populating
    *  this list adds a small per-function overhead. */
   readonly trackFallbacks?: boolean;
+  /**
+   * Checker-backed certification for recursive call-graph components. A
+   * rejected component is kept on the direct path even when optimistic
+   * propagation found a scalar-looking signature. Accepted components still
+   * pass every ordinary selector shape and closure gate.
+   */
+  readonly recursiveTypeEvidence?: RecursiveTypeEvidence;
   /**
    * (#1373b Slice 1) When true, async functions (no `*`) are eligible to
    * flow through the IR's CPS lowering (Phase C). When false (default),
@@ -492,16 +501,24 @@ export function planIrCompilation(
       continue;
     }
     declByName.set(stmt.name.text, stmt);
-    const reason = trackFallbacks
-      ? whyNotIrClaimable(stmt, typeMap, localClasses)
-      : isIrClaimable(stmt, typeMap, localClasses)
-        ? null
-        : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
+    const recursiveDecision = options?.recursiveTypeEvidence?.decisions.get(stmt.name.text);
+    const reason =
+      recursiveDecision?.accepted === false
+        ? "recursive-type-evidence"
+        : trackFallbacks
+          ? whyNotIrClaimable(stmt, typeMap, localClasses)
+          : isIrClaimable(stmt, typeMap, localClasses)
+            ? null
+            : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
     if (reason === null) {
       individuallyClaimed.add(stmt.name.text);
     } else if (trackFallbacks) {
       fallbackReasons.set(stmt.name.text, reason);
-      captureShapeDetail(stmt.name.text, reason);
+      if (reason === "recursive-type-evidence" && recursiveDecision?.detail) {
+        fallbackDetails.set(stmt.name.text, recursiveDecision.detail);
+      } else {
+        captureShapeDetail(stmt.name.text, reason);
+      }
     }
   }
 
@@ -1244,6 +1261,34 @@ function isIrClaimable(
 type ResolvedKind = "f64" | "bool" | "string" | "object" | "void" | "closure" | "dynamic" | null;
 
 /**
+ * Return the declaration's effective parameter type node.
+ *
+ * For TypeScript this is the ordinary `param.type`. For JavaScript, the TS
+ * parser/checker boundary exposes a standard `@param {T}` annotation through
+ * `getJSDocType` while deliberately leaving `param.type` unset. Keeping this
+ * lookup in one helper prevents the selector and the shared AST-to-IR
+ * signature resolver from disagreeing about the same source declaration. No
+ * comment text is parsed and no synthetic annotation is attached to the AST.
+ */
+export function effectiveIrParamTypeNode(param: ts.ParameterDeclaration): ts.TypeNode | undefined {
+  return param.type ?? ts.getJSDocType(param);
+}
+
+/**
+ * Return the declaration's effective return type node, including a JavaScript
+ * JSDoc `@returns {T}` annotation when present.
+ *
+ * The caller still applies the existing narrow primitive/object/dynamic
+ * mapping. In particular, this helper does not turn an unannotated, `any`,
+ * union, or otherwise unsupported signature into a primitive claim.
+ */
+export function effectiveIrReturnTypeNode(
+  fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration,
+): ts.TypeNode | undefined {
+  return fn.type ?? ts.getJSDocReturnType(fn);
+}
+
+/**
  * #2859 — build an `IrClosureSignature` from an explicit function-type
  * annotation (`(a: number, b: string) => number`), or return `null` when the
  * annotation is outside the expressible surface. The primitive mapping MUST
@@ -1279,10 +1324,11 @@ export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode
 }
 
 function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | undefined): ResolvedKind {
-  if (p.type) {
-    if (p.type.kind === ts.SyntaxKind.NumberKeyword) return "f64";
-    if (p.type.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
-    if (p.type.kind === ts.SyntaxKind.StringKeyword) return "string";
+  const effectiveType = effectiveIrParamTypeNode(p);
+  if (effectiveType) {
+    if (effectiveType.kind === ts.SyntaxKind.NumberKeyword) return "f64";
+    if (effectiveType.kind === ts.SyntaxKind.BooleanKeyword) return "bool";
+    if (effectiveType.kind === ts.SyntaxKind.StringKeyword) return "string";
     // (#2949 slice 3b) `any` IS the dynamic type. The historical #1228
     // mapping ("any" kind → externref override) claimed EVERY any-param
     // function unconditionally and relied on from-ast throwing for
@@ -1292,13 +1338,13 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     // routes any-params through the SAME move-only scan + carrier as
     // unannotated dynamics: non-move uses now reject PRE-claim (no
     // demotion), and the claimed ones share legacy's ABI in both modes.
-    if (p.type.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
+    if (effectiveType.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
     // #2859 — function-typed param (`fn: () => number`). Accepted when the
     // signature is expressible with the slice-3 closure surface; the param
     // lowers to the closure supertype struct and `fn()` dispatches through
     // `lowerClosureCall`. Inexpressible function types stay rejected.
-    if (ts.isFunctionTypeNode(p.type)) {
-      return irClosureSignatureFromFunctionTypeNode(p.type) ? "closure" : null;
+    if (ts.isFunctionTypeNode(effectiveType)) {
+      return irClosureSignatureFromFunctionTypeNode(effectiveType) ? "closure" : null;
     }
     // Slice 2 (#1169b) — accept TypeLiteral / TypeReference at the
     // selector level. The actual shape resolution happens in
@@ -1311,7 +1357,12 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     // Slice 6 part 2 (#1181) — accept ArrayTypeNode (`T[]`) too.
     // `Array<T>` already resolves via TypeReferenceNode. Both shapes
     // route to a vec ref in `resolvePositionType`.
-    if (ts.isTypeLiteralNode(p.type) || ts.isTypeReferenceNode(p.type) || ts.isArrayTypeNode(p.type)) return "object";
+    if (
+      ts.isTypeLiteralNode(effectiveType) ||
+      ts.isTypeReferenceNode(effectiveType) ||
+      ts.isArrayTypeNode(effectiveType)
+    )
+      return "object";
     return null;
   }
   if (mapped?.kind === "f64") return "f64";
@@ -1357,8 +1408,9 @@ function resolveReturnType(
   fn: ts.FunctionDeclaration | ts.MethodDeclaration | ts.GetAccessorDeclaration,
   mapped: LatticeType | undefined,
 ): ResolvedKind {
-  if (fn.type) {
-    return resolveReturnTypeNode(fn.type);
+  const effectiveType = effectiveIrReturnTypeNode(fn);
+  if (effectiveType) {
+    return resolveReturnTypeNode(effectiveType);
   }
   if (mapped?.kind === "f64") return "f64";
   if (mapped?.kind === "bool") return "bool";
@@ -1956,7 +2008,7 @@ function isPhase1TryStatement(
   // loop is claimable (the lowerer inlines crossed finallys before the br).
   inLoop: boolean = false,
 ): boolean {
-  if (!stmt.catchClause && !stmt.finallyBlock) return false;
+  if (!stmt.catchClause && !stmt.finallyBlock) return shapeNo("try-missing-handler", stmt);
 
   // (#2856 C1) try/catch/finally bodies are early-return BARRIERS: a Wasm
   // `return` inside them would skip the inlined finally blocks. (#2952 s2's
@@ -1967,7 +2019,7 @@ function isPhase1TryStatement(
     // Try body: must be a Phase-1 body statement list.
     const tryScope = new Set(scope);
     for (const s of stmt.tryBlock.statements) {
-      if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return false;
+      if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return shapeNo("try-body-stmt", s);
     }
 
     if (stmt.catchClause) {
@@ -1976,18 +2028,18 @@ function isPhase1TryStatement(
         const v = stmt.catchClause.variableDeclaration;
         // Slice 9 only accepts identifier bindings. Destructuring catch
         // (`catch ({message})`) defers to slice 9.5.
-        if (!ts.isIdentifier(v.name)) return false;
+        if (!ts.isIdentifier(v.name)) return shapeNo("try-catch-binding", v.name);
         catchScope.add(v.name.text);
       }
       for (const s of stmt.catchClause.block.statements) {
-        if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return false;
+        if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return shapeNo("try-catch-body-stmt", s);
       }
     }
 
     if (stmt.finallyBlock) {
       const finallyScope = new Set(scope);
       for (const s of stmt.finallyBlock.statements) {
-        if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return false;
+        if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return shapeNo("try-finally-body-stmt", s);
       }
     }
 
@@ -2108,7 +2160,7 @@ function isPhase1ForStatement(
   localClasses: ReadonlySet<string>,
 ): boolean {
   // Cond must be present (no infinite loops in slice 12).
-  if (!stmt.condition) return false;
+  if (!stmt.condition) return shapeNo("for-missing-cond", stmt);
 
   const innerScope = new Set(scope);
 
@@ -2117,40 +2169,46 @@ function isPhase1ForStatement(
   if (stmt.initializer) {
     if (ts.isVariableDeclarationList(stmt.initializer)) {
       const flags = stmt.initializer.flags;
-      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return false;
+      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const))
+        return shapeNo("for-init-var-kind", stmt.initializer);
       for (const d of stmt.initializer.declarations) {
-        if (!ts.isIdentifier(d.name)) return false;
-        if (!d.initializer) return false;
-        if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return false;
+        if (!ts.isIdentifier(d.name)) return shapeNo("for-init-name", d.name);
+        if (!d.initializer) return shapeNo("for-init-noinit", d);
+        if (!isPhase1Expr(d.initializer, innerScope, localClasses)) return shapeNo("for-init-expr", d.initializer);
         // (#2856) A name a SIBLING for-init leaked into the flat scope set is
         // NOT a genuine duplicate — from-ast scopes each for-init in its own
         // innerCx copy, so `for (let i...) {} for (let i...) {}` builds fine.
         // Genuine outer bindings still reject (build-side redeclaration).
-        if (innerScope.has(d.name.text) && !forInitLeakedNames.has(d.name.text)) return false; // duplicate
+        if (innerScope.has(d.name.text) && !forInitLeakedNames.has(d.name.text))
+          return shapeNo("for-init-shadow", d.name); // duplicate
         innerScope.add(d.name.text);
       }
     } else {
       // Expression init.
-      if (!isPhase1Expr(stmt.initializer, innerScope, localClasses)) return false;
+      if (!isPhase1Expr(stmt.initializer, innerScope, localClasses)) return shapeNo("for-init-expr", stmt.initializer);
     }
   }
 
   // Cond: must be a Phase-1 expression in the inner scope.
-  if (!isPhase1Expr(stmt.condition, innerScope, localClasses)) return false;
+  if (!isPhase1Expr(stmt.condition, innerScope, localClasses)) return shapeNo("for-cond", stmt.condition);
 
   // Update: optional. When present, must be a Phase-1 expression OR a
   // postfix `i++` / `i--` (which `isPhase1Expr` doesn't accept on its
   // own because postfix mutates state — but it's the canonical for-loop
   // update so we accept it explicitly here).
   if (stmt.incrementor) {
-    if (!isPhase1ForUpdateExpr(stmt.incrementor, innerScope, localClasses)) return false;
+    if (!isPhase1ForUpdateExpr(stmt.incrementor, innerScope, localClasses))
+      return shapeNo("for-update", stmt.incrementor);
   }
 
   // Body: single Phase-1 body statement.
   // (#2856 C1) for bodies admit the early-return arm.
   earlyReturnLoopDepth++;
   try {
-    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+    return (
+      isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true) ||
+      shapeNo("for-body", stmt.statement)
+    );
   } finally {
     earlyReturnLoopDepth--;
   }
@@ -2622,19 +2680,21 @@ function isPhase1ClosureLiteral(
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
 ): boolean {
-  if (ts.isFunctionExpression(expr) && expr.name) return false; // named func expr — defer
-  if ("asteriskToken" in expr && expr.asteriskToken) return false; // generator
-  if (expr.modifiers && expr.modifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return false;
-  if (expr.typeParameters && expr.typeParameters.length > 0) return false;
+  if (ts.isFunctionExpression(expr) && expr.name) return shapeNo("closure-named-fnexpr", expr.name); // named func expr — defer
+  if ("asteriskToken" in expr && expr.asteriskToken) return shapeNo("closure-generator", expr); // generator
+  if (expr.modifiers && expr.modifiers.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))
+    return shapeNo("closure-async", expr);
+  if (expr.typeParameters && expr.typeParameters.length > 0) return shapeNo("closure-type-params", expr);
 
-  if (!expr.type || annotationToResolvedKind(expr.type) === null) return false;
+  if (!expr.type || annotationToResolvedKind(expr.type) === null)
+    return shapeNo("closure-return-type", expr.type ?? expr);
 
   const inner = new Set(scope);
   for (const p of expr.parameters) {
-    if (!ts.isIdentifier(p.name)) return false;
-    if (p.questionToken || p.dotDotDotToken || p.initializer) return false;
-    if (!p.type || annotationToResolvedKind(p.type) === null) return false;
-    if (inner.has(p.name.text)) return false;
+    if (!ts.isIdentifier(p.name)) return shapeNo("closure-param-name", p.name);
+    if (p.questionToken || p.dotDotDotToken || p.initializer) return shapeNo("closure-param-shape", p);
+    if (!p.type || annotationToResolvedKind(p.type) === null) return shapeNo("closure-param-type", p.type ?? p);
+    if (inner.has(p.name.text)) return shapeNo("closure-param-shadow", p.name);
     inner.add(p.name.text);
   }
 
@@ -2642,10 +2702,10 @@ function isPhase1ClosureLiteral(
   // ArrowFunction / FunctionExpression with block body: Phase-1 tail
   // statement list.
   if (ts.isArrowFunction(expr) && !ts.isBlock(expr.body)) {
-    return isPhase1Expr(expr.body, inner, localClasses);
+    return isPhase1Expr(expr.body, inner, localClasses) || shapeNo("closure-concise-body", expr.body);
   }
-  if (!ts.isBlock(expr.body)) return false;
-  return isPhase1StatementList(expr.body.statements, inner, localClasses);
+  if (!ts.isBlock(expr.body)) return shapeNo("closure-body-kind", expr.body);
+  return isPhase1StatementList(expr.body.statements, inner, localClasses) || shapeNo("closure-body", expr.body);
 }
 
 /**
@@ -2820,11 +2880,14 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // excluded for symmetry with the legacy user-class-shadows-extern rule
     // (#1284).
     if (scope.has(expr.text)) return true;
-    return (
+    if (
       currentHostGlobalResolver !== null &&
       !localClasses.has(expr.text) &&
       currentHostGlobalResolver(expr) !== undefined
-    );
+    ) {
+      return true;
+    }
+    return shapeNo("expr-ident-not-in-scope", expr);
   }
   // #1370 Phase A — `this` reference inside a method or constructor body.
   // The selector marks `this` as an in-scope binding for class members
@@ -3021,13 +3084,14 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // class shape; slice 10 against `getExternClassInfo`'s
   // constructorParams).
   if (ts.isNewExpression(expr)) {
-    if (!ts.isIdentifier(expr.expression)) return false;
+    if (!ts.isIdentifier(expr.expression)) return shapeNo("expr-new-callee-nonident", expr.expression);
     const ctorName = expr.expression.text;
-    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName)) return false;
-    if (expr.typeArguments && expr.typeArguments.length > 0) return false; // defer generics
+    if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName))
+      return shapeNo("expr-new-ctor-unknown", expr.expression);
+    if (expr.typeArguments && expr.typeArguments.length > 0) return shapeNo("expr-new-type-args", expr); // defer generics
     if (!expr.arguments) return true;
     for (const arg of expr.arguments) {
-      if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      if (!isPhase1Expr(arg, scope, localClasses)) return shapeNo("expr-new-arg", arg);
     }
     return true;
   }
@@ -3182,28 +3246,30 @@ function isPhase1ObjectLiteral(
   // objects don't form a usable IrType.object shape) — but accepting
   // them at the selector level wouldn't cause a regression: the
   // overrides pass would skip them when shape resolution failed.
-  if (expr.properties.length === 0) return false;
+  if (expr.properties.length === 0) return shapeNo("objectlit-empty", expr);
 
   const seen = new Set<string>();
   for (const prop of expr.properties) {
     if (ts.isPropertyAssignment(prop)) {
       const name = phase1PropertyName(prop.name);
-      if (name === null) return false;
-      if (seen.has(name)) return false; // duplicate key — defer
+      if (name === null) return shapeNo("objectlit-computed-key", prop.name);
+      if (seen.has(name)) return shapeNo("objectlit-duplicate-key", prop.name); // duplicate key — defer
       seen.add(name);
-      if (!isPhase1Expr(prop.initializer, scope, localClasses)) return false;
+      if (!isPhase1Expr(prop.initializer, scope, localClasses))
+        return shapeNo("objectlit-property-init", prop.initializer);
       continue;
     }
     if (ts.isShorthandPropertyAssignment(prop)) {
       const name = prop.name.text;
-      if (seen.has(name)) return false;
-      if (!scope.has(name)) return false;
+      if (seen.has(name)) return shapeNo("objectlit-duplicate-key", prop.name);
+      if (!scope.has(name)) return shapeNo("objectlit-shorthand-not-in-scope", prop.name);
       seen.add(name);
       continue;
     }
     // SpreadAssignment, MethodDeclaration, GetAccessorDeclaration,
     // SetAccessorDeclaration → reject.
-    return false;
+    if (ts.isSpreadAssignment(prop)) return shapeNo("objectlit-spread", prop);
+    return shapeNo("objectlit-property-kind", prop);
   }
   return true;
 }

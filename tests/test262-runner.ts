@@ -16,6 +16,7 @@ import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 import { ts } from "../src/ts-api.js";
 import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
+import { isModuleGoal } from "../scripts/test262-module-goal.mjs";
 import { restoreHostBuiltins } from "./test262-restore-builtins.js";
 import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-original-harness.js";
 import { SANDBOX_GLOBAL_NAMES } from "../scripts/test262-sandbox-globals.mjs";
@@ -3628,14 +3629,7 @@ export function standaloneHostImportError(target: string | undefined, imports: r
 /** Default per-test timeout in milliseconds (prevents infinite-loop hangs) */
 const TEST_TIMEOUT_MS = 15000;
 
-export function isModuleGoal(category: string, meta: Test262Meta, source: string): boolean {
-  if (category === "language/module-code") return true;
-  if (category === "language/import") return true;
-  if (category === "language/export") return true;
-  if (meta.flags?.includes("module")) return true;
-  if (/\b(?:import|export)\b/.test(source)) return true;
-  return false;
-}
+export { isModuleGoal };
 
 export function buildNegativeCompileSource(source: string, meta: Test262Meta, category: string): string {
   const strippedSource = source.replace(/\/\*---[\s\S]*?---\*\//, "");
@@ -4489,6 +4483,7 @@ export async function runSyntheticTest262File(
 
   // Wrap the test
   const { source: wrappedSource, bodyLineOffset } = wrapTest(source, meta, target);
+  const moduleGoal = isModuleGoal(category, meta, source);
 
   /** Adjust error line numbers to refer to the original source file.
    *  The wrapped source has a variable preamble and stripped comments,
@@ -4538,7 +4533,7 @@ export async function runSyntheticTest262File(
       // only genuine module-goal tests infer module-strictness; script tests
       // keep mapped `arguments` despite the synthetic `export function test()`
       // wrapper. Matches `test262-shared.ts`.
-      inferModuleStrictArguments: isModuleGoal(category, meta, source),
+      inferModuleStrictArguments: moduleGoal,
       // (#2095) standalone lane for the baseline validator (default host/gc).
       // (#3049 C1 / #3123) Host lane defers top-level init (export
       // `__module_init`, no wasm `(start)` section) so top-level code runs
@@ -4551,7 +4546,7 @@ export async function runSyntheticTest262File(
       // one binary — V8 rejects it ("Duplicate export name '__module_init'"),
       // which is exactly the 6-file `language/module-code/*` regression that
       // parked the stack PR #2835/#2839 in the merge queue.
-      ...(target ? { target } : isModuleGoal(category, meta, source) ? {} : { deferTopLevelInit: true }),
+      ...(target ? { target } : moduleGoal ? {} : { deferTopLevelInit: true }),
       // #1251: align with the sharded runner — both `scripts/compiler-fork-worker.mjs`
       // (the production path that records the committed JSONL) and `tests/test262-vitest.test.ts`
       // FIXTURE multi-compile pass `skipSemanticDiagnostics: true`. Without this flag,

@@ -250,6 +250,8 @@ export interface ClosureInfo {
   returnType: ValType | null;
   /** Parameter types of the closure (excluding the closure struct self param) */
   paramTypes: ValType[];
+  /** True only for source closures with one or more captured lexical bindings. */
+  hasCaptures?: boolean;
 }
 
 /** Metadata for a generator lowered to an in-module WasmGC state machine (#680). */
@@ -1407,6 +1409,32 @@ export interface CodegenContext {
    * under `--target standalone`, so the GC/host path stays byte-identical.
    */
   applyClosureReserved?: boolean;
+  /**
+   * (#3468 C-core) Set when `ensureObjectRuntime` reserved the closure-own-
+   * property side-table helpers (`__is_closure_prop_carrier`, `__closure_bag_lookup`,
+   * `__closure_bag_ensure`, `__closure_prop_get`, `__closure_prop_set`). Their
+   * bodies self-call `__extern_get`/`__extern_set` and need the COMPLETE
+   * captured-closure subtype set, both only available at FINALIZE, so they are
+   * filled by `fillClosurePropHelpers` —
+   * same reserve-then-fill pattern as `applyClosureReserved` (#1719). Only set
+   * under `--target standalone`, so the GC/host path (which uses `env::__extern_*`
+   * imports) stays byte-identical.
+   */
+  closurePropHelpersReserved?: boolean;
+  /**
+   * (#3468 C-core) Type index of the `$ClosurePropEntry` linked-list node
+   * `{ next: (ref null $ClosurePropEntry); key: eqref; bag: externref }` used by
+   * the closure-own-property side table. Registered in `ensureObjectRuntime`'s
+   * type section (standalone only) so `fillClosurePropHelpers` can `struct.new`/
+   * `struct.get` against a stable index.
+   */
+  closurePropEntryTypeIdx?: number;
+  /**
+   * (#3468 C-core) Global index of `$__closure_prop_head`
+   * (`(mut ref null $ClosurePropEntry)`, init `ref.null`) — the head of the
+   * closure-own-property side table's linked list.
+   */
+  closurePropHeadGlobalIdx?: number;
   /**
    * (#1100) Set when the standalone Proxy trap-dispatch runtime reserved its
    * `__proxy_call_{get,set,has}` driver placeholders (in `ensureProxyRuntime`).

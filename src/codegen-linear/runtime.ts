@@ -1,5 +1,10 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import type { FuncTypeDef, GlobalDef, Instr, ValType, WasmModule } from "../ir/types.js";
+import {
+  LINEAR_ARRAY_FORWARDING,
+  LINEAR_STRING_PAYLOAD_PREFIX_BYTES,
+  LINEAR_STRING_PAYLOAD_SIZE_OFFSET,
+} from "../ir/analysis/linear-memory-plan.js";
 import type { LinearContext } from "./context.js";
 import { hashProbeAdvanceInstrs } from "./emit-idioms.js";
 
@@ -489,9 +494,6 @@ export function addUint8ArrayRuntime(mod: WasmModule): void {
   );
 }
 
-/** Tag byte marking a relocated (grown) array header — see addArrayResolveRuntime (#1977). */
-const ARR_FORWARDED_TAG = 0x06;
-
 /**
  * Register the array forwarding resolver (#1977) — idempotent; called by
  * every runtime builder whose functions touch array memory
@@ -499,9 +501,10 @@ const ARR_FORWARDED_TAG = 0x06;
  *
  * When __arr_push outgrows capacity it relocates the array to a fresh
  * allocation and rewrites the OLD header into a forwarding record:
- * tag ARR_FORWARDED_TAG at +0, the new pointer at +4. Aliased locals/fields
+ * the shared forwarding tag at its planned tag offset, and the new pointer at
+ * its planned pointer offset. Aliased locals/fields
  * still hold the old pointer, so every accessor first chases the forwarding
- * chain: while (tag == ARR_FORWARDED_TAG) ptr = *(ptr+4).
+ * chain described by `LINEAR_ARRAY_FORWARDING`.
  */
 function ensureArrayResolveRuntime(mod: WasmModule): void {
   if (mod.functions.some((f) => f.name === "__arr_resolve")) return;
@@ -514,15 +517,15 @@ function ensureArrayResolveRuntime(mod: WasmModule): void {
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            // if tag != ARR_FORWARDED_TAG, break
+            // If this is not a forwarding record, break.
             { op: "local.get", index: 0 },
-            { op: "i32.load8_u", align: 0, offset: 0 },
-            { op: "i32.const", value: ARR_FORWARDED_TAG },
+            { op: "i32.load8_u", align: 0, offset: LINEAR_ARRAY_FORWARDING.tagOffset },
+            { op: "i32.const", value: LINEAR_ARRAY_FORWARDING.tag },
             { op: "i32.ne" },
             { op: "br_if", depth: 1 },
-            // ptr = *(ptr+4)
+            // ptr = forwarding replacement pointer
             { op: "local.get", index: 0 },
-            { op: "i32.load", align: 2, offset: 4 },
+            { op: "i32.load", align: 2, offset: LINEAR_ARRAY_FORWARDING.pointerOffset },
             { op: "local.set", index: 0 },
             { op: "br", depth: 0 },
           ],
@@ -598,7 +601,7 @@ export function addArrayRuntime(mod: WasmModule): void {
   // __arr_grow(ptr, minCap) → newPtr (#1977)
   // Relocate the array to a fresh allocation with cap = max(cap*2, minCap, 4),
   // copy len elements, and rewrite the old header into a forwarding record
-  // (tag ARR_FORWARDED_TAG at +0, newPtr at +4) so stale aliases resolve.
+  // using the shared forwarding contract so stale aliases resolve.
   // Caller must pass an already-resolved ptr.
   addRuntimeFunc(
     mod,
@@ -703,13 +706,13 @@ export function addArrayRuntime(mod: WasmModule): void {
             },
           ],
         },
-        // Forward the old header: tag ARR_FORWARDED_TAG, newPtr at +4
+        // Forward the old header with the shared tag and pointer offsets.
         { op: "local.get", index: 0 },
-        { op: "i32.const", value: ARR_FORWARDED_TAG },
-        { op: "i32.store8", align: 0, offset: 0 },
+        { op: "i32.const", value: LINEAR_ARRAY_FORWARDING.tag },
+        { op: "i32.store8", align: 0, offset: LINEAR_ARRAY_FORWARDING.tagOffset },
         { op: "local.get", index: 0 },
         { op: "local.get", index: newPtrLocal },
-        { op: "i32.store", align: 2, offset: 4 },
+        { op: "i32.store", align: 2, offset: LINEAR_ARRAY_FORWARDING.pointerOffset },
         // Return newPtr
         { op: "local.get", index: newPtrLocal },
       ];
@@ -1126,6 +1129,12 @@ export function addStringRuntime(mod: WasmModule): void {
         { op: "i32.add" },
         { op: "call", funcIdx: mallocIdx },
         { op: "local.set", index: ptrLocal },
+        // Preserve the canonical header meaning: length field + byte capacity.
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: 1 },
+        { op: "i32.const", value: LINEAR_STRING_PAYLOAD_PREFIX_BYTES },
+        { op: "i32.add" },
+        { op: "i32.store", align: 2, offset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET },
         // Store len at ptr+8
         { op: "local.get", index: ptrLocal },
         { op: "local.get", index: 1 }, // len
@@ -1567,6 +1576,14 @@ export function addStringRuntime(mod: WasmModule): void {
         { op: "i32.add" },
         { op: "call", funcIdx: mallocIdx },
         { op: "local.set", index: ptrLocal },
+        // Immutable concat has no spare capacity.
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: lenALocal },
+        { op: "local.get", index: lenBLocal },
+        { op: "i32.add" },
+        { op: "i32.const", value: LINEAR_STRING_PAYLOAD_PREFIX_BYTES },
+        { op: "i32.add" },
+        { op: "i32.store", align: 2, offset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET },
         // Store total len at ptr+8
         { op: "local.get", index: ptrLocal },
         { op: "local.get", index: lenALocal },
@@ -1850,6 +1867,11 @@ export function addStringRuntime(mod: WasmModule): void {
         { op: "i32.add" },
         { op: "call", funcIdx: mallocIdx },
         { op: "local.set", index: ptrLocal },
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: newLenLocal },
+        { op: "i32.const", value: LINEAR_STRING_PAYLOAD_PREFIX_BYTES },
+        { op: "i32.add" },
+        { op: "i32.store", align: 2, offset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET },
         // store length at ptr+8
         { op: "local.get", index: ptrLocal },
         { op: "local.get", index: newLenLocal },
@@ -2114,6 +2136,10 @@ export function addStringRuntime(mod: WasmModule): void {
 
 /** Reserved `(string pointer, UTF-16 index) -> code unit` helper for #2956 L3. */
 export const LINEAR_IR_STRING_CHAR_CODE_AT_FN = "__linear_ir_str_char_code_at";
+/** Reserved ASCII-proven `(string pointer, UTF-16 index) -> string` helper. */
+export const LINEAR_IR_STRING_CHAR_AT_FN = "__linear_ir_str_char_at";
+/** Reserved owned ASCII append over the canonical linear string layout. */
+export const LINEAR_IR_STRING_APPEND_ASCII_FN = "__linear_ir_str_append_ascii";
 
 /**
  * Add the string helper needed only by the opt-in linear-IR overlay.
@@ -2125,6 +2151,194 @@ export const LINEAR_IR_STRING_CHAR_CODE_AT_FN = "__linear_ir_str_char_code_at";
  * indices return NaN as required by ECMA-262 §22.1.3.3.
  */
 export function addLinearIrStringRuntime(mod: WasmModule): void {
+  if (!mod.functions.some((func) => func.name === LINEAR_IR_STRING_APPEND_ASCII_FN)) {
+    const mallocIdx = findFuncIndex(mod, "__malloc");
+    addRuntimeFunc(
+      mod,
+      LINEAR_IR_STRING_APPEND_ASCII_FN,
+      [{ kind: "i32" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      [],
+      (firstLocalIdx) => {
+        const leftLength = firstLocalIdx;
+        const rightLength = firstLocalIdx + 1;
+        const totalLength = firstLocalIdx + 2;
+        const capacity = firstLocalIdx + 3;
+        const result = firstLocalIdx + 4;
+        const nextCapacity = firstLocalIdx + 5;
+        const cursor = firstLocalIdx + 6;
+        return [
+          { op: "local.get", index: 0 },
+          { op: "i32.load", align: 2, offset: 8 },
+          { op: "local.set", index: leftLength },
+          { op: "local.get", index: 1 },
+          { op: "i32.load", align: 2, offset: 8 },
+          { op: "local.set", index: rightLength },
+          { op: "local.get", index: leftLength },
+          { op: "local.get", index: rightLength },
+          { op: "i32.add" },
+          { op: "local.set", index: totalLength },
+          { op: "local.get", index: 0 },
+          { op: "i32.load", align: 2, offset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET },
+          { op: "i32.const", value: LINEAR_STRING_PAYLOAD_PREFIX_BYTES },
+          { op: "i32.sub" },
+          { op: "local.set", index: capacity },
+          { op: "local.get", index: 0 },
+          { op: "local.set", index: result },
+          // Grow geometrically only when the proven-owned carrier is full.
+          { op: "local.get", index: totalLength },
+          { op: "local.get", index: capacity },
+          { op: "i32.gt_u" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: capacity },
+              { op: "i32.const", value: 1 },
+              { op: "i32.shl" },
+              { op: "local.set", index: nextCapacity },
+              { op: "local.get", index: nextCapacity },
+              { op: "i32.const", value: 16 },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "i32.const", value: 16 },
+                  { op: "local.set", index: nextCapacity },
+                ],
+              },
+              { op: "local.get", index: nextCapacity },
+              { op: "local.get", index: totalLength },
+              { op: "i32.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  { op: "local.get", index: totalLength },
+                  { op: "local.set", index: nextCapacity },
+                ],
+              },
+              { op: "i32.const", value: 12 },
+              { op: "local.get", index: nextCapacity },
+              { op: "i32.add" },
+              { op: "call", funcIdx: mallocIdx },
+              { op: "local.set", index: result },
+              { op: "local.get", index: result },
+              { op: "local.get", index: nextCapacity },
+              { op: "i32.const", value: LINEAR_STRING_PAYLOAD_PREFIX_BYTES },
+              { op: "i32.add" },
+              { op: "i32.store", align: 2, offset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET },
+              // Copy the prior contents once per geometric growth.
+              { op: "i32.const", value: 0 },
+              { op: "local.set", index: cursor },
+              {
+                op: "block",
+                blockType: { kind: "empty" },
+                body: [
+                  {
+                    op: "loop",
+                    blockType: { kind: "empty" },
+                    body: [
+                      { op: "local.get", index: cursor },
+                      { op: "local.get", index: leftLength },
+                      { op: "i32.ge_u" },
+                      { op: "br_if", depth: 1 },
+                      { op: "local.get", index: result },
+                      { op: "local.get", index: cursor },
+                      { op: "i32.add" },
+                      { op: "local.get", index: 0 },
+                      { op: "local.get", index: cursor },
+                      { op: "i32.add" },
+                      { op: "i32.load8_u", align: 0, offset: 12 },
+                      { op: "i32.store8", align: 0, offset: 12 },
+                      { op: "local.get", index: cursor },
+                      { op: "i32.const", value: 1 },
+                      { op: "i32.add" },
+                      { op: "local.set", index: cursor },
+                      { op: "br", depth: 0 },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          // Append RHS to the selected carrier.
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: cursor },
+          {
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: cursor },
+                  { op: "local.get", index: rightLength },
+                  { op: "i32.ge_u" },
+                  { op: "br_if", depth: 1 },
+                  { op: "local.get", index: result },
+                  { op: "local.get", index: leftLength },
+                  { op: "i32.add" },
+                  { op: "local.get", index: cursor },
+                  { op: "i32.add" },
+                  { op: "local.get", index: 1 },
+                  { op: "local.get", index: cursor },
+                  { op: "i32.add" },
+                  { op: "i32.load8_u", align: 0, offset: 12 },
+                  { op: "i32.store8", align: 0, offset: 12 },
+                  { op: "local.get", index: cursor },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: cursor },
+                  { op: "br", depth: 0 },
+                ],
+              },
+            ],
+          },
+          { op: "local.get", index: result },
+          { op: "local.get", index: totalLength },
+          { op: "i32.store", align: 2, offset: 8 },
+          { op: "local.get", index: result },
+        ];
+      },
+      7,
+    );
+  }
+
+  if (!mod.functions.some((func) => func.name === LINEAR_IR_STRING_CHAR_AT_FN)) {
+    const strSliceIdx = findFuncIndex(mod, "__str_slice");
+    addRuntimeFunc(mod, LINEAR_IR_STRING_CHAR_AT_FN, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], [], () => [
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 0 },
+      { op: "i32.load", align: 2, offset: 8 },
+      { op: "i32.ge_u" },
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "call", funcIdx: strSliceIdx },
+        ],
+        else: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 1 },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "call", funcIdx: strSliceIdx },
+        ],
+      },
+    ]);
+  }
+
   if (mod.functions.some((func) => func.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN)) return;
 
   addRuntimeFunc(

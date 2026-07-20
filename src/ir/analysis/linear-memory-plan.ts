@@ -36,12 +36,29 @@ export const LINEAR_RECORD_HEADER_BYTES = 8;
 export const LINEAR_RECORD_FIELD_SLOT_BYTES = 8;
 export const LINEAR_RECORD_TAG_OFFSET = 0;
 export const LINEAR_RECORD_PAYLOAD_SIZE_OFFSET = 4;
+/**
+ * Shared forwarding-record representation for relocated linear arrays.
+ *
+ * A grown array rewrites its old record header to this tag plus the pointer
+ * to the replacement record. Keep this contract beside the canonical linear
+ * layout offsets so every artifact adapter and the direct linear runtime read
+ * and write the same representation.
+ */
+export const LINEAR_ARRAY_FORWARDING = Object.freeze({
+  tag: 0x06,
+  tagOffset: LINEAR_RECORD_TAG_OFFSET,
+  pointerOffset: LINEAR_RECORD_PAYLOAD_SIZE_OFFSET,
+  pointerBytes: LINEAR_POINTER_BYTES,
+});
 export const LINEAR_VECTOR_LENGTH_OFFSET = 8;
 export const LINEAR_VECTOR_CAPACITY_OFFSET = 12;
 export const LINEAR_VECTOR_ELEMENTS_OFFSET = 16;
 export const LINEAR_VECTOR_MINIMUM_CAPACITY = 16;
 export const LINEAR_STRING_LENGTH_OFFSET = 8;
 export const LINEAR_STRING_ELEMENTS_OFFSET = 12;
+export const LINEAR_STRING_PAYLOAD_SIZE_OFFSET = LINEAR_RECORD_PAYLOAD_SIZE_OFFSET;
+/** Bytes between the record header and the first string element (the length field). */
+export const LINEAR_STRING_PAYLOAD_PREFIX_BYTES = LINEAR_STRING_ELEMENTS_OFFSET - LINEAR_RECORD_HEADER_BYTES;
 
 /** Storage vocabulary independent of a machine instruction set. */
 export type LinearStorageKind = "i8" | "i16" | "i32" | "i64" | "f32" | "f64" | "bytes16" | "pointer";
@@ -108,6 +125,8 @@ export interface LinearVectorLayoutPlan extends LinearLayoutBase {
 
 export interface LinearStringLayoutPlan extends LinearLayoutBase {
   readonly kind: "string";
+  readonly payloadSizeOffset: number;
+  readonly payloadPrefixBytes: number;
   readonly lengthOffset: number;
   readonly elementsOffset: number;
   readonly elementStorage: "i8" | "i16";
@@ -584,6 +603,8 @@ export function planLinearStringLayout(): LinearStringLayoutPlan {
     alignment: LINEAR_RECORD_ALIGNMENT,
     size: { kind: "elements", baseBytes: LINEAR_STRING_ELEMENTS_OFFSET, strideBytes: 1, minimumElements: 0 },
     pointerMap: { kind: "none" },
+    payloadSizeOffset: LINEAR_STRING_PAYLOAD_SIZE_OFFSET,
+    payloadPrefixBytes: LINEAR_STRING_PAYLOAD_PREFIX_BYTES,
     lengthOffset: LINEAR_STRING_LENGTH_OFFSET,
     elementsOffset: LINEAR_STRING_ELEMENTS_OFFSET,
     elementStorage: "i8",

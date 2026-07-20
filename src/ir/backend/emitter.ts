@@ -51,12 +51,23 @@ import type {
   IrVecLowering,
   LinearVecLowering,
 } from "./handles.js";
+import type { StringBackendEmitter } from "./string-contract.js";
 
 // #1714: the vec primitives accept either backend's vec-layout handle. WasmGc
 // uses IrVecLowering (typeIdx-based); Linear uses LinearVecLowering
 // (offset-based). Each emitter narrows to its own shape. This is the
 // "widen to a handle union" option from the #1713 spec section 7.
 type VecLayout = IrVecLowering | LinearVecLowering;
+
+/**
+ * Backend-neutral scalar operations used while expanding composite JS
+ * semantics. These are deliberately narrower than `Instr`: lower.ts may use
+ * them for a multi-step lowering without leaking raw Wasm into a non-Wasm
+ * sink, while each backend still chooses its native typed representation.
+ */
+export type BackendScalarConstType = "i32" | "f64";
+export type BackendNumericConversionOp = "i32.trunc_sat_f64_u" | "f64.convert_i32_s" | "f64.convert_i32_u";
+export type BackendI32BitwiseOp = "i32.and" | "i32.or" | "i32.xor" | "i32.shl" | "i32.shr_s" | "i32.shr_u";
 
 /**
  * #1584: the trait is generic over its SINK type `S`. `WasmGcEmitter` /
@@ -76,7 +87,7 @@ type VecLayout = IrVecLowering | LinearVecLowering;
  *    not-yet-migrated boundary, surfaced loudly). As each family migrates
  *    (§2a), its sites move from `pushRaw` to a typed primitive.
  */
-export interface BackendEmitter<S = Instr[]> {
+export interface BackendEmitter<S = Instr[]> extends StringBackendEmitter<S> {
   /** Backend identity used by the IR legality verifier at the emit boundary. */
   readonly backend: IrBackendKind;
 
@@ -126,6 +137,12 @@ export interface BackendEmitter<S = Instr[]> {
   emitBinary(op: IrBinop, out: S): void;
   /** Pass-through unary op. */
   emitUnary(op: IrUnop, out: S): void;
+  /** Scalar literal used by a backend-neutral composite lowering. */
+  emitScalarConst(type: BackendScalarConstType, value: number, out: S): void;
+  /** Numeric conversion used by a backend-neutral composite lowering. */
+  emitNumericConversion(op: BackendNumericConversionOp, out: S): void;
+  /** Native 32-bit bitwise operation; operands are already in the i32 domain. */
+  emitI32Bitwise(op: BackendI32BitwiseOp, out: S): void;
   emitLocalGet(index: number, out: S): void;
   emitLocalSet(index: number, out: S): void;
   emitLocalTee(index: number, out: S): void;

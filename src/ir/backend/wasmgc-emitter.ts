@@ -13,10 +13,16 @@
 // arithmetic / control flow) and the vec group. The remaining primitives
 // are added here as their groups get wired.
 
-import { emitConstInstr } from "../lower.js";
-import { asVal, type IrBinop, type IrInstr, type IrType, type IrUnop } from "../nodes.js";
+import { emitConstInstr, type IrLowerResolver } from "../lower.js";
+import { asVal, type AllocSiteId, type IrBinop, type IrInstr, type IrType, type IrUnop } from "../nodes.js";
+import type { IrStringConcatMode, IrStringEncoding } from "../string-runtime.js";
 import type { BlockType, Instr, ValType } from "../types.js";
-import type { BackendEmitter } from "./emitter.js";
+import type {
+  BackendEmitter,
+  BackendI32BitwiseOp,
+  BackendNumericConversionOp,
+  BackendScalarConstType,
+} from "./emitter.js";
 import type {
   IrClassLowering,
   IrClosureLowering,
@@ -29,6 +35,8 @@ import type {
 export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   readonly backend = "wasmgc" as const;
 
+  constructor(private readonly stringRuntime?: IrLowerResolver) {}
+
   // #1584: sink = Instr[]. The factory returns a plain array and the raw escape
   // hatch is a direct `push` — so the emitted `Instr` stream is byte-identical
   // to the pre-#1584 inline emission (the WasmGC path is unchanged).
@@ -37,6 +45,43 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   }
   pushRaw(out: Instr[], instr: Instr): void {
     out.push(instr);
+  }
+
+  emitStringConst(value: string, alloc: AllocSiteId | undefined, out: Instr[]): void {
+    const ops = this.stringRuntime?.emitStringConst?.(value, alloc);
+    if (!ops) throw new Error("WasmGcEmitter: string.const runtime is unavailable");
+    out.push(...ops);
+  }
+
+  emitStringConcat(alloc: AllocSiteId | undefined, mode: IrStringConcatMode, out: Instr[]): void {
+    const ops = this.stringRuntime?.emitStringConcat?.(alloc, mode);
+    if (!ops) throw new Error("WasmGcEmitter: string.concat runtime is unavailable");
+    out.push(...ops);
+  }
+
+  emitStringEquals(negate: boolean, out: Instr[]): void {
+    const ops = this.stringRuntime?.emitStringEquals?.();
+    if (!ops) throw new Error("WasmGcEmitter: string.eq runtime is unavailable");
+    out.push(...ops);
+    if (negate) out.push({ op: "i32.eqz" });
+  }
+
+  emitStringLength(_inputEncoding: IrStringEncoding | undefined, out: Instr[]): void {
+    const ops = this.stringRuntime?.emitStringLen?.(_inputEncoding);
+    if (!ops) throw new Error("WasmGcEmitter: string.len runtime is unavailable");
+    out.push(...ops, { op: "f64.convert_i32_s" });
+  }
+
+  emitStringCharAt(_alloc: AllocSiteId | undefined, _inputEncoding: IrStringEncoding, out: Instr[]): void {
+    const ops = this.stringRuntime?.emitStringCharAt?.(_alloc, _inputEncoding);
+    if (!ops) throw new Error("WasmGcEmitter: string.char_at runtime is unavailable");
+    out.push(...ops);
+  }
+
+  emitStringCharCodeAt(_inputEncoding: IrStringEncoding, out: Instr[]): void {
+    const ops = this.stringRuntime?.emitStringCharCodeAt?.(_inputEncoding);
+    if (!ops) throw new Error("WasmGcEmitter: string.char_code_at runtime is unavailable");
+    out.push(...ops);
   }
 
   // ---- vec (array) ----------------------------------------------------
@@ -107,6 +152,18 @@ export class WasmGcEmitter implements BackendEmitter<Instr[]> {
   }
 
   emitUnary(op: IrUnop, out: Instr[]): void {
+    out.push({ op });
+  }
+
+  emitScalarConst(type: BackendScalarConstType, value: number, out: Instr[]): void {
+    out.push(type === "f64" ? { op: "f64.const", value } : { op: "i32.const", value });
+  }
+
+  emitNumericConversion(op: BackendNumericConversionOp, out: Instr[]): void {
+    out.push({ op });
+  }
+
+  emitI32Bitwise(op: BackendI32BitwiseOp, out: Instr[]): void {
     out.push({ op });
   }
 

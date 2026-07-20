@@ -38,6 +38,7 @@ import {
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { Instr, ValType } from "./types.js";
 import { JsTag, jsTagUnboxKind } from "./js-tag.js";
+import type { IrStringConcatMode, IrStringEncoding } from "./string-runtime.js";
 
 interface OpenBlock {
   readonly id: IrBlockId;
@@ -293,12 +294,17 @@ export class IrFunctionBuilder {
     return result;
   }
 
-  emitStringConcat(lhs: IrValueId, rhs: IrValueId): IrValueId {
+  emitStringConcat(
+    lhs: IrValueId,
+    rhs: IrValueId,
+    encodingEvidence?: IrStringEncoding,
+    concatMode: IrStringConcatMode = "immutable",
+  ): IrValueId {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "string" };
     this.valueTypes.set(result, resultType);
     const alloc = this.allocId("string", resultType);
-    this.pushInstr({ kind: "string.concat", lhs, rhs, result, resultType, alloc });
+    this.pushInstr({ kind: "string.concat", lhs, rhs, result, resultType, alloc, encodingEvidence, concatMode });
     return result;
   }
 
@@ -310,11 +316,42 @@ export class IrFunctionBuilder {
     return result;
   }
 
-  emitStringLen(value: IrValueId): IrValueId {
+  emitStringLen(value: IrValueId, inputEncoding?: IrStringEncoding): IrValueId {
     const result = this.allocator.fresh();
     const resultType: IrType = { kind: "val", val: { kind: "f64" } };
     this.valueTypes.set(result, resultType);
-    this.pushInstr({ kind: "string.len", value, result, resultType });
+    this.pushInstr({ kind: "string.len", value, result, resultType, inputEncoding });
+    return result;
+  }
+
+  emitStringCharAt(
+    value: IrValueId,
+    index: IrValueId,
+    inputEncoding: IrStringEncoding,
+    encodingEvidence: IrStringEncoding,
+  ): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "string" };
+    this.valueTypes.set(result, resultType);
+    const alloc = this.allocId("string", resultType);
+    this.pushInstr({
+      kind: "string.char_at",
+      value,
+      index,
+      inputEncoding,
+      encodingEvidence,
+      result,
+      resultType,
+      alloc,
+    });
+    return result;
+  }
+
+  emitStringCharCodeAt(value: IrValueId, index: IrValueId, inputEncoding: IrStringEncoding): IrValueId {
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "val", val: { kind: "f64" } };
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "string.char_code_at", value, index, inputEncoding, result, resultType });
     return result;
   }
 

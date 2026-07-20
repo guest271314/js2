@@ -41,7 +41,9 @@ import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
 import { LINEAR_GENERIC_OBJECT_TAG } from "../../codegen-linear/layout.js";
 import {
+  LINEAR_IR_STRING_CHAR_AT_FN,
   LINEAR_IR_STRING_CHAR_CODE_AT_FN,
+  LINEAR_IR_STRING_APPEND_ASCII_FN,
   LINEAR_IR_VEC_INIT_F64_FN,
   linearStringLiteralInstrs,
 } from "../../codegen-linear/runtime.js";
@@ -62,6 +64,8 @@ import {
   type LinearRuntimeOperation,
   type LinearStorageKind,
 } from "../analysis/linear-memory-plan.js";
+import { bindLinearStringRuntime } from "../analysis/linear-string-runtime.js";
+import type { IrStringConcatMode, IrStringEncoding } from "../string-runtime.js";
 import {
   asVal,
   irVal,
@@ -74,7 +78,9 @@ import {
   type IrType,
   type IrTypeRef,
 } from "../nodes.js";
-import { planIrCompilation } from "../select.js";
+import { buildTypeMap, type LatticeType } from "../propagate.js";
+import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, planIrCompilation } from "../select.js";
+import { buildRecursiveTypeEvidence } from "../type-evidence.js";
 import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
 import type { TypeConverter } from "./contract.js";
@@ -173,7 +179,19 @@ export function compileLinearIrFunctions(
   // L4 folds the selector's per-function direct-path list into the same
   // ratchet as post-claim build/verify/legality demotions. Prefix the stable
   // selector reason so pre-claim and post-claim buckets cannot collide.
-  const selection = planIrCompilation(sourceFile, { experimentalIR: true, trackFallbacks: true });
+  // The general propagation pass deliberately starts optimistically so it
+  // can discover recursive arithmetic. For linear, expose only the recursive
+  // SCC entries that the checker-backed certifier has independently proved;
+  // this avoids widening unrelated unannotated selection while giving the
+  // selector and from-ast one shared, concrete recursive ABI.
+  const propagated = buildTypeMap(sourceFile, ctx.checker);
+  const recursiveTypeEvidence = buildRecursiveTypeEvidence(sourceFile, ctx.checker, propagated);
+  const evidenceChecker = overlayCertifiedCheckerTypes(ctx.checker, recursiveTypeEvidence.checkerTypeOverrides);
+  const selection = planIrCompilation(
+    sourceFile,
+    { experimentalIR: true, trackFallbacks: true, recursiveTypeEvidence },
+    recursiveTypeEvidence.typeMap,
+  );
   for (const fallback of selection.fallbacks ?? []) {
     rejected.push({
       func: fallback.name,
@@ -201,27 +219,36 @@ export function compileLinearIrFunctions(
   // the enriched map. Bounded by the claim count (each round must compile
   // at least one new function to continue).
   const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
+  const ownTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
   const built = new Map<string, IrFunction>();
   const lastFailure = new Map<string, LinearIrRejection>();
   let pending = claimedDecls;
 
-  // Pre-seed `calleeTypes` from ANNOTATIONS with from-ast's own primitive
-  // mapping (`typeNodeToIr`) so SELF- and mutually-recursive claims (fib!)
-  // resolve their own signature during the first build. Only fully-annotated
-  // primitive signatures seed; anything else is left to the fixpoint below
-  // (a wrong/absent seed just demotes, never mis-compiles — from-ast checks
-  // the seed against annotations via `resolveIrType`).
+  // Pre-seed `calleeTypes` from effective TS/JSDoc annotations and, only for
+  // certified recursive SCC members, the evidence TypeMap. The same entries
+  // are passed as from-ast overrides so declaration lowering and recursive
+  // call lowering cannot derive different signatures.
   for (const { name, decl } of claimedDecls) {
     try {
-      const params = decl.parameters.map((p) => typeNodeToIr(p.type, `pre-seed param of ${name}`));
+      const evidence = recursiveTypeEvidence.typeMap.get(name);
+      const params = decl.parameters.map((param, index) => {
+        const annotated = effectiveIrParamTypeNode(param);
+        if (annotated) return typeNodeToIr(annotated, `pre-seed param of ${name}`);
+        return latticeEvidenceToIr(evidence?.params[index], `pre-seed param of ${name}`);
+      });
+      const returnNode = effectiveIrReturnTypeNode(decl);
       const returnType =
-        decl.type === undefined || decl.type.kind === ts.SyntaxKind.VoidKeyword
+        returnNode?.kind === ts.SyntaxKind.VoidKeyword
           ? null
-          : typeNodeToIr(decl.type, `pre-seed return of ${name}`);
-      calleeTypes.set(name, { params, returnType });
+          : returnNode
+            ? typeNodeToIr(returnNode, `pre-seed return of ${name}`)
+            : latticeEvidenceToIr(evidence?.returnType, `pre-seed return of ${name}`);
+      const signature = { params, returnType };
+      ownTypes.set(name, signature);
+      calleeTypes.set(name, signature);
     } catch {
-      // Unannotated / non-primitive signature — no seed; the fixpoint may
-      // still supply it from a successful build.
+      // Non-primitive or unresolved signatures stay on the existing
+      // build-fixpoint/demotion path.
     }
   }
 
@@ -236,10 +263,12 @@ export function compileLinearIrFunctions(
         // shapes; every other representation-dependent family still throws
         // and demotes.
         const { main, lifted } = lowerFunctionAstToIr(decl, {
-          checker: ctx.checker,
+          checker: evidenceChecker,
           exported,
           funcName: name,
           calleeTypes,
+          paramTypeOverrides: ownTypes.get(name)?.params,
+          returnTypeOverride: ownTypes.get(name)?.returnType,
           resolver,
           allocRegistry,
         });
@@ -316,6 +345,7 @@ export function compileLinearIrFunctions(
     try {
       const emitter = new LinearEmitter({
         resolveRuntimeOperation: (operation) => resolveLinearRuntimeOperation(ctx, operation),
+        stringRuntime: resolver,
       });
       const body = lowerIrFunctionBody(main, resolver, emitter, linearValueTypeConverter(resolver, main.name));
       const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
@@ -359,6 +389,29 @@ export function compileLinearIrFunctions(
   }
 
   return result;
+}
+
+function latticeEvidenceToIr(type: LatticeType | undefined, context: string): IrType {
+  if (type?.kind === "f64") return irVal({ kind: "f64" });
+  if (type?.kind === "bool") return irVal({ kind: "i32" });
+  if (type?.kind === "string") return { kind: "string" };
+  throw new Error(`linear-ir: ${context} has no certified scalar type`);
+}
+
+function overlayCertifiedCheckerTypes(
+  checker: ts.TypeChecker,
+  overrides: ReadonlyMap<ts.Node, ts.Type>,
+): ts.TypeChecker {
+  if (overrides.size === 0) return checker;
+  return new Proxy(checker, {
+    get(target, property) {
+      if (property === "getTypeAtLocation") {
+        return (node: ts.Node): ts.Type => overrides.get(node) ?? target.getTypeAtLocation(node);
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 /**
@@ -493,7 +546,12 @@ function makeLinearIrResolver(
       // #2956 L3: from-ast keeps string comparison/method choice abstract.
       // Resolve those names onto the canonical linear UTF-8 runtime here.
       if (ref.name === IR_STRING_COMPARE_FN) return resolveRuntimeFunc("__str_cmp");
-      if (ref.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN || ref.name === "__str_slice") {
+      if (
+        ref.name === LINEAR_IR_STRING_CHAR_AT_FN ||
+        ref.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN ||
+        ref.name === LINEAR_IR_STRING_APPEND_ASCII_FN ||
+        ref.name === "__str_slice"
+      ) {
         return resolveRuntimeFunc(ref.name);
       }
       // (#2956 L2) Vec MUTATION rides from-ast's element-store helper call
@@ -579,10 +637,11 @@ function makeLinearIrResolver(
       if (!plan || !allocation?.dataSegmentId) {
         throw new Error("linear-ir: string literal is absent from the completed memory plan");
       }
+      bindLinearStringRuntime(plan, { intrinsic: "constant", alloc });
       const segment = plan.requireDataSegment(allocation.dataSegmentId);
       return linearStringLiteralInstrs(ctx, value, resolveLinearRuntimeOperation(ctx, operation), segment.bytes);
     },
-    emitStringConcat(alloc?: AllocSiteId): readonly Instr[] {
+    emitStringConcat(alloc?: AllocSiteId, mode: IrStringConcatMode = "immutable"): readonly Instr[] {
       const layout = memoryPlan?.layouts.find((candidate) => candidate.kind === "string") ?? planLinearStringLayout();
       if (layout.kind !== "string") throw new Error("linear-ir: invalid string layout");
       const allocation = allocationFor(layout.id, alloc);
@@ -592,13 +651,30 @@ function makeLinearIrResolver(
         (candidate) => candidate.family === "string" && candidate.operation === "concatenate",
         "string concatenation",
       );
+      if (!memoryPlan) throw new Error("linear-ir: string concatenation has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "concat", alloc });
+      if (mode === "owned-append") {
+        return [{ op: "call", funcIdx: resolveRuntimeFunc(LINEAR_IR_STRING_APPEND_ASCII_FN) }];
+      }
       return [{ op: "call", funcIdx: resolveLinearRuntimeOperation(ctx, operation) }];
     },
     emitStringEquals(): readonly Instr[] {
       return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_eq") }];
     },
-    emitStringLen(): readonly Instr[] {
+    emitStringLen(inputEncoding?: IrStringEncoding): readonly Instr[] {
+      if (!memoryPlan) throw new Error("linear-ir: string length has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "length", inputEncoding });
       return [{ op: "call", funcIdx: resolveRuntimeFunc("__str_length_utf16") }];
+    },
+    emitStringCharAt(alloc?: AllocSiteId, inputEncoding?: IrStringEncoding): readonly Instr[] {
+      if (!memoryPlan) throw new Error("linear-ir: string charAt has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "char-at", alloc, inputEncoding });
+      return [{ op: "call", funcIdx: resolveRuntimeFunc(LINEAR_IR_STRING_CHAR_AT_FN) }];
+    },
+    emitStringCharCodeAt(inputEncoding?: IrStringEncoding): readonly Instr[] {
+      if (!memoryPlan) throw new Error("linear-ir: string charCodeAt has no completed memory plan");
+      bindLinearStringRuntime(memoryPlan, { intrinsic: "char-code-at", inputEncoding });
+      return [{ op: "call", funcIdx: resolveRuntimeFunc(LINEAR_IR_STRING_CHAR_CODE_AT_FN) }];
     },
     resolveObject(shape: IrObjectShape, alloc?: AllocSiteId): LinearObjectLowering | null {
       const layout = memoryPlan?.layoutForObjectShape(shape);

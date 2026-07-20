@@ -2,8 +2,10 @@
 id: 3468
 title: "Standalone: method calls on function objects silently swallow assertions (assert.sameValue/throws never fire) — root cause is function-object own-property gap, NOT a catch_all swallow"
 status: blocked
+spec: complete
+assignee: ttraenkler/sendev-3468-closure-props
 created: 2026-07-19
-blocked_reason: "root-caused; needs architect spec (approach A/B/C) + stakeholder floor-rebaseline decision before implementation"
+blocked_reason: "The captured-closure dynamic-runtime substrate is independently mergeable; shared noncapturing wrappers and top-level test262 harness routing remain blocked after an exact-baseline merge-group measurement found 3,608 stable pass→fail transitions (3,540 assertion-time module-init throws). Fix the exposed semantics; do not rebaseline."
 priority: high
 feasibility: hard
 task_type: bug
@@ -12,6 +14,14 @@ goal: standalone
 sprint: current
 horizon: l
 related: [2860, 3417]
+# (#3102) C-core keeps the bulk of its logic in the NEW leaf module
+# src/codegen/closure-props.ts; these three touches are the unavoidable minimum:
+# the three dead arms live in object-runtime.ts, the reserve/fill ctx flags in
+# context/types.ts, and the finalize call in index.ts.
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)
@@ -182,3 +192,221 @@ throw); offer as an optional standalone-correctness win, separate PR.
 In the worktree `.tmp/`: `repro.mjs`, `probe2.mjs`-`probe8.mjs`, `caseA.wat`,
 `C_tail.wat`. All use `compile(src, { target: "standalone", ... })` and
 `WebAssembly.instantiate`.
+
+## Implementation Plan
+
+> Recommendation: **Approach C** (runtime closure-identity side property table),
+> phased **C-core → C-complete**. NOT A, NOT B. Verified against `origin/main`.
+
+### Recommendation & why (C over A/B)
+
+The three terminal dispatch helpers **already receive the closure receiver** as
+an externref and simply bail in their "not a `$Object`" arm:
+
+| Op | route | terminal helper (object-runtime.ts) | dead arm today |
+| --- | --- | --- | --- |
+| `f.p = v` | `__set_member_p` | `__extern_set` | non-`$Object` arm → `return` (no-op) |
+| `f.p` | `__get_member_p` | `__extern_get` | miss arm → undefined |
+| `f.m()` | `__call_m_m_0` | `__extern_method_call` | else → `ref.null.extern` |
+
+**C fills those three currently-dead arms for concrete capturing-closure
+subtypes.** The `$Object` fast-path is untouched. Shared noncapturing wrapper
+structs — including the test262 `assert` harness receiver — deliberately remain
+outside this first rollout; the exact merge-group measurement below explains
+why. The slice fixes real programs with aliased capturing receivers and reuses
+the existing `$Object` prop machinery for per-closure own props.
+
+### Phasing
+- **C-core (this PR):** wire the 3 helpers + side table for capturing closures.
+- **C-core rollout (blocked):** expand to shared noncapturing wrappers only after
+  the assertion failures exposed by the merge-group measurement are fixed.
+- **C-complete (follow-on):** route reflection (`in` / `delete` / ownKeys /
+  `getOwnPropertyDescriptor`) through the same prop-bag.
+- **A (optional):** compile-time fast-path for statically-named accesses.
+
+### Changes — C-core (as implemented)
+
+**1. Runtime structure** — struct
+`$ClosurePropEntry { next: (mut ref null $ClosurePropEntry); key: eqref; bag: externref }`
++ module global `$__closure_prop_head : (mut ref null $ClosurePropEntry)` init
+`ref.null`. Registered in `ensureObjectRuntime`'s type section, gated on
+`ctx.standalone` (host/gc uses `env::__extern_*` imports → never touches these →
+byte-identical). Linked list: prepend O(1), lookup = walk with `ref.eq`.
+
+**2. Reserved-then-filled helpers** (mirror `reserveApplyClosure`/
+`fillApplyClosure` — reserve funcIdx w/ `unreachable` stub at object-runtime-emit
+time so the `__extern_*` bodies bake a stable `call <idx>`; fill at FINALIZE once
+the captured-closure subtype set is complete; the late-import shifter keeps
+`funcMap` + baked calls in sync). Guarded on the
+`ctx.closurePropHelpersReserved` flag so a fill never runs without a reserve.
+- `__is_closure_prop_carrier(externref)->i32` — `ref.test` chain over concrete
+  closure structs whose source closure captured one or more lexical bindings.
+- `__closure_bag_lookup(externref recv)->externref` — walk head; `ref.eq(key,
+  recv-as-eqref)` → `bag`; miss → `ref.null.extern` (read; never creates).
+- `__closure_bag_ensure(externref recv)->externref` — as lookup; on miss
+  `bag=__new_plain_object()`, prepend entry, `global.set head`, return bag.
+- `__closure_prop_get(obj,key)->externref` / `__closure_prop_set(obj,key,val)->()`
+  — thin wrappers that self-call `__extern_get`/`__extern_set` on the bag.
+
+> **Deviation from the sketch (WHY):** the spec sketched "3 helpers, inline the
+> arm bodies." But the `set`/`get` arms need to self-call `__extern_set`/
+> `__extern_get` on the bag, and a func's own funcIdx is **not** in `funcMap`
+> while its body is being built (`registerNative` mints at registration time,
+> after the body array is constructed). Routing the self-call through two extra
+> reserved-and-filled wrappers (`__closure_prop_get`/`_set`, filled at FINALIZE
+> when both `__extern_get`/`_set` funcIdxs ARE in `funcMap`) is the clean fix and
+> avoids touching the registration of the two hottest object-runtime funcs.
+> `__extern_method_call`'s else-arm is inlined directly (its deps — `extern_get`,
+> `apply_closure` (reserved), `__nullish_to_null` — are all live at build time).
+
+Receiver→eqref for `ref.eq`: `any.convert_extern` → `ref.cast EQ_HEAP_TYPE(-19)`.
+Closures are eq-structs and `__is_closure_prop_carrier` guards every call, so
+the cast is always safe.
+
+**3–5. The three arms** now route their non-`$Object`/miss/else branch through
+the helpers (`__closure_prop_set` / `__closure_prop_get` / inline closure mirror
+guarded by `__is_closure_prop_carrier`). `.name`/`.length` `bfnGetMetaIdx`
+meta-arm stays FIRST in `__extern_get`, so builtin metadata still answers before
+the side-table fallback. `.prototype`/`.constructor`/`.__proto__` are
+special-cased upstream and never reach these helpers.
+
+**6. Finalize wiring** — `fillClosurePropHelpers(ctx)` next to `fillApplyClosure`
+in `index.ts`.
+
+### Floor interaction — exact measurement
+The original all-closure rollout flipped vacuous standalone passes to truthful
+failures and breached the standalone floor. The PR-shepherd measurement below
+found 3,608 stable regressions, so no rebaseline or verdict exception is
+permitted. This PR retains only the captured-closure boundary; #3468 stays
+blocked for the shared-wrapper/harness rollout until the exposed semantics are
+fixed.
+
+### Test plan (vitest, target "standalone")
+- Own-prop round-trip on a capturing arrow: `(memo as any).cache=5; ===5`.
+- Method call + side effect: `(fn as any).m=()=>777; (fn as any).m()===777`.
+- Aliasing/identity: `const g=fn; (g as any).x=5; (fn as any).x===5`.
+- Distinct instances don't cross-talk; builtin `.name`/`.length` not shadowed.
+- A shared noncapturing wrapper's custom property remains outside the rollout.
+
+## C-core IMPLEMENTATION FINDING (2026-07-19) — runtime done, ROUTING GAP blocks the harness
+
+C-core was implemented (`src/codegen/closure-props.ts` + the three arms in
+`object-runtime.ts` + finalize wiring in `index.ts`) and the **runtime substrate
+is verified correct** — but through the DYNAMIC member path only. A decisive gap
+was found that **overturns the spec's "blast radius ≈ 0 / routing already works"
+premise**:
+
+**Verified working (dynamic path — a receiver flowing through an `any`-typed
+local, e.g. `const g = fn`):**
+- own-prop round-trip `(g as any).cache = 5; (g as any).cache` → `5`
+- method call `(g as any).m = () => 777; (g as any).m()` → `777` (+ side effects run)
+- identity `const g = fn; (g as any).x = 5; (fn as any).x` → `5` (`ref.eq` identity holds)
+- distinct closures isolated → `11`, not `22`
+- host/gc mode byte-identical (nothing emitted there); `--target standalone` only
+
+**The gap — function-DECLARATION member ops bypass the dynamic path entirely:**
+`assert.sameValue = fn`, `assert.sameValue`, `assert.sameValue(1,2)` (a bare
+function-declaration receiver, which is EXACTLY the test262 `assert` harness
+shape) are lowered STATICALLY against the closure-wrapper struct — WAT-confirmed:
+the **write emits no runtime op** (silently dropped) and the **read resolves to
+undefined** (`ref.cast (ref <wrapper>)` then no field). The real harness WAT
+contains **zero** `__extern_*` / `__set_member` / `__closure_prop_*` calls, so the
+filled arms are **unreachable for the harness**.
+
+**Consequence: C-core as scoped yields floor delta ≈ 0.** The motivating vacuous
+passes do NOT flip, because the assert harness never reaches the fixed arms. The
+architect's "WAT-confirmed routes to `__extern_set`" held only for the local-alias
+case, not the function-declaration case.
+
+**To actually fix the harness** the front-end member dispatch must route a
+function/closure receiver's NON-builtin member get/set/call to the dynamic path
+(`__get_member`/`__set_member`/`__extern_method_call` → the C-core arms). Decision
+points: `compilePropertyAccess` (`src/codegen/property-access.ts`) for reads; the
+member-assignment lowering for writes; the method-call lowering for calls.
+Exclusions to avoid regressions: `.name`/`.length`/`.call`/`.apply`/`.bind`/
+`.prototype`/`.constructor`, class statics, and any statically-known member. This
+is **A/front-end-routing territory** (deferred by this task's "C-core only"
+scope) and its blast radius is NOT ≈0 — it changes how every function-value
+member access lowers, so it needs full test262, not a canary. **Scope decision
+pending with the tech-lead/stakeholder.** #3468 stays `blocked`.
+
+## MEASUREMENT (2026-07-19) — routing is correct but BLOCKED by a pre-existing string-codegen bug
+
+Ran a strided standalone before(`origin/main`)/after(branch) subset (730 files,
+assert-heavy). Result — DO NOT read the raw flip count as the floor delta:
+
+| | before(main) | after(branch) |
+|---|---|---|
+| pass | 446 | 55 |
+| fail | 179 | 570 |
+| compile_error | 26 | 26 |
+
+- `pass → fail`: **391** · `pass → compile_error`: **0** · `fail → pass`: 0 ·
+  `compile_error` unchanged (26 = 26, so #3468 adds ZERO new js2wasm CEs).
+
+**The 391 `pass→fail` are NOT the intended floor-lowering.** Sampling them shows
+they fail with a **WebAssembly.instantiate CompileError** (invalid Wasm), not an
+assertion throw: `call[0] expected type (ref null 6=$AnyString), found externref`
+in a harness closure. The routing makes the test262 harness (`sta.js`+`assert.js`)
+COMPILE its `assert`/`assert.sameValue` function bodies — and those bodies hit a
+**pre-existing standalone codegen bug** that produces invalid Wasm.
+
+**Root cause (minimal, PRE-EXISTING, independent of #3468):** a function
+EXPRESSION whose externref param is reassigned to a native-string literal in one
+branch and then string-concatenated:
+```js
+const f = function (msg) { if (msg === undefined) { msg = ''; } else { msg += ' '; } msg += 'x'; return msg; };
+```
+compiled `--target standalone` produces invalid Wasm (`__str_concat` called with
+an externref where `(ref null $AnyString)` is expected) on **BOTH origin/main and
+this branch** — no expando, no routing, no C-core involved. `assert.sameValue`'s
+message-building (`if (message === undefined) { message = ''; } else { message += ' '; }
+message += 'Expected…'`) is exactly this shape. A plain function DECLARATION with
+the same body is VALID — the bug is specific to function EXPRESSIONS / closures.
+
+**Implication:** #3468's C-core + routing are correct for their scope, but the
+routing cannot be net-positive until this pre-existing string-codegen bug is
+fixed — otherwise the harness compiles (correct) → hits the string bug → invalid
+Wasm → ~391 assert-using tests flip from vacuous-pass to fail-to-instantiate (a
+regression, not the truthful correction). The string bug is a SEPARATE issue
+(function-expression externref-param reassign-to-native-string type unification),
+a prerequisite for landing #3468's routing. #3468 stays `blocked`; PR held; not
+merged.
+
+## PR-shepherd resolution (2026-07-20) — land captured-closure substrate; keep harness rollout blocked
+
+The string-codegen prerequisite above landed on current `main` as #3472, so the
+held PR was re-measured from its own latest `merge_group` run
+(`29749566966`, merge SHA `ea8d3e523cbbb667cf0df30494bd0caa46fdc2e0`)
+against the exact standalone baseline commit
+`55e90a8441c27438823144c54d869928d6114b8e`.
+
+The result disproves the remaining premise that the top-level harness routing
+can be part of a normal conformance-preserving PR:
+
+- 3,608 stable pass→non-pass regressions with changed Wasm (compile-timeout
+  noise excluded), versus 18 improvements;
+- 3,540 of those are `wasm exception during module init` after the test body was
+  previously reached — the test262 assertions are now executing and exposing
+  existing semantic mismatches;
+- both baseline and candidate use `oracle_version: 8`; this is not oracle drift;
+- the absolute host-free floor also falls to 25,048, 405 below the committed
+  25,453 high-water mark.
+
+Those failures cannot be erased honestly inside a closure-property routing
+change: doing so requires fixing the exposed language/runtime semantics. A
+baseline edit, verdict exception, or swallowed assertion would weaken the
+oracle and is explicitly rejected.
+
+Therefore PR #3418 is narrowed to the first principled **captured-closure
+substrate** slice:
+
+- route only concrete closure subtypes with captured lexical bindings through
+  the dynamic runtime side table; shared noncapturing wrappers remain on their
+  current behavior;
+- keep seven executed round-trip, invocation, side-effect, identity, isolation,
+  metadata, and noncapturing-boundary tests;
+- remove the top-level `FunctionDeclaration` statement-retention arm and its
+  harness tests from this PR;
+- keep this issue `blocked` for a future staged harness rollout after the
+  exposed failures are fixed, with no floor rebaseline.
