@@ -36,6 +36,7 @@ import {
   legalityFor,
 } from "./contract.js";
 import type { IrBinop, IrUnop } from "../nodes.js";
+import type { BackendI32BitwiseOp, BackendNumericConversionOp, BackendScalarConstType } from "./emitter.js";
 import type {
   IrClassLowering,
   IrClosureLowering,
@@ -112,6 +113,15 @@ export class StubEmitter implements BackendEmitter<StubSink> {
   }
   emitUnary(op: IrUnop, out: StubSink): void {
     out.push(`unary:${op}`);
+  }
+  emitScalarConst(type: BackendScalarConstType, value: number, out: StubSink): void {
+    out.push(`scalar.const:${type}:${value}`);
+  }
+  emitNumericConversion(op: BackendNumericConversionOp, out: StubSink): void {
+    out.push(`numeric.convert:${op}`);
+  }
+  emitI32Bitwise(op: BackendI32BitwiseOp, out: StubSink): void {
+    out.push(`i32.bitwise:${op}`);
   }
   emitLocalGet(index: number, out: StubSink): void {
     out.push(`local.get:${index}`);
