@@ -55,7 +55,7 @@ import {
   stringIndexProvenBelow,
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
-import { mathUnaryToIrOp } from "./select.js";
+import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, mathUnaryToIrOp } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
   asVal,
@@ -578,8 +578,12 @@ export function lowerFunctionAstToIr(
     !isCtor &&
     ts.isFunctionDeclaration(fn) &&
     !!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword);
-  const asyncUnwrappedReturn = isAsync ? unwrapPromiseTypeNode(fn.type) : null;
-  const effectiveReturnTypeNode = isAsync ? (asyncUnwrappedReturn ?? undefined) : fn.type;
+  const declaredReturnTypeNode =
+    ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn) || ts.isGetAccessorDeclaration(fn)
+      ? effectiveIrReturnTypeNode(fn)
+      : undefined;
+  const asyncUnwrappedReturn = isAsync ? unwrapPromiseTypeNode(declaredReturnTypeNode) : null;
+  const effectiveReturnTypeNode = isAsync ? (asyncUnwrappedReturn ?? undefined) : declaredReturnTypeNode;
   const isVoidReturn =
     !isGenerator &&
     !isCtor &&
@@ -606,7 +610,7 @@ export function lowerFunctionAstToIr(
     if (ts.isObjectBindingPattern(p.name) || ts.isArrayBindingPattern(p.name)) {
       return {
         name: `__pattern_param_${idx}`,
-        type: resolveIrType(p.type, override, `pattern param #${idx} of ${name}`),
+        type: resolveIrType(effectiveIrParamTypeNode(p), override, `pattern param #${idx} of ${name}`),
       };
     }
     if (!ts.isIdentifier(p.name)) {
@@ -625,7 +629,7 @@ export function lowerFunctionAstToIr(
     }
     return {
       name: p.name.text,
-      type: resolveIrType(p.type, override, `param ${p.name.text} of ${name}`),
+      type: resolveIrType(effectiveIrParamTypeNode(p), override, `param ${p.name.text} of ${name}`),
     };
   });
 

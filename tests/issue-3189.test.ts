@@ -101,6 +101,39 @@ describe("#3189 — trap-category growth ratchet", () => {
     expect(r.newCounts.unreachable).toBe(1);
   });
 
+  it("treats compile_timeout → trap as an unknown baseline runtime outcome", () => {
+    const base = mk({
+      "null.js": { status: "compile_timeout" },
+      "oob.js": { status: "compile_timeout" },
+    });
+    const cur = mk({
+      "null.js": { status: "fail", error_category: "null_deref", wasm_sha: "null" },
+      "oob.js": { status: "fail", error_category: "oob", wasm_sha: "oob" },
+    });
+    const r = evaluateTrapCategoryGrowth(base, cur);
+    expect(r.failures).toEqual([]);
+    expect(r.newCounts.null_deref).toBe(0);
+    expect(r.newCounts.oob).toBe(0);
+    expect(r.unknownBaselineTimeouts.null_deref).toEqual(["null.js"]);
+    expect(r.unknownBaselineTimeouts.oob).toEqual(["oob.js"]);
+  });
+
+  it("does not let a timeout-unknown trap hide genuine observed trap growth", () => {
+    const base = mk({
+      "unknown.js": { status: "compile_timeout" },
+      "observed.js": { status: "pass", wasm_sha: "before" },
+    });
+    const cur = mk({
+      "unknown.js": { status: "fail", error_category: "null_deref", wasm_sha: "unknown" },
+      "observed.js": { status: "fail", error_category: "null_deref", wasm_sha: "after" },
+    });
+    const r = evaluateTrapCategoryGrowth(base, cur);
+    expect(r.failures).toHaveLength(1);
+    expect(r.failures[0]).toContain('null_deref" grew 0 → 1');
+    expect(r.newlyTrapping.null_deref).toEqual(["observed.js"]);
+    expect(r.unknownBaselineTimeouts.null_deref).toEqual(["unknown.js"]);
+  });
+
   it("honours a per-category tolerance (operational safety valve)", () => {
     const base = mk({ "x.js": { status: "pass", wasm_sha: "x" } });
     const cur = mk({
