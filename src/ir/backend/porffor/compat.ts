@@ -242,7 +242,14 @@ export function assertPorfforIrCompatibility(
   }
   const allocProbe = module.Alloc(probe, 0);
   assertPorfforNode(allocProbe, "Alloc probe", actualCommit);
-  const expectedAllocProbe = [module.K.Alloc, PORFFOR_TYPE_ENTRIES[7][1], PORFFOR_EFFECT_ENTRIES[3][1], probe, 0, 0];
+  const expectedAllocProbe = [
+    PORFFOR_KIND_NAMES.indexOf("Alloc"),
+    PORFFOR_TYPE_ENTRIES[7][1],
+    PORFFOR_EFFECT_ENTRIES[3][1],
+    probe,
+    0,
+    0,
+  ];
   for (let i = 0; i < expectedAllocProbe.length; i++) {
     if (allocProbe[i] !== expectedAllocProbe[i]) {
       throw new PorfforCompatibilityError(
