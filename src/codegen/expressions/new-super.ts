@@ -80,6 +80,7 @@ import {
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
+  maybeStampCompiledFunctionArgName,
   noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
@@ -536,6 +537,9 @@ function emitSuperExternMethodCall(
     } else if (argType === null) {
       fctx.body.push({ op: "ref.null.extern" });
     }
+    // (#3429) See maybeStampCompiledFunctionArgName — no-ops outside JS-host
+    // (this whole function already refuses standalone/wasi above).
+    maybeStampCompiledFunctionArgName(ctx, fctx, valueExpr);
     const finalPushIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
     fctx.body.push({ op: "call", funcIdx: finalPushIdx });
   }

@@ -102,6 +102,7 @@ import {
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
+  maybeStampCompiledFunctionArgName,
   noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
@@ -3175,6 +3176,10 @@ export function compileReceiverMethodCall(
             if (argType === null) {
               fctx.body.push({ op: "ref.null.extern" });
             }
+            // (#3429) A statically-name-resolvable compiled function/class
+            // argument (e.g. `assert.throws(MyError, fn)`) gets its real
+            // `.name` stamped before crossing — see maybeStampCompiledFunctionArgName.
+            maybeStampCompiledFunctionArgName(ctx, fctx, arg);
             fctx.body.push({ op: "call", funcIdx: arrPushIdx });
           }
 
