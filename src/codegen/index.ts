@@ -4649,6 +4649,11 @@ export function generateMultiModule(
     emitStructFieldGetters(ctx);
     emitStructFieldSetters(ctx);
 
+    // (#3468) Multi-source compilation can reserve the closure own-property
+    // side-table helpers too. Fill their placeholders only after every source
+    // has registered its closure types, matching the single-source pipeline.
+    fillClosurePropHelpers(ctx);
+
     // (#3496) A multi-source entry can reserve a closed method dispatcher just
     // like a single source can. The literal Test262 harness does so for
     // `assert.compareArray(...)`: the property assignment registers a closure
