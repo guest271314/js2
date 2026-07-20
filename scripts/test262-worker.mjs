@@ -1090,12 +1090,10 @@ async function doCompile(
   // top-level code runs against a fully-wired runtime. Aligned with
   // compiler-fork-worker.mjs + tests/test262-runner.ts (#1251 both-paths
   // rule). Standalone/wasi/linear targets keep their own `_start` init model.
-  // MODULE-GOAL tests (`inferModuleStrictArguments` is exactly the
-  // module-goal flag) are EXCLUDED: the multi-module FIXTURE link already
-  // synthesizes per-module init plumbing, and the flag added a SECOND
-  // `__module_init` export in one binary — V8's "Duplicate export name"
-  // CompileError, the 6-file `language/module-code/*` regression that parked
-  // the stack PR #2835/#2839.
+  // compileMulti fixture graphs follow the same host rule after #3505: its
+  // progressively accumulated dependency-order initializers retain only the
+  // final `__module_init` export, so the graph can be wired before that one
+  // initializer runs without producing duplicate Wasm exports.
   const deferOpt = target || (!originalHarness && inferModuleStrictArguments) ? {} : { deferTopLevelInit: true };
   if (hasFixtureGraph(fixtureFiles)) {
     if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
@@ -1128,6 +1126,7 @@ async function doCompile(
       skipSemanticDiagnostics: negativePhase !== "resolution",
       target,
       inferModuleStrictArguments,
+      ...deferOpt,
     });
   }
   if (originalHarness) {
