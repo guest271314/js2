@@ -446,6 +446,11 @@ the broader conformance gates.
   gitlink's intentional `update=none` setting only for `vendor/Porffor`, and
   verifies checkout, gitlink, and compatibility fingerprint equality before
   running ASan/UBSan.
+- The pinned renderer prints its `i64` typedef with `%lld`; on LP64 Linux that
+  typedef is `long`, so Clang rejects the generated vararg under `-Werror`. The
+  test applies one exact, count-checked cast to `long long` before native
+  compilation. This keeps `-Werror` and format diagnostics enabled, preserves
+  the rendered value, and fails loudly if the pinned renderer fragment drifts.
 
 The source lowerer currently assigns stable `AllocSiteId` values but does not
 populate the optional line/column `IrSiteId` on `object.new`. An initial test
@@ -459,6 +464,10 @@ adding coordinate metadata would require an out-of-scope source-builder change.
 - `JS2WASM_PORFFOR_ROOT=tests/fixtures/porffor-intentionally-absent pnpm exec vitest run tests/issue-3478-porffor-source-to-native-canary.test.ts --reporter=dot` — 1 passed, 1 skipped (native optional), file passed.
 - `CC=clang JS2WASM_PORFFOR_ROOT=vendor/Porffor PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run tests/issue-3478-porffor-source-to-native-canary.test.ts --reporter=dot` — 2/2 passed under ASan/UBSan.
 - Focused #3478/#3295/#3297/#3299/#3300 matrix — 5 files, 22/22 tests passed with the pinned checkout.
+- GitHub's Ubuntu advisory run exposed the pinned renderer's LP64 `%lld` / `i64`
+  vararg mismatch under `-Werror`. After the exact count-checked cast
+  normalization, the same pinned local sanitizer matrix passed 22/22 while
+  retaining format diagnostics.
 - `pnpm run typecheck`, `pnpm run build`, `pnpm run lint`, `pnpm run format:check`, `pnpm run check:linear-ir`, `pnpm run check:ir-fallbacks`, `pnpm run check:loc-budget`, `pnpm run check:dead-exports`, `pnpm run check:issues`, `pnpm run check:issue-ids`, and `GATE_BASE=origin/main pnpm run check:issue-ids:against-main` passed.
 - Workflow parsing/semantics, the `update=checkout` submodule override, gitlink
   pin equality, and `git diff --check` passed. Local test262 was intentionally

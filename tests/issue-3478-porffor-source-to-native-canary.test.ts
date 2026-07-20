@@ -176,7 +176,7 @@ describe("#3478 real source to shared linear-memory plan", () => {
 
       const porffor = await loadOptionalPorffor({ root: porfforRoot });
       for (const row of rows) {
-        const rendered = porfforRendererOutputText(porffor.render(row.porfforInput));
+        const rendered = normalizePinnedPorfforCForNative(porfforRendererOutputText(porffor.render(row.porfforInput)));
         const nativeValues = compileAndRunSanitizedC(cCompiler, rendered, row.porfforInput, sanitizerEnabled);
         expect(nativeValues.slice(0, fixedSeeds.length)).toStrictEqual(directValues);
         expect(nativeValues.at(-1)).toBe(directChecksum);
@@ -254,6 +254,20 @@ function findCCompiler(): string | null {
     if (spawnSync(candidate, ["--version"], { stdio: "ignore" }).status === 0) return candidate;
   }
   return null;
+}
+
+function normalizePinnedPorfforCForNative(rendered: string): string {
+  const incompatible = 'snprintf(buf, sizeof buf, "%lld", (i64)d)';
+  const portable = 'snprintf(buf, sizeof buf, "%lld", (long long)(i64)d)';
+  const occurrences = rendered.split(incompatible).length - 1;
+  if (occurrences !== 1) {
+    throw new Error(`pinned Porffor i64 printf compatibility site count changed: expected 1, received ${occurrences}`);
+  }
+
+  // The pinned renderer's i64 is long on LP64 Linux, while %lld requires a
+  // long long vararg. Make that exact site type-correct without suppressing
+  // Clang's format diagnostics or changing the value being rendered.
+  return rendered.replace(incompatible, portable);
 }
 
 function compileAndRunSanitizedC(
