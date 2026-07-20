@@ -14,6 +14,12 @@ model: opus
 sprint: current
 horizon: m
 related: [3417, 1395, 1047, 1364]
+loc-budget-allow:
+  # +28 lines in the host runtime's _wrapForHost has/getOwnPropertyDescriptor
+  # traps to consult _staticMethodNames (Slice A). This IS the correct
+  # subsystem — the host proxy that materializes class objects lives here,
+  # alongside _wasmStructHasOwn / _readOwnDescriptor which it mirrors.
+  - src/runtime.ts
 ---
 
 # #3479 — static class members invisible to `hasOwnProperty` via the host proxy
