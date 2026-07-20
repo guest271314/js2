@@ -62,6 +62,7 @@ import type { IrClosureSignature, IrType } from "./nodes.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
+import type { RecursiveTypeEvidence } from "./type-evidence.js";
 
 /**
  * #1169q telemetry — record why a top-level FunctionDeclaration didn't make
@@ -93,6 +94,7 @@ export type IrFallbackReason =
   | "body-shape-rejected"
   | "external-call" // calls a non-local identifier (parseInt, etc.)
   | "call-graph-closure" // local caller/callee not claimed
+  | "recursive-type-evidence" // recursive SCC failed conservative ABI certification
   | "type-resolution-failure" // overrideMap couldn't be built (set externally)
   // #1370 Phase A — class method / constructor of a shape the IR selector
   // doesn't yet handle. Examples: methods on a class with an `extends`
@@ -248,6 +250,13 @@ export interface IrSelectionOptions {
    *  along with the reason it was rejected. Off by default — populating
    *  this list adds a small per-function overhead. */
   readonly trackFallbacks?: boolean;
+  /**
+   * Checker-backed certification for recursive call-graph components. A
+   * rejected component is kept on the direct path even when optimistic
+   * propagation found a scalar-looking signature. Accepted components still
+   * pass every ordinary selector shape and closure gate.
+   */
+  readonly recursiveTypeEvidence?: RecursiveTypeEvidence;
   /**
    * (#1373b Slice 1) When true, async functions (no `*`) are eligible to
    * flow through the IR's CPS lowering (Phase C). When false (default),
@@ -492,16 +501,24 @@ export function planIrCompilation(
       continue;
     }
     declByName.set(stmt.name.text, stmt);
-    const reason = trackFallbacks
-      ? whyNotIrClaimable(stmt, typeMap, localClasses)
-      : isIrClaimable(stmt, typeMap, localClasses)
-        ? null
-        : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
+    const recursiveDecision = options?.recursiveTypeEvidence?.decisions.get(stmt.name.text);
+    const reason =
+      recursiveDecision?.accepted === false
+        ? "recursive-type-evidence"
+        : trackFallbacks
+          ? whyNotIrClaimable(stmt, typeMap, localClasses)
+          : isIrClaimable(stmt, typeMap, localClasses)
+            ? null
+            : "param-shape-rejected"; // sentinel — not used when trackFallbacks=false
     if (reason === null) {
       individuallyClaimed.add(stmt.name.text);
     } else if (trackFallbacks) {
       fallbackReasons.set(stmt.name.text, reason);
-      captureShapeDetail(stmt.name.text, reason);
+      if (reason === "recursive-type-evidence" && recursiveDecision?.detail) {
+        fallbackDetails.set(stmt.name.text, recursiveDecision.detail);
+      } else {
+        captureShapeDetail(stmt.name.text, reason);
+      }
     }
   }
 
