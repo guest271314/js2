@@ -47,12 +47,11 @@ executor. The dependency graph is not represented equivalently, so the
 literal lane fails during module initialization instead of testing the
 namespace cycle.
 
-The current `gc` project runner has a separate multi-source initialization
-frontier: its graph-linked compile reaches the harness but traps `unreachable`
-while top-level harness function properties are installed before `setExports`.
-Therefore #3491's `gc` parity target is the same honest graph-linked failure,
-not a pass; deferring multi-source initialization without duplicate
-`__module_init` exports is compiler follow-up work outside this runner issue.
+At the time this issue was implemented, the current `gc` project runner had a
+separate multi-source initialization frontier: its graph-linked compile reached
+the harness but trapped `unreachable`. #3493 subsequently preserved the
+cross-module setup and filled the reserved multi-source member dispatchers, so
+the same honest graph now passes in both `gc` and standalone.
 
 ## Evidence (2026-07-20)
 
@@ -60,8 +59,9 @@ not a pass; deferring multi-source initialization without duplicate
 - Path-exact standalone rerun with a fresh one-test worker: deterministic FAIL,
   `wasm exception during module init`.
 - Path-exact graphless FYI `gc` rerun: deterministic FAIL, `a is not defined`.
-- Path-exact graph-linked project `gc` rerun: deterministic FAIL,
+- Before #3493, path-exact graph-linked project `gc` failed with
   `RuntimeError: unreachable` during module initialization.
+- After #3493, path-exact FYI reruns pass **1/1** in both `gc` and standalone.
 - The entry test is `flags: [module]` and contains two static namespace imports
   to `_FIXTURE.js` files.
 - The two fixtures exist at the pinned Test262 revision and form a circular
@@ -89,8 +89,8 @@ not a pass; deferring multi-source initialization without duplicate
   into Script/function declarations.
 - The exact circular-star test passes in FYI `standalone`, matching the project
   runner.
-- The FYI `gc` verdict reaches the same current project-runner `unreachable`
-  multi-source-init signature, never the graphless `a is not defined` result.
+- The FYI `gc` and standalone verdicts both pass after executing the real
+  circular graph, never the graphless `a is not defined` result.
 - A missing fixture or missing-module diagnostic never satisfies a
   resolution-negative test's expected `SyntaxError`.
 - Add focused controls for one-level imports, transitive imports, missing
@@ -105,13 +105,11 @@ not a pass; deferring multi-source initialization without duplicate
 - Run a small module-code sample containing fixture-free, one-level, transitive,
   and circular fixture cases and compare with the project runner.
 
-## Follow-up boundary
+## Follow-up resolution
 
-Making graph-linked `gc` execution pass requires the compiler's multi-source
-path to defer the one aggregated module initializer until after `setExports`.
-Applying the existing single-source `deferTopLevelInit` option today exports
-multiple functions named `__module_init` and produces an invalid Wasm binary.
-That compiler change is intentionally not part of #3491.
+#3493 closed the graph-linked `gc` frontier by preserving top-level
+`globalThis` setup and filling the reserved multi-source member set/get
+dispatchers. No harness exception or source rewrite is needed.
 
 ## Implementation summary
 
@@ -128,5 +126,5 @@ That compiler change is intentionally not part of #3491.
   diagnostic as their expected `SyntaxError`.
 - Focused coverage exercises fixture-free record accounting, one-level,
   transitive, missing, and circular graphs; literal assembly preservation; the
-  exact standalone pass and gc parity signature; and a representative official
+  exact standalone and gc passes; and a representative official
   resolution-negative anti-false-pass case in both targets.
