@@ -243,7 +243,7 @@ export interface IrLowerResolver {
   // Optional — resolvers/callers that omit it get the i16 path (byte-identical).
   emitStringConst?(value: string, alloc?: AllocSiteId): readonly Instr[];
   /** `[call concat]` (host) or `[call __str_concat]` (native). */
-  emitStringConcat?(alloc?: AllocSiteId): readonly Instr[];
+  emitStringConcat?(alloc?: AllocSiteId, mode?: import("./string-runtime.js").IrStringConcatMode): readonly Instr[];
   /** `[call equals]` (host) or `[call __str_equals]` (native). */
   emitStringEquals?(): readonly Instr[];
   /**
@@ -251,7 +251,13 @@ export interface IrLowerResolver {
    * Result is i32 — the `string.len` IR instr appends an
    * `f64.convert_i32_s` after this.
    */
-  emitStringLen?(): readonly Instr[];
+  emitStringLen?(inputEncoding?: import("./string-runtime.js").IrStringEncoding): readonly Instr[];
+  /** Typed character operations consume an already-normalized i32 index. */
+  emitStringCharAt?(
+    alloc?: AllocSiteId,
+    inputEncoding?: import("./string-runtime.js").IrStringEncoding,
+  ): readonly Instr[];
+  emitStringCharCodeAt?(inputEncoding?: import("./string-runtime.js").IrStringEncoding): readonly Instr[];
   /**
    * Slice 9 (#1169h): resolve (and lazily register) the shared `__exn`
    * exception tag. The tag carries an `externref` payload — every
@@ -370,7 +376,7 @@ export function lowerIrFunctionToWasm(
   // #1713: the active backend. Defaults to WasmGcEmitter so every existing
   // caller (integration.ts) is unchanged and Phase 1 stays zero-delta.
   // #1714/#1715 pass an explicit emitter selected by compile target.
-  emitter: BackendEmitter = new WasmGcEmitter(),
+  emitter: BackendEmitter = new WasmGcEmitter(resolver),
 ): IrLowerResult {
   const lowered = lowerIrFunctionBody(
     func,
@@ -1583,35 +1589,36 @@ export function lowerIrFunctionBody<S, Slot>(
         return;
       }
       case "string.const": {
-        const ops = resolver.emitStringConst?.(instr.value, instr.alloc);
-        if (!ops) throw new Error(`ir/lower: resolver cannot emit string.const (${func.name})`);
-        for (const o of ops) emitter.pushRaw(out, o);
+        emitter.emitStringConst(instr.value, instr.alloc, out);
         return;
       }
       case "string.concat": {
         emitValue(instr.lhs, out);
         emitValue(instr.rhs, out);
-        const ops = resolver.emitStringConcat?.(instr.alloc);
-        if (!ops) throw new Error(`ir/lower: resolver cannot emit string.concat (${func.name})`);
-        for (const o of ops) emitter.pushRaw(out, o);
+        emitter.emitStringConcat(instr.alloc, instr.concatMode ?? "immutable", out);
         return;
       }
       case "string.eq": {
         emitValue(instr.lhs, out);
         emitValue(instr.rhs, out);
-        const ops = resolver.emitStringEquals?.();
-        if (!ops) throw new Error(`ir/lower: resolver cannot emit string.eq (${func.name})`);
-        for (const o of ops) emitter.pushRaw(out, o);
-        if (instr.negate) emitter.pushRaw(out, { op: "i32.eqz" });
+        emitter.emitStringEquals(instr.negate, out);
         return;
       }
       case "string.len": {
         emitValue(instr.value, out);
-        const ops = resolver.emitStringLen?.();
-        if (!ops) throw new Error(`ir/lower: resolver cannot emit string.len (${func.name})`);
-        for (const o of ops) emitter.pushRaw(out, o);
-        // IR-level result is f64 — promote the i32 length.
-        emitter.pushRaw(out, { op: "f64.convert_i32_s" });
+        emitter.emitStringLength(instr.inputEncoding, out);
+        return;
+      }
+      case "string.char_at": {
+        emitValue(instr.value, out);
+        emitValue(instr.index, out);
+        emitter.emitStringCharAt(instr.alloc, instr.inputEncoding, out);
+        return;
+      }
+      case "string.char_code_at": {
+        emitValue(instr.value, out);
+        emitValue(instr.index, out);
+        emitter.emitStringCharCodeAt(instr.inputEncoding, out);
         return;
       }
       case "object.new": {
@@ -3201,6 +3208,9 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.lhs, instr.rhs];
     case "string.len":
       return [instr.value];
+    case "string.char_at":
+    case "string.char_code_at":
+      return [instr.value, instr.index];
     case "object.new":
       return instr.values;
     case "object.get":

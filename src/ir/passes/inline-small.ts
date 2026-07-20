@@ -458,6 +458,13 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (v === inst.value) return inst;
       return { ...inst, value: v };
     }
+    case "string.char_at":
+    case "string.char_code_at": {
+      const value = mapId(rename, inst.value);
+      const index = mapId(rename, inst.index);
+      if (value === inst.value && index === inst.index) return inst;
+      return { ...inst, value, index };
+    }
     case "object.new": {
       let changed = false;
       const newValues: IrValueId[] = [];

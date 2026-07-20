@@ -49,7 +49,12 @@ export function lowerIrModuleToPorffor(
             nested.kind === "vec.new_fixed" ||
             nested.kind === "vec.len" ||
             nested.kind === "vec.get" ||
-            nested.kind === "vec.set"
+            nested.kind === "vec.set" ||
+            nested.kind === "string.const" ||
+            nested.kind === "string.concat" ||
+            nested.kind === "string.len" ||
+            nested.kind === "string.char_at" ||
+            nested.kind === "string.char_code_at"
           ) {
             found = true;
           }

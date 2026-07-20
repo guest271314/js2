@@ -47,6 +47,8 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
+import { classifyLiteral, joinEncoding, type Encoding } from "./analysis/encoding.js";
+import { proveTypedStringAppend, proveTypedStringMethod, type TypedValueEvidence } from "./analysis/string-evidence.js";
 import {
   EmptyArrayElementInference,
   emptyArrayInferenceDiagnostic,
@@ -713,6 +715,7 @@ export function lowerFunctionAstToIr(
   const lifted: IrFunction[] = [];
   const liftedCounter = { value: 0 };
   const mutatedLets = collectMutatedLetNames(fn);
+  const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
   const emptyArrayInference = inferEmptyArrayElementTypes(
     fn,
     options.checker ? new TsCheckerOracle(options.checker) : undefined,
@@ -728,6 +731,7 @@ export function lowerFunctionAstToIr(
     lifted,
     liftedCounter,
     mutatedLets,
+    ownedStringAppendSymbols,
     emptyArrayInference,
     // (#2972) statically-known literal string lengths — proven-in-bounds
     // string element reads (`hex[(n >> 4) & 0xf]`) consult this.
@@ -1240,7 +1244,7 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
  *     semantics without requiring SSA phi nodes.
  */
 type ScopeBinding =
-  | { kind: "local"; value: IrValueId; type: IrType }
+  | { kind: "local"; value: IrValueId; type: IrType; stringEncoding?: Encoding }
   | {
       /**
        * (#3142 Slice 2) A module-scope binding inside the `<module-init>`
@@ -1252,6 +1256,7 @@ type ScopeBinding =
       kind: "moduleGlobal";
       globalName: string;
       type: IrType;
+      stringEncoding?: Encoding;
     }
   | {
       kind: "nestedFunc";
@@ -1284,6 +1289,7 @@ type ScopeBinding =
        * native mode — so this is purely a type-system rewrite.
        */
       asType?: IrType;
+      stringEncoding?: Encoding;
     };
 
 /**
@@ -1337,6 +1343,13 @@ interface LowerCtx {
    * `lowerFunctionAstToIr` via `collectMutatedLetNames`.
    */
   readonly mutatedLets: ReadonlySet<string>;
+  /**
+   * #3502 conservative ownership proof for string builders. Each symbol is a
+   * fresh empty-string `let` whose loop-local uses are discarded `+=` writes
+   * only. Linear backends may therefore reuse its current allocation without
+   * exposing mutation through a JavaScript string alias.
+   */
+  readonly ownedStringAppendSymbols: ReadonlySet<ts.Symbol>;
   /**
    * #3501 function-wide may-alias/evidence closure for unannotated `[]`.
    * It is analysis-only: allocation remains the ordinary vec.new_fixed site.
@@ -1414,6 +1427,58 @@ interface LowerCtx {
   readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
 }
 
+/** Conservative producer-side encoding evidence for the typed string slice. */
+function inferStringEncoding(expr: ts.Expression, cx: LowerCtx): Encoding | undefined {
+  if (ts.isParenthesizedExpression(expr)) return inferStringEncoding(expr.expression, cx);
+  if (ts.isStringLiteral(expr) || expr.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral) {
+    return classifyLiteral((expr as ts.StringLiteral | ts.NoSubstitutionTemplateLiteral).text);
+  }
+  if (ts.isIdentifier(expr)) {
+    const binding = cx.scope.get(expr.text);
+    return binding && "stringEncoding" in binding ? binding.stringEncoding : undefined;
+  }
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = inferStringEncoding(expr.left, cx);
+    const right = inferStringEncoding(expr.right, cx);
+    return left && right ? joinEncoding(left, right) : undefined;
+  }
+  if (
+    ts.isCallExpression(expr) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    expr.expression.name.text === "charAt"
+  ) {
+    const receiver = inferStringEncoding(expr.expression.expression, cx);
+    return receiver === "ascii" ? "ascii" : receiver ? "wtf16" : undefined;
+  }
+  return undefined;
+}
+
+function typedValueEvidence(
+  expr: ts.Expression,
+  carrierType: IrType,
+  stringEncoding: Encoding | undefined,
+  cx: LowerCtx,
+  producerSemanticType: IrType = carrierType,
+): TypedValueEvidence {
+  const checkerProof = cx.checker ? classifyPrimitiveProof(cx.checker.getTypeAtLocation(expr)) : "unprovable";
+  if (checkerProof === "string" || checkerProof === "number") {
+    return {
+      semanticType: checkerProof,
+      carrierType,
+      semanticSource: "checker",
+      ...(checkerProof === "string" && stringEncoding ? { stringEncoding } : {}),
+    };
+  }
+  const producerCarrier = asVal(producerSemanticType);
+  return {
+    semanticType:
+      producerSemanticType.kind === "string" ? "string" : producerCarrier?.kind === "f64" ? "number" : "other",
+    carrierType,
+    semanticSource: "producer",
+    ...(producerSemanticType.kind === "string" && stringEncoding ? { stringEncoding } : {}),
+  };
+}
+
 /**
  * Slice 6 part 2 (#1181): walk a function body to collect every `let`
  * name that is reassigned somewhere — `<id> = <expr>`, `<id> +=/-=/*=/`/=`
@@ -1472,6 +1537,114 @@ function collectMutatedLetNamesFromBlock(body: ts.Block): Set<string> {
   };
   forEachChild(body, visit);
   return writes;
+}
+
+/**
+ * Prove the narrow, backend-neutral string-builder shape used by the linear
+ * append optimization:
+ *
+ *   let value = "";
+ *   for (...) {
+ *     value += part;
+ *   }
+ *
+ * The declaration and loop must be adjacent. Within the loop every reference
+ * to the exact checker symbol must be the direct LHS of a discarded `+=`;
+ * nested-function references are rejected. Later reads are allowed, but later
+ * writes are not. This keeps the semantic IR operation `string.concat` while
+ * proving that a linear backend may mutate/reallocate the current carrier.
+ */
+function collectOwnedStringAppendSymbols(body: ts.Block, checker: ts.TypeChecker | undefined): Set<ts.Symbol> {
+  const proven = new Set<ts.Symbol>();
+  if (!checker) return proven;
+
+  const statements = body.statements;
+  for (let statementIndex = 0; statementIndex + 1 < statements.length; statementIndex++) {
+    const declarationStatement = statements[statementIndex]!;
+    const loopStatement = statements[statementIndex + 1]!;
+    if (!ts.isVariableStatement(declarationStatement)) continue;
+    if (!(declarationStatement.declarationList.flags & ts.NodeFlags.Let)) continue;
+    if (declarationStatement.declarationList.declarations.length !== 1) continue;
+    if (!isIterationStatement(loopStatement)) continue;
+
+    const declaration = declarationStatement.declarationList.declarations[0]!;
+    if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+    if (!isEmptyStringLiteral(declaration.initializer)) continue;
+    const symbol = checker.getSymbolAtLocation(declaration.name);
+    if (!symbol) continue;
+
+    let appendCount = 0;
+    let loopUsesAreOwnedAppends = true;
+    const visitLoop = (node: ts.Node, nestedFunction = false): void => {
+      const entersNestedFunction =
+        nestedFunction ||
+        (node !== loopStatement &&
+          (ts.isFunctionDeclaration(node) ||
+            ts.isFunctionExpression(node) ||
+            ts.isArrowFunction(node) ||
+            ts.isMethodDeclaration(node)));
+      if (ts.isIdentifier(node) && checker.getSymbolAtLocation(node) === symbol) {
+        const parent = node.parent;
+        const isDiscardedAppend =
+          !entersNestedFunction &&
+          ts.isBinaryExpression(parent) &&
+          parent.left === node &&
+          parent.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
+          ts.isExpressionStatement(parent.parent);
+        if (!isDiscardedAppend) loopUsesAreOwnedAppends = false;
+        else appendCount++;
+      }
+      forEachChild(node, (child) => visitLoop(child, entersNestedFunction));
+    };
+    visitLoop(loopStatement);
+    if (!loopUsesAreOwnedAppends || appendCount === 0) continue;
+
+    let laterWrite = false;
+    const visitLater = (node: ts.Node): void => {
+      if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left)) {
+        const op = node.operatorToken.kind;
+        if (
+          checker.getSymbolAtLocation(node.left) === symbol &&
+          (op === ts.SyntaxKind.EqualsToken ||
+            (op >= ts.SyntaxKind.PlusEqualsToken && op <= ts.SyntaxKind.CaretEqualsToken))
+        ) {
+          laterWrite = true;
+        }
+      }
+      if (
+        (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+        ts.isIdentifier(node.operand) &&
+        checker.getSymbolAtLocation(node.operand) === symbol
+      ) {
+        laterWrite = true;
+      }
+      forEachChild(node, visitLater);
+    };
+    for (let laterIndex = statementIndex + 2; laterIndex < statements.length; laterIndex++) {
+      visitLater(statements[laterIndex]!);
+    }
+    if (!laterWrite) proven.add(symbol);
+  }
+  return proven;
+}
+
+function isIterationStatement(statement: ts.Statement): boolean {
+  return (
+    ts.isForStatement(statement) ||
+    ts.isForInStatement(statement) ||
+    ts.isForOfStatement(statement) ||
+    ts.isWhileStatement(statement) ||
+    ts.isDoStatement(statement)
+  );
+}
+
+function isEmptyStringLiteral(expression: ts.Expression): boolean {
+  const unwrapped = ts.isParenthesizedExpression(expression) ? expression.expression : expression;
+  return (
+    (ts.isStringLiteral(unwrapped) || unwrapped.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral) &&
+    (unwrapped as ts.StringLiteral | ts.NoSubstitutionTemplateLiteral).text.length === 0
+  );
 }
 
 function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
@@ -1601,6 +1774,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     const hint: IrType = annotated ?? inferredEmptyArrayHint ?? moduleBinding?.type ?? irVal({ kind: "f64" });
     const value = lowerExpr(d.initializer, cx, hint);
     const inferred = cx.builder.typeOf(value);
+    const stringEncoding = inferred.kind === "string" ? inferStringEncoding(d.initializer, cx) : undefined;
     if (annotated) {
       // Slice 1 (#1169a): the IrType discriminator includes a `string` arm
       // alongside `val`, so use `irTypeEquals` for a structural match
@@ -1658,7 +1832,12 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
         const one = cx.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
         cx.builder.emitGlobalSet({ kind: "global", name: moduleBinding.tdzGlobalName }, one);
       }
-      cx.scope.set(name, { kind: "moduleGlobal", globalName: moduleBinding.globalName, type: moduleBinding.type });
+      cx.scope.set(name, {
+        kind: "moduleGlobal",
+        globalName: moduleBinding.globalName,
+        type: moduleBinding.type,
+        ...(stringEncoding ? { stringEncoding } : {}),
+      });
       continue;
     }
     // Slice 6 part 2 (#1181): mutable `let` bindings whose name is
@@ -1679,7 +1858,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       if (slotValType !== null && slotValType.kind !== "ref" && slotValType.kind !== "ref_null") {
         const slotIndex = cx.builder.declareSlot(name, slotValType);
         cx.builder.emitSlotWrite(slotIndex, value);
-        cx.scope.set(name, { kind: "slot", slotIndex, type: inferred });
+        cx.scope.set(name, { kind: "slot", slotIndex, type: inferred, ...(stringEncoding ? { stringEncoding } : {}) });
         continue;
       }
       // String let in native-strings mode: slot ValType is the
@@ -1695,6 +1874,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
             slotIndex,
             type: irVal(stringValType),
             asType: { kind: "string" },
+            ...(stringEncoding ? { stringEncoding } : {}),
           });
           continue;
         }
@@ -1703,7 +1883,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       // the lowerer will catch any subsequent assignment and throw,
       // landing the function back on the legacy path.
     }
-    cx.scope.set(name, { kind: "local", value, type: inferred });
+    cx.scope.set(name, { kind: "local", value, type: inferred, ...(stringEncoding ? { stringEncoding } : {}) });
   }
 }
 
@@ -2676,7 +2856,7 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
     if (propName !== "length") {
       throw new Error(`ir/from-ast: .${propName} on string is not in slice 2 (${cx.funcName})`);
     }
-    return cx.builder.emitStringLen(recv);
+    return cx.builder.emitStringLen(recv, inferStringEncoding(expr.expression, cx));
   }
 
   if (recvType.kind === "object") {
@@ -3196,7 +3376,7 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
   if (recvType.kind === "string" && ts.isIdentifier(expr.expression)) {
     const litLen = cx.stringLiteralLens?.get(expr.expression.text);
     if (litLen !== undefined && stringIndexProvenBelow(arg, litLen)) {
-      const r = lowerStringMethodCall("charAt", recv, ts.factory.createNodeArray([arg]), cx);
+      const r = lowerStringMethodCall("charAt", recv, expr.expression, ts.factory.createNodeArray([arg]), cx);
       if (r !== null) return r;
       throw new Error(`ir/from-ast: internal — charAt delegation produced no value in ${cx.funcName}`);
     }
@@ -3977,7 +4157,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // the active string backend. Returns null when the method isn't supported
   // by Phase 1 (caller falls through to the existing `string` arm below).
   if (recvType.kind === "string") {
-    const r = lowerStringMethodCall(methodName, recv, expr.arguments, cx);
+    const r = lowerStringMethodCall(methodName, recv, expr.expression.expression, expr.arguments, cx);
     if (r !== null) return r;
     // Method not in slice 13c table — fall through to the recvType.kind !== "class"
     // check below, which throws the clean "not in slice 4" error and routes this
@@ -4251,7 +4431,7 @@ export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
   toUpperCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   toLowerCase: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
   trim: { hostArgs: [], result: { kind: "string" }, requiredArgs: 0 },
-  charAt: { hostArgs: [{ kind: "f64" }], result: { kind: "string" }, requiredArgs: 1 },
+  charAt: { hostArgs: [{ kind: "f64" }], result: { kind: "string" }, requiredArgs: 0 },
   slice: {
     hostArgs: [{ kind: "f64" }, { kind: "f64" }],
     result: { kind: "string" },
@@ -4311,6 +4491,7 @@ export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
 function lowerStringMethodCall(
   methodName: string,
   recv: IrValueId,
+  receiverExpr: ts.Expression,
   args: ts.NodeArray<ts.Expression>,
   cx: LowerCtx,
 ): IrValueId | null {
@@ -4321,6 +4502,45 @@ function lowerStringMethodCall(
     throw new Error(
       `ir/from-ast: String.${methodName}(...) arg count ${args.length} not in [${sig.requiredArgs}, ${sig.hostArgs.length}] (${cx.funcName})`,
     );
+  }
+
+  if (methodName === "charAt" || methodName === "charCodeAt") {
+    const receiverEncoding = inferStringEncoding(receiverExpr, cx);
+    const receiverEvidence = typedValueEvidence(receiverExpr, cx.builder.typeOf(recv), receiverEncoding, cx);
+    // Without encoding evidence, preserve the established helper-call path
+    // below. Internal stdlib string parameters intentionally have no source
+    // producer proof, while literal/slot chains in the shared linear slice do.
+    if (receiverEvidence.semanticType === "string" && receiverEvidence.stringEncoding !== undefined) {
+      let index: IrValueId;
+      let indexType: IrType | null = null;
+      if (args.length === 0) {
+        index = cx.builder.emitConst({ kind: "i32", value: 0 }, irVal({ kind: "i32" }));
+      } else {
+        const indexExpr = args[0]!;
+        const semantic = proveAdditiveOperand(indexExpr, cx);
+        if (semantic !== "number" && semantic !== "no-checker") {
+          throw new Error(
+            `ir/from-ast: String.${methodName} index is not provably numeric (${semantic}) in ${cx.funcName}`,
+          );
+        }
+        const numeric = lowerExpr(indexExpr, cx, irVal({ kind: "f64" }));
+        indexType = cx.builder.typeOf(numeric);
+        index =
+          asVal(indexType)?.kind === "i32"
+            ? numeric
+            : cx.builder.emitUnary("i32.trunc_sat_f64_s", numeric, irVal({ kind: "i32" }));
+      }
+      const evidence = proveTypedStringMethod(receiverEvidence, methodName, indexType === null ? [] : [indexType]);
+      if (!evidence) {
+        throw new Error(
+          `ir/from-ast: String.${methodName} requires typed string receiver/encoding evidence (${cx.funcName})`,
+        );
+      }
+      if (evidence.intrinsic === "char-at") {
+        return cx.builder.emitStringCharAt(recv, index, evidence.receiverEncoding, evidence.resultEncoding ?? "wtf16");
+      }
+      return cx.builder.emitStringCharCodeAt(recv, index, evidence.receiverEncoding);
+    }
   }
 
   // (#2955 slice 2) The mode decision — target name, index-arg rep, and the
@@ -4396,7 +4616,7 @@ function lowerStringMethodCall(
       // native-mode omission already returned a null plan (demote) above.
       if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
         // emitStringLen returns f64; truncate to i32 for native helpers
-        const f64Len = cx.builder.emitStringLen(recv);
+        const f64Len = cx.builder.emitStringLen(recv, inferStringEncoding(receiverExpr, cx));
         const i32Len = cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Len, irVal({ kind: "i32" }));
         loweredArgs.push(i32Len);
         continue;
@@ -4411,7 +4631,7 @@ function lowerStringMethodCall(
       // spec SWAPS to `substring(0, start)` (§22.1.3.24 step 6-8). All other
       // missing optional args fall back to the generic sentinel.
       if ((methodName === "slice" || methodName === "substring") && i === 1 && expectedHost.kind === "f64") {
-        const lenVal = cx.builder.emitStringLen(recv);
+        const lenVal = cx.builder.emitStringLen(recv, inferStringEncoding(receiverExpr, cx));
         loweredArgs.push(lenVal);
         continue;
       }
@@ -5678,6 +5898,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
       );
     }
     cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, newValue);
+    cx.scope.set(id.text, { ...binding, stringEncoding: inferStringEncoding(rhs, cx) });
     return;
   }
   if (binding.kind !== "slot") {
@@ -5700,6 +5921,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
     );
   }
   cx.builder.emitSlotWrite(binding.slotIndex, newValue);
+  cx.scope.set(id.text, { ...binding, stringEncoding: inferStringEncoding(rhs, cx) });
 }
 
 /**
@@ -5718,6 +5940,34 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
     throw new Error(
       `ir/from-ast: compound assign to non-slot binding "${id.text}" — mutation pre-pass should have detected it (${cx.funcName})`,
     );
+  }
+  const logicalType = binding.kind === "slot" ? (binding.asType ?? binding.type) : binding.type;
+  if (compoundOp === ts.SyntaxKind.PlusEqualsToken && logicalType.kind === "string") {
+    const lhs =
+      binding.kind === "moduleGlobal"
+        ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, logicalType)
+        : cx.builder.emitSlotReadAs(binding.slotIndex, logicalType);
+    const rhsValue = lowerExpr(rhs, cx, logicalType);
+    const rhsType = cx.builder.typeOf(rhsValue);
+    const proof = proveTypedStringAppend(
+      typedValueEvidence(id, binding.type, binding.stringEncoding, cx, logicalType),
+      typedValueEvidence(rhs, rhsType, inferStringEncoding(rhs, cx), cx),
+    );
+    if (!proof) {
+      throw new Error(
+        `ir/from-ast: typed string += requires checker/producer string and encoding evidence for "${id.text}" (${cx.funcName})`,
+      );
+    }
+    const symbol = cx.checker?.getSymbolAtLocation(id);
+    const concatMode = symbol && cx.ownedStringAppendSymbols.has(symbol) ? "owned-append" : "immutable";
+    const result = cx.builder.emitStringConcat(lhs, rhsValue, proof.resultEncoding, concatMode);
+    if (binding.kind === "moduleGlobal") {
+      cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+    } else {
+      cx.builder.emitSlotWrite(binding.slotIndex, result);
+    }
+    cx.scope.set(id.text, { ...binding, stringEncoding: proof.resultEncoding });
+    return;
   }
   const slotValType = asVal(binding.type);
   if (!slotValType || slotValType.kind !== "f64") {
@@ -6334,7 +6584,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
     switch (op) {
       case ts.SyntaxKind.PlusToken:
-        return cx.builder.emitStringConcat(lhs, rhs);
+        return cx.builder.emitStringConcat(lhs, rhs, inferStringEncoding(expr, cx));
       case ts.SyntaxKind.EqualsEqualsEqualsToken:
       case ts.SyntaxKind.EqualsEqualsToken:
         return cx.builder.emitStringEq(lhs, rhs, false);
@@ -7221,6 +7471,7 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    ownedStringAppendSymbols: fn.body ? collectOwnedStringAppendSymbols(fn.body, cx.checker) : new Set<ts.Symbol>(),
     emptyArrayInference: inferEmptyArrayElementTypes(fn, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — nested function decls are NEVER generators
     // in slice 7a (the selector rejects `function*` nesting via
@@ -7301,6 +7552,9 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    ownedStringAppendSymbols: ts.isBlock(expr.body)
+      ? collectOwnedStringAppendSymbols(expr.body, cx.checker)
+      : new Set<ts.Symbol>(),
     emptyArrayInference: inferEmptyArrayElementTypes(expr, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — closures are never generator/async in 7a
     // (the selector rejects them in `isPhase1ClosureLiteral`).

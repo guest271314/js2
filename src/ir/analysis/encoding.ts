@@ -32,7 +32,8 @@
 // in the issue.
 
 import { ALLOC_NAMESPACES, type AllocSiteRegistry } from "../alloc-registry.js";
-import type { AllocSiteId, IrFunction, IrInstr, IrValueId } from "../nodes.js";
+import { forEachInstrDeep, type AllocSiteId, type IrFunction, type IrInstr, type IrValueId } from "../nodes.js";
+import type { IrStringEncoding } from "../string-runtime.js";
 
 /**
  * Encoding lattice. Ordering (most → least restrictive):
@@ -42,7 +43,7 @@ import type { AllocSiteId, IrFunction, IrInstr, IrValueId } from "../nodes.js";
  * any operand being `wtf16` forces `wtf16`; otherwise `utf8-guaranteed`
  * unless both are `ascii`.
  */
-export type Encoding = "ascii" | "utf8-guaranteed" | "wtf16";
+export type Encoding = IrStringEncoding;
 
 /** Rank in the lattice — higher is more permissive (closer to top). */
 function rank(e: Encoding): number {
@@ -118,7 +119,7 @@ export function analyzeEncoding(fn: IrFunction, registry: AllocSiteRegistry): vo
 
   for (const block of fn.blocks) {
     for (const instr of block.instrs) {
-      classifyInstr(instr, enc, record);
+      forEachInstrDeep(instr, (nested) => classifyInstr(nested, enc, record));
     }
   }
 }
@@ -137,7 +138,10 @@ function classifyInstr(
       // cannot create a lone surrogate, and joining two ASCII strings stays
       // ASCII. (WTF-16 inputs can split surrogate pairs across the seam, but
       // the lattice already forces `wtf16` whenever either operand is.)
-      record(instr.result, instr.alloc, joinEncoding(enc(instr.lhs), enc(instr.rhs)));
+      record(instr.result, instr.alloc, instr.encodingEvidence ?? joinEncoding(enc(instr.lhs), enc(instr.rhs)));
+      return;
+    case "string.char_at":
+      record(instr.result, instr.alloc, instr.encodingEvidence);
       return;
     case "call":
       // String-returning calls (Phase 2): origin rules for built-ins that

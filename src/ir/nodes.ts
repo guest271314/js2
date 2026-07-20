@@ -19,6 +19,7 @@ import type { ValType } from "./types.js";
 // consume it without the IR→codegen import inversion). Type-only:
 // nodes.ts stays free of value imports.
 import type { JsTag } from "./js-tag.js";
+import type { IrStringConcatMode, IrStringEncoding } from "./string-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Symbolic references
@@ -1036,6 +1037,10 @@ export interface IrInstrStringConcat extends IrInstrBase {
   readonly kind: "string.concat";
   readonly lhs: IrValueId;
   readonly rhs: IrValueId;
+  /** Producer proof for the result; the encoding pass validates/records it. */
+  readonly encodingEvidence?: IrStringEncoding;
+  /** `owned-append` is legal only after the producer proves prior values unobservable. */
+  readonly concatMode?: IrStringConcatMode;
 }
 
 /**
@@ -1059,6 +1064,26 @@ export interface IrInstrStringEq extends IrInstrBase {
 export interface IrInstrStringLen extends IrInstrBase {
   readonly kind: "string.len";
   readonly value: IrValueId;
+  readonly inputEncoding?: IrStringEncoding;
+}
+
+/** Return one UTF-16 code unit as a string, or the empty string out of bounds. */
+export interface IrInstrStringCharAt extends IrInstrBase {
+  readonly kind: "string.char_at";
+  readonly value: IrValueId;
+  /** Index after ToIntegerOrInfinity-compatible numeric normalization. */
+  readonly index: IrValueId;
+  readonly inputEncoding: IrStringEncoding;
+  readonly encodingEvidence: IrStringEncoding;
+}
+
+/** Return one UTF-16 code unit as f64, or NaN out of bounds. */
+export interface IrInstrStringCharCodeAt extends IrInstrBase {
+  readonly kind: "string.char_code_at";
+  readonly value: IrValueId;
+  /** Index after ToIntegerOrInfinity-compatible numeric normalization. */
+  readonly index: IrValueId;
+  readonly inputEncoding: IrStringEncoding;
 }
 
 // ---------------------------------------------------------------------------
@@ -2326,6 +2351,8 @@ export type IrInstr =
   | IrInstrStringConcat
   | IrInstrStringEq
   | IrInstrStringLen
+  | IrInstrStringCharAt
+  | IrInstrStringCharCodeAt
   | IrInstrObjectNew
   | IrInstrObjectGet
   | IrInstrObjectSet
@@ -2628,6 +2655,8 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "string.concat":
     case "string.eq":
     case "string.len":
+    case "string.char_at":
+    case "string.char_code_at":
     case "object.new":
     case "object.get":
     case "object.set":
@@ -2779,6 +2808,8 @@ export function mapNestedBuffers(
     case "string.concat":
     case "string.eq":
     case "string.len":
+    case "string.char_at":
+    case "string.char_code_at":
     case "object.new":
     case "object.get":
     case "object.set":
@@ -2883,6 +2914,9 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.recv, instr.key];
     case "string.len":
       return [instr.value];
+    case "string.char_at":
+    case "string.char_code_at":
+      return [instr.value, instr.index];
     case "object.new":
       return instr.values;
     case "object.get":

@@ -1831,6 +1831,24 @@ function makeResolver(
       if (idx === undefined) throw new Error("ir/integration: wasm:js-string length not registered");
       return [{ op: "call", funcIdx: idx }];
     },
+    emitStringCharAt(): readonly Instr[] {
+      if (ctx.nativeStrings) {
+        for (let i = 0; i < ctx.mod.functions.length; i++) {
+          if (ctx.mod.functions[i]!.name === "__str_charAt") {
+            return [{ op: "call", funcIdx: ctx.numImportFuncs + i }];
+          }
+        }
+        throw new Error("ir/integration: __str_charAt helper not registered");
+      }
+      const idx = ctx.funcMap.get("string_charAt");
+      if (idx === undefined) throw new Error("ir/integration: string_charAt import not registered");
+      return [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: idx }];
+    },
+    emitStringCharCodeAt(): readonly Instr[] {
+      const idx = ctx.nativeStrings ? ensureNativeCharCodeAtHelper(ctx) : ensureHostCharCodeAtGuarded(ctx);
+      if (idx === null) throw new Error("ir/integration: guarded charCodeAt helper unavailable");
+      return [{ op: "call", funcIdx: idx }];
+    },
     // -------------------------------------------------------------------
     // Exception handling dispatch (slice 9 — #1169h).
     //
@@ -1970,7 +1988,9 @@ function instrUsesStrings(instr: IrInstr): boolean {
     instr.kind === "string.const" ||
     instr.kind === "string.concat" ||
     instr.kind === "string.eq" ||
-    instr.kind === "string.len"
+    instr.kind === "string.len" ||
+    instr.kind === "string.char_at" ||
+    instr.kind === "string.char_code_at"
   );
 }
 

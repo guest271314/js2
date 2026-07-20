@@ -3,6 +3,10 @@
 /** String operations whose observable behavior is shared by every IR backend. */
 export type IrStringRuntimeIntrinsic = "constant" | "concat" | "length" | "char-at" | "char-code-at";
 
+/** Audited producer evidence consumed by linear string backends. */
+export type IrStringEncoding = "ascii" | "utf8-guaranteed" | "wtf16";
+export type IrStringConcatMode = "immutable" | "owned-append";
+
 export type IrStringRuntimeOperand = "string" | "number-index";
 export type IrStringRuntimeResult = "string" | "number";
 

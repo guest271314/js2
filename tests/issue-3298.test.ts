@@ -214,12 +214,17 @@ describe("#3298 — target-neutral LinearMemoryPlan", () => {
     });
   });
 
-  it("materializes linear-Wasm string data from the canonical plan bytes", async () => {
+  it("preserves canonical UTF-8 plan bytes while the shared backend claim stays ASCII-only", async () => {
     const result = await compile(`export function unicode(): number { return "hé".length; }`, { target: "linear" });
     expect(result.success, result.success ? "" : result.errors.map((error) => error.message).join("; ")).toBe(true);
 
     const report = getLastLinearIrReport();
-    expect(report?.compiled).toContain("unicode");
+    expect(report?.compiled).not.toContain("unicode");
+    expect(report?.rejected).toContainEqual({
+      func: "unicode",
+      reason: "build",
+      detail: "ir/linear-string: ASCII encoding proof required for constant result (got utf8-guaranteed)",
+    });
     const allocation = report?.memoryPlan.allocations.find((candidate) => candidate.dataSegmentId !== undefined);
     expect(allocation?.dataSegmentId).toBeDefined();
     expect(report?.memoryPlan.requireDataSegment(allocation!.dataSegmentId!).bytes).toEqual([104, 195, 169]);

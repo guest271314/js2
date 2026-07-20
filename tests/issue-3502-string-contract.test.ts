@@ -18,7 +18,8 @@ import {
 } from "../src/ir/analysis/string-evidence.js";
 import { IrFunctionBuilder } from "../src/ir/builder.js";
 import { getLastLinearIrReport } from "../src/ir/backend/linear-integration.js";
-import { irVal, type IrType } from "../src/ir/nodes.js";
+import { lowerIrModuleToPorffor } from "../src/ir/backend/porffor/integration.js";
+import { forEachInstrDeep, irVal, type IrInstr, type IrType } from "../src/ir/nodes.js";
 import { IR_STRING_RUNTIME, utf16CharAt, utf16CharCodeAt } from "../src/ir/string-runtime.js";
 
 const STRING: IrType = { kind: "string" };
@@ -38,20 +39,35 @@ const numberEvidence: TypedValueEvidence = {
 };
 
 describe("#3502 backend-neutral string contract", () => {
-  it("records the exact initial unsupported boundary without rewriting the landing source", async () => {
+  it("claims the untouched landing source with typed append and character IR", async () => {
     const source = readFileSync(sourcePath, "utf8");
     await compile(source, { fileName: sourcePath, target: "linear" });
     const report = getLastLinearIrReport();
 
-    expect(report?.compiled).toEqual([]);
-    expect(report?.irModule.functions).toEqual([]);
-    expect(report?.rejected).toEqual([
-      {
-        func: "run",
-        reason: "build",
-        detail: 'ir/from-ast: compound assign to non-f64 slot "text" (i32) not in slice 6 (run)',
-      },
-    ]);
+    expect(report?.compiled).toEqual(["run"]);
+    expect(report?.rejected).toEqual([]);
+    const instructions: IrInstr[] = [];
+    for (const block of report!.irModule.functions[0]!.blocks) {
+      for (const instruction of block.instrs) {
+        forEachInstrDeep(instruction, (nested) => instructions.push(nested));
+      }
+    }
+    expect(instructions.some((instr) => instr.kind === "string.char_at")).toBe(true);
+    expect(instructions.some((instr) => instr.kind === "string.char_code_at")).toBe(true);
+    expect(instructions.filter((instr) => instr.kind === "string.concat")).toHaveLength(3);
+    expect(
+      instructions
+        .filter((instr): instr is Extract<IrInstr, { kind: "string.concat" }> => instr.kind === "string.concat")
+        .every((instr) => instr.concatMode === "owned-append" && instr.encodingEvidence === "ascii"),
+    ).toBe(true);
+    expect(
+      report!.memoryPlan.allocations
+        .filter((allocation) => allocation.allocationKind === "string")
+        .every((allocation) => allocation.encoding === "ascii"),
+    ).toBe(true);
+    expect(() =>
+      lowerIrModuleToPorffor(report!.irModule, { memoryPlan: report!.memoryPlan, prefs: { gc: false } }),
+    ).not.toThrow();
   });
 
   it("uses semantic checker/producer evidence instead of the linear carrier", () => {
@@ -173,5 +189,69 @@ describe("#3502 backend-neutral string contract", () => {
       `${LINEAR_STRING_ASCII_PROOF_REQUIRED} for length input (got unproven)`,
     );
     expect(JSON.stringify(concatBinding)).not.toMatch(/funcIdx|typeIdx|RawC|renderer|#include|__str_/);
+  });
+
+  it("rejects non-ASCII source at the linear runtime boundary with a stable diagnostic", async () => {
+    await compile(
+      `
+        /** @param {number} n @returns {number} */
+        export function unicodeAppend(n) {
+          let text = "";
+          for (let i = 0; i < n; i++) {
+            text += "é";
+          }
+          return text.charCodeAt(0);
+        }
+      `,
+      { fileName: "issue-3502-non-ascii.js", target: "linear" },
+    );
+    const report = getLastLinearIrReport();
+    expect(report?.compiled).toStrictEqual([]);
+    expect(report?.rejected).toContainEqual({
+      func: "unicodeAppend",
+      reason: "build",
+      detail: `${LINEAR_STRING_ASCII_PROOF_REQUIRED} for constant result (got utf8-guaranteed)`,
+    });
+    expect(() =>
+      lowerIrModuleToPorffor(report!.irModule, {
+        memoryPlan: report!.memoryPlan,
+        prefs: { gc: false },
+      }),
+    ).toThrow(`${LINEAR_STRING_ASCII_PROOF_REQUIRED} for constant result (got utf8-guaranteed)`);
+  });
+
+  it("keeps concat immutable when a loop observes the previous string value", async () => {
+    const compiled = await compile(
+      `
+        /** @param {number} n @returns {number} */
+        export function observedAppend(n) {
+          let text = "";
+          let previous = "";
+          for (let i = 0; i < n; i++) {
+            previous = text;
+            text += "a";
+          }
+          return previous.length;
+        }
+      `,
+      { fileName: "issue-3502-observed-append.js", target: "linear" },
+    );
+    expect(compiled.success, compiled.errors.map((error) => error.message).join("\n")).toBe(true);
+    const report = getLastLinearIrReport();
+    expect(report?.compiled).toStrictEqual(["observedAppend"]);
+    expect(report?.rejected).toStrictEqual([]);
+    const concats: Array<Extract<IrInstr, { kind: "string.concat" }>> = [];
+    for (const block of report!.irModule.functions[0]!.blocks) {
+      for (const instruction of block.instrs) {
+        forEachInstrDeep(instruction, (nested) => {
+          if (nested.kind === "string.concat") concats.push(nested);
+        });
+      }
+    }
+    expect(concats).toHaveLength(1);
+    expect(concats[0]?.concatMode).toBe("immutable");
+    const { instance } = await WebAssembly.instantiate(compiled.binary, compiled.importObject ?? {});
+    const observedAppend = (instance.exports as Record<string, (n: number) => number>).observedAppend;
+    expect(observedAppend(3)).toBe(2);
   });
 });
