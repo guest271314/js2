@@ -38,30 +38,16 @@ import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./wi
 const NON_CONFIGURABLE_GLOBALS = new Set(["NaN", "Infinity", "undefined"]);
 
 /**
- * (#2703, #3422) Build the terminal `throw` sequence for the spec error cases of
- * `delete` (§13.5.1.2): a super reference (ReferenceError), a null/undefined
- * base, or a strict-mode non-configurable property refusal (TypeError).
- *
- * Historically this threw a **bare string** on the shared exception tag, relying
- * on the legacy `wrapTest` harness stripping the expected constructor out of
- * `assert.throws`. Under the authentic test262 harness (#3370) that assumption is
- * false: the real `propertyHelper.js::isConfigurable()` probes the refusal with
- * `try { delete obj[name] } catch (e) { if (!(e instanceof TypeError)) throw … }`,
- * and a thrown STRING is not `instanceof TypeError` — so ~313 strict-rerun cases
- * failed with "Expected TypeError, got TypeError: Cannot delete non-configurable
- * property in strict mode" (the string carried its own "TypeError:" prefix, which
- * is why the `+ e` message looked like a TypeError yet the `instanceof` guard
- * still tripped). Building a **real** error instance via `buildThrowJsErrorInstrs`
- * (host `__new_<Kind>` import / standalone in-module constructor) makes
- * `instanceof` match in both lanes — the same fix #3471 landed for the
- * strict-mode read-only-assignment sibling family.
- *
- * `message` is the bare human message (NO "Kind:" prefix — the constructor adds
- * it). `opts.flush` MUST be the enclosing `FunctionContext` so the late
- * `__new_<Kind>` import's funcIdx shifts are applied to already-emitted body
- * instructions (the #1839 late-import ordering hazard). After the throw the rest
- * of the enclosing expression is unreachable, so the `delete` expression's
- * nominal i32 result is supplied stack-polymorphically.
+ * (#2703, #3422) Terminal `throw` for `delete`'s spec error cases (§13.5.1.2):
+ * super reference → ReferenceError; null/undefined base or strict-mode
+ * non-configurable refusal → TypeError. Emits a REAL error instance via
+ * `buildThrowJsErrorInstrs` (host `__new_<Kind>` / standalone in-module ctor),
+ * NOT a bare string: the authentic harness (#3370)
+ * `propertyHelper.js::isConfigurable()` rethrows unless `e instanceof TypeError`,
+ * so the pre-#3422 bare-string throw broke ~313 strict reruns (the `delete`
+ * counterpart of #3471). `message` carries no "Kind:" prefix (the ctor adds it);
+ * `opts.flush` = fctx applies the late `__new_<Kind>` funcIdx shift to the
+ * already-emitted body (#1839). The throw is terminal / stack-polymorphic.
  */
 function deleteThrowInstrs(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): Instr[] {
   return buildThrowJsErrorInstrs(ctx, kind, message, { flush: fctx });
