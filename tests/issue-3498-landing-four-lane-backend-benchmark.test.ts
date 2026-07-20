@@ -221,7 +221,10 @@ describe("#3498 landing four-lane backend benchmark", () => {
   it("keeps the manual canonical workflow in real benchmark mode", () => {
     const workflow = readFileSync(resolve(repoRoot, ".github/workflows/landing-four-lane-backend.yml"), "utf8");
     const runner = readFileSync(resolve(repoRoot, "scripts/benchmark-landing-four-lane.mts"), "utf8");
-    expect(workflow).toContain("--benchmark --canonical-ubuntu");
+    expect(workflow.match(/^ {8}run: pnpm run benchmark:landing-four-lane.*$/gm)).toEqual([
+      "        run: pnpm run benchmark:landing-four-lane --benchmark --canonical-ubuntu --output .tmp/landing-four-lane-canonical",
+      "        run: pnpm run benchmark:landing-four-lane --validate-result .tmp/landing-four-lane-canonical/latest.json",
+    ]);
     expect(workflow).not.toContain("--probe --canonical-ubuntu");
     expect(workflow).toContain('"benchmarks/wasmtime-cold-host/**"');
     expect(workflow).toContain('"scripts/wasmtime-bench-child-js.mjs"');
