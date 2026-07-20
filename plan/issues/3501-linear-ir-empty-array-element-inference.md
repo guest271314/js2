@@ -1,7 +1,7 @@
 ---
 id: 3501
 title: "Infer typed linear vectors from empty-array read/write evidence"
-status: in-progress
+status: in-review
 sprint: current
 created: 2026-07-20
 updated: 2026-07-20
@@ -99,8 +99,8 @@ IR and `LinearMemoryPlan`; it must not introduce a Porffor-only array carrier.
 The first exact Porffor probe exposed typed JS bitwise composites
 (`js.shr_u`, `js.bitxor`, `js.bitand`, `js.bitor`) as an independent legality
 gap. That work belongs to #3499 and its owned files; #3501 does not duplicate or
-modify that lowering. Final exact-source native validation waits for #3499 to
-land on `origin/main` and merges that landed commit before running.
+modify that lowering. #3499 landed in `origin/main` at `946ec0e8`; the final
+exact-source native validation below ran only after merging that commit.
 
 ## Acceptance criteria
 
@@ -118,22 +118,39 @@ land on `origin/main` and merges that landed commit before running.
       OOB reads reject conservatively with focused coverage.
 - [x] Direct linear Wasm and Porffor consume the same asserted forwarding
       record contract; the adapter contains no duplicated tag/offset literals.
-- [ ] The exact public source renders through landed #3499 Porffor lowering and
+- [x] The exact public source renders through landed #3499 Porffor lowering and
       executes Node-equal native C under ASan/UBSan.
-- [ ] Focused/regression checks, typecheck, lint, formatting, and repository
+- [x] Focused/regression checks, typecheck, lint, formatting, and repository
       policy checks pass on the final merge of `origin/main`.
 
 ## Test results
 
-- `pnpm exec vitest run tests/issue-3501-empty-array-element-inference.test.ts`
-  — 8 passed, 2 optional native tests skipped without an initialized Porffor
-  checkout.
-- `JS2WASM_PORFFOR_ROOT=... PORFFOR_NATIVE_REQUIRED=1
-PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run ... -t "allocation growth
-and alias-forwarded"` — focused native vector runtime passed under combined
-  ASan/UBSan.
-- `pnpm exec tsc --noEmit --tsBuildInfoFile /tmp/js2-3501-tsconfig.tsbuildinfo`
-  — passed.
+- Final base: merged `origin/main@946ec0e8` (#3499) in branch merge
+  `aedc71500` with no conflicts or edits to #3499-owned files.
+- `JS2WASM_PORFFOR_ROOT=../3482-direct-porffor-ab/vendor/Porffor
+PORFFOR_NATIVE_REQUIRED=1 PORFFOR_NATIVE_SANITIZERS=1 pnpm exec vitest run
+tests/issue-3501-empty-array-element-inference.test.ts --pool=forks
+--poolOptions.forks.singleFork=true --no-file-parallelism --reporter=verbose`
+  — 10/10 passed. The source-derived vector probe and the untouched public
+  `array-sum.js` (441 bytes, SHA-256
+  `61affa6e44688788cfdb50f5186078cb55c171f19df2bb104e2dcb9f331cd59c`)
+  both rendered to C and exited cleanly under combined ASan/UBSan with no
+  sanitizer diagnostics. Exact Node/WasmGC/linear-Wasm/Porffor-native outputs
+  were `0 -> 0`, `17 -> 2314`, `2000 -> 1018392`, and
+  `1000000 -> 511492320`.
+- Adjacent vector/linear/Porffor regression command covering 11 focused files
+  — 81 passed, 6 optional-native tests skipped.
+- `pnpm run typecheck`, `pnpm run lint`, and `pnpm run format:check` — passed.
+- `pnpm run check:ir-fallbacks` — passed with no unintended/post-claim increase.
+- `pnpm run check:linear-ir` — passed; compiled units improved from 8 to 10.
+- `pnpm run check:loc-budget` and `pnpm run check:issues` — passed.
 
-Final exact-source sanitizer and regression evidence will be recorded after
-the #3499 dependency is present on landed `origin/main`.
+## Landed-main baseline observed
+
+The broad adjacent run also included `tests/issue-1977.test.ts`; two landed-main
+relocation-value assertions failed (`69` expected / `24` received and `40`
+expected / `16` received). The same two failures reproduce on the clean landed
+#3499 worktree at `2a0e9da29`, without any #3501 files. #3501 therefore records
+the upstream baseline and does not broaden into the independently owned direct
+linear lowerer/runtime behavior. Its own source-derived forwarding/growth probe
+passes in linear Wasm and sanitized Porffor native execution.

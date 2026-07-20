@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -32,6 +33,8 @@ import { ts } from "../src/ts-api.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const exactSourcePath = join(here, "../website/public/benchmarks/competitive/programs/array-sum.js");
+const exactSourceBytes = 441;
+const exactSourceSha256 = "61affa6e44688788cfdb50f5186078cb55c171f19df2bb104e2dcb9f331cd59c";
 const porfforRoot = process.env.JS2WASM_PORFFOR_ROOT ?? join(here, "../vendor/Porffor");
 const hasOptionalPorffor = existsSync(join(porfforRoot, "compiler/ir.js"));
 const nativeRequired = process.env.PORFFOR_NATIVE_REQUIRED === "1";
@@ -298,7 +301,7 @@ describe("#3501 shared planned-vector backend operations", () => {
 
 describe("#3501 exact landing array-sum source", () => {
   it("matches Node through WasmGC and source-derived shared linear IR", async () => {
-    const source = readFileSync(exactSourcePath, "utf8");
+    const source = readExactSource();
     const inputs = [0, 1, 16, 17, 2000];
     const expected = exactNodeValues(inputs);
 
@@ -323,7 +326,7 @@ describe("#3501 exact landing array-sum source", () => {
       requireNativeEnvironment();
       const inputs = [0, 17, 2000, 1_000_000];
       const expected = exactNodeValues(inputs);
-      const source = readFileSync(exactSourcePath, "utf8");
+      const source = readExactSource();
       const { report } = await compileLinear(source, exactSourcePath);
       const input = lowerIrModuleToPorffor(report.irModule, {
         memoryPlan: report.memoryPlan,
@@ -372,6 +375,13 @@ function exactNodeValues(inputs: readonly number[]): number[] {
   return JSON.parse(
     execFileSync(process.execPath, ["--input-type=module", "--eval", script], { encoding: "utf8" }),
   ) as number[];
+}
+
+function readExactSource(): string {
+  const source = readFileSync(exactSourcePath);
+  expect(source.byteLength).toBe(exactSourceBytes);
+  expect(createHash("sha256").update(source).digest("hex")).toBe(exactSourceSha256);
+  return source.toString("utf8");
 }
 
 function collectPorfforNodes(value: unknown, out: PorfforNode[] = []): PorfforNode[] {
