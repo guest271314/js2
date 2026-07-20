@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-20",
   "threshold": 1500,
-  "totalCeiling": 439677,
+  "totalCeiling": 439822,
   "files": {
     "src/codegen-linear/index.ts": 5572,
     "src/codegen-linear/runtime.ts": 3852,
@@ -26,12 +26,12 @@
     "src/codegen/expressions/call-builtin-static.ts": 3213,
     "src/codegen/expressions/call-identifier.ts": 2205,
     "src/codegen/expressions/call-namespace-static.ts": 2035,
-    "src/codegen/expressions/call-receiver-method.ts": 3269,
+    "src/codegen/expressions/call-receiver-method.ts": 3274,
     "src/codegen/expressions/call-tail-dispatch.ts": 1867,
     "src/codegen/expressions/calls-closures.ts": 1595,
-    "src/codegen/expressions/calls.ts": 8155,
+    "src/codegen/expressions/calls.ts": 8158,
     "src/codegen/expressions/identifiers.ts": 1978,
-    "src/codegen/expressions/new-super.ts": 4061,
+    "src/codegen/expressions/new-super.ts": 4065,
     "src/codegen/expressions/operator-assignment.ts": 3062,
     "src/codegen/expressions/unary-updates.ts": 1912,
     "src/codegen/extern-declarations.ts": 1650,
@@ -71,6 +71,6 @@
     "src/ir/lower.ts": 3653,
     "src/ir/nodes.ts": 3011,
     "src/ir/select.ts": 3639,
-    "src/runtime.ts": 14871
+    "src/runtime.ts": 14901
   }
 }
