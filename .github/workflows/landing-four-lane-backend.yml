@@ -143,10 +143,10 @@ jobs:
         env:
           CC: clang
           JS2WASM_PORFFOR_ROOT: vendor/Porffor
-        run: pnpm run benchmark:landing-four-lane -- --benchmark --canonical-ubuntu --output .tmp/landing-four-lane-canonical
+        run: pnpm run benchmark:landing-four-lane --benchmark --canonical-ubuntu --output .tmp/landing-four-lane-canonical
 
       - name: Validate the machine-readable matrix
-        run: pnpm run benchmark:landing-four-lane -- --validate-result .tmp/landing-four-lane-canonical/latest.json
+        run: pnpm run benchmark:landing-four-lane --validate-result .tmp/landing-four-lane-canonical/latest.json
 
       - name: Upload canonical evidence without thresholds
         if: always()
