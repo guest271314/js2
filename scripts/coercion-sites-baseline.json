@@ -25,7 +25,7 @@
   "codegen/expressions/logical-ops.ts": 2,
   "codegen/expressions/new-builtin-globals.ts": 4,
   "codegen/expressions/new-super.ts": 1,
-  "codegen/expressions/operator-assignment.ts": 12,
+  "codegen/expressions/operator-assignment.ts": 13,
   "codegen/expressions/unary-updates.ts": 3,
   "codegen/expressions.ts": 1,
   "codegen/fixups.ts": 1,

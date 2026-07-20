@@ -1,9 +1,9 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: done
+status: ready
 pr: 1292
-sprint: 61
+sprint: current
 created: 2026-06-07
 updated: 2026-06-10
 completed: 2026-06-10
@@ -213,3 +213,7 @@ Runtime-side coercion counterpart: the ToPrimitive bucket under #1917.
 > wiring (D2) + dynamic-`new` brand-dispatch (D3) + `%TypedArray%` intrinsic
 > identity (D4, coordinates #2580 M3). This is the constructor-tier extension of
 > this issue's case-(c). See `plan/issues/2651-builtin-constructor-prototype-as-value-substrate.md`.
+
+## Reopened 2026-07-20 (stale false-done review)
+
+Marked `done` but live test262 shows: BigUint64Array built-in static property value read still unsupported (standalone). Reopened as `ready`. See #3474 (done-status integrity).

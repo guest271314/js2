@@ -5621,6 +5621,13 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // #1364b — class object: a deleted static-method name must not appear in
       // `obj.method in C` checks anymore.
       if (typeof key === "string" && _isDeletedClassProp(obj, key)) return false;
+      // (#3479) Registered class-OBJECT static method — the host proxy must
+      // answer `"m" in C` / GetOwnProperty for static methods the same way the
+      // direct `__extern_has` path (_wasmStructHasOwn:2748) already does via the
+      // allowlist. Without this, `Object.prototype.hasOwnProperty.call(C, "m")`
+      // (the `.call.bind` form propertyHelper uses) misses static methods.
+      const staticMethods = _staticMethodNames.get(obj);
+      if (staticMethods !== undefined && typeof key === "string" && staticMethods.includes(key)) return true;
       if (safeGetField(key) !== undefined) return true;
       const sc = _wasmStructProps.get(obj);
       if (sc && key in sc) return true;
@@ -5660,6 +5667,27 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // reflection operation. Do not let the host proxy resurrect it during
       // Object.assign/object spread enumeration.
       if (isTombstoned(key)) return undefined;
+      // (#3479) Registered class-OBJECT static method — return the spec
+      // descriptor the direct `__getOwnPropertyDescriptor` path already produces
+      // (_readOwnDescriptor:4381 → {writable:true, enumerable:false,
+      // configurable:true} with the static-method bridge value). `[[GetOwnProperty]]`
+      // is what `Object.prototype.hasOwnProperty.call(C, "m")` (propertyHelper's
+      // `.call.bind` form) invokes, so without this the host proxy reports static
+      // methods absent even though `in` / `Object.getOwnPropertyDescriptor` see them.
+      if (typeof key === "string" && !_isDeletedClassProp(obj, key)) {
+        const staticMethods = _staticMethodNames.get(obj);
+        if (staticMethods !== undefined && staticMethods.includes(key)) {
+          const cd = _readOwnDescriptor(obj, key, exports);
+          if (cd !== undefined) {
+            try {
+              Object.defineProperty(target, key, cd);
+            } catch {
+              /* already defined with different flags — ignore */
+            }
+            return cd;
+          }
+        }
+      }
       // For Proxy invariants, getOwnPropertyDescriptor must match target's
       // non-configurable keys. Our target is an empty extensible object, so
       // we can return any descriptor we like. We must also reflect the
