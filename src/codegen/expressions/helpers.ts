@@ -481,8 +481,9 @@ export function emitCoercedLocalSet(
  * functions, ambient declarations, class values, …) — the caller leaves such
  * arguments untouched.
  *
- * Deliberately does NOT consult the raw TS checker (`ctx.checker.*`) — the
- * membership test is `ctx.topLevelFunctionNames` (`src/codegen/index.ts` /
+ * Deliberately does NOT consult the raw TypeScript checker at all (no
+ * `getSymbolAtLocation`/`getTypeAtLocation` reach-in) — the membership test
+ * is `ctx.topLevelFunctionNames` (`src/codegen/index.ts` /
  * `declarations.ts`), the SAME hoisting-time registry `class-member-keys.ts`
  * and `call-builtin-static.ts` already use to answer "is this identifier a
  * real compiled top-level function". It is populated purely from AST
