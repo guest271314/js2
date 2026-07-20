@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import { LinearEmitter } from "../src/ir/backend/linear-emitter.js";
 import {
   PORFFOR_KIND_NAMES,
+  PORFFOR_TYPE_ENTRIES,
   porfforRendererOutputText,
   type PorfforNode,
   type PorfforRendererInput,
@@ -41,6 +42,7 @@ const F64 = irVal({ kind: "f64" });
 const I32 = irVal({ kind: "i32" });
 const U32 = { kind: "val", val: { kind: "i32" }, signed: false } as const;
 const BITWISE_OPS = ["js.bitand", "js.bitor", "js.bitxor", "js.shl", "js.shr_s", "js.shr_u"] as const;
+const porfforU32Type = PORFFOR_TYPE_ENTRIES.find(([name]) => name === "u32")![1];
 
 function scalarFunction(
   name: string,
@@ -175,9 +177,10 @@ describe("#3499 backend-neutral typed bitwise composites", () => {
     const shifts = nodes.filter((node) => nodeName(node) === "Bin" && (node[3] === "<<" || node[3] === ">>"));
     expect(shifts.length).toBeGreaterThanOrEqual(3);
     for (const shift of shifts) {
+      // Every generated C shift is unsigned. In particular, arithmetic
+      // js.shr_s must not rely on C's implementation-defined negative >>.
+      expect(shift[1]).toBe(porfforU32Type);
       const count = shift[5] as PorfforNode;
-      expect(nodeName(count)).toBe("Bin");
-      expect(count[3]).toBe("&");
       expect(collectNodes(count).some((node) => nodeName(node) === "Const" && node[3] === 31)).toBe(true);
     }
 
@@ -204,6 +207,7 @@ describe("#3499 backend-neutral typed bitwise composites", () => {
         Number.POSITIVE_INFINITY ^ Number.NaN,
         -1 << 31,
         -2_147_483_648 >> 63,
+        -123_456_789 >> 0,
         -1 >>> 0,
         4_294_967_297.75 & -3,
         -2 | 4_294_967_297.5,
@@ -267,6 +271,7 @@ int main(int argc, char** argv) {
   printf("%.17g\\n", ${symbol("bitxor")}(INFINITY, NAN));
   printf("%.17g\\n", ${symbol("shl")}(-1.0, 31.0));
   printf("%.17g\\n", ${symbol("shr_s")}(-2147483648.0, 63.0));
+  printf("%.17g\\n", ${symbol("shr_s")}(-123456789.0, 0.0));
   printf("%.17g\\n", ${symbol("shr_u")}(-1.0, 0.0));
   printf("%.17g\\n", ${symbol("mixedF64I32")}(4294967297.75, -3));
   printf("%.17g\\n", ${symbol("mixedI32F64")}(-2, 4294967297.5));

@@ -106,9 +106,11 @@ Porffor maps `i32.trunc_sat_f64_u` through its range-aware conversion node with
 the range-known flag clear. That detail matters for `NaN` and infinities:
 Porffor uses its defined conversion helper rather than an undefined raw C
 float-to-integer cast. `i32.shl` converts its left operand to u32 before `<<`
-and converts the bit pattern back to i32 afterward. Every shift count is
-explicitly converted to u32 and masked by `0x1f`; this makes the generated C
-defined for counts such as 32 and 63 instead of relying on target behavior.
+and converts the bit pattern back to i32 afterward. Signed right shift is also
+reconstructed from logical u32 shift plus an explicit sign-fill mask, avoiding
+C's implementation-defined `negative_i32 >> count`. Every generated C shift
+therefore has u32 operands, and every dynamic shift count is masked by `0x1f`;
+counts such as 0, 32, and 63 are defined without relying on target behavior.
 
 Current pre-prerequisite validation:
 

@@ -450,6 +450,12 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
         effects: PORFFOR_FX.none,
         value: 31,
       });
+    const u32Const = (value: number): PorfforExpr => ({
+      kind: "const",
+      type: "u32",
+      effects: PORFFOR_FX.none,
+      value,
+    });
 
     switch (op) {
       case "i32.and":
@@ -469,9 +475,27 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
         out.push(convertExpr("i32", shifted, 1));
         return;
       }
-      case "i32.shr_s":
-        out.push(binary("i32", ">>", signed(left!), maskedShift()));
+      case "i32.shr_s": {
+        // C leaves right-shifting a negative signed integer
+        // implementation-defined. Reconstruct Wasm/ECMAScript arithmetic
+        // shift entirely with defined u32 operations:
+        //   logical | ((signMask << ((32 - n) & 31)) & nonZeroMask)
+        // The non-zero mask suppresses sign fill when n == 0 without ever
+        // shifting by 32.
+        const value = unsigned(left!);
+        const count = maskedShift();
+        const logical = binary("u32", ">>", value, count);
+        const signBit = binary("u32", ">>", value, u32Const(31));
+        const signMask = binary("u32", "-", u32Const(0), signBit);
+        const fillCount = binary("u32", "&", binary("u32", "-", u32Const(32), count), u32Const(31));
+        const shiftedSignMask = binary("u32", "<<", signMask, fillCount);
+        const negatedCount = binary("u32", "-", u32Const(0), count);
+        const countHighBit = binary("u32", ">>", binary("u32", "|", count, negatedCount), u32Const(31));
+        const nonZeroMask = binary("u32", "-", u32Const(0), countHighBit);
+        const signFill = binary("u32", "&", shiftedSignMask, nonZeroMask);
+        out.push(convertExpr("i32", binary("u32", "|", logical, signFill), 1));
         return;
+      }
       case "i32.shr_u":
         out.push(binary("u32", ">>", unsigned(left!), maskedShift()));
         return;
