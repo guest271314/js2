@@ -6,6 +6,7 @@ sprint: Backlog
 created: 2026-07-20
 updated: 2026-07-20
 completed: 2026-07-20
+pr: 3439
 priority: high
 horizon: l
 feasibility: hard
