@@ -129,6 +129,12 @@ Current-main legality and implementation evidence:
 - The additive generic #3482 adapter parameterizes only the exported unary
   function and source parameter. The canary wrapper retains its exact index,
   ABI assertions, safety checks, command model, hashes, and tests.
+- Benchmark capture pins the Wasmtime CLI and embedded host to 46.0.1 and the
+  host compiler/toolchain to exact Rust/Cargo 1.94.1 (`rust-version = "1.94"`
+  in the host manifest). Its checkpoint identity includes the rebuilt host and
+  exact 6-warmup/9-measured median configuration. Resume and final validation
+  enforce the phase/round rotation formula, so a valid-looking permutation
+  cannot be reused under a different interleave schedule.
 
 Why the native JS2 cells are blocked instead of patched here: without a
 selected source-derived function there is no typed SSA or shared

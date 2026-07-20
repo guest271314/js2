@@ -13,6 +13,7 @@ import {
   LANDING_FOUR_LANE_MEASURED_ROUNDS,
   LANDING_FOUR_LANE_WARMUP_ROUNDS,
   classifyLandingSanitizerExecution,
+  landingFourLaneExpectedOrder,
   nullMeasurements,
   validateLandingFourLaneResult,
   verifyLandingBenchmarkCorpus,
@@ -30,6 +31,8 @@ import {
   parseLandingWasmtimeColdHostOutput,
 } from "./lib/landing-runtime-timing.mjs";
 import {
+  LANDING_FOUR_LANE_INNER_MEASURED_CALLS,
+  LANDING_FOUR_LANE_INNER_WARMUP_CALLS,
   LANDING_WASMTIME_COMPILE_OPTIONS,
   LANDING_WASMTIME_WARM_VALIDATION_EXPORT,
   LANDING_WASM_OPT_ARGS,
@@ -98,7 +101,9 @@ const CAPTURE_PHASE_METHODOLOGY: Readonly<Record<CapturePhase, string>> = Object
   warm: "uniform-six-warmup-nine-call-median-v2",
 });
 
-const CAPTURE_CONFIGURATION = Object.freeze({
+export const LANDING_FOUR_LANE_RUSTC_VERSION = "1.94.1";
+
+export const CAPTURE_CONFIGURATION = Object.freeze({
   rounds: {
     warmup: LANDING_FOUR_LANE_WARMUP_ROUNDS,
     measured: LANDING_FOUR_LANE_MEASURED_ROUNDS,
@@ -106,7 +111,11 @@ const CAPTURE_CONFIGURATION = Object.freeze({
   wasm: {
     compile: { ...LANDING_WASMTIME_COMPILE_OPTIONS, experimentalIR: false },
     normalize: LANDING_WASM_OPT_ARGS,
-    warmDriver: { warmup: 5, measured: 40, aggregation: "minimum" },
+    warmDriver: {
+      warmup: LANDING_FOUR_LANE_INNER_WARMUP_CALLS,
+      measured: LANDING_FOUR_LANE_INNER_MEASURED_CALLS,
+      aggregation: "median",
+    },
   },
   js2Native: { target: "linear", allocator: "analysis-stack" },
   plainPorffor: {
@@ -116,9 +125,17 @@ const CAPTURE_CONFIGURATION = Object.freeze({
   native: {
     optimized: ["-O3", "-DNDEBUG", "-fno-lto"],
     sanitizer: ["-O1", "-fno-omit-frame-pointer", "-fsanitize=address,undefined"],
-    warmDriver: { warmup: 6, measured: 9, aggregation: "median" },
+    warmDriver: {
+      warmup: LANDING_FOUR_LANE_INNER_WARMUP_CALLS,
+      measured: LANDING_FOUR_LANE_INNER_MEASURED_CALLS,
+      aggregation: "median",
+    },
   },
-  v8WarmDriver: { warmup: 6, measured: 9, aggregation: "median" },
+  v8WarmDriver: {
+    warmup: LANDING_FOUR_LANE_INNER_WARMUP_CALLS,
+    measured: LANDING_FOUR_LANE_INNER_MEASURED_CALLS,
+    aggregation: "median",
+  },
 });
 
 const SANITIZER_ENVIRONMENT = Object.freeze({
@@ -510,7 +527,7 @@ export function validatePartialSampleSets(
   let previousComplete = true;
   let derivedPhase: CapturePhase | null = null;
   let derivedRound = -1;
-  for (const phase of phases) {
+  for (const [phaseIndex, phase] of phases.entries()) {
     const lengths = cells.map((cell) => samples.get(cellKey(cell))![phase].length);
     if (new Set(lengths).size !== 1) throw new Error(`#3498 partial ${phase} sample counts differ across cells`);
     const length = lengths[0]!;
@@ -538,10 +555,15 @@ export function validatePartialSampleSets(
       }
     }
     for (let round = 0; round < length; round++) {
-      const orders = cells.map((cell) => samples.get(cellKey(cell))![phase][round]!.order).sort((a, b) => a - b);
-      if (orders.some((order, index) => order !== index)) {
-        throw new Error(`#3498 partial ${phase} round ${round} has duplicate or missing interleave order`);
-      }
+      cells.forEach((cell, canonicalCellIndex) => {
+        const order = samples.get(cellKey(cell))![phase][round]!.order;
+        const expectedOrder = landingFourLaneExpectedOrder(canonicalCellIndex, phaseIndex, round, cells.length);
+        if (order !== expectedOrder) {
+          throw new Error(
+            `#3498 partial ${phase} round ${round} cell ${canonicalCellIndex} order ${order} does not match rotation ${expectedOrder}`,
+          );
+        }
+      });
     }
   }
   if (derivedPhase === null || completedPhase !== derivedPhase || completedRound !== derivedRound) {
@@ -963,8 +985,19 @@ async function prepareCaptureSetup(
   const cargoTarget = join(coldHostTemporaryDirectory, "target");
   mkdirSync(setupRoot, { recursive: true });
   try {
+    const rustcVersion = commandVersion("rustc", ["--version", "--verbose"], repoRoot);
+    const cargoVersion = commandVersion("cargo", ["--version", "--verbose"], repoRoot);
+    assertLandingCaptureRustcVersion(rustcVersion);
+    assertExactRustToolVersion(cargoVersion, "cargo");
+    if (versions.rustc !== rustcVersion || versions.cargo !== cargoVersion) {
+      throw new Error("Rust toolchain changed after environment provenance was recorded; refusing capture");
+    }
     const coldHostManifest = resolve(repoRoot, "benchmarks/wasmtime-cold-host/Cargo.toml");
-    const coldHostBuildEnvironment = { CARGO_TARGET_DIR: cargoTarget };
+    const coldHostBuildEnvironment = {
+      CARGO_TARGET_DIR: cargoTarget,
+      RUSTC: "rustc",
+      RUSTUP_TOOLCHAIN: LANDING_FOUR_LANE_RUSTC_VERSION,
+    };
     const coldHostBuild = timedSpawnWithRss(
       "cargo",
       ["build", "--release", "--manifest-path", coldHostManifest],
@@ -985,8 +1018,6 @@ async function prepareCaptureSetup(
       sha256: String(coldHostArtifact.sha256),
     };
     const coldHostVersion = commandVersion(coldHostPath, ["--version"], repoRoot);
-    const rustcVersion = commandVersion("rustc", ["--version", "--verbose"], repoRoot);
-    const cargoVersion = commandVersion("cargo", ["--version", "--verbose"], repoRoot);
     const cliEngineVersion = parseWasmtimeEngineVersion(versions.wasmtime);
     const hostEngineVersion = parseWasmtimeEngineVersion(coldHostVersion);
     if (cliEngineVersion !== hostEngineVersion) {
@@ -1967,6 +1998,19 @@ function parseWasmtimeEngineVersion(value: string): string {
   const match = value.match(/(?:^|\n)wasmtime\s+(\d+\.\d+\.\d+)\b/);
   if (!match) throw new Error(`could not parse Wasmtime engine version from ${JSON.stringify(value)}`);
   return match[1]!;
+}
+
+export function assertLandingCaptureRustcVersion(value: string): void {
+  assertExactRustToolVersion(value, "rustc");
+}
+
+function assertExactRustToolVersion(value: string, tool: "rustc" | "cargo"): void {
+  const match = value.match(new RegExp(`(?:^|\\n)${tool}\\s+(\\d+\\.\\d+\\.\\d+)\\b`));
+  if (!match || match[1] !== LANDING_FOUR_LANE_RUSTC_VERSION) {
+    throw new Error(
+      `#3498 capture requires ${tool} ${LANDING_FOUR_LANE_RUSTC_VERSION}; observed ${JSON.stringify(value)}`,
+    );
+  }
 }
 
 function commandVersion(command: string, args: readonly string[], cwd: string): string {

@@ -10,6 +10,23 @@ export const LANDING_FOUR_LANE_SCHEMA_VERSION = 1;
 export const LANDING_FOUR_LANE_WARMUP_ROUNDS = 5;
 export const LANDING_FOUR_LANE_MEASURED_ROUNDS = 21;
 
+export function landingFourLaneExpectedOrder(
+  canonicalCellIndex: number,
+  phaseIndex: number,
+  round: number,
+  executableCellCount: number,
+): number {
+  for (const [label, value] of Object.entries({ canonicalCellIndex, phaseIndex, round })) {
+    if (!Number.isInteger(value) || value < 0) throw new Error(`${label} must be a nonnegative integer`);
+  }
+  if (!Number.isInteger(executableCellCount) || executableCellCount <= 0) {
+    throw new Error("executableCellCount must be a positive integer");
+  }
+  if (canonicalCellIndex >= executableCellCount) throw new Error("canonicalCellIndex is out of range");
+  const rotation = (round + phaseIndex) % executableCellCount;
+  return (canonicalCellIndex - rotation + executableCellCount) % executableCellCount;
+}
+
 export const LANDING_FOUR_LANE_IDS = [
   "v8-node-exact-source",
   "js2-wasmgc-wasmtime-cranelift",
@@ -310,19 +327,26 @@ export function validateLandingFourLaneResult(value: unknown): asserts value is 
     const executableCells = cells
       .map((cell) => record(cell, "benchmark cell"))
       .filter((cell) => cell.status !== "unsupported");
-    for (const phase of ["build", "startup", "cold", "warm"] as const) {
+    for (const [phaseIndex, phase] of (["build", "startup", "cold", "warm"] as const).entries()) {
       for (let round = 0; round < warmupRounds + measuredRounds; round++) {
-        const orders = executableCells.map((cell) => {
+        executableCells.forEach((cell, canonicalCellIndex) => {
           const measurement = record(record(cell.measurements, "measurements")[phase], phase);
           const samples = array(measurement.samples, `${phase}.samples`);
           const sample = samples.find((candidate) => record(candidate, "sample").round === round);
           if (!sample) throw new Error(`${phase} is missing benchmark round ${round}`);
-          return nonnegativeInteger(record(sample, "sample").order, `${phase}.order`);
+          const order = nonnegativeInteger(record(sample, "sample").order, `${phase}.order`);
+          const expectedOrder = landingFourLaneExpectedOrder(
+            canonicalCellIndex,
+            phaseIndex,
+            round,
+            executableCells.length,
+          );
+          if (order !== expectedOrder) {
+            throw new Error(
+              `${phase} round ${round} cell ${canonicalCellIndex} order ${order} does not match rotation ${expectedOrder}`,
+            );
+          }
         });
-        const sorted = [...orders].sort((left, right) => left - right);
-        if (sorted.some((order, index) => order !== index)) {
-          throw new Error(`${phase} round ${round} is not a complete interleaved executable-cell order`);
-        }
       }
     }
   }

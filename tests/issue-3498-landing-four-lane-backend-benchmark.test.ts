@@ -8,13 +8,19 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { validatePartialSampleSets } from "../scripts/benchmark-landing-four-lane.mjs";
+import {
+  CAPTURE_CONFIGURATION,
+  LANDING_FOUR_LANE_RUSTC_VERSION,
+  assertLandingCaptureRustcVersion,
+  validatePartialSampleSets,
+} from "../scripts/benchmark-landing-four-lane.mjs";
 import { LANDING_BENCHMARK_PROGRAMS } from "../scripts/lib/landing-benchmark-corpus.mjs";
 import {
   LANDING_FOUR_LANE_IDS,
   LANDING_FOUR_LANE_MEASURED_ROUNDS,
   LANDING_FOUR_LANE_WARMUP_ROUNDS,
   classifyLandingSanitizerExecution,
+  landingFourLaneExpectedOrder,
   validateLandingFourLaneResult,
   verifyLandingBenchmarkCorpus,
   type LandingFourLaneResult,
@@ -173,9 +179,9 @@ describe("#3498 landing four-lane backend benchmark", () => {
     const completeBenchmark = clone(coreResult);
     completeBenchmark.capture = nullBenchmark.capture;
     const executableCells = completeBenchmark.cells.filter((cell: any) => cell.status !== "unsupported");
-    for (const [order, cell] of executableCells.entries()) {
+    for (const [canonicalCellIndex, cell] of executableCells.entries()) {
       const program = completeBenchmark.programs.find((candidate: any) => candidate.id === cell.programId)!;
-      for (const phase of ["build", "startup", "cold", "warm"] as const) {
+      for (const [phaseIndex, phase] of (["build", "startup", "cold", "warm"] as const).entries()) {
         cell.measurements[phase] = {
           reason: null,
           samples: Array.from(
@@ -183,7 +189,7 @@ describe("#3498 landing four-lane backend benchmark", () => {
             (_, round) => ({
               phase: round < LANDING_FOUR_LANE_WARMUP_ROUNDS ? "warmup" : "measured",
               round,
-              order,
+              order: landingFourLaneExpectedOrder(canonicalCellIndex, phaseIndex, round, executableCells.length),
               wallNs: 1_000 + round,
               cpuNs: 900 + round,
               peakRssBytes: 4_096,
@@ -196,6 +202,13 @@ describe("#3498 landing four-lane backend benchmark", () => {
       }
     }
     expect(() => validateLandingFourLaneResult(completeBenchmark)).not.toThrow();
+
+    const wrongRotation = clone(completeBenchmark);
+    const rotatedCells = wrongRotation.cells.filter((cell: any) => cell.status !== "unsupported");
+    const firstOrder = rotatedCells[0].measurements.build.samples[0].order;
+    rotatedCells[0].measurements.build.samples[0].order = rotatedCells[1].measurements.build.samples[0].order;
+    rotatedCells[1].measurements.build.samples[0].order = firstOrder;
+    expect(() => validateLandingFourLaneResult(wrongRotation)).toThrow(/does not match rotation/);
 
     const syntheticOutput = clone(completeBenchmark);
     const wasmCold = syntheticOutput.cells.find(
@@ -215,10 +228,15 @@ describe("#3498 landing four-lane backend benchmark", () => {
     expect(workflow.match(/timeout-minutes: 90/g)).toHaveLength(2);
     expect(workflow.match(/runs-on: ubuntu-24\.04/g)).toHaveLength(2);
     expect(workflow.match(/node-version: "25\.7\.0"/g)).toHaveLength(2);
+    expect(workflow).toContain('RUST_TOOLCHAIN_VERSION: "1.94.1"');
+    expect(
+      workflow.match(/rustup toolchain install "\$RUST_TOOLCHAIN_VERSION" --profile minimal --no-self-update/g),
+    ).toHaveLength(2);
+    expect(workflow.match(/RUSTUP_TOOLCHAIN=\$RUST_TOOLCHAIN_VERSION/g)).toHaveLength(2);
     expect(workflow).toContain('WASMTIME_VERSION: "46.0.1"');
-    expect(readFileSync(resolve(repoRoot, "benchmarks/wasmtime-cold-host/Cargo.toml"), "utf8")).toContain(
-      'wasmtime = "=46.0.1"',
-    );
+    const coldHostManifest = readFileSync(resolve(repoRoot, "benchmarks/wasmtime-cold-host/Cargo.toml"), "utf8");
+    expect(coldHostManifest).toContain('rust-version = "1.94"');
+    expect(coldHostManifest).toContain('wasmtime = "=46.0.1"');
     expect(readFileSync(resolve(repoRoot, "benchmarks/wasmtime-cold-host/src/main.rs"), "utf8")).toContain(
       'println!("wasmtime {}", wasmtime_environ::VERSION)',
     );
@@ -242,6 +260,11 @@ describe("#3498 landing four-lane backend benchmark", () => {
     expect(runner).toContain("binary: setup.coldHostBinary");
     expect(runner).toContain("rustc: setup.rustcVersion");
     expect(runner).toContain("cargo: setup.cargoVersion");
+    expect(runner).toContain('RUSTC: "rustc"');
+    expect(runner).toContain("RUSTUP_TOOLCHAIN: LANDING_FOUR_LANE_RUSTC_VERSION");
+    expect(runner.indexOf("assertLandingCaptureRustcVersion(rustcVersion)")).toBeLessThan(
+      runner.indexOf("const coldHostBuild = timedSpawnWithRss"),
+    );
   });
 
   it("uses the same six-plus-nine median warm estimator for the Wasmtime lane", () => {
@@ -252,9 +275,21 @@ describe("#3498 landing four-lane backend benchmark", () => {
     expect(source.match(/if \(__t\d > __t\d\)/g)).toHaveLength(36);
     expect(source).toContain("return __t4;");
     expect(source).not.toContain("__best");
+    expect(CAPTURE_CONFIGURATION.wasm.warmDriver).toEqual({
+      warmup: LANDING_FOUR_LANE_INNER_WARMUP_CALLS,
+      measured: LANDING_FOUR_LANE_INNER_MEASURED_CALLS,
+      aggregation: "median",
+    });
     const runner = readFileSync(resolve(repoRoot, "scripts/benchmark-landing-four-lane.mts"), "utf8");
     expect(runner).toContain("landingFourLaneWasmtimeMedianWarmDriverSource()");
     expect(runner).not.toContain("landingWasmtimeWarmDriverSource(5, 40)");
+  });
+
+  it("requires the exact Rust compiler used to build the cold host", () => {
+    expect(LANDING_FOUR_LANE_RUSTC_VERSION).toBe("1.94.1");
+    expect(() => assertLandingCaptureRustcVersion("rustc 1.94.1 (e408947bf 2026-03-25)\nhost: fixture")).not.toThrow();
+    expect(() => assertLandingCaptureRustcVersion("rustc 1.94.0 (fixture)")).toThrow(/requires rustc 1\.94\.1/);
+    expect(() => assertLandingCaptureRustcVersion("rustc 1.94.2 (fixture)")).toThrow(/requires rustc 1\.94\.1/);
   });
 
   it("distinguishes sanitizer findings from infrastructure failures", () => {
@@ -335,6 +370,62 @@ describe("#3498 landing four-lane backend benchmark", () => {
     const detachedObservation = makeSamples();
     detachedObservation.values().next().value.startup[0].outputObservation.commandIndex = 1;
     expect(() => validate(detachedObservation)).toThrow(/not tied to the expected command/);
+
+    const rotationPrograms = (await verifyLandingBenchmarkCorpus(repoRoot)).slice(0, 2);
+    const rotationCells = rotationPrograms.map(
+      (candidate) =>
+        ({
+          programId: candidate.id,
+          laneId: "v8-node-exact-source",
+          sourceSha256: candidate.sha256,
+        }) as any,
+    );
+    const rotationSamples = new Map(
+      rotationCells.map((candidate, canonicalCellIndex) => {
+        const candidateProgram = rotationPrograms[canonicalCellIndex]!;
+        const build = Array.from(
+          { length: LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS },
+          (_, round) => ({
+            phase: round < LANDING_FOUR_LANE_WARMUP_ROUNDS ? "warmup" : "measured",
+            round,
+            order: landingFourLaneExpectedOrder(canonicalCellIndex, 0, round, rotationCells.length),
+            wallNs: 1_000 + round,
+            cpuNs: null,
+            peakRssBytes: 4_096,
+            validatedOutput: null,
+            outputObservation: null,
+            commands: [[process.execPath, "--check", resolve(repoRoot, candidateProgram.sourcePath)]],
+          }),
+        );
+        return [`${candidate.programId}:v8-node-exact-source`, { build, startup: [], cold: [], warm: [] }];
+      }),
+    ) as any;
+    expect(() =>
+      validatePartialSampleSets(
+        repoRoot,
+        temporaryRoot,
+        rotationPrograms,
+        rotationCells,
+        rotationSamples,
+        "build",
+        LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS - 1,
+      ),
+    ).not.toThrow();
+    const firstRotationOrder = rotationSamples.values().next().value.build[0].order;
+    const secondRotationSamples = [...rotationSamples.values()][1];
+    rotationSamples.values().next().value.build[0].order = secondRotationSamples.build[0].order;
+    secondRotationSamples.build[0].order = firstRotationOrder;
+    expect(() =>
+      validatePartialSampleSets(
+        repoRoot,
+        temporaryRoot,
+        rotationPrograms,
+        rotationCells,
+        rotationSamples,
+        "build",
+        LANDING_FOUR_LANE_WARMUP_ROUNDS + LANDING_FOUR_LANE_MEASURED_ROUNDS - 1,
+      ),
+    ).toThrow(/does not match rotation/);
   });
 
   it("times native cold initialization plus its first call without changing warm/default setup", () => {

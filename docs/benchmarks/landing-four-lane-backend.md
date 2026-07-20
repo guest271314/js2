@@ -76,12 +76,16 @@ pnpm run benchmark:landing-four-lane -- --validate-result .tmp/landing-four-lane
 ```
 
 The runner interleaves every executable kernel/lane cell in a rotating order
-for 5 warmup and 21 measured outer rounds. Every sample retains positive wall
-time and peak RSS, CPU time where the method exposes it, exact invocations, and
-an observed output tied to one of those invocations. `latest.json` retains the
-raw samples and is authoritative. `summary.md` is a convenience view containing
-measured-round-only median wall milliseconds; it does not rank lanes. Unsafe
-plain-Porffor medians are marked UB-contaminated and non-authoritative.
+for 5 warmup and 21 measured outer rounds. For phase index `p`, round `r`, and
+canonical executable-cell index `j`, the retained order is exactly
+`mod(j - mod(r + p, N), N)`. Both checkpoint and final-result validation enforce
+that formula rather than accepting an arbitrary permutation. Every sample
+retains positive wall time and peak RSS, CPU time where the method exposes it,
+exact invocations, and an observed output tied to one of those invocations.
+`latest.json` retains the raw samples and is authoritative. `summary.md` is a
+convenience view containing measured-round-only median wall milliseconds; it
+does not rank lanes. Unsafe plain-Porffor medians are marked UB-contaminated and
+non-authoritative.
 Completed outer rounds are checkpointed in `partial-measurements.json`; a
 restart accepts that checkpoint only after rebuilding the cold host and
 validating exact cell keys, contiguous phase/round sets, interleave orders,
@@ -134,12 +138,15 @@ leak ownership. Exit zero without a sanitizer signature is clean; nonzero with
 a recognized ASan/UBSan signature is a finding; every other result aborts as
 infrastructure failure.
 
-The manual workflow pins `ubuntu-24.04`, Node `25.7.0`, and Wasmtime `46.0.1`,
-invokes `--benchmark --canonical-ubuntu`, has no performance threshold, and
-uploads the complete output directory. Results record Actions image metadata
-when present, `/etc/os-release`, kernel, CPU model, Node, Clang, Rust, Cargo,
-Wasmtime, Binaryen, and the pinned Porffor commit. Pull-request CI continues to
-run the faster support/correctness/sanitizer probe.
+The manual workflow pins `ubuntu-24.04`, Node `25.7.0`, Rust/Cargo `1.94.1`, and
+Wasmtime `46.0.1`, invokes `--benchmark --canonical-ubuntu`, has no performance
+threshold, and uploads the complete output directory. The cold-host manifest
+declares the compatible `rust-version = "1.94"`, while the capture runner
+requires exact Rust/Cargo 1.94.1 and directs Cargo to the same recorded `rustc`
+before accepting samples. Results record Actions image metadata when present,
+`/etc/os-release`, kernel, CPU model, Node, Clang, Rust, Cargo, Wasmtime,
+Binaryen, and the pinned Porffor commit. Pull-request CI continues to run the
+faster support/correctness/sanitizer probe.
 
 ## Interpretation boundary
 

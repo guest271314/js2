@@ -33,6 +33,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RUST_TOOLCHAIN_VERSION: "1.94.1"
   WASMTIME_VERSION: "46.0.1"
 
 jobs:
@@ -60,6 +61,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "25.7.0"
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN_VERSION" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN_VERSION" >> "$GITHUB_ENV"
 
       - name: Setup pnpm via Corepack
         run: |
@@ -109,6 +117,13 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "25.7.0"
+
+      - name: Install pinned Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN_VERSION" --profile minimal --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN_VERSION" >> "$GITHUB_ENV"
 
       - name: Setup pnpm via Corepack
         run: |
