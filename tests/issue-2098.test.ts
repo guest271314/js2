@@ -52,6 +52,36 @@ describe("#2098 flake classification + bucket signature in diff-test262", () => 
     expect(out).toMatch(/ct_suspect unk\.js \(baseline compile unknown\)/);
   });
 
+  it("surfaces compile_timeout recoveries without counting exposed traps as trap growth", () => {
+    const p = paths();
+    writeJsonl(p.base, [
+      { oracle_version: 1, file: "fast-trap.js", status: "compile_timeout" },
+      { oracle_version: 1, file: "slow-trap.js", status: "compile_timeout" },
+    ]);
+    writeJsonl(p.cand, [
+      {
+        oracle_version: 1,
+        file: "fast-trap.js",
+        status: "fail",
+        error_category: "null_deref",
+        compile_ms: 700,
+      },
+      {
+        oracle_version: 1,
+        file: "slow-trap.js",
+        status: "fail",
+        error_category: "oob",
+        compile_ms: 8000,
+      },
+    ]);
+    const { code, out } = runDiff(p.base, p.cand);
+    expect(code).toBe(0);
+    expect(out).toMatch(/ct_flake recoveries.*: 1 ===/);
+    expect(out).toMatch(/ct_suspect recoveries.*: 1 ===/);
+    expect(out).toMatch(/Trap baseline unknowns .*: 2 ===/);
+    expect(out).not.toMatch(/GATE FAIL: trap category/);
+  });
+
   it("emits a bucket signature stable across row order and wasm_sha (cluster identity)", () => {
     const p = paths();
     writeJsonl(p.base, [
