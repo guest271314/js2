@@ -1,7 +1,7 @@
 ---
 id: 3482
 title: "Benchmark direct Porffor against JS2 typed SSA and shared-plan Porffor IR"
-status: blocked
+status: in-progress
 sprint: Backlog
 created: 2026-07-20
 updated: 2026-07-20
@@ -14,7 +14,7 @@ area: ir, codegen-linear, backend, benchmarking, ci
 language_feature: compiler-internals
 es_edition: n/a
 goal: backend-agnostic-ir
-blocked_by: "issue #3478 / PR #3432 (not yet present on this branch base)"
+blocked_by: "final PR publication waits for issue #3478 / PR #3432 to merge"
 related: [3288, 3295, 3297, 3298, 3299, 3300, 3336, 3478]
 origin: "2026-07-20 explicit user request: fair plain/direct Porffor vs JS2 source-to-typed-SSA/shared-plan/Porffor-IR/native-C A/B"
 ---
@@ -38,12 +38,12 @@ both C outputs ─> the same external Clang flags ─> the same lane ABI/harness
 
 Report four rows, not a single ambiguous "Porffor vs JS2" pair:
 
-| Row id | Source/front end | Value ABI | Allocation row |
-| --- | --- | --- | --- |
-| `direct-porffor-gc` | pinned Porffor directly consumes the `.ts` | Porffor boxed `jsval` for ordinary TypeScript `number` | Porffor default global GC |
-| `direct-porffor-bump` | pinned Porffor directly consumes the `.ts` | Porffor boxed `jsval` | Porffor global `gc=false` bump control |
-| `js2-porffor-arena-v1` | JS2 source -> typed SSA -> shared plan -> Porffor IR | raw `f64` at the benchmark function boundary | JS2 `arena-v1` |
-| `js2-porffor-analysis-stack-arena-v1` | same JS2 pipeline and renderer | raw `f64` | JS2 per-site `analysis-stack-arena-v1` |
+| Row id                                | Source/front end                                     | Value ABI                                              | Allocation row                         |
+| ------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------ | -------------------------------------- |
+| `direct-porffor-gc`                   | pinned Porffor directly consumes the `.ts`           | Porffor boxed `jsval` for ordinary TypeScript `number` | Porffor default global GC              |
+| `direct-porffor-bump`                 | pinned Porffor directly consumes the `.ts`           | Porffor boxed `jsval`                                  | Porffor global `gc=false` bump control |
+| `js2-porffor-arena-v1`                | JS2 source -> typed SSA -> shared plan -> Porffor IR | raw `f64` at the benchmark function boundary           | JS2 `arena-v1`                         |
+| `js2-porffor-analysis-stack-arena-v1` | same JS2 pipeline and renderer                       | raw `f64`                                              | JS2 per-site `analysis-stack-arena-v1` |
 
 The result is an engineering measurement, not a marketing winner table. The
 end-to-end direct-vs-JS2 rows necessarily conflate front end, value ABI, object
@@ -52,18 +52,24 @@ constant and isolate `LinearMemoryPlan` allocation policy.
 
 ## Dependency and readiness gate
 
-This issue is blocked on #3478 / PR #3432. Implementation starts only after
-PR #3432 lands on `main` with its validated Ubuntu fix commit `2509181c3`
-reachable from the merge result. Consume, do not copy, its:
+The final PR is blocked on #3478 / PR #3432. Per the implementation handoff,
+development starts from its exact green head
+`4c7e3a01d31275163ec9940e864c7292f6961b20`; publication waits until that PR
+lands and this branch has merged the latest `origin/main`. Consume, do not copy,
+its:
 
 - `tests/fixtures/porffor-source-to-native-canary.ts` checked-in source;
 - exact source-derived `LinearIrResult.irModule` telemetry;
 - exact `LinearIrResult.memoryPlan` paired with that module; and
 - explicit `update=checkout` Porffor initialization pattern.
 
-`blocked_by` is string-valued while #3478 is absent from this branch's base so
-the current issue index remains valid. Once #3478 lands, replace it with the
-normal machine dependency `depends_on: [3478]` before implementation begins.
+The planning handoff named `2509181c33516ca1fe2462f7008650f2d99eb129`
+as the Ubuntu fix, but that object is not an ancestor of the exact green head.
+The green head instead contains
+`559109b723d8c08c0469594db9591f40b1fdfad0`; both commits have stable patch ID
+`e45f9ef358b38d5dee543ccc2ca16f92962b193f`. The benchmark asserts the green
+head and its reachable patch-equivalent fix. Once #3478 lands, replace the
+string-valued `blocked_by` with `depends_on: [3478]`.
 
 At implementation start, re-run the open-PR/open-issue duplicate scan and
 verify `git log origin/main --grep="#3478"` contains the merged dependency.
@@ -200,6 +206,7 @@ change expected)**
   Add only `--no-gc` for `direct-porffor-bump`; leave `gc` unset for
   `direct-porffor-gc`. Do not pass `--gc=false` (a string-valued preference can
   be truthy), and do not use `porf native`.
+
 - Set `globalThis.file` to the real `.ts` path before dynamically importing
   pinned `compiler/index.js`. Install a temporary `globalThis.compileCallback`
   that captures the module immediately before rendering. Do not import or copy
@@ -217,6 +224,10 @@ change expected)**
   the C text before generating a wrapper symbol. The fixture name contains
   only safe identifier characters; do not reimplement Porffor's general
   sanitizer.
+- Preserve plain direct generated C after entry suppression. The only allowed
+  text compatibility edit is the separately asserted pinned `%lld` LP64 cast;
+  do not repair object-entry loads/stores in the primary direct rows. Hash the
+  rendered C independently from the separate common wrapper.
 - Guard every reliance on `compileCallback`, `cg.times`, module fields, boxed
   function ABI, C symbol spelling, `entry` suppression, `porf_init`,
   `porf_data_init`, and GC stack-anchor support behind the exact commit check
@@ -239,7 +250,7 @@ compatibility test and explicit justification in the issue update.
 - Accept exactly one row id, source path/SHA, output directory, and mode
   (`optimized` or `sanitize`). Reject unknown options.
 - For a JS2 row, call public `compile(source, { target: "linear", allocator,
-  fileName })` sequentially with:
+fileName })` sequentially with:
   - `bump` -> required plan policy `arena-v1`;
   - `analysis-stack` -> required policy `analysis-stack-arena-v1`.
 - Capture `getLastLinearIrReport()` immediately after `compile()` and before
@@ -335,6 +346,7 @@ compatibility test and explicit justification in the issue update.
 
   Record the exact argv arrays. Never let direct Porffor choose independent
   LTO/link flags through `porf native`.
+
 - Run five complete warmup rounds, then 21 measured rounds. Every round runs
   all four lanes once in a deterministic cyclic Latin-square order; record the
   actual order so thermal/cache drift cannot silently favor one lane. Warmup
@@ -381,7 +393,12 @@ compatibility test and explicit justification in the issue update.
   `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`. Leak detection is disabled
   because arena/bump rows intentionally retain memory until process exit; all
   address, bounds, lifetime, alignment, and undefined-behavior checks remain
-  hard failures.
+  enabled. Plain pinned Porffor's known misaligned dynamic-object `f64`
+  accesses are an expected recorded result, not a skipped row: both direct
+  rows must fail with the exact UBSan misaligned-address class. Both JS2 rows
+  must complete all 20,000 calls with the exact checksum and no sanitizer
+  finding. Any different direct failure or any JS2 finding fails the test.
+
 - Never merge sanitizer samples or `-O1` artifact sizes into the optimized
   benchmark JSON/table.
 
@@ -415,7 +432,9 @@ compatibility test and explicit justification in the issue update.
     "dependency": {
       "issue": 3478,
       "pr": 3432,
-      "requiredFixCommit": "2509181c3"
+      "requiredGreenHead": "4c7e3a01d31275163ec9940e864c7292f6961b20",
+      "validatedFixCommit": "559109b723d8c08c0469594db9591f40b1fdfad0",
+      "supersededPatchEquivalentCommit": "2509181c33516ca1fe2462f7008650f2d99eb129"
     },
     "environment": {
       "os": "linux",
@@ -455,11 +474,29 @@ compatibility test and explicit justification in the issue update.
           "objectBytes": 56,
           "objectBytesIsEstimate": true
         },
+        "safety": {
+          "generatedC": "plain-pinned-porffor",
+          "sanitizerExpectation": "misaligned-object-entry-ubsan",
+          "performanceAuthority": "ub-contaminated-non-authoritative",
+          "finding": {
+            "kind": "misaligned-dynamic-object-f64",
+            "objectEntryStrideBytes": 20,
+            "payloadOffsetBytes": 8,
+            "secondEntryPayloadOffsetBytes": 28,
+            "requiredAlignmentBytes": 8,
+            "rawAccessSites": { "gcLoads": 2, "entryStores": 3, "entryLoads": 1 }
+          }
+        },
+        "validity": {
+          "performanceAuthority": "ub-contaminated-non-authoritative",
+          "knownUndefinedBehavior": true
+        },
         "artifacts": {
           "renderedCBytes": 0,
           "wrapperBytes": 0,
           "objectBytes": 0,
           "executableBytes": 0,
+          "renderedCSha256": "64-hex",
           "cSha256": "64-hex"
         },
         "warmups": [],
@@ -484,13 +521,18 @@ compatibility test and explicit justification in the issue update.
     ],
     "interpretation": {
       "endToEndConflates": ["frontend", "value-abi", "layout", "ir", "allocator"],
-      "policyIsolationPair": [
-        "js2-porffor-arena-v1",
-        "js2-porffor-analysis-stack-arena-v1"
-      ]
+      "policyIsolationPair": ["js2-porffor-arena-v1", "js2-porffor-analysis-stack-arena-v1"]
     }
   }
   ```
+
+  In `sanitize` mode, each row retains one sample verdict rather than a
+  performance summary. Direct samples record
+  `verdict: "expected-ubsan-failure"`, nonzero process status/signal, exact
+  diagnostic class/line, and stdout/stderr hashes; their output/checksum are
+  `null` because UBSan aborts during fixed canaries. JS2 samples record
+  `verdict: "clean"`, status zero, and exact fixed outputs/checksum. A missing
+  row, a different direct failure, or any JS2 sanitizer finding is invalid.
 
 - Store checksums as decimal strings. Use bytes and nanoseconds as integer base
   units; derive display milliseconds only in summaries.
@@ -539,6 +581,7 @@ compatibility test and explicit justification in the issue update.
   Verify checkout HEAD equals the superproject gitlink and
   `PORFFOR_IR_COMMIT` before install/test. This override is mandatory because
   `.gitmodules` intentionally declares `update = none`.
+
 - Pin the repository's Node/Corepack/pnpm setup, require Ubuntu Clang, install
   with `pnpm install --frozen-lockfile`, and set
   `PORFFOR_NATIVE_REQUIRED=1`. The semantic job runs the four-row ASan/UBSan
@@ -580,6 +623,9 @@ The implementation must fail loudly if any invariant is false:
    all raw samples and actual row order are retained.
 8. ASan/UBSan uses separately built artifacts and never contributes optimized
    runtime, size, RSS, or compile summaries.
+9. Plain direct rendered C retains its raw object-entry accesses. Its known
+   UBSan failure is explicit, and direct optimized timings are always labelled
+   UB-contaminated and non-authoritative.
 
 ## Portability
 
@@ -622,18 +668,59 @@ The implementation must fail loudly if any invariant is false:
   row order balance positions; quartiles and all raw samples expose spread.
 - **Sanitizer/optimized conflation:** separate builds, commands, artifacts, and
   workflow jobs; never copy sanitizer sizes/times into optimized results.
+- **Plain direct Porffor undefined behavior:** do not normalize the offending
+  generated accesses. Require the pinned direct UBSan failure, require clean
+  JS2 rows, retain raw stderr and C hashes, and mark direct optimized timings
+  UB-contaminated/non-authoritative.
 - **Benchmark runner drift:** declare and lock `tsx`; do not rely on floating
   `npx --yes` downloads.
 
+## Implementation notes (2026-07-20)
+
+- The branch was created from exact green prerequisite head
+  `4c7e3a01d31275163ec9940e864c7292f6961b20`, then planning commit
+  `f891b3e0f4327c9f0c3ac2394bb95d48f5821cfc` was cherry-picked. No source
+  fixture or telemetry was copied or reconstructed.
+- Pinned direct Porffor renders the one source parameter plus hidden
+  `#newtarget` and `#this` as three `jsval` C parameters. Its suppressed
+  top-level `#main` remains necessary for source initialization, so the direct
+  wrapper calls that symbol during lane initialization before timing. Both
+  facts are exact-commit structural assertions, not generalized Porffor APIs.
+- The first all-row ASan/UBSan run exposed misaligned `f64` accesses in pinned
+  direct Porffor's 20-byte dynamic-object entries. With the payload at offset
+  8, the second entry payload is at byte offset 28 and violates eight-byte
+  alignment. A briefly attempted benchmark-only unaligned-helper rewrite was
+  rejected before final capture because it would benchmark a repaired
+  compiler rather than plain Porffor.
+- The final adapter only counts the unchanged raw sites: three `entryPtr`
+  stores and one load in each direct row, plus two GC traversal loads in the
+  GC row. The separately built sanitizer matrix must record both direct rows'
+  exact `runtime error: ... misaligned address` failure and must require both
+  JS2 rows to complete 20,000 calls with fixed outputs
+  `[-535, 235, 675, 3645]` and checksum `4711770`. No suppression or production
+  `src/**` change is used. Optimized direct results are retained but explicitly
+  UB-contaminated and non-authoritative.
+- Corrected local evidence command:
+  `PORFFOR_DIRECT_AB_REQUIRED=1 PORFFOR_DIRECT_AB_TEST_OUTPUT=.tmp/porffor-direct-ab-safety-corrected pnpm run test:porffor-direct-ab`.
+  Direct GC aborts at representative `rendered.c:3006` with
+  `runtime error: store to misaligned address` (rendered-C SHA-256
+  `8dd5f0be49386b638cf3a631393573fe77aaecdeef2f1ff9ca6d3dc77660c93c`);
+  direct bump aborts at `rendered.c:828` with the same class (SHA-256
+  `9edf0adba0ea04679b3eb76adc375da533467ff409879b50f0f90854c4ed0517`).
+  Both JS2 rows exit zero with the exact checksum. Raw stderr hashes/logs and
+  exact argv are retained in that artifact; schema revalidation passes through
+  the package runner.
+
 ## Acceptance criteria
 
-- [ ] #3478 / PR #3432 is merged, and main contains the validated Ubuntu fix
-      commit `2509181c3` in its ancestry.
+- [ ] #3478 / PR #3432 is merged, and main contains exact green head
+      `4c7e3a01d` plus reachable patch-equivalent Ubuntu fix `559109b723d8`.
 - [ ] One checked-in `.ts` byte sequence and SHA feed all four rows and a Node
       oracle; no `.js` twin or hand-built replacement IR exists.
 - [ ] Pinned direct Porffor accepts the file through the exact
       `porf c --module -O1` path, and the programmatic adapter suppresses only
-      generated `main` before render.
+      generated `main` before render; apart from the asserted `%lld` cast, its
+      object-entry C remains plain and independently hashed.
 - [ ] Every direct internal assumption is commit-fingerprinted and
       structurally asserted before its value is used.
 - [ ] JS2 rows consume the exact #3478 source-derived `IrModule` and
@@ -648,14 +735,19 @@ The implementation must fail loudly if any invariant is false:
       RSS, C/object/executable size, and compile phases.
 - [ ] Every output/checksum matches the Node oracle before a sample enters the
       result; all 21 raw samples and actual orders are retained.
-- [ ] ASan/UBSan correctness runs separately for all four rows and is advisory
-      CI, never an optimized performance input.
+- [ ] ASan/UBSan runs separately for all four rows, records both exact expected
+      plain-direct misalignment failures, requires both JS2 rows clean, and is
+      advisory CI rather than an optimized performance input.
+- [ ] Every direct optimized timing is labelled UB-contaminated and
+      non-authoritative in raw JSON, generated Markdown, and methodology docs.
 - [ ] Performance CI is `workflow_dispatch` artifact-only, has no noisy speed
       thresholds, initializes Porffor with explicit `update=checkout`, and
       cannot pass with a skipped row.
 - [ ] `latest.json`, generated `latest.md`, and the methodology document contain
       provenance, exact commands, the required caveat, and the policy-isolating
-      pair; raw results are checked in only from a complete Ubuntu artifact.
+      pair; if canonical Ubuntu is unavailable before merge, a complete local
+      capture is retained with an unmistakable noncanonical Darwin label and
+      no cross-machine claim.
 - [ ] The existing #3300 note is explicitly labelled a hand-built-IR policy
       proof, not the direct compiler comparison.
 - [ ] New commands use a declared lockfile-backed runner; no undeclared
