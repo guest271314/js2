@@ -250,6 +250,8 @@ export interface ClosureInfo {
   returnType: ValType | null;
   /** Parameter types of the closure (excluding the closure struct self param) */
   paramTypes: ValType[];
+  /** True only for source closures with one or more captured lexical bindings. */
+  hasCaptures?: boolean;
 }
 
 /** Metadata for a generator lowered to an in-module WasmGC state machine (#680). */
@@ -1409,11 +1411,11 @@ export interface CodegenContext {
   applyClosureReserved?: boolean;
   /**
    * (#3468 C-core) Set when `ensureObjectRuntime` reserved the closure-own-
-   * property side-table helpers (`__is_closure_internal`, `__closure_bag_lookup`,
+   * property side-table helpers (`__is_closure_prop_carrier`, `__closure_bag_lookup`,
    * `__closure_bag_ensure`, `__closure_prop_get`, `__closure_prop_set`). Their
-   * bodies self-call `__extern_get`/`__extern_set` and need the COMPLETE closure
-   * base-wrapper type set (via `collectClosureBaseWrapperTypeIdxs`), both only
-   * available at FINALIZE, so they are filled by `fillClosurePropHelpers` —
+   * bodies self-call `__extern_get`/`__extern_set` and need the COMPLETE
+   * captured-closure subtype set, both only available at FINALIZE, so they are
+   * filled by `fillClosurePropHelpers` —
    * same reserve-then-fill pattern as `applyClosureReserved` (#1719). Only set
    * under `--target standalone`, so the GC/host path (which uses `env::__extern_*`
    * imports) stays byte-identical.

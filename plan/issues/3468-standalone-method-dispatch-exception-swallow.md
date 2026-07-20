@@ -5,7 +5,7 @@ status: blocked
 spec: complete
 assignee: ttraenkler/sendev-3468-closure-props
 created: 2026-07-19
-blocked_reason: "root-caused; C-core implemented + PR open; STAYS blocked pending stakeholder floor-rebaseline decision (this fix flips vacuous standalone passes to correct FAILs — measured delta reported to tech-lead)"
+blocked_reason: "The captured-closure dynamic-runtime substrate is independently mergeable; shared noncapturing wrappers and top-level test262 harness routing remain blocked after an exact-baseline merge-group measurement found 3,608 stable pass→fail transitions (3,540 assertion-time module-init throws). Fix the exposed semantics; do not rebaseline."
 priority: high
 feasibility: hard
 task_type: bug
@@ -22,9 +22,6 @@ loc-budget-allow:
   - src/codegen/object-runtime.ts
   - src/codegen/context/types.ts
   - src/codegen/index.ts
-  # the top-level-statement keep arm (#3468 routing) must live in the existing
-  # top-level-statement classifier next to the #2671 host arm it mirrors.
-  - src/codegen/declarations.ts
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)
@@ -212,14 +209,17 @@ an externref and simply bail in their "not a `$Object`" arm:
 | `f.p` | `__get_member_p` | `__extern_get` | miss arm → undefined |
 | `f.m()` | `__call_m_m_0` | `__extern_method_call` | else → `ref.null.extern` |
 
-**C fills those three currently-dead arms.** Blast radius ≈ 0 (the `$Object`
-fast-path is untouched; only closure-receiver property ops, 100% broken today,
-change), general (fixes the `assert` harness AND real programs incl. aliased
-receivers), and reuses the existing `$Object` prop machinery for per-closure
-own props.
+**C fills those three currently-dead arms for concrete capturing-closure
+subtypes.** The `$Object` fast-path is untouched. Shared noncapturing wrapper
+structs — including the test262 `assert` harness receiver — deliberately remain
+outside this first rollout; the exact merge-group measurement below explains
+why. The slice fixes real programs with aliased capturing receivers and reuses
+the existing `$Object` prop machinery for per-closure own props.
 
 ### Phasing
-- **C-core (this issue):** wire the 3 helpers + side table. MEASURE floor delta.
+- **C-core (this PR):** wire the 3 helpers + side table for capturing closures.
+- **C-core rollout (blocked):** expand to shared noncapturing wrappers only after
+  the assertion failures exposed by the merge-group measurement are fixed.
 - **C-complete (follow-on):** route reflection (`in` / `delete` / ownKeys /
   `getOwnPropertyDescriptor`) through the same prop-bag.
 - **A (optional):** compile-time fast-path for statically-named accesses.
@@ -236,11 +236,11 @@ byte-identical). Linked list: prepend O(1), lookup = walk with `ref.eq`.
 **2. Reserved-then-filled helpers** (mirror `reserveApplyClosure`/
 `fillApplyClosure` — reserve funcIdx w/ `unreachable` stub at object-runtime-emit
 time so the `__extern_*` bodies bake a stable `call <idx>`; fill at FINALIZE once
-`collectClosureBaseWrapperTypeIdxs` is complete; the late-import shifter keeps
-`funcMap` + baked calls in sync). Guarded on the `ctx.closurePropHelpersReserved`
-flag so a fill never runs without a reserve.
-- `__is_closure_internal(externref)->i32` — `ref.test` chain over the base
-  wrapper types (same shape as `emitIsClosureExport`).
+the captured-closure subtype set is complete; the late-import shifter keeps
+`funcMap` + baked calls in sync). Guarded on the
+`ctx.closurePropHelpersReserved` flag so a fill never runs without a reserve.
+- `__is_closure_prop_carrier(externref)->i32` — `ref.test` chain over concrete
+  closure structs whose source closure captured one or more lexical bindings.
 - `__closure_bag_lookup(externref recv)->externref` — walk head; `ref.eq(key,
   recv-as-eqref)` → `bag`; miss → `ref.null.extern` (read; never creates).
 - `__closure_bag_ensure(externref recv)->externref` — as lookup; on miss
@@ -260,33 +260,33 @@ flag so a fill never runs without a reserve.
 > `apply_closure` (reserved), `__nullish_to_null` — are all live at build time).
 
 Receiver→eqref for `ref.eq`: `any.convert_extern` → `ref.cast EQ_HEAP_TYPE(-19)`.
-Closures are eq-structs and `__is_closure_internal` guards every call, so the
-cast is always safe.
+Closures are eq-structs and `__is_closure_prop_carrier` guards every call, so
+the cast is always safe.
 
 **3–5. The three arms** now route their non-`$Object`/miss/else branch through
 the helpers (`__closure_prop_set` / `__closure_prop_get` / inline closure mirror
-guarded by `__is_closure_internal`). `.name`/`.length` `bfnGetMetaIdx` meta-arm
-stays FIRST in `__extern_get`, so builtin metadata still answers before the
-side-table fallback. `.prototype`/`.constructor`/`.__proto__` are special-cased
-upstream and never reach these helpers.
+guarded by `__is_closure_prop_carrier`). `.name`/`.length` `bfnGetMetaIdx`
+meta-arm stays FIRST in `__extern_get`, so builtin metadata still answers before
+the side-table fallback. `.prototype`/`.constructor`/`.__proto__` are
+special-cased upstream and never reach these helpers.
 
 **6. Finalize wiring** — `fillClosurePropHelpers(ctx)` next to `fillApplyClosure`
 in `index.ts`.
 
-### Floor interaction — MEASURE FIRST
-Fixing fn props flips vacuous standalone passes to truth: should-FAIL vacuous
-passes → correctly FAIL (dominant; trips standalone-floor on `merge_group`);
-fail-only-because-method-uncallable → may flip fail→pass. Net truthful,
-predominantly downward. #3468 STAYS `blocked` until the stakeholder approves the
-rebaseline; the red regression test cannot merge before then.
+### Floor interaction — exact measurement
+The original all-closure rollout flipped vacuous standalone passes to truthful
+failures and breached the standalone floor. The PR-shepherd measurement below
+found 3,608 stable regressions, so no rebaseline or verdict exception is
+permitted. This PR retains only the captured-closure boundary; #3468 stays
+blocked for the shared-wrapper/harness rollout until the exposed semantics are
+fixed.
 
 ### Test plan (vitest, target "standalone")
-- Harness: `assert.sameValue(1,2)` THROWS; `assert.throws(TypeError,()=>{})`
-  THROWS; control `assert.sameValue(2,2)` no-throw.
-- Own-prop round-trip: `function memo(){}; (memo as any).cache=5; ===5`.
+- Own-prop round-trip on a capturing arrow: `(memo as any).cache=5; ===5`.
 - Method call + side effect: `(fn as any).m=()=>777; (fn as any).m()===777`.
 - Aliasing/identity: `const g=fn; (g as any).x=5; (fn as any).x===5`.
 - Distinct instances don't cross-talk; builtin `.name`/`.length` not shadowed.
+- A shared noncapturing wrapper's custom property remains outside the rollout.
 
 ## C-core IMPLEMENTATION FINDING (2026-07-19) — runtime done, ROUTING GAP blocks the harness
 
@@ -372,3 +372,41 @@ regression, not the truthful correction). The string bug is a SEPARATE issue
 (function-expression externref-param reassign-to-native-string type unification),
 a prerequisite for landing #3468's routing. #3468 stays `blocked`; PR held; not
 merged.
+
+## PR-shepherd resolution (2026-07-20) — land captured-closure substrate; keep harness rollout blocked
+
+The string-codegen prerequisite above landed on current `main` as #3472, so the
+held PR was re-measured from its own latest `merge_group` run
+(`29749566966`, merge SHA `ea8d3e523cbbb667cf0df30494bd0caa46fdc2e0`)
+against the exact standalone baseline commit
+`55e90a8441c27438823144c54d869928d6114b8e`.
+
+The result disproves the remaining premise that the top-level harness routing
+can be part of a normal conformance-preserving PR:
+
+- 3,608 stable pass→non-pass regressions with changed Wasm (compile-timeout
+  noise excluded), versus 18 improvements;
+- 3,540 of those are `wasm exception during module init` after the test body was
+  previously reached — the test262 assertions are now executing and exposing
+  existing semantic mismatches;
+- both baseline and candidate use `oracle_version: 8`; this is not oracle drift;
+- the absolute host-free floor also falls to 25,048, 405 below the committed
+  25,453 high-water mark.
+
+Those failures cannot be erased honestly inside a closure-property routing
+change: doing so requires fixing the exposed language/runtime semantics. A
+baseline edit, verdict exception, or swallowed assertion would weaken the
+oracle and is explicitly rejected.
+
+Therefore PR #3418 is narrowed to the first principled **captured-closure
+substrate** slice:
+
+- route only concrete closure subtypes with captured lexical bindings through
+  the dynamic runtime side table; shared noncapturing wrappers remain on their
+  current behavior;
+- keep seven executed round-trip, invocation, side-effect, identity, isolation,
+  metadata, and noncapturing-boundary tests;
+- remove the top-level `FunctionDeclaration` statement-retention arm and its
+  harness tests from this PR;
+- keep this issue `blocked` for a future staged harness rollout after the
+  exposed failures are fixed, with no floor rebaseline.

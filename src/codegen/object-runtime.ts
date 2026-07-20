@@ -78,7 +78,12 @@ import {
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
-import { CLOSURE_PROP_GET, CLOSURE_PROP_SET, IS_CLOSURE_INTERNAL, reserveClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
+import {
+  buildClosurePropGetMissArm,
+  buildClosurePropMethodCallElseArm,
+  buildClosurePropSetMissArm,
+  reserveClosurePropHelpers,
+} from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
 import { ensureSymbolCarrier } from "./symbol-native.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
@@ -1444,13 +1449,6 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // shared Instr objects get double-remapped by finalize walks (see
     // `reference_shared_instr_object_dce_double_remap`).
     const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
-    // (#3468 C-core) When a closure receiver reaches the non-`$Object` miss arm,
-    // route the read through the closure-own-property side table instead of
-    // returning undefined. `__closure_prop_get` itself returns the same `getMiss`
-    // sentinel for non-closures and bag-misses, so the arm's behaviour is
-    // unchanged for every non-closure receiver. Reserved (⇒ funcMap-present) only
-    // under standalone/wasi; `undefined` otherwise ⇒ the original miss arm.
-    const closurePropGetIdx = ctx.funcMap.get(CLOSURE_PROP_GET);
     const body: Instr[] = [
       // (#2896) Builtin-fn metadata arm: `fn[key]` for key "name"/"length" on a
       // builtin function value answers its spec metadata (host-free). Non-meta
@@ -1482,15 +1480,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then:
-          closurePropGetIdx !== undefined
-            ? [
-                { op: "local.get", index: 0 }, // obj
-                { op: "local.get", index: 1 }, // key
-                { op: "call", funcIdx: closurePropGetIdx },
-                { op: "return" },
-              ]
-            : [...getMiss(), { op: "return" }],
+        then: buildClosurePropGetMissArm(ctx, getMiss),
       },
       // o = cast<$Object>(any)
       { op: "local.get", index: 4 },
@@ -2052,12 +2042,6 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // body bakes its `call`; body filled in finalize (fillAccessorDrivers) once
     // `__call_fn_method_1` exists.
     const callAccessorSetIdx = reserveAccessorSetDriver(ctx);
-    // (#3468 C-core) When a closure receiver reaches the non-`$Object` arm, store
-    // the property in the closure-own-property side table instead of dropping it.
-    // `__closure_prop_set` is a no-op for a non-closure, so behaviour is unchanged
-    // for every non-closure receiver. Reserved (funcMap-present) only under
-    // standalone/wasi; `undefined` otherwise ⇒ the original silent no-op.
-    const closurePropSetIdx = ctx.funcMap.get(CLOSURE_PROP_SET);
     const body: Instr[] = [
       // any = any.convert_extern(obj)
       { op: "local.get", index: 0 },
@@ -2070,16 +2054,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       {
         op: "if",
         blockType: { kind: "empty" },
-        then:
-          closurePropSetIdx !== undefined
-            ? [
-                { op: "local.get", index: 0 }, // obj
-                { op: "local.get", index: 1 }, // key
-                { op: "local.get", index: 2 }, // value
-                { op: "call", funcIdx: closurePropSetIdx },
-                { op: "return" },
-              ]
-            : [{ op: "return" }],
+        then: buildClosurePropSetMissArm(ctx),
       },
       // o = cast<$Object>(any)
       { op: "local.get", index: 6 },
@@ -4038,13 +4013,6 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   if (S2_OPENANY_DISPATCH_WIRED) {
     const applyClosureIdx = reserveApplyClosure(ctx);
     const externGetIdx = ctx.funcMap.get("__extern_get")!;
-    // (#3468 C-core) A closure receiver is NOT a `$Object`, so it reaches the
-    // else arm. Mirror the `$Object` dispatch, guarded by `__is_closure_internal`:
-    // `__extern_get(recv, name)` now routes a closure to its side-table bag, so
-    // the stored method resolves and `__apply_closure` invokes it. Reserved
-    // (funcMap-present) only under standalone/wasi; `undefined` ⇒ original else.
-    const isClosureInternalIdx = ctx.funcMap.get(IS_CLOSURE_INTERNAL);
-
     const body: Instr[] = [
       // any = any.convert_extern(recv); if null → return undefined
       { op: "local.get", index: 0 },
@@ -4081,31 +4049,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         // in the side table — mirror the $Object dispatch for it; other brands
         // ($Vec/string/Map/Set) are the Slice-4 arms → undefined for now (never
         // invalid Wasm).
-        else:
-          isClosureInternalIdx !== undefined
-            ? [
-                { op: "local.get", index: 0 }, // recv
-                { op: "call", funcIdx: isClosureInternalIdx },
-                {
-                  op: "if",
-                  blockType: { kind: "val", type: { kind: "externref" } },
-                  then: [
-                    // m = __extern_get(recv, name) — routes closures to the bag
-                    { op: "local.get", index: 0 },
-                    { op: "local.get", index: 1 },
-                    { op: "call", funcIdx: externGetIdx },
-                    ...(ctx.funcMap.has("__nullish_to_null")
-                      ? ([{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] satisfies Instr[])
-                      : []),
-                    // __apply_closure(m, recv, args)
-                    { op: "local.get", index: 0 },
-                    { op: "local.get", index: 2 },
-                    { op: "call", funcIdx: applyClosureIdx },
-                  ],
-                  else: [{ op: "ref.null.extern" }],
-                },
-              ]
-            : [{ op: "ref.null.extern" }],
+        else: buildClosurePropMethodCallElseArm(ctx, externGetIdx, applyClosureIdx),
       },
     ];
     registerNative(

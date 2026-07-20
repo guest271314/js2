@@ -15,11 +15,15 @@
  *
  * ## The fix (Approach C-core)
  * Keep closures as-is and give those three dead arms a fallback: a runtime,
- * closure-identity-keyed side table mapping each property-carrying closure to a
- * fresh `$Object` "bag" that holds its own properties. The bag reuses the
- * existing `$Object` prop machinery (`__new_plain_object` + `__extern_get`/
- * `__extern_set`), so reads/writes/method-calls on a function value work exactly
- * as they do on a plain object.
+ * closure-identity-keyed side table mapping each property-carrying CAPTURING
+ * closure to a fresh `$Object` "bag" that holds its own properties. The initial
+ * mergeable slice deliberately excludes shared noncapturing wrapper structs:
+ * current-main's test262 harness reaches the dynamic path with noncapturing
+ * `assert` functions, and enabling those truthfully de-masks thousands of
+ * pre-existing semantic failures. Capturing closure structs have distinct
+ * subtype identities, so this is a principled runtime boundary rather than a
+ * harness-name exception. The bag reuses the existing `$Object` prop machinery
+ * (`__new_plain_object` + `__extern_get`/`__extern_set`).
  *
  * The table is a singly-linked list of `$ClosurePropEntry { next; key; bag }`
  * rooted at the module global `$__closure_prop_head`. Append = prepend (O(1));
@@ -30,9 +34,9 @@
  * The helper bodies self-call `__extern_get`/`__extern_set` on the bag, but a
  * function's own funcIdx is NOT in `funcMap` while its body is being built
  * (`registerNative` mints at registration time, after the body array is
- * constructed) — and `__is_closure_internal`'s `ref.test` chain needs the
- * COMPLETE closure base-wrapper type set, which is only known at FINALIZE
- * (`collectClosureBaseWrapperTypeIdxs`). So, exactly like `reserveApplyClosure`/
+ * constructed) — and `__is_closure_prop_carrier`'s `ref.test` chain needs the
+ * COMPLETE captured-closure subtype set, which is only known at FINALIZE. So,
+ * exactly like `reserveApplyClosure`/
  * `fillApplyClosure` (#1888) and the accessor drivers (#1719): reserve the five
  * helper funcIdxs with `unreachable` stubs at object-runtime-emit time (so the
  * `__extern_*` arms bake a stable `call <idx>`), then fill the real bodies in
@@ -53,7 +57,6 @@
  */
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import { undefinedExternInstrs } from "./any-helpers.js";
-import { collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
 import type { CodegenContext } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
@@ -62,16 +65,73 @@ import { addFuncType } from "./registry/types.js";
 const EQ_HEAP_TYPE = -19;
 
 /** Reserved helper names (all internal, non-exported). */
-export const IS_CLOSURE_INTERNAL = "__is_closure_internal";
-export const CLOSURE_BAG_LOOKUP = "__closure_bag_lookup";
-export const CLOSURE_BAG_ENSURE = "__closure_bag_ensure";
-export const CLOSURE_PROP_GET = "__closure_prop_get";
-export const CLOSURE_PROP_SET = "__closure_prop_set";
+const IS_CLOSURE_PROP_CARRIER = "__is_closure_prop_carrier";
+const CLOSURE_BAG_LOOKUP = "__closure_bag_lookup";
+const CLOSURE_BAG_ENSURE = "__closure_bag_ensure";
+const CLOSURE_PROP_GET = "__closure_prop_get";
+const CLOSURE_PROP_SET = "__closure_prop_set";
 
 /** $ClosurePropEntry field indices. */
 const F_NEXT = 0;
 const F_KEY = 1;
 const F_BAG = 2;
+
+/** Build `__extern_get`'s non-object receiver arm. */
+export function buildClosurePropGetMissArm(ctx: CodegenContext, getMiss: () => Instr[]): Instr[] {
+  const closurePropGetIdx = ctx.funcMap.get(CLOSURE_PROP_GET);
+  return closurePropGetIdx === undefined
+    ? [...getMiss(), { op: "return" }]
+    : [
+        { op: "local.get", index: 0 }, // obj
+        { op: "local.get", index: 1 }, // key
+        { op: "call", funcIdx: closurePropGetIdx },
+        { op: "return" },
+      ];
+}
+
+/** Build `__extern_set`'s non-object receiver arm. */
+export function buildClosurePropSetMissArm(ctx: CodegenContext): Instr[] {
+  const closurePropSetIdx = ctx.funcMap.get(CLOSURE_PROP_SET);
+  return closurePropSetIdx === undefined
+    ? [{ op: "return" }]
+    : [
+        { op: "local.get", index: 0 }, // obj
+        { op: "local.get", index: 1 }, // key
+        { op: "local.get", index: 2 }, // value
+        { op: "call", funcIdx: closurePropSetIdx },
+        { op: "return" },
+      ];
+}
+
+/** Build `__extern_method_call`'s non-object receiver arm. */
+export function buildClosurePropMethodCallElseArm(
+  ctx: CodegenContext,
+  externGetIdx: number,
+  applyClosureIdx: number,
+): Instr[] {
+  const isClosurePropCarrierIdx = ctx.funcMap.get(IS_CLOSURE_PROP_CARRIER);
+  if (isClosurePropCarrierIdx === undefined) return [{ op: "ref.null.extern" }];
+  return [
+    { op: "local.get", index: 0 }, // recv
+    { op: "call", funcIdx: isClosurePropCarrierIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [
+        { op: "local.get", index: 0 }, // recv
+        { op: "local.get", index: 1 }, // name
+        { op: "call", funcIdx: externGetIdx },
+        ...(ctx.funcMap.has("__nullish_to_null")
+          ? ([{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] satisfies Instr[])
+          : []),
+        { op: "local.get", index: 0 }, // thisArg
+        { op: "local.get", index: 2 }, // args
+        { op: "call", funcIdx: applyClosureIdx },
+      ],
+      else: [{ op: "ref.null.extern" }],
+    },
+  ];
+}
 
 /**
  * Register the `$ClosurePropEntry` struct type + `$__closure_prop_head` global
@@ -131,7 +191,7 @@ export function reserveClosurePropHelpers(ctx: CodegenContext): void {
   };
 
   const externref: ValType = { kind: "externref" };
-  reserve(IS_CLOSURE_INTERNAL, [externref], [{ kind: "i32" }]);
+  reserve(IS_CLOSURE_PROP_CARRIER, [externref], [{ kind: "i32" }]);
   reserve(CLOSURE_BAG_LOOKUP, [externref], [externref]);
   reserve(CLOSURE_BAG_ENSURE, [externref], [externref]);
   reserve(CLOSURE_PROP_GET, [externref, externref], [externref]);
@@ -153,7 +213,7 @@ export function fillClosurePropHelpers(ctx: CodegenContext): void {
   const headGlobalIdx = ctx.closurePropHeadGlobalIdx;
   if (entryTypeIdx === undefined || headGlobalIdx === undefined) return;
 
-  const isClosureIdx = ctx.funcMap.get(IS_CLOSURE_INTERNAL);
+  const isClosureIdx = ctx.funcMap.get(IS_CLOSURE_PROP_CARRIER);
   const bagLookupIdx = ctx.funcMap.get(CLOSURE_BAG_LOOKUP);
   const bagEnsureIdx = ctx.funcMap.get(CLOSURE_BAG_ENSURE);
   const externGetIdx = ctx.funcMap.get("__extern_get");
@@ -174,23 +234,33 @@ export function fillClosurePropHelpers(ctx: CodegenContext): void {
   // finalize walks; see reference_shared_instr_object_dce_double_remap).
   const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
 
-  // ── __is_closure_internal(externref value) -> i32 ──
-  // ref.test chain over the closure base-wrapper types (same shape as
-  // emitIsClosureExport). Constant 0 when the module has no closures.
+  // ── __is_closure_prop_carrier(externref value) -> i32 ──
+  // Match only concrete CAPTURING closure structs: they are subtypes with
+  // capture fields beyond the wrapper's field-0 funcref. Do not test the shared
+  // root wrappers here — a root test would also accept every noncapturing
+  // top-level harness function and recreate the measured #3418 floor breach.
+  // Constant 0 when the module has no capturing closures.
   {
-    const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
+    const carrierTypeIdxs: number[] = [];
+    for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+      if (!info?.hasCaptures) continue;
+      const typeDef = ctx.mod.types[typeIdx];
+      if (typeDef?.kind === "struct") {
+        carrierTypeIdxs.push(typeIdx);
+      }
+    }
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.set", index: 1 }, // __any
     ];
-    for (const baseIdx of baseTypeIdxs) {
+    for (const carrierIdx of carrierTypeIdxs) {
       body.push({ op: "local.get", index: 1 });
-      body.push({ op: "ref.test", typeIdx: baseIdx });
+      body.push({ op: "ref.test", typeIdx: carrierIdx });
       body.push({ op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] });
     }
     body.push({ op: "i32.const", value: 0 });
-    setBody(IS_CLOSURE_INTERNAL, [{ name: "__any", type: { kind: "anyref" } }], body);
+    setBody(IS_CLOSURE_PROP_CARRIER, [{ name: "__any", type: { kind: "anyref" } }], body);
   }
 
   // ── __closure_bag_lookup(externref recv) -> externref ──

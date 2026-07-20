@@ -2740,11 +2740,7 @@ export function generateModule(
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
 
-    // (#3468 C-core) Fill the reserved closure-own-property side-table helpers
-    // now that every closure root + `__extern_get`/`__extern_set`/
-    // `__new_plain_object` are registered. Needs `__apply_closure` filled first
-    // (the method-call arm dispatches through it). No-op when the helpers were
-    // never reserved (`ctx.closurePropHelpersReserved` — gc/host mode).
+    // (#3468) Fill after all closure types and object-runtime deps are known.
     fillClosurePropHelpers(ctx);
 
     // (#3140) Fill the reserved `__bind_dyn` dynamic-bind helper now that every
