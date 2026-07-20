@@ -272,6 +272,15 @@ function porfforBinopLegal(op: IrBinop): boolean {
     case "i32.le_u":
     case "i32.gt_u":
     case "i32.ge_u":
+    // #3499: lower.ts expands these through backend-neutral typed scalar
+    // primitives (ToInt32, native i32 bitwise op, and signed/unsigned result
+    // conversion). No raw Wasm instruction reaches the Porffor sink.
+    case "js.bitand":
+    case "js.bitor":
+    case "js.bitxor":
+    case "js.shl":
+    case "js.shr_s":
+    case "js.shr_u":
       return true;
     default:
       return false;
