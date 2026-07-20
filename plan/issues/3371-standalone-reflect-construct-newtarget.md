@@ -17,6 +17,13 @@ goal: standalone-mode
 umbrella: 1781
 related: [1781, 1905, 2046, 3240, 1472]
 origin: "2026-07-17 /harvest-errors. Baselines run 20260717-151504 (gitHash 0069df37, 32,139 pass), standalone lane test262-standalone-current.jsonl."
+loc-budget-allow:
+  - src/codegen/expressions/call-namespace-static.ts
+  - src/codegen/property-access-dispatch.ts
+  - src/codegen/expressions/call-identifier.ts
+  - src/codegen/index.ts
+  - src/codegen/dataview-native.ts
+  - src/codegen/expressions/identifiers.ts
 ---
 
 # #3371 — Standalone `Reflect.construct` (with NewTarget) refused

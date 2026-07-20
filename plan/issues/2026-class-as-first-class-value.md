@@ -16,6 +16,10 @@ language_feature: classes
 goal: core-semantics
 related: [1395, 1116, 1721, 1992]
 origin: "2026-06-10 spec-conformance sweep (classes agent): verified on main"
+loc-budget-allow:
+  - src/codegen/expressions/new-super.ts
+coercion-sites-allow:
+  - src/codegen/expressions/new-super.ts
 ---
 
 # #2026 — no runtime constructor-object identity

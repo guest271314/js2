@@ -25,6 +25,11 @@ files:
   - src/codegen/regexp-standalone.ts
   - tests/issue-682.test.ts
   - tests/issue-3507.test.ts
+loc-budget-allow:
+  - src/codegen/regexp-standalone.ts
+  - src/codegen/closed-method-dispatch.ts
+  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/expressions/calls-closures.ts
 ---
 
 # #3507 — Standalone native RegExp carrier dispatch

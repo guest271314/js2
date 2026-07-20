@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { compile } from "../src/index.js";
+import { compile, compileMulti } from "../src/index.js";
 import { runTest262File } from "./test262-runner.js";
 
 const REPRESENTATIVES = [
@@ -38,6 +38,30 @@ describe("#3371 standalone Reflect.construct", () => {
         }
       `),
     ).resolves.toBe(42);
+  });
+
+  it("keeps constructible function-expression wrappers callable in compileMulti", async () => {
+    const result = await compileMulti(
+      {
+        "./dependency.js": `export const value = 1;`,
+        "./entry.js": `
+          import { value } from "./dependency.js";
+          function assert() {}
+          assert.sameValue = function (actual, expected) {
+            if (actual !== expected) throw new Error("values differ");
+          };
+          assert.sameValue(value, 1);
+          export function run() { return value; }
+        `,
+      },
+      "./entry.js",
+      { allowJs: true, skipSemanticDiagnostics: true, target: "standalone" },
+    );
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.imports).toEqual([]);
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports.run as () => number)()).toBe(1);
   });
 
   it("keeps unsupported argsList shapes fail-loud under #3371", async () => {

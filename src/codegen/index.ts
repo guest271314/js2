@@ -4657,6 +4657,13 @@ export function generateMultiModule(
     // has registered its closure types, matching the single-source pipeline.
     fillClosurePropHelpers(ctx);
 
+    // (#3371/#3496) Constructible function-expression wrappers are nominal
+    // subtypes of the ordinary closure wrapper. Multi-source harness methods
+    // route those values through `__apply_closure`, so rebuild that reserved
+    // bridge only after every source has registered its complete closure-type
+    // set. Leaving the placeholder untouched traps valid `assert.*` calls.
+    fillApplyClosure(ctx);
+
     // (#3496) A multi-source entry can reserve a closed method dispatcher just
     // like a single source can. The literal Test262 harness does so for
     // `assert.compareArray(...)`: the property assignment registers a closure
