@@ -158,7 +158,7 @@ async function run(options: WorkerArguments): Promise<void> {
               rejection?.detail ??
               `the exact exported ${program.functionName} function did not reach the shared LinearMemoryPlan`,
             evidence: evidence.length > 0 ? evidence : ["no source-derived IR function was selected"],
-            followUpIssue: rejection?.reason === "select:return-type-not-resolvable" ? 3497 : null,
+            followUpIssue: followUpForNativeBlock(rejection?.reason, evidence),
           },
           compilePhasesMs: { js2SourceToLinearMs: sourceToLinearMs },
           compilerResourceUsage: compilerResourceUsage(),
@@ -182,10 +182,55 @@ async function run(options: WorkerArguments): Promise<void> {
   }
 
   const loweringStart = performance.now();
-  const input = lowerIrModuleToPorffor(report.irModule, {
-    memoryPlan: report.memoryPlan,
-    prefs: { gc: false },
-  });
+  let input: ReturnType<typeof lowerIrModuleToPorffor>;
+  try {
+    input = lowerIrModuleToPorffor(report.irModule, {
+      memoryPlan: report.memoryPlan,
+      prefs: { gc: false },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const jsBitwise = /does not support binary op 'js\.bit(?:and|or|xor)'/.test(message);
+    writeFileSync(
+      join(options.outputDirectory, "worker.json"),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          lane: options.lane,
+          programId: program.id,
+          source: { path: program.sourcePath, sha256: source.sha256, bytes: source.bytes },
+          status: "unsupported",
+          diagnostic: {
+            phase: "js2-porffor-legality",
+            code: jsBitwise ? "typed-composite-bitwise-not-lowered" : "porffor-backend-legality-failed",
+            message,
+            evidence: [
+              `compiled functions: ${JSON.stringify(report.compiled)}`,
+              "report.irModule and report.memoryPlan were passed directly to lowerIrModuleToPorffor",
+            ],
+            followUpIssue: jsBitwise ? 3499 : null,
+          },
+          compilePhasesMs: {
+            js2SourceToLinearMs: sourceToLinearMs,
+            js2IrToPorfforFailedAfterMs: performance.now() - loweringStart,
+          },
+          compilerResourceUsage: compilerResourceUsage(),
+          commandProvenance: {
+            frontend: "js2-exact-source",
+            js2CompileOptions: {
+              target: "linear",
+              allocator: "analysis-stack",
+              fileName: source.path,
+            },
+            memoryPlan: report.memoryPlan,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return;
+  }
   const loweringMs = performance.now() - loweringStart;
   const functionRecord = findExactFunction(input, program.functionName);
   const f64 = porfforType("f64");
@@ -296,6 +341,15 @@ function compilerResourceUsage(): Readonly<Record<string, unknown>> {
     peakRss: usage.maxRSS,
     peakRssUnit: process.platform === "darwin" ? "bytes" : "kilobytes",
   };
+}
+
+function followUpForNativeBlock(reason: string | undefined, evidence: readonly string[]): number | null {
+  if (reason === "select:return-type-not-resolvable") return 3497;
+  if (reason === "select:call-graph-closure") return 3500;
+  const joined = evidence.join("\n");
+  if (/empty array literal needs a vec-typed hint/.test(joined)) return 3501;
+  if (/compound assign to non-f64 slot|\.charAt\(\)|\.charCodeAt\(\)/.test(joined)) return 3502;
+  return null;
 }
 
 function usage(): string {

@@ -157,16 +157,51 @@ describe("#3498 landing four-lane backend benchmark", () => {
       const plainCells = result.cells.filter((cell) => cell.laneId === "plain-porffor-c-native");
       expect(js2Cells).toHaveLength(4);
       expect(plainCells).toHaveLength(4);
-      for (const cell of js2Cells) {
-        expect(cell).toMatchObject({
-          status: "unsupported",
-          validation: null,
-          diagnostic: {
-            phase: "js2-linear-ir-selection",
-            code: "select:return-type-not-resolvable",
-            followUpIssue: 3497,
+      if (js2Cells[0]!.diagnostic?.code === "select:return-type-not-resolvable") {
+        // Current main before #3497/PR #3446 lands.
+        for (const cell of js2Cells) {
+          expect(cell).toMatchObject({
+            status: "unsupported",
+            validation: null,
+            diagnostic: {
+              phase: "js2-linear-ir-selection",
+              code: "select:return-type-not-resolvable",
+              followUpIssue: 3497,
+            },
+          });
+        }
+      } else {
+        // Post-#3497 body/lowering gaps, verified at PR #3446 head 383d6b146.
+        expect(js2Cells).toMatchObject([
+          {
+            programId: "fib",
+            status: "unsupported",
+            diagnostic: {
+              phase: "js2-porffor-legality",
+              code: "typed-composite-bitwise-not-lowered",
+              followUpIssue: 3499,
+            },
           },
-        });
+          {
+            programId: "fib-recursive",
+            status: "unsupported",
+            diagnostic: {
+              phase: "js2-linear-ir-selection",
+              code: "select:call-graph-closure",
+              followUpIssue: 3500,
+            },
+          },
+          {
+            programId: "array-sum",
+            status: "unsupported",
+            diagnostic: { phase: "js2-linear-ir-build", code: "build", followUpIssue: 3501 },
+          },
+          {
+            programId: "string-hash",
+            status: "unsupported",
+            diagnostic: { phase: "js2-linear-ir-build", code: "build", followUpIssue: 3502 },
+          },
+        ]);
       }
       for (const [index, cell] of plainCells.entries()) {
         const program = result.programs[index]!;

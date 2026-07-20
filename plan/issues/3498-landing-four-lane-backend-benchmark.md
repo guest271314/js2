@@ -14,7 +14,7 @@ task_type: performance
 area: benchmarking, ir, codegen-linear, website, ci
 goal: backend-agnostic-ir
 depends_on: [3482, 3497]
-related: [1760, 1764, 3288, 3336, 3482, 3497]
+related: [1760, 1764, 3288, 3336, 3482, 3497, 3499, 3500, 3501, 3502]
 assignee: ttraenkler/sendev-3498
 origin: "2026-07-20 user request to implement the landing-page four-lane backend benchmark"
 ---
@@ -115,6 +115,12 @@ Current-main legality and implementation evidence:
   inference, and `string-hash` reaches the existing string-method gaps. #3498
   remains based on current-main behavior until that PR lands, then re-probes
   the landed code rather than cherry-picking the dependency.
+- A disposable integration probe at #3446 head `383d6b146` confirmed those
+  diagnostics and exposed one additional `fib` boundary:
+  `lowerIrModuleToPorffor` rejects typed `js.bitor` before composite-op
+  lowering. Follow-up plans are #3499 (typed bitwise), #3500 (recursive
+  call-graph evidence), #3501 (empty-array element inference), and #3502
+  (shared string construction/method lowering).
 - Pinned plain `porf c --module -O1` succeeds for all four exact files. Untouched
   C sizes are respectively 182500, 183257, 211942, and 188200 bytes. Optimized
   Clang executables match all Node outputs. Separate ASan/UBSan probes reproduce
