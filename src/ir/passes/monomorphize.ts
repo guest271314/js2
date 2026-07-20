@@ -665,6 +665,9 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.lhs, instr.rhs];
     case "string.len":
       return [instr.value];
+    case "string.char_at":
+    case "string.char_code_at":
+      return [instr.value, instr.index];
     case "object.new":
       return instr.values;
     case "object.get":

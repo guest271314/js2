@@ -410,6 +410,25 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
     );
   }
 
+  emitStringConst(): void {
+    throw new Error("BytecodeEmitter: string primitives are not in the #1584 numeric subset.");
+  }
+  emitStringConcat(): void {
+    throw new Error("BytecodeEmitter: string primitives are not in the #1584 numeric subset.");
+  }
+  emitStringEquals(): void {
+    throw new Error("BytecodeEmitter: string primitives are not in the #1584 numeric subset.");
+  }
+  emitStringLength(): void {
+    throw new Error("BytecodeEmitter: string primitives are not in the #1584 numeric subset.");
+  }
+  emitStringCharAt(): void {
+    throw new Error("BytecodeEmitter: string primitives are not in the #1584 numeric subset.");
+  }
+  emitStringCharCodeAt(): void {
+    throw new Error("BytecodeEmitter: string primitives are not in the #1584 numeric subset.");
+  }
+
   emitConst(instr: Extract<IrInstr, { kind: "const" }>, funcName: string, out: BytecodeSink): void {
     const v = instr.value;
     switch (v.kind) {
