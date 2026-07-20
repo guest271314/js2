@@ -2449,6 +2449,10 @@ export interface CodegenContext {
   nativeBigIntTypeIdx: number;
   /** Cache for function reference wrappers: signature key → ClosureInfo */
   funcRefWrapperCache: Map<string, ClosureInfo>;
+  /** #3371: constructible ordinary-function wrapper subtypes, keyed by signature. */
+  constructibleFuncRefWrapperCache: Map<string, ClosureInfo>;
+  /** #3371: exact wrapper/subtype identities which implement [[Construct]]. */
+  constructibleClosureTypeIdxs: Set<number>;
   /**
    * (#3433) Per-compile memo: source file → symbols assigned an async function
    * expression via `x = async function …` / `x = async () => …` anywhere in the

@@ -748,10 +748,11 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
   });
 
   it("Phase C: unsupported Reflect.* methods refuse in standalone without leaking __reflect_* imports", async () => {
-    // The descriptor/prototype/integrity/apply/construct family has no native
+    // The descriptor/prototype/integrity/apply family has no native
     // analog yet; each must fail at compile time with the Phase C message
     // instead of leaking an env::__reflect_* import that traps at instantiation.
-    // Reflect.get/set/has/deleteProperty are covered by #1905.
+    // Reflect.get/set/has/deleteProperty are covered by #1905;
+    // Reflect.construct moved to its dedicated #3371 lowering.
     const cases: ReadonlyArray<[string, string]> = [
       ["defineProperty", `export function f(o: any): boolean { return Reflect.defineProperty(o, "k", {}); }`],
       [
@@ -761,7 +762,6 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
       ["getPrototypeOf", `export function f(o: any): any { return Reflect.getPrototypeOf(o); }`],
       ["setPrototypeOf", `export function f(o: any, p: any): boolean { return Reflect.setPrototypeOf(o, p); }`],
       ["apply", `export function f(fn: any, t: any, a: any): any { return Reflect.apply(fn, t, a); }`],
-      ["construct", `export function f(c: any, a: any): any { return Reflect.construct(c, a); }`],
     ];
     for (const [method, source] of cases) {
       const r = await compile(source, { target: "standalone" });

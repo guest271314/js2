@@ -23,6 +23,7 @@ import {
   getOrRegisterResizableAbType,
   getOrRegisterVecType,
   resolveWasmType,
+  TYPED_ARRAY_NAMES,
   typedArrayVecStorage,
 } from "../index.js";
 import { coercionPlan } from "../coercion-plan.js"; // (#2934 1c) single coercion table for the copy-ctor element bridge
@@ -3187,6 +3188,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // never changes the runtime VALUE, so symbol resolution on the unwrapped
   // identifier reflects the actual binding.
   const calleeIdent = ts.isIdentifier(unwrappedNonId) ? unwrappedNonId : undefined;
+  // #3371: a compiler-synthesized `new` used by standalone Reflect.construct
+  // has no checker-owned type for the synthetic NewExpression itself. The
+  // callee is still the original source identifier, so retain the exact native
+  // indexed-constructor identity instead of misrouting DataView/TypedArray to
+  // the dynamic-any constructor fallback.
+  if (
+    !className &&
+    calleeIdent &&
+    (calleeIdent.text === "Array" ||
+      calleeIdent.text === "ArrayBuffer" ||
+      calleeIdent.text === "SharedArrayBuffer" ||
+      calleeIdent.text === "DataView" ||
+      TYPED_ARRAY_NAMES.has(calleeIdent.text))
+  ) {
+    className = calleeIdent.text;
+  }
   if ((!className || !ctx.classSet.has(className)) && calleeIdent) {
     const idName = calleeIdent.text;
     if (ctx.classSet.has(idName)) {

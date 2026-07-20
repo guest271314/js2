@@ -3337,7 +3337,7 @@ export function isGlobalBuiltinIdentifier(ctx: CodegenContext, fctx: FunctionCon
  * declarations actually used as values, so it is a no-op for programs without
  * function-valued declarations.
  */
-function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFile): void {
+export function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFile): void {
   const flag = ctx as unknown as { __funcValueWrappersRegistered?: boolean };
   if (flag.__funcValueWrappersRegistered) return;
   flag.__funcValueWrappersRegistered = true;

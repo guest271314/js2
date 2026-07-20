@@ -1927,6 +1927,10 @@ export function compileArrowAsClosure(
     closureResults,
     closureName,
     isNamedFuncExpr: !!isNamedFuncExpr,
+    constructible:
+      ts.isFunctionExpression(arrow) &&
+      arrow.asteriskToken === undefined &&
+      !(arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false),
   }));
 
   // 5. Build the lifted function body

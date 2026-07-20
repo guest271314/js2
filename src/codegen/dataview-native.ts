@@ -479,6 +479,9 @@ export function getOrRegisterDvWindowType(ctx: CodegenContext): number {
       { name: "buf", type: { kind: "ref_null", typeIdx: vecTypeIdx }, mutable: false },
       { name: "byteOffset", type: { kind: "i32" }, mutable: false },
       { name: "byteLength", type: { kind: "i32" }, mutable: false },
+      // #3371: null selects DataView.prototype; a non-null $Object is the
+      // distinct NewTarget.prototype selected by Reflect.construct.
+      { name: "constructProto", type: { kind: "externref" }, mutable: true },
     ],
   });
   ctx.dvWindowTypeIdx = idx;
@@ -488,6 +491,7 @@ export function getOrRegisterDvWindowType(ctx: CodegenContext): number {
     { name: "buf", type: { kind: "ref_null" as const, typeIdx: vecTypeIdx }, mutable: false },
     { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
     { name: "byteLength", type: { kind: "i32" as const }, mutable: false },
+    { name: "constructProto", type: { kind: "externref" as const }, mutable: true },
   ]);
   return idx;
 }
@@ -3702,6 +3706,7 @@ export function emitDynamicTaViewConstruct(
     fctx.body.push({ op: "local.get", index: offsetLocal });
     fctx.body.push({ op: "local.get", index: kindLocal });
     fctx.body.push({ op: "ref.null.extern" }); // expando (#3177 slice 4) — lazily created
+    fctx.body.push({ op: "ref.null.extern" }); // #3371 constructProto (intrinsic default)
     fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
     fctx.body.push({ op: "extern.convert_any" });
     fctx.body.push({ op: "local.set", index: resultLocal });
@@ -3883,6 +3888,7 @@ export function emitTaDynCtorConstructFromLocals(
     fctx.body.push({ op: "i32.const", value: 0 });
     fctx.body.push({ op: "local.get", index: kindLocal });
     fctx.body.push({ op: "ref.null.extern" }); // expando (#3177 slice 4) — lazily created
+    fctx.body.push({ op: "ref.null.extern" }); // #3371 constructProto (intrinsic default)
     fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
     fctx.body.push({ op: "extern.convert_any" });
     fctx.body.push({ op: "local.set", index: resultLocal });
@@ -4176,6 +4182,7 @@ export function emitTaDynCtorConstructFromLocals(
         fctx.body.push({ op: "local.get", index: offLocal });
         fctx.body.push({ op: "local.get", index: kindLocal });
         fctx.body.push({ op: "ref.null.extern" }); // expando (#3177 slice 4) — lazily created
+        fctx.body.push({ op: "ref.null.extern" }); // #3371 constructProto (intrinsic default)
         fctx.body.push({ op: "struct.new", typeIdx: dynIdx });
         fctx.body.push({ op: "extern.convert_any" });
         fctx.body.push({ op: "local.set", index: resultLocal });

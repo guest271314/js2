@@ -1125,6 +1125,12 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     !isInternalHelperName() &&
     !ctx.classSet.has(name)
   ) {
+    const valueDecl = ctx.checker.getSymbolAtLocation(id)?.valueDeclaration;
+    const isOrdinaryFunctionDecl =
+      valueDecl !== undefined &&
+      ts.isFunctionDeclaration(valueDecl) &&
+      valueDecl.asteriskToken === undefined &&
+      !(valueDecl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false);
     // Check if there's already a closure registered (e.g. from closureMap)
     const existingClosure = ctx.closureMap.get(name);
     if (existingClosure) {
@@ -1151,13 +1157,13 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     // no captures are required.
     const nestedCaptures = ctx.nestedFuncCaptures.get(name);
     if (!nestedCaptures || nestedCaptures.length === 0) {
-      const cachedRefType = emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx);
+      const cachedRefType = emitCachedFuncClosureAccess(ctx, fctx, name, funcRefIdx, isOrdinaryFunctionDecl);
       if (cachedRefType) {
         return cachedRefType;
       }
     }
     // Fallback: per-site closure struct (with captures, or if cache emit failed).
-    const refType = emitFuncRefAsClosure(ctx, fctx, name, funcRefIdx);
+    const refType = emitFuncRefAsClosure(ctx, fctx, name, funcRefIdx, isOrdinaryFunctionDecl);
     if (refType) return refType;
   }
 

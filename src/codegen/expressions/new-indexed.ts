@@ -447,6 +447,7 @@ export function tryCompileIndexedBuiltinNew(
           // bufferByteLength - offset default computed above).
           { op: "local.get", index: lenF64 },
           { op: "i32.trunc_sat_f64_s" },
+          { op: "ref.null.extern" }, // #3371 constructProto (intrinsic default)
           { op: "struct.new", typeIdx: dvWinTypeIdx },
           // DataView locals are externref (EXTERNREF_GLOBAL_NAMES) — hand back an
           // externref so the wrapper survives the variable store and is recovered

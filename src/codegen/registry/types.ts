@@ -411,6 +411,9 @@ export function getOrRegisterTaDynViewType(ctx: CodegenContext): number {
     // cast on use). APPEND-ONLY: existing field indices and the `$__vec_base`
     // supertype prefix stay valid.
     { name: "expando", type: { kind: "externref" as const }, mutable: true },
+    // #3371: Reflect.construct's distinct NewTarget may select a custom
+    // ordinary-object prototype. Null means "use the intrinsic per-kind proto".
+    { name: "constructProto", type: { kind: "externref" as const }, mutable: true },
   ];
   ctx.mod.types.push({ kind: "struct", name, superTypeIdx: vecBaseIdx, fields });
   ctx.taDynViewTypeIdx = idx;

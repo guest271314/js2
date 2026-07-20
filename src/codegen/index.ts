@@ -91,7 +91,8 @@ import {
   fillProxyDispatch,
 } from "./object-runtime.js";
 import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
-import { fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177) dyn-view §10.4.5 MOP arms
+import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
+import { fillReflectIsConstructor } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
@@ -2843,6 +2844,8 @@ export function generateModule(
     // (each fill prepends at body[0]; last fill wins the front slot, and the
     // dyn-view arm must beat the generic `$__vec_base` arms it subtypes).
     fillTaDynViewMopArms(ctx);
+    fillDataViewConstructProtoArm(ctx);
+    fillReflectIsConstructor(ctx);
 
     // (#2896) Fill the reserved builtin-fn metadata natives
     // (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
@@ -4674,6 +4677,14 @@ export function generateMultiModule(
     // reserve phase, so these fills do not mutate function indices.
     fillMemberSetDispatch(ctx);
     fillMemberGetDispatch(ctx);
+
+    // (#3371) Reflect.construct reserves the same host-free constructor
+    // classifier and native-view prototype overrides in project compilation as
+    // in the single-source pipeline. Fill only after every source has
+    // registered its closure and carrier types.
+    fillTaDynViewMopArms(ctx);
+    fillDataViewConstructProtoArm(ctx);
+    fillReflectIsConstructor(ctx);
 
     // (#3495) `__extern_get_idx` is reserved while compiling standalone
     // numeric reads through an externref (for example `globalThis.logs[i]`).
