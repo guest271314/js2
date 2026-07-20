@@ -22,9 +22,9 @@ import {
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, parseRegExpLiteral, resolveWasmType } from "./index.js";
 import { emitExternrefDestructureGuard } from "./destructuring-params.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { buildThrowJsErrorInstrs, type JsErrorKind } from "./js-errors.js";
 import { compileStandaloneRegExpLiteral } from "./regexp-standalone.js";
-import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
+import { addImport } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
@@ -38,24 +38,23 @@ import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./wi
 const NON_CONFIGURABLE_GLOBALS = new Set(["NaN", "Infinity", "undefined"]);
 
 /**
- * (#2703) Emit an unconditional `throw` of a string-valued exception, used for
- * the spec error cases of `delete` (§13.5.1.2): a super reference, a null/
- * undefined base, or a strict-mode non-configurable property. The test262
- * `assert.throws` harness catches *any* thrown value (the expected constructor
- * is stripped during the source transform), and a string carried on the
- * standard exception tag is catchable in both the JS-host and standalone lanes
- * (the same pattern `object-runtime.ts` uses for descriptor TypeErrors). After
- * the throw the rest of the enclosing expression is unreachable, so the
- * `delete` expression's nominal i32 result is supplied stack-polymorphically.
+ * (#2703, #3422) Terminal `throw` for `delete`'s spec error cases (§13.5.1.2):
+ * super reference → ReferenceError; null/undefined base or strict-mode
+ * non-configurable refusal → TypeError. Emits a REAL error instance via
+ * `buildThrowJsErrorInstrs` (host `__new_<Kind>` / standalone in-module ctor),
+ * NOT a bare string: the authentic harness (#3370)
+ * `propertyHelper.js::isConfigurable()` rethrows unless `e instanceof TypeError`,
+ * so the pre-#3422 bare-string throw broke ~313 strict reruns (the `delete`
+ * counterpart of #3471). `message` carries no "Kind:" prefix (the ctor adds it);
+ * `opts.flush` = fctx applies the late `__new_<Kind>` funcIdx shift to the
+ * already-emitted body (#1839). The throw is terminal / stack-polymorphic.
  */
-function deleteThrowInstrs(ctx: CodegenContext, message: string): Instr[] {
-  const tagIdx = ensureExnTag(ctx);
-  addStringConstantGlobal(ctx, message);
-  return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx }];
+function deleteThrowInstrs(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): Instr[] {
+  return buildThrowJsErrorInstrs(ctx, kind, message, { flush: fctx });
 }
 
-function emitDeleteThrow(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
-  for (const instr of deleteThrowInstrs(ctx, message)) fctx.body.push(instr);
+function emitDeleteThrow(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): void {
+  fctx.body.push(...deleteThrowInstrs(ctx, fctx, kind, message));
 }
 
 /**
@@ -83,7 +82,7 @@ function maybeEmitNonConfigurableAccessorDelete(
   if (recvType) fctx.body.push({ op: "drop" });
   // Strict mode: a refused non-configurable delete is a TypeError.
   if (isStrictContext(expr)) {
-    emitDeleteThrow(ctx, fctx, "TypeError: Cannot delete non-configurable property in strict mode");
+    emitDeleteThrow(ctx, fctx, "TypeError", "Cannot delete non-configurable property in strict mode");
   }
   // Sloppy mode: the delete expression evaluates to `false`.
   fctx.body.push({ op: "i32.const", value: 0 });
@@ -106,7 +105,7 @@ function emitStrictDeleteCheck(ctx: CodegenContext, fctx: FunctionContext, expr:
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
-    then: deleteThrowInstrs(ctx, "TypeError: Cannot delete non-configurable property in strict mode"),
+    then: deleteThrowInstrs(ctx, fctx, "TypeError", "Cannot delete non-configurable property in strict mode"),
     else: [],
   });
   fctx.body.push({ op: "local.get", index: resLocal });
@@ -202,7 +201,7 @@ function emitStructDeleteOutcome(
     fctx.body.push({
       op: "if",
       blockType: { kind: "empty" },
-      then: deleteThrowInstrs(ctx, "TypeError: Cannot delete non-configurable property in strict mode"),
+      then: deleteThrowInstrs(ctx, fctx, "TypeError", "Cannot delete non-configurable property in strict mode"),
       else: [],
     });
   }
@@ -253,7 +252,7 @@ export function compileDeleteExpression(
     (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) &&
     inner.expression.kind === ts.SyntaxKind.SuperKeyword
   ) {
-    emitDeleteThrow(ctx, fctx, "ReferenceError: 'super' property cannot be deleted");
+    emitDeleteThrow(ctx, fctx, "ReferenceError", "'super' property cannot be deleted");
     return { kind: "i32" };
   }
 
