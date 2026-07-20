@@ -5767,8 +5767,19 @@ function compileCallExpression(
 
   // Dynamic import() — delegate to __dynamic_import host import.
   // Takes a specifier (externref string) and returns an externref (Promise).
-  // In standalone (no JS host) mode, this will trap since there is no host.
+  // #3494 — standalone has no host loader, while compileMulti does not yet
+  // represent deferred module records or module namespace objects. Reject the
+  // construct explicitly instead of emitting an env.__dynamic_import that the
+  // target cannot satisfy (or manufacturing an always-fulfilled placeholder).
   if (expr.expression.kind === ts.SyntaxKind.ImportKeyword) {
+    if (ctx.standalone) {
+      reportError(
+        ctx,
+        expr,
+        "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects",
+      );
+      return null;
+    }
     // Ensure __dynamic_import is registered
     let dynIdx = ctx.funcMap.get("__dynamic_import");
     if (dynIdx === undefined) {

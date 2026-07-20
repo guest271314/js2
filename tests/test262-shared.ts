@@ -11,10 +11,11 @@
  */
 import { createHash } from "crypto";
 import { closeSync, existsSync, mkdirSync, readFileSync, writeSync as fdWrite, fsyncSync, openSync } from "fs";
-import { dirname, join, relative } from "path";
+import { join, relative } from "path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import { availableParallelism } from "os";
 import { CompilerPool, type TestResult } from "../scripts/compiler-pool.js";
+import { discoverFixtureGraph } from "../scripts/test262-fixture-graph.mjs";
 import { isPoisonCompileError } from "../scripts/test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "../scripts/negative-verdict.mjs";
 import { isRecordedVerdictSentinel } from "../scripts/verdict-once.mjs";
@@ -58,19 +59,8 @@ async function getBuildImports() {
   return _buildImports;
 }
 
-/**
- * Extract _FIXTURE.js file references from static import/export statements.
- */
-function resolveFixtures(source: string, testFilePath: string): string[] {
-  const fixtures: string[] = [];
-  const dir = dirname(testFilePath);
-  const importRe = /(?:import|export)\s+.*?from\s+['"]([^'"]*_FIXTURE\.js)['"]/g;
-  let m;
-  while ((m = importRe.exec(source)) !== null) {
-    const resolved = join(dir, m[1]!);
-    if (existsSync(resolved)) fixtures.push(resolved);
-  }
-  return [...new Set(fixtures)];
+function resolveFixtureGraph(source: string, testFilePath: string) {
+  return discoverFixtureGraph(relative(join(TEST262_ROOT, "test"), testFilePath), source);
 }
 
 // ── Slow-test priority map ─────────────────────────────────────────
@@ -655,16 +645,33 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
             let lineAdjustOffset = harnessAssembly.primary.bodyLineOffset;
 
             // Multi-file compilation for FIXTURE imports (handled in-process)
-            const fixtures = resolveFixtures(source, filePath);
-            if (fixtures.length > 0) {
+            const fixtureGraph = resolveFixtureGraph(source, filePath);
+            if (
+              TEST262_TARGET === "standalone" &&
+              !isNegative &&
+              Object.keys(fixtureGraph.dynamicFixtureFiles).length > 0
+            ) {
+              recordResult(
+                relPath,
+                category,
+                "compile_error",
+                "standalone literal dynamic fixture import is unsupported (#3494)",
+                undefined,
+                scopeInfo,
+                undefined,
+                { reachedTest: false },
+              );
+              return;
+            }
+            if (Object.keys(fixtureGraph.fixtureFiles).length > 0) {
               // Fixture tests are rare — compile in-process
               try {
-                const vfiles: Record<string, string> = { "./test.ts": compileSource };
-                for (const fixPath of fixtures) {
-                  vfiles["./" + relative(dirname(filePath), fixPath)] = readFileSync(fixPath, "utf-8");
-                }
+                const vfiles: Record<string, string> = {
+                  ...fixtureGraph.fixtureFiles,
+                  [fixtureGraph.entryFile]: compileSource,
+                };
                 const multiCompile = await getCompileMulti();
-                const result = await multiCompile(vfiles, "./test.ts", {
+                const result = await multiCompile(vfiles, fixtureGraph.entryFile, {
                   skipSemanticDiagnostics: true,
                   target: TEST262_TARGET,
                   inferModuleStrictArguments,
@@ -798,6 +805,40 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   }
                   if (isRuntimeNegative) throw originalHarnessNoThrow;
                   if (harnessAssembly.async) {
+                    // (#3496) Multi-module fixture tests execute in this
+                    // process instead of the unified worker. Mirror the
+                    // worker's standalone async handling: the host-free
+                    // compiler writes console output to its native sink, not
+                    // `consoleProxy`, so drain the Wasm queue and copy that
+                    // sink into the same marker buffer before polling.
+                    let standaloneDrainError: unknown = null;
+                    if (TEST262_TARGET === "standalone") {
+                      const exp = instance.exports as Record<string, any>;
+                      if (typeof exp.__drain_microtasks === "function") {
+                        try {
+                          exp.__drain_microtasks();
+                        } catch (err) {
+                          standaloneDrainError = err;
+                        }
+                      }
+                      if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
+                        let length = 0;
+                        try {
+                          length = exp.__stdout_prepare() | 0;
+                        } catch {
+                          length = 0;
+                        }
+                        if (length > 0) {
+                          let sink = "";
+                          for (let i = 0; i < length; i++) {
+                            sink += String.fromCharCode(exp.__stdout_char(i) & 0xffff);
+                          }
+                          for (const line of sink.split("\n")) {
+                            if (line.length > 0) appendFixtureOutput(line);
+                          }
+                        }
+                      }
+                    }
                     const marker = (prefix: string) => fixtureOutput.find((line) => line.includes(prefix));
                     const deadline = Date.now() + 1_000;
                     while (
@@ -809,7 +850,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                     }
                     const failure = marker("Test262:AsyncTestFailure");
                     if (failure) throw new Error(failure);
-                    if (!marker("Test262:AsyncTestComplete")) throw new Error("async completion marker not observed");
+                    if (!marker("Test262:AsyncTestComplete")) {
+                      const detail =
+                        standaloneDrainError != null
+                          ? `async continuation threw before completion: ${extractWasmExceptionMessage(
+                              standaloneDrainError,
+                              instance,
+                            )}`
+                          : "async completion marker not observed";
+                      throw new Error(detail);
+                    }
                   }
                   recordResult(
                     relPath,
