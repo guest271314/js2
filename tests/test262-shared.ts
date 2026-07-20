@@ -801,6 +801,40 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   }
                   if (isRuntimeNegative) throw originalHarnessNoThrow;
                   if (harnessAssembly.async) {
+                    // (#3496) Multi-module fixture tests execute in this
+                    // process instead of the unified worker. Mirror the
+                    // worker's standalone async handling: the host-free
+                    // compiler writes console output to its native sink, not
+                    // `consoleProxy`, so drain the Wasm queue and copy that
+                    // sink into the same marker buffer before polling.
+                    let standaloneDrainError: unknown = null;
+                    if (TEST262_TARGET === "standalone") {
+                      const exp = instance.exports as Record<string, any>;
+                      if (typeof exp.__drain_microtasks === "function") {
+                        try {
+                          exp.__drain_microtasks();
+                        } catch (err) {
+                          standaloneDrainError = err;
+                        }
+                      }
+                      if (typeof exp.__stdout_prepare === "function" && typeof exp.__stdout_char === "function") {
+                        let length = 0;
+                        try {
+                          length = exp.__stdout_prepare() | 0;
+                        } catch {
+                          length = 0;
+                        }
+                        if (length > 0) {
+                          let sink = "";
+                          for (let i = 0; i < length; i++) {
+                            sink += String.fromCharCode(exp.__stdout_char(i) & 0xffff);
+                          }
+                          for (const line of sink.split("\n")) {
+                            if (line.length > 0) appendFixtureOutput(line);
+                          }
+                        }
+                      }
+                    }
                     const marker = (prefix: string) => fixtureOutput.find((line) => line.includes(prefix));
                     const deadline = Date.now() + 1_000;
                     while (
@@ -812,7 +846,16 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                     }
                     const failure = marker("Test262:AsyncTestFailure");
                     if (failure) throw new Error(failure);
-                    if (!marker("Test262:AsyncTestComplete")) throw new Error("async completion marker not observed");
+                    if (!marker("Test262:AsyncTestComplete")) {
+                      const detail =
+                        standaloneDrainError != null
+                          ? `async continuation threw before completion: ${extractWasmExceptionMessage(
+                              standaloneDrainError,
+                              instance,
+                            )}`
+                          : "async completion marker not observed";
+                      throw new Error(detail);
+                    }
                   }
                   recordResult(
                     relPath,

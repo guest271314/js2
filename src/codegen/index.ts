@@ -4483,6 +4483,17 @@ export function generateMultiModule(
     // (#1483) Emit deferred WASI helper functions for the same reason.
     emitDeferredWasiHelpers(ctx);
 
+    // (#3496) Mirror the single-source pre-body step for standalone console
+    // output. The FYI harness defines `print` in the entry source and reaches
+    // it through `$DONE`; compileMulti's collector correctly marks the console
+    // use, but without minting the sink before bodies compile, `console.log`
+    // deliberately lowers to a no-op and the runner cannot observe the async
+    // completion marker. The helper remains host-free and is only emitted when
+    // a source actually uses a console method.
+    if (ctx.usesStandaloneConsoleSink) {
+      ensureStandaloneStdoutSink(ctx);
+    }
+
     // Emit wrapper valueOf functions (after all imports registered, before user funcs)
     emitWrapperValueOfFunctions(ctx);
 
@@ -4633,6 +4644,16 @@ export function generateMultiModule(
     // were missing these export emits).
     emitStructFieldGetters(ctx);
     emitStructFieldSetters(ctx);
+
+    // (#3496) A multi-source entry can reserve a closed method dispatcher just
+    // like a single source can. The literal Test262 harness does so for
+    // `assert.compareArray(...)`: the property assignment registers a closure
+    // candidate and the later call reserves `__call_m_compareArray_2`.
+    // Finalize those placeholders only after every source has contributed its
+    // object shapes and closure methods, matching the single-source pipeline.
+    // The fill is read-only over the function map because its dependencies are
+    // registered when the dispatcher is reserved.
+    fillClosedMethodDispatch(ctx);
 
     // (#3493) compileMulti shares the same property-access lowering as the
     // single-source path, so a dynamic property write/read can reserve one of

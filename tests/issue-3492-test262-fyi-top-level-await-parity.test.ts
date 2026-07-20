@@ -85,7 +85,7 @@ describe("#3492 — honest Test262 fixture graph parity", () => {
     expect(result).toMatchObject({ phase: "runtime", reachedTest: true });
   });
 
-  it("reports the two historical project-only passes as honest unreached failures", { timeout: 60_000 }, async () => {
+  it("rejects unsupported dynamic fixtures while reaching the fixed static cycle", { timeout: 60_000 }, async () => {
     const tests = await loadOriginalHarnessTests([DYNAMIC_TLA_PATH, PENDING_CYCLE_PATH]);
     const byPath = new Map(tests.map((test) => [test.file, test]));
     const [dynamic, cycle] = await Promise.all([
@@ -100,10 +100,9 @@ describe("#3492 — honest Test262 fixture graph parity", () => {
       detail: "standalone literal dynamic fixture import is unsupported (#3494)",
     });
     expect(cycle).toMatchObject({
-      pass: false,
+      pass: true,
       phase: "runtime",
-      reachedTest: false,
+      reachedTest: true,
     });
-    expect(cycle.detail).toContain("illegal cast");
   });
 });
