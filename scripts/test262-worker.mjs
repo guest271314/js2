@@ -3,7 +3,7 @@
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, negativePhase?, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
@@ -1048,6 +1048,15 @@ function hasDynamicFixtureGraph(dynamicFixtureFiles) {
   );
 }
 
+// #3506 — the 5 resolution-phase paths in this slice import Test262's
+// `ensure-linking-error_FIXTURE.js`, whose deliberate self-import of an
+// unexported binding is reported by TypeScript as TS2459. Requiring that
+// graph-resolution evidence prevents an unrelated entry grammar/type
+// diagnostic from satisfying the requested resolution SyntaxError. Keep this
+// narrow: other resolution populations remain on their existing policy until
+// their own compiler support is verified (the #3491 TS2308 control).
+const FYI_NEGATIVE_FIXTURE_RESOLUTION_CODES = new Set([2459]);
+
 async function doCompile(
   source,
   sourceMapUrl,
@@ -1057,6 +1066,7 @@ async function doCompile(
   fixtureFiles,
   entryFile,
   isNegative,
+  negativePhase,
 ) {
   // Defence-in-depth: restore any poisoned builtins BEFORE each compile.
   // postCompileCleanup runs after the previous test, but under rare worker
@@ -1100,11 +1110,22 @@ async function doCompile(
     // graph deliberately omits deferTopLevelInit: compileMulti synthesizes
     // one init schedule for the entire graph, including circular exports.
     return compileMulti({ ...fixtureFiles, [entryFile]: source }, entryFile, {
-      allowJs: !isNegative,
+      // #3506 — every virtual root is a real pinned `.js` file. With
+      // `allowJs:false`, TypeScript excludes the graph before syntax checking
+      // and codegen crashes at `undefined.kind`. Retain the literal JavaScript
+      // roots for both verdicts. Parse/early graphs opt back into grammar + ES
+      // early-error rejection; resolution graphs retain full linked-program
+      // diagnostics. No path or source is rewritten.
+      allowJs: true,
+      strictJsSyntax: isNegative,
+      enforceJsEarlyErrors: isNegative && negativePhase !== "resolution",
       sourceMap: true,
       sourceMapUrl: sourceMapUrl || "test.wasm.map",
       emitWat: false,
-      skipSemanticDiagnostics: true,
+      // Resolution negatives need TypeScript's linked-program diagnostics
+      // (e.g. a fixture's missing export). Parse/early tests deliberately stop
+      // before semantic analysis.
+      skipSemanticDiagnostics: negativePhase !== "resolution",
       target,
       inferModuleStrictArguments,
     });
@@ -1475,6 +1496,7 @@ process.on("message", async (msg) => {
       msg.fixtureFiles,
       msg.entryFile,
       isNegative,
+      msg.negativePhase,
     );
   } catch (err) {
     // Thrown exception may have poisoned the incremental compiler's internal
@@ -1577,7 +1599,18 @@ process.on("message", async (msg) => {
       const missingFixtureDiagnostic =
         fixtureGraph &&
         (errorCodes.includes(2307) || errorCodes.includes(2792) || /cannot find module|module not found/i.test(errMsg));
-      const matched = !missingFixtureDiagnostic && negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
+      const expectedFixtureResolutionDiagnostic =
+        !fixtureGraph ||
+        msg.negativePhase !== "resolution" ||
+        errorCodes.some((code) => FYI_NEGATIVE_FIXTURE_RESOLUTION_CODES.has(code));
+      // oracle-version-exempt: only the external FYI executor supplies
+      // negativePhase; published project-runner baseline messages and verdicts
+      // are unchanged, so this fixes FYI assembly exposure with zero baseline
+      // row reclassification.
+      const matched =
+        !missingFixtureDiagnostic &&
+        expectedFixtureResolutionDiagnostic &&
+        negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
       if (matched) {
         sendResult({ id, status: "pass", compileMs, errorCodes, ...compileMetadata });
       } else {

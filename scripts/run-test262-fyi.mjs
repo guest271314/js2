@@ -134,6 +134,7 @@ function testWorkerOptions(test) {
     execute: true,
     isNegative,
     isRuntimeNegative,
+    negativePhase: negative === true ? undefined : negative?.phase,
     expectedErrorType: negative === true ? undefined : negative?.type,
     originalHarness: true,
     asyncTest: Boolean(test.flags?.async),

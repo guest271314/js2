@@ -1496,9 +1496,11 @@ export async function compileMultiSource(
 
   // When allowJs is set (e.g. compiling npm packages like lodash-es), only report
   // diagnostics from the entry file — dependency files may have TS errors we can't
-  // control (missing globals, JSDoc param issues, etc.).
+  // control (missing globals, JSDoc param issues, etc.). strictJsSyntax is the
+  // explicit exception for syntax-test graphs whose complete literal JavaScript
+  // input is owned by the caller (#3506).
   const isEntryDiag = (diag: { file?: { fileName: string } }) =>
-    !options.allowJs || !diag.file || diag.file === multiAst.entryFile;
+    !options.allowJs || options.strictJsSyntax === true || !diag.file || diag.file === multiAst.entryFile;
 
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1 && isEntryDiag(diag)) {
@@ -1522,9 +1524,11 @@ export async function compileMultiSource(
 
   // When allowJs is set, don't bail on TS diagnostics — JS packages with JSDoc
   // annotations produce many false-positive errors (TS1016 optional params,
-  // TS2322 type mismatches, TS8017 signature-in-JS, etc.). Codegen handles it fine.
+  // TS2322 type mismatches, TS8017 signature-in-JS, etc.). Codegen handles it
+  // fine. strictJsSyntax restores only the syntactic rejection gate; semantic
+  // JavaScript diagnostics retain the existing allowJs policy.
   const hasSyntaxErrors =
-    !options.allowJs &&
+    (!options.allowJs || options.strictJsSyntax === true) &&
     multiAst.syntacticDiagnostics.some(
       (d) => d.category === 1 && isEntryDiag(d) && multiAst.sourceFiles.some((sf) => d.file === sf),
     );
@@ -1592,6 +1596,11 @@ export async function compileMultiSource(
       }),
       sourcesContent,
       diagnosticAnchor: multiAst.entryFile,
+      // #3506 — retain real `.js` roots (`allowJs`) while allowing a syntax
+      // oracle to opt back into the ECMAScript early-error pass. Kept separate
+      // from strictJsSyntax because resolution-phase tests must observe the
+      // linked graph without manufacturing a parse rejection.
+      runEarlyErrorsOnAllowJs: options.enforceJsEarlyErrors === true,
       options,
     }),
     options,
