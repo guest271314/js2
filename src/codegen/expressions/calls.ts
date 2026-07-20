@@ -253,6 +253,7 @@ import {
   getFuncParamTypes,
   getWasmFuncReturnType,
   isEffectivelyVoidReturn,
+  maybeStampCompiledFunctionArgName,
   noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
@@ -7280,6 +7281,8 @@ export function emitFnctorSubclassDynamicMethodCall(
     if (argType === null) {
       fctx.body.push({ op: "ref.null.extern" });
     }
+    // (#3429) See maybeStampCompiledFunctionArgName — no-ops outside JS-host.
+    maybeStampCompiledFunctionArgName(ctx, fctx, arg);
     fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get(arrPushName) ?? arrPushIdx });
   }
   fctx.body.push({ op: "local.get", index: recvLocal });
