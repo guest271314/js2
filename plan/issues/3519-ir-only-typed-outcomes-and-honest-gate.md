@@ -2,7 +2,7 @@
 id: 3519
 title: "IR-only R0: typed preparation outcomes and an honest readiness gate"
 status: done
-sprint: current
+sprint: 74
 created: 2026-07-21
 updated: 2026-07-21
 completed: 2026-07-21

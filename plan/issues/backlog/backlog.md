@@ -104,11 +104,31 @@ fallback-count sweep:
   honest gate. Hybrid is green at 5/5 entries, 37 terminal units, 31 emitted IR
   bodies, 6 Unsupported, 0 Invariants, and 37 legacy bodies; strict is
   intentionally red on the six typed blockers plus legacy emission.
-- **#3520 — ready, critical, current**: R1 source-qualified `IrUnitId` and
-  whole-program `ProgramAbiMap`; this is the next executable retirement slice.
-- **R2–R8 — blocked** on #3520 and their dependency spine. No later ownership,
-  unit-kind, whole-program, semantic, async, or shared-linear slice may bypass
-  R1.
+- [#3520](../3520-ir-r1-source-qualified-identity-program-abi.md) — **ready,
+  critical, current**: R1 source-qualified identities and whole-program ABI;
+  this is the next executable retirement slice.
+- [#3521](../3521-ir-r2-prepared-program-free-function-compile-once.md) —
+  **blocked, critical, current**: R2 Prepared-program ownership and compile-once
+  top-level free functions; depends on #3520.
+- [#3522](../3522-ir-r3-classes-closures-compile-once.md) — **blocked,
+  critical, current**: R3 exhaustive classes/members/closures and support-unit
+  ownership; depends on #3521.
+- [#3523](../3523-ir-r4-module-init-compile-once.md) — **blocked, critical,
+  current**: R4 typed ordered module-init and exactly-once startup; depends on
+  #3521 and #3522.
+- [#3525](../3525-ir-r5-whole-program-multi-source-ownership.md) — **blocked,
+  critical, current**: R5 one Prepared owner/ABI/init plan across single- and
+  multi-source/M0; depends on #3520–#3523.
+- [#3526](../3526-ir-r6-semantic-runtime-contract.md) — **blocked, critical,
+  current**: R6 typed intrinsic/runtime-feature/host-capability contract,
+  pre-lowering manifest freeze, and measured provider-family slices; depends
+  on #3521.
+- [#3527](../3527-ir-r7-ast-free-async-plan.md) — **blocked, critical,
+  current**: R7 AST-free suspension plans and canonical async ABI through the
+  existing frame engine; depends on #3522, #3525, and #3526.
+- [#3528](../3528-ir-r8-shared-linear-prepared-program.md) — **blocked,
+  critical, current**: R8 linear consumption of the exact shared Prepared
+  program with zero direct AST lowering; depends on #3525–#3527.
 - [#3090](../3090-shrink-codegen-delete-dormant-legacy-handlers.md) — blocked
   R10 deletion ledger. The remaining ~59,676 frontend fn-lines are still
   reachable and may be deleted only after #3518 R9.

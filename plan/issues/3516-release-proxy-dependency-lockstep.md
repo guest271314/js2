@@ -2,7 +2,7 @@
 id: 3516
 title: "Keep the js2wasm proxy dependency in release lockstep"
 status: done
-sprint: current
+sprint: 74
 created: 2026-07-21
 updated: 2026-07-21
 completed: 2026-07-21

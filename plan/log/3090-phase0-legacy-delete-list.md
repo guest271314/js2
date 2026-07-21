@@ -10,10 +10,10 @@ per-function detail to `.tmp/legacy-reachability.json`, prints the tables below)
 > roughly **47K runtime/builtin entry fn-lines**. None of the frontend handlers
 > is deletion-ready: hybrid compile-twice reachability remains for free
 > functions, classes, module init, multi-source/M0, and linear. Run the audit
-> again only after #3518 R9 establishes fail-closed IR-only ownership. R0 now
-> starts with #3529 typed-producer equivalence parity before #3519's honest gate;
-> neither capability reclassification nor equivalence-baseline expansion is
-> evidence that a handler became unreachable.
+> again only after #3518 R9 establishes fail-closed IR-only ownership. R0
+> completed with #3529 typed-producer equivalence parity and #3519's honest
+> gate; neither capability reclassification nor equivalence-baseline expansion
+> is evidence that a handler became unreachable.
 
 ## What was measured
 
@@ -68,8 +68,8 @@ on four structural facts:
   `collectLocalCallEdges`). Safe-by-construction: everything else compiles
   twice. The historical proposal was to widen this allowlist and delete
   per-kind handlers incrementally. The measured 28.1% ceiling disproved that as
-  the retirement path: #3518 R2 replaces it with prepare-before-emit ownership,
-  and R9 clears G1 globally before deletion.
+  the retirement path: #3521 (R2) replaces it with prepare-before-emit
+  ownership, and R9 clears G1 globally before deletion.
 - **G2 — whole-function claim unit keeps every handler live.** The selector
   claims `FunctionDeclaration`s; any rejection (every non-zero bucket in
   `plan/log/ir-adoption.md`, every `mixed`/`direct-only`/`deferred` kind in
@@ -83,7 +83,7 @@ on four structural facts:
   `__module_init` slot. The legacy module-init body is nevertheless emitted
   first, and a rejection or integration failure retains it. Claimable (or a
   zero module histogram) therefore does not clear deletion reachability.
-  #3518 R4 must prepare module init before emission; R9 removes fallback.
+  #3523 (R4) must prepare module init before emission; R9 removes fallback.
 - **G4 — runtime emission enters through legacy dispatch.** ~47K fn-lines of
   stdlib behavior emission (`array-methods`, `property-access`, `object-ops`,
   `native-regex`, `string-ops`, `json-*`, `dataview`, `map-runtime`…) are
@@ -105,9 +105,10 @@ causes the whole function to retain legacy, and an IR overlay may patch a body
 that was already emitted. **No frontend handler is deletable from the flip,
 function-corpus zero, or module claimability alone.** #3518 replaces incremental
 allowlist-to-deletion speculation with a prepare-before-emit whole-program
-sequence: typed outcomes → program identity/ABI → PreparedIrProgram → classes /
-module / multi / runtime / async / linear → fail-closed default → this audit's
-R10 deletion.
+sequence: #3529/#3519 completed R0 → #3520 identity/ABI → #3521
+PreparedIrProgram → #3522 classes/closures → #3523 module init → #3525 whole
+program / #3526 runtime → #3527 async → #3528 linear → fail-closed default →
+this audit's R10 deletion.
 
 **Consequence:** "deletable today with zero capability change" =
 the **unreferenced set (~2.1K fn-lines)** — everything else is conditional.
@@ -202,10 +203,11 @@ The unconditional dead-export cleanup is exhausted. The remaining work follows
 #3518's R0–R10 spine; it is not safe to delete handlers kind-by-kind from
 adoption labels:
 
-1. Establish typed Prepared/Unsupported/Invariant outcomes and an honest
-   readiness gate (#3519).
+1. R0 is complete: typed Prepared/Unsupported/Invariant outcomes, producer
+   parity, and an honest readiness gate (#3529/#3519).
 2. Build source-qualified whole-program identity/ABI and prepare all supported
-   units before backend/body emission (#3518 R1–R8).
+   units before backend/body emission (#3520 R1 → #3521 R2 → #3522 R3 → #3523
+   R4, followed by #3525–#3528 R5–R8).
 3. Make fail-closed IR-only the sole production policy and remove hybrid/
    compile-twice escape hatches (#3518 R9).
 4. Re-run this reachability audit against that committed state. Delete only the

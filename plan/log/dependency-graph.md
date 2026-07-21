@@ -19,20 +19,15 @@ frontend-only fn-lines remain reachable.
                               #3520 R1 identity/ABI (ready)
                                              |
                                              v
-                              R2 PreparedIrProgram (blocked)
-                                      /       |       \
-                           R3 classes    R4 module    R6 runtime intents
-                              (blocked)    (blocked)       (blocked)
-                                      \       |       /
-                              R5 whole-program multi (blocked)
-                                             |
-                              R7 async/unsupported (blocked)
-                                             |
-                              R8 shared linear IR (blocked)
-                                             |
-                              R9 fail-closed default (blocked)
-                                             |
-                              R10 #3090 deletion (blocked)
+                              #3521 R2 Prepared program (blocked)
+
+#3521 ──> #3522 R3 ──> #3523 R4
+#3520 + #3521 + #3522 + #3523 ──> #3525 R5 whole program
+#3521 ──> #3526 R6 runtime contract
+#3522 + #3525 + #3526 ──> #3527 R7 async plan
+#3525 + #3526 + #3527 ──> #3528 R8 shared linear
+#3522 + #3523 + #3525 + #3526 + #3527 + #3528 ──> R9 fail-closed
+R9 ──> R10 #3090 deletion
 ```
 
 | Issue / slice | Priority | Status      | Dependency / decision                                                                                    |
@@ -41,10 +36,14 @@ frontend-only fn-lines remain reachable.
 | #3529 / R0a   | critical | **done**    | 1,608 passing / 35 failing; 36 known baseline, one known case now passes, zero new regressions           |
 | #3519 / R0b   | critical | **done**    | Hybrid 5/5, 37 terminal, 31 IR, 6 Unsupported, 0 Invariants, 37 legacy; strict intentionally remains red |
 | #3520 / R1    | critical | **ready**   | Next executable slice: source-qualified `IrUnitId` and whole-program `ProgramAbiMap`                     |
+| #3521 / R2    | critical | blocked     | Depends on #3520; Prepared free-function compile-once ownership                                          |
+| #3522 / R3    | critical | blocked     | Depends on #3521; exhaustive classes, members, closures, support units                                   |
+| #3523 / R4    | critical | blocked     | Depends on #3521/#3522; ordered module-init and startup ownership                                        |
+| #3525 / R5    | critical | blocked     | Depends on #3520–#3523; whole-program single/multi Prepared ownership                                    |
+| #3526 / R6    | critical | blocked     | Depends on #3521; frozen typed semantic runtime contract                                                 |
+| #3527 / R7    | critical | blocked     | Depends on #3522/#3525/#3526; AST-free async plans and canonical ABI                                     |
+| #3528 / R8    | critical | blocked     | Depends on #3525–#3527; linear consumes the exact shared program                                         |
 | #3517         | high     | in-progress | Measured module `Map` residual; closes a corpus count, not R4                                            |
-| R2            | critical | **blocked** | Requires #3520/R1; prepare-before-emit ownership                                                         |
-| R3 / R4 / R6  | critical | **blocked** | Require R2; classes, module init, and runtime families may then split                                    |
-| R5 / R7 / R8  | critical | **blocked** | Dependency sequence after their prerequisites: whole-program → async/unsupported → shared linear         |
 | R9            | critical | blocked     | Requires R3–R8; removes hybrid and all escape hatches                                                    |
 | #3090 / R10   | high     | blocked     | Requires R9 plus a refreshed reachability audit                                                          |
 

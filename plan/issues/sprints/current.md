@@ -27,9 +27,34 @@ updated: 2026-07-21
    six typed blockers and the separately reported 37 legacy-emitted bodies.
 3. **#3520 (R1, ready, next)** — add source-qualified `IrUnitId` and a
    whole-program `ProgramAbiMap` on the delivered R0 boundary.
-4. **#3518 (program owner, in-progress)** — the IR-only default and direct
-   front-end retirement program remains open. R0 is complete; R2–R8 remain
-   blocked behind #3520 and their declared dependency chain.
+4. **#3521 (R2, blocked on #3520)** — `PreparedIrProgram` and compile-once
+   ownership for single-source top-level free functions.
+5. **#3522 (R3, blocked on #3521)** — exhaustive class/member/closure census
+   and compile-once ownership, including constructor support units.
+6. **#3523 (R4, blocked on #3521 and #3522)** — typed ordered module-init
+   planning, one body emission, and planned host/deferred/WASI invocation.
+7. **#3525 (R5, blocked on #3520–#3523)** — one whole-program
+   `PreparedIrProgram`/`ProgramAbiMap` for single- and multi-source/M0,
+   including imports/re-exports, collisions, fast mode, classes, and init.
+8. **#3526 (R6, blocked on #3521)** — typed
+   `IntrinsicId -> RuntimeFeature -> HostCapability` contract, fixed-point
+   manifest freeze, and measured runtime-family rewiring beginning with pure Math.
+9. **#3527 (R7, blocked on #3522, #3525, and #3526)** — AST-free
+   `IrAsyncPlan`, canonical Promise ABI, and one existing frame engine across
+   declarations, closures, methods, `for await`, and async generators.
+10. **#3528 (R8, blocked on #3525–#3527)** — linear consumes the exact shared
+    Prepared program/runtime/async plans; zero unhandled and zero direct AST
+    bodies replace the current permissive overlay ratchet.
+11. **#3518 (program owner, in-progress)** — the IR-only default and direct
+    front-end retirement program remains open. R0 is complete; R2–R8 remain
+    blocked behind #3520 and their declared dependency chain.
+12. **#3517 (active stacked slice)** — retire the last measured Algorithms
+    module-init `Map` residual. This closes a corpus count, not R4 compile-once
+    module ownership.
+
+Only #3520 is ready in the retirement spine. The R2–R8 files are dispatch
+specifications, not authorization to bypass their dependencies or implement
+directly from #3518.
 
 Program owner: **#3518**. Deletion ledger: **#3090**, blocked until R9. The
 function fallback-corpus epic **#2855 is done** and is not a claimable tail

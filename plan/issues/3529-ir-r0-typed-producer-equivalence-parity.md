@@ -2,7 +2,7 @@
 id: 3529
 title: "IR R0 prerequisite: typed producer equivalence parity"
 status: done
-sprint: current
+sprint: 74
 created: 2026-07-21
 updated: 2026-07-21
 completed: 2026-07-21
