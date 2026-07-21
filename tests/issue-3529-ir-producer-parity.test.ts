@@ -34,15 +34,8 @@ describe("#3529 — typed AST-to-IR producer capability gaps", () => {
 
   it("types mixed string/boolean addition as unsupported operand coercion", async () => {
     const result = await compile(
-      `let flag: number = 0;
-      export function test(): number {
-        try {
-          const message = "result: " + (2 > 1);
-          throw new Error(message);
-        } catch (error) {
-          flag = 1;
-        }
-        return flag;
+      `export function test(): string {
+        return "result: " + (2 > 1);
       }`,
       { fileName: "operand-coercion.ts", trackIrOutcomes: true },
     );
