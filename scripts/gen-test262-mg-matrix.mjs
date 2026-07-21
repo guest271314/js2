@@ -2,42 +2,37 @@
 // gen-test262-mg-matrix.mjs — computes the merge_group-CONSOLIDATED test262
 // shard matrix (#3431).
 //
-// Why a separate, smaller matrix just for merge_group: the merge queue can
-// build up to `max_entries_to_build: 5` groups concurrently (docs/ci-policy.md
-// #1956), each running the full test262-sharded.yml workflow. At the
-// pull_request-era 57-shard x 2-target = 114-job matrix, 5 concurrent groups
-// contend for up to 570 runner slots at once, and evidence from real
-// merge_group runs (2026-07-18, runs 29632953272 et al.) shows job start
-// times trickling over ~20 minutes under that contention — vs. an isolated,
-// uncontended 114-job run finishing in ~15-19 minutes total. That contention
-// wave, not fixed per-job setup cost (measured at ~30-45s: checkout + node +
-// pnpm + bundle build), is what stretches merge_group validation to ~60+
-// minutes and drains the queue at ~1 PR/hour.
+// Why merge_group has its own matrix: the queue previously allowed five
+// speculative groups to build concurrently. At 114 jobs per group that meant
+// up to 570 shard jobs competing for the 120-runner pool; enqueue/dequeue churn
+// also invalidated descendant groups and restarted work that could never land.
+// The active main ruleset was therefore changed to `max_entries_to_build: 1`.
+// With only one stable group in flight, throughput now comes from parallelism
+// *inside* that group rather than from keeping the per-group matrix small.
 //
-// Fewer, bigger shards reduce the per-entry job count, and therefore the
-// contention footprint under a busy queue, at the cost of a longer
-// best-case (uncontended) per-shard runtime. js-host and standalone get
-// DIFFERENT shard counts because the lanes have different total work. The
-// original 40/19 split used pre-#3374 timings and became stale again when the
-// fast native-harness host lane (#3461) removed most repeated harness compile
-// work. Six successful, uncontended merge_group runs on 2026-07-21
-// (29791392339..29799448439) measured:
-//   js-host at 40:    avg job 9.0 min, mean max 10.5 min
-//   standalone at 19: avg job 10.4 min, mean max 12.0 min
-// After subtracting the measured ~25 s setup/build envelope, total work is
-// ~20,600 runner-seconds for host and ~11,400 for standalone: a 1.80 ratio.
-// A 34/19 split matches that ratio (1.79), so both targets reach the fan-in at
-// approximately the same time. The host timing weights are refreshed from the
-// same six runs so persistent fast/slow partitions are also redistributed.
-// Both stay under the existing 25-minute per-shard timeout (test262-shard-mg
-// uses 28 min for a small safety margin instead of raising the timeout
-// aggressively) with no change needed to pull_request/push/workflow_dispatch,
-// which keep the full 57-shard matrix untouched.
+// The pool has 120 four-core runners and every shard intentionally uses all
+// four cores (`COMPILER_POOL_SIZE=4`). Reserve 14 runners for the overlapping
+// CI quality/equivalence jobs, the differential workflow, the Test262 gate,
+// and short-lived orchestration jobs. The remaining 106 runners are assigned
+// to Test262, so a serial queue entry can use the fleet without starving its
+// other required checks.
 //
-// Job count: 34 + 19 = 53, vs. the static 114-job push/manual matrix — a 53%
-// reduction in the merge_group matrix's job count (and therefore its
-// contention footprint under a busy queue), while the measured long-pole
-// remains around 12 minutes, well inside the existing timeout.
+// js-host and standalone get DIFFERENT counts because their measured work is
+// not equal. The first 34/19 run after #3470 (merge_group run 29807524490,
+// 2026-07-21) started all 53 jobs within one second and measured the `Run shard`
+// steps as:
+//   js-host:    24,071 runner-seconds total, 818 s max (34 jobs)
+//   standalone: 11,284 runner-seconds total, 654 s max (19 jobs)
+// The 2.13 work ratio is matched by 72/34 = 2.12. At perfect distribution that
+// is about 334 vs. 332 seconds of measured shard work per runner, plus setup
+// and tail skew. Both lanes therefore target the same ~6-8 minute window while
+// retaining ample margin under the 25-minute job timeout.
+//
+// The host lane is costlier primarily because both lanes still compile the
+// honest full in-Wasm harness, while the host target emits JS/Wasm interop glue.
+// In run 29807524490 host compilation totaled 77.7M ms vs. 42.3M ms for
+// standalone; execution was only 2.4M vs. 0.7M ms. Host also reaches more
+// passing tests and therefore performs more strict-mode recompilations.
 //
 // The underlying partition (assignBalancedChunk, test262-shared.ts) is a
 // pure function of (chunkIndex, totalChunks): it re-derives the FULL test262
@@ -50,8 +45,10 @@
 // matrix cell invokes (index/total supplied via env vars instead of being
 // baked into a per-shard filename).
 
-export const JS_HOST_CHUNKS = 34;
-export const STANDALONE_CHUNKS = 19;
+export const MERGE_GROUP_RUNNER_CAPACITY = 120;
+export const MERGE_GROUP_RESERVED_RUNNERS = 14;
+export const JS_HOST_CHUNKS = 72;
+export const STANDALONE_CHUNKS = 34;
 
 /**
  * @param {string} targetName matrix job-name suffix, e.g. "js-host"

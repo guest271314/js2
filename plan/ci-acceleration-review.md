@@ -7,24 +7,40 @@
 
 ## 2026-07-21 implementation update
 
-The three highest-priority levers from this review have since landed: L1
-(merge-group artifact reuse on push), L2 (contention-tolerant compile-timeout
-guard), and L3 (the separately-versioned fast native-harness host lane).
+The highest-priority levers from this review have since landed: merge-group
+artifact reuse on push, a contention-tolerant compile-timeout guard, the
+native-harness implementation behind a separate oracle mode, cached setup,
+and a target-weighted merge-group matrix.
 
-Six successful post-L3 merge-group runs (29791392339..29799448439) now show
-all 59 old matrix jobs starting within 1–2 seconds, with these execution times:
+The first matrix revision used 34 host + 19 standalone jobs because the old
+queue configuration allowed five speculative merge groups to build at once.
+That configuration caused both runner oversubscription and cancellation churn:
+adding, removing, or ejecting an earlier entry invalidated descendant groups
+and restarted their full matrices. The live main ruleset now deliberately has
+`max_entries_to_build=1`, so retaining the contention-sized 53-job matrix would
+leave more than half of the 120-runner pool idle.
 
-| lane       | old shards | mean job | mean per-run max |
-| ---------- | ---------: | -------: | ---------------: |
-| js-host    |         40 |  9.0 min |         10.5 min |
-| standalone |         19 | 10.4 min |         12.0 min |
+Production merge-group run 29807524490 validated the serial-queue model: all 53
+jobs started within one second, with no runner queue. Its `Run shard` timings
+were:
 
-The host lane's timing map still described the pre-native-harness cost model.
-The follow-up therefore regenerates it from the per-test median of all six
-runs and changes the merge-group split to 34 host / 19 standalone (53 jobs).
-After subtracting the measured ~25-second setup envelope, the two lanes carry
-~20,600 vs ~11,400 runner-seconds of work, a 1.80 ratio; 34/19 matches it at
-1.79 while removing six more jobs without lengthening the measured long pole.
+| lane       | shards | total runner-s | mean job |  max job |
+| ---------- | -----: | -------------: | -------: | -------: |
+| js-host    |     34 |         24,071 | 11.8 min | 13.6 min |
+| standalone |     19 |         11,284 |  9.9 min | 10.9 min |
+
+The measured 2.13:1 work ratio maps to 72 host + 34 standalone jobs (2.12:1).
+That uses 106 runners and reserves 14 for the overlapping quality, equivalence,
+differential, Test262-gate, and orchestration jobs. Perfect distribution is
+about 334 vs 332 seconds of shard work per runner, targeting a 6–8 minute shard
+phase while keeping the existing 25-minute safety ceiling.
+
+The host cost is compilation, not corpus size. Both lanes in the production
+run used the honest full in-Wasm harness (the fast native-host mode was not set
+in the merge-group environment). Host compile time totaled 77.7M ms versus
+42.3M ms standalone; execution totaled only 2.4M versus 0.7M ms. Host interop
+codegen is costlier and more host tests reach pass, which also triggers more
+strict-mode recompilations.
 
 Other implemented pipeline reductions:
 
@@ -36,16 +52,13 @@ Other implemented pipeline reductions:
   `equivalence-gate` is a status fan-in instead of a second checkout/install
   plus eight artifact uploads and downloads.
 
-Running js-host then standalone on one runner was rejected for the current
-capacity profile. Repartitioning both targets into 34 identical subsets would
-cut the matrix from 53 to 34 jobs and reuse checkout/install/build, but the
-measured total work predicts a ~16-minute paired shard instead of today's
-~12-minute parallel long pole. All jobs in the six-run sample started within
-1–2 seconds, so the extra serialization currently loses wall time; pairing is
-a valid contingency if runner queueing returns. Shared linked harness/runtime
-code remains the #2527/#2514 end-state; mutable compiler/checker and
-execution-realm state stays process-isolated and is reused only behind the
-existing periodic recreation, poison retry, and realm-canary recycle guards.
+Running js-host then standalone on one runner remains a poor fit for the serial
+queue and available capacity: it saves setup work but serializes two compiler-
+heavy lanes while idle runners are available. Pairing is a contingency only if
+runner capacity shrinks. Shared linked harness/runtime code remains the
+#2527/#2514 end-state; mutable compiler/checker and execution-realm state stays
+process-isolated and is reused only behind the existing periodic recreation,
+poison retry, and realm-canary recycle guards.
 
 ## 0. Executive summary — the brief is partially stale (good news)
 

@@ -13,7 +13,13 @@
 // same corpus at totalChunks=16 for local dev, vs. 57 in CI, with matching
 // pass counts).
 import { describe, expect, it } from "vitest";
-import { JS_HOST_CHUNKS, STANDALONE_CHUNKS, buildMergeGroupMatrix } from "../scripts/gen-test262-mg-matrix.mjs";
+import {
+  JS_HOST_CHUNKS,
+  MERGE_GROUP_RESERVED_RUNNERS,
+  MERGE_GROUP_RUNNER_CAPACITY,
+  STANDALONE_CHUNKS,
+  buildMergeGroupMatrix,
+} from "../scripts/gen-test262-mg-matrix.mjs";
 
 describe("#3431 gen-test262-mg-matrix", () => {
   it("produces exactly JS_HOST_CHUNKS + STANDALONE_CHUNKS entries", () => {
@@ -63,12 +69,11 @@ describe("#3431 gen-test262-mg-matrix", () => {
     expect(standalone.result_prefix).toBe("test262-standalone");
   });
 
-  it("53 total shards is a >50% reduction from the static 114-job matrix (57 chunks x 2 targets)", () => {
+  it("uses the serial queue's runner budget while reserving capacity for other required checks", () => {
     const matrix = buildMergeGroupMatrix();
-    const staticTotal = 57 * 2;
-    const reduction = 1 - matrix.length / staticTotal;
-    expect(matrix).toHaveLength(53);
-    expect(reduction).toBeGreaterThan(0.5);
+    expect(matrix).toHaveLength(106);
+    expect(matrix.length).toBe(MERGE_GROUP_RUNNER_CAPACITY - MERGE_GROUP_RESERVED_RUNNERS);
+    expect(JS_HOST_CHUNKS / STANDALONE_CHUNKS).toBeCloseTo(2.12, 2);
   });
 });
 
@@ -85,16 +90,16 @@ describe("#3431 test262-chunk-dynamic.test.ts env-var contract", () => {
   }
 
   it("accepts valid index/total pairs", () => {
-    expect(validateChunkEnv("0", "34")).toBe(true);
+    expect(validateChunkEnv("0", "72")).toBe(true);
+    expect(validateChunkEnv("71", "72")).toBe(true);
     expect(validateChunkEnv("33", "34")).toBe(true);
-    expect(validateChunkEnv("18", "19")).toBe(true);
   });
 
   it("rejects missing, out-of-range, or non-numeric env vars", () => {
     expect(validateChunkEnv("", "")).toBe(false);
-    expect(validateChunkEnv("34", "34")).toBe(false); // index == total (out of range)
-    expect(validateChunkEnv("-1", "34")).toBe(false);
-    expect(validateChunkEnv("abc", "34")).toBe(false);
+    expect(validateChunkEnv("72", "72")).toBe(false); // index == total (out of range)
+    expect(validateChunkEnv("-1", "72")).toBe(false);
+    expect(validateChunkEnv("abc", "72")).toBe(false);
     expect(validateChunkEnv("0", "0")).toBe(false); // total must be > 0
   });
 });

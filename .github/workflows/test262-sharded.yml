@@ -208,9 +208,10 @@ jobs:
       # TEST262_PATH_FILTER) and by every diff-based gate (as --path-filter)
       # so a scoped candidate JSONL is never diffed against the full baseline.
       test262_scope: ${{ steps.scope.outputs.scope }}
-      # #3431 — the merge_group-CONSOLIDATED shard matrix (fewer, bigger
-      # shards than the 57x2=114-job pull_request/push/workflow_dispatch
-      # matrix). Only computed for merge_group; empty for every other event
+      # #3431 — the merge_group capacity-sized shard matrix. The live queue is
+      # serial (`max_entries_to_build=1`), so it uses 106 of the 120 runners
+      # and reserves 14 for overlapping required workflows. Only computed for
+      # merge_group; empty for every other event
       # (those keep using the static chunk/target arrays on `test262-shard`,
       # unchanged). See scripts/gen-test262-mg-matrix.mjs for the shard-count
       # rationale and evidence.
@@ -321,10 +322,10 @@ jobs:
   #   queued change          changes.run_shards   test262-shard-mg   merge-report
   #   ---------------------  ------------------   ----------------   -------------------
   #   src/** (or any         true                 RUNS (#3431         runs, real result
-  #     &test262-paths)                              53-job matrix)
+  #     &test262-paths)                             106-job matrix)
   #   website/plan/doc-only  false                SKIPPED             runs, trivial PASS
   #   base_sha empty /       true (fail-safe)     RUNS (#3431         runs, real result
-  #     diff fails / empty                           53-job matrix)
+  #     diff fails / empty                          106-job matrix)
   #
   # In ALL three rows the required check "merge shard reports" is produced.
   # It is green only when shards succeeded or the merge_group no-shards skip is
@@ -403,10 +404,10 @@ jobs:
     # (it fails there and is ejected) rather than at PR-open time.
     #
     # #3431 — merge_group NO LONGER runs this job. It has its own
-    # consolidated matrix in `test262-shard-mg` below (fewer, bigger shards
-    # sized to fit the same per-shard timeout, sized to reduce the job-count
-    # contention footprint when the merge queue builds multiple entries
-    # concurrently — see scripts/gen-test262-mg-matrix.mjs). This job keeps
+    # capacity-sized, target-balanced matrix in `test262-shard-mg` below.
+    # The serial merge queue uses most of the runner pool for its one stable
+    # entry while retaining headroom for other required checks — see
+    # scripts/gen-test262-mg-matrix.mjs. This job keeps
     # its ORIGINAL 57-shard x 2-target matrix, UNCHANGED, for push (baseline
     # update) and workflow_dispatch (manual reruns).
     needs: [changes, mg-artifact-probe]
@@ -592,11 +593,7 @@ jobs:
           if-no-files-found: warn
 
   test262-shard-mg:
-    # #3431 — the merge_group-ONLY, CONSOLIDATED test262 shard matrix. Fewer,
-    # bigger shards than `test262-shard`'s 57x2=114-job matrix, sized to cut
-    # the job-count contention footprint when the merge queue builds
-    # multiple entries concurrently (`max_entries_to_build: 5`,
-    # docs/ci-policy.md).
+    # #3431 — the merge_group-ONLY, capacity-sized test262 shard matrix.
     #
     # Evidence (2026-07-18): an ISOLATED, uncontended 114-job merge_group run
     # (run 29631214965) finished the shard matrix in ~15-19 min total, with
@@ -610,16 +607,18 @@ jobs:
     # across up to 5 concurrently-building queue entries (5x114=570 jobs
     # contending for runner slots), is what was driving multi-hour merge
     # queue drains (~1 PR/hour) despite any single uncontended run being fast.
+    # Queue membership churn also invalidated descendant speculative groups,
+    # cancelling their expensive runs. The active ruleset now builds exactly
+    # one merge-group entry at a time (`max_entries_to_build=1`).
     #
-    # Reducing the per-entry job count from 114 to 53 (see
-    # scripts/gen-test262-mg-matrix.mjs for the current js-host=34/
-    # standalone=19 split and the measured-work scaling math) cuts the
-    # contention footprint by ~53% without changing pull_request/push/
-    # workflow_dispatch behavior at all (they keep using `test262-shard`
-    # above, completely unchanged).
+    # With the queue serialized, the matrix instead uses 106 of the 120
+    # four-core runners: js-host=72 and standalone=34, based on the 2.13:1
+    # measured work ratio from run 29807524490. The remaining 14 runners cover
+    # the overlapping CI/equivalence/differential/gate jobs. pull_request,
+    # push, and workflow_dispatch behavior remains unchanged.
     #
     # Uses the SAME dynamic entry point (tests/test262-chunk-dynamic.test.ts)
-    # for every matrix cell instead of 34/19 hand-written per-chunk files —
+    # for every matrix cell instead of hand-written per-chunk files —
     # the partition logic (assignBalancedChunk in test262-shared.ts) is a
     # pure function of (chunkIndex, totalChunks), so this is behaviorally
     # equivalent to the static tests/test262-chunkN.test.ts files, just
@@ -628,10 +627,9 @@ jobs:
     if: github.event_name == 'merge_group' && needs.changes.outputs.run_shards == 'true'
     name: test262 ${{ matrix.target_name }} shard ${{ matrix.chunk_label }}/${{ matrix.chunk_total }}
     runs-on: ubuntu-latest
-    # Same 25-min timeout as `test262-shard`. The consolidated per-target
-    # counts (js-host=34, standalone=19) are derived from six post-#3461 runs;
-    # both lanes' measured long pole is ~12 min, leaving ample headroom — see
-    # scripts/gen-test262-mg-matrix.mjs.
+    # Same 25-min timeout as `test262-shard`. The per-target counts
+    # (js-host=72, standalone=34) target ~6-8 minutes from the first #3470
+    # production run while leaving ample timeout headroom — see the generator.
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -705,7 +703,7 @@ jobs:
           # (test262-*-shard-*) pick these up with no changes there — only
           # one of the two shard jobs ever runs per workflow run, so there is
           # no naming collision risk even though chunk_label ranges overlap
-          # (1..34 / 1..19 here vs 1..57 in test262-shard).
+          # (1..72 / 1..34 here vs 1..57 in test262-shard).
           name: test262-${{ matrix.target_name }}-shard-${{ matrix.chunk_label }}
           path: |
             benchmarks/results/${{ matrix.result_prefix }}-results-${{ env.RUN_TIMESTAMP }}.jsonl
@@ -778,7 +776,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "-> merge_group queued only non-test262-relevant changes"
-            echo "   (changes.run_shards=='false'); the consolidated 53-job matrix (#3431,"
+            echo "   (changes.run_shards=='false'); the capacity-sized 106-job matrix (#3431,"
             echo "   test262-shard-mg) was intentionally skipped. Reporting 'merge shard"
             echo "   reports' green."
           elif [ "${{ github.event_name }}" = "push" ]; then
@@ -789,7 +787,7 @@ jobs:
           else
             echo "-> pull_request: heavy test262 shards are merge_group-only under the"
             echo "   #2519 slim-down, so they do not run at PR-time. The cheap gate"
-            echo "   (typecheck + lint) validated this PR; the consolidated 53-job matrix"
+            echo "   (typecheck + lint) validated this PR; the capacity-sized 106-job matrix"
             echo "   (#3431, test262-shard-mg) runs in the merge_group when the PR reaches"
             echo "   the front of the queue."
           fi
@@ -1104,8 +1102,8 @@ jobs:
         env:
           # CT_SOFT: contention-flake floor. A CT above this is only actionable
           #   when the aggregate arm agrees (see the combined trigger). Scaled
-          #   with per-shard test density (#3431). The current 53-job matrix is
-          #   denser than the original 114-job matrix, but the count cannot fail
+          #   with per-shard test density (#3431). The current 106-job matrix is
+          #   close to the original 114-job density, but the count cannot fail
           #   alone: the aggregate arm must corroborate it below. Keep 50 as a
           #   deliberately sensitive warning/combined-trigger threshold.
           CT_SOFT: "50"
@@ -2295,7 +2293,7 @@ jobs:
           # #1951 — DEFER this commit while the merge queue is non-empty. Any
           # push to main (even [skip ci]) makes GitHub rebuild EVERY queued
           # merge group: each rebuild costs a full shard-matrix validation
-          # (#3431: 59 consolidated jobs, was 114) per
+          # (#3431: 106 capacity-sized jobs, was 114 static jobs) per
           # queued PR plus ~10 min of added queue latency (observed 2026-06-10:
           # PR #1283 validated 3× because baseline pushes kept landing under
           # it). The baselines-REPO push above is unaffected — it doesn't move
