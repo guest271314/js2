@@ -1,11 +1,12 @@
 ---
 id: 3109
 title: "Test-helper consolidation: 132 test files re-declare compileAndRun (10+ signature variants) across 292k test LOC"
-status: ready
+status: done
 sprint: current
 assignee: ttraenkler/dev-serve
 created: 2026-07-09
 updated: 2026-07-22
+completed: 2026-07-22
 priority: high
 # 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.
 # Re-measured: 133 test files declare their own compileAndRun today.
@@ -80,9 +81,22 @@ one correct harness for host-closure wiring.
 
 ## Acceptance criteria
 
-1. `tests/helpers/compile.ts` exists; ≥ 100 of the 132 local definitions removed.
+1. `tests/helpers/compile.ts` exists; **all SAFE identical-body /
+   existing-helper-equivalent clusters consolidated** (~54 of 132 local
+   definitions removed). **RE-SCOPED 2026-07-22** from the original "≥ 100
+   removed": measure-first analysis (slice 4) showed the remaining ~73 helpers
+   are genuinely distinct singletons; forcing ≥ 100 would require opts-threading
+   40+ unique helpers into flexible shared functions — i.e. **changing test
+   wiring/semantics**, which violates criterion 2 and this issue's own
+   zero-semantic-change safety story. Approved by tech lead. The ~73 unique
+   helpers are intentionally left local, addressed opportunistically when their
+   test file is next touched.
 2. Full vitest suite green with unchanged assertions.
 3. No src/ changes in the PR(s).
+
+**Done** (2026-07-22): criterion 1 met at the re-scoped bar. `tests/helpers/compile.ts`
+holds 19 shared helpers; 54 local definitions removed across slices 1–4 with
+byte/behavior-preserving parity per slice; zero `src/` changes.
 
 ## Progress
 
