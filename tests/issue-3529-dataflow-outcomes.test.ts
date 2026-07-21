@@ -6,6 +6,7 @@ import ts from "typescript";
 import { analyzeSource } from "../src/checker/index.js";
 import { compile, type IrObservedOutcome } from "../src/index.js";
 import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
+import type { IrClassShape } from "../src/ir/nodes.js";
 import { classifyIrFailure, type IrUnsupportedCode } from "../src/ir/outcomes.js";
 
 function terminalFor(result: Awaited<ReturnType<typeof compile>>, displayName = "test"): IrObservedOutcome {
@@ -26,14 +27,18 @@ async function expectBuildUnsupported(source: string, code: IrUnsupportedCode): 
   });
 }
 
-function lowerDirect(source: string): void {
+function directDeclaration(source: string): ts.FunctionDeclaration {
   const ast = analyzeSource(source, "direct-string-method.ts");
   const declaration = ast.sourceFile.statements.find(
     (statement): statement is ts.FunctionDeclaration =>
       ts.isFunctionDeclaration(statement) && statement.name?.text === "test",
   );
   expect(declaration).toBeDefined();
-  lowerFunctionAstToIr(declaration!, { exported: true });
+  return declaration!;
+}
+
+function lowerDirect(source: string): void {
+  lowerFunctionAstToIr(directDeclaration(source), { exported: true });
 }
 
 describe("#3529 P2 — typed dataflow outcomes", () => {
@@ -130,6 +135,60 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
       kind: "emitted",
       irBodyEmitted: true,
     });
+  });
+
+  it("constructs an exact local class named Date before consulting the ambient extern registry", () => {
+    const dateShape: IrClassShape = {
+      className: "Date",
+      fields: [],
+      methods: [],
+      constructorParams: [],
+    };
+    const resolver = {
+      getExternClassInfo: (name: string) =>
+        name === "Date"
+          ? {
+              className: "Date",
+              constructorParams: [],
+              methods: new Map(),
+              properties: new Map(),
+            }
+          : undefined,
+      isAmbientBinding: () => false,
+    };
+    const lowered = lowerFunctionAstToIr(
+      directDeclaration(`
+        class Date {}
+        export function test(): Date { return new Date(); }
+      `),
+      {
+        exported: true,
+        returnTypeOverride: { kind: "class", shape: dateShape },
+        classShapes: new Map([["Date", dateShape]]),
+        resolver,
+      },
+    ).main;
+
+    const instructionKinds = lowered.blocks.flatMap((block) => block.instrs.map((instruction) => instruction.kind));
+    expect(instructionKinds).toContain("class.new");
+    expect(instructionKinds).not.toContain("extern.new");
+
+    const localShape: IrClassShape = { ...dateShape, className: "Local" };
+    expect(() =>
+      lowerFunctionAstToIr(
+        directDeclaration(`
+          class Local {}
+          const Date = Local;
+          export function test(): Local { return new Date(); }
+        `),
+        {
+          exported: true,
+          returnTypeOverride: { kind: "class", shape: localShape },
+          classShapes: new Map([["Local", localShape]]),
+          resolver,
+        },
+      ),
+    ).toThrow('extern constructor "Date" is shadowed');
   });
 
   it.each(["toString", "valueOf"])("does not treat inherited String.%s as a method-table signature", (methodName) => {

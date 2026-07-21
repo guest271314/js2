@@ -4303,14 +4303,17 @@ function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
     throw new Error(`ir/from-ast: module binding "${className}" is not a direct constructor (${cx.funcName})`);
   }
 
-  // Slice 10 (#1169i): host extern class (RegExp, Uint8Array, …) takes
-  // priority over the slice-4 class registry — the legacy externClasses
-  // map is the source of truth for built-in constructors. The result is
-  // tagged as `IrType.extern { className }` so subsequent
-  // `recv.method(...)` and `recv.prop` access can dispatch through the
-  // extern path.
+  // Slice 10 (#1169i): host extern class (RegExp, Uint8Array, …) normally
+  // takes priority over the slice-4 class registry — except when this exact
+  // constructor name has a source-owned class shape. In that case checker-
+  // backed selection already proved the identifier resolves to the local
+  // class (for example `class Date { ... }`), so construction must use the
+  // local shape rather than the ambient extern registry's name-only entry.
+  // Aliases and non-class shadows have no matching shape and retain the loud
+  // extern-shadow invariant below.
+  const shape = cx.classShapes?.get(className);
   const externInfo = cx.resolver?.getExternClassInfo?.(className);
-  if (externInfo) {
+  if (externInfo && !shape) {
     if (cx.resolver?.isAmbientBinding?.(expr.expression) === false) {
       throw new Error(`ir/from-ast: extern constructor "${className}" is shadowed (${cx.funcName})`);
     }
@@ -4354,7 +4357,6 @@ function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
     return cx.builder.emitExternNew(className, args);
   }
 
-  const shape = cx.classShapes?.get(className);
   if (!shape) {
     throw new Error(`ir/from-ast: unknown class "${className}" in ${cx.funcName}`);
   }
@@ -7316,8 +7318,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
       lProof !== "no-checker" &&
       rProof !== "no-checker" &&
       (lProof === "unprovable" || rProof === "unprovable" || lProof !== rProof);
-    const detail =
-      `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`;
+    const detail = `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`;
     if (requiresJsCoercion) {
       throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
     }
