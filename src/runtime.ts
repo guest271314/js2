@@ -5621,13 +5621,22 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // #1364b — class object: a deleted static-method name must not appear in
       // `obj.method in C` checks anymore.
       if (typeof key === "string" && _isDeletedClassProp(obj, key)) return false;
-      // (#3479) Registered class-OBJECT static method — the host proxy must
-      // answer `"m" in C` / GetOwnProperty for static methods the same way the
-      // direct `__extern_has` path (_wasmStructHasOwn:2748) already does via the
-      // allowlist. Without this, `Object.prototype.hasOwnProperty.call(C, "m")`
-      // (the `.call.bind` form propertyHelper uses) misses static methods.
+      // (#3479 Slice C / #3512) Registered class OBJECT: the static-method
+      // allowlist + sidecar are AUTHORITATIVE — mirrors the #1047 class-prototype
+      // branch above and the class-object arm of `_wasmStructHasOwn` (2778). The
+      // constructor's host proxy must NOT expose the class's INSTANCE struct
+      // fields (`foo = "x"`) as own properties: `hasOwnProperty.call(C, "foo")`
+      // and `"foo" in C` are false (instance fields live on instances, not on C).
+      // Slice A (#3479) added the static-method answer via the allowlist but then
+      // fell through to `safeGetField`/`fieldNamesForHost`, which read the
+      // instance-field shape → the symmetric leak this closes. (`_isDeletedClassProp`
+      // already returned false above for a deleted static name.)
       const staticMethods = _staticMethodNames.get(obj);
-      if (staticMethods !== undefined && typeof key === "string" && staticMethods.includes(key)) return true;
+      if (staticMethods !== undefined) {
+        if (typeof key === "string" && staticMethods.includes(key)) return true;
+        const sc = _wasmStructProps.get(obj);
+        return !!sc && key in sc;
+      }
       if (safeGetField(key) !== undefined) return true;
       const sc = _wasmStructProps.get(obj);
       if (sc && key in sc) return true;
@@ -5705,6 +5714,14 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       if (protoMethods !== undefined) {
         if (!hasInFields && !hasInSidecar) return undefined;
       }
+      // (#3479 Slice C / #3512) Registered class OBJECT: symmetric to the #1047
+      // prototype restriction — only the static-method allowlist (already handled
+      // above) and the sidecar are own properties of the constructor. Do NOT
+      // report the class's INSTANCE struct fields (`hasInFields`) via the
+      // constructor's `[[GetOwnProperty]]`, so `Object.getOwnPropertyDescriptor(C,
+      // "foo")` / `hasOwnProperty.call(C, "foo")` are `undefined`/false.
+      const staticMethods = _staticMethodNames.get(obj);
+      if (staticMethods !== undefined && !hasInSidecar) return undefined;
       const val = safeGetField(key);
       if (protoMethods === undefined && val === undefined && !hasInSidecar && !hasInFields) return undefined;
       // (#2714) Reflect the sidecar descriptor's stored enumerable flag so a
