@@ -15,6 +15,8 @@ area: codegen
 language_feature: standalone
 goal: standalone-everything
 parent: 2711
+loc-budget-allow:
+  - src/codegen/array-methods.ts
 ---
 # #2717 — Array.prototype.flat / flatMap have no standalone arm
 
