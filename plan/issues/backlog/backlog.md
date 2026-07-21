@@ -87,21 +87,40 @@ Updated (not new): [#1524](../1524-test262-harness-resizable-buffer-ctors-fixtur
 
 Investigated, no new issue needed: #2940's default-lane 1,496-record "vacuous harness-wrapper callback" tag is the **intended** honest reclassification (not a regression) — already tracked for policy ratchet by #3001/#3004. Most standalone-lane uncited patterns (`Cannot convert object to primitive`, `illegal cast` in iterator dstr, `Property description must be an object`, etc.) map cleanly onto existing open issues (#1900/#2733/#2042/#2864/#2875) — counts noted in harvest, no duplicates filed.
 
-## 2026-06-30 — IR front-end migration ratchet (queued `sprint: current`)
+## 2026-07-21 — IR-only default and direct-front-end retirement (current priority)
 
-Direct-AST→Wasm → typed-IR migration, sliced by `IrFallbackReason` bucket. Epic
-[#2855](../2855-ir-frontend-migration-ratchet-buckets-to-zero.md) remains the
-IR-only retirement owner. Its original corpus-ratchet children are complete:
+The explicit completion directive supersedes the June 30 demotion of IR work.
+The active program is
+[#3518](../3518-ir-only-default-and-direct-frontend-retirement.md), a staged
+prepare-before-emit migration rather than another fallback-count sweep:
+
+- [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **ready,
+  critical, current**: typed Prepared/Unsupported/Invariant outcomes and an
+  honest IR-only gate. First executable slice.
+- [#3090](../3090-shrink-codegen-delete-dormant-legacy-handlers.md) — blocked
+  R10 deletion ledger. The remaining ~59,676 frontend fn-lines are still
+  reachable and may be deleted only after #3518 R9.
+- [#2950](../2950-ir-first-default-flip-retire-compile-twice.md) — completed
+  historical default-flip milestone; its undelivered retirement scope moved to
+  #3518.
+- [#3142](../3142-ir-module-level-statement-adoption.md) — completed
+  module-init claim/patch milestone; compile-once module ownership remains R4.
+
+The earlier corpus-ratchet epic
+[#2855](../2855-ir-frontend-migration-ratchet-buckets-to-zero.md) is now closed
+as the narrow function-level milestone. Its children are complete:
 
 - [#2856](../2856-ir-body-shape-rejected-to-zero.md) — `body-shape-rejected` 31 → 0 — **done 2026-07-21**.
 - [#2857](../2857-ir-class-method-residual-to-zero.md) — `class-method` 6 → 0 — done.
 - [#2858](../2858-ir-call-graph-closure-to-zero.md) — `call-graph-closure` 7 → 0 — done.
 - [#2859](../2859-ir-param-type-not-resolvable-to-zero.md) — `param-type-not-resolvable` 1 → 0 — done.
 
-Remaining measured residuals belong to the wider IR-only program: deferred
-`async-function` (4) → #1373b and module-level `body-shape-rejected` (1) for the
-Algorithms Map initializer. Corpus-zero reasons remain non-strict until their
-source-language coverage is genuinely complete.
+Remaining measured residuals belong to #3518: deferred `async-function` (4) →
+#1373b/R7 and the module-level Algorithms `Map` initializer → #3517/R4.
+Corpus-zero reasons remain non-strict until their source-language coverage is
+genuinely complete. Even after those histograms reach zero, classes, module
+init, M0, linear, runtime entry points, fail-closed defaulting, and reachability
+deletion remain separate structural gates.
 
 ## 2026-06-23 — Sprint-65 value-rep substrate landings (session)
 

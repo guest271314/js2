@@ -2,16 +2,43 @@
 sprint: current
 status: active
 planned: 2026-06-30
+updated: 2026-07-21
 ---
 
-# Current budget window — FOCUS: close the standalone-vs-js-host test262 gap
+# Current budget window — FOCUS: complete the IR-only migration
 
-> **Stakeholder directive (2026-06-30).** Closing the standalone gap is the TOP
-> priority for the current budget window. This is the live planning record for
-> the `sprint: current` window; it is frozen into a numbered `sprints/{N}.md` at
-> token-budget rollover (`scripts/freeze-sprint.mjs`).
+> **Stakeholder directive (2026-07-21).** Drive the IR migration through an
+> IR-only default and retire direct codegen. This supersedes the June 30
+> ordering for new pulls. Standalone correctness remains a protected parallel
+> lane and a required final acceptance gate; it no longer outranks the
+> migration spine.
 
-## The goal
+## Top of the sprint — IR retirement
+
+1. **#3519 (R0, ready, critical)** — typed Prepared/Unsupported/Invariant
+   outcomes and an honest `check:ir-only` gate. It blocks every ownership/default
+   change because the present telemetry can miss TypeMap failures,
+   `result.errors`, and compile failures. R0 proves the schema on a named,
+   bounded single-host lane; #3518 expands it to inline equivalence and the
+   other production lanes before R9.
+2. **#3517 (active stacked slice)** — retire the last measured Algorithms
+   module-init `Map` residual. This closes a corpus count, not R4 compile-once
+   module ownership.
+3. **#3518 R1 next** — source-qualified `IrUnitId` + `ProgramAbiMap`. Allocate a
+   child issue only after R0 fixes the outcome boundary; do not implement from
+   the epic prose in parallel with R0.
+
+Program owner: **#3518**. Deletion ledger: **#3090**, blocked until R9. The
+function fallback-corpus epic **#2855 is done** and is not a claimable tail
+task.
+
+Sprint acceptance for this lane is the #3519 hybrid gate with complete
+denominators, plus an intentionally non-green IR-only report that names every
+remaining typed blocker. “Function bucket zero” is not an IR-only status.
+
+## Parallel protected lane — standalone-vs-js-host Test262 gap
+
+### Protected-lane goal
 
 The standalone metric was made **honest** in #2879 (via #2360): a standalone
 pass is credited only when it is **host-free** (no leaked host imports), not when
@@ -26,7 +53,7 @@ Umbrella: **#2860**. The gap decomposes into the carriers (architecture-scale
 half) plus the dynamic-object substrate, the proto-glue / CE clusters, and the
 de-masked real-failure clusters.
 
-## Top of the sprint — the ordered standalone-gap queue (devs pull these first)
+### Ordered standalone-gap queue
 
 All `priority: high` + `sprint: current` except #2877 (medium). Within the high
 tier the **carriers are the biggest lever**, then the substrate/cluster track in
@@ -57,15 +84,15 @@ then layer the carriers:
    horizon m.
 8. **#2878** invalid-Wasm residual (`__str_flatten` + user-body shapes) —
    horizon m. Correctness; follows the #2868 URI-carrier fix.
-9. **#2872** TypedArray.prototype.* cluster — 294, horizon m (de-masked from
+9. **#2872** TypedArray.prototype.\* cluster — 294, horizon m (de-masked from
    #2862).
 10. **#2873** language/expressions cluster — 276, horizon m (de-masked).
-11. **#2875** String.prototype.* cluster — 159, horizon m (de-masked).
+11. **#2875** String.prototype.\* cluster — 159, horizon m (de-masked).
 12. **#2876** RegExp cluster — 125, horizon m (de-masked).
 13. **#2877** standalone exception message readability — horizon s, medium.
     Triage enabler (lower lever).
 
-## Already done / blocked (not queued)
+### Already done / blocked (not queued)
 
 - **#2868** invalid-Wasm emission (URI/str_flatten carrier) — **done** (via #2350).
 - **#2874** getOwnPropertyDescriptor numeric-key coercion — **done** (via #2354).
@@ -76,27 +103,26 @@ then layer the carriers:
 - **#2862** ToPrimitive over built-in exotics — **blocked** (superseded; the
   de-masked clusters #2872/#2873/#2875/#2876 carry the tractable residual).
 
-## Demoted below the standalone gap (priority: low, kept sprint: current)
+### Demoted tail work (priority: low, kept sprint: current)
 
 These stay claimable as tail-filler but sort under all the standalone-gap work.
 Do NOT close them — just lowered priority per the directive:
 
-| Issue | Was | Now | Why demoted |
-| ----- | --- | --- | ----------- |
-| #2850 | high | low | acorn dogfood regex-validator remnant — non-standalone |
-| #2853 | high | low | acorn dogfood self-parse remnant — non-standalone |
-| #2855 | high | low | IR-migration tracking epic — non-standalone |
-| #2669 | high | low | ES2015 destructuring umbrella — non-standalone conformance |
-| #2803 | high | low | callsite param-type inference — non-standalone (platform) |
+| Issue | Was  | Now | Why demoted                                                           |
+| ----- | ---- | --- | --------------------------------------------------------------------- |
+| #2850 | high | low | acorn dogfood regex-validator remnant — non-standalone                |
+| #2853 | high | low | acorn dogfood self-parse remnant — non-standalone                     |
+| #2669 | high | low | ES2015 destructuring umbrella — non-standalone conformance            |
+| #2803 | high | low | callsite param-type inference — non-standalone (platform)             |
 | #1042 | high | low | async state-machine epic — non-standalone (deferred acceptance owner) |
 
-**In-progress non-standalone work left untouched.** Active claimed tasks
+**Other in-progress non-standalone work left untouched.** Active claimed tasks
 (e.g. #1917, #2106, #2710, #2773, #2838, #2580, #2623, #2660) are not competing
-for the next pull, so their priority is unchanged; they finish, and the next
-pull lands on the standalone-gap top. (Note: #2029, #2161, #2173, #2175, #2651
+for the next pull, so their priority is unchanged; they finish, and available
+protected-lane capacity follows the standalone queue. (Note: #2029, #2161, #2173, #2175, #2651
 are `goal: standalone-mode` — these ARE standalone work and stay as-is.)
 
-## Definition of done (window)
+### Definition of done (protected standalone lane)
 
 Host-free standalone official_pass climbs from ~12,883 toward the ~34,052 host
 figure. Each child issue's test plan = its cluster's standalone-CE/fail tests

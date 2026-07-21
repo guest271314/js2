@@ -1,90 +1,122 @@
 # Goal: ir-full-coverage
 
-**ALL AST node kinds route through the IR front-end (`src/ir/from-ast.ts`).
-WasmGC vs linear memory is purely a backend fork below the IR (the
-`BackendEmitter` trait). The legacy direct AST→Wasm path is
-deprecation-tracked, not a peer front-end.**
+**Every supported source unit is prepared as typed IR before emission. WasmGC
+and linear differ only below that IR boundary. Unsupported source fails with a
+typed diagnostic, and the direct AST→Wasm front-end is deleted.**
 
-- **Status**: Active (elevated 2026-07-02 — north star, see
-  `docs/architecture/codegen-axes.md` "North star")
-- **Track**: Supporting / architecture track (parallel to conformance)
-- **Target**: every _unintended_ bucket in `scripts/ir-fallback-baseline.json`
-  at zero, its rejection reason promoted to `STRICT_IR_REASONS`, and the
-  demote-to-warning escape hatch removed (#2855). Deferred features (`eval` /
-  `with` / Proxy wont-fix rows) die with the direct path rather than migrate.
-- **Dependencies**: `compiler-architecture` (met for this purpose);
-  `backend-agnostic-ir` supplies the trait seam (#1713/#1714) that makes
-  "one front-end, two backends" real rather than aspirational.
+- **Status:** Active — current migration priority (2026-07-21)
+- **Track:** Compiler architecture / IR retirement
+- **Tracking epic:** [#3518](../issues/3518-ir-only-default-and-direct-frontend-retirement.md)
+- **First executable slice:** [#3519](../issues/3519-ir-only-typed-outcomes-and-honest-gate.md)
+- **Target:** `pnpm run check:ir-only` passes across the authoritative corpus
+  and both backends; the hybrid/direct path and its escape hatches no longer
+  exist; the #3090 reachability audit reports no direct-front-end survivors.
+- **Dependencies:** `compiler-architecture`; `backend-agnostic-ir` supplies the
+  shared backend seam, while #3518 completes whole-program consumption.
 
 ## Why
 
-The codegen-axes doc names two orthogonal axes. The backend axis is settled:
-WasmGC and linear both stay, chosen by target. The front-end axis is NOT a
-peer choice — the direct AST→Wasm paths (`src/codegen/`'s front-end role and
-`src/codegen-linear/`'s direct AST reading) exist only because IR adoption is
-staged. Leaving them as a permanent tier means every front-end concern (type
-propagation, binding resolution, control-flow normalization, scope handling)
-is implemented 2–3 times and fixed 2–3 times — the #1098 hack inventory and
-the #2713 IR↔legacy parity bug class are the measured cost.
+The backend axis is legitimate: WasmGC and linear use different
+representations/lowering. The front-end axis is temporary duplication. Keeping
+both typed IR and direct AST→Wasm lowering makes type propagation, binding,
+control flow, source semantics, and bug fixes diverge across two or three
+implementations.
 
-The end state, stated once and explicitly:
+The desired boundary is:
 
-1. **One front-end.** Every AST node kind is built into typed IR by
-   `from-ast.ts`. The selector either claims a kind (IR succeeds) or reports a
-   structured deferred reason — no silent legacy fallback (#2855).
-2. **Backends fork below the IR.** Backend-divergent Wasm shapes are
-   `BackendEmitter` intents with a `WasmGcEmitter` and a `LinearEmitter`
-   implementation (#1713/#1714) — never a reason to keep a kind on the direct
-   path.
-3. **The direct path is a shrinking remainder.** Every kind still on it is an
-   entry in `plan/log/ir-adoption.md` with a bucket in the #1376 ratchet and
-   an issue driving it to zero.
+```text
+source → PreparedIrProgram → WasmGC lowering
+                           → linear lowering
+```
 
-## Approach
+Runtime/builtin behavior may remain shared code below semantic IR intents. No
+runtime family may require an AST dispatcher as its entry point.
 
-Bucket-by-bucket ratchet, banked by CI (`check:ir-fallbacks`,
-`--update-on-decrease` post-merge):
+## Current state (2026-07-21)
 
-1. **#2856** — `body-shape-rejected` to zero (dominant unintended bucket).
-2. **#2857** — class-method residual to zero (#1370 Phase C/D/E).
-3. **#2858** — `call-graph-closure` to zero (derivative of the first two).
-4. **#2859** — `param-type-not-resolvable` to zero (TypeMap propagation).
-5. On each zeroed bucket: add the reason to `STRICT_IR_REASONS`
-   (`src/codegen/index.ts`) so regression = hard compile error, and update
-   `plan/log/ir-adoption.md`.
-6. **#2855** — retire the demote-to-warning channel once the unintended
-   buckets are zero.
+The compiler is **default-on hybrid, not IR-only**:
+
+- #2856 reduced the measured playground function `body-shape-rejected` bucket
+  to zero, but that is a narrow corpus ratchet, not strictness or reachability.
+- The adoption matrix has 18/56 IR-owned rows. Mixed/direct rows remain, and
+  an IR-owned node inside one rejected function still uses its legacy handler.
+- The latest compile-once ceiling is 441/1,568 functions (28.1%). The remaining
+  71.9% needs runtime/object/string/array/method IR, not signature widening.
+- Class members and the #3142 module-init unit compile twice. Module claimability
+  and successful slot patching do not prove that legacy emission was skipped.
+- Multi-source/M0 and linear are incomplete whole-program IR consumers.
+- Roughly 59,676 frontend-only fn-lines remain reachable. Roughly 47K
+  runtime/builtin entry fn-lines must be rewired behind IR intents, not deleted.
+- `STRICT_IR_REASONS` and corpus baselines cannot define IR-only policy. A
+  legitimate unsupported source may use a reason that happens to be zero on a
+  sample corpus. #3341's typed invariant work is the precedent, but substring
+  matching must be retired by #3519.
+
+## Delivery strategy
+
+The old bucket-only sequence (#2855) is complete as a measured function-corpus
+milestone. The retirement now follows #3518's dependency spine:
+
+1. **R0 / #3519 — truth:** typed Prepared/Unsupported/Invariant outcomes and an
+   honest gate that includes TypeMap failures, thrown compiles,
+   `CompileResult.errors`, named corpus denominators, classes, and module init.
+   Later retirement slices expand that same schema to inline equivalence and
+   the other production lanes before the fail-closed default flip.
+2. **R1 — identity/ABI:** source-qualified `IrUnitId` and `ProgramAbiMap`.
+3. **R2 — ownership:** a `PreparedIrProgram` built before body emission; free
+   functions compile once without an allowlist.
+4. **R3/R4 — remaining unit kinds:** classes and module init compile once.
+5. **R5 — whole program:** multi-source/M0, collisions, imports, fast mode, and
+   one program-owned module-init plan.
+6. **R6 — semantics:** typed intrinsic contracts and IR entry points for each
+   runtime/builtin family.
+7. **R7 — async/unsupported:** async becomes IR-owned; deliberately unsupported
+   syntax becomes a source-located hard diagnostic, never direct fallback.
+8. **R8 — backend convergence:** linear consumes the same prepared IR.
+9. **R9 — policy flip:** fail-closed IR-only becomes the sole production mode;
+   remove hybrid demotion and every legacy escape hatch.
+10. **R10 — subtraction:** re-run #3090 and delete the proven-unreachable
+    direct front-end.
+
+Corpus fallback counts remain useful downward ratchets during this program,
+but no zero count advances a later stage without its structural acceptance
+evidence.
 
 ## Issues
 
 <!-- AUTOGENERATED:GOAL-ISSUES-START -->
 
-| #         | Title                                                                                              | Sprint  | Status  | Priority |
-| --------- | -------------------------------------------------------------------------------------------------- | ------- | ------- | -------- |
-| **1370**  | IR: claim class methods and constructors (largest legacy bypass)                                   | 51      | done    | high     |
-| **1371**  | IR: expand external-call whitelist to stop rejecting host imports and Math.\*                      | 51      | done    | high     |
-| **1372**  | IR: support destructuring params (removes param-shape-rejected bypass)                             | 51      | done    | high     |
-| **1373**  | IR: claim async functions (async/await through IR path)                                            | 52      | done    | medium   |
-| **1373b** | IR async Phase C: CPS lowering for await + async-return + async-throw                              | 67      | backlog | top      |
-| **1374**  | IR: string for-of and for-in through IR (removes legacy fallback for string iteration)             | 51      | done    | medium   |
-| **1375**  | IR: full optional-chain support (?. and ?.[]) without resolver fallback                            | 51      | done    | medium   |
-| **1376**  | IR: fallback telemetry gate — CI fails when unintended legacy bypasses exceed threshold            | 51      | done    | high     |
-| **1382**  | structural: Wasm closures not JS-callable from host imports — bridge gap                           | 52      | done    | high     |
-| **1392**  | IR: null-safe access primitives — ref.is_null IrUnop + value-producing if/else IR node             | 51      | done    | high     |
-| **2855**  | IR front-end migration: ratchet unintended fallback buckets to zero + promote to STRICT_IR_REASONS | current | backlog | low      |
-| **2856**  | IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)                 | current | ready   | high     |
-| **2857**  | IR: drive class-method fallback bucket to zero (#1370 Phase C/D/E residual)                        | current | ready   | high     |
-| **2858**  | IR: drive call-graph-closure fallback bucket to zero (derivative of body-shape + class-method)     | current | ready   | high     |
-| **2859**  | IR: drive param-type-not-resolvable fallback bucket to zero (TypeMap propagation)                  | current | ready   | high     |
+| #         | Title                                                            | Sprint  | Status      | Role                                               |
+| --------- | ---------------------------------------------------------------- | ------- | ----------- | -------------------------------------------------- |
+| **3518**  | IR-only default and direct front-end retirement                  | current | in-progress | Active tracking epic, R0–R10                       |
+| **3519**  | IR-only R0: typed preparation outcomes and honest readiness gate | current | ready       | First executable slice                             |
+| **3090**  | Retire direct front-end after IR-only reachability gates close   | current | blocked     | R10 deletion ledger                                |
+| **3143**  | IR-first default flip                                            | 71      | done        | Historical default-on hybrid milestone             |
+| **3142**  | IR module-init overlay adoption                                  | 72      | done        | Historical claim/patch milestone; not compile-once |
+| **2855**  | IR fallback-corpus ratchet                                       | 73      | done        | Historical function-corpus zero milestone          |
+| **2856**  | `body-shape-rejected` function corpus to zero                    | 73      | done        | #2855 child                                        |
+| **2857**  | Class-method fallback corpus to zero                             | current | done        | #2855 child                                        |
+| **2858**  | Call-graph-closure fallback corpus to zero                       | current | done        | #2855 child                                        |
+| **2859**  | Param-type fallback corpus to zero                               | current | done        | #2855 child                                        |
+| **3341**  | Typed strict IR invariant hardening                              | current | in-progress | Precedent/input to R0                              |
+| **1373b** | Async CPS lowering                                               | 67      | backlog     | Feeds R7                                           |
+| **2950**  | IR-first default flip historical issue                           | 71      | done        | Delivered by #3143; retirement superseded by #3518 |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 
 ## Success criteria
 
-- `pnpm run check:ir-fallbacks` reports zero for every unintended bucket.
-- `STRICT_IR_REASONS` covers all formerly-unintended reasons; the
-  fallback-to-warning escape hatch in `src/codegen/index.ts` is deleted.
-- `plan/log/ir-adoption.md` shows no `direct-only` row for a non-wont-fix
-  kind.
-- The codegen-axes decision tree has no "stopgap on the direct path" branch
-  left to take.
+- `pnpm run check:ir-only` passes with complete denominators and zero
+  Unsupported, Invariant, unaccounted, legacy-emitted, or fatal-result rows.
+- Every supported function, class member, synthetic callback, module-init unit,
+  and multi-source unit belongs to one `PreparedIrProgram` before either
+  backend emits bodies.
+- WasmGC and linear consume the same program ABI and semantic IR intents.
+- Unsupported features fail source-located and typed; there is no silent
+  selector fallback or post-claim demotion.
+- `experimentalIR`, `JS2WASM_IR_FIRST`, `disableIrFirst`, compile-twice
+  allowlists, and direct-path test modes are removed.
+- The refreshed #3090 audit reports zero reachable direct AST→Wasm front-end
+  handlers. Runtime/substrate survivors are reached only below the IR boundary.
+- Equivalence, cross-backend, full Test262 in both lanes, standalone-floor,
+  linear, validity, typecheck, lint/format, LOC, and dead-export gates are green.

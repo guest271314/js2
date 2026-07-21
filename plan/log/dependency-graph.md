@@ -4,13 +4,57 @@ Issues organized by dependency order -- work items at the top are ready now,
 items below unlock when their dependencies complete. No sprint batching needed:
 pick any "ready" item and start.
 
-## TOP PRIORITY — close the standalone-vs-js-host test262 gap (stakeholder directive, 2026-06-30)
+## TOP PRIORITY — IR-only default and direct-front-end retirement (stakeholder directive, 2026-07-21)
+
+Tracking epic **#3518**. First executable slice **#3519** is `ready`; all later
+ownership/deletion work depends on its typed truth channel. Current compiler
+state is default-on hybrid: 0 measured function `body-shape-rejected` does not
+mean IR-only, class/module/M0/linear ownership is incomplete, and 59,676
+frontend-only fn-lines remain reachable.
+
+```text
+#3143 (done) ──> #3519 R0
+                     |
+                     v
+              R1 IrUnitId + ProgramAbiMap
+                     |
+                     v
+              R2 PreparedIrProgram
+                /       |       \
+          R3 classes  R4 module  R6 runtime intents
+                \       |       /
+                 R5 whole-program multi
+                          |
+                 R7 async/unsupported
+                          |
+                 R8 shared linear IR
+                          |
+                 R9 fail-closed default
+                          |
+                 R10 #3090 deletion
+```
+
+| Issue / slice | Priority | Status               | Dependency / decision                                                  |
+| ------------- | -------- | -------------------- | ---------------------------------------------------------------------- |
+| #3518         | critical | in-progress          | Tracking epic; not a one-shot dev claim                                |
+| #3519 / R0    | critical | **ready**            | Depends on #3143; #2855/#3341 supply history and invariant precedent   |
+| #3517         | high     | in-progress          | Last measured module `Map` residual; closes a corpus count, not R4     |
+| R1–R2         | critical | pending child issues | Sequential after R0; identity/ABI before prepare-before-emit ownership |
+| R3 / R4 / R6  | critical | pending child issues | Parallel only after R2; classes, module init, runtime families         |
+| R5 / R7 / R8  | critical | pending child issues | Integration sequence: multi → async/unsupported → shared linear        |
+| R9            | critical | blocked              | Requires R3–R8; removes hybrid and all escape hatches                  |
+| #3090 / R10   | high     | blocked              | Requires R9 plus a refreshed reachability audit                        |
+
+#2855 is **done** as the narrow function-corpus ratchet. #2950 is **done** as a
+historical default-flip milestone; neither owns the remaining retirement.
+
+## PROTECTED PARALLEL PRIORITY — close the standalone-vs-js-host test262 gap (directive 2026-06-30)
 
 Umbrella **#2860**. The honest metric (#2879 via #2360) re-based the gap to
 **~20,500 host-free tests** (js-host ~34,052 vs host-free standalone ~12,883).
-**This is THE sprint focus.** Every issue below is `priority: high` +
-`sprint: current` and sorts to the TOP of the auto-synced TaskList. The
-self-serving devs pull these first, in this order:
+This remains a protected correctness lane and final IR-retirement acceptance
+gate. New pulls prioritize #3518's dependency spine; available non-overlapping
+capacity may continue this ordered queue:
 
 **Carriers (the biggest lever — architecture-scale, ~2,476 combined).** Share a
 common Wasm-native suspendable **frame substrate** (arch-frame spec in
@@ -42,9 +86,8 @@ common Wasm-native suspendable **frame substrate** (arch-frame spec in
 #2360) all **done**. #2862 (ToPrimitive built-in exotics) **blocked** —
 superseded; the de-masked clusters carry the tractable residual.
 
-**Demoted to `priority: low`** (kept `sprint: current` as tail-filler, sort
-under the standalone work): acorn remnants **#2850/#2853**, IR-migration
-**#2855–#2858** (#2859 already low), and ES/spec umbrellas **#2669** (ES2015
+**Demoted to `priority: low`** (kept `sprint: current` as tail-filler): acorn
+remnants **#2850/#2853** and ES/spec umbrellas **#2669** (ES2015
 destructuring), **#2803** (callsite param-type inference), **#1042** (async
 state-machine epic). In-progress non-standalone work is left at its current
 priority (already claimed — not competing for the next pull).
@@ -52,9 +95,9 @@ priority (already claimed — not competing for the next pull).
 ## Current-origin/main PO audit findings (2026-07-17) - ready, not current-sprint focus
 
 These are verified untracked gaps from the July 17 audit. They do **not**
-displace the #2860 standalone-vs-js-host sprint focus above, but they are high
-leverage backlog candidates because each removes a planning or correctness risk
-that can otherwise misdirect larger implementation work.
+displace the #3518 dependency spine or the protected #2860 lane, but remain
+high-leverage backlog candidates because each removes a planning or correctness
+risk that can otherwise misdirect larger implementation work.
 
 | Issue | Area                          | Priority | Horizon | Status  | Dependency note                                                                                                                              |
 | ----- | ----------------------------- | -------- | ------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -64,33 +107,24 @@ that can otherwise misdirect larger implementation work.
 | #3339 | Axios project nontermination  | high     | l       | backlog | Architect spec required: identify the unbounded resolver/lowering/emitter phase before dispatch; parent #1032, survey #1571.                 |
 | #3340 | Root baseline classification  | high     | s       | ready   | No hard deps. Ratchets stale #2143 and WASI expected-pass IDs; coordinates with #3337 but does not implement argv.                           |
 
-## IR front-end migration — fallback-bucket ratchet (added 2026-06-30, DEMOTED to `priority: low` 2026-06-30)
+## Historical IR fallback-corpus ratchet (#2855, completed 2026-07-21)
 
-> **Demoted below the standalone gap (stakeholder directive, 2026-06-30).** All
-> rows below are now `priority: low` — still `sprint: current` (claimable as
-> tail-filler) but sorting under the standalone-gap work above. The counts /
-> sequencing are unchanged; only priority dropped.
-
-Drive the **unintended** `IrFallbackReason` buckets to zero, then promote each
-reason into `STRICT_IR_REASONS` (`src/codegen/index.ts:1013`). Counts verified
-against `origin/main` @ dc29fd081 via `pnpm run check:ir-fallbacks -- --verbose`.
-Epic **#2855** is the tracking owner (supersedes the stale `#1530` citation in
-CLAUDE.md / codegen-axes.md / ir-adoption.md). Gate mechanism: #1376 / #2089 /
-#1923 (all done).
+The bucket gate remains a useful regression ratchet, but its retirement role is
+closed and transferred to #3518. Corpus zero is neither a strictness rule nor a
+compile-once/deletion gate.
 
 | Issue | Bucket                      | Count | Priority | Horizon | Status                                                                        |
 | ----- | --------------------------- | ----- | -------- | ------- | ----------------------------------------------------------------------------- |
-| #2855 | (tracking epic)             | —     | high     | xl      | **ready** — IR-only/default + direct-front-end retirement endgame             |
+| #2855 | function-corpus epic        | —     | high     | xl      | **done** — narrow ratchet milestone; superseded by #3518 for retirement       |
 | #2856 | `body-shape-rejected`       | 0     | high     | l       | **done** — playground function corpus zero; generic reason remains non-strict |
 | #2857 | `class-method`              | 0     | low      | m       | **done** — measured corpus residual retired                                   |
 | #2858 | `call-graph-closure`        | 0     | low      | m       | **done** — measured corpus residual retired                                   |
 | #2859 | `param-type-not-resolvable` | 0     | low      | s       | **done** — measured corpus residual retired                                   |
 
-Deferred `async-function` (4) continues in #1373b. Module-level
-`body-shape-rejected` is 1 (Algorithms Map initializer). Already-zero
-unintended buckets (`external-call`,
-`param-shape-rejected`, `return-type-not-resolvable`, `type-resolution-failure`,
-`destructuring-param-complex`) — retired by #1370/#1371/#1372/#1374/#1375.
+Deferred `async-function` (4) continues in #1373b / #3518 R7. The module-level
+Algorithms `Map` residual is #3517. Neither residual changes the structural
+facts that class members and module init compile twice and M0/linear remain
+incomplete.
 
 ## Sprint 65 landings (2026-06-23 session — value-rep substrate spine)
 
