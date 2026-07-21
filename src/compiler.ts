@@ -997,7 +997,7 @@ function runPipeline(input: PipelineInput): CompileResult {
       }
       capturedIrCompiledFuncs = result.irCompiledFuncs;
       capturedIrFirstSkipped = multiAst
-        ? undefined // generateMultiModule has no IR overlay yet — the #2138 multi seam is a follow-on slice
+        ? undefined // #2138 M0 multi overlay is compile-twice only; it never enables IR-first body skipping
         : (result as ReturnType<typeof generateModule>).irFirstSkipped;
       // Propagate codegen errors with source locations. #1921 — a deliberate
       // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
