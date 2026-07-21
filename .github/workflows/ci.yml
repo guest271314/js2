@@ -55,7 +55,7 @@ jobs:
           CHANGED=$(git diff --name-only "$BASE"...HEAD)
           echo "Changed files:"; echo "$CHANGED"
           # Run the heavy suites iff any compiler / test / build-config path changed.
-          if echo "$CHANGED" | grep -qE '^(src/|tests/|scripts/|package\.json$|pnpm-lock\.yaml$|tsconfig.*\.json$|vitest\.config\.ts$|\.github/workflows/ci\.yml$)'; then
+          if echo "$CHANGED" | grep -qE '^(src/|tests/|scripts/|package\.json$|pnpm-lock\.yaml$|tsconfig.*\.json$|vitest\.config\.ts$|\.github/actions/setup-node-pnpm/action\.yml$|\.github/workflows/ci\.yml$)'; then
             echo "code/test/build paths changed -> run heavy suites"
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
@@ -89,25 +89,40 @@ jobs:
           # guarantee base-ancestry by construction — no extra check needed.
           echo "✓ ${{ github.event_name }} ref already includes base by construction"
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 25
-
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: pnpm run lint
+      - name: Lint, format, and typecheck (parallel)
+        run: |
+          # These checks are independent and read-only. Running them as three
+          # lanes keeps the required `quality` context intact while bounding
+          # this stage by typecheck (the long pole) instead of their sum.
+          set +e
+          tmp_dir=$(mktemp -d)
 
-      - name: Format check
-        run: pnpm run format:check
+          pnpm run lint > "$tmp_dir/lint.log" 2>&1 &
+          lint_pid=$!
+          pnpm run format:check > "$tmp_dir/format.log" 2>&1 &
+          format_pid=$!
+          pnpm run typecheck > "$tmp_dir/typecheck.log" 2>&1 &
+          typecheck_pid=$!
 
-      - name: Typecheck
-        run: pnpm run typecheck
+          wait "$lint_pid"; lint_rc=$?
+          wait "$format_pid"; format_rc=$?
+          wait "$typecheck_pid"; typecheck_rc=$?
+          set -e
+
+          for lane in lint format typecheck; do
+            echo "--- $lane ---"
+            cat "$tmp_dir/$lane.log"
+          done
+
+          if [ "$lint_rc" -ne 0 ] || [ "$format_rc" -ne 0 ] || [ "$typecheck_rc" -ne 0 ]; then
+            echo "::error::quality lanes failed (lint=$lint_rc, format=$format_rc, typecheck=$typecheck_rc)"
+            exit 1
+          fi
 
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
@@ -450,13 +465,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 25
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
       - run: pnpm install --frozen-lockfile
       - name: Run linear-backend, C-ABI, and SIMD tests
         run: |
@@ -470,10 +480,10 @@ jobs:
 
   # #1659 — Run tests/equivalence/ in CI. Previously skipped because the full
   # suite OOMed under file-parallelism. Each shard runs single-fork (peak
-  # ~1 GB RAM, ~1-2 min) and emits a partial failure list; the merge job
-  # combines partials and gates against scripts/equivalence-baseline.json —
-  # only NEW failures (not in the baseline) fail CI, so the existing failure
-  # backlog does not block every PR while still catching genuine regressions.
+  # ~1 GB RAM, ~1-3 min) and gates its own failures against
+  # scripts/equivalence-baseline.json. The final required context is only a
+  # status fan-in: regression membership is independent per test, so shipping
+  # eight partial artifacts to repeat the same set comparison adds no safety.
   equivalence-shard:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -484,47 +494,25 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 25
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Run equivalence shard ${{ matrix.shard }}/8
+      - name: Run and gate equivalence shard ${{ matrix.shard }}/8
         env:
           SHARD: ${{ matrix.shard }}/8
-          PARTIAL_OUT: equiv-partial-${{ matrix.shard }}.json
         run: node scripts/equivalence-gate.mjs
-      - name: Upload partial result
-        uses: actions/upload-artifact@v6
-        with:
-          name: equiv-partial-${{ matrix.shard }}
-          path: equiv-partial-${{ matrix.shard }}.json
-          retention-days: 3
 
   equivalence-gate:
     needs: [changes, equivalence-shard]
-    if: needs.changes.outputs.code == 'true'
+    if: always() && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 25
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
-      - run: pnpm install --frozen-lockfile
-      - name: Download shard partials
-        uses: actions/download-artifact@v7
-        with:
-          pattern: equiv-partial-*
-          path: equiv-partials
-          merge-multiple: true
-      - name: Gate against baseline
+      - name: Verify every equivalence shard passed its baseline gate
         env:
-          MERGE_PARTIALS_DIR: equiv-partials
-        run: node scripts/equivalence-gate.mjs
+          SHARD_RESULT: ${{ needs.equivalence-shard.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::one or more equivalence shards failed their local baseline gate (matrix result: $SHARD_RESULT)"
+            exit 1
+          fi
+          echo "All equivalence shards passed their local baseline gates."

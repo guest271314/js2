@@ -17,25 +17,27 @@
 // Fewer, bigger shards reduce the per-entry job count, and therefore the
 // contention footprint under a busy queue, at the cost of a longer
 // best-case (uncontended) per-shard runtime. js-host and standalone get
-// DIFFERENT shard counts because they have very different per-shard runtimes
-// at the SAME split — measured from a real, uncontended 57-way merge_group
-// run (run 29631214965, 2026-07-18):
-//   js-host:    avg 13.6 min/shard, max 15.9 min/shard (57-way)
-//   standalone: avg  5.8 min/shard, max  7.0 min/shard (57-way)
-// Scaling those linearly (assignBalancedChunk in test262-shared.ts balances
-// by measured historical test duration, so total per-target work is
-// ~constant regardless of shard count):
-//   JS_HOST_CHUNKS = 40    -> est. avg ~19.4 min, max ~22.7 min  (< 25 min cap)
-//   STANDALONE_CHUNKS = 19 -> est. avg ~17.4 min, max ~21.0 min  (< 25 min cap)
+// DIFFERENT shard counts because the lanes have different total work. The
+// original 40/19 split used pre-#3374 timings and became stale again when the
+// fast native-harness host lane (#3461) removed most repeated harness compile
+// work. Six successful, uncontended merge_group runs on 2026-07-21
+// (29791392339..29799448439) measured:
+//   js-host at 40:    avg job 9.0 min, mean max 10.5 min
+//   standalone at 19: avg job 10.4 min, mean max 12.0 min
+// After subtracting the measured ~25 s setup/build envelope, total work is
+// ~20,600 runner-seconds for host and ~11,400 for standalone: a 1.80 ratio.
+// A 34/19 split matches that ratio (1.79), so both targets reach the fan-in at
+// approximately the same time. The host timing weights are refreshed from the
+// same six runs so persistent fast/slow partitions are also redistributed.
 // Both stay under the existing 25-minute per-shard timeout (test262-shard-mg
 // uses 28 min for a small safety margin instead of raising the timeout
 // aggressively) with no change needed to pull_request/push/workflow_dispatch,
 // which keep the full 57-shard matrix untouched.
 //
-// Job count: 40 + 19 = 59, vs. 114 today — a 48% reduction in the merge_group
-// matrix's job count (and therefore its contention footprint under a busy
-// queue), while every individual shard estimate stays inside the existing
-// timeout.
+// Job count: 34 + 19 = 53, vs. the static 114-job push/manual matrix — a 53%
+// reduction in the merge_group matrix's job count (and therefore its
+// contention footprint under a busy queue), while the measured long-pole
+// remains around 12 minutes, well inside the existing timeout.
 //
 // The underlying partition (assignBalancedChunk, test262-shared.ts) is a
 // pure function of (chunkIndex, totalChunks): it re-derives the FULL test262
@@ -48,7 +50,7 @@
 // matrix cell invokes (index/total supplied via env vars instead of being
 // baked into a per-shard filename).
 
-export const JS_HOST_CHUNKS = 40;
+export const JS_HOST_CHUNKS = 34;
 export const STANDALONE_CHUNKS = 19;
 
 /**

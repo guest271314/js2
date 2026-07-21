@@ -30,6 +30,7 @@ set -euo pipefail
 matches_test262_path() {
   local p="$1"
   case "$p" in
+    .github/actions/setup-node-pnpm/action.yml) return 0 ;;
     .github/workflows/test262-sharded.yml) return 0 ;;
     package.json) return 0 ;;
     pnpm-lock.yaml) return 0 ;;
