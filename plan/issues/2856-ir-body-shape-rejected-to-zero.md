@@ -1275,11 +1275,12 @@ which from-ast has no native Date constructor; it is now explicitly rejected
 before claim rather than allowed to create a post-claim demotion. Algorithms
 still rejects its generic `new Map<number, number>()`, as expected.
 
-Validation: 47 focused Capability C tests (including mixed storage in both
+Validation: 49 focused Capability C tests (including mixed storage in both
 directions, boolean i32, nullable extern, ambient declarations, #3343 identity,
 fast/native-string/standalone/WASI representation gates, builtin-vs-user `Map`,
 declaration-scoped scalar/Map aliases, catch shadowing, exact extern-brand flow,
-and negative pre-claim consumer guards); 52 adjacent #3142 module-init, C3 Map,
+extern-member boundary provenance, builtin-constructor shadowing, and negative
+pre-claim consumer guards); 52 adjacent #3142 module-init, C3 Map,
 extern-in-IR, #3343, selector-attribution, and non-terminating-guard tests green;
 full equivalence gate at 1,607 passing / 36 known failures with no new
 regressions; typecheck clean; fallback baseline ratcheted to 13.

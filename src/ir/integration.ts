@@ -1460,6 +1460,12 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
       const identity = moduleBindingResolver?.(node, writeValue);
       return identity ? resolveModuleBindingGlobal(ctx, identity) : undefined;
     },
+    isDirectModuleBinding(node: ts.Identifier): boolean {
+      return moduleBindingResolver?.isDirectModuleBinding(node) === true;
+    },
+    isAmbientBinding(node: ts.Identifier): boolean {
+      return moduleBindingResolver?.isAmbientBinding(node) === true;
+    },
     // (#2856) Variant selection for `console.<m>(arg)` — the SAME checker
     // predicates as the legacy `collectConsoleImports` registration scan
     // (string → bool → number → externref, in that order), so the import

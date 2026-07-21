@@ -355,6 +355,10 @@ export interface IrFromAstResolver {
    * module declarations return undefined.
    */
   resolveModuleBinding?(node: ts.Identifier, writeValue?: ts.Expression): ModuleBindingGlobal | undefined;
+  /** True for any checker-owned top-level lexical, including unsupported reps. */
+  isDirectModuleBinding?(node: ts.Identifier): boolean;
+  /** True when the identifier resolves to an ambient declaration-file symbol. */
+  isAmbientBinding?(node: ts.Identifier): boolean;
 }
 
 export interface AstToIrOptions {
@@ -3962,6 +3966,9 @@ function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
     throw new Error(`ir/from-ast: only direct constructor names supported in slice 4 (${cx.funcName})`);
   }
   const className = expr.expression.text;
+  if (cx.resolver?.isDirectModuleBinding?.(expr.expression) === true) {
+    throw new Error(`ir/from-ast: module binding "${className}" is not a direct constructor (${cx.funcName})`);
+  }
 
   // Slice 10 (#1169i): host extern class (RegExp, Uint8Array, …) takes
   // priority over the slice-4 class registry — the legacy externClasses
@@ -3971,6 +3978,9 @@ function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
   // extern path.
   const externInfo = cx.resolver?.getExternClassInfo?.(className);
   if (externInfo) {
+    if (cx.resolver?.isAmbientBinding?.(expr.expression) === false) {
+      throw new Error(`ir/from-ast: extern constructor "${className}" is shadowed (${cx.funcName})`);
+    }
     const argExprs = expr.arguments ?? [];
     // Constructor arity is permissive: the legacy host imports often
     // accept fewer args than `constructorParams` reports (the optional
@@ -4151,8 +4161,8 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   }
   const methodName = expr.expression.name.text;
   const receiverIdentifier = ts.isIdentifier(expr.expression.expression) ? expr.expression.expression : undefined;
-  const receiverIsModuleBinding =
-    receiverIdentifier !== undefined && cx.resolver?.resolveModuleBinding?.(receiverIdentifier) !== undefined;
+  const receiverIsDirectModuleBinding =
+    receiverIdentifier !== undefined && cx.resolver?.isDirectModuleBinding?.(receiverIdentifier) === true;
 
   // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method slot.
   // Intercepted BEFORE receiver lowering: `super` is a keyword lowerExpr can't
@@ -4205,7 +4215,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   if (
     ts.isIdentifier(expr.expression.expression) &&
     expr.expression.expression.text === "console" &&
-    !receiverIsModuleBinding &&
+    !receiverIsDirectModuleBinding &&
     cx.scope.get("console") === undefined &&
     cx.resolver?.consoleArgVariant !== undefined
   ) {
@@ -4248,7 +4258,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   if (
     ts.isIdentifier(expr.expression.expression) &&
     expr.expression.expression.text === "Math" &&
-    !receiverIsModuleBinding
+    !receiverIsDirectModuleBinding
   ) {
     const irOp = mathUnaryToIrOp(methodName);
     if (irOp !== null && expr.arguments.length === 1) {
@@ -4275,7 +4285,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // param, so `class.static_call` emits args only.
   if (
     ts.isIdentifier(expr.expression.expression) &&
-    !receiverIsModuleBinding &&
+    !receiverIsDirectModuleBinding &&
     cx.scope.get(expr.expression.expression.text) === undefined &&
     cx.classShapes?.has(expr.expression.expression.text)
   ) {

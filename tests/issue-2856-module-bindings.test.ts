@@ -296,6 +296,67 @@ export function replace(): boolean {
     }
   });
 
+  it("rejects GC values at module-rooted extern member boundaries before claim", async () => {
+    const result = await compile(
+      `
+        declare class Child { value: object; }
+        declare class Host {
+          value: object;
+          flag: any;
+          nullable: number | null;
+          take(value: object): void;
+          takeArray(value: number[]): void;
+          takeAny(value: any): void;
+          takeNullable(value: number | null): void;
+          child(): Child;
+        }
+        let host: Host | null = null;
+        export function callObject(): void { if (host !== null) host.take({ x: 1 }); }
+        export function callArray(): void { if (host !== null) host.takeArray([1, 2]); }
+        export function callBoolean(): void { if (host !== null) host.takeAny(true); }
+        export function callNull(): void { if (host !== null) host.takeNullable(null); }
+        export function writeObject(): void { if (host !== null) host.value = { x: 1 }; }
+        export function writeBoolean(): void { if (host !== null) host.flag = true; }
+        export function writeNull(): void { if (host !== null) host.nullable = null; }
+        export function writeNested(): void { if (host !== null) host.child().value = { x: 1 }; }
+      `,
+      { experimentalIR: true, trackFallbacks: true },
+    );
+
+    expect(result.success, result.errors[0]?.message).toBe(true);
+    for (const name of [
+      "callObject",
+      "callArray",
+      "callBoolean",
+      "callNull",
+      "writeObject",
+      "writeBoolean",
+      "writeNull",
+      "writeNested",
+    ]) {
+      expect(result.irCompiledFuncs ?? []).not.toContain(name);
+    }
+    expect(result.irPostClaimErrors ?? []).toStrictEqual([]);
+  });
+
+  it("does not treat source declarations named like extern constructors as builtins", async () => {
+    for (const source of [
+      `
+        class CustomMap { size: number = 7; }
+        const Map = CustomMap;
+        export function read(): number { return new Map().size; }
+      `,
+      `
+        class Map { size: number = 7; }
+        export function read(): number { return new Map().size; }
+      `,
+    ]) {
+      const { result, exports } = await compileAndInstantiate(source);
+      expect(result.irCompiledFuncs ?? []).not.toContain("read");
+      expect(exports.read!()).toBe(7);
+    }
+  });
+
   it("keeps exact extern brands claimable at direct and spread call boundaries", async () => {
     const result = await compile(
       `

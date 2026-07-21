@@ -1846,6 +1846,9 @@ function isPhase1StatementList(
         // Identifier or (#3000) a PrivateIdentifier (`this.#x = v`).
         if (!ts.isIdentifier(s.expression.left.name) && !ts.isPrivateIdentifier(s.expression.left.name))
           return shapeNo("nontail-assign-computedprop", s.expression);
+        if (!moduleExternPropertyWriteIsProven(s.expression.left, s.expression.right)) {
+          return shapeNo("nontail-module-extern-assign-value", s.expression.right);
+        }
         if (!isPhase1Expr(s.expression.left.expression, scope, localClasses))
           return shapeNo("nontail-assign-recv", s.expression.left.expression);
         // RHS: any Phase-1 expression.
@@ -2372,6 +2375,9 @@ function isPhase1BodyStatement(
           // bodies, in addition to plain-Identifier field writes.
           if (!ts.isIdentifier(stmt.expression.left.name) && !ts.isPrivateIdentifier(stmt.expression.left.name))
             return false;
+          if (!moduleExternPropertyWriteIsProven(stmt.expression.left, stmt.expression.right)) {
+            return shapeNo("body-module-extern-assign-value", stmt.expression.right);
+          }
           if (!isPhase1Expr(stmt.expression.left.expression, scope, localClasses)) return false;
           return isPhase1Expr(stmt.expression.right, scope, localClasses);
         }
@@ -2582,6 +2588,9 @@ function isPhase1Tail(
     ) {
       if (!ts.isIdentifier(expr.left.name) && !ts.isPrivateIdentifier(expr.left.name))
         return shapeNo("tail-assign-computedprop", expr);
+      if (!moduleExternPropertyWriteIsProven(expr.left, expr.right)) {
+        return shapeNo("tail-module-extern-assign-value", expr.right);
+      }
       if (!isPhase1Expr(expr.left.expression, scope, localClasses))
         return shapeNo("tail-assign-recv", expr.left.expression);
       return isPhase1Expr(expr.right, scope, localClasses);
@@ -3186,7 +3195,13 @@ function expressionIsModuleExternAccessChain(expr: ts.Expression): boolean {
   if (ts.isPropertyAccessExpression(candidate)) {
     return expressionIsModuleExternAccessChain(candidate.expression);
   }
+  if (ts.isCallExpression(candidate)) return expressionIsModuleExternRootedCall(candidate);
   return false;
+}
+
+function moduleExternPropertyWriteIsProven(left: ts.PropertyAccessExpression, right: ts.Expression): boolean {
+  if (!expressionIsModuleExternAccessChain(left.expression)) return true;
+  return currentModuleBindingResolver?.externValueIsPassable(right) === true;
 }
 
 /** True when a static property chain is rooted in any module value. */
@@ -3718,7 +3733,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       if (
         ts.isIdentifier(expr.expression.expression) &&
         expr.expression.expression.text === "Math" &&
-        moduleBinding(expr.expression.expression) === undefined &&
+        currentModuleBindingResolver?.isDirectModuleBinding(expr.expression.expression) !== true &&
         IR_MATH_UNARY_WHITELIST.has(expr.expression.name.text) &&
         expr.arguments.length === 1 &&
         !ts.isSpreadElement(expr.arguments[0]!)
@@ -3813,6 +3828,16 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isNewExpression(expr)) {
     if (!ts.isIdentifier(expr.expression)) return shapeNo("expr-new-callee-nonident", expr.expression);
     const ctorName = expr.expression.text;
+    if (currentModuleBindingResolver?.isDirectModuleBinding(expr.expression)) {
+      return shapeNo("expr-new-module-binding-callee", expr.expression);
+    }
+    if (
+      isKnownExternClass(ctorName) &&
+      currentModuleBindingResolver !== null &&
+      !currentModuleBindingResolver.isAmbientBinding(expr.expression)
+    ) {
+      return shapeNo("expr-new-extern-shadow", expr.expression);
+    }
     // Calendar's module initializer uses the legacy native Date struct path,
     // not the extern-class registry consumed by from-ast. Keep the whole
     // synthetic unit legacy-owned until Date has an IR-native constructor;
@@ -4302,7 +4327,10 @@ function buildLocalCallGraph(
       if (ts.isNewExpression(node)) {
         if (
           ts.isIdentifier(node.expression) &&
-          (localClasses.has(node.expression.text) || isKnownExternClass(node.expression.text))
+          (localClasses.has(node.expression.text) ||
+            (isKnownExternClass(node.expression.text) &&
+              (currentModuleBindingResolver === null ||
+                currentModuleBindingResolver.isAmbientBinding(node.expression))))
         ) {
           // Slice 4: local class — `<Class>_new` has a stable signature.
           // Slice 10 (#1169i): known extern class — `<Class>_new` is
@@ -4356,6 +4384,7 @@ function buildLocalCallGraph(
           if (
             ts.isIdentifier(node.expression.expression) &&
             node.expression.expression.text === "Math" &&
+            currentModuleBindingResolver?.isDirectModuleBinding(node.expression.expression) !== true &&
             IR_MATH_UNARY_WHITELIST.has(node.expression.name.text)
           ) {
             for (const a of node.arguments) visit(a);

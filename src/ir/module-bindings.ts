@@ -23,10 +23,14 @@ export interface IrModuleBindingResolver {
   (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingIdentity | undefined;
   /** True for any checker-owned top-level lexical, including unsupported reps. */
   readonly isDirectModuleBinding: (node: ts.Identifier) => boolean;
+  /** True when the identifier resolves to an ambient declaration-file symbol. */
+  readonly isAmbientBinding: (node: ts.Identifier) => boolean;
   /** Resolve a local variable use to its exact declaration for alias tracking. */
   readonly localVariableDeclaration: (node: ts.Identifier) => ts.VariableDeclaration | undefined;
   /** Module extern arguments must keep their exact branded parameter ABI. */
   readonly externCallArgumentsMatch: (call: ts.CallExpression | ts.NewExpression) => boolean;
+  /** True when a value can cross an extern member boundary without GC-ref boxing. */
+  readonly externValueIsPassable: (value: ts.Expression) => boolean;
   /** Checker-backed scalar result family for provenance-preserving consumers. */
   readonly scalarExpressionFamily: (expr: ts.Expression) => "f64" | "boolean" | undefined;
   /** True when f64 `.toString()` lowers through the host string import. */
@@ -164,6 +168,37 @@ function externValueSourceIsProven(
     return checker.getResolvedSignature(value)?.getDeclaration()?.getSourceFile().isDeclarationFile === true;
   }
   return false;
+}
+
+function externValueIsPassable(
+  checker: ts.TypeChecker,
+  expr: ts.Expression,
+  options: IrModuleBindingResolverOptions,
+): boolean {
+  const value = unwrapParens(expr);
+  // Without the resolved legacy ValType, null is ambiguous: externref accepts
+  // it, while nullable scalar declarations still use f64/i32 and reject it.
+  if (value.kind === ts.SyntaxKind.NullKeyword) return false;
+  const type = checker.getTypeAtLocation(value);
+  if ((type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.StringLike)) !== 0) {
+    return true;
+  }
+  if (!externClassNameForType(type, checker, options)) return false;
+  return externValueSourceIsProven(checker, value, options);
+}
+
+function callReceiverIsModuleExtern(
+  call: ts.CallExpression,
+  resolve: (node: ts.Identifier) => IrModuleBindingIdentity | undefined,
+): boolean {
+  const visit = (expr: ts.Expression): boolean => {
+    const candidate = unwrapParens(expr);
+    if (ts.isIdentifier(candidate)) return resolve(candidate)?.valueKind.kind === "extern";
+    if (ts.isPropertyAccessExpression(candidate)) return visit(candidate.expression);
+    if (ts.isCallExpression(candidate)) return visit(candidate.expression);
+    return false;
+  };
+  return ts.isPropertyAccessExpression(call.expression) && visit(call.expression.expression);
 }
 
 /**
@@ -323,6 +358,19 @@ export function makeIrModuleBindingResolver(
         return false;
       }
     },
+    isAmbientBinding(node: ts.Identifier): boolean {
+      try {
+        const symbol = checker.getSymbolAtLocation(node);
+        return (
+          symbol !== undefined &&
+          [symbol.valueDeclaration, ...(symbol.declarations ?? [])].some(
+            (declaration) => declaration?.getSourceFile().isDeclarationFile === true,
+          )
+        );
+      } catch {
+        return false;
+      }
+    },
     localVariableDeclaration(node: ts.Identifier): ts.VariableDeclaration | undefined {
       try {
         return localVariableDeclaration(node, checker);
@@ -347,10 +395,12 @@ export function makeIrModuleBindingResolver(
         };
         const callArguments = call.arguments ?? [];
         const signature = checker.getResolvedSignature(call);
-        if (!signature) return !callArguments.some(containsModuleExtern);
+        const moduleExternReceiver = ts.isCallExpression(call) && callReceiverIsModuleExtern(call, resolve);
+        if (!signature) return !moduleExternReceiver && !callArguments.some(containsModuleExtern);
         const parameters = signature.getParameters();
         const argumentMatches = (rawArgument: ts.Expression, parameterIndex: number): boolean => {
           const argument = unwrapParens(rawArgument);
+          if (moduleExternReceiver && !externValueIsPassable(checker, argument, options)) return false;
           if (!ts.isIdentifier(argument)) return !containsModuleExtern(argument);
           const binding = resolve(argument);
           if (binding?.valueKind.kind !== "extern") return true;
@@ -385,6 +435,13 @@ export function makeIrModuleBindingResolver(
           parameterIndex++;
         }
         return true;
+      } catch {
+        return false;
+      }
+    },
+    externValueIsPassable(value: ts.Expression): boolean {
+      try {
+        return externValueIsPassable(checker, value, options);
       } catch {
         return false;
       }
