@@ -1917,19 +1917,17 @@ export function compileArrowAsClosure(
   // getOrCreateFuncRefWrapperTypes. This ensures all no-capture closures with
   // the same signature share the same struct type, enabling consistent call_ref
   // dispatch when closures are passed as callable parameters (externref).
-  let structTypeIdx: number;
-  let liftedFuncTypeIdx: number;
-  let liftedSelfTypeIdx: number;
-  let liftedParams: ValType[];
   const isNamedFuncExpr = ts.isFunctionExpression(arrow) && arrow.name;
 
-  ({ structTypeIdx, liftedFuncTypeIdx, liftedSelfTypeIdx, liftedParams } = mintClosureStructTypes(ctx, {
+  const mintedTypes = mintClosureStructTypes(ctx, {
     captures,
     arrowParams,
     closureResults,
     closureName,
     isNamedFuncExpr: !!isNamedFuncExpr,
-  }));
+  });
+  let { structTypeIdx, liftedFuncTypeIdx, liftedParams } = mintedTypes;
+  const { liftedSelfTypeIdx } = mintedTypes;
 
   // 5. Build the lifted function body
   // Shared-wrapper lifted functions receive the canonical wrapper ROOT,
