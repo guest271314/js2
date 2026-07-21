@@ -15,6 +15,13 @@
 // so those predicates were deleted — git history preserves them if the
 // allowlist-widening track (#2855/#2856) ever wants to reference them.
 import ts from "typescript";
+import { compareIrIdentity, type IrUnitId } from "../ir/identity.js";
+import { collectModuleInitPopulation } from "../ir/module-init.js";
+import {
+  IrPlanningIdentityInvariantError,
+  requireIrPlanningSourceId,
+  type IrPlanningIdentityContext,
+} from "../ir/planning-identity.js";
 
 // ===========================================================================
 // (#3143) ALLOWLIST skip predicate — the safe-by-construction IR-first skip.
@@ -344,4 +351,142 @@ export function collectLocalCallEdges(sourceFile: ts.SourceFile): ReadonlyMap<st
     }
   }
   return edges;
+}
+
+/** Structural local-call edges for one exact source in a shared planning context. */
+export interface IrIdentityLocalCallEdges {
+  readonly callees: ReadonlyMap<IrUnitId, ReadonlySet<IrUnitId>>;
+  /** Local targets reached from AST regions that have no R0 executable owner. */
+  readonly calleesFromUnownedCallers: ReadonlySet<IrUnitId>;
+}
+
+/**
+ * Identity-keyed counterpart of {@link collectLocalCallEdges}.
+ *
+ * Bare identifier calls retain the compatibility collector's conservative,
+ * checker-free resolution, but candidates are restricted to top-level
+ * functions in this exact source. Duplicate declarations retain every
+ * candidate ID. Nested callbacks keep their terminal executable owner, while
+ * module population is attributed to the source-owned module-init unit.
+ */
+export function collectLocalCallEdgesByIdentity(
+  sourceFile: ts.SourceFile,
+  identityContext: IrPlanningIdentityContext,
+): IrIdentityLocalCallEdges {
+  const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+  const unitById = new Map(identityContext.inventory.allUnits.map((unit) => [unit.id, unit]));
+  const requireDeclarationUnitId = (declaration: ts.Node): IrUnitId => {
+    const unitId = identityContext.unitIdByDeclaration.get(declaration);
+    if (!unitId) {
+      throw new IrPlanningIdentityInvariantError(
+        "missing-unit-declaration",
+        `executable ${ts.SyntaxKind[declaration.kind]} has no structural IR unit`,
+      );
+    }
+    if (unitById.get(unitId)?.sourceId !== sourceId) {
+      throw new IrPlanningIdentityInvariantError(
+        "unit-record-mismatch",
+        `unit ${unitId} does not belong to authoritative source ${sourceId}`,
+      );
+    }
+    return unitId;
+  };
+
+  const candidatesByName = new Map<string, IrUnitId[]>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isFunctionDeclaration(statement) || !statement.name || !statement.body) continue;
+    const unitId = requireDeclarationUnitId(statement);
+    const candidates = candidatesByName.get(statement.name.text) ?? [];
+    candidates.push(unitId);
+    candidatesByName.set(statement.name.text, candidates);
+  }
+  for (const candidates of candidatesByName.values()) candidates.sort(compareIrIdentity);
+
+  // A boundary may deliberately reset ownership to null (for example an
+  // export-assignment support unit). Support callbacks retain their terminal
+  // owner, which preserves the old enclosing-owner over-approximation without
+  // putting their own structural support IDs into the caller graph.
+  const ownerByBoundary = new Map<ts.Node, IrUnitId | null>();
+  const terminalOwnerFor = (declaration: ts.Node, required: boolean): IrUnitId | null | undefined => {
+    const unitId = identityContext.unitIdByDeclaration.get(declaration);
+    if (unitId === undefined) return required ? requireDeclarationUnitId(declaration) : undefined;
+    const unit = unitById.get(unitId);
+    if (!unit || unit.sourceId !== sourceId) return requireDeclarationUnitId(declaration);
+    return unit.terminalOwnerId;
+  };
+  const recordCallableBoundaries = (
+    declaration: ts.Node,
+    body: ts.Node | undefined,
+    parameters: readonly ts.ParameterDeclaration[],
+  ): void => {
+    const owner = terminalOwnerFor(declaration, body !== undefined);
+    if (owner === undefined) return;
+    if (body) ownerByBoundary.set(body, owner);
+    for (const parameter of parameters) {
+      ownerByBoundary.set(parameter.name, owner);
+      if (parameter.initializer) ownerByBoundary.set(parameter.initializer, owner);
+    }
+  };
+  const collectBoundaries = (node: ts.Node): void => {
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)
+    ) {
+      recordCallableBoundaries(node, node.body, node.parameters);
+    } else if (ts.isClassStaticBlockDeclaration(node)) {
+      const owner = terminalOwnerFor(node, true);
+      if (owner !== undefined) ownerByBoundary.set(node.body, owner);
+    } else if (ts.isPropertyDeclaration(node) && node.initializer) {
+      const owner = terminalOwnerFor(node.initializer, true);
+      if (owner !== undefined) ownerByBoundary.set(node.initializer, owner);
+    } else if (ts.isExportAssignment(node)) {
+      const owner = terminalOwnerFor(node, true);
+      if (owner !== undefined) ownerByBoundary.set(node.expression, owner);
+    }
+    ts.forEachChild(node, collectBoundaries);
+  };
+  collectBoundaries(sourceFile);
+
+  const modulePopulation = collectModuleInitPopulation(sourceFile);
+  const moduleInitId = identityContext.moduleInitUnitIdBySourceFile.get(sourceFile);
+  if (modulePopulation.length > 0 && !moduleInitId) {
+    throw new IrPlanningIdentityInvariantError(
+      "invalid-module-init",
+      `source ${sourceId} has module population but no structural module-init unit`,
+    );
+  }
+  if (moduleInitId) {
+    for (const statement of modulePopulation) ownerByBoundary.set(statement, moduleInitId);
+  }
+
+  const callees = new Map<IrUnitId, Set<IrUnitId>>();
+  const calleesFromUnownedCallers = new Set<IrUnitId>();
+  const recordCall = (caller: IrUnitId | null, name: string): void => {
+    const candidates = candidatesByName.get(name);
+    if (!candidates) return; // no same-source target: external or dynamic
+    if (caller === null) {
+      for (const candidate of candidates) calleesFromUnownedCallers.add(candidate);
+      return;
+    }
+    let targets = callees.get(caller);
+    if (!targets) {
+      targets = new Set<IrUnitId>();
+      callees.set(caller, targets);
+    }
+    for (const candidate of candidates) targets.add(candidate);
+  };
+  const walk = (node: ts.Node, inheritedOwner: IrUnitId | null): void => {
+    const boundaryOwner = ownerByBoundary.get(node);
+    const owner = boundaryOwner === undefined ? inheritedOwner : boundaryOwner;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) recordCall(owner, node.expression.text);
+    ts.forEachChild(node, (child) => walk(child, owner));
+  };
+  walk(sourceFile, null);
+
+  return Object.freeze({ callees, calleesFromUnownedCallers });
 }
