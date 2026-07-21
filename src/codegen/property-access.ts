@@ -4090,7 +4090,11 @@ export function compileElementAccessBody(
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
       const keyLocal = allocLocal(fctx, `__dyn_key_${fctx.locals.length}`, { kind: "externref" });
       fctx.body.push({ op: "local.set", index: keyLocal });
-      const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+      // (#3511) Symbol-safe index probe: `__any_to_index` returns NaN (not throw)
+      // for a Symbol/BigInt key, so `obj[symbol]` falls to `__extern_get(recv,
+      // key)` below instead of throwing "Cannot convert a Symbol value to a
+      // number". Numeric/string keys match `__unbox_number` byte-for-byte.
+      const unboxIdx = ensureLateImport(ctx, "__any_to_index", [{ kind: "externref" }], [{ kind: "f64" }]);
       const extGetIdx = ensureLateImport(
         ctx,
         "__extern_get",

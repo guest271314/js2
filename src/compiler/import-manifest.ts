@@ -101,6 +101,11 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__typeof_object") return { type: "typeof_check", targetType: "object" };
   if (name === "__typeof_function") return { type: "typeof_check", targetType: "function" };
   if (name === "__unbox_number") return { type: "unbox", targetType: "number" };
+  // Symbol-safe array-index probe (#3511): like __unbox_number (ToNumber) but
+  // NEVER throws — a Symbol/BigInt key (or any ToNumber-throwing value) returns
+  // NaN so the element-access caller falls to the string/symbol-keyed property
+  // path instead of throwing "Cannot convert a Symbol value to a number".
+  if (name === "__any_to_index") return { type: "any_to_index" };
   if (name === "__unbox_boolean") return { type: "unbox", targetType: "boolean" };
   if (name === "__box_number") return { type: "box", targetType: "number" };
   if (name === "__box_boolean") return { type: "box", targetType: "boolean" };

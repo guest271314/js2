@@ -13810,6 +13810,33 @@ assert._isSameValue = isSameValue;
         // `0 + Symbol()` etc. silently coerce. Let the exception propagate.
         return Number(v);
       };
+    case "any_to_index":
+      // #3511 — Symbol-safe array-index probe. The dynamic-`any`-index element
+      // access (`obj[key]` get/set/delete) ToNumber-probes the key to decide
+      // vec-index vs property-key. Using the throwing `__unbox_number` (ToNumber)
+      // for that probe made a **Symbol** (or BigInt) key throw "Cannot convert a
+      // Symbol value to a number" BEFORE the `__extern_get(recv, key)` property
+      // fallback — but `obj[symbol]` is an ordinary property access. This probe
+      // NEVER throws: a value whose ToNumber would throw returns NaN, so the
+      // caller's integer round-trip guard fails and routes to the property path.
+      // For every non-throwing input it matches `__unbox_number` exactly (numeric
+      // strings, booleans, null/undefined, object valueOf), so numeric/string
+      // keys keep byte-identical index behavior.
+      return (v: any) => {
+        if (typeof v === "symbol" || typeof v === "bigint") return NaN;
+        try {
+          if (v != null && typeof v === "object") {
+            const prim = _toPrimitive(v, "number", callbackState);
+            if (prim !== undefined) return Number(prim);
+            return Number(_hostToPrimitive(v, "number", callbackState));
+          }
+          return Number(v);
+        } catch {
+          // A ToPrimitive/ToNumber that throws (e.g. valueOf → Symbol/BigInt)
+          // means the key is not an array index — treat as a property key.
+          return NaN;
+        }
+      };
     case "truthy_check":
       return (v: any) => (v ? 1 : 0);
     case "extern_get":
