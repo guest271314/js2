@@ -378,10 +378,11 @@ export function mintClosureStructTypes(
     isNamedFuncExpr: boolean;
     constructible: boolean;
   },
-): { structTypeIdx: number; liftedFuncTypeIdx: number; liftedParams: ValType[] } {
+): { structTypeIdx: number; liftedFuncTypeIdx: number; liftedSelfTypeIdx: number; liftedParams: ValType[] } {
   const { captures, arrowParams, closureResults, closureName, isNamedFuncExpr, constructible } = opts;
   let structTypeIdx: number;
   let liftedFuncTypeIdx: number;
+  let liftedSelfTypeIdx: number;
   let liftedParams: ValType[];
   if (captures.length === 0 && !isNamedFuncExpr) {
     const wrapperTypes = constructible
@@ -390,7 +391,8 @@ export function mintClosureStructTypes(
     if (wrapperTypes) {
       structTypeIdx = wrapperTypes.structTypeIdx;
       liftedFuncTypeIdx = wrapperTypes.liftedFuncTypeIdx;
-      liftedParams = [{ kind: "ref", typeIdx: structTypeIdx }, ...arrowParams];
+      liftedSelfTypeIdx = wrapperTypes.liftedSelfTypeIdx;
+      liftedParams = [{ kind: "ref", typeIdx: liftedSelfTypeIdx }, ...arrowParams];
     } else {
       // Fallback: create a unique struct type
       const structFields = [{ name: "func", type: { kind: "funcref" as const }, mutable: false }];
@@ -400,7 +402,8 @@ export function mintClosureStructTypes(
         name: `${closureName}_struct`,
         fields: structFields,
       });
-      liftedParams = [{ kind: "ref", typeIdx: structTypeIdx }, ...arrowParams];
+      liftedSelfTypeIdx = structTypeIdx;
+      liftedParams = [{ kind: "ref", typeIdx: liftedSelfTypeIdx }, ...arrowParams];
       liftedFuncTypeIdx = addFuncType(ctx, liftedParams, closureResults, `${closureName}_type`);
     }
   } else {
@@ -445,10 +448,11 @@ export function mintClosureStructTypes(
       });
       if (constructible) ctx.constructibleClosureTypeIdxs.add(structTypeIdx);
       // Share the wrapper's lifted func type so call_ref dispatches correctly.
-      // The __self param is (ref $wrapperStruct), and the lifted body will
-      // ref.cast to the specific subtype to access captures.
+      // The __self param is the canonical wrapper ROOT, and the lifted body
+      // ref.casts to the specific subtype to access captures.
       liftedFuncTypeIdx = wrapperTypes.liftedFuncTypeIdx;
-      liftedParams = [{ kind: "ref_null", typeIdx: structTypeIdx }, ...arrowParams];
+      liftedSelfTypeIdx = wrapperTypes.liftedSelfTypeIdx;
+      liftedParams = [{ kind: "ref", typeIdx: liftedSelfTypeIdx }, ...arrowParams];
     } else {
       ctx.mod.types.push({
         kind: "struct",
@@ -459,11 +463,12 @@ export function mintClosureStructTypes(
       // 4. Create the lifted function type: (ref_null $closure_struct, ...arrowParams) → results
       // Use ref_null for __self so that var-hoisted variables shadowing the function name
       // (e.g. `var g` inside `function g()`) can be default-initialized to null.
-      liftedParams = [{ kind: "ref_null", typeIdx: structTypeIdx }, ...arrowParams];
+      liftedSelfTypeIdx = structTypeIdx;
+      liftedParams = [{ kind: "ref_null", typeIdx: liftedSelfTypeIdx }, ...arrowParams];
       liftedFuncTypeIdx = addFuncType(ctx, liftedParams, closureResults, `${closureName}_type`);
     }
   }
-  return { structTypeIdx, liftedFuncTypeIdx, liftedParams };
+  return { structTypeIdx, liftedFuncTypeIdx, liftedSelfTypeIdx, liftedParams };
 }
 
 /**

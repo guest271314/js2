@@ -204,10 +204,10 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
   if (entries.length === 0) return;
 
-  // Fallback to any base wrapper if none was found at the target arity.
-  // V8 isorecursive canonicalization collapses single-funcref-field
-  // base structs to the same type regardless of arity, so any base
-  // wrapper works for the initial ref.test + struct.get.
+  // Fall back to the module's canonical wrapper root if no target-arity entry
+  // selected it. Shared signature wrappers are distinct children, not
+  // canonicalized peers; only the permanently-open root admits every shared
+  // signature wrapper for the initial ref.test + struct.get.
   if (baseWrapperIdx === undefined) {
     for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
       const typeDef = mod.types[typeIdx];
@@ -391,17 +391,13 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
     ];
   }
 
-  // (#1712) Funcref extraction must succeed for EVERY closure struct shape in
-  // the dispatch entries. Capture-carrying closures are emitted as standalone
-  // struct types (compiler-side superTypeIdx === -1, no Wasm subtype relation
-  // to the 1-field base wrapper), so the previous single
-  // `ref.test <representative base>` excluded them and the dispatcher silently
-  // returned null for any capturing closure — acorn's prototype methods all
-  // capture their fnctor, which made every compiled `parse()` come back null.
-  // Mirror `__is_closure` (collectClosureBaseWrapperTypeIdxs): chain a
-  // `ref.test` per distinct self-struct shape, extracting field 0 (funcref)
-  // from whichever matches. `funcLocal` stays null when nothing matches and
-  // the funcref dispatch below falls through to `ref.null.extern` as before.
+  // (#1712) Funcref extraction must succeed for EVERY self-carrier shape in the
+  // dispatch entries. Shared capture structs now subtype their signature
+  // wrapper and canonical root, but private/named function-expression structs
+  // retain unrelated concrete self types. Mirror `__is_closure`
+  // (collectClosureBaseWrapperTypeIdxs): chain a `ref.test` per distinct self
+  // shape, extracting field 0 from whichever matches. `funcLocal` stays null
+  // when nothing matches and the dispatch falls through as before.
   body.push(...buildFuncrefExtraction(entries, anyLocal, funcLocal));
   body.push(...funcrefDispatch);
 
@@ -696,12 +692,11 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   }
 
   // (#1712) Per-shape funcref extraction — same rationale as
-  // `emitClosureCallExportN` / `buildFuncrefExtraction`: capture-carrying
-  // closure structs have no Wasm subtype relation to the 1-field base
-  // wrapper, so a single representative `ref.test` excluded them and every
-  // capturing prototype method dispatched to null. The funcref dispatch
-  // below leaves its externref result on the stack (null fallthrough when
-  // `funcLocal` stayed null because no shape matched).
+  // `emitClosureCallExportN` / `buildFuncrefExtraction`: shared captures pass
+  // the canonical-root test, while private/named closure self structs still
+  // require their own shape arms. The funcref dispatch below leaves its
+  // externref result on the stack (null fallthrough when `funcLocal` stayed
+  // null because no shape matched).
   body.push(...buildFuncrefExtraction(entries, anyLocal, funcLocal));
   body.push(...funcrefDispatch);
 

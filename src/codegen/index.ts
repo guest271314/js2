@@ -119,7 +119,7 @@ import {
   repairStructTypeMismatches,
 } from "./fixups.js";
 import { emitInlineMathFunctions } from "./math-helpers.js";
-import { finalizeMethodTrampolines } from "./closures.js";
+import { finalizeMethodTrampolines, getFuncRefWrapperRootTypeIdx } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { brandCollidingShapeTypes } from "./shape-brand.js";
 import {
@@ -871,16 +871,19 @@ function resolvePositionType(
       if (ir) return ir;
       throw new Error(`object TypeNode ${ts.SyntaxKind[node.kind]} could not be lowered to IrType.object`);
     }
-    // #2859 — function-typed position (`fn: () => number`). Mirrors the
-    // selector's `resolveParamType` FunctionTypeNode arm: the signature is
+    // #2859 / #3214 B0 — function-typed PARAMETER (`fn: () => number`). Mirrors
+    // the selector's `resolveParamType` FunctionTypeNode arm: the signature is
     // built by the SAME helper, so the override the lowerer receives compares
     // `irTypeEquals`-equal to the signature a slice-3 closure literal argument
     // produces. A claimed function reaching the throw below means selector and
     // override builder diverged (the standard out-of-sync guard → legacy).
+    // Callable RESULTS remain deliberately unclaimable: the selector rejects a
+    // FunctionTypeNode return as `return-type-not-resolvable` before this shared
+    // position resolver can be reached for it (#3214 B0 parameter-only invariant).
     if (ts.isFunctionTypeNode(node)) {
       const signature = irClosureSignatureFromFunctionTypeNode(node);
-      if (signature) return { kind: "closure", signature };
-      throw new Error(`function TypeNode not expressible as an IR closure signature`);
+      if (signature) return { kind: "callable", signature };
+      throw new Error(`function TypeNode not expressible as an IR callable signature`);
     }
     throw new Error(`unsupported TypeNode kind ${ts.SyntaxKind[node.kind]}`);
   }
@@ -3307,7 +3310,8 @@ export function generateModule(
     // BEFORE dead-type elimination so the brand-chain refs get remapped.
     brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
-    markLeafStructsFinal(mod, ctx.wasi);
+    const callableRootTypeIdx = getFuncRefWrapperRootTypeIdx(ctx);
+    markLeafStructsFinal(mod, ctx.wasi, callableRootTypeIdx === undefined ? undefined : new Set([callableRootTypeIdx]));
 
     // Dead import and type elimination pass
     eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
@@ -5172,7 +5176,8 @@ export function generateMultiModule(
     // emission, before dead-type elimination.
     brandCollidingShapeTypes(mod, ctx.noBrandShapeTypes);
 
-    markLeafStructsFinal(mod, ctx.wasi);
+    const callableRootTypeIdx = getFuncRefWrapperRootTypeIdx(ctx);
+    markLeafStructsFinal(mod, ctx.wasi, callableRootTypeIdx === undefined ? undefined : new Set([callableRootTypeIdx]));
 
     // Dead import and type elimination pass
     eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal

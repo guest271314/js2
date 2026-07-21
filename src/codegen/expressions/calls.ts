@@ -73,6 +73,7 @@ import {
   compileArrowAsClosure,
   compileArrowFunction,
   computeClosureWrapperSig,
+  getClosureFuncSelfTypeIdx,
   getFuncRefWrapperRootTypeIdx,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
@@ -1286,28 +1287,31 @@ function emitReflectiveNativeProtoClosureCall(
   if (userArgs === undefined) return undefined; // dynamic apply args → fall through
 
   // Recover the closure value the variable HOLDS — compile the receiver `m`
-  // (an externref carrying the `$wrap` struct), then `any.convert_extern` +
-  // `ref.cast` to the wrapper struct type. Using the freshly-emitted closure
+  // (an externref carrying a `$wrap` struct), then `any.convert_extern` +
+  // `ref.cast` to the lifted function's actual self carrier. Shared wrapper
+  // funcs use the canonical root; private/named funcs retain concrete self.
+  // Using the freshly-emitted closure
   // (`ref.func`+`struct.new`) instead tripped a wrapper-struct type-idx
   // consistency check at finalize (the probe vs final wrapper in
   // `ensureStandaloneNativeMethodClosure` register distinct struct types). The
-  // receiver's runtime value is exactly the value-read closure, so casting it to
-  // `closureInfo.structTypeIdx` yields a `(ref structTypeIdx)` whose type lines
-  // up with the lifted func type's self param.
-  const structRefT: ValType = { kind: "ref", typeIdx: closureInfo.structTypeIdx };
+  // receiver's runtime value is exactly the value-read closure. Do not cast a
+  // shared closure to the module-local per-signature allocation wrapper: the
+  // same signature may occupy a different child position in another module.
+  const selfTypeIdx = getClosureFuncSelfTypeIdx(ctx, closureInfo.funcTypeIdx) ?? closureInfo.structTypeIdx;
+  const structRefT: ValType = { kind: "ref", typeIdx: selfTypeIdx };
   const closureLocal = allocLocal(fctx, `__protocall_${fctx.locals.length}`, structRefT);
   const recvType = compileExpression(ctx, fctx, receiver);
   // The receiver is externref (type-erased) or already a (ref $wrap). Normalize
-  // to the concrete wrapper struct via any.convert_extern + ref.cast.
+  // to the function's self carrier via any.convert_extern + ref.cast.
   if (recvType && recvType.kind === "externref") {
     fctx.body.push({ op: "any.convert_extern" });
   }
-  fctx.body.push({ op: "ref.cast", typeIdx: closureInfo.structTypeIdx });
+  fctx.body.push({ op: "ref.cast", typeIdx: selfTypeIdx });
   fctx.body.push({ op: "local.set", index: closureLocal });
 
   // call_ref ABI mirrors the canonical closure-call sequence
   // (calls-closures.ts compileClosureCall): the lifted func type is
-  //   (ref $wrapStruct, ...userParams) -> result
+  //   (ref $selfCarrier, ...userParams) -> result
   // so the wasm stack must be [self_struct, ...userParams, funcref], where the
   // trailing operand is the FUNCREF extracted from the wrapper's field 0 — NOT
   // the wrapper struct itself. The earlier draft pushed the struct as the
@@ -1337,7 +1341,7 @@ function emitReflectiveNativeProtoClosureCall(
   // the lifted func type, null-checked (→ TypeError, never a trap) — exactly
   // the canonical closure-call tail (calls-closures.ts ~lines 138-150).
   fctx.body.push({ op: "local.get", index: closureLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: closureInfo.structTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "struct.get", typeIdx: selfTypeIdx, fieldIdx: 0 });
   emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
   emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
   fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
@@ -7656,30 +7660,27 @@ function compileExpressionCallee(
     if (matchedClosureInfo && matchedStructTypeIdx !== undefined) {
       // Compile the callee expression to get the closure on the stack
       const innerResultType = compileExpression(ctx, fctx, calleeExpr);
+      const selfTypeIdx = getClosureFuncSelfTypeIdx(ctx, matchedClosureInfo.funcTypeIdx) ?? matchedStructTypeIdx;
+      const closureRefType: ValType = { kind: "ref_null", typeIdx: selfTypeIdx };
 
-      // Save closure ref to a local
-      let closureLocal: number;
+      // Normalize an erased shared closure to the canonical root. Private/named
+      // closure funcs still resolve to their concrete self type.
+      const closureLocal = allocLocal(fctx, `__expr_call_${fctx.locals.length}`, closureRefType);
       if (innerResultType?.kind === "externref") {
-        const closureRefType: ValType = {
-          kind: "ref_null",
-          typeIdx: matchedStructTypeIdx,
-        };
-        closureLocal = allocLocal(fctx, `__expr_call_${fctx.locals.length}`, closureRefType);
         fctx.body.push({ op: "any.convert_extern" });
-        emitGuardedRefCast(fctx, matchedStructTypeIdx);
-        fctx.body.push({ op: "local.set", index: closureLocal });
-      } else {
-        const closureRefType: ValType = innerResultType ?? {
-          kind: "ref",
-          typeIdx: matchedStructTypeIdx,
-        };
-        closureLocal = allocLocal(fctx, `__expr_call_${fctx.locals.length}`, closureRefType);
-        fctx.body.push({ op: "local.set", index: closureLocal });
+        emitGuardedRefCast(fctx, selfTypeIdx);
+      } else if (
+        innerResultType &&
+        (innerResultType.kind === "ref" || innerResultType.kind === "ref_null") &&
+        innerResultType.typeIdx !== selfTypeIdx
+      ) {
+        emitGuardedRefCast(fctx, selfTypeIdx);
       }
+      fctx.body.push({ op: "local.set", index: closureLocal });
 
       // Push closure ref as first arg (self param) — null-check → TypeError (#728)
       fctx.body.push({ op: "local.get", index: closureLocal });
-      emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
+      emitNullCheckThrow(ctx, fctx, closureRefType);
 
       // Push call arguments (only up to declared param count)
       const ecParamCnt = matchedClosureInfo.paramTypes.length;
@@ -7701,10 +7702,10 @@ function compileExpressionCallee(
 
       // Push the funcref from closure struct and call_ref — null-check → TypeError (#728)
       fctx.body.push({ op: "local.get", index: closureLocal });
-      emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: matchedStructTypeIdx });
+      emitNullCheckThrow(ctx, fctx, closureRefType);
       fctx.body.push({
         op: "struct.get",
-        typeIdx: matchedStructTypeIdx,
+        typeIdx: selfTypeIdx,
         fieldIdx: 0,
       });
       // Guard funcref cast to avoid illegal cast (#778)
