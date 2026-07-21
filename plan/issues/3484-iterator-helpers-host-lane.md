@@ -1,7 +1,8 @@
 ---
 id: 3484
 title: "Iterator Helpers (host lane): Iterator global + Iterator.prototype.{map,filter,take,drop,flatMap,reduce,find,some,every,forEach,toArray} — ~84 host fails"
-status: ready
+status: blocked
+blocked_reason: "Slice 1 (un-gate native helpers to host) is infeasible as scoped — the native iterator substrate transitively requires the standalone object runtime, which is not host-safe (see Investigation findings 2026-07-21). Needs an architect decision between (A) host-safe object runtime and (B) AST desugaring to for-of, before a dev can proceed."
 created: 2026-07-20
 priority: medium
 feasibility: hard
@@ -88,3 +89,88 @@ propagation, helper-iterator `[Symbol.iterator]`/brand.
   the work is host-lane wiring + the `Iterator` global/prototype + generic `.call`.
 - `#2903` (R3) is the standalone origin; this issue is its host-lane completion.
 - Budget-fit: this is an XL big-rock — start early in a budget window.
+
+## Investigation findings (2026-07-21, opus dev — verify-first, no code landed)
+
+**Verify-first MEASURE (the issue's ~84 estimate is wrong).** Ran the real
+`test262/built-ins/Iterator/prototype/**` set (357 files, 11 methods) through
+`runTest262File` in both lanes:
+
+| lane | pass | non-pass (fail+CE) |
+| --- | --- | --- |
+| **host (gc)** | **75** | **282** |
+| **standalone** | **285** | **72** |
+
+So the true host gap is ~210 (not 84). The native path (standalone) already
+passes 285. Non-pass host tests split by call form:
+- **86 pure instance-form** (`iter.map(f)` / `iter.some(cb)`, no `Iterator`
+  reference) — the **only** bucket Slice 1 (native-helpers-to-host) can flip.
+- **84** reference `Iterator.prototype` (Slice 2/3).
+- **112** reference bare `Iterator` (Slice 2 — the global).
+So Slice 1's realistic ceiling is **~86**, not the majority. The "X is not a
+function" bucket (64) is 61/64 **first-class form** (`Iterator.prototype.X`),
+NOT method-call form — it is Slice 2, not Slice 1.
+
+**Slice 1 is NOT a small "un-gate" — it is blocked by deep standalone coupling
+(the real root cause).** The plan's premise ("un-gate `NATIVE_ITER_HOF_METHODS`
+from `ctx.standalone`") understates the work. Two hard blockers, confirmed
+empirically:
+
+1. **Dispatch routing gap.** The closed-method dispatcher (`__call_m_<name>_N`,
+   which carries the standalone iterator arm) is only *invoked* under
+   `(ctx.standalone || ctx.wasi)` — see `call-receiver-method.ts:2670`. In host
+   mode `iter.map(f)` never reaches the dispatcher at all; it falls to the
+   generic `__extern_method_call(recv, name, jsArray)` path
+   (`call-receiver-method.ts:3108`), whose host mirror cannot drive an opaque
+   WasmGC iterator externref → silent `undefined`. So Slice 1 needs a NEW
+   host-lane call-site interception, not just an arm un-gate. (A working
+   narrow-interception design was prototyped — host-only, eager helpers,
+   receiver `ref.test $Object`/null → keep host path, else native — and it fired
+   correctly. It is blocked by #2 below, not by routing.)
+
+2. **The native iterator substrate transitively requires the STANDALONE object
+   runtime, which is not host-safe.** `ensureNativeIterHof` →
+   `ensureObjectRuntime` (for `__objvec_*` + `$Object` type + `__apply_closure`
+   args). In host mode `ensureObjectRuntime` is effectively never exercised on
+   `main` (host uses `env::__extern_*` imports instead — verified: host-mode
+   `JSON.stringify`/loose-eq compile without ever pulling it). Forcing it into a
+   host (`wasm:js-string`) module cascades standalone-only emissions:
+   - `ensureObjectRuntime` → `ensureNativeStringHelpers` →
+     `emitSelfHostedStringHelpers` emits `__str_trimStart` (a #3256 TS-lowered
+     helper) which **hard-requires native-strings mode** → throws
+     `stdlib-selfhost: __str_trimStart needs string.len ... not in
+     native-strings mode`. (Guardable in ~1 line:
+     `if (ctx.nativeStrings) emitSelfHostedStringHelpers(...)` at
+     `native-strings.ts:224` — the Tier-1 direct-Wasm builders above it are
+     host-safe. This unblocks the first throw but is not sufficient.)
+   - Next, `ensureObjectRuntime` emits the **standalone-native**
+     `__defineProperty_value` (object-runtime-descriptors.ts:160), whose body
+     calls the standalone error-constructor graph (`__new_TypeError` via
+     `emitWasiErrorConstructor`, `__object_is`) — NOT registered in host mode →
+     `absoluteFuncIndex: unresolved call target (funcIdx=undefined)` inside
+     `__defineProperty_value`. The header comment there confirms host mode is
+     meant to use the `env::__defineProperty_value` **host import**, not the
+     native version. This is whack-a-mole: the object runtime emits
+     standalone-native versions of everything and references a whole
+     standalone-only helper graph.
+
+**Conclusion / re-scope.** Slice 1 as written ("un-gate to host") is INFEASIBLE
+as a small change. Landing it needs ONE of these L/XL foundations first:
+  - **(A)** Make `ensureObjectRuntime` (and its descriptor/error-constructor
+    deps) host-string-safe / host-import-backed — a broad dual-backend change to
+    a deep subsystem; or
+  - **(B)** Reimplement the eager Iterator helpers host-native WITHOUT the
+    standalone object runtime — e.g. an **AST/source-level desugaring** of
+    `iter.toArray()`/`.some()`/`.find()`/… into equivalent `for-of` loops +
+    host arrays + direct callback calls. NOTE: host-lane `for-of` on iterators
+    already WORKS (verified: `for (const x of [1,2,3].values())` sums to 6), so
+    (B) reuses proven host machinery and sidesteps the object-runtime coupling
+    entirely. This looks like the cleanest genuine Slice 1, but it is an L
+    implementation (loop IR synthesis, counter, early-exit, IteratorClose).
+
+**Recommendation:** route to architect for a design decision between (A) and (B)
+before the next dev attempt; deferred here because both exceed a 12%-budget
+window and would strand. No code landed (a partial un-gate turns the current
+silent-`undefined` into a hard compile error — a regression — so it must not
+ship without the foundation). Measurement harness: `.tmp/measure-iter.mts`
+(host vs standalone, per-method, JSON output).
