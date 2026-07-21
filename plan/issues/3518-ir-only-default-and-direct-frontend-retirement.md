@@ -18,7 +18,7 @@ goal: ir-full-coverage
 lane: ir-retirement
 model: gpt-5.6-sol
 depends_on: [3519]
-related: [1373b, 2855, 2950, 3090, 3142, 3143, 3341, 3517, 3520, 3521, 3522, 3523]
+related: [1373b, 2855, 2950, 3090, 3142, 3143, 3341, 3517, 3520, 3521, 3522, 3523, 3525, 3526, 3527, 3528]
 origin: "2026-07-21 explicit user directive: enable IR-only by default and retire the old direct codegen path"
 ---
 
@@ -94,8 +94,8 @@ Additional blockers:
 
 ## Dependency spine
 
-Every row is an independently reviewable landing. R1–R4 now have concrete
-child issues; R5–R10 receive child issue IDs before dispatch. This epic owns
+Every row is an independently reviewable landing. R1–R8 now have concrete
+child issues; R9–R10 receive child issue IDs before dispatch. This epic owns
 their order and acceptance boundaries.
 
 | Slice          | Outcome                                                                                               | Depends on                     | Exit evidence                                                                                                                                                   |
@@ -105,17 +105,17 @@ their order and acceptance boundaries.
 | **R2 — #3521** | `PreparedIrProgram` and prepare-before-emit compile-once pipeline                                     | #3520                          | Prepared free functions never call legacy body compilation; unsupported units are decided before any body emitter side effect                                   |
 | **R3 — #3522** | Classes and class members are Prepared/compile-once                                                   | #3521                          | Constructors, instance/static methods, fields, inheritance, wrappers, and type indices no longer depend on legacy body compilation                              |
 | **R4 — #3523** | Module init is Prepared/compile-once                                                                  | #3521, #3522                   | One program-owned module-init unit replaces the compile-first/patch-later `__module_init` overlay, including top-level binding/TDZ/export effects               |
-| **R5**         | Whole-program multi-source/M0 ownership                                                               | R1–R4                          | Cross-file calls/imports, fast mode, collisions, module init, and class members use one `PreparedIrProgram`; no per-source overlay loop remains                 |
-| **R6**         | Semantic intrinsic contract and IR entry points for runtime/builtin families                          | R2                             | The ~47K runtime/builtin emission lines are reached from typed IR intents, never AST dispatch; families land in measured sub-slices                             |
-| **R7**         | Async ownership plus explicit unsupported-source policy                                               | R2, R6                         | #1373b async residuals are Prepared; deliberately unsupported `eval`/`Function`/`with`/other deferred syntax fails source-located and cannot fall back          |
-| **R8**         | Shared linear consumption                                                                             | R1, R2, R6, R7                 | WasmGC and linear differ only below IR; `src/codegen-linear/` has no source-AST lowering path                                                                   |
+| **R5 — #3525** | Whole-program single- and multi-source Prepared ownership                                             | #3520–#3523                    | Cross-file calls/imports, fast mode, collisions, module init, and class members use one `PreparedIrProgram`; no per-source overlay loop remains                 |
+| **R6 — #3526** | Typed semantic intrinsic/runtime-feature/host-capability contract                                     | #3521                          | The ~47K runtime/builtin emission lines are reached from a frozen semantic manifest, never AST dispatch; families land in measured sub-slices                   |
+| **R7 — #3527** | AST-free async suspension plans and canonical Promise ABI                                             | #3522, #3525, #3526            | Every supported async container uses one verified `IrAsyncPlan` and the existing frame engine; no AST callback/direct async route remains                       |
+| **R8 — #3528** | Linear consumes the shared Prepared program                                                           | #3525–#3527                    | WasmGC and linear receive the exact same program/ABI/runtime/async plans; `src/codegen-linear/` has no source-AST lowering path                                 |
 | **R9**         | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8                          | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
 | **R10**        | Reachability-proven direct-front-end deletion                                                         | R9                             | Re-run #3090 audit; delete the ~59,676 frontend-only fn-lines and dispatch roots; zero direct AST→Wasm reachability remains                                     |
 
 R4 follows R3 because its ordered plan consumes the class/static-intent census
-owned by #3522. Runtime-family sub-slices in R6 may proceed in parallel after
-R2 once their semantic intent is fixed. R5, R8, and R9 are integration
-barriers, not parallel deletion opportunities.
+owned by #3522. Runtime-family sub-slices in #3526 may proceed in parallel after
+R2 once C0 fixes their semantic contract. #3525, #3527, #3528, and R9 are
+integration barriers, not parallel deletion opportunities.
 
 ## Program rules
 

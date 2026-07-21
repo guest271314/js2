@@ -19,7 +19,7 @@ lane: ir-retirement-r1
 model: gpt-5.6-sol
 parent: 3518
 depends_on: [3519]
-required_by: [3521]
+required_by: [3521, 3525]
 related: [1983, 2138, 2930, 3142, 3143, 3518]
 origin: "#3518 R1 — replace display-name identity before preparation ownership changes"
 files:

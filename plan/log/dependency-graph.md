@@ -7,7 +7,7 @@ pick any "ready" item and start.
 ## TOP PRIORITY — IR-only default and direct-front-end retirement (stakeholder directive, 2026-07-21)
 
 Tracking epic **#3518**. First executable slice **#3519** is `ready`; concrete
-R1–R4 issues #3520–#3523 are blocked behind its typed truth channel. Current
+R1–R8 issues #3520–#3528 are blocked behind its typed truth channel. Current
 compiler state is default-on hybrid: 0 measured function
 `body-shape-rejected` does not mean IR-only, class/module/M0/linear ownership
 is incomplete, and 59,676 frontend-only fn-lines remain reachable.
@@ -17,35 +17,31 @@ is incomplete, and 59,676 frontend-only fn-lines remain reachable.
                                       |
                                       v
                              #3521 R2 Prepared program
-                                /                 \
-                               v                   v
-                      #3522 R3 classes       R6 runtime intents
-                               |                   |
-                               v                   v
-                      #3523 R4 module        R7 async/unsupported
-                               |                   |
-                               v                   |
-                      R5 whole-program multi       v
-                               |          R8 shared linear IR
-                               \                  /
-                                v                v
-                                 R9 fail-closed default
-                                          |
-                                 R10 #3090 deletion
+
+#3521 ──> #3522 R3 ──> #3523 R4
+#3520 + #3521 + #3522 + #3523 ──> #3525 R5 whole program
+#3521 ──> #3526 R6 runtime contract
+#3522 + #3525 + #3526 ──> #3527 R7 async plan
+#3525 + #3526 + #3527 ──> #3528 R8 shared linear
+#3522 + #3523 + #3525 + #3526 + #3527 + #3528 ──> R9 fail-closed
+R9 ──> R10 #3090 deletion
 ```
 
-| Issue / slice | Priority | Status               | Dependency / decision                                                  |
-| ------------- | -------- | -------------------- | ---------------------------------------------------------------------- |
-| #3518         | critical | in-progress          | Tracking epic; not a one-shot dev claim                                |
-| #3519 / R0    | critical | **ready**            | Depends on #3143; #2855/#3341 supply history and invariant precedent   |
-| #3517         | high     | in-progress          | Last measured module `Map` residual; closes a corpus count, not R4     |
-| #3520 / R1    | critical | blocked              | Depends on #3519; source-qualified identities and whole-program ABI    |
-| #3521 / R2    | critical | blocked              | Depends on #3520; Prepared free-function compile-once ownership        |
-| #3522 / R3    | critical | blocked              | Depends on #3521; exhaustive classes, members, closures, support units |
-| #3523 / R4    | critical | blocked              | Depends on #3521/#3522; ordered module-init and startup ownership      |
-| R5 / R6–R8    | critical | pending child issues | Multi, runtime semantics, async policy, then shared linear integration |
-| R9            | critical | blocked              | Requires R3–R8; removes hybrid and all escape hatches                  |
-| #3090 / R10   | high     | blocked              | Requires R9 plus a refreshed reachability audit                        |
+| Issue / slice | Priority | Status      | Dependency / decision                                                  |
+| ------------- | -------- | ----------- | ---------------------------------------------------------------------- |
+| #3518         | critical | in-progress | Tracking epic; not a one-shot dev claim                                |
+| #3519 / R0    | critical | **ready**   | Depends on #3143; #2855/#3341 supply history and invariant precedent   |
+| #3517         | high     | in-progress | Last measured module `Map` residual; closes a corpus count, not R4     |
+| #3520 / R1    | critical | blocked     | Depends on #3519; source-qualified identities and whole-program ABI    |
+| #3521 / R2    | critical | blocked     | Depends on #3520; Prepared free-function compile-once ownership        |
+| #3522 / R3    | critical | blocked     | Depends on #3521; exhaustive classes, members, closures, support units |
+| #3523 / R4    | critical | blocked     | Depends on #3521/#3522; ordered module-init and startup ownership      |
+| #3525 / R5    | critical | blocked     | Depends on #3520–#3523; whole-program single/multi Prepared ownership  |
+| #3526 / R6    | critical | blocked     | Depends on #3521; frozen typed semantic runtime contract               |
+| #3527 / R7    | critical | blocked     | Depends on #3522/#3525/#3526; AST-free async plans and canonical ABI   |
+| #3528 / R8    | critical | blocked     | Depends on #3525–#3527; linear consumes the exact shared program       |
+| R9            | critical | blocked     | Requires R3–R8; removes hybrid and all escape hatches                  |
+| #3090 / R10   | high     | blocked     | Requires R9 plus a refreshed reachability audit                        |
 
 #2855 is **done** as the narrow function-corpus ratchet. #2950 is **done** as a
 historical default-flip milestone; neither owns the remaining retirement.

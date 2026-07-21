@@ -32,8 +32,20 @@ updated: 2026-07-21
    and compile-once ownership, including constructor support units.
 6. **#3523 (R4, blocked on #3521 and #3522)** — typed ordered module-init
    planning, one body emission, and planned host/deferred/WASI invocation.
+7. **#3525 (R5, blocked on #3520–#3523)** — one whole-program
+   `PreparedIrProgram`/`ProgramAbiMap` for single- and multi-source/M0,
+   including imports/re-exports, collisions, fast mode, classes, and init.
+8. **#3526 (R6, blocked on #3521)** — typed
+   `IntrinsicId -> RuntimeFeature -> HostCapability` contract, fixed-point
+   manifest freeze, and measured runtime-family rewiring beginning with pure Math.
+9. **#3527 (R7, blocked on #3522, #3525, and #3526)** — AST-free
+   `IrAsyncPlan`, canonical Promise ABI, and one existing frame engine across
+   declarations, closures, methods, `for await`, and async generators.
+10. **#3528 (R8, blocked on #3525–#3527)** — linear consumes the exact shared
+    Prepared program/runtime/async plans; zero unhandled and zero direct AST
+    bodies replace the current permissive overlay ratchet.
 
-Only #3519 is ready now. The R1–R4 files are dispatch specifications, not
+Only #3519 is ready now. The R1–R8 files are dispatch specifications, not
 authorization to bypass their dependencies or implement directly from #3518.
 
 Program owner: **#3518**. Deletion ledger: **#3090**, blocked until R9. The

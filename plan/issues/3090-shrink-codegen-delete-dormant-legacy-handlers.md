@@ -23,7 +23,7 @@ area: codegen
 language_feature: compiler-internals
 es_edition: n/a
 goal: ir-full-coverage
-related: [2855, 2856, 3142, 3143, 3518, 3519, 3520, 3521, 3522, 3523]
+related: [2855, 2856, 3142, 3143, 3518, 3519, 3520, 3521, 3522, 3523, 3525, 3526, 3527, 3528]
 ---
 
 # #3090 — Retire the direct front-end after IR-only reachability gates close
@@ -36,10 +36,12 @@ related: [2855, 2856, 3142, 3143, 3518, 3519, 3520, 3521, 3522, 3523]
 > slices before #3518 R9 makes IR-only fail-closed and a refreshed reachability
 > audit proves the exact targets dead.
 
-The concrete first ownership gates are #3520 (R1 identity/ABI), #3521 (R2
-Prepared free functions), #3522 (R3 classes/closures), and #3523 (R4 ordered
-module init). All four must preserve the direct implementation for typed hybrid
-Unsupported outcomes; none authorizes deletion from this ledger.
+The concrete gate spine is #3520 (R1 identity/ABI), #3521 (R2 Prepared free
+functions), #3522 (R3 classes/closures), #3523 (R4 ordered module init), #3525
+(R5 whole-program ownership), #3526 (R6 semantic runtime contract), #3527 (R7
+AST-free async plans), and #3528 (R8 shared linear consumption). All must
+preserve any direct implementation still needed for typed hybrid Unsupported
+outcomes; none authorizes general deletion from this ledger.
 
 ## Why (motivation)
 
@@ -118,8 +120,8 @@ job and delete the orphaned exports it flags across `src/codegen/`
 mechanical win; catches residue Phase 1 leaves behind.
 
 **Phase 3 — superseded by #3518 R0–R10.** Bucket/adoption changes continue as
-telemetry, but handler deletion waits for #3520–#3523, the remaining R5–R8
-whole-program gates, and fail-closed R9 ownership.
+telemetry, but handler deletion waits for #3520–#3523, #3525–#3528, and
+fail-closed R9 ownership.
 
 ## Phase 0 audit landed (2026-07-10)
 

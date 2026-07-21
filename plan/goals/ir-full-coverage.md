@@ -11,7 +11,11 @@ typed diagnostic, and the direct AST→Wasm front-end is deleted.**
 - **Allocated ownership spine:** [#3520](../issues/3520-ir-r1-source-qualified-identity-program-abi.md)
   → [#3521](../issues/3521-ir-r2-prepared-program-free-function-compile-once.md)
   → [#3522](../issues/3522-ir-r3-classes-closures-compile-once.md) →
-  [#3523](../issues/3523-ir-r4-module-init-compile-once.md)
+  [#3523](../issues/3523-ir-r4-module-init-compile-once.md) →
+  [#3525](../issues/3525-ir-r5-whole-program-multi-source-ownership.md) +
+  [#3526](../issues/3526-ir-r6-semantic-runtime-contract.md) →
+  [#3527](../issues/3527-ir-r7-ast-free-async-plan.md) →
+  [#3528](../issues/3528-ir-r8-shared-linear-prepared-program.md)
 - **Target:** `pnpm run check:ir-only` passes across the authoritative corpus
   and both backends; the hybrid/direct path and its escape hatches no longer
   exist; the #3090 reachability audit reports no direct-front-end survivors.
@@ -73,13 +77,14 @@ milestone. The retirement now follows #3518's dependency spine:
 4. **R3 / #3522 then R4 / #3523 — remaining unit kinds:** classes/closures
    compile once before their ordered static intents feed compile-once module
    init.
-5. **R5 — whole program:** multi-source/M0, collisions, imports, fast mode, and
-   one program-owned module-init plan.
-6. **R6 — semantics:** typed intrinsic contracts and IR entry points for each
-   runtime/builtin family.
-7. **R7 — async/unsupported:** async becomes IR-owned; deliberately unsupported
-   syntax becomes a source-located hard diagnostic, never direct fallback.
-8. **R8 — backend convergence:** linear consumes the same prepared IR.
+5. **R5 / #3525 — whole program:** multi-source/M0, collisions, imports, fast
+   mode, and one program-owned module-init plan.
+6. **R6 / #3526 — semantics:** typed intrinsic/runtime-feature/host-capability
+   contract, immutable fixed-point manifest, then measured runtime families.
+7. **R7 / #3527 — async:** AST-free suspension/liveness/handler plans and one
+   canonical Promise ABI through the existing frame engine.
+8. **R8 / #3528 — backend convergence:** linear consumes the exact same
+   Prepared program, ABI, runtime manifest, and async plans.
 9. **R9 — policy flip:** fail-closed IR-only becomes the sole production mode;
    remove hybrid demotion and every legacy escape hatch.
 10. **R10 — subtraction:** re-run #3090 and delete the proven-unreachable
@@ -101,6 +106,10 @@ evidence.
 | **3521**  | IR-only R2: Prepared free-function compile-once ownership        | current | blocked     | Depends on #3520                                   |
 | **3522**  | IR-only R3: compile-once classes, members, and closures          | current | blocked     | Depends on #3521                                   |
 | **3523**  | IR-only R4: typed ordered module-init compile-once ownership     | current | blocked     | Depends on #3521 and #3522                         |
+| **3525**  | IR-only R5: whole-program single/multi Prepared ownership        | current | blocked     | Depends on #3520–#3523                             |
+| **3526**  | IR-only R6: typed semantic runtime contract                      | current | blocked     | Depends on #3521                                   |
+| **3527**  | IR-only R7: AST-free async suspension plans                      | current | blocked     | Depends on #3522, #3525, and #3526                 |
+| **3528**  | IR-only R8: linear consumes shared Prepared program              | current | blocked     | Depends on #3525–#3527                             |
 | **3090**  | Retire direct front-end after IR-only reachability gates close   | current | blocked     | R10 deletion ledger                                |
 | **3143**  | IR-first default flip                                            | 71      | done        | Historical default-on hybrid milestone             |
 | **3142**  | IR module-init overlay adoption                                  | 72      | done        | Historical claim/patch milestone; not compile-once |

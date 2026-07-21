@@ -19,7 +19,7 @@ lane: ir-retirement-r3
 model: gpt-5.6-sol
 parent: 3518
 depends_on: [3521]
-required_by: [3523]
+required_by: [3523, 3525, 3527]
 related: [1370, 1983, 2857, 2951, 3000, 3045, 3144, 3518]
 origin: "#3518 R3 — extend PreparedIrProgram from free functions to every single-source executable class/closure unit"
 files:

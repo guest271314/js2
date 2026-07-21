@@ -19,7 +19,7 @@ lane: ir-retirement-r2
 model: gpt-5.6-sol
 parent: 3518
 depends_on: [3520]
-required_by: [3522, 3523]
+required_by: [3522, 3523, 3525, 3526]
 related: [2138, 2855, 3143, 3203, 3518, 3519]
 origin: "#3518 R2 — invert single-source free functions from compile/patch to prepare/emit"
 files:

@@ -19,6 +19,7 @@ lane: ir-retirement-r4
 model: gpt-5.6-sol
 parent: 3518
 depends_on: [3521, 3522]
+required_by: [3525]
 related: [1789, 2796, 2931, 2965, 2992, 3142, 3517, 3518]
 origin: "#3518 R4 — replace compile-first/patch-later __module_init with typed ordered prepare-before-emit ownership"
 files:

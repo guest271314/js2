@@ -5,7 +5,9 @@ Unlike a linear roadmap, multiple independent goals can be worked on in parallel
 and a goal being "ready" doesn't mean it should be worked on immediately.
 
 <!-- AUTO:conformance-start -->
+
 **test262 conformance**: 30,272 / 43,096 (70.2 %)
+
 <!-- AUTO:conformance-end -->
 
 ## DAG
@@ -171,7 +173,7 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
 | **refactoring**          | Independent                                   | maintainability                                                                                       | --                                                                                  | #688, #741, #788, #803-#811                                                                                                                                                                                                                        |
 | **self-hosting-dogfood** | Active (s57)                                  | compiled acorn AST == node-acorn                                                                      | compilable (met), crash-free (partial)                                              | #1710 (harness), #1711 (triage), #1712 (acceptance); #1679/#1690/#1690b done                                                                                                                                                                       |
 | **backend-agnostic-ir**  | Active (s57)                                  | IR lowers to 2+ backends via a trait                                                                  | compiler-architecture                                                               | #1713 (trait seam, hard, arch-spec), #1714 (linear proof), #1715 (bytecode proof), #2953 (pushRaw gap, P1), #2954 (LinearEmitter core ops), #2956 (linear consumes IR, XL); feeds #1584                                                            |
-| **ir-full-coverage**     | **Active — NORTH STAR** (elevated 2026-07-02) | ALL AST kinds through the IR front-end; backends fork below the IR; direct AST→Wasm front-end retired | backend-agnostic-ir (trait seam)                                                    | Current retirement: #3518 epic, #3519 typed truth, #3520 identity/ABI, #3521 Prepared free functions, #3522 classes/closures, #3523 module init, #3090 deletion ledger. Historical inputs: #2855/#2856–#2859, #2949–#2952, #2955.                  |
+| **ir-full-coverage**     | **Active — NORTH STAR** (elevated 2026-07-02) | ALL AST kinds through the IR front-end; backends fork below the IR; direct AST→Wasm front-end retired | backend-agnostic-ir (trait seam)                                                    | Current retirement: #3518 epic; #3519 truth; #3520–#3523 identity/compile-once; #3525 whole program; #3526 runtime contract; #3527 async plans; #3528 shared linear; #3090 deletion. Historical inputs: #2855/#2856–#2859, #2949–#2952, #2955.     |
 
 ## How to use this
 
