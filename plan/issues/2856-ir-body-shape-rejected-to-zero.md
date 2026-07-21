@@ -25,6 +25,7 @@ loc-budget-allow:
   - scripts/check-ir-fallbacks.ts
   - scripts/ir-fallback-baseline.json
   - src/codegen/index.ts
+  - src/codegen/stack-balance.ts
   - src/ir/backend/linear-integration.ts
   - src/ir/capability.ts
   - src/ir/from-ast.ts
@@ -1638,6 +1639,10 @@ legitimately require the direct front-end.
   immediate `new Date().get*()` expressions. Module and function snapshots now
   share the host Date ABI, removing the UTC/local split found during final
   review and reducing the module-level corpus residual from 2 to 1.
+- Taught the stack-balance verifier that a concrete closure struct is already
+  assignable to its declared closure-root local through Wasm GC subtyping. This
+  removes three redundant Calendar casts and keeps the `local-set-coerce`
+  quality bucket at zero without banking a false repair baseline.
 - Banked the function-level zero floor while deliberately keeping the generic
   `body-shape-rejected` reason non-strict: corpus-zero is not proof that every
   real-world body is IR-lowerable.
@@ -1648,6 +1653,9 @@ legitimately require the direct front-end.
   on the pre-claim path instead of creating new post-claim demotions.
 - Shared callable packing and one finalization boundary let callbacks, Date,
   and Promise lowering compose deterministically in the same module.
+- Strict stack-balance telemetry localized the final CI failure to subtype-safe
+  closure stores, so the producer/verifier contract could be fixed narrowly
+  without changing call-argument coercion or weakening the ratchet.
 - The fallback ratchet stayed monotonic: no unintended reason grew, no
   post-claim class appeared, and Calendar module-init adoption banked an
   additional module-level decrease.
@@ -1668,7 +1676,8 @@ legitimately require the direct front-end.
 
 - IR selection, AST lowering, integration, module binding, closure, Date, and
   Promise-delay planning under `src/ir/`.
-- Final overlay preparation and driver wiring under `src/codegen/`.
+- Final overlay preparation, driver wiring, and declared-subtype recognition in
+  the stack-balance verifier under `src/codegen/`.
 - Focused Calendar, async-delay, callable ABI, module-binding, and inliner
   regression suites under `tests/`.
 - The fallback baseline, generated IR-adoption record, and this markdown issue.
@@ -1683,4 +1692,6 @@ legitimately require the direct front-end.
   regressions.
 - Fallback gate: function body-shape 0, deferred async 4, module-level
   body-shape 1, and no post-claim demotions.
+- Stack-balance gate: `local-set-coerce` 0; `call-arg-coerce` improves 7 → 6;
+  no fixup bucket increases.
 - Typecheck and `git diff --check`: pass.
