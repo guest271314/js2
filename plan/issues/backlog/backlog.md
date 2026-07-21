@@ -94,9 +94,14 @@ The active program is
 [#3518](../3518-ir-only-default-and-direct-frontend-retirement.md), a staged
 prepare-before-emit migration rather than another fallback-count sweep:
 
-- [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **ready,
-  critical, current**: typed Prepared/Unsupported/Invariant outcomes and an
-  honest IR-only gate. First executable slice.
+- [#3529](../3529-ir-r0-typed-producer-equivalence-parity.md) — **in-progress,
+  critical, current**: restore the 154 full-equivalence compile regressions
+  exposed by strict typed outcomes through explicit preclaim/Unsupported
+  decisions and 13 true invariant fixes. First executable prerequisite.
+- [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **blocked,
+  critical, current** on #3529: typed Prepared/Unsupported/Invariant outcomes
+  and an honest IR-only gate. Hybrid must be green before R0 acceptance;
+  strict stays red only on typed blockers.
 - [#3090](../3090-shrink-codegen-delete-dormant-legacy-handlers.md) — blocked
   R10 deletion ledger. The remaining ~59,676 frontend fn-lines are still
   reachable and may be deleted only after #3518 R9.

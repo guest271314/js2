@@ -6,14 +6,18 @@ pick any "ready" item and start.
 
 ## TOP PRIORITY — IR-only default and direct-front-end retirement (stakeholder directive, 2026-07-21)
 
-Tracking epic **#3518**. First executable slice **#3519** is `ready`; all later
-ownership/deletion work depends on its typed truth channel. Current compiler
-state is default-on hybrid: 0 measured function `body-shape-rejected` does not
-mean IR-only, class/module/M0/linear ownership is incomplete, and 59,676
-frontend-only fn-lines remain reachable.
+Tracking epic **#3518**. First executable prerequisite **#3529** is
+`in-progress`; **#3519** is blocked until its strict typed truth channel can
+preserve full-equivalence parity. Current compiler state is default-on hybrid:
+0 measured function `body-shape-rejected` does not mean IR-only,
+class/module/M0/linear ownership is incomplete, and 59,676 frontend-only
+fn-lines remain reachable.
 
 ```text
-#3143 (done) ──> #3519 R0
+#3143 (done) ──> #3529 R0a typed-producer parity
+                     |
+                     v
+               #3519 R0b typed truth/gate
                      |
                      v
               R1 IrUnitId + ProgramAbiMap
@@ -34,16 +38,17 @@ frontend-only fn-lines remain reachable.
                  R10 #3090 deletion
 ```
 
-| Issue / slice | Priority | Status               | Dependency / decision                                                  |
-| ------------- | -------- | -------------------- | ---------------------------------------------------------------------- |
-| #3518         | critical | in-progress          | Tracking epic; not a one-shot dev claim                                |
-| #3519 / R0    | critical | **ready**            | Depends on #3143; #2855/#3341 supply history and invariant precedent   |
-| #3517         | high     | in-progress          | Last measured module `Map` residual; closes a corpus count, not R4     |
-| R1–R2         | critical | pending child issues | Sequential after R0; identity/ABI before prepare-before-emit ownership |
-| R3 / R4 / R6  | critical | pending child issues | Parallel only after R2; classes, module init, runtime families         |
-| R5 / R7 / R8  | critical | pending child issues | Integration sequence: multi → async/unsupported → shared linear        |
-| R9            | critical | blocked              | Requires R3–R8; removes hybrid and all escape hatches                  |
-| #3090 / R10   | high     | blocked              | Requires R9 plus a refreshed reachability audit                        |
+| Issue / slice | Priority | Status               | Dependency / decision                                                                      |
+| ------------- | -------- | -------------------- | ------------------------------------------------------------------------------------------ |
+| #3518         | critical | in-progress          | Tracking epic; not a one-shot dev claim                                                    |
+| #3529 / R0a   | critical | **in-progress**      | Depends on #3143; restores 154 compile regressions without weakening strict classification |
+| #3519 / R0b   | critical | **blocked**          | Depends on #3143/#3529; hybrid green and strict typed blockers are the exit gate           |
+| #3517         | high     | in-progress          | Last measured module `Map` residual; closes a corpus count, not R4                         |
+| R1–R2         | critical | pending child issues | Sequential after R0; identity/ABI before prepare-before-emit ownership                     |
+| R3 / R4 / R6  | critical | pending child issues | Parallel only after R2; classes, module init, runtime families                             |
+| R5 / R7 / R8  | critical | pending child issues | Integration sequence: multi → async/unsupported → shared linear                            |
+| R9            | critical | blocked              | Requires R3–R8; removes hybrid and all escape hatches                                      |
+| #3090 / R10   | high     | blocked              | Requires R9 plus a refreshed reachability audit                                            |
 
 #2855 is **done** as the narrow function-corpus ratchet. #2950 is **done** as a
 historical default-flip milestone; neither owns the remaining retirement.
