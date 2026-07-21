@@ -6,49 +6,47 @@ pick any "ready" item and start.
 
 ## TOP PRIORITY — IR-only default and direct-front-end retirement (stakeholder directive, 2026-07-21)
 
-Tracking epic **#3518**. First executable prerequisite **#3529** is
-`in-progress`; **#3519** is blocked until its strict typed truth channel can
-preserve full-equivalence parity. Current compiler state is default-on hybrid:
-0 measured function `body-shape-rejected` does not mean IR-only,
-class/module/M0/linear ownership is incomplete, and 59,676 frontend-only
-fn-lines remain reachable.
+Tracking epic **#3518** remains `in-progress`. R0a **#3529** and R0b **#3519**
+completed on 2026-07-21; **#3520 is ready** as the next executable R1 slice.
+R2–R8 remain blocked on that dependency spine. The compiler is still
+default-on hybrid: class/module/M0/linear ownership is incomplete, and 59,676
+frontend-only fn-lines remain reachable.
 
 ```text
-#3143 (done) ──> #3529 R0a typed-producer parity
-                     |
-                     v
-               #3519 R0b typed truth/gate
-                     |
-                     v
-              R1 IrUnitId + ProgramAbiMap
-                     |
-                     v
-              R2 PreparedIrProgram
-                /       |       \
-          R3 classes  R4 module  R6 runtime intents
-                \       |       /
-                 R5 whole-program multi
-                          |
-                 R7 async/unsupported
-                          |
-                 R8 shared linear IR
-                          |
-                 R9 fail-closed default
-                          |
-                 R10 #3090 deletion
+#3143 (done) ──> #3529 R0a (done) ──> #3519 R0b (done)
+                                             |
+                                             v
+                              #3520 R1 identity/ABI (ready)
+                                             |
+                                             v
+                              R2 PreparedIrProgram (blocked)
+                                      /       |       \
+                           R3 classes    R4 module    R6 runtime intents
+                              (blocked)    (blocked)       (blocked)
+                                      \       |       /
+                              R5 whole-program multi (blocked)
+                                             |
+                              R7 async/unsupported (blocked)
+                                             |
+                              R8 shared linear IR (blocked)
+                                             |
+                              R9 fail-closed default (blocked)
+                                             |
+                              R10 #3090 deletion (blocked)
 ```
 
-| Issue / slice | Priority | Status               | Dependency / decision                                                                      |
-| ------------- | -------- | -------------------- | ------------------------------------------------------------------------------------------ |
-| #3518         | critical | in-progress          | Tracking epic; not a one-shot dev claim                                                    |
-| #3529 / R0a   | critical | **in-progress**      | Depends on #3143; restores 154 compile regressions without weakening strict classification |
-| #3519 / R0b   | critical | **blocked**          | Depends on #3143/#3529; hybrid green and strict typed blockers are the exit gate           |
-| #3517         | high     | in-progress          | Last measured module `Map` residual; closes a corpus count, not R4                         |
-| R1–R2         | critical | pending child issues | Sequential after R0; identity/ABI before prepare-before-emit ownership                     |
-| R3 / R4 / R6  | critical | pending child issues | Parallel only after R2; classes, module init, runtime families                             |
-| R5 / R7 / R8  | critical | pending child issues | Integration sequence: multi → async/unsupported → shared linear                            |
-| R9            | critical | blocked              | Requires R3–R8; removes hybrid and all escape hatches                                      |
-| #3090 / R10   | high     | blocked              | Requires R9 plus a refreshed reachability audit                                            |
+| Issue / slice | Priority | Status      | Dependency / decision                                                                                    |
+| ------------- | -------- | ----------- | -------------------------------------------------------------------------------------------------------- |
+| #3518         | critical | in-progress | Tracking epic; R0 complete, retirement continues                                                         |
+| #3529 / R0a   | critical | **done**    | 1,608 passing / 35 failing; 36 known baseline, one known case now passes, zero new regressions           |
+| #3519 / R0b   | critical | **done**    | Hybrid 5/5, 37 terminal, 31 IR, 6 Unsupported, 0 Invariants, 37 legacy; strict intentionally remains red |
+| #3520 / R1    | critical | **ready**   | Next executable slice: source-qualified `IrUnitId` and whole-program `ProgramAbiMap`                     |
+| #3517         | high     | in-progress | Measured module `Map` residual; closes a corpus count, not R4                                            |
+| R2            | critical | **blocked** | Requires #3520/R1; prepare-before-emit ownership                                                         |
+| R3 / R4 / R6  | critical | **blocked** | Require R2; classes, module init, and runtime families may then split                                    |
+| R5 / R7 / R8  | critical | **blocked** | Dependency sequence after their prerequisites: whole-program → async/unsupported → shared linear         |
+| R9            | critical | blocked     | Requires R3–R8; removes hybrid and all escape hatches                                                    |
+| #3090 / R10   | high     | blocked     | Requires R9 plus a refreshed reachability audit                                                          |
 
 #2855 is **done** as the narrow function-corpus ratchet. #2950 is **done** as a
 historical default-flip milestone; neither owns the remaining retirement.
@@ -126,10 +124,10 @@ compile-once/deletion gate.
 | #2858 | `call-graph-closure`        | 0     | low      | m       | **done** — measured corpus residual retired                                   |
 | #2859 | `param-type-not-resolvable` | 0     | low      | s       | **done** — measured corpus residual retired                                   |
 
-Deferred `async-function` (4) continues in #1373b / #3518 R7. The module-level
-Algorithms `Map` residual is #3517. Neither residual changes the structural
-facts that class members and module init compile twice and M0/linear remain
-incomplete.
+The final R0 lane records six typed Unsupported units: `async-function` (2),
+`call-graph-closure` (1), `body-shape` (1), and static class members (2).
+These explicit strict blockers do not change the structural facts that class
+members and module init compile twice and M0/linear remain incomplete.
 
 ## Sprint 65 landings (2026-06-23 session — value-rep substrate spine)
 

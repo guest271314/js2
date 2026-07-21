@@ -322,3 +322,22 @@ Post-publish verification found that `js2wasm@0.64.0` still depended on
 not its dependency. #3516 carries the repair into the current sprint: update the
 dependency in the same release transaction, reject mismatched tag publishes,
 and supersede the immutable npm metadata with a patch release.
+
+## Sprint 74 (2026-07-21) — IR R0 truth boundary
+
+IR retirement R0 is delivered. #3519 added typed terminal outcomes and an
+honest `check:ir-only` policy gate; #3529 recovered the 154 compilation
+failures that strict outcome handling exposed without expanding the equivalence
+baseline. Full equivalence has zero new failures. One baseline-known case now
+passes and remains deliberately unratcheted in this recovery slice.
+
+The bounded hybrid lane is green with 31 / 37 IR-emitted units, six typed
+Unsupported units, zero Invariants, and complete accounting. Strict remains
+correctly non-green on the same six typed blockers and all 37 legacy-emitted
+bodies. The broader #3518 program remains open: #3520 is the next ready R1
+slice, and R2–R8 stay blocked behind it and their dependency chain.
+
+The previous v0.64.1 patch is published and verified, including the matching
+`js2wasm` proxy dependency on `@loopdive/js2@0.64.1`. Sprint 74 closes at a
+clean R0 boundary; v0.65.0 is cut from the resulting `main` before execution
+pauses.

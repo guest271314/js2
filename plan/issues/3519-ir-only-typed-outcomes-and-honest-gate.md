@@ -1,10 +1,11 @@
 ---
 id: 3519
 title: "IR-only R0: typed preparation outcomes and an honest readiness gate"
-status: blocked
+status: done
 sprint: current
 created: 2026-07-21
 updated: 2026-07-21
+completed: 2026-07-21
 priority: critical
 horizon: l
 complexity: L
@@ -85,15 +86,37 @@ The production routing remains unchanged until #3518 R2/R9. “IR-only” in R0 
 an opt-in verdict over telemetry, not a new public compile option or a
 compatibility promise.
 
-## Current blocker (2026-07-21)
+## Completion evidence (2026-07-21)
 
-#3529 is the typed-producer parity prerequisite exposed by this issue's full
-equivalence run: strict unknown-throw-to-Invariant classification revealed 154
-previously demoted compile failures (141 capability gaps and 13 true
-invariants). Keep this issue blocked until #3529 restores the committed
-equivalence baseline without weakening classification. The hybrid gate may be
-accepted only after it is green with zero Invariants; strict remains expected
-to be red on explicit typed Unsupported blockers.
+#3529 restored full-equivalence parity without weakening unknown-throw-to-
+Invariant classification or changing the committed baseline:
+
+| Signal                                      | Result |
+| ------------------------------------------- | -----: |
+| Passing tests                               |  1,608 |
+| Failing tests                               |     35 |
+| Committed known failures                    |     36 |
+| Baseline-known cases that now pass          |      1 |
+| New regressions                             |      0 |
+| `scripts/equivalence-baseline.json` changes |      0 |
+
+The final bounded `single-host` lane is non-vacuous and fully accounted:
+
+| Signal                | Result |
+| --------------------- | -----: |
+| Corpus entries        |    5/5 |
+| Terminal units        |     37 |
+| Emitted IR bodies     |     31 |
+| Typed `Unsupported`   |      6 |
+| `Invariant` outcomes  |      0 |
+| Legacy-emitted bodies |     37 |
+
+The six typed Unsupported units are two async functions, one call-graph-
+closure case, one body-shape case, and two static class members. Hybrid policy
+is green with zero skipped entries, unaccounted units, Invariants, or
+uninspected compile failures. Strict IR-only is intentionally red on those six
+typed blockers and on all 37 legacy-emitted bodies; that is honest readiness
+evidence for the later retirement slices, not an R0 failure.
 
 ## Implementation notes (2026-07-21)
 
@@ -119,55 +142,23 @@ The complete equivalence gate then exposed the wider pre-existing population
 that R0's former silent demotion had hidden: 154 failures not in the committed
 baseline, of which 152 surface the now-fatal IR diagnostic directly and two
 assert only `CompileResult.success` without printing the underlying diagnostic.
-This is a producer-audit input, not permission to weaken
-unknown-throw-to-Invariant or expand the equivalence baseline. Each intended
-capability gap needs an explicit `IrUnsupportedError` or an honest pre-claim
-decision; selector/builder and pass-contract bugs need fixes at their producer
-seams before R0 can satisfy the equivalence acceptance criterion.
+That result became #3529's producer audit, not permission to weaken
+unknown-throw-to-Invariant or expand the equivalence baseline. Intended
+capability gaps needed an explicit `IrUnsupportedError` or honest pre-claim
+decision, while selector/builder and pass-contract bugs needed fixes at their
+producer seams.
 
-### Blocked checkpoint after the first #3529 producer slices
+### Producer-parity resolution
 
-The selector/builder seed fixes, the dynamic-box pass correction, and the first
-two typed producer exits reduce the unchanged-baseline equivalence result from
-154 to **111 new compilation failures**. The fresh full run is:
+The selector/builder seed fixes, dynamic-box pass correction, explicit typed
+producer exits, and integration preflights removed the entire 154-regression
+population exposed by the honest boundary. Capability gaps now terminate as
+stable `Unsupported` outcomes, while the genuine selector, builder, pass, and
+integration contract violations were fixed rather than reclassified. The
+single-host lane improved from its intermediate 30 emitted / 7 Unsupported
+checkpoint to 31 emitted / 6 Unsupported with the baseline unchanged.
 
-| Signal                   | Result |
-| ------------------------ | -----: |
-| Passing tests            |  1,496 |
-| Failing tests            |    147 |
-| Committed known failures |     36 |
-| New failures             |    111 |
-
-The 111 residuals are still #3529 work; this issue remains blocked and is not
-complete. Their exact diagnostic-family census is:
-
-| Residual family                        | Count |
-| -------------------------------------- | ----: |
-| Unsupported String / RegExp methods    |    20 |
-| Logical `&&` / `\|\|` value shapes     |    18 |
-| `Error`-family constructors            |    10 |
-| Class projection / member access       |     9 |
-| Call / constructor / nested resolution |     9 |
-| Template coercion                      |     6 |
-| Mixed string equality                  |     6 |
-| Unary coercion                         |     6 |
-| Null / undefined carrier shapes        |     6 |
-| Binary coercion                        |     5 |
-| String `+=` evidence                   |     4 |
-| Ref property writes                    |     3 |
-| Numeric primitive methods              |     3 |
-| `Function.call` / `Function.apply`     |     2 |
-| Raw internal `TypeError` invariants    |     2 |
-| Dynamic / mixed `+`                    |     1 |
-| Mutation-prepass invariant             |     1 |
-
-No equivalence baseline entry changed. The bounded readiness lane currently
-observes 5/5 entries, 37 terminal units, 30 emitted IR bodies, 7 typed
-Unsupported units, zero Invariants, and 37 legacy-emitted bodies. Hybrid policy
-is green at this checkpoint; strict IR-only is correctly red because all 37
-units still have legacy bodies and only 30/37 have an emitted IR body.
-
-## Why the current gate is insufficient
+## Why the pre-R0 fallback gate was insufficient
 
 `check:ir-fallbacks` is a useful narrow ratchet, but it cannot answer “can we
 remove the direct front-end?” today:
@@ -179,8 +170,8 @@ remove the direct front-end?” today:
    documented false green.
 4. Its disk walk does not execute the inline template programs in the actual
    equivalence suite.
-5. `STRICT_IR_BUILD_ERRORS` classifies compiler invariants by message
-   substring, so wording changes can silently change policy.
+5. `STRICT_IR_BUILD_ERRORS` classified compiler invariants by message
+   substring, so wording changes could silently change policy.
 6. `irCompiledFuncs` proves a slot was patched; it does not prove the unit was
    prepared before legacy emission or that every source unit was accounted for.
 
@@ -396,26 +387,47 @@ increases are bankable progress.
 
 ## Acceptance criteria
 
-- [ ] `emitted` / `Unsupported` / `Invariant` are the only policy-bearing IR
+- [x] `emitted` / `Unsupported` / `Invariant` are the only policy-bearing IR
       preparation outcomes; every outcome has a stable code and stage.
-- [ ] `STRICT_IR_BUILD_ERRORS` substring matching is deleted and its existing
+- [x] `STRICT_IR_BUILD_ERRORS` substring matching is deleted and its existing
       three strict cases are covered by typed invariant codes.
-- [ ] Invariants fail both policy evaluators; Unsupported remains observable
+- [x] Invariants fail both policy evaluators; Unsupported remains observable
       hybrid fallback and makes the IR-only evaluator non-ready. Production
       routing is otherwise unchanged in R0.
-- [ ] Compile-result unit accounting covers functions, class members, and
+- [x] Compile-result unit accounting covers functions, class members, and
       module init and distinguishes “IR patched” from “legacy never emitted.”
-- [ ] `pnpm run check:ir-only -- --policy=hybrid` completes with zero skipped
+- [x] `pnpm run check:ir-only -- --policy=hybrid` completes with zero skipped
       corpus entries, zero unaccounted units, zero Invariants, and zero
       uninspected compile failures.
-- [ ] `pnpm run check:ir-only -- --policy=ir-only --json` exits non-zero on the
+- [x] `pnpm run check:ir-only -- --policy=ir-only --json` exits non-zero on the
       current known blockers and names each typed blocker; it may not report a
       false green merely because fallback/post-claim baselines are zero.
-- [ ] The focused policy tests above pass, including `result.errors`, TypeMap,
+- [x] The focused policy tests above pass, including `result.errors`, TypeMap,
       compile-failure, class, and module-init coverage.
-- [ ] Existing `pnpm run check:ir-fallbacks`, typecheck, format/lint, issue
+- [x] Existing `pnpm run check:ir-fallbacks`, typecheck, format/lint, issue
       integrity, equivalence, and cross-backend gates remain green under the
       unchanged production default.
+
+## Implementation Summary
+
+- **What was done:** added the closed emitted/Unsupported/Invariant outcome
+  contract, preserved terminal evidence through compiler failures, reconciled
+  it with transitional telemetry, and added the bounded hybrid/strict
+  `check:ir-only` policy gate with anti-vacuity checks.
+- **What worked:** stable typed codes now drive policy independently of
+  diagnostic wording, and complete per-unit accounting exposes class members,
+  module init, legacy emission, and hard `result.errors` without skip paths.
+- **What did not work:** making unknown post-claim throws fatal initially
+  exposed 154 previously demoted equivalence failures. Expanding the baseline
+  or weakening classification was rejected; #3529 repaired the true
+  invariants and made capability exits explicit instead.
+- **Files changed:** the IR outcome/selection/preparation seams, compiler and
+  codegen telemetry plumbing, `check:ir-only` script/baseline/CI wiring, and
+  the focused outcome/gate tests listed in this issue's frontmatter.
+- **Tests:** equivalence finished at 1,608 passing / 35 failing against 36
+  committed known failures (one known case now passes, zero new regressions,
+  baseline unchanged); hybrid finished at 5/5 entries, 37 terminal units,
+  31 emitted IR bodies, 6 Unsupported, 0 Invariants, and 37 legacy bodies.
 
 ## Required validation commands
 

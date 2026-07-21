@@ -92,16 +92,23 @@ Investigated, no new issue needed: #2940's default-lane 1,496-record "vacuous ha
 The explicit completion directive supersedes the June 30 demotion of IR work.
 The active program is
 [#3518](../3518-ir-only-default-and-direct-frontend-retirement.md), a staged
-prepare-before-emit migration rather than another fallback-count sweep:
+prepare-before-emit migration that remains **in-progress**, rather than another
+fallback-count sweep:
 
-- [#3529](../3529-ir-r0-typed-producer-equivalence-parity.md) — **in-progress,
-  critical, current**: restore the 154 full-equivalence compile regressions
-  exposed by strict typed outcomes through explicit preclaim/Unsupported
-  decisions and 13 true invariant fixes. First executable prerequisite.
-- [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **blocked,
-  critical, current** on #3529: typed Prepared/Unsupported/Invariant outcomes
-  and an honest IR-only gate. Hybrid must be green before R0 acceptance;
-  strict stays red only on typed blockers.
+- [#3529](../3529-ir-r0-typed-producer-equivalence-parity.md) — **done
+  2026-07-21**: restored full-equivalence parity at 1,608 passing / 35 failing
+  against 36 committed known failures. One baseline-known case now passes,
+  there are zero new regressions, and the baseline is unchanged.
+- [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **done
+  2026-07-21**: landed typed emitted/Unsupported/Invariant outcomes and the
+  honest gate. Hybrid is green at 5/5 entries, 37 terminal units, 31 emitted IR
+  bodies, 6 Unsupported, 0 Invariants, and 37 legacy bodies; strict is
+  intentionally red on the six typed blockers plus legacy emission.
+- **#3520 — ready, critical, current**: R1 source-qualified `IrUnitId` and
+  whole-program `ProgramAbiMap`; this is the next executable retirement slice.
+- **R2–R8 — blocked** on #3520 and their dependency spine. No later ownership,
+  unit-kind, whole-program, semantic, async, or shared-linear slice may bypass
+  R1.
 - [#3090](../3090-shrink-codegen-delete-dormant-legacy-handlers.md) — blocked
   R10 deletion ledger. The remaining ~59,676 frontend fn-lines are still
   reachable and may be deleted only after #3518 R9.
@@ -120,12 +127,12 @@ as the narrow function-level milestone. Its children are complete:
 - [#2858](../2858-ir-call-graph-closure-to-zero.md) — `call-graph-closure` 7 → 0 — done.
 - [#2859](../2859-ir-param-type-not-resolvable-to-zero.md) — `param-type-not-resolvable` 1 → 0 — done.
 
-Remaining measured residuals belong to #3518: deferred `async-function` (4) →
-#1373b/R7 and the module-level Algorithms `Map` initializer → #3517/R4.
+The final R0 lane records six typed Unsupported units: `async-function` (2),
+`call-graph-closure` (1), `body-shape` (1), and static class members (2).
 Corpus-zero reasons remain non-strict until their source-language coverage is
-genuinely complete. Even after those histograms reach zero, classes, module
-init, M0, linear, runtime entry points, fail-closed defaulting, and reachability
-deletion remain separate structural gates.
+genuinely complete. Classes, module init, M0, linear, runtime entry points,
+fail-closed defaulting, and reachability deletion remain separate structural
+gates under #3518.
 
 ## 2026-06-23 — Sprint-65 value-rep substrate landings (session)
 

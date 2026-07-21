@@ -15,29 +15,30 @@ updated: 2026-07-21
 
 ## Top of the sprint — IR retirement
 
-1. **#3529 (R0a, in-progress, critical)** — restore the 154 full-equivalence
-   compile regressions exposed by strict typed outcomes: 141 explicit
-   capability decisions and 13 true invariant fixes. Unknown throws stay
-   Invariant; the equivalence baseline does not expand.
-2. **#3519 (R0b, blocked, critical)** — typed
-   Prepared/Unsupported/Invariant outcomes and an honest `check:ir-only` gate.
-   It resumes after #3529 restores parity. Hybrid must be green with complete
-   accounting; strict remains red only on explicit typed blockers.
-3. **#3517 (active stacked slice)** — retire the last measured Algorithms
-   module-init `Map` residual. This closes a corpus count, not R4 compile-once
-   module ownership.
-4. **#3518 R1 next** — source-qualified `IrUnitId` + `ProgramAbiMap`. Allocate a
-   child issue only after R0a/R0b fix and validate the outcome boundary; do not
-   implement from the epic prose in parallel with R0.
+1. **#3529 (R0a, delivered)** — full equivalence is back to zero new failures
+   without expanding the committed baseline. Known capability gaps now leave
+   through explicit typed outcomes and genuine producer/pass invariants were
+   fixed. One baseline-known case now passes and remains deliberately
+   unratcheted in this slice.
+2. **#3519 (R0b, delivered)** — the typed terminal-outcome channel and honest
+   `check:ir-only` policy gate are in place. The bounded hybrid lane is green
+   with 31 / 37 IR-emitted units, six typed Unsupported units, zero Invariants,
+   and complete accounting. Strict remains intentionally non-green on those
+   six typed blockers and the separately reported 37 legacy-emitted bodies.
+3. **#3520 (R1, ready, next)** — add source-qualified `IrUnitId` and a
+   whole-program `ProgramAbiMap` on the delivered R0 boundary.
+4. **#3518 (program owner, in-progress)** — the IR-only default and direct
+   front-end retirement program remains open. R0 is complete; R2–R8 remain
+   blocked behind #3520 and their declared dependency chain.
 
 Program owner: **#3518**. Deletion ledger: **#3090**, blocked until R9. The
 function fallback-corpus epic **#2855 is done** and is not a claimable tail
 task.
 
-Sprint acceptance for this lane is #3529 at zero new equivalence failures,
-followed by the #3519 hybrid gate with complete denominators and an
-intentionally non-green IR-only report that names every remaining typed
-blocker. “Function bucket zero” is not an IR-only status.
+The next acceptance boundary is #3520, not a default flip. The R0 hybrid-green
+result proves honest observation and equivalence preservation; the strict
+six-blocker result proves that IR-only readiness has not yet been reached.
+“Function bucket zero” is not an IR-only status.
 
 ## Parallel protected lane — standalone-vs-js-host Test262 gap
 

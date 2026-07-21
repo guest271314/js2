@@ -66,6 +66,13 @@ The following measurements are independent and must not be conflated:
 | Front-end reachability                           | **59,676 legacy-only fn-lines** | Approximate final deletion opportunity                                 | Those lines are dormant today                                               |
 | Runtime/builtin reachability                     |               **~47K fn-lines** | Behavior emission must gain IR-owned entry points                      | Those routines should be deleted with the front-end                         |
 
+R0 is complete. Full equivalence is **1,608 passing / 35 failing** against 36
+committed known failures: one baseline-known case now passes, there are zero
+new regressions, and the baseline is unchanged. The bounded hybrid gate is
+green at 5/5 entries, 37 terminal units, 31 emitted IR bodies, 6 typed
+Unsupported outcomes, 0 Invariants, and 37 legacy bodies. Strict IR-only is
+honestly red on the six Unsupported units and the 37 legacy bodies.
+
 Additional blockers:
 
 - Class members are still compile-twice. Legacy declaration/body side effects
@@ -76,9 +83,10 @@ Additional blockers:
   class members, module init, and IR-first body skipping are incomplete.
 - The linear backend still has direct AST-reading paths and does not consume the
   same whole-program IR contract as WasmGC.
-- `STRICT_IR_REASONS` corpus-zero promotion and substring-matched build errors
-  are not an IR-only policy. #3341 correctly proved that a selector reason can
-  be zero on one corpus while remaining a legitimate wider-source rejection.
+- The R0 typed gate has replaced substring-matched build-error policy, but its
+  current strict failure is expected: async (2), call-graph closure (1), body
+  shape (1), and static class members (2) remain explicit Unsupported units,
+  and every measured unit still has a legacy body.
 
 ## Terms used by this program
 
@@ -94,28 +102,30 @@ Additional blockers:
 
 ## Dependency spine
 
-Every row is an independently reviewable landing. R1–R10 receive child issue
-IDs before dispatch; this epic owns their order and acceptance boundaries.
+Every row is an independently reviewable landing. R1 is tracked by #3520;
+R2–R10 receive child issue IDs before dispatch. This epic owns their order and
+acceptance boundaries.
 
-| Slice           | Outcome                                                                                               | Depends on                            | Exit evidence                                                                                                                                                   |
-| --------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **R0a — #3529** | Restore typed-producer equivalence parity without weakening unknown-throw-to-Invariant classification | #3143; exposed by #3519               | 154 new compile failures return to the committed baseline through preclaim/typed Unsupported or true invariant fixes; no baseline expansion                     |
-| **R0b — #3519** | Typed `Prepared` / `Unsupported` / `Invariant` outcomes plus an honest `check:ir-only` readiness gate | #3143, #3529; informed by #2855/#3341 | No TypeMap or compile failures are skipped; `result.errors` and every unit outcome are accounted for; hybrid vs IR-only policy is tested                        |
-| **R1**          | Source-qualified `IrUnitId` and a whole-program `ProgramAbiMap`                                       | R0                                    | Same-named units across files/classes cannot collide; signatures, globals, imports, types, exports, and synthetic units are planned once                        |
-| **R2**          | `PreparedIrProgram` and prepare-before-emit compile-once pipeline                                     | R1                                    | Prepared free functions never call legacy body compilation; unsupported units are decided before any body emitter side effect                                   |
-| **R3**          | Classes and class members are Prepared/compile-once                                                   | R2                                    | Constructors, instance/static methods, fields, inheritance, wrappers, and type indices no longer depend on legacy body compilation                              |
-| **R4**          | Module init is Prepared/compile-once                                                                  | R2, R3                                | One program-owned module-init unit replaces the compile-first/patch-later `__module_init` overlay, including top-level binding/TDZ/export effects               |
-| **R5**          | Whole-program multi-source/M0 ownership                                                               | R1–R4                                 | Cross-file calls/imports, fast mode, collisions, module init, and class members use one `PreparedIrProgram`; no per-source overlay loop remains                 |
-| **R6**          | Semantic intrinsic contract and IR entry points for runtime/builtin families                          | R2                                    | The ~47K runtime/builtin emission lines are reached from typed IR intents, never AST dispatch; families land in measured sub-slices                             |
-| **R7**          | Async ownership plus explicit unsupported-source policy                                               | R2, R6                                | #1373b async residuals are Prepared; deliberately unsupported `eval`/`Function`/`with`/other deferred syntax fails source-located and cannot fall back          |
-| **R8**          | Shared linear consumption                                                                             | R1, R2, R6, R7                        | WasmGC and linear differ only below IR; `src/codegen-linear/` has no source-AST lowering path                                                                   |
-| **R9**          | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8                                 | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
-| **R10**         | Reachability-proven direct-front-end deletion                                                         | R9                                    | Re-run #3090 audit; delete the ~59,676 frontend-only fn-lines and dispatch roots; zero direct AST→Wasm reachability remains                                     |
+| Slice                  | Outcome                                                                                               | Depends on                            | Exit evidence                                                                                                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **R0a — #3529 (done)** | Restore typed-producer equivalence parity without weakening unknown-throw-to-Invariant classification | #3143; exposed by #3519               | 154 new compile failures return to the committed baseline through preclaim/typed Unsupported or true invariant fixes; no baseline expansion                     |
+| **R0b — #3519 (done)** | Typed `Prepared` / `Unsupported` / `Invariant` outcomes plus an honest `check:ir-only` readiness gate | #3143, #3529; informed by #2855/#3341 | No TypeMap or compile failures are skipped; `result.errors` and every unit outcome are accounted for; hybrid vs IR-only policy is tested                        |
+| **R1 — #3520 (ready)** | Source-qualified `IrUnitId` and a whole-program `ProgramAbiMap`                                       | R0                                    | Same-named units across files/classes cannot collide; signatures, globals, imports, types, exports, and synthetic units are planned once                        |
+| **R2 (blocked)**       | `PreparedIrProgram` and prepare-before-emit compile-once pipeline                                     | R1                                    | Prepared free functions never call legacy body compilation; unsupported units are decided before any body emitter side effect                                   |
+| **R3 (blocked)**       | Classes and class members are Prepared/compile-once                                                   | R2                                    | Constructors, instance/static methods, fields, inheritance, wrappers, and type indices no longer depend on legacy body compilation                              |
+| **R4 (blocked)**       | Module init is Prepared/compile-once                                                                  | R2, R3                                | One program-owned module-init unit replaces the compile-first/patch-later `__module_init` overlay, including top-level binding/TDZ/export effects               |
+| **R5 (blocked)**       | Whole-program multi-source/M0 ownership                                                               | R1–R4                                 | Cross-file calls/imports, fast mode, collisions, module init, and class members use one `PreparedIrProgram`; no per-source overlay loop remains                 |
+| **R6 (blocked)**       | Semantic intrinsic contract and IR entry points for runtime/builtin families                          | R2                                    | The ~47K runtime/builtin emission lines are reached from typed IR intents, never AST dispatch; families land in measured sub-slices                             |
+| **R7 (blocked)**       | Async ownership plus explicit unsupported-source policy                                               | R2, R6                                | #1373b async residuals are Prepared; deliberately unsupported `eval`/`Function`/`with`/other deferred syntax fails source-located and cannot fall back          |
+| **R8 (blocked)**       | Shared linear consumption                                                                             | R1, R2, R6, R7                        | WasmGC and linear differ only below IR; `src/codegen-linear/` has no source-AST lowering path                                                                   |
+| **R9**                 | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8                                 | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
+| **R10**                | Reachability-proven direct-front-end deletion                                                         | R9                                    | Re-run #3090 audit; delete the ~59,676 frontend-only fn-lines and dispatch roots; zero direct AST→Wasm reachability remains                                     |
 
-R0b remains blocked until R0a restores full-equivalence parity. R3 and R4 may
-proceed in parallel after R2. Runtime-family sub-slices in R6
-may proceed in parallel once their semantic intent is fixed. R5, R8, and R9
-are integration barriers, not parallel deletion opportunities.
+R0a and R0b completed on 2026-07-21. **#3520 is the ready next slice.** R2–R8
+remain blocked on the dependency spine; R3 and R4 may proceed in parallel only
+after R2, and runtime-family sub-slices in R6 may proceed in parallel once
+their semantic intent is fixed. R5, R8, and R9 are integration barriers, not
+parallel deletion opportunities.
 
 ## Program rules
 

@@ -7,9 +7,12 @@ typed diagnostic, and the direct AST→Wasm front-end is deleted.**
 - **Status:** Active — current migration priority (2026-07-21)
 - **Track:** Compiler architecture / IR retirement
 - **Tracking epic:** [#3518](../issues/3518-ir-only-default-and-direct-frontend-retirement.md)
-- **First executable prerequisite:** [#3529](../issues/3529-ir-r0-typed-producer-equivalence-parity.md)
-- **Typed truth/gate slice:** [#3519](../issues/3519-ir-only-typed-outcomes-and-honest-gate.md),
-  blocked on #3529 parity
+- **Completed R0:** [#3529](../issues/3529-ir-r0-typed-producer-equivalence-parity.md)
+  producer parity and
+  [#3519](../issues/3519-ir-only-typed-outcomes-and-honest-gate.md) typed
+  truth/gate, completed 2026-07-21
+- **Next executable slice:** **#3520 / R1 — ready**; R2–R8 remain blocked on
+  the dependency spine
 - **Target:** `pnpm run check:ir-only` passes across the authoritative corpus
   and both backends; the hybrid/direct path and its escape hatches no longer
   exist; the #3090 reachability audit reports no direct-front-end survivors.
@@ -49,40 +52,42 @@ The compiler is **default-on hybrid, not IR-only**:
 - Multi-source/M0 and linear are incomplete whole-program IR consumers.
 - Roughly 59,676 frontend-only fn-lines remain reachable. Roughly 47K
   runtime/builtin entry fn-lines must be rewired behind IR intents, not deleted.
-- `STRICT_IR_REASONS` and corpus baselines cannot define IR-only policy. A
-  legitimate unsupported source may use a reason that happens to be zero on a
-  sample corpus. #3341's typed invariant work is the precedent, but substring
-  matching must be retired by #3519.
-- #3519's strict boundary exposed 154 previously demoted equivalence compile
-  failures. #3529 must classify 141 capability gaps explicitly and fix 13 true
-  invariants before the R0 gate can be accepted; the equivalence baseline does
-  not expand.
+- R0 now provides typed emitted/Unsupported/Invariant outcomes and complete
+  gate accounting without substring policy. Full equivalence is 1,608 passing
+  / 35 failing against 36 committed known failures: one baseline-known case
+  now passes, there are zero new regressions, and the baseline is unchanged.
+- The bounded hybrid lane is green at 5/5 entries, 37 terminal units, 31
+  emitted IR bodies, 6 Unsupported, 0 Invariants, and 37 legacy bodies. Strict
+  IR-only is intentionally red on async (2), call-graph closure (1), body shape
+  (1), static class members (2), and the 37 legacy-emitted bodies.
 
 ## Delivery strategy
 
 The old bucket-only sequence (#2855) is complete as a measured function-corpus
 milestone. The retirement now follows #3518's dependency spine:
 
-1. **R0a / #3529 — producer parity:** retain strict
-   unknown-throw-to-Invariant behavior, preclaim known capability shapes, use
-   narrow typed Unsupported exits for residual evidence, and fix the 13 true
-   producer/pass invariants until full equivalence has zero new failures.
-2. **R0b / #3519 — truth:** typed Prepared/Unsupported/Invariant outcomes and
+1. **R0a / #3529 — done 2026-07-21:** retained strict
+   unknown-throw-to-Invariant behavior, preclaimed known capability shapes,
+   used narrow typed Unsupported exits for residual evidence, and fixed the 13
+   true producer/pass invariants; full equivalence has zero new failures.
+2. **R0b / #3519 — done 2026-07-21:** typed
+   emitted/Unsupported/Invariant outcomes and
    an honest gate that includes TypeMap failures, thrown compiles,
    `CompileResult.errors`, named corpus denominators, classes, and module init.
    Later retirement slices expand that same schema to inline equivalence and
    the other production lanes before the fail-closed default flip.
-3. **R1 — identity/ABI:** source-qualified `IrUnitId` and `ProgramAbiMap`.
-4. **R2 — ownership:** a `PreparedIrProgram` built before body emission; free
+3. **R1 / #3520 — ready next:** source-qualified `IrUnitId` and
+   `ProgramAbiMap`.
+4. **R2 — blocked on R1:** a `PreparedIrProgram` built before body emission; free
    functions compile once without an allowlist.
-5. **R3/R4 — remaining unit kinds:** classes and module init compile once.
-6. **R5 — whole program:** multi-source/M0, collisions, imports, fast mode, and
+5. **R3/R4 — blocked on R2:** classes and module init compile once.
+6. **R5 — blocked on R1–R4:** multi-source/M0, collisions, imports, fast mode, and
    one program-owned module-init plan.
-7. **R6 — semantics:** typed intrinsic contracts and IR entry points for each
+7. **R6 — blocked on R2:** typed intrinsic contracts and IR entry points for each
    runtime/builtin family.
-8. **R7 — async/unsupported:** async becomes IR-owned; deliberately unsupported
+8. **R7 — blocked on R2/R6:** async becomes IR-owned; deliberately unsupported
    syntax becomes a source-located hard diagnostic, never direct fallback.
-9. **R8 — backend convergence:** linear consumes the same prepared IR.
+9. **R8 — blocked on R1/R2/R6/R7:** linear consumes the same prepared IR.
 10. **R9 — policy flip:** fail-closed IR-only becomes the sole production mode;
     remove hybrid demotion and every legacy escape hatch.
 11. **R10 — subtraction:** re-run #3090 and delete the proven-unreachable
@@ -96,22 +101,23 @@ evidence.
 
 <!-- AUTOGENERATED:GOAL-ISSUES-START -->
 
-| #         | Title                                                            | Sprint  | Status      | Role                                                   |
-| --------- | ---------------------------------------------------------------- | ------- | ----------- | ------------------------------------------------------ |
-| **3518**  | IR-only default and direct front-end retirement                  | current | in-progress | Active tracking epic, R0–R10                           |
-| **3529**  | IR R0 prerequisite: typed producer equivalence parity            | current | in-progress | First executable prerequisite; 154 compile regressions |
-| **3519**  | IR-only R0: typed preparation outcomes and honest readiness gate | current | blocked     | Depends on #3529 parity                                |
-| **3090**  | Retire direct front-end after IR-only reachability gates close   | current | blocked     | R10 deletion ledger                                    |
-| **3143**  | IR-first default flip                                            | 71      | done        | Historical default-on hybrid milestone                 |
-| **3142**  | IR module-init overlay adoption                                  | 72      | done        | Historical claim/patch milestone; not compile-once     |
-| **2855**  | IR fallback-corpus ratchet                                       | 73      | done        | Historical function-corpus zero milestone              |
-| **2856**  | `body-shape-rejected` function corpus to zero                    | 73      | done        | #2855 child                                            |
-| **2857**  | Class-method fallback corpus to zero                             | current | done        | #2855 child                                            |
-| **2858**  | Call-graph-closure fallback corpus to zero                       | current | done        | #2855 child                                            |
-| **2859**  | Param-type fallback corpus to zero                               | current | done        | #2855 child                                            |
-| **3341**  | Typed strict IR invariant hardening                              | current | in-progress | Precedent/input to R0                                  |
-| **1373b** | Async CPS lowering                                               | 67      | backlog     | Feeds R7                                               |
-| **2950**  | IR-first default flip historical issue                           | 71      | done        | Delivered by #3143; retirement superseded by #3518     |
+| #         | Title                                                            | Sprint  | Status      | Role                                               |
+| --------- | ---------------------------------------------------------------- | ------- | ----------- | -------------------------------------------------- |
+| **3518**  | IR-only default and direct front-end retirement                  | current | in-progress | Active tracking epic; R0 complete, R1–R10 remain   |
+| **3529**  | IR R0 prerequisite: typed producer equivalence parity            | current | done        | R0a completed 2026-07-21                           |
+| **3519**  | IR-only R0: typed preparation outcomes and honest readiness gate | current | done        | R0b completed 2026-07-21                           |
+| **3520**  | R1 source-qualified unit identity and whole-program ABI map      | current | ready       | Next executable slice                              |
+| **3090**  | Retire direct front-end after IR-only reachability gates close   | current | blocked     | R10 deletion ledger                                |
+| **3143**  | IR-first default flip                                            | 71      | done        | Historical default-on hybrid milestone             |
+| **3142**  | IR module-init overlay adoption                                  | 72      | done        | Historical claim/patch milestone; not compile-once |
+| **2855**  | IR fallback-corpus ratchet                                       | 73      | done        | Historical function-corpus zero milestone          |
+| **2856**  | `body-shape-rejected` function corpus to zero                    | 73      | done        | #2855 child                                        |
+| **2857**  | Class-method fallback corpus to zero                             | current | done        | #2855 child                                        |
+| **2858**  | Call-graph-closure fallback corpus to zero                       | current | done        | #2855 child                                        |
+| **2859**  | Param-type fallback corpus to zero                               | current | done        | #2855 child                                        |
+| **3341**  | Typed strict IR invariant hardening                              | current | in-progress | Precedent/input to R0                              |
+| **1373b** | Async CPS lowering                                               | 67      | backlog     | Feeds R7                                           |
+| **2950**  | IR-first default flip historical issue                           | 71      | done        | Delivered by #3143; retirement superseded by #3518 |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 
