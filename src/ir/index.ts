@@ -2,6 +2,7 @@
 export * from "./types.js";
 export * from "./outcomes.js";
 export * from "./identity.js";
+export * from "./planning-identity.js";
 export * from "./program-abi.js";
 export * from "./nodes.js";
 export * from "./alloc-registry.js";

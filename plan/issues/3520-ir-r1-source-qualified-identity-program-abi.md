@@ -9,7 +9,7 @@ branch: symphony/3520-r1-identity-abi
 pr: 3490
 sprint: current
 created: 2026-07-21
-updated: 2026-07-21
+updated: 2026-07-22
 priority: critical
 horizon: l
 complexity: L
@@ -29,6 +29,7 @@ related: [1983, 2138, 2930, 3142, 3143, 3518, 3529]
 origin: "#3518 R1 — replace display-name identity before preparation ownership changes"
 files:
   - src/ir/identity.ts
+  - src/ir/planning-identity.ts
   - src/ir/program-abi.ts
   - src/ir/index.ts
   - src/ir/nodes.ts
@@ -66,7 +67,6 @@ files:
   - src/ir/passes/simplify-cfg.ts
   - src/ir/passes/tagged-union-types.ts
   - src/ir/passes/tagged-unions.ts
-  - src/index.ts
   - src/compiler.ts
   - src/compiler/ir-outcome-inventory.ts
   - src/compiler/validation.ts
@@ -233,11 +233,15 @@ arrays, so it cannot claim that existing runtime collisions are fixed.
 
 - Replace source-unit string keys in `propagate.ts`, `type-evidence.ts`,
   `select.ts`, `ast-lowering-plans.ts`, imported/module-binding plans,
-  promise-delay ownership, IR-first call-graph closure, class-member keys, and
-  self-host selection with structural IDs.
-- Key recursion/SCC, escape/ownership, string-evidence, and linear-memory-plan
-  source ownership by identity. Property names, intrinsic names, and layout
-  field names remain labels and must not be mechanically converted.
+  promise-delay ownership, IR-first call-graph closure, outcome reconciliation,
+  and self-host selection with structural IDs. Keep `class-member-keys.ts` as
+  the legacy slot adapter until Commit 4.
+- Key source-level recursion/SCC evidence by identity and add a validated
+  source-owner ID only at the linear integration seam. Escape, ownership,
+  stack-allocation, encoding, and string-evidence analyses already key their
+  semantic facts by IR value/allocation IDs and do not need a source-name
+  migration. Property names, intrinsic names, layout field names, and the
+  generic linear-plan `ownerFunction` label remain strings in this commit.
 - Keep existing selection results, preparation order, and diagnostics stable;
   this commit changes lookup identity only.
 
@@ -327,14 +331,328 @@ Intentionally deferred from this PR:
 Remaining numbered work:
 
 - **Commit 2:** thread `IrUnitId` from the validated declaration index through
-  selection, propagation, source planning, recursion/SCC, ownership/escape,
-  imported/module binding, promise-delay, class-key, and self-host plans.
+  selection, propagation, source planning, recursion/SCC evidence,
+  imported/module binding, promise-delay, self-host planning, the additive
+  linear source-owner join, and terminal outcomes. Keep class-member naming as
+  the legacy adapter; value/allocation-keyed ownership, escape, stack, encoding,
+  and string-evidence analyses do not need migration here.
 - **Commit 3:** put identities on IR functions/references, key inline and
   monomorphization edits structurally, derive IDs for pass-created units, and
   carry the same binding identities through verification/lowering/backends.
 - **Commit 4:** populate the whole-program ABI intentions, bind only
   ModuleAssembler-final indices, then route legacy maps/exports through the
   adapter and prove runtime collision behavior plus non-collision byte parity.
+
+## Commit 2 implementation plan — source planning by identity
+
+**Planned/assigned R1b branch after PR #3490 merges:**
+`symphony/3520-r1-planning-identity`
+
+The active tracker remains the frontmatter branch/PR for R1a (`#3490`) until
+that PR merges; the R1b branch is not yet the active issue branch.
+
+### Root cause
+
+R1a created structural source/unit/class identities, but production planning
+still rebuilds independent name maps in each phase. `buildTypeMap`, recursive
+evidence, selection, IR-first closure, imported/Promise plans, and overlay
+reconciliation can therefore resolve the same declaration through different
+`Map<string, ...>` instances. Multi-source compilation makes the defect
+observable: the inventory distinguishes two declarations named `main`, while
+planning still collapses or conservatively rejects them by that label.
+
+The R1a terminal join is also only half-threaded. Outcome rows carry `unitId`,
+but `recordObservedIrOutcomes` immediately rejoins selection, failures, and
+integration events through `legacyMatchName`. Commit 2 must make the ID the
+join key before Commit 3 changes `IrFunction` and `IrFuncRef` themselves.
+
+### One per-program identity context
+
+**Files: `src/ir/identity.ts` and new internal
+`src/ir/planning-identity.ts`**
+
+`buildIrUnitInventory` remains the only inventory builder. Its scanner records
+the exact source, unit-declaration, and class-declaration objects while it
+constructs the returned `IrUnitInventory`; that scanner metadata is associated
+with that exact inventory object. `buildIrPlanningIdentityContext` consumes the
+already-built inventory and validates the scanner metadata. It must never call
+`buildIrUnitInventory`, clone/reconstruct an inventory, or recover a declaration
+through name, text, line, or span matching. A copied or independently rebuilt
+inventory is rejected with the typed `untracked-inventory` invariant.
+
+The new internal module owns the context/error/validation implementation and
+keeps the large identity scanner within the repository LOC budget. This split
+does not receive a LOC-budget allowance and does not change any baseline.
+
+```ts
+export interface IrPlanningIdentityContext {
+  readonly inventory: IrUnitInventory;
+  readonly sourceIdBySourceFile: ReadonlyMap<ts.SourceFile, IrSourceId>;
+  readonly sourceFileBySourceId: ReadonlyMap<IrSourceId, ts.SourceFile>;
+  readonly unitIdByDeclaration: ReadonlyMap<ts.Node, IrUnitId>;
+  readonly declarationByUnitId: ReadonlyMap<IrUnitId, ts.Node>;
+  readonly terminalByUnitId: ReadonlyMap<IrUnitId, IrTerminalUnitRecord>;
+  readonly classIdByDeclaration: ReadonlyMap<
+    ts.ClassDeclaration | ts.ClassExpression,
+    IrClassId
+  >;
+  readonly declarationByClassId: ReadonlyMap<
+    IrClassId,
+    ts.ClassDeclaration | ts.ClassExpression
+  >;
+  readonly moduleInitUnitIdBySourceId: ReadonlyMap<IrSourceId, IrUnitId>;
+  readonly moduleInitUnitIdBySourceFile: ReadonlyMap<ts.SourceFile, IrUnitId>;
+}
+
+export function buildIrPlanningIdentityContext(
+  inventory: IrUnitInventory,
+): IrPlanningIdentityContext;
+```
+
+Ordinary unit and class entries use their exact scanner-captured declaration
+object. Only two semantic anchors are explicit:
+
+- module init is source-owned and therefore appears in
+  `moduleInitUnitIdBySourceId` / `moduleInitUnitIdBySourceFile`, not in the
+  declaration maps; and
+- an implicit constructor is anchored to its owning class declaration or
+  expression. Unit and class maps are separate, so that class-like node may
+  validly map to both its constructor `IrUnitId` and its `IrClassId`.
+
+A field-initializer support unit retains its own scanner-captured declaration.
+There is no general exception that permits a consumer to search by span. Every
+forward/reverse pair, terminal owner, source object, and module-init anchor is
+validated; duplicate or missing entries are typed R0 invariants.
+
+Dependency order is a derived view, not a second identity index: iterate
+`context.inventory.sources` and resolve each record through
+`context.sourceFileBySourceId`. This preserves the inventory's SCC/canonical-
+key ordering for planning without changing the existing global R0 source loop
+or legacy body-emission order.
+
+The compiler builds the final complete inventory once, after all source
+rewrites/reparses, then immediately derives one context from that same object.
+Single- and multi-source overlays receive that context; no per-source overlay
+may rebuild inventory. Checker resolution must select an exact declaration and
+look it up in the context. Checker-free textual resolution remains conservative:
+only a unique eligible declaration in the existing domain may project to the
+legacy path; ambiguous or absent targets retain the current demotion.
+
+### Validated legacy projection retained by Commit 2
+
+Commit 2 does not yet make `IrFunction` or the codegen slot tables structural.
+It therefore retains a validated, one-to-one compatibility projection for each
+active source-planning population:
+
+```ts
+interface IrLegacyUnitProjection {
+  readonly unitId: IrUnitId;
+  readonly legacyName: string;
+}
+```
+
+Both directions are validated: an ID has exactly one legacy name and a legacy
+name identifies at most one active ID at the receiving API. A collision is
+demoted by the current typed collision/safety policy before a name-keyed call;
+it is never collapsed by first/last wins. The originating `unitId` remains on
+the selection, plan, skip/preparation record, and outcome evidence across that
+call, and a returned name is accepted only through the same projection.
+
+This compatibility projection remains required for the still-name-keyed
+`compileIrPathFunctions`, `IrTypeOverrideMap`, `from-ast` `calleeTypes`,
+`classShapes`, and integration interfaces until Commit 3 or 4 replaces those
+interfaces. Class resolution likewise carries `{ classId, legacyName }`; the
+local class-expression resolver returns that pair, while `classShapes` remains
+name-keyed. `class-member-keys.ts` and every existing static/instance/accessor
+collision guard remain active legacy adapters.
+
+### Ordered migration of planning consumers
+
+The dependency order is load-bearing:
+
+1. Land `IrPlanningIdentityContext` over the exact existing inventory and
+   export it only through the internal IR barrel.
+2. Key propagation and recursive source evidence by `IrUnitId`; derive
+   deterministic worklist/SCC order from the context.
+3. Make selection and source plans carry unit/class IDs for every executable
+   owner/target, without changing which units are selected.
+4. Build and validate the one-to-one legacy projection before invoking the
+   still-name-keyed compile, override, class-shape, from-AST, or integration
+   APIs. Preserve collision demotion.
+5. Carry the original ID through IR-first closure, preparation, integration
+   correlation, and terminal outcome reconciliation.
+6. Add source owner IDs only at the linear integration seam and tighten the
+   existing self-host cache eligibility/fingerprint behavior.
+
+Do not start Commit 3's `IrFunction`/`IrFuncRef` migration in this slice. In
+particular, do not reconstruct an owner from `IrFunction.name`.
+
+### Exact file and API changes
+
+| File / current API | Commit 2 contract |
+| --- | --- |
+| `src/ir/identity.ts` — inventory scanner and `buildIrUnitInventory` | Capture exact scanner metadata while building the one authoritative inventory. Expose only the narrow internal hand-off needed by `planning-identity.ts`; do not add a second scan, span join, inventory copy, LOC allowance, or baseline change. |
+| `src/ir/planning-identity.ts` — new internal module | Own `IrPlanningIdentityContext`, its typed invariant error/codes, read-only map wrappers, and `buildIrPlanningIdentityContext(existingInventory)`. Validate that the exact tracked inventory and all forward/reverse source, declaration, terminal, class, and module-init joins agree. Module init uses its source anchor; implicit construction uses its class anchor. |
+| `src/ir/index.ts` | Export the context and builder through this internal IR barrel. The root `src/index.ts` public package surface is unchanged. |
+| `src/ir/propagate.ts` — `TypeMap`, `buildTypeMap`, `buildCallGraph`, `collectFunctionDeclarations` | Make source declaration, call, inbound, seed, worklist, and result keys `IrUnitId`. Resolve declarations through the supplied context. Parameter/local lexical scopes remain string-keyed. Preserve the current unique checker-free fallback and demote ambiguity. |
+| `src/ir/type-evidence.ts` — `RecursiveTypeEvidence`, `buildRecursiveTypeEvidence`, `recursiveComponents` | Carry `{ unitId, displayName, declaration, symbol }`; key source calls, escapes, signatures, decisions, graph members, and Tarjan components by `IrUnitId`. Derive tie-breaking from context order; render the display label only after the decision. This is source-level recursive evidence, not a rewrite of value/allocation-keyed escape analysis. |
+| `src/ir/select.ts` — `IrFallback`, `IrSelection`, `IrModuleInitAssessment`, `planIrCompilation` | Carry a required `unitId` on executable fallbacks, selected functions/members, local edges, and non-empty module-init assessment; carry `IrClassId` with class decisions. Keep display/member/property names as labels. Preserve selection, compile-twice, and every collision demotion. |
+| `src/codegen/index.ts` — `buildIrClassShapes` / `tsTypeToClassPositionIr`; `src/ir/module-bindings.ts` — `makeIrLocalClassExpressionResolver` | Resolve class declarations through `classIdByDeclaration`, but return `{ classId, legacyName }` from the local class-expression resolver. Keep `classShapes` and legacy `ctx.classSet` / `structFields` name-keyed behind a validated projection. Ambiguity retains the current demotion. |
+| `src/ir/imported-functions.ts` — `IrResolvedFunctionTarget`, `makeIrImportedFunctionResolver` | Change construction to `makeIrImportedFunctionResolver(checker, sourceFiles, identityContext)`. Return the exporting declaration's `targetUnitId` alongside its legacy target name. Symbol/declaration identity chooses the target; canonical-name counting cannot choose semantic identity. The name remains only for the validated `funcMap` / from-AST compatibility projection. |
+| `src/ir/ast-lowering-plans.ts` — imported-call/function-value/host-callback plans | Add required `ownerUnitId` and source `targetUnitId`; retain explicitly named legacy target, trampoline, cache-global, and capture strings consumed by current lowering. Exact AST-site maps remain node-keyed. |
+| `src/ir/module-bindings.ts` — `IrModuleBindingIdentity`, `makeIrModuleBindingResolver` | Keep the checker-resolved `VariableDeclaration` as binding identity until Commit 4. Every source use carries its `ownerUnitId` (or module-init ID), and class evidence carries `IrClassId`. Generated `__mod_*` names remain compatibility labels. |
+| `src/ir/promise-delay-lowering.ts` — owner collection and plans | Key owner certification/selection by `IrUnitId` and store it on every plan. Capture/lifted names remain strings. Derived identities for executor/timer functions wait for Commit 3. |
+| `src/codegen/ir-first-gate.ts` — `collectLocalCallEdges` | Produce ID-keyed source edges and use the source's actual module-init ID internally. Before `compileIrPathFunctions`, validate and pass the one-to-one `{ unitId, legacyName }` projection; correlate its named result back through those exact pairs. Do not remove conservative collision demotion. |
+| `src/codegen/ir-overlay-finalize.ts` — blocked closure and preparation | Carry IDs through blocked-component, Date/Promise/callback owner, and preparation state. Host/lifted slot names stay strings at the legacy boundary. Translate to a name only through the active projection and retain the ID on the structural state. |
+| `src/codegen/index.ts` — `IrOverlayPlan`, `computeIrFirstSkipSet`, `planIrOverlay`, multi-source safety | Keep structural selection/declaration/owner/blocked/skip state ID-addressed. Retain `IrTypeOverrideMap` as name-keyed and create its entries only from validated pairs. Multi-source collision scanners remain safety gates and demote the exact affected IDs. Never translate a skipped name through a global name map. |
+| `src/ir/from-ast.ts` and `src/ir/integration.ts` — `calleeTypes`, class shapes, compilation/integration report | Keep these interfaces name-keyed in Commit 2. Supply only validated projected names, retain each source ID in the calling plan/sidecar, and correlate each compiled/error result through the same pair. No named event can satisfy a different same-label ID. Their structural API migration belongs to Commit 3/4. |
+| `src/codegen/index.ts` — `recordObservedIrOutcomes` | Reconcile selection, preparation, static/member policy, integration correlation, and patch evidence by the retained `unitId`; use `terminalByUnitId` for metadata/duplicate checks. Legacy keys, labels, histograms, and public compiled-name telemetry remain unchanged output. |
+| `src/ir/backend/linear-integration.ts` — `compileLinearIrFunctions` source integration seam | Add/require `ownerUnitId` only on the source integration descriptor or a total validated sidecar used at this seam. Keep generic `LinearAllocationSitePlan.ownerFunction`, `planLinearMemory`, allocation/layout IDs, and stack operation schemas unchanged until Commit 3 gives `IrFunction` an ID. `encoding`, `escape`, `ownership`, `stack-alloc`, and `string-evidence` already use IR value/allocation IDs and need no Commit 2 source-name migration. |
+| `src/codegen/stdlib-selfhost.ts` — `memoKey`, `irCache`, `buildSelfHostedIr` | Preserve `memoKey` as the context-free cache-eligibility guard and preserve the guard that excludes ctx-bound type/resolver (`typeIdx`) state. Compute a deterministic template fingerprint only after eligibility and only for an identity-free template; never cache a program-relative ID. A ctx/typeIdx-dependent build must never enter the cache. If that cannot be proved without widening the slice, defer the fingerprint change to Commit 3 rather than weakening the guard. |
+| `src/codegen/class-member-keys.ts` | Leave the string-keyed module, relocation logic, and collision guards in place as the legacy compatibility adapter through Commit 4. |
+
+### String-versus-identity boundary
+
+After Commit 2, structural source-planning state uses `IrUnitId`/`IrClassId`
+for selection membership, caller/callee closure, recursive components, owner/
+target facts, blocked/skip decisions, and terminal joins. Strings remain valid
+for local/parameter/property/field names, import/export spellings, public names,
+intrinsics/helpers, concrete Wasm names, diagnostics, and current legacy slot
+interfaces.
+
+The validated `{ unitId, legacyName }` projection is deliberately still used as
+a semantic compatibility boundary for `compileIrPathFunctions`,
+`IrTypeOverrideMap`, `calleeTypes`, `classShapes`, and integration. The ID must
+remain alongside every projected name, and reverse correlation must use the
+same one-to-one projection. Thus Commit 2 removes independent name re-joins
+without claiming that all string-keyed compiler APIs have already disappeared.
+
+Commit 2 does not assign `IrBindingId` to module globals, put IDs on
+`IrFunction`/`IrFuncRef`, derive IDs for lifted/monomorphized functions, migrate
+generic linear-plan ownership, or bind ABI slots. Those remain Commit 3/4 work.
+
+### Outcome join and parity requirements
+
+The existing global R0 source loop remains unchanged. Within each source,
+`recordObservedIrOutcomes` consumes that source's terminal records in canonical
+inventory order and addresses structural state by `unitId`. It validates named
+integration evidence through the source's one-to-one projection rather than a
+global `legacyMatchName` map.
+
+For every terminal ID, apply and record exactly one branch in this stable
+precedence:
+
+1. an inventory-authored `directFailure`;
+2. the selector's typed rejection;
+3. a typed preparation failure;
+4. the explicit `static-class-member` compile-twice outcome;
+5. a typed late-preparation rejection;
+6. the explicit `module-init-legacy-coupling` integration outcome;
+7. another typed integration error; or
+8. successful, exactly-once patch evidence.
+
+Duplicate or absent terminal/evidence IDs, multiple compiled/error events for
+one projection, a same-label event owned by another ID, or leftover unconsumed
+integration evidence produces the existing typed invariant. Branch precedence
+must not silently mask duplicate evidence. R0 row count/order, fallback
+histograms, `displayName`, `key`, public compiled-name telemetry, the global
+source-loop order, and emitted binaries remain unchanged.
+
+### Anti-vacuity tests for Commit 2
+
+Extend `tests/issue-3520-ir-unit-identity.test.ts` and add focused planning
+fixtures only where required. Prove behavior through real consumers:
+
+1. Build an inventory once, derive `IrPlanningIdentityContext` from that exact
+   object, and prove its forward/reverse maps, source-derived dependency view,
+   source-owned module init, and class-anchored implicit constructor. A copied
+   or rebuilt inventory must fail as `untracked-inventory`; no span match is
+   accepted.
+2. Give two files declarations named `same` and classes named `C`; reverse
+   caller insertion order and prove distinct propagation/selection IDs with no
+   inventory rebuild. Where the receiving legacy API cannot represent both,
+   prove the existing collision demotion instead of a collapsed name entry.
+3. Create same-named recursive SCCs with different scalar evidence and prove
+   the worklist, Tarjan components, decisions, and diagnostics stay attached to
+   the correct IDs.
+4. Cover instance/static `m`, get/set `x`, repeated computed labels, nested
+   same-named classes, class expressions, and implicit constructors. Prove the
+   local resolver returns `{ classId, legacyName }`, class shapes remain behind
+   the validated projection, and current slot demotions/output do not change.
+5. Resolve default and renamed imports through checker declarations. Prove
+   `makeIrImportedFunctionResolver(..., identityContext)` returns the exporting
+   unit ID and that call/function-value plans retain owner/target IDs across the
+   named from-AST/integration boundary.
+6. Give same-named Promise/Date owners and `<module-init>` units in two files;
+   prove blocked/preparation/outcome state stays separate and named events only
+   correlate through their exact pairs.
+7. Exercise module binding from a function and module init. Prove structural
+   owner IDs coexist with exact binding declaration identity and that a same-
+   spelled shadowed local is not captured.
+8. Exercise the linear source integration seam with same-label source owners.
+   Prove its additive/sidecar `ownerUnitId` is total while generic allocation
+   plans still use their unchanged schema and value/allocation IDs.
+9. Prove the self-host `memoKey` eligibility and no-ctx-bound-type/resolver
+   guard remain active: eligible identity-free templates fingerprint safely,
+   while a ctx/typeIdx-dependent build never reads or writes the cache.
+10. Cover every outcome branch above, including inventory `directFailure`,
+    `static-class-member`, and `module-init-legacy-coupling`; reject same-label
+    cross-ID evidence and prove per-source canonical order without changing the
+    global source loop. Keep legacy rows/histograms and tracked/untracked output
+    byte-identical.
+
+Run the new tests with the R1a identity/ABI/outcome suites, #2138, linear,
+self-host, phase3c, equivalence, and cross-backend differential validation. Run
+#1983 and inline-small separately as control-matched known-failure matrices:
+their exact failures must match the pre-branch base and are not an expected
+green command. No local Test262 run or baseline refresh belongs to this commit.
+
+### Commit 2 risks and containment
+
+- **Inventory substitution:** rebuilding or copying an inventory loses its
+  scanner object joins. Build once, require exact object identity, and reject
+  untracked inventories.
+- **AST identity invalidation:** a transform after inventory construction makes
+  exact node maps stale. Finish rewrites first; reject unknown nodes without a
+  text/span fallback.
+- **Ambiguous checker edges:** aliases, overloads, merged declarations, and
+  reassignments may resolve to multiple/non-executable declarations. Accept one
+  indexed executable declaration or retain Unsupported/compile-twice behavior.
+- **Legacy projection collision:** structural planning cannot make the current
+  named compiler API represent two occupants. Preserve collision demotion,
+  validate both projection directions, and never use first/last wins.
+- **ID loss at return:** a name-only compiled/error result can be attached to
+  the wrong unit. Retain the ID sidecar through the call, consume each named
+  result once through the exact projection, and reject leftovers/duplicates.
+- **Linear scope creep:** `IrFunction` lacks a structural ID. Add owner identity
+  only at source integration; changing the generic plan would also require the
+  #3298/#3299/#3300/#3502 test families and
+  `scripts/benchmark-allocation-policies.mts`, so defer that schema change to
+  Commit 3.
+- **Self-host cache leakage:** a fingerprint cannot make ctx/type-index state
+  context-free. Preserve eligibility guards and defer caching when any resolver
+  state is bound to the active compilation.
+
+### Commit 2 foundation status
+
+Implemented on the planned R1b continuation branch, pending the R1a merge:
+
+- the exact inventory scanner now retains frozen source/unit/class declaration
+  metadata outside the serializable identity records;
+- `buildIrPlanningIdentityContext(existingInventory)` validates immutable
+  bidirectional source, unit, terminal, class, and source-owned module-init
+  mappings without rebuilding the inventory or joining by display/span;
+- `indexIrTerminalDeclarations` now consumes those exact record/node joins;
+  copied or independently rebuilt inventories are rejected; and
+- the planning implementation lives in `src/ir/planning-identity.ts` so
+  `identity.ts` remains below the 1,500-line subsystem limit without an
+  allowance or baseline change.
+
+Validation for this foundation is **30/30** identity tests, **10/10** ABI
+tests, and **96/96** across the expanded identity/outcome/multi-source/producer
+matrix. Typecheck, lint, formatting, diff, and LOC-budget checks pass. This is
+only stage 1 of the ordered Commit 2 plan; propagation, selection, feature
+planners, legacy projections, and ID-keyed outcome reconciliation remain.
 
 ### R1a validation evidence
 
@@ -482,8 +800,10 @@ multi-file equivalence suite.
 
 ## Required completion evidence
 
+Expected-green Commit 2 and R1 gates:
+
 ```bash
-pnpm exec vitest run tests/issue-3520-ir-unit-identity.test.ts tests/issue-3520-program-abi.test.ts tests/issue-1983-funcmap-collision.test.ts tests/issue-2138-multi-module-ir-overlay.test.ts tests/ir/inline-small.test.ts tests/ir/phase3c.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+pnpm exec vitest run tests/issue-3520-ir-unit-identity.test.ts tests/issue-3520-program-abi.test.ts tests/issue-2138-multi-module-ir-overlay.test.ts tests/ir/phase3c.test.ts tests/linear-integration.test.ts tests/issue-3161.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
 pnpm run check:ir-only -- --policy=hybrid
 pnpm run check:ir-fallbacks -- --verbose
 pnpm run typecheck
@@ -492,6 +812,19 @@ pnpm run format:check
 node scripts/equivalence-gate.mjs
 pnpm exec vitest run tests/cross-backend-diff.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
 ```
+
+Known-base control matrix, run separately against both the branch and its exact
+pre-branch base:
+
+```bash
+pnpm exec vitest run tests/issue-1983-funcmap-collision.test.ts tests/ir/inline-small.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+```
+
+This control command is not expected green while the existing #1983 type-index
+and inline-small harness/expectation failures remain. Completion requires the
+exact test/failure set and diagnostics to match the pre-branch control, with no
+new failure. Do not combine it with the expected-green command or report the
+combined exit status as a green gate.
 
 The PR report must include the source/unit/class/binding denominators, a
 collision matrix, deterministic-order proof, old-vs-new telemetry diff, and
