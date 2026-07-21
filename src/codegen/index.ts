@@ -84,7 +84,6 @@ import {
   preparePromiseDelayLowering,
 } from "./ir-overlay-finalize.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
-import { truthyEnv } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
@@ -1513,10 +1512,6 @@ const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReaso
  */
 function explicitlyDisabledEnv(v: string | undefined): boolean {
   return v === "0" || v === "false";
-}
-
-export function irVerifierHardFailureEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return truthyEnv(env.JS2WASM_IR_VERIFY_HARD) || truthyEnv(env.CI) || env.NODE_ENV === "test" || truthyEnv(env.VITEST);
 }
 
 export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
