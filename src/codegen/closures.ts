@@ -1927,6 +1927,11 @@ export function compileArrowAsClosure(
     closureResults,
     closureName,
     isNamedFuncExpr: !!isNamedFuncExpr,
+    constructible:
+      noJsHost(ctx) &&
+      ts.isFunctionExpression(arrow) &&
+      arrow.asteriskToken === undefined &&
+      !(arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false),
   }));
 
   // 5. Build the lifted function body
@@ -1965,6 +1970,7 @@ export function compileArrowAsClosure(
     // class-object singleton rather than `undefined`.
     isStaticContext: fctx.isStaticContext,
     isGenerator,
+    deferredDynamicImportTrap: !isAsync && !isGenerator,
     // (#1636-S1) This lifted closure body can be dispatched from the host via
     // `__call_fn_method_N` (e.g. as a `JSON.stringify` replacer / `toJSON`),
     // which installs the host receiver into `__current_this`. Allow `this`

@@ -189,6 +189,13 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
     addUnionImportsViaRegistry(ctx);
   }
 
+  // #3507 — the `$NativeRegExp` test/1 brand arm returns a real JS boolean.
+  // Register boxing before the call site mints the helper so finalize remains
+  // read-only and no import shift can invalidate baked indices.
+  if (ctx.standalone && methodName === "test" && arity === 1) {
+    addUnionImportsViaRegistry(ctx);
+  }
+
   // (#2927) For the in-place array MUTATION methods (`push`/`pop`), register the
   // native `$__vec_base` brand-arm deps NOW so the fill only READS funcMap
   // (#1719): the `$__vec_base` supertype and `__box_number` (push returns an i32
@@ -1158,6 +1165,40 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
             op: "if",
             blockType: { kind: "val", type: { kind: "externref" } },
             then: dvCall,
+            else: current,
+          },
+        ];
+      }
+    }
+
+    // #3507 — helper/object/array carriers erase a native RegExp to externref.
+    // Dispatch `.test(subject)` by the runtime `$NativeRegExp` brand, not by
+    // the first ambient extern class named `test`. User closed-struct methods
+    // are wrapped outside this arm below and therefore retain precedence.
+    {
+      const regexpTypeIdx = ctx.structMap.get("__StandaloneRegExp");
+      const regexpTestIdx = ctx.funcMap.get("__regexp_test_carrier");
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      if (
+        ctx.standalone &&
+        methodName === "test" &&
+        arity === 1 &&
+        regexpTypeIdx !== undefined &&
+        regexpTestIdx !== undefined &&
+        boxBoolIdx !== undefined
+      ) {
+        current = [
+          { op: "local.get", index: anyLocalIdx },
+          { op: "ref.test", typeIdx: regexpTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: regexpTestIdx },
+              { op: "call", funcIdx: boxBoolIdx },
+            ],
             else: current,
           },
         ];

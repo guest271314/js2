@@ -15,7 +15,11 @@ import { allocLocal, getLocalType } from "../context/locals.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { getOrRegisterRefCellType } from "../index.js";
 import { mintDefinedFunc, pushDefinedFunc } from "../func-space.js";
-import { getFuncSignature, getOrCreateFuncRefWrapperTypes } from "./funcref-wrapper-types.js";
+import {
+  getFuncSignature,
+  getOrCreateConstructibleFuncRefWrapperTypes,
+  getOrCreateFuncRefWrapperTypes,
+} from "./funcref-wrapper-types.js";
 
 /**
  * (#2976) Emit the memoized, `ref.is_null`-guarded VALUE instance of a
@@ -56,6 +60,7 @@ function emitMemoizedNestedFnClosure(
   trampolineFuncIdx: number,
   nestedCaptures: NonNullable<ReturnType<CodegenContext["nestedFuncCaptures"]["get"]>>,
   tdzFlaggedNested: NonNullable<ReturnType<CodegenContext["nestedFuncCaptures"]["get"]>>,
+  constructible: boolean,
 ): void {
   const numCaptures = nestedCaptures.length;
   const numTdzFlags = tdzFlaggedNested.length;
@@ -200,6 +205,7 @@ function emitMemoizedNestedFnClosure(
       }
     }
   }
+  if (constructible) fctx.body.push({ op: "i32.const", value: 1 });
   fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
   fctx.body.push({ op: "local.set", index: memoLocal });
 
@@ -222,6 +228,7 @@ export function emitFuncRefAsClosure(
   fctx: FunctionContext,
   funcName: string,
   funcIdx: number,
+  constructible = false,
 ): ValType | null {
   const sig = getFuncSignature(ctx, funcIdx);
   if (!sig) return null;
@@ -267,6 +274,7 @@ export function emitFuncRefAsClosure(
           trampIdx,
           nestedCaptures,
           tdzFlaggedNested,
+          constructible,
         );
         return { kind: "ref", typeIdx: cachedArtifacts.structTypeIdx };
       }
@@ -291,6 +299,9 @@ export function emitFuncRefAsClosure(
         });
       }
     }
+    if (constructible) {
+      captureFields.push({ name: "__constructible", type: { kind: "i32" }, mutable: false });
+    }
     const closureName = `__fn_cap_${funcName}_${ctx.closureCounter++}`;
     const structTypeIdx = ctx.mod.types.length;
     ctx.mod.types.push({
@@ -299,6 +310,7 @@ export function emitFuncRefAsClosure(
       fields: [{ name: "func", type: { kind: "funcref" as const }, mutable: false }, ...captureFields],
       superTypeIdx: wrapperTypes.structTypeIdx,
     });
+    if (constructible) ctx.constructibleClosureTypeIdxs.add(structTypeIdx);
 
     // Use the base wrapper's func type so call_ref works via subtype cast
     const liftedFuncTypeIdx = wrapperTypes.liftedFuncTypeIdx;
@@ -371,13 +383,16 @@ export function emitFuncRefAsClosure(
       trampolineFuncIdx,
       nestedCaptures,
       tdzFlaggedNested,
+      constructible,
     );
     return { kind: "ref", typeIdx: structTypeIdx };
   }
 
   const userParams = sig.params;
 
-  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, sig.results);
+  const wrapperTypes = constructible
+    ? getOrCreateConstructibleFuncRefWrapperTypes(ctx, userParams, sig.results)
+    : getOrCreateFuncRefWrapperTypes(ctx, userParams, sig.results);
   if (!wrapperTypes) return null;
 
   const { structTypeIdx, liftedFuncTypeIdx, closureInfo } = wrapperTypes;
@@ -405,6 +420,7 @@ export function emitFuncRefAsClosure(
 
   // Emit: ref.func $trampoline, struct.new $closure_struct
   fctx.body.push({ op: "ref.func", funcIdx: trampolineFuncIdx });
+  if (constructible) fctx.body.push({ op: "i32.const", value: 1 });
   fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
 
   return { kind: "ref", typeIdx: structTypeIdx };

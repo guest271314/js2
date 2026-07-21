@@ -105,24 +105,30 @@ describe("#3492 — honest Test262 fixture graph parity", () => {
     expect(result).toMatchObject({ phase: "runtime", reachedTest: true });
   });
 
-  it("rejects unsupported dynamic fixtures while reaching the fixed static cycle", { timeout: 60_000 }, async () => {
-    const tests = await loadOriginalHarnessTests([DYNAMIC_TLA_PATH, PENDING_CYCLE_PATH]);
-    const byPath = new Map(tests.map((test) => [test.file, test]));
-    const [dynamic, cycle] = await Promise.all([
-      runTest(byPath.get(DYNAMIC_TLA_PATH)!, "standalone"),
-      runTest(byPath.get(PENDING_CYCLE_PATH)!, "standalone"),
-    ]);
+  it(
+    "lets compiler policy reject eager dynamic fixtures while reaching the fixed static cycle",
+    { timeout: 60_000 },
+    async () => {
+      const tests = await loadOriginalHarnessTests([DYNAMIC_TLA_PATH, PENDING_CYCLE_PATH]);
+      const byPath = new Map(tests.map((test) => [test.file, test]));
+      const [dynamic, cycle] = await Promise.all([
+        runTest(byPath.get(DYNAMIC_TLA_PATH)!, "standalone"),
+        runTest(byPath.get(PENDING_CYCLE_PATH)!, "standalone"),
+      ]);
 
-    expect(dynamic).toMatchObject({
-      pass: false,
-      phase: "compile",
-      reachedTest: false,
-      detail: "standalone literal dynamic fixture import is unsupported (#3494)",
-    });
-    expect(cycle).toMatchObject({
-      pass: true,
-      phase: "runtime",
-      reachedTest: true,
-    });
-  });
+      expect(dynamic).toMatchObject({
+        pass: false,
+        phase: "compile",
+        reachedTest: false,
+      });
+      expect(dynamic.detail).toContain(
+        "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects",
+      );
+      expect(cycle).toMatchObject({
+        pass: true,
+        phase: "runtime",
+        reachedTest: true,
+      });
+    },
+  );
 });

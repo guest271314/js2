@@ -823,15 +823,31 @@ const STANDALONE_DYNAMIC_IMPORT_ERROR =
   "Standalone dynamic import is unsupported until compileMulti provides internal module records and namespace objects";
 
 /**
- * #3494 — catch import() before codegen for every source position, including
- * top-level await paths that the flattened module initializer may not lower
- * through compileCallExpression. A standalone binary cannot satisfy the host
- * loader, and compileMulti has no honest internal module-record substitute yet.
+ * #3494 — catch eager import() before codegen, including top-level await paths
+ * that the flattened module initializer may not lower through
+ * compileCallExpression. A standalone binary cannot satisfy the host loader,
+ * and compileMulti has no honest internal module-record substitute yet.
+ *
+ * #3509 — ordinary arrow/function-expression bodies are runtime-trap eligible:
+ * creating one needs no loader, and calls.ts emits a host-free TypeError if its
+ * import executes. Async/generator functions stay fatal here because a direct
+ * synchronous throw would not preserve their rejection/lazy-throw semantics.
  */
 function detectStandaloneDynamicImports(sourceFile: ts.SourceFile): CompileError[] {
   const errors: CompileError[] = [];
+  const canTrapAtRuntime = (call: ts.CallExpression): boolean => {
+    for (let parent: ts.Node | undefined = call.parent; parent; parent = parent.parent) {
+      if (!ts.isFunctionLike(parent)) continue;
+      if (!ts.isArrowFunction(parent) && !ts.isFunctionExpression(parent)) return false;
+      const isAsync = parent.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+      const isGenerator = ts.isFunctionExpression(parent) && parent.asteriskToken !== undefined;
+      return !isAsync && !isGenerator;
+    }
+    return false;
+  };
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      if (canTrapAtRuntime(node)) return;
       const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
       errors.push({
         message: STANDALONE_DYNAMIC_IMPORT_ERROR,
@@ -1496,9 +1512,11 @@ export async function compileMultiSource(
 
   // When allowJs is set (e.g. compiling npm packages like lodash-es), only report
   // diagnostics from the entry file — dependency files may have TS errors we can't
-  // control (missing globals, JSDoc param issues, etc.).
+  // control (missing globals, JSDoc param issues, etc.). strictJsSyntax is the
+  // explicit exception for syntax-test graphs whose complete literal JavaScript
+  // input is owned by the caller (#3506).
   const isEntryDiag = (diag: { file?: { fileName: string } }) =>
-    !options.allowJs || !diag.file || diag.file === multiAst.entryFile;
+    !options.allowJs || options.strictJsSyntax === true || !diag.file || diag.file === multiAst.entryFile;
 
   for (const diag of multiAst.diagnostics) {
     if (diag.category === 1 && isEntryDiag(diag)) {
@@ -1522,9 +1540,11 @@ export async function compileMultiSource(
 
   // When allowJs is set, don't bail on TS diagnostics — JS packages with JSDoc
   // annotations produce many false-positive errors (TS1016 optional params,
-  // TS2322 type mismatches, TS8017 signature-in-JS, etc.). Codegen handles it fine.
+  // TS2322 type mismatches, TS8017 signature-in-JS, etc.). Codegen handles it
+  // fine. strictJsSyntax restores only the syntactic rejection gate; semantic
+  // JavaScript diagnostics retain the existing allowJs policy.
   const hasSyntaxErrors =
-    !options.allowJs &&
+    (!options.allowJs || options.strictJsSyntax === true) &&
     multiAst.syntacticDiagnostics.some(
       (d) => d.category === 1 && isEntryDiag(d) && multiAst.sourceFiles.some((sf) => d.file === sf),
     );
@@ -1592,6 +1612,11 @@ export async function compileMultiSource(
       }),
       sourcesContent,
       diagnosticAnchor: multiAst.entryFile,
+      // #3506 — retain real `.js` roots (`allowJs`) while allowing a syntax
+      // oracle to opt back into the ECMAScript early-error pass. Kept separate
+      // from strictJsSyntax because resolution-phase tests must observe the
+      // linked graph without manufacturing a parse rejection.
+      runEarlyErrorsOnAllowJs: options.enforceJsEarlyErrors === true,
       options,
     }),
     options,

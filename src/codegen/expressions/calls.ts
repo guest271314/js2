@@ -3356,7 +3356,7 @@ export function isGlobalBuiltinIdentifier(ctx: CodegenContext, fctx: FunctionCon
  * declarations actually used as values, so it is a no-op for programs without
  * function-valued declarations.
  */
-function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFile): void {
+export function ensureFuncValueWrappersRegistered(ctx: CodegenContext, sf: ts.SourceFile): void {
   const flag = ctx as unknown as { __funcValueWrappersRegistered?: boolean };
   if (flag.__funcValueWrappersRegistered) return;
   flag.__funcValueWrappersRegistered = true;
@@ -5536,6 +5536,22 @@ function tryIteratorStaticsIntrinsicCall(
   return VOID_RESULT;
 }
 
+/**
+ * #3509 — A standalone dynamic import in an ordinary lifted closure can be lowered
+ * to a call-site trap instead of rejecting the whole module. This is the
+ * deferred case: creating the function does not need a loader, and execution
+ * remains honest because reaching import() throws before a Promise or module
+ * namespace can be manufactured.
+ *
+ * Async functions stay on #3494's explicit unsupported path. Their throw must
+ * become a rejected Promise rather than escape synchronously, which requires
+ * the async/module-evaluation substrate that this bounded fix deliberately
+ * does not approximate.
+ */
+function canDeferStandaloneDynamicImport(fctx: FunctionContext): boolean {
+  return fctx.deferredDynamicImportTrap === true;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -5787,11 +5803,34 @@ function compileCallExpression(
   // Dynamic import() — delegate to __dynamic_import host import.
   // Takes a specifier (externref string) and returns an externref (Promise).
   // #3494 — standalone has no host loader, while compileMulti does not yet
-  // represent deferred module records or module namespace objects. Reject the
-  // construct explicitly instead of emitting an env.__dynamic_import that the
-  // target cannot satisfy (or manufacturing an always-fulfilled placeholder).
+  // represent deferred module records or module namespace objects. Never emit
+  // env.__dynamic_import or manufacture an always-fulfilled placeholder.
+  //
+  // #3509 — an ordinary function body is deferred: compiling/creating it does
+  // not require a loader. Preserve that property with a host-free, catchable
+  // runtime throw if execution reaches import(). Eager/top-level and async
+  // cases retain #3494's fatal diagnostic until their Promise/module semantics
+  // can be implemented honestly.
   if (expr.expression.kind === ts.SyntaxKind.ImportKeyword) {
     if (ctx.standalone) {
+      if (canDeferStandaloneDynamicImport(fctx)) {
+        reportError(
+          ctx,
+          expr,
+          "Warning: standalone dynamic import has no module loader and will throw if this function is invoked (#3509; module evaluation #3494)",
+          "warning",
+        );
+        // Preserve argument side effects and nesting order before the loader
+        // failure. A nested import emits its own terminal throw here; Wasm's
+        // stack-polymorphic unreachable tail keeps the enclosing expression
+        // valid without inventing a result.
+        for (const argument of expr.arguments) {
+          const argumentType = compileExpression(ctx, fctx, argument);
+          if (argumentType !== null) fctx.body.push({ op: "drop" });
+        }
+        emitThrowTypeError(ctx, fctx, "Standalone dynamic import requires a module loader (#3494)");
+        return { kind: "externref" };
+      }
       reportError(
         ctx,
         expr,

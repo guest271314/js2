@@ -3,7 +3,7 @@
  * Uses child_process.fork for full memory isolation.
  *
  * Protocol:
- *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
+ *   Parent sends: { id, source, execute, isNegative, isRuntimeNegative, negativePhase?, target?, fixtureFiles?, dynamicFixtureFiles?, entryFile? }
  *   Worker sends: { id, status, error?, ret?, compileMs?, execMs?, errorCodes?, ... }
  *
  * When execute=false: compile only, write to disk (for cache warming).
@@ -29,19 +29,20 @@ import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 //
 // Hash inputs (in priority order):
 //   1. TEST262_BUNDLE_HASH env var (set by CI from `hashFiles(...)` digest)
-//   2. sha256 of `scripts/compiler-bundle.mjs` (computed locally as fallback)
+//   2. sha256 of the source-runner compiler bundle or packaged compiler entry
 //
 // Computed once per worker startup — cheap (a few MB read + sha256).
 const _workerDir = dirname(fileURLToPath(import.meta.url));
 function computeBundleHash() {
   const fromEnv = process.env.TEST262_BUNDLE_HASH;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
-  try {
-    const buf = readFileSync(join(_workerDir, "compiler-bundle.mjs"));
-    return createHash("sha256").update(buf).digest("hex").slice(0, 16);
-  } catch {
-    return "no-bundle";
+  for (const file of ["compiler-bundle.mjs", "index.js"]) {
+    try {
+      const buf = readFileSync(join(_workerDir, file));
+      return createHash("sha256").update(buf).digest("hex").slice(0, 16);
+    } catch {}
   }
+  return "no-bundle";
 }
 const BUNDLE_HASH = computeBundleHash();
 
@@ -1039,15 +1040,14 @@ function hasFixtureGraph(fixtureFiles) {
   );
 }
 
-function hasDynamicFixtureGraph(dynamicFixtureFiles) {
-  return (
-    dynamicFixtureFiles &&
-    typeof dynamicFixtureFiles === "object" &&
-    !Array.isArray(dynamicFixtureFiles) &&
-    Object.keys(dynamicFixtureFiles).length > 0
-  );
-}
-
+// #3506 — the 5 resolution-phase paths in this slice import Test262's
+// `ensure-linking-error_FIXTURE.js`, whose deliberate self-import of an
+// unexported binding is reported by TypeScript as TS2459. Requiring that
+// graph-resolution evidence prevents an unrelated entry grammar/type
+// diagnostic from satisfying the requested resolution SyntaxError. Keep this
+// narrow: other resolution populations remain on their existing policy until
+// their own compiler support is verified (the #3491 TS2308 control).
+const FYI_NEGATIVE_FIXTURE_RESOLUTION_CODES = new Set([2459]);
 async function doCompile(
   source,
   sourceMapUrl,
@@ -1057,6 +1057,7 @@ async function doCompile(
   fixtureFiles,
   entryFile,
   isNegative,
+  negativePhase,
 ) {
   // Defence-in-depth: restore any poisoned builtins BEFORE each compile.
   // postCompileCleanup runs after the previous test, but under rare worker
@@ -1080,12 +1081,10 @@ async function doCompile(
   // top-level code runs against a fully-wired runtime. Aligned with
   // compiler-fork-worker.mjs + tests/test262-runner.ts (#1251 both-paths
   // rule). Standalone/wasi/linear targets keep their own `_start` init model.
-  // MODULE-GOAL tests (`inferModuleStrictArguments` is exactly the
-  // module-goal flag) are EXCLUDED: the multi-module FIXTURE link already
-  // synthesizes per-module init plumbing, and the flag added a SECOND
-  // `__module_init` export in one binary — V8's "Duplicate export name"
-  // CompileError, the 6-file `language/module-code/*` regression that parked
-  // the stack PR #2835/#2839.
+  // compileMulti fixture graphs follow the same host rule after #3505: its
+  // progressively accumulated dependency-order initializers retain only the
+  // final `__module_init` export, so the graph can be wired before that one
+  // initializer runs without producing duplicate Wasm exports.
   const deferOpt = target || (!originalHarness && inferModuleStrictArguments) ? {} : { deferTopLevelInit: true };
   if (hasFixtureGraph(fixtureFiles)) {
     if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
@@ -1100,13 +1099,25 @@ async function doCompile(
     // graph deliberately omits deferTopLevelInit: compileMulti synthesizes
     // one init schedule for the entire graph, including circular exports.
     return compileMulti({ ...fixtureFiles, [entryFile]: source }, entryFile, {
-      allowJs: !isNegative,
+      // #3506 — every virtual root is a real pinned `.js` file. With
+      // `allowJs:false`, TypeScript excludes the graph before syntax checking
+      // and codegen crashes at `undefined.kind`. Retain the literal JavaScript
+      // roots for both verdicts. Parse/early graphs opt back into grammar + ES
+      // early-error rejection; resolution graphs retain full linked-program
+      // diagnostics. No path or source is rewritten.
+      allowJs: true,
+      strictJsSyntax: isNegative,
+      enforceJsEarlyErrors: isNegative && negativePhase !== "resolution",
       sourceMap: true,
       sourceMapUrl: sourceMapUrl || "test.wasm.map",
       emitWat: false,
-      skipSemanticDiagnostics: true,
+      // Resolution negatives need TypeScript's linked-program diagnostics
+      // (e.g. a fixture's missing export). Parse/early tests deliberately stop
+      // before semantic analysis.
+      skipSemanticDiagnostics: negativePhase !== "resolution",
       target,
       inferModuleStrictArguments,
+      ...deferOpt,
     });
   }
   if (originalHarness) {
@@ -1446,23 +1457,12 @@ process.on("message", async (msg) => {
   const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
   const compileStart = performance.now();
 
-  // #3492 — A literal dynamic Test262 fixture import is a real module-loader
-  // dependency, not a static compileMulti edge. The standalone backend has no
-  // host loader yet (#3494), so reject it explicitly instead of dropping the
-  // fixture and allowing the entry's `$DONE` to manufacture a false pass.
-  // Parse/early/resolution-negative sources must still reach the compiler:
-  // their import expression is never evaluated, and rejecting it here would
-  // replace the expected syntax verdict with an unrelated loader failure.
-  if (target === "standalone" && !isNegative && hasDynamicFixtureGraph(msg.dynamicFixtureFiles)) {
-    sendResult({
-      id,
-      status: "compile_error",
-      error: "standalone literal dynamic fixture import is unsupported (#3494)",
-      compileMs: performance.now() - compileStart,
-      reachedTest: false,
-    });
-    return;
-  }
+  // #3492/#3509 — Dynamic fixture discovery is transport metadata, not proof
+  // that a loader is needed during this test. Let the compiler distinguish an
+  // eager import (fatal #3494) from an ordinary deferred closure (host-free
+  // runtime trap, #3509). A blanket graph guard false-failed syntax-valid tests
+  // whose arrow was never invoked. No dynamic fixture is promoted to a static
+  // compileMulti edge here.
 
   let result;
   try {
@@ -1475,6 +1475,7 @@ process.on("message", async (msg) => {
       msg.fixtureFiles,
       msg.entryFile,
       isNegative,
+      msg.negativePhase,
     );
   } catch (err) {
     // Thrown exception may have poisoned the incremental compiler's internal
@@ -1577,7 +1578,18 @@ process.on("message", async (msg) => {
       const missingFixtureDiagnostic =
         fixtureGraph &&
         (errorCodes.includes(2307) || errorCodes.includes(2792) || /cannot find module|module not found/i.test(errMsg));
-      const matched = !missingFixtureDiagnostic && negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
+      const expectedFixtureResolutionDiagnostic =
+        !fixtureGraph ||
+        msg.negativePhase !== "resolution" ||
+        errorCodes.some((code) => FYI_NEGATIVE_FIXTURE_RESOLUTION_CODES.has(code));
+      // oracle-version-exempt: only the external FYI executor supplies
+      // negativePhase; published project-runner baseline messages and verdicts
+      // are unchanged, so this fixes FYI assembly exposure with zero baseline
+      // row reclassification.
+      const matched =
+        !missingFixtureDiagnostic &&
+        expectedFixtureResolutionDiagnostic &&
+        negativeCompileErrorMatches(expectedErrorType, errorCodes, errMsg);
       if (matched) {
         sendResult({ id, status: "pass", compileMs, errorCodes, ...compileMetadata });
       } else {

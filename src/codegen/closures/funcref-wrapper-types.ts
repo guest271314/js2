@@ -78,6 +78,50 @@ export function getOrCreateFuncRefWrapperTypes(
 }
 
 /**
+ * #3371 — Return a nominally-distinct subtype for an ordinary function value.
+ *
+ * Arrow functions and method closures deliberately keep using the signature
+ * wrapper above.  Ordinary function declarations/expressions add one immutable
+ * marker field, making their runtime type distinguishable for IsConstructor
+ * without changing field 0 or the shared lifted-call ABI.  The subtype still
+ * casts to the base wrapper at every existing call site.
+ */
+export function getOrCreateConstructibleFuncRefWrapperTypes(
+  ctx: CodegenContext,
+  userParams: ValType[],
+  resultTypes: ValType[],
+): { structTypeIdx: number; liftedFuncTypeIdx: number; closureInfo: ClosureInfo } | null {
+  const sigKey = `${userParams.map((p) => p.kind + ((p as any).typeIdx ?? "")).join(",")}->${resultTypes.map((r) => r.kind + ((r as any).typeIdx ?? "")).join(",")}`;
+  const cached = ctx.constructibleFuncRefWrapperCache.get(sigKey);
+  if (cached) {
+    return { structTypeIdx: cached.structTypeIdx, liftedFuncTypeIdx: cached.funcTypeIdx, closureInfo: cached };
+  }
+
+  const base = getOrCreateFuncRefWrapperTypes(ctx, userParams, resultTypes);
+  if (!base) return null;
+  const structTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: `__constructible_fn_wrap_${ctx.closureCounter++}_struct`,
+    fields: [
+      { name: "func", type: { kind: "funcref" as const }, mutable: false },
+      { name: "__constructible", type: { kind: "i32" as const }, mutable: false },
+    ],
+    superTypeIdx: base.structTypeIdx,
+  });
+  const closureInfo: ClosureInfo = {
+    structTypeIdx,
+    funcTypeIdx: base.liftedFuncTypeIdx,
+    returnType: resultTypes.length > 0 ? resultTypes[0]! : null,
+    paramTypes: userParams,
+  };
+  ctx.closureInfoByTypeIdx.set(structTypeIdx, closureInfo);
+  ctx.constructibleFuncRefWrapperCache.set(sigKey, closureInfo);
+  ctx.constructibleClosureTypeIdxs.add(structTypeIdx);
+  return { structTypeIdx, liftedFuncTypeIdx: base.liftedFuncTypeIdx, closureInfo };
+}
+
+/**
  * (#2873 park fix) The ROOT funcref-wrapper struct type — the FIRST wrapper
  * `getOrCreateFuncRefWrapperTypes` created in this module. Every later
  * per-signature wrapper struct is a `sub final` of it (see the star chaining

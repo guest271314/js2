@@ -117,9 +117,9 @@ function resolveFixture(testRoot, importerPath, specifier, required = true) {
  * pinned Test262 `test/` tree. Dynamic files are never promoted to static
  * edges; runners can reject an unsupported target without changing execution.
  */
-export function discoverFixtureGraph(testPath, entrySource) {
+export function discoverFixtureGraph(testPath, entrySource, { test262Root = TEST262_ROOT } = {}) {
   const normalizedEntry = normalizeTestPath(testPath);
-  const testRoot = resolve(TEST262_ROOT, "test");
+  const testRoot = resolve(test262Root, "test");
   const fixtureFiles = {};
   const dynamicFixtureFiles = {};
   const visited = new Set();

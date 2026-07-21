@@ -71,6 +71,8 @@ import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
 import { nativeStringRepr } from "./builtin-scaffold.js";
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
+import { addFuncType } from "./registry/types.js";
 
 export const STANDALONE_REGEXP_ABI_VERSION = 1;
 
@@ -160,6 +162,7 @@ export function hasStandaloneRegExpEngine(state: StandaloneRegExpEngineState): b
 }
 
 const STANDALONE_REGEXP_STRUCT_NAME = "__StandaloneRegExp";
+export const STANDALONE_REGEXP_CARRIER_TEST_HELPER = "__regexp_test_carrier";
 // g/i/y from Phase 2a, m/s from 2c, d/u/v from 2d (#1911 — `d` does not
 // change MATCHING semantics; the `.indices` result surface is #1914's lane;
 // u/v code-point atoms resolve via compile-time host enumeration, Slice B).
@@ -890,7 +893,13 @@ export function compileStandaloneRegExpConstructor(
       if (syntaxMsg !== null && hasStandaloneRegExpEngine(ctx)) {
         return emitThrowRegExpSyntaxError(ctx, fctx, syntaxMsg);
       }
-      return compileStandaloneRegExpPattern(ctx, fctx, copy.pattern, copy.flags, node);
+      const compiled = compileStandaloneRegExpPattern(ctx, fctx, copy.pattern, copy.flags, node);
+      if (compiled !== null) return compiled;
+      // A null expression result is speculative in the legacy expression
+      // wrapper: it rolls back both emitted code AND diagnostics (#1919).
+      // Keep constructor refusals loud with a typed unreachable placeholder.
+      fctx.body.push({ op: "unreachable" });
+      return { kind: "ref", typeIdx: ensureStandaloneRegExpStruct(ctx) };
     }
   }
 
@@ -900,13 +909,15 @@ export function compileStandaloneRegExpConstructor(
   const pattern = patternArg === undefined ? "" : staticConstStringValue(ctx, patternArg);
   if (pattern === null) {
     reportStandaloneRegExpUnsupported(ctx, patternArg, "dynamic constructor patterns");
-    return null;
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "ref", typeIdx: ensureStandaloneRegExpStruct(ctx) };
   }
 
   const flags = flagsArg === undefined ? "" : staticConstStringValue(ctx, flagsArg);
   if (flags === null) {
     reportStandaloneRegExpUnsupported(ctx, flagsArg, "dynamic constructor flags");
-    return null;
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "ref", typeIdx: ensureStandaloneRegExpStruct(ctx) };
   }
 
   // §22.2.3.2: an invalid static pattern/flags pair throws SyntaxError when
@@ -918,7 +929,10 @@ export function compileStandaloneRegExpConstructor(
     return emitThrowRegExpSyntaxError(ctx, fctx, syntaxMsg);
   }
 
-  return compileStandaloneRegExpPattern(ctx, fctx, pattern ?? "", flags ?? "", node);
+  const compiled = compileStandaloneRegExpPattern(ctx, fctx, pattern ?? "", flags ?? "", node);
+  if (compiled !== null) return compiled;
+  fctx.body.push({ op: "unreachable" });
+  return { kind: "ref", typeIdx: ensureStandaloneRegExpStruct(ctx) };
 }
 
 function isStandaloneRegExpValue(
@@ -960,14 +974,19 @@ function loadStandaloneRegExpStruct(
   const regexpType = compileExpression(ctx, fctx, regexpExpr);
   let storedRegexpType = regexpType;
   if (regexpType?.kind === "externref") {
-    if (!isKnownBackendCreatedRegExpReceiver(ctx, regexpExpr)) {
-      reportStandaloneRegExpUnsupported(ctx, regexpExpr, "RegExp values not created by this standalone backend");
-      return null;
-    }
-    const typeIdx = ensureStandaloneRegExpStruct(ctx);
-    fctx.body.push({ op: "any.convert_extern" });
-    fctx.body.push({ op: "ref.cast", typeIdx });
-    storedRegexpType = { kind: "ref", typeIdx };
+    // #3507 — function parameters, object fields, and array/for-of elements
+    // preserve the runtime `$NativeRegExp` value but erase its concrete Wasm
+    // type to externref. Syntactic provenance cannot recover those carriers.
+    // Store the value and use the same runtime brand check as reflective
+    // RegExp.prototype calls: backend values recover losslessly, while a
+    // foreign/host RegExp throws a catchable TypeError instead of becoming a
+    // raw ref.cast trap or silently routing to env.RegExp_*.
+    const externLocal = allocLocal(fctx, `__re_carrier_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: externLocal });
+    const recovered = recoverRegExpStructFromExternref(ctx, fctx, externLocal);
+    if (recovered === null) return null;
+    storedRegexpType = { kind: "ref", typeIdx: recovered.structTypeIdx };
+    fctx.body.push({ op: "local.get", index: recovered.regexpLocal });
   }
   if (!isStandaloneRegExpValue(ctx, storedRegexpType)) {
     reportStandaloneRegExpUnsupported(ctx, regexpExpr, "RegExp values not created by this standalone backend");
@@ -2438,6 +2457,18 @@ export function emitRegExpTestFromLocals(
   fctx.body.push({ op: "i32.ne" });
   fctx.body.push({ op: "local.set", index: stickyLocal });
 
+  // gOrY = (flags & (RE_FLAG_G | RE_FLAG_Y)) != 0. Unlike the expression
+  // fast path, a carrier's flags are known only at runtime, so the native
+  // helper must select the RegExpBuiltinExec lastIndex semantics dynamically.
+  const gyLocal = allocLocal(fctx, `__re_tgy_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_FLAGS });
+  fctx.body.push({ op: "i32.const", value: RE_FLAG_G | RE_FLAG_Y });
+  fctx.body.push({ op: "i32.and" });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "i32.ne" });
+  fctx.body.push({ op: "local.set", index: gyLocal });
+
   // __regex_search(prog, classTable, nSlots, inData, inOff, inLen, start=0, sticky, caps)
   fctx.body.push({ op: "local.get", index: regexpLocal });
   fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
@@ -2450,10 +2481,104 @@ export function emitRegExpTestFromLocals(
   fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
   fctx.body.push({ op: "local.get", index: subjStrLocal });
   fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
-  fctx.body.push({ op: "i32.const", value: 0 }); // startIdx
+  fctx.body.push({ op: "local.get", index: gyLocal });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: regexpLocal },
+      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX },
+      { op: "i32.trunc_sat_f64_s" },
+    ],
+    else: [{ op: "i32.const", value: 0 }],
+  });
   fctx.body.push({ op: "local.get", index: stickyLocal });
   fctx.body.push({ op: "local.get", index: capsLocal });
   fctx.body.push({ op: "call", funcIdx: searchIdx });
+
+  // RegExpBuiltinExec updates lastIndex only for global/sticky receivers.
+  // Preserve the match flag while storing the match end, or zero on failure.
+  const matchedLocal = allocLocal(fctx, `__re_tmatched_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: matchedLocal });
+  fctx.body.push({ op: "local.get", index: gyLocal });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: regexpLocal },
+      { op: "local.get", index: matchedLocal },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "f64" } },
+        then: [
+          { op: "local.get", index: capsLocal },
+          { op: "i32.const", value: 1 },
+          { op: "array.get", typeIdx: i32Arr },
+          { op: "f64.convert_i32_s" },
+        ],
+        else: [{ op: "f64.const", value: 0 }],
+      },
+      { op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX },
+    ],
+  });
+  fctx.body.push({ op: "local.get", index: matchedLocal });
+}
+
+/**
+ * #3507 — native `.test` entry point for RegExp values whose static type was
+ * erased to `any`/externref by a helper parameter, object property, or array
+ * carrier. The closed-method dispatcher brand-tests `$NativeRegExp` before
+ * calling this helper; the repeated recovery here keeps the helper safe when
+ * called independently and produces the standard catchable brand error.
+ */
+export function ensureStandaloneRegExpCarrierTestHelper(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get(STANDALONE_REGEXP_CARRIER_TEST_HELPER);
+  if (existing !== undefined) return existing;
+
+  ensureNativeStringHelpers(ctx);
+  ensureRegexSearch(ctx);
+  ensureStandaloneRegExpStruct(ctx);
+
+  const params: ValType[] = [{ kind: "externref" }, { kind: "externref" }];
+  const typeIdx = addFuncType(ctx, params, [{ kind: "i32" }], "$regexp_carrier_test_type");
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set(STANDALONE_REGEXP_CARRIER_TEST_HELPER, funcIdx);
+
+  const fctx: FunctionContext = {
+    name: STANDALONE_REGEXP_CARRIER_TEST_HELPER,
+    params: [
+      { name: "recv", type: { kind: "externref" } },
+      { name: "subject", type: { kind: "externref" } },
+    ],
+    locals: [],
+    localMap: new Map([
+      ["recv", 0],
+      ["subject", 1],
+    ]),
+    returnType: { kind: "i32" },
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+  const recovered = recoverRegExpStructFromExternref(ctx, fctx, 0);
+  if (recovered === null) {
+    fctx.body.push({ op: "i32.const", value: 0 });
+  } else {
+    const subjectLocal = flattenExternrefArgToString(ctx, fctx, 1);
+    emitRegExpTestFromLocals(ctx, fctx, recovered.regexpLocal, recovered.structTypeIdx, subjectLocal);
+  }
+
+  pushDefinedFunc(ctx, funcIdx, {
+    name: STANDALONE_REGEXP_CARRIER_TEST_HELPER,
+    typeIdx,
+    locals: fctx.locals,
+    body: fctx.body,
+    exported: false,
+  });
+  return funcIdx;
 }
 
 // ── #2175 S1: RegExp builtin-prototype glue ───────────────────────────────────
