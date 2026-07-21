@@ -281,8 +281,8 @@ MODULE whose module-init unit is not claimable (gated must-not-increase by
 \`check:ir-fallbacks\`). Slice 2 wires the actual lowering + the
 \`__module_init\` slot patch; only then do legacy statement handlers become
 per-file deletable (gate G3 in \`plan/log/3090-phase0-legacy-delete-list.md\`).
-The current corpus floor is **1**: Calendar's nine-statement initializer is
-IR-owned; Algorithms' top-level Map initializer is the remaining unit.`;
+The current corpus floor is **0** (#3517): Calendar's nine-statement initializer
+and Algorithms' top-level generic Map initializer are both IR-owned.`;
 
 const FOOTER = `## How to update this table
 
