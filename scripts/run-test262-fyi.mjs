@@ -165,9 +165,10 @@ function normalizeWorkerResult(result) {
  * are shared so the two lanes cannot silently disagree about the same source.
  */
 export class FyiSourceExecutor {
-  constructor(timeoutMs = sourceTimeoutMs(), { execPath = process.execPath } = {}) {
+  constructor(timeoutMs = sourceTimeoutMs(), { execPath = process.execPath, workerPath = WORKER_PATH } = {}) {
     this.timeoutMs = timeoutMs;
     this.execPath = execPath;
+    this.workerPath = workerPath;
     this.child = undefined;
     this.starting = undefined;
     this.nextId = 1;
@@ -178,7 +179,7 @@ export class FyiSourceExecutor {
     if (this.starting) return this.starting;
 
     this.starting = new Promise((resolveWorker, rejectWorker) => {
-      const child = fork(WORKER_PATH, [], {
+      const child = fork(this.workerPath, [], {
         execPath: this.execPath,
         stdio: ["ignore", "inherit", "inherit", "ipc"],
         execArgv: ["--expose-gc", "--max-old-space-size=512"],
@@ -408,7 +409,7 @@ async function main() {
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (invokedPath.endsWith("run-test262-fyi.mjs") && invokedPath === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;

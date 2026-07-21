@@ -163,7 +163,7 @@ export function enforceTest262FyiRuntime({ actual = detectTest262FyiRuntime(), a
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath === fileURLToPath(import.meta.url)) {
+if (invokedPath.endsWith("test262-fyi-runtime.mjs") && invokedPath === fileURLToPath(import.meta.url)) {
   try {
     const runtimeContract = enforceTest262FyiRuntime();
     console.log(

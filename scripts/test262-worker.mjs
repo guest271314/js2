@@ -29,19 +29,20 @@ import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 //
 // Hash inputs (in priority order):
 //   1. TEST262_BUNDLE_HASH env var (set by CI from `hashFiles(...)` digest)
-//   2. sha256 of `scripts/compiler-bundle.mjs` (computed locally as fallback)
+//   2. sha256 of the source-runner compiler bundle or packaged compiler entry
 //
 // Computed once per worker startup — cheap (a few MB read + sha256).
 const _workerDir = dirname(fileURLToPath(import.meta.url));
 function computeBundleHash() {
   const fromEnv = process.env.TEST262_BUNDLE_HASH;
   if (fromEnv && fromEnv.length > 0) return fromEnv;
-  try {
-    const buf = readFileSync(join(_workerDir, "compiler-bundle.mjs"));
-    return createHash("sha256").update(buf).digest("hex").slice(0, 16);
-  } catch {
-    return "no-bundle";
+  for (const file of ["compiler-bundle.mjs", "index.js"]) {
+    try {
+      const buf = readFileSync(join(_workerDir, file));
+      return createHash("sha256").update(buf).digest("hex").slice(0, 16);
+    } catch {}
   }
+  return "no-bundle";
 }
 const BUNDLE_HASH = computeBundleHash();
 
