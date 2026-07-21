@@ -1,10 +1,11 @@
 ---
 id: 3516
 title: "Keep the js2wasm proxy dependency in release lockstep"
-status: in-progress
+status: done
 sprint: current
 created: 2026-07-21
 updated: 2026-07-21
+completed: 2026-07-21
 priority: high
 horizon: s
 feasibility: easy
@@ -34,13 +35,13 @@ repair `js2wasm@0.64.0`; a patch release must supersede it.
 
 ## Acceptance criteria
 
-- [ ] The release script pins `packages/js2wasm`'s `@loopdive/js2` dependency to
+- [x] The release script pins `packages/js2wasm`'s `@loopdive/js2` dependency to
       the target release version.
-- [ ] The tag verification job refuses to publish when that dependency differs
+- [x] The tag verification job refuses to publish when that dependency differs
       from the tag.
-- [ ] Regression coverage checks the pure manifest update and checked-in
+- [x] Regression coverage checks the pure manifest update and checked-in
       root/proxy/dependency equality.
-- [ ] A patch release publishes `js2wasm` with a dependency on the matching
+- [x] A patch release publishes `js2wasm` with a dependency on the matching
       `@loopdive/js2` version.
 
 ## Validation
@@ -48,3 +49,11 @@ repair `js2wasm@0.64.0`; a patch release must supersede it.
 - `tests/issue-3516-release-proxy-dependency-lockstep.test.ts`
 - Prettier, typecheck, issue-ID, and issue-spec gates.
 - Registry metadata verification after the patch tag is published.
+
+## Result
+
+PR #3469 merged after all PR and merge-group checks passed, including the full
+59-shard Test262 gate. The v0.64.1 publication workflow completed successfully
+for npm, JSR, the unscoped proxy, and the GitHub release. Registry verification
+confirmed `js2wasm@0.64.1` depends exactly on `@loopdive/js2@0.64.1`, and a
+fresh-cache `npx js2wasm@0.64.1 --version` returned `0.64.1`.
