@@ -290,7 +290,18 @@ describe("#2856 Calendar residual lowering", () => {
   it("genuinely emits the live single-source Calendar owners with zero postclaim", async () => {
     const fileName = new URL("../website/playground/examples/dom/calendar.ts", import.meta.url);
     const source = readFileSync(fileName, "utf8");
-    const result = await tracked(source, { fileName: fileName.pathname });
+    const previousStrictBalance = process.env.JS2WASM_STRICT_BALANCE;
+    process.env.JS2WASM_STRICT_BALANCE = "1";
+    let result: CompileResult;
+    try {
+      result = await tracked(source, { fileName: fileName.pathname });
+    } finally {
+      if (previousStrictBalance === undefined) {
+        Reflect.deleteProperty(process.env, "JS2WASM_STRICT_BALANCE");
+      } else {
+        process.env.JS2WASM_STRICT_BALANCE = previousStrictBalance;
+      }
+    }
     expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
     expect(WebAssembly.validate(result.binary)).toBe(true);
     expect(result.irCompiledFuncs ?? []).toEqual(
@@ -308,6 +319,7 @@ describe("#2856 Calendar residual lowering", () => {
       ]),
     );
     expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.errors.filter((error) => /Stack-balance fixup \[local-set-coerce\]/.test(error.message))).toEqual([]);
     expect(dateImportNames(result)).toEqual(["Date_getDate", "Date_getFullYear", "Date_getMonth", "Date_new"]);
   });
 });

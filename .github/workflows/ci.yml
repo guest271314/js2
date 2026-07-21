@@ -450,6 +450,67 @@ jobs:
       #       fi
       #     fi
 
+  # Keep Test262 parallel on the green path: making it depend on `quality`
+  # would add the full quality duration to every successful merge group. On a
+  # quality failure, however, the Test262 result cannot make the group
+  # mergeable. Cancel only the exact sibling run so a failing group stops
+  # consuming the large shard matrix while later groups keep running.
+  cancel-test262-on-quality-failure:
+    name: Cancel Test262 after quality failure
+    needs: quality
+    if: ${{ always() && github.event_name == 'merge_group' && needs.quality.result == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Cancel the exact Test262 sibling
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -uo pipefail
+
+          # One exact-SHA lookup, with no polling or retry loop. Treat API
+          # trouble as a warning: quality is already the authoritative failure,
+          # and this best-effort job must not obscure its diagnostics.
+          CANDIDATES=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?event=merge_group&head_sha=${HEAD_SHA}&per_page=100" \
+            --jq '.workflow_runs[] | [.id, .name, .path, .head_sha, .event, .status] | @tsv' \
+            2>&1) || {
+            echo "::warning::Could not list Test262 siblings; quality has already failed."
+            printf '%s\n' "$CANDIDATES"
+            exit 0
+          }
+
+          REQUESTED=0
+          while IFS=$'\t' read -r run_id run_name run_path run_sha run_event run_status; do
+            [ -n "${run_id:-}" ] || continue
+            [ "$run_name" = "Test262 Sharded" ] || continue
+            [ "$run_path" = ".github/workflows/test262-sharded.yml" ] || continue
+            [ "$run_sha" = "$HEAD_SHA" ] || continue
+            [ "$run_event" = "merge_group" ] || continue
+            case "$run_status" in
+              queued|in_progress) ;;
+              *) continue ;;
+            esac
+
+            echo "Cancelling Test262 run ${run_id} for failed merge-group SHA ${HEAD_SHA}."
+            if gh api -X POST \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" >/dev/null 2>&1; then
+              REQUESTED=$((REQUESTED + 1))
+            else
+              echo "::warning::GitHub rejected cancellation of Test262 run ${run_id}."
+            fi
+          done <<< "$CANDIDATES"
+
+          if [ "$REQUESTED" -eq 0 ]; then
+            echo "No queued or in-progress Test262 sibling matched this merge-group SHA."
+          else
+            echo "Requested cancellation of ${REQUESTED} Test262 sibling run(s)."
+          fi
+
   # #2139 — Execute the linear-backend (linear-memory lowering), C-ABI, and
   # SIMD test suites in CI. These 20 files (tests/linear-*.test.ts,
   # tests/c-abi.test.ts, tests/simd*.test.ts) sat at tests/ root with NO CI

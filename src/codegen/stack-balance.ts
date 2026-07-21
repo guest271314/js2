@@ -2632,6 +2632,34 @@ export function stackBalance(mod: WasmModule): number {
 }
 
 /**
+ * Return whether a reference stack value is already assignable to a local via
+ * Wasm GC's declared struct-subtype relation.
+ *
+ * `closure.new` produces the concrete closure struct while IR locals use the
+ * shared closure root. A concrete non-null closure is valid in that wider
+ * local without a cast; treating the different type indices as a mismatch
+ * makes stack-balance report (and insert) a false `local-set-coerce` repair.
+ */
+function isDeclaredRefSubtypeAssignable(actual: ValType, expected: ValType, types: TypeDef[]): boolean {
+  if (actual.kind !== "ref" && actual.kind !== "ref_null") return false;
+  if (expected.kind !== "ref" && expected.kind !== "ref_null") return false;
+
+  // A nullable value cannot flow into a non-null local without a check.
+  if (actual.kind === "ref_null" && expected.kind === "ref") return false;
+
+  let current = actual.typeIdx;
+  for (let depth = 0; depth < 64; depth++) {
+    if (current === expected.typeIdx) return true;
+    const def = types[current];
+    if (!def || def.kind !== "struct") return false;
+    const parent = def.superTypeIdx;
+    if (parent === undefined || parent < 0) return false;
+    current = parent;
+  }
+  return false;
+}
+
+/**
  * Fix local.set type mismatches in a function body.
  *
  * Walks the instruction stream looking for local.set/local.tee instructions.
@@ -2756,6 +2784,11 @@ function fixLocalSetCoercion(
     const prev = body[i - 1]!;
     const stackType = inferInstrType(prev, localTypes, globalTypes, types, mod, numImports);
     if (!stackType) continue;
+
+    // A declared struct subtype is already valid in a wider ref local. In
+    // particular, concrete closure structs flow into the canonical closure
+    // root used by IR locals without needing a repair cast.
+    if (isDeclaredRefSubtypeAssignable(stackType, localType, types)) continue;
 
     // Check if coercion is needed
     const coercion = callArgCoercionInstrs(stackType, localType, boxNumberIdx, unboxNumberIdx);
