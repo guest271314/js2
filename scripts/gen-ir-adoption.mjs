@@ -200,6 +200,66 @@ const BUCKETS = {
     "unintended",
     "Corpus bucket **0** (#2856); not strict while unsupported real-world shapes still legitimately use the direct front-end",
   ],
+  "string-method-unsupported": [
+    "unintended",
+    "All checker-identified String method surfaces and arities have typed IR lowering (#3518)",
+  ],
+  "array-method-unsupported": [
+    "unintended",
+    "All checker-identified Array method surfaces and arities have typed IR lowering (#3518)",
+  ],
+  "primitive-method-unsupported": [
+    "unintended",
+    "All checker-identified primitive method surfaces and arities have typed IR lowering (#3518)",
+  ],
+  "function-invocation-method-unsupported": [
+    "unintended",
+    "`Function.call` / `Function.apply` receiver and argument semantics are represented in typed IR (#3518)",
+  ],
+  "logical-value-unsupported": [
+    "unintended",
+    "Logical value/result families and JavaScript short-circuit coercions are represented in typed IR (#3518)",
+  ],
+  "template-substitution-unsupported": [
+    "unintended",
+    "Template substitutions support the remaining typed coercion families (#3518)",
+  ],
+  "error-constructor-unsupported": [
+    "unintended",
+    "Error-family constructor identity, arity, and runtime intent are represented in typed IR (#3518)",
+  ],
+  "typed-array-constructor-unsupported": [
+    "unintended",
+    "TypedArray constructor identity, arity, and backend capability are represented in typed IR (#3518)",
+  ],
+  "date-constructor-unsupported": [
+    "unintended",
+    "Date constructor identity, arity, and backend capability are represented in typed IR (#3518)",
+  ],
+  "call-resolution-unsupported": [
+    "unintended",
+    "Every supported call target resolves through the source-qualified whole-program ABI map (#3520)",
+  ],
+  "call-arity-unsupported": [
+    "unintended",
+    "Typed IR models the supported JavaScript call-arity/default/rest semantics (#3518)",
+  ],
+  "constructor-resolution-unsupported": [
+    "unintended",
+    "Every supported constructor target resolves through the source-qualified whole-program ABI map (#3520)",
+  ],
+  "constructor-arity-unsupported": [
+    "unintended",
+    "Typed IR models the supported JavaScript constructor-arity/default/rest semantics (#3518)",
+  ],
+  "class-projection-unsupported": [
+    "unintended",
+    "Class projection identity and storage are represented in the prepared class-unit model (#3522)",
+  ],
+  "class-member-unsupported": [
+    "unintended",
+    "All supported instance/static class members are represented in the prepared class-unit model (#3522)",
+  ],
   "external-call": ["unintended", "Math.\\* / parseInt / Console wired through IR (#1371)"],
   "call-graph-closure": ["unintended", "Callees of claimed funcs all claimable themselves"],
   "recursive-type-evidence": [

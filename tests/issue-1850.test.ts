@@ -223,9 +223,18 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
 
     const errors = verifyIrBackendLegality(fn, "bytecode");
     expect(errors.some((e) => /instr string\.const/.test(e.message))).toBe(true);
-    expect(() =>
-      lowerIrFunctionBody(fn, minimalResolver(), new BytecodeEmitter(), new BytecodeTypeConverter()),
-    ).toThrow(/bytecode backend legality failed.*string\.const/);
+    try {
+      lowerIrFunctionBody(fn, minimalResolver(), new BytecodeEmitter(), new BytecodeTypeConverter());
+      throw new Error("expected backend legality producer to throw");
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: "IrInvariantError",
+        kind: "invariant",
+        code: "backend-legality-failure",
+        stage: "backend-legality",
+      });
+      expect(error).toHaveProperty("message", expect.stringMatching(/bytecode backend legality failed.*string\.const/));
+    }
   });
 
   it("#2954: accepts a core-op (const) whole-function lowering through the linear boundary", () => {
@@ -272,11 +281,17 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
     expect(verifyIrBackendLegality(fn, "linear")).toEqual([]);
   });
 
-  it("promotes verifier fallback diagnostics to hard Codegen errors in test builds only", () => {
+  it("promotes typed verifier invariants while leaving Unsupported builds as warnings", () => {
     const verifyDiag = formatIrPathFallbackDiagnostic({
       func: "claimed",
       message: "post-hygiene verify: duplicate SSA def",
       kind: "verify",
+      outcome: {
+        kind: "invariant",
+        code: "verifier-failure",
+        stage: "verify",
+        detail: "post-hygiene verify: duplicate SSA def",
+      },
     });
     expect(verifyDiag.severity).toBe("error");
     expect(verifyDiag.message).toMatch(/^Codegen error: IR path failed for claimed:/);
@@ -285,6 +300,12 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
       func: "claimed",
       message: "ir/from-ast: feature not in slice",
       kind: "build",
+      outcome: {
+        kind: "unsupported",
+        code: "late-preparation-unsupported",
+        stage: "build",
+        detail: "ir/from-ast: feature not in slice",
+      },
     });
     expect(buildDiag.severity).toBe("warning");
     expect(buildDiag.message).toMatch(/^IR path failed for claimed:/);

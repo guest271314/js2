@@ -14,6 +14,38 @@ import type { ValType } from "../types.js";
 
 export type IrBackendKind = "wasmgc" | "linear" | "bytecode" | "porffor";
 
+/** Source/target features whose availability is known before IR construction. */
+export type IrBackendTargetCapability = "host-date-snapshot";
+
+/**
+ * The target facts needed by pre-claim capability checks. Keep this smaller
+ * than CodegenContext so the selector and non-Wasm backends can share the
+ * legality decision without depending on legacy codegen state.
+ */
+export interface IrBackendTargetProfile {
+  readonly backend: IrBackendKind;
+  readonly target: "gc" | "linear" | "standalone" | "wasi";
+  readonly allowHostImports: boolean;
+}
+
+/**
+ * Answer predictable target/provider questions before build/lower.
+ *
+ * This is deliberately separate from verifyIrBackendLegality: a false result
+ * is an expected source/target capability exit, while a later legality error
+ * after this function returned true is an Invariant (the backend promise was
+ * contradicted).
+ */
+export function supportsIrBackendTargetCapability(
+  profile: IrBackendTargetProfile,
+  capability: IrBackendTargetCapability,
+): boolean {
+  switch (capability) {
+    case "host-date-snapshot":
+      return profile.backend === "wasmgc" && profile.target === "gc" && profile.allowHostImports;
+  }
+}
+
 export interface IrBackendLegalityError {
   readonly message: string;
   readonly func: string;

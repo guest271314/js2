@@ -127,6 +127,12 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: IR-only readiness instrumentation (#3519)
+        # Hybrid policy is the bounded migration ratchet: Unsupported rows are
+        # measured, while any invariant, missing unit, or compile failure is
+        # fatal. R9 promotes the strict IR-only policy once blockers reach zero.
+        run: pnpm run check:ir-only -- --policy=hybrid
+
       - name: Dead-export gate (#3090 Phase 2)
         # Fails when a NEW unreferenced top-level function appears in
         # src/codegen/ vs scripts/dead-export-baseline.json (call-graph

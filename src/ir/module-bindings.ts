@@ -6,9 +6,137 @@
 
 import { isExternalDeclaredClass } from "../checker/type-mapper.js";
 import { ts } from "../ts-api.js";
+import type { IrClassShape } from "./nodes.js";
 
 export type IrPrimitiveExpressionFamily = "number" | "boolean" | "string";
 export type IrDeclaredPrimitiveExpressionFamily = IrPrimitiveExpressionFamily | "primitive-union";
+
+export type IrLocalClassExpressionResolver = (expression: ts.Expression) => string | undefined;
+
+/**
+ * Build a checker-backed resolver from an expression's exact instance type to
+ * one projected top-level source class. Textual names are deliberately not a
+ * fallback: aliases, duplicate declarations, constructor objects, and
+ * unprojected classes must not acquire class-instance evidence by spelling.
+ */
+export function makeIrLocalClassExpressionResolver(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  projectedShapes: ReadonlyMap<string, IrClassShape>,
+): IrLocalClassExpressionResolver {
+  const declarations: { readonly name: string; readonly symbol: ts.Symbol }[] = [];
+  const nameCounts = new Map<string, number>();
+  const symbolCounts = new Map<ts.Symbol, number>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isClassDeclaration(statement) || !statement.name) continue;
+    const name = statement.name.text;
+    const shape = projectedShapes.get(name);
+    if (!shape || shape.className !== name) continue;
+    const symbol = checker.getSymbolAtLocation(statement.name);
+    if (!symbol) continue;
+    declarations.push({ name, symbol });
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    symbolCounts.set(symbol, (symbolCounts.get(symbol) ?? 0) + 1);
+  }
+
+  const classNameBySymbol = new Map<ts.Symbol, string>();
+  for (const declaration of declarations) {
+    if (nameCounts.get(declaration.name) !== 1 || symbolCounts.get(declaration.symbol) !== 1) continue;
+    classNameBySymbol.set(declaration.symbol, declaration.name);
+  }
+
+  const exactProjectedType = (expression: ts.Expression): string | undefined => {
+    try {
+      const type = checker.getTypeAtLocation(expression);
+      if (
+        type.isUnionOrIntersection() ||
+        type.aliasSymbol !== undefined ||
+        (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter | ts.TypeFlags.Never)) !==
+          0 ||
+        type.getCallSignatures().length !== 0 ||
+        type.getConstructSignatures().length !== 0
+      ) {
+        return undefined;
+      }
+      const symbol = type.getSymbol();
+      return symbol ? classNameBySymbol.get(symbol) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const resolveExpression = (rawExpression: ts.Expression, seen: Set<ts.VariableDeclaration>): string | undefined => {
+    let expression = unwrapParens(rawExpression);
+    while (
+      ts.isAsExpression(expression) ||
+      ts.isTypeAssertionExpression(expression) ||
+      ts.isSatisfiesExpression(expression) ||
+      ts.isNonNullExpression(expression)
+    ) {
+      expression = unwrapParens(expression.expression);
+    }
+
+    const projected = exactProjectedType(expression);
+    if (!projected) return undefined;
+    if (ts.isConditionalExpression(expression)) {
+      const whenTrue = resolveExpression(expression.whenTrue, new Set(seen));
+      const whenFalse = resolveExpression(expression.whenFalse, new Set(seen));
+      return whenTrue === projected && whenFalse === projected ? projected : undefined;
+    }
+    if (!ts.isIdentifier(expression)) return projected;
+
+    const symbol = checker.getSymbolAtLocation(expression);
+    const declaration = symbol?.valueDeclaration;
+    if (declaration && ts.isVariableDeclaration(declaration)) {
+      if (seen.has(declaration) || !declaration.initializer || (declaration.parent.flags & ts.NodeFlags.Const) === 0) {
+        return undefined;
+      }
+      seen.add(declaration);
+      return resolveExpression(declaration.initializer, seen) === projected ? projected : undefined;
+    }
+    if (declaration && ts.isParameter(declaration)) {
+      const typeNode = declaration.type;
+      return typeNode &&
+        ts.isTypeReferenceNode(typeNode) &&
+        ts.isIdentifier(typeNode.typeName) &&
+        typeNode.typeName.text === projected
+        ? projected
+        : undefined;
+    }
+    // Binding elements, imports, and other alias-like value declarations need
+    // their own producer proof before they can become class-instance evidence.
+    if (declaration) return undefined;
+    return projected;
+  };
+
+  return (expression) => resolveExpression(expression, new Set());
+}
+
+/**
+ * Build a checker-backed Array/tuple predicate for selector-only method
+ * routing. The IR front-end currently lowers vec `.push(...)`, but not the
+ * wider Array prototype surface. Keeping this proof separate from primitive
+ * classification lets local classes with methods such as `indexOf` retain
+ * ordinary class dispatch while real arrays reject before claim.
+ */
+export function makeIrArrayExpressionPredicate(checker: ts.TypeChecker): (expr: ts.Expression) => boolean {
+  return (expr) => {
+    try {
+      const type = checker.getTypeAtLocation(unwrapParens(expr));
+      if (type.isUnion()) {
+        const members = type.types.filter(
+          (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Never)) === 0,
+        );
+        return (
+          members.length > 0 && members.every((member) => checker.isArrayType(member) || checker.isTupleType(member))
+        );
+      }
+      return checker.isArrayType(type) || checker.isTupleType(type);
+    } catch {
+      return false;
+    }
+  };
+}
 
 /**
  * Build a checker-only ambient-binding predicate. Unlike the full module
@@ -154,8 +282,29 @@ export interface IrModuleBindingIdentity {
   readonly valueKind: IrModuleBindingValueKind;
 }
 
+/**
+ * Structural module-binding result used at the integration boundary.
+ *
+ * The selector-facing resolver remains conservative (`undefined` means do
+ * not claim), but module-init integration must distinguish an ordinary source
+ * capability gap from a broken checker/selection promise. In particular, a
+ * real top-level lexical with an unsupported representation is expected; a
+ * node that is no longer the direct declaration the selector assessed is an
+ * invariant.
+ */
+export type IrModuleBindingInspection =
+  | { readonly kind: "supported"; readonly identity: IrModuleBindingIdentity }
+  | { readonly kind: "unsupported"; readonly declaration: ts.VariableDeclaration }
+  | { readonly kind: "not-direct" };
+
 export interface IrModuleBindingResolver {
   (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingIdentity | undefined;
+  /**
+   * Inspect the exact source declaration without swallowing checker failures.
+   * Integration uses this after a module-init claim, where an unexpected
+   * checker throw is an Invariant rather than an Unsupported capability.
+   */
+  readonly inspectDirectBinding: (node: ts.Identifier, writeValue?: ts.Expression) => IrModuleBindingInspection;
   /** True for any checker-owned top-level lexical, including unsupported reps. */
   readonly isDirectModuleBinding: (node: ts.Identifier) => boolean;
   /** True when the identifier resolves to an ambient declaration-file symbol. */
@@ -672,44 +821,49 @@ export function makeIrModuleBindingResolver(
   options: IrModuleBindingResolverOptions,
 ): IrModuleBindingResolver {
   const isAmbientBinding = makeIrAmbientBindingPredicate(checker);
+  const inspectDirectBinding = (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingInspection => {
+    const declaration = directTopLevelDeclaration(node, checker);
+    if (!declaration) return { kind: "not-direct" };
+    const list = declaration.parent as ts.VariableDeclarationList;
+    const statement = list.parent;
+    // Ambient declarations establish a real checker identity but allocate no
+    // legacy `__mod_*` slot. Keep them visible to isDirectModuleBinding below
+    // so leaked flat scope names cannot impersonate them, while declining
+    // them as supported storage here.
+    if (
+      declaration.getSourceFile().isDeclarationFile ||
+      (ts.isVariableStatement(statement) &&
+        statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword))
+    ) {
+      return { kind: "unsupported", declaration };
+    }
+    const mutable = (list.flags & ts.NodeFlags.Let) !== 0;
+    if (writeValue !== undefined && !mutable) return { kind: "unsupported", declaration };
+
+    const declaredType = checker.getTypeAtLocation(declaration.name);
+    let valueKind = scalarKind(declaredType, options);
+    if (!valueKind && options.allowHostExterns) {
+      const className = externClassNameForType(declaredType, checker, options);
+      if (className) {
+        valueKind = { kind: "extern", className };
+      }
+    }
+    if (!valueKind) return { kind: "unsupported", declaration };
+    if (writeValue !== undefined && !writeValueMatches(checker, declaredType, valueKind, writeValue, options)) {
+      return { kind: "unsupported", declaration };
+    }
+    return { kind: "supported", identity: { declaration, mutable, valueKind } };
+  };
   const resolve = (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingIdentity | undefined => {
     try {
-      const declaration = directTopLevelDeclaration(node, checker);
-      if (!declaration) return undefined;
-      const list = declaration.parent as ts.VariableDeclarationList;
-      const statement = list.parent;
-      // Ambient declarations establish a real checker identity but allocate no
-      // legacy `__mod_*` slot. Keep them visible to isDirectModuleBinding below
-      // so leaked flat scope names cannot impersonate them, while declining
-      // them as supported storage here.
-      if (
-        declaration.getSourceFile().isDeclarationFile ||
-        (ts.isVariableStatement(statement) &&
-          statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword))
-      ) {
-        return undefined;
-      }
-      const mutable = (list.flags & ts.NodeFlags.Let) !== 0;
-      if (writeValue !== undefined && !mutable) return undefined;
-
-      const declaredType = checker.getTypeAtLocation(declaration.name);
-      let valueKind = scalarKind(declaredType, options);
-      if (!valueKind && options.allowHostExterns) {
-        const className = externClassNameForType(declaredType, checker, options);
-        if (className) {
-          valueKind = { kind: "extern", className };
-        }
-      }
-      if (!valueKind) return undefined;
-      if (writeValue !== undefined && !writeValueMatches(checker, declaredType, valueKind, writeValue, options)) {
-        return undefined;
-      }
-      return { declaration, mutable, valueKind };
+      const inspected = inspectDirectBinding(node, writeValue);
+      return inspected.kind === "supported" ? inspected.identity : undefined;
     } catch {
       return undefined;
     }
   };
   return Object.assign(resolve, {
+    inspectDirectBinding,
     isDirectModuleBinding(node: ts.Identifier): boolean {
       try {
         return directTopLevelDeclaration(node, checker) !== undefined;

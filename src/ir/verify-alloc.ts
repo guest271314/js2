@@ -23,6 +23,7 @@
 
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import type { AllocKind, AllocSiteId, IrFunction, IrInstr } from "./nodes.js";
+import { IrInvariantError } from "./outcomes.js";
 
 export interface AllocVerifyError {
   readonly message: string;
@@ -134,7 +135,12 @@ export function assertAllocProvenance(func: IrFunction, registry: AllocSiteRegis
   const errors = verifyAllocProvenance(func, registry);
   if (errors.length > 0) {
     const lines = errors.map((e) => `  - [${e.func}] ${e.message}`).join("\n");
-    throw new Error(`IR alloc-provenance check failed (#1586):\n${lines}`);
+    throw new IrInvariantError(
+      "allocation-provenance-failure",
+      "verify",
+      `IR alloc-provenance check failed (#1586):\n${lines}`,
+      errors,
+    );
   }
 }
 

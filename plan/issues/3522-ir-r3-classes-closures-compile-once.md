@@ -1,0 +1,297 @@
+---
+id: 3522
+title: "IR-only R3: compile-once classes, members, and closures"
+status: blocked
+sprint: current
+created: 2026-07-21
+updated: 2026-07-21
+priority: critical
+horizon: xl
+complexity: XL
+feasibility: hard
+reasoning_effort: max
+task_type: refactor
+area: ir, codegen, classes, closures
+language_feature: compiler-internals
+es_edition: multi
+goal: ir-full-coverage
+lane: ir-retirement-r3
+model: gpt-5.6-sol
+parent: 3518
+depends_on: [3521]
+required_by: [3523, 3525, 3527]
+related: [1370, 1983, 2857, 2951, 3000, 3045, 3144, 3518]
+origin: "#3518 R3 — extend PreparedIrProgram from free functions to every single-source executable class/closure unit"
+files:
+  - src/ir/source-units.ts
+  - src/ir/program.ts
+  - src/ir/prepare.ts
+  - src/ir/nodes.ts
+  - src/ir/select.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
+  - src/codegen/class-bodies.ts
+  - src/codegen/closures.ts
+  - src/codegen/declarations.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+  - tests/issue-3522-ir-class-compile-once.test.ts
+---
+
+# #3522 — IR-only R3: compile-once classes, members, and closures
+
+## Objective
+
+Extend R2's prepare-before-emit ownership from top-level free functions to the
+complete executable-unit census of an ordinary single-source program:
+
+- class declarations and class expressions;
+- explicit/default constructors;
+- instance and static methods;
+- instance and static getters/setters;
+- instance field initializers and constructor parameter/default work;
+- inheritance, `super`, inherited aliases, and class support wrappers;
+- nested function declarations, function expressions, arrows, object methods,
+  and every lifted closure body/trampoline/cache unit.
+
+Every source body is Prepared and IR-emitted once or typed Unsupported and
+direct-emitted once under the temporary hybrid policy. No class/member/closure
+may be selected, silently skipped by integration, compiled direct, and then
+patched.
+
+## Current evidence
+
+Class integration still depends on direct compilation as its ABI producer:
+
+- `src/ir/select.ts:591-616` inventories constructors, instance methods, and
+  static methods under legacy synthetic names. The comment still describes a
+  selector-only/patch-later model.
+- `src/ir/select.ts:700-705` explicitly admits ordinary static methods, but
+  `src/ir/integration.ts:396-411` skips every static member. This is a concrete
+  claimed-without-integration hole that a fallback histogram can miss.
+- `src/ir/integration.ts:280-297` says class members and module init target
+  legacy-preallocated slots. At `:393-445` it finds a class/member by flat
+  display name, and at `:943-970` a type mismatch keeps the direct body.
+- `src/codegen/class-bodies.ts:595-1465` combines class identity/layout/ABI
+  planning with placeholder registration, inherited aliases, descriptors,
+  static globals, and static-init queue mutation.
+- `src/codegen/class-bodies.ts:1551-1740` then compiles constructor/default/
+  field work directly. The source constructor body is split across
+  `${Class}_new` and `${Class}_init` support functions
+  (`:1043-1075`, `:1642-1692`). Those support units are not represented in the
+  current `IrModule` contract.
+- `src/codegen/declarations.ts:1872-2074` recursively eager/deferred-compiles
+  class declarations/expressions. Capturing nested classes are routed through
+  separate in-scope paths; a pre-emission unit inventory does not yet own that
+  decision.
+- `src/ir/from-ast.ts:537-545` can return lifted functions, but their identity,
+  ABI slots, and failure are attached after the parent build. A lifted failure
+  can therefore demote a parent only after other legacy effects exist.
+
+R3 splits class/closure planning from body emission and makes every hidden
+support unit visible to `PreparedIrProgram`.
+
+## Exhaustive source-unit census
+
+Before preparing any body, walk the source once in lexical/source order and
+record one `IrUnitId` per executable source body. The census must distinguish:
+
+1. Top-level and nested function declarations, including last-wins/Annex-B
+   declarations without losing shadowed identities.
+2. Function expressions, arrows, IIFEs, callback expressions, object-literal
+   methods/getters/setters, and computed/private method bodies.
+3. Class declarations and expressions at module, function, block, loop,
+   switch, try/catch/finally, and expression positions.
+4. Explicit constructors, synthesized default base/derived constructors,
+   instance/static methods, and instance/static getter/setter pairs.
+5. Instance field initializer expressions and parameter-property/default work;
+   static field/block execution is inventoried here but its ordered
+   `ModuleInitPlan` emission belongs to #3523.
+6. Lifted closure bodies and nested functions produced from each parent.
+
+Unsupported or ambient/abstract bodies are not omitted. Ambient/abstract
+entries receive an explicit non-executable classification; executable but
+unimplemented entries receive typed Unsupported. Inventory must equal terminal
+outcomes before class/body emission.
+
+## Source units versus support units
+
+Do not equate generated Wasm functions with source bodies. Record explicit
+support relationships:
+
+- A source constructor is one source unit. For a WasmGC class,
+  `<Class>_new` is an allocation wrapper and `<Class>_init` is the support unit
+  that executes field/default/source-constructor semantics. The source body
+  must occur in exactly one of them, never both.
+- A default constructor receives a deterministic synthetic source-unit ID and
+  support units derived from its `IrClassId`.
+- Inherited member aliases point to a canonical parent unit/slot and are not a
+  second body emission.
+- Closure trampolines, wrapper structs, cache globals, host bridges, and
+  method-call adapters are support units/bindings derived from the source unit.
+  Their own emissions are counted, but they do not inflate the source-body
+  denominator.
+- Runtime provider bodies (Promise subclass bridges, coercion helpers, string/
+  object/array providers) remain shared support code until R6. R3 plans typed
+  calls to them; it does not copy or delete them.
+
+## Preparation and ownership rules
+
+1. Build class layouts, parent relationships, member signatures, field plans,
+   descriptors, closure captures, and support intents into `ProgramAbiMap` /
+   `PreparedIrProgram` before any class or closure body emitter runs.
+2. Prepare a class ownership component atomically when its layouts,
+   constructor/init chain, members, field initializers, nested closures, or
+   inheritance edges cannot safely cross policies. One unsupported member may
+   temporarily make the whole component direct, but that decision and every
+   per-unit outcome are final before emission.
+3. Prepared source bodies use only IR emission and planned support units.
+   Unsupported components use the direct path once. No legacy class body is
+   retained behind an IR patch.
+4. A lifted/nested function failure is part of its parent component's typed
+   preparation result. It cannot be discovered after the parent body shipped.
+5. Replace the current selector/integration static mismatch with exhaustive
+   reconciliation: `selected IDs == prepared IDs + typed failures`. A `continue`
+   that drops a selected unit is an Invariant.
+6. Preserve class evaluation and static initializer intents for #3523. R3
+   plans their identities/layouts but does not reorder top-level execution.
+
+## Bounded landing sequence
+
+### Commit 1 — exhaustive census and class/closure ABI planning
+
+- Add the source-unit walker and source/support-unit distinction.
+- Move the planning half of `collectClassDeclaration` into typed class/layout/
+  ABI data without compiling bodies.
+- Inventory all nested/class-expression/object-method/closure positions and
+  reconcile them with R0 outcomes.
+
+### Commit 2 — Prepared class members and constructor support
+
+- Prepare constructors, `_new`/`_init`, methods, getters/setters, fields,
+  inheritance, and `super` call components.
+- Implement static method/accessor signatures without `self`; close the
+  selector-static/integration-skip hole.
+- IR-emit Prepared components once; direct-emit Unsupported components once.
+
+### Commit 3 — closures, nested units, and legacy-body bypass
+
+- Prepare lifted functions, closure captures, object methods, and nested class
+  units before emission.
+- Route closure support through planned ABI bindings and exact counters.
+- Bypass `compileClassBodies` / nested direct body compilation for every
+  Prepared unit. Leave the direct implementation present for temporary
+  Unsupported policy and R10 deletion.
+
+## File ownership and locks
+
+One developer owns `src/codegen/class-bodies.ts`,
+`src/codegen/declarations.ts`, `src/codegen/closures.ts`, `src/ir/select.ts`,
+`src/ir/from-ast.ts`, `src/ir/integration.ts`, and the Prepared-program modules
+for the R3 landing. These files encode one class/closure component invariant
+and must not be split between parallel implementation branches.
+
+`src/ir/module-init.ts` and module-init/start wiring are reserved for #3523.
+Runtime/builtin provider files are reserved for R6. Multi-source and linear
+files remain R5/R8.
+
+## Anti-vacuity tests
+
+`tests/issue-3522-ir-class-compile-once.test.ts` must prove:
+
+1. An explicit base constructor, synthesized default constructor, and derived
+   constructor inventory one source body each. `_new` and `_init` are distinct
+   support units; constructor/field code executes once and counters reconcile.
+2. Instance/static methods with the same property name, instance/static
+   getters/setters, and a top-level synthetic-key collision receive distinct
+   IDs, slots, and correct receiver signatures.
+3. A static method admitted by selection is Prepared and emitted; a test seam
+   that restores the current integration `continue` fails reconciliation.
+4. Fields, parameter defaults, `super(...)`, `super.method()`, overrides,
+   inherited aliases, and multi-level local inheritance run like JavaScript on
+   host, standalone, and WASI-relevant configurations.
+5. Named/anonymous class expressions and class declarations nested in a
+   function/block/loop/try inventory deterministically and capture the correct
+   enclosing binding.
+6. Function declarations, expressions, arrows, object methods/accessors,
+   IIFEs, and lifted closures record one source outcome and one body emitter.
+   A lifted build/verify failure is terminal before any parent body emission.
+7. A Prepared class component has `direct=0, IR=1` for every source body. An
+   Unsupported component has `direct=1, IR=0`; no unit has both or neither.
+8. Static field/block intents are present in source order for #3523 but are not
+   executed by a second R3 path.
+
+Run adjacent coverage from `tests/issue-1983-funcmap-collision.test.ts`,
+`tests/issue-3000-1b.test.ts`, `tests/issue-3000-e.test.ts`,
+`tests/issue-3144-ir-class-claims.test.ts`, `tests/class-expressions.test.ts`,
+`tests/nested-class-declarations.test.ts`, and closure equivalence suites.
+
+## Acceptance criteria
+
+- [ ] The single-source inventory is exhaustive for every executable function,
+      class/member, field-initializer, object-method, nested, and closure body;
+      inventory equals terminal outcomes before emission.
+- [ ] Source units and synthetic support units have distinct structural IDs and
+      counters. No constructor or inherited alias double-counts a source body.
+- [ ] Constructors, `_new`/`_init`, instance/static methods, get/set, fields,
+      inheritance, class expressions, nested declarations, object methods, and
+      closures follow the Prepared-or-Unsupported compile-once rule.
+- [ ] There is no selector-static/integration-skip hole and no selected unit can
+      disappear through a `continue` or flat-name collision.
+- [ ] Prepared class/closure bodies do not call legacy body compilers or patch
+      legacy-created slots. Unsupported units remain one-pass direct only under
+      the temporary hybrid policy.
+- [ ] Class layouts/type indices/signatures and capture ABI are fully planned
+      before bodies; late unplanned support is fatal.
+- [ ] Runtime provider implementations remain shared and present for R6; R3
+      deletes no behavior merely because a class body is IR-owned.
+- [ ] Runtime/equivalence, cross-backend, standalone/WASI validity, full class/
+      closure tests, and merge-group Test262 are net-non-negative.
+
+## Risks and mitigations
+
+- **Incomplete nested census:** class expressions, object methods, or lifted
+  closures can remain invisible while common class tests pass. Reconcile the
+  exhaustive source walk against terminal outcomes and add omission seams.
+- **Constructor/support double execution:** `_new`, `_init`, field work, and
+  the source constructor can overlap. Model one source unit with explicit
+  support edges and assert source-body and support-emitter counts separately.
+- **Class ABI/layout drift:** receiver signatures, inheritance, and type-index
+  order are validation-sensitive. Freeze the entire class component in
+  `ProgramAbiMap` and test legacy/IR boundary calls before emitting it.
+- **Evaluation-order leakage into R4:** collecting static intents can execute or
+  reorder them too early. R3 records immutable source ordinals only; #3523 is
+  the sole owner of their execution.
+- **Runtime-provider scope creep:** class/closure support may call shared
+  runtime families. Record typed intents and retain providers for R6 instead of
+  copying or deleting behavior in R3.
+
+## Out of scope
+
+- Ordered module-init execution, static field/block emission, live-binding
+  seeds, TDZ/export/start/defer/WASI init policy (#3523).
+- Cross-file/multi-source Prepared ownership (R5).
+- Replacing runtime provider entry points with semantic intrinsics (R6).
+- Async class/method/closure ownership beyond R7's policy, shared linear
+  consumption (R8), escape-hatch removal (R9), or direct-handler deletion
+  (#3090/R10).
+
+## Required completion evidence
+
+```bash
+pnpm exec vitest run tests/issue-3522-ir-class-compile-once.test.ts tests/issue-1983-funcmap-collision.test.ts tests/issue-3000-1b.test.ts tests/issue-3000-e.test.ts tests/issue-3144-ir-class-claims.test.ts tests/class-expressions.test.ts tests/nested-class-declarations.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+pnpm run check:ir-only -- --policy=hybrid
+pnpm run check:ir-only -- --policy=ir-only --json
+pnpm run check:ir-fallbacks -- --verbose
+pnpm run typecheck
+pnpm run lint
+pnpm run format:check
+node scripts/equivalence-gate.mjs
+pnpm exec vitest run tests/cross-backend-diff.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+```
+
+The PR report must include the exhaustive source/support-unit census by kind,
+class-component ownership decisions, the static-claim reconciliation table,
+per-unit direct/IR emission counters, and runtime evidence for every listed
+class/closure family. A green class sample with missing nested/static IDs is
+vacuous and does not close R3.

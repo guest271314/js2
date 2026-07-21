@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   asBlockId,
   asValueId,
+  irDynamic,
   irVal,
   lowerIrFunctionToWasm,
   verifyIrFunction,
@@ -114,12 +115,14 @@ describe("#1167c — monomorphize (unit)", () => {
 
     // One clone produced (the first tuple keeps the original callee).
     expect(result.cloneSignatures.size).toBe(1);
+    expect(result.cloneOrigins.size).toBe(1);
 
     // Clone name starts with `identity$` regardless of which tuple (f64 vs
     // externref) won the first-keeps-original slot — our canonical sort is
     // lexicographic over the ValType kind, so the winner depends on member
     // kind spelling; both the test and the impl must not hardcode that.
     const cloneName = [...result.cloneSignatures.keys()][0]!;
+    expect(result.cloneOrigins.get(cloneName)).toBe("identity");
     expect(cloneName.startsWith("identity$")).toBe(true);
 
     // One of the two callers now targets the clone, the other still hits
@@ -356,6 +359,63 @@ describe("#1167c — taggedUnions (unit)", () => {
     expect(taggedUnions(mod)).toBe(mod);
     const { errors } = runTaggedUnions(mod);
     expect(errors).toEqual([]);
+  });
+
+  it("accepts box-to-dynamic without consulting the tagged-union registry", () => {
+    const dynamicType = irDynamic();
+    const fn: IrFunction = {
+      name: "boxDynamic",
+      params: [{ value: id(0), type: F64, name: "value" }],
+      resultTypes: [dynamicType],
+      blocks: [
+        {
+          id: asBlockId(0),
+          blockArgs: [],
+          blockArgTypes: [],
+          instrs: [
+            {
+              kind: "box",
+              value: id(0),
+              toType: dynamicType,
+              result: id(1),
+              resultType: dynamicType,
+            },
+          ],
+          terminator: { kind: "return", values: [id(1)] },
+        },
+      ],
+      exported: false,
+      valueCount: 2,
+    };
+    const mod = { functions: [fn] };
+
+    expect(verifyIrFunction(fn)).toEqual([]);
+    const result = runTaggedUnions(mod);
+    expect(result.module).toBe(mod);
+    expect(result.errors).toEqual([]);
+  });
+
+  it("keeps the invariant backstop for box targets outside union or dynamic", () => {
+    const fn: IrFunction = {
+      name: "boxInvalid",
+      params: [{ value: id(0), type: F64, name: "value" }],
+      resultTypes: [F64],
+      blocks: [
+        {
+          id: asBlockId(0),
+          blockArgs: [],
+          blockArgTypes: [],
+          instrs: [{ kind: "box", value: id(0), toType: F64, result: id(1), resultType: F64 }],
+          terminator: { kind: "return", values: [id(1)] },
+        },
+      ],
+      exported: false,
+      valueCount: 2,
+    };
+
+    const { errors } = runTaggedUnions({ functions: [fn] });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]!.message).toMatch(/union or dynamic/);
   });
 
   it("a value typed union<f64, i32> lowers via `$union_*` struct ops, not __box_number", () => {

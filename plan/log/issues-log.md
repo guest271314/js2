@@ -530,3 +530,10 @@ sprint: 0
 | 3369 | 2026-07-17 | Close the original-harness parity gap in the deterministic 50-test array sample | Current |
 | 3370 | 2026-07-17 | Make the original Test262 harness authoritative for project-runner verdicts | Current |
 | 2856 | 2026-07-21 | IR body-shape fallback corpus to zero | Sprint 73 |
+| 2950 | 2026-07-13 | IR-first default flip (historical milestone; retirement transferred to #3518) | Sprint 71 |
+| 2855 | 2026-07-21 | IR fallback-corpus ratchet completed; IR-only retirement transferred to #3518 | Sprint 73 |
+| 3529 | 2026-07-21 | IR R0 typed-producer equivalence parity restored: 1,608 pass / 35 fail, one baseline-known improvement, zero new regressions, unchanged baseline | Current |
+| 3519 | 2026-07-21 | IR R0 typed outcomes and honest gate: hybrid 5/5, 37 terminal, 31 IR, 6 Unsupported, 0 Invariants, 37 legacy | Current |
+
+> **IR retirement checkpoint:** #3518 remains in progress; #3520 is ready as
+> the next R1 slice. R2–R8 remain blocked on the dependency spine.

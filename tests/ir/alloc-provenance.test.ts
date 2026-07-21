@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   AllocSiteRegistry,
   IrFunctionBuilder,
+  assertAllocProvenance,
   asAllocSiteId,
   irVal,
   verifyAllocProvenance,
@@ -82,6 +83,36 @@ describe("#1586 — alloc provenance", () => {
     const errors = verifyAllocProvenance(fn, reg);
     expect(errors.length).toBeGreaterThan(0);
     expect(errors[0]!.message).toMatch(/stale provenance|retired/);
+  });
+
+  it("the throwing producer preserves a stable typed invariant code", () => {
+    const original = process.env.IR_VERIFY_ALLOC;
+    process.env.IR_VERIFY_ALLOC = "1";
+    try {
+      const reg = new AllocSiteRegistry();
+      const b = new IrFunctionBuilder("f", [{ kind: "string" }], false, reg);
+      b.openBlock();
+      const s = b.emitStringConst("hi");
+      b.terminate({ kind: "return", values: [s] });
+      const fn = b.finish();
+      const strInstr = fn.blocks[0]!.instrs.find((instr) => instr.kind === "string.const")!;
+      reg.retire(strInstr.alloc!);
+
+      try {
+        assertAllocProvenance(fn, reg);
+        throw new Error("expected assertAllocProvenance to throw");
+      } catch (error) {
+        expect(error).toMatchObject({
+          name: "IrInvariantError",
+          kind: "invariant",
+          code: "allocation-provenance-failure",
+          stage: "verify",
+        });
+      }
+    } finally {
+      if (original === undefined) Reflect.deleteProperty(process.env, "IR_VERIFY_ALLOC");
+      else process.env.IR_VERIFY_ALLOC = original;
+    }
   });
 
   it("checker flags an allocation instr missing its id entirely", () => {

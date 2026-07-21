@@ -1,0 +1,176 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * Typed terminal outcomes for the AST -> IR preparation boundary.
+ *
+ * Diagnostic text is deliberately not policy-bearing. Callers decide whether
+ * a unit may retain its legacy body from the discriminant and stable code; the
+ * detail remains available only to make failures actionable.
+ */
+import type { IrFallbackReason } from "./select.js";
+
+export type IrPreparationStage = "select" | "resolve" | "build" | "verify" | "lower" | "backend-legality" | "patch";
+
+export type IrUnsupportedCode =
+  | IrFallbackReason
+  | "anonymous-class"
+  | "implicit-class-initializer"
+  | "static-class-initialization"
+  | "void-call-expression"
+  | "array-representation-unsupported"
+  | "nullish-value-unsupported"
+  | "operand-coercion-unsupported"
+  | "property-write-unsupported"
+  | "string-evidence-unsupported"
+  | "type-resolution-unsupported"
+  | "imported-call-planning-unsupported"
+  | "late-preparation-unsupported"
+  | "new-target-threading"
+  | "static-class-member"
+  | "module-init-legacy-coupling";
+
+export type IrInvariantCode =
+  | "unknown-function-ref"
+  | "unknown-global-ref"
+  | "unknown-type-ref"
+  | "verifier-failure"
+  | "backend-legality-failure"
+  | "missing-function-slot"
+  | "unpatched-slot"
+  | "abi-type-index-mismatch"
+  | "selection-preparation-mismatch"
+  | "type-map-failure"
+  | "duplicate-unit-outcome"
+  | "missing-terminal-outcome"
+  | "allocation-provenance-failure"
+  | "tagged-union-validation-failure"
+  | "synthetic-owner-missing"
+  | "pass-output-mismatch"
+  | "unexpected-internal-throw";
+
+export type IrPreparationFailure =
+  | {
+      readonly kind: "unsupported";
+      readonly code: IrUnsupportedCode;
+      readonly stage: "select" | "resolve" | "build";
+      readonly detail: string;
+      readonly cause?: unknown;
+    }
+  | {
+      readonly kind: "invariant";
+      readonly code: IrInvariantCode;
+      readonly stage: Exclude<IrPreparationStage, "select">;
+      readonly detail: string;
+      readonly cause?: unknown;
+    };
+
+export class IrUnsupportedError extends Error {
+  readonly kind = "unsupported" as const;
+
+  constructor(
+    readonly code: IrUnsupportedCode,
+    readonly stage: "select" | "resolve" | "build",
+    detail: string,
+    readonly cause?: unknown,
+  ) {
+    super(detail);
+    this.name = "IrUnsupportedError";
+  }
+}
+
+export class IrInvariantError extends Error {
+  readonly kind = "invariant" as const;
+
+  constructor(
+    readonly code: IrInvariantCode,
+    readonly stage: Exclude<IrPreparationStage, "select">,
+    detail: string,
+    readonly cause?: unknown,
+  ) {
+    super(detail);
+    this.name = "IrInvariantError";
+  }
+}
+
+/** Preserve a typed failure; unknown throws are compiler invariants. */
+export function classifyIrFailure(error: unknown, stage: Exclude<IrPreparationStage, "select">): IrPreparationFailure {
+  if (error instanceof IrUnsupportedError) {
+    return {
+      kind: "unsupported",
+      code: error.code,
+      stage: error.stage,
+      detail: error.message,
+      ...(error.cause === undefined ? {} : { cause: error.cause }),
+    };
+  }
+  if (error instanceof IrInvariantError) {
+    return {
+      kind: "invariant",
+      code: error.code,
+      stage: error.stage,
+      detail: error.message,
+      ...(error.cause === undefined ? {} : { cause: error.cause }),
+    };
+  }
+  return {
+    kind: "invariant",
+    code: "unexpected-internal-throw",
+    stage,
+    detail: error instanceof Error ? error.message : String(error),
+    cause: error,
+  };
+}
+
+export type IrObservedUnitKind = "function" | "class-member" | "module-init";
+export type IrObservedBackend = "wasmgc" | "linear";
+export type IrObservedTarget = "gc" | "linear" | "standalone" | "wasi";
+
+interface IrObservedOutcomeBase {
+  /** Observational label only. R1 replaces this with source-qualified identity. */
+  readonly key: string;
+  readonly file: string;
+  readonly unitKind: IrObservedUnitKind;
+  readonly displayName: string;
+  readonly ordinal: number;
+  readonly line: number;
+  readonly column: number;
+  readonly backend: IrObservedBackend;
+  readonly target: IrObservedTarget;
+  readonly legacyBodyEmitted: boolean;
+  readonly irBodyEmitted: boolean;
+}
+
+export type IrObservedOutcome =
+  | (IrObservedOutcomeBase & {
+      readonly kind: "emitted";
+      readonly stage: "patch";
+    })
+  | (IrObservedOutcomeBase & IrPreparationFailure);
+
+export type IrOutcomePolicy = "hybrid" | "ir-only";
+
+export interface IrOutcomePolicyVerdict {
+  readonly policy: IrOutcomePolicy;
+  readonly ready: boolean;
+  readonly blockers: readonly IrObservedOutcome[];
+}
+
+/** Evaluate policy over the exact observed ledger; never re-run selection. */
+export function evaluateIrOutcomePolicy(
+  outcomes: readonly IrObservedOutcome[],
+  policy: IrOutcomePolicy,
+): IrOutcomePolicyVerdict {
+  const blockers = outcomes.filter((outcome) => {
+    if (outcome.kind === "invariant") return true;
+    // The discriminant and body evidence are one contract. Hybrid may retain
+    // a typed Unsupported unit only when its direct body actually exists; an
+    // unsupported skipped slot has no executable implementation to fall back
+    // to. Likewise, an emitted row without an IR body (or a non-emitted row
+    // claiming one) is malformed evidence and must fail both policies.
+    if (outcome.kind === "emitted" && !outcome.irBodyEmitted) return true;
+    if (outcome.kind !== "emitted" && outcome.irBodyEmitted) return true;
+    if (outcome.kind === "unsupported" && !outcome.legacyBodyEmitted) return true;
+    if (policy === "hybrid") return false;
+    return outcome.kind === "unsupported" || outcome.legacyBodyEmitted || !outcome.irBodyEmitted;
+  });
+  return { policy, ready: blockers.length === 0, blockers };
+}

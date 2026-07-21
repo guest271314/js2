@@ -3,6 +3,7 @@
 import { ts } from "../ts-api.js";
 import type { IrHostVoidCallbackLoweringPlan } from "../ir/ast-lowering-plans.js";
 import type { IrPromiseDelayLoweringPlans } from "../ir/promise-delay-lowering.js";
+import { classifyIrFailure, type IrPreparationFailure } from "../ir/outcomes.js";
 import type { IrSelection } from "../ir/select.js";
 import type { ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
@@ -251,6 +252,7 @@ export function preparePromiseDelayLowering(
   sourceFile: ts.SourceFile,
   plans: IrPromiseDelayLoweringPlans,
   selection: IrSelection,
+  preparationFailures?: Map<string, IrPreparationFailure>,
 ): IrSelection {
   const activePlans = [...plans.constructions.values()].filter((delay) => selection.funcs.has(delay.ownerName));
   if (activePlans.length === 0) return selection;
@@ -300,8 +302,11 @@ export function preparePromiseDelayLowering(
   const retainedPlans = activePlans.filter((delay) => retained.funcs.has(delay.ownerName));
   if (retainedPlans.length === 0) return retained;
 
-  let registrationFailed = false;
+  let registrationFailure: IrPreparationFailure | undefined;
   try {
+    if (process.env.JS2WASM_TEST_INJECT_IR_PROMISE_REGISTRATION_THROW === "1") {
+      throw new Error("injected Promise late-registration failure");
+    }
     let requestedLateImport = false;
     if (!boxExact) {
       ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
@@ -312,12 +317,13 @@ export function preparePromiseDelayLowering(
       requestedLateImport = true;
     }
     if (requestedLateImport) flushLateImportShifts(ctx, null);
-  } catch {
-    registrationFailed = true;
+  } catch (error) {
+    registrationFailure = classifyIrFailure(error, "resolve");
+    for (const delay of retainedPlans) preparationFailures?.set(delay.ownerName, registrationFailure);
   }
 
   const exactAfterRegistration =
-    !registrationFailed &&
+    !registrationFailure &&
     hasUncontestedExactEnvFunctionImport(ctx, "Promise_new", [{ kind: "externref" }], [{ kind: "externref" }]) &&
     hasUncontestedExactEnvFunctionImport(
       ctx,

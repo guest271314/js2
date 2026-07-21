@@ -24,6 +24,7 @@
 
 import { ts } from "../ts-api.js";
 import { makeIrHostDateSnapshotResolver } from "./host-date.js";
+import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "./backend/legality.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
@@ -82,6 +83,7 @@ import {
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
+  makeIrArrayExpressionPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
@@ -120,7 +122,7 @@ import { inlineSmall } from "./passes/inline-small.js";
 import { monomorphize } from "./passes/monomorphize.js";
 import { simplifyCFG } from "./passes/simplify-cfg.js";
 import { UnionStructRegistry } from "./passes/tagged-union-types.js";
-import { taggedUnions } from "./passes/tagged-unions.js";
+import { runTaggedUnions } from "./passes/tagged-unions.js";
 import {
   collectModuleInitPopulation,
   makeModuleInitSynthetic,
@@ -134,6 +136,14 @@ import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
 import { definedFuncAt, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
+import {
+  classifyIrFailure,
+  IrInvariantError,
+  IrUnsupportedError,
+  type IrInvariantCode,
+  type IrPreparationFailure,
+  type IrPreparationStage,
+} from "./outcomes.js";
 
 export interface IrIntegrationReport {
   readonly compiled: readonly string[];
@@ -143,7 +153,84 @@ export interface IrIntegrationReport {
 export interface IrIntegrationError {
   readonly func: string;
   readonly message: string;
-  readonly kind?: "verify" | "build" | "lower" | "backend-legality";
+  readonly kind: "verify" | "build" | "lower" | "backend-legality";
+  readonly outcome: IrPreparationFailure;
+}
+
+function legacyIntegrationKind(stage: IrPreparationStage): "verify" | "build" | "lower" | "backend-legality" {
+  if (stage === "verify") return "verify";
+  if (stage === "backend-legality") return "backend-legality";
+  if (stage === "lower" || stage === "patch") return "lower";
+  return "build";
+}
+
+function integrationFailure(func: string, outcome: IrPreparationFailure): IrIntegrationError {
+  return {
+    func,
+    message: outcome.detail,
+    kind: legacyIntegrationKind(outcome.stage),
+    outcome,
+  };
+}
+
+function invariantIntegrationFailure(
+  func: string,
+  code: IrInvariantCode,
+  stage: Exclude<IrPreparationStage, "select">,
+  detail: string,
+): IrIntegrationError {
+  return integrationFailure(func, { kind: "invariant", code, stage, detail });
+}
+
+function caughtIntegrationFailure(
+  func: string,
+  error: unknown,
+  stage: Exclude<IrPreparationStage, "select">,
+): IrIntegrationError {
+  return integrationFailure(func, classifyIrFailure(error, stage));
+}
+
+/**
+ * Find checker-certified ambient Date snapshots in owners that have already
+ * been selected. Production selection should reject these on host-free
+ * targets; this integration guard keeps a stale/external selection from
+ * discovering the target gap in helper registration or emission.
+ */
+function collectSelectedHostDateSnapshotOwners(
+  sourceFile: ts.SourceFile,
+  selection: IrSelection,
+  resolveSnapshot: ReturnType<typeof makeIrHostDateSnapshotResolver>,
+): ReadonlySet<string> {
+  const owners = new Set<string>();
+  const scan = (ownerName: string, root: ts.Node): void => {
+    const visit = (node: ts.Node): void => {
+      if (owners.has(ownerName)) return;
+      if (node !== root && ts.isFunctionLike(node)) return;
+      if (ts.isNewExpression(node) && resolveSnapshot(node)) {
+        owners.add(ownerName);
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(root);
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      statement.name &&
+      statement.body &&
+      selection.funcs.has(statement.name.text)
+    ) {
+      scan(statement.name.text, statement.body);
+    }
+  }
+  if (selection.moduleInit?.reason === null && selection.moduleInit.stmtCount > 0) {
+    for (const statement of collectModuleInitPopulation(sourceFile)) {
+      scan(MODULE_INIT_UNIT_NAME, statement);
+    }
+  }
+  return owners;
 }
 
 /**
@@ -173,27 +260,40 @@ export function compileIrPathFunctions(
   classShapes?: ReadonlyMap<string, IrClassShape>,
   loweringPlans?: IrIntegrationLoweringPlans,
 ): IrIntegrationReport {
+  const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  const supportsBackendCapability = (capability: IrBackendTargetCapability): boolean =>
+    supportsIrBackendTargetCapability(
+      {
+        backend: "wasmgc",
+        target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
+        allowHostImports: jsHostExterns,
+      },
+      capability,
+    );
+  const supportsHostDateSnapshots = supportsBackendCapability("host-date-snapshot");
+  const backendCapabilitySelectionOptions = { supportsBackendCapability };
   const moduleBindingResolver = makeIrModuleBindingResolver(ctx.checker, {
     numberStorage: ctx.fast ? "i32" : "f64",
-    allowHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
-    allowBuiltinMapExtern: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
+    allowHostExterns: jsHostExterns && !ctx.nativeStrings,
+    allowBuiltinMapExtern: jsHostExterns && !ctx.nativeStrings,
   });
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ctx.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
+  const isArrayExpression = makeIrArrayExpressionPredicate(ctx.checker);
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
       experimentalIR: true,
-      jsHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
-      ...(!(ctx.standalone || ctx.wasi || ctx.strictNoHostImports)
-        ? { hostDateSnapshots: makeIrHostDateSnapshotResolver(ctx.checker) }
-        : {}),
+      jsHostExterns,
+      ...(supportsHostDateSnapshots ? { hostDateSnapshots: makeIrHostDateSnapshotResolver(ctx.checker) } : {}),
       resolveModuleBinding: moduleBindingResolver,
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
+      isArrayExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
-      supportsHostStringArrayLiterals: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
+      supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
+      ...backendCapabilitySelectionOptions,
     });
   // (#3142 Slice 2) A claimable, non-empty module-init unit keeps the
   // pipeline alive even with no claimed functions/class members.
@@ -201,6 +301,9 @@ export function compileIrPathFunctions(
     selected.moduleInit && selected.moduleInit.reason === null && selected.moduleInit.stmtCount > 0
       ? selected.moduleInit
       : undefined;
+  const unsupportedHostDateOwners = supportsHostDateSnapshots
+    ? new Set<string>()
+    : collectSelectedHostDateSnapshotOwners(sourceFile, selected, makeIrHostDateSnapshotResolver(ctx.checker));
   // #1370 Phase B: don't short-circuit when only class members are claimed —
   // a source file may declare a class with IR-eligible methods but no
   // top-level FunctionDeclarations.
@@ -222,6 +325,16 @@ export function compileIrPathFunctions(
 
   const compiled: string[] = [];
   const errors: IrIntegrationError[] = [];
+  for (const ownerName of unsupportedHostDateOwners) {
+    errors.push(
+      integrationFailure(ownerName, {
+        kind: "unsupported",
+        code: "late-preparation-unsupported",
+        stage: "resolve",
+        detail: "host Date snapshots are unavailable for the selected backend target/provider",
+      }),
+    );
+  }
 
   // #1586: one allocation-site registry per module compile. Threaded into the
   // builder (mints ids on value-creating instrs) and every pass (preserve /
@@ -267,6 +380,8 @@ export function compileIrPathFunctions(
   // -------------------------------------------------------------------------
   interface BuiltFn {
     readonly name: string;
+    /** Stable source-unit identity; synthesized artifacts never become rows. */
+    readonly ownerName: string;
     readonly fn: IrFunction;
     /**
      * Slice 3 (#1169c): set when `fn` is a lifted closure or nested
@@ -297,11 +412,28 @@ export function compileIrPathFunctions(
     readonly moduleInit?: boolean;
   }
   const built: BuiltFn[] = [];
+  const verifyBuiltArtifact = (
+    fn: IrFunction,
+    ownerName: string,
+    synthesized: boolean,
+  ): ReturnType<typeof verifyIrFunction> => {
+    const injection = process.env.JS2WASM_TEST_INJECT_IR_VERIFY_FAILURE;
+    const inject = injection === "1" || injection === ownerName || (injection === "synthetic" && synthesized);
+    if (!inject || fn.blocks.length === 0) return verifyIrFunction(fn);
+    const first = fn.blocks[0]!;
+    const malformed: IrFunction = {
+      ...fn,
+      blocks: [{ ...first, id: ((first.id as number) + 1) as typeof first.id }, ...fn.blocks.slice(1)],
+    };
+    return verifyIrFunction(malformed);
+  };
   for (const stmt of sourceFile.statements) {
     if (!ts.isFunctionDeclaration(stmt)) continue;
+    if (!stmt.body) continue;
     if (!stmt.name) continue;
     const name = stmt.name.text;
     if (!selected.funcs.has(name)) continue;
+    if (unsupportedHostDateOwners.has(name)) continue;
 
     try {
       // #1923 — test-only seam: simulate a build-time demotion on a CLAIMED
@@ -330,28 +462,39 @@ export function compileIrPathFunctions(
         // can discharge the widening-escape proof via `getContextualType`.
         checker: ctx.checker,
       });
-      const mainErrors = verifyIrFunction(result.main);
+      const mainErrors = verifyBuiltArtifact(result.main, name, false);
       if (mainErrors.length > 0) {
-        for (const e of mainErrors) errors.push({ func: name, message: e.message, kind: "verify" });
+        for (const e of mainErrors) {
+          errors.push(invariantIntegrationFailure(name, "verifier-failure", "verify", e.message));
+        }
         continue;
       }
       // Slice 3 (#1169c): verify each lifted function before pushing.
       let anyLiftedFailed = false;
       for (const lifted of result.lifted) {
-        const liftedErrors = verifyIrFunction(lifted);
+        const liftedErrors = verifyBuiltArtifact(lifted, name, true);
         if (liftedErrors.length > 0) {
-          for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
+          for (const e of liftedErrors) {
+            errors.push(
+              invariantIntegrationFailure(
+                name,
+                "verifier-failure",
+                "verify",
+                `synthetic artifact ${lifted.name}: ${e.message}`,
+              ),
+            );
+          }
           anyLiftedFailed = true;
         }
       }
       if (anyLiftedFailed) continue;
 
-      built.push({ name, fn: result.main });
+      built.push({ name, ownerName: name, fn: result.main });
       for (const lifted of result.lifted) {
-        built.push({ name: lifted.name, fn: lifted, synthesized: true });
+        built.push({ name: lifted.name, ownerName: name, fn: lifted, synthesized: true });
       }
     } catch (e) {
-      errors.push({ func: name, message: e instanceof Error ? e.message : String(e), kind: "build" });
+      errors.push(caughtIntegrationFailure(name, e, "build"));
     }
   }
 
@@ -401,6 +544,7 @@ export function compileIrPathFunctions(
         const isCtorMember = ts.isConstructorDeclaration(member);
         const isAccessor = ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member);
         if (!ts.isMethodDeclaration(member) && !isAccessor && !isCtorMember) continue;
+        if (!member.body) continue;
         // Non-ctor members: skip nameless / static / abstract. A constructor
         // carries no `.name`, is never static, and never abstract — so these
         // guards apply only to methods / accessors.
@@ -415,7 +559,8 @@ export function compileIrPathFunctions(
         // (mirrors `class-bodies.ts`). Methods/accessors compute their key from
         // the member name below.
         let memberName: string;
-        let returnTypeOverride: IrType | null | undefined;
+        let memberBaseName: string | undefined;
+        let descriptorKind: "method" | "getter" | "setter" | undefined;
         if (isCtorMember) {
           memberName = `${className}_new`;
         } else {
@@ -423,7 +568,6 @@ export function compileIrPathFunctions(
           // numeric-literal — replicate the dispatch here without re-importing
           // the helper (it's selector-private). The synthetic name format
           // mirrors `class-bodies.ts:275` exactly.
-          let memberBaseName: string;
           if (ts.isIdentifier(member.name!)) memberBaseName = member.name!.text;
           else if (ts.isStringLiteral(member.name!) || ts.isNumericLiteral(member.name!)) {
             memberBaseName = member.name!.text;
@@ -435,16 +579,33 @@ export function compileIrPathFunctions(
           // `member.type` unchanged. Methods keep `${className}_${name}`.
           if (ts.isGetAccessorDeclaration(member)) {
             memberName = `${className}_get_${memberBaseName}`;
+            descriptorKind = "getter";
           } else if (ts.isSetAccessorDeclaration(member)) {
             memberName = `${className}_set_${memberBaseName}`;
-            returnTypeOverride = null; // set accessor bodies return void
+            descriptorKind = "setter";
           } else {
             memberName = `${className}_${memberBaseName}`;
+            descriptorKind = "method";
           }
         }
         if (!selected.classMembers.has(memberName)) continue;
 
         try {
+          const descriptor = isCtorMember
+            ? undefined
+            : classShape.methods.find(
+                (candidate) =>
+                  candidate.name === memberBaseName && (candidate.memberKind ?? "method") === descriptorKind,
+              );
+          if (!isCtorMember && !descriptor) {
+            throw new IrInvariantError(
+              "selection-preparation-mismatch",
+              "build",
+              `ir/integration: selected class member ${memberName} has no exact ${descriptorKind} descriptor`,
+            );
+          }
+          const paramTypeOverrides = isCtorMember ? classShape.constructorParams : descriptor!.params;
+          const returnTypeOverride = isCtorMember ? undefined : descriptor!.returnType;
           // #3000-C: a constructor is NOT passed `__self` — it allocates the
           // instance itself (`constructorClassShape` drives the `class.alloc` +
           // `return this` synthesis in from-ast). Methods/accessors get the
@@ -453,8 +614,12 @@ export function compileIrPathFunctions(
             exported: false, // class members are not directly exported
             funcName: memberName,
             ...(isCtorMember
-              ? { constructorClassShape: classShape }
-              : { selfParam: { type: { kind: "class", shape: classShape } as IrType }, returnTypeOverride }),
+              ? { constructorClassShape: classShape, paramTypeOverrides }
+              : {
+                  selfParam: { type: { kind: "class", shape: classShape } as IrType },
+                  paramTypeOverrides,
+                  returnTypeOverride,
+                }),
             calleeTypes,
             importedCalls: loweringPlans?.importedCalls,
             topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
@@ -466,9 +631,11 @@ export function compileIrPathFunctions(
             // ArrayLiteral widening-escape proof in method bodies too.
             checker: ctx.checker,
           });
-          const mainErrors = verifyIrFunction(result.main);
+          const mainErrors = verifyBuiltArtifact(result.main, memberName, false);
           if (mainErrors.length > 0) {
-            for (const e of mainErrors) errors.push({ func: memberName, message: e.message, kind: "verify" });
+            for (const e of mainErrors) {
+              errors.push(invariantIntegrationFailure(memberName, "verifier-failure", "verify", e.message));
+            }
             continue;
           }
           // Class method bodies should not produce lifted closures in Phase B
@@ -476,20 +643,29 @@ export function compileIrPathFunctions(
           // bodies that capture `this`). Defensive re-verify if any appear.
           let anyLiftedFailed = false;
           for (const lifted of result.lifted) {
-            const liftedErrors = verifyIrFunction(lifted);
+            const liftedErrors = verifyBuiltArtifact(lifted, memberName, true);
             if (liftedErrors.length > 0) {
-              for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
+              for (const e of liftedErrors) {
+                errors.push(
+                  invariantIntegrationFailure(
+                    memberName,
+                    "verifier-failure",
+                    "verify",
+                    `synthetic artifact ${lifted.name}: ${e.message}`,
+                  ),
+                );
+              }
               anyLiftedFailed = true;
             }
           }
           if (anyLiftedFailed) continue;
 
-          built.push({ name: memberName, fn: result.main, classMember: true });
+          built.push({ name: memberName, ownerName: memberName, fn: result.main, classMember: true });
           for (const lifted of result.lifted) {
-            built.push({ name: lifted.name, fn: lifted, synthesized: true });
+            built.push({ name: lifted.name, ownerName: memberName, fn: lifted, synthesized: true });
           }
         } catch (e) {
-          errors.push({ func: memberName, message: e instanceof Error ? e.message : String(e), kind: "build" });
+          errors.push(caughtIntegrationFailure(memberName, e, "build"));
         }
       }
     }
@@ -519,22 +695,38 @@ export function compileIrPathFunctions(
   //     the #1789-adjacent collection note in declarations.ts; executing
   //     them would diverge from the legacy baseline).
   // -------------------------------------------------------------------------
-  if (moduleInitClaim) {
+  if (moduleInitClaim && !unsupportedHostDateOwners.has(MODULE_INIT_UNIT_NAME)) {
     try {
       if (!ctx.mod.functions.some((f) => f.name === "__module_init")) {
-        throw new Error("module-init: no legacy __module_init slot to patch (legacy collected no init statements)");
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: no legacy __module_init slot to patch (legacy collected no init statements)",
+        );
       }
       if (ctx.staticInitExprs.length > 0) {
-        throw new Error("module-init: static class initializers present — legacy body carries them");
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: static class initializers present — legacy body carries them",
+        );
       }
       if ((ctx.liveFuncBindingGlobals?.size ?? 0) > 0) {
-        throw new Error("module-init: live function-binding seeds present — legacy body carries them");
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: live function-binding seeds present — legacy body carries them",
+        );
       }
       const population = collectModuleInitPopulation(sourceFile);
       if (!ctx.wasi) {
         for (const s of population) {
           if (ts.isThrowStatement(s)) {
-            throw new Error("module-init: top-level throw is dropped by legacy outside WASI — keeping legacy body");
+            throw new IrUnsupportedError(
+              "module-init-legacy-coupling",
+              "build",
+              "module-init: top-level throw is dropped by legacy outside WASI — keeping legacy body",
+            );
           }
         }
       }
@@ -555,31 +747,43 @@ export function compileIrPathFunctions(
         allocRegistry,
         checker: ctx.checker,
       });
-      const mainErrors = verifyIrFunction(result.main);
+      const mainErrors = verifyBuiltArtifact(result.main, MODULE_INIT_UNIT_NAME, false);
       if (mainErrors.length > 0) {
-        for (const e of mainErrors) errors.push({ func: MODULE_INIT_UNIT_NAME, message: e.message, kind: "verify" });
+        for (const e of mainErrors) {
+          errors.push(invariantIntegrationFailure(MODULE_INIT_UNIT_NAME, "verifier-failure", "verify", e.message));
+        }
       } else {
         let anyLiftedFailed = false;
         for (const lifted of result.lifted) {
-          const liftedErrors = verifyIrFunction(lifted);
+          const liftedErrors = verifyBuiltArtifact(lifted, MODULE_INIT_UNIT_NAME, true);
           if (liftedErrors.length > 0) {
-            for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
+            for (const e of liftedErrors) {
+              errors.push(
+                invariantIntegrationFailure(
+                  MODULE_INIT_UNIT_NAME,
+                  "verifier-failure",
+                  "verify",
+                  `synthetic artifact ${lifted.name}: ${e.message}`,
+                ),
+              );
+            }
             anyLiftedFailed = true;
           }
         }
         if (!anyLiftedFailed) {
-          built.push({ name: MODULE_INIT_UNIT_NAME, fn: result.main, moduleInit: true });
+          built.push({
+            name: MODULE_INIT_UNIT_NAME,
+            ownerName: MODULE_INIT_UNIT_NAME,
+            fn: result.main,
+            moduleInit: true,
+          });
           for (const lifted of result.lifted) {
-            built.push({ name: lifted.name, fn: lifted, synthesized: true });
+            built.push({ name: lifted.name, ownerName: MODULE_INIT_UNIT_NAME, fn: lifted, synthesized: true });
           }
         }
       }
     } catch (e) {
-      errors.push({
-        func: MODULE_INIT_UNIT_NAME,
-        message: e instanceof Error ? e.message : String(e),
-        kind: "build",
-      });
+      errors.push(caughtIntegrationFailure(MODULE_INIT_UNIT_NAME, e, "build"));
     }
   }
 
@@ -591,27 +795,64 @@ export function compileIrPathFunctions(
   // -------------------------------------------------------------------------
 
   // 2a. Per-function hygiene (CF → DCE → simplifyCFG to fixpoint).
-  const afterHygiene: BuiltFn[] = [];
-  for (const entry of built) {
-    const optimized = runHygienePasses(entry.fn, allocRegistry);
-    const postErrors = verifyIrFunction(optimized);
-    if (postErrors.length > 0) {
-      for (const e of postErrors) {
-        errors.push({ func: entry.name, message: `post-hygiene verify: ${e.message}`, kind: "verify" });
-      }
-      continue;
+  const failedOwners = new Set<string>();
+  const markOwnerFailure = (
+    ownerName: string,
+    artifactName: string,
+    error: unknown,
+    stage: Exclude<IrPreparationStage, "select">,
+  ): void => {
+    if (failedOwners.has(ownerName)) return;
+    const classified = classifyIrFailure(error, stage);
+    const outcome: IrPreparationFailure =
+      artifactName === ownerName
+        ? classified
+        : { ...classified, detail: `synthetic artifact ${artifactName}: ${classified.detail}` };
+    errors.push(integrationFailure(ownerName, outcome));
+    failedOwners.add(ownerName);
+  };
+  const markOwnerInvariant = (
+    ownerName: string,
+    artifactName: string,
+    code: IrInvariantCode,
+    stage: Exclude<IrPreparationStage, "select">,
+    detail: string,
+  ): void => markOwnerFailure(ownerName, artifactName, new IrInvariantError(code, stage, detail), stage);
+  const failEveryOwner = (
+    entries: readonly BuiltFn[],
+    error: unknown,
+    stage: Exclude<IrPreparationStage, "select">,
+  ): void => {
+    for (const ownerName of new Set(entries.map((entry) => entry.ownerName))) {
+      markOwnerFailure(ownerName, ownerName, error, stage);
     }
-    // #1586: alloc-provenance gate (debug-only). A pass that loses provenance
-    // throws here at the same boundary that already catches malformed SSA.
-    assertAllocProvenance(optimized, allocRegistry);
-    afterHygiene.push({
-      name: entry.name,
-      fn: optimized,
-      synthesized: entry.synthesized,
-      classMember: entry.classMember,
-      moduleInit: entry.moduleInit,
-    });
+  };
+  const retainHealthyOwners = (entries: readonly BuiltFn[]): BuiltFn[] =>
+    entries.filter((entry) => !failedOwners.has(entry.ownerName));
+
+  const hygieneCandidates: BuiltFn[] = [];
+  for (const entry of built) {
+    try {
+      if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "hygiene-synthetic" && entry.synthesized) {
+        throw new Error("injected synthetic hygiene failure");
+      }
+      const optimized = runHygienePasses(entry.fn, allocRegistry);
+      const postErrors = verifyIrFunction(optimized);
+      if (postErrors.length > 0) {
+        throw new IrInvariantError(
+          "verifier-failure",
+          "verify",
+          `post-hygiene verify: ${postErrors.map((error) => error.message).join("; ")}`,
+          postErrors,
+        );
+      }
+      assertAllocProvenance(optimized, allocRegistry);
+      hygieneCandidates.push({ ...entry, fn: optimized });
+    } catch (error) {
+      markOwnerFailure(entry.ownerName, entry.name, error, "verify");
+    }
   }
+  let afterHygiene = retainHealthyOwners(hygieneCandidates);
 
   if (afterHygiene.length === 0) return { compiled, errors };
 
@@ -622,38 +863,71 @@ export function compileIrPathFunctions(
   // (inline/mono) preserve or alias the alloc ids, so an annotation written
   // here travels to the canonical site via the registry's alias merge.
   for (const entry of afterHygiene) {
-    analyzeEncoding(entry.fn, allocRegistry);
+    try {
+      analyzeEncoding(entry.fn, allocRegistry);
+    } catch (error) {
+      markOwnerFailure(entry.ownerName, entry.name, error, "verify");
+    }
   }
+  afterHygiene = retainHealthyOwners(afterHygiene);
+  if (afterHygiene.length === 0) return { compiled, errors };
 
   // 2b. Module-scope inlining (#1167b).
   const modIn: IrModule = { functions: afterHygiene.map((e) => e.fn) };
-  const modOut = inlineSmall(modIn, allocRegistry);
+  let modOut: IrModule;
+  try {
+    if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "inline") {
+      throw new Error("injected module inline failure");
+    }
+    modOut = inlineSmall(modIn, allocRegistry);
+    if (
+      modOut.functions.length !== afterHygiene.length ||
+      modOut.functions.some((fn, index) => fn.name !== afterHygiene[index]!.name)
+    ) {
+      throw new IrInvariantError(
+        "pass-output-mismatch",
+        "verify",
+        "inline pass changed function cardinality or identity",
+      );
+    }
+  } catch (error) {
+    failEveryOwner(afterHygiene, error, "verify");
+    return { compiled, errors };
+  }
 
   // 2c. Re-run hygiene on functions the inline pass actually rewrote; verify.
   const afterInline: BuiltFn[] = [];
   for (let i = 0; i < afterHygiene.length; i++) {
     const before = afterHygiene[i]!;
-    const after = modOut.functions[i]!;
-    const changed = after !== before.fn;
-    const final = changed ? runHygienePasses(after, allocRegistry) : after;
-    const verifyErrors = verifyIrFunction(final);
-    if (verifyErrors.length > 0) {
-      for (const e of verifyErrors) {
-        errors.push({ func: before.name, message: `post-inline verify: ${e.message}`, kind: "verify" });
+    try {
+      const after = modOut.functions[i]!;
+      const changed = after !== before.fn;
+      const final = changed ? runHygienePasses(after, allocRegistry) : after;
+      const verifyErrors = verifyIrFunction(final);
+      if (verifyErrors.length > 0) {
+        throw new IrInvariantError(
+          "verifier-failure",
+          "verify",
+          `post-inline verify: ${verifyErrors.map((error) => error.message).join("; ")}`,
+          verifyErrors,
+        );
       }
-      continue;
+      if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "provenance-synthetic" && before.synthesized) {
+        throw new IrInvariantError(
+          "allocation-provenance-failure",
+          "verify",
+          "injected synthetic allocation provenance failure",
+        );
+      }
+      assertAllocProvenance(final, allocRegistry);
+      afterInline.push({ ...before, fn: final });
+    } catch (error) {
+      markOwnerFailure(before.ownerName, before.name, error, "verify");
     }
-    assertAllocProvenance(final, allocRegistry);
-    afterInline.push({
-      name: before.name,
-      fn: final,
-      synthesized: before.synthesized,
-      classMember: before.classMember,
-      moduleInit: before.moduleInit,
-    });
   }
 
-  if (afterInline.length === 0) return { compiled, errors };
+  const healthyAfterInline = retainHealthyOwners(afterInline);
+  if (healthyAfterInline.length === 0) return { compiled, errors };
 
   // -------------------------------------------------------------------------
   // 2d. Monomorphize — specialize polymorphic callees across the module.
@@ -664,16 +938,98 @@ export function compileIrPathFunctions(
   // `ctx.mod.functions` and register it in `ctx.funcMap` so the Phase-3
   // lowerer's resolver can map the clone's `IrFuncRef` to a concrete index.
   // -------------------------------------------------------------------------
-  const monoIn: IrModule = { functions: afterInline.map((e) => e.fn) };
-  const monoResult = monomorphize(monoIn, allocRegistry);
-  const originalNames = new Set<string>(afterInline.map((e) => e.name));
+  const monoIn: IrModule = { functions: healthyAfterInline.map((e) => e.fn) };
+  let monoResult: ReturnType<typeof monomorphize>;
+  try {
+    if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "monomorphize") {
+      throw new Error("injected module monomorphize failure");
+    }
+    monoResult = monomorphize(monoIn, allocRegistry);
+  } catch (error) {
+    failEveryOwner(healthyAfterInline, error, "verify");
+    return { compiled, errors };
+  }
+  const originalNames = new Set<string>(healthyAfterInline.map((e) => e.name));
+  const afterInlineByName = new Map<string, BuiltFn>();
+  const ownerByArtifact = new Map<string, string>();
+  for (const entry of healthyAfterInline) {
+    afterInlineByName.set(entry.name, entry);
+    ownerByArtifact.set(entry.name, entry.ownerName);
+  }
+  for (const [cloneName, originName] of monoResult.cloneOrigins) {
+    const originOwner = ownerByArtifact.get(originName);
+    if (!originOwner) {
+      failEveryOwner(
+        healthyAfterInline,
+        new IrInvariantError(
+          "synthetic-owner-missing",
+          "verify",
+          `monomorphize clone ${cloneName} references unknown origin ${originName}`,
+        ),
+        "verify",
+      );
+      return { compiled, errors };
+    }
+    ownerByArtifact.set(cloneName, originOwner);
+  }
+  for (const fn of monoResult.module.functions) {
+    if (!ownerByArtifact.has(fn.name)) {
+      failEveryOwner(
+        healthyAfterInline,
+        new IrInvariantError(
+          "synthetic-owner-missing",
+          "verify",
+          `pass output ${fn.name} has no explicit source owner`,
+        ),
+        "verify",
+      );
+      return { compiled, errors };
+    }
+  }
 
   // -------------------------------------------------------------------------
   // 2e. Tagged-union representation pass (identity in V1 — see
   // `passes/tagged-unions.ts` for the scope note). Structurally wired so
   // follow-up extension work lands in a purpose-built module.
   // -------------------------------------------------------------------------
-  const modAfterTU = taggedUnions(monoResult.module);
+  let taggedResult: ReturnType<typeof runTaggedUnions>;
+  try {
+    if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "tagged-union") {
+      throw new Error("injected tagged-union pass failure");
+    }
+    taggedResult = runTaggedUnions(monoResult.module);
+  } catch (error) {
+    failEveryOwner(healthyAfterInline, error, "verify");
+    return { compiled, errors };
+  }
+  for (const error of taggedResult.errors) {
+    const ownerName = ownerByArtifact.get(error.func);
+    if (!ownerName) {
+      failEveryOwner(
+        healthyAfterInline,
+        new IrInvariantError(
+          "synthetic-owner-missing",
+          "verify",
+          `tagged-union failure for unknown artifact ${error.func}`,
+        ),
+        "verify",
+      );
+      return { compiled, errors };
+    }
+    markOwnerInvariant(
+      ownerName,
+      error.func,
+      "tagged-union-validation-failure",
+      "verify",
+      `block ${error.block}: ${error.message}`,
+    );
+  }
+  const modAfterTU: IrModule = {
+    functions: taggedResult.module.functions.filter((fn) => {
+      const owner = ownerByArtifact.get(fn.name);
+      return owner !== undefined && !failedOwners.has(owner);
+    }),
+  };
 
   // -------------------------------------------------------------------------
   // 2f. Re-run hygiene on any function whose reference changed across the
@@ -682,36 +1038,39 @@ export function compileIrPathFunctions(
   // (usually a no-op but cheap).
   // -------------------------------------------------------------------------
   const readyForLower: BuiltFn[] = [];
-  const afterInlineByName = new Map<string, BuiltFn>();
-  for (const e of afterInline) afterInlineByName.set(e.name, e);
 
   for (const fn of modAfterTU.functions) {
     const before = afterInlineByName.get(fn.name);
     const wasCloned = before === undefined;
-    const changed = wasCloned || fn !== before.fn;
-    const final = changed ? runHygienePasses(fn, allocRegistry) : fn;
-    const verifyErrors = verifyIrFunction(final);
-    if (verifyErrors.length > 0) {
-      for (const e of verifyErrors) {
-        errors.push({ func: fn.name, message: `post-mono verify: ${e.message}`, kind: "verify" });
+    const ownerName = ownerByArtifact.get(fn.name)!;
+    try {
+      const changed = wasCloned || fn !== before.fn;
+      const final = changed ? runHygienePasses(fn, allocRegistry) : fn;
+      const verifyErrors = verifyIrFunction(final);
+      if (verifyErrors.length > 0) {
+        throw new IrInvariantError(
+          "verifier-failure",
+          "verify",
+          `post-mono verify: ${verifyErrors.map((error) => error.message).join("; ")}`,
+          verifyErrors,
+        );
       }
-      continue;
+      assertAllocProvenance(final, allocRegistry);
+      readyForLower.push({
+        name: fn.name,
+        ownerName,
+        fn: final,
+        synthesized: before?.synthesized || wasCloned,
+        classMember: before?.classMember,
+        moduleInit: before?.moduleInit,
+      });
+    } catch (error) {
+      markOwnerFailure(ownerName, fn.name, error, "verify");
     }
-    assertAllocProvenance(final, allocRegistry);
-    // Slice 3 (#1169c): clones from monomorphize don't have synthesized
-    // info from the build phase; treat them as synthesized iff the
-    // pre-mono entry was synthesized OR the function is brand-new (a
-    // cloned specialization for a new param-type tuple).
-    readyForLower.push({
-      name: fn.name,
-      fn: final,
-      synthesized: before?.synthesized || wasCloned,
-      classMember: before?.classMember,
-      moduleInit: before?.moduleInit,
-    });
   }
 
-  if (readyForLower.length === 0) return { compiled, errors };
+  let healthyForLower = retainHealthyOwners(readyForLower);
+  if (healthyForLower.length === 0) return { compiled, errors };
 
   // -------------------------------------------------------------------------
   // 2g. Ownership + access-semantics analysis (#1587) — gated, default OFF.
@@ -736,13 +1095,54 @@ export function compileIrPathFunctions(
   const wantOwnership = ownershipAnalysisEnabled();
   const wantEscape = escapeAnalysisEnabled();
   if (wantOwnership || wantEscape) {
-    for (const entry of readyForLower) {
-      const ownershipResult = analyzeOwnership(entry.fn, allocRegistry);
-      if (wantEscape) {
-        analyzeEscape(entry.fn, allocRegistry, ownershipResult);
+    for (const entry of healthyForLower) {
+      try {
+        const ownershipResult = analyzeOwnership(entry.fn, allocRegistry);
+        if (wantEscape) analyzeEscape(entry.fn, allocRegistry, ownershipResult);
+      } catch (error) {
+        markOwnerFailure(entry.ownerName, entry.name, error, "verify");
       }
     }
   }
+  healthyForLower = retainHealthyOwners(healthyForLower);
+  if (healthyForLower.length === 0) return { compiled, errors };
+
+  // Every late-registration boundary is part of IR preparation. Unknown
+  // throws are invariants and must fan out to the active source owners rather
+  // than escaping or being silently demoted.
+  const runGlobalPreparation = (action: () => void): boolean => {
+    try {
+      action();
+      return true;
+    } catch (error) {
+      failEveryOwner(healthyForLower, error, "resolve");
+      return false;
+    }
+  };
+  if (!runGlobalPreparation(() => preregisterStringSupport(ctx, healthyForLower))) return { compiled, errors };
+  if (!runGlobalPreparation(() => preregisterHostDateSnapshotSupport(ctx, healthyForLower))) {
+    return { compiled, errors };
+  }
+  const iteratorFailures = preregisterIteratorSupport(ctx, healthyForLower);
+  for (const [ownerName, outcome] of iteratorFailures) {
+    if (failedOwners.has(ownerName)) continue;
+    errors.push(integrationFailure(ownerName, outcome));
+    failedOwners.add(ownerName);
+  }
+  healthyForLower = retainHealthyOwners(healthyForLower);
+  if (healthyForLower.length === 0) return { compiled, errors };
+  if (
+    !runGlobalPreparation(() => {
+      if (healthyForLower.some((entry) => entry.fn.funcKind === "generator")) addGeneratorImports(ctx);
+    })
+  ) {
+    return { compiled, errors };
+  }
+  if (!runGlobalPreparation(() => preregisterNativeStringHelpers(ctx, healthyForLower))) {
+    return { compiled, errors };
+  }
+  if (!runGlobalPreparation(() => preregisterExceptionSupport(ctx, healthyForLower))) return { compiled, errors };
+  if (!runGlobalPreparation(() => preregisterDynamicSupport(ctx, healthyForLower))) return { compiled, errors };
 
   // -------------------------------------------------------------------------
   // Register monomorphized clones in `ctx` — append a placeholder
@@ -750,7 +1150,7 @@ export function compileIrPathFunctions(
   // The placeholder body is overwritten with the real lowered body in the
   // Phase-3 loop below.
   // -------------------------------------------------------------------------
-  for (const entry of readyForLower) {
+  for (const entry of healthyForLower) {
     // Top-level (non-synthesized) functions already have a funcIdx
     // allocated by `compileDeclarations`. Skip them.
     if (originalNames.has(entry.name) && !entry.synthesized) continue;
@@ -794,8 +1194,7 @@ export function compileIrPathFunctions(
   // machinery — but we still walk the IR for symmetry and to keep the
   // resolver path uniform.
   // -------------------------------------------------------------------------
-  preregisterStringSupport(ctx, readyForLower);
-  preregisterHostDateSnapshotSupport(ctx, readyForLower);
+  // Registration completed transactionally above, before synthetic slots.
 
   // -------------------------------------------------------------------------
   // Slice 6 part 3 (#1182) — iterator host imports.
@@ -807,7 +1206,7 @@ export function compileIrPathFunctions(
   // BEFORE Phase 3 resolves IrFuncRef symbols. This pre-registration
   // matches `preregisterStringSupport`'s rationale.
   // -------------------------------------------------------------------------
-  preregisterIteratorSupport(ctx, readyForLower);
+  // Iterator registration completed transactionally above.
 
   // -------------------------------------------------------------------------
   // Slice 7a (#1169f) — pre-register generator host imports if any IR
@@ -822,9 +1221,7 @@ export function compileIrPathFunctions(
   // that don't trigger legacy detection (e.g. an IR test that
   // synthesises a generator without the AST scan running).
   // -------------------------------------------------------------------------
-  if (readyForLower.some((e) => e.fn.funcKind === "generator")) {
-    addGeneratorImports(ctx);
-  }
+  // Generator registration completed transactionally above.
   // -------------------------------------------------------------------------
   // Slice 6 part 4 (#1183) — native-string helpers (notably __str_charAt).
   //
@@ -834,7 +1231,7 @@ export function compileIrPathFunctions(
   // resolves the funcref. The helper itself is idempotent, but calling
   // it eagerly avoids late-import shifts during Phase 3 emission.
   // -------------------------------------------------------------------------
-  preregisterNativeStringHelpers(ctx, readyForLower);
+  // Native-string registration completed transactionally above.
 
   // -------------------------------------------------------------------------
   // Slice 9 (#1169h) — pre-register the shared `__exn` exception tag if
@@ -843,7 +1240,7 @@ export function compileIrPathFunctions(
   // pre-registering here keeps the resolver path uniform and matches
   // the pattern used for other lazy registrations.
   // -------------------------------------------------------------------------
-  preregisterExceptionSupport(ctx, readyForLower);
+  // Exception registration completed transactionally above.
 
   // -------------------------------------------------------------------------
   // #2949 slice 3 — pre-register the dynamic box/unbox/tag.test backing
@@ -856,7 +1253,7 @@ export function compileIrPathFunctions(
   // idempotent, and `addUnionImports` performs the defined-function shift
   // fix-up itself for anything already compiled.
   // -------------------------------------------------------------------------
-  preregisterDynamicSupport(ctx, readyForLower);
+  // Dynamic registration completed transactionally above.
 
   // -------------------------------------------------------------------------
   // Phase 3 — Lower: translate each IrFunction to Wasm and install in ctx.
@@ -870,54 +1267,68 @@ export function compileIrPathFunctions(
   // post-shift (the shift pass updates `funcMap` and call ops in bodies but
   // not the helpers map), so we resolve names against `ctx.mod.functions`
   // directly to pick up the current absolute index.
-  const stringBackend = computeStringBackend(ctx);
-  // Build the resolver in two steps so the resolver and the
-  // ObjectStructRegistry / ClosureStructRegistry can refer to each
-  // other without a circular direct reference: the registries need
-  // `lowerIrTypeToValType` (which calls `resolver.resolveString` /
-  // `resolveObject` / `resolveClosure`), and the resolver delegates
-  // back to the registries. We hand the resolver `Deferred*Resolver`
-  // shells whose `resolve` callbacks are filled in after the
-  // registries exist.
-  const deferredObj: DeferredObjectResolver = {
-    resolve: (_shape: IrObjectShape) => null,
+  let resolver: IrLowerResolver;
+  try {
+    const stringBackend = computeStringBackend(ctx);
+    // Build the resolver in two steps so the resolver and the
+    // ObjectStructRegistry / ClosureStructRegistry can refer to each
+    // other without a circular direct reference: the registries need
+    // `lowerIrTypeToValType` (which calls `resolver.resolveString` /
+    // `resolveObject` / `resolveClosure`), and the resolver delegates
+    // back to the registries. We hand the resolver `Deferred*Resolver`
+    // shells whose `resolve` callbacks are filled in after the
+    // registries exist.
+    const deferredObj: DeferredObjectResolver = {
+      resolve: (_shape: IrObjectShape) => null,
+    };
+    const deferredCl: DeferredClosureResolver = {
+      resolveBase: () => null,
+      resolveSubtype: () => null,
+    };
+    const deferredCell: DeferredRefCellResolver = {
+      resolve: () => null,
+    };
+    const deferredClass: DeferredClassResolver = {
+      resolve: () => null,
+    };
+    resolver = makeResolver(ctx, unionRegistry, stringBackend, deferredObj, deferredCl, deferredCell, deferredClass);
+    const resolverInjection = process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE;
+    if (resolverInjection === "function") resolver.resolveFunc({ kind: "func", name: "__injected_missing_func" });
+    if (resolverInjection === "global") resolver.resolveGlobal({ kind: "global", name: "__injected_missing_global" });
+    if (resolverInjection === "type") resolver.resolveType({ kind: "type", name: "__injected_missing_type" });
+    const objectRegistry = new ObjectStructRegistry(ctx, (t) => lowerIrTypeToValType(t, resolver, "<obj-registry>"));
+    deferredObj.resolve = (shape) => objectRegistry.resolve(shape);
+    const closureRegistry = new ClosureStructRegistry(ctx, (t) =>
+      lowerIrTypeToValType(t, resolver, "<closure-registry>"),
+    );
+    deferredCl.resolveBase = (sig) => closureRegistry.resolveBase(sig);
+    deferredCl.resolveSubtype = (sig, fields) => closureRegistry.resolveSubtype(sig, fields);
+    const refCellRegistry = new RefCellRegistry(ctx);
+    deferredCell.resolve = (inner) => refCellRegistry.resolve(inner);
+    // Slice 4 (#1169d): the class registry is a thin lookup over the
+    // legacy class-collection state — `ctx.structMap`, `ctx.structFields`,
+    // and `ctx.funcMap` carry everything we need.
+    const classRegistry = new ClassRegistry(ctx);
+    deferredClass.resolve = (shape) => classRegistry.resolve(shape);
+  } catch (error) {
+    failEveryOwner(healthyForLower, error, "resolve");
+    return { compiled, errors };
+  }
+
+  type PendingPatch = {
+    readonly entry: BuiltFn;
+    readonly funcIdx: number;
+    readonly existing: NonNullable<ReturnType<typeof definedFuncAt>>;
+    readonly wasmFunc: ReturnType<typeof lowerIrFunctionToWasm>["func"];
+    readonly finalBody: Instr[];
   };
-  const deferredCl: DeferredClosureResolver = {
-    resolveBase: () => null,
-    resolveSubtype: () => null,
-  };
-  const deferredCell: DeferredRefCellResolver = {
-    resolve: () => null,
-  };
-  const deferredClass: DeferredClassResolver = {
-    resolve: () => null,
-  };
-  const resolver = makeResolver(
-    ctx,
-    unionRegistry,
-    stringBackend,
-    deferredObj,
-    deferredCl,
-    deferredCell,
-    deferredClass,
-  );
-  const objectRegistry = new ObjectStructRegistry(ctx, (t) => lowerIrTypeToValType(t, resolver, "<obj-registry>"));
-  deferredObj.resolve = (shape) => objectRegistry.resolve(shape);
-  const closureRegistry = new ClosureStructRegistry(ctx, (t) =>
-    lowerIrTypeToValType(t, resolver, "<closure-registry>"),
-  );
-  deferredCl.resolveBase = (sig) => closureRegistry.resolveBase(sig);
-  deferredCl.resolveSubtype = (sig, fields) => closureRegistry.resolveSubtype(sig, fields);
-  const refCellRegistry = new RefCellRegistry(ctx);
-  deferredCell.resolve = (inner) => refCellRegistry.resolve(inner);
-  // Slice 4 (#1169d): the class registry is a thin lookup over the
-  // legacy class-collection state — `ctx.structMap`, `ctx.structFields`,
-  // and `ctx.funcMap` carry everything we need.
-  const classRegistry = new ClassRegistry(ctx);
-  deferredClass.resolve = (shape) => classRegistry.resolve(shape);
-  for (const entry of readyForLower) {
+  const pendingPatches: PendingPatch[] = [];
+  for (const entry of healthyForLower) {
     const name = entry.name;
     try {
+      if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "lower-synthetic" && entry.synthesized) {
+        throw new Error("injected synthetic lower failure");
+      }
       // (#3142 Slice 2) The module-init unit's slot is the legacy
       // `__module_init` function — located by NAME (it is never in
       // `ctx.funcMap`; the slot was pushed directly by compileDeclarations).
@@ -928,14 +1339,20 @@ export function compileIrPathFunctions(
           })()
         : ctx.funcMap.get(name);
       if (funcIdx === undefined) {
-        errors.push({ func: name, message: `no funcIdx allocated for ${name}` });
+        markOwnerInvariant(entry.ownerName, name, "missing-function-slot", "patch", `no funcIdx allocated for ${name}`);
         continue;
       }
       // #1916 S2 — definedFuncAt/replaceDefinedFuncAt are the positional
       // read/write chokepoints (func-space.ts).
       const existing = definedFuncAt(ctx, funcIdx);
       if (!existing) {
-        errors.push({ func: name, message: `funcIdx ${funcIdx} out of local range for ${name}` });
+        markOwnerInvariant(
+          entry.ownerName,
+          name,
+          "missing-function-slot",
+          "patch",
+          `funcIdx ${funcIdx} out of local range for ${name}`,
+        );
         continue;
       }
 
@@ -964,10 +1381,13 @@ export function compileIrPathFunctions(
       // dedups on shape, so the IR-lowered void unit lands on the same
       // index; a mismatch means the lowering went wrong — keep legacy.
       if ((entry.classMember || entry.moduleInit) && wasmFunc.typeIdx !== existing.typeIdx) {
-        errors.push({
-          func: name,
-          message: `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
-        });
+        markOwnerInvariant(
+          entry.ownerName,
+          name,
+          "abi-type-index-mismatch",
+          "patch",
+          `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
+        );
         continue;
       }
       // Tail-call optimization parity with the legacy AST path (#602): the IR
@@ -995,40 +1415,47 @@ export function compileIrPathFunctions(
           finalBody.pop();
         }
         if (bodyContainsReturnClassOp(finalBody)) {
-          errors.push({
-            func: name,
-            message:
-              "module-init body contains a non-trailing return-class op — appended init epilogues would be skipped; keeping legacy body",
-            kind: "lower",
-          });
+          markOwnerInvariant(
+            entry.ownerName,
+            name,
+            "abi-type-index-mismatch",
+            "lower",
+            "module-init body contains a non-trailing return-class op — appended init epilogues would be skipped; keeping legacy body",
+          );
           continue;
         }
       } else {
         finalBody = applyIrTailCalls(ctx, wasmFunc.body, wasmFunc.typeIdx);
       }
-      replaceDefinedFuncAt(ctx, funcIdx, {
-        name: existing.name,
-        typeIdx: wasmFunc.typeIdx,
-        locals: wasmFunc.locals,
-        body: finalBody,
-        exported: existing.exported,
-      });
-      compiled.push(name);
+      pendingPatches.push({ entry, funcIdx, existing, wasmFunc, finalBody });
     } catch (e) {
-      errors.push({
-        func: name,
-        message: e instanceof Error ? e.message : String(e),
-        // (#2134) "emission-schedule verify" marks a failure of the
-        // independent schedule checker in lower.ts — classify it "verify" so
-        // it is a HARD failure under CI/test (`irVerifierHardFailureEnabled`)
-        // while remaining a demote-to-legacy warning in production.
-        kind:
-          e instanceof Error && e.message.includes("backend legality failed")
-            ? "backend-legality"
-            : e instanceof Error && e.message.includes("emission-schedule verify")
-              ? "verify"
-              : "lower",
-      });
+      markOwnerFailure(entry.ownerName, name, e, "lower");
+    }
+  }
+
+  // Patch only after every artifact lowered successfully. A lifted/clone
+  // failure invalidates its whole source owner, including an already-lowered
+  // main artifact, so the ledger can never report emitted+fatal for one row.
+  for (const patch of pendingPatches) {
+    if (failedOwners.has(patch.entry.ownerName)) continue;
+    replaceDefinedFuncAt(ctx, patch.funcIdx, {
+      name: patch.existing.name,
+      typeIdx: patch.wasmFunc.typeIdx,
+      locals: patch.wasmFunc.locals,
+      body: patch.finalBody,
+      exported: patch.existing.exported,
+    });
+    compiled.push(patch.entry.name);
+  }
+
+  const dropTerminal = process.env.JS2WASM_TEST_DROP_IR_TERMINAL;
+  if (dropTerminal) {
+    const owner = dropTerminal === "1" ? healthyForLower[0]?.ownerName : dropTerminal;
+    if (owner) {
+      return {
+        compiled: compiled.filter((name) => name !== owner),
+        errors: errors.filter((error) => error.func !== owner),
+      };
     }
   }
 
@@ -1064,18 +1491,40 @@ function bodyContainsReturnClassOp(body: readonly Instr[]): boolean {
 }
 
 /** Resolve a checker-owned module declaration to its exact legacy slot. */
-function resolveModuleBindingGlobal(
-  ctx: CodegenContext,
-  identity: IrModuleBindingIdentity,
-): ModuleBindingGlobal | undefined {
+function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindingIdentity): ModuleBindingGlobal {
   const declaration = identity.declaration;
-  if (!ts.isIdentifier(declaration.name)) return undefined;
+  if (!ts.isIdentifier(declaration.name)) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "build",
+      "module-init: a supported binding identity no longer has an identifier declaration",
+    );
+  }
   const name = declaration.name.text;
-  if (!ctx.moduleGlobals.has(name)) return undefined;
+  if (!ctx.moduleGlobals.has(name)) {
+    throw new IrInvariantError(
+      "unknown-global-ref",
+      "build",
+      `module-init: supported binding '${name}' is absent from the legacy module-global registry`,
+    );
+  }
 
   const globalName = `__mod_${name}`;
   const global = ctx.mod.globals.find((candidate) => candidate.name === globalName);
-  if (!global || !global.mutable) return undefined;
+  if (!global) {
+    throw new IrInvariantError(
+      "unknown-global-ref",
+      "build",
+      `module-init: legacy module-global registry contains '${name}' but ${globalName} is missing`,
+    );
+  }
+  if (!global.mutable) {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `module-init: legacy global ${globalName} is immutable but IR module bindings require a writable slot`,
+    );
+  }
 
   let type: IrType;
   let storageKind: "f64" | "i32" | "externref";
@@ -1089,12 +1538,24 @@ function resolveModuleBindingGlobal(
       storageKind = "i32";
       break;
     case "extern":
-      if (!ctx.externClasses.has(identity.valueKind.className)) return undefined;
+      if (!ctx.externClasses.has(identity.valueKind.className)) {
+        throw new IrInvariantError(
+          "unknown-type-ref",
+          "build",
+          `module-init: extern binding '${name}' references unregistered class ${identity.valueKind.className}`,
+        );
+      }
       type = { kind: "extern", className: identity.valueKind.className };
       storageKind = "externref";
       break;
   }
-  if (global.type.kind !== storageKind) return undefined;
+  if (global.type.kind !== storageKind) {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `module-init: ${globalName} uses legacy ${global.type.kind} storage but IR resolved ${storageKind}`,
+    );
+  }
 
   return {
     globalName,
@@ -1119,16 +1580,29 @@ function buildModuleBindingsMap(
     if (!ts.isVariableStatement(stmt)) continue;
     for (const d of stmt.declarationList.declarations) {
       if (!ts.isIdentifier(d.name)) {
-        throw new Error("module-init: top-level destructuring declaration not in Slice 2 scope");
-      }
-      const name = d.name.text;
-      const identity = resolveModuleBinding(d.name);
-      const binding = identity ? resolveModuleBindingGlobal(ctx, identity) : undefined;
-      if (!binding) {
-        throw new Error(
-          `module-init: top-level binding '${name}' has no supported direct legacy global — keeping legacy body`,
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: top-level destructuring has no one-to-one legacy global mapping",
         );
       }
+      const name = d.name.text;
+      const inspected = resolveModuleBinding.inspectDirectBinding(d.name);
+      if (inspected.kind === "unsupported") {
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          `module-init: top-level binding '${name}' has no supported legacy storage representation`,
+        );
+      }
+      if (inspected.kind === "not-direct") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `module-init: declaration '${name}' no longer resolves to the direct top-level binding selected for this unit`,
+        );
+      }
+      const binding = resolveModuleBindingGlobal(ctx, inspected.identity);
       map.set(name, binding);
     }
   }
@@ -1630,6 +2104,13 @@ function makeResolver(
   let dynamicLoweringMemo: IrDynamicLowering | null | undefined;
   return {
     resolveFunc(ref: IrFuncRef): number {
+      if (process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE === "function") {
+        throw new IrInvariantError(
+          "unknown-function-ref",
+          "lower",
+          `injected unknown function ref through resolver (${ref.name})`,
+        );
+      }
       // #2945 — `%` lowers to a call of the Wasm-native exact-fmod helper.
       // Materialize it on demand: `ensureFmod` is idempotent (funcMap-cached)
       // and appends a DEFINED function (never an import), so no existing
@@ -1718,16 +2199,34 @@ function makeResolver(
       // host import rather than a defined helper.
       const helperIdx = ctx.nativeStrHelpers.get(ref.name);
       if (helperIdx !== undefined) return helperIdx;
-      throw new Error(`ir/integration: unknown function ref "${ref.name}"`);
+      throw new IrInvariantError("unknown-function-ref", "lower", `ir/integration: unknown function ref "${ref.name}"`);
     },
     resolveGlobal(ref: IrGlobalRef): number {
+      if (process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE === "global") {
+        throw new IrInvariantError(
+          "unknown-global-ref",
+          "lower",
+          `injected unknown global ref through resolver (${ref.name})`,
+        );
+      }
       const localIdx = ctx.mod.globals.findIndex((g) => g.name === ref.name);
-      if (localIdx < 0) throw new Error(`ir/integration: unknown global ref "${ref.name}"`);
+      if (localIdx < 0) {
+        throw new IrInvariantError("unknown-global-ref", "lower", `ir/integration: unknown global ref "${ref.name}"`);
+      }
       return ctx.numImportGlobals + localIdx;
     },
     resolveType(ref: IrTypeRef): number {
+      if (process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE === "type") {
+        throw new IrInvariantError(
+          "unknown-type-ref",
+          "lower",
+          `injected unknown type ref through resolver (${ref.name})`,
+        );
+      }
       const idx = ctx.mod.types.findIndex((t) => "name" in t && (t as { name?: string }).name === ref.name);
-      if (idx < 0) throw new Error(`ir/integration: unknown type ref "${ref.name}"`);
+      if (idx < 0) {
+        throw new IrInvariantError("unknown-type-ref", "lower", `ir/integration: unknown type ref "${ref.name}"`);
+      }
       return idx;
     },
     internFuncType(type: FuncTypeDef): number {
@@ -1970,6 +2469,8 @@ function makeResolver(
 
 interface BuiltFnRef {
   readonly fn: IrFunction;
+  readonly ownerName?: string;
+  readonly name?: string;
 }
 
 interface HostDateImportSpec {
@@ -2162,7 +2663,10 @@ function instrUsesStrings(instr: IrInstr): boolean {
  * `addIteratorImports` is idempotent on `ctx.funcMap.has("__iterator")`,
  * so it's safe to call repeatedly.
  */
-function preregisterIteratorSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+function preregisterIteratorSupport(
+  ctx: CodegenContext,
+  fns: readonly BuiltFnRef[],
+): ReadonlyMap<string, IrPreparationFailure> {
   const usesIter = (instr: IrInstr): boolean => {
     switch (instr.kind) {
       case "iter.new":
@@ -2190,28 +2694,42 @@ function preregisterIteratorSupport(ctx: CodegenContext, fns: readonly BuiltFnRe
         return false;
     }
   };
+  const users: BuiltFnRef[] = [];
   for (const entry of fns) {
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
         if (usesIter(instr)) {
-          if (ctx.standalone || ctx.wasi) {
-            ctx.errors.push({
-              message:
-                "Codegen error: #681 standalone/WASI for-of over this iterable still requires the JS-host iterator protocol; " +
-                "known array for-of lowers to an index loop, but generic/custom iterables need a future pure-Wasm Iterator Record path " +
-                "(ECMA-262 §7.4 IteratorStepValue/IteratorClose, §14.7.5 for-of).",
-              line: 0,
-              column: 0,
-              severity: "error",
-            });
-            return;
-          }
-          addIteratorImports(ctx);
-          return;
+          users.push(entry);
+          break;
         }
       }
     }
   }
+  if (users.length === 0) return new Map();
+  const failures = new Map<string, IrPreparationFailure>();
+  const owners = new Set(users.map((entry) => entry.ownerName ?? entry.name ?? entry.fn.name));
+  if (ctx.standalone || ctx.wasi) {
+    for (const owner of owners) {
+      failures.set(owner, {
+        kind: "unsupported",
+        code: "late-preparation-unsupported",
+        stage: "resolve",
+        detail:
+          "standalone/WASI generic iteration requires the JS-host iterator protocol; a pure-Wasm Iterator Record path is not available",
+      });
+    }
+    return failures;
+  }
+  try {
+    if (process.env.JS2WASM_TEST_INJECT_IR_ITERATOR_REGISTRATION_THROW === "1") {
+      throw new Error("injected iterator registration failure");
+    }
+    addIteratorImports(ctx);
+  } catch (error) {
+    const failure = classifyIrFailure(error, "resolve");
+    for (const owner of owners) failures.set(owner, failure);
+  }
+  return failures;
 }
 
 // ---------------------------------------------------------------------------

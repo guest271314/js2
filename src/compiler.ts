@@ -413,17 +413,37 @@ function remapDiagnosticPosition(
     return diag.file.getLineAndCharacterOfPosition(processedStart);
   }
   const origOffset = Math.min(Math.max(0, positionMap.toInputOffset(processedStart)), originalSource.length);
+  return originalLineAndCharacter(originalSource, origOffset);
+}
+
+function originalLineAndCharacter(source: string, offset: number): { line: number; character: number } {
   // Resolve line/column from the original text. Counting newlines is O(offset)
   // but diagnostics are few; a shared line-start index would be premature here.
   let line = 0;
   let lastNewline = -1;
-  for (let i = 0; i < origOffset; i++) {
-    if (originalSource.charCodeAt(i) === 10 /* \n */) {
+  for (let i = 0; i < offset; i++) {
+    if (source.charCodeAt(i) === 10 /* \n */) {
       line++;
       lastNewline = i;
     }
   }
-  return { line, character: origOffset - lastNewline - 1 };
+  return { line, character: offset - lastNewline - 1 };
+}
+
+/** Map opt-in IR ledger locations through the same preprocessor map as diagnostics. */
+function remapIrOutcomePositions(
+  outcomes: NonNullable<CompileResult["irOutcomes"]>,
+  processedFile: ts.SourceFile,
+  originalSource: string,
+  positionMap: PositionMap,
+): NonNullable<CompileResult["irOutcomes"]> {
+  if (positionMap.isIdentity) return outcomes;
+  return outcomes.map((outcome) => {
+    const processedOffset = processedFile.getPositionOfLineAndCharacter(outcome.line - 1, outcome.column - 1);
+    const originalOffset = Math.min(Math.max(0, positionMap.toInputOffset(processedOffset)), originalSource.length);
+    const original = originalLineAndCharacter(originalSource, originalOffset);
+    return { ...outcome, line: original.line + 1, column: original.character + 1 };
+  });
 }
 
 function isGuardedNullablePrimitiveDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
@@ -644,8 +664,13 @@ function detectRawWasiImports(source: string): { rawWasi: Set<string>; memAccess
   return { rawWasi, memAccessors };
 }
 
-/** The canonical empty failure result. #1927 — replaces the inline copies. */
-function failResult(errors: CompileError[]): CompileResult {
+type FailureTelemetry = Pick<
+  CompileResult,
+  "fallbackCounts" | "irPostClaimErrors" | "irCompiledFuncs" | "irFirstSkipped" | "irOutcomes"
+>;
+
+/** The canonical failure result, retaining any telemetry codegen already produced. */
+function failResult(errors: CompileError[], telemetry: Partial<FailureTelemetry> = {}): CompileResult {
   return {
     binary: new Uint8Array(0),
     wat: "",
@@ -657,6 +682,7 @@ function failResult(errors: CompileError[]): CompileResult {
     imports: [],
     hasMain: false,
     hasTopLevelStatements: false,
+    ...telemetry,
   };
 }
 
@@ -763,6 +789,8 @@ function buildCodegenOptions(
     // revert. Forwarded to ALL drivers now (#1927); `generateMultiModule`
     // ignores it until #2138 wires the IR overlay into the multi generator.
     experimentalIR: options.experimentalIR !== false,
+    // #3519 — opt-in typed terminal ledger; routing remains hybrid.
+    trackIrOutcomes: options.trackIrOutcomes === true,
     // (#2973) Forward the IR-first opt-out. The eval / new Function host shims
     // set this so a post-claim IR-first hard error in a sub-compile is not
     // swallowed by the shim's fallback catch into a silent wrong answer.
@@ -964,6 +992,8 @@ function runPipeline(input: PipelineInput): CompileResult {
   let capturedIrCompiledFuncs: import("./index.js").CompileResult["irCompiledFuncs"];
   // (#2138) IR-first skip telemetry — populated when IR-first is active (default as of #3143).
   let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
+  // #3519 — retain terminal outcomes even when a later codegen/emit check fails.
+  let capturedIrOutcomes: import("./index.js").CompileResult["irOutcomes"];
   try {
     if (useLinear) {
       mod = multiAst
@@ -1012,6 +1042,7 @@ function runPipeline(input: PipelineInput): CompileResult {
         }
       }
       capturedIrCompiledFuncs = result.irCompiledFuncs;
+      capturedIrOutcomes = result.irOutcomes;
       capturedIrFirstSkipped = multiAst
         ? undefined // #2138 M0 multi overlay is compile-twice only; it never enables IR-first body skipping
         : (result as ReturnType<typeof generateModule>).irFirstSkipped;
@@ -1028,7 +1059,13 @@ function runPipeline(input: PipelineInput): CompileResult {
       }
       // #1921 — gate on severity, not a "Codegen error:" message prefix.
       if (result.errors.some(isFatalCodegenDiagnostic)) {
-        return failResult(errors);
+        return failResult(errors, {
+          fallbackCounts: capturedFallbackCounts,
+          irPostClaimErrors: capturedIrPostClaimErrors,
+          irCompiledFuncs: capturedIrCompiledFuncs,
+          irFirstSkipped: capturedIrFirstSkipped,
+          irOutcomes: capturedIrOutcomes,
+        });
       }
     }
   } catch (e) {
@@ -1041,7 +1078,13 @@ function runPipeline(input: PipelineInput): CompileResult {
       `Codegen error: ${e instanceof Error ? e.message : String(e)}`,
       "error",
     );
-    return failResult(errors);
+    return failResult(errors, {
+      fallbackCounts: capturedFallbackCounts,
+      irPostClaimErrors: capturedIrPostClaimErrors,
+      irCompiledFuncs: capturedIrCompiledFuncs,
+      irFirstSkipped: capturedIrFirstSkipped,
+      irOutcomes: capturedIrOutcomes,
+    });
   }
 
   // Step 2b: Apply C ABI transformations if requested (linear target only).
@@ -1084,7 +1127,13 @@ function runPipeline(input: PipelineInput): CompileResult {
       `Binary emit error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
       "error",
     );
-    return failResult(errors);
+    return failResult(errors, {
+      fallbackCounts: capturedFallbackCounts,
+      irPostClaimErrors: capturedIrPostClaimErrors,
+      irCompiledFuncs: capturedIrCompiledFuncs,
+      irFirstSkipped: capturedIrFirstSkipped,
+      irOutcomes: capturedIrOutcomes,
+    });
   }
 
   // Step 3b: Optimize — applied by the async entry adapters via applyOptimize,
@@ -1137,6 +1186,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     irPostClaimErrors: capturedIrPostClaimErrors,
     irCompiledFuncs: capturedIrCompiledFuncs,
     irFirstSkipped: capturedIrFirstSkipped,
+    irOutcomes: capturedIrOutcomes,
   };
 }
 
@@ -1460,7 +1510,7 @@ export function compileSourceSync(
   const emitSourceMap = options.sourceMap === true;
   const sourcesContent = new Map<string, string>();
   sourcesContent.set(effectiveFileName, source);
-  return runPipeline({
+  const result = runPipeline({
     userSourceFiles: [ast.sourceFile],
     entryAst: ast,
     multiAst: null,
@@ -1480,6 +1530,10 @@ export function compileSourceSync(
     runEarlyErrorsOnAllowJs: true,
     options,
   });
+  if (result.irOutcomes) {
+    result.irOutcomes = remapIrOutcomePositions(result.irOutcomes, ast.sourceFile, source, positionMap);
+  }
+  return result;
 }
 
 /**

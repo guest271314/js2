@@ -87,21 +87,72 @@ Updated (not new): [#1524](../1524-test262-harness-resizable-buffer-ctors-fixtur
 
 Investigated, no new issue needed: #2940's default-lane 1,496-record "vacuous harness-wrapper callback" tag is the **intended** honest reclassification (not a regression) — already tracked for policy ratchet by #3001/#3004. Most standalone-lane uncited patterns (`Cannot convert object to primitive`, `illegal cast` in iterator dstr, `Property description must be an object`, etc.) map cleanly onto existing open issues (#1900/#2733/#2042/#2864/#2875) — counts noted in harvest, no duplicates filed.
 
-## 2026-06-30 — IR front-end migration ratchet (queued `sprint: current`)
+## 2026-07-21 — IR-only default and direct-front-end retirement (current priority)
 
-Direct-AST→Wasm → typed-IR migration, sliced by `IrFallbackReason` bucket. Epic
-[#2855](../2855-ir-frontend-migration-ratchet-buckets-to-zero.md) remains the
-IR-only retirement owner. Its original corpus-ratchet children are complete:
+The explicit completion directive supersedes the June 30 demotion of IR work.
+The active program is
+[#3518](../3518-ir-only-default-and-direct-frontend-retirement.md), a staged
+prepare-before-emit migration that remains **in-progress**, rather than another
+fallback-count sweep:
+
+- [#3529](../3529-ir-r0-typed-producer-equivalence-parity.md) — **done
+  2026-07-21**: restored full-equivalence parity at 1,608 passing / 35 failing
+  against 36 committed known failures. One baseline-known case now passes,
+  there are zero new regressions, and the baseline is unchanged.
+- [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **done
+  2026-07-21**: landed typed emitted/Unsupported/Invariant outcomes and the
+  honest gate. Hybrid is green at 5/5 entries, 37 terminal units, 31 emitted IR
+  bodies, 6 Unsupported, 0 Invariants, and 37 legacy bodies; strict is
+  intentionally red on the six typed blockers plus legacy emission.
+- [#3520](../3520-ir-r1-source-qualified-identity-program-abi.md) — **ready,
+  critical, current**: R1 source-qualified identities and whole-program ABI;
+  this is the next executable retirement slice.
+- [#3521](../3521-ir-r2-prepared-program-free-function-compile-once.md) —
+  **blocked, critical, current**: R2 Prepared-program ownership and compile-once
+  top-level free functions; depends on #3520.
+- [#3522](../3522-ir-r3-classes-closures-compile-once.md) — **blocked,
+  critical, current**: R3 exhaustive classes/members/closures and support-unit
+  ownership; depends on #3521.
+- [#3523](../3523-ir-r4-module-init-compile-once.md) — **blocked, critical,
+  current**: R4 typed ordered module-init and exactly-once startup; depends on
+  #3521 and #3522.
+- [#3525](../3525-ir-r5-whole-program-multi-source-ownership.md) — **blocked,
+  critical, current**: R5 one Prepared owner/ABI/init plan across single- and
+  multi-source/M0; depends on #3520–#3523.
+- [#3526](../3526-ir-r6-semantic-runtime-contract.md) — **blocked, critical,
+  current**: R6 typed intrinsic/runtime-feature/host-capability contract,
+  pre-lowering manifest freeze, and measured provider-family slices; depends
+  on #3521.
+- [#3527](../3527-ir-r7-ast-free-async-plan.md) — **blocked, critical,
+  current**: R7 AST-free suspension plans and canonical async ABI through the
+  existing frame engine; depends on #3522, #3525, and #3526.
+- [#3528](../3528-ir-r8-shared-linear-prepared-program.md) — **blocked,
+  critical, current**: R8 linear consumption of the exact shared Prepared
+  program with zero direct AST lowering; depends on #3525–#3527.
+- [#3090](../3090-shrink-codegen-delete-dormant-legacy-handlers.md) — blocked
+  R10 deletion ledger. The remaining ~59,676 frontend fn-lines are still
+  reachable and may be deleted only after #3518 R9.
+- [#2950](../2950-ir-first-default-flip-retire-compile-twice.md) — completed
+  historical default-flip milestone; its undelivered retirement scope moved to
+  #3518.
+- [#3142](../3142-ir-module-level-statement-adoption.md) — completed
+  module-init claim/patch milestone; compile-once module ownership remains R4.
+
+The earlier corpus-ratchet epic
+[#2855](../2855-ir-frontend-migration-ratchet-buckets-to-zero.md) is now closed
+as the narrow function-level milestone. Its children are complete:
 
 - [#2856](../2856-ir-body-shape-rejected-to-zero.md) — `body-shape-rejected` 31 → 0 — **done 2026-07-21**.
 - [#2857](../2857-ir-class-method-residual-to-zero.md) — `class-method` 6 → 0 — done.
 - [#2858](../2858-ir-call-graph-closure-to-zero.md) — `call-graph-closure` 7 → 0 — done.
 - [#2859](../2859-ir-param-type-not-resolvable-to-zero.md) — `param-type-not-resolvable` 1 → 0 — done.
 
-Remaining measured residuals belong to the wider IR-only program: deferred
-`async-function` (4) → #1373b and module-level `body-shape-rejected` (1) for the
-Algorithms Map initializer. Corpus-zero reasons remain non-strict until their
-source-language coverage is genuinely complete.
+The final R0 lane records six typed Unsupported units: `async-function` (2),
+`call-graph-closure` (1), `body-shape` (1), and static class members (2).
+Corpus-zero reasons remain non-strict until their source-language coverage is
+genuinely complete. Classes, module init, M0, linear, runtime entry points,
+fail-closed defaulting, and reachability deletion remain separate structural
+gates under #3518.
 
 ## 2026-06-23 — Sprint-65 value-rep substrate landings (session)
 

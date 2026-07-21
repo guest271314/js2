@@ -10,6 +10,7 @@ import { ts } from "../../ts-api.js";
 import type { TypeOracle } from "../../checker/oracle.js";
 import type { UsageInference } from "../../checker/usage-inference.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
+import type { IrObservedOutcome } from "../../ir/outcomes.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
 import type { FallbackCounts } from "../fallback-telemetry.js";
@@ -51,6 +52,8 @@ export interface CodegenResult {
    * destructure `{ module, errors }` are unaffected.
    */
   fallbackCounts?: FallbackCounts;
+  /** #3519 — optional typed terminal outcome ledger for attempted IR units. */
+  irOutcomes?: readonly IrObservedOutcome[];
 }
 
 /** Public options for backend code generation. */
@@ -158,6 +161,8 @@ export interface CodegenOptions {
    * only the warning emission is gated).
    */
   trackSilentFallbacks?: boolean;
+  /** #3519 — collect typed terminal outcomes for every attempted IR unit. */
+  trackIrOutcomes?: boolean;
   /** Node builtin modules detected during import preprocessing (#1044) */
   nodeBuiltins?: import("../../import-resolver.js").NodeBuiltinImport[];
   /** Set of function names imported from node:fs (detected pre-preprocessing).
@@ -1046,6 +1051,8 @@ export interface CodegenContext {
    * function/message.
    */
   irPostClaimErrors: { kind: string; func: string; message: string }[];
+  /** #3519 — allocated only when `trackIrOutcomes` is requested. */
+  irOutcomes?: IrObservedOutcome[];
   /**
    * #3000 — names of functions/class-members whose slots were actually patched
    * with an IR-lowered body by `compileIrPathFunctions` (its `report.compiled`).
