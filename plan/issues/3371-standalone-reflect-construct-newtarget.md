@@ -24,6 +24,10 @@ loc-budget-allow:
   - src/codegen/index.ts
   - src/codegen/dataview-native.ts
   - src/codegen/expressions/identifiers.ts
+oracle-ratchet-allow:
+  - src/codegen/expressions/call-namespace-static.ts
+  - src/codegen/expressions/identifiers.ts
+  - src/codegen/property-access-dispatch.ts
 ---
 
 # #3371 — Standalone `Reflect.construct` (with NewTarget) refused
