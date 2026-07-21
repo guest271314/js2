@@ -6,9 +6,111 @@
 
 import { isExternalDeclaredClass } from "../checker/type-mapper.js";
 import { ts } from "../ts-api.js";
+import type { IrClassShape } from "./nodes.js";
 
 export type IrPrimitiveExpressionFamily = "number" | "boolean" | "string";
 export type IrDeclaredPrimitiveExpressionFamily = IrPrimitiveExpressionFamily | "primitive-union";
+
+export type IrLocalClassExpressionResolver = (expression: ts.Expression) => string | undefined;
+
+/**
+ * Build a checker-backed resolver from an expression's exact instance type to
+ * one projected top-level source class. Textual names are deliberately not a
+ * fallback: aliases, duplicate declarations, constructor objects, and
+ * unprojected classes must not acquire class-instance evidence by spelling.
+ */
+export function makeIrLocalClassExpressionResolver(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  projectedShapes: ReadonlyMap<string, IrClassShape>,
+): IrLocalClassExpressionResolver {
+  const declarations: { readonly name: string; readonly symbol: ts.Symbol }[] = [];
+  const nameCounts = new Map<string, number>();
+  const symbolCounts = new Map<ts.Symbol, number>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isClassDeclaration(statement) || !statement.name) continue;
+    const name = statement.name.text;
+    const shape = projectedShapes.get(name);
+    if (!shape || shape.className !== name) continue;
+    const symbol = checker.getSymbolAtLocation(statement.name);
+    if (!symbol) continue;
+    declarations.push({ name, symbol });
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+    symbolCounts.set(symbol, (symbolCounts.get(symbol) ?? 0) + 1);
+  }
+
+  const classNameBySymbol = new Map<ts.Symbol, string>();
+  for (const declaration of declarations) {
+    if (nameCounts.get(declaration.name) !== 1 || symbolCounts.get(declaration.symbol) !== 1) continue;
+    classNameBySymbol.set(declaration.symbol, declaration.name);
+  }
+
+  const exactProjectedType = (expression: ts.Expression): string | undefined => {
+    try {
+      const type = checker.getTypeAtLocation(expression);
+      if (
+        type.isUnionOrIntersection() ||
+        type.aliasSymbol !== undefined ||
+        (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter | ts.TypeFlags.Never)) !==
+          0 ||
+        type.getCallSignatures().length !== 0 ||
+        type.getConstructSignatures().length !== 0
+      ) {
+        return undefined;
+      }
+      const symbol = type.getSymbol();
+      return symbol ? classNameBySymbol.get(symbol) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const resolveExpression = (rawExpression: ts.Expression, seen: Set<ts.VariableDeclaration>): string | undefined => {
+    let expression = unwrapParens(rawExpression);
+    while (
+      ts.isAsExpression(expression) ||
+      ts.isTypeAssertionExpression(expression) ||
+      ts.isSatisfiesExpression(expression) ||
+      ts.isNonNullExpression(expression)
+    ) {
+      expression = unwrapParens(expression.expression);
+    }
+
+    const projected = exactProjectedType(expression);
+    if (!projected) return undefined;
+    if (ts.isConditionalExpression(expression)) {
+      const whenTrue = resolveExpression(expression.whenTrue, new Set(seen));
+      const whenFalse = resolveExpression(expression.whenFalse, new Set(seen));
+      return whenTrue === projected && whenFalse === projected ? projected : undefined;
+    }
+    if (!ts.isIdentifier(expression)) return projected;
+
+    const symbol = checker.getSymbolAtLocation(expression);
+    const declaration = symbol?.valueDeclaration;
+    if (declaration && ts.isVariableDeclaration(declaration)) {
+      if (seen.has(declaration) || !declaration.initializer || (declaration.parent.flags & ts.NodeFlags.Const) === 0) {
+        return undefined;
+      }
+      seen.add(declaration);
+      return resolveExpression(declaration.initializer, seen) === projected ? projected : undefined;
+    }
+    if (declaration && ts.isParameter(declaration)) {
+      const typeNode = declaration.type;
+      return typeNode &&
+        ts.isTypeReferenceNode(typeNode) &&
+        ts.isIdentifier(typeNode.typeName) &&
+        typeNode.typeName.text === projected
+        ? projected
+        : undefined;
+    }
+    // Binding elements, imports, and other alias-like value declarations need
+    // their own producer proof before they can become class-instance evidence.
+    if (declaration) return undefined;
+    return projected;
+  };
+
+  return (expression) => resolveExpression(expression, new Set());
+}
 
 /**
  * Build a checker-backed Array/tuple predicate for selector-only method

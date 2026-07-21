@@ -559,7 +559,8 @@ export function compileIrPathFunctions(
         // (mirrors `class-bodies.ts`). Methods/accessors compute their key from
         // the member name below.
         let memberName: string;
-        let returnTypeOverride: IrType | null | undefined;
+        let memberBaseName: string | undefined;
+        let descriptorKind: "method" | "getter" | "setter" | undefined;
         if (isCtorMember) {
           memberName = `${className}_new`;
         } else {
@@ -567,7 +568,6 @@ export function compileIrPathFunctions(
           // numeric-literal — replicate the dispatch here without re-importing
           // the helper (it's selector-private). The synthetic name format
           // mirrors `class-bodies.ts:275` exactly.
-          let memberBaseName: string;
           if (ts.isIdentifier(member.name!)) memberBaseName = member.name!.text;
           else if (ts.isStringLiteral(member.name!) || ts.isNumericLiteral(member.name!)) {
             memberBaseName = member.name!.text;
@@ -579,16 +579,33 @@ export function compileIrPathFunctions(
           // `member.type` unchanged. Methods keep `${className}_${name}`.
           if (ts.isGetAccessorDeclaration(member)) {
             memberName = `${className}_get_${memberBaseName}`;
+            descriptorKind = "getter";
           } else if (ts.isSetAccessorDeclaration(member)) {
             memberName = `${className}_set_${memberBaseName}`;
-            returnTypeOverride = null; // set accessor bodies return void
+            descriptorKind = "setter";
           } else {
             memberName = `${className}_${memberBaseName}`;
+            descriptorKind = "method";
           }
         }
         if (!selected.classMembers.has(memberName)) continue;
 
         try {
+          const descriptor = isCtorMember
+            ? undefined
+            : classShape.methods.find(
+                (candidate) =>
+                  candidate.name === memberBaseName && (candidate.memberKind ?? "method") === descriptorKind,
+              );
+          if (!isCtorMember && !descriptor) {
+            throw new IrInvariantError(
+              "selection-preparation-mismatch",
+              "build",
+              `ir/integration: selected class member ${memberName} has no exact ${descriptorKind} descriptor`,
+            );
+          }
+          const paramTypeOverrides = isCtorMember ? classShape.constructorParams : descriptor!.params;
+          const returnTypeOverride = isCtorMember ? undefined : descriptor!.returnType;
           // #3000-C: a constructor is NOT passed `__self` — it allocates the
           // instance itself (`constructorClassShape` drives the `class.alloc` +
           // `return this` synthesis in from-ast). Methods/accessors get the
@@ -597,8 +614,12 @@ export function compileIrPathFunctions(
             exported: false, // class members are not directly exported
             funcName: memberName,
             ...(isCtorMember
-              ? { constructorClassShape: classShape }
-              : { selfParam: { type: { kind: "class", shape: classShape } as IrType }, returnTypeOverride }),
+              ? { constructorClassShape: classShape, paramTypeOverrides }
+              : {
+                  selfParam: { type: { kind: "class", shape: classShape } as IrType },
+                  paramTypeOverrides,
+                  returnTypeOverride,
+                }),
             calleeTypes,
             importedCalls: loweringPlans?.importedCalls,
             topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
