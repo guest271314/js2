@@ -1997,11 +1997,12 @@ export function ensureAsyncDisposableStackNativeProtoGlue(ctx: CodegenContext): 
 }
 
 /**
- * (#2651 M1 / D2) The concrete non-bigint TypedArray view ctor names whose
- * `<View>.prototype` value read this slice wires host-free. BigInt64Array /
- * BigUint64Array are deliberately excluded (bigint views are out of scope —
- * `TYPED_ARRAY_NAMES` in index.ts excludes them too); their `.prototype` read
- * keeps the existing refuse-loud behaviour until a bigint slice lands.
+ * (#2651 M1 / D2) The 9 non-bigint TypedArray view ctor names. Drives
+ * `isWiredTypedArrayViewName` — the `%TypedArray%` intrinsic-ctor identity,
+ * `Object.getPrototypeOf(<view>)` recognition, and dynamic-`new` brand dispatch.
+ * The bigint views stay OUT of this list (their reflective i64 getter bodies +
+ * those consumers are a separate slice); their `.prototype` value read is wired
+ * via `TYPED_ARRAY_VIEW_PROTO_NAMES` below (#1907).
  */
 const WIRED_TYPED_ARRAY_VIEWS = [
   "Int8Array",
@@ -2014,6 +2015,20 @@ const WIRED_TYPED_ARRAY_VIEWS = [
   "Float32Array",
   "Float64Array",
 ] as const;
+
+/**
+ * (#1907) Every TypedArray view whose `<View>.prototype` VALUE read resolves
+ * host-free — the 9 non-bigint views plus the 2 bigint views, which inherit the
+ * same `%TypedArray%.prototype` member set (§23.2; the proto is a pure value
+ * object, so no i64-specific body is emitted). Closes the reopened `#1907 /
+ * #1888 S6-b` `BigInt64Array.prototype` / `BigUint64Array.prototype` refusal
+ * left after #838 landed the views.
+ */
+const TYPED_ARRAY_VIEW_PROTO_NAMES: ReadonlySet<string> = new Set<string>([
+  ...WIRED_TYPED_ARRAY_VIEWS,
+  "BigInt64Array",
+  "BigUint64Array",
+]);
 
 /**
  * (#2651 M1 / D2) Register the abstract `%TypedArray%.prototype` glue (idempotent)
@@ -2033,13 +2048,14 @@ export function ensureTypedArrayIntrinsicNativeProtoGlue(ctx: CodegenContext): n
 
 /**
  * (#2651 M1 / D2) Register a concrete TypedArray view's `<View>.prototype` glue
- * (idempotent) and return its brand, or `undefined` if `viewName` is not a wired
- * non-bigint view (caller falls through to the existing refusal). Each view shares
- * the `%TypedArray%.prototype` member set (`TYPED_ARRAY_PROTO_METHODS`). The brand
- * is the per-view brand pre-reserved in `BUILTIN_BRAND_TABLE`.
+ * (idempotent) and return its brand, or `undefined` if `viewName` is not a
+ * TypedArray view (caller falls through to the existing refusal). All 11 views
+ * (incl. the two bigint views, #1907) share the `%TypedArray%.prototype` member
+ * set (`TYPED_ARRAY_PROTO_METHODS`); the proto value object is pure (member CSV
+ * only). The brand is the per-view brand pre-reserved in `BUILTIN_BRAND_TABLE`.
  */
 export function ensureTypedArrayViewNativeProtoGlue(ctx: CodegenContext, viewName: string): number | undefined {
-  if (!(WIRED_TYPED_ARRAY_VIEWS as readonly string[]).includes(viewName)) return undefined;
+  if (!TYPED_ARRAY_VIEW_PROTO_NAMES.has(viewName)) return undefined;
   const brand = getBuiltinBrand(ctx, viewName);
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
