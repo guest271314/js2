@@ -152,4 +152,35 @@ describe("#3529 exact local-class integration", () => {
     const instance = await instantiateWithRuntime(result);
     expect((instance.exports.run as () => number)()).toBe(42);
   });
+
+  it("lowers exact class-typed getter and setter signatures", async () => {
+    const result = await compile(
+      `class Value {
+         n: number;
+         constructor(n: number) { this.n = n; }
+       }
+       class Holder {
+         get value(): Value { return new Value(42); }
+         set value(next: Value) { return; }
+       }
+       export function run(): number {
+         const holder = new Holder();
+         holder.value = new Value(1);
+         return holder.value.n;
+       }`,
+      { fileName: "class-accessor-overrides.ts", experimentalIR: true, trackIrOutcomes: true },
+    );
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    for (const displayName of ["Holder_get_value", "Holder_set_value"]) {
+      expect(result.irOutcomes?.find((outcome) => outcome.displayName === displayName)).toMatchObject({
+        kind: "emitted",
+        stage: "patch",
+        irBodyEmitted: true,
+      });
+    }
+    const instance = await instantiateWithRuntime(result);
+    expect((instance.exports.run as () => number)()).toBe(42);
+  });
 });

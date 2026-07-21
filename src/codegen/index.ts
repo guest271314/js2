@@ -64,6 +64,7 @@ import {
 import {
   makeIrArrayExpressionPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
+  makeIrLocalClassExpressionResolver,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
 } from "../ir/module-bindings.js"; // (#2856 Capability C)
@@ -2267,9 +2268,6 @@ function planIrOverlay(
       capability,
     );
   const supportsHostDateSnapshots = supportsBackendCapability("host-date-snapshot");
-  // Spread keeps this branch compatible before P1 adds the optional field to
-  // IrSelectionOptions; once present, the selector consumes the same callback
-  // without a second codegen wiring change.
   const backendCapabilitySelectionOptions = { supportsBackendCapability };
   const resolveModuleBinding =
     options.resolveModuleBindings === false
@@ -2288,6 +2286,12 @@ function planIrOverlay(
     jsHostExterns && !ctx.fast && !ctx.nativeStrings && options.resolveModuleBindings !== false
       ? makeIrPromiseDelayResolver(ast.checker)
       : undefined;
+  // Selection and lowering consume one authoritative class projection. Build
+  // it before claiming units, then derive checker-backed expression identity
+  // from the exact same declarations/shapes so textual aliases and shadows
+  // cannot drift between the two phases.
+  const classShapes = buildIrClassShapes(ctx, ast.sourceFile);
+  const resolveLocalClassExpression = makeIrLocalClassExpressionResolver(ast.checker, ast.sourceFile, classShapes);
   // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
   // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
   // the gc `$AnyValue` but strings are host js-string externrefs, so the native
@@ -2311,6 +2315,8 @@ function planIrOverlay(
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
+      projectedClassShapes: classShapes,
+      resolveLocalClassExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
@@ -2342,12 +2348,6 @@ function planIrOverlay(
     }
   }
   const promiseDelayByOwner = collectIrPromiseDelayOwners(ast.sourceFile, selection.funcs, resolvePromiseDelay);
-  // Slice 4 (#1169d) — build the class-shape registry from the
-  // legacy class collection (`ctx.classSet`, `ctx.structFields`,
-  // `ctx.funcMap`). Done BEFORE override resolution so class-typed
-  // positions (`p: Point`) lower to `IrType.class` rather than
-  // throwing in `resolvePositionType`.
-  const classShapes = buildIrClassShapes(ctx, ast.sourceFile);
   // Build per-function IR type overrides from the propagated TypeMap.
   //
   // For a claimed function, the selector must have resolved each

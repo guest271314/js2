@@ -157,7 +157,7 @@ describe("#3519 typed IR terminal outcomes", () => {
     }
   });
 
-  it("types the post-claim void-call expression gap without inspecting its message", async () => {
+  it("emits discarded super calls instead of retaining the obsolete void-call gap", async () => {
     const result = await compile(
       `
 class Animal {
@@ -174,10 +174,10 @@ export function value(): number { return new Dog(4).age; }
       { fileName: "void-call.ts", trackIrOutcomes: true },
     );
     expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
-    const gap = terminal(result).find((outcome) => outcome.displayName === "Dog_new" && outcome.kind === "unsupported");
-    expect(gap).toMatchObject({ kind: "unsupported", code: "void-call-expression", stage: "build" });
-    expect(gap && evaluateIrOutcomePolicy([gap], "hybrid").ready).toBe(true);
-    expect(gap && evaluateIrOutcomePolicy([gap], "ir-only").ready).toBe(false);
+    const constructorOutcome = terminal(result).find((outcome) => outcome.displayName === "Dog_new");
+    expect(constructorOutcome).toMatchObject({ kind: "emitted", stage: "patch", irBodyEmitted: true });
+    expect(constructorOutcome && evaluateIrOutcomePolicy([constructorOutcome], "hybrid").ready).toBe(true);
+    expect(constructorOutcome && evaluateIrOutcomePolicy([constructorOutcome], "ir-only").ready).toBe(false);
   });
 
   it("accounts class members and a non-empty module initializer exactly once", async () => {
