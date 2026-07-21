@@ -177,6 +177,7 @@ export function countRelevantDrift(floorSha, ref, maxBehind) {
 // path per line) touches test262 conformance iff any line matches.
 export function pathsTouchTest262(changedBlob) {
   const EXACT = new Set([
+    ".github/actions/setup-node-pnpm/action.yml",
     ".github/workflows/test262-sharded.yml",
     "package.json",
     "pnpm-lock.yaml",

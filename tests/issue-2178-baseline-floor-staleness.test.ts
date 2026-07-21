@@ -58,6 +58,7 @@ describe("#2178 — pathsTouchTest262 mirrors the test262-paths allowlist", () =
     // The JS mirror and the shell source of truth must agree. Spot-check a
     // representative path set through BOTH and assert identical verdicts.
     const cases = [
+      ".github/actions/setup-node-pnpm/action.yml",
       "src/a/b.ts",
       "tests/test262-chunk1.test.ts",
       "tests/test262-runner.ts",

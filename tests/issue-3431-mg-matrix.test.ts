@@ -63,11 +63,12 @@ describe("#3431 gen-test262-mg-matrix", () => {
     expect(standalone.result_prefix).toBe("test262-standalone");
   });
 
-  it("59 total shards is a ~48% reduction from the static 114-job matrix (57 chunks x 2 targets)", () => {
+  it("53 total shards is a >50% reduction from the static 114-job matrix (57 chunks x 2 targets)", () => {
     const matrix = buildMergeGroupMatrix();
     const staticTotal = 57 * 2;
     const reduction = 1 - matrix.length / staticTotal;
-    expect(reduction).toBeGreaterThan(0.4);
+    expect(matrix).toHaveLength(53);
+    expect(reduction).toBeGreaterThan(0.5);
   });
 });
 
@@ -84,16 +85,16 @@ describe("#3431 test262-chunk-dynamic.test.ts env-var contract", () => {
   }
 
   it("accepts valid index/total pairs", () => {
-    expect(validateChunkEnv("0", "40")).toBe(true);
-    expect(validateChunkEnv("39", "40")).toBe(true);
+    expect(validateChunkEnv("0", "34")).toBe(true);
+    expect(validateChunkEnv("33", "34")).toBe(true);
     expect(validateChunkEnv("18", "19")).toBe(true);
   });
 
   it("rejects missing, out-of-range, or non-numeric env vars", () => {
     expect(validateChunkEnv("", "")).toBe(false);
-    expect(validateChunkEnv("40", "40")).toBe(false); // index == total (out of range)
-    expect(validateChunkEnv("-1", "40")).toBe(false);
-    expect(validateChunkEnv("abc", "40")).toBe(false);
+    expect(validateChunkEnv("34", "34")).toBe(false); // index == total (out of range)
+    expect(validateChunkEnv("-1", "34")).toBe(false);
+    expect(validateChunkEnv("abc", "34")).toBe(false);
     expect(validateChunkEnv("0", "0")).toBe(false); // total must be > 0
   });
 });

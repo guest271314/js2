@@ -8,6 +8,7 @@ on:
   pull_request:
     branches: [main]
     paths: &test262-paths
+      - ".github/actions/setup-node-pnpm/action.yml"
       - ".github/workflows/test262-sharded.yml"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -151,14 +152,8 @@ jobs:
           # extra ancestry check needed and the previous one had TOCTOU + shallow
           # checkout false-positive issues.
           echo "✓ ${{ github.event_name }} ref already includes base by construction"
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Typecheck + lint (parallel)
@@ -326,10 +321,10 @@ jobs:
   #   queued change          changes.run_shards   test262-shard-mg   merge-report
   #   ---------------------  ------------------   ----------------   -------------------
   #   src/** (or any         true                 RUNS (#3431         runs, real result
-  #     &test262-paths)                              59-job matrix)
+  #     &test262-paths)                              53-job matrix)
   #   website/plan/doc-only  false                SKIPPED             runs, trivial PASS
   #   base_sha empty /       true (fail-safe)     RUNS (#3431         runs, real result
-  #     diff fails / empty                           59-job matrix)
+  #     diff fails / empty                           53-job matrix)
   #
   # In ALL three rows the required check "merge shard reports" is produced.
   # It is green only when shards succeeded or the merge_group no-shards skip is
@@ -549,15 +544,8 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
-
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -623,15 +611,15 @@ jobs:
     # contending for runner slots), is what was driving multi-hour merge
     # queue drains (~1 PR/hour) despite any single uncontended run being fast.
     #
-    # Reducing the per-entry job count from 114 to 59 (see
-    # scripts/gen-test262-mg-matrix.mjs for the exact js-host=40/
-    # standalone=19 split and the per-target scaling math) cuts the
-    # contention footprint by ~48% without changing pull_request/push/
+    # Reducing the per-entry job count from 114 to 53 (see
+    # scripts/gen-test262-mg-matrix.mjs for the current js-host=34/
+    # standalone=19 split and the measured-work scaling math) cuts the
+    # contention footprint by ~53% without changing pull_request/push/
     # workflow_dispatch behavior at all (they keep using `test262-shard`
     # above, completely unchanged).
     #
     # Uses the SAME dynamic entry point (tests/test262-chunk-dynamic.test.ts)
-    # for every matrix cell instead of 40/19 hand-written per-chunk files —
+    # for every matrix cell instead of 34/19 hand-written per-chunk files —
     # the partition logic (assignBalancedChunk in test262-shared.ts) is a
     # pure function of (chunkIndex, totalChunks), so this is behaviorally
     # equivalent to the static tests/test262-chunkN.test.ts files, just
@@ -641,9 +629,9 @@ jobs:
     name: test262 ${{ matrix.target_name }} shard ${{ matrix.chunk_label }}/${{ matrix.chunk_total }}
     runs-on: ubuntu-latest
     # Same 25-min timeout as `test262-shard`. The consolidated per-target
-    # counts (js-host=40, standalone=19) were picked specifically to keep
-    # estimated max shard runtime (~22.7 min host, ~21.0 min standalone)
-    # under this cap with headroom — see scripts/gen-test262-mg-matrix.mjs.
+    # counts (js-host=34, standalone=19) are derived from six post-#3461 runs;
+    # both lanes' measured long pole is ~12 min, leaving ample headroom — see
+    # scripts/gen-test262-mg-matrix.mjs.
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -677,15 +665,8 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
-
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -724,7 +705,7 @@ jobs:
           # (test262-*-shard-*) pick these up with no changes there — only
           # one of the two shard jobs ever runs per workflow run, so there is
           # no naming collision risk even though chunk_label ranges overlap
-          # (1..40 / 1..19 here vs 1..57 in test262-shard).
+          # (1..34 / 1..19 here vs 1..57 in test262-shard).
           name: test262-${{ matrix.target_name }}-shard-${{ matrix.chunk_label }}
           path: |
             benchmarks/results/${{ matrix.result_prefix }}-results-${{ env.RUN_TIMESTAMP }}.jsonl
@@ -797,7 +778,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "-> merge_group queued only non-test262-relevant changes"
-            echo "   (changes.run_shards=='false'); the consolidated 59-job matrix (#3431,"
+            echo "   (changes.run_shards=='false'); the consolidated 53-job matrix (#3431,"
             echo "   test262-shard-mg) was intentionally skipped. Reporting 'merge shard"
             echo "   reports' green."
           elif [ "${{ github.event_name }}" = "push" ]; then
@@ -808,7 +789,7 @@ jobs:
           else
             echo "-> pull_request: heavy test262 shards are merge_group-only under the"
             echo "   #2519 slim-down, so they do not run at PR-time. The cheap gate"
-            echo "   (typecheck + lint) validated this PR; the consolidated 59-job matrix"
+            echo "   (typecheck + lint) validated this PR; the consolidated 53-job matrix"
             echo "   (#3431, test262-shard-mg) runs in the merge_group when the PR reaches"
             echo "   the front of the queue."
           fi
@@ -826,17 +807,9 @@ jobs:
           # unreadable in exactly the job that gates the merge queue.
           fetch-depth: 2
 
-      - name: Setup Node
+      - name: Setup Node and pnpm (cached)
         if: env.SHARDS_RAN == 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
-
-      - name: Setup pnpm via Corepack
-        if: env.SHARDS_RAN == 'true'
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Install dependencies
         if: env.SHARDS_RAN == 'true'
@@ -1131,10 +1104,10 @@ jobs:
         env:
           # CT_SOFT: contention-flake floor. A CT above this is only actionable
           #   when the aggregate arm agrees (see the combined trigger). Scaled
-          #   with per-shard test density (#3431): the 114→59 merge_group shard
-          #   consolidation ~doubles tests-per-shard, so boundary compiles that
-          #   flirt with the 30s per-test timeout cross it proportionally more
-          #   often under CPU contention (25 × 114/59 ≈ 48, rounded to 50).
+          #   with per-shard test density (#3431). The current 53-job matrix is
+          #   denser than the original 114-job matrix, but the count cannot fail
+          #   alone: the aggregate arm must corroborate it below. Keep 50 as a
+          #   deliberately sensitive warning/combined-trigger threshold.
           CT_SOFT: "50"
           # CT_HARD: unconditional-fail ceiling (~boundary-population scale). A CT
           #   this high is a real pathological slowdown regardless of the
@@ -1334,17 +1307,9 @@ jobs:
           # prints a leading '-', which the version extraction strips).
           fetch-depth: 0
 
-      - name: Setup Node
+      - name: Setup Node and pnpm (cached)
         if: env.SHARDS_RAN == 'true'
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
-
-      - name: Setup pnpm via Corepack
-        if: env.SHARDS_RAN == 'true'
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Install dependencies
         if: env.SHARDS_RAN == 'true'
@@ -1918,10 +1883,8 @@ jobs:
           fetch-depth: 2
           persist-credentials: true
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
 
       # #3448 — MISS path: the full matrix ran and merge-report built +
       # uploaded `test262-merged-report`. Download it exactly as before.
@@ -1986,10 +1949,6 @@ jobs:
       # Bounded cost: the poison count is small (acceptance: < 2 min).
       # Needs pnpm + deps + the test262 submodule (checkout already pulls
       # submodules recursively above).
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Heal poison-classified rows (#2099)
@@ -2721,15 +2680,8 @@ jobs:
           submodules: recursive
           fetch-depth: 2
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 25
-
-      - name: Setup pnpm via Corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10.30.2 --activate
+      - name: Setup Node and pnpm (cached)
+        uses: ./.github/actions/setup-node-pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
