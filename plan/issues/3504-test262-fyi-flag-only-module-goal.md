@@ -2,8 +2,9 @@
 id: 3504
 title: "Test262 FYI worker must preserve flag-only Module goal"
 status: done
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 priority: high
 horizon: s

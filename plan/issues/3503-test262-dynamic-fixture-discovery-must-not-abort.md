@@ -2,9 +2,10 @@
 id: 3503
 title: "Test262 dynamic fixture discovery must not abort the corpus"
 status: done
+sprint: 73
 completed: 2026-07-20
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: s
 feasibility: easy

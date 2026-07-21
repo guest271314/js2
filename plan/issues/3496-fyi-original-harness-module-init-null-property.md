@@ -2,8 +2,9 @@
 id: 3496
 title: "FYI original harness must initialize module fixtures without null global properties"
 status: done
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: m
 feasibility: hard

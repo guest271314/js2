@@ -2,9 +2,9 @@
 id: 3482
 title: "Benchmark direct Porffor against JS2 typed SSA and shared-plan Porffor IR"
 status: done
-sprint: Backlog
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 pr: 3439
 priority: high

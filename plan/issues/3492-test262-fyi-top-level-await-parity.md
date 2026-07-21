@@ -2,9 +2,10 @@
 id: 3492
 title: "Test262 runners must not false-pass omitted fixture module graphs"
 status: done
+sprint: 73
 completed: 2026-07-20
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: m
 feasibility: medium

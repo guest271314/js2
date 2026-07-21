@@ -2,9 +2,10 @@
 id: 3493
 title: "compileMulti must execute top-level globalThis property assignments"
 status: done
+sprint: 73
 completed: 2026-07-20
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: m
 feasibility: hard
