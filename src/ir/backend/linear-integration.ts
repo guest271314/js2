@@ -78,7 +78,9 @@ import {
   type IrType,
   type IrTypeRef,
 } from "../nodes.js";
-import { buildTypeMap, type LatticeType } from "../propagate.js";
+import { buildIrUnitInventory } from "../identity.js";
+import { buildIrPlanningIdentityContext } from "../planning-identity.js";
+import { buildLegacyProjectedTypeMap, type LatticeType } from "../propagate.js";
 import {
   makeIrArrayExpressionPredicate,
   makeIrAmbientBindingPredicate,
@@ -86,7 +88,7 @@ import {
   makeIrPrimitiveExpressionClassifier,
 } from "../module-bindings.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, planIrCompilation } from "../select.js";
-import { buildRecursiveTypeEvidence } from "../type-evidence.js";
+import { buildLegacyProjectedRecursiveTypeEvidence } from "../type-evidence.js";
 import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
 import type { TypeConverter } from "./contract.js";
@@ -190,8 +192,15 @@ export function compileLinearIrFunctions(
   // SCC entries that the checker-backed certifier has independently proved;
   // this avoids widening unrelated unannotated selection while giving the
   // selector and from-ast one shared, concrete recursive ABI.
-  const propagated = buildTypeMap(sourceFile, ctx.checker);
-  const recursiveTypeEvidence = buildRecursiveTypeEvidence(sourceFile, ctx.checker, propagated);
+  const inventory = buildIrUnitInventory([sourceFile], { entrySource: sourceFile, checker: ctx.checker });
+  const identityContext = buildIrPlanningIdentityContext(inventory);
+  const propagated = buildLegacyProjectedTypeMap(sourceFile, ctx.checker, identityContext);
+  const recursiveTypeEvidence = buildLegacyProjectedRecursiveTypeEvidence(
+    sourceFile,
+    ctx.checker,
+    propagated,
+    identityContext,
+  );
   const evidenceChecker = overlayCertifiedCheckerTypes(ctx.checker, recursiveTypeEvidence.checkerTypeOverrides);
   const selection = planIrCompilation(
     sourceFile,

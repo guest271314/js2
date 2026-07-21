@@ -24,6 +24,7 @@ import {
 import {
   buildIrPlanningIdentityContext,
   IrPlanningIdentityInvariantError,
+  requireIrPlanningSourceId,
   type IrPlanningIdentityInvariantCode,
 } from "../src/ir/index.js";
 
@@ -596,6 +597,11 @@ describe("#3520 structural IR identity", () => {
     ]);
 
     const entrySourceId = context.sourceIdBySourceFile.get(entry)!;
+    expect(requireIrPlanningSourceId(context, entry)).toBe(entrySourceId);
+    expectPlanningInvariant(
+      () => requireIrPlanningSourceId(context, source(entry.fileName, entry.text)),
+      "source-record-mismatch",
+    );
     expect(context.sourceFileBySourceId.get(entrySourceId)).toBe(entry);
     expect(context.moduleInitUnitIdBySourceId.get(entrySourceId)).toBe(moduleInitId);
     expect(context.declarationByUnitId.has(moduleInitId)).toBe(false);

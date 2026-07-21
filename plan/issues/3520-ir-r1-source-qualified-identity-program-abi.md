@@ -83,6 +83,9 @@ files:
   - src/codegen/stdlib-selfhost.ts
   - tests/issue-3520-ir-unit-identity.test.ts
   - tests/issue-3520-program-abi.test.ts
+  - tests/issue-3520-legacy-unit-projection.test.ts
+  - tests/issue-3520-propagation-identity.test.ts
+  - tests/issue-3520-context-integration.test.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
@@ -663,9 +666,26 @@ The focused Stage 2 suites pass **13/13**. The existing propagation/evidence
 consumer matrix passes **95 tests with 1 skipped**, including reversed-source
 numeric and string recursive SCCs that share a display name plus a third
 non-recursive peer. Typecheck, lint, formatting, diff, and LOC-budget checks
-pass. Production planning still needs to consume the authoritative context,
-then selection, feature plans, overlays, and terminal outcome reconciliation
-must retain IDs through their remaining legacy calls.
+pass.
+
+Stage 3 threads that context through the production entry seams:
+
+- single-source and multi-source WasmGC planning build one inventory/context
+  and retain that exact context from propagation through terminal outcomes;
+- tracking-only compilation preserves the pre-R1 binary/result behavior while
+  deriving its outcome population from the same authoritative inventory;
+- linear propagation and recursive evidence share one inventory/context rather
+  than independently rebuilding their source population; and
+- outcome collection requires the exact `SourceFile` object, resolves its
+  `IrSourceId`, filters terminal units by that ID, and deduplicates whole-source
+  failures by source ID. A cloned AST with the same filename is rejected with
+  the typed `source-record-mismatch` invariant.
+
+The Stage 3 checkpoint passes **86/86** focused identity, context, propagation,
+projection, outcome, multi-source, and linear tests. Typecheck, lint,
+formatting, diff, and LOC-budget checks pass. Selection, feature plans,
+IR-first closure, and final outcome correlation still need to retain IDs
+through their remaining legacy calls.
 
 ### R1a validation evidence
 

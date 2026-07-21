@@ -330,6 +330,19 @@ function planningIdentityInvariant(code: IrPlanningIdentityInvariantCode, messag
   throw new IrPlanningIdentityInvariantError(code, message);
 }
 
+/** Require an exact source object from the authoritative planning context. */
+export function requireIrPlanningSourceId(
+  identityContext: IrPlanningIdentityContext,
+  sourceFile: ts.SourceFile,
+): IrSourceId {
+  const sourceId = identityContext.sourceIdBySourceFile.get(sourceFile);
+  if (sourceId) return sourceId;
+  return planningIdentityInvariant(
+    "source-record-mismatch",
+    `source ${sourceFile.fileName} is not part of the authoritative IR planning context`,
+  );
+}
+
 /**
  * Validate and expose the exact declaration identities captured while one
  * inventory was built. Passing a rebuilt/copied inventory is rejected: source

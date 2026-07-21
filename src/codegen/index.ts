@@ -27,7 +27,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule 
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
 import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
-import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
+import { buildLegacyProjectedTypeMap, type LatticeType } from "../ir/propagate.js";
 import {
   classifyIrFailure,
   IrInvariantError,
@@ -57,12 +57,15 @@ import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } fro
 import { collectModuleInitPopulation, MODULE_INIT_UNIT_NAME } from "../ir/module-init.js";
 import {
   buildIrUnitInventory,
-  terminalIrUnitsForSource,
   type BuildIrUnitInventoryOptions,
   type IrSourceId,
   type IrUnitId,
-  type IrUnitInventory,
 } from "../ir/identity.js";
+import {
+  buildIrPlanningIdentityContext,
+  requireIrPlanningSourceId,
+  type IrPlanningIdentityContext,
+} from "../ir/planning-identity.js";
 import { makeIrPromiseDelayResolver } from "../ir/promise-delay.js";
 import {
   buildIrPromiseDelayLoweringPlans,
@@ -1537,33 +1540,17 @@ export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
 // ---------------------------------------------------------------------------
 // #2138 — IR-first compile-once inversion (flag-gated investigation)
 //
-// `planIrOverlay` is the IR *planning* phase extracted verbatim from the
-// `if (options?.experimentalIR)` overlay block in `generateModule`: it runs
-// `buildTypeMap` → `planIrCompilation` → `buildIrClassShapes` → the
-// overrideMap/safeSelection resolution (including the STRICT_IR_REASONS
-// promotion and the #2023 `new.target` coarse gate). Extraction exists so
-// the SAME code can run at two different pipeline positions:
-//
-//   - flag OFF (default): called AFTER `compileDeclarations`, exactly where
-//     the inline block sat — the pipeline is byte-identical to pre-#2138.
-//   - `JS2WASM_IR_FIRST=1` (+ experimentalIR): called BEFORE
-//     `compileDeclarations`, so the body pass can SKIP legacy emission for
-//     functions the IR will own — every claimed function stops being
-//     compiled twice.
-//
-// Why the reorder is flag-gated rather than unconditional (a deliberate
-// deviation from the issue's original Slice-1 spec, which assumed the hoist
-// was byte-identical): the planning block is NOT side-effect-free —
-//   (a) `resolvePositionType` calls `getOrRegisterVecType` /
-//       `typedArrayVecStorage`, which can first-register Wasm types; moving
-//       it above the body pass can permute type-section index assignment;
-//   (b) `buildIrClassShapes` reads `ctx.structFields`, which body
-//       compilation can mutate (dynamic field additions, #516).
-// Gating the ORDER on the flag makes acceptance criterion 1 (byte-identical
-// output without the flag) true by construction instead of by corpus diff.
+// `planIrOverlay` owns propagation → selection → class shapes → the override
+// and safe-selection projections. IR-first runs it before `compileDeclarations`
+// so claimed bodies can skip legacy emission; the opt-out runs it afterward.
+// The order remains gated because planning is not side-effect-free:
+// `resolvePositionType` can register Wasm types, while `buildIrClassShapes`
+// reads fields that body compilation can add (#516). Keeping both positions
+// preserves the opt-out pipeline's type-index and body-emission behavior.
 // ---------------------------------------------------------------------------
 
 interface IrOverlayPlan {
+  readonly identityContext: IrPlanningIdentityContext;
   readonly selection: import("../ir/select.js").IrSelection;
   readonly classShapes: Map<string, import("../ir/nodes.js").IrClassShape>;
   readonly overrideMap: Map<string, { params: IrType[]; returnType: IrType | null }>;
@@ -1671,34 +1658,38 @@ interface ObservedIrUnit {
 /** Build the exact legacy R0 terminal view from the structural R1 inventory. */
 function collectObservedIrUnits(
   sourceFile: ts.SourceFile,
-  _selection?: IrSelection,
-  inventory = buildIrUnitInventory([sourceFile], { entrySource: sourceFile }),
+  identityContext: IrPlanningIdentityContext,
 ): ObservedIrUnit[] {
-  return terminalIrUnitsForSource(inventory, sourceFile).map((unit) => ({
-    key: unit.legacyKey,
-    sourceId: unit.sourceId,
-    unitId: unit.id,
-    matchName: unit.legacyMatchName,
-    unitKind: unit.observedKind,
-    displayName: unit.displayName,
-    ordinal: unit.legacyOrdinal,
-    line: unit.line,
-    column: unit.column,
-    staticClassMember: unit.staticClassMember,
-    legacyBodyAvailable: unit.legacyBodyAvailable,
-    ...(unit.directFailure ? { directFailure: unit.directFailure } : {}),
-  }));
+  const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+  return identityContext.inventory.terminalUnits
+    .filter((unit) => unit.sourceId === sourceId)
+    .map((unit) => ({
+      key: unit.legacyKey,
+      sourceId: unit.sourceId,
+      unitId: unit.id,
+      matchName: unit.legacyMatchName,
+      unitKind: unit.observedKind,
+      displayName: unit.displayName,
+      ordinal: unit.legacyOrdinal,
+      line: unit.line,
+      column: unit.column,
+      staticClassMember: unit.staticClassMember,
+      legacyBodyAvailable: unit.legacyBodyAvailable,
+      ...(unit.directFailure ? { directFailure: unit.directFailure } : {}),
+    }));
 }
 
 function recordWholeSourceFailure(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
   failure: IrPreparationFailure,
-  inventory?: IrUnitInventory,
+  identityContext?: IrPlanningIdentityContext,
 ): void {
-  if (ctx.irOutcomes === undefined || ctx.irOutcomes.some((outcome) => outcome.file === sourceFile.fileName)) return;
+  if (!identityContext || ctx.irOutcomes === undefined) return;
+  const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+  if (ctx.irOutcomes.some((outcome) => outcome.sourceId === sourceId)) return;
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
-  for (const unit of collectObservedIrUnits(sourceFile, undefined, inventory)) {
+  for (const unit of collectObservedIrUnits(sourceFile, identityContext)) {
     ctx.irOutcomes.push(
       observedFailure(
         {
@@ -1763,7 +1754,6 @@ function recordObservedIrOutcomes(
   preparedSelection: Pick<IrSelection, "funcs" | "classMembers" | "moduleInit">,
   report: IrIntegrationReport,
   irSkipBodies?: ReadonlySet<string>,
-  inventory?: IrUnitInventory,
 ): void {
   if (ctx.irOutcomes === undefined) return;
 
@@ -1779,7 +1769,7 @@ function recordObservedIrOutcomes(
 
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
   const keys = new Set(ctx.irOutcomes.map((outcome) => outcome.key));
-  for (const unit of collectObservedIrUnits(sourceFile, plan.selection, inventory)) {
+  for (const unit of collectObservedIrUnits(sourceFile, plan.identityContext)) {
     const legacyBodyEmitted =
       unit.legacyBodyAvailable && !(unit.unitKind === "function" && irSkipBodies?.has(unit.matchName));
     const base = {
@@ -2103,6 +2093,7 @@ function computeIrFirstSkipSet(
 function planIrOverlay(
   ctx: CodegenContext,
   ast: TypedAST,
+  identityContext: IrPlanningIdentityContext,
   options: {
     readonly resolveModuleBindings?: boolean;
     readonly importedFunctions?: IrImportedFunctionResolver;
@@ -2113,7 +2104,7 @@ function planIrOverlay(
     if (process.env.JS2WASM_TEST_INJECT_IR_TYPEMAP_THROW === "1") {
       throw new Error("injected TypeMap failure");
     }
-    typeMap = buildTypeMap(ast.sourceFile, ast.checker);
+    typeMap = buildLegacyProjectedTypeMap(ast.sourceFile, ast.checker, identityContext);
   } catch (error) {
     throw new IrInvariantError(
       "type-map-failure",
@@ -2544,6 +2535,7 @@ function planIrOverlay(
     }
   }
   return {
+    identityContext,
     selection,
     classShapes,
     overrideMap,
@@ -2568,7 +2560,6 @@ function consumeIrOverlayReport(
   preparedSelection: Pick<IrSelection, "funcs" | "classMembers" | "moduleInit">,
   sourceFile: ts.SourceFile,
   irSkipBodies?: ReadonlySet<string>,
-  inventory?: IrUnitInventory,
 ): void {
   const { selection, logFallbacks } = plan;
   // #3000 — aggregate genuine emission across every source-file overlay. A
@@ -2614,7 +2605,7 @@ function consumeIrOverlayReport(
     }
   }
 
-  recordObservedIrOutcomes(ctx, sourceFile, plan, preparedSelection, report, irSkipBodies, inventory);
+  recordObservedIrOutcomes(ctx, sourceFile, plan, preparedSelection, report, irSkipBodies);
 
   // #1169q — retain the existing selector-fallback log format, now once per
   // source file for a multi-module compilation.
@@ -3042,9 +3033,12 @@ export function generateModule(
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
-  const irUnitInventory = options?.trackIrOutcomes
-    ? buildIrUnitInventory([ast.sourceFile], { ...inventoryOptions, entrySource: ast.sourceFile })
-    : undefined;
+  const irPlanningIdentityContext =
+    options?.experimentalIR || options?.trackIrOutcomes
+      ? buildIrPlanningIdentityContext(
+          buildIrUnitInventory([ast.sourceFile], { ...inventoryOptions, entrySource: ast.sourceFile }),
+        )
+      : undefined;
   const sourceFileInternal = ast.sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node };
   ctx.sourceIsModule = sourceFileInternal.externalModuleIndicator !== undefined;
   // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
@@ -3430,7 +3424,7 @@ export function generateModule(
     let irPlan: IrOverlayPlan | null = null;
     let irSkipBodies: ReadonlySet<string> | undefined;
     if (irFirst) {
-      irPlan = planIrOverlay(ctx, ast);
+      irPlan = planIrOverlay(ctx, ast, irPlanningIdentityContext!);
       // (#2951) generators are skippable only for the JS-host path — the same
       // condition the selector uses for `jsHostExterns`. Standalone/WASI keep
       // generators on the compile-twice path (see gate 2 in computeIrFirstSkipSet).
@@ -3474,7 +3468,7 @@ export function generateModule(
       // flag-off pipeline is order-identical. `planIrOverlay` holds the
       // planning code verbatim (typeMap → selection → STRICT_IR_REASONS →
       // classShapes → overrideMap → safeSelection → new.target gate).
-      const plan = irPlan ?? planIrOverlay(ctx, ast);
+      const plan = irPlan ?? planIrOverlay(ctx, ast, irPlanningIdentityContext!);
       const { classShapes, overrideMap } = plan;
       let safeSelection = prepareHostVoidCallbackLowering(
         ctx,
@@ -3496,7 +3490,7 @@ export function generateModule(
         hostVoidCallbacks: plan.hostVoidCallbacks,
         promiseDelays: plan.promiseDelays,
       });
-      consumeIrOverlayReport(ctx, report, plan, safeSelection, ast.sourceFile, irSkipBodies, irUnitInventory);
+      consumeIrOverlayReport(ctx, report, plan, safeSelection, ast.sourceFile, irSkipBodies);
     }
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.
@@ -4023,7 +4017,7 @@ export function generateModule(
     // Must run after all other passes since they can introduce invalid coercions.
     fixupExternConvertAny(ctx);
   } catch (e) {
-    recordWholeSourceFailure(ctx, ast.sourceFile, classifyIrFailure(e, "build"), irUnitInventory);
+    recordWholeSourceFailure(ctx, ast.sourceFile, classifyIrFailure(e, "build"), irPlanningIdentityContext);
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
@@ -5443,12 +5437,15 @@ export function generateMultiModule(
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
-  const irUnitInventory = options?.trackIrOutcomes
-    ? buildIrUnitInventory(multiAst.sourceFiles, {
-        entrySource: multiAst.entryFile,
-        checker: multiAst.checker,
-      })
-    : undefined;
+  const irPlanningIdentityContext =
+    options?.experimentalIR || options?.trackIrOutcomes
+      ? buildIrPlanningIdentityContext(
+          buildIrUnitInventory(multiAst.sourceFiles, {
+            entrySource: multiAst.entryFile,
+            checker: multiAst.checker,
+          }),
+        )
+      : undefined;
   // Multi-file compilation is linked through import/export module records.
   ctx.sourceIsModule = true;
   try {
@@ -5655,7 +5652,7 @@ export function generateMultiModule(
           diagnostics: multiAst.diagnostics,
           syntacticDiagnostics: multiAst.syntacticDiagnostics,
         };
-        const plan = planIrOverlay(ctx, sourceAst, {
+        const plan = planIrOverlay(ctx, sourceAst, irPlanningIdentityContext!, {
           resolveModuleBindings: false,
           ...(hostImportedFunctions ? { importedFunctions: hostImportedFunctions } : {}),
         });
@@ -5676,7 +5673,7 @@ export function generateMultiModule(
           hostVoidCallbacks: plan.hostVoidCallbacks,
           promiseDelays: plan.promiseDelays,
         });
-        consumeIrOverlayReport(ctx, report, plan, safeSelection, sourceFile, undefined, irUnitInventory);
+        consumeIrOverlayReport(ctx, report, plan, safeSelection, sourceFile);
       }
       // A+B1 may create callback singleton trampolines after the legacy
       // finalization pass. Rebuild those late declarations against the target's
@@ -5936,7 +5933,7 @@ export function generateMultiModule(
   } catch (e) {
     const failure = classifyIrFailure(e, "build");
     for (const sourceFile of multiAst.sourceFiles) {
-      recordWholeSourceFailure(ctx, sourceFile, failure, irUnitInventory);
+      recordWholeSourceFailure(ctx, sourceFile, failure, irPlanningIdentityContext);
     }
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
