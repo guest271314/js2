@@ -448,6 +448,15 @@ export interface IrSelectionOptions {
    */
   readonly projectedClassShapes?: ReadonlyMap<string, IrClassShape>;
   /**
+   * Checker-backed identity for expressions whose value is an instance of a
+   * projected local class. The callback returns the declaration's exact local
+   * class name, not a textual guess. Production callers can therefore carry
+   * class evidence through conditionals, fields/getters, and static method
+   * results; bare selector callers omit it and use the conservative syntax
+   * proofs below.
+   */
+  readonly resolveLocalClassExpression?: (expression: ts.Expression) => string | undefined;
+  /**
    * #3529 P1/P4 structural target-capability seam. P1 stays independent of
    * backend/legality.ts; P4 wires its exported capability predicate here.
    * An explicit false prevents an ambient Date snapshot from being claimed
@@ -692,6 +701,22 @@ export function planIrCompilation(
     // a claim here always finds a shape in Phase B (no post-claim demotion).
     const parentName = extendsParentName(stmt);
     const parentIsLocalClass = parentName !== null && localClasses.has(parentName);
+    // The legacy funcMap uses one `${className}_${methodName}` key for both
+    // static and instance methods. Patching either side when both declarations
+    // exist can target the other side's ABI slot, and the winner otherwise
+    // depends on source order. Precompute the collision and suppress BOTH
+    // claims deterministically.
+    const methodKindsByName = new Map<string, number>();
+    for (const candidate of stmt.members) {
+      if (!ts.isMethodDeclaration(candidate) || !candidate.name) continue;
+      const name = phase1MemberName(candidate.name);
+      if (name === null) continue;
+      const kind = classElementIsStatic(candidate) ? 2 : 1;
+      methodKindsByName.set(name, (methodKindsByName.get(name) ?? 0) | kind);
+    }
+    const staticInstanceMethodCollisions = new Set(
+      [...methodKindsByName].filter(([, kinds]) => kinds === 3).map(([name]) => name),
+    );
     for (const member of stmt.members) {
       let memberName: string;
       let memberNode:
@@ -721,6 +746,11 @@ export function planIrCompilation(
           continue;
         }
         memberName = `${className}_${methodNameRaw}`;
+        if (staticInstanceMethodCollisions.has(methodNameRaw)) {
+          individuallyClaimedClassMembers.delete(memberName);
+          if (trackFallbacks) fallbackReasons.set(memberName, "class-member-unsupported");
+          continue;
+        }
         memberNode = member;
       } else if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) {
         if (!member.body) continue;
@@ -767,31 +797,37 @@ export function planIrCompilation(
       const isStaticMethod =
         ts.isMethodDeclaration(memberNode) &&
         (memberNode.modifiers?.some((m) => m.kind === ts.SyntaxKind.StaticKeyword) ?? false);
-      const staticMethodName =
-        isStaticMethod && ts.isMethodDeclaration(memberNode) && ts.isIdentifier(memberNode.name)
-          ? memberNode.name.text
-          : null;
+      const exactShapes = currentSelectionOptions?.projectedClassShapes;
+      if (exactShapes && !ts.isConstructorDeclaration(memberNode)) {
+        const descriptorName = memberNode.name ? phase1MemberName(memberNode.name) : null;
+        const descriptorKind = ts.isMethodDeclaration(memberNode)
+          ? isStaticMethod
+            ? "static"
+            : "method"
+          : ts.isGetAccessorDeclaration(memberNode)
+            ? "getter"
+            : "setter";
+        const exactDescriptor =
+          descriptorName === null
+            ? undefined
+            : exactShapes
+                .get(className)
+                ?.methods.find(
+                  (candidate) =>
+                    candidate.name === descriptorName && (candidate.memberKind ?? "method") === descriptorKind,
+                );
+        if (!exactDescriptor) {
+          individuallyClaimedClassMembers.delete(memberName);
+          if (trackFallbacks) fallbackReasons.set(memberName, "class-member-unsupported");
+          continue;
+        }
+      }
       // A static method body has no class-shaped `self`; checker failure to
       // project an unrelated instance field/method must not suppress this
       // otherwise primitive function. Instance members still require the
       // exact class descriptor used by the builder.
       if (classHasKnownProjectionGap && !isStaticMethod) {
         if (trackFallbacks) fallbackReasons.set(memberName, "class-projection-unsupported");
-        continue;
-      }
-      if (
-        isStaticMethod &&
-        staticMethodName !== null &&
-        stmt.members.some(
-          (candidate) =>
-            candidate !== memberNode &&
-            ts.isMethodDeclaration(candidate) &&
-            ts.isIdentifier(candidate.name) &&
-            candidate.name.text === staticMethodName &&
-            !(candidate.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword) ?? false),
-        )
-      ) {
-        if (trackFallbacks) fallbackReasons.set(memberName, "class-member-unsupported");
         continue;
       }
       // A static method with no `super` is claimable under ANY parent (#2857 —
@@ -1050,6 +1086,13 @@ let currentClassBindings = new Map<string, string>();
 let currentCallableArities = new Map<string, number>();
 let currentCallableReturnClasses = new Map<string, string>();
 let currentNestedFunctionNames: ReadonlySet<string> = new Set();
+// Direct lexical value declarations that are visible for name resolution even
+// before their initializer runs. The selector walks statements in source
+// order, so this separate TDZ set prevents an earlier `new C()` / `f()` from
+// falling through to a same-text top-level declaration. Statement-list scopes
+// are stacked independently so a binding in a nested block does not shadow a
+// use outside that block.
+let currentLexicalValueBindingNames: ReadonlySet<string> = new Set();
 // (#1373b C-1) Names of the top-level ASYNC (non-generator) function
 // declarations of the current run. A claimed body may reference these ONLY as
 // the immediate operand of an `await`: legacy classifies any other call-site
@@ -1151,6 +1194,7 @@ function whyNotIrClaimable(
   currentCallableArities = new Map<string, number>();
   currentCallableReturnClasses = new Map<string, string>();
   currentNestedFunctionNames = fn.body ? collectDirectNestedFunctionNames(fn.body) : new Set<string>();
+  currentLexicalValueBindingNames = new Set<string>();
   // (#2856 Step-1) Clear any stale reject detail from a prior subject; the body
   // walk below repopulates it via `shapeNo` when SHAPE_DIAG_ON.
   if (SHAPE_DIAG_ON) shapeRejectDetail = null;
@@ -1390,11 +1434,13 @@ function whyNotIrClaimable(
     // returns route through the implicit `return this` synthesis.
     earlyReturnBarrierDepth++;
     try {
-      for (const s of body.statements) {
-        if (!isPhase1BodyStatement(s, ctorScope, localClasses)) {
-          return typedShapeRejectReason ?? "body-shape-rejected";
+      const accepted = withLexicalValueBindingScope(body.statements, () => {
+        for (const s of body.statements) {
+          if (!isPhase1BodyStatement(s, ctorScope, localClasses)) return false;
         }
-      }
+        return true;
+      });
+      if (!accepted) return typedShapeRejectReason ?? "body-shape-rejected";
     } finally {
       earlyReturnBarrierDepth--;
     }
@@ -2093,7 +2139,9 @@ function isPhase1StatementList(
   isVoidReturn: boolean = false,
 ): boolean {
   return withProjectionEvidenceScope(() =>
-    isPhase1StatementListInScope(stmts, scope, localClasses, isGenerator, isVoidReturn),
+    withLexicalValueBindingScope(stmts, () =>
+      isPhase1StatementListInScope(stmts, scope, localClasses, isGenerator, isVoidReturn),
+    ),
   );
 }
 
@@ -2441,45 +2489,52 @@ function isPhase1TryStatementInScope(
   earlyReturnBarrierDepth++;
   try {
     // Try body: must be a Phase-1 body statement list.
-    const tryAccepted = withProjectionEvidenceScope(() => {
-      const tryScope = new Set(scope);
-      for (const s of stmt.tryBlock.statements) {
-        if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return shapeNo("try-body-stmt", s);
-      }
-      return true;
-    });
+    const tryAccepted = withProjectionEvidenceScope(() =>
+      withLexicalValueBindingScope(stmt.tryBlock.statements, () => {
+        const tryScope = new Set(scope);
+        for (const s of stmt.tryBlock.statements) {
+          if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return shapeNo("try-body-stmt", s);
+        }
+        return true;
+      }),
+    );
     if (!tryAccepted) return false;
 
     if (stmt.catchClause) {
-      const catchAccepted = withProjectionEvidenceScope(() => {
-        const catchScope = new Set(scope);
-        if (stmt.catchClause!.variableDeclaration) {
-          const v = stmt.catchClause!.variableDeclaration;
-          // Slice 9 only accepts identifier bindings. Destructuring catch
-          // (`catch ({message})`) defers to slice 9.5.
-          if (!ts.isIdentifier(v.name)) return shapeNo("try-catch-binding", v.name);
-          if (trackedModuleAliasHasName(v.name.text)) {
-            return shapeNo("try-catch-module-alias-shadow", v.name);
+      const catchAccepted = withProjectionEvidenceScope(() =>
+        withLexicalValueBindingScope(stmt.catchClause!.block.statements, () => {
+          const catchScope = new Set(scope);
+          if (stmt.catchClause!.variableDeclaration) {
+            const v = stmt.catchClause!.variableDeclaration;
+            // Slice 9 only accepts identifier bindings. Destructuring catch
+            // (`catch ({message})`) defers to slice 9.5.
+            if (!ts.isIdentifier(v.name)) return shapeNo("try-catch-binding", v.name);
+            if (trackedModuleAliasHasName(v.name.text)) {
+              return shapeNo("try-catch-module-alias-shadow", v.name);
+            }
+            clearProjectionBinding(v.name.text);
+            catchScope.add(v.name.text);
           }
-          clearProjectionBinding(v.name.text);
-          catchScope.add(v.name.text);
-        }
-        for (const s of stmt.catchClause!.block.statements) {
-          if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return shapeNo("try-catch-body-stmt", s);
-        }
-        return true;
-      });
+          for (const s of stmt.catchClause!.block.statements) {
+            if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return shapeNo("try-catch-body-stmt", s);
+          }
+          return true;
+        }),
+      );
       if (!catchAccepted) return false;
     }
 
     if (stmt.finallyBlock) {
-      const finallyAccepted = withProjectionEvidenceScope(() => {
-        const finallyScope = new Set(scope);
-        for (const s of stmt.finallyBlock!.statements) {
-          if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop)) return shapeNo("try-finally-body-stmt", s);
-        }
-        return true;
-      });
+      const finallyAccepted = withProjectionEvidenceScope(() =>
+        withLexicalValueBindingScope(stmt.finallyBlock!.statements, () => {
+          const finallyScope = new Set(scope);
+          for (const s of stmt.finallyBlock!.statements) {
+            if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop))
+              return shapeNo("try-finally-body-stmt", s);
+          }
+          return true;
+        }),
+      );
       if (!finallyAccepted) return false;
     }
 
@@ -2708,6 +2763,7 @@ function isPhase1ForUpdateExpr(
       if (isUnrepresentableModuleBinding(expr.operand)) return false;
       if (currentModuleBindingResolver?.(expr.operand) && !currentSubjectIsModuleInit) return false;
       if (!scope.has(expr.operand.text)) return false;
+      if (projectionBindingMutationIsUnsupported(expr.operand.text, expr)) return false;
       clearProjectionBinding(expr.operand.text);
       return true;
     }
@@ -2746,6 +2802,7 @@ function isPhase1ForUpdateExpr(
       op === ts.SyntaxKind.SlashEqualsToken
     ) {
       if (!scope.has(expr.left.text)) return false;
+      if (projectionBindingMutationIsUnsupported(expr.left.text, expr)) return false;
       if (!isPhase1Expr(expr.right, scope, localClasses)) return false;
       clearProjectionBinding(expr.left.text);
       if (op === ts.SyntaxKind.EqualsToken) {
@@ -2782,13 +2839,15 @@ function isPhase1BodyStatement(
   inLoop: boolean = false,
 ): boolean {
   if (ts.isBlock(stmt)) {
-    return withProjectionEvidenceScope(() => {
-      const inner = new Set(scope);
-      for (const s of stmt.statements) {
-        if (!isPhase1BodyStatement(s, inner, localClasses, inLoop)) return false;
-      }
-      return true;
-    });
+    return withProjectionEvidenceScope(() =>
+      withLexicalValueBindingScope(stmt.statements, () => {
+        const inner = new Set(scope);
+        for (const s of stmt.statements) {
+          if (!isPhase1BodyStatement(s, inner, localClasses, inLoop)) return false;
+        }
+        return true;
+      }),
+    );
   }
   if (ts.isVariableStatement(stmt)) {
     return isPhase1VarDecl(stmt, scope, localClasses);
@@ -2823,6 +2882,7 @@ function isPhase1BodyStatement(
             return isPhase1Expr(stmt.expression.right, scope, localClasses);
           }
           if (!scope.has(stmt.expression.left.text)) return false;
+          if (projectionBindingMutationIsUnsupported(stmt.expression.left.text, stmt.expression)) return false;
           if (!isPhase1Expr(stmt.expression.right, scope, localClasses)) return false;
           clearProjectionBinding(stmt.expression.left.text);
           const className = localClassNameForExpression(stmt.expression.right, scope);
@@ -2871,6 +2931,7 @@ function isPhase1BodyStatement(
             return shapeNo("body-module-compound", stmt.expression);
           }
           if (!scope.has(stmt.expression.left.text)) return false;
+          if (projectionBindingMutationIsUnsupported(stmt.expression.left.text, stmt.expression)) return false;
           if (!isPhase1Expr(stmt.expression.right, scope, localClasses)) return false;
           clearProjectionBinding(stmt.expression.left.text);
           return true;
@@ -2892,6 +2953,7 @@ function isPhase1BodyStatement(
           return shapeNo("body-module-update", stmt.expression);
         }
         if (!scope.has(stmt.expression.operand.text)) return false;
+        if (projectionBindingMutationIsUnsupported(stmt.expression.operand.text, stmt.expression)) return false;
         clearProjectionBinding(stmt.expression.operand.text);
         return true;
       }
@@ -4197,6 +4259,16 @@ function localClassNameFromTypeNode(node: ts.TypeNode): string | null {
 
 type ProjectionBindingSnapshot = readonly [Map<string, string>, Map<string, number>, Map<string, string>];
 
+function hasProjectionBinding(name: string): boolean {
+  return currentClassBindings.has(name) || currentCallableArities.has(name) || currentCallableReturnClasses.has(name);
+}
+
+function projectionBindingMutationIsUnsupported(name: string, node: ts.Node): boolean {
+  if (!hasProjectionBinding(name)) return false;
+  shapeNo("projection-binding-mutation-no-slot", node);
+  return true;
+}
+
 function clearProjectionBinding(name: string): void {
   currentClassBindings.delete(name);
   currentCallableArities.delete(name);
@@ -4218,6 +4290,18 @@ function restoreProjectionBindings(snapshot: ProjectionBindingSnapshot): void {
   [currentClassBindings, currentCallableArities, currentCallableReturnClasses] = snapshot;
 }
 
+function projectionEvidenceChanged(
+  previous: ProjectionBindingSnapshot,
+  scoped: ProjectionBindingSnapshot,
+  name: string,
+): boolean {
+  return (
+    previous[0].get(name) !== scoped[0].get(name) ||
+    previous[1].get(name) !== scoped[1].get(name) ||
+    previous[2].get(name) !== scoped[2].get(name)
+  );
+}
+
 function withProjectionEvidenceScope<T>(callback: () => T): T {
   const previous = projectionBindingSnapshot();
   currentClassBindings = new Map(currentClassBindings);
@@ -4226,7 +4310,44 @@ function withProjectionEvidenceScope<T>(callback: () => T): T {
   try {
     return callback();
   } finally {
+    const scoped = projectionBindingSnapshot();
+    const invalidatedOuterNames = new Set([...previous[0].keys(), ...previous[1].keys(), ...previous[2].keys()]);
     restoreProjectionBindings(previous);
+    // Declarations introduced only inside the scoped walk disappear. Changes
+    // to evidence that existed on entry are a control-flow join, however: the
+    // nested path may have executed, so restoring the stale outer fact would
+    // be unsound. Keep it only when every tracked component is unchanged.
+    for (const name of invalidatedOuterNames) {
+      if (projectionEvidenceChanged(previous, scoped, name)) clearProjectionBinding(name);
+    }
+  }
+}
+
+function collectBindingNameTexts(name: ts.BindingName, target: Set<string>): void {
+  if (ts.isIdentifier(name)) {
+    target.add(name.text);
+    return;
+  }
+  for (const element of name.elements) {
+    if (ts.isOmittedExpression(element)) continue;
+    collectBindingNameTexts(element.name, target);
+  }
+}
+
+function withLexicalValueBindingScope<T>(statements: readonly ts.Statement[], callback: () => T): T {
+  const previous = currentLexicalValueBindingNames;
+  const scoped = new Set(previous);
+  for (const statement of statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      collectBindingNameTexts(declaration.name, scoped);
+    }
+  }
+  currentLexicalValueBindingNames = scoped;
+  try {
+    return callback();
+  } finally {
+    currentLexicalValueBindingNames = previous;
   }
 }
 
@@ -4430,6 +4551,63 @@ function classPropertyHasKnownProjectionGap(className: string, propertyName: str
     exactShape = exactShape?.parent;
   }
   return true;
+}
+
+function classPropertyReturnClassName(className: string, propertyName: string): string | null {
+  const exactShapes = currentSelectionOptions?.projectedClassShapes;
+  let exactShape = exactShapes?.get(className);
+  let cursor = currentLocalClassDeclarations.get(className);
+  while (cursor) {
+    const ownMembers = cursor.members.filter(
+      (member) =>
+        !!member.name &&
+        !classElementIsStatic(member) &&
+        (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name)
+          ? member.name.text === propertyName
+          : computedMemberMayName(member.name, propertyName)),
+    );
+    const field = ownMembers.find(ts.isPropertyDeclaration);
+    if (field) {
+      if (exactShapes) {
+        const descriptor = exactShape?.fields.find((candidate) => candidate.name === propertyName);
+        return descriptor?.type.kind === "class" ? descriptor.type.shape.className : null;
+      }
+      if (!classFieldMayProject(field, cursor)) return null;
+      const annotated = field.type ? localClassNameFromTypeNode(field.type) : null;
+      if (annotated !== null) return annotated;
+      const initializer = field.initializer ? unwrapProjectionExpression(field.initializer) : undefined;
+      return initializer && ts.isNewExpression(initializer) && ts.isIdentifier(initializer.expression)
+        ? currentLocalClassDeclarations.has(initializer.expression.text)
+          ? initializer.expression.text
+          : null
+        : null;
+    }
+    const getter = ownMembers.find(ts.isGetAccessorDeclaration);
+    if (getter) {
+      if (ts.isComputedPropertyName(getter.name)) return null;
+      if (exactShapes) {
+        const descriptor = exactShape?.methods.find(
+          (candidate) => candidate.name === propertyName && candidate.memberKind === "getter",
+        );
+        return descriptor?.returnType?.kind === "class" ? descriptor.returnType.shape.className : null;
+      }
+      return classAccessorMayProject(getter, cursor) && getter.type ? localClassNameFromTypeNode(getter.type) : null;
+    }
+    if (ownMembers.length > 0) return null;
+    if (exactShapes) {
+      const fieldDescriptor = exactShape?.fields.find((candidate) => candidate.name === propertyName);
+      if (fieldDescriptor) return fieldDescriptor.type.kind === "class" ? fieldDescriptor.type.shape.className : null;
+      const getterDescriptor = exactShape?.methods.find(
+        (candidate) => candidate.name === propertyName && candidate.memberKind === "getter",
+      );
+      if (getterDescriptor)
+        return getterDescriptor.returnType?.kind === "class" ? getterDescriptor.returnType.shape.className : null;
+    }
+    const parent = extendsParentName(cursor);
+    cursor = parent === null ? undefined : currentLocalClassDeclarations.get(parent);
+    exactShape = exactShape?.parent;
+  }
+  return null;
 }
 
 function classPropertyWriteHasKnownProjectionGap(className: string, propertyName: string): boolean {
@@ -4641,11 +4819,15 @@ function projectedConstructorArity(className: string): number | undefined {
 }
 
 function localClassValueIsUnshadowed(name: string, scope: ReadonlySet<string>): boolean {
-  return !scope.has(name) && !currentNestedFunctionNames.has(name);
+  return !scope.has(name) && !currentNestedFunctionNames.has(name) && !currentLexicalValueBindingNames.has(name);
 }
 
 function localClassNameForExpression(expression: ts.Expression, scope: ReadonlySet<string>): string | null {
   const candidate = unwrapProjectionExpression(expression);
+  const checkerClassName = currentSelectionOptions?.resolveLocalClassExpression?.(candidate);
+  if (checkerClassName !== undefined && currentLocalClassDeclarations.has(checkerClassName)) {
+    return checkerClassName;
+  }
   if (candidate.kind === ts.SyntaxKind.ThisKeyword) return currentClaimClassName;
   if (ts.isNewExpression(candidate) && ts.isIdentifier(candidate.expression)) {
     return localClassValueIsUnshadowed(candidate.expression.text, scope) &&
@@ -4656,23 +4838,45 @@ function localClassNameForExpression(expression: ts.Expression, scope: ReadonlyS
   if (ts.isIdentifier(candidate)) {
     return scope.has(candidate.text) ? (currentClassBindings.get(candidate.text) ?? null) : null;
   }
+  if (ts.isConditionalExpression(candidate)) {
+    const whenTrue = localClassNameForExpression(candidate.whenTrue, scope);
+    const whenFalse = localClassNameForExpression(candidate.whenFalse, scope);
+    return whenTrue !== null && whenTrue === whenFalse ? whenTrue : null;
+  }
   if (ts.isCallExpression(candidate)) {
     if (ts.isIdentifier(candidate.expression)) {
       if (scope.has(candidate.expression.text)) {
         return currentCallableReturnClasses.get(candidate.expression.text) ?? null;
       }
-      if (currentNestedFunctionNames.has(candidate.expression.text)) return null;
+      if (
+        currentNestedFunctionNames.has(candidate.expression.text) ||
+        currentLexicalValueBindingNames.has(candidate.expression.text)
+      )
+        return null;
       const declaration = currentDynScanDecls?.get(candidate.expression.text);
       const returnType = declaration ? effectiveIrReturnTypeNode(declaration) : undefined;
       return returnType ? localClassNameFromTypeNode(returnType) : null;
     }
     if (ts.isPropertyAccessExpression(candidate.expression)) {
       const receiver = candidate.expression.expression;
+      const staticReceiver = unwrapProjectionExpression(receiver);
+      if (
+        ts.isIdentifier(staticReceiver) &&
+        localClassValueIsUnshadowed(staticReceiver.text, scope) &&
+        currentLocalClassDeclarations.has(staticReceiver.text)
+      ) {
+        const method = classMethodProjection(staticReceiver.text, candidate.expression.name.text, true);
+        return method.status === "projected" ? (method.returnClassName ?? null) : null;
+      }
       const receiverClass = localClassNameForExpression(receiver, scope);
       if (!receiverClass) return null;
       const method = classMethodProjection(receiverClass, candidate.expression.name.text, false);
       return method.status === "projected" ? (method.returnClassName ?? null) : null;
     }
+  }
+  if (ts.isPropertyAccessExpression(candidate) && ts.isIdentifier(candidate.name)) {
+    const receiverClass = localClassNameForExpression(candidate.expression, scope);
+    return receiverClass === null ? null : classPropertyReturnClassName(receiverClass, candidate.name.text);
   }
   return null;
 }
@@ -4686,7 +4890,8 @@ function knownCallableArity(expression: ts.Expression, scope: ReadonlySet<string
   if (scope.has(candidate.text)) {
     return currentClassBindings.has(candidate.text) ? undefined : currentCallableArities.get(candidate.text);
   }
-  if (currentNestedFunctionNames.has(candidate.text)) return undefined;
+  if (currentNestedFunctionNames.has(candidate.text) || currentLexicalValueBindingNames.has(candidate.text))
+    return undefined;
   const topLevel = currentDynScanDecls?.get(candidate.text);
   if (topLevel && hasFixedIrParameters(topLevel.parameters)) return topLevel.parameters.length;
   const declaration = currentModuleBindingResolver?.localVariableDeclaration(candidate);
@@ -4704,6 +4909,66 @@ function knownCallableArity(expression: ts.Expression, scope: ReadonlySet<string
     return signature?.params.length;
   }
   return undefined;
+}
+
+type ObviousSelectorValueFamily = "number" | "boolean" | "string" | "reference" | "nullish";
+
+function obviousSelectorValueFamily(
+  expression: ts.Expression,
+  scope: ReadonlySet<string>,
+): ObviousSelectorValueFamily | undefined {
+  const candidate = unwrapProjectionExpression(expression);
+  if (ts.isNumericLiteral(candidate)) return "number";
+  if (candidate.kind === ts.SyntaxKind.TrueKeyword || candidate.kind === ts.SyntaxKind.FalseKeyword) return "boolean";
+  if (ts.isStringLiteral(candidate) || ts.isNoSubstitutionTemplateLiteral(candidate)) return "string";
+  if (candidate.kind === ts.SyntaxKind.NullKeyword) return "nullish";
+  if (ts.isTypeOfExpression(candidate) || ts.isTemplateExpression(candidate)) return "string";
+  if (ts.isPrefixUnaryExpression(candidate)) {
+    if (candidate.operator === ts.SyntaxKind.ExclamationToken) return "boolean";
+    if (
+      candidate.operator === ts.SyntaxKind.PlusToken ||
+      candidate.operator === ts.SyntaxKind.MinusToken ||
+      candidate.operator === ts.SyntaxKind.TildeToken
+    )
+      return "number";
+  }
+  if (ts.isBinaryExpression(candidate) && isComparisonResultOperator(candidate.operatorToken.kind)) return "boolean";
+  if (ts.isConditionalExpression(candidate)) {
+    const whenTrue = obviousSelectorValueFamily(candidate.whenTrue, scope);
+    const whenFalse = obviousSelectorValueFamily(candidate.whenFalse, scope);
+    return whenTrue !== undefined && whenTrue === whenFalse ? whenTrue : undefined;
+  }
+  if (
+    ts.isObjectLiteralExpression(candidate) ||
+    ts.isArrayLiteralExpression(candidate) ||
+    ts.isArrowFunction(candidate) ||
+    ts.isFunctionExpression(candidate) ||
+    currentSelectionOptions?.isArrayExpression?.(candidate) === true ||
+    localClassNameForExpression(candidate, scope) !== null ||
+    (ts.isIdentifier(candidate) &&
+      localClassValueIsUnshadowed(candidate.text, scope) &&
+      currentLocalClassDeclarations.has(candidate.text)) ||
+    knownCallableArity(candidate, scope) !== undefined
+  ) {
+    return "reference";
+  }
+  return undefined;
+}
+
+function declaredExpressionHasExactFamily(
+  expression: ts.Expression,
+  expected: "boolean" | "string",
+  scope: ReadonlySet<string>,
+): boolean {
+  const classifier = currentSelectionOptions?.classifyDeclaredPrimitiveExpression;
+  const classified = classifier?.(expression);
+  if (classified !== undefined) return classified === expected;
+  const obvious = obviousSelectorValueFamily(expression, scope);
+  // With checker evidence available, `undefined` means class/object/array,
+  // any, or unknown — none is an exact primitive proof. Bare selector callers
+  // keep their historical unknown-expression fallback but reject every syntax
+  // family the selector can identify positively.
+  return classifier ? obvious === expected : obvious === undefined || obvious === expected;
 }
 
 function staticCallArgumentCount(argumentsList: readonly ts.Expression[]): number | null {
@@ -4854,11 +5119,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   if (ts.isBinaryExpression(expr)) {
     const binOp = expr.operatorToken.kind;
     if (binOp === ts.SyntaxKind.AmpersandAmpersandToken || binOp === ts.SyntaxKind.BarBarToken) {
-      const leftFamily = currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(expr.left);
-      const rightFamily = currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(expr.right);
       if (
-        (leftFamily !== undefined && leftFamily !== "boolean") ||
-        (rightFamily !== undefined && rightFamily !== "boolean")
+        !declaredExpressionHasExactFamily(expr.left, "boolean", scope) ||
+        !declaredExpressionHasExactFamily(expr.right, "boolean", scope)
       ) {
         return capabilityNo("logical-value-unsupported", "expr-logical-value-family", expr);
       }
@@ -4966,6 +5229,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       localClasses.has(expr.right.text) &&
       localClassValueIsUnshadowed(expr.right.text, scope)
     ) {
+      if (localClassHasKnownProjectionGap(expr.right.text)) {
+        return capabilityNo("class-projection-unsupported", "expr-instanceof-class-shape", expr.right);
+      }
       return isPhase1Expr(expr.left, scope, localClasses);
     }
     if (!isPhase1BinaryOp(binOp)) return shapeNo(`expr-binary-op-${ts.tokenToString(binOp) ?? binOp}`, expr);
@@ -5280,11 +5546,11 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         return capabilityNo("call-arity-unsupported", "expr-local-call-arity", expr);
       }
     } else {
-      if (currentNestedFunctionNames.has(calleeName)) {
-        // A sibling declaration exists but is not live in the selector's
-        // in-order closure scope. Never fall through to a same-text top-level
-        // declaration: the lexical binding wins even though the builder cannot
-        // lower this forward reference.
+      if (currentNestedFunctionNames.has(calleeName) || currentLexicalValueBindingNames.has(calleeName)) {
+        // A sibling function declaration or a TDZ lexical value declaration
+        // exists but is not live in the selector's in-order scope. Never fall
+        // through to a same-text top-level declaration: the lexical binding
+        // wins even though the builder cannot lower this forward reference.
         return capabilityNo("call-resolution-unsupported", "expr-nested-call-before-binding", expr.expression);
       }
       const declaration = currentDynScanDecls?.get(calleeName);
@@ -5416,13 +5682,12 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // string literal at the AST level (`\`hello\``).
   if (expr.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral) return true;
   // Slice 1: template expressions with substitutions, where every
-  // substitution is itself a Phase-1 expression. Type compatibility
-  // (each sub must produce a string in slice 1) is enforced later in
-  // from-ast — accepting the shape here is shape-only acceptance.
+  // substitution is itself a Phase-1 expression and is positively proven to
+  // produce the string representation consumed by from-ast. Object/class
+  // coercion stays legacy-owned instead of relying on a builder throw.
   if (ts.isTemplateExpression(expr)) {
     for (const span of expr.templateSpans) {
-      const family = currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(span.expression);
-      if (family !== undefined && family !== "string") {
+      if (!declaredExpressionHasExactFamily(span.expression, "string", scope)) {
         return capabilityNo("template-substitution-unsupported", "expr-template-substitution-family", span.expression);
       }
       if (expressionIsModuleExternAccessChain(span.expression)) {
@@ -5789,6 +6054,7 @@ function assessModuleInit(
   currentCallableArities = new Map<string, number>();
   currentCallableReturnClasses = new Map<string, string>();
   currentNestedFunctionNames = new Set<string>();
+  currentLexicalValueBindingNames = new Set<string>();
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 1;
   forInitLeakedNames = new Set();

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 
 import { compile, type IrObservedOutcome, type IrUnsupportedCode } from "../src/index.js";
+import type { IrClassShape } from "../src/ir/nodes.js";
 import { classifyIrFailure, evaluateIrOutcomePolicy } from "../src/ir/outcomes.js";
 import { planIrCompilation } from "../src/ir/select.js";
 import { ts } from "../src/ts-api.js";
@@ -192,6 +193,86 @@ describe("#3529 selector preclaim capability parity", () => {
 
   it.each([
     {
+      name: "local class",
+      source: `class Box {}
+        export function test(): number {
+          const box = new Box();
+          return (box && true) ? 1 : 0;
+        }`,
+    },
+    {
+      name: "object",
+      source: `export function test(): number {
+        const value = { answer: 1 };
+        return (value || false) ? 1 : 0;
+      }`,
+    },
+    {
+      name: "array",
+      source: `export function test(): number {
+        const values = [1];
+        return (values && true) ? 1 : 0;
+      }`,
+    },
+  ])("requires boolean evidence for a $name logical operand", async ({ name, source }) => {
+    if (name === "local class") expect(directFallbackReason(source)).toBe("logical-value-unsupported");
+    const result = await compile(source, {
+      fileName: `logical-${name.replaceAll(" ", "-")}.ts`,
+      trackIrOutcomes: true,
+    });
+    expectSelectUnsupported(outcomes(result), "test", "logical-value-unsupported");
+  });
+
+  it("preserves an exact boolean logical expression", async () => {
+    const result = await compile(
+      `export function test(flag: boolean): number {
+      return (flag && true) ? 1 : 0;
+    }`,
+      { fileName: "logical-boolean.ts", trackIrOutcomes: true },
+    );
+    expect(outcomes(result).find((entry) => entry.displayName === "test")).toMatchObject({
+      kind: "emitted",
+      stage: "patch",
+      irBodyEmitted: true,
+    });
+  });
+
+  it.each([
+    {
+      name: "local class",
+      source: "class Box {} export function test(): string { const box = new Box(); return `box=${box}`; }",
+    },
+    {
+      name: "object",
+      source: "export function test(): string { const value = { answer: 1 }; return `value=${value}`; }",
+    },
+    {
+      name: "array",
+      source: "export function test(): string { const values = [1]; return `values=${values}`; }",
+    },
+  ])("requires string evidence for a $name template substitution", async ({ name, source }) => {
+    if (name === "local class") expect(directFallbackReason(source)).toBe("template-substitution-unsupported");
+    const result = await compile(source, {
+      fileName: `template-${name.replaceAll(" ", "-")}.ts`,
+      trackIrOutcomes: true,
+    });
+    expectSelectUnsupported(outcomes(result), "test", "template-substitution-unsupported");
+  });
+
+  it("preserves an exact string template substitution", async () => {
+    const result = await compile("export function test(value: string): string { return `value=${value}`; }", {
+      fileName: "template-string.ts",
+      trackIrOutcomes: true,
+    });
+    expect(outcomes(result).find((entry) => entry.displayName === "test")).toMatchObject({
+      kind: "emitted",
+      stage: "patch",
+      irBodyEmitted: true,
+    });
+  });
+
+  it.each([
+    {
       name: "sibling branch",
       source: `export function test(flag: boolean): number {
         if (flag) {
@@ -222,6 +303,35 @@ describe("#3529 selector preclaim capability parity", () => {
     },
   ])("does not leak callable evidence across a $name boundary", ({ source }) => {
     expect(directFallbackReason(source)).toBe("call-resolution-unsupported");
+  });
+
+  it.each([
+    {
+      name: "branch",
+      mutation: `if (flag) { x = new B(); }`,
+    },
+    {
+      name: "nested block",
+      mutation: `if (flag) { { x = new B(); } }`,
+    },
+    {
+      name: "loop",
+      mutation: `while (flag) { x = new B(); break; }`,
+    },
+  ])("rejects a projected class binding mutation across a $name join", async ({ name, mutation }) => {
+    const source = `class A { a(): number { return 1; } }
+      class B { a(): number { return 2; } }
+      export function test(flag: boolean): number {
+        let x = new A();
+        ${mutation}
+        return x.a();
+      }`;
+    expect(directFallbackReason(source)).toBe("body-shape-rejected");
+    const result = await compile(source, {
+      fileName: `projection-${name.replaceAll(" ", "-")}-join.ts`,
+      trackIrOutcomes: true,
+    });
+    expectSelectUnsupported(outcomes(result), "test", "body-shape-rejected");
   });
 
   it("restores projection evidence after a checker-certified callback body", () => {
@@ -294,6 +404,41 @@ describe("#3529 selector preclaim capability parity", () => {
     expect(directFallbackReason(source)).toBe("constructor-resolution-unsupported");
   });
 
+  it.each([
+    {
+      name: "class value declaration",
+      reason: "constructor-resolution-unsupported",
+      source: `class Box { value: number; constructor(value: number) { this.value = value; } }
+        export function test(): number {
+          const value = new Box(1);
+          const Box = 1;
+          return value.value;
+        }`,
+    },
+    {
+      name: "callable value declaration",
+      reason: "call-resolution-unsupported",
+      source: `function target(left: number, right: number): number { return left + right; }
+        export function test(): number {
+          const value = target(1, 2);
+          const target = (input: number): number => input;
+          return value;
+        }`,
+    },
+    {
+      name: "binding-pattern declaration",
+      reason: "constructor-resolution-unsupported",
+      source: `class Box { value: number; constructor(value: number) { this.value = value; } }
+        export function test(input: { Box: number }): number {
+          const value = new Box(1);
+          const { Box } = input;
+          return value.value + Box;
+        }`,
+    },
+  ] as const)("respects the TDZ of a later $name", ({ source, reason }) => {
+    expect(directFallbackReason(source)).toBe(reason);
+  });
+
   it("uses an exact missing class projection as an authoritative rejection", () => {
     const source = `class Exact { value: number; constructor(value: number) { this.value = value; } }
       export function test(): number { return new Exact(1).value; }`;
@@ -309,14 +454,149 @@ describe("#3529 selector preclaim capability parity", () => {
     expect(selection.funcs.has("test")).toBe(true);
   });
 
-  it("rejects a static/instance method-name collision", () => {
+  it.each([
+    {
+      name: "instance then static",
+      members: `value(): number { return 1; }
+        static value(): number { return 2; }`,
+    },
+    {
+      name: "static then instance",
+      members: `static value(): number { return 2; }
+        value(): number { return 1; }`,
+    },
+  ])("suppresses both sides of a $name method-name collision", async ({ name, members }) => {
+    const source = `class Clash { ${members} }
+      export function test(): number { return 0; }`;
+    const selection = directSelection(source);
+    expect(selection.classMembers?.has("Clash_value") ?? false).toBe(false);
+    expect(selection.fallbacks?.find((fallback) => fallback.name === "Clash_value")?.reason).toBe(
+      "class-member-unsupported",
+    );
+
+    const result = await compile(source, {
+      fileName: `collision-${name.replaceAll(" ", "-")}.ts`,
+      trackIrOutcomes: true,
+    });
+    expectSelectUnsupported(outcomes(result), "Clash_value", "class-member-unsupported");
+  });
+
+  it("requires an exact own class-member descriptor and kind", () => {
+    const source = `class C { "m"(value: number): number { return value; } }`;
+    const shape: IrClassShape = {
+      className: "C",
+      fields: [],
+      methods: [],
+      constructorParams: [],
+    };
+    const selection = directSelection(source, { projectedClassShapes: new Map([["C", shape]]) });
+    expect(selection.classMembers?.has("C_m") ?? false).toBe(false);
+    expect(selection.fallbacks?.find((fallback) => fallback.name === "C_m")?.reason).toBe("class-member-unsupported");
+
+    const wrongKindShape: IrClassShape = {
+      ...shape,
+      methods: [{ name: "m", params: [], returnType: null, memberKind: "static" }],
+    };
+    const wrongKindSelection = directSelection(`class C { m(): void {} }`, {
+      projectedClassShapes: new Map([["C", wrongKindShape]]),
+    });
+    expect(wrongKindSelection.classMembers?.has("C_m") ?? false).toBe(false);
+    expect(wrongKindSelection.fallbacks?.find((fallback) => fallback.name === "C_m")?.reason).toBe(
+      "class-member-unsupported",
+    );
+  });
+
+  it("propagates a static method's projected class return before a property read", async () => {
+    const source = `class Box { get ["value"](): number { return 1; } }
+      class Factory { static make(): Box { return new Box(); } }
+      export function test(): number { return Factory.make().value; }`;
+    expect(directFallbackReason(source)).toBe("class-member-unsupported");
+
+    const boxShape: IrClassShape = {
+      className: "Box",
+      fields: [],
+      methods: [],
+      constructorParams: [],
+    };
+    const factoryShape: IrClassShape = {
+      className: "Factory",
+      fields: [],
+      methods: [
+        {
+          name: "make",
+          params: [],
+          returnType: { kind: "class", shape: boxShape },
+          memberKind: "static",
+        },
+      ],
+      constructorParams: [],
+    };
     expect(
-      directFallbackReason(`class Clash {
-        value(): number { return 1; }
-        static value(): number { return 2; }
-      }
-      export function test(): number { return Clash.value(); }`),
+      directFallbackReason(source, "test", {
+        projectedClassShapes: new Map([
+          ["Box", boxShape],
+          ["Factory", factoryShape],
+        ]),
+      }),
     ).toBe("class-member-unsupported");
+
+    const result = await compile(source, { fileName: "static-class-return.ts", trackIrOutcomes: true });
+    expectSelectUnsupported(outcomes(result), "test", "class-member-unsupported");
+  });
+
+  it("propagates projected field/getter class returns before a chained property read", () => {
+    const source = `class Box { get ["value"](): number { return 1; } }
+      class Holder { get child(): Box { return new Box(); } }
+      export function test(): number { return new Holder().child.value; }`;
+    expect(directFallbackReason(source)).toBe("class-member-unsupported");
+
+    const boxShape: IrClassShape = {
+      className: "Box",
+      fields: [],
+      methods: [],
+      constructorParams: [],
+    };
+    const holderShape: IrClassShape = {
+      className: "Holder",
+      fields: [],
+      methods: [
+        {
+          name: "child",
+          params: [],
+          returnType: { kind: "class", shape: boxShape },
+          memberKind: "getter",
+        },
+      ],
+      constructorParams: [],
+    };
+    expect(
+      directFallbackReason(source, "test", {
+        projectedClassShapes: new Map([
+          ["Box", boxShape],
+          ["Holder", holderShape],
+        ]),
+      }),
+    ).toBe("class-member-unsupported");
+  });
+
+  it("uses checker class-expression identity and keeps a conservative conditional fallback", () => {
+    const seamSource = `class Box { get ["value"](): number { return 1; } }
+      export function test(): number {
+        const boxes = [new Box()];
+        return boxes[0].value;
+      }`;
+    expect(
+      directFallbackReason(seamSource, "test", {
+        resolveLocalClassExpression: (expression) => (ts.isElementAccessExpression(expression) ? "Box" : undefined),
+      }),
+    ).toBe("class-member-unsupported");
+
+    const conservativeSource = `class Box { get ["value"](): number { return 1; } }
+      export function test(flag: boolean): number {
+        const box = flag ? new Box() : new Box();
+        return box.value;
+      }`;
+    expect(directFallbackReason(conservativeSource)).toBe("class-member-unsupported");
   });
 
   it.each([
@@ -414,6 +694,31 @@ describe("#3529 selector preclaim capability parity", () => {
         "Child_read",
       ),
     ).toBe("class-member-unsupported");
+  });
+
+  it("requires the local instanceof target to have a projected shape", async () => {
+    const source = `class Good {}
+      class Bad { data: number | string; constructor() { this.data = 1; } }
+      export function test(): number {
+        const value = new Good();
+        return value instanceof Bad ? 1 : 0;
+      }`;
+    expect(directFallbackReason(source)).toBe("class-projection-unsupported");
+
+    const goodShape: IrClassShape = {
+      className: "Good",
+      fields: [],
+      methods: [],
+      constructorParams: [],
+    };
+    expect(
+      directFallbackReason(source, "test", {
+        projectedClassShapes: new Map([["Good", goodShape]]),
+      }),
+    ).toBe("class-projection-unsupported");
+
+    const result = await compile(source, { fileName: "instanceof-class-gap.ts", trackIrOutcomes: true });
+    expectSelectUnsupported(outcomes(result), "test", "class-projection-unsupported");
   });
 
   it.each([
