@@ -1,7 +1,7 @@
 ---
 id: 3519
 title: "IR-only R0: typed preparation outcomes and an honest readiness gate"
-status: ready
+status: blocked
 sprint: current
 created: 2026-07-21
 updated: 2026-07-21
@@ -29,6 +29,8 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
+  - src/ir/module-bindings.ts
+  - src/ir/backend/linear-integration.ts
   - src/ir/passes/monomorphize.ts
   - src/ir/select.ts
   - src/ir/verify-alloc.ts
@@ -39,6 +41,8 @@ files:
   - src/ir/from-ast.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
+  - src/ir/module-bindings.ts
+  - src/ir/backend/linear-integration.ts
   - src/ir/passes/monomorphize.ts
   - src/ir/verify-alloc.ts
   - src/codegen/context/types.ts
@@ -48,6 +52,7 @@ files:
   - src/index.ts
   - src/compiler.ts
   - scripts/check-ir-only.ts
+  - scripts/check-ir-fallbacks.ts
   - scripts/ir-only-baseline.json
   - package.json
   - .github/workflows/ci.yml
@@ -79,6 +84,78 @@ legacy code. It introduces a policy evaluator over observed outcomes:
 The production routing remains unchanged until #3518 R2/R9. “IR-only” in R0 is
 an opt-in verdict over telemetry, not a new public compile option or a
 compatibility promise.
+
+## Implementation notes (2026-07-21)
+
+Making unknown post-claim throws fatal exposed three pre-existing
+selector/builder contract mismatches in the required cross-backend suite; the
+typed-outcome work did not introduce new runtime behavior:
+
+- reassigned scalar parameters were accepted by selection but retained as SSA
+  locals, so `countdown(n) { n--; }` reached the builder's non-slot invariant;
+  the builder now seeds accepted mutable scalar/string parameters into slots;
+- ambient typed-array constructors were listed as generic extern classes even
+  though their implementation remains owned by the direct backend's native vec
+  path; they now reject before claim;
+- real Array/tuple receivers admitted every method name although the IR vec
+  producer currently implements only `.push`; a checker-backed identity proof
+  now rejects the unimplemented Array prototype surface before claim without
+  stealing same-named local-class methods.
+
+Focused outcome tests pin all three producer decisions. The post-merge
+cross-backend differential suite is 29/29 after these changes.
+
+The complete equivalence gate then exposed the wider pre-existing population
+that R0's former silent demotion had hidden: 154 failures not in the committed
+baseline, of which 152 surface the now-fatal IR diagnostic directly and two
+assert only `CompileResult.success` without printing the underlying diagnostic.
+This is a producer-audit input, not permission to weaken
+unknown-throw-to-Invariant or expand the equivalence baseline. Each intended
+capability gap needs an explicit `IrUnsupportedError` or an honest pre-claim
+decision; selector/builder and pass-contract bugs need fixes at their producer
+seams before R0 can satisfy the equivalence acceptance criterion.
+
+### Blocked checkpoint after the first #3529 producer slices
+
+The selector/builder seed fixes, the dynamic-box pass correction, and the first
+two typed producer exits reduce the unchanged-baseline equivalence result from
+154 to **111 new compilation failures**. The fresh full run is:
+
+| Signal                   | Result |
+| ------------------------ | -----: |
+| Passing tests            |  1,496 |
+| Failing tests            |    147 |
+| Committed known failures |     36 |
+| New failures             |    111 |
+
+The 111 residuals are still #3529 work; this issue remains blocked and is not
+complete. Their exact diagnostic-family census is:
+
+| Residual family                        | Count |
+| -------------------------------------- | ----: |
+| Unsupported String / RegExp methods    |    20 |
+| Logical `&&` / `\|\|` value shapes     |    18 |
+| `Error`-family constructors            |    10 |
+| Class projection / member access       |     9 |
+| Call / constructor / nested resolution |     9 |
+| Template coercion                      |     6 |
+| Mixed string equality                  |     6 |
+| Unary coercion                         |     6 |
+| Null / undefined carrier shapes        |     6 |
+| Binary coercion                        |     5 |
+| String `+=` evidence                   |     4 |
+| Ref property writes                    |     3 |
+| Numeric primitive methods              |     3 |
+| `Function.call` / `Function.apply`     |     2 |
+| Raw internal `TypeError` invariants    |     2 |
+| Dynamic / mixed `+`                    |     1 |
+| Mutation-prepass invariant             |     1 |
+
+No equivalence baseline entry changed. The bounded readiness lane currently
+observes 5/5 entries, 37 terminal units, 30 emitted IR bodies, 7 typed
+Unsupported units, zero Invariants, and 37 legacy-emitted bodies. Hybrid policy
+is green at this checkpoint; strict IR-only is correctly red because all 37
+units still have legacy bodies and only 30/37 have an emitted IR body.
 
 ## Why the current gate is insufficient
 
