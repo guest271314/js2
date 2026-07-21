@@ -2867,7 +2867,9 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
   // (handled above): with a wide hint they already build a correct wide vec, so
   // there is no narrow build to let escape.
   if (arrayLiteralWideningEscapes(expr, cx)) {
-    throw new Error(
+    throw new IrUnsupportedError(
+      "array-representation-unsupported",
+      "build",
       `ir/from-ast: array literal flows into a widening/heterogeneous sink ` +
         `(any[]/unknown[]/union element) — the packed vec.new_fixed fast path is ` +
         `unsound here; demote to the SAFE boxed legacy lowering (${cx.funcName})`,
@@ -7164,7 +7166,9 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     const rProof = proveAdditiveOperand(expr.right, cx);
     if (lProof !== "no-checker" && rProof !== "no-checker") {
       if (lProof === "unprovable" || rProof === "unprovable" || lProof !== rProof) {
-        throw new Error(
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
           `ir/from-ast: '+' operands not provably both-number or both-string ` +
             `(${lProof}/${rProof}) — the unboxed numeric-add / string-concat fast ` +
             `path is unsound here; demote to the SAFE dynamic '+' (emitAnyAdd) in ${cx.funcName}`,

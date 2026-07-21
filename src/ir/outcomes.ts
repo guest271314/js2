@@ -16,6 +16,8 @@ export type IrUnsupportedCode =
   | "implicit-class-initializer"
   | "static-class-initialization"
   | "void-call-expression"
+  | "array-representation-unsupported"
+  | "operand-coercion-unsupported"
   | "type-resolution-unsupported"
   | "imported-call-planning-unsupported"
   | "late-preparation-unsupported"
