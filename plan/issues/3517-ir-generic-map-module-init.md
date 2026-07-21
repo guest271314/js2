@@ -28,6 +28,7 @@ files:
   - scripts/gen-ir-adoption.mjs
   - plan/log/ir-adoption.md
 loc-budget-allow:
+  - src/ir/from-ast.ts
   - src/ir/select.ts
 ---
 
