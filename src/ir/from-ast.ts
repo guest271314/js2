@@ -146,7 +146,7 @@ export interface IrExternClassMeta {
  * (#2955) The raw `nativeStrings()` mode discriminator is deliberately NOT
  * on this interface anymore: every former from-ast mode read is now a
  * narrow resolver-owned capability/rep/strategy query (`stringIsExternref`,
- * `hasHostNumberBox`, `hasHostNumberToString`, `stringMethodPlan`,
+ * `hasHostNumberBox`, `hasHostBooleanBox`, `hasHostNumberToString`, `stringMethodPlan`,
  * `stringForOfPlan`). Keeping the raw discriminator off the front-end
  * surface makes a new representation-polymorphic IR-build branch a compile
  * error instead of a drift channel. (`IrLowerResolver` still carries it —
@@ -179,6 +179,13 @@ export interface IrFromAstResolver {
    * standalone `$AnyValue` boxing) is a semantic follow-up tracked in #2955.
    */
   hasHostNumberBox?(): boolean;
+  /**
+   * Does this compile's lane own the host `__box_boolean` import? Boolean
+   * values use the same i32 carrier as integer-shaped numbers, so this
+   * capability is deliberately separate from `hasHostNumberBox`: callers
+   * must prove the boolean brand before selecting the boolean boxer.
+   */
+  hasHostBooleanBox?(): boolean;
   /**
    * (#2955 slice 3) Rep predicate: is `IrType.string`'s carrier ValType
    * externref (the host-strings backend), so a string SSA value can flow
@@ -2390,7 +2397,7 @@ export function typeNodeToIr(node: ts.TypeNode | undefined, where: string): IrTy
     case ts.SyntaxKind.NumberKeyword:
       return irVal({ kind: "f64" });
     case ts.SyntaxKind.BooleanKeyword:
-      return irVal({ kind: "i32" });
+      return irVal({ kind: "i32", boolean: true });
     case ts.SyntaxKind.StringKeyword:
       return { kind: "string" };
     default:
@@ -4465,6 +4472,23 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
     const boxed = cx.builder.emitCall({ kind: "func", name: "__box_number" }, [value], irVal({ kind: "externref" }));
     if (boxed === null) {
       throw new Error(`ir/from-ast: __box_number produced no result in ${cx.funcName}`);
+    }
+    return boxed;
+  }
+  // Boolean-branded i32 -> externref: preserve JS identity by using the
+  // boolean boxer. An unbranded i32 is intentionally not accepted here: that
+  // carrier may represent an integer-shaped number or a symbol handle, whose
+  // boxing semantics differ.
+  if (
+    expected.kind === "externref" &&
+    got !== null &&
+    got.kind === "i32" &&
+    got.boolean === true &&
+    cx.resolver?.hasHostBooleanBox?.() === true
+  ) {
+    const boxed = cx.builder.emitCall({ kind: "func", name: "__box_boolean" }, [value], irVal({ kind: "externref" }));
+    if (boxed === null) {
+      throw new Error(`ir/from-ast: __box_boolean produced no result in ${cx.funcName}`);
     }
     return boxed;
   }
