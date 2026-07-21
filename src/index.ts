@@ -114,6 +114,9 @@ export type {
   IrOutcomePolicyVerdict,
   IrUnsupportedCode,
 } from "./ir/outcomes.js";
+// Outcome rows expose these opaque IDs; inventory/ABI construction remains an
+// internal IR seam until later R1 commits wire it into compiler ownership.
+export type { IrSourceId, IrUnitId } from "./ir/identity.js";
 import type { ExportSignature } from "./ir/types.js";
 import type { IrObservedOutcome } from "./ir/outcomes.js";
 

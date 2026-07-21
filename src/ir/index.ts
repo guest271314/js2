@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 export * from "./types.js";
 export * from "./outcomes.js";
+export * from "./identity.js";
+export * from "./program-abi.js";
 export * from "./nodes.js";
 export * from "./alloc-registry.js";
 export * from "./builder.js";
