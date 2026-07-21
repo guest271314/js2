@@ -16,7 +16,6 @@ import type { CodegenOptions } from "./codegen/context/types.js";
 import { assertCodegenRegistrationsComplete } from "./codegen/shared.js";
 import { isFatalCodegenDiagnostic } from "./codegen/context/errors.js";
 import type { WasmModule } from "./ir/types.js";
-import { buildIrUnitInventory, type BuildIrUnitInventoryOptions } from "./ir/identity.js";
 import {
   buildImportManifest,
   checkJsTypeCoverage,
@@ -41,7 +40,7 @@ import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
-import { elideDeadTopLevelBindings } from "./deadcode-elide.js";
+import { elideWithIrIds, makeIrInventoryOptions, type IrInventoryOptions } from "./compiler/ir-outcome-inventory.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -821,8 +820,7 @@ interface PipelineInput {
   errors: CompileError[];
   /** Resolved codegen option bundle (see buildCodegenOptions). */
   codegenOptions: CodegenOptions;
-  /** Read-only provenance/dependency inputs for the shadow R1 inventory. */
-  irInventoryOptions?: BuildIrUnitInventoryOptions;
+  irInventoryOptions?: IrInventoryOptions;
   /** For source-map sourcesContent: original-name → original text. */
   sourcesContent: Map<string, string>;
   /** Anchor file for pushSourceAnchoredDiagnostic on codegen/emit throws. */
@@ -1311,8 +1309,7 @@ export function compileSourceSync(
   // #1491 — detect named fs imports for both WASI (#1035 syscall path) and the
   // new JS-host imports (non-WASI). Detection is identical; the codegen branch
   // is selected based on `ctx.wasi` + `ctx.allowFs`.
-  // Same-line rewrites still change structural AST offsets and can inject
-  // executable support units, so eval/super contributes a real provenance map.
+  // #1928/#1054 — same-line eval/super rewrites still contribute structural provenance.
   const evalResult = rewriteEvalSuperCallWithMap(cjsRewritten);
   const cjsRewritten2 = evalResult.source;
   const wasiNodeFsFuncs = detectNodeFsImports(cjsRewritten);
@@ -1323,9 +1320,7 @@ export function compileSourceSync(
   const { rawWasi: wasiRawImports, memAccessors: wasiMemAccessors } = detectRawWasiImports(cjsRewritten);
   const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
   let processedSource = preprocessed.source;
-  // Composed map: processedSource → original source. Pipeline output order is
-  // define → stdin-prelude → cjs → eval/super → imports, so compose
-  // outermost-first.
+  // Compose imports → eval/super → CJS → Iterator → stdin → define back to the original source.
   const positionMap = preprocessed.positionMap
     .compose(evalResult.positionMap)
     .compose(cjsResult.positionMap)
@@ -1337,12 +1332,7 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
-  let irInventoryOptions: BuildIrUnitInventoryOptions | undefined = options.trackIrOutcomes
-    ? {
-        compilerOriginAt: (_sourceFile: ts.SourceFile, offset: number) =>
-          positionMap.compilerOriginAtOutputOffset(offset),
-      }
-    : undefined;
+  let irInventory = options.trackIrOutcomes ? makeIrInventoryOptions(positionMap) : undefined;
   // #2645/#2736 — `--target node`/`deno` (formerly `--platform node`) implies
   // node-style emulation so the ambient surface and the importable `node:<mod>`
   // capability gate share one target model. This EFFECTIVE flag drives the
@@ -1358,51 +1348,14 @@ export function compileSourceSync(
   // stay intact. Byte-neutral when no prelude was injected.
   const forceTsGrammar = stdinResult.injected || iterStaticsResult.injected;
 
-  // Step 1a: #3418 — host-free targets only: elide provably-dead top-level
-  // pure bindings BEFORE the parse, so never-invoked function bodies (e.g. the
-  // test262 harness shim's `var print = function () { console.log(...) }` /
-  // `var $262 = { detachArrayBuffer: ... structuredClone ... }` when the
-  // program never mentions them) don't register host imports in the unified
-  // collector. Strictly same-length whitespace blanking → identity map, no
-  // positionMap composition needed; bails (source untouched) on any syntax
-  // error. Host `gc`/`linear` targets are excluded and stay byte-identical.
+  // Step 1a: #3418 — host-free targets elide dead pure top-level bindings before
+  // parsing so unreachable bodies do not register host imports. Same-length
+  // whitespace blanking needs no PositionMap; syntax errors leave source intact.
   if (options.target === "standalone" || options.target === "wasi") {
     const scriptKind = isJsMode && !forceTsGrammar ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-    const preElisionSource = processedSource;
-    const elision = elideDeadTopLevelBindings(preElisionSource, scriptKind);
-    if (irInventoryOptions && elision.elided.length > 0) {
-      const identitySource = ts.createSourceFile(
-        effectiveFileName,
-        preElisionSource,
-        ts.ScriptTarget.Latest,
-        true,
-        scriptKind,
-      );
-      const canonical = buildIrUnitInventory([identitySource], {
-        entrySource: identitySource,
-        compilerOriginAt: irInventoryOptions.compilerOriginAt,
-      });
-      const unitOrdinals = new Map(
-        canonical.allUnits.map((unit) => [
-          `${unit.declarationStart}\u0000${unit.declarationEnd}\u0000${unit.kind}`,
-          unit.ordinal,
-        ]),
-      );
-      const classOrdinals = new Map(
-        canonical.classes.map((record) => [
-          `${record.declarationStart}\u0000${record.declarationEnd}\u0000${record.declarationKind}`,
-          record.ordinal,
-        ]),
-      );
-      irInventoryOptions = {
-        ...irInventoryOptions,
-        canonicalUnitOrdinalAt: (_sourceFile, declarationStart, declarationEnd, kind) =>
-          unitOrdinals.get(`${declarationStart}\u0000${declarationEnd}\u0000${kind}`),
-        canonicalClassOrdinalAt: (_sourceFile, declarationStart, declarationEnd, declarationKind) =>
-          classOrdinals.get(`${declarationStart}\u0000${declarationEnd}\u0000${declarationKind}`),
-      };
-    }
+    const elision = elideWithIrIds(processedSource, effectiveFileName, scriptKind, irInventory);
     processedSource = elision.source;
+    irInventory = elision.inventoryOptions;
   }
 
   let ast: TypedAST;
@@ -1564,7 +1517,7 @@ export function compileSourceSync(
       wasiMemAccessors,
       jsxRuntime: preprocessed.jsxRuntime,
     }),
-    ...(irInventoryOptions ? { irInventoryOptions } : {}),
+    ...(irInventory ? { irInventoryOptions: irInventory } : {}),
     sourcesContent,
     diagnosticAnchor: ast.sourceFile,
     // #1958 — single-source: the lone source is the entry, so always run ES

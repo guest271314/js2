@@ -68,6 +68,7 @@ files:
   - src/ir/passes/tagged-unions.ts
   - src/index.ts
   - src/compiler.ts
+  - src/compiler/ir-outcome-inventory.ts
   - src/compiler/validation.ts
   - src/import-resolver.ts
   - src/iterator-statics-prelude.ts
@@ -366,7 +367,9 @@ Remaining numbered work:
   harness/expectation failures reproduce identically on the exact pre-branch
   base `d3d2454b`, so the combined nine-file result is **102/108** with no new
   failure attributable to this slice. #2138, #3529, and phase3c are green.
-- `pnpm run typecheck`, `pnpm run lint`, and `pnpm run format:check` pass.
+- `pnpm run typecheck`, `pnpm run lint`, `pnpm run format:check`, and
+  `pnpm run check:loc-budget` pass; compiler-driver identity anchoring lives in
+  `src/compiler/ir-outcome-inventory.ts` rather than growing `src/compiler.ts`.
 - `pnpm run check:ir-only -- --policy=hybrid`: **READY**, 37 terminal units,
   31 emitted, 6 typed Unsupported, 0 Invariants; existing labels/counts remain
   unchanged.
