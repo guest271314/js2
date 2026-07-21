@@ -2417,6 +2417,13 @@ export function compileDeclarations(
       exported: exportModuleInit,
     });
     if (exportModuleInit) {
+      // (#3505) compileMulti calls compileDeclarations once per source file
+      // against one accumulating context. Each pass emits a progressively
+      // more complete graph initializer, so only the newest export may remain:
+      // it contains every dependency seen so far in resolver order. Keeping
+      // the earlier exports gave the final Wasm duplicate `__module_init`
+      // names; selecting an earlier one instead would drop later modules.
+      ctx.mod.exports = ctx.mod.exports.filter((entry) => entry.name !== "__module_init");
       ctx.mod.exports.push({
         name: "__module_init",
         desc: { kind: "func", index: initFuncIdx },

@@ -25,7 +25,10 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { addFunctionOwnLocals } from "../binding-info.js";
-import { getOrCreateFuncRefWrapperTypes } from "./funcref-wrapper-types.js";
+import {
+  getOrCreateConstructibleFuncRefWrapperTypes,
+  getOrCreateFuncRefWrapperTypes,
+} from "./funcref-wrapper-types.js";
 import { allocLocal } from "../context/locals.js";
 import { emitBoundsCheckedArrayGet } from "../shared.js";
 import { spliceNullGuarded } from "./param-emit-helpers.js";
@@ -373,15 +376,18 @@ export function mintClosureStructTypes(
     closureResults: ValType[];
     closureName: string;
     isNamedFuncExpr: boolean;
+    constructible: boolean;
   },
 ): { structTypeIdx: number; liftedFuncTypeIdx: number; liftedSelfTypeIdx: number; liftedParams: ValType[] } {
-  const { captures, arrowParams, closureResults, closureName, isNamedFuncExpr } = opts;
+  const { captures, arrowParams, closureResults, closureName, isNamedFuncExpr, constructible } = opts;
   let structTypeIdx: number;
   let liftedFuncTypeIdx: number;
   let liftedSelfTypeIdx: number;
   let liftedParams: ValType[];
   if (captures.length === 0 && !isNamedFuncExpr) {
-    const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults);
+    const wrapperTypes = constructible
+      ? getOrCreateConstructibleFuncRefWrapperTypes(ctx, arrowParams, closureResults)
+      : getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults);
     if (wrapperTypes) {
       structTypeIdx = wrapperTypes.structTypeIdx;
       liftedFuncTypeIdx = wrapperTypes.liftedFuncTypeIdx;
@@ -421,6 +427,9 @@ export function mintClosureStructTypes(
         });
       }
     }
+    if (constructible) {
+      structFields.push({ name: "__constructible", type: { kind: "i32" as const }, mutable: false });
+    }
 
     // For closures with captures (but not named func exprs), make the struct
     // a subtype of the shared wrapper struct so ref.cast at call sites succeeds.
@@ -437,6 +446,7 @@ export function mintClosureStructTypes(
         fields: structFields,
         superTypeIdx: wrapperTypes.structTypeIdx,
       });
+      if (constructible) ctx.constructibleClosureTypeIdxs.add(structTypeIdx);
       // Share the wrapper's lifted func type so call_ref dispatches correctly.
       // The __self param is the canonical wrapper ROOT, and the lifted body
       // ref.casts to the specific subtype to access captures.
@@ -449,6 +459,7 @@ export function mintClosureStructTypes(
         name: `${closureName}_struct`,
         fields: structFields,
       });
+      if (constructible) ctx.constructibleClosureTypeIdxs.add(structTypeIdx);
       // 4. Create the lifted function type: (ref_null $closure_struct, ...arrowParams) → results
       // Use ref_null for __self so that var-hoisted variables shadowing the function name
       // (e.g. `var g` inside `function g()`) can be default-initialized to null.
@@ -777,6 +788,10 @@ export function emitClosureConstruction(
         }
       }
     }
+  }
+
+  if (ctx.constructibleClosureTypeIdxs.has(structTypeIdx)) {
+    fctx.body.push({ op: "i32.const", value: 1 });
   }
 
   fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });

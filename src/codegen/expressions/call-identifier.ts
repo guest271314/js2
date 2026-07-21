@@ -76,6 +76,7 @@ import {
   calleeMayBeHostCallable,
   compileCallExpression,
   compileWasiStringArgToLinearMemory,
+  ensureFuncValueWrappersRegistered,
   emitBoundFunctionCall,
   PATH_BASED_FS_FNS,
   resolveClosureInfoFromLocal,
@@ -981,6 +982,11 @@ export function compileIdentifierCall(
         if (hostCall !== null) return hostCall;
       }
       if (callSigs && callSigs.length > 0) {
+        // Populate runtime callback candidates before compiling this HOF body.
+        // Without the pre-scan, Test262's one-formal function expression is
+        // compiled only after its two-formal JSDoc callback consumer, leaving
+        // the shorter (but JS-compatible) funcref signature out of the dispatch.
+        ensureFuncValueWrappersRegistered(ctx, expr.getSourceFile());
         const sig = callSigs[0]!;
         const sigParamCount = sig.parameters.length;
         const sigRetType = ctx.checker.getReturnTypeOfSignature(sig);
@@ -1050,12 +1056,18 @@ export function compileIdentifierCall(
           // distinct per return type — we must dispatch on funcref type.
           // Create common return-type variants now so closures compiled later
           // reuse the same funcref types and the dispatch chain finds them.
-          type FuncCandidate = { funcTypeIdx: number; structTypeIdx: number; returnType: ValType | null };
+          type FuncCandidate = {
+            funcTypeIdx: number;
+            structTypeIdx: number;
+            returnType: ValType | null;
+            paramTypes: ValType[];
+          };
           const funcCandidates: FuncCandidate[] = [
             {
               funcTypeIdx: matchedClosureInfo.funcTypeIdx,
               structTypeIdx: matchedClosureInfo.structTypeIdx,
               returnType: matchedClosureInfo.returnType,
+              paramTypes: matchedClosureInfo.paramTypes,
             },
           ];
           const seenFuncTypeIdx = new Set<number>([matchedClosureInfo.funcTypeIdx]);
@@ -1068,6 +1080,7 @@ export function compileIdentifierCall(
                 funcTypeIdx: alt.closureInfo.funcTypeIdx,
                 structTypeIdx: alt.closureInfo.structTypeIdx,
                 returnType: alt.closureInfo.returnType,
+                paramTypes: alt.closureInfo.paramTypes,
               });
             }
           };
@@ -1081,10 +1094,15 @@ export function compileIdentifierCall(
           }
           // Also scan closureInfoByTypeIdx for other matching-arity func types
           for (const [, info] of ctx.closureInfoByTypeIdx) {
-            if (info.paramTypes.length !== sigParamCount) continue;
+            // JS ignores surplus call-site arguments. A JSDoc callback typedef
+            // can declare two parameters while the actual function expression
+            // declares one (Test262's typed-array harness does exactly this),
+            // so retain shorter runtime signatures and marshal only their
+            // formal prefix in the dispatch arm below.
+            if (info.paramTypes.length > sigParamCount) continue;
             if (seenFuncTypeIdx.has(info.funcTypeIdx)) continue;
             let paramsMatch = true;
-            for (let pi = 0; pi < sigParamCount; pi++) {
+            for (let pi = 0; pi < info.paramTypes.length; pi++) {
               if (!valTypesMatch(info.paramTypes[pi]!, sigParamWasmTypes[pi]!)) {
                 paramsMatch = false;
                 break;
@@ -1096,6 +1114,7 @@ export function compileIdentifierCall(
                 funcTypeIdx: info.funcTypeIdx,
                 structTypeIdx: info.structTypeIdx,
                 returnType: info.returnType,
+                paramTypes: info.paramTypes,
               });
             }
           }
@@ -1503,8 +1522,8 @@ export function compileIdentifierCall(
                 fcCallBody.push({ op: "ref.cast", typeIdx: candidateSelfTypeIdx });
               }
               // Push args
-              for (const al of argLocals) {
-                fcCallBody.push({ op: "local.get", index: al });
+              for (let ai = 0; ai < fc.paramTypes.length; ai++) {
+                fcCallBody.push({ op: "local.get", index: argLocals[ai]! });
               }
               // Push typed funcref and call
               fcCallBody.push({ op: "local.get", index: funcrefLocal });

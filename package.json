@@ -31,7 +31,8 @@
   },
   "bin": {
     "js2": "./dist/cli.js",
-    "js2wasm": "./dist/cli.js"
+    "js2wasm": "./dist/cli.js",
+    "js2-test262": "./dist/test262-fyi-cli.js"
   },
   "exports": {
     ".": {
@@ -80,7 +81,8 @@
     "new:issue-id": "node scripts/claim-issue.mjs --allocate",
     "preview:issue-id": "node scripts/next-issue-id.mjs",
     "worktree:provision": "bash scripts/provision-worktree-deps.sh",
-    "build": "vite build --config vite.config.lib.ts",
+    "build": "vite build --config vite.config.lib.ts && node scripts/build-test262-cli.mjs",
+    "build:test262-cli": "node scripts/build-test262-cli.mjs",
     "build:playground": "vite build --config website/playground/vite.config.ts",
     "dev": "pnpm run build:compiler-bundle && (pnpm run dashboard:watch &) && vite serve --config website/playground/vite.config.ts",
     "test": "node node_modules/vitest/dist/cli.js run",

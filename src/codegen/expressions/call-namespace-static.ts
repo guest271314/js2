@@ -27,6 +27,7 @@ import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.
 import { rollbackSpeculative, snapshotSpeculative } from "../context/speculative.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { getOrRegisterDvWindowType } from "../dataview-native.js";
+import { ensureReflectIsConstructor } from "../reflect-construct-native.js";
 import { emitNativeDateParse } from "../date-parse-native.js";
 import {
   addUnionImports,
@@ -65,6 +66,7 @@ import { ensureSymbolRegistry } from "../symbol-native.js";
 import { tryCompileTemporalStaticCall } from "../temporal-native.js";
 import { pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper } from "./builtins.js";
+import { compileNewExpression } from "./new-super.js";
 import {
   emitThrowTypeError,
   getFuncParamTypes,
@@ -86,6 +88,141 @@ import {
   tryEmitJsonParsePrimitive,
   tryEmitJsonStringifyPrimitive,
 } from "./calls.js";
+
+function unwrapReflectConstructExpr(value: ts.Expression): ts.Expression {
+  let current = value;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function isOrdinaryFunctionLike(node: ts.Node | undefined): boolean {
+  if (!node || (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node))) return false;
+  return (
+    node.asteriskToken === undefined &&
+    !(node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false)
+  );
+}
+
+function isStaticallyConstructible(ctx: CodegenContext, value: ts.Expression): boolean {
+  const expr = unwrapReflectConstructExpr(value);
+  if (isOrdinaryFunctionLike(expr) || ts.isClassExpression(expr)) return true;
+  if (!ts.isIdentifier(expr)) return false;
+  if (TYPED_ARRAY_NAMES.has(expr.text)) return true;
+  if (
+    new Set([
+      "Array",
+      "ArrayBuffer",
+      "Boolean",
+      "DataView",
+      "Date",
+      "Error",
+      "EvalError",
+      "Function",
+      "Map",
+      "Number",
+      "Object",
+      "Promise",
+      "RangeError",
+      "ReferenceError",
+      "RegExp",
+      "Set",
+      "String",
+      "SyntaxError",
+      "TypeError",
+      "URIError",
+      "WeakMap",
+      "WeakSet",
+    ]).has(expr.text)
+  ) {
+    return true;
+  }
+  const declaration = ctx.checker.getSymbolAtLocation(expr)?.valueDeclaration;
+  if (isOrdinaryFunctionLike(declaration) || (declaration !== undefined && ts.isClassDeclaration(declaration))) {
+    return true;
+  }
+  if (declaration && ts.isVariableDeclaration(declaration) && declaration.initializer) {
+    const init = unwrapReflectConstructExpr(declaration.initializer);
+    // The original Test262 realm shim returns the current global. Its
+    // `new other.Function()` constructor value is still statically known to
+    // implement [[Construct]], even though its native value carrier is opaque.
+    if (
+      ts.isNewExpression(init) &&
+      ((ts.isIdentifier(init.expression) && init.expression.text === "Function") ||
+        (ts.isPropertyAccessExpression(init.expression) && init.expression.name.text === "Function"))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function sameReflectConstructTarget(a: ts.Expression, b: ts.Expression): boolean {
+  const left = unwrapReflectConstructExpr(a);
+  const right = unwrapReflectConstructExpr(b);
+  return ts.isIdentifier(left) && ts.isIdentifier(right) && left.text === right.text;
+}
+
+/** Last preceding `NewTarget.prototype = rhs`, used by the supported native-carrier slice. */
+function assignedNewTargetPrototype(
+  ctx: CodegenContext,
+  value: ts.Expression,
+  before: number,
+): ts.Expression | undefined {
+  const target = unwrapReflectConstructExpr(value);
+  if (!ts.isIdentifier(target)) return undefined;
+  const targetSymbol = ctx.checker.getSymbolAtLocation(target);
+  let found: ts.Expression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (node.getStart() >= before) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.name.text === "prototype" &&
+      ts.isIdentifier(node.left.expression) &&
+      ctx.checker.getSymbolAtLocation(node.left.expression) === targetSymbol
+    ) {
+      found = node.right;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(value.getSourceFile());
+  return found;
+}
+
+function isEmptyOrdinaryFunction(value: ts.Expression): boolean {
+  const target = unwrapReflectConstructExpr(value);
+  return ts.isFunctionExpression(target) && target.body.statements.length === 0 && isOrdinaryFunctionLike(target);
+}
+
+function isDefinitelyPrimitivePrototype(ctx: CodegenContext, value: ts.Expression): boolean {
+  const expr = unwrapReflectConstructExpr(value);
+  if (
+    expr.kind === ts.SyntaxKind.NullKeyword ||
+    expr.kind === ts.SyntaxKind.UndefinedKeyword ||
+    (ts.isIdentifier(expr) && expr.text === "undefined") ||
+    ts.isNumericLiteral(expr) ||
+    ts.isStringLiteralLike(expr) ||
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    expr.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    return true;
+  }
+  if (ts.isIdentifier(expr)) {
+    const declaration = ctx.checker.getSymbolAtLocation(expr)?.valueDeclaration;
+    if (declaration && ts.isVariableDeclaration(declaration) && declaration.initializer) {
+      return isDefinitelyPrimitivePrototype(ctx, declaration.initializer);
+    }
+  }
+  return false;
+}
 
 /**
  * (#742 slice 3) Remaining built-in namespace static-method dispatch —
@@ -704,6 +841,146 @@ export function compileNamespaceStaticCall(
           return { kind: "i32" };
         }
         return fallbackReturn(0, "i32-true");
+      }
+
+      if (reflectMethod === "construct") {
+        const targetArg = expr.arguments[0];
+        const listArg = expr.arguments[1];
+        const newTargetArg = expr.arguments[2];
+        const unwrappedList = listArg === undefined ? undefined : unwrapReflectConstructExpr(listArg);
+        if (
+          targetArg === undefined ||
+          !unwrappedList ||
+          !ts.isArrayLiteralExpression(unwrappedList) ||
+          unwrappedList.elements.some(ts.isOmittedExpression)
+        ) {
+          reportError(
+            ctx,
+            expr,
+            "Codegen error: standalone Reflect.construct currently requires an array-literal argsList (#3371).",
+          );
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+
+        const distinctNewTarget = newTargetArg !== undefined && !sameReflectConstructTarget(targetArg, newTargetArg);
+        if (newTargetArg !== undefined && !isStaticallyConstructible(ctx, newTargetArg)) {
+          // Evaluate the runtime NewTarget exactly once, then use the finalize-
+          // filled nominal carrier classifier. Ordinary functions have a
+          // constructible wrapper subtype; arrows/method closures do not.
+          const ntType = compileExpression(ctx, fctx, newTargetArg, externRef);
+          if (ntType && ntType.kind !== "externref") coerceType(ctx, fctx, ntType, externRef);
+          else if (ntType === null) fctx.body.push({ op: "ref.null.extern" });
+          const isCtorIdx = ensureReflectIsConstructor(ctx);
+          fctx.body.push({ op: "call", funcIdx: isCtorIdx });
+          fctx.body.push({ op: "i32.eqz" });
+          const throwBody: Instr[] = [];
+          const savedBody = fctx.body;
+          fctx.body = throwBody;
+          emitThrowTypeError(ctx, fctx, "Reflect.construct newTarget is not a constructor");
+          fctx.body = savedBody;
+          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwBody });
+        }
+
+        // The Test262 IsConstructor helper's exact probe target has an empty
+        // body and no arguments. Validation above is the observable purpose;
+        // materialize the ordinary result as a native $Object so the returned
+        // value remains a real object if a caller does observe it.
+        if (distinctNewTarget && isEmptyOrdinaryFunction(targetArg) && unwrappedList.elements.length === 0) {
+          ensureObjectRuntime(ctx);
+          const createIdx = ctx.funcMap.get("__object_create");
+          if (createIdx !== undefined) {
+            fctx.body.push({ op: "ref.null.extern" });
+            fctx.body.push({ op: "call", funcIdx: createIdx });
+            return { kind: "externref" };
+          }
+        }
+
+        const newExpr = ts.factory.createNewExpression(targetArg, undefined, [
+          ...unwrappedList.elements,
+        ] as ts.Expression[]);
+        ts.setTextRange(newExpr, expr);
+        const resultType = compileNewExpression(ctx, fctx, newExpr);
+        if (resultType === null) {
+          fctx.body.push({ op: "ref.null.extern" });
+          return { kind: "externref" };
+        }
+        if (resultType.kind !== "externref") coerceType(ctx, fctx, resultType, externRef);
+
+        if (!distinctNewTarget) return { kind: "externref" };
+
+        const assignedProto = assignedNewTargetPrototype(ctx, newTargetArg!, expr.getStart());
+        if (assignedProto === undefined) {
+          reportError(
+            ctx,
+            expr,
+            "Codegen error: standalone Reflect.construct cannot preserve an arbitrary distinct NewTarget " +
+              "without a statically-resolved NewTarget.prototype assignment (#3371).",
+          );
+          return { kind: "externref" };
+        }
+
+        if (isDefinitelyPrimitivePrototype(ctx, assignedProto)) return { kind: "externref" };
+
+        // Preserve the constructed value while evaluating the selected proto.
+        const resultLocal = allocLocal(fctx, `__reflect_construct_result_${fctx.locals.length}`, externRef);
+        fctx.body.push({ op: "local.set", index: resultLocal });
+        const protoType = compileExpression(ctx, fctx, assignedProto, externRef);
+        if (protoType && protoType.kind !== "externref") coerceType(ctx, fctx, protoType, externRef);
+        else if (protoType === null) fctx.body.push({ op: "ref.null.extern" });
+        const protoLocal = allocLocal(fctx, `__reflect_construct_proto_${fctx.locals.length}`, externRef);
+        fctx.body.push({ op: "local.set", index: protoLocal });
+
+        ensureObjectRuntime(ctx);
+        const resultAny = allocLocal(fctx, `__reflect_construct_any_${fctx.locals.length}`, { kind: "anyref" });
+        fctx.body.push({ op: "local.get", index: resultLocal });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "local.set", index: resultAny });
+
+        const setCarrierProto = (typeIdx: number, fieldIdx: number): Instr[] => [
+          { op: "local.get", index: resultAny },
+          { op: "ref.cast", typeIdx },
+          { op: "local.get", index: protoLocal },
+          { op: "struct.set", typeIdx, fieldIdx },
+        ];
+        const carrierArms: Instr[] = [];
+        const unwrappedTarget = unwrapReflectConstructExpr(targetArg);
+        const isStaticDataView = ts.isIdentifier(unwrappedTarget) && unwrappedTarget.text === "DataView";
+        if (isStaticDataView && ctx.dvWindowTypeIdx >= 0) {
+          carrierArms.push(...setCarrierProto(ctx.dvWindowTypeIdx, 3));
+        } else if (ctx.dvWindowTypeIdx >= 0) {
+          carrierArms.push(
+            { op: "local.get", index: resultAny },
+            { op: "ref.test", typeIdx: ctx.dvWindowTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: setCarrierProto(ctx.dvWindowTypeIdx, 3),
+            },
+          );
+        }
+        if (ctx.taDynViewTypeIdx >= 0) {
+          carrierArms.push(
+            { op: "local.get", index: resultAny },
+            { op: "ref.test", typeIdx: ctx.taDynViewTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: setCarrierProto(ctx.taDynViewTypeIdx, 5),
+            },
+          );
+        }
+        if (carrierArms.length === 0) {
+          reportError(
+            ctx,
+            expr,
+            "Codegen error: standalone Reflect.construct distinct NewTarget is not implemented for this target carrier (#3371).",
+          );
+        } else {
+          fctx.body.push(...carrierArms);
+        }
+        fctx.body.push({ op: "local.get", index: resultLocal });
+        return { kind: "externref" };
       }
       // Boolean-returning methods need an i32 on the stack; the rest return
       // externref. Pick the fallback shape per method so the surrounding

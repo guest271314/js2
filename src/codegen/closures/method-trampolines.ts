@@ -25,7 +25,11 @@ import {
   ensureLateImport as ensureLateImportShared,
   flushLateImportShifts as flushLateImportShiftsShared,
 } from "../shared.js";
-import { getFuncSignature, getOrCreateFuncRefWrapperTypes } from "./funcref-wrapper-types.js";
+import {
+  getFuncSignature,
+  getOrCreateConstructibleFuncRefWrapperTypes,
+  getOrCreateFuncRefWrapperTypes,
+} from "./funcref-wrapper-types.js";
 
 /**
  * (#2015) Build the `this`-slot prologue for an object-method trampoline.
@@ -539,9 +543,11 @@ function emitLazyClosureCacheAccess(
   cacheGlobalIdx: number,
   trampolineFuncIdx: number,
   structTypeIdx: number,
+  constructible = false,
 ): void {
   const initBody: Instr[] = [
     { op: "ref.func", funcIdx: trampolineFuncIdx },
+    ...(constructible ? ([{ op: "i32.const", value: 1 }] satisfies Instr[]) : []),
     { op: "struct.new", typeIdx: structTypeIdx },
     { op: "extern.convert_any" },
     { op: "global.set", index: cacheGlobalIdx },
@@ -726,6 +732,7 @@ export function emitCachedFuncClosureAccess(
   fctx: FunctionContext,
   funcName: string,
   funcIdx: number,
+  constructible = false,
 ): ValType | null {
   const sig = getFuncSignature(ctx, funcIdx);
   if (!sig) return null;
@@ -733,7 +740,9 @@ export function emitCachedFuncClosureAccess(
   const userParams = sig.params;
   const results = sig.results;
 
-  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
+  const wrapperTypes = constructible
+    ? getOrCreateConstructibleFuncRefWrapperTypes(ctx, userParams, results)
+    : getOrCreateFuncRefWrapperTypes(ctx, userParams, results);
   if (!wrapperTypes) return null;
   const { structTypeIdx, liftedFuncTypeIdx } = wrapperTypes;
 
@@ -817,7 +826,7 @@ export function emitCachedFuncClosureAccess(
   //   global.get $cache
   //   any.convert_extern
   //   ref.cast (ref $struct)
-  emitLazyClosureCacheAccess(fctx, cacheGlobalIdx, trampolineFuncIdx, structTypeIdx);
+  emitLazyClosureCacheAccess(fctx, cacheGlobalIdx, trampolineFuncIdx, structTypeIdx, constructible);
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
   return { kind: "ref", typeIdx: structTypeIdx };

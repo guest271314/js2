@@ -246,6 +246,8 @@ export function createCodegenContext(
     nativeBoxBooleanTypeIdx: -1,
     nativeBigIntTypeIdx: -1,
     funcRefWrapperCache: new Map(),
+    constructibleFuncRefWrapperCache: new Map(),
+    constructibleClosureTypeIdxs: new Set(),
     pendingInitBody: null,
     inlinableFunctions: new Map(),
     symbolCounterGlobalIdx: -1,

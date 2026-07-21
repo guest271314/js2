@@ -63,6 +63,7 @@ import {
 } from "../index.js";
 import { LAZY_ITER_METHODS } from "../iter-lazy-native.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { ensureStandaloneRegExpCarrierTestHelper } from "../regexp-standalone.js";
 import { compilePropertyIntrospection } from "../object-ops.js";
 import { ensureObjVecBuilders, ensureObjectRuntime, reserveBindDynHelper } from "../object-runtime.js";
 import {
@@ -2670,6 +2671,11 @@ export function compileReceiverMethodCall(
       if ((ctx.standalone || ctx.wasi) && dispatchArgs !== null && !recvIsBuiltinClass) {
         const arity = dispatchArgs.length;
         const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
+        // #3507 — reserve the native RegExp carrier helper while function
+        // indices are still append-safe. The dispatcher fill only reads it.
+        if (ctx.standalone && methodName === "test" && arity === 1) {
+          ensureStandaloneRegExpCarrierTestHelper(ctx);
+        }
         // (#2927) For the in-place array mutation forms (`push` arity 1 / `pop`
         // arity 0) the closed-method dispatcher grows a native `$__vec_base`
         // brand arm (fillClosedMethodDispatch) that routes an `any`/externref

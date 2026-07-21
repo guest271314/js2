@@ -1327,6 +1327,12 @@ export function tryExternClassMethodOnAny(
   propAccess: ts.PropertyAccessExpression,
   methodName: string,
 ): InnerResult {
+  // #3507 — `RegExp.prototype.test` is ambiguous on an any-typed receiver.
+  // The first ambient extern-class match binds `env.RegExp_test` before the
+  // standalone runtime can inspect the receiver's real `$NativeRegExp` brand.
+  // Let the closed-method dispatcher perform that runtime identity check.
+  if (ctx.standalone && methodName === "test" && expr.arguments.length === 1) return null;
+
   // (#2994) `Object.prototype.isPrototypeOf` / `Function.prototype.isPrototypeOf`
   // static fold. On an `any`-typed receiver — which is how `Function.prototype`
   // / `Object.prototype` (builtin prototype objects) surface here — the

@@ -19,6 +19,8 @@ parent: 1472
 claimed_by: codex-developer
 claimed_at: 2026-06-07T10:22:55.064Z
 completed: 2026-06-11
+loc-budget-allow:
+  - src/codegen/array-prototype-borrow.ts
 ---
 # #1888 — Standalone open-any method dispatch + built-ins-as-static-globals
 

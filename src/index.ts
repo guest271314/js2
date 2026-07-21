@@ -396,6 +396,19 @@ export interface CompileOptions {
   allowedExternMembers?: Record<string, string[]>;
   /** Allow JavaScript source files as input (auto-detected for .js fileName) */
   allowJs?: boolean;
+  /**
+   * Treat every JavaScript root in a multi-file compile as syntax-test input:
+   * retain all-root diagnostics and stop on TypeScript grammar errors. By
+   * default, `allowJs` keeps its package-oriented diagnostic leniency. Opt-in
+   * so ordinary JavaScript product compiles stay unchanged.
+   */
+  strictJsSyntax?: boolean;
+  /**
+   * Run the compiler's ECMAScript early-error pass even when `allowJs` is set.
+   * Intended for callers that own the complete JavaScript input graph; package
+   * dependency compiles retain the historical early-error skip by default.
+   */
+  enforceJsEarlyErrors?: boolean;
   /** Virtual file name for the source (controls language: use ".js" for JS input) */
   fileName?: string;
   /** Module resolution options for npm packages */

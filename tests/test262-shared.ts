@@ -646,23 +646,11 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
             // Multi-file compilation for FIXTURE imports (handled in-process)
             const fixtureGraph = resolveFixtureGraph(source, filePath);
-            if (
-              TEST262_TARGET === "standalone" &&
-              !isNegative &&
-              Object.keys(fixtureGraph.dynamicFixtureFiles).length > 0
-            ) {
-              recordResult(
-                relPath,
-                category,
-                "compile_error",
-                "standalone literal dynamic fixture import is unsupported (#3494)",
-                undefined,
-                scopeInfo,
-                undefined,
-                { reachedTest: false },
-              );
-              return;
-            }
+            // #3509 — Dynamic fixture metadata alone does not mean this test
+            // executes import(). Compiler capability validation rejects eager
+            // #3494 cases while allowing an uncalled ordinary closure to reach
+            // the test with a host-free runtime trap in its body. Do not turn
+            // dynamic fixtures into eager compileMulti inputs.
             if (Object.keys(fixtureGraph.fixtureFiles).length > 0) {
               // Fixture tests are rare — compile in-process
               try {

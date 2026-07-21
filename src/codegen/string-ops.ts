@@ -3389,10 +3389,13 @@ export function compileNativeStringMethodCall(
         ctx,
         expr,
         `Codegen error: String.prototype.${method}(...) with a RegExp or symbol-protocol search value is not supported in ` +
-          "--target standalone (#1474). Pass a string pattern instead, or " +
+          "--target standalone (#1474). Use a supported backend-created static RegExp or native string-only overload, or " +
           "recompile without --target standalone.",
       );
-      return null;
+      // Commit the diagnostic through compileExpression's #1919 transaction:
+      // a null result is treated as a speculative miss and rolls errors back.
+      fctx.body.push({ op: "f64.const", value: 0 });
+      return { kind: "f64" };
     }
   }
 

@@ -81,6 +81,7 @@ import {
   emitGeneratorPrototypeSingleton,
   emitNativeGlobalThisObject,
   emitTypedArrayIntrinsicCtorObject,
+  ensureTypedArrayViewNativeProtoGlue,
 } from "./array-object-proto.js";
 import {
   dvDetachedThrowInstrs,
@@ -101,8 +102,10 @@ import {
 import {
   getArrTypeIdxFromVec,
   getOrRegisterResizableAbType,
+  getOrRegisterTaCtorType,
   getOrRegisterVecType,
   isTaViewTypeIdx,
+  TA_CTOR_KINDS,
   taCtorKindOf,
 } from "./registry/types.js";
 import {
@@ -252,6 +255,90 @@ export function tryConstructorPrototypeIdentity(
   propName: string,
   objType: ts.Type,
 ): PADispatchResult {
+  // #3371: the original Test262 realm shim deliberately aliases
+  // `$262.createRealm().global` to the current native global. Therefore
+  // `other[TA.name]` is the same first-class `$__ta_ctor` value as `TA`, and
+  // `.prototype` must select the corresponding per-kind native singleton.
+  // Resolve this compound expression directly; the generic `$Object` global
+  // map does not pre-populate every builtin constructor name.
+  if (
+    noJsHost(ctx) &&
+    propName === "prototype" &&
+    ts.isElementAccessExpression(expr.expression) &&
+    ts.isPropertyAccessExpression(expr.expression.argumentExpression) &&
+    expr.expression.argumentExpression.name.text === "name"
+  ) {
+    const realmExpr = expr.expression.expression;
+    let isRealmGlobal = ts.isIdentifier(realmExpr) && realmExpr.text === "globalThis";
+    if (!isRealmGlobal && ts.isIdentifier(realmExpr)) {
+      const realmSymbol = ctx.checker.getSymbolAtLocation(realmExpr);
+      const declaration =
+        realmSymbol?.valueDeclaration ??
+        realmSymbol?.declarations?.find((candidate) => ts.isVariableDeclaration(candidate));
+      const initializer = declaration && ts.isVariableDeclaration(declaration) ? declaration.initializer : undefined;
+      const init = initializer ? skipTransparentExpressions(initializer) : undefined;
+      isRealmGlobal =
+        init !== undefined &&
+        ts.isPropertyAccessExpression(init) &&
+        init.name.text === "global" &&
+        ts.isCallExpression(init.expression) &&
+        ts.isPropertyAccessExpression(init.expression.expression) &&
+        init.expression.expression.name.text === "createRealm";
+    }
+    if (isRealmGlobal) {
+      const ctorExpr = expr.expression.argumentExpression.expression;
+      getOrRegisterTaCtorType(ctx);
+      const ctorType = compileExpression(ctx, fctx, ctorExpr, { kind: "externref" });
+      if (ctorType && ctorType.kind !== "externref") coerceType(ctx, fctx, ctorType, { kind: "externref" });
+      else if (ctorType === null) fctx.body.push({ op: "ref.null.extern" });
+      if (ctx.taCtorTypeIdx >= 0) {
+        const anyLocal = allocLocal(fctx, `__realm_tac_any_${fctx.locals.length}`, { kind: "anyref" });
+        const kindLocal = allocLocal(fctx, `__realm_tac_kind_${fctx.locals.length}`, { kind: "i32" });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "local.set", index: anyLocal });
+        let chain: Instr[] = [{ op: "ref.null.extern" }];
+        for (let kind = TA_CTOR_KINDS.length - 1; kind >= 0; kind--) {
+          const brand = ensureTypedArrayViewNativeProtoGlue(ctx, TA_CTOR_KINDS[kind]!);
+          if (brand === undefined) continue;
+          const then: Instr[] = [];
+          const saved = fctx.body;
+          fctx.body = then;
+          const emitted = emitLazyNativeProtoGet(ctx, fctx, brand);
+          fctx.body = saved;
+          if (!emitted) continue;
+          chain = [
+            { op: "local.get", index: kindLocal },
+            { op: "i32.const", value: kind },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then,
+              else: chain,
+            },
+          ];
+        }
+        const matched: Instr[] = [
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: ctx.taCtorTypeIdx },
+          { op: "struct.get", typeIdx: ctx.taCtorTypeIdx, fieldIdx: 0 },
+          { op: "local.set", index: kindLocal },
+          ...chain,
+        ];
+        fctx.body.push({ op: "local.get", index: anyLocal });
+        fctx.body.push({ op: "ref.test", typeIdx: ctx.taCtorTypeIdx });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: matched,
+          else: [{ op: "ref.null.extern" }],
+        });
+        return { kind: "externref" };
+      }
+      return { kind: "externref" };
+    }
+  }
+
   // (#2743 a) `arguments.constructor.prototype` → %Object.prototype% (§10.4.4):
   // the arguments object's `.constructor` is %Object%, whose `.prototype` is
   // %Object.prototype%. The arguments object is modeled as a vec, so the inner
