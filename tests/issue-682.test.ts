@@ -139,15 +139,15 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     );
   });
 
-  it("refuses direct RegExp symbol protocol calls without JS-host imports", async () => {
-    const r = await compile(`export function test(): number { const re = /abc/; return re[Symbol.search]("zabc"); }`, {
-      fileName: "issue-682.ts",
-      target: "standalone",
-    });
+  it("runs direct RegExp Symbol.search calls without JS-host imports", async () => {
+    const value = await runStandaloneNumber(`
+      export function test(): number {
+        const re = /abc/;
+        return re[Symbol.search]("zabc");
+      }
+    `);
 
-    expect(r.success).toBe(false);
-    expect(r.errors.some((e) => /symbol protocol calls/.test(e.message) && /#682\/#1474/.test(e.message))).toBe(true);
-    expect(r.imports.some((i) => HOST_REGEXP_IMPORT_RE.test(`${i.module}::${i.name}`))).toBe(false);
+    expect(value).toBe(1);
   });
 
   it("RegExp.prototype.exec.call on a standalone literal compiles and matches (no host import)", async () => {
@@ -218,8 +218,8 @@ describe("#682 standalone RegExp literal-substring backend", () => {
     expect(str).toBeDefined();
   });
 
-  it("refuses RegExp-building string methods without JS-host string imports", async () => {
-    const r = await compile(`export function test(s: string): number { return s.search("a"); }`, {
+  it("refuses string-pattern search instead of compiling a silent wrong result", async () => {
+    const r = await compile(`export function test(): number { return "banana".search("a"); }`, {
       fileName: "issue-682.ts",
       target: "standalone",
     });
