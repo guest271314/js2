@@ -8,6 +8,7 @@ import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
+import type { TypeFact } from "../checker/oracle.js";
 import {
   isBigIntType,
   isBooleanType,
@@ -2256,25 +2257,24 @@ function functionBodyContainsNestedRuntimeDeclaration(fn: ts.FunctionDeclaration
   return found;
 }
 
-function typeContainsCallSignature(type: ts.Type): boolean {
-  if (type.getCallSignatures().length > 0) return true;
-  return type.isUnionOrIntersection() && type.types.some(typeContainsCallSignature);
+function typeFactCouldBeCallable(fact: TypeFact): boolean {
+  if (fact.kind === "function") return true;
+  if (fact.kind === "union") return fact.parts.some(typeFactCouldBeCallable);
+  // This is a safety gate: an incomplete fact must reduce M0 coverage rather
+  // than let a legacy caller cross an ABI boundary we have not proven.
+  return fact.kind === "any" || fact.kind === "unknown" || fact.kind === "unresolvable";
 }
 
 /** Callable parameters/returns still have a legacy↔IR wrapper ABI boundary. */
 function functionHasCallableBoundary(ctx: CodegenContext, declaration: ts.FunctionDeclaration): boolean {
-  try {
-    for (const parameter of declaration.parameters) {
-      if (parameter.type !== undefined && ts.isFunctionTypeNode(parameter.type)) return true;
-      if (typeContainsCallSignature(ctx.checker.getTypeAtLocation(parameter))) return true;
-    }
-    const signature = ctx.checker.getSignatureFromDeclaration(declaration);
-    return signature !== undefined && typeContainsCallSignature(ctx.checker.getReturnTypeOfSignature(signature));
-  } catch {
-    // Unknown callable shape is ABI-sensitive until the canonical callable ABI
-    // slice makes legacy/IR wrappers interchangeable.
-    return true;
+  for (const parameter of declaration.parameters) {
+    if (parameter.type !== undefined && ts.isFunctionTypeNode(parameter.type)) return true;
+    if (typeFactCouldBeCallable(ctx.oracle.typeFactOf(parameter))) return true;
   }
+  const signature = ctx.oracle.signatureOf(declaration);
+  // Unknown callable shape is ABI-sensitive until the canonical callable ABI
+  // slice makes legacy/IR wrappers interchangeable.
+  return signature === undefined || typeFactCouldBeCallable(signature.returns);
 }
 
 /**
