@@ -182,3 +182,37 @@ pass→fail drift is possible. Scoped `tsc --noEmit`, `biome lint`, and
 clustering finds only ~4 more 2-file groups whose bodies differ in error-message
 code, needing opts-threading or per-file equivalence review to migrate safely).
 Issue stays `ready` until ≥100 of 132 removed (acceptance criterion 1).
+
+### Slice 4 (ttraenkler/dev-serve, 2026-07-22) — 2 files + the ≥100 WALL
+
+issue-818 + issue-855 → existing `compileAndRunTestNumber` (both:
+`compile({fileName})` → throw-on-!success → `buildImports(imports, undefined,
+stringPool)` → async instantiate → `return test()`, differing only in the
+throw-message text a passing test never hits). 855 keeps its own `compile`
+import (used outside the helper). Parity: both files green post-migration
+(23 tests pass); `tsc`/`biome`/`prettier` clean; zero `src/` changes.
+
+**≥100 acceptance bar is UNSAFE — re-scope needed.** Measure-first analysis of
+all 80 remaining local helpers (strong semantic normalization — strip string
+literals, options-object contents, type annotations, local-var names, whitespace):
+**60 are distinct singletons**; the only consolidatable groups are one 3-file
+(818/855/761) + two 2-file, and per-file inspection shrinks even those:
+
+- 761 (3-file group) has **2 PRE-EXISTING failing tests on origin/main** — its
+  migration is parity-preserving but adds a known-failing file to a refactor PR,
+  so it is excluded here.
+- 300/1433 (a sig-cluster) are **NOT** body-equivalent — 300 uses
+  `WebAssembly.validate` + severity filtering + `buildImports(result)`; 1433 uses
+  `setExports` + async instantiate. The aggressive sig collapsed them falsely.
+- 797d/836 (compile-only, return the result) each also use `buildImports`/
+  `WebAssembly` OUTSIDE the helper, so the import cleanup is per-file.
+
+So after slice 4 only **~2–3 files** consolidate cleanly; the remaining ~73 are
+genuinely per-file-unique helpers. Reaching ≥100 removed (48 more) would require
+**opts-threading 40+ distinct helpers into flexible shared functions — i.e.
+changing test wiring/semantics**, which violates the issue's own safety story
+("only migrate files whose local copy is semantically equivalent"). **Recommend
+re-scoping acceptance from a hard count (≥100) to "all SAFE identical-body /
+existing-helper-equivalent clusters consolidated"** — which is now essentially
+complete (54 removed). The ~73 unique helpers are best left local or addressed
+one-at-a-time opportunistically when their test file is next touched.

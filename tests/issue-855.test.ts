@@ -1,16 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
-
-async function compileAndRun(src: string): Promise<any> {
-  const r = await compile(src, { fileName: "test.ts" });
-  if (!r.success) {
-    throw new Error(`CE: ${r.errors.map((e) => e.message).join("\n")}`);
-  }
-  const imports = buildImports(r.imports, undefined, r.stringPool);
-  const { instance } = await WebAssembly.instantiate(r.binary, imports);
-  return (instance.exports as any).test();
-}
+import { compileAndRunTestNumber as compileAndRun } from "./helpers/compile.js";
 
 async function compileOnly(src: string): Promise<{ success: boolean; errors?: any[]; imports?: any[] }> {
   return await compile(src, { fileName: "test.ts" });
