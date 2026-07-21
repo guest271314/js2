@@ -67,6 +67,7 @@ export type ImportIntent =
   | { type: "host_eq" }
   | { type: "host_loose_eq" }
   | { type: "host_add" }
+  | { type: "host_bigint_binop" }
   | { type: "host_compare" }
   | { type: "same_value_zero" }
   | { type: "dynamic_import" }

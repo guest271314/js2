@@ -1,7 +1,8 @@
 ---
 id: 3481
 title: "bigint/symbol coercion: value-substrate ToPrimitive/ToNumeric fidelity (host ~164 fails) — architect-spec hand-off"
-status: ready
+status: in-progress
+assignee: ttraenkler/senior-dev
 created: 2026-07-20
 priority: medium
 feasibility: hard
@@ -12,7 +13,10 @@ goal: test262-conformance
 model: opus
 sprint: current
 horizon: xl
-related: [3422]
+related: [3422, 3328]
+loc-budget-allow:
+  - src/codegen/binary-ops.ts
+  - src/runtime.ts
 ---
 
 # #3481 — bigint/symbol coercion fidelity (value substrate)
@@ -70,3 +74,72 @@ BigInt re-check on ToPrimitive results, (3) the isolated operator/arg-validation
   `instanceof TypeError` at the coercion site.
 - The ~10 isolated cases (`>>>`, toFixed order, sort comparefn, species, fromCharCode) throw.
 - Zero regression on the arithmetic-coercion cases that already pass.
+
+## Implementation Notes — senior-dev, 2026-07-21 (branch `issue-3481-value-rep-coercion`)
+
+**Verify-first disproved the "bigint-wrapper is a tight slice" premise. This IS the
+epic the issue predicted — there is no single-PR slice that flips a whole host
+test262 file.** What landed on the branch is a correct, low-regression *prerequisite*,
+not a self-merge. Escalated to the tech lead for sequencing (do NOT enqueue).
+
+### What the branch implements (step 1 of the issue's own sequence — "wrapper-object ToPrimitive unwrap")
+A new internal host import `__host_bigint_binop(op:i32, a:externref, b:externref)->externref`
+(mirrors the existing `host_add`/`host_compare`/`host_eq` precedent — compiler-emitted,
+not user-facing, so the host-import allowlist gate does not bite):
+- `src/index.ts` — `ImportIntent` union: `{ type: "host_bigint_binop" }`.
+- `src/compiler/import-manifest.ts` — name→intent mapping.
+- `src/runtime.ts` (`case "host_bigint_binop"`) — struct operands ToPrimitive-reduced via
+  `_toPrimitiveSync` (hint `default` for `+`, `number` otherwise), then JS applies the
+  operator → ToNumeric + the mix-TypeError check + BigInt arithmetic + `>>>`-on-BigInt
+  throw, all for free. i32 opcode is a private ABI shared with `bigIntHostBinopOpcode`.
+- `src/codegen/binary-ops.ts` — in the mixed-BigInt arithmetic block, BEFORE the
+  `emitThrowTypeError("Cannot mix BigInt…")`, delegate to the host binop when the
+  **non-bigint operand is `Any|Unknown|Object`** and mode is JS-host + default
+  (`anyValueTypeIdx < 0`). Standalone/WASI keeps the throw (no JS host). Gate includes
+  `Object` (not just `Any`) deliberately — object-literal operands are `TypeFlags.Object`,
+  and broadening is safe *because* the binop pre-reduces structs via `_toPrimitiveSync`
+  (the #1374 regression was raw `a<b` on opaque structs with NO pre-reduction).
+
+**Regression surface = zero on passing tests**: the delegated arm replaces a path that
+*currently always throws at runtime*. Only outcomes are throw→compute (fix) or
+TypeError-msgA→TypeError-msgB (benign — `assert.throws(TypeError)` still passes).
+Empirically verified: `Object(2n)*2n=4n`, `2n*Object(2n)=4n`, `-`/`+`/`**`/`|`/`>>` on
+`Object(bigint)` correct; `(5 as any)*2n` and `2n*(3 as number)` still throw TypeError;
+`Object(4n) >>> 1n` throws; plain `2n*2n`/`5n+3n`/`1n<<4n` untouched.
+
+### Why it flips 0 whole host files ALONE (inferred from assertion-path analysis)
+test262 aborts on the FIRST failed `assert.*`, and every failing FILE bundles the
+wrapper case with an assertion this slice does NOT cover:
+- **`.../bigint-wrapped-values.js` (13 files)** — assertion #3 (before the passing
+  `Object(2n)` rows finish the file) is `{[Symbol.toPrimitive](){return 2n}} * 2n`, then
+  `{valueOf}`/`{toString}`. These are WasmGC structs; two substrate gaps block them:
+  - **Gap A** — a compiled `valueOf`/`toString` dispatched via a method-call-through-`any`
+    loses the BigInt brand: it returns `2` (number), not `2n`, so `2 * 2n` throws the JS
+    mix error. (A *direct* closure return preserves the brand — the loss is in the
+    method-via-any / `__call_fn_method_0` return boxing.)
+  - **Gap B** — an object-literal computed `[Symbol.toPrimitive]` is NOT dispatched by
+    `_hostToPrimitive` at all (no sidecar / no `__call_@@toPrimitive` for object literals)
+    → falls to `"[object Object]"`.
+  Both are `_hostToPrimitive` / nominal-struct ToPrimitive substrate — **the same lane as
+  the active `issue-3328-capturing-closure-toprimitive-dispatch` worktree.** Not touched
+  here to avoid duplicate-work collision (lane-partition rule). Once #3328's dispatch
+  lands, this binop is what routes the reduced primitive back into a BigInt op → the
+  wrapped-values files flip. The binop is a genuine dependency of that flip, not redundant.
+- **`.../bigint-and-number.js` (9 files)** — assertions like `Object(1n) * 1` and
+  `Object(1n) * Object(1)` have **neither** operand statically bigint, so they never enter
+  the mixed-BigInt block; they need general `any`-arithmetic host delegation, which changes
+  the result type of ALL `any * number` from f64→externref (blast radius across every
+  any-arithmetic site + the AnyValue fast-mode ABI) — explicitly NOT a low-regression first
+  slice (#1374 lesson). Deferred.
+
+### Remaining slices (for the architect/PO to sequence)
+1. **Gap A + Gap B in `_hostToPrimitive`** (coordinate with #3328) — unblocks the 13
+   `bigint-wrapped-values.js` files given the binop above.
+2. **General `any`-arithmetic host delegation** (multiplicative/bitwise) — unblocks the 9
+   `bigint-and-number.js` files; needs its own regression budget (result-type f64→externref).
+3. **Symbol ×79 cluster** — the larger, unexplored lever (localized property-access Symbol-key
+   coercion per the scope notes). Needs a short feasibility probe (single coercion site vs
+   shared substrate) before commit; likely the better flip-positive host win this session,
+   but a different subsystem from the bigint work here.
+4. Family-B ToString/ToInteger/ToIndex Symbol/BigInt re-check on ToPrimitive results, and the
+   isolated operator/arg-validation cases.

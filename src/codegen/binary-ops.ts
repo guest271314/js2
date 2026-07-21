@@ -299,6 +299,46 @@ function tryFlattenBinaryChain(
   return resultType;
 }
 
+/**
+ * (#3481) Compact opcode for `__host_bigint_binop`, the JS-host delegation used
+ * when a BigInt is combined with a dynamically-object/any operand that ToNumeric
+ * may reduce to a BigInt (`Object(2n) * 2n`, `{valueOf(){return 2n}} - 2n`, …).
+ * Returns `undefined` for operators that never reach the mixed-BigInt arithmetic
+ * throw (equality/relational are handled earlier), so the caller keeps its
+ * existing path. The numbering is a private ABI shared only with the
+ * `host_bigint_binop` runtime intent — keep the two in lockstep.
+ */
+function bigIntHostBinopOpcode(op: ts.SyntaxKind): number | undefined {
+  switch (op) {
+    case ts.SyntaxKind.PlusToken:
+      return 0;
+    case ts.SyntaxKind.MinusToken:
+      return 1;
+    case ts.SyntaxKind.AsteriskToken:
+      return 2;
+    case ts.SyntaxKind.SlashToken:
+      return 3;
+    case ts.SyntaxKind.PercentToken:
+      return 4;
+    case ts.SyntaxKind.AsteriskAsteriskToken:
+      return 5;
+    case ts.SyntaxKind.AmpersandToken:
+      return 6;
+    case ts.SyntaxKind.BarToken:
+      return 7;
+    case ts.SyntaxKind.CaretToken:
+      return 8;
+    case ts.SyntaxKind.LessThanLessThanToken:
+      return 9;
+    case ts.SyntaxKind.GreaterThanGreaterThanToken:
+      return 10;
+    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
+      return 11;
+    default:
+      return undefined;
+  }
+}
+
 export function compileBinaryExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1172,6 +1212,67 @@ export function compileBinaryExpression(
       // BigInt side (`1n + "" === "1"` per §13.15.4).
       if (op === ts.SyntaxKind.PlusToken && (isStringType(leftTsType) || isStringType(rightTsType))) {
         return compileStringBinaryOp(ctx, fctx, expr, op);
+      }
+      // (#3481) BigInt wrapper / ToPrimitive-yields-BigInt. When the NON-bigint
+      // operand is dynamically an object/any (`Object(2n)`, `{valueOf(){return
+      // 2n}}`, `{[Symbol.toPrimitive](){return 2n}}`), we cannot statically know
+      // it is a real "mix": ToNumeric (§7.1.3) may reduce it to a BigInt, in
+      // which case the operator is a valid BigInt op (`Object(2n) * 2n === 4n`),
+      // not a TypeError. In JS-host mode delegate the whole operator to JS via
+      // `__host_bigint_binop` — that gives ToPrimitive (incl. the wrapper /
+      // @@toPrimitive / valueOf reduction, with struct operands routed through
+      // the in-module dispatcher), the mix TypeError check, and BigInt
+      // arithmetic for free. Gate: the non-bigint side is Any|Unknown|Object (a
+      // statically number/string/boolean operand is a *provable* mix — keep the
+      // cheap throw; JS would throw the same TypeError anyway). Default mode only
+      // (`anyValueTypeIdx < 0`), mirroring emitAnyAdd's host-import ABI rule.
+      // Standalone/WASI has no JS host, so it keeps the throw (existing
+      // limitation — a native ToNumeric reduction is the follow-up slice).
+      const noJsHost3481 = ctx.standalone === true || ctx.wasi === true;
+      const nonBigIntTsType = leftIsBigInt ? rightTsType : leftTsType;
+      const nonBigIntIsObjectish =
+        (nonBigIntTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Object)) !== 0;
+      const hostBinopCode = bigIntHostBinopOpcode(op);
+      if (!noJsHost3481 && ctx.anyValueTypeIdx < 0 && nonBigIntIsObjectish && hostBinopCode !== undefined) {
+        // Evaluate operands left→right, box each to externref, store in temps.
+        // The statically-bigint side is a branded i64 → __box_bigint yields a JS
+        // bigint (force the brand: isBigIntType already proved it is a bigint).
+        const lHint: ValType = leftIsBigInt ? { kind: "i64" } : { kind: "externref" };
+        const lType = compileExpression(ctx, fctx, expr.left, lHint);
+        if (!lType) return null;
+        if (lType.kind === "i64") {
+          coerceType(ctx, fctx, { kind: "i64", bigint: true }, { kind: "externref" });
+        } else if (lType.kind !== "externref") {
+          coerceType(ctx, fctx, lType, { kind: "externref" });
+        }
+        const lTmp = allocTempLocal(fctx, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: lTmp });
+        const rHint: ValType = rightIsBigInt ? { kind: "i64" } : { kind: "externref" };
+        const rType = compileExpression(ctx, fctx, expr.right, rHint);
+        if (!rType) return null;
+        if (rType.kind === "i64") {
+          coerceType(ctx, fctx, { kind: "i64", bigint: true }, { kind: "externref" });
+        } else if (rType.kind !== "externref") {
+          coerceType(ctx, fctx, rType, { kind: "externref" });
+        }
+        const rTmp = allocTempLocal(fctx, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: rTmp });
+        const hostIdx = ensureLateImport(
+          ctx,
+          "__host_bigint_binop",
+          [{ kind: "i32" }, { kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        const finalIdx = ctx.funcMap.get("__host_bigint_binop") ?? hostIdx;
+        if (finalIdx === undefined) throw new Error("Missing import after ensureLateImport: __host_bigint_binop");
+        fctx.body.push({ op: "i32.const", value: hostBinopCode });
+        fctx.body.push({ op: "local.get", index: lTmp });
+        fctx.body.push({ op: "local.get", index: rTmp });
+        releaseTempLocal(fctx, rTmp);
+        releaseTempLocal(fctx, lTmp);
+        fctx.body.push({ op: "call", funcIdx: finalIdx });
+        return { kind: "externref" };
       }
       // Compile both sides for side effects, drop their values, then throw.
       const lt = compileExpression(ctx, fctx, expr.left);

@@ -14030,6 +14030,59 @@ assert._isSameValue = isSameValue;
           b != null && typeof b === "object" && _isWasmStruct(b) ? _toPrimitiveSync(b, "default", callbackState) : b;
         return av + bv;
       };
+    case "host_bigint_binop":
+      // #3481 — a BigInt combined with a dynamically-object/any operand whose
+      // ToNumeric (§7.1.3) may reduce to a BigInt: `Object(2n) * 2n === 4n`,
+      // `{valueOf(){return 2n}} - 2n === 0n`, `{[Symbol.toPrimitive](){return
+      // 2n}} ** 2n === 4n`. The compiler can't decide statically whether this is
+      // a real BigInt/Number *mix* (a TypeError) or a valid BigInt op, so it
+      // delegates the operator to JS here. A WasmGC-struct operand (an object
+      // literal / class instance carrying a COMPILED valueOf / toString /
+      // @@toPrimitive) is first reduced via `_toPrimitiveSync` — the same proxy
+      // `host_add` uses — because native JS `a * b` would otherwise throw
+      // "Cannot convert object to primitive value" on the opaque struct. `+`
+      // takes the "default" hint (string-if-either-is-string), every other
+      // operator the "number" hint, per §13.15.3 / §7.1.3. Once both operands
+      // are primitives, the JS operator gives ToNumeric + the mix-TypeError
+      // check + BigInt arithmetic for free (a Number-vs-BigInt mix throws a real
+      // `instanceof TypeError`; `>>>` on BigInt throws, matching the spec).
+      // The i32 opcode is a private ABI shared with `bigIntHostBinopOpcode` in
+      // binary-ops.ts — keep them in lockstep.
+      return (op: number, a: any, b: any) => {
+        const hint = op === 0 ? "default" : "number";
+        const av =
+          a != null && typeof a === "object" && _isWasmStruct(a) ? _toPrimitiveSync(a, hint, callbackState) : a;
+        const bv =
+          b != null && typeof b === "object" && _isWasmStruct(b) ? _toPrimitiveSync(b, hint, callbackState) : b;
+        switch (op) {
+          case 0:
+            return av + bv;
+          case 1:
+            return av - bv;
+          case 2:
+            return av * bv;
+          case 3:
+            return av / bv;
+          case 4:
+            return av % bv;
+          case 5:
+            return av ** bv;
+          case 6:
+            return av & bv;
+          case 7:
+            return av | bv;
+          case 8:
+            return av ^ bv;
+          case 9:
+            return av << bv;
+          case 10:
+            return av >> bv;
+          case 11:
+            return av >>> bv;
+          default:
+            throw new TypeError("Cannot mix BigInt and other types, use explicit conversions");
+        }
+      };
     case "host_compare":
       // #2059 — relational compare for two externref operands (§7.2.13
       // IsLessThan). JS `<`/`>` give ToPrimitive (hint "number"), the
