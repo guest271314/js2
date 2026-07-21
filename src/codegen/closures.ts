@@ -100,11 +100,12 @@ import type { NativeGeneratorInfo } from "./context/types.js";
 // (#3270) Extracted closure subsystems. Re-exported below so external importers
 // that reference these symbols via `./closures.js` are unaffected.
 import {
+  getClosureFuncSelfTypeIdx,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
   getFuncRefWrapperRootTypeIdx,
 } from "./closures/funcref-wrapper-types.js";
-export { getFuncSignature, getOrCreateFuncRefWrapperTypes, getFuncRefWrapperRootTypeIdx };
+export { getClosureFuncSelfTypeIdx, getFuncSignature, getOrCreateFuncRefWrapperTypes, getFuncRefWrapperRootTypeIdx };
 import {
   isVecOrArrayRefType,
   isHostCallbackArgument,
@@ -1918,10 +1919,11 @@ export function compileArrowAsClosure(
   // dispatch when closures are passed as callable parameters (externref).
   let structTypeIdx: number;
   let liftedFuncTypeIdx: number;
+  let liftedSelfTypeIdx: number;
   let liftedParams: ValType[];
   const isNamedFuncExpr = ts.isFunctionExpression(arrow) && arrow.name;
 
-  ({ structTypeIdx, liftedFuncTypeIdx, liftedParams } = mintClosureStructTypes(ctx, {
+  ({ structTypeIdx, liftedFuncTypeIdx, liftedSelfTypeIdx, liftedParams } = mintClosureStructTypes(ctx, {
     captures,
     arrowParams,
     closureResults,
@@ -1930,16 +1932,13 @@ export function compileArrowAsClosure(
   }));
 
   // 5. Build the lifted function body
-  // For no-capture closures using wrapper types, self param is non-null ref.
-  // For captured closures sharing wrapper types, self param uses the WRAPPER struct
-  // type (non-null ref) — captures are accessed via ref.cast to the subtype.
-  // For named func exprs, self param is ref_null (var hoisting support).
-  const usesWrapperFuncType =
-    captures.length > 0 && !isNamedFuncExpr && !!getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults);
+  // Shared-wrapper lifted functions receive the canonical wrapper ROOT,
+  // regardless of their per-signature allocation wrapper. Captured bodies
+  // downcast that root to their concrete environment subtype. Named function
+  // expressions retain their private nullable self type for var hoisting.
+  const usesWrapperFuncType = liftedSelfTypeIdx !== structTypeIdx;
   const selfParamKind = isNamedFuncExpr ? ("ref_null" as const) : ("ref" as const);
-  const selfTypeIdx = usesWrapperFuncType
-    ? getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults)!.structTypeIdx
-    : structTypeIdx;
+  const selfTypeIdx = liftedSelfTypeIdx;
   const liftedFctx: FunctionContext = {
     name: closureName,
     params: [
@@ -2147,10 +2146,10 @@ export function compileArrowAsClosure(
   // (#2118) Register the self-recursive const/let arrow binding so recursive
   // calls compile as closure calls dispatched through __self. The struct.get
   // that fetches the funcref runs against __self's *actual* param type
-  // (selfTypeIdx — the wrapper base struct when capture-subtyping is used, else
-  // the specific struct), not necessarily the concrete subtype, so use
-  // selfTypeIdx as the call-site struct type. Field 0 (funcref) is inherited
-  // from the wrapper base, so the lifted func type still drives call_ref.
+  // (`selfTypeIdx`: the canonical wrapper root for shared wrappers, or the
+  // private struct for named function expressions), not necessarily the
+  // concrete allocation subtype. Field 0 is available on that root, and the
+  // lifted func type still drives call_ref.
   let savedSelfBindingClosureInfo: ClosureInfo | undefined;
   let hadSavedSelfBindingClosureInfo = false;
   if (selfBindingName !== undefined && selfBindingName !== funcExprName) {

@@ -1343,16 +1343,18 @@ selection is widened.
 
 ### Prerequisite B0 (zero delta) — one callable boundary ABI
 
-The legacy front end carries callable parameters and results as `externref`
-wrappers rooted in `__fn_wrap_*`; the current IR closure types use a private
-`__ir_closure_base_*` hierarchy. Direct all-IR tests hide that mismatch, but an
-M0 mixed-front-end call can expose an invalid signature or cast. Before any
-imported call or top-level function value is claimed, #3214 must establish one
-boundary representation: keep typed closures internal, pack them into the
-legacy wrapper carrier at callable positions, and unpack through the exact
-signature wrapper before `call_ref`. B0 must prove both IR→legacy and legacy→IR
-callable parameters/results while preserving **12 → 12** and zero post-claim
-demotions.
+The legacy front end carries callable parameters as `externref` wrappers rooted
+in `__fn_wrap_*`; the pre-B0 IR closure types used a private
+`__ir_closure_base_*` hierarchy. Direct all-IR tests hid that mismatch, but an
+M0 mixed-front-end call could expose an invalid signature or cast. #3214 B0 now
+keeps typed closures internal, packs them into the legacy carrier at callable
+parameter boundaries, and unpacks through one permanently open canonical
+wrapper root. Exact signature checking happens on the extracted funcref before
+`call_ref`; it never depends on a module-local signature-wrapper RTT. Mixed
+legacy→IR runtime coverage in both adversarial wrapper orders plus the
+compositional IR→legacy pack path preserve **12 → 12** with zero post-claim
+demotions. Function-valued results and storage/escape remain deliberately
+deferred; B0 does not claim them.
 
 ### Capability A (M) — imported-callee calls (first half of the 8 mains)
 

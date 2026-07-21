@@ -10,6 +10,7 @@ import { ts } from "../ts-api.js";
 import { emitIsUndefinedSingletonExternAt, isAnyValue, undefinedSingletonActive } from "./any-helpers.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
 import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
+import { getClosureFuncSelfTypeIdx } from "./closures.js";
 import { compileAndEmitToString, emitToString } from "./coercion-engine.js";
 import { registerStringHelperEmitters } from "./string-emitter-registry.js";
 import { popBody, pushBody } from "./context/bodies.js";
@@ -1283,27 +1284,23 @@ export function compileTaggedTemplateExpression(
     if (matchedClosureInfo && matchedStructTypeIdx !== undefined) {
       // Compile the tag expression to get the closure on the stack
       const tagResult = compileExpression(ctx, fctx, expr.tag);
+      const selfTypeIdx = getClosureFuncSelfTypeIdx(ctx, matchedClosureInfo.funcTypeIdx) ?? matchedStructTypeIdx;
+      const closureRefType: ValType = { kind: "ref_null", typeIdx: selfTypeIdx };
 
-      // Save closure ref to a local
-      let closureLocal: number;
+      // Normalize erased shared closures to the canonical root. Private/named
+      // funcs retain their concrete self carrier.
+      const closureLocal = allocLocal(fctx, `__tt_tag_${fctx.locals.length}`, closureRefType);
       if (tagResult?.kind === "externref") {
-        // Need to convert externref back to the closure struct ref (guarded)
-        const closureRefType: ValType = {
-          kind: "ref_null",
-          typeIdx: matchedStructTypeIdx,
-        };
-        closureLocal = allocLocal(fctx, `__tt_tag_${fctx.locals.length}`, closureRefType);
         fctx.body.push({ op: "any.convert_extern" });
-        emitGuardedRefCast(fctx, matchedStructTypeIdx);
-        fctx.body.push({ op: "local.set", index: closureLocal });
-      } else {
-        const closureRefType: ValType = tagResult ?? {
-          kind: "ref",
-          typeIdx: matchedStructTypeIdx,
-        };
-        closureLocal = allocLocal(fctx, `__tt_tag_${fctx.locals.length}`, closureRefType);
-        fctx.body.push({ op: "local.set", index: closureLocal });
+        emitGuardedRefCast(fctx, selfTypeIdx);
+      } else if (
+        tagResult &&
+        (tagResult.kind === "ref" || tagResult.kind === "ref_null") &&
+        tagResult.typeIdx !== selfTypeIdx
+      ) {
+        emitGuardedRefCast(fctx, selfTypeIdx);
       }
+      fctx.body.push({ op: "local.set", index: closureLocal });
 
       // Push closure ref as self param (first arg of lifted function)
       fctx.body.push({ op: "local.get", index: closureLocal });
@@ -1333,7 +1330,7 @@ export function compileTaggedTemplateExpression(
       fctx.body.push({ op: "ref.as_non_null" });
       fctx.body.push({
         op: "struct.get",
-        typeIdx: matchedStructTypeIdx,
+        typeIdx: selfTypeIdx,
         fieldIdx: 0,
       });
       emitGuardedFuncRefCast(fctx, matchedClosureInfo.funcTypeIdx);

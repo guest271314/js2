@@ -103,6 +103,13 @@ export interface IrTypeRef {
 //                                inner IrType's ValType as its `$val`
 //                                (unwrapped via `asVal` at the resolver
 //                                boundary).
+//   { kind: "closure", signature }
+//                              → ref to the canonical `__fn_wrap_*` ROOT.
+//                                Construction still allocates the signature
+//                                wrapper or a declared captured subtype.
+//   { kind: "callable", signature }
+//                              → externref boundary carrier for that canonical
+//                                wrapper family (#3214 B0).
 //   { kind: "dynamic", tag? }  → `resolver.resolveDynamic()` — the module's
 //                                canonical boxed-any carrier (#2949/#1852:
 //                                `ref_null $AnyValue` in fast/standalone,
@@ -128,9 +135,9 @@ export interface IrObjectShape {
 /**
  * Slice 3 (#1169c) — a closure's caller-visible signature. Used both as
  * the IR-level type discriminator for closure values and as the resolver
- * lookup key for the supertype struct + lifted func type. The implicit
- * `__self` struct param at index 0 of the lifted body is NOT present in
- * `params` — it's added by the resolver when synthesizing the func type.
+ * lookup key for the signature allocation wrapper + exact lifted func type.
+ * The implicit canonical-root `__self` param at index 0 of the lifted body is
+ * NOT present in `params` — the resolver adds it to the func type.
  */
 export interface IrClosureSignature {
   readonly params: readonly IrType[];
@@ -232,14 +239,20 @@ export type IrType =
   // and `boxed`, the IR carries enough information to drive the resolver
   // without committing to a specific Wasm typeIdx until lowering time.
   | { readonly kind: "object"; readonly shape: IrObjectShape }
-  // Backend-agnostic closure marker (#1169c). Carries the caller-visible
-  // signature only — captures are an implementation detail of the
-  // closure-construction site, not a type-system property. Two closure
-  // values with the same signature but different captures share the same
-  // IrType (matches the legacy funcref-wrapper supertype pattern). The
-  // resolver registers a base WasmGC struct per signature plus a subtype
-  // struct per (signature, captureFieldTypes) pair.
+  // Backend-agnostic INTERNAL closure marker (#1169c). Carries the
+  // caller-visible signature only — captures are an implementation detail of
+  // the closure-construction site, not a type-system property. This type is
+  // compiler-owned and lowers to the canonical wrapper ROOT carrier. A
+  // closure.new site still allocates the signature wrapper (or its captured
+  // subtype), both of which are valid root subtypes.
   | { readonly kind: "closure"; readonly signature: IrClosureSignature }
+  // #3214 B0 — callable values crossing a source-function boundary. Legacy
+  // already exposes callbacks as externref-wrapped `__fn_wrap_*` values, so
+  // IR parameters must use the same ABI rather than leaking the internal
+  // closure struct reference. `callable<S>` is deliberately distinct from
+  // `closure<S>`: only an explicit closure→callable pack may cross the
+  // boundary, while callable→callable forwards without representation churn.
+  | { readonly kind: "callable"; readonly signature: IrClosureSignature }
   // Slice 4 (#1169d) — symbolic class instance reference. The Wasm-level
   // value type is `(ref $ClassStruct)` where the struct is registered by
   // the legacy `collectClassDeclaration` pass; the resolver maps
@@ -379,6 +392,9 @@ export function irTypeEquals(a: IrType, b: IrType): boolean {
     return objectShapeEquals(a.shape, b.shape);
   }
   if (a.kind === "closure" && b.kind === "closure") {
+    return closureSignatureEquals(a.signature, b.signature);
+  }
+  if (a.kind === "callable" && b.kind === "callable") {
     return closureSignatureEquals(a.signature, b.signature);
   }
   if (a.kind === "class" && b.kind === "class") {
@@ -1136,18 +1152,19 @@ export interface IrInstrObjectSet extends IrInstrBase {
 /**
  * Materialize a closure value. `liftedFunc` names the lifted top-level
  * function (registered in the IR module as a synthesized BuiltFn).
- * `signature` is the caller-visible signature (used to look up the
- * supertype struct + funcref type). `captures` populates the subtype's
- * capture fields parallel to `captureFieldTypes`.
+ * `signature` is the caller-visible signature (used to look up its allocation
+ * wrapper + exact funcref type). `captures` populates an optional
+ * captured subtype's fields parallel to `captureFieldTypes`; an empty capture
+ * list constructs the exact wrapper itself.
  *
  * Lowering emits:
  *   ref.func $lifted
  *   <push each capture>
  *   struct.new $closure_<signature>_<captureSig>
  *
- * Result type: `{ kind: "closure"; signature }`. The Wasm-level value
- * type is the supertype struct so call_ref against the base func type
- * accepts any subtype.
+ * Result type: `{ kind: "closure"; signature }`. The Wasm-level SSA carrier is
+ * the canonical wrapper root; construction still creates the signature
+ * wrapper or a captured subtype beneath it.
  */
 export interface IrInstrClosureNew extends IrInstrBase {
   readonly kind: "closure.new";
@@ -1178,15 +1195,20 @@ export interface IrInstrClosureCap extends IrInstrBase {
 }
 
 /**
- * Invoke a closure value. `callee` must be `IrType.closure`. `args` must
- * match the signature's params arity and types.
+ * Invoke a compiler-owned closure or a boundary callable. `args` must match
+ * the callee signature's params arity and types.
  *
  * Lowering emits:
- *   <emit callee>          ;; pushes self
+ *   <emit/unpack callee>   ;; pushes canonical-root self
  *   <emit args>
- *   <emit callee>          ;; pushes self again — second use forces a Wasm local
- *   struct.get $base_struct $func
- *   call_ref $base_funcType
+ *   <emit/unpack callee>   ;; pushes self again — second use forces a Wasm local
+ *   struct.get $wrapper_root $func
+ *   ref.cast $lifted_func_type
+ *   call_ref $lifted_func_type
+ *
+ * A `callable<S>` unpack converts externref→anyref and casts once to the
+ * canonical wrapper root. The typed funcref cast performs the exact signature
+ * check; `call_ref` receives that field-0 funcref, never the wrapper itself.
  *
  * Result type: `signature.returnType`.
  */
@@ -1622,7 +1644,9 @@ export interface IrInstrForOfVec extends IrInstrBase {
  *   - val/externref input → no-op (input already externref)
  *   - any other ref input → `extern.convert_any` after pushing the value.
  *
- * Result type: `irVal({ kind: "externref" })`.
+ * Result type is normally `irVal({ kind: "externref" })`. The explicit
+ * closure-boundary pack reuses this representation operation with result
+ * type `{ kind: "callable"; signature }`; both lower to externref.
  */
 export interface IrInstrCoerceToExternref extends IrInstrBase {
   readonly kind: "coerce.to_externref";

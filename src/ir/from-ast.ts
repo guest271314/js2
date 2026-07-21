@@ -2266,6 +2266,10 @@ function describeIrType(t: IrType): string {
     const ps = t.signature.params.map(describeIrType).join(",");
     return `closure(${ps})->${describeIrType(t.signature.returnType)}`;
   }
+  if (t.kind === "callable") {
+    const ps = t.signature.params.map(describeIrType).join(",");
+    return `callable(${ps})->${describeIrType(t.signature.returnType)}`;
+  }
   if (t.kind === "class") return `class<${t.shape.className}>`;
   if (t.kind === "extern") return `extern<${t.className}>`;
   // #1926 — union members / boxed inner are IrTypes; recurse.
@@ -2852,6 +2856,11 @@ function isIrTypeNullable(t: IrType): boolean {
     case "string":
     case "closure":
       return false;
+    case "callable":
+      // Boundary callables are externref carriers. A host can still supply
+      // null despite the source annotation, so optional access must retain a
+      // runtime null check / legacy fallback.
+      return true;
     case "extern":
       // Host-class externref values (Map, RegExp, ...) — externref is
       // nullable at the JS host level. Treat as nullable for `?.` gating.
@@ -3719,11 +3728,11 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   // Slice 3 (#1169c): local-binding lookups WIN over top-level callees
   // because the source-level identifier resolution puts inner-scope
   // names first. The dispatcher picks one of three paths:
-  //   - `local` binding whose IrType is closure → closure.call
+  //   - `local` binding whose IrType is closure/callable → closure.call
   //   - `nestedFunc` binding → direct call with prepended captures
   //   - top-level callee in calleeTypes → vanilla `call`
   const binding = cx.scope.get(calleeName);
-  if (binding?.kind === "local" && binding.type.kind === "closure") {
+  if (binding?.kind === "local" && (binding.type.kind === "closure" || binding.type.kind === "callable")) {
     return lowerClosureCall(binding.value, binding.type.signature, expr.arguments, cx);
   }
   if (binding?.kind === "nestedFunc") {
@@ -3748,8 +3757,20 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   for (let i = 0; i < expandedArgExprs.length; i++) {
     const argExpr = expandedArgExprs[i]!;
     const expected = calleeSig.params[i]!;
-    const argVal = lowerExpr(argExpr, cx, expected);
-    const argType = cx.builder.typeOf(argVal);
+    let argVal = lowerExpr(argExpr, cx, expected);
+    let argType = cx.builder.typeOf(argVal);
+    // #3214 B0 — source-function callable params use externref, while closure
+    // literals remain compiler-owned root-carrier refs. Cross that boundary
+    // only for an exact signature match. Already-packed callables forward
+    // unchanged; reverse or covariant conversions remain rejected below.
+    if (
+      argType.kind === "closure" &&
+      expected.kind === "callable" &&
+      closureSignatureEquals(argType.signature, expected.signature)
+    ) {
+      argVal = cx.builder.emitCallablePack(argVal, expected.signature);
+      argType = cx.builder.typeOf(argVal);
+    }
     if (!irTypeArgAssignable(argType, expected)) {
       throw new Error(
         `ir/from-ast: arg ${i} of call to ${calleeName} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
@@ -3844,11 +3865,11 @@ function expandStaticSpreadArgs(args: readonly ts.Expression[], cx: LowerCtx): t
 }
 
 /**
- * Slice 3 (#1169c): lower a call-by-value to a closure binding.
- * `callee` is the SSA value of the closure struct. The lowered
- * `closure.call` instr emits `<callee>; args; <callee>; struct.get
- * $func; call_ref` — the second `<callee>` use is forced into a Wasm
- * local by `collectIrUses`'s double count.
+ * Slice 3 / #3214 B0: lower a call-by-value to an internal closure or a
+ * boundary callable binding. The lowered `closure.call` emits canonical-root
+ * self, args, root self again, field-0 funcref extraction, and call_ref.
+ * Boundary callables unpack externref through a root cast on each self use;
+ * `collectIrUses`'s double count forces the source SSA value into a local.
  */
 function lowerClosureCall(
   callee: IrValueId,
@@ -6686,11 +6707,11 @@ function findClassMember(
  * Class-typed LHS → `class.instanceof` (runtime `__tag` compare against C's
  * tag + descendant tags — exactly legacy `compileInstanceOf`'s non-null-ref
  * path). LHS representations that can never hold a user-class instance
- * (unboxed scalars, strings, plain-object structs, closures) fold to
+ * (unboxed scalars, strings, plain-object structs, internal closures) fold to
  * constant false with the operand still evaluated for effects (legacy
- * parity: `drop; i32.const 0`). Everything else (externref, dynamic, union,
- * boxed, vec refs) demotes cleanly to legacy, which has the full dynamic
- * `__instanceof_dyn` path.
+ * parity: `drop; i32.const 0`). Everything else (boundary callables/externref,
+ * dynamic, union, boxed, vec refs) demotes cleanly to legacy, which has the
+ * full dynamic `__instanceof_dyn` path.
  */
 function lowerInstanceOf(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   if (!ts.isIdentifier(expr.right)) {
@@ -6780,7 +6801,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
 
   // (#2856 C3) STRICT undefined-compare — `hit !== undefined`. Dispatch on
   // the non-undefined operand's IrType (mirrors the selector's acceptance):
-  //   - externref-shaped (externref val / extern class / host string):
+  //   - externref-shaped (externref val / extern class / callable / host string):
   //     runtime `__extern_is_undefined(v)` (the legacy check for the same
   //     shape), inverted for `!==`.
   //   - representations that can never hold the JS `undefined` VALUE
@@ -7262,7 +7283,8 @@ function typeOfValue(v: IrValueId, cx: LowerCtx): IrType {
  * the normal lowering).
  *
  * Dispatch by the non-undefined operand's IrType:
- *   - externref-shaped (externref val / extern class / host-mode string) —
+ *   - externref-shaped (externref val / extern class / callable /
+ *     host-mode string) —
  *     the runtime CAN hold the host `undefined`: emit the same
  *     `__extern_is_undefined(v)` check legacy emits for this shape (import
  *     registered by legacy's own lowering of the identical site in the
@@ -7311,6 +7333,7 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
   const externrefShaped =
     (tv !== null && tv.kind === "externref") ||
     t.kind === "extern" ||
+    t.kind === "callable" ||
     (t.kind === "string" && cx.resolver?.stringIsExternref?.() === true);
   if (externrefShaped) {
     const flag = cx.builder.emitCall({ kind: "func", name: "__extern_is_undefined" }, [v], irVal({ kind: "i32" }));
@@ -7389,8 +7412,8 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
     const flag = cx.builder.emitRefIsNull(v);
     return isNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
   }
-  // #1981: `class`, `object`, and `closure` IrTypes lower to nullable WasmGC
-  // ref shapes (`(ref null $Struct)`). A class/object/closure-typed value can
+  // #1981 / #3214: `class`, `object`, `closure`, and boundary `callable`
+  // IrTypes are reference-shaped. A class/object/closure/callable value can
   // be `null` at runtime (e.g. a host call passing `null` for a class-typed
   // parameter), so the defensive `=== null` / `!== null` guard must NOT be
   // folded to a constant — folding it deletes the guard, which either returns
@@ -7398,7 +7421,12 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   // true, then `p.v` traps). Bail so the caller falls back to legacy, which
   // emits a runtime `ref.is_null` check. The slice-1 fold is only sound for
   // statically non-nullable kinds.
-  if (otherType.kind === "class" || otherType.kind === "object" || otherType.kind === "closure") {
+  if (
+    otherType.kind === "class" ||
+    otherType.kind === "object" ||
+    otherType.kind === "closure" ||
+    otherType.kind === "callable"
+  ) {
     return null;
   }
   // #2713 — a `string` IrType lowers to a nullable ref shape: host-strings

@@ -37,8 +37,17 @@ import { absoluteFuncIndexCached } from "../emit/resolve-layout.js"; // (#1916 S
  * runtime that doesn't support custom-descriptors (today: wasmtime / standalone
  * Wasm consumers). Pass `true` to leave subtypes as plain `(sub $parent ...)`
  * so wasm-opt has nothing to convert into an exact ref.
+ *
+ * `keepOpenTypeIdxs` holds ABI roots whose non-finality is observable across
+ * separately compiled modules. In particular, the canonical funcref-wrapper
+ * root must remain open even in a module with no wrapper child: finality is
+ * part of WasmGC canonical type identity.
  */
-export function markLeafStructsFinal(mod: WasmModule, skipFinal = false): void {
+export function markLeafStructsFinal(
+  mod: WasmModule,
+  skipFinal = false,
+  keepOpenTypeIdxs: ReadonlySet<number> = new Set<number>(),
+): void {
   if (skipFinal) return;
   // Collect all type indices that are used as a supertype
   const hasSubtypes = new Set<number>();
@@ -63,7 +72,7 @@ export function markLeafStructsFinal(mod: WasmModule, skipFinal = false): void {
   // Mark leaf struct types as final
   for (let i = 0; i < mod.types.length; i++) {
     const td = mod.types[i];
-    if (td.kind === "struct" && td.superTypeIdx !== undefined && !hasSubtypes.has(i)) {
+    if (td.kind === "struct" && td.superTypeIdx !== undefined && !hasSubtypes.has(i) && !keepOpenTypeIdxs.has(i)) {
       td.final = true;
     } else if (td.kind === "rec") {
       // Types inside rec groups have their own indices (rec groups occupy consecutive indices)
@@ -71,7 +80,12 @@ export function markLeafStructsFinal(mod: WasmModule, skipFinal = false): void {
       // Actually, rec group members are indexed consecutively starting at i
       let innerIdx = i;
       for (const inner of td.types) {
-        if (inner.kind === "struct" && inner.superTypeIdx !== undefined && !hasSubtypes.has(innerIdx)) {
+        if (
+          inner.kind === "struct" &&
+          inner.superTypeIdx !== undefined &&
+          !hasSubtypes.has(innerIdx) &&
+          !keepOpenTypeIdxs.has(innerIdx)
+        ) {
           inner.final = true;
         }
         innerIdx++;
