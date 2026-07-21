@@ -53,6 +53,7 @@ import type {
 } from "../ir/ast-lowering-plans.js";
 import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../ir/host-extern.js"; // (#2856/#3214)
 import { makeIrHostDateSnapshotResolver } from "../ir/host-date.js";
+import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "../ir/backend/legality.js";
 import { collectModuleInitPopulation, MODULE_INIT_UNIT_NAME } from "../ir/module-init.js";
 import { makeIrPromiseDelayResolver } from "../ir/promise-delay.js";
 import {
@@ -1589,6 +1590,63 @@ interface IrOverlayPlan {
   readonly importedFunctionResolver?: IrImportedFunctionResolver;
 }
 
+function irSelectionContainsHostDateOwner(selection: IrSelection, ownerName: string): boolean {
+  return ownerName === MODULE_INIT_UNIT_NAME
+    ? selection.moduleInit?.reason === null && selection.moduleInit.stmtCount > 0
+    : selection.funcs.has(ownerName);
+}
+
+/**
+ * Resolve predictable Date target/provider gaps before integration builds or
+ * emits an owner. The backend capability query handles target exclusions; the
+ * existing final-context helper proves the exact synthetic import occupants.
+ * Unknown registration throws deliberately escape this function and remain
+ * Invariants at the outer preparation boundary.
+ */
+function prepareHostDateSnapshotPreflight(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  plan: IrOverlayPlan,
+  selection: IrSelection,
+): IrSelection {
+  const activeOwners = [...plan.hostDateImportsByOwner.keys()].filter((ownerName) =>
+    irSelectionContainsHostDateOwner(selection, ownerName),
+  );
+  if (activeOwners.length === 0) return selection;
+
+  const supported = supportsIrBackendTargetCapability(
+    {
+      backend: "wasmgc",
+      target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
+      allowHostImports: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
+    },
+    "host-date-snapshot",
+  );
+  if (!supported) {
+    for (const ownerName of activeOwners) {
+      plan.preparationFailures.set(ownerName, {
+        kind: "unsupported",
+        code: "late-preparation-unsupported",
+        stage: "resolve",
+        detail: "host Date snapshots are unavailable for the selected backend target/provider",
+      });
+    }
+    return closeIrBlockedComponent(sourceFile, selection, new Set(activeOwners));
+  }
+
+  const retained = prepareHostDateSnapshotLowering(ctx, sourceFile, plan.hostDateImportsByOwner, selection);
+  for (const ownerName of activeOwners) {
+    if (irSelectionContainsHostDateOwner(retained, ownerName)) continue;
+    plan.preparationFailures.set(ownerName, {
+      kind: "unsupported",
+      code: "late-preparation-unsupported",
+      stage: "resolve",
+      detail: "the exact host Date provider ABI is unavailable in the final module context",
+    });
+  }
+  return retained;
+}
+
 interface ObservedIrUnit {
   readonly key: string;
   readonly matchName: string;
@@ -2199,6 +2257,20 @@ function planIrOverlay(
   // time from-ast lowers (post-`compileDeclarations`), which is where member
   // resolution happens.
   const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  const supportsBackendCapability = (capability: IrBackendTargetCapability): boolean =>
+    supportsIrBackendTargetCapability(
+      {
+        backend: "wasmgc",
+        target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
+        allowHostImports: jsHostExterns,
+      },
+      capability,
+    );
+  const supportsHostDateSnapshots = supportsBackendCapability("host-date-snapshot");
+  // Spread keeps this branch compatible before P1 adds the optional field to
+  // IrSelectionOptions; once present, the selector consumes the same callback
+  // without a second codegen wiring change.
+  const backendCapabilitySelectionOptions = { supportsBackendCapability };
   const resolveModuleBinding =
     options.resolveModuleBindings === false
       ? undefined
@@ -2211,7 +2283,7 @@ function planIrOverlay(
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
   const isArrayExpression = makeIrArrayExpressionPredicate(ast.checker);
   const resolveHostVoidCallback = jsHostExterns ? makeIrHostVoidCallbackResolver(ast.checker) : undefined;
-  const resolveHostDateSnapshot = jsHostExterns ? makeIrHostDateSnapshotResolver(ast.checker) : undefined;
+  const resolveHostDateSnapshot = supportsHostDateSnapshots ? makeIrHostDateSnapshotResolver(ast.checker) : undefined;
   const resolvePromiseDelay =
     jsHostExterns && !ctx.fast && !ctx.nativeStrings && options.resolveModuleBindings !== false
       ? makeIrPromiseDelayResolver(ast.checker)
@@ -2242,6 +2314,7 @@ function planIrOverlay(
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
+      ...backendCapabilitySelectionOptions,
       ...(jsHostExterns && options.importedFunctions ? { importedFunctions: options.importedFunctions } : {}),
       // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
       // async engine ($AsyncFrame drive / host-drive) declines it — the
@@ -3516,7 +3589,7 @@ export function generateModule(
         plan.hostVoidCallbacks,
         plan.safeSelection,
       );
-      safeSelection = prepareHostDateSnapshotLowering(ctx, ast.sourceFile, plan.hostDateImportsByOwner, safeSelection);
+      safeSelection = prepareHostDateSnapshotPreflight(ctx, ast.sourceFile, plan, safeSelection);
       safeSelection = preparePromiseDelayLowering(
         ctx,
         ast.sourceFile,
@@ -5690,7 +5763,7 @@ export function generateMultiModule(
         let safeSelection = makeMultiIrSafeSelection(ctx, plan, sourceFile, safety);
         safeSelection = prepareMultiIrImportedLowering(ctx, sourceFile, plan, safeSelection);
         safeSelection = prepareHostVoidCallbackLowering(ctx, sourceFile, plan.hostVoidCallbacks, safeSelection);
-        safeSelection = prepareHostDateSnapshotLowering(ctx, sourceFile, plan.hostDateImportsByOwner, safeSelection);
+        safeSelection = prepareHostDateSnapshotPreflight(ctx, sourceFile, plan, safeSelection);
         safeSelection = preparePromiseDelayLowering(
           ctx,
           sourceFile,

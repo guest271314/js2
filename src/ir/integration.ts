@@ -24,6 +24,7 @@
 
 import { ts } from "../ts-api.js";
 import { makeIrHostDateSnapshotResolver } from "./host-date.js";
+import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "./backend/legality.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
@@ -190,6 +191,49 @@ function caughtIntegrationFailure(
 }
 
 /**
+ * Find checker-certified ambient Date snapshots in owners that have already
+ * been selected. Production selection should reject these on host-free
+ * targets; this integration guard keeps a stale/external selection from
+ * discovering the target gap in helper registration or emission.
+ */
+function collectSelectedHostDateSnapshotOwners(
+  sourceFile: ts.SourceFile,
+  selection: IrSelection,
+  resolveSnapshot: ReturnType<typeof makeIrHostDateSnapshotResolver>,
+): ReadonlySet<string> {
+  const owners = new Set<string>();
+  const scan = (ownerName: string, root: ts.Node): void => {
+    const visit = (node: ts.Node): void => {
+      if (owners.has(ownerName)) return;
+      if (node !== root && ts.isFunctionLike(node)) return;
+      if (ts.isNewExpression(node) && resolveSnapshot(node)) {
+        owners.add(ownerName);
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(root);
+  };
+
+  for (const statement of sourceFile.statements) {
+    if (
+      ts.isFunctionDeclaration(statement) &&
+      statement.name &&
+      statement.body &&
+      selection.funcs.has(statement.name.text)
+    ) {
+      scan(statement.name.text, statement.body);
+    }
+  }
+  if (selection.moduleInit?.reason === null && selection.moduleInit.stmtCount > 0) {
+    for (const statement of collectModuleInitPopulation(sourceFile)) {
+      scan(MODULE_INIT_UNIT_NAME, statement);
+    }
+  }
+  return owners;
+}
+
+/**
  * Per-function IR type overrides sourced from the Phase-2 propagation
  * pass. Indexed by function name. When present for a selected function,
  * these types are used in place of (or alongside) any explicit TS
@@ -216,10 +260,22 @@ export function compileIrPathFunctions(
   classShapes?: ReadonlyMap<string, IrClassShape>,
   loweringPlans?: IrIntegrationLoweringPlans,
 ): IrIntegrationReport {
+  const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
+  const supportsBackendCapability = (capability: IrBackendTargetCapability): boolean =>
+    supportsIrBackendTargetCapability(
+      {
+        backend: "wasmgc",
+        target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
+        allowHostImports: jsHostExterns,
+      },
+      capability,
+    );
+  const supportsHostDateSnapshots = supportsBackendCapability("host-date-snapshot");
+  const backendCapabilitySelectionOptions = { supportsBackendCapability };
   const moduleBindingResolver = makeIrModuleBindingResolver(ctx.checker, {
     numberStorage: ctx.fast ? "i32" : "f64",
-    allowHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
-    allowBuiltinMapExtern: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
+    allowHostExterns: jsHostExterns && !ctx.nativeStrings,
+    allowBuiltinMapExtern: jsHostExterns && !ctx.nativeStrings,
   });
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ctx.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
@@ -228,17 +284,16 @@ export function compileIrPathFunctions(
     selection ??
     planIrCompilation(sourceFile, {
       experimentalIR: true,
-      jsHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
-      ...(!(ctx.standalone || ctx.wasi || ctx.strictNoHostImports)
-        ? { hostDateSnapshots: makeIrHostDateSnapshotResolver(ctx.checker) }
-        : {}),
+      jsHostExterns,
+      ...(supportsHostDateSnapshots ? { hostDateSnapshots: makeIrHostDateSnapshotResolver(ctx.checker) } : {}),
       resolveModuleBinding: moduleBindingResolver,
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
-      supportsHostStringArrayLiterals: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
+      supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
+      ...backendCapabilitySelectionOptions,
     });
   // (#3142 Slice 2) A claimable, non-empty module-init unit keeps the
   // pipeline alive even with no claimed functions/class members.
@@ -246,6 +301,9 @@ export function compileIrPathFunctions(
     selected.moduleInit && selected.moduleInit.reason === null && selected.moduleInit.stmtCount > 0
       ? selected.moduleInit
       : undefined;
+  const unsupportedHostDateOwners = supportsHostDateSnapshots
+    ? new Set<string>()
+    : collectSelectedHostDateSnapshotOwners(sourceFile, selected, makeIrHostDateSnapshotResolver(ctx.checker));
   // #1370 Phase B: don't short-circuit when only class members are claimed —
   // a source file may declare a class with IR-eligible methods but no
   // top-level FunctionDeclarations.
@@ -267,6 +325,16 @@ export function compileIrPathFunctions(
 
   const compiled: string[] = [];
   const errors: IrIntegrationError[] = [];
+  for (const ownerName of unsupportedHostDateOwners) {
+    errors.push(
+      integrationFailure(ownerName, {
+        kind: "unsupported",
+        code: "late-preparation-unsupported",
+        stage: "resolve",
+        detail: "host Date snapshots are unavailable for the selected backend target/provider",
+      }),
+    );
+  }
 
   // #1586: one allocation-site registry per module compile. Threaded into the
   // builder (mints ids on value-creating instrs) and every pass (preserve /
@@ -365,6 +433,7 @@ export function compileIrPathFunctions(
     if (!stmt.name) continue;
     const name = stmt.name.text;
     if (!selected.funcs.has(name)) continue;
+    if (unsupportedHostDateOwners.has(name)) continue;
 
     try {
       // #1923 — test-only seam: simulate a build-time demotion on a CLAIMED
@@ -605,7 +674,7 @@ export function compileIrPathFunctions(
   //     the #1789-adjacent collection note in declarations.ts; executing
   //     them would diverge from the legacy baseline).
   // -------------------------------------------------------------------------
-  if (moduleInitClaim) {
+  if (moduleInitClaim && !unsupportedHostDateOwners.has(MODULE_INIT_UNIT_NAME)) {
     try {
       if (!ctx.mod.functions.some((f) => f.name === "__module_init")) {
         throw new IrUnsupportedError(
@@ -1401,18 +1470,40 @@ function bodyContainsReturnClassOp(body: readonly Instr[]): boolean {
 }
 
 /** Resolve a checker-owned module declaration to its exact legacy slot. */
-function resolveModuleBindingGlobal(
-  ctx: CodegenContext,
-  identity: IrModuleBindingIdentity,
-): ModuleBindingGlobal | undefined {
+function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindingIdentity): ModuleBindingGlobal {
   const declaration = identity.declaration;
-  if (!ts.isIdentifier(declaration.name)) return undefined;
+  if (!ts.isIdentifier(declaration.name)) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "build",
+      "module-init: a supported binding identity no longer has an identifier declaration",
+    );
+  }
   const name = declaration.name.text;
-  if (!ctx.moduleGlobals.has(name)) return undefined;
+  if (!ctx.moduleGlobals.has(name)) {
+    throw new IrInvariantError(
+      "unknown-global-ref",
+      "build",
+      `module-init: supported binding '${name}' is absent from the legacy module-global registry`,
+    );
+  }
 
   const globalName = `__mod_${name}`;
   const global = ctx.mod.globals.find((candidate) => candidate.name === globalName);
-  if (!global || !global.mutable) return undefined;
+  if (!global) {
+    throw new IrInvariantError(
+      "unknown-global-ref",
+      "build",
+      `module-init: legacy module-global registry contains '${name}' but ${globalName} is missing`,
+    );
+  }
+  if (!global.mutable) {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `module-init: legacy global ${globalName} is immutable but IR module bindings require a writable slot`,
+    );
+  }
 
   let type: IrType;
   let storageKind: "f64" | "i32" | "externref";
@@ -1426,12 +1517,24 @@ function resolveModuleBindingGlobal(
       storageKind = "i32";
       break;
     case "extern":
-      if (!ctx.externClasses.has(identity.valueKind.className)) return undefined;
+      if (!ctx.externClasses.has(identity.valueKind.className)) {
+        throw new IrInvariantError(
+          "unknown-type-ref",
+          "build",
+          `module-init: extern binding '${name}' references unregistered class ${identity.valueKind.className}`,
+        );
+      }
       type = { kind: "extern", className: identity.valueKind.className };
       storageKind = "externref";
       break;
   }
-  if (global.type.kind !== storageKind) return undefined;
+  if (global.type.kind !== storageKind) {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `module-init: ${globalName} uses legacy ${global.type.kind} storage but IR resolved ${storageKind}`,
+    );
+  }
 
   return {
     globalName,
@@ -1456,16 +1559,29 @@ function buildModuleBindingsMap(
     if (!ts.isVariableStatement(stmt)) continue;
     for (const d of stmt.declarationList.declarations) {
       if (!ts.isIdentifier(d.name)) {
-        throw new Error("module-init: top-level destructuring declaration not in Slice 2 scope");
-      }
-      const name = d.name.text;
-      const identity = resolveModuleBinding(d.name);
-      const binding = identity ? resolveModuleBindingGlobal(ctx, identity) : undefined;
-      if (!binding) {
-        throw new Error(
-          `module-init: top-level binding '${name}' has no supported direct legacy global — keeping legacy body`,
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: top-level destructuring has no one-to-one legacy global mapping",
         );
       }
+      const name = d.name.text;
+      const inspected = resolveModuleBinding.inspectDirectBinding(d.name);
+      if (inspected.kind === "unsupported") {
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          `module-init: top-level binding '${name}' has no supported legacy storage representation`,
+        );
+      }
+      if (inspected.kind === "not-direct") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `module-init: declaration '${name}' no longer resolves to the direct top-level binding selected for this unit`,
+        );
+      }
+      const binding = resolveModuleBindingGlobal(ctx, inspected.identity);
       map.set(name, binding);
     }
   }
