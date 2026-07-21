@@ -6,7 +6,7 @@ assignee: ttraenkler/opus-2856
 spec: banked
 sprint: current
 created: 2026-06-30
-updated: 2026-07-10
+updated: 2026-07-21
 priority: high
 horizon: l
 feasibility: hard
@@ -21,8 +21,15 @@ fable_role: spec
 parent: 2855
 related: [1376, 1131, 2138, 2135, 2134]
 loc-budget-allow:
+  - scripts/check-ir-fallbacks.ts
+  - scripts/ir-fallback-baseline.json
+  - src/codegen/index.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
   - src/ir/lower.ts
+  - src/ir/module-bindings.ts
   - src/ir/select.ts
+  - tests/issue-2856-module-bindings.test.ts
 ---
 
 # #2856 — IR: `body-shape-rejected` → 0
@@ -245,8 +252,10 @@ bucket's growth** (demonstrated empirically: shape-fixing a leaf in
    (verify `pnpm run check:ir-fallbacks` reports the bucket gone).
 2. The kind histogram from the diagnostic pass is recorded in this issue.
 3. Equivalence tests for each newly-IR-claimed kind pass (legacy/IR parity).
-4. `"body-shape-rejected"` is added to `STRICT_IR_REASONS` once the bucket is
-   zero, so a regression hard-errors.
+4. Once the corpus bucket reaches zero, the zero floor is banked in the
+   fallback baseline and the promotion verdict is recorded. Do **not** add
+   `"body-shape-rejected"` to `STRICT_IR_REASONS` while real-world shapes can
+   still legitimately use the legacy front-end (see “At corpus-zero” below).
 5. No regression in the existing IR test suite (`tests/ir-*.test.ts`) or
    test262 conformance.
 
@@ -257,7 +266,8 @@ bucket's growth** (demonstrated empirically: shape-fixing a leaf in
 - `src/ir/lower.ts` / `src/ir/nodes.ts` — IR node types + Wasm lowering as needed.
 - `scripts/check-ir-fallbacks.ts` — (diagnostic) per-node-kind reporting.
 - `scripts/ir-fallback-baseline.json` — ratchet down as slices land.
-- `src/codegen/index.ts:1013` — `STRICT_IR_REASONS` once at zero.
+- `src/codegen/index.ts` — record the no-promotion verdict at corpus zero;
+  promotion belongs to the sole-front-end endgame.
 - `plan/log/ir-adoption.md` — promote rows (regenerated).
 
 ## Implementation Plan — extern-in-IR (host-global member access)
@@ -1209,9 +1219,10 @@ branded extern) — this capability generalizes it:
    legacy reader and legacy writer / IR reader), extending the C3 pattern in
    `tests/ir-algorithms-cluster.test.ts`.
 
-Expected gate delta: `renderCal`, `onDay`, `main`, and (per Step 0) likely
-`updFoot` claim → **−4 function-level**, and the moduleLevel calendar entry
-shrinks toward claimable. algorithms.ts's 1 moduleLevel stmt
+Pre-implementation forecast (superseded by the measured result below):
+`renderCal`, `onDay`, `main`, and (per Step 0) likely `updFoot` claim → **−4
+function-level**, and the moduleLevel calendar entry shrinks toward claimable.
+algorithms.ts's 1 moduleLevel stmt
 (`const fibCache = new Map<…>()`) needs the module-level `new Map` claim —
 verify whether #3142's module-init IR covers extern-class `new` at module
 scope; if not, leave moduleLevel at 1 and record it (moduleLevel is gated
@@ -1221,6 +1232,58 @@ DOM-file verification standard: identical-failure-mode under Node's shimless
 host (established in the extern-in-IR slice); full equivalence gate
 (`node scripts/equivalence-gate.mjs`), not scoped tests — the #2858 caller-arm
 episode showed scoped runs miss real regressions.
+
+#### Capability C result (2026-07-21) — declaration identity + shared legacy slots
+
+Implemented scope is the independently landable storage slice, measured against
+`origin/main` at `94f91fd`:
+
+- One checker-backed resolver now identifies a module binding by its actual
+  top-level `VariableDeclaration`, shared by selector and builder. Flat names
+  are never sufficient, so locals/params/imports and the #3343 leaked
+  `for (let i)` selector name cannot alias `__mod_i`.
+- Ordinary f64 numbers, boolean i32 values, and branded
+  nullable-extern values whose legacy slot is actually externref-backed use
+  symbolic `global.get`; supported plain writes use `global.set`; TDZ reads
+  preserve the existing legacy flag check. IR and legacy functions share the
+  same global in both directions, covered by single-instance mixed-front-end
+  tests. Fast-mode ordinary numbers and every native-string host-extern slot
+  remain pre-claim rejects until their representations are unified. Numeric
+  i32 aliases are not claimed: the checker erases those aliases at this lookup
+  site, so no distinct numeric-i32 module representation is currently proven.
+- Const writes, module compound assignments, and module updates stay
+  pre-claim rejects in ordinary functions. The synthetic module-init unit keeps
+  its already-supported `++`/`+=` behavior through scoped `moduleGlobal`
+  bindings.
+- Strict nullable-extern `=== null` / `!== null` lowers to `ref.is_null`;
+  loose equality and extern truthiness remain legacy-owned because they need
+  host `undefined` and JavaScript ToBoolean semantics, respectively.
+- A void function may now end in a statement guard (`if (c) effect;`) followed
+  by its implicit empty return. This is the final hidden shape needed after
+  `updFoot`'s module reads became visible.
+
+Measured gate result: function-level `body-shape-rejected` **14 → 13**
+(`updFoot` genuinely IR-emitted), all other function buckets unchanged, and
+zero post-claim build/verify/lower errors. The earlier `−4 likely` forecast was
+not sound: `renderCal` and `main` next reject on arrow callbacks (Capability B),
+while opening `onDay`'s converging if/else alone would only move it into
+`call-graph-closure` because it calls still-legacy `renderCal`.
+
+Module-level remains **2** rather than the forecast 2 → 1. Calendar module init
+uses the legacy native `Date` constructor (`new Date().getFullYear()`), for
+which from-ast has no native Date constructor; it is now explicitly rejected
+before claim rather than allowed to create a post-claim demotion. Algorithms
+still rejects its generic `new Map<number, number>()`, as expected.
+
+Validation: 49 focused Capability C tests (including mixed storage in both
+directions, boolean i32, nullable extern, ambient declarations, #3343 identity,
+fast/native-string/standalone/WASI representation gates, builtin-vs-user `Map`,
+declaration-scoped scalar/Map aliases, catch shadowing, exact extern-brand flow,
+extern-member boundary provenance, builtin-constructor shadowing, and negative
+pre-claim consumer guards); 52 adjacent #3142 module-init, C3 Map,
+extern-in-IR, #3343, selector-attribution, and non-terminating-guard tests green;
+full equivalence gate at 1,607 passing / 36 known failures with no new
+regressions; typecheck clean; fallback baseline ratcheted to 13.
 
 ### Capability A (M) — imported-callee calls (first half of the 8 mains)
 
@@ -1291,9 +1354,9 @@ dictate an unshippable capability.
 
 ### Ordering and landability
 
-1. Step 0 (S) → 2. Capability C (M–L, self-contained, −4 likely) →
-2. Capability A (M) → 4. Capability B (L; A+B together if A alone is
-   net-zero) → 5. `delay` decision.
+1. Step 0 (S, landed) → 2. Capability C (M–L, independently landable,
+   measured −1) → 3. Capability A (M) → 4. Capability B (L; A+B together if
+   A alone is net-zero) → 5. `delay` decision.
 
 Each slice: prove claims via byte-diff/`irFirstSkipped` (anti-vacuity, the
 established pattern), zero post-claim demotions, bank via

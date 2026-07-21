@@ -348,23 +348,17 @@ export interface IrFromAstResolver {
    */
   isTypedArrayViewExpr?(expr: ts.Expression): boolean;
   /**
-   * (#2856 C3) Resolve a module-scope `const`/`let` binding to the Wasm
-   * global (and optional TDZ flag global) the legacy backend allocated for
-   * it, plus the extern-class brand of its value when the binding holds a
-   * host object (e.g. `const cache = new Map()` → className "Map").
-   * Returns `undefined` when the name isn't a registered module global or
-   * its value isn't an externref-shaped extern-class instance.
+   * (#2856 Capability C) Resolve the checker-owned module declaration for
+   * this identifier to the exact legacy storage slot. Passing `writeValue`
+   * additionally proves that the declaration is mutable and that the RHS
+   * preserves its storage representation. Locals/params/imports/unsupported
+   * module declarations return undefined.
    */
-  getModuleScopeExternBinding?(name: string):
-    | {
-        /** Name of the value global in `ctx.mod.globals` (`__mod_<name>`). */
-        globalName: string;
-        /** Name of the i32 TDZ flag global, or null when TDZ was elided. */
-        tdzGlobalName: string | null;
-        /** Registered extern class of the held value (e.g. "Map"). */
-        className: string;
-      }
-    | undefined;
+  resolveModuleBinding?(node: ts.Identifier, writeValue?: ts.Expression): ModuleBindingGlobal | undefined;
+  /** True for any checker-owned top-level lexical, including unsupported reps. */
+  isDirectModuleBinding?(node: ts.Identifier): boolean;
+  /** True when the identifier resolves to an ambient declaration-file symbol. */
+  isAmbientBinding?(node: ts.Identifier): boolean;
 }
 
 export interface AstToIrOptions {
@@ -487,9 +481,8 @@ export interface AstToIrOptions {
    * SAME storage slot (and binds in scope as a `moduleGlobal`
    * ScopeBinding), so every other function — legacy or IR — observes the
    * initialized value exactly as it does with the legacy `__module_init`
-   * body. Slice 2 restricts entries to f64/i32-backed globals (the
-   * integration layer builds the map and throws → demotes for anything
-   * else).
+   * body. Capability C admits f64/i32 and branded externref-backed globals;
+   * unsupported storage still demotes.
    */
   readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
 }
@@ -506,8 +499,8 @@ export interface ModuleBindingGlobal {
    *  binding, else null. The declaration lowering mirrors legacy
    *  `emitTdzInit`: after the value write, set the flag to 1. */
   readonly tdzGlobalName: string | null;
-  /** The binding's IrType — derived from (and Wasm-identical to) the
-   *  global's ValType. Slice 2: f64 or i32 only. */
+  /** The binding's logical IR type. `extern<C>` is Wasm-identical to the
+   *  legacy externref global while retaining the checker-derived brand. */
   readonly type: IrType;
 }
 
@@ -898,6 +891,14 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       if (
         ts.isBinaryExpression(s.expression) &&
         s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(s.expression.left)
+      ) {
+        lowerIdentifierAssignment(s.expression.left, s.expression.right, cx);
+        continue;
+      }
+      if (
+        ts.isBinaryExpression(s.expression) &&
+        s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
         lowerPropertyAssignment(s.expression, cx);
@@ -1140,6 +1141,15 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       cx.builder.terminate({ kind: "return", values: [] });
       return;
     }
+    if (
+      ts.isBinaryExpression(stmt.expression) &&
+      stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(stmt.expression.left)
+    ) {
+      lowerIdentifierAssignment(stmt.expression.left, stmt.expression.right, cx);
+      cx.builder.terminate({ kind: "return", values: [] });
+      return;
+    }
     // #3000-B: property-store assignment as a void tail — the SET accessor
     // body shape `set name(v) { this.#name = v; }`. Route through the SAME
     // `lowerPropertyAssignment` the non-tail statement path uses (see
@@ -1188,7 +1198,12 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
   }
   if (ts.isIfStatement(stmt)) {
     if (!stmt.elseStatement) {
-      throw new Error(`ir/from-ast: Phase 1 if must have an else arm in ${cx.funcName}`);
+      if (cx.returnType !== null) {
+        throw new Error(`ir/from-ast: non-void Phase 1 if must have an else arm in ${cx.funcName}`);
+      }
+      lowerIfBodyStatement(stmt, cx);
+      cx.builder.terminate({ kind: "return", values: [] });
+      return;
     }
     // #1043: compile-time constant fold. After --define substitution of
     // process.env.NODE_ENV (etc.), the condition may be a literal-vs-literal
@@ -1989,7 +2004,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // a TDZ flag global exists for the name, set it to 1 AFTER the value
     // write so cross-function TDZ checks observe initialization.
     if (moduleBinding) {
-      if (!irTypeEquals(inferred, moduleBinding.type)) {
+      if (!moduleStorageCompatible(inferred, moduleBinding.type)) {
         throw new Error(
           `ir/from-ast: module binding '${name}' initializer is ${describeIrType(inferred)} but its global is ` +
             `${describeIrType(moduleBinding.type)} in ${cx.funcName}`,
@@ -2288,6 +2303,38 @@ function resolveIrType(node: ts.TypeNode | undefined, override: IrType | undefin
   throw new Error(`ir/from-ast: missing type annotation and no override (${where})`);
 }
 
+/** True when two logical IR types use the same already-allocated global slot. */
+function moduleStorageCompatible(actual: IrType, expected: IrType): boolean {
+  if (irTypeEquals(actual, expected)) return true;
+  if (expected.kind !== "extern") return false;
+  if (actual.kind === "extern") return true;
+  return asVal(actual)?.kind === "externref";
+}
+
+/** Emit the legacy module-global TDZ check followed by the symbolic read. */
+function lowerResolvedModuleBindingRead(name: string, binding: ModuleBindingGlobal, cx: LowerCtx): IrValueId {
+  if (binding.type.kind === "extern") {
+    assertNotDeferred(
+      hostExternCapability(cx.resolver?.jsHostExterns?.() === true),
+      `module-scope extern binding "${name}"`,
+      cx.funcName,
+    );
+  }
+  if (binding.tdzGlobalName) {
+    const tdz = cx.builder.emitGlobalGet({ kind: "global", name: binding.tdzGlobalName }, irVal({ kind: "i32" }));
+    const cond = cx.builder.emitUnary("i32.eqz", tdz, irVal({ kind: "i32" }));
+    const thenBody = cx.builder.collectBodyInstrs(() => {
+      const nullExt = cx.builder.emitConst(
+        { kind: "null", ty: irVal({ kind: "externref" }) },
+        irVal({ kind: "externref" }),
+      );
+      cx.builder.emitThrow(nullExt);
+    });
+    cx.builder.emitIfStmt({ cond, then: thenBody, else: [] });
+  }
+  return cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, binding.type);
+}
+
 function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
   if (ts.isParenthesizedExpression(expr)) {
     return lowerExpr(expr.expression, cx, hint);
@@ -2413,6 +2460,8 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     // function in those modes anyway (`assertNotDeferred` guards the
     // invariant).
     if (!p) {
+      const moduleBinding = cx.resolver?.resolveModuleBinding?.(expr);
+      if (moduleBinding) return lowerResolvedModuleBindingRead(expr.text, moduleBinding, cx);
       const hg = cx.resolver?.getHostGlobalInfo?.(expr.text);
       if (hg) {
         assertNotDeferred(
@@ -2428,38 +2477,6 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
           throw new Error(`ir/from-ast: host global "${expr.text}" produced no result in ${cx.funcName}`);
         }
         return r;
-      }
-      // (#2856 C3) Module-scope binding holding an extern-class instance
-      // (`const fibCache = new Map()` at module level). The legacy backend
-      // allocated a `__mod_<name>` externref global (module-level statements
-      // always compile via legacy — the IR only claims functions), so the IR
-      // read is a `global.get` against the SAME storage slot, branded with
-      // the binding's extern class so member calls dispatch through the
-      // extern arms. When legacy tracked a TDZ flag for the binding, emit
-      // the same read-site check legacy does: `if (__tdz_<name> == 0) throw`.
-      const mg = cx.resolver?.getModuleScopeExternBinding?.(expr.text);
-      if (mg) {
-        assertNotDeferred(
-          hostExternCapability(cx.resolver?.jsHostExterns?.() === true),
-          `module-scope extern binding "${expr.text}"`,
-          cx.funcName,
-        );
-        if (mg.tdzGlobalName) {
-          const tdz = cx.builder.emitGlobalGet({ kind: "global", name: mg.tdzGlobalName }, irVal({ kind: "i32" }));
-          const cond = cx.builder.emitUnary("i32.eqz", tdz, irVal({ kind: "i32" }));
-          const thenBody = cx.builder.collectBodyInstrs(() => {
-            const nullExt = cx.builder.emitConst(
-              { kind: "null", ty: irVal({ kind: "externref" }) },
-              irVal({ kind: "externref" }),
-            );
-            cx.builder.emitThrow(nullExt);
-          });
-          cx.builder.emitIfStmt({ cond, then: thenBody, else: [] });
-        }
-        return cx.builder.emitGlobalGet(
-          { kind: "global", name: mg.globalName },
-          { kind: "extern", className: mg.className },
-        );
       }
     }
     if (!p) throw new Error(`ir/from-ast: identifier "${expr.text}" is not in scope in ${cx.funcName}`);
@@ -3949,6 +3966,9 @@ function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
     throw new Error(`ir/from-ast: only direct constructor names supported in slice 4 (${cx.funcName})`);
   }
   const className = expr.expression.text;
+  if (cx.resolver?.isDirectModuleBinding?.(expr.expression) === true) {
+    throw new Error(`ir/from-ast: module binding "${className}" is not a direct constructor (${cx.funcName})`);
+  }
 
   // Slice 10 (#1169i): host extern class (RegExp, Uint8Array, …) takes
   // priority over the slice-4 class registry — the legacy externClasses
@@ -3958,6 +3978,9 @@ function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
   // extern path.
   const externInfo = cx.resolver?.getExternClassInfo?.(className);
   if (externInfo) {
+    if (cx.resolver?.isAmbientBinding?.(expr.expression) === false) {
+      throw new Error(`ir/from-ast: extern constructor "${className}" is shadowed (${cx.funcName})`);
+    }
     const argExprs = expr.arguments ?? [];
     // Constructor arity is permissive: the legacy host imports often
     // accept fewer args than `constructorParams` reports (the optional
@@ -4137,6 +4160,9 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     throw new Error(`ir/from-ast: malformed method call in ${cx.funcName}`);
   }
   const methodName = expr.expression.name.text;
+  const receiverIdentifier = ts.isIdentifier(expr.expression.expression) ? expr.expression.expression : undefined;
+  const receiverIsDirectModuleBinding =
+    receiverIdentifier !== undefined && cx.resolver?.isDirectModuleBinding?.(receiverIdentifier) === true;
 
   // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method slot.
   // Intercepted BEFORE receiver lowering: `super` is a keyword lowerExpr can't
@@ -4189,6 +4215,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   if (
     ts.isIdentifier(expr.expression.expression) &&
     expr.expression.expression.text === "console" &&
+    !receiverIsDirectModuleBinding &&
     cx.scope.get("console") === undefined &&
     cx.resolver?.consoleArgVariant !== undefined
   ) {
@@ -4228,7 +4255,11 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // produces the same clean "not in slice" error we use elsewhere
   // (avoiding a confusing "unknown identifier 'Math'" from the
   // receiver lower path below).
-  if (ts.isIdentifier(expr.expression.expression) && expr.expression.expression.text === "Math") {
+  if (
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "Math" &&
+    !receiverIsDirectModuleBinding
+  ) {
     const irOp = mathUnaryToIrOp(methodName);
     if (irOp !== null && expr.arguments.length === 1) {
       const arg = lowerExpr(expr.arguments[0]!, cx, irVal({ kind: "f64" }));
@@ -4254,6 +4285,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // param, so `class.static_call` emits args only.
   if (
     ts.isIdentifier(expr.expression.expression) &&
+    !receiverIsDirectModuleBinding &&
     cx.scope.get(expr.expression.expression.text) === undefined &&
     cx.classShapes?.has(expr.expression.expression.text)
   ) {
@@ -6076,13 +6108,31 @@ function lowerEarlyReturn(stmt: ts.ReturnStatement, cx: LowerCtx): void {
 function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: LowerCtx): void {
   const binding = cx.scope.get(id.text);
   if (!binding) {
+    const readable = cx.resolver?.resolveModuleBinding?.(id);
+    if (readable) {
+      const writable = cx.resolver?.resolveModuleBinding?.(id, rhs);
+      if (!writable) {
+        throw new Error(
+          `ir/from-ast: assignment to readonly or representation-incompatible module binding "${id.text}" in ${cx.funcName}`,
+        );
+      }
+      const newValue = lowerExpr(rhs, cx, writable.type);
+      const newType = cx.builder.typeOf(newValue);
+      if (!moduleStorageCompatible(newType, writable.type)) {
+        throw new Error(
+          `ir/from-ast: assignment to module binding "${id.text}" (${describeIrType(writable.type)}) got ${describeIrType(newType)} in ${cx.funcName}`,
+        );
+      }
+      cx.builder.emitGlobalSet({ kind: "global", name: writable.globalName }, newValue);
+      return;
+    }
     throw new Error(`ir/from-ast: assignment to undeclared identifier "${id.text}" in ${cx.funcName}`);
   }
   // (#3142 Slice 2) Module-scope binding — write the legacy global.
   if (binding.kind === "moduleGlobal") {
     const newValue = lowerExpr(rhs, cx, binding.type);
     const newType = cx.builder.typeOf(newValue);
-    if (!irTypeEquals(newType, binding.type)) {
+    if (!moduleStorageCompatible(newType, binding.type)) {
       throw new Error(
         `ir/from-ast: assignment to module binding "${id.text}" (${describeIrType(binding.type)}) got ${describeIrType(newType)} in ${cx.funcName}`,
       );
@@ -7274,13 +7324,16 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   // unions whose members are non-null (V1 unions only carry f64/i32).
   // `boxed` is deferred; bail so the caller errors cleanly.
   if (otherType.kind === "boxed") return null;
-  // Slice 10 (#1169i): extern-class values are externref-shaped at
-  // the Wasm level and CAN be null at runtime — `RegExp.exec()` and
-  // similar host imports are documented to return `externref|null`.
-  // Bail so the caller falls back to legacy, which has a runtime
-  // `ref.is_null` check on the receiver. (TODO follow-up: emit
-  // `ref.is_null` directly from the IR.)
-  if (otherType.kind === "extern") return null;
+  // Capability C: branded extern values are externref-backed and nullable.
+  // Strict null equality is exactly `ref.is_null`; loose equality would also
+  // have to recognize the host `undefined` sentinel, so keep that on legacy.
+  if (otherType.kind === "extern") {
+    if (op !== ts.SyntaxKind.EqualsEqualsEqualsToken && op !== ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      return null;
+    }
+    const flag = cx.builder.emitRefIsNull(v);
+    return isNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+  }
   // #1981: `class`, `object`, and `closure` IrTypes lower to nullable WasmGC
   // ref shapes (`(ref null $Struct)`). A class/object/closure-typed value can
   // be `null` at runtime (e.g. a host call passing `null` for a class-typed
@@ -7303,12 +7356,16 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   // the caller falls back to legacy — same fix class as the #1981 class/
   // object/closure arm above, left open for the string arm.
   if (otherType.kind === "string") return null;
-  // Slice 10 (#1169i): a `val { externref }` operand is similarly
-  // nullable. Functions that compare externref-typed values against
-  // null (e.g. through extern.call results assigned to a local) need
-  // a runtime null check, not a static fold.
+  // A plain val<externref> uses the same strict runtime check.
   const otherVal = asVal(otherType);
-  if (otherVal && (otherVal.kind === "externref" || otherVal.kind === "ref_null")) {
+  if (otherVal?.kind === "externref") {
+    if (op !== ts.SyntaxKind.EqualsEqualsEqualsToken && op !== ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+      return null;
+    }
+    const flag = cx.builder.emitRefIsNull(v);
+    return isNeq ? cx.builder.emitUnary("i32.eqz", flag, irVal({ kind: "i32" })) : flag;
+  }
+  if (otherVal?.kind === "ref_null") {
     return null;
   }
 

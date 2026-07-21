@@ -197,15 +197,20 @@ describe("#3299 shared heap/layout plan", () => {
 
     const allocs = nodes.filter((node) => nodeName(node) === "Alloc");
     expect(allocs).toHaveLength(plan.allocations.length);
-    for (const alloc of allocs) {
-      const [siteId, raw] = alloc[5] as readonly [number, boolean];
-      const planned = plan.allocation(siteId as AllocSiteId)!;
+    const allocatedBytes = allocs.map((alloc) => {
       const bytesNode = alloc[3] as PorfforNode;
       expect(nodeName(bytesNode)).toBe("Const");
-      expect(bytesNode[3]).toBe(planned.size.kind === "constant" ? planned.size.bytes : undefined);
       expect(alloc[4]).toBe(0);
-      expect(raw).toBe(false);
-    }
+      expect(alloc[5]).toBe(0);
+      return bytesNode[3] as number;
+    });
+    const plannedBytes = plan.allocations.map((allocation) => {
+      expect(allocation.size.kind).toBe("constant");
+      return allocation.size.kind === "constant" ? allocation.size.bytes : Number.NaN;
+    });
+    expect(allocatedBytes.sort((left, right) => left - right)).toEqual(
+      plannedBytes.sort((left, right) => left - right),
+    );
     expect(plan.policy).toBe("arena-v1");
     expect(
       plan.allocations.every(

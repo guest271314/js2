@@ -58,6 +58,7 @@ import ts from "typescript";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
 import { makeIrHostGlobalResolver } from "../src/ir/host-extern.js";
+import { makeIrModuleBindingResolver } from "../src/ir/module-bindings.js";
 import { compile } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -254,6 +255,11 @@ async function aggregate(): Promise<{
         trackFallbacks: true,
         jsHostExterns: true,
         resolveHostGlobal: makeIrHostGlobalResolver(checker),
+        resolveModuleBinding: makeIrModuleBindingResolver(checker, {
+          numberStorage: "f64",
+          allowHostExterns: true,
+          allowBuiltinMapExtern: true,
+        }),
       },
       typeMap,
     );
