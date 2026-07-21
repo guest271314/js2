@@ -1440,12 +1440,15 @@ module-unique.
 The gate ratchets function-level `body-shape-rejected` **5 -> 4** with zero
 post-claim demotions. The exact remaining histogram is calendar `renderCal`,
 `onDay`, and `main`, plus async `delay`; module-level remains **2** and deferred
-async functions remain **4**. The 22-test B2 suite covers optimized and
+async functions remain **4**. The 23-test B2 suite covers optimized and
 unoptimized runtime dispatch, callback identity/undefined/nonconstructibility,
 unchanged legacy positive-id dispatch, IR shape, strict negatives including
 symbol-vs-spelling capture ambiguity including destructured bindings,
 cross-source name safety, maker/lifted collision demotion, and standalone
-containment. Calendar and Promise/async executor shapes are unchanged.
+containment. A replay regression additionally keeps any local call component
+containing a planned B2 owner out of the IR-first skip set until final-context
+maker/lifted-name proofs complete, preventing skipped-body placeholders after a
+safe demotion. Calendar and Promise/async executor shapes are unchanged.
 
 ### Ordering and landability
 

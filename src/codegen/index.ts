@@ -1806,6 +1806,26 @@ function computeIrFirstSkipSet(
       }
     }
   }
+
+  // #3214 B2 final-context preparation runs only AFTER legacy declaration /
+  // import collection, because only then can it prove the actual
+  // `env.__make_callback` slot/signature and deterministic lifted-name slot.
+  // Any B2 owner may therefore still be demoted after this pre-body decision.
+  // Keep its whole selected local call component compile-twice: otherwise a
+  // pure-f64 caller can enter `skip`, final preparation can remove that caller
+  // through bidirectional graph closure, and its unreachable placeholder ships
+  // as an IR-first skipped-slot hard error. Use the exact same component
+  // closure as final preparation, but treat every planned B2 owner as
+  // potentially blocked because final ctx state is deliberately unavailable.
+  if (plan.hostVoidCallbacks.size > 0 && skip.size > 0) {
+    const potentiallyBlockedOwners = new Set(
+      [...plan.hostVoidCallbacks.values()].map((callback) => callback.ownerName),
+    );
+    const retained = closeMultiIrBlockedComponent(_sourceFile, plan.safeSelection, potentiallyBlockedOwners);
+    for (const name of skip) {
+      if (!retained.funcs.has(name)) skip.delete(name);
+    }
+  }
   return skip;
 }
 

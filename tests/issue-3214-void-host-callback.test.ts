@@ -193,6 +193,29 @@ describe("#3214 B2 — ambient void host callbacks", () => {
     expect(result.irPostClaimErrors ?? []).toEqual([]);
   });
 
+  it("keeps a potentially final-demoted B2 call component out of the IR-first skip set", async () => {
+    const result = await compileHostCallback(`
+      type i32 = number;
+      function __make_callback(_id: i32, capture: object): object { return capture; }
+      function install(n: number): number {
+        document.body.addEventListener("tick", () => { n + 1; });
+        return n;
+      }
+      export function caller(n: number): number { return install(n); }
+      export function independent(n: number): number { return n + 1; }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(result.binary)).toBe(true);
+    expect(result.irCompiledFuncs ?? []).not.toContain("install");
+    expect(result.irCompiledFuncs ?? []).not.toContain("caller");
+    expect(result.irCompiledFuncs ?? []).toContain("independent");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.irFirstSkipped ?? []).not.toContain("install");
+    expect(result.irFirstSkipped ?? []).not.toContain("caller");
+    expect(result.irFirstSkipped ?? []).toContain("independent");
+  });
+
   it.each([
     [
       "property",

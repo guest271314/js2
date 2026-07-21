@@ -315,18 +315,21 @@ It validates the actual function-import ordinal as exactly
 `<owner>__closure_0` before integration, and closes the affected local call
 component. Captured IR subtype names allocate against the module-wide struct
 registry, so separate source overlays and user structs cannot reuse or
-overwrite `__ir_closure_N`.
+overwrite `__ir_closure_N`. Because those final proofs require the completed
+legacy import/function registries, every selected local call component that
+contains a planned B2 owner remains compile-twice under IR-first; a later safe
+demotion can therefore never expose an unreachable skipped-body placeholder.
 
 ### Measured result
 
-- `tests/issue-3214-void-host-callback.test.ts`: **22/22**. Runtime dispatch
+- `tests/issue-3214-void-host-callback.test.ts`: **23/23**. Runtime dispatch
   twice, sentinel identity/cache, distinct-closure identity, `undefined`,
   arity zero, `Reflect.construct` rejection, and unchanged positive-id legacy
   dispatch; optimized/unoptimized genuine IR execution; exact
   `-1`/maker/zero-result shape; strict pre-claim negatives including
   symbol-vs-spelling capture ambiguity (including destructured bindings);
   wrong maker/lifted-name collision demotion; cross-source subtype uniqueness;
-  and standalone containment.
+  IR-first skipped-slot containment; and standalone containment.
 - The production gate genuinely IR-emits `addBenchCard` and ratchets
   `body-shape-rejected` **5 -> 4**. Module-level remains **2**, async-function
   remains **4**, and every post-claim bucket remains zero.
