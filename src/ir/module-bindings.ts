@@ -7,6 +7,141 @@
 import { isExternalDeclaredClass } from "../checker/type-mapper.js";
 import { ts } from "../ts-api.js";
 
+export type IrPrimitiveExpressionFamily = "number" | "boolean" | "string";
+export type IrDeclaredPrimitiveExpressionFamily = IrPrimitiveExpressionFamily | "primitive-union";
+
+/**
+ * Build a checker-only ambient-binding predicate. Unlike the full module
+ * binding resolver, this exposes no source storage capability, so backends
+ * without module-global lowering can still distinguish the real lib `Math`
+ * object from a source declaration or parameter with the same name.
+ */
+export function makeIrAmbientBindingPredicate(checker: ts.TypeChecker): (node: ts.Identifier) => boolean {
+  return (node) => {
+    try {
+      const symbol = checker.getSymbolAtLocation(node);
+      return (
+        symbol !== undefined &&
+        [symbol.valueDeclaration, ...(symbol.declarations ?? [])].some(
+          (declaration) => declaration?.getSourceFile().isDeclarationFile === true,
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+}
+
+/**
+ * Classify the receiver's declared checker surface for builtin-name routing.
+ * This is intentionally distinct from the provenance-safe classifier below:
+ * an invalid `const x: string = 1` must still be recognised as a primitive
+ * builtin receiver and rejected before claim, while class/extern receivers
+ * with the same method name keep ordinary dispatch. Mixed or nullable unions
+ * containing a primitive get a sentinel family so they reject conservatively;
+ * `any` and `unknown` remain unproven.
+ */
+export function makeIrDeclaredPrimitiveExpressionClassifier(
+  checker: ts.TypeChecker,
+): (expr: ts.Expression) => IrDeclaredPrimitiveExpressionFamily | undefined {
+  const classifyType = (type: ts.Type): IrDeclaredPrimitiveExpressionFamily | undefined => {
+    if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return undefined;
+    if (type.isUnion()) {
+      const families = new Set<IrPrimitiveExpressionFamily>();
+      let sawNonPrimitive = false;
+      let sawNullish = false;
+      for (const member of type.types) {
+        if ((member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Never)) !== 0) {
+          sawNullish = true;
+          continue;
+        }
+        const family = classifyType(member);
+        if (family === "primitive-union") {
+          sawNonPrimitive = true;
+        } else if (family !== undefined) {
+          families.add(family);
+        } else {
+          sawNonPrimitive = true;
+        }
+      }
+      if (families.size === 0) return undefined;
+      if (families.size !== 1 || sawNonPrimitive || sawNullish) return "primitive-union";
+      return families.values().next().value;
+    }
+    if ((type.flags & ts.TypeFlags.NumberLike) !== 0) return "number";
+    if ((type.flags & ts.TypeFlags.BooleanLike) !== 0) return "boolean";
+    if ((type.flags & ts.TypeFlags.StringLike) !== 0) return "string";
+    return undefined;
+  };
+
+  return (expr) => {
+    try {
+      return classifyType(checker.getTypeAtLocation(unwrapParens(expr)));
+    } catch {
+      return undefined;
+    }
+  };
+}
+
+/**
+ * Build a provenance-safe primitive classifier for coercion-sensitive
+ * builtin acceptance. This follows local initializers and ignores type
+ * assertions, so diagnostics-off annotations cannot masquerade as runtime
+ * evidence. Use makeIrDeclaredPrimitiveExpressionClassifier for routing.
+ */
+export function makeIrPrimitiveExpressionClassifier(
+  checker: ts.TypeChecker,
+): (expr: ts.Expression) => IrPrimitiveExpressionFamily | undefined {
+  const classifyType = (type: ts.Type): IrPrimitiveExpressionFamily | undefined => {
+    if (type.isUnion()) {
+      const families = type.types.map(classifyType);
+      const first = families[0];
+      return first !== undefined && families.every((family) => family === first) ? first : undefined;
+    }
+    if ((type.flags & ts.TypeFlags.NumberLike) !== 0) return "number";
+    if ((type.flags & ts.TypeFlags.BooleanLike) !== 0) return "boolean";
+    if ((type.flags & ts.TypeFlags.StringLike) !== 0) return "string";
+    return undefined;
+  };
+
+  const classifyExpression = (
+    expr: ts.Expression,
+    seen: Set<ts.VariableDeclaration>,
+  ): IrPrimitiveExpressionFamily | undefined => {
+    try {
+      const candidate = unwrapParens(expr);
+      // A type assertion is not runtime evidence. Follow the represented
+      // value so diagnostics-off inputs such as `"x" as number` cannot make
+      // a coercion-sensitive builtin claim the function.
+      if (
+        ts.isAsExpression(candidate) ||
+        ts.isTypeAssertionExpression(candidate) ||
+        ts.isSatisfiesExpression(candidate) ||
+        ts.isNonNullExpression(candidate)
+      ) {
+        return classifyExpression(candidate.expression, seen);
+      }
+      const family = classifyType(checker.getTypeAtLocation(candidate));
+      if (family === undefined || !ts.isIdentifier(candidate)) return family;
+
+      const symbol = checker.getSymbolAtLocation(candidate);
+      const declaration = [symbol?.valueDeclaration, ...(symbol?.declarations ?? [])].find(
+        (node): node is ts.VariableDeclaration =>
+          node !== undefined && ts.isVariableDeclaration(node) && node.getSourceFile() === candidate.getSourceFile(),
+      );
+      if (!declaration) return family; // parameters and checker-owned nonlocals
+      if (!declaration.initializer || seen.has(declaration)) return undefined;
+      const nextSeen = new Set(seen);
+      nextSeen.add(declaration);
+      return classifyExpression(declaration.initializer, nextSeen) === family ? family : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  return (expr) => classifyExpression(expr, new Set());
+}
+
 export type IrModuleBindingValueKind =
   | { readonly kind: "f64" }
   | { readonly kind: "i32"; readonly semantic: "boolean" }
@@ -313,6 +448,7 @@ export function makeIrModuleBindingResolver(
   checker: ts.TypeChecker,
   options: IrModuleBindingResolverOptions,
 ): IrModuleBindingResolver {
+  const isAmbientBinding = makeIrAmbientBindingPredicate(checker);
   const resolve = (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingIdentity | undefined => {
     try {
       const declaration = directTopLevelDeclaration(node, checker);
@@ -359,17 +495,7 @@ export function makeIrModuleBindingResolver(
       }
     },
     isAmbientBinding(node: ts.Identifier): boolean {
-      try {
-        const symbol = checker.getSymbolAtLocation(node);
-        return (
-          symbol !== undefined &&
-          [symbol.valueDeclaration, ...(symbol.declarations ?? [])].some(
-            (declaration) => declaration?.getSourceFile().isDeclarationFile === true,
-          )
-        );
-      } catch {
-        return false;
-      }
+      return isAmbientBinding(node);
     },
     localVariableDeclaration(node: ts.Identifier): ts.VariableDeclaration | undefined {
       try {

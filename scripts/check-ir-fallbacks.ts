@@ -58,7 +58,11 @@ import ts from "typescript";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
 import { makeIrHostGlobalResolver } from "../src/ir/host-extern.js";
-import { makeIrModuleBindingResolver } from "../src/ir/module-bindings.js";
+import {
+  makeIrDeclaredPrimitiveExpressionClassifier,
+  makeIrModuleBindingResolver,
+  makeIrPrimitiveExpressionClassifier,
+} from "../src/ir/module-bindings.js";
 import { compile } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -260,6 +264,10 @@ async function aggregate(): Promise<{
           allowHostExterns: true,
           allowBuiltinMapExtern: true,
         }),
+        classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(checker),
+        classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(checker),
+        supportsSymbolicMathHelpers: true,
+        supportsLiteralStringReplace: true,
       },
       typeMap,
     );

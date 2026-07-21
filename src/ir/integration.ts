@@ -76,7 +76,9 @@ import {
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
+  makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
+  makeIrPrimitiveExpressionClassifier,
   type IrModuleBindingIdentity,
   type IrModuleBindingResolver,
 } from "./module-bindings.js";
@@ -164,12 +166,18 @@ export function compileIrPathFunctions(
     allowHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
     allowBuiltinMapExtern: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
   });
+  const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ctx.checker);
+  const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
       experimentalIR: true,
       jsHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
       resolveModuleBinding: moduleBindingResolver,
+      classifyPrimitiveExpression,
+      classifyDeclaredPrimitiveExpression,
+      supportsSymbolicMathHelpers: true,
+      supportsLiteralStringReplace: true,
     });
   // (#3142 Slice 2) A claimable, non-empty module-init unit keeps the
   // pipeline alive even with no claimed functions/class members.

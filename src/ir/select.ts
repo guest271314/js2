@@ -61,7 +61,11 @@ import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codeg
 import type { IrClosureSignature, IrType } from "./nodes.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
-import type { IrModuleBindingResolver } from "./module-bindings.js";
+import type {
+  IrDeclaredPrimitiveExpressionFamily,
+  IrModuleBindingResolver,
+  IrPrimitiveExpressionFamily,
+} from "./module-bindings.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 import type { RecursiveTypeEvidence } from "./type-evidence.js";
 
@@ -149,18 +153,41 @@ function takeShapeRejectDetail(): string | undefined {
   return d;
 }
 
+export type IrMathMethodPlan =
+  | {
+      readonly arity: 1;
+      readonly op: "f64.abs" | "f64.sqrt" | "f64.floor" | "f64.ceil" | "f64.trunc";
+    }
+  | { readonly arity: 1 | 2; readonly helper: `Math_${string}` };
+
 /**
- * (#1371) Whitelist of `Math.<name>(arg)` unary calls the IR can lower to a
- * plain Wasm `f64.<op>` instruction without any host import. Each entry maps
- * 1:1 to an op in the `IrUnop` extended set (`src/ir/nodes.ts`). Restricting
- * the whitelist to ops with direct Wasm equivalents preserves bit-exact JS
- * semantics:
- *  - `Math.round` is intentionally excluded — JS rounds 0.5 → 1 (away from
- *    zero) but `f64.nearest` rounds to even, so a 1:1 lowering is unsound.
- *  - `Math.min` / `Math.max` are binary and live in `IR_MATH_BINARY_WHITELIST`
- *    (deferred — needs an `IrBinop` extension).
+ * Exact-arity Math surface shared by selection, call-graph closure, and the
+ * AST→IR builder. Direct Wasm unary operations stay direct; transcendental
+ * functions call the already-registered self-hosted `Math_<method>` helper.
+ * Keeping arity in this table prevents selector/builder drift and preserves
+ * ambient-Math identity checks at each consumer.
  */
-export const IR_MATH_UNARY_WHITELIST: ReadonlySet<string> = new Set(["abs", "sqrt", "floor", "ceil", "trunc"]);
+export const IR_MATH_METHOD_TABLE: Readonly<Record<string, IrMathMethodPlan>> = {
+  abs: { arity: 1, op: "f64.abs" },
+  sqrt: { arity: 1, op: "f64.sqrt" },
+  floor: { arity: 1, op: "f64.floor" },
+  ceil: { arity: 1, op: "f64.ceil" },
+  trunc: { arity: 1, op: "f64.trunc" },
+  sin: { arity: 1, helper: "Math_sin" },
+  cos: { arity: 1, helper: "Math_cos" },
+  exp: { arity: 1, helper: "Math_exp" },
+  log: { arity: 1, helper: "Math_log" },
+  log2: { arity: 1, helper: "Math_log2" },
+  pow: { arity: 2, helper: "Math_pow" },
+  atan2: { arity: 2, helper: "Math_atan2" },
+};
+
+/** Compatibility view for callers/tests that only need the method names. */
+export const IR_MATH_UNARY_WHITELIST: ReadonlySet<string> = new Set(
+  Object.entries(IR_MATH_METHOD_TABLE)
+    .filter(([, plan]) => plan.arity === 1)
+    .map(([name]) => name),
+);
 
 /**
  * Map a whitelisted `Math.<name>` to its corresponding IR `f64.<op>` tag.
@@ -168,20 +195,8 @@ export const IR_MATH_UNARY_WHITELIST: ReadonlySet<string> = new Set(["abs", "sqr
  * source of truth.
  */
 export function mathUnaryToIrOp(name: string): "f64.abs" | "f64.sqrt" | "f64.floor" | "f64.ceil" | "f64.trunc" | null {
-  switch (name) {
-    case "abs":
-      return "f64.abs";
-    case "sqrt":
-      return "f64.sqrt";
-    case "floor":
-      return "f64.floor";
-    case "ceil":
-      return "f64.ceil";
-    case "trunc":
-      return "f64.trunc";
-    default:
-      return null;
-  }
+  const plan = IR_MATH_METHOD_TABLE[name];
+  return plan && "op" in plan ? plan.op : null;
 }
 
 export interface IrSelection {
@@ -315,6 +330,36 @@ export interface IrSelectionOptions {
   /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
    *  strictNoHostImports). Gates the host-extern capability. */
   readonly jsHostExterns?: boolean;
+  /**
+   * Proven primitive value family used by coercion-sensitive builtin
+   * acceptance. Invalid local annotations and type assertions return
+   * `undefined`; this is evidence, not receiver routing.
+   */
+  readonly classifyPrimitiveExpression?: (expr: ts.Expression) => IrPrimitiveExpressionFamily | undefined;
+  /**
+   * Declared checker family used only to route builtin-named method calls.
+   * Mixed/nullable primitive unions return `primitive-union`; pure
+   * class/extern and any/unknown receivers return `undefined` so they keep
+   * ordinary conservative dispatch.
+   */
+  readonly classifyDeclaredPrimitiveExpression?: (
+    expr: ts.Expression,
+  ) => IrDeclaredPrimitiveExpressionFamily | undefined;
+  /**
+   * Checker-only ambient identity proof used by Math call selection when a
+   * backend deliberately does not install the module-binding capability.
+   * Absent means unproven: bare selector callers stay shadow-safe.
+   */
+  readonly isAmbientBinding?: (node: ts.Identifier) => boolean;
+  /** True only when the active backend can resolve `Math_<method>` helpers. */
+  readonly supportsSymbolicMathHelpers?: boolean;
+  /**
+   * True when the active backend explicitly supports the selector's exact
+   * literal-string `String.replace(search, replacement)` slice. Backends
+   * without a matching method plan reject before claim instead of becoming a
+   * build demotion.
+   */
+  readonly supportsLiteralStringReplace?: boolean;
   /**
    * (#3053 U2) True iff the unified gc member-read primitive `__dyn_member_get`
    * (#3053 U0) has a SOUND body in this compile config. The gc `$AnyValue` body
@@ -3453,6 +3498,137 @@ function isPhase1ConditionExpr(
   return isPhase1Expr(expr, scope, localClasses);
 }
 
+/** Numeric proof used by coercion-sensitive builtin slices (`~`, toFixed). */
+function expressionIsProvenNumber(expr: ts.Expression, seen = new Set<ts.VariableDeclaration>()): boolean {
+  const candidate = unwrapPhase1Parens(expr);
+  if (ts.isNumericLiteral(candidate)) return true;
+  if (ts.isIdentifier(candidate)) {
+    const checkerProvesNumber = currentSelectionOptions?.classifyPrimitiveExpression?.(candidate) === "number";
+    if (currentModuleBindingResolver?.scalarExpressionFamily(candidate) !== "f64" && !checkerProvesNumber) return false;
+    const declaration = currentModuleBindingResolver?.localVariableDeclaration(candidate);
+    // Parameters and checker-proven non-local numeric bindings have no local
+    // initializer to audit. Local variables do: with semantic diagnostics
+    // skipped, their annotation may say `number` while the initializer is a
+    // string/boolean. Trace the initializer before allowing a coercion-
+    // sensitive builtin to claim the function.
+    if (!declaration) return checkerProvesNumber || currentModuleBindingResolver !== null;
+    if (seen.has(declaration)) return false;
+    if (declaration.type !== undefined && !typeNodeIsNumberOnly(declaration.type)) return false;
+    if (!declaration.initializer) return false;
+    const nextSeen = new Set(seen);
+    nextSeen.add(declaration);
+    return expressionIsProvenNumber(declaration.initializer, nextSeen);
+  }
+  if (ts.isPrefixUnaryExpression(candidate)) {
+    return (
+      (candidate.operator === ts.SyntaxKind.PlusToken ||
+        candidate.operator === ts.SyntaxKind.MinusToken ||
+        candidate.operator === ts.SyntaxKind.TildeToken) &&
+      expressionIsProvenNumber(candidate.operand, seen)
+    );
+  }
+  if (
+    ts.isAsExpression(candidate) ||
+    ts.isTypeAssertionExpression(candidate) ||
+    ts.isSatisfiesExpression(candidate) ||
+    ts.isNonNullExpression(candidate)
+  ) {
+    return expressionIsProvenNumber(candidate.expression, seen);
+  }
+  if (ts.isCallExpression(candidate) && ts.isPropertyAccessExpression(candidate.expression)) {
+    const recv = candidate.expression.expression;
+    const plan = IR_MATH_METHOD_TABLE[candidate.expression.name.text];
+    return (
+      ts.isIdentifier(recv) &&
+      recv.text === "Math" &&
+      selectorSeesAmbientBinding(recv) &&
+      plan !== undefined &&
+      selectorSupportsMathPlan(plan) &&
+      candidate.arguments.length === plan.arity &&
+      candidate.arguments.every((arg) => !ts.isSpreadElement(arg) && expressionIsProvenNumber(arg, seen))
+    );
+  }
+  return (
+    currentModuleBindingResolver?.scalarExpressionFamily(candidate) === "f64" ||
+    currentSelectionOptions?.classifyPrimitiveExpression?.(candidate) === "number"
+  );
+}
+
+function selectorSeesAmbientBinding(node: ts.Identifier): boolean {
+  return (
+    currentSelectionOptions?.isAmbientBinding?.(node) === true ||
+    currentModuleBindingResolver?.isAmbientBinding(node) === true
+  );
+}
+
+function selectorSupportsMathPlan(plan: IrMathMethodPlan): boolean {
+  return "op" in plan || currentSelectionOptions?.supportsSymbolicMathHelpers === true;
+}
+
+function isBoundedToFixedCall(expr: ts.CallExpression): boolean {
+  if (!ts.isPropertyAccessExpression(expr.expression) || expr.expression.name.text !== "toFixed") return false;
+  if (currentModuleBindingResolver?.supportsHostNumberToString !== true) return false;
+  if (expr.arguments.length !== 1 || !ts.isNumericLiteral(expr.arguments[0]!)) return false;
+  const digits = Number(expr.arguments[0]!.text.replace(/_/g, ""));
+  return (
+    Number.isInteger(digits) && digits >= 0 && digits <= 100 && expressionIsProvenNumber(expr.expression.expression)
+  );
+}
+
+function expressionIsProvenString(expr: ts.Expression, seen = new Set<ts.VariableDeclaration>()): boolean {
+  const candidate = unwrapPhase1Parens(expr);
+  if (ts.isStringLiteral(candidate) || ts.isNoSubstitutionTemplateLiteral(candidate)) return true;
+  if (!ts.isIdentifier(candidate)) return false;
+  // Literal provenance alone is insufficient when an explicit annotation
+  // gives the local a different IR representation. With semantic diagnostics
+  // skipped, `const s: number = "aba"` is still a valid input to codegen; the
+  // old proof admitted `s.replace(...)`, then the builder failed after claim
+  // while trying to initialize an f64 local with a string. Inferred locals are
+  // checker-proven by their literal initializer. Explicit annotations need an
+  // equally narrow string-only certificate here; aliases and mixed unions stay
+  // conservatively legacy-owned until the resolver exposes string type proof.
+  if (currentModuleBindingResolver?.scalarExpressionFamily(candidate) !== undefined) return false;
+  const declaration = currentModuleBindingResolver?.localVariableDeclaration(candidate);
+  if (!declaration || seen.has(declaration)) return false;
+  if (declaration.type !== undefined && !typeNodeIsStringOnly(declaration.type)) return false;
+  if (!declaration.initializer) return false;
+  seen.add(declaration);
+  return expressionIsProvenString(declaration.initializer, seen);
+}
+
+function typeNodeIsStringOnly(typeNode: ts.TypeNode): boolean {
+  if (typeNode.kind === ts.SyntaxKind.StringKeyword) return true;
+  if (ts.isParenthesizedTypeNode(typeNode)) return typeNodeIsStringOnly(typeNode.type);
+  if (ts.isLiteralTypeNode(typeNode)) return ts.isStringLiteral(typeNode.literal);
+  if (ts.isUnionTypeNode(typeNode)) return typeNode.types.every(typeNodeIsStringOnly);
+  return false;
+}
+
+function typeNodeIsNumberOnly(typeNode: ts.TypeNode): boolean {
+  if (typeNode.kind === ts.SyntaxKind.NumberKeyword) return true;
+  if (ts.isParenthesizedTypeNode(typeNode)) return typeNodeIsNumberOnly(typeNode.type);
+  if (ts.isLiteralTypeNode(typeNode)) {
+    if (ts.isNumericLiteral(typeNode.literal)) return true;
+    return (
+      ts.isPrefixUnaryExpression(typeNode.literal) &&
+      (typeNode.literal.operator === ts.SyntaxKind.PlusToken ||
+        typeNode.literal.operator === ts.SyntaxKind.MinusToken) &&
+      ts.isNumericLiteral(typeNode.literal.operand)
+    );
+  }
+  if (ts.isUnionTypeNode(typeNode)) return typeNode.types.every(typeNodeIsNumberOnly);
+  return false;
+}
+
+function isLiteralStringReplaceCall(expr: ts.CallExpression): boolean {
+  if (!ts.isPropertyAccessExpression(expr.expression) || expr.expression.name.text !== "replace") return false;
+  if (expr.arguments.length !== 2) return false;
+  return (
+    expressionIsProvenString(expr.expression.expression) &&
+    expr.arguments.every((arg) => ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg))
+  );
+}
+
 function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClasses: ReadonlySet<string>): boolean {
   if (
     (expressionTouchesModuleExtern(expr) || expressionTouchesModuleMapGetAlias(expr)) &&
@@ -3559,6 +3735,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     }
     if (expressionMayBeModuleExtern(expr.operand)) {
       return shapeNo("expr-module-extern-prefix", expr);
+    }
+    if (expr.operator === ts.SyntaxKind.TildeToken && !expressionIsProvenNumber(expr.operand)) {
+      return shapeNo("expr-tilde-nonnumeric", expr.operand);
     }
     return isPhase1Expr(expr.operand, scope, localClasses);
   }
@@ -3730,15 +3909,54 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       // generic receiver check below would reject these. Recognise the shape
       // here and accept it; the lowerer in from-ast.ts emits a plain unary
       // f64 op for the call.
+      const mathPlan = IR_MATH_METHOD_TABLE[expr.expression.name.text];
       if (
         ts.isIdentifier(expr.expression.expression) &&
         expr.expression.expression.text === "Math" &&
-        currentModuleBindingResolver?.isDirectModuleBinding(expr.expression.expression) !== true &&
-        IR_MATH_UNARY_WHITELIST.has(expr.expression.name.text) &&
-        expr.arguments.length === 1 &&
-        !ts.isSpreadElement(expr.arguments[0]!)
+        selectorSeesAmbientBinding(expr.expression.expression) &&
+        !scope.has(expr.expression.expression.text) &&
+        mathPlan !== undefined &&
+        selectorSupportsMathPlan(mathPlan) &&
+        expr.arguments.length === mathPlan.arity
       ) {
-        return isPhase1Expr(expr.arguments[0]!, scope, localClasses);
+        return expr.arguments.every(
+          (arg) => !ts.isSpreadElement(arg) && expressionIsProvenNumber(arg) && isPhase1Expr(arg, scope, localClasses),
+        );
+      }
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        expr.expression.expression.text === "Math" &&
+        selectorSeesAmbientBinding(expr.expression.expression)
+      ) {
+        return shapeNo("expr-math-call-shape", expr);
+      }
+      const builtinReceiver = expr.expression.expression;
+      const checkerReceiverFamily = currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(builtinReceiver);
+      const scalarReceiverFamily = currentModuleBindingResolver?.scalarExpressionFamily(builtinReceiver);
+      const builtinReceiverFamily =
+        checkerReceiverFamily ??
+        (scalarReceiverFamily === "f64" ? "number" : scalarReceiverFamily === "boolean" ? "boolean" : undefined);
+      const isNumberReceiver = builtinReceiverFamily === "number" || expressionIsProvenNumber(builtinReceiver);
+      const isStringReceiver = builtinReceiverFamily === "string" || expressionIsProvenString(builtinReceiver);
+      if (expr.expression.name.text === "toFixed" && isNumberReceiver) {
+        if (!isBoundedToFixedCall(expr)) return shapeNo("expr-number-tofixed-shape", expr);
+        return (
+          isPhase1Expr(builtinReceiver, scope, localClasses) && isPhase1Expr(expr.arguments[0]!, scope, localClasses)
+        );
+      }
+      if (expr.expression.name.text === "toFixed" && (builtinReceiverFamily !== undefined || isStringReceiver)) {
+        return shapeNo("expr-number-tofixed-receiver", expr);
+      }
+      if (expr.expression.name.text === "replace" && isStringReceiver) {
+        if (currentSelectionOptions?.supportsLiteralStringReplace !== true) {
+          return shapeNo("expr-string-replace-backend", expr);
+        }
+        if (!isLiteralStringReplaceCall(expr)) return shapeNo("expr-string-replace-shape", expr);
+        if (!isPhase1Expr(builtinReceiver, scope, localClasses)) return false;
+        return expr.arguments.every((arg) => isPhase1Expr(arg, scope, localClasses));
+      }
+      if (expr.expression.name.text === "replace" && builtinReceiverFamily !== undefined) {
+        return shapeNo("expr-string-replace-receiver", expr);
       }
       // (#2856 C3/Capability C) Preserve the exact Map.get/set arity guard,
       // but identify the receiver through its checker-owned declaration.
@@ -4381,11 +4599,14 @@ function buildLocalCallGraph(
           // receiver — `Math` is a host global that the receiver-walk
           // would otherwise mark as external. We still walk args to
           // catch nested external calls.
+          const mathPlan = IR_MATH_METHOD_TABLE[node.expression.name.text];
           if (
             ts.isIdentifier(node.expression.expression) &&
             node.expression.expression.text === "Math" &&
-            currentModuleBindingResolver?.isDirectModuleBinding(node.expression.expression) !== true &&
-            IR_MATH_UNARY_WHITELIST.has(node.expression.name.text)
+            selectorSeesAmbientBinding(node.expression.expression) &&
+            mathPlan !== undefined &&
+            selectorSupportsMathPlan(mathPlan) &&
+            node.arguments.length === mathPlan.arity
           ) {
             for (const a of node.arguments) visit(a);
             return;

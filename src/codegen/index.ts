@@ -29,7 +29,11 @@ import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js"
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
-import { makeIrModuleBindingResolver } from "../ir/module-bindings.js"; // (#2856 Capability C)
+import {
+  makeIrDeclaredPrimitiveExpressionClassifier,
+  makeIrModuleBindingResolver,
+  makeIrPrimitiveExpressionClassifier,
+} from "../ir/module-bindings.js"; // (#2856 Capability C)
 import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
@@ -1753,6 +1757,8 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
     allowHostExterns: jsHostExterns && !ctx.nativeStrings,
     allowBuiltinMapExtern: jsHostExterns && !ctx.nativeStrings,
   });
+  const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ast.checker);
+  const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
   // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
   // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
   // the gc `$AnyValue` but strings are host js-string externrefs, so the native
@@ -1770,6 +1776,10 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
       resolveModuleBinding,
+      classifyPrimitiveExpression,
+      classifyDeclaredPrimitiveExpression,
+      supportsSymbolicMathHelpers: true,
+      supportsLiteralStringReplace: true,
       // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
       // async engine ($AsyncFrame drive / host-drive) declines it — the
       // legacy sync-pass-through population. Engine-activated functions keep
