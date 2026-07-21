@@ -219,18 +219,24 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
   // aligned with `src/runtime.ts::buildImports` without turning this compact
   // helper into an unrestricted second runtime implementation.
   const errorConstructorImports = result.imports.filter((descriptor) => {
-    if (descriptor.module !== "env" || descriptor.kind !== "func" || !descriptor.name.startsWith("__new_")) {
+    if (descriptor.module !== "env" || descriptor.kind !== "func") {
       return false;
     }
-    const errorName = descriptor.name.slice("__new_".length);
-    if (!isWasiErrorName(errorName)) return false;
-    if (descriptor.intent.type === "extern_class") {
-      return descriptor.intent.action === "new" && descriptor.intent.className === errorName;
+    if (descriptor.name === "__new_AggregateError") {
+      return descriptor.intent.type === "builtin" && descriptor.intent.name === "__new_AggregateError";
     }
-    // AggregateError owns a specialised runtime builtin because its iterable
-    // `errors` argument and optional cause cannot use the generic extern-class
-    // constructor bridge.
-    return descriptor.intent.type === "builtin" && descriptor.intent.name === descriptor.name;
+    if (!descriptor.name.startsWith("__new_")) return false;
+    const errorName = descriptor.name.slice("__new_".length);
+    // The seven ordinary Error-family constructors use the generic exact-class
+    // bridge. AggregateError is intentionally excluded here: only its
+    // specialised builtin intent owns the iterable/message/options ABI above.
+    return (
+      errorName !== "AggregateError" &&
+      isWasiErrorName(errorName) &&
+      descriptor.intent.type === "extern_class" &&
+      descriptor.intent.action === "new" &&
+      descriptor.intent.className === errorName
+    );
   });
   if (errorConstructorImports.length > 0) {
     Object.assign(env, buildRuntimeImports(errorConstructorImports, undefined, result.stringPool).env);
