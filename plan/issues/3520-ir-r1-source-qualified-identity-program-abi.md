@@ -27,6 +27,7 @@ files:
   - src/ir/program-abi.ts
   - src/ir/index.ts
   - src/ir/nodes.ts
+  - src/ir/outcomes.ts
   - src/ir/builder.ts
   - src/ir/ast-lowering-plans.ts
   - src/ir/from-ast.ts
@@ -146,6 +147,21 @@ human-readable label is stored separately and may remain byte-compatible with
 current telemetry. Equality, maps, call graphs, passes, and ABI resolution may
 never use that label.
 
+The inventory exposes two explicit populations rather than conflating nested
+support artifacts with terminal source outcomes:
+
+- `allUnits` is exhaustive over source, nested, lifted, and synthetic support
+  units. Every record has a `terminalOwnerId` and, where applicable, a
+  `lexicalOwnerId`.
+- `terminalUnits` is the exact one-to-one population consumed by the R0 outcome
+  ledger. Its count must equal terminal outcomes, while every additional
+  `allUnits` record must resolve to one terminal owner.
+
+An equality check between `allUnits.length` and the R0 outcome count is invalid:
+R0 deliberately attributes lifted/support preparation failures to their source
+owner. R1 makes that relationship structural instead of manufacturing extra
+terminal rows.
+
 ## `ProgramAbiMap` contract
 
 Build one whole-program inventory in deterministic source order. The map owns:
@@ -184,8 +200,9 @@ adapter is the only string-keyed compatibility boundary. It must:
 - Cover class declarations/expressions, static/instance/accessor distinctions,
   nested scopes, object methods, lifted functions, module init, and known
   synthetic support roles. Unsupported syntax is still inventoried.
-- Cross-check the R0 outcome ledger: every observational label maps to exactly
-  one `IrUnitId`; inventory count and terminal-outcome count remain equal.
+- Cross-check the R0 outcome ledger: every terminal row maps to exactly one
+  `terminalUnits` identity, every `allUnits` record resolves through
+  `terminalOwnerId`, and legacy labels/histograms remain unchanged.
 
 ### Commit 2 — key source planning and analyses by identity
 
@@ -262,8 +279,9 @@ and shared backend conversion belongs to R8.
 5. Imported/default/renamed aliases and inherited members resolve as explicit
    aliases to one canonical binding, while an accidental collision raises the
    stable ABI invariant.
-6. The R0 ledger has exactly one outcome per inventoried unit and its legacy
-   display labels/histograms are unchanged.
+6. The R0 ledger has exactly one outcome per `terminalUnits` record; nested and
+   support records remain present in `allUnits`, resolve to a terminal owner,
+   and do not change legacy display labels/histograms.
 
 Run the collision tests alongside `tests/issue-1983-funcmap-collision.test.ts`,
 `tests/issue-2138-multi-module-ir-overlay.test.ts`,
