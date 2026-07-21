@@ -434,6 +434,8 @@ export interface AstToIrOptions {
   readonly importedCalls?: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
   /** (#3214 B1) Exact bare top-level function-value sites, keyed by AST node. */
   readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
+  /** (#3214 B2) Exact ambient-host void arrows, keyed by their AST node. */
+  readonly hostVoidCallbacks?: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
   /**
    * Slice 4 (#1169d): map from class name to that class's IR shape
    * (fields + methods + constructor signature). Consulted when lowering
@@ -513,6 +515,12 @@ export interface IrTopLevelFunctionValueLoweringPlan {
   readonly signature: IrClosureSignature;
   readonly trampolineName: string;
   readonly cacheGlobalName: string;
+}
+
+export interface IrHostVoidCallbackLoweringPlan {
+  readonly ownerName: string;
+  readonly signature: IrClosureSignature;
+  readonly captureNames: ReadonlySet<string>;
 }
 
 /**
@@ -749,6 +757,7 @@ export function lowerFunctionAstToIr(
     calleeTypes: options.calleeTypes,
     importedCalls: options.importedCalls,
     topLevelFunctionValues: options.topLevelFunctionValues,
+    hostVoidCallbacks: options.hostVoidCallbacks,
     classShapes: options.classShapes,
     resolver: options.resolver,
     lifted,
@@ -1408,6 +1417,7 @@ interface LowerCtx {
   readonly calleeTypes?: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
   readonly importedCalls?: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
   readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
+  readonly hostVoidCallbacks?: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
   /** Slice 4 (#1169d) — class shape registry, keyed by className. */
   readonly classShapes?: ReadonlyMap<string, IrClassShape>;
   /**
@@ -2361,11 +2371,11 @@ function describeIrType(t: IrType): string {
   }
   if (t.kind === "closure") {
     const ps = t.signature.params.map(describeIrType).join(",");
-    return `closure(${ps})->${describeIrType(t.signature.returnType)}`;
+    return `closure(${ps})->${t.signature.returnType === null ? "void" : describeIrType(t.signature.returnType)}`;
   }
   if (t.kind === "callable") {
     const ps = t.signature.params.map(describeIrType).join(",");
-    return `callable(${ps})->${describeIrType(t.signature.returnType)}`;
+    return `callable(${ps})->${t.signature.returnType === null ? "void" : describeIrType(t.signature.returnType)}`;
   }
   if (t.kind === "class") return `class<${t.shape.className}>`;
   if (t.kind === "extern") return `extern<${t.className}>`;
@@ -4078,6 +4088,9 @@ function lowerClosureCall(
   argExprs: readonly ts.Expression[],
   cx: LowerCtx,
 ): IrValueId {
+  if (signature.returnType === null) {
+    throw new Error(`ir/from-ast: void closure calls are not in value position scope (${cx.funcName})`);
+  }
   if (argExprs.length !== signature.params.length) {
     throw new Error(`ir/from-ast: closure call arity mismatch in ${cx.funcName}`);
   }
@@ -4116,6 +4129,9 @@ function lowerNestedFuncCall(
   argExprs: readonly ts.Expression[],
   cx: LowerCtx,
 ): IrValueId {
+  if (binding.signature.returnType === null) {
+    throw new Error(`ir/from-ast: void nested calls are not in value position scope (${cx.funcName})`);
+  }
   if (argExprs.length !== binding.signature.params.length) {
     throw new Error(`ir/from-ast: nested func call arity mismatch in ${cx.funcName}`);
   }
@@ -4658,7 +4674,34 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     const args: IrValueId[] = [];
     for (let i = 0; i < expr.arguments.length; i++) {
       const expected = userParams[i]!;
-      const argVal = lowerExpr(expr.arguments[i]!, cx, irVal(expected));
+      const argument = expr.arguments[i]!;
+      const hostCallbackArrow = ts.isArrowFunction(argument) ? argument : undefined;
+      const hostCallbackPlan = hostCallbackArrow ? cx.hostVoidCallbacks?.get(hostCallbackArrow) : undefined;
+      if (hostCallbackPlan && hostCallbackArrow) {
+        if (
+          methodName !== "addEventListener" ||
+          i !== 1 ||
+          expected.kind !== "externref" ||
+          hostCallbackPlan.signature.params.length !== 0 ||
+          hostCallbackPlan.signature.returnType !== null
+        ) {
+          throw new Error(`ir/from-ast: invalid host void callback plan for ${definingClass}.${methodName}`);
+        }
+        const closure = lowerHostVoidCallbackExpression(hostCallbackArrow, hostCallbackPlan, cx);
+        const packed = cx.builder.emitCallablePack(closure, hostCallbackPlan.signature);
+        const sentinel = cx.builder.emitConst({ kind: "i32", value: -1 }, irVal({ kind: "i32" }));
+        const wrapped = cx.builder.emitCall(
+          { kind: "func", name: "__make_callback" },
+          [sentinel, packed],
+          irVal({ kind: "externref" }),
+        );
+        if (wrapped === null) {
+          throw new Error(`ir/from-ast: __make_callback produced no value in ${cx.funcName}`);
+        }
+        args.push(wrapped);
+        continue;
+      }
+      const argVal = lowerExpr(argument, cx, irVal(expected));
       args.push(coerceToExpectedExtern(argVal, expected, cx, `arg ${i} of ${definingClass}.${methodName}`));
     }
     // (#2856) Pad missing OPTIONAL args with default sentinels: the host
@@ -7869,7 +7912,48 @@ function lowerClosureExpression(expr: ts.ArrowFunction | ts.FunctionExpression, 
   const returnType = typeNodeToIr(expr.type, `return type of ${cx.funcName}.<closure>`);
   const signature: IrClosureSignature = { params, returnType };
 
+  return lowerClosureExpressionWithSignature(expr, signature, undefined, cx);
+}
+
+/**
+ * #3214 B2 — materialise the one certified ambient-host callback as a
+ * canonical zero-result IR closure. The checker/selector plan owns the narrow
+ * syntax and readonly-capture proof; this defensive comparison prevents a
+ * stale or node-mismatched plan from widening lowering after selection.
+ */
+function lowerHostVoidCallbackExpression(
+  expr: ts.ArrowFunction,
+  plan: IrHostVoidCallbackLoweringPlan,
+  cx: LowerCtx,
+): IrValueId {
+  if (
+    !ts.isBlock(expr.body) ||
+    expr.parameters.length !== 0 ||
+    plan.signature.params.length !== 0 ||
+    plan.signature.returnType !== null
+  ) {
+    throw new Error(`ir/from-ast: malformed host void callback plan (${cx.funcName})`);
+  }
+  return lowerClosureExpressionWithSignature(expr, plan.signature, plan.captureNames, cx);
+}
+
+function lowerClosureExpressionWithSignature(
+  expr: ts.ArrowFunction | ts.FunctionExpression,
+  signature: IrClosureSignature,
+  expectedReadonlyCaptures: ReadonlySet<string> | undefined,
+  cx: LowerCtx,
+): IrValueId {
   const captures = analyseCaptures(expr, cx);
+  if (expectedReadonlyCaptures) {
+    const actual = new Set(captures.map((capture) => capture.name));
+    if (
+      captures.some((capture) => capture.mutable) ||
+      actual.size !== expectedReadonlyCaptures.size ||
+      [...actual].some((name) => !expectedReadonlyCaptures.has(name))
+    ) {
+      throw new Error(`ir/from-ast: host void callback capture proof diverged (${cx.funcName})`);
+    }
+  }
 
   const liftedName = `${cx.funcName}__closure_${cx.liftedCounter.value++}`;
 
@@ -7970,6 +8054,9 @@ function liftNestedFunction(
   captures: readonly NestedCapture[],
   cx: LowerCtx,
 ): IrFunction {
+  if (signature.returnType === null) {
+    throw new Error(`ir/from-ast: void nested function signatures are outside slice 3 (${liftedName})`);
+  }
   const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false, cx.allocRegistry);
   const scope = new Map<string, ScopeBinding>();
 
@@ -7999,6 +8086,7 @@ function liftNestedFunction(
     calleeTypes: cx.calleeTypes,
     importedCalls: cx.importedCalls,
     topLevelFunctionValues: cx.topLevelFunctionValues,
+    hostVoidCallbacks: cx.hostVoidCallbacks,
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
@@ -8046,7 +8134,12 @@ function liftClosureBody(
   captureFieldTypes: readonly IrType[],
   cx: LowerCtx,
 ): IrFunction {
-  const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false, cx.allocRegistry);
+  const builder = new IrFunctionBuilder(
+    liftedName,
+    signature.returnType === null ? [] : [signature.returnType],
+    false,
+    cx.allocRegistry,
+  );
   const scope = new Map<string, ScopeBinding>();
 
   const selfType: IrType = { kind: "closure", signature };
@@ -8079,6 +8172,7 @@ function liftClosureBody(
     calleeTypes: cx.calleeTypes,
     importedCalls: cx.importedCalls,
     topLevelFunctionValues: cx.topLevelFunctionValues,
+    hostVoidCallbacks: cx.hostVoidCallbacks,
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
@@ -8102,6 +8196,9 @@ function liftClosureBody(
   };
 
   if (ts.isArrowFunction(expr) && !ts.isBlock(expr.body)) {
+    if (signature.returnType === null) {
+      throw new Error(`ir/from-ast: void host callbacks must be block-bodied (${liftedName})`);
+    }
     // Concise body — wrap as `return <expr>`.
     const v = lowerExpr(expr.body, innerCx, signature.returnType);
     if (!irTypeEquals(builder.typeOf(v), signature.returnType)) {

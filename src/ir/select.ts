@@ -60,6 +60,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
 import { closureSignatureEquals, type IrClosureSignature, type IrType } from "./nodes.js";
 import type { IrImportedFunctionResolver, IrResolvedFunctionTarget } from "./imported-functions.js";
+import type { IrHostVoidCallbackResolver } from "./host-extern.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type {
@@ -384,6 +385,12 @@ export interface IrSelectionOptions {
    * pre-slice conservative boundary.
    */
   readonly importedFunctions?: IrImportedFunctionResolver;
+  /**
+   * (#3214 B2) Checker-certified direct ambient `addEventListener` callback
+   * sites. Omitted in host-free modes and bare selector callers so arrows do
+   * not widen accidentally outside the production/gate shared proof.
+   */
+  readonly hostVoidCallbacks?: IrHostVoidCallbackResolver;
 }
 
 /**
@@ -4107,6 +4114,37 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         return true;
       }
       if (!isPhase1Expr(expr.expression.expression, scope, localClasses)) return false;
+      // (#3214 B2) One exact host callback widening. The checker resolver
+      // proves this is the ambient EventTarget `addEventListener` surface and
+      // that the zero-param block arrow is synchronous, void, nested-decl
+      // free, and capture-readonly. Selection still owns ordinary expression
+      // coverage: the event type and the callback body must both fit the
+      // complete Phase-1 surface, and every certified capture must already be
+      // live in this lexical scope. No other arrow argument bypasses the
+      // generic `isPhase1Expr` rejection below.
+      const hostVoidCallback = currentSelectionOptions?.hostVoidCallbacks?.(expr);
+      if (hostVoidCallback) {
+        for (const capture of hostVoidCallback.captureNames) {
+          if (!scope.has(capture)) return shapeNo("expr-host-void-callback-capture-scope", hostVoidCallback.callback);
+        }
+        const eventType = expr.arguments[0]!;
+        if (ts.isSpreadElement(eventType) || !isPhase1Expr(eventType, scope, localClasses)) {
+          return shapeNo("expr-host-void-callback-event", eventType);
+        }
+        const callbackScope = new Set(scope);
+        if (
+          !isPhase1StatementList(
+            hostVoidCallback.callback.body.statements,
+            callbackScope,
+            localClasses,
+            /* isGenerator */ false,
+            /* isVoidReturn */ true,
+          )
+        ) {
+          return shapeNo("expr-host-void-callback-body", hostVoidCallback.callback.body);
+        }
+        return true;
+      }
       for (const arg of expr.arguments) {
         // Slice 8a (#1169g): spread args restricted to method calls is
         // out of scope — methods on classes have known signatures and

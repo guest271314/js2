@@ -141,7 +141,8 @@ export interface IrObjectShape {
  */
 export interface IrClosureSignature {
   readonly params: readonly IrType[];
-  readonly returnType: IrType;
+  /** `null` is the canonical zero-result / JavaScript `void` signature. */
+  readonly returnType: IrType | null;
 }
 
 /**
@@ -440,7 +441,9 @@ export function closureSignatureEquals(a: IrClosureSignature, b: IrClosureSignat
   for (let i = 0; i < a.params.length; i++) {
     if (!irTypeEquals(a.params[i]!, b.params[i]!)) return false;
   }
-  return irTypeEquals(a.returnType, b.returnType);
+  return a.returnType === null || b.returnType === null
+    ? a.returnType === b.returnType
+    : irTypeEquals(a.returnType, b.returnType);
 }
 
 /**

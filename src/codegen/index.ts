@@ -39,11 +39,12 @@ import {
 } from "../ir/select.js";
 import { makeIrImportedFunctionResolver, type IrImportedFunctionResolver } from "../ir/imported-functions.js";
 import type {
+  IrHostVoidCallbackLoweringPlan,
   IrImportedCallLoweringPlan,
   IrImportedOptionalParamPlan,
   IrTopLevelFunctionValueLoweringPlan,
 } from "../ir/from-ast.js";
-import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
+import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../ir/host-extern.js"; // (#2856/#3214)
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
@@ -1592,6 +1593,8 @@ interface IrOverlayPlan {
   readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
   /** Bare same-file function values admitted only at certified HOF positions. */
   readonly topLevelFunctionValues: Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
+  /** Exact ambient addEventListener void arrows admitted by B2. */
+  readonly hostVoidCallbacks: Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
   readonly importedFunctionResolver?: IrImportedFunctionResolver;
 }
 
@@ -1847,6 +1850,7 @@ function planIrOverlay(
         });
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ast.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
+  const resolveHostVoidCallback = jsHostExterns ? makeIrHostVoidCallbackResolver(ast.checker) : undefined;
   // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
   // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
   // the gc `$AnyValue` but strings are host js-string externrefs, so the native
@@ -1863,6 +1867,7 @@ function planIrOverlay(
       jsHostExterns,
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
+      ...(resolveHostVoidCallback ? { hostVoidCallbacks: resolveHostVoidCallback } : {}),
       ...(resolveModuleBinding ? { resolveModuleBinding } : {}),
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
@@ -2032,6 +2037,7 @@ function planIrOverlay(
   }
   const importedCalls = new Map<ts.CallExpression, IrImportedCallLoweringPlan>();
   const topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
+  const hostVoidCallbacks = new Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>();
   if (jsHostExterns && options.importedFunctions) {
     for (const [ownerName, declaration] of declByName) {
       if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
@@ -2103,6 +2109,27 @@ function planIrOverlay(
       }
     }
   }
+  if (resolveHostVoidCallback) {
+    for (const [ownerName, declaration] of declByName) {
+      if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
+      const visit = (node: ts.Node): void => {
+        if (node !== declaration && ts.isFunctionLike(node)) return;
+        if (ts.isCallExpression(node)) {
+          const certified = resolveHostVoidCallback(node);
+          if (certified) {
+            hostVoidCallbacks.set(certified.callback, {
+              ownerName,
+              signature: { params: [], returnType: null },
+              captureNames: certified.captureNames,
+            });
+            return;
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(declaration.body);
+    }
+  }
   return {
     selection,
     classShapes,
@@ -2112,6 +2139,7 @@ function planIrOverlay(
     declByName,
     importedCalls,
     topLevelFunctionValues,
+    hostVoidCallbacks,
     ...(options.importedFunctions ? { importedFunctionResolver: options.importedFunctions } : {}),
   };
 }
@@ -2374,11 +2402,17 @@ function functionBodyHasUnsupportedImportUse(fn: ts.FunctionDeclaration, plan: I
 }
 
 /** Nested functions mint flat synthetic names that M0 cannot collision-prove. */
-function functionBodyContainsNestedRuntimeDeclaration(fn: ts.FunctionDeclaration): boolean {
+function functionBodyContainsNestedRuntimeDeclaration(fn: ts.FunctionDeclaration, plan: IrOverlayPlan): boolean {
   if (!fn.body) return false;
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
+    if (ts.isArrowFunction(node) && plan.hostVoidCallbacks.has(node)) {
+      // B2 owns this one synthesized closure. Keep walking its body so a
+      // nested function/class still trips the conservative M0 collision gate.
+      ts.forEachChild(node.body, visit);
+      return;
+    }
     if (
       ts.isFunctionDeclaration(node) ||
       ts.isFunctionExpression(node) ||
@@ -2449,6 +2483,29 @@ function multiIrTargetHasExactRegistryEntry(
   return idx !== undefined && idx >= ctx.numImportFuncs && definedFuncAt(ctx, idx)?.name === targetName;
 }
 
+/** Final-context proof for B2's symbolic `__make_callback` dependency. */
+function hasExactHostVoidCallbackMakerImport(ctx: CodegenContext): boolean {
+  const makerIdx = ctx.funcMap.get("__make_callback");
+  if (makerIdx === undefined || makerIdx < 0 || makerIdx >= ctx.numImportFuncs) return false;
+
+  let functionIndex = 0;
+  for (const imported of ctx.mod.imports) {
+    if (imported.desc.kind !== "func") continue;
+    if (functionIndex++ !== makerIdx) continue;
+    if (imported.module !== "env" || imported.name !== "__make_callback") return false;
+    const type = ctx.mod.types[imported.desc.typeIdx];
+    return (
+      type?.kind === "func" &&
+      type.params.length === 2 &&
+      type.params[0]?.kind === "i32" &&
+      type.params[1]?.kind === "externref" &&
+      type.results.length === 1 &&
+      type.results[0]?.kind === "externref"
+    );
+  }
+  return false;
+}
+
 function closeMultiIrBlockedComponent(
   sourceFile: ts.SourceFile,
   selection: IrSelection,
@@ -2481,6 +2538,36 @@ function closeMultiIrBlockedComponent(
   return { funcs, classMembers: new Set(), moduleInit: undefined };
 }
 
+/**
+ * Apply B2's final-context safety proof after legacy declaration/import
+ * collection. This is shared by single- and multi-file compilation: planning
+ * cannot prove the eventual import slot/signature or whether a user function
+ * occupies the deterministic lifted name.
+ */
+function prepareHostVoidCallbackLowering(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  plan: IrOverlayPlan,
+  selection: IrSelection,
+): IrSelection {
+  const activePlans = [...plan.hostVoidCallbacks.values()].filter((callback) =>
+    selection.funcs.has(callback.ownerName),
+  );
+  if (activePlans.length === 0) return selection;
+
+  const blocked = new Set<string>();
+  if (!hasExactHostVoidCallbackMakerImport(ctx)) {
+    for (const callback of activePlans) blocked.add(callback.ownerName);
+  }
+  for (const callback of activePlans) {
+    const liftedName = `${callback.ownerName}__closure_0`;
+    if (ctx.funcMap.has(liftedName) || ctx.mod.functions.some((fn) => fn.name === liftedName)) {
+      blocked.add(callback.ownerName);
+    }
+  }
+  return blocked.size === 0 ? selection : closeMultiIrBlockedComponent(sourceFile, selection, blocked);
+}
+
 function makeMultiIrSafeSelection(
   ctx: CodegenContext,
   plan: IrOverlayPlan,
@@ -2500,7 +2587,6 @@ function makeMultiIrSafeSelection(
   for (const valuePlan of plan.topLevelFunctionValues.values()) {
     if (!multiIrTargetHasExactRegistryEntry(ctx, valuePlan.targetName, safety)) blocked.add(valuePlan.ownerName);
   }
-
   for (const name of funcs) {
     const declaration = plan.declByName.get(name);
     if (!declaration) {
@@ -2514,7 +2600,7 @@ function makeMultiIrSafeSelection(
     if (
       safety.collisions.has(name) ||
       functionBodyHasUnsupportedImportUse(declaration, plan) ||
-      functionBodyContainsNestedRuntimeDeclaration(declaration) ||
+      functionBodyContainsNestedRuntimeDeclaration(declaration, plan) ||
       (declaration.typeParameters?.length ?? 0) > 0 ||
       safety.importAliasNames.has(name) ||
       safety.occupiedFunctionNameCounts.get(name) !== 1 ||
@@ -3042,8 +3128,13 @@ export function generateModule(
       // planning code verbatim (typeMap → selection → STRICT_IR_REASONS →
       // classShapes → overrideMap → safeSelection → new.target gate).
       const plan = irPlan ?? planIrOverlay(ctx, ast);
-      const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
-      const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
+      const { selection, classShapes, overrideMap, trackFallbacks } = plan;
+      const safeSelection = prepareHostVoidCallbackLowering(ctx, ast.sourceFile, plan, plan.safeSelection);
+      const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes, {
+        importedCalls: plan.importedCalls,
+        topLevelFunctionValues: plan.topLevelFunctionValues,
+        hostVoidCallbacks: plan.hostVoidCallbacks,
+      });
       consumeIrOverlayReport(ctx, report, selection, trackFallbacks, ast.sourceFile.fileName, irSkipBodies);
     }
 
@@ -5199,9 +5290,11 @@ export function generateMultiModule(
         });
         let safeSelection = makeMultiIrSafeSelection(ctx, plan, sourceFile, safety);
         safeSelection = prepareMultiIrImportedLowering(ctx, sourceFile, plan, safeSelection);
+        safeSelection = prepareHostVoidCallbackLowering(ctx, sourceFile, plan, safeSelection);
         const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes, {
           importedCalls: plan.importedCalls,
           topLevelFunctionValues: plan.topLevelFunctionValues,
+          hostVoidCallbacks: plan.hostVoidCallbacks,
         });
         consumeIrOverlayReport(ctx, report, plan.selection, plan.trackFallbacks, sourceFile.fileName);
       }

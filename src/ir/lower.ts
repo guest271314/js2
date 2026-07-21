@@ -3585,11 +3585,11 @@ function describeIrTypeShallow(t: IrType): string {
   if (t.kind === "object") return `object{${describeShape(t.shape)}}`;
   if (t.kind === "closure") {
     const ps = t.signature.params.map(describeIrTypeShallow).join(",");
-    return `closure(${ps})->${describeIrTypeShallow(t.signature.returnType)}`;
+    return `closure(${ps})->${t.signature.returnType === null ? "void" : describeIrTypeShallow(t.signature.returnType)}`;
   }
   if (t.kind === "callable") {
     const ps = t.signature.params.map(describeIrTypeShallow).join(",");
-    return `callable(${ps})->${describeIrTypeShallow(t.signature.returnType)}`;
+    return `callable(${ps})->${t.signature.returnType === null ? "void" : describeIrTypeShallow(t.signature.returnType)}`;
   }
   if (t.kind === "class") return `class<${t.shape.className}>`;
   if (t.kind === "extern") return `extern<${t.className}>`;

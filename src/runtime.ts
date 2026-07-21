@@ -1013,6 +1013,10 @@ const _wasmClosureWrapperSource = new WeakMap<Function, { closure: any; arity: n
 const _wasmClosureDynamicWrapperCache = new WeakMap<object, Function>();
 const _wasmClosureWrapperCache = new WeakMap<object, Map<number, Function>>();
 const _wasmClosureWrapperTargets = new WeakMap<Function, object>();
+// #3214 B2 — `__make_callback(-1, closure)` bridges a canonical void IR
+// closure without minting a legacy `__cb_N` export. Cache the non-constructible
+// JS arrow per raw closure so repeated boundary conversion preserves identity.
+const _wasmVoidHostCallbackCache = new WeakMap<object, Function>();
 const _test262ErrorConstructors = new WeakSet<Function>();
 
 // (#3369) Callback bridges must remain usable while the evaluated program has
@@ -1475,6 +1479,28 @@ function _maybeWrapCallable(
   if (!_isWasmStruct(val)) return val;
   const wrapped = _wrapWasmClosure(val, arity, callbackState);
   return wrapped ?? val;
+}
+
+function _wrapVoidHostCallback(
+  closure: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (!_canBeWeakKey(closure)) return closure;
+  const cached = _wasmVoidHostCallbackCache.get(closure as object);
+  if (cached) return cached;
+  const dispatch = _maybeWrapCallable(closure, 0, callbackState);
+  if (typeof dispatch !== "function") return dispatch;
+
+  // Arrow functions have no [[Construct]], matching the source arrow. The
+  // block intentionally discards the Wasm dispatcher's result so a `void`
+  // callback observes JavaScript `undefined` even though the generic
+  // `__call_fn_0` bridge itself has an externref result carrier.
+  const wrapped = (..._args: any[]): void => {
+    dispatch();
+  };
+  _wasmVoidHostCallbackCache.set(closure as object, wrapped);
+  _wasmClosureWrapperTargets.set(wrapped, closure as object);
+  return wrapped;
 }
 
 /**
@@ -13695,8 +13721,12 @@ assert._isSameValue = isSameValue;
       return () => {};
     }
     case "callback_maker":
-      return (id: number, cap: any) =>
-        (...args: any[]) => {
+      return (id: number, cap: any) => {
+        // #3214 B2 reserves -1 for an already-materialised canonical IR
+        // closure. Legacy callbacks keep their non-negative `__cb_N` ids and
+        // therefore remain byte-for-byte on the existing dispatch path.
+        if (id === -1) return _wrapVoidHostCallback(cap, callbackState);
+        return (...args: any[]) => {
           const exports = callbackState?.getExports();
           // (#3284) A callback whose reaction fires DURING WebAssembly.instantiate
           // — e.g. a top-level `Promise.resolve(x).then(cb)` whose microtask
@@ -13720,6 +13750,7 @@ assert._isSameValue = isSameValue;
           }
           return exports?.[`__cb_${id}`]?.(cap, ...args);
         };
+      };
     case "getter_callback_maker":
       return (id: number, cap: any) =>
         // Regular function (not arrow) so 'this' is bound to the receiver;
