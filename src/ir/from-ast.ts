@@ -4232,7 +4232,10 @@ function lowerNestedFuncCall(
  *
  * The class shape is looked up against `cx.classShapes`. Argument types
  * must match the constructor's declared `constructorParams`. Generic
- * type-arguments are not supported (the selector rejects them).
+ * type-arguments are normally rejected by the selector; #3517 admits only a
+ * checker-certified direct module `const Map<K, V>` initializer because those
+ * arguments are erased and its extern storage/constructor ABI is already
+ * proven.
  *
  * Returns the SSA value of the constructed instance — its IrType is
  * `{ kind: "class", shape }` so subsequent property accesses / method
