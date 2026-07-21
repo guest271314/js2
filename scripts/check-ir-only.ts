@@ -235,6 +235,11 @@ export function evaluateIrOnlyReport(
         if (outcome.kind !== "emitted" && outcome.irBodyEmitted) {
           failures.push(`${lane.name}/${entry.entry}: non-emitted terminal ${outcome.displayName} claims an IR body`);
         }
+        if (outcome.kind === "unsupported" && !outcome.legacyBodyEmitted) {
+          failures.push(
+            `${lane.name}/${entry.entry}: unsupported terminal ${outcome.displayName} has no retained legacy body`,
+          );
+        }
         if (outcome.unitKind === "function" && !outcome.legacyBodyEmitted && !skipped.has(outcome.displayName)) {
           failures.push(
             `${lane.name}/${entry.entry}: non-legacy function ${outcome.displayName} is absent from irFirstSkipped`,

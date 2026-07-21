@@ -161,6 +161,14 @@ export function evaluateIrOutcomePolicy(
 ): IrOutcomePolicyVerdict {
   const blockers = outcomes.filter((outcome) => {
     if (outcome.kind === "invariant") return true;
+    // The discriminant and body evidence are one contract. Hybrid may retain
+    // a typed Unsupported unit only when its direct body actually exists; an
+    // unsupported skipped slot has no executable implementation to fall back
+    // to. Likewise, an emitted row without an IR body (or a non-emitted row
+    // claiming one) is malformed evidence and must fail both policies.
+    if (outcome.kind === "emitted" && !outcome.irBodyEmitted) return true;
+    if (outcome.kind !== "emitted" && outcome.irBodyEmitted) return true;
+    if (outcome.kind === "unsupported" && !outcome.legacyBodyEmitted) return true;
     if (policy === "hybrid") return false;
     return outcome.kind === "unsupported" || outcome.legacyBodyEmitted || !outcome.irBodyEmitted;
   });

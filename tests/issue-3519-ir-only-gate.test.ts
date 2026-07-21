@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { CompileResult, IrObservedOutcome } from "../src/index.js";
+import { evaluateIrOutcomePolicy } from "../src/ir/outcomes.js";
 import {
   evaluateIrOnlyReport,
   observeSingleHostLane,
@@ -188,6 +189,33 @@ describe("#3519 honest IR-only gate", () => {
         "ir-only",
       ).ready,
     ).toBe(false);
+  });
+
+  it("rejects unsupported units without a retained legacy body and malformed body evidence in both policies", () => {
+    const noLegacy = { ...unsupported("blocked"), legacyBodyEmitted: false } satisfies IrObservedOutcome;
+    expect(evaluateIrOutcomePolicy([noLegacy], "hybrid").ready).toBe(false);
+    expect(evaluateIrOutcomePolicy([noLegacy], "ir-only").ready).toBe(false);
+
+    const observed = lane([entry([emitted("ok"), noLegacy])]);
+    const prior = baseline({
+      terminalUnitFloor: 2,
+      emittedFloor: 1,
+      irBodyEmittedFloor: 1,
+      unsupportedCeiling: 1,
+      unsupportedByCode: { "select/async-function": 1 },
+    });
+    const hybrid = evaluateIrOnlyReport([observed], prior, "hybrid");
+    expect(hybrid.ready).toBe(false);
+    expect(hybrid.failures).toContain(
+      "single-host/fixture.ts: unsupported terminal blocked has no retained legacy body",
+    );
+
+    const emittedWithoutBody = { ...emitted("bad-emitted"), irBodyEmitted: false } satisfies IrObservedOutcome;
+    const unsupportedWithBody = { ...unsupported("bad-unsupported"), irBodyEmitted: true } satisfies IrObservedOutcome;
+    for (const malformed of [emittedWithoutBody, unsupportedWithBody]) {
+      expect(evaluateIrOutcomePolicy([malformed], "hybrid").ready).toBe(false);
+      expect(evaluateIrOutcomePolicy([malformed], "ir-only").ready).toBe(false);
+    }
   });
 
   it("counts compile throws, success:false, and fatal result.errors without consulting irPostClaimErrors", async () => {
