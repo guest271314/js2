@@ -59,6 +59,11 @@ interface LoopCtx {
  * {@link emit} to get the {@link FuncMeta}.
  */
 class FunctionEmitter {
+  private readonly params: Node[];
+  private readonly body: Node;
+  private readonly name: JSValue;
+  private readonly isScript: boolean;
+  private readonly isExpressionBody: boolean;
   private readonly enc = new Encoder();
   /** name → fixed register (params + hoisted locals). */
   private readonly names = new Map<string, number>();
@@ -73,13 +78,16 @@ class FunctionEmitter {
   /** Hoisted function declarations (collected before emission). */
   private readonly hoistedFuncs: Node[] = [];
 
-  constructor(
-    private readonly params: Node[],
-    private readonly body: Node,
-    private readonly name: JSValue,
-    private readonly isScript: boolean,
-    private readonly isExpressionBody: boolean, // arrow with expression body
-  ) {}
+  constructor(params: Node[], body: Node, name: JSValue, isScript: boolean, isExpressionBody: boolean) {
+    // Use explicit fields instead of TypeScript parameter properties: the E2
+    // self-compiler materialises declared class fields as WasmGC struct fields,
+    // while parameter properties currently fall back to dynamic object reads.
+    this.params = params;
+    this.body = body;
+    this.name = name;
+    this.isScript = isScript;
+    this.isExpressionBody = isExpressionBody; // arrow with expression body
+  }
 
   // ── register allocation ────────────────────────────────────────────────────
   private allocReg(): number {
@@ -183,38 +191,29 @@ class FunctionEmitter {
     for (const s of stmts) this.collectHoistStatement(s);
   }
   private collectHoistStatement(s: Node): void {
-    switch (s.type) {
-      case "VariableDeclaration":
-        for (const d of s.declarations) this.collectHoistPattern(d.id);
-        break;
-      case "FunctionDeclaration":
-        if (s.id) this.hoistedFuncs.push(s);
-        break;
-      case "IfStatement":
-        this.collectHoistStatement(s.consequent);
-        if (s.alternate) this.collectHoistStatement(s.alternate);
-        break;
-      case "BlockStatement":
-        this.collectHoist(s.body);
-        break;
-      case "WhileStatement":
-      case "DoWhileStatement":
-        this.collectHoistStatement(s.body);
-        break;
-      case "ForStatement":
-        if (s.init && s.init.type === "VariableDeclaration") this.collectHoistStatement(s.init);
-        this.collectHoistStatement(s.body);
-        break;
-      case "TryStatement":
-        this.collectHoistStatement(s.block);
-        if (s.handler) this.collectHoistStatement(s.handler.body);
-        if (s.finalizer) this.collectHoistStatement(s.finalizer);
-        break;
-      case "LabeledStatement":
-        this.collectHoistStatement(s.body);
-        break;
-      default:
-        break;
+    // Dynamic ESTree string discriminants deliberately use equality chains.
+    // A standalone switch over a dynamic/native-string field does not share
+    // the statically typed string switch representation.
+    if (s.type === "VariableDeclaration") {
+      for (const d of s.declarations) this.collectHoistPattern(d.id);
+    } else if (s.type === "FunctionDeclaration") {
+      if (s.id) this.hoistedFuncs.push(s);
+    } else if (s.type === "IfStatement") {
+      this.collectHoistStatement(s.consequent);
+      if (s.alternate) this.collectHoistStatement(s.alternate);
+    } else if (s.type === "BlockStatement") {
+      this.collectHoist(s.body);
+    } else if (s.type === "WhileStatement" || s.type === "DoWhileStatement") {
+      this.collectHoistStatement(s.body);
+    } else if (s.type === "ForStatement") {
+      if (s.init && s.init.type === "VariableDeclaration") this.collectHoistStatement(s.init);
+      this.collectHoistStatement(s.body);
+    } else if (s.type === "TryStatement") {
+      this.collectHoistStatement(s.block);
+      if (s.handler) this.collectHoistStatement(s.handler.body);
+      if (s.finalizer) this.collectHoistStatement(s.finalizer);
+    } else if (s.type === "LabeledStatement") {
+      this.collectHoistStatement(s.body);
     }
   }
   private collectHoistPattern(id: Node): void {
@@ -248,67 +247,50 @@ class FunctionEmitter {
 
   // ── statements ─────────────────────────────────────────────────────────────
   private emitStatement(s: Node): void {
-    switch (s.type) {
-      case "ExpressionStatement": {
-        this.emitExpr(s.expression);
-        if (this.isScript && this.completionReg >= 0) {
-          // Completion-value semantics: the last value-producing statement's
-          // value is the eval/script result — DO NOT drop it in script context.
-          this.enc.emitReg(Op.Star, this.completionReg);
-        }
-        return;
+    if (s.type === "ExpressionStatement") {
+      this.emitExpr(s.expression);
+      if (this.isScript && this.completionReg >= 0) {
+        // Completion-value semantics: the last value-producing statement's
+        // value is the eval/script result — DO NOT drop it in script context.
+        this.enc.emitReg(Op.Star, this.completionReg);
       }
-      case "VariableDeclaration":
-        this.emitVarDecl(s);
-        return;
-      case "FunctionDeclaration":
-        return; // already hoisted + initialised
-      case "BlockStatement":
-        for (const inner of s.body) this.emitStatement(inner);
-        return;
-      case "IfStatement":
-        this.resetCompletion();
-        this.emitIf(s);
-        return;
-      case "WhileStatement":
-        this.resetCompletion();
-        this.emitWhile(s);
-        return;
-      case "DoWhileStatement":
-        this.resetCompletion();
-        this.emitDoWhile(s);
-        return;
-      case "ForStatement":
-        this.resetCompletion();
-        this.emitFor(s);
-        return;
-      case "ReturnStatement":
-        if (s.argument) this.emitExpr(s.argument);
-        else this.enc.emit0(Op.LdaUndef);
-        this.enc.emit0(Op.Return);
-        return;
-      case "BreakStatement":
-        this.emitBreak(s);
-        return;
-      case "ContinueStatement":
-        this.emitContinue(s);
-        return;
-      case "ThrowStatement":
-        this.emitExpr(s.argument);
-        this.enc.emit0(Op.Throw);
-        return;
-      case "TryStatement":
-        this.resetCompletion();
-        this.emitTry(s);
-        return;
-      case "LabeledStatement":
-        this.resetCompletion();
-        this.emitLabeled(s);
-        return;
-      case "EmptyStatement":
-        return;
-      default:
-        throw new UnsupportedNodeError(`statement ${s.type}`, s.type);
+    } else if (s.type === "VariableDeclaration") {
+      this.emitVarDecl(s);
+    } else if (s.type === "FunctionDeclaration") {
+      return; // already hoisted + initialised
+    } else if (s.type === "BlockStatement") {
+      for (const inner of s.body) this.emitStatement(inner);
+    } else if (s.type === "IfStatement") {
+      this.resetCompletion();
+      this.emitIf(s);
+    } else if (s.type === "WhileStatement") {
+      this.resetCompletion();
+      this.emitWhile(s);
+    } else if (s.type === "DoWhileStatement") {
+      this.resetCompletion();
+      this.emitDoWhile(s);
+    } else if (s.type === "ForStatement") {
+      this.resetCompletion();
+      this.emitFor(s);
+    } else if (s.type === "ReturnStatement") {
+      if (s.argument) this.emitExpr(s.argument);
+      else this.enc.emit0(Op.LdaUndef);
+      this.enc.emit0(Op.Return);
+    } else if (s.type === "BreakStatement") {
+      this.emitBreak(s);
+    } else if (s.type === "ContinueStatement") {
+      this.emitContinue(s);
+    } else if (s.type === "ThrowStatement") {
+      this.emitExpr(s.argument);
+      this.enc.emit0(Op.Throw);
+    } else if (s.type === "TryStatement") {
+      this.resetCompletion();
+      this.emitTry(s);
+    } else if (s.type === "LabeledStatement") {
+      this.resetCompletion();
+      this.emitLabeled(s);
+    } else if (s.type !== "EmptyStatement") {
+      throw new UnsupportedNodeError(`statement ${s.type}`, s.type);
     }
   }
 
@@ -521,62 +503,24 @@ class FunctionEmitter {
 
   // ── expressions (each leaves its value in acc, restores regTop) ──────────────
   private emitExpr(node: Node): void {
-    switch (node.type) {
-      case "Literal":
-        this.emitLiteral(node);
-        return;
-      case "Identifier":
-        this.emitLoadName(node.name);
-        return;
-      case "ThisExpression":
-        this.enc.emitReg(Op.Ldar, 0);
-        return;
-      case "ArrayExpression":
-        this.emitArray(node);
-        return;
-      case "ObjectExpression":
-        this.emitObject(node);
-        return;
-      case "MemberExpression":
-        this.emitMemberGet(node);
-        return;
-      case "CallExpression":
-        this.emitCall(node);
-        return;
-      case "NewExpression":
-        this.emitNew(node);
-        return;
-      case "AssignmentExpression":
-        this.emitAssign(node);
-        return;
-      case "UpdateExpression":
-        this.emitUpdate(node);
-        return;
-      case "BinaryExpression":
-        this.emitBinary(node);
-        return;
-      case "LogicalExpression":
-        this.emitLogical(node);
-        return;
-      case "UnaryExpression":
-        this.emitUnary(node);
-        return;
-      case "ConditionalExpression":
-        this.emitConditional(node);
-        return;
-      case "SequenceExpression":
-        this.emitSequence(node);
-        return;
-      case "FunctionExpression":
-      case "ArrowFunctionExpression":
-        this.emitClosure(node);
-        return;
-      case "TemplateLiteral":
-        this.emitTemplate(node);
-        return;
-      default:
-        throw new UnsupportedNodeError(`expression ${node.type}`, node.type);
-    }
+    if (node.type === "Literal") this.emitLiteral(node);
+    else if (node.type === "Identifier") this.emitLoadName(node.name);
+    else if (node.type === "ThisExpression") this.enc.emitReg(Op.Ldar, 0);
+    else if (node.type === "ArrayExpression") this.emitArray(node);
+    else if (node.type === "ObjectExpression") this.emitObject(node);
+    else if (node.type === "MemberExpression") this.emitMemberGet(node);
+    else if (node.type === "CallExpression") this.emitCall(node);
+    else if (node.type === "NewExpression") this.emitNew(node);
+    else if (node.type === "AssignmentExpression") this.emitAssign(node);
+    else if (node.type === "UpdateExpression") this.emitUpdate(node);
+    else if (node.type === "BinaryExpression") this.emitBinary(node);
+    else if (node.type === "LogicalExpression") this.emitLogical(node);
+    else if (node.type === "UnaryExpression") this.emitUnary(node);
+    else if (node.type === "ConditionalExpression") this.emitConditional(node);
+    else if (node.type === "SequenceExpression") this.emitSequence(node);
+    else if (node.type === "FunctionExpression" || node.type === "ArrowFunctionExpression") this.emitClosure(node);
+    else if (node.type === "TemplateLiteral") this.emitTemplate(node);
+    else throw new UnsupportedNodeError(`expression ${node.type}`, node.type);
   }
 
   private emitLiteral(node: Node): void {
