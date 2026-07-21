@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #3508 — standalone may compile an ordinary deferred function containing
+// #3509 — standalone may compile an ordinary deferred function containing
 // import() without a host loader. Reaching the import still throws; executable
 // dynamic module evaluation remains #3494.
 import { describe, expect, it } from "vitest";
@@ -35,7 +35,7 @@ const OFFICIAL_SUFFIX_SHAPES = [
   },
 ] as const;
 
-describe("#3508 standalone deferred dynamic import", () => {
+describe("#3509 standalone deferred dynamic import", () => {
   it.each(
     OFFICIAL_SUFFIX_SHAPES.flatMap(({ suffix, expression }) => [
       {

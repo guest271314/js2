@@ -1,5 +1,5 @@
 ---
-id: 3508
+id: 3509
 title: "Standalone deferred dynamic import must trap only when invoked"
 status: done
 created: 2026-07-21
@@ -24,7 +24,7 @@ files:
   - src/codegen/context/types.ts
   - scripts/test262-worker.mjs
   - tests/test262-shared.ts
-  - tests/issue-3508.test.ts
+  - tests/issue-3509.test.ts
   - tests/issue-3492-test262-fyi-top-level-await-parity.test.ts
 loc-budget-allow:
   - src/compiler.ts
@@ -34,7 +34,7 @@ loc-budget-allow:
   - src/codegen/expressions/calls.ts
 ---
 
-# #3508 — Standalone deferred dynamic import runtime trap
+# #3509 — Standalone deferred dynamic import runtime trap
 
 ## Problem
 
@@ -97,10 +97,10 @@ does `language/module-code/top-level-await/module-graphs-does-not-hang.js` under
 
 ## Validation
 
-- `tests/issue-3508.test.ts` covers the 2 × 4 official deferred shapes, nested
+- `tests/issue-3509.test.ts` covers the 2 × 4 official deferred shapes, nested
   imports, deterministic invocation failure, executed async-IIFE, executed
   `with`, the #3494 TLA module graph, and unchanged host lowering.
-- Run focused #3508 and #3494 tests, TypeScript typecheck, Prettier check,
+- Run focused #3509 and #3494 tests, TypeScript typecheck, Prettier check,
   issue/spec coverage, Test262 hard-error, and IR-fallback gates.
 
 ## Implementation
@@ -120,12 +120,12 @@ does `language/module-code/top-level-await/module-graphs-does-not-hang.js` under
 ## Test results (2026-07-21)
 
 - Focused Vitest: **21 passed**, **1 existing #3494 todo** across
-  `tests/issue-3508.test.ts` and
+  `tests/issue-3509.test.ts` and
   `tests/issue-3494-standalone-literal-dynamic-import.test.ts`.
 - Runner parity control: `tests/issue-3492-test262-fyi-top-level-await-parity.test.ts`
   passes with eager dynamic graph rejection still attributed to #3494.
 - Authoritative original FYI harness, Node **v25.9.0**, Unicode **17.0**, one
-  worker, standalone: exact #3508 set **8/8 passed**, **8/8 reached the test**,
+  worker, standalone: exact #3509 set **8/8 passed**, **8/8 reached the test**,
   **0 failed**.
 - Project Vitest Test262 runner, `TEST262_TARGET=standalone`,
   `TEST262_WORKERS=1`, exact `TEST262_PATH_FILTER`: **8/8 passed**, **0 failed**,

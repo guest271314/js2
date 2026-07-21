@@ -1456,10 +1456,10 @@ process.on("message", async (msg) => {
   const fixtureGraph = hasFixtureGraph(msg.fixtureFiles);
   const compileStart = performance.now();
 
-  // #3492/#3508 — Dynamic fixture discovery is transport metadata, not proof
+  // #3492/#3509 — Dynamic fixture discovery is transport metadata, not proof
   // that a loader is needed during this test. Let the compiler distinguish an
   // eager import (fatal #3494) from an ordinary deferred closure (host-free
-  // runtime trap, #3508). A blanket graph guard false-failed syntax-valid tests
+  // runtime trap, #3509). A blanket graph guard false-failed syntax-valid tests
   // whose arrow was never invoked. No dynamic fixture is promoted to a static
   // compileMulti edge here.
 

@@ -646,7 +646,7 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
 
             // Multi-file compilation for FIXTURE imports (handled in-process)
             const fixtureGraph = resolveFixtureGraph(source, filePath);
-            // #3508 — Dynamic fixture metadata alone does not mean this test
+            // #3509 — Dynamic fixture metadata alone does not mean this test
             // executes import(). Compiler capability validation rejects eager
             // #3494 cases while allowing an uncalled ordinary closure to reach
             // the test with a host-free runtime trap in its body. Do not turn

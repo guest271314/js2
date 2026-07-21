@@ -262,7 +262,7 @@ export function compileTailDispatch(
             return VOID_RESULT;
           }
 
-          // #3508 — ordinary IIFEs use the same host-free call-site trap as
+          // #3509 — ordinary IIFEs use the same host-free call-site trap as
           // invoking a previously-created ordinary closure. The inline path
           // has no lifted FunctionContext of its own, so carry the marker only
           // while compiling this function body. Async IIFEs stay on #3494's

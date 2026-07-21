@@ -554,7 +554,7 @@ export interface FunctionContext {
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
   /**
-   * #3508 — This is an ordinary lifted closure whose body is deferred until
+   * #3509 — This is an ordinary lifted closure whose body is deferred until
    * invocation. Standalone dynamic import may compile to an in-module runtime
    * trap in this body instead of rejecting closure creation. Async/generator
    * closures deliberately leave this unset because their Promise/lazy-throw

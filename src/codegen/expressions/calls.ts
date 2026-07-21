@@ -5518,7 +5518,7 @@ function tryIteratorStaticsIntrinsicCall(
 }
 
 /**
- * #3508 — A standalone dynamic import in an ordinary lifted closure can be lowered
+ * #3509 — A standalone dynamic import in an ordinary lifted closure can be lowered
  * to a call-site trap instead of rejecting the whole module. This is the
  * deferred case: creating the function does not need a loader, and execution
  * remains honest because reaching import() throws before a Promise or module
@@ -5787,7 +5787,7 @@ function compileCallExpression(
   // represent deferred module records or module namespace objects. Never emit
   // env.__dynamic_import or manufacture an always-fulfilled placeholder.
   //
-  // #3508 — an ordinary function body is deferred: compiling/creating it does
+  // #3509 — an ordinary function body is deferred: compiling/creating it does
   // not require a loader. Preserve that property with a host-free, catchable
   // runtime throw if execution reaches import(). Eager/top-level and async
   // cases retain #3494's fatal diagnostic until their Promise/module semantics
@@ -5798,7 +5798,7 @@ function compileCallExpression(
         reportError(
           ctx,
           expr,
-          "Warning: standalone dynamic import has no module loader and will throw if this function is invoked (#3508; module evaluation #3494)",
+          "Warning: standalone dynamic import has no module loader and will throw if this function is invoked (#3509; module evaluation #3494)",
           "warning",
         );
         // Preserve argument side effects and nesting order before the loader

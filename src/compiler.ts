@@ -828,7 +828,7 @@ const STANDALONE_DYNAMIC_IMPORT_ERROR =
  * compileCallExpression. A standalone binary cannot satisfy the host loader,
  * and compileMulti has no honest internal module-record substitute yet.
  *
- * #3508 — ordinary arrow/function-expression bodies are runtime-trap eligible:
+ * #3509 — ordinary arrow/function-expression bodies are runtime-trap eligible:
  * creating one needs no loader, and calls.ts emits a host-free TypeError if its
  * import executes. Async/generator functions stay fatal here because a direct
  * synchronous throw would not preserve their rejection/lazy-throw semantics.
