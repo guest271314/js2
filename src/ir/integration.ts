@@ -82,6 +82,7 @@ import {
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
+  makeIrArrayExpressionPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
@@ -222,6 +223,7 @@ export function compileIrPathFunctions(
   });
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ctx.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
+  const isArrayExpression = makeIrArrayExpressionPredicate(ctx.checker);
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
@@ -233,6 +235,7 @@ export function compileIrPathFunctions(
       resolveModuleBinding: moduleBindingResolver,
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
+      isArrayExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,

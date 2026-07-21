@@ -11,6 +11,32 @@ export type IrPrimitiveExpressionFamily = "number" | "boolean" | "string";
 export type IrDeclaredPrimitiveExpressionFamily = IrPrimitiveExpressionFamily | "primitive-union";
 
 /**
+ * Build a checker-backed Array/tuple predicate for selector-only method
+ * routing. The IR front-end currently lowers vec `.push(...)`, but not the
+ * wider Array prototype surface. Keeping this proof separate from primitive
+ * classification lets local classes with methods such as `indexOf` retain
+ * ordinary class dispatch while real arrays reject before claim.
+ */
+export function makeIrArrayExpressionPredicate(checker: ts.TypeChecker): (expr: ts.Expression) => boolean {
+  return (expr) => {
+    try {
+      const type = checker.getTypeAtLocation(unwrapParens(expr));
+      if (type.isUnion()) {
+        const members = type.types.filter(
+          (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Never)) === 0,
+        );
+        return (
+          members.length > 0 && members.every((member) => checker.isArrayType(member) || checker.isTupleType(member))
+        );
+      }
+      return checker.isArrayType(type) || checker.isTupleType(type);
+    } catch {
+      return false;
+    }
+  };
+}
+
+/**
  * Build a checker-only ambient-binding predicate. Unlike the full module
  * binding resolver, this exposes no source storage capability, so backends
  * without module-global lowering can still distinguish the real lib `Math`

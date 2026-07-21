@@ -80,6 +80,7 @@ import {
 } from "../nodes.js";
 import { buildTypeMap, type LatticeType } from "../propagate.js";
 import {
+  makeIrArrayExpressionPredicate,
   makeIrAmbientBindingPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrPrimitiveExpressionClassifier,
@@ -200,6 +201,7 @@ export function compileLinearIrFunctions(
       recursiveTypeEvidence,
       classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
       classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
+      isArrayExpression: makeIrArrayExpressionPredicate(ctx.checker),
       isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
       supportsSymbolicMathHelpers: false,
       supportsLiteralStringReplace: false,

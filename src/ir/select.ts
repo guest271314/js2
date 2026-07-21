@@ -352,6 +352,12 @@ export interface IrSelectionOptions {
     expr: ts.Expression,
   ) => IrDeclaredPrimitiveExpressionFamily | undefined;
   /**
+   * Checker-backed proof that an expression is an Array or tuple. Used to
+   * keep Array prototype methods without IR producers out of the claimed set
+   * while preserving same-named methods on local classes.
+   */
+  readonly isArrayExpression?: (expr: ts.Expression) => boolean;
+  /**
    * Checker-only ambient identity proof used by Math call selection when a
    * backend deliberately does not install the module-binding capability.
    * Absent means unproven: bare selector callers stay shadow-safe.
@@ -1017,6 +1023,32 @@ let currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "
  */
 let currentDynMemberReadBuildable = true;
 
+/** Collect direct identifier mutations in one function body. */
+function collectDirectMutationNames(body: ts.Block): ReadonlySet<string> {
+  const names = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (node !== body && isFunctionLike(node)) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+      ts.isIdentifier(node.left)
+    ) {
+      names.add(node.left.text);
+    }
+    if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand)
+    ) {
+      names.add(node.operand.text);
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(body, visit);
+  return names;
+}
+
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
   typeMap: TypeMap | undefined,
@@ -1097,6 +1129,7 @@ function whyNotIrClaimable(
   // / resolveParamType still fall back to the AST annotation, which is
   // sufficient for the explicit-typed-method shape the spec targets.
   const entry = !isMethod && ts.isFunctionDeclaration(fn) && fn.name ? typeMap?.get(fn.name.text) : undefined;
+  const directMutationNames = fn.body ? collectDirectMutationNames(fn.body) : new Set<string>();
 
   let isVoidReturn = false;
   // #2949 slice 2 — true when the return position resolved `dynamic`
@@ -1168,6 +1201,13 @@ function whyNotIrClaimable(
       // that's box/unbox territory (slice 3). Keep the honest rejection.
       if (paramResolved === "dynamic") return "param-type-not-resolvable";
 
+      const patternNames = new Set<string>();
+      collectPatternNames(p.name, patternNames);
+      if ([...patternNames].some((name) => directMutationNames.has(name))) {
+        shapeNo("param-pattern-mutation", p.name);
+        return "body-shape-rejected";
+      }
+
       collectPatternNames(p.name, scope);
       continue;
     }
@@ -1181,6 +1221,15 @@ function whyNotIrClaimable(
     const mapped = entry?.params[i];
     const paramResolved = resolveParamType(p, mapped);
     if (paramResolved === null) return "param-type-not-resolvable";
+    if (
+      directMutationNames.has(p.name.text) &&
+      paramResolved !== "f64" &&
+      paramResolved !== "bool" &&
+      paramResolved !== "string"
+    ) {
+      shapeNo("param-mutation-no-slot-representation", p);
+      return "body-shape-rejected";
+    }
     // #2949 slice 2 — collect dynamic-typed param names for the move-only scan.
     if (paramResolved === "dynamic") dynNames.add(p.name.text);
 
@@ -3205,6 +3254,25 @@ const KNOWN_EXTERN_CLASSES = new Set<string>([
   "Promise",
 ]);
 
+// Typed arrays are handled by the legacy backend's native vec constructor
+// path, not by the IR extern-class registry. Treating them as generic extern
+// classes therefore claims `new Uint8Array(...)` without a matching builder
+// producer. Keep them pre-claim until a representation-polymorphic IR typed-
+// array constructor lands.
+const NATIVE_TYPED_ARRAY_CLASSES = new Set<string>([
+  "Uint8Array",
+  "Int8Array",
+  "Uint8ClampedArray",
+  "Uint16Array",
+  "Int16Array",
+  "Uint32Array",
+  "Int32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+]);
+
 function isKnownExternClass(name: string): boolean {
   return KNOWN_EXTERN_CLASSES.has(name);
 }
@@ -4137,6 +4205,14 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         (scalarReceiverFamily === "f64" ? "number" : scalarReceiverFamily === "boolean" ? "boolean" : undefined);
       const isNumberReceiver = builtinReceiverFamily === "number" || expressionIsProvenNumber(builtinReceiver);
       const isStringReceiver = builtinReceiverFamily === "string" || expressionIsProvenString(builtinReceiver);
+      if (currentSelectionOptions?.isArrayExpression?.(builtinReceiver) === true) {
+        if (expr.expression.name.text !== "push") {
+          return shapeNo("expr-array-method-not-lowerable", expr);
+        }
+        if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) {
+          return shapeNo("expr-array-push-shape", expr);
+        }
+      }
       if (expr.expression.name.text === "toFixed" && isNumberReceiver) {
         if (!isBoundedToFixedCall(expr)) return shapeNo("expr-number-tofixed-shape", expr);
         return (
@@ -4302,6 +4378,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       return true;
     }
     const ctorName = expr.expression.text;
+    if (NATIVE_TYPED_ARRAY_CLASSES.has(ctorName) && !localClasses.has(ctorName)) {
+      return shapeNo("expr-new-native-typed-array", expr);
+    }
     if (currentModuleBindingResolver?.isDirectModuleBinding(expr.expression)) {
       return shapeNo("expr-new-module-binding-callee", expr.expression);
     }

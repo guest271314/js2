@@ -676,6 +676,7 @@ export function lowerFunctionAstToIr(
     options.exported ?? false,
     options.allocRegistry,
   );
+  const mutatedLets = collectMutatedLetNames(fn);
 
   // Single scope map for both params and let/const locals. Phase 1 forbids
   // shadowing (enforced by the selector) so there is no nesting to track.
@@ -693,6 +694,7 @@ export function lowerFunctionAstToIr(
   // #1372 — track binding-pattern params + their SSA values for the post-
   // openBlock destructure preamble.
   const pendingDestructures: { pattern: ts.BindingPattern; value: IrValueId }[] = [];
+  const pendingMutableParams: { name: string; type: IrType; value: IrValueId }[] = [];
   for (let i = 0; i < params.length; i++) {
     const p = params[i]!;
     const astParam = fn.parameters[i]!;
@@ -703,10 +705,44 @@ export function lowerFunctionAstToIr(
       pendingDestructures.push({ pattern: astParam.name, value: v });
       continue;
     }
-    scope.set(p.name, { kind: "local", value: v, type: p.type });
+    if (mutatedLets.has(p.name)) {
+      pendingMutableParams.push({ name: p.name, type: p.type, value: v });
+    } else {
+      scope.set(p.name, { kind: "local", value: v, type: p.type });
+    }
   }
 
   builder.openBlock();
+
+  // Parameters enter the function as SSA values, but a parameter that is
+  // reassigned must subsequently read through mutable storage just like a
+  // reassigned `let`. Seed one slot from the incoming SSA value before any
+  // user-body instruction. Selection admits only scalar/string mutable
+  // parameters, so every accepted type has an exact slot representation.
+  for (const param of pendingMutableParams) {
+    const valType = asVal(param.type);
+    if (valType) {
+      const slotIndex = builder.declareSlot(param.name, valType);
+      builder.emitSlotWrite(slotIndex, param.value);
+      scope.set(param.name, { kind: "slot", slotIndex, type: param.type });
+      continue;
+    }
+    if (param.type.kind === "string") {
+      const stringValType = options.resolver?.resolveString?.();
+      if (stringValType) {
+        const slotIndex = builder.declareSlot(param.name, stringValType);
+        builder.emitSlotWrite(slotIndex, param.value);
+        scope.set(param.name, {
+          kind: "slot",
+          slotIndex,
+          type: irVal(stringValType),
+          asType: param.type,
+        });
+        continue;
+      }
+    }
+    throw new Error(`ir/from-ast: mutable parameter "${param.name}" has no slot representation (${name})`);
+  }
 
   // Slice 7a (#1169f): generator prologue — allocate the `__gen_buffer`
   // Wasm-local slot, initialize it via `__gen_create_buffer()`. Must
@@ -742,7 +778,6 @@ export function lowerFunctionAstToIr(
 
   const lifted: IrFunction[] = [];
   const liftedCounter = { value: 0 };
-  const mutatedLets = collectMutatedLetNames(fn);
   const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
   const emptyArrayInference = inferEmptyArrayElementTypes(
     fn,
@@ -1788,8 +1823,10 @@ function typedValueEvidence(
  * write semantics inside for-of loops work correctly. Const-bound names
  * are not in scope for mutation; we only track identifier-LHS writes.
  *
- * We DON'T descend into nested function-likes — their writes are local
- * to their own scope and don't influence the outer's slot decisions.
+ * This includes parameters as well as `let` locals: an accepted reassigned
+ * parameter is seeded into a slot from its incoming SSA value. We DON'T
+ * descend into nested function-likes — their writes are local to their own
+ * scope and don't influence the outer's slot decisions.
  */
 function collectMutatedLetNames(
   fn:

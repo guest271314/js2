@@ -62,6 +62,7 @@ import { makeIrHostDateSnapshotResolver } from "../src/ir/host-date.js";
 import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../src/ir/host-extern.js";
 import { makeIrPromiseDelayResolver } from "../src/ir/promise-delay.js";
 import {
+  makeIrArrayExpressionPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
@@ -260,6 +261,7 @@ async function aggregate(): Promise<{
         }),
         classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(checker),
         classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(checker),
+        isArrayExpression: makeIrArrayExpressionPredicate(checker),
         supportsSymbolicMathHelpers: true,
         supportsLiteralStringReplace: true,
         supportsHostStringArrayLiterals: true,

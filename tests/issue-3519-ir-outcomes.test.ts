@@ -88,6 +88,60 @@ describe("#3519 typed IR terminal outcomes", () => {
     expect(evaluateIrOutcomePolicy(outcomes, "ir-only").ready).toBe(false);
   });
 
+  it("seeds reassigned scalar parameters into slots before lowering", async () => {
+    const result = await compile(
+      `export function countdown(n: number): number {
+        let count = 0;
+        do { count++; n--; } while (n > 0);
+        return count;
+      }`,
+      { fileName: "mutable-param.ts", trackIrOutcomes: true },
+    );
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(terminal(result)).toEqual([
+      expect.objectContaining({ displayName: "countdown", kind: "emitted", irBodyEmitted: true }),
+    ]);
+  });
+
+  it("rejects native typed-array construction before the builder", async () => {
+    const result = await compile(
+      `export function first(): number {
+        const values = new Uint8Array(1);
+        values[0] = 257;
+        return values[0];
+      }`,
+      { fileName: "typed-array-selector.ts", trackIrOutcomes: true },
+    );
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(terminal(result)).toEqual([
+      expect.objectContaining({
+        displayName: "first",
+        kind: "unsupported",
+        stage: "select",
+        code: "body-shape-rejected",
+      }),
+    ]);
+  });
+
+  it("rejects unimplemented Array methods before lowering a vec receiver", async () => {
+    const result = await compile(
+      `export function find(): number {
+        const values = [10, 20, 30];
+        return values.indexOf(20);
+      }`,
+      { fileName: "array-method-selector.ts", trackIrOutcomes: true },
+    );
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(terminal(result)).toEqual([
+      expect.objectContaining({
+        displayName: "find",
+        kind: "unsupported",
+        stage: "select",
+        code: "body-shape-rejected",
+      }),
+    ]);
+  });
+
   it("collects fallback evidence quietly unless verbose logging is requested", async () => {
     const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {

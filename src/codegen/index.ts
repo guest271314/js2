@@ -61,6 +61,7 @@ import {
   type IrPromiseDelayLoweringPlans,
 } from "../ir/promise-delay-lowering.js";
 import {
+  makeIrArrayExpressionPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
@@ -2208,6 +2209,7 @@ function planIrOverlay(
         });
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ast.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
+  const isArrayExpression = makeIrArrayExpressionPredicate(ast.checker);
   const resolveHostVoidCallback = jsHostExterns ? makeIrHostVoidCallbackResolver(ast.checker) : undefined;
   const resolveHostDateSnapshot = jsHostExterns ? makeIrHostDateSnapshotResolver(ast.checker) : undefined;
   const resolvePromiseDelay =
@@ -2236,6 +2238,7 @@ function planIrOverlay(
       ...(resolveModuleBinding ? { resolveModuleBinding } : {}),
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
+      isArrayExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
