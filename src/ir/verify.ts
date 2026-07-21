@@ -1120,6 +1120,7 @@ function binopOperandKind(op: import("./nodes.js").IrBinop): ValType["kind"] | n
 function unopResultKind(op: import("./nodes.js").IrUnop): ValType["kind"] | null {
   switch (op) {
     case "f64.neg":
+    case "f64.reinterpret_i64":
     // (#3168) boolean → f64 ToNumber for unary `+`/`-`.
     case "f64.convert_i32_s":
       return "f64";
@@ -1139,6 +1140,8 @@ function unopOperandKind(op: import("./nodes.js").IrUnop): ValType["kind"] | nul
     case "f64.neg":
     case "i32.trunc_sat_f64_s":
       return "f64";
+    case "f64.reinterpret_i64":
+      return "i64";
     case "i32.eqz":
     // (#3168) the boolean-ToNumber conversion consumes the i32 0/1.
     case "f64.convert_i32_s":

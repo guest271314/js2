@@ -29,11 +29,20 @@ import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationRepo
 import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import {
+  certifyImportedIrCall,
+  effectiveIrParamTypeNode,
+  effectiveIrReturnTypeNode,
   planIrCompilation,
   irClosureSignatureFromFunctionTypeNode,
   type IrFallbackReason,
   type IrSelection,
 } from "../ir/select.js";
+import { makeIrImportedFunctionResolver, type IrImportedFunctionResolver } from "../ir/imported-functions.js";
+import type {
+  IrImportedCallLoweringPlan,
+  IrImportedOptionalParamPlan,
+  IrTopLevelFunctionValueLoweringPlan,
+} from "../ir/from-ast.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
@@ -119,7 +128,7 @@ import {
   repairStructTypeMismatches,
 } from "./fixups.js";
 import { emitInlineMathFunctions } from "./math-helpers.js";
-import { finalizeMethodTrampolines, getFuncRefWrapperRootTypeIdx } from "./closures.js";
+import { ensureFuncClosureSingleton, finalizeMethodTrampolines, getFuncRefWrapperRootTypeIdx } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
 import { brandCollidingShapeTypes } from "./shape-brand.js";
 import {
@@ -1579,6 +1588,60 @@ interface IrOverlayPlan {
   };
   readonly trackFallbacks: boolean;
   readonly declByName: ReadonlyMap<string, ts.FunctionDeclaration>;
+  /** Checker-certified A+B1 imported-call sites, keyed by exact AST node. */
+  readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
+  /** Bare same-file function values admitted only at certified HOF positions. */
+  readonly topLevelFunctionValues: Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
+  readonly importedFunctionResolver?: IrImportedFunctionResolver;
+}
+
+/**
+ * A zero-result imported call is lowerable only where JavaScript discards its
+ * value. Keep this check in the pre-claim planner: ordinary expression
+ * lowering requires an SSA result and must never discover the missing value
+ * after the legacy body has already been skipped.
+ */
+function importedVoidCallIsDiscarded(call: ts.CallExpression, owner: ts.FunctionDeclaration): boolean {
+  let current: ts.Expression = call;
+  for (;;) {
+    const parent = current.parent;
+    if (ts.isParenthesizedExpression(parent) && parent.expression === current) {
+      current = parent;
+      continue;
+    }
+    // `void` always discards its operand, even when the resulting undefined
+    // value is itself consumed by an outer expression.
+    if (ts.isVoidExpression(parent) && parent.expression === current) return true;
+    // A conditional arm is discarded only when the conditional as a whole is
+    // discarded. Its condition is a value position and deliberately stops.
+    if (ts.isConditionalExpression(parent) && (parent.whenTrue === current || parent.whenFalse === current)) {
+      current = parent;
+      continue;
+    }
+    // Discard lowering evaluates comma operands in source order. Ascend to
+    // require the whole comma expression to reach a discarded context.
+    if (ts.isCommaListExpression(parent) && parent.elements.some((element) => element === current)) {
+      current = parent;
+      continue;
+    }
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.operatorToken.kind === ts.SyntaxKind.CommaToken &&
+      (parent.left === current || parent.right === current)
+    ) {
+      current = parent;
+      continue;
+    }
+    break;
+  }
+
+  const parent = current.parent;
+  if (ts.isExpressionStatement(parent) && parent.expression === current) return true;
+  return (
+    ts.isReturnStatement(parent) &&
+    parent.expression === current &&
+    effectiveIrReturnTypeNode(owner)?.kind === ts.SyntaxKind.VoidKeyword
+  );
 }
 
 /**
@@ -1746,7 +1809,10 @@ function computeIrFirstSkipSet(
 function planIrOverlay(
   ctx: CodegenContext,
   ast: TypedAST,
-  options: { readonly resolveModuleBindings?: boolean } = {},
+  options: {
+    readonly resolveModuleBindings?: boolean;
+    readonly importedFunctions?: IrImportedFunctionResolver;
+  } = {},
 ): IrOverlayPlan {
   const typeMap = buildTypeMap(ast.sourceFile, ast.checker);
   // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS is set, request the
@@ -1802,6 +1868,7 @@ function planIrOverlay(
       classifyDeclaredPrimitiveExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
+      ...(jsHostExterns && options.importedFunctions ? { importedFunctions: options.importedFunctions } : {}),
       // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
       // async engine ($AsyncFrame drive / host-drive) declines it — the
       // legacy sync-pass-through population. Engine-activated functions keep
@@ -1963,7 +2030,90 @@ function planIrOverlay(
     // (#3142 Slice 2) The module-init unit routes through legacy too.
     safeSelection.moduleInit = undefined;
   }
-  return { selection, classShapes, overrideMap, safeSelection, trackFallbacks, declByName };
+  const importedCalls = new Map<ts.CallExpression, IrImportedCallLoweringPlan>();
+  const topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
+  if (jsHostExterns && options.importedFunctions) {
+    for (const [ownerName, declaration] of declByName) {
+      if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
+      let planningFailed = false;
+      const visit = (node: ts.Node): void => {
+        if (planningFailed) return;
+        if (node !== declaration && ts.isFunctionLike(node)) return;
+        if (ts.isCallExpression(node)) {
+          const certified = certifyImportedIrCall(node, options.importedFunctions);
+          if (certified) {
+            try {
+              const params = certified.target.declaration.parameters.map((parameter) =>
+                resolvePositionType(effectiveIrParamTypeNode(parameter), undefined, ctx, classShapes),
+              );
+              const returnNode = effectiveIrReturnTypeNode(certified.target.declaration);
+              const returnType =
+                returnNode?.kind === ts.SyntaxKind.VoidKeyword
+                  ? null
+                  : resolvePositionType(returnNode, undefined, ctx, classShapes);
+              if (returnType === null && !importedVoidCallIsDiscarded(node, declaration)) {
+                throw new Error("void imported result is used in a value context");
+              }
+              if (returnType?.kind === "callable") {
+                throw new Error("callable imported results are outside A+B1");
+              }
+              const optionalParams = new Map<number, IrImportedOptionalParamPlan>();
+              for (const optional of ctx.funcOptionalParams.get(certified.target.targetName) ?? []) {
+                optionalParams.set(optional.index, {
+                  ...(optional.constantDefault ? { constantDefault: optional.constantDefault } : {}),
+                  ...(optional.hasExpressionDefault ? { hasExpressionDefault: true } : {}),
+                });
+              }
+              importedCalls.set(node, {
+                ownerName,
+                targetName: certified.target.targetName,
+                params,
+                returnType,
+                optionalParams,
+                needsArgc:
+                  ctx.funcUsesArguments.has(certified.target.targetName) ||
+                  ctx.funcOptionalParams.has(certified.target.targetName),
+              });
+              for (const functionArgument of certified.functionArguments) {
+                topLevelFunctionValues.set(functionArgument.argument, {
+                  ownerName,
+                  targetName: functionArgument.target.targetName,
+                  signature: functionArgument.signature,
+                  trampolineName: `__fn_tramp_${functionArgument.target.targetName}_cached`,
+                  cacheGlobalName: `__fn_closure_${functionArgument.target.targetName}`,
+                });
+              }
+            } catch {
+              planningFailed = true;
+              return;
+            }
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(declaration.body);
+      if (planningFailed) {
+        safeSelection.funcs.delete(ownerName);
+        for (const [call, plan] of importedCalls) {
+          if (plan.ownerName === ownerName) importedCalls.delete(call);
+        }
+        for (const [identifier, plan] of topLevelFunctionValues) {
+          if (plan.ownerName === ownerName) topLevelFunctionValues.delete(identifier);
+        }
+      }
+    }
+  }
+  return {
+    selection,
+    classShapes,
+    overrideMap,
+    safeSelection,
+    trackFallbacks,
+    declByName,
+    importedCalls,
+    topLevelFunctionValues,
+    ...(options.importedFunctions ? { importedFunctionResolver: options.importedFunctions } : {}),
+  };
 }
 
 /** Consume one IR overlay attempt through the shared diagnostics/telemetry path. */
@@ -2054,25 +2204,6 @@ function collectMultiIrFunctionNameCollisions(sourceFiles: readonly ts.SourceFil
     }
   }
   return collisions;
-}
-
-function collectImportBindingNames(sourceFile: ts.SourceFile): ReadonlySet<string> {
-  const names = new Set<string>();
-  for (const stmt of sourceFile.statements) {
-    if (ts.isImportDeclaration(stmt)) {
-      const clause = stmt.importClause;
-      if (!clause) continue;
-      if (clause.name) names.add(clause.name.text);
-      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
-        names.add(clause.namedBindings.name.text);
-      } else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-        for (const element of clause.namedBindings.elements) names.add(element.name.text);
-      }
-    } else if (ts.isImportEqualsDeclaration(stmt)) {
-      names.add(stmt.name.text);
-    }
-  }
-  return names;
 }
 
 /** Import locals that can overwrite an unrelated flat `ctx.funcMap` key. */
@@ -2221,14 +2352,20 @@ function collectMultiCrossFileFunctionNames(
   return names;
 }
 
-function functionBodyReferencesAnyName(fn: ts.FunctionDeclaration, names: ReadonlySet<string>): boolean {
-  if (!fn.body || names.size === 0) return false;
+function functionBodyHasUnsupportedImportUse(fn: ts.FunctionDeclaration, plan: IrOverlayPlan): boolean {
+  if (!fn.body || !plan.importedFunctionResolver) return false;
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
-    if (ts.isIdentifier(node) && names.has(node.text)) {
-      found = true;
-      return;
+    if (node !== fn && ts.isFunctionLike(node)) return;
+    if (ts.isIdentifier(node) && plan.importedFunctionResolver?.isImportBinding(node)) {
+      const parent = node.parent;
+      const isCertifiedDirectCall =
+        ts.isCallExpression(parent) && parent.expression === node && plan.importedCalls.has(parent);
+      if (!isCertifiedDirectCall) {
+        found = true;
+        return;
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -2272,7 +2409,11 @@ function typeFactCouldBeCallable(fact: TypeFact): boolean {
 /** Callable parameters/returns still have a legacy↔IR wrapper ABI boundary. */
 function functionHasCallableBoundary(ctx: CodegenContext, declaration: ts.FunctionDeclaration): boolean {
   for (const parameter of declaration.parameters) {
-    if (parameter.type !== undefined && ts.isFunctionTypeNode(parameter.type)) return true;
+    const typeNode = effectiveIrParamTypeNode(parameter);
+    // A checker-certified exact FunctionTypeNode uses the same canonical
+    // callable ABI in both front-ends. Host A+B1 can therefore retain an
+    // imported HOF target instead of demoting its whole cross-file component.
+    if (typeNode && ts.isFunctionTypeNode(typeNode) && irClosureSignatureFromFunctionTypeNode(typeNode)) continue;
     if (typeFactCouldBeCallable(ctx.oracle.typeFactOf(parameter))) return true;
   }
   const signature = ctx.oracle.signatureOf(declaration);
@@ -2297,48 +2438,25 @@ interface MultiIrGraphSafety {
   readonly occupiedFunctionNameCounts: ReadonlyMap<string, number>;
 }
 
-function makeMultiIrSafeSelection(
+function multiIrTargetHasExactRegistryEntry(
   ctx: CodegenContext,
-  plan: IrOverlayPlan,
-  sourceFile: ts.SourceFile,
+  targetName: string,
   safety: MultiIrGraphSafety,
+): boolean {
+  if (safety.occupiedFunctionNameCounts.get(targetName) !== 1) return false;
+  if (safety.occupiedFunctionKeys.some((key) => key.startsWith(`${targetName}$`))) return false;
+  const idx = ctx.funcMap.get(targetName);
+  return idx !== undefined && idx >= ctx.numImportFuncs && definedFuncAt(ctx, idx)?.name === targetName;
+}
+
+function closeMultiIrBlockedComponent(
+  sourceFile: ts.SourceFile,
+  selection: IrSelection,
+  initialBlocked: ReadonlySet<string>,
 ): IrSelection {
-  const funcs = new Set(plan.safeSelection.funcs);
-  const blocked = new Set<string>([...safety.collisions, MODULE_INIT_CALLER]);
-  for (const name of plan.selection.funcs) {
-    if (!plan.safeSelection.funcs.has(name)) blocked.add(name);
-  }
-  const importBindings = collectImportBindingNames(sourceFile);
-  const conservativeCrossFileCallers = ctx.standalone || ctx.wasi || ctx.strictNoHostImports;
-
-  for (const name of funcs) {
-    const declaration = plan.declByName.get(name);
-    if (!declaration) {
-      blocked.add(name);
-      continue;
-    }
-    const crossFileTarget = safety.crossFileFunctionNames.has(name);
-    const hasCallableBoundary = crossFileTarget && functionHasCallableBoundary(ctx, declaration);
-    const registeredIdx = ctx.funcMap.get(name);
-    const registeredFunction = registeredIdx === undefined ? undefined : definedFuncAt(ctx, registeredIdx);
-    if (
-      safety.collisions.has(name) ||
-      functionBodyReferencesAnyName(declaration, importBindings) ||
-      functionBodyContainsNestedRuntimeDeclaration(declaration) ||
-      (declaration.typeParameters?.length ?? 0) > 0 ||
-      safety.importAliasNames.has(name) ||
-      safety.occupiedFunctionNameCounts.get(name) !== 1 ||
-      registeredFunction?.name !== name ||
-      safety.occupiedFunctionKeys.some((key) => key.startsWith(`${name}$`)) ||
-      (crossFileTarget && (conservativeCrossFileCallers || hasCallableBoundary))
-    ) {
-      blocked.add(name);
-    }
-  }
+  const funcs = new Set(selection.funcs);
+  const blocked = new Set(initialBlocked);
   for (const name of blocked) funcs.delete(name);
-
-  // A collision/dangerous removal re-opens the selector's graph-closure
-  // invariant in both directions. Drop its whole selected weak component.
   const callEdges = collectLocalCallEdges(sourceFile);
   for (let changed = true; changed; ) {
     changed = false;
@@ -2360,12 +2478,126 @@ function makeMultiIrSafeSelection(
       }
     }
   }
+  return { funcs, classMembers: new Set(), moduleInit: undefined };
+}
 
-  return {
-    funcs,
-    classMembers: new Set<string>(),
-    moduleInit: undefined,
-  };
+function makeMultiIrSafeSelection(
+  ctx: CodegenContext,
+  plan: IrOverlayPlan,
+  sourceFile: ts.SourceFile,
+  safety: MultiIrGraphSafety,
+): IrSelection {
+  const funcs = new Set(plan.safeSelection.funcs);
+  const blocked = new Set<string>([...safety.collisions, MODULE_INIT_CALLER]);
+  for (const name of plan.selection.funcs) {
+    if (!plan.safeSelection.funcs.has(name)) blocked.add(name);
+  }
+  const conservativeCrossFileCallers = ctx.standalone || ctx.wasi || ctx.strictNoHostImports;
+
+  for (const callPlan of plan.importedCalls.values()) {
+    if (!multiIrTargetHasExactRegistryEntry(ctx, callPlan.targetName, safety)) blocked.add(callPlan.ownerName);
+  }
+  for (const valuePlan of plan.topLevelFunctionValues.values()) {
+    if (!multiIrTargetHasExactRegistryEntry(ctx, valuePlan.targetName, safety)) blocked.add(valuePlan.ownerName);
+  }
+
+  for (const name of funcs) {
+    const declaration = plan.declByName.get(name);
+    if (!declaration) {
+      blocked.add(name);
+      continue;
+    }
+    const crossFileTarget = safety.crossFileFunctionNames.has(name);
+    const hasCallableBoundary = crossFileTarget && functionHasCallableBoundary(ctx, declaration);
+    const registeredIdx = ctx.funcMap.get(name);
+    const registeredFunction = registeredIdx === undefined ? undefined : definedFuncAt(ctx, registeredIdx);
+    if (
+      safety.collisions.has(name) ||
+      functionBodyHasUnsupportedImportUse(declaration, plan) ||
+      functionBodyContainsNestedRuntimeDeclaration(declaration) ||
+      (declaration.typeParameters?.length ?? 0) > 0 ||
+      safety.importAliasNames.has(name) ||
+      safety.occupiedFunctionNameCounts.get(name) !== 1 ||
+      registeredFunction?.name !== name ||
+      safety.occupiedFunctionKeys.some((key) => key.startsWith(`${name}$`)) ||
+      (crossFileTarget && (conservativeCrossFileCallers || hasCallableBoundary))
+    ) {
+      blocked.add(name);
+    }
+  }
+  for (const name of blocked) funcs.delete(name);
+
+  // A collision/dangerous removal re-opens the selector's graph-closure
+  // invariant in both directions. Drop its whole selected weak component.
+  return closeMultiIrBlockedComponent(
+    sourceFile,
+    { funcs, classMembers: new Set<string>(), moduleInit: undefined },
+    blocked,
+  );
+}
+
+function importedMissingArgNeedsUndefined(type: IrType): boolean {
+  const val = asVal(type);
+  return (
+    type.kind === "extern" ||
+    type.kind === "callable" ||
+    type.kind === "string" ||
+    type.kind === "dynamic" ||
+    val?.kind === "externref" ||
+    val?.kind === "ref_extern"
+  );
+}
+
+/**
+ * Materialize the legacy-owned runtime declarations referenced symbolically by
+ * A+B1 before the IR builder runs. Any uncertainty removes the owner's whole
+ * local call component, so an admitted site can never become a post-claim
+ * symbolic-resolution failure.
+ */
+function prepareMultiIrImportedLowering(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  plan: IrOverlayPlan,
+  selection: IrSelection,
+): IrSelection {
+  if (plan.importedCalls.size === 0) return selection;
+  const blocked = new Set<string>();
+  let requestedLateImport = false;
+
+  for (const [call, callPlan] of plan.importedCalls) {
+    if (!selection.funcs.has(callPlan.ownerName)) continue;
+    if (callPlan.needsArgc) ensureArgcGlobal(ctx);
+    for (let i = call.arguments.length; i < callPlan.params.length; i++) {
+      if (!importedMissingArgNeedsUndefined(callPlan.params[i]!)) continue;
+      if (ensureGetUndefined(ctx) === undefined) blocked.add(callPlan.ownerName);
+      else requestedLateImport = true;
+    }
+  }
+
+  // A new host import shifts every defined funcIdx. Settle that once before
+  // looking up callback targets or creating trampolines that capture an index.
+  if (requestedLateImport) flushLateImportShifts(ctx, null);
+
+  for (const valuePlan of plan.topLevelFunctionValues.values()) {
+    if (!selection.funcs.has(valuePlan.ownerName) || blocked.has(valuePlan.ownerName)) continue;
+    const funcIdx = ctx.funcMap.get(valuePlan.targetName);
+    if (
+      funcIdx === undefined ||
+      funcIdx < ctx.numImportFuncs ||
+      definedFuncAt(ctx, funcIdx)?.name !== valuePlan.targetName
+    ) {
+      blocked.add(valuePlan.ownerName);
+      continue;
+    }
+    const singleton = ensureFuncClosureSingleton(ctx, valuePlan.targetName, funcIdx, false);
+    const trampoline = singleton ? definedFuncAt(ctx, singleton.trampolineFuncIdx) : undefined;
+    const cache = singleton ? ctx.mod.globals[localGlobalIdx(ctx, singleton.cacheGlobalIdx)] : undefined;
+    if (!singleton || trampoline?.name !== valuePlan.trampolineName || cache?.name !== valuePlan.cacheGlobalName) {
+      blocked.add(valuePlan.ownerName);
+    }
+  }
+
+  return blocked.size === 0 ? selection : closeMultiIrBlockedComponent(sourceFile, selection, blocked);
 }
 
 /** Compile a typed AST into a WasmModule IR */
@@ -4932,7 +5164,16 @@ export function generateMultiModule(
     // members, module init, and IR-first body skipping are deliberately out of
     // scope. In particular, never patch the one shared `__module_init` once per
     // source file.
-    if (options?.experimentalIR) {
+    // Fast-mode legacy declarations use i32 for `number`, while the current IR
+    // overlay uses f64. A multi-file target can be reached by a legacy caller,
+    // so replacing only that target would change its live Wasm ABI. Keep the
+    // whole multi-file overlay pre-claim disabled until those numeric boundary
+    // representations are planned mode-aware.
+    if (options?.experimentalIR && !ctx.fast) {
+      const hostImportedFunctions =
+        ctx.standalone || ctx.wasi || ctx.strictNoHostImports
+          ? undefined
+          : makeIrImportedFunctionResolver(multiAst.checker, multiAst.sourceFiles);
       const occupiedFunctionNameCounts = new Map<string, number>();
       for (const fn of ctx.mod.functions) {
         occupiedFunctionNameCounts.set(fn.name, (occupiedFunctionNameCounts.get(fn.name) ?? 0) + 1);
@@ -4952,11 +5193,22 @@ export function generateMultiModule(
           diagnostics: multiAst.diagnostics,
           syntacticDiagnostics: multiAst.syntacticDiagnostics,
         };
-        const plan = planIrOverlay(ctx, sourceAst, { resolveModuleBindings: false });
-        const safeSelection = makeMultiIrSafeSelection(ctx, plan, sourceFile, safety);
-        const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes);
+        const plan = planIrOverlay(ctx, sourceAst, {
+          resolveModuleBindings: false,
+          ...(hostImportedFunctions ? { importedFunctions: hostImportedFunctions } : {}),
+        });
+        let safeSelection = makeMultiIrSafeSelection(ctx, plan, sourceFile, safety);
+        safeSelection = prepareMultiIrImportedLowering(ctx, sourceFile, plan, safeSelection);
+        const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes, {
+          importedCalls: plan.importedCalls,
+          topLevelFunctionValues: plan.topLevelFunctionValues,
+        });
         consumeIrOverlayReport(ctx, report, plan.selection, plan.trackFallbacks, sourceFile.fileName);
       }
+      // A+B1 may create callback singleton trampolines after the legacy
+      // finalization pass. Rebuild those late declarations against the target's
+      // final signature before any fixup/validation pass observes them.
+      finalizeMethodTrampolines(ctx);
     }
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.

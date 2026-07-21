@@ -430,6 +430,10 @@ export interface AstToIrOptions {
    * for void; calls in statement position (`f();`) are fine.
    */
   readonly calleeTypes?: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
+  /** (#3214 A) Exact imported direct calls certified by the shared selector. */
+  readonly importedCalls?: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
+  /** (#3214 B1) Exact bare top-level function-value sites, keyed by AST node. */
+  readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
   /**
    * Slice 4 (#1169d): map from class name to that class's IR shape
    * (fields + methods + constructor signature). Consulted when lowering
@@ -485,6 +489,30 @@ export interface AstToIrOptions {
    * unsupported storage still demotes.
    */
   readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
+}
+
+export interface IrImportedOptionalParamPlan {
+  readonly constantDefault?:
+    | { readonly kind: "f64"; readonly value: number }
+    | { readonly kind: "i32"; readonly value: number };
+  readonly hasExpressionDefault?: boolean;
+}
+
+export interface IrImportedCallLoweringPlan {
+  readonly ownerName: string;
+  readonly targetName: string;
+  readonly params: readonly IrType[];
+  readonly returnType: IrType | null;
+  readonly optionalParams: ReadonlyMap<number, IrImportedOptionalParamPlan>;
+  readonly needsArgc: boolean;
+}
+
+export interface IrTopLevelFunctionValueLoweringPlan {
+  readonly ownerName: string;
+  readonly targetName: string;
+  readonly signature: IrClosureSignature;
+  readonly trampolineName: string;
+  readonly cacheGlobalName: string;
 }
 
 /**
@@ -719,6 +747,8 @@ export function lowerFunctionAstToIr(
     funcName: name,
     returnType,
     calleeTypes: options.calleeTypes,
+    importedCalls: options.importedCalls,
+    topLevelFunctionValues: options.topLevelFunctionValues,
     classShapes: options.classShapes,
     resolver: options.resolver,
     lifted,
@@ -1044,6 +1074,65 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
 }
 
 /**
+ * Lower an expression whose value is discarded while preserving its effects.
+ * Calls need an explicit statement-position bit because a void callee has no
+ * SSA result. Routing `return voidCall()` through ordinary expression lowering
+ * incorrectly treated that absence as a value-use error; the same bug affected
+ * early returns nested in loop/body buffers.
+ */
+function lowerDiscardedExpression(expr: ts.Expression, cx: LowerCtx): void {
+  if (ts.isParenthesizedExpression(expr)) {
+    lowerDiscardedExpression(expr.expression, cx);
+    return;
+  }
+  if (ts.isVoidExpression(expr)) {
+    lowerDiscardedExpression(expr.expression, cx);
+    return;
+  }
+  if (ts.isConditionalExpression(expr)) {
+    const rawCond = lowerExpr(expr.condition, cx, irVal({ kind: "i32" }));
+    const condType = cx.builder.typeOf(rawCond);
+    const cond = condType.kind === "dynamic" ? cx.builder.emitDynTruthy(rawCond) : rawCond;
+    if (condType.kind !== "dynamic" && asVal(condType)?.kind !== "i32") {
+      throw new Error(`ir/from-ast: discarded ternary condition must be bool in ${cx.funcName}`);
+    }
+
+    const branchScope = new Map(cx.scope);
+    const thenCx: LowerCtx = { ...cx, scope: new Map(branchScope) };
+    const thenBody = cx.builder.collectBodyInstrs(() => {
+      lowerDiscardedExpression(expr.whenTrue, thenCx);
+    });
+    const elseCx: LowerCtx = { ...cx, scope: new Map(branchScope) };
+    const elseBody = cx.builder.collectBodyInstrs(() => {
+      lowerDiscardedExpression(expr.whenFalse, elseCx);
+    });
+    cx.builder.emitIfStmt({ cond, then: thenBody, else: elseBody });
+    joinScopeStringEncodingFacts(cx.scope, [thenCx.scope, elseCx.scope]);
+    return;
+  }
+  if (ts.isCommaListExpression(expr)) {
+    for (const element of expr.elements) lowerDiscardedExpression(element, cx);
+    return;
+  }
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+    lowerDiscardedExpression(expr.left, cx);
+    lowerDiscardedExpression(expr.right, cx);
+    return;
+  }
+  if (ts.isCallExpression(expr)) {
+    if (ts.isPropertyAccessExpression(expr.expression) && !expr.questionDotToken) {
+      void lowerMethodCall(expr, cx, /* statementPosition */ true);
+      return;
+    }
+    if (ts.isIdentifier(expr.expression)) {
+      void lowerCall(expr, cx, /* statementPosition */ true);
+      return;
+    }
+  }
+  void lowerExpr(expr, cx, irVal({ kind: "externref" }));
+}
+
+/**
  * Lower a "tail" statement — one that must end in a return on every path.
  * Phase 1 tails are: `return <expr>;`, a `Block { ... }` whose own tail is a
  * tail, or `if (<cond>) <tail> else <tail>`.
@@ -1103,8 +1192,7 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
     // (the value is discarded). Terminate with empty values.
     if (cx.returnType === null) {
       if (stmt.expression) {
-        // Lower for side effects but discard the value.
-        lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
+        lowerDiscardedExpression(stmt.expression, cx);
       }
       cx.builder.terminate({ kind: "return", values: [] });
       return;
@@ -1122,22 +1210,8 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
   // We accept ExpressionStatement (e.g., `f();`) as a tail in void
   // functions and synthesize the implicit return.
   if (cx.returnType === null && ts.isExpressionStatement(stmt)) {
-    // (#2856) Method-shaped tail call in a void function — statement
-    // position, so void extern/console methods are legal here too.
-    if (
-      ts.isCallExpression(stmt.expression) &&
-      ts.isPropertyAccessExpression(stmt.expression.expression) &&
-      !stmt.expression.questionDotToken
-    ) {
-      void lowerMethodCall(stmt.expression, cx, /* statementPosition */ true);
-      cx.builder.terminate({ kind: "return", values: [] });
-      return;
-    }
-    // (#2856 C4) Direct-call tail in a void function — `quicksort(arr, p +
-    // 1, hi);` as the last statement. Statement position, so a void callee
-    // is legal.
-    if (ts.isCallExpression(stmt.expression) && ts.isIdentifier(stmt.expression.expression)) {
-      void lowerCall(stmt.expression, cx, /* statementPosition */ true);
+    if (ts.isCallExpression(stmt.expression)) {
+      lowerDiscardedExpression(stmt.expression, cx);
       cx.builder.terminate({ kind: "return", values: [] });
       return;
     }
@@ -1176,8 +1250,7 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       cx.builder.terminate({ kind: "return", values: [] });
       return;
     }
-    // Lower the expression for side effects, discard the value.
-    lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
+    lowerDiscardedExpression(stmt.expression, cx);
     cx.builder.terminate({ kind: "return", values: [] });
     return;
   }
@@ -1333,6 +1406,8 @@ interface LowerCtx {
   // `lowerTail` checks this to accept bare `return;` / fall-through tails.
   readonly returnType: IrType | null;
   readonly calleeTypes?: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
+  readonly importedCalls?: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
+  readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
   /** Slice 4 (#1169d) — class shape registry, keyed by className. */
   readonly classShapes?: ReadonlyMap<string, IrClassShape>;
   /**
@@ -1489,6 +1564,28 @@ function sameScopeStorage(a: StringEncodingScopeBinding, b: ScopeBinding | undef
     case "slot":
       return b.kind === "slot" && b.slotIndex === a.slotIndex;
   }
+}
+
+/**
+ * (#3214 B1) Read/create the canonical cached wrapper for one exact bare
+ * top-level function-value site.  The codegen planning phase has already
+ * materialized the matching symbolic trampoline/global declarations through
+ * `ensureFuncClosureSingleton`; IR owns only the lazy access sequence.
+ */
+function lowerTopLevelFunctionValue(plan: IrTopLevelFunctionValueLoweringPlan, cx: LowerCtx): IrValueId {
+  const cache = { kind: "global" as const, name: plan.cacheGlobalName };
+  const cached = cx.builder.emitGlobalGet(cache, irVal({ kind: "externref" }));
+  const isNull = cx.builder.emitRefIsNull(cached);
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    const closure = cx.builder.emitClosureNew({ kind: "func", name: plan.trampolineName }, plan.signature, [], []);
+    const external = cx.builder.emitCoerceToExternref(closure);
+    cx.builder.emitGlobalSet(cache, external);
+  });
+  cx.builder.emitIfStmt({ cond: isNull, then: thenBody, else: [] });
+  // `callable<S>` is the source boundary type and lowers to the exact same
+  // externref global carrier. Retagging the final read avoids an unsound
+  // externref→closure cast while preserving singleton identity.
+  return cx.builder.emitGlobalGet(cache, { kind: "callable", signature: plan.signature });
 }
 
 /**
@@ -2452,6 +2549,8 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return p.value;
   }
   if (ts.isIdentifier(expr)) {
+    const topLevelFunction = cx.topLevelFunctionValues?.get(expr);
+    if (topLevelFunction) return lowerTopLevelFunctionValue(topLevelFunction, cx);
     const p = cx.scope.get(expr.text);
     // (#2856) Host ambient global (`document`, `window`, …): not a scope
     // binding — resolves through the legacy declared-globals registry to the
@@ -2585,7 +2684,7 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
   // emit a proper undefined-typed value; for slice 11, throw if the
   // operand context demands a non-f64 result.
   if (ts.isVoidExpression(expr)) {
-    void lowerExpr(expr.expression, cx, irVal({ kind: "f64" }));
+    lowerDiscardedExpression(expr.expression, cx);
     return cx.builder.emitConst({ kind: "f64", value: NaN }, irVal({ kind: "f64" }));
   }
   throw new Error(`ir/from-ast: unsupported expression kind ${ts.SyntaxKind[expr.kind]} in ${cx.funcName}`);
@@ -3667,6 +3766,105 @@ function requireSuperParentShape(cx: LowerCtx): IrClassShape {
   return parent;
 }
 
+function importedMissingArgument(
+  expected: IrType,
+  optional: IrImportedOptionalParamPlan | undefined,
+  cx: LowerCtx,
+): IrValueId {
+  const constant = optional?.constantDefault;
+  if (constant?.kind === "f64") {
+    return cx.builder.emitConst({ kind: "f64", value: constant.value }, expected);
+  }
+  if (constant?.kind === "i32") {
+    return cx.builder.emitConst({ kind: "i32", value: constant.value }, expected);
+  }
+
+  const val = asVal(expected);
+  if (val?.kind === "f64") {
+    if (optional?.hasExpressionDefault) {
+      // Exact legacy default-expression sentinel. Construct from its bits so
+      // JS number canonicalization can never quiet/change the NaN payload.
+      const bits = cx.builder.emitConst({ kind: "i64", value: 0x7ff00000deadc0den }, irVal({ kind: "i64" }));
+      return cx.builder.emitUnary("f64.reinterpret_i64", bits, expected);
+    }
+    return cx.builder.emitConst({ kind: "f64", value: 0 }, expected);
+  }
+  if (val?.kind === "i32") {
+    // i32 defaults use __argc to distinguish an absent arg from a supplied 0.
+    return cx.builder.emitConst({ kind: "i32", value: 0 }, expected);
+  }
+
+  const hostExternCarrier =
+    expected.kind === "extern" ||
+    expected.kind === "callable" ||
+    expected.kind === "string" ||
+    expected.kind === "dynamic" ||
+    val?.kind === "externref" ||
+    val?.kind === "ref_extern";
+  if (hostExternCarrier) {
+    const undefinedValue = cx.builder.emitCall({ kind: "func", name: "__get_undefined" }, [], expected);
+    if (undefinedValue === null) {
+      throw new Error(`ir/from-ast: __get_undefined unexpectedly returned void (${cx.funcName})`);
+    }
+    return undefinedValue;
+  }
+  throw new Error(
+    `ir/from-ast: missing imported-call argument of ${describeIrType(expected)} is outside A+B1 (${cx.funcName})`,
+  );
+}
+
+function lowerImportedCall(
+  expr: ts.CallExpression,
+  plan: IrImportedCallLoweringPlan,
+  cx: LowerCtx,
+  statementPosition: boolean,
+): IrValueId | null {
+  if (expr.arguments.length > plan.params.length || expr.arguments.some(ts.isSpreadElement)) {
+    throw new Error(`ir/from-ast: imported call shape diverged after certification (${cx.funcName})`);
+  }
+  const args: IrValueId[] = [];
+  for (let i = 0; i < plan.params.length; i++) {
+    const expected = plan.params[i]!;
+    let value: IrValueId;
+    if (i < expr.arguments.length) {
+      value = lowerExpr(expr.arguments[i]!, cx, expected);
+      let actual = cx.builder.typeOf(value);
+      if (
+        actual.kind === "closure" &&
+        expected.kind === "callable" &&
+        closureSignatureEquals(actual.signature, expected.signature)
+      ) {
+        value = cx.builder.emitCallablePack(value, expected.signature);
+        actual = cx.builder.typeOf(value);
+      }
+      if (!irTypeArgAssignable(actual, expected)) {
+        throw new Error(
+          `ir/from-ast: arg ${i} of imported call to ${plan.targetName} is ${describeIrType(actual)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
+        );
+      }
+    } else {
+      value = importedMissingArgument(expected, plan.optionalParams.get(i), cx);
+    }
+    args.push(value);
+  }
+
+  // Argument evaluation can itself call a default/arguments-sensitive
+  // function, so mirror legacy ordering and publish this callee's argc only
+  // after every argument value has been evaluated.
+  if (plan.needsArgc) {
+    const argc = cx.builder.emitConst({ kind: "i32", value: expr.arguments.length }, irVal({ kind: "i32" }));
+    cx.builder.emitGlobalSet({ kind: "global", name: "__argc" }, argc);
+  }
+
+  const result = cx.builder.emitCall({ kind: "func", name: plan.targetName }, args, plan.returnType);
+  if (result === null && !statementPosition) {
+    throw new Error(
+      `ir/from-ast: imported call to ${plan.targetName} returned void used as expression in ${cx.funcName}`,
+    );
+  }
+  return result;
+}
+
 function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
   // Optional call (`fn?.()` / `obj?.method()`, #1281). The IR has no
   // short-circuit primitive for nullable callees, and at this point we
@@ -3738,6 +3936,9 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   if (binding?.kind === "nestedFunc") {
     return lowerNestedFuncCall(binding, expr.arguments, cx);
   }
+
+  const imported = cx.importedCalls?.get(expr);
+  if (imported) return lowerImportedCall(expr, imported, cx, statementPosition);
 
   const calleeSig = cx.calleeTypes?.get(calleeName);
   if (!calleeSig) {
@@ -5965,14 +6166,7 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
   }
   if (ts.isExpressionStatement(stmt)) {
     if (ts.isCallExpression(stmt.expression)) {
-      // (#2856) Method-shaped statement calls in body position — statement
-      // position, so void extern/console methods are legal.
-      if (ts.isPropertyAccessExpression(stmt.expression.expression) && !stmt.expression.questionDotToken) {
-        void lowerMethodCall(stmt.expression, cx, /* statementPosition */ true);
-        return;
-      }
-      // (#2856 C4) Statement position — a VOID direct call is legal.
-      void lowerCall(stmt.expression, cx, /* statementPosition */ true);
+      lowerDiscardedExpression(stmt.expression, cx);
       return;
     }
     // Slice 7a (#1169f): `yield <expr>;` inside a for-of body. The
@@ -6153,8 +6347,7 @@ function lowerEarlyReturn(stmt: ts.ReturnStatement, cx: LowerCtx): void {
   }
   if (cx.returnType === null) {
     if (stmt.expression) {
-      // Lower for side effects but discard the value (void function).
-      lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
+      lowerDiscardedExpression(stmt.expression, cx);
     }
     cx.builder.emitEarlyReturn(null);
     return;
@@ -7804,6 +7997,8 @@ function liftNestedFunction(
     funcName: liftedName,
     returnType: signature.returnType,
     calleeTypes: cx.calleeTypes,
+    importedCalls: cx.importedCalls,
+    topLevelFunctionValues: cx.topLevelFunctionValues,
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
@@ -7882,6 +8077,8 @@ function liftClosureBody(
     funcName: liftedName,
     returnType: signature.returnType,
     calleeTypes: cx.calleeTypes,
+    importedCalls: cx.importedCalls,
+    topLevelFunctionValues: cx.topLevelFunctionValues,
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,

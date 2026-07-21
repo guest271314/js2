@@ -128,6 +128,7 @@ import {
   finalizeMethodTrampolines,
   emitCachedMethodClosureAccess,
   ensureMethodClosureSingleton,
+  ensureFuncClosureSingleton,
   emitCachedFuncClosureAccess,
 } from "./closures/method-trampolines.js";
 export {
@@ -135,6 +136,7 @@ export {
   finalizeMethodTrampolines,
   emitCachedMethodClosureAccess,
   ensureMethodClosureSingleton,
+  ensureFuncClosureSingleton,
   emitCachedFuncClosureAccess,
 };
 

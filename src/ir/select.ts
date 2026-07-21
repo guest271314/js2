@@ -58,7 +58,8 @@ import { ts, forEachChild } from "../ts-api.js";
 // (#1373b C-1) Pure-syntactic async helpers from the LEAF module (safe for
 // ir/* — async-static.ts imports only ts-api, so no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
-import type { IrClosureSignature, IrType } from "./nodes.js";
+import { closureSignatureEquals, type IrClosureSignature, type IrType } from "./nodes.js";
+import type { IrImportedFunctionResolver, IrResolvedFunctionTarget } from "./imported-functions.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type {
@@ -376,6 +377,13 @@ export interface IrSelectionOptions {
    * default (undefined ⇒ true) is correct for the default-host fallback path.
    */
   readonly dynMemberReadBuildable?: boolean;
+  /**
+   * (#3214 A+B1) Realm-wide, checker-backed imported-function resolution.
+   * Present only for host/component multi-file compilation.  Bare selector
+   * callers and standalone/WASI intentionally omit it, preserving the
+   * pre-slice conservative boundary.
+   */
+  readonly importedFunctions?: IrImportedFunctionResolver;
 }
 
 /**
@@ -764,19 +772,11 @@ export function planIrCompilation(
   //     bodies are rejected up front by the body-shape work (#2856/#2857).
   // -------------------------------------------------------------------------
   const demoteOnLegacyCaller = options?.jsHostExterns !== true;
-  // #2858 host-mode narrowing (BANKED 2026-07-06 regression fix). #3214 B0 now
-  // makes a legacy caller and IR callee ABI-compatible for function-typed
-  // parameters: both cross the boundary as externref and unpack through the
-  // canonical wrapper root. Keep this callable-param caller demotion for B0
-  // anyway to freeze the selector claim set. Function-valued argument lowering
-  // (inline arrows and named top-level functions) belongs to follow-up A; that
-  // slice can deliberately remove this conservative gate with its own coverage.
-  // Value-param leaves retain the existing host-mode relaxation.
-  const hasCallableParam = (name: string): boolean => {
-    const fn = declByName.get(name);
-    if (!fn) return false;
-    return fn.parameters.some((p) => p.type !== undefined && ts.isFunctionTypeNode(p.type));
-  };
+  // #3214 A+B1 — B0 made an exact FunctionTypeNode source boundary use the
+  // canonical externref callable ABI in both front-ends.  Host mode can now use
+  // the same caller-direction relaxation for callable-param functions as for
+  // scalar leaves. Standalone/WASI retain the conservative closure until B1 is
+  // explicitly implemented for their carrier/runtime.
   const { callers, callees, hasExternalCall } = buildLocalCallGraph(declByName, localClasses);
 
   const claimed = new Set(individuallyClaimed);
@@ -797,10 +797,8 @@ export function planIrCompilation(
     for (const name of [...claimed]) {
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
-      // Caller-direction demotion: always in standalone/wasi (#2858), and in
-      // host mode only for functions with a callable param (B0 scope freeze;
-      // see `hasCallableParam` above).
-      if (demoteOnLegacyCaller || hasCallableParam(name)) {
+      // Caller-direction demotion remains only in standalone/wasi (#2858).
+      if (demoteOnLegacyCaller) {
         const myCallers = callers.get(name) ?? new Set<string>();
         for (const c of myCallers) {
           if (!claimed.has(c)) {
@@ -1356,6 +1354,123 @@ export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode
   const returnType = prim(node.type);
   if (!returnType) return null;
   return { params, returnType };
+}
+
+/**
+ * Exact callback signature for a bare top-level FunctionDeclaration value.
+ * B1 deliberately requires explicit primitive annotations and ordinary,
+ * fixed-arity functions: no inference, generators/async, generics,
+ * optional/rest/default parameters, destructuring, or callable/void results.
+ */
+export function irClosureSignatureFromFunctionDeclaration(
+  declaration: ts.FunctionDeclaration,
+): IrClosureSignature | null {
+  if (
+    !declaration.body ||
+    declaration.asteriskToken ||
+    (declaration.typeParameters?.length ?? 0) > 0 ||
+    declaration.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+  ) {
+    return null;
+  }
+  const params: IrType[] = [];
+  for (const parameter of declaration.parameters) {
+    if (
+      !ts.isIdentifier(parameter.name) ||
+      parameter.questionToken ||
+      parameter.dotDotDotToken ||
+      parameter.initializer
+    ) {
+      return null;
+    }
+    const type = effectiveIrParamTypeNode(parameter);
+    if (!type) return null;
+    if (type.kind === ts.SyntaxKind.NumberKeyword) params.push({ kind: "val", val: { kind: "f64" } });
+    else if (type.kind === ts.SyntaxKind.BooleanKeyword) params.push({ kind: "val", val: { kind: "i32" } });
+    else if (type.kind === ts.SyntaxKind.StringKeyword) params.push({ kind: "string" });
+    else return null;
+  }
+  const resultNode = effectiveIrReturnTypeNode(declaration);
+  let returnType: IrType;
+  if (resultNode?.kind === ts.SyntaxKind.NumberKeyword) returnType = { kind: "val", val: { kind: "f64" } };
+  else if (resultNode?.kind === ts.SyntaxKind.BooleanKeyword) returnType = { kind: "val", val: { kind: "i32" } };
+  else if (resultNode?.kind === ts.SyntaxKind.StringKeyword) returnType = { kind: "string" };
+  else return null;
+  return { params, returnType };
+}
+
+export interface IrImportedFunctionArgumentCertification {
+  readonly argument: ts.Identifier;
+  readonly target: IrResolvedFunctionTarget;
+  readonly signature: IrClosureSignature;
+}
+
+export interface IrImportedCallCertification {
+  readonly call: ts.CallExpression;
+  readonly target: IrResolvedFunctionTarget;
+  readonly functionArguments: readonly IrImportedFunctionArgumentCertification[];
+}
+
+/**
+ * Certify the exact cross-file direct-call surface shared by selection and
+ * overlay planning.  Ordinary arguments are left to `isPhase1Expr`; this
+ * helper owns only the imported callee/arity contract and the B1 exception for
+ * a bare same-file top-level FunctionDeclaration in an exact FunctionTypeNode
+ * parameter position.
+ */
+export function certifyImportedIrCall(
+  call: ts.CallExpression,
+  resolver: IrImportedFunctionResolver | undefined,
+): IrImportedCallCertification | undefined {
+  if (
+    !resolver ||
+    call.questionDotToken ||
+    (call.typeArguments?.length ?? 0) > 0 ||
+    !ts.isIdentifier(call.expression) ||
+    call.arguments.some(ts.isSpreadElement)
+  ) {
+    return undefined;
+  }
+  const target = resolver.resolveImportedFunction(call.expression);
+  if (!target) return undefined;
+  const declaration = target.declaration;
+  const returnNode = effectiveIrReturnTypeNode(declaration);
+  if (
+    !declaration.body ||
+    declaration.asteriskToken ||
+    (declaration.typeParameters?.length ?? 0) > 0 ||
+    declaration.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
+    declaration.parameters.some((p) => p.dotDotDotToken || !ts.isIdentifier(p.name)) ||
+    (returnNode !== undefined && ts.isFunctionTypeNode(returnNode))
+  ) {
+    return undefined;
+  }
+  if (call.arguments.length > declaration.parameters.length) return undefined;
+  for (let i = call.arguments.length; i < declaration.parameters.length; i++) {
+    const parameter = declaration.parameters[i]!;
+    if (!parameter.questionToken && !parameter.initializer) return undefined;
+  }
+
+  const functionArguments: IrImportedFunctionArgumentCertification[] = [];
+  for (let i = 0; i < call.arguments.length; i++) {
+    const argument = call.arguments[i]!;
+    const parameter = declaration.parameters[i]!;
+    const parameterType = effectiveIrParamTypeNode(parameter);
+    if (!parameterType || !ts.isFunctionTypeNode(parameterType)) continue;
+    // A supplied callback is B1 only when it is the exact bare declaration
+    // value. Arrows, aliases, stored values, and widened callable types stay on
+    // legacy. Optional/default callback parameters may be omitted, but a
+    // present callback parameter itself must be the exact required shape.
+    if (parameter.questionToken || parameter.initializer || !ts.isIdentifier(argument)) {
+      return undefined;
+    }
+    const expected = irClosureSignatureFromFunctionTypeNode(parameterType);
+    const functionTarget = resolver.resolveTopLevelFunctionValue(argument);
+    const actual = functionTarget ? irClosureSignatureFromFunctionDeclaration(functionTarget.declaration) : null;
+    if (!expected || !functionTarget || !actual || !closureSignatureEquals(actual, expected)) return undefined;
+    functionArguments.push({ argument, target: functionTarget, signature: actual });
+  }
+  return { call, target, functionArguments };
 }
 
 function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | undefined): ResolvedKind {
@@ -4012,6 +4127,20 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     if (currentAsyncDeclNames.has(expr.expression.text) && !scope.has(expr.expression.text)) {
       return shapeNo("expr-async-callee-not-awaited", expr);
     }
+    // (#3214 A+B1) A checker-certified imported direct call is a stable
+    // in-module funcMap target, not an external call.  Bare top-level function
+    // identifiers are accepted ONLY at the exact FunctionTypeNode argument
+    // positions certified by the shared helper; ordinary arguments still
+    // recurse through the complete Phase-1 shape checker.
+    const imported = certifyImportedIrCall(expr, currentSelectionOptions?.importedFunctions);
+    if (imported) {
+      const functionArgs = new Set<ts.Expression>(imported.functionArguments.map((entry) => entry.argument));
+      for (const arg of expr.arguments) {
+        if (functionArgs.has(arg)) continue;
+        if (!isPhase1Expr(arg, scope, localClasses)) return false;
+      }
+      return true;
+    }
     for (const arg of expr.arguments) {
       // Slice 8a (#1169g): accept `f(...source)` where the spread source
       // is an ArrayLiteralExpression with no nested spread. The lowerer
@@ -4565,6 +4694,14 @@ function buildLocalCallGraph(
       }
       if (ts.isCallExpression(node)) {
         if (ts.isIdentifier(node.expression)) {
+          const imported = certifyImportedIrCall(node, currentSelectionOptions?.importedFunctions);
+          if (imported) {
+            // Imported direct calls are neither local graph edges nor external
+            // calls. Walk arguments so nested calls retain their own graph
+            // classification; the imported callee identifier itself is inert.
+            for (const argument of node.arguments) visit(argument);
+            return;
+          }
           const callee = node.expression.text;
           if (decls.has(callee)) {
             callees.get(callerName)!.add(callee);
