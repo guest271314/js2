@@ -76,6 +76,11 @@ import {
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
+  makeIrModuleBindingResolver,
+  type IrModuleBindingIdentity,
+  type IrModuleBindingResolver,
+} from "./module-bindings.js";
+import {
   lowerIrFunctionToWasm,
   lowerIrTypeToValType,
   type IrClassLowering,
@@ -154,7 +159,18 @@ export function compileIrPathFunctions(
   overrides?: IrTypeOverrideMap,
   classShapes?: ReadonlyMap<string, IrClassShape>,
 ): IrIntegrationReport {
-  const selected = selection ?? planIrCompilation(sourceFile, { experimentalIR: true });
+  const moduleBindingResolver = makeIrModuleBindingResolver(ctx.checker, {
+    numberStorage: ctx.fast ? "i32" : "f64",
+    allowHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
+    allowBuiltinMapExtern: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
+  });
+  const selected =
+    selection ??
+    planIrCompilation(sourceFile, {
+      experimentalIR: true,
+      jsHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
+      resolveModuleBinding: moduleBindingResolver,
+    });
   // (#3142 Slice 2) A claimable, non-empty module-init unit keeps the
   // pipeline alive even with no claimed functions/class members.
   const moduleInitClaim =
@@ -220,7 +236,7 @@ export function compileIrPathFunctions(
   // Phase 3 once the registries exist; both share the same underlying
   // logic for the methods both expose.
   // -------------------------------------------------------------------------
-  const fromAstResolver = makeFromAstResolver(ctx, sourceFile);
+  const fromAstResolver = makeFromAstResolver(ctx, moduleBindingResolver);
 
   // -------------------------------------------------------------------------
   // Phase 1 — Build: lower every selected AST function to an IrFunction.
@@ -491,7 +507,7 @@ export function compileIrPathFunctions(
           }
         }
       }
-      const moduleBindings = buildModuleBindingsMap(ctx, population);
+      const moduleBindings = buildModuleBindingsMap(ctx, population, moduleBindingResolver);
       const synthetic = makeModuleInitSynthetic(population);
       const result = lowerFunctionAstToIr(synthetic, {
         exported: false,
@@ -1012,17 +1028,56 @@ function bodyContainsReturnClassOp(body: readonly Instr[]): boolean {
   return false;
 }
 
+/** Resolve a checker-owned module declaration to its exact legacy slot. */
+function resolveModuleBindingGlobal(
+  ctx: CodegenContext,
+  identity: IrModuleBindingIdentity,
+): ModuleBindingGlobal | undefined {
+  const declaration = identity.declaration;
+  if (!ts.isIdentifier(declaration.name)) return undefined;
+  const name = declaration.name.text;
+  if (!ctx.moduleGlobals.has(name)) return undefined;
+
+  const globalName = `__mod_${name}`;
+  const global = ctx.mod.globals.find((candidate) => candidate.name === globalName);
+  if (!global || !global.mutable) return undefined;
+
+  let type: IrType;
+  let storageKind: "f64" | "i32" | "externref";
+  switch (identity.valueKind.kind) {
+    case "f64":
+      type = { kind: "val", val: { kind: "f64" } };
+      storageKind = "f64";
+      break;
+    case "i32":
+      type = { kind: "val", val: { kind: "i32" } };
+      storageKind = "i32";
+      break;
+    case "extern":
+      if (!ctx.externClasses.has(identity.valueKind.className)) return undefined;
+      type = { kind: "extern", className: identity.valueKind.className };
+      storageKind = "externref";
+      break;
+  }
+  if (global.type.kind !== storageKind) return undefined;
+
+  return {
+    globalName,
+    tdzGlobalName: ctx.mod.globals.some((candidate) => candidate.name === `__tdz_${name}`) ? `__tdz_${name}` : null,
+    type,
+  };
+}
+
 /**
  * (#3142 Slice 2) Map every top-level declared binding in the module-init
  * population to its legacy-allocated Wasm global (`__mod_<name>`, TDZ flag
- * `__tdz_<name>` when tracked). Throws (→ whole-unit demote to the legacy
- * body) when a binding has no module global or its global is not f64/i32
- * backed — Slice 2's scope is numeric/boolean module state; string / ref /
- * externref-backed bindings stay on legacy.
+ * `__tdz_<name>` when tracked). Capability C admits f64/i32 and branded
+ * externref storage; every unsupported representation demotes the whole unit.
  */
 function buildModuleBindingsMap(
   ctx: CodegenContext,
   population: readonly ts.Statement[],
+  resolveModuleBinding: IrModuleBindingResolver,
 ): Map<string, ModuleBindingGlobal> {
   const map = new Map<string, ModuleBindingGlobal>();
   for (const stmt of population) {
@@ -1032,24 +1087,14 @@ function buildModuleBindingsMap(
         throw new Error("module-init: top-level destructuring declaration not in Slice 2 scope");
       }
       const name = d.name.text;
-      if (!ctx.moduleGlobals.has(name)) {
+      const identity = resolveModuleBinding(d.name);
+      const binding = identity ? resolveModuleBindingGlobal(ctx, identity) : undefined;
+      if (!binding) {
         throw new Error(
-          `module-init: top-level binding '${name}' has no module global (shadowed or class-bound) — keeping legacy body`,
+          `module-init: top-level binding '${name}' has no supported direct legacy global — keeping legacy body`,
         );
       }
-      const globalName = `__mod_${name}`;
-      const g = ctx.mod.globals.find((gl) => gl.name === globalName);
-      if (!g || (g.type.kind !== "f64" && g.type.kind !== "i32")) {
-        throw new Error(
-          `module-init: top-level binding '${name}' is ${g ? g.type.kind : "missing"}-backed — not in Slice 2 scope (f64/i32 only)`,
-        );
-      }
-      const tdzGlobalName = ctx.mod.globals.some((gl) => gl.name === `__tdz_${name}`) ? `__tdz_${name}` : null;
-      map.set(name, {
-        globalName,
-        tdzGlobalName,
-        type: { kind: "val", val: { kind: g.type.kind } } as IrType,
-      });
+      map.set(name, binding);
     }
   }
   return map;
@@ -1232,7 +1277,7 @@ function externResultClassName(
   }
 }
 
-function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): IrFromAstResolver {
+function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
   return {
     // (#2955 slice 5) No raw `nativeStrings()` here anymore — from-ast's
     // interface no longer carries the mode discriminator; every mode
@@ -1409,37 +1454,17 @@ function makeFromAstResolver(ctx: CodegenContext, sourceFile?: ts.SourceFile): I
       }
       return !!name && TYPED_ARRAY_NAMES.has(name);
     },
-    // (#2856 C3) Module-scope binding → the Wasm global the legacy backend
-    // allocated (`__mod_<name>` in ctx.mod.globals, TDZ flag `__tdz_<name>`
-    // when tracked) + the extern-class brand of the held value from the
-    // checker at the DECLARATION site. Only externref-shaped extern-class
-    // instances resolve (e.g. `const cache = new Map()` → "Map"); plain
-    // scalars / non-extern values return undefined so the identifier arm
-    // demotes cleanly.
-    getModuleScopeExternBinding(name: string) {
-      if (!ctx.moduleGlobals.has(name)) return undefined;
-      const globalName = `__mod_${name}`;
-      const g = ctx.mod.globals.find((gl) => gl.name === globalName);
-      if (!g || g.type.kind !== "externref") return undefined;
-      // Brand from the checker: the module-level declaration's type symbol
-      // must name a REGISTERED extern class (host mode only — in
-      // standalone/nativeStrings the class isn't registered, so this
-      // resolves nothing and the function demotes to legacy, which has the
-      // native runtime interception).
-      const sf = sourceFile;
-      if (!sf) return undefined;
-      let className: string | undefined;
-      for (const stmt of sf.statements) {
-        if (!ts.isVariableStatement(stmt)) continue;
-        for (const d of stmt.declarationList.declarations) {
-          if (!ts.isIdentifier(d.name) || d.name.text !== name) continue;
-          const t = ctx.checker.getTypeAtLocation(d.name);
-          className = t.getSymbol()?.name ?? t.aliasSymbol?.name;
-        }
-      }
-      if (!className || !ctx.externClasses.has(className)) return undefined;
-      const tdzGlobalName = ctx.mod.globals.some((gl) => gl.name === `__tdz_${name}`) ? `__tdz_${name}` : null;
-      return { globalName, tdzGlobalName, className };
+    // (#2856 Capability C) Declaration identity is proven by the checker;
+    // only then map it to the legacy slot and retain the logical extern brand.
+    resolveModuleBinding(node: ts.Identifier, writeValue?: ts.Expression) {
+      const identity = moduleBindingResolver?.(node, writeValue);
+      return identity ? resolveModuleBindingGlobal(ctx, identity) : undefined;
+    },
+    isDirectModuleBinding(node: ts.Identifier): boolean {
+      return moduleBindingResolver?.isDirectModuleBinding(node) === true;
+    },
+    isAmbientBinding(node: ts.Identifier): boolean {
+      return moduleBindingResolver?.isAmbientBinding(node) === true;
     },
     // (#2856) Variant selection for `console.<m>(arg)` — the SAME checker
     // predicates as the legacy `collectConsoleImports` registration scan
