@@ -719,7 +719,7 @@ export function extractConstantDefault(
  */
 function latticeToIr(t: LatticeType): IrType {
   if (t.kind === "f64") return irVal({ kind: "f64" });
-  if (t.kind === "bool") return irVal({ kind: "i32" });
+  if (t.kind === "bool") return irVal({ kind: "i32", boolean: true });
   // #1169a — strings flow as the backend-agnostic `IrType.string`; the
   // resolver picks the concrete Wasm representation at lowering time.
   if (t.kind === "string") return { kind: "string" };

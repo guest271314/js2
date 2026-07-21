@@ -173,6 +173,9 @@ const NATIVE_STRINGS_FROMAST_RESOLVER: IrFromAstResolver = {
   hasHostNumberBox(): boolean {
     return false;
   },
+  hasHostBooleanBox(): boolean {
+    return false;
+  },
   hasHostNumberToString(): boolean {
     return false;
   },
