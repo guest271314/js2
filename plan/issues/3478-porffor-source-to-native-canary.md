@@ -3,9 +3,9 @@ id: 3478
 renumbered_from: 3476
 title: "Porffor source-to-native canary: real TypeScript through shared linear-memory planning"
 status: done
-sprint: porffor-backend
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 priority: high
 horizon: m

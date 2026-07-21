@@ -3,9 +3,9 @@ id: 3429
 title: "Host assert.throws: expected error constructor rendered as internal 'wasmClosureDynamicBridge' (544 records) under oracle v8"
 status: done
 completed: 2026-07-20
-sprint: current
+sprint: 73
 created: 2026-07-18
-updated: 2026-07-20
+updated: 2026-07-21
 priority: medium
 horizon: m
 feasibility: medium

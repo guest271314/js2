@@ -2,8 +2,9 @@
 id: 3495
 title: "compileMulti must finalize standalone vec indexed reads"
 status: done
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: m
 feasibility: medium

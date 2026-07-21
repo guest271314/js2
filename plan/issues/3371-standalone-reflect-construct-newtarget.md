@@ -5,7 +5,7 @@ status: done
 created: 2026-07-17
 updated: 2026-07-21
 completed: 2026-07-20
-sprint: Backlog
+sprint: 73
 priority: medium
 horizon: l
 feasibility: hard

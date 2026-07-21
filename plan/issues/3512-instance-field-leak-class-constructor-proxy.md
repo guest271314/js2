@@ -11,7 +11,7 @@ task_type: bugfix
 area: runtime
 goal: test262-conformance
 model: opus
-sprint: current
+sprint: 73
 horizon: m
 related: [3479, 1047, 1395]
 loc-budget-allow:

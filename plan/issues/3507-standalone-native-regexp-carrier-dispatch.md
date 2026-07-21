@@ -2,9 +2,9 @@
 id: 3507
 title: "Standalone native RegExp values lose identity across function, object, and array carriers"
 status: done
-sprint: current
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 priority: high
 horizon: m

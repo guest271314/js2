@@ -9,7 +9,7 @@ priority: high
 task_type: bug
 area: test262-conformance
 goal: test262-conformance
-sprint: current
+sprint: 73
 horizon: m
 related: [3422, 3175, 3191, 3429]
 ---

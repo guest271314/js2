@@ -2,8 +2,9 @@
 id: 3490
 title: "Test262 FYI comparisons must use the same Node 25 and Unicode 17 host runtime as CI"
 status: done
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 priority: high
 horizon: s

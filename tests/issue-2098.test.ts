@@ -82,6 +82,54 @@ describe("#2098 flake classification + bucket signature in diff-test262", () => 
     expect(out).not.toMatch(/GATE FAIL: trap category/);
   });
 
+  it("treats a candidate trap with no baseline row as unknown and surfaces the missing evidence", () => {
+    const p = paths();
+    writeJsonl(p.base, [{ oracle_version: 1, file: "control.js", status: "pass", wasm_sha: "same" }]);
+    writeJsonl(p.cand, [
+      { oracle_version: 1, file: "control.js", status: "pass", wasm_sha: "same" },
+      {
+        oracle_version: 1,
+        file: "omitted-by-baseline.js",
+        status: "fail",
+        error_category: "oob",
+        wasm_sha: "candidate-only",
+      },
+    ]);
+
+    const { code, out } = runDiff(p.base, p.cand);
+    expect(code).toBe(0);
+    expect(out).toMatch(/Trap baseline unknowns \(absent\/compile_timeout → trap; excluded from #3189\): 1 ===/);
+    expect(out).toMatch(/oob: omitted-by-baseline\.js \(baseline absent\)/);
+    expect(out).not.toMatch(/GATE FAIL: trap category/);
+  });
+
+  it("still ratchets an observed baseline nontrap into a candidate trap", () => {
+    const p = paths();
+    writeJsonl(p.base, [
+      {
+        oracle_version: 1,
+        file: "observed-nontrap.js",
+        status: "fail",
+        error_category: "assertion_fail",
+        wasm_sha: "before",
+      },
+    ]);
+    writeJsonl(p.cand, [
+      {
+        oracle_version: 1,
+        file: "observed-nontrap.js",
+        status: "fail",
+        error_category: "oob",
+        wasm_sha: "after",
+      },
+    ]);
+
+    const { code, out } = runDiff(p.base, p.cand);
+    expect(code).toBe(1);
+    expect(out).toMatch(/GATE FAIL: trap category "oob" grew 0 → 1/);
+    expect(out).toMatch(/Newly trapping: observed-nontrap\.js/);
+  });
+
   it("emits a bucket signature stable across row order and wasm_sha (cluster identity)", () => {
     const p = paths();
     writeJsonl(p.base, [

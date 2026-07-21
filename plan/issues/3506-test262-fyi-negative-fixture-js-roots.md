@@ -2,8 +2,9 @@
 id: 3506
 title: "Test262 FYI negative fixture graphs must retain JavaScript roots"
 status: done
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 priority: high
 horizon: m
