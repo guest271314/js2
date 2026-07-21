@@ -351,3 +351,19 @@ passes to 28,149 / 43,106. The close harvest cross-referenced all >50-row
 failure families and filed only one new Markdown owner: Backlog #3531 for 216
 standalone array-concat/JS-array host-import leaks. v0.65.0 is cut from the
 resulting `main` before execution pauses.
+
+## 2026-07-21 21:41 — v0.65.0 published and verified
+
+- Release PR #3488 merged to `main` at
+  `14bdb88682b92ae2c081e19a2ef1bdf749e389c8` after CI, differential, and the
+  full merge-group Test262 matrix passed. The annotated `v0.65.0` tag peels
+  exactly to release commit `4ae9b1fd9b4c52fa7848c9ac011c3320748a6c8a`.
+- Publish workflow
+  [29862176875](https://github.com/loopdive/js2/actions/runs/29862176875)
+  passed version verification and published `@loopdive/js2`, the `js2wasm`
+  proxy, JSR, and the public GitHub release.
+- Independent registry checks found both npm packages at `0.65.0` with the
+  release commit as `gitHead`, the proxy dependency pinned exactly to
+  `@loopdive/js2@0.65.0`, JSR latest at `0.65.0`, and a fresh
+  `npx js2wasm@0.65.0 --version` returning `0.65.0`.
+- No Test262 run logs or equivalence baselines were changed by the release.
