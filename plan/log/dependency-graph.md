@@ -78,16 +78,17 @@ Epic **#2855** is the tracking owner (supersedes the stale `#1530` citation in
 CLAUDE.md / codegen-axes.md / ir-adoption.md). Gate mechanism: #1376 / #2089 /
 #1923 (all done).
 
-| Issue | Bucket                      | Count | Priority | Horizon | Status                                                                       |
-| ----- | --------------------------- | ----- | -------- | ------- | ---------------------------------------------------------------------------- |
-| #2855 | (tracking epic)             | —     | low      | xl      | backlog (visible, not a code task)                                           |
-| #2856 | `body-shape-rejected`       | 31    | low      | l       | **ready** — dominant; diagnostic pass first, then slice by kind              |
-| #2857 | `class-method`              | 6     | low      | m       | **ready** — #1370 Phase C/D/E residual (ctor/static/accessors/private/super) |
-| #2858 | `call-graph-closure`        | 7     | low      | m       | **ready** — derivative; depends_on #2856 + #2857                             |
-| #2859 | `param-type-not-resolvable` | 1     | low      | s       | **ready** — single site (benchmarks/helpers.ts); TypeMap propagation         |
+| Issue | Bucket                      | Count | Priority | Horizon | Status                                                                        |
+| ----- | --------------------------- | ----- | -------- | ------- | ----------------------------------------------------------------------------- |
+| #2855 | (tracking epic)             | —     | high     | xl      | **ready** — IR-only/default + direct-front-end retirement endgame             |
+| #2856 | `body-shape-rejected`       | 0     | high     | l       | **done** — playground function corpus zero; generic reason remains non-strict |
+| #2857 | `class-method`              | 0     | low      | m       | **done** — measured corpus residual retired                                   |
+| #2858 | `call-graph-closure`        | 0     | low      | m       | **done** — measured corpus residual retired                                   |
+| #2859 | `param-type-not-resolvable` | 0     | low      | s       | **done** — measured corpus residual retired                                   |
 
-Deferred (NOT queued): `async-function` (4) → #1373b (blocked on #1326c
-standalone microtask drain). Already-zero unintended buckets (`external-call`,
+Deferred `async-function` (4) continues in #1373b. Module-level
+`body-shape-rejected` is 1 (Algorithms Map initializer). Already-zero
+unintended buckets (`external-call`,
 `param-shape-rejected`, `return-type-not-resolvable`, `type-resolution-failure`,
 `destructuring-param-complex`) — retired by #1370/#1371/#1372/#1374/#1375.
 

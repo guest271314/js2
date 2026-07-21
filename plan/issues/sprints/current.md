@@ -71,6 +71,8 @@ then layer the carriers:
 - **#2874** getOwnPropertyDescriptor numeric-key coercion — **done** (via #2354).
 - **#2879** honest host-free metric — **done** (via #2360); re-based the gap to
   ~20,500.
+- **#2856** IR `body-shape-rejected` playground corpus — **done** (31 → 0;
+  Sprint 73). The generic reason remains non-strict for wider source coverage.
 - **#2862** ToPrimitive over built-in exotics — **blocked** (superseded; the
   de-masked clusters #2872/#2873/#2875/#2876 carry the tractable residual).
 
@@ -84,10 +86,6 @@ Do NOT close them — just lowered priority per the directive:
 | #2850 | high | low | acorn dogfood regex-validator remnant — non-standalone |
 | #2853 | high | low | acorn dogfood self-parse remnant — non-standalone |
 | #2855 | high | low | IR-migration tracking epic — non-standalone |
-| #2856 | high | low | IR `body-shape-rejected` bucket — non-standalone |
-| #2857 | medium | low | IR `class-method` bucket — non-standalone |
-| #2858 | medium | low | IR `call-graph-closure` bucket — non-standalone |
-| #2859 | low | low | IR `param-type-not-resolvable` — already low |
 | #2669 | high | low | ES2015 destructuring umbrella — non-standalone conformance |
 | #2803 | high | low | callsite param-type inference — non-standalone (platform) |
 | #1042 | high | low | async state-machine epic — non-standalone (deferred acceptance owner) |

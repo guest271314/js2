@@ -1,10 +1,11 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: in-progress
+status: done
+completed: 2026-07-21
 assignee: ttraenkler/opus-2856
 spec: banked
-sprint: current
+sprint: 73
 created: 2026-06-30
 updated: 2026-07-21
 priority: high
@@ -35,6 +36,7 @@ loc-budget-allow:
   - src/ir/select.ts
   - tests/issue-2856-inline-small-buffer-caller.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
+  - tests/issue-2856-async-delay-ir.test.ts
   - tests/issue-2856-module-bindings.test.ts
   - tests/issue-2856-builtins-component.test.ts
 ---
@@ -1583,3 +1585,102 @@ IR-completeness endgame, not this issue's AC. At corpus-zero: bank the floor
 in the baseline, update `plan/log/ir-adoption.md`, and record the verdict at
 the `STRICT_IR_REASONS` comment (see the #2855 Fable plan's verdict table —
 this corrects acceptance criterion 4 above).
+
+### Async delay 1→0 implementation result (2026-07-21)
+
+The final residual is banked through an exact checker-certified lowering of the
+playground `delay(ms, value)` shape: `new Promise<number>` with one synchronous
+executor, one `setTimeout` callback, and one `resolve(value)` call. The proof is
+symbol-identity based and deliberately single-source/JS-host only; shadowed or
+shape-divergent Promise/timer forms, fast/native-string lanes, standalone/WASI,
+and the M0 multi-module overlay remain on their pre-existing paths.
+
+Lowering uses the canonical callable ABI for both closures. The Promise
+executor captures `ms` plus transitive `value`; the timer callback captures the
+raw host `resolve` function plus `value`. Final-context preparation proves the
+exact `Promise_new`, `__timer_set_timeout`, `__box_number`, and
+`__call_1_f64` signatures, collision-checks both deterministic lifted names,
+and registers missing helpers as one late-import batch only after every
+read-only refusal check succeeds. Callback, Date, and Promise preparation run
+in that order before IR compilation, with one shared compile-twice component
+closure for every final-demotable owner.
+
+The 29-test async-delay suite covers optimized/unoptimized real Promise and
+timer execution, concurrent capture isolation, deterministic output, exact
+post-pruning binary import signatures, strict syntax/symbol negatives, helper
+and lifted-name collisions, component replay, host-free/fast/native-string/M0
+containment, and a combined callback + Date + Promise runtime module. Calendar
+remains green at 28/28, callback coverage at 29/29, and the nested-buffer
+regression at 1/1. Full equivalence remains 1,607 passing with the same 36
+known failures and zero new failures.
+
+The production gate now records function-level `body-shape-rejected` **1 →
+0** and `--shape-diag` reports zero attributed rejections. Deferred
+`async-function` remains **4**, module-level `body-shape-rejected` is **1**
+after Calendar's exact top-level Date snapshots joined the same host ABI as its
+function bodies, and all post-claim buckets remain empty. The baseline is banked
+at zero, but
+`body-shape-rejected` intentionally remains outside `STRICT_IR_REASONS`: the
+13-file corpus is complete while unsupported real-world shapes still
+legitimately require the direct front-end.
+
+## Implementation Summary
+
+### What was done
+
+- Drove the playground corpus's function-level `body-shape-rejected` bucket
+  from 31 to 0 through bounded IR capabilities for control flow, module
+  bindings, imported calls, first-class callables, host callbacks, Calendar
+  string tables and Date snapshots, and the exact Promise timer-delay shape.
+- Preserved whole-component closure and final-context collision proofs so a
+  late ABI refusal cannot strand an IR-first skipped body.
+- Made Calendar's nine-statement module initializer IR-owned for its exact
+  immediate `new Date().get*()` expressions. Module and function snapshots now
+  share the host Date ABI, removing the UTC/local split found during final
+  review and reducing the module-level corpus residual from 2 to 1.
+- Banked the function-level zero floor while deliberately keeping the generic
+  `body-shape-rejected` reason non-strict: corpus-zero is not proof that every
+  real-world body is IR-lowerable.
+
+### What worked
+
+- Checker- and symbol-certified narrow capabilities kept unsupported variants
+  on the pre-claim path instead of creating new post-claim demotions.
+- Shared callable packing and one finalization boundary let callbacks, Date,
+  and Promise lowering compose deterministically in the same module.
+- The fallback ratchet stayed monotonic: no unintended reason grew, no
+  post-claim class appeared, and Calendar module-init adoption banked an
+  additional module-level decrease.
+
+### What did not work
+
+- Promoting `body-shape-rejected` wholesale to `STRICT_IR_REASONS` at corpus
+  zero was rejected because unsupported source shapes still legitimately need
+  the direct front-end. Strict promotion belongs to the IR-only endgame.
+- The first Calendar Date implementation mixed legacy UTC module state with
+  host-local function snapshots. Final review caught the boundary case; the
+  fix moved exact top-level snapshots onto the same host ABI.
+- Fractional/NaN string-array indexing remains legacy-parity conformance debt.
+  It is not a regression introduced by this migration slice and is not hidden
+  by the zero-fallback claim.
+
+### Files changed
+
+- IR selection, AST lowering, integration, module binding, closure, Date, and
+  Promise-delay planning under `src/ir/`.
+- Final overlay preparation and driver wiring under `src/codegen/`.
+- Focused Calendar, async-delay, callable ABI, module-binding, and inliner
+  regression suites under `tests/`.
+- The fallback baseline, generated IR-adoption record, and this markdown issue.
+
+## Test Results
+
+- Calendar residual suite: 28/28.
+- Async-delay suite: 29/29; callback ABI suite: 29/29; inline-buffer regression:
+  1/1.
+- Integrated focused matrix: 142/142.
+- Equivalence gate: 1,607 passing, the same 36 known failures, zero new
+  regressions.
+- Fallback gate: function body-shape 0, deferred async 4, module-level
+  body-shape 1, and no post-claim demotions.
+- Typecheck and `git diff --check`: pass.

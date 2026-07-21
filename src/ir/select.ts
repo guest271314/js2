@@ -4281,11 +4281,13 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     }
     // Date is native-struct-owned in legacy, while this slice deliberately
     // lowers only checker-certified host snapshots through synthetic extern
-    // imports. Module init and every broader Date shape remain legacy-owned.
-    if (currentSubjectIsModuleInit && ctorName === "Date") {
+    // imports. Exact immediate module-init snapshots share that same host ABI
+    // so a Calendar cannot mix UTC-native module state with local host getters.
+    const hostDateSnapshot = ctorName === "Date" ? currentSelectionOptions?.hostDateSnapshots?.(expr) : undefined;
+    if (currentSubjectIsModuleInit && ctorName === "Date" && !hostDateSnapshot) {
       return shapeNo("expr-new-module-native-date", expr);
     }
-    if (ctorName === "Date" && !currentSelectionOptions?.hostDateSnapshots?.(expr)) {
+    if (ctorName === "Date" && !hostDateSnapshot) {
       return shapeNo("expr-new-date-snapshot-shape", expr);
     }
     if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName))

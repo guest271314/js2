@@ -11,9 +11,12 @@ export interface IrHostDateSnapshotCertification {
 
 export type IrHostDateSnapshotResolver = (expression: ts.NewExpression) => IrHostDateSnapshotCertification | undefined;
 
-function containingTopLevelFunction(node: ts.Node): ts.FunctionDeclaration | undefined {
+type IrHostDateSnapshotOwner = ts.FunctionDeclaration | ts.SourceFile;
+
+function containingTopLevelOwner(node: ts.Node): IrHostDateSnapshotOwner | undefined {
   let current: ts.Node | undefined = node.parent;
   while (current && !ts.isFunctionLike(current) && !ts.isSourceFile(current)) current = current.parent;
+  if (current && ts.isSourceFile(current)) return current;
   return current && ts.isFunctionDeclaration(current) && current.body && ts.isSourceFile(current.parent)
     ? current
     : undefined;
@@ -21,7 +24,7 @@ function containingTopLevelFunction(node: ts.Node): ts.FunctionDeclaration | und
 
 function isExactGetterCall(
   receiver: ts.Expression,
-  owner: ts.FunctionDeclaration,
+  owner: IrHostDateSnapshotOwner,
   checker: ts.TypeChecker,
 ): ts.CallExpression | undefined {
   const access = receiver.parent;
@@ -40,7 +43,7 @@ function isExactGetterCall(
     call.questionDotToken ||
     (call.typeArguments?.length ?? 0) !== 0 ||
     call.arguments.length !== 0 ||
-    containingTopLevelFunction(call) !== owner
+    containingTopLevelOwner(call) !== owner
   ) {
     return undefined;
   }
@@ -52,9 +55,11 @@ function isExactGetterCall(
  * Certify the intentionally tiny host Date snapshot surface used by Calendar.
  * A snapshot is either an immediate `new Date().get*()` receiver or a `const`
  * local used only by zero-argument getDate/getMonth/getFullYear calls in the
- * same top-level function. Aliases, escapes, writes, optional calls, arguments,
- * unsupported methods, nested-function uses, and shadowed Date constructors
- * all reject before an IR claim.
+ * same top-level function. Module init additionally admits only the immediate
+ * `new Date().get*()` form, so it needs no externref-backed module storage.
+ * Aliases, escapes, writes, optional calls, arguments, unsupported methods,
+ * nested-function uses, and shadowed Date constructors all reject before an
+ * IR claim.
  */
 export function makeIrHostDateSnapshotResolver(checker: ts.TypeChecker): IrHostDateSnapshotResolver {
   const cache = new WeakMap<ts.NewExpression, IrHostDateSnapshotCertification | null>();
@@ -83,8 +88,8 @@ export function makeIrHostDateSnapshotResolver(checker: ts.TypeChecker): IrHostD
         cache.set(expression, null);
         return undefined;
       }
-      const owner = containingTopLevelFunction(expression);
-      if (!owner?.body) {
+      const owner = containingTopLevelOwner(expression);
+      if (!owner) {
         cache.set(expression, null);
         return undefined;
       }
@@ -102,6 +107,10 @@ export function makeIrHostDateSnapshotResolver(checker: ts.TypeChecker): IrHostD
         }
         getterCalls.add(direct);
       } else {
+        if (ts.isSourceFile(owner)) {
+          cache.set(expression, null);
+          return undefined;
+        }
         if (!ts.isIdentifier(variable.name)) {
           cache.set(expression, null);
           return undefined;
@@ -131,7 +140,7 @@ export function makeIrHostDateSnapshotResolver(checker: ts.TypeChecker): IrHostD
           }
           ts.forEachChild(node, visit);
         };
-        ts.forEachChild(owner.body, visit);
+        ts.forEachChild(owner.body!, visit);
         if (invalidUse || getterCalls.size === 0) {
           cache.set(expression, null);
           return undefined;

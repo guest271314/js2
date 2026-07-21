@@ -6,7 +6,7 @@ import type { IrPromiseDelayLoweringPlans } from "../ir/promise-delay-lowering.j
 import type { IrSelection } from "../ir/select.js";
 import type { ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
-import { collectLocalCallEdges } from "./ir-first-gate.js";
+import { collectLocalCallEdges, MODULE_INIT_CALLER } from "./ir-first-gate.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 
 /** Demote both directions of a selected local-call component before legacy bodies are discarded. */
@@ -133,6 +133,33 @@ const HOST_DATE_IMPORT_SIGNATURES = new Map<string, HostDateImportSignature>([
   ["Date_getFullYear", { params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
 ]);
 
+function hasSelectedModuleInit(selection: IrSelection): boolean {
+  return selection.moduleInit?.reason === null && selection.moduleInit.stmtCount > 0;
+}
+
+function closeIrBlockedModuleComponent(sourceFile: ts.SourceFile, selection: IrSelection): IrSelection {
+  const moduleCallees = collectLocalCallEdges(sourceFile).get(MODULE_INIT_CALLER);
+  if (moduleCallees && moduleCallees.size > 0) {
+    return closeIrBlockedComponent(sourceFile, selection, moduleCallees);
+  }
+  return { ...selection, moduleInit: undefined };
+}
+
+function hostDateOwnerIsSelected(selection: IrSelection, owner: string): boolean {
+  return owner === MODULE_INIT_CALLER ? hasSelectedModuleInit(selection) : selection.funcs.has(owner);
+}
+
+function closeBlockedHostDateOwners(
+  sourceFile: ts.SourceFile,
+  selection: IrSelection,
+  blockedFunctions: ReadonlySet<string>,
+  moduleInitBlocked: boolean,
+): IrSelection {
+  let retained = moduleInitBlocked ? closeIrBlockedModuleComponent(sourceFile, selection) : selection;
+  if (blockedFunctions.size > 0) retained = closeIrBlockedComponent(sourceFile, retained, blockedFunctions);
+  return retained;
+}
+
 /** Materialise and prove Calendar's synthetic host-Date ABI as one late-import batch. */
 export function prepareHostDateSnapshotLowering(
   ctx: CodegenContext,
@@ -142,27 +169,32 @@ export function prepareHostDateSnapshotLowering(
 ): IrSelection {
   if (importsByOwner.size === 0) return selection;
   const blocked = new Set<string>();
+  let moduleInitBlocked = false;
 
   // Prove every existing occupant before mutation so a wrong Date_get* name
   // cannot leave a partial Date_new import on the legacy fallback path.
   for (const [owner, names] of importsByOwner) {
-    if (!selection.funcs.has(owner)) continue;
+    if (!hostDateOwnerIsSelected(selection, owner)) continue;
     for (const name of names) {
       const signature = HOST_DATE_IMPORT_SIGNATURES.get(name);
       if (
         !signature ||
         (ctx.funcMap.has(name) && !hasExactEnvFunctionImport(ctx, name, signature.params, signature.results))
       ) {
-        blocked.add(owner);
+        if (owner === MODULE_INIT_CALLER) moduleInitBlocked = true;
+        else blocked.add(owner);
         break;
       }
     }
   }
 
-  const retained = blocked.size === 0 ? selection : closeIrBlockedComponent(sourceFile, selection, blocked);
+  const retained =
+    blocked.size === 0 && !moduleInitBlocked
+      ? selection
+      : closeBlockedHostDateOwners(sourceFile, selection, blocked, moduleInitBlocked);
   const needed = new Set<string>();
   for (const [owner, names] of importsByOwner) {
-    if (!retained.funcs.has(owner)) continue;
+    if (!hostDateOwnerIsSelected(retained, owner)) continue;
     for (const name of names) needed.add(name);
   }
   let requestedLateImport = false;
@@ -174,16 +206,19 @@ export function prepareHostDateSnapshotLowering(
   if (requestedLateImport) flushLateImportShifts(ctx, null);
 
   for (const [owner, names] of importsByOwner) {
-    if (!retained.funcs.has(owner)) continue;
+    if (!hostDateOwnerIsSelected(retained, owner)) continue;
     for (const name of names) {
       const signature = HOST_DATE_IMPORT_SIGNATURES.get(name)!;
       if (!hasExactEnvFunctionImport(ctx, name, signature.params, signature.results)) {
-        blocked.add(owner);
+        if (owner === MODULE_INIT_CALLER) moduleInitBlocked = true;
+        else blocked.add(owner);
         break;
       }
     }
   }
-  return blocked.size === 0 ? retained : closeIrBlockedComponent(sourceFile, retained, blocked);
+  return blocked.size === 0 && !moduleInitBlocked
+    ? retained
+    : closeBlockedHostDateOwners(sourceFile, retained, blocked, moduleInitBlocked);
 }
 
 function hasFunctionNameOccupant(ctx: CodegenContext, name: string): boolean {

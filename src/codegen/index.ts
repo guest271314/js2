@@ -46,6 +46,7 @@ import type {
 } from "../ir/ast-lowering-plans.js";
 import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../ir/host-extern.js"; // (#2856/#3214)
 import { makeIrHostDateSnapshotResolver } from "../ir/host-date.js";
+import { collectModuleInitPopulation, MODULE_INIT_UNIT_NAME } from "../ir/module-init.js";
 import { makeIrPromiseDelayResolver } from "../ir/promise-delay.js";
 import {
   buildIrPromiseDelayLoweringPlans,
@@ -1497,6 +1498,9 @@ const STRICT_IR_REASONS: ReadonlySet<IrFallbackReason> = new Set<IrFallbackReaso
 // promoted to strict ONLY once it is genuinely UNREACHABLE in the IR (i.e. the
 // IR is now expected to always claim+lower that construct, so a rejection is a
 // bug) — real #2855-family adoption work, reason by reason, not a doc flip.
+// #2856 reached corpus-zero for `body-shape-rejected` on 2026-07-21, but the
+// reason remains non-strict under this rule: unsupported real-world bodies are
+// still expected to route through the direct front-end.
 // The intended promotion order once each becomes genuinely unreachable
 // (cheapest first, see plan/log/ir-adoption.md):
 //   "param-type-not-resolvable",
@@ -2178,10 +2182,9 @@ function planIrOverlay(
     }
   }
   if (resolveHostDateSnapshot) {
-    for (const [ownerName, declaration] of declByName) {
-      if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
+    const collectHostDateImports = (ownerName: string, root: ts.Node): void => {
       const visit = (node: ts.Node): void => {
-        if (node !== declaration && ts.isFunctionLike(node)) return;
+        if (node !== root && ts.isFunctionLike(node)) return;
         if (ts.isNewExpression(node)) {
           const certified = resolveHostDateSnapshot(node);
           if (certified) {
@@ -2196,7 +2199,16 @@ function planIrOverlay(
         }
         ts.forEachChild(node, visit);
       };
-      visit(declaration.body);
+      visit(root);
+    };
+    for (const [ownerName, declaration] of declByName) {
+      if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
+      collectHostDateImports(ownerName, declaration.body);
+    }
+    if (safeSelection.moduleInit?.reason === null && safeSelection.moduleInit.stmtCount > 0) {
+      for (const statement of collectModuleInitPopulation(ast.sourceFile)) {
+        collectHostDateImports(MODULE_INIT_UNIT_NAME, statement);
+      }
     }
   }
   return {

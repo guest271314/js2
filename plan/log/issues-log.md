@@ -529,3 +529,4 @@ sprint: 0
 | 3368 | 2026-07-17 | Close the 17 project-runner residuals in the deterministic 50-test array sample | Current |
 | 3369 | 2026-07-17 | Close the original-harness parity gap in the deterministic 50-test array sample | Current |
 | 3370 | 2026-07-17 | Make the original Test262 harness authoritative for project-runner verdicts | Current |
+| 2856 | 2026-07-21 | IR body-shape fallback corpus to zero | Sprint 73 |

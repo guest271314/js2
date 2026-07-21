@@ -120,6 +120,80 @@ describe("#2856 Calendar residual lowering", () => {
     expect(constructions).toBe(2);
   });
 
+  it("uses the same host Date snapshot ABI in module init and function bodies", async () => {
+    const result = await tracked(`
+      let moduleYear = new Date().getFullYear();
+      export function years(): number {
+        return moduleYear * 10000 + new Date().getFullYear();
+      }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(result.binary)).toBe(true);
+    expect(result.irCompiledFuncs ?? []).toEqual(expect.arrayContaining(["<module-init>", "years"]));
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(dateImportNames(result)).toEqual(["Date_getFullYear", "Date_new"]);
+
+    const imports = buildImports(result.imports, undefined, result.stringPool);
+    const snapshot = {};
+    let constructions = 0;
+    imports.env.Date_new = () => {
+      constructions++;
+      return snapshot;
+    };
+    imports.env.Date_getFullYear = (value: object) => {
+      expect(value).toBe(snapshot);
+      return 2024;
+    };
+    const { instance } = await WebAssembly.instantiate(result.binary, imports);
+    imports.setExports?.(instance.exports as Record<string, Function>);
+    expect((instance.exports.years as () => number)()).toBe(20242024);
+    expect(constructions).toBe(2);
+  });
+
+  it("materializes the host Date ABI for a module-init-only snapshot", async () => {
+    const result = await tracked(`
+      let moduleYear = new Date().getFullYear();
+      export function years(): number { return moduleYear; }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(result.binary)).toBe(true);
+    expect(result.irCompiledFuncs ?? []).toContain("<module-init>");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(dateImportNames(result)).toEqual(["Date_getFullYear", "Date_new"]);
+  });
+
+  it.each(["Date_new", "Date_getFullYear"])("demotes a module-init-only snapshot when %s is occupied", async (name) => {
+    const result = await tracked(`
+        function ${name}(): number { return 1; }
+        let moduleYear = new Date().getFullYear();
+        export function years(): number { return moduleYear; }
+      `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(result.binary)).toBe(true);
+    expect(result.irCompiledFuncs ?? []).not.toContain("<module-init>");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(dateImportNames(result)).toEqual([]);
+  });
+
+  it("closes module-init callees when a Date import collision demotes the module", async () => {
+    const result = await tracked(`
+      function Date_new(): number { return 1; }
+      function helper(): number { return 7; }
+      let moduleYear = new Date().getFullYear() + helper();
+      export function years(): number { return moduleYear; }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(result.binary)).toBe(true);
+    expect(result.irCompiledFuncs ?? []).not.toContain("<module-init>");
+    expect(result.irCompiledFuncs ?? []).not.toContain("helper");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(dateImportNames(result)).toEqual([]);
+  });
+
   it.each([
     ["constructor argument", `const d = new Date(0); return d.getDate();`],
     ["unsupported getter", `const d = new Date(); return d.getTime();`],
