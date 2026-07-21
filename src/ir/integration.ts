@@ -77,6 +77,8 @@ import {
   lowerFunctionAstToIr,
   STRING_METHOD_TABLE,
   type IrFromAstResolver,
+  type IrImportedCallLoweringPlan,
+  type IrTopLevelFunctionValueLoweringPlan,
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
@@ -158,12 +160,19 @@ export interface IrTypeOverrideMap {
   get(name: string): { readonly params: readonly IrType[]; readonly returnType: IrType | null } | undefined;
 }
 
+/** Exact AST-node plans shared by selection and AST-to-IR lowering. */
+export interface IrIntegrationLoweringPlans {
+  readonly importedCalls: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
+  readonly topLevelFunctionValues: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
+}
+
 export function compileIrPathFunctions(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
   selection?: IrSelection,
   overrides?: IrTypeOverrideMap,
   classShapes?: ReadonlyMap<string, IrClassShape>,
+  loweringPlans?: IrIntegrationLoweringPlans,
 ): IrIntegrationReport {
   const moduleBindingResolver = makeIrModuleBindingResolver(ctx.checker, {
     numberStorage: ctx.fast ? "i32" : "f64",
@@ -304,6 +313,8 @@ export function compileIrPathFunctions(
         paramTypeOverrides: o?.params,
         returnTypeOverride: o?.returnType,
         calleeTypes,
+        importedCalls: loweringPlans?.importedCalls,
+        topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
         classShapes,
         // Slice 6 part 4 refactor (#1185): thread the from-ast subset
         // of the IR resolver. Replaces the per-feature `nativeStrings:
@@ -440,6 +451,8 @@ export function compileIrPathFunctions(
               ? { constructorClassShape: classShape }
               : { selfParam: { type: { kind: "class", shape: classShape } as IrType }, returnTypeOverride }),
             calleeTypes,
+            importedCalls: loweringPlans?.importedCalls,
+            topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
             classShapes,
             resolver: fromAstResolver,
             allocRegistry,
@@ -528,6 +541,8 @@ export function compileIrPathFunctions(
         moduleInitUnit: true,
         moduleBindings,
         calleeTypes,
+        importedCalls: loweringPlans?.importedCalls,
+        topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
         classShapes,
         resolver: fromAstResolver,
         allocRegistry,

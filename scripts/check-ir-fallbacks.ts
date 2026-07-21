@@ -52,9 +52,10 @@
  * Corpus: every `.ts` file under `playground/examples/` (excluding `.d.ts`).
  */
 import { readFileSync, writeFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import ts from "typescript";
+import { analyzeFiles } from "../src/checker/index.js";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
 import { makeIrHostGlobalResolver } from "../src/ir/host-extern.js";
@@ -63,12 +64,30 @@ import {
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
 } from "../src/ir/module-bindings.js";
-import { compile } from "../src/index.js";
+import { makeIrImportedFunctionResolver } from "../src/ir/imported-functions.js";
+import { compileFiles } from "../src/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// `analyzeFiles` is also consumed from the published CJS-compatible surface
+// and currently obtains node:path through `require`. The gate executes source
+// directly as ESM, so supply the same Node require binding before compileFiles.
+(globalThis as typeof globalThis & { require?: ReturnType<typeof createRequire> }).require ??= createRequire(
+  import.meta.url,
+);
 const REPO_ROOT = resolve(__dirname, "..");
 const BASELINE_PATH = join(REPO_ROOT, "scripts/ir-fallback-baseline.json");
 const CORPUS_ROOTS = [join(REPO_ROOT, "website/playground/examples")];
+const IMPORTED_HOF_ENTRY_FILES = new Set(
+  [
+    "website/playground/examples/benchmarks.ts",
+    "website/playground/examples/benchmarks/array.ts",
+    "website/playground/examples/benchmarks/dom.ts",
+    "website/playground/examples/benchmarks/fib.ts",
+    "website/playground/examples/benchmarks/loop.ts",
+    "website/playground/examples/benchmarks/string.ts",
+    "website/playground/examples/benchmarks/style.ts",
+  ].map((file) => resolve(REPO_ROOT, file)),
+);
 
 /** Reasons that must NOT increase vs. baseline. */
 const UNINTENDED: ReadonlySet<IrFallbackReason> = new Set([
@@ -184,13 +203,13 @@ async function aggregate(): Promise<{
 }> {
   const corpus = CORPUS_ROOTS.flatMap(listTsFiles);
 
-  // One in-memory program per file is fine for a 10-file corpus and keeps the
-  // checker scope local. Each file's TypeMap is independent.
+  // One disk-backed program per entry mirrors compileFiles: imports and barrel
+  // re-exports participate in the same checker realm and exact source set.
   const unintended: Partial<Record<IrFallbackReason, number>> = {};
   const deferred: Partial<Record<IrFallbackReason, number>> = {};
-  // #1923 — post-claim demotions, collected from a real `compile()` of each
-  // corpus file (the selector-level `planIrCompilation` below cannot see them
-  // — they happen during build/verify/lower AFTER the selector claims).
+  // #1923 — post-claim demotions, collected from a real `compileFiles()` graph
+  // for each corpus entry (the selector-level `planIrCompilation` below cannot
+  // see them — they happen during build/verify/lower AFTER the selector claims).
   const postClaim = emptyPostClaim();
   const moduleLevel: Partial<Record<IrFallbackReason, number>> = {};
   const moduleLevelInfo = { claimable: 0, empty: 0 };
@@ -198,44 +217,13 @@ async function aggregate(): Promise<{
   const perFile: Array<{ file: string; reasons: Partial<Record<IrFallbackReason, number>> }> = [];
   const shapeDetails: Array<{ file: string; name: string; detail: string }> = [];
 
-  const compilerOptions: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    strict: true,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    skipLibCheck: true,
-    noEmit: true,
-    // (#2856) The host-extern selector arm resolves ambient globals
-    // (`document`, `console`) through the checker — the program needs the
-    // REAL default libs (es + dom) for those `declare var`s to exist. The
-    // previous hand-rolled host declared `lib.d.ts` but had no lib dir on
-    // its search path, so the program ran lib-less and every ambient global
-    // was unresolvable — fine before #2856 (the selector was lib-blind),
-    // WRONG after (the gate would never see host-extern claims the real
-    // compiler makes).
-    lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
-  };
-
   for (const filePath of corpus) {
-    const source = readFileSync(filePath, "utf-8");
-    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.ES2022, true);
-
-    // Build a program over just this file so we can derive a checker for the
-    // type-propagation pass AND (#2856) ambient-global resolution. The
-    // disk-backed default host resolves the bundled typescript lib files;
-    // only `filePath` is served from the pre-parsed in-memory source.
-    const baseHost = ts.createCompilerHost(compilerOptions, /* setParentNodes */ true);
-    const host: ts.CompilerHost = {
-      ...baseHost,
-      getSourceFile: (name, languageVersion, ...rest) => {
-        if (name === filePath) return sf;
-        return baseHost.getSourceFile(name, languageVersion, ...rest);
-      },
-      writeFile: () => {},
-    };
-    const program = ts.createProgram([filePath], compilerOptions, host);
-    const checker = program.getTypeChecker();
-    const sourceFile = program.getSourceFile(filePath) ?? sf;
+    // Use the exact production disk graph and checker that compileFiles uses,
+    // including dependency order and the emitted user-source set.
+    const graph = analyzeFiles(filePath);
+    const checker = graph.checker;
+    const sourceFile = graph.entryFile;
+    const importedFunctions = makeIrImportedFunctionResolver(checker, graph.sourceFiles);
 
     let typeMap;
     try {
@@ -259,6 +247,7 @@ async function aggregate(): Promise<{
         trackFallbacks: true,
         jsHostExterns: true,
         resolveHostGlobal: makeIrHostGlobalResolver(checker),
+        importedFunctions,
         resolveModuleBinding: makeIrModuleBindingResolver(checker, {
           numberStorage: "f64",
           allowHostExterns: true,
@@ -297,18 +286,21 @@ async function aggregate(): Promise<{
       }
     }
 
-    // #1923 — post-claim demotions: compile the file for real and aggregate
-    // `irPostClaimErrors` by kind + normalized message class. A compile that
-    // throws contributes nothing (same tolerance as the selector pass above).
+    // #1923 — post-claim demotions: compile the full production graph for real
+    // and aggregate `irPostClaimErrors` by kind + normalized message class.
     try {
-      const result = await compile(source, { fileName: filePath, experimentalIR: true });
+      const result = await compileFiles(filePath, { experimentalIR: true });
+      if (IMPORTED_HOF_ENTRY_FILES.has(resolve(filePath)) && !(result.irCompiledFuncs ?? []).includes("main")) {
+        throw new Error(`#3214 A+B1 gate invariant: ${relative(REPO_ROOT, filePath)}::main was not emitted through IR`);
+      }
       for (const e of result.irPostClaimErrors ?? []) {
         const kind = (POST_CLAIM_KINDS as readonly string[]).includes(e.kind) ? (e.kind as PostClaimKind) : "lower";
         const cls = normalizeMessageClass(e.message);
         postClaim[kind][cls] = (postClaim[kind][cls] ?? 0) + 1;
       }
-    } catch {
-      // ignore — example-file compile failures are not the gate's concern
+    } catch (error) {
+      if (IMPORTED_HOF_ENTRY_FILES.has(resolve(filePath))) throw error;
+      // Other example-file compile failures are not the gate's concern.
     }
   }
   return { unintended, deferred, postClaim, moduleLevel, moduleLevelInfo, modulePerFile, perFile, shapeDetails };

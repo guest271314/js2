@@ -17,9 +17,12 @@ goal: ir-full-coverage
 parent: 2855
 related: [2856, 1276, 1382]
 loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/closures.ts
   - src/ir/lower.ts
   - src/ir/from-ast.ts
   - src/ir/nodes.ts
+  - src/ir/select.ts
   - src/ir/builder.ts
   - src/codegen/expressions/calls-closures.ts
   - src/ir/integration.ts
@@ -186,6 +189,96 @@ The sequencing is intentional:
   This is the precise invariant: mandatory canonicalization intentionally
   changes the type shape of sources that already lower internal IR closures,
   even if they do not yet expose an `IrType.callable` boundary.
+
+## A+B1 implementation result — imported direct HOF calls (2026-07-21)
+
+The first claim-set widening is complete for the production non-fast multi-file
+host lane. It deliberately combines the two pieces needed by the benchmark entry
+functions: a checker-certified imported direct call (A), and an exact bare
+same-file top-level `FunctionDeclaration` value in a function-typed parameter
+position (B1). The broader arrow/storage/result surface remains deferred.
+
+### Root cause and design
+
+M0 treated every imported call as an external selector boundary, and the IR
+lowerer had no representation for a bare declaration value such as
+`bench_fib`. Text-based import/name checks were insufficient: renamed/default
+imports, barrel aliases, shadowing, reassignment, overloads, and the compiler's
+flat function registry could otherwise select one symbol and lower another.
+
+The implementation therefore uses one realm-wide checker resolver shared by
+selection and overlay planning. It accepts only value named/default imports
+whose alias chain resolves to one non-ambient function body in the exact
+compiled source set. Namespace/import-equals/type-only/external/cyclic or
+ambiguous aliases, overload sets, flat-name collisions, and reassigned/live
+bindings are rejected before claim. Reassignment detection is symbol-exact and
+covers updates, destructuring, and `for-in`/`for-of` assignment targets.
+
+Selection admits a bare function identifier only when it is a same-file
+top-level declaration at an exact, required `FunctionTypeNode` argument
+position and its primitive signature exactly matches. Arrows, aliases/stored
+values, callable results, optional supplied callbacks, generics, rest/spread,
+and extra arguments remain on legacy. Imported calls are symbolic external
+edges, not local call-graph edges; standalone/WASI retain the conservative M0
+boundary.
+
+The overlay records AST-node-keyed symbolic plans (`targetName`, signature,
+defaults, argc requirement), never pre-shift numeric indices. Before lowering,
+it proves each target against the final flat `funcMap`, settles any late
+`__get_undefined` import shift, registers `__argc` when required, and extracts
+the legacy cached function-singleton creation path. IR then emits the same
+lazy `__fn_closure_<target>` / `__fn_tramp_<target>_cached` protocol and packs
+the canonical wrapper as `callable<S>`. A second trampoline finalization pass
+handles declarations created after legacy compilation. Host function
+declarations remain ordinary/non-constructible; the standalone #3371
+constructible-wrapper path is unchanged.
+
+Missing imported arguments mirror legacy: constants are inlined, numeric
+expression defaults use the exact `0x7ff00000deadc0de` signaling-NaN sentinel,
+i32 uses zero plus `__argc`, and host extern/callable carriers use
+`__get_undefined`. Unsupported preparation removes the owner's entire local
+call component before integration, keeping the post-claim channel at zero.
+Cached singleton reuse is provenance-paired: a source function occupying
+`__fn_tramp_<target>_cached` cannot be mistaken for the generated trampoline,
+so A+B1 preparation demotes rather than creating a mismatched cache. Legacy
+value-producing sites instead use the existing per-site `emitFuncRefAsClosure`
+path when the canonical pair is unavailable; this includes reassigned-function
+live-binding seeds, Annex-B bindings, fnctor registration, and identifier
+reads. Void-return expressions share recursive discard lowering through
+parentheses, `void`, conditionals, and comma expressions in final and loop
+early returns. A zero-result imported call outside those proven discarded
+contexts is rejected during planning, before the legacy body can be skipped.
+Fast multi-file overlays remain pre-claim disabled because legacy uses i32 for
+numeric function boundaries while the current IR plans f64; full fast support
+requires a mode-aware boundary plan rather than an unsafe cast.
+
+### Measured result
+
+- `tests/issue-3214-imported-hof.test.ts`: **20/20**. Runtime execution,
+  runtime identity plus one cached singleton, renamed/default/barrel imports,
+  void, constant and expression defaults, host `undefined`, argc semantics,
+  optimize off/on, namespace/storage/arrow/reassigned-callback/live-target/
+  spread/extra/overload negatives, synthetic-trampoline collision demotion,
+  collision-safe reassigned live-binding seeding, recursively wrapped
+  final/loop-early/conditional void-return effects, value-context void-call
+  pre-claim rejection, standalone and fast-mode pins, and zero post-claim
+  demotions.
+- `tests/issue-3214-callable-abi.test.ts`: **11/11**. The B0 canonical callable
+  ABI and mixed wrapper-order proofs remain green.
+- `tests/issue-2138-multi-module-ir-overlay.test.ts`: **6/6**, updated to prove
+  the bounded host import widening while retaining collision, global-script,
+  standalone, class-member, module-init, compileFiles, and compileProject
+  guards.
+- The production fallback gate now compiles disk dependency graphs through
+  `compileFiles`, asserts all seven benchmark entry `main` functions appear in
+  `irCompiledFuncs`, and measures `body-shape-rejected` **12 -> 5**,
+  module-level **2 -> 2**, with **zero** post-claim demotions.
+- The five residual body rejections are exactly: benchmark helper
+  `addBenchCard` (inline arrow; B2), calendar `renderCal`, `onDay`, and `main`,
+  plus async `delay`. This supersedes the older statement above that #3214
+  alone could not move the bucket: the prerequisite imported-call and host DOM
+  capabilities now exist, so the combined A+B1 slice genuinely unlocks the
+  seven benchmark entry functions.
 
 ## Sequenced acceptance criteria
 

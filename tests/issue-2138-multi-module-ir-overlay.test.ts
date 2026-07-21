@@ -2,8 +2,9 @@
 //
 // #2138 M0 — bounded multi-module IR overlay. Multi-source WasmGC compiles
 // legacy bodies first, then lets IR replace only unambiguous top-level function
-// slots. Cross-file imports, class members, module init, and IR-first body
-// skipping remain legacy-owned until their dedicated capabilities land.
+// slots. #3214 A+B1 additionally admits checker-certified host imported direct
+// calls (including exact bare top-level callbacks). Class members, module init,
+// and IR-first body skipping remain legacy-owned.
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -57,7 +58,7 @@ async function instantiate(result: CompileResult): Promise<Record<string, (...ar
 }
 
 describe("#2138 M0 — multi-module top-level IR overlay", () => {
-  it("IR-emits pure functions in dependency and entry while imported calls and module init stay legacy", async () => {
+  it("IR-emits pure functions and certified imported calls while module init stays legacy", async () => {
     const ir = await compileMulti(MULTI_FILES, "./entry.ts", { experimentalIR: true });
     const legacy = await compileMulti(MULTI_FILES, "./entry.ts", { experimentalIR: false });
     expectSuccess(ir, "IR multi compile");
@@ -69,9 +70,9 @@ describe("#2138 M0 — multi-module top-level IR overlay", () => {
     expect(compiled.has("depPure")).toBe(true);
     expect(compiled.has("entryPure")).toBe(true);
 
-    // Capability A is not part of M0: the renamed imported call remains an
-    // external selector edge, and module state/module init remain legacy-owned.
-    expect(compiled.has("callRenamed")).toBe(false);
+    // #3214 A+B1: the checker-certified renamed import is now a symbolic IR
+    // call to the existing legacy/IR target slot. Module state/init stay legacy.
+    expect(compiled.has("callRenamed")).toBe(true);
     expect(compiled.has("readInit")).toBe(false);
     expect(compiled.has("initHelper")).toBe(false);
     expect(compiled.has("<module-init>")).toBe(false);
@@ -118,7 +119,9 @@ describe("#2138 M0 — multi-module top-level IR overlay", () => {
     expect(compiled.has("shared")).toBe(false);
     expect(compiled.has("depCaller")).toBe(false);
     expect(compiled.has("entryCaller")).toBe(false);
-    expect(compiled.has("runDep")).toBe(false);
+    // The imported caller itself is safe: it symbolically calls depCaller's
+    // retained legacy slot and does not join the collided local component.
+    expect(compiled.has("runDep")).toBe(true);
     // The guard is component-local, not a blanket shutdown of either file.
     expect(compiled.has("depLeaf")).toBe(true);
     expect(compiled.has("entryLeaf")).toBe(true);
@@ -203,10 +206,10 @@ describe("#2138 M0 — multi-module top-level IR overlay", () => {
       expectSuccess(legacy, `${label} global-script legacy compile`);
 
       const compiled = new Set(ir.irCompiledFuncs ?? []);
-      // `apply` is checker-resolved across source files even though there is no
-      // import declaration. Patching it behind the legacy `callApply` body used
-      // to make the callable wrapper cast trap at runtime.
-      expect(compiled.has("apply"), `${label}: callable target stays legacy`).toBe(false);
+      // B0's canonical callable ABI makes the target itself safe in host mode.
+      // The caller is still outside A+B1 because this global-script edge has no
+      // supported ESM import binding; standalone remains conservative.
+      expect(compiled.has("apply"), `${label}: callable target mode gate`).toBe(label === "host");
       expect(compiled.has("identity"), `${label}: callable-result target stays legacy`).toBe(false);
       expect(compiled.has("callApply"), `${label}: cross-file caller stays legacy`).toBe(false);
       expect(compiled.has("callIdentity"), `${label}: callable-result caller stays legacy`).toBe(false);
@@ -289,7 +292,7 @@ describe("#2138 M0 — multi-module top-level IR overlay", () => {
         const compiled = new Set(result.irCompiledFuncs ?? []);
         expect(compiled.has("depPure"), `${label}: dependency anti-vacuity`).toBe(true);
         expect(compiled.has("entryPure"), `${label}: entry anti-vacuity`).toBe(true);
-        expect(compiled.has("callRenamed"), `${label}: imported caller stays legacy`).toBe(false);
+        expect(compiled.has("callRenamed"), `${label}: imported caller is IR-emitted`).toBe(true);
         expect(compiled.has("initHelper"), `${label}: module-init callee stays legacy`).toBe(false);
         expect(compiled.has("<module-init>"), `${label}: shared module init stays legacy`).toBe(false);
         expect(result.irPostClaimErrors ?? []).toEqual([]);

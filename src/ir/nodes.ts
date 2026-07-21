@@ -686,6 +686,8 @@ export type IrBinop =
  */
 export type IrUnop =
   | "f64.neg"
+  // (#3214 A) Bit-exact caller-side sNaN sentinel for expression defaults.
+  | "f64.reinterpret_i64"
   | "i32.eqz"
   | "i32.trunc_sat_f64_s"
   // (#3168) boolean → f64 ToNumber for unary `+`/`-` (§7.1.4: false/true →
