@@ -14,6 +14,9 @@ model: opus
 sprint: current
 horizon: xl
 related: [3422, 3328]
+loc-budget-allow:
+  - src/codegen/binary-ops.ts
+  - src/runtime.ts
 ---
 
 # #3481 — bigint/symbol coercion fidelity (value substrate)
