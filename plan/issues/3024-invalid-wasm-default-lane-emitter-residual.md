@@ -716,3 +716,68 @@ cross-statement eval-promotion family (broad-impact, needs a full-CI window) and
 `__anon_#_method` global-get numeric desync, `Parent_new` tail-call, `__new_function_#`
 funcref-cast). The 8 files here still need genuine resizable-ArrayBuffer support
 to reach `pass`.
+
+---
+
+## Fresh measurement + LARGEST cluster root-caused (dev-serve, 2026-07-22) — HANDOFF
+
+Re-harvested current `origin/main` via `runTest262File` over the baseline-jsonl
+`compile_error` ∪ `fail`-with-`reached_test:false` candidates (the earlier
+`compile_error`-only harvest MISSED the real bucket — invalid-Wasm modules fail
+at **instantiate**, so the runner buckets them as `fail`, NOT `compile_error`).
+
+**Live count: 202 invalid-Wasm files** (the prior "78" undercounted for that
+reason; main also moved). The banked `fN.ne` eval-promotion family and the
+`object/dstr async-gen-meth` family now **PASS** — already fixed, do not re-chase.
+
+### Largest cluster: 68 files, `any.convert_extern expected externref, found struct.get of type funcref`
+
+ALL 68 are `built-ins/Function/prototype/toString/*`, sharing the harness
+`nativeFunctionMatcher.js`, failing at instantiate in a nested closure
+(`__closure_N`). The invalid instruction sequence (WAT-confirmed) is
+`struct.get <closureStructType> 0` (a closure's field-0 **funcref** code
+pointer) fed straight into `any.convert_extern`. `any.convert_extern` takes an
+**externref**; a funcref is a separate hierarchy → invalid. Root-cause CLASS:
+**a captured closure value coerced to `any`/anyref wrongly extracts its funcref
+field-0 instead of treating the closure STRUCT ref as the anyref** — the mirror
+of the landed slice-4 `extern.convert_any`-on-funcref bug, but for the reverse
+conversion. `coercion-plan.ts` already has correct `funcref→anyref` (no-op, L193)
+and `funcref→externref` (L189) arms, so the bug is a **type-tracking desync**
+upstream: some site reports a funcref-producing closure read as `externref`, then
+requests the externref→anyref coercion (`any.convert_extern`, coercion-plan.ts
+L163).
+
+### KEY diagnostic — it is LAYOUT-DEPENDENT (funcIdx/closure-index shift class)
+
+Bisected the confirmed failing assembly down to `nativeFunctionMatcher.js`
+**alone**, then reduced further. The trigger is **module-function-layout
+sensitive**, not source-shape sensitive:
+
+| variant                                                     | result           |
+| ---------------------------------------------------------- | ---------------- |
+| raw `nativeFunctionMatcher.js`, NO exported function        | **INVALID-FUNCREF** |
+| same + any `export function test(){ return 1; }`            | **VALID**        |
+| same + a call to `assertToStringOrNativeFunction`           | **VALID**        |
+| byte-identical `validateNativeFunctionSource` alone + call  | VALID            |
+| byte-identical all-three funcs (17-220) + export            | VALID            |
+
+Adding **one exported function shifts the function-index space and the bug
+vanishes.** This is the `addUnionImports` / late-import funcIdx-shift class
+(cf. `reference_1461`, `project_standalone_hostimport_gate_index_shift`,
+`project_type_index_shift_and_deadelim`): the closure's struct-type resolution or
+the coercion's reported type depends on the function-index layout, so whether the
+funcref read is (mis)labelled externref depends on how many funcs/exports the
+module has. In real test262 the assembled harness+test hits an invalid layout
+(all 68 reproduce); a trivial reconstruction lands on a valid layout, which is
+why minimal repros keep validating.
+
+### Recommendation (why NOT landed here)
+
+This is a **hard, layout-fragile funcIdx/closure-type-index desync** in the
+closure-value→anyref coercion path — a senior-level deep fix (trace where a
+closure read reports `externref` while emitting a funcref `struct.get 0`, gated by
+module layout), needing full-CI validation for the 68-file blast radius. It is
+NOT the "quick per-root-cause singleton" this issue's residual was framed as.
+Confirmed repro for the next owner: `[assert.js, sta.js, nativeFunctionMatcher.js,
+<any toString test>]` OR the raw `nativeFunctionMatcher.js` with NO exported
+function. Suggest routing to `senior-developer`.
