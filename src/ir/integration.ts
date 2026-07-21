@@ -23,6 +23,7 @@
 // That's the whole point of the symbolic-ref design — spec #1131 §1.2.
 
 import { ts } from "../ts-api.js";
+import { makeIrHostDateSnapshotResolver } from "./host-date.js";
 
 import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
@@ -76,10 +77,8 @@ import {
   IR_STRING_COMPARE_FN,
   lowerFunctionAstToIr,
   STRING_METHOD_TABLE,
+  type AstToIrOptions,
   type IrFromAstResolver,
-  type IrHostVoidCallbackLoweringPlan,
-  type IrImportedCallLoweringPlan,
-  type IrTopLevelFunctionValueLoweringPlan,
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
@@ -162,11 +161,9 @@ export interface IrTypeOverrideMap {
 }
 
 /** Exact AST-node plans shared by selection and AST-to-IR lowering. */
-export interface IrIntegrationLoweringPlans {
-  readonly importedCalls: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
-  readonly topLevelFunctionValues: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
-  readonly hostVoidCallbacks: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
-}
+export type IrIntegrationLoweringPlans = Required<
+  Pick<AstToIrOptions, "importedCalls" | "topLevelFunctionValues" | "hostVoidCallbacks" | "promiseDelays">
+>;
 
 export function compileIrPathFunctions(
   ctx: CodegenContext,
@@ -188,11 +185,15 @@ export function compileIrPathFunctions(
     planIrCompilation(sourceFile, {
       experimentalIR: true,
       jsHostExterns: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
+      ...(!(ctx.standalone || ctx.wasi || ctx.strictNoHostImports)
+        ? { hostDateSnapshots: makeIrHostDateSnapshotResolver(ctx.checker) }
+        : {}),
       resolveModuleBinding: moduleBindingResolver,
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
+      supportsHostStringArrayLiterals: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports) && !ctx.nativeStrings,
     });
   // (#3142 Slice 2) A claimable, non-empty module-init unit keeps the
   // pipeline alive even with no claimed functions/class members.
@@ -318,6 +319,7 @@ export function compileIrPathFunctions(
         importedCalls: loweringPlans?.importedCalls,
         topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
         hostVoidCallbacks: loweringPlans?.hostVoidCallbacks,
+        promiseDelays: loweringPlans?.promiseDelays,
         classShapes,
         // Slice 6 part 4 refactor (#1185): thread the from-ast subset
         // of the IR resolver. Replaces the per-feature `nativeStrings:
@@ -793,6 +795,7 @@ export function compileIrPathFunctions(
   // resolver path uniform.
   // -------------------------------------------------------------------------
   preregisterStringSupport(ctx, readyForLower);
+  preregisterHostDateSnapshotSupport(ctx, readyForLower);
 
   // -------------------------------------------------------------------------
   // Slice 6 part 3 (#1182) — iterator host imports.
@@ -1394,7 +1397,21 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
     // `(receiver, args...)` shape).
     getExternClassInfo(className: string) {
       const info = ctx.externClasses.get(className);
-      if (!info) return undefined;
+      if (!info) {
+        if (className !== "Date" || ctx.standalone || ctx.wasi || ctx.strictNoHostImports) return undefined;
+        const externref = { kind: "externref" } as const;
+        const f64 = { kind: "f64" } as const;
+        return {
+          className: "Date",
+          constructorParams: [],
+          methods: new Map([
+            ["getDate", { params: [externref], results: [f64] }],
+            ["getMonth", { params: [externref], results: [f64] }],
+            ["getFullYear", { params: [externref], results: [f64] }],
+          ]),
+          properties: new Map(),
+        };
+      }
       return {
         className: info.className,
         constructorParams: info.constructorParams,
@@ -1953,6 +1970,83 @@ function makeResolver(
 
 interface BuiltFnRef {
   readonly fn: IrFunction;
+}
+
+interface HostDateImportSpec {
+  readonly name: string;
+  readonly params: readonly ValType[];
+  readonly results: readonly ValType[];
+}
+
+const HOST_DATE_IMPORTS = new Map<string, HostDateImportSpec>([
+  ["Date_new", { name: "Date_new", params: [], results: [{ kind: "externref" }] }],
+  ["Date_getDate", { name: "Date_getDate", params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
+  ["Date_getMonth", { name: "Date_getMonth", params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
+  ["Date_getFullYear", { name: "Date_getFullYear", params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
+]);
+
+function exactHostDateImport(ctx: CodegenContext, spec: HostDateImportSpec): boolean {
+  const idx = ctx.funcMap.get(spec.name);
+  if (idx === undefined || idx < 0 || idx >= ctx.numImportFuncs) return false;
+  let functionIndex = 0;
+  for (const imported of ctx.mod.imports) {
+    if (imported.desc.kind !== "func") continue;
+    if (functionIndex++ !== idx) continue;
+    if (imported.module !== "env" || imported.name !== spec.name) return false;
+    const type = ctx.mod.types[imported.desc.typeIdx];
+    if (
+      type?.kind !== "func" ||
+      type.params.length !== spec.params.length ||
+      type.results.length !== spec.results.length
+    ) {
+      return false;
+    }
+    return (
+      type.params.every((param, i) => param.kind === spec.params[i]!.kind) &&
+      type.results.every((result, i) => result.kind === spec.results[i]!.kind)
+    );
+  }
+  return false;
+}
+
+/** Register only the synthetic host-Date symbols present in built IR. */
+function preregisterHostDateSnapshotSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  const needed = new Set<string>();
+  for (const entry of fns) {
+    for (const block of entry.fn.blocks) {
+      for (const instr of block.instrs) {
+        forEachInstrDeep(instr, (nested) => {
+          if (nested.kind === "extern.new" && nested.className === "Date") needed.add("Date_new");
+          if (nested.kind === "extern.call" && nested.className === "Date") {
+            needed.add(`Date_${nested.method}`);
+          }
+        });
+      }
+    }
+  }
+  if (needed.size === 0) return;
+  if (ctx.standalone || ctx.wasi || ctx.strictNoHostImports) {
+    throw new Error("ir/integration: synthetic Date snapshots require the JS host");
+  }
+
+  let added = false;
+  for (const name of needed) {
+    const spec = HOST_DATE_IMPORTS.get(name);
+    if (!spec) throw new Error(`ir/integration: unsupported synthetic Date import ${name}`);
+    if (!ctx.funcMap.has(name)) added = true;
+    ensureLateImport(ctx, spec.name, [...spec.params], [...spec.results]);
+  }
+  if (added) flushLateImportShifts(ctx, null);
+
+  // `ensureLateImport` intentionally treats an occupied funcMap name as a
+  // lookup. Refuse user-defined or wrong-signature occupants rather than
+  // resolving them as the ambient Date ABI.
+  for (const name of needed) {
+    const spec = HOST_DATE_IMPORTS.get(name)!;
+    if (!exactHostDateImport(ctx, spec)) {
+      throw new Error(`ir/integration: ${name} is not the exact env host-Date import`);
+    }
+  }
 }
 
 /**

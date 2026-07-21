@@ -116,6 +116,66 @@ describe("#3214 B2 — ambient void host callbacks", () => {
     expect(() => Reflect.construct(listener, [])).toThrow(TypeError);
   });
 
+  it("keeps multiple certified callback sites distinct in source order", async () => {
+    const result = await compileHostCallback(`
+      export function install(
+        target: EventTarget,
+        numberSink: HTMLElement,
+        textSink: HTMLElement,
+        value: number,
+        label: string,
+      ): void {
+        target.addEventListener("number", () => {
+          numberSink.textContent = value.toString();
+        });
+        target.addEventListener("text", () => {
+          textSink.textContent = label;
+        });
+      }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(result.binary)).toBe(true);
+    expect(result.irCompiledFuncs ?? []).toContain("install");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.wat).toContain("(func $install__closure_0");
+    expect(result.wat).toContain("(func $install__closure_1");
+
+    const imports = buildImports(result.imports, undefined, result.stringPool);
+    const { instance } = await WebAssembly.instantiate(result.binary, imports);
+    imports.setExports?.(instance.exports as Record<string, Function>);
+
+    const listeners: Function[] = [];
+    const eventTypes: string[] = [];
+    const target = {
+      addEventListener(type: string, listener: Function): void {
+        eventTypes.push(type);
+        listeners.push(listener);
+      },
+    };
+    const numberSink = { textContent: "" };
+    const textSink = { textContent: "" };
+    (
+      instance.exports.install as (
+        target: object,
+        numberSink: object,
+        textSink: object,
+        value: number,
+        label: string,
+      ) => void
+    )(target, numberSink, textSink, 42, "second");
+
+    expect(eventTypes).toEqual(["number", "text"]);
+    expect(listeners).toHaveLength(2);
+    expect(listeners[0]).not.toBe(listeners[1]);
+    expect(listeners[0]!()).toBeUndefined();
+    expect(numberSink.textContent).toBe("42");
+    expect(textSink.textContent).toBe("");
+    expect(listeners[1]!()).toBeUndefined();
+    expect(numberSink.textContent).toBe("42");
+    expect(textSink.textContent).toBe("second");
+  });
+
   it.each([
     ["wrong method", `target.removeEventListener("tick", () => { sink.textContent = "x"; });`],
     ["options argument", `target.addEventListener("tick", () => { sink.textContent = "x"; }, false);`],
@@ -133,14 +193,52 @@ describe("#3214 B2 — ambient void host callbacks", () => {
       `target.addEventListener("tick", () => { const nested = (): number => 1; sink.textContent = nested().toString(); });`,
     ],
     [
-      "multiple callback sites",
-      `target.addEventListener("tick", () => { sink.textContent = "first"; }); target.addEventListener("tock", () => { sink.textContent = "second"; });`,
-    ],
-    [
       "lexical arguments",
       `target.addEventListener("tick", () => { sink.textContent = arguments.length.toString(); });`,
     ],
   ] as const)("rejects %s before the IR claim", async (_label, body) => {
+    const result = await compileHostCallback(`
+      export function install(target: EventTarget, sink: HTMLElement, value: number): void {
+        ${body}
+      }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irCompiledFuncs ?? []).not.toContain("install");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+  });
+
+  it.each([
+    [
+      "nested function before",
+      `function nested(): number { return 1; }
+       target.addEventListener("tick", () => { sink.textContent = value.toString(); });
+       nested();`,
+    ],
+    [
+      "nested function after",
+      `target.addEventListener("tick", () => { sink.textContent = value.toString(); });
+       function nested(): number { return 1; }
+       nested();`,
+    ],
+    [
+      "ordinary arrow before",
+      `const ordinary = (): number => 1;
+       target.addEventListener("tick", () => { sink.textContent = value.toString(); });
+       ordinary();`,
+    ],
+    [
+      "ordinary arrow after",
+      `target.addEventListener("tick", () => { sink.textContent = value.toString(); });
+       const ordinary = (): number => 1;
+       ordinary();`,
+    ],
+    [
+      "non-certified host callback",
+      `target.addEventListener("tick", () => { sink.textContent = value.toString(); });
+       target.addEventListener("tock", (_event: Event) => { sink.textContent = "invalid"; });`,
+    ],
+  ] as const)("rejects a %s sibling before the IR claim", async (_label, body) => {
     const result = await compileHostCallback(`
       export function install(target: EventTarget, sink: HTMLElement, value: number): void {
         ${body}
@@ -172,6 +270,20 @@ describe("#3214 B2 — ambient void host callbacks", () => {
       function install__closure_0(): number { return 0; }
       export function install(target: EventTarget, sink: HTMLElement): void {
         target.addEventListener("tick", () => { sink.textContent = "x"; });
+      }
+    `);
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irCompiledFuncs ?? []).not.toContain("install");
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+  });
+
+  it("demotes before lowering when a later lifted name is occupied", async () => {
+    const result = await compileHostCallback(`
+      function install__closure_1(): number { return 0; }
+      export function install(target: EventTarget, sink: HTMLElement, value: number): void {
+        target.addEventListener("tick", () => { sink.textContent = value.toString(); });
+        target.addEventListener("tock", () => { sink.textContent = "second"; });
       }
     `);
 

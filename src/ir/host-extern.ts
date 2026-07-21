@@ -14,7 +14,7 @@ import { ts } from "../ts-api.js";
 import { isExternalDeclaredClass } from "../checker/type-mapper.js";
 
 /**
- * #3214 B2 — one checker-certified host callback site.
+ * #3214 B2 / #2856 Calendar — one checker-certified host callback site.
  *
  * The capture list is declaration-identity based. Selection uses it to prove
  * the names are live in its lexical scope, while lowering rechecks the same
@@ -109,7 +109,7 @@ function symbolIsWrittenIn(
 /**
  * Build the exact B2 resolver shared by production planning and the fallback
  * gate. It deliberately recognises only the browser-host EventTarget method
- * shape needed by the benchmark helper:
+ * shape needed by the benchmark helper and calendar:
  *
  *   ambientExtern.addEventListener(type, () => { ... })
  *
@@ -152,22 +152,31 @@ export function makeIrHostVoidCallbackResolver(checker: ts.TypeChecker): IrHostV
         return undefined;
       }
 
-      // Keep B2's synthesized name deterministic: the benchmark owner has
-      // exactly one runtime closure, so lowering must mint `<owner>__closure_0`.
-      // A sibling closure/function/class would consume another lift ordinal
-      // whose collision proof is outside this slice. Nested declarations in
-      // the callback are rejected again by the lexical scan below.
-      let hasOtherRuntimeDeclaration = false;
-      const findOtherRuntimeDeclaration = (node: ts.Node): void => {
-        if (hasOtherRuntimeDeclaration || node === callback) return;
+      // Multiple sibling callback sites are safe when they are the owner's
+      // only runtime declarations: source-order lowering then assigns the
+      // contiguous `<owner>__closure_N` names recorded by the overlay plan.
+      // This is intentionally only a syntactic sibling screen. Each sibling
+      // is independently checker-certified when selection reaches its call;
+      // a malformed sibling therefore rejects the owner before claim.
+      let unsupportedSiblingRuntime = false;
+      const visitSiblingRuntime = (node: ts.Node): void => {
+        if (unsupportedSiblingRuntime || node === callback) return;
         if (ts.isFunctionLike(node) || ts.isClassLike(node)) {
-          hasOtherRuntimeDeclaration = true;
+          const parent = node.parent;
+          const isSiblingHostCallbackCandidate =
+            ts.isArrowFunction(node) &&
+            ts.isCallExpression(parent) &&
+            parent.arguments[1] === node &&
+            ts.isExpressionStatement(parent.parent) &&
+            ts.isPropertyAccessExpression(parent.expression) &&
+            parent.expression.name.text === "addEventListener";
+          if (!isSiblingHostCallbackCandidate) unsupportedSiblingRuntime = true;
           return;
         }
-        ts.forEachChild(node, findOtherRuntimeDeclaration);
+        ts.forEachChild(node, visitSiblingRuntime);
       };
-      ts.forEachChild(owner.body, findOtherRuntimeDeclaration);
-      if (hasOtherRuntimeDeclaration) return undefined;
+      ts.forEachChild(owner.body, visitSiblingRuntime);
+      if (unsupportedSiblingRuntime) return undefined;
 
       const resolved = checker.getResolvedSignature(call);
       const declaration = resolved?.declaration;
@@ -191,11 +200,15 @@ export function makeIrHostVoidCallbackResolver(checker: ts.TypeChecker): IrHostV
       // `textContent` parameter plus `sink.textContent`). Without this guard,
       // lowering would mistake the property name for an extra capture even
       // though the checker correctly resolves it to the ambient property.
-      const ownerBindingsByName = new Map<string, ts.Symbol>();
+      const ownerBindingsByName = new Map<string, Set<ts.Symbol>>();
       const registerOwnerBindingName = (name: ts.BindingName): void => {
         if (ts.isIdentifier(name)) {
           const symbol = checker.getSymbolAtLocation(name);
-          if (symbol) ownerBindingsByName.set(name.text, symbol);
+          if (symbol) {
+            let symbols = ownerBindingsByName.get(name.text);
+            if (!symbols) ownerBindingsByName.set(name.text, (symbols = new Set()));
+            symbols.add(symbol);
+          }
           return;
         }
         for (const element of name.elements) {
@@ -232,8 +245,8 @@ export function makeIrHostVoidCallbackResolver(checker: ts.TypeChecker): IrHostV
         }
         if (ts.isIdentifier(node)) {
           const symbol = checker.getSymbolAtLocation(node);
-          const sameSpellingOwnerBinding = ownerBindingsByName.get(node.text);
-          if (sameSpellingOwnerBinding && symbol !== sameSpellingOwnerBinding) {
+          const sameSpellingOwnerBindings = ownerBindingsByName.get(node.text);
+          if (sameSpellingOwnerBindings && (!symbol || !sameSpellingOwnerBindings.has(symbol))) {
             invalidLexicalShape = true;
             return;
           }

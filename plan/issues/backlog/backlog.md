@@ -90,15 +90,18 @@ Investigated, no new issue needed: #2940's default-lane 1,496-record "vacuous ha
 ## 2026-06-30 — IR front-end migration ratchet (queued `sprint: current`)
 
 Direct-AST→Wasm → typed-IR migration, sliced by `IrFallbackReason` bucket. Epic
-[#2855](../2855-ir-frontend-migration-ratchet-buckets-to-zero.md) (tracking;
-supersedes stale `#1530`). Queued children (`sprint: current`, `status: ready`):
+[#2855](../2855-ir-frontend-migration-ratchet-buckets-to-zero.md) remains the
+IR-only retirement owner. Its original corpus-ratchet children are complete:
 
-- [#2856](../2856-ir-body-shape-rejected-to-zero.md) — `body-shape-rejected` (31) → 0 — high, horizon L (dominant).
-- [#2857](../2857-ir-class-method-residual-to-zero.md) — `class-method` (6) → 0 — medium, horizon M (#1370 Phase C/D/E residual).
-- [#2858](../2858-ir-call-graph-closure-to-zero.md) — `call-graph-closure` (7) → 0 — medium, horizon M (depends_on #2856+#2857).
-- [#2859](../2859-ir-param-type-not-resolvable-to-zero.md) — `param-type-not-resolvable` (1) → 0 — low, horizon S.
+- [#2856](../2856-ir-body-shape-rejected-to-zero.md) — `body-shape-rejected` 31 → 0 — **done 2026-07-21**.
+- [#2857](../2857-ir-class-method-residual-to-zero.md) — `class-method` 6 → 0 — done.
+- [#2858](../2858-ir-call-graph-closure-to-zero.md) — `call-graph-closure` 7 → 0 — done.
+- [#2859](../2859-ir-param-type-not-resolvable-to-zero.md) — `param-type-not-resolvable` 1 → 0 — done.
 
-Deferred (not queued): `async-function` (4) → #1373b.
+Remaining measured residuals belong to the wider IR-only program: deferred
+`async-function` (4) → #1373b and module-level `body-shape-rejected` (1) for the
+Algorithms Map initializer. Corpus-zero reasons remain non-strict until their
+source-language coverage is genuinely complete.
 
 ## 2026-06-23 — Sprint-65 value-rep substrate landings (session)
 

@@ -60,7 +60,11 @@ import { ts, forEachChild } from "../ts-api.js";
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
 import { closureSignatureEquals, type IrClosureSignature, type IrType } from "./nodes.js";
 import type { IrImportedFunctionResolver, IrResolvedFunctionTarget } from "./imported-functions.js";
+import type { IrHostDateSnapshotResolver } from "./host-date.js";
 import type { IrHostVoidCallbackResolver } from "./host-extern.js";
+import type { IrPromiseDelayResolver } from "./promise-delay.js";
+import { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_NAME } from "./module-init.js";
+export { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_NAME } from "./module-init.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type {
@@ -363,6 +367,13 @@ export interface IrSelectionOptions {
    */
   readonly supportsLiteralStringReplace?: boolean;
   /**
+   * True only when the active backend can materialise a fixed array of
+   * checker-proven strings as an externref vec. The default is false: native
+   * strings and host-free lanes use a different string carrier and must stay
+   * on the legacy path instead of failing after an IR claim.
+   */
+  readonly supportsHostStringArrayLiterals?: boolean;
+  /**
    * (#3053 U2) True iff the unified gc member-read primitive `__dyn_member_get`
    * (#3053 U0) has a SOUND body in this compile config. The gc `$AnyValue` body
    * reads via native `__extern_get` and re-boxes with the native honest
@@ -391,6 +402,15 @@ export interface IrSelectionOptions {
    * not widen accidentally outside the production/gate shared proof.
    */
   readonly hostVoidCallbacks?: IrHostVoidCallbackResolver;
+  /** Exact checker-certified ambient zero-arg Date snapshots (Calendar). */
+  readonly hostDateSnapshots?: IrHostDateSnapshotResolver;
+  /**
+   * (#2856 async-delay slice) Exact checker-certified
+   * `new Promise<number>((resolve) => { setTimeout(...); })` construction.
+   * Omitted by bare-selector and host-free/M0 callers, so generic arrow/new
+   * selection remains unchanged outside the one production proof.
+   */
+  readonly promiseDelays?: IrPromiseDelayResolver;
 }
 
 /**
@@ -2056,6 +2076,25 @@ function isPhase1StatementList(
     // Phase 2 extension: an `if (cond)` with NO else, split by whether the
     // then-arm unconditionally terminates — mirroring `lowerStatementList`'s
     // `thenArmTerminates` fork in `from-ast.ts` exactly (#1979).
+    // (#2856 calendar residual) A converging top-level `if/else` followed by
+    // more statements is already representable by the structured `if.stmt`
+    // instruction used inside loop/body buffers. Keep this arm deliberately
+    // narrower than the tail-CFG path below: neither branch may return out of
+    // the function, and branch-local declarations do not escape. This is the
+    // exact shape of calendar::onDay's selection-state update before its two
+    // trailing render calls.
+    if (ts.isIfStatement(s) && s.elseStatement) {
+      if (!isPhase1ConditionExpr(s.expression, scope, localClasses)) {
+        return shapeNo("nontail-ifelse-cond", s.expression);
+      }
+      if (!isPhase1BodyStatement(s.thenStatement, new Set(scope), localClasses, /* inLoop */ false)) {
+        return shapeNo("nontail-ifelse-then", s.thenStatement);
+      }
+      if (!isPhase1BodyStatement(s.elseStatement, new Set(scope), localClasses, /* inLoop */ false)) {
+        return shapeNo("nontail-ifelse-else", s.elseStatement);
+      }
+      continue;
+    }
     if (ts.isIfStatement(s) && !s.elseStatement) {
       if (!isPhase1ConditionExpr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
       if (thenArmTerminates(s.thenStatement)) {
@@ -3472,7 +3511,7 @@ function obviousModuleValueFamily(expr: ts.Expression): ObviousModuleValueFamily
     const whenFalse = obviousModuleValueFamily(candidate.whenFalse);
     return whenTrue !== undefined && whenTrue === whenFalse ? whenTrue : undefined;
   }
-  if (ts.isCallExpression(candidate) && isExactF64ModuleToStringCall(candidate)) return "string";
+  if (ts.isCallExpression(candidate) && isExactF64ScalarToStringCall(candidate)) return "string";
   if (ts.isCallExpression(candidate) && exactModuleMapMethod(candidate) === "get") return "extern";
   return currentModuleBindingResolver?.scalarExpressionFamily(candidate);
 }
@@ -3519,17 +3558,21 @@ function exactModuleMapMethod(expr: ts.CallExpression): string | undefined {
   return receiver?.valueKind.kind === "extern" && receiver.valueKind.className === "Map" ? callee.name.text : undefined;
 }
 
-/** The one scalar-module method whose current lowering is representation-safe. */
-function isExactF64ModuleToStringCall(expr: ts.CallExpression): boolean {
+/**
+ * The one scalar method whose current host-string lowering is
+ * representation-safe. The receiver proof deliberately covers numeric call
+ * results as well as direct module globals/aliases: calendar::renderCal calls
+ * `priceOf(...module-derived args).toString()`, whose result is checker-proven
+ * f64 even though provenance scanning still sees the module arguments.
+ */
+function isExactF64ScalarToStringCall(expr: ts.CallExpression): boolean {
   if (currentModuleBindingResolver?.supportsHostNumberToString !== true) return false;
   if (expr.questionDotToken || expr.arguments.length !== 0) return false;
   const callee = unwrapPhase1Parens(expr.expression);
   if (!ts.isPropertyAccessExpression(callee) || callee.questionDotToken || callee.name.text !== "toString") {
     return false;
   }
-  return (
-    moduleBinding(callee.expression)?.valueKind.kind === "f64" || moduleScalarAliasFamily(callee.expression) === "f64"
-  );
+  return expressionIsProvenNumber(callee.expression);
 }
 
 /**
@@ -3619,6 +3662,13 @@ function expressionIsProvenNumber(expr: ts.Expression, seen = new Set<ts.Variabl
   const candidate = unwrapPhase1Parens(expr);
   if (ts.isNumericLiteral(candidate)) return true;
   if (ts.isIdentifier(candidate)) {
+    // The module-binding resolver has already proved the shared slot and all
+    // of its writes numeric. Do not re-audit the declaration initializer as a
+    // local alias: host-produced numeric initializers such as
+    // `new Date().getFullYear()` are intentionally outside this helper's
+    // narrow call-expression recursion, but their module slot is still an
+    // exact f64 value.
+    if (moduleBinding(candidate)?.valueKind.kind === "f64") return true;
     const checkerProvesNumber = currentSelectionOptions?.classifyPrimitiveExpression?.(candidate) === "number";
     if (currentModuleBindingResolver?.scalarExpressionFamily(candidate) !== "f64" && !checkerProvesNumber) return false;
     const declaration = currentModuleBindingResolver?.localVariableDeclaration(candidate);
@@ -4089,7 +4139,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         return true;
       }
       if (expressionTouchesScalarModuleBinding(expr.expression.expression)) {
-        if (!isExactF64ModuleToStringCall(expr)) {
+        if (!isExactF64ScalarToStringCall(expr)) {
           return shapeNo("expr-module-scalar-method", expr);
         }
         return isPhase1Expr(expr.expression.expression, scope, localClasses);
@@ -4206,6 +4256,18 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // constructorParams).
   if (ts.isNewExpression(expr)) {
     if (!ts.isIdentifier(expr.expression)) return shapeNo("expr-new-callee-nonident", expr.expression);
+    // (#2856 async-delay slice) Intercept the exact checker-certified
+    // Promise<number> timer construction before the generic constructor arm
+    // rejects its type argument and arrow.  The resolver has already proven
+    // the whole nested relationship; selection only rechecks that its two
+    // transitive executor captures are live in this function scope.
+    const promiseDelay = currentSelectionOptions?.promiseDelays?.resolve(expr);
+    if (promiseDelay) {
+      for (const capture of promiseDelay.executorCaptureNames) {
+        if (!scope.has(capture)) return shapeNo("expr-promise-delay-capture-scope", expr);
+      }
+      return true;
+    }
     const ctorName = expr.expression.text;
     if (currentModuleBindingResolver?.isDirectModuleBinding(expr.expression)) {
       return shapeNo("expr-new-module-binding-callee", expr.expression);
@@ -4217,12 +4279,16 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     ) {
       return shapeNo("expr-new-extern-shadow", expr.expression);
     }
-    // Calendar's module initializer uses the legacy native Date struct path,
-    // not the extern-class registry consumed by from-ast. Keep the whole
-    // synthetic unit legacy-owned until Date has an IR-native constructor;
-    // otherwise selection would claim and build would demote post-claim.
-    if (currentSubjectIsModuleInit && ctorName === "Date") {
+    // Date is native-struct-owned in legacy, while this slice deliberately
+    // lowers only checker-certified host snapshots through synthetic extern
+    // imports. Exact immediate module-init snapshots share that same host ABI
+    // so a Calendar cannot mix UTC-native module state with local host getters.
+    const hostDateSnapshot = ctorName === "Date" ? currentSelectionOptions?.hostDateSnapshots?.(expr) : undefined;
+    if (currentSubjectIsModuleInit && ctorName === "Date" && !hostDateSnapshot) {
       return shapeNo("expr-new-module-native-date", expr);
+    }
+    if (ctorName === "Date" && !hostDateSnapshot) {
+      return shapeNo("expr-new-date-snapshot-shape", expr);
     }
     if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName))
       return shapeNo("expr-new-ctor-unknown", expr.expression);
@@ -4352,10 +4418,33 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         family = elementFamily;
       }
     }
+    const primitiveFamilies = new Set<IrPrimitiveExpressionFamily>();
+    let everyElementPrimitive = expr.elements.length > 0;
     for (const el of expr.elements) {
       if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
       if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope
       if (!isPhase1Expr(el, scope, localClasses)) return false;
+      const family =
+        currentSelectionOptions?.classifyPrimitiveExpression?.(el) ??
+        (ts.isStringLiteral(el) || el.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral
+          ? "string"
+          : ts.isNumericLiteral(el)
+            ? "number"
+            : el.kind === ts.SyntaxKind.TrueKeyword || el.kind === ts.SyntaxKind.FalseKeyword
+              ? "boolean"
+              : undefined);
+      if (family) primitiveFamilies.add(family);
+      else everyElementPrimitive = false;
+    }
+    if (everyElementPrimitive && primitiveFamilies.size > 1) {
+      return shapeNo("expr-arraylit-mixed-primitive-family", expr);
+    }
+    if (
+      everyElementPrimitive &&
+      primitiveFamilies.has("string") &&
+      currentSelectionOptions?.supportsHostStringArrayLiterals !== true
+    ) {
+      return shapeNo("expr-arraylit-string-backend", expr);
     }
     return true;
   }
@@ -4568,63 +4657,6 @@ function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
  *
  * (The helpers below are exported for Slice 2's integration.)
  */
-/** (#3142) The synthetic claim-unit name for the module-level statement list. */
-export const MODULE_INIT_UNIT_NAME = "<module-init>";
-
-/**
- * (#3142) The module-init population: every top-level statement that is not
- * a function / class / type / import / export declaration — i.e. the
- * statements the legacy path routes into `__module_init` (approximated
- * syntactically; the legacy collection in `declarations.ts` additionally
- * drops some side-effect-free forms, which only makes the assessment
- * conservative). Exported so Slice 2's integration lowers EXACTLY the
- * population the selector assessed — one definition, no drift.
- */
-export function collectModuleInitPopulation(sourceFile: ts.SourceFile): ts.Statement[] {
-  const population: ts.Statement[] = [];
-  for (const stmt of sourceFile.statements) {
-    if (
-      ts.isFunctionDeclaration(stmt) ||
-      ts.isClassDeclaration(stmt) ||
-      ts.isInterfaceDeclaration(stmt) ||
-      ts.isTypeAliasDeclaration(stmt) ||
-      ts.isImportDeclaration(stmt) ||
-      ts.isImportEqualsDeclaration(stmt) ||
-      ts.isExportDeclaration(stmt) ||
-      ts.isExportAssignment(stmt) ||
-      ts.isEmptyStatement(stmt)
-    ) {
-      // Declaration statements are owned by the existing declaration
-      // machinery (`compileDeclarations` / class collection / export glue) —
-      // not module-init work. NOTE: `enum` and `namespace` declarations
-      // deliberately STAY in the population (they generate runtime code) and
-      // reject via the body-shape gate's unhandled-statement arm.
-      continue;
-    }
-    population.push(stmt);
-  }
-  return population;
-}
-
-/**
- * (#3142) Wrap the module-init population in a synthetic void
- * `<module-init>` FunctionDeclaration. Shared by the selector's Gate-2
- * call-graph scan and Slice 2's from-ast lowering so both see the same
- * unit shape. Factory nodes are only ever walked downward via
- * `forEachChild`, so the missing parent/position info is inert.
- */
-export function makeModuleInitSynthetic(population: readonly ts.Statement[]): ts.FunctionDeclaration {
-  return ts.factory.createFunctionDeclaration(
-    /* modifiers */ undefined,
-    /* asteriskToken */ undefined,
-    MODULE_INIT_UNIT_NAME,
-    /* typeParameters */ undefined,
-    /* parameters */ [],
-    /* type */ undefined,
-    ts.factory.createBlock([...population], /* multiLine */ true),
-  );
-}
-
 function assessModuleInit(
   sourceFile: ts.SourceFile,
   claimedFuncs: ReadonlySet<string>,
@@ -4704,6 +4736,12 @@ function buildLocalCallGraph(
       // stable signature. Walk into the args (which may contain real
       // calls), but don't mark the outer as having an external call.
       if (ts.isNewExpression(node)) {
+        // The exact Promise-delay resolver owns every call nested below this
+        // construction (Promise executor, timer callback, and resolve call).
+        // Treat it as one certified leaf instead of reporting setTimeout /
+        // resolve as external identifier calls.  Uncertified `new Promise`
+        // shapes retain the ordinary graph behavior below.
+        if (currentSelectionOptions?.promiseDelays?.resolve(node)) return;
         if (
           ts.isIdentifier(node.expression) &&
           (localClasses.has(node.expression.text) ||

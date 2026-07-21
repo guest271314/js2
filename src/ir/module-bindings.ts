@@ -268,6 +268,224 @@ function externClassNameForType(
   return isExternalDeclaredClass(nonNull, checker) ? className : undefined;
 }
 
+/**
+ * Prove the narrow same-file extern factory used by the calendar example.
+ *
+ * A source function's return annotation alone is not provenance: with
+ * semantic diagnostics skipped, `function fake(): HTMLElement { return 1 as
+ * any; }` still has an extern-looking call type. Require a direct call to the
+ * exact top-level FunctionDeclaration, an explicit extern return annotation,
+ * one final return, and a return source that is independently known to be a
+ * host extern. A returned local must be a top-level `const` in the factory so
+ * its initializer remains the value actually returned.
+ */
+function sameFileExternFactoryCallIsProven(
+  checker: ts.TypeChecker,
+  call: ts.CallExpression,
+  options: IrModuleBindingResolverOptions,
+  seen: Set<ts.Node>,
+): boolean {
+  if (
+    call.questionDotToken ||
+    call.typeArguments?.length ||
+    !ts.isIdentifier(call.expression) ||
+    call.arguments.some(ts.isSpreadElement)
+  ) {
+    return false;
+  }
+  const signature = checker.getResolvedSignature(call);
+  const declaration = signature?.getDeclaration();
+  if (
+    !signature ||
+    !declaration ||
+    !ts.isFunctionDeclaration(declaration) ||
+    !declaration.name ||
+    !declaration.body ||
+    !declaration.type ||
+    declaration.parent !== call.getSourceFile() ||
+    declaration.getSourceFile() !== call.getSourceFile() ||
+    declaration.asteriskToken ||
+    declaration.typeParameters?.length ||
+    declaration.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ||
+    seen.has(declaration)
+  ) {
+    return false;
+  }
+
+  const calleeSymbol = checker.getSymbolAtLocation(call.expression);
+  if (
+    calleeSymbol?.valueDeclaration !== declaration &&
+    !(calleeSymbol?.declarations ?? []).some((candidate) => candidate === declaration)
+  ) {
+    return false;
+  }
+
+  const annotatedReturn = checker.getTypeFromTypeNode(declaration.type);
+  if (
+    annotatedReturn.isUnion() &&
+    annotatedReturn.types.some((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)
+  ) {
+    return false;
+  }
+  if (!externClassNameForType(annotatedReturn, checker, options)) return false;
+  const statements = declaration.body.statements;
+  const finalStatement = statements[statements.length - 1];
+  if (!finalStatement || !ts.isReturnStatement(finalStatement) || !finalStatement.expression) return false;
+
+  let earlierReturn = false;
+  const findEarlierReturn = (node: ts.Node): void => {
+    if (earlierReturn) return;
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return;
+    }
+    if (ts.isReturnStatement(node)) {
+      earlierReturn = true;
+      return;
+    }
+    node.forEachChild(findEarlierReturn);
+  };
+  for (const statement of statements.slice(0, -1)) findEarlierReturn(statement);
+  if (earlierReturn) return false;
+
+  const returned = unwrapParens(finalStatement.expression);
+  let source = returned;
+  if (ts.isIdentifier(returned)) {
+    const symbol = checker.getSymbolAtLocation(returned);
+    const variable = [symbol?.valueDeclaration, ...(symbol?.declarations ?? [])].find(
+      (candidate): candidate is ts.VariableDeclaration =>
+        candidate !== undefined &&
+        ts.isVariableDeclaration(candidate) &&
+        ts.isVariableStatement(candidate.parent.parent) &&
+        candidate.parent.parent.parent === declaration.body,
+    );
+    if (
+      !variable?.initializer ||
+      !ts.isVariableDeclarationList(variable.parent) ||
+      (variable.parent.flags & ts.NodeFlags.Const) === 0
+    ) {
+      return false;
+    }
+
+    // `const` is the provenance anchor, but diagnostics-off sources can still
+    // contain illegal writes. Reject those explicitly rather than trusting
+    // the checker diagnostic to have stopped compilation. Nested functions
+    // are also outside this exact factory shape because they could mutate a
+    // captured binding before the final return.
+    let bindingMayChange = false;
+    const isReturnedBinding = (node: ts.Identifier): boolean => checker.getSymbolAtLocation(node) === symbol;
+    const assignmentTargetWritesBinding = (target: ts.Expression): boolean => {
+      const candidate = unwrapParens(target);
+      if (ts.isIdentifier(candidate)) return isReturnedBinding(candidate);
+      if (ts.isBinaryExpression(candidate) && candidate.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        return assignmentTargetWritesBinding(candidate.left);
+      }
+      if (ts.isArrayLiteralExpression(candidate)) {
+        return candidate.elements.some(
+          (element) =>
+            !ts.isOmittedExpression(element) &&
+            assignmentTargetWritesBinding(ts.isSpreadElement(element) ? element.expression : element),
+        );
+      }
+      if (ts.isObjectLiteralExpression(candidate)) {
+        return candidate.properties.some((property) => {
+          if (ts.isShorthandPropertyAssignment(property)) return isReturnedBinding(property.name);
+          if (ts.isPropertyAssignment(property)) return assignmentTargetWritesBinding(property.initializer);
+          if (ts.isSpreadAssignment(property)) return assignmentTargetWritesBinding(property.expression);
+          return false;
+        });
+      }
+      return false;
+    };
+    const visitForWrites = (node: ts.Node): void => {
+      if (bindingMayChange) return;
+      if (
+        ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node)
+      ) {
+        bindingMayChange = true;
+        return;
+      }
+      if (ts.isBinaryExpression(node)) {
+        const operator = node.operatorToken.kind;
+        if (
+          operator >= ts.SyntaxKind.FirstAssignment &&
+          operator <= ts.SyntaxKind.LastAssignment &&
+          assignmentTargetWritesBinding(node.left)
+        ) {
+          bindingMayChange = true;
+          return;
+        }
+      }
+      if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
+        if (
+          (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+          ts.isIdentifier(node.operand) &&
+          isReturnedBinding(node.operand)
+        ) {
+          bindingMayChange = true;
+          return;
+        }
+      }
+      if (
+        (ts.isForInStatement(node) || ts.isForOfStatement(node)) &&
+        !ts.isVariableDeclarationList(node.initializer) &&
+        assignmentTargetWritesBinding(node.initializer)
+      ) {
+        bindingMayChange = true;
+        return;
+      }
+      node.forEachChild(visitForWrites);
+    };
+    for (const statement of statements.slice(0, -1)) visitForWrites(statement);
+    if (bindingMayChange) return false;
+    source = unwrapParens(variable.initializer);
+  }
+
+  // A parameter merely moves the provenance obligation to the call site.
+  // This narrow proof intentionally does not perform interprocedural argument
+  // substitution, so reject direct/aliased parameter forwarding instead of
+  // trusting an extern-looking annotation under diagnostics-off compilation.
+  const forwardsParameter = (candidate: ts.Expression, seenVariables = new Set<ts.VariableDeclaration>()): boolean => {
+    const value = unwrapParens(candidate);
+    if (
+      ts.isAsExpression(value) ||
+      ts.isTypeAssertionExpression(value) ||
+      ts.isSatisfiesExpression(value) ||
+      ts.isNonNullExpression(value)
+    ) {
+      return forwardsParameter(value.expression, seenVariables);
+    }
+    if (!ts.isIdentifier(value)) return false;
+    const symbol = checker.getSymbolAtLocation(value);
+    const declarations = [symbol?.valueDeclaration, ...(symbol?.declarations ?? [])].filter(
+      (node): node is ts.Declaration => node !== undefined,
+    );
+    if (declarations.some(ts.isParameter)) return true;
+    const variable = declarations.find(ts.isVariableDeclaration);
+    if (!variable?.initializer || seenVariables.has(variable)) return false;
+    const nextSeen = new Set(seenVariables);
+    nextSeen.add(variable);
+    return forwardsParameter(variable.initializer, nextSeen);
+  };
+  if (forwardsParameter(source)) return false;
+
+  try {
+    if (!checker.isTypeAssignableTo(checker.getTypeAtLocation(source), annotatedReturn)) return false;
+  } catch {
+    return false;
+  }
+  const nextSeen = new Set(seen);
+  nextSeen.add(declaration);
+  return externValueSourceIsProven(checker, source, options, nextSeen);
+}
+
 function externValueSourceIsProven(
   checker: ts.TypeChecker,
   expr: ts.Expression,
@@ -299,7 +517,12 @@ function externValueSourceIsProven(
     const symbol = checker.getSymbolAtLocation(value.name);
     return (symbol?.declarations ?? []).some((declaration) => declaration.getSourceFile().isDeclarationFile);
   }
-  if (ts.isCallExpression(value) || ts.isNewExpression(value)) {
+  if (ts.isCallExpression(value)) {
+    const signatureDeclaration = checker.getResolvedSignature(value)?.getDeclaration();
+    if (signatureDeclaration?.getSourceFile().isDeclarationFile === true) return true;
+    return sameFileExternFactoryCallIsProven(checker, value, options, seen);
+  }
+  if (ts.isNewExpression(value)) {
     return checker.getResolvedSignature(value)?.getDeclaration()?.getSourceFile().isDeclarationFile === true;
   }
   return false;

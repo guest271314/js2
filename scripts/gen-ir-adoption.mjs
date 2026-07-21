@@ -196,7 +196,10 @@ const SECTIONS = [
 // reason -> [category, "what promotes a row"]. The set of keys MUST equal the
 // IrFallbackReason union in src/ir/select.ts (enforced below).
 const BUCKETS = {
-  "body-shape-rejected": ["unintended", "from-ast.ts handles every statement in the body"],
+  "body-shape-rejected": [
+    "unintended",
+    "Corpus bucket **0** (#2856); not strict while unsupported real-world shapes still legitimately use the direct front-end",
+  ],
   "external-call": ["unintended", "Math.\\* / parseInt / Console wired through IR (#1371)"],
   "call-graph-closure": ["unintended", "Callees of claimed funcs all claimable themselves"],
   "recursive-type-evidence": [
@@ -277,7 +280,9 @@ section of \`scripts/ir-fallback-baseline.json\` counts one entry per corpus
 MODULE whose module-init unit is not claimable (gated must-not-increase by
 \`check:ir-fallbacks\`). Slice 2 wires the actual lowering + the
 \`__module_init\` slot patch; only then do legacy statement handlers become
-per-file deletable (gate G3 in \`plan/log/3090-phase0-legacy-delete-list.md\`).`;
+per-file deletable (gate G3 in \`plan/log/3090-phase0-legacy-delete-list.md\`).
+The current corpus floor is **1**: Calendar's nine-statement initializer is
+IR-owned; Algorithms' top-level Map initializer is the remaining unit.`;
 
 const FOOTER = `## How to update this table
 

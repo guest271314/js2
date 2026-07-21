@@ -1,10 +1,11 @@
 ---
 id: 2856
 title: "IR: drive body-shape-rejected fallback bucket to zero (dominant unintended bucket)"
-status: in-progress
+status: done
+completed: 2026-07-21
 assignee: ttraenkler/opus-2856
 spec: banked
-sprint: current
+sprint: 73
 created: 2026-06-30
 updated: 2026-07-21
 priority: high
@@ -24,13 +25,19 @@ loc-budget-allow:
   - scripts/check-ir-fallbacks.ts
   - scripts/ir-fallback-baseline.json
   - src/codegen/index.ts
+  - src/codegen/stack-balance.ts
   - src/ir/backend/linear-integration.ts
   - src/ir/capability.ts
   - src/ir/from-ast.ts
+  - src/ir/host-date.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
   - src/ir/module-bindings.ts
+  - src/ir/passes/inline-small.ts
   - src/ir/select.ts
+  - tests/issue-2856-inline-small-buffer-caller.test.ts
+  - tests/issue-2856-calendar-residuals.test.ts
+  - tests/issue-2856-async-delay-ir.test.ts
   - tests/issue-2856-module-bindings.test.ts
   - tests/issue-2856-builtins-component.test.ts
 ---
@@ -1440,15 +1447,17 @@ module-unique.
 The gate ratchets function-level `body-shape-rejected` **5 -> 4** with zero
 post-claim demotions. The exact remaining histogram is calendar `renderCal`,
 `onDay`, and `main`, plus async `delay`; module-level remains **2** and deferred
-async functions remain **4**. The 23-test B2 suite covers optimized and
+async functions remain **4**. The 29-test B2 suite covers optimized and
 unoptimized runtime dispatch, callback identity/undefined/nonconstructibility,
-unchanged legacy positive-id dispatch, IR shape, strict negatives including
-symbol-vs-spelling capture ambiguity including destructured bindings,
-cross-source name safety, maker/lifted collision demotion, and standalone
-containment. A replay regression additionally keeps any local call component
-containing a planned B2 owner out of the IR-first skip set until final-context
-maker/lifted-name proofs complete, preventing skipped-body placeholders after a
-safe demotion. Calendar and Promise/async executor shapes are unchanged.
+unchanged legacy positive-id dispatch, distinct per-site values and capture
+shapes, IR shape, strict negatives including symbol-vs-spelling capture
+ambiguity including destructured bindings, nested/non-certified sibling
+declarations, cross-source name safety, maker/lifted collision demotion, and
+standalone containment. A replay regression additionally keeps any local call
+component containing a planned B2 owner out of the IR-first skip set until
+final-context maker/lifted-name proofs complete, preventing skipped-body
+placeholders after a safe demotion. Promise/async executor shapes are
+unchanged.
 
 ### Ordering and landability
 
@@ -1470,6 +1479,104 @@ established pattern), zero post-claim demotions, bank via
 host-gated off), but re-verify per slice that `call-graph-closure` and
 `external-call` stay 0.
 
+### Calendar residual implementation notes (2026-07-21)
+
+The three non-callback calendar gaps are implemented as a deliberately narrow
+preparation slice for the measured **4 → 1** step after A+B1/B2 lands:
+
+- `renderCal`'s `priceOf(...).toString()` is admitted only when the checker
+  proves the receiver numeric and the call is the exact zero-argument,
+  non-optional scalar formatter already supported by `number_toString`. This is
+  provenance-based rather than syntax-based because the receiver is a module
+  call result, while radix overloads and optional calls remain pre-claim
+  rejections.
+- `onDay`'s top-level non-tail `if/else` reuses the existing structured
+  `if.stmt` lowering. Both branches must fit the existing branch-body subset,
+  function returns remain excluded, and each branch is selected with an
+  isolated scope so branch-local declarations cannot leak across the join.
+  This avoids adding a second CFG encoding for a shape the IR already
+  represents.
+- Calendar `main`'s assignments from the local `el(...)` helper are accepted
+  only through exact same-file extern-factory provenance. The callee must be a
+  direct top-level function with an explicit non-null extern-class return,
+  one final return source, and no mutation of a returned local. Its source must
+  recursively trace to an already-proven host extern value. Branching returns,
+  forwarded parameters, mutable locals, nullable annotations, optional calls,
+  and cross-file helpers remain rejected. The proof deliberately lives in
+  module binding analysis, where the global write's expected storage type and
+  source provenance are both available.
+
+Focused tests cover runtime behavior and `irCompiledFuncs` genuine-emission
+anti-vacuity for all three positive shapes plus pre-claim negatives. On the
+B0-only base used for this preparation commit, the fallback baseline is
+intentionally unchanged:
+the newly selected `onDay` routes to `call-graph-closure` until `renderCal`'s
+callback arguments are unlocked by B2, while `renderCal` and `main` still stop
+at their arrow expressions. Therefore the residual slice is to be measured
+and banked only after the callback prerequisite lands; do not record the
+intermediate routing shuffle as a new floor.
+
+Validation on the B0 base:
+
+- `pnpm run typecheck` passes.
+- The focused residual suite passes 6/6, and the combined module-binding,
+  host-extern, guard-tail, and structured-control-flow suites pass 85/85.
+- A direct compile of the live
+  `website/playground/examples/dom/calendar.ts` validates as Wasm with no
+  post-claim demotions.
+- `--shape-diag` reports 11 body-shape rejections: calendar `renderCal` and
+  `main` now stop only at `ArrowFunction`; `onDay` has left the bucket.
+- The default gate fails in the expected pre-stack shape
+  (`body-shape-rejected` 12 → 11, `call-graph-closure` 0 → 1) because `onDay`
+  calls the still-arrow-blocked `renderCal`. The baseline JSON remains
+  untouched; B2 removes that temporary closure before this slice is banked.
+
+### Calendar 4→1 implementation result (2026-07-21)
+
+The prepared Calendar shapes are now banked on the exact B2 stack. Four narrow
+pieces complete the live source without widening the Promise/async surface:
+
+- B2 callback planning now accepts multiple independently checker-certified
+  sibling `addEventListener` sites. Every lifted callback receives a stable
+  source-order ordinal, every `<owner>__closure_N` name is final-context
+  validated, and any uncertified/nested sibling declaration rejects the owner
+  before claim.
+- Homogeneous string-literal array expressions lower to the existing
+  externref-vector family only in JS-host, non-native-string mode. Each element
+  uses the established string-to-externref coercion; mixed, sparse, spread,
+  annotated-carrier, callback-use, native-string, standalone, WASI, and linear
+  shapes remain pre-claim rejections.
+- Exact ambient `new Date()` snapshots with only zero-argument `getDate`,
+  `getMonth`, and `getFullYear` reads lower through synthetic JS-host imports.
+  Selection is checker-certified and symbol-exact; aliases, escapes, writes,
+  optional calls, constructor arguments, unsupported methods, shadowed Date,
+  nested ownership, and host-free targets reject before claim. Final-context
+  preparation runs after callback preparation, registers only the retained
+  component's exact imports as one batch, and demotes the entire connected
+  component on any name/signature collision without leaving partial imports.
+  This host-only path follows JavaScript's local-time getter semantics; legacy
+  native Date behavior is unchanged.
+- `inlineSmall` now treats any caller containing nested instruction buffers as
+  a conservative inlining barrier. This prevents result-id rewrites from
+  leaving stale uses inside loop/if/while bodies; ordinary buffer-free inlining
+  remains enabled.
+
+The 23-test Calendar residual suite proves runtime behavior, strict negative
+containment, final-context Date/callback collision ordering, deterministic
+parallel compilation, and the live source itself. The direct anti-vacuity
+compile genuinely IR-emits `renderCal` plus closures 0–2, `onDay`, and `main`
+plus closures 0–3; its Wasm validates, its Date import set is exactly
+`Date_new`, `Date_getDate`, `Date_getMonth`, and `Date_getFullYear`, and
+`irPostClaimErrors` is empty. The nested-buffer inliner regression also
+executes and validates with zero post-claim demotions.
+
+The production gate ratchets function-level `body-shape-rejected` **4 → 1**.
+Calendar contributes no residual; `--shape-diag` identifies the sole remaining
+rejection as async `delay` (`expr-new-type-args:NewExpression`). Deferred
+`async-function` remains **4**, module-level `body-shape-rejected` remains
+**2**, all post-claim buckets remain zero, and no rejection is reclassified
+into another unintended bucket.
+
 ### At corpus-zero — the promotion question (answered)
 
 Do **NOT** add `body-shape-rejected` to `STRICT_IR_REASONS` at corpus-zero.
@@ -1479,3 +1586,112 @@ IR-completeness endgame, not this issue's AC. At corpus-zero: bank the floor
 in the baseline, update `plan/log/ir-adoption.md`, and record the verdict at
 the `STRICT_IR_REASONS` comment (see the #2855 Fable plan's verdict table —
 this corrects acceptance criterion 4 above).
+
+### Async delay 1→0 implementation result (2026-07-21)
+
+The final residual is banked through an exact checker-certified lowering of the
+playground `delay(ms, value)` shape: `new Promise<number>` with one synchronous
+executor, one `setTimeout` callback, and one `resolve(value)` call. The proof is
+symbol-identity based and deliberately single-source/JS-host only; shadowed or
+shape-divergent Promise/timer forms, fast/native-string lanes, standalone/WASI,
+and the M0 multi-module overlay remain on their pre-existing paths.
+
+Lowering uses the canonical callable ABI for both closures. The Promise
+executor captures `ms` plus transitive `value`; the timer callback captures the
+raw host `resolve` function plus `value`. Final-context preparation proves the
+exact `Promise_new`, `__timer_set_timeout`, `__box_number`, and
+`__call_1_f64` signatures, collision-checks both deterministic lifted names,
+and registers missing helpers as one late-import batch only after every
+read-only refusal check succeeds. Callback, Date, and Promise preparation run
+in that order before IR compilation, with one shared compile-twice component
+closure for every final-demotable owner.
+
+The 29-test async-delay suite covers optimized/unoptimized real Promise and
+timer execution, concurrent capture isolation, deterministic output, exact
+post-pruning binary import signatures, strict syntax/symbol negatives, helper
+and lifted-name collisions, component replay, host-free/fast/native-string/M0
+containment, and a combined callback + Date + Promise runtime module. Calendar
+remains green at 28/28, callback coverage at 29/29, and the nested-buffer
+regression at 1/1. Full equivalence remains 1,607 passing with the same 36
+known failures and zero new failures.
+
+The production gate now records function-level `body-shape-rejected` **1 →
+0** and `--shape-diag` reports zero attributed rejections. Deferred
+`async-function` remains **4**, module-level `body-shape-rejected` is **1**
+after Calendar's exact top-level Date snapshots joined the same host ABI as its
+function bodies, and all post-claim buckets remain empty. The baseline is banked
+at zero, but
+`body-shape-rejected` intentionally remains outside `STRICT_IR_REASONS`: the
+13-file corpus is complete while unsupported real-world shapes still
+legitimately require the direct front-end.
+
+## Implementation Summary
+
+### What was done
+
+- Drove the playground corpus's function-level `body-shape-rejected` bucket
+  from 31 to 0 through bounded IR capabilities for control flow, module
+  bindings, imported calls, first-class callables, host callbacks, Calendar
+  string tables and Date snapshots, and the exact Promise timer-delay shape.
+- Preserved whole-component closure and final-context collision proofs so a
+  late ABI refusal cannot strand an IR-first skipped body.
+- Made Calendar's nine-statement module initializer IR-owned for its exact
+  immediate `new Date().get*()` expressions. Module and function snapshots now
+  share the host Date ABI, removing the UTC/local split found during final
+  review and reducing the module-level corpus residual from 2 to 1.
+- Taught the stack-balance verifier that a concrete closure struct is already
+  assignable to its declared closure-root local through Wasm GC subtyping. This
+  removes three redundant Calendar casts and keeps the `local-set-coerce`
+  quality bucket at zero without banking a false repair baseline.
+- Banked the function-level zero floor while deliberately keeping the generic
+  `body-shape-rejected` reason non-strict: corpus-zero is not proof that every
+  real-world body is IR-lowerable.
+
+### What worked
+
+- Checker- and symbol-certified narrow capabilities kept unsupported variants
+  on the pre-claim path instead of creating new post-claim demotions.
+- Shared callable packing and one finalization boundary let callbacks, Date,
+  and Promise lowering compose deterministically in the same module.
+- Strict stack-balance telemetry localized the final CI failure to subtype-safe
+  closure stores, so the producer/verifier contract could be fixed narrowly
+  without changing call-argument coercion or weakening the ratchet.
+- The fallback ratchet stayed monotonic: no unintended reason grew, no
+  post-claim class appeared, and Calendar module-init adoption banked an
+  additional module-level decrease.
+
+### What did not work
+
+- Promoting `body-shape-rejected` wholesale to `STRICT_IR_REASONS` at corpus
+  zero was rejected because unsupported source shapes still legitimately need
+  the direct front-end. Strict promotion belongs to the IR-only endgame.
+- The first Calendar Date implementation mixed legacy UTC module state with
+  host-local function snapshots. Final review caught the boundary case; the
+  fix moved exact top-level snapshots onto the same host ABI.
+- Fractional/NaN string-array indexing remains legacy-parity conformance debt.
+  It is not a regression introduced by this migration slice and is not hidden
+  by the zero-fallback claim.
+
+### Files changed
+
+- IR selection, AST lowering, integration, module binding, closure, Date, and
+  Promise-delay planning under `src/ir/`.
+- Final overlay preparation, driver wiring, and declared-subtype recognition in
+  the stack-balance verifier under `src/codegen/`.
+- Focused Calendar, async-delay, callable ABI, module-binding, and inliner
+  regression suites under `tests/`.
+- The fallback baseline, generated IR-adoption record, and this markdown issue.
+
+## Test Results
+
+- Calendar residual suite: 28/28.
+- Async-delay suite: 29/29; callback ABI suite: 29/29; inline-buffer regression:
+  1/1.
+- Integrated focused matrix: 142/142.
+- Equivalence gate: 1,607 passing, the same 36 known failures, zero new
+  regressions.
+- Fallback gate: function body-shape 0, deferred async 4, module-level
+  body-shape 1, and no post-claim demotions.
+- Stack-balance gate: `local-set-coerce` 0; `call-arg-coerce` improves 7 → 6;
+  no fixup bucket increases.
+- Typecheck and `git diff --check`: pass.
