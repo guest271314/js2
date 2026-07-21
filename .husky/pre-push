@@ -122,13 +122,37 @@ if grep -q '"format:check"' package.json 2>/dev/null; then
   # wedging agents in push wait-loops). CI's `quality` job re-runs the exact same
   # `format:check`, so on a LOCAL hang we degrade to a warning and let the push
   # proceed; on a genuine format failure (prettier exits non-zero fast) we block.
-  fmt_out=$(timeout 90 pnpm run format:check 2>&1)
+  #
+  # The watchdog is PORTABLE (#3409): stock macOS ships no GNU `timeout`, so an
+  # unconditional `timeout 90 …` used to exit 127 (command-not-found) before
+  # prettier ran and get mislabeled as a format failure, blocking every macOS
+  # push with a blank "Offending files" list. run_format_watchdog probes for
+  # `timeout`/`gtimeout` and falls open to a direct (un-watchdogged) run when
+  # neither exists — never synthesizing a 127. It lives in a sourced helper so it
+  # can be unit-tested (tests/hooks/pre-push-format-timeout.test.ts), mirroring
+  # the #3410 push-remote-classify.sh split.
+  fmt_lib="$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/format-gate.sh"
+  if [ -r "$fmt_lib" ]; then
+    . "$fmt_lib"
+    fmt_out=$(run_format_watchdog 90 pnpm run format:check 2>&1)
+  else
+    echo "Pre-push: WARNING — cannot read $fmt_lib; running format:check without a watchdog." >&2
+    fmt_out=$(pnpm run format:check 2>&1)
+  fi
   fmt_rc=$?
   if [ "$fmt_rc" -eq 124 ]; then
     echo "Pre-push: format:check TIMED OUT (90s) — skipping local check, CI 'quality' will enforce it."
   elif [ "$fmt_rc" -ne 0 ]; then
     echo "Pre-push: format:check FAILED. Offending files:"
-    echo "$fmt_out" | grep -iE '\[warn\]|^\S+\.ts$' | head -30
+    # Prefer the prettier warning / *.ts filter, but if it matches nothing (e.g.
+    # a runner/setup error rather than a formatting defect) show the RAW output
+    # instead of an empty section, so the real cause is visible (#3409).
+    fmt_filtered=$(echo "$fmt_out" | grep -iE '\[warn\]|^\S+\.ts$' | head -30)
+    if [ -n "$fmt_filtered" ]; then
+      echo "$fmt_filtered"
+    else
+      echo "$fmt_out" | head -30
+    fi
     echo ""
     echo "Fix with: pnpm run format:write   (or: npx prettier --write <file>)"
     echo "Then re-push. (Or --no-verify to defer to CI.)"
