@@ -4,7 +4,7 @@ title: "Self-host stdlib: convert object-runtime.ts hand-emitted Instr[] to TS (
 status: done
 assignee: ttraenkler/symphony-3258-object-runtime-tier3
 completed: 2026-07-20
-sprint: current
+sprint: 73
 priority: medium
 horizon: xl
 feasibility: hard
@@ -14,7 +14,7 @@ area: codegen, stdlib, ir
 language_feature: compiler-internals
 goal: ir-full-coverage
 created: 2026-07-14
-updated: 2026-07-20
+updated: 2026-07-21
 depends_on: [3257]
 related: [3141, 3256, 3257]
 origin: "sprint-71 bloat audit — object-runtime.ts = 11.6k LOC / 3,738 hand-emitted Instr[] sites (largest single lever)"

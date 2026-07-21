@@ -2,6 +2,7 @@
 id: 3509
 title: "Standalone deferred dynamic import must trap only when invoked"
 status: done
+sprint: 73
 created: 2026-07-21
 updated: 2026-07-21
 completed: 2026-07-21

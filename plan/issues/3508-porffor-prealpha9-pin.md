@@ -2,6 +2,7 @@
 id: 3508
 title: "Advance the optional Porffor integration pin to pre-alpha 9"
 status: done
+sprint: 73
 assignee: ttraenkler/codex-senior-3508
 created: 2026-07-21
 updated: 2026-07-21

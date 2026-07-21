@@ -2,7 +2,7 @@
 id: 3473
 title: Extract fyi-runner parity plumbing from stale #3415
 status: done
-sprint: current
+sprint: 73
 priority: medium
 horizon: m
 assignee: ttraenkler/extract-3415-agent

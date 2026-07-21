@@ -2,9 +2,9 @@
 id: 3430
 title: "Host conformance: integrity-level operations do not throw expected TypeError (1,316 records, newly honest under oracle v8)"
 status: done
-sprint: current
+sprint: 73
 created: 2026-07-18
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 assignee: ttraenkler/senior-dev
 priority: medium

@@ -2,8 +2,9 @@
 id: 3491
 title: "Test262 FYI original-harness lane must link static _FIXTURE module graphs"
 status: done
+sprint: 73
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: m
 feasibility: medium

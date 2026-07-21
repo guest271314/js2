@@ -2,9 +2,10 @@
 id: 3489
 title: "Test262 module-goal classification must ignore import/export text in comments and strings"
 status: done
+sprint: 73
 completed: 2026-07-20
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: s
 feasibility: easy

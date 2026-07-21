@@ -294,3 +294,23 @@ close (sprint/66 tag, PR #2146). **Net +305 passes.** 22 issues done + 1 wont-fi
 fnctor-reconstruct, IR effect-model lane (#2134–#2141), async/Promise (#2613/#2614),
 Proxy (#1355/#2618), standalone residual tails, type-oracle/pipeline refactors, and
 the newly-unblocked substrate slices (#2710/#2722/#2724 for implementation in s67).
+
+## Sprint 73 (2026-07-19 → 2026-07-21) — honest Test262 parity and external runner
+
+**Baseline**: JS-host 28,294 / 43,106 (65.6%) → **30,282 / 43,099
+(70.3%)**; standalone 27,378 / 43,106 (63.5%) → **28,136 / 43,106
+(65.3%)**. 28 issues completed; 191 remain `sprint: current`.
+
+The project runner and test262.fyi path now execute the original harness with
+matching source assembly, fixture graphs, negative-test checks, async completion,
+and verdict classification. The stricter oracle exposed silent false passes;
+compiler and runner fixes converted the real supported cases back to passes.
+`@loopdive/js2` gained the reusable `js2-test262` CLI for a first standalone-only
+test262.fyi publication. Early IR/self-host/Porffor integration slices also
+landed, while the architecture epics remain open.
+
+The merge queue caught a 29-test illegal-cast regression in the JS-host closure
+ABI before landing. It was fixed at the standalone `Reflect.construct` marker
+boundary instead of being excused. Sprint bookkeeping drift was also repaired:
+16 completed issues were normalized into sprint 73, and all unfinished work was
+carried forward without retagging it to a numbered sprint.

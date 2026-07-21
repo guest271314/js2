@@ -2,9 +2,10 @@
 id: 3505
 title: "Host compileMulti must initialize harness callables after exports wiring"
 status: done
+sprint: 73
 completed: 2026-07-20
 created: 2026-07-20
-updated: 2026-07-20
+updated: 2026-07-21
 priority: high
 horizon: s
 feasibility: hard

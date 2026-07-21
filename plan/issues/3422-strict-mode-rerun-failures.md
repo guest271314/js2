@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 goal: test262-conformance
 model: fable
-sprint: current
+sprint: 73
 horizon: m
 related: [3370, 3417]
 ---

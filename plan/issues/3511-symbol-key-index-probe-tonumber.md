@@ -11,7 +11,7 @@ task_type: bug
 area: codegen
 goal: test262-conformance
 model: opus
-sprint: current
+sprint: 73
 horizon: m
 related: [3481]
 loc-budget-allow:
