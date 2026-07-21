@@ -8,6 +8,7 @@ import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
+import type { TypeFact } from "../checker/oracle.js";
 import {
   isBigIntType,
   isBooleanType,
@@ -24,10 +25,15 @@ import {
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
-import { compileIrPathFunctions, type IrIntegrationError } from "../ir/integration.js";
+import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
 import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { planIrCompilation, irClosureSignatureFromFunctionTypeNode, type IrFallbackReason } from "../ir/select.js";
+import {
+  planIrCompilation,
+  irClosureSignatureFromFunctionTypeNode,
+  type IrFallbackReason,
+  type IrSelection,
+} from "../ir/select.js";
 import { makeIrHostGlobalResolver } from "../ir/host-extern.js"; // (#2856)
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
@@ -37,7 +43,12 @@ import {
 import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
-import { collectLocalCallEdges, irFirstBodyIsProvenLowerable, type ValueDomain } from "./ir-first-gate.js";
+import {
+  collectLocalCallEdges,
+  irFirstBodyIsProvenLowerable,
+  MODULE_INIT_CALLER,
+  type ValueDomain,
+} from "./ir-first-gate.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { truthyEnv } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
@@ -1728,7 +1739,11 @@ function computeIrFirstSkipSet(
   return skip;
 }
 
-function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
+function planIrOverlay(
+  ctx: CodegenContext,
+  ast: TypedAST,
+  options: { readonly resolveModuleBindings?: boolean } = {},
+): IrOverlayPlan {
   const typeMap = buildTypeMap(ast.sourceFile, ast.checker);
   // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS is set, request the
   // selector to track every top-level FunctionDeclaration that didn't
@@ -1752,11 +1767,14 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
   // time from-ast lowers (post-`compileDeclarations`), which is where member
   // resolution happens.
   const jsHostExterns = !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports);
-  const resolveModuleBinding = makeIrModuleBindingResolver(ast.checker, {
-    numberStorage: ctx.fast ? "i32" : "f64",
-    allowHostExterns: jsHostExterns && !ctx.nativeStrings,
-    allowBuiltinMapExtern: jsHostExterns && !ctx.nativeStrings,
-  });
+  const resolveModuleBinding =
+    options.resolveModuleBindings === false
+      ? undefined
+      : makeIrModuleBindingResolver(ast.checker, {
+          numberStorage: ctx.fast ? "i32" : "f64",
+          allowHostExterns: jsHostExterns && !ctx.nativeStrings,
+          allowBuiltinMapExtern: jsHostExterns && !ctx.nativeStrings,
+        });
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ast.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
   // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
@@ -1775,7 +1793,7 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
       jsHostExterns,
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
-      resolveModuleBinding,
+      ...(resolveModuleBinding ? { resolveModuleBinding } : {}),
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       supportsSymbolicMathHelpers: true,
@@ -1942,6 +1960,408 @@ function planIrOverlay(ctx: CodegenContext, ast: TypedAST): IrOverlayPlan {
     safeSelection.moduleInit = undefined;
   }
   return { selection, classShapes, overrideMap, safeSelection, trackFallbacks, declByName };
+}
+
+/** Consume one IR overlay attempt through the shared diagnostics/telemetry path. */
+function consumeIrOverlayReport(
+  ctx: CodegenContext,
+  report: IrIntegrationReport,
+  selection: IrSelection,
+  trackFallbacks: boolean,
+  fileLabel: string,
+  irSkipBodies?: ReadonlySet<string>,
+): void {
+  // #3000 — aggregate genuine emission across every source-file overlay. A
+  // selector claim alone is not evidence that an existing function slot was
+  // patched successfully.
+  ctx.irCompiledFuncs = [...(ctx.irCompiledFuncs ?? []), ...report.compiled];
+
+  for (const err of report.errors) {
+    // #1923 — selector-claimed functions that fail build/verify/lower are
+    // metered even when their already-emitted legacy bodies remain usable.
+    (ctx.irPostClaimErrors ??= []).push({
+      kind: err.kind ?? "lower",
+      func: err.func,
+      message: err.message,
+    });
+    const diag = formatIrPathFallbackDiagnostic(err);
+    // #2138 — only the single-source IR-first path can omit a legacy body. The
+    // multi-module overlay never passes a skip set and therefore always keeps
+    // the ordinary warning demotion available.
+    const skippedTrap = irSkipBodies !== undefined && irSkipBodies.has(err.func);
+    ctx.errors.push({
+      message:
+        skippedTrap && diag.severity !== "error"
+          ? `Codegen error: ${diag.message} [IR-FIRST skipped-slot, #2138]`
+          : diag.message,
+      line: 0,
+      column: 0,
+      severity: skippedTrap ? "error" : diag.severity,
+    });
+  }
+
+  // #2138 — a skipped legacy slot must have been filled or have failed loud.
+  if (irSkipBodies !== undefined && irSkipBodies.size > 0) {
+    const compiledSet = new Set(report.compiled);
+    const erroredSet = new Set(report.errors.map((e) => e.func));
+    for (const name of irSkipBodies) {
+      if (!compiledSet.has(name) && !erroredSet.has(name)) {
+        reportErrorNoNode(
+          ctx,
+          `IR-first (#2138): legacy body for "${name}" was skipped but the IR path neither compiled it nor reported an error — the unreachable placeholder would ship. Selector/integration divergence; file an issue.`,
+        );
+      }
+    }
+  }
+
+  // #1169q — retain the existing selector-fallback log format, now once per
+  // source file for a multi-module compilation.
+  if (trackFallbacks && selection.fallbacks) {
+    const total = selection.funcs.size + selection.fallbacks.length;
+    const reasonHist: Record<string, number> = {};
+    for (const fb of selection.fallbacks) {
+      reasonHist[fb.reason] = (reasonHist[fb.reason] ?? 0) + 1;
+    }
+    const reasonStr = Object.entries(reasonHist)
+      .sort((a, b) => b[1] - a[1])
+      .map(([r, n]) => `${r}=${n}`)
+      .join(",");
+    process.stderr.write(
+      `[ir-fallback] file=${fileLabel || "<source>"} total=${total} claimed=${selection.funcs.size} fallback=${selection.fallbacks.length} reasons=${reasonStr}\n`,
+    );
+  }
+}
+
+/** Flat function names shared by two or more source files are not safe IR keys. */
+function collectMultiIrFunctionNameCollisions(sourceFiles: readonly ts.SourceFile[]): ReadonlySet<string> {
+  const owner = new Map<string, ts.SourceFile>();
+  const collisions = new Set<string>();
+  for (const sourceFile of sourceFiles) {
+    const namesInFile = new Set<string>();
+    for (const stmt of sourceFile.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
+        namesInFile.add(stmt.name.text);
+      }
+    }
+    for (const name of namesInFile) {
+      const previous = owner.get(name);
+      if (previous && previous !== sourceFile) collisions.add(name);
+      else owner.set(name, sourceFile);
+    }
+  }
+  return collisions;
+}
+
+function collectImportBindingNames(sourceFile: ts.SourceFile): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const stmt of sourceFile.statements) {
+    if (ts.isImportDeclaration(stmt)) {
+      const clause = stmt.importClause;
+      if (!clause) continue;
+      if (clause.name) names.add(clause.name.text);
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        names.add(clause.namedBindings.name.text);
+      } else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) names.add(element.name.text);
+      }
+    } else if (ts.isImportEqualsDeclaration(stmt)) {
+      names.add(stmt.name.text);
+    }
+  }
+  return names;
+}
+
+/** Import locals that can overwrite an unrelated flat `ctx.funcMap` key. */
+function collectMultiImportAliasNames(sourceFiles: readonly ts.SourceFile[]): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const sourceFile of sourceFiles) {
+    for (const stmt of sourceFile.statements) {
+      if (ts.isImportDeclaration(stmt)) {
+        const clause = stmt.importClause;
+        if (!clause) continue;
+        if (clause.name) names.add(clause.name.text);
+        if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+          names.add(clause.namedBindings.name.text);
+        } else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+          for (const element of clause.namedBindings.elements) {
+            const target = (element.propertyName ?? element.name).text;
+            if (element.name.text !== target) names.add(element.name.text);
+          }
+        }
+      } else if (ts.isImportEqualsDeclaration(stmt)) {
+        names.add(stmt.name.text);
+      }
+    }
+  }
+  return names;
+}
+
+/** Resolve cross-file import aliases back to their declared function names. */
+function collectMultiImportedFunctionNames(
+  sourceFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): ReadonlySet<string> {
+  const names = new Set<string>();
+  const addFunctionDeclarations = (symbol: ts.Symbol | undefined): void => {
+    if (!symbol) return;
+    const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+    for (const declaration of target.declarations ?? []) {
+      if (ts.isFunctionDeclaration(declaration) && declaration.name) names.add(declaration.name.text);
+    }
+    if (target.flags & ts.SymbolFlags.Module) {
+      for (const exported of checker.getExportsOfModule(target)) {
+        const value = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
+        for (const declaration of value.declarations ?? []) {
+          if (ts.isFunctionDeclaration(declaration) && declaration.name) names.add(declaration.name.text);
+        }
+      }
+    }
+  };
+  const addTarget = (local: ts.Identifier, syntacticTarget?: string): void => {
+    addFunctionDeclarations(checker.getSymbolAtLocation(local));
+    if (syntacticTarget) names.add(syntacticTarget);
+  };
+
+  for (const sourceFile of sourceFiles) {
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isImportDeclaration(stmt)) continue;
+      const clause = stmt.importClause;
+      if (!clause) continue;
+      if (clause.name) addTarget(clause.name);
+      if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        addTarget(clause.namedBindings.name);
+      } else if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          addTarget(element.name, (element.propertyName ?? element.name).text);
+        }
+      }
+    }
+    for (const stmt of sourceFile.statements) {
+      if (ts.isImportEqualsDeclaration(stmt)) addTarget(stmt.name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Top-level function declarations referenced from a different source file.
+ *
+ * Import syntax covers ordinary ESM edges, but `compileMulti` also accepts
+ * global-script roots. A module can call a function declared by one of those
+ * roots without an `ImportDeclaration`; TypeScript still resolves the
+ * identifier to the other file's declaration. Treat that checker-resolved
+ * edge exactly like an imported target so a legacy caller never observes an
+ * IR-only callable ABI (the M0 overlay has no cross-file call closure yet).
+ */
+function collectMultiCrossFileFunctionNames(
+  sourceFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+): ReadonlySet<string> {
+  // Preserve the deliberately conservative namespace/default/re-export import
+  // handling above, then add all symbol-resolved cross-file references.
+  const names = new Set(collectMultiImportedFunctionNames(sourceFiles, checker));
+  // External modules can only cross source-file boundaries through the import
+  // surface already collected above. Pay the full checker walk only when a
+  // global-script root makes import-free cross-file references possible.
+  if (!sourceFiles.some((sourceFile) => !ts.isExternalModule(sourceFile))) return names;
+  const sourceSet = new Set(sourceFiles);
+  const allFunctionNames = new Set<string>();
+  for (const sourceFile of sourceFiles) {
+    for (const stmt of sourceFile.statements) {
+      if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) allFunctionNames.add(stmt.name.text);
+    }
+  }
+  const markUnknownTargetConservatively = (): void => {
+    for (const name of allFunctionNames) names.add(name);
+  };
+
+  const addResolvedTarget = (symbol: ts.Symbol | undefined, referenceFile: ts.SourceFile): void => {
+    if (!symbol) return;
+    let target = symbol;
+    if (target.flags & ts.SymbolFlags.Alias) {
+      try {
+        target = checker.getAliasedSymbol(target);
+      } catch {
+        markUnknownTargetConservatively();
+        return;
+      }
+    }
+    for (const declaration of target.declarations ?? []) {
+      if (
+        ts.isFunctionDeclaration(declaration) &&
+        declaration.name &&
+        declaration.body &&
+        sourceSet.has(declaration.getSourceFile()) &&
+        declaration.getSourceFile() !== referenceFile
+      ) {
+        names.add(declaration.name.text);
+      }
+    }
+  };
+
+  for (const sourceFile of sourceFiles) {
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) {
+        try {
+          addResolvedTarget(checker.getSymbolAtLocation(node), sourceFile);
+        } catch {
+          // Safety scan uncertainty must only reduce M0 coverage. In host mode
+          // this blocks callable boundaries; standalone/WASI block every name.
+          markUnknownTargetConservatively();
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return names;
+}
+
+function functionBodyReferencesAnyName(fn: ts.FunctionDeclaration, names: ReadonlySet<string>): boolean {
+  if (!fn.body || names.size === 0) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(node) && names.has(node.text)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(fn.body);
+  return found;
+}
+
+/** Nested functions mint flat synthetic names that M0 cannot collision-prove. */
+function functionBodyContainsNestedRuntimeDeclaration(fn: ts.FunctionDeclaration): boolean {
+  if (!fn.body) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(fn.body, visit);
+  return found;
+}
+
+function typeFactCouldBeCallable(fact: TypeFact): boolean {
+  if (fact.kind === "function") return true;
+  if (fact.kind === "union") return fact.parts.some(typeFactCouldBeCallable);
+  // This is a safety gate: an incomplete fact must reduce M0 coverage rather
+  // than let a legacy caller cross an ABI boundary we have not proven.
+  return fact.kind === "any" || fact.kind === "unknown" || fact.kind === "unresolvable";
+}
+
+/** Callable parameters/returns still have a legacy↔IR wrapper ABI boundary. */
+function functionHasCallableBoundary(ctx: CodegenContext, declaration: ts.FunctionDeclaration): boolean {
+  for (const parameter of declaration.parameters) {
+    if (parameter.type !== undefined && ts.isFunctionTypeNode(parameter.type)) return true;
+    if (typeFactCouldBeCallable(ctx.oracle.typeFactOf(parameter))) return true;
+  }
+  const signature = ctx.oracle.signatureOf(declaration);
+  // Unknown callable shape is ABI-sensitive until the canonical callable ABI
+  // slice makes legacy/IR wrappers interchangeable.
+  return signature === undefined || typeFactCouldBeCallable(signature.returns);
+}
+
+/**
+ * Bound the M0 multi-module overlay to unambiguous top-level functions.
+ *
+ * `ctx.funcMap` and IR overrides are still keyed by flat function name. Drop a
+ * cross-file collision and every local caller that can reach a dropped name so
+ * no IR body can resolve or patch the wrong module's slot. Class members and
+ * the shared `__module_init` stay legacy-owned in M0.
+ */
+interface MultiIrGraphSafety {
+  readonly collisions: ReadonlySet<string>;
+  readonly crossFileFunctionNames: ReadonlySet<string>;
+  readonly importAliasNames: ReadonlySet<string>;
+  readonly occupiedFunctionKeys: readonly string[];
+  readonly occupiedFunctionNameCounts: ReadonlyMap<string, number>;
+}
+
+function makeMultiIrSafeSelection(
+  ctx: CodegenContext,
+  plan: IrOverlayPlan,
+  sourceFile: ts.SourceFile,
+  safety: MultiIrGraphSafety,
+): IrSelection {
+  const funcs = new Set(plan.safeSelection.funcs);
+  const blocked = new Set<string>([...safety.collisions, MODULE_INIT_CALLER]);
+  for (const name of plan.selection.funcs) {
+    if (!plan.safeSelection.funcs.has(name)) blocked.add(name);
+  }
+  const importBindings = collectImportBindingNames(sourceFile);
+  const conservativeCrossFileCallers = ctx.standalone || ctx.wasi || ctx.strictNoHostImports;
+
+  for (const name of funcs) {
+    const declaration = plan.declByName.get(name);
+    if (!declaration) {
+      blocked.add(name);
+      continue;
+    }
+    const crossFileTarget = safety.crossFileFunctionNames.has(name);
+    const hasCallableBoundary = crossFileTarget && functionHasCallableBoundary(ctx, declaration);
+    const registeredIdx = ctx.funcMap.get(name);
+    const registeredFunction = registeredIdx === undefined ? undefined : definedFuncAt(ctx, registeredIdx);
+    if (
+      safety.collisions.has(name) ||
+      functionBodyReferencesAnyName(declaration, importBindings) ||
+      functionBodyContainsNestedRuntimeDeclaration(declaration) ||
+      (declaration.typeParameters?.length ?? 0) > 0 ||
+      safety.importAliasNames.has(name) ||
+      safety.occupiedFunctionNameCounts.get(name) !== 1 ||
+      registeredFunction?.name !== name ||
+      safety.occupiedFunctionKeys.some((key) => key.startsWith(`${name}$`)) ||
+      (crossFileTarget && (conservativeCrossFileCallers || hasCallableBoundary))
+    ) {
+      blocked.add(name);
+    }
+  }
+  for (const name of blocked) funcs.delete(name);
+
+  // A collision/dangerous removal re-opens the selector's graph-closure
+  // invariant in both directions. Drop its whole selected weak component.
+  const callEdges = collectLocalCallEdges(sourceFile);
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [caller, callees] of callEdges) {
+      if (blocked.has(caller)) {
+        for (const callee of callees) {
+          if (!funcs.delete(callee)) continue;
+          blocked.add(callee);
+          changed = true;
+        }
+      } else if (funcs.has(caller)) {
+        for (const callee of callees) {
+          if (!blocked.has(callee)) continue;
+          funcs.delete(caller);
+          blocked.add(caller);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    funcs,
+    classMembers: new Set<string>(),
+    moduleInit: undefined,
+  };
 }
 
 /** Compile a typed AST into a WasmModule IR */
@@ -2388,105 +2808,7 @@ export function generateModule(
       const plan = irPlan ?? planIrOverlay(ctx, ast);
       const { selection, classShapes, overrideMap, safeSelection, trackFallbacks } = plan;
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
-      // #3000 — record the set of functions/class-members whose slots were
-      // actually patched with an IR body (genuine-emission signal; a mere
-      // selector claim does not imply this — see `irCompiledFuncs` doc).
-      ctx.irCompiledFuncs = report.compiled;
-      // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
-      // legacy path has already produced a working `body` for every function
-      // before `compileIrPathFunctions` runs; an ordinary IR throw here is a
-      // "we tried to optimise this function via IR, it didn't fit the IR's
-      // claim shape, falling back to legacy" event.
-      //
-      // Emit as severity-"warning" so they remain visible to the
-      // bridge tests (#1181's `irErrors` filter still sees them) but
-      // don't affect the test262 `result.success || severity==="error"`
-      // gate. Cleaner long-term: thread an `IrPathReport` channel through
-      // `CompileResult` separate from compile diagnostics; tracked as a
-      // follow-up.
-      //
-      // #1530 — the demotion is gated by `STRICT_IR_BUILD_ERRORS`: if any
-      // pattern in that set matches the build-error message, the
-      // diagnostic is promoted to "error" instead. The set starts empty
-      // (non-behavioural change); once a build-error class is known to
-      // be permanently fixed in the IR path, the matching pattern is
-      // added here and the legacy fallback path is closed for that
-      // class. This is the per-kind scoping hook the long-term retire
-      // plan wires through (see plan/log/ir-adoption.md).
-      for (const err of report.errors) {
-        // #1923 — meter post-claim demotions for the ratchet gate. These are
-        // functions the selector CLAIMED that then failed build/verify/lower/
-        // backend-legality and fell back to legacy through this warning channel
-        // — counted by no selector-level metric (`IrFallbackReason`). Always
-        // collected (cheap: the errors are already iterated here) and surfaced
-        // on `CompileResult.irPostClaimErrors`, mirroring `fallbackCounts`,
-        // which is likewise always counted; the gate buckets by kind +
-        // normalized message class. Pure telemetry; the demotion below is
-        // unchanged.
-        (ctx.irPostClaimErrors ??= []).push({
-          kind: err.kind ?? "lower",
-          func: err.func,
-          message: err.message,
-        });
-        const diag = formatIrPathFallbackDiagnostic(err);
-        // (#2138) Under IR-first, a post-claim IR failure on a function whose
-        // LEGACY body was SKIPPED cannot demote to a warning: there is no
-        // legacy body to fall back to — the slot holds an `unreachable`
-        // placeholder that would be a live runtime trap. Promote to a hard
-        // compile error. This is the intended investigation behavior: the
-        // flag's job is to surface exactly these selector↔builder
-        // divergences as loud, filable failures (#2135) instead of silent
-        // legacy demotes. Functions NOT in the skip set keep today's
-        // graceful demotion.
-        const skippedTrap = irSkipBodies !== undefined && irSkipBodies.has(err.func);
-        ctx.errors.push({
-          message:
-            skippedTrap && diag.severity !== "error"
-              ? `Codegen error: ${diag.message} [IR-FIRST skipped-slot, #2138]`
-              : diag.message,
-          line: 0,
-          column: 0,
-          severity: skippedTrap ? "error" : diag.severity,
-        });
-      }
-      // (#2138) Backstop for the skip contract: every function whose legacy
-      // body was skipped MUST have been IR-compiled into its slot. A skipped
-      // function that neither appears in `report.compiled` nor produced an
-      // entry in `report.errors` (which the loop above already promoted)
-      // means its placeholder would ship silently — fail the compile.
-      if (irSkipBodies !== undefined && irSkipBodies.size > 0) {
-        const compiledSet = new Set(report.compiled);
-        const erroredSet = new Set(report.errors.map((e) => e.func));
-        for (const name of irSkipBodies) {
-          if (!compiledSet.has(name) && !erroredSet.has(name)) {
-            reportErrorNoNode(
-              ctx,
-              `IR-first (#2138): legacy body for "${name}" was skipped but the IR path neither compiled it nor reported an error — the unreachable placeholder would ship. Selector/integration divergence; file an issue.`,
-            );
-          }
-        }
-      }
-      // #1169q telemetry — when JS2WASM_LOG_IR_FALLBACKS=1, log a one-line
-      // summary per compile to stderr: total top-level FunctionDeclarations
-      // claimed vs. fallback, with rejection reason histogram. This is the
-      // gating measurement before retiring the legacy path: drive the
-      // claim rate to ~100% (excluding deferred features) and only THEN
-      // delete expressions.ts / statements.ts. See #1169q.
-      if (trackFallbacks && selection.fallbacks) {
-        const total = selection.funcs.size + selection.fallbacks.length;
-        const reasonHist: Record<string, number> = {};
-        for (const fb of selection.fallbacks) {
-          reasonHist[fb.reason] = (reasonHist[fb.reason] ?? 0) + 1;
-        }
-        const fileLabel = ast.sourceFile.fileName || "<source>";
-        const reasonStr = Object.entries(reasonHist)
-          .sort((a, b) => b[1] - a[1])
-          .map(([r, n]) => `${r}=${n}`)
-          .join(",");
-        process.stderr.write(
-          `[ir-fallback] file=${fileLabel} total=${total} claimed=${selection.funcs.size} fallback=${selection.fallbacks.length} reasons=${reasonStr}\n`,
-        );
-      }
+      consumeIrOverlayReport(ctx, report, selection, trackFallbacks, ast.sourceFile.fileName, irSkipBodies);
     }
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.
@@ -4595,6 +4917,40 @@ export function generateMultiModule(
 
     // (#1602) Rebuild method-closure trampolines against final method sigs.
     finalizeMethodTrampolines(ctx);
+
+    // (#2138 M0) Compile-twice IR overlay for multi-module top-level functions.
+    // Every legacy body in every source file is already present, and method
+    // trampolines are final, before planning starts. Imported calls remain an
+    // external selector boundary in M0 (no module-binding resolver); class
+    // members, module init, and IR-first body skipping are deliberately out of
+    // scope. In particular, never patch the one shared `__module_init` once per
+    // source file.
+    if (options?.experimentalIR) {
+      const occupiedFunctionNameCounts = new Map<string, number>();
+      for (const fn of ctx.mod.functions) {
+        occupiedFunctionNameCounts.set(fn.name, (occupiedFunctionNameCounts.get(fn.name) ?? 0) + 1);
+      }
+      const safety: MultiIrGraphSafety = {
+        collisions: collectMultiIrFunctionNameCollisions(multiAst.sourceFiles),
+        crossFileFunctionNames: collectMultiCrossFileFunctionNames(multiAst.sourceFiles, multiAst.checker),
+        importAliasNames: collectMultiImportAliasNames(multiAst.sourceFiles),
+        occupiedFunctionKeys: [...ctx.funcMap.keys()],
+        occupiedFunctionNameCounts,
+      };
+      for (const sourceFile of multiAst.sourceFiles) {
+        const sourceAst: TypedAST = {
+          sourceFile,
+          checker: multiAst.checker,
+          program: multiAst.program,
+          diagnostics: multiAst.diagnostics,
+          syntacticDiagnostics: multiAst.syntacticDiagnostics,
+        };
+        const plan = planIrOverlay(ctx, sourceAst, { resolveModuleBindings: false });
+        const safeSelection = makeMultiIrSafeSelection(ctx, plan, sourceFile, safety);
+        const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes);
+        consumeIrOverlayReport(ctx, report, plan.selection, plan.trackFallbacks, sourceFile.fileName);
+      }
+    }
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.
     fixupStructNewArgCounts(ctx);

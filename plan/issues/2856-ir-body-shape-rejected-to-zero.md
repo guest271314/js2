@@ -1324,6 +1324,36 @@ pre-claim routing, and representation-mode gates; typecheck and the fallback
 gate clean; full equivalence gate at 1,607 passing / 36 known failures with no
 new regressions.
 
+### Prerequisite M0 (zero delta) — bounded multi-module IR overlay
+
+Imported-callee coverage cannot be measured honestly until the multi-source
+entry points actually run the IR overlay. M0 adds that compile-twice seam to
+`compileMulti`, `compileFiles`, and `compileProject` only after every legacy
+body and method trampoline exists. It deliberately leaves module init, class
+members, imports, ambiguous flat names, and unsafe cross-file callable ABI
+components legacy-owned. Graph-wide collision pruning and checker-resolved
+global-script edges prevent an IR body from patching or calling the wrong flat
+function slot.
+
+M0 is an enabling slice, not a bucket-serving claim widening. Its focused
+multi-source probes genuinely IR-emit safe leaves with runtime parity while
+the fallback gate remains exactly **12 → 12**, module-level **2 → 2**, and
+post-claim buckets stay empty. This prerequisite must land before imported-call
+selection is widened.
+
+### Prerequisite B0 (zero delta) — one callable boundary ABI
+
+The legacy front end carries callable parameters and results as `externref`
+wrappers rooted in `__fn_wrap_*`; the current IR closure types use a private
+`__ir_closure_base_*` hierarchy. Direct all-IR tests hide that mismatch, but an
+M0 mixed-front-end call can expose an invalid signature or cast. Before any
+imported call or top-level function value is claimed, #3214 must establish one
+boundary representation: keep typed closures internal, pack them into the
+legacy wrapper carrier at callable positions, and unpack through the exact
+signature wrapper before `call_ref`. B0 must prove both IR→legacy and legacy→IR
+callable parameters/results while preserving **12 → 12** and zero post-claim
+demotions.
+
 ### Capability A (M) — imported-callee calls (first half of the 8 mains)
 
 Root: the gate compiles each corpus file as its own program
@@ -1360,13 +1390,13 @@ Design (mirror the extern-in-IR split — selection runs early, from-ast late):
 `external-call`** — measure with `--shape-diag` + `--verbose`; if the mains
 still reject on the function-reference args, A+B must land together.
 
-### Capability B (L) — first-class function references + arrow values
+### Capability B1/B2 (L) — first-class function references + arrow values
 
 Two arms, both required by the mains' `addBenchCard("fib", bench_fib)`-style
 calls and by `addBenchCard` itself (`expr-unhandled:ArrowFunction`, the
 `addEventListener("click", () => …)` callback):
 
-1. **Top-level function reference as a value** — an Identifier referencing a
+1. **B1: top-level function reference as a value** — an Identifier referencing a
    FunctionDeclaration in argument position with a function-typed param.
    Lower to the closure ABI legacy uses for the same site (`$__fn_wrap` /
    `builtin-fn-meta.ts`, `closures.ts`) — the emitter primitives already
@@ -1375,7 +1405,7 @@ calls and by `addBenchCard` itself (`expr-unhandled:ArrowFunction`, the
    bar** (a legacy callee will `call_ref` through the same wrapper type —
    mind the #2873 wrapper-RTT creation-order hazard: cast to ROOT + funcref
    sig-dispatch, don't depend on RTT order).
-2. **Arrow-function expressions as values in argument position** —
+2. **B2: arrow-function expressions as values in argument position** —
    `isPhase1ClosureLiteral` (`select.ts:2490`) exists but is only consulted
    from var-decl initializer position (`:2357`). Widen to call-argument
    position; from-ast reuses the same closure-literal lowering. Captures:
@@ -1393,9 +1423,16 @@ dictate an unshippable capability.
 
 ### Ordering and landability
 
-1. Step 0 (S, landed) → 2. Capability C (M–L, independently landable,
-   measured −1) → 3. Capability A (M) → 4. Capability B (L; A+B together if
-   A alone is net-zero) → 5. `delay` decision.
+1. Step 0 (landed) → 2. Capability C (landed, measured −1) → 3. builtins
+   component (measured −1) → 4. M0 multi-module overlay (zero delta) → 5. B0
+   canonical callable ABI (zero delta) → 6. Capability A + B1 atomically → 7.
+   B2 arrow values → 8. remaining calendar shapes → 9. `delay` support or an
+   explicitly approved deferred rebucket.
+
+The expected measurement sequence from the current 12 floor is
+**12 → 12 → 12 → 5 → 4 → 1 → 0**. Treat those intermediate numbers as routing
+forecasts, not acceptance substitutes: each slice banks only its observed gate
+result, and any mismatch is diagnosed before widening the next claim surface.
 
 Each slice: prove claims via byte-diff/`irFirstSkipped` (anti-vacuity, the
 established pattern), zero post-claim demotions, bank via
