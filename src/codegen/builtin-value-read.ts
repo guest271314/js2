@@ -1012,7 +1012,7 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
   const funcName = `__builtin_static_${builtinName}_${propName}`;
   let funcIdx = ctx.funcMap.get(funcName);
   if (funcIdx === undefined) {
-    const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
+    const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.liftedSelfTypeIdx };
     const closureFctx = makeBuiltinClosureFctx(funcName, selfType, paramTypes, returnType);
 
     if (key === "Array.isArray") {

@@ -134,17 +134,25 @@ export interface IrLowerResolver {
    */
   resolveObject?(shape: IrObjectShape, alloc?: AllocSiteId): IrObjectStructLowering | null;
   /**
-   * Slice 3 (#1169c): resolve the SUPERTYPE WasmGC struct for a closure
-   * signature. Carried by the IrType.closure ValType so all
-   * same-signature closures share one Wasm type. Returns `null` if the
-   * signature contains an IrType the backend can't lower (e.g. a
-   * nested object shape the slice-2 resolver hasn't pre-walked).
+   * Slice 3 / #3214 B0: resolve the per-signature allocation wrapper and its
+   * exact lifted funcref type. The wrapper is used by `closure.new` (and as the
+   * parent of captured environments), but is not the cross-module carrier or
+   * lifted `self` type; those use `resolveClosureRoot`. Returns `null` if the
+   * signature contains an IrType the backend can't lower.
    */
   resolveClosure?(signature: IrClosureSignature): IrClosureLowering | null;
   /**
-   * Slice 3 (#1169c): resolve the SUBTYPE WasmGC struct for a specific
-   * closure-construction site. Different `(signature, captureFieldTypes)`
-   * pairs produce different subtypes of the supertype struct, so the
+   * #3214 B0: resolve the canonical root shared by every legacy/IR
+   * funcref-wrapper struct. This is the stable closure carrier, field-0 read
+   * type, and lifted `self` type. Only allocation and capture recovery use a
+   * narrower per-signature wrapper/subtype.
+   */
+  resolveClosureRoot?(): number | null;
+  /**
+   * Slice 3 (#1169c): resolve the captured SUBTYPE WasmGC struct for a specific
+   * closure-construction site. Different non-empty
+   * `(signature, captureFieldTypes)` pairs produce different subtypes of the
+   * signature's exact canonical wrapper, so the
    * lifted body's `ref.cast` recovers capture-field positions.
    */
   resolveClosureSubtype?(signature: IrClosureSignature, captureFieldTypes: readonly IrType[]): IrClosureLowering | null;
@@ -1703,22 +1711,40 @@ export function lowerIrFunctionBody<S, Slot>(
       }
       case "closure.call": {
         const calleeT = typeOf(instr.callee);
-        if (calleeT.kind !== "closure") {
-          throw new Error(`ir/lower: closure.call callee must be closure IrType, got ${calleeT.kind} (${func.name})`);
+        if (calleeT.kind !== "closure" && calleeT.kind !== "callable") {
+          throw new Error(
+            `ir/lower: closure.call callee must be closure/callable IrType, got ${calleeT.kind} (${func.name})`,
+          );
         }
         const cl = resolver.resolveClosure?.(calleeT.signature);
         if (!cl) {
           throw new Error(`ir/lower: resolver cannot lower closure for call (${func.name})`);
         }
-        // Push __self (closure value), then user args, then the closure
-        // value AGAIN to extract the funcref. The double-emit is the
-        // reason `collectIrUses` returns `callee` twice — that forces
-        // the closure SSA value into a Wasm local so the second emit
-        // is just `local.get`, not a re-emission of the producing tree.
-        emitValue(instr.callee, out);
+        // The wrapper ROOT is the only cross-module-stable struct identity:
+        // per-signature wrappers depend on which signature a module happened
+        // to register first. It is therefore both the lifted `self` carrier and
+        // the type used for field-0 extraction. The funcref cast below performs
+        // the exact signature check without narrowing the struct itself.
+        // Resolving `cl` first creates the root when necessary.
+        const rootTypeIdx = resolver.resolveClosureRoot?.() ?? null;
+        if (rootTypeIdx === null) {
+          throw new Error(`ir/lower: resolver cannot lower closure wrapper root (${func.name})`);
+        }
+        const emitRootSelf = (): void => {
+          emitValue(instr.callee, out);
+          if (calleeT.kind === "callable") {
+            emitter.emitFromExternref({ typeIdx: rootTypeIdx }, out);
+          }
+        };
+
+        // Push root __self, then user args, then the callee value AGAIN to
+        // extract field 0. The double-emit is the reason
+        // `collectIrUses` returns `callee` twice — it forces the SSA value
+        // into a Wasm local instead of re-emitting its producing tree.
+        emitRootSelf();
         for (const a of instr.args) emitValue(a, out);
-        emitValue(instr.callee, out);
-        emitter.emitClosureFuncGet(cl, out);
+        emitRootSelf();
+        emitter.emitClosureFuncGet({ ...cl, structTypeIdx: rootTypeIdx }, out);
         // The struct's `func` field is typed as the abstract `funcref`
         // (matches the legacy `getOrCreateFuncRefWrapperTypes` pattern,
         // which avoids a circular type reference between the struct and
@@ -2309,6 +2335,7 @@ export function lowerIrFunctionBody<S, Slot>(
         const opTy = typeOf(instr.value);
         const alreadyExternref =
           (opTy.kind === "val" && opTy.val.kind === "externref") ||
+          opTy.kind === "callable" ||
           (opTy.kind === "string" && resolver.resolveString?.()?.kind === "externref");
         if (!alreadyExternref) {
           emitter.emitToExternref(out);
@@ -3448,6 +3475,10 @@ function memberValType(t: IrType, funcName: string): ValType {
 
 export function lowerIrTypeToValType(t: IrType, resolver: IrLowerResolver, funcName: string): ValType {
   if (t.kind === "val") return t.val;
+  // #3214 B0 — source-level callable boundaries use the same externref ABI as
+  // legacy callbacks. The signature remains in IrType for exact unpack/call
+  // lowering; it has no distinct Wasm parameter representation.
+  if (t.kind === "callable") return { kind: "externref" };
   if (t.kind === "string") {
     const sty = resolver.resolveString?.();
     if (!sty) {
@@ -3468,17 +3499,19 @@ export function lowerIrTypeToValType(t: IrType, resolver: IrLowerResolver, funcN
     return { kind: "ref", typeIdx: obj.typeIdx };
   }
   if (t.kind === "closure") {
-    // Slice 3 (#1169c): a closure value lowers to a (ref $base_struct)
-    // — the supertype struct shared by all closures with this signature.
-    // `call_ref` against the base func type accepts any subtype value,
-    // so the same Wasm-level type works for both construction (subtype)
-    // and call (supertype). The resolver registers the supertype lazily
-    // on first use.
+    // Slice 3 / #3214 B0: allocation still resolves the per-signature wrapper,
+    // but closure SSA values and lifted `__self` use the canonical root. The
+    // same signature can be the root in one separately compiled module and a
+    // child in another, so its allocation wrapper is not an ABI-stable carrier.
     const cl = resolver.resolveClosure?.(t.signature);
     if (!cl) {
       throw new Error(`ir/lower: resolver cannot lower closure (${funcName})`);
     }
-    return { kind: "ref", typeIdx: cl.structTypeIdx };
+    const rootTypeIdx = resolver.resolveClosureRoot?.() ?? null;
+    if (rootTypeIdx === null) {
+      throw new Error(`ir/lower: resolver cannot lower closure wrapper root (${funcName})`);
+    }
+    return { kind: "ref", typeIdx: rootTypeIdx };
   }
   if (t.kind === "class") {
     // Slice 4 (#1169d): class instances lower to a non-null `(ref
@@ -3553,6 +3586,10 @@ function describeIrTypeShallow(t: IrType): string {
   if (t.kind === "closure") {
     const ps = t.signature.params.map(describeIrTypeShallow).join(",");
     return `closure(${ps})->${describeIrTypeShallow(t.signature.returnType)}`;
+  }
+  if (t.kind === "callable") {
+    const ps = t.signature.params.map(describeIrTypeShallow).join(",");
+    return `callable(${ps})->${describeIrTypeShallow(t.signature.returnType)}`;
   }
   if (t.kind === "class") return `class<${t.shape.className}>`;
   if (t.kind === "extern") return `extern<${t.className}>`;

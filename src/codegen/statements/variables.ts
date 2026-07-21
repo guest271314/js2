@@ -1455,8 +1455,8 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           // stay) externref — the #962 guard already refuses to narrow it — the
           // sequence was `any.convert_extern` + guarded cast to ONE
           // signature-matched closure struct + widen back to externref: a pure
-          // round-trip whose else-arm NULLS the value. Closure wrapper structs
-          // are sibling `sub final` types with creation-ORDER-dependent RTTs
+          // round-trip whose else-arm NULLS the value. Signature wrapper structs
+          // are distinct root-child siblings with creation-ORDER-dependent RTTs
           // (see reference #2873), and `closureInfoByTypeIdx` iteration picks an
           // arbitrary first match, so a perfectly good closure of a SIBLING
           // wrapper type read out of an array (`var f = factories[k]`) was

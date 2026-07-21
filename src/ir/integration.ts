@@ -60,6 +60,10 @@ import {
 } from "../codegen/registry/types.js";
 import type { CodegenContext, FunctionContext } from "../codegen/context/types.js";
 import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
+import {
+  getFuncRefWrapperRootTypeIdx,
+  getOrCreateFuncRefWrapperTypes,
+} from "../codegen/closures/funcref-wrapper-types.js";
 import { ensureFmod, FMOD_FN } from "../codegen/fmod.js"; // #2945 — on-demand `%` helper materialization
 // (#3156) — on-demand guarded charCodeAt helper materialization
 import {
@@ -1704,6 +1708,9 @@ function makeResolver(
     resolveClosure(sig: IrClosureSignature): IrClosureLowering | null {
       return closureResolver.resolveBase(sig);
     },
+    resolveClosureRoot(): number | null {
+      return getFuncRefWrapperRootTypeIdx(ctx) ?? null;
+    },
     resolveClosureSubtype(sig: IrClosureSignature, fields: readonly IrType[]): IrClosureLowering | null {
       return closureResolver.resolveSubtype(sig, fields);
     },
@@ -2858,6 +2865,10 @@ function irTypeKey(t: IrType): string {
     const ps = t.signature.params.map(irTypeKey).join(",");
     return `closure(${ps})->${irTypeKey(t.signature.returnType)}`;
   }
+  if (t.kind === "callable") {
+    const ps = t.signature.params.map(irTypeKey).join(",");
+    return `callable(${ps})->${irTypeKey(t.signature.returnType)}`;
+  }
   // Slice 4 (#1169d): class is keyed by name — uniqueness across the
   // compilation unit makes this safe.
   if (t.kind === "class") return `class:${t.shape.className}`;
@@ -2896,10 +2907,12 @@ function legacyFieldsHashKey(fields: readonly FieldDef[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Slice 3 (#1169c): per-signature closure struct registry. Maintains:
- *   - **base** structs (one per signature) — single-funcref-field
- *     supertype; carried by `IrType.closure` so all closures of the same
- *     signature share one Wasm value type.
+ * Slice 3 / #3214 B0: closure allocation registry. Maintains:
+ *   - **base** structs (one per signature) — the canonical legacy
+ *     `__fn_wrap_*` allocation wrapper returned by
+ *     `getOrCreateFuncRefWrapperTypes`. Every lifted funcref and closure SSA
+ *     carrier uses the module-wide wrapper root instead, making its type stable
+ *     across modules with different wrapper creation order.
  *   - **subtype** structs (one per `(signature, captureFieldTypes)`
  *     pair) — extends the base with capture fields. Constructed at
  *     each `closure.new` site; lifted bodies `ref.cast` __self to
@@ -2919,26 +2932,10 @@ class ClosureStructRegistry {
     const cached = this.baseCache.get(key);
     if (cached) return cached;
 
-    // Synthesize the base struct: just the funcref field, no captures.
-    // Mark as `superTypeIdx: -1` (root of hierarchy, non-final) so
-    // subtypes can extend it. A bare struct with `superTypeIdx`
-    // undefined is emitted as final by the Wasm spec, which would
-    // make the subtype declaration invalid (`type N extends final
-    // type M`).
-    const baseStructIdx = this.ctx.mod.types.length;
-    const baseStructName = `__ir_closure_base_${this.baseCache.size}`;
-    const baseFields: FieldDef[] = [{ name: "func", type: { kind: "funcref" }, mutable: false }];
-    this.ctx.mod.types.push({
-      kind: "struct",
-      name: baseStructName,
-      fields: baseFields,
-      superTypeIdx: -1,
-    } as StructTypeDef);
-    this.ctx.structMap.set(baseStructName, baseStructIdx);
-    this.ctx.typeIdxToStructName.set(baseStructIdx, baseStructName);
-    this.ctx.structFields.set(baseStructName, baseFields);
-
-    // Lifted func type: (ref $base, ...sig.params) -> sig.returnType.
+    // Resolve the source signature first, then delegate both the allocation
+    // wrapper and lifted func type to the canonical legacy registry. This is
+    // the ABI join point: legacy and IR share allocation metadata, while the
+    // helper makes the lifted func's self type the module-wide wrapper root.
     let paramTypes: ValType[];
     let resultTypes: ValType[];
     try {
@@ -2947,26 +2944,27 @@ class ClosureStructRegistry {
     } catch {
       return null;
     }
-    const liftedFuncTypeIdx = addFuncType(
-      this.ctx,
-      [{ kind: "ref", typeIdx: baseStructIdx }, ...paramTypes],
-      resultTypes,
-      `${baseStructName}_funcType`,
-    );
+    const wrapper = getOrCreateFuncRefWrapperTypes(this.ctx, paramTypes, resultTypes);
+    if (!wrapper) return null;
 
     const lowering: IrClosureLowering = {
-      structTypeIdx: baseStructIdx,
+      structTypeIdx: wrapper.structTypeIdx,
       funcFieldIdx: 0,
       capFieldIdx: () => {
         throw new Error("ir/integration: base closure struct has no captures");
       },
-      funcTypeIdx: liftedFuncTypeIdx,
+      funcTypeIdx: wrapper.liftedFuncTypeIdx,
     };
     this.baseCache.set(key, lowering);
     return lowering;
   }
 
   resolveSubtype(sig: IrClosureSignature, captureFieldTypes: readonly IrType[]): IrClosureLowering | null {
+    // A no-capture closure allocates the signature wrapper directly. Creating
+    // a redundant empty subtype would add an unnecessary RTT; invocation reads
+    // every wrapper through the root and discriminates on the funcref type.
+    if (captureFieldTypes.length === 0) return this.resolveBase(sig);
+
     const key = `${sigKey(sig)}#${captureFieldTypes.map(irTypeKey).join(",")}`;
     const cached = this.subCache.get(key);
     if (cached) return cached;
@@ -2997,6 +2995,18 @@ class ClosureStructRegistry {
     this.ctx.typeIdxToStructName.set(subIdx, subName);
     this.ctx.structFields.set(subName, fields);
 
+    const baseInfo = this.ctx.closureInfoByTypeIdx.get(base.structTypeIdx);
+    if (!baseInfo) {
+      throw new Error(`ir/integration: canonical wrapper ${base.structTypeIdx} has no closure metadata`);
+    }
+    this.ctx.closureInfoByTypeIdx.set(subIdx, {
+      structTypeIdx: subIdx,
+      funcTypeIdx: base.funcTypeIdx,
+      paramTypes: [...baseInfo.paramTypes],
+      returnType: baseInfo.returnType,
+      hasCaptures: true,
+    });
+
     const fieldIdxByCap = new Map<number, number>();
     for (let i = 0; i < captureFieldTypes.length; i++) fieldIdxByCap.set(i, i + 1);
 
@@ -3008,7 +3018,9 @@ class ClosureStructRegistry {
         if (v === undefined) throw new Error(`ir/integration: closure subtype has no capture index ${i}`);
         return v;
       },
-      // call_ref dispatches via the BASE func type — subtype shares it.
+      // call_ref dispatches via the signature-specific lifted func type. Its
+      // self param is the wrapper root; the captured body downcasts that root
+      // to this concrete subtype before reading captures.
       funcTypeIdx: base.funcTypeIdx,
     };
     this.subCache.set(key, lowering);

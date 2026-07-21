@@ -10,6 +10,7 @@ import {
   asBlockId,
   asLabelId,
   asValueId,
+  closureSignatureEquals,
   irVal,
   irDynamic,
   AllocKind,
@@ -1450,6 +1451,24 @@ export class IrFunctionBuilder {
   emitCoerceToExternref(value: IrValueId): IrValueId {
     const result = this.allocator.fresh();
     const resultType: IrType = irVal({ kind: "externref" });
+    this.valueTypes.set(result, resultType);
+    this.pushInstr({ kind: "coerce.to_externref", value, result, resultType });
+    return result;
+  }
+
+  /**
+   * Pack an internal closure into the canonical externref callable ABI.
+   * This is intentionally the only closure→callable conversion: signatures
+   * must match exactly, so the boundary does not introduce callback
+   * covariance or broaden selection.
+   */
+  emitCallablePack(value: IrValueId, signature: IrClosureSignature): IrValueId {
+    const valueType = this.typeOf(value);
+    if (valueType.kind !== "closure" || !closureSignatureEquals(valueType.signature, signature)) {
+      throw new Error(`IrFunctionBuilder: callable pack requires an exact closure signature (func ${this.name})`);
+    }
+    const result = this.allocator.fresh();
+    const resultType: IrType = { kind: "callable", signature };
     this.valueTypes.set(result, resultType);
     this.pushInstr({ kind: "coerce.to_externref", value, result, resultType });
     return result;

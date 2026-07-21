@@ -35,13 +35,23 @@ export function getOrCreateFuncRefWrapperTypes(
   ctx: CodegenContext,
   userParams: ValType[],
   resultTypes: ValType[],
-): { structTypeIdx: number; liftedFuncTypeIdx: number; closureInfo: ClosureInfo } | null {
+): {
+  structTypeIdx: number;
+  liftedFuncTypeIdx: number;
+  liftedSelfTypeIdx: number;
+  closureInfo: ClosureInfo;
+} | null {
   // Build cache key from param types and result types
   const sigKey = `${userParams.map((p) => p.kind + ((p as any).typeIdx ?? "")).join(",")}->${resultTypes.map((r) => r.kind + ((r as any).typeIdx ?? "")).join(",")}`;
 
   const cached = ctx.funcRefWrapperCache.get(sigKey);
   if (cached) {
-    return { structTypeIdx: cached.structTypeIdx, liftedFuncTypeIdx: cached.funcTypeIdx, closureInfo: cached };
+    return {
+      structTypeIdx: cached.structTypeIdx,
+      liftedFuncTypeIdx: cached.funcTypeIdx,
+      liftedSelfTypeIdx: getFuncRefWrapperRootTypeIdx(ctx) ?? cached.structTypeIdx,
+      closureInfo: cached,
+    };
   }
 
   // Create the closure struct type: just (field $func funcref), no captures.
@@ -57,12 +67,18 @@ export function getOrCreateFuncRefWrapperTypes(
     fields: structFields,
     superTypeIdx: rootWrapperTypeIdx ?? -1, // first wrapper is the root; later signatures subtype it
   });
+  const liftedSelfTypeIdx = rootWrapperTypeIdx ?? structTypeIdx;
   if (rootWrapperTypeIdx === undefined) {
     (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx = structTypeIdx;
   }
 
-  // Create the lifted function type: (ref $struct, ...userParams) -> results
-  const liftedParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }, ...userParams];
+  // Cross-module callable ABI: every lifted funcref takes the structurally
+  // canonical ROOT as `self`, never the per-signature allocation wrapper.
+  // Wrapper creation order is module-local, so embedding the latter here
+  // makes identical source signatures disagree across separately compiled
+  // modules. Captured bodies recover their environment with a root→subtype
+  // cast; the user-visible params/results still identify the funcref exactly.
+  const liftedParams: ValType[] = [{ kind: "ref", typeIdx: liftedSelfTypeIdx }, ...userParams];
   const liftedFuncTypeIdx = addFuncType(ctx, liftedParams, resultTypes, `${closureName}_type`);
 
   const closureInfo: ClosureInfo = {
@@ -74,7 +90,7 @@ export function getOrCreateFuncRefWrapperTypes(
   ctx.closureInfoByTypeIdx.set(structTypeIdx, closureInfo);
   ctx.funcRefWrapperCache.set(sigKey, closureInfo);
 
-  return { structTypeIdx, liftedFuncTypeIdx, closureInfo };
+  return { structTypeIdx, liftedFuncTypeIdx, liftedSelfTypeIdx, closureInfo };
 }
 
 /**
@@ -90,11 +106,21 @@ export function getOrCreateConstructibleFuncRefWrapperTypes(
   ctx: CodegenContext,
   userParams: ValType[],
   resultTypes: ValType[],
-): { structTypeIdx: number; liftedFuncTypeIdx: number; closureInfo: ClosureInfo } | null {
+): {
+  structTypeIdx: number;
+  liftedFuncTypeIdx: number;
+  liftedSelfTypeIdx: number;
+  closureInfo: ClosureInfo;
+} | null {
   const sigKey = `${userParams.map((p) => p.kind + ((p as any).typeIdx ?? "")).join(",")}->${resultTypes.map((r) => r.kind + ((r as any).typeIdx ?? "")).join(",")}`;
   const cached = ctx.constructibleFuncRefWrapperCache.get(sigKey);
   if (cached) {
-    return { structTypeIdx: cached.structTypeIdx, liftedFuncTypeIdx: cached.funcTypeIdx, closureInfo: cached };
+    return {
+      structTypeIdx: cached.structTypeIdx,
+      liftedFuncTypeIdx: cached.funcTypeIdx,
+      liftedSelfTypeIdx: getFuncRefWrapperRootTypeIdx(ctx) ?? cached.structTypeIdx,
+      closureInfo: cached,
+    };
   }
 
   const base = getOrCreateFuncRefWrapperTypes(ctx, userParams, resultTypes);
@@ -118,28 +144,53 @@ export function getOrCreateConstructibleFuncRefWrapperTypes(
   ctx.closureInfoByTypeIdx.set(structTypeIdx, closureInfo);
   ctx.constructibleFuncRefWrapperCache.set(sigKey, closureInfo);
   ctx.constructibleClosureTypeIdxs.add(structTypeIdx);
-  return { structTypeIdx, liftedFuncTypeIdx: base.liftedFuncTypeIdx, closureInfo };
+  return {
+    structTypeIdx,
+    liftedFuncTypeIdx: base.liftedFuncTypeIdx,
+    liftedSelfTypeIdx: base.liftedSelfTypeIdx,
+    closureInfo,
+  };
 }
 
 /**
  * (#2873 park fix) The ROOT funcref-wrapper struct type — the FIRST wrapper
  * `getOrCreateFuncRefWrapperTypes` created in this module. Every later
- * per-signature wrapper struct is a `sub final` of it (see the star chaining
- * above), so the root is the ONLY wrapper type a `ref.test`/`ref.cast` is
- * guaranteed to accept for a closure value of ANY signature's wrapper.
+ * per-signature wrapper struct is a direct subtype of it. It is also the
+ * canonical lifted-function `self` type for EVERY signature, so function type
+ * identity does not depend on which signature created the root locally. The
+ * finalization pass explicitly keeps this root open even in a minimal module
+ * with no child wrapper: WasmGC canonical identity includes finality, so an
+ * opportunistically-final root would not match another module's open root.
+ * The root is therefore the ONLY wrapper type a `ref.test`/`ref.cast` is
+ * guaranteed to accept for a closure value of ANY shared signature wrapper.
  *
  * Why callers need it: wrapper structs are all layout-identical
  * `(struct (field funcref))`, but WasmGC isorecursive canonicalization keys on
- * (fields, supertype, finality) — a `sub final $root` sibling does NOT
- * canonicalize with the root or with another sibling. A call site that casts a
+ * (fields, supertype, finality) — a direct `$root` subtype does NOT canonicalize
+ * with the root or with another sibling. A call site that casts a
  * closure value to the wrapper of its *declared* signature therefore nulls out
  * whenever the value was allocated under a different signature's wrapper
  * (e.g. an activated async closure: its wrapper is minted for the REWRITTEN
  * `... -> externref` Promise signature, while an `fn: () => void` param casts
  * to the void wrapper) — unless creation ORDER happened to make the declared
- * wrapper the root. Cast to the root instead and discriminate on the funcref's
- * exact type (which encodes the true signature).
+ * wrapper the root. Cast/read/pass `self` through the root instead and
+ * discriminate only on the funcref's exact type (which encodes the true
+ * signature).
  */
 export function getFuncRefWrapperRootTypeIdx(ctx: CodegenContext): number | undefined {
   return (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx;
+}
+
+/**
+ * Return the concrete struct type used by a closure funcref's leading `self`
+ * parameter. Shared wrapper funcs return the canonical root; private/named
+ * function-expression funcs return their concrete nullable struct. Dispatch
+ * sites use this distinction to avoid foreign per-signature wrapper casts
+ * without breaking private closure types.
+ */
+export function getClosureFuncSelfTypeIdx(ctx: CodegenContext, funcTypeIdx: number): number | undefined {
+  const type = ctx.mod.types[funcTypeIdx];
+  if (!type || type.kind !== "func") return undefined;
+  const self = type.params[0];
+  return self && (self.kind === "ref" || self.kind === "ref_null") ? self.typeIdx : undefined;
 }

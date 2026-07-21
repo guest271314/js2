@@ -12,7 +12,7 @@ import { ts } from "../../ts-api.js";
 import { isBooleanType, isPromiseType, isStringType, isVoidType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { resolveArrayInfo } from "../array-methods.js";
-import { compileArrowAsClosure, getFuncRefWrapperRootTypeIdx, getOrCreateFuncRefWrapperTypes } from "../closures.js";
+import { compileArrowAsClosure, getClosureFuncSelfTypeIdx, getOrCreateFuncRefWrapperTypes } from "../closures.js";
 import { emitToNumber, emitToString } from "../coercion-engine.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
@@ -1028,7 +1028,6 @@ export function compileIdentifierCall(
 
         if (wrapperTypes) {
           const matchedClosureInfo = wrapperTypes.closureInfo;
-          const matchedStructTypeIdx = wrapperTypes.structTypeIdx;
           // (#2174) When the callee's signature returns `Promise<T>`,
           // `resolveWasmType` strips the Promise wrapper and yields the awaited
           // value's wasm type (e.g. f64 for `() => Promise<number>`). But an
@@ -1126,24 +1125,24 @@ export function compileIdentifierCall(
           // Save closure ref to a local
           let closureLocal: number;
           let rawCalleeLocal: number | undefined;
-          // (#2873 park fix) Struct type the externref callee is cast to. The
-          // declared-signature wrapper (`matchedStructTypeIdx`) only accepts
+          // (#2873 park fix) Struct type the externref callee is cast to. A
+          // declared-signature allocation wrapper only accepts
           // values whose ACTUAL signature wrapper is the same type — but the
-          // wrapper chain is a star of `sub final` siblings under the FIRST
-          // wrapper created, so a value allocated under a different signature's
+          // wrapper family is a star of distinct children under the FIRST,
+          // permanently-open wrapper root, so a value allocated under a different signature's
           // wrapper (an activated ASYNC closure whose result was rewritten to
           // externref/Promise while the param says `() => void`; a covariant
           // sync closure like `() => string` passed as `() => void`) nulls the
           // guarded cast and the funcref fetch below traps "dereferencing a
           // null pointer" (the 32-file asyncTest() merge_group cluster on PR
-          // #2873 — creation ORDER decided which modules survived). Cast to the
-          // wrapper ROOT instead — the guaranteed supertype of every wrapper —
-          // and let the per-candidate funcref `ref.test` (which encodes the
-          // exact signature) discriminate; each dispatch arm re-casts self to
-          // its own candidate's struct type.
-          let closureCastStructIdx = matchedStructTypeIdx;
+          // #2873 — creation ORDER decided which modules survived). Cast/read
+          // and pass self through the wrapper ROOT — the guaranteed supertype
+          // of every wrapper. The per-candidate funcref `ref.test`/cast encodes
+          // the exact signature; narrowing the struct after that would still
+          // be wrong across modules because their same-signature allocation
+          // wrappers can occupy different places in the local hierarchy.
+          const closureCastStructIdx = wrapperTypes.liftedSelfTypeIdx;
           if (innerResultType?.kind === "externref") {
-            closureCastStructIdx = getFuncRefWrapperRootTypeIdx(ctx) ?? matchedStructTypeIdx;
             const closureRefType: ValType = {
               kind: "ref_null",
               typeIdx: closureCastStructIdx,
@@ -1160,9 +1159,9 @@ export function compileIdentifierCall(
             emitGuardedRefCast(fctx, closureCastStructIdx);
             fctx.body.push({ op: "local.set", index: closureLocal });
           } else {
-            const closureRefType: ValType = innerResultType ?? {
-              kind: "ref",
-              typeIdx: matchedStructTypeIdx,
+            const closureRefType: ValType = {
+              kind: innerResultType?.kind === "ref_null" ? "ref_null" : "ref",
+              typeIdx: closureCastStructIdx,
             };
             closureLocal = allocLocal(fctx, `__callable_param_${fctx.locals.length}`, closureRefType);
             fctx.body.push({ op: "local.set", index: closureLocal });
@@ -1372,14 +1371,13 @@ export function compileIdentifierCall(
             // Push self (null-check)
             fctx.body.push({ op: "local.get", index: closureLocal });
             emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureCastStructIdx });
-            // (#2873) Root-typed local → the single candidate's self param type.
-            // The guarded funcref cast below already gates the call (TypeError
-            // on signature mismatch); a value that passes it is of the matched
-            // wrapper (or a capture subtype), so this cast succeeds for every
-            // value that reaches the call — and traps no earlier than the old
-            // struct.get-on-null did for mismatched shapes.
-            if (closureCastStructIdx !== matchedStructTypeIdx) {
-              fctx.body.push({ op: "ref.cast_null", typeIdx: matchedStructTypeIdx });
+            // Shared funcs use root self; private funcs retain a concrete self
+            // type. The matched wrapper candidate is shared, but derive rather
+            // than assume so the invariant stays local to the func type.
+            const matchedSelfTypeIdx =
+              getClosureFuncSelfTypeIdx(ctx, matchedClosureInfo.funcTypeIdx) ?? closureCastStructIdx;
+            if (matchedSelfTypeIdx !== closureCastStructIdx) {
+              fctx.body.push({ op: "ref.cast", typeIdx: matchedSelfTypeIdx });
             }
             // Push args
             for (const al of argLocals) {
@@ -1432,10 +1430,12 @@ export function compileIdentifierCall(
             // arm is dead-arm-safe (#2174 — no late-import index shifts).
             if (variadic !== undefined) {
               const armBody: Instr[] = [];
-              // self (root-typed local → the variadic wrapper struct)
+              // self (canonical root for shared variadic wrappers; concrete
+              // self only if this ever becomes a private func type).
               armBody.push({ op: "local.get", index: closureLocal });
-              if (variadic.structTypeIdx !== closureCastStructIdx) {
-                armBody.push({ op: "ref.cast", typeIdx: variadic.structTypeIdx });
+              const variadicSelfTypeIdx = getClosureFuncSelfTypeIdx(ctx, variadic.funcTypeIdx) ?? closureCastStructIdx;
+              if (variadicSelfTypeIdx !== closureCastStructIdx) {
+                armBody.push({ op: "ref.cast", typeIdx: variadicSelfTypeIdx });
               }
               // Pack args: declared-slot locals up to the TRUE call-site count
               // (argLocals beyond expr.arguments.length are synthesized padding),
@@ -1507,25 +1507,19 @@ export function compileIdentifierCall(
             }
 
             for (const fc of [...funcCandidates].reverse()) {
-              // Each candidate needs: push self, push args, push typed funcref, call_ref
-              // The self struct type must match the funcref's expected first param.
-              // All wrapper struct types have the same layout so closureLocal works,
-              // but call_ref expects (ref $specificStruct). We use ref.cast to cast
-              // closureLocal to the funcref's expected struct type.
+              // Each candidate needs root self, args, typed funcref, call_ref.
+              // Exactness belongs solely to the funcref type; wrapper subtypes
+              // are module-local allocation identities.
               const fcCallBody: Instr[] = [];
-              // Push self (cast to the funcref's expected struct type).
-              // (#2873) Compare against the LOCAL's static type (the wrapper
-              // root on the externref path), not the declared wrapper: an arm
-              // only runs when its funcref `ref.test` matched, and a closure's
-              // struct is always its funcref-signature's wrapper (or a capture
-              // subtype of it), so the downcast from the root succeeds exactly
-              // on the live arm. NB the old "V8 canonicalizes same-layout
-              // structs" claim is FALSE for the wrapper chain — `sub final
-              // $root` siblings do not canonicalize together; only root-casts
-              // are universal.
+              // Shared func types use canonical-root self. A private/named
+              // closure func type still names its concrete self, so its arm
+              // needs a concrete cast to remain statically call_ref-valid.
+              // An unrelated private carrier cannot pass the wrapper-root gate;
+              // that candidate arm may therefore be runtime-unreachable.
               fcCallBody.push({ op: "local.get", index: closureLocal });
-              if (fc.structTypeIdx !== closureCastStructIdx) {
-                fcCallBody.push({ op: "ref.cast", typeIdx: fc.structTypeIdx });
+              const candidateSelfTypeIdx = getClosureFuncSelfTypeIdx(ctx, fc.funcTypeIdx) ?? closureCastStructIdx;
+              if (candidateSelfTypeIdx !== closureCastStructIdx) {
+                fcCallBody.push({ op: "ref.cast", typeIdx: candidateSelfTypeIdx });
               }
               // Push args
               for (let ai = 0; ai < fc.paramTypes.length; ai++) {

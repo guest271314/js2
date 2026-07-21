@@ -111,24 +111,22 @@ export interface LinearObjectLowering extends PlannedObjectLowering {
 }
 
 /**
- * Slice 3 (#1169c): WasmGC type info for a closure value. Two structs
- * are involved per closure construction site:
- *   - The SUPERTYPE struct (`structTypeIdx`): contains only the funcref
- *     field. Carried by the IrType.closure ValType so all closures
- *     sharing a signature have the same Wasm-level type.
- *   - The SUBTYPE struct (resolved via `resolveClosureSubtype`): adds
- *     the capture fields. Constructed at the closure's creation site
- *     (`struct.new <subtype>`) and `ref.cast`-ed inside the lifted
- *     body to read captures.
+ * Slice 3 / #3214 B0: WasmGC allocation/type info for a closure:
+ *   - A signature wrapper (`structTypeIdx`) contains field 0's funcref and is
+ *     shared with the legacy `__fn_wrap_*` registry. A no-capture closure
+ *     constructs it directly; it is not the cross-module carrier.
+ *   - An optional captured subtype extends that signature wrapper with capture
+ *     fields and is downcast from root `self` inside the lifted body.
  *
- * `funcTypeIdx` is the lifted function's Wasm func type
- * `(ref $base, ...sig.params) -> sig.returnType` -- used by `call_ref`
- * at the call site.
+ * `funcTypeIdx` is the exact lifted function signature
+ * `(ref $wrapperRoot, ...sig.params) -> sig.returnType`. The root self type,
+ * field-0 read, and funcref signature together are independent of per-module
+ * signature-wrapper creation order.
  */
 export interface IrClosureLowering {
   readonly structTypeIdx: number;
   readonly funcFieldIdx: number;
-  /** Field index for capture position `i` (0-based). Valid only for subtype lowerings. */
+  /** Field index for capture position `i` (0-based). Valid only for captured-subtype lowerings. */
   capFieldIdx(index: number): number;
   readonly funcTypeIdx: number;
 }

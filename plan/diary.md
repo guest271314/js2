@@ -314,3 +314,11 @@ ABI before landing. It was fixed at the standalone `Reflect.construct` marker
 boundary instead of being excused. Sprint bookkeeping drift was also repaired:
 16 completed issues were normalized into sprint 73, and all unfinished work was
 carried forward without retagging it to a numbered sprint.
+
+### 2026-07-21 — v0.64.0 proxy metadata follow-up
+
+Post-publish verification found that `js2wasm@0.64.0` still depended on
+`@loopdive/js2@0.60.1`: the release script bumped the proxy package version but
+not its dependency. #3516 carries the repair into the current sprint: update the
+dependency in the same release transaction, reject mismatched tag publishes,
+and supersede the immutable npm metadata with a patch release.

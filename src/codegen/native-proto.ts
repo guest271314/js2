@@ -465,7 +465,7 @@ export function ensureStandaloneNativeMethodClosure(
   // fctx, then keep that body (it's the real body — no double emission).
   const wrapperProbe = getOrCreateFuncRefWrapperTypes(ctx, userParams, []);
   if (!wrapperProbe) return null;
-  const selfType: ValType = { kind: "ref", typeIdx: wrapperProbe.structTypeIdx };
+  const selfType: ValType = { kind: "ref", typeIdx: wrapperProbe.liftedSelfTypeIdx };
   const bodyFctx = makeNativeClosureFctx(`__probe_${brand}_${member}`, selfType, userParams, null);
   const probedResult = glue.emitMemberBody(ctx, bodyFctx, member, kind);
   // (#2984 Phase 2) Refusal + opted-in fallback (methods only): keep going with
@@ -499,10 +499,10 @@ export function ensureStandaloneNativeMethodClosure(
   const funcName = kind === "getter" ? `__proto_method_${brand}_get_${member}` : `__proto_method_${brand}_${member}`;
   let funcIdx = ctx.funcMap.get(funcName);
   if (funcIdx === undefined) {
-    // Re-emit the body against the final (result-typed) wrapper self param so the
+    // Re-emit the body against the final signature's canonical-root self param so the
     // funcIdx-bearing function carries the right lifted type. (The probe above
     // only computed the result type; this is the committed emission.)
-    const finalSelf: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
+    const finalSelf: ValType = { kind: "ref", typeIdx: wrapperTypes.liftedSelfTypeIdx };
     const closureFctx = makeNativeClosureFctx(funcName, finalSelf, userParams, resultType);
     if (useRefusalBody) {
       // (#2984 Phase 2) Degrade-to-catchable body: a real TypeError instance +

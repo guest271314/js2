@@ -419,6 +419,7 @@ function checkNestedTypeShapes(
       for (const field of type.shape.fields) checkType(field.type, block, `${where}.${field.name}`);
       return;
     case "closure":
+    case "callable":
       for (let i = 0; i < type.signature.params.length; i++)
         checkType(type.signature.params[i]!, block, `${where}.param${i}`);
       if (type.signature.returnType) checkType(type.signature.returnType, block, `${where}.return`);

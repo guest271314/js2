@@ -764,21 +764,14 @@ export function planIrCompilation(
   //     bodies are rejected up front by the body-shape work (#2856/#2857).
   // -------------------------------------------------------------------------
   const demoteOnLegacyCaller = options?.jsHostExterns !== true;
-  // #2858 host-mode narrowing (BANKED 2026-07-06 regression fix). Relaxing the
-  // caller-direction demotion in host mode is sound for value-param leaf helpers
-  // (the #2949 slice-3b `any`-ABI unification makes a legacy caller of an IR
-  // callee signature-safe). It is NOT sound when the claimed helper takes a
-  // **callable/closure param** (a `FunctionTypeNode` parameter, e.g.
-  // `fn: () => number`): #2949's `any`-ABI unification does not cover the
-  // closure-as-callable-param ABI. If such a helper is claimed for IR only
-  // because its lone unclaimed edge is a legacy caller passing it a
-  // captured-closure argument, the IR lowering illegal-casts that legacy
-  // captured-closure struct (legacy closure ABI ≠ IR callable/funcref
-  // signature) and diverges from the legacy output (the 3 equivalence-gate
-  // regressions on #2752). Keep the conservative caller-direction demotion for
-  // any function carrying a callable param so it stays on the legacy path
-  // alongside its legacy caller; value-param leaves keep the relaxation
-  // (bucket→0 win + the 24 tagged-template fixes preserved).
+  // #2858 host-mode narrowing (BANKED 2026-07-06 regression fix). #3214 B0 now
+  // makes a legacy caller and IR callee ABI-compatible for function-typed
+  // parameters: both cross the boundary as externref and unpack through the
+  // canonical wrapper root. Keep this callable-param caller demotion for B0
+  // anyway to freeze the selector claim set. Function-valued argument lowering
+  // (inline arrows and named top-level functions) belongs to follow-up A; that
+  // slice can deliberately remove this conservative gate with its own coverage.
+  // Value-param leaves retain the existing host-mode relaxation.
   const hasCallableParam = (name: string): boolean => {
     const fn = declByName.get(name);
     if (!fn) return false;
@@ -805,8 +798,8 @@ export function planIrCompilation(
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
       // Caller-direction demotion: always in standalone/wasi (#2858), and in
-      // host mode only for functions with a callable/closure param (BANKED
-      // 2026-07-06 — see `hasCallableParam` above).
+      // host mode only for functions with a callable param (B0 scope freeze;
+      // see `hasCallableParam` above).
       if (demoteOnLegacyCaller || hasCallableParam(name)) {
         const myCallers = callers.get(name) ?? new Set<string>();
         for (const c of myCallers) {
@@ -1282,10 +1275,11 @@ function isIrClaimable(
 //     `return;` / fall-through tails. `void` in param position is rejected
 //     (no JS source emits a `void`-typed param value, so there's nothing to
 //     accept).
-// #2859 — `closure` (param only): a FunctionTypeNode annotation whose params
+// #2859 / #3214 B0 — `closure` selector kind (param only): a FunctionTypeNode annotation whose params
 //   and return are all primitive-annotated (the same surface slice-3 closure
-//   literals support). Lowers to `IrType.closure`; calls through the param
-//   dispatch via `lowerClosureCall` exactly like a closure-typed local.
+//   literals support). The override lowers the source parameter to
+//   `IrType.callable` / externref; calls unpack it through the canonical wrapper
+//   root. `IrType.closure` remains the compiler-owned local literal carrier.
 // #2949 slice 2 — `dynamic`: an UNANNOTATED position whose propagated lattice
 //   type converged to `unknown` (no evidence) or `dynamic` (top). Lowers to
 //   `IrType.dynamic` → the module's boxed-any carrier via
@@ -1380,10 +1374,10 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
     // unannotated dynamics: non-move uses now reject PRE-claim (no
     // demotion), and the claimed ones share legacy's ABI in both modes.
     if (effectiveType.kind === ts.SyntaxKind.AnyKeyword) return "dynamic";
-    // #2859 — function-typed param (`fn: () => number`). Accepted when the
-    // signature is expressible with the slice-3 closure surface; the param
-    // lowers to the closure supertype struct and `fn()` dispatches through
-    // `lowerClosureCall`. Inexpressible function types stay rejected.
+    // #2859 / #3214 B0 — function-typed param (`fn: () => number`). Accepted
+    // when the signature is expressible with the slice-3 closure surface; the
+    // source boundary lowers to callable/externref and `fn()` unpacks through
+    // the canonical wrapper root. Inexpressible function types stay rejected.
     if (ts.isFunctionTypeNode(effectiveType)) {
       return irClosureSignatureFromFunctionTypeNode(effectiveType) ? "closure" : null;
     }
@@ -4666,9 +4660,9 @@ function collectLocalClasses(sourceFile: ts.SourceFile): Set<string> {
 function collectLocalClosureBindings(fn: ts.FunctionDeclaration): Set<string> {
   const names = new Set<string>();
   if (!fn.body) return names;
-  // #2859 — function-typed params (`fn: () => number`). A call through such a
-  // param dispatches via the IR's closure machinery (`lowerClosureCall`),
-  // exactly like a slice-3 closure local — it is NOT an external call. Only
+  // #2859 / #3214 B0 — function-typed params (`fn: () => number`). A call
+  // through such a param dispatches via the IR callable/root machinery — it is
+  // NOT an external call. Only
   // expressible signatures count; an inexpressible function type keeps the
   // function on `param-type-not-resolvable` anyway, so its call sites never
   // reach the IR.

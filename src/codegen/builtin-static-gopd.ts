@@ -414,7 +414,7 @@ function ensureStandaloneSpeciesGetterClosure(
   const funcName = `__builtin_species_get_${builtinName}`;
   let funcIdx = ctx.funcMap.get(funcName);
   if (funcIdx === undefined) {
-    const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
+    const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.liftedSelfTypeIdx };
     const closureFctx = makeBuiltinClosureFctx(funcName, selfType, userParams, { kind: "externref" });
     // Step 1 (the whole algorithm): Return the this value.
     closureFctx.body.push({ op: "local.get", index: 1 });
