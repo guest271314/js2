@@ -409,7 +409,7 @@ export function compileLinearIrFunctions(
 
 function latticeEvidenceToIr(type: LatticeType | undefined, context: string): IrType {
   if (type?.kind === "f64") return irVal({ kind: "f64" });
-  if (type?.kind === "bool") return irVal({ kind: "i32" });
+  if (type?.kind === "bool") return irVal({ kind: "i32", boolean: true });
   if (type?.kind === "string") return { kind: "string" };
   throw new Error(`linear-ir: ${context} has no certified scalar type`);
 }
@@ -617,6 +617,9 @@ function makeLinearIrResolver(
       return false;
     },
     hasHostNumberBox(): boolean {
+      return false;
+    },
+    hasHostBooleanBox(): boolean {
       return false;
     },
     hasHostNumberToString(): boolean {

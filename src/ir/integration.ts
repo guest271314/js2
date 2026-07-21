@@ -1925,6 +1925,12 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
     hasHostNumberBox(): boolean {
       return !ctx.nativeStrings;
     },
+    // Boolean values share the host union-import family with numbers, but
+    // retain their own boxer so `true` never crosses an externref boundary as
+    // the number `1`.
+    hasHostBooleanBox(): boolean {
+      return !ctx.nativeStrings;
+    },
     // (#2955 slice 3) Rep predicate: the string carrier is externref (host
     // strings), so string SSA values flow unchanged into externref-expected
     // positions (`coerceToExpectedExtern` host-call args) and take the

@@ -28,23 +28,27 @@ loc-budget-allow:
   - src/ir/select.ts
   - src/ir/from-ast.ts
   - src/ir/integration.ts
+  - src/ir/backend/linear-integration.ts
   - src/ir/module-bindings.ts
   - src/ir/backend/legality.ts
   - src/ir/passes/tagged-unions.ts
   - src/ir/passes/tagged-union-types.ts
   - src/ir/verify.ts
   - src/codegen/index.ts
+  - src/codegen/stdlib-selfhost.ts
 files:
   - src/ir/outcomes.ts
   - src/ir/select.ts
   - src/ir/from-ast.ts
   - src/ir/integration.ts
+  - src/ir/backend/linear-integration.ts
   - src/ir/module-bindings.ts
   - src/ir/backend/legality.ts
   - src/ir/passes/tagged-unions.ts
   - src/ir/passes/tagged-union-types.ts
   - src/ir/verify.ts
   - src/codegen/index.ts
+  - src/codegen/stdlib-selfhost.ts
   - tests/equivalence/helpers.ts
   - tests/issue-3529-producer-contract.test.ts
   - tests/issue-3529-selector-preclaim.test.ts
@@ -52,6 +56,7 @@ files:
   - tests/issue-3529-tagged-union-dynamic.test.ts
   - tests/issue-3529-integration-preflight.test.ts
   - tests/issue-3529-result-errors.test.ts
+  - tests/issue-3529-ir-producer-parity.test.ts
 ---
 
 # #3529 — IR R0 prerequisite: typed producer equivalence parity
@@ -343,7 +348,11 @@ exit and remains within that slice's locked files.
 - **What was done:** classified the 141 capability gaps at checker-aware
   preclaim or narrow typed producer sites, repaired all 13 genuine producer/
   pass invariants, and made the two formerly opaque equivalence assertions
-  include fatal compiler diagnostics.
+  include fatal compiler diagnostics. A merge-queue differential then exposed
+  one missed producer seam: inferred mutually recursive boolean returns lost
+  their i32 boolean brand before an `externref` console boundary. The IR now
+  retains that brand and emits the canonical `__box_boolean` call when the
+  host lane owns it; native/self-host lanes explicitly decline the capability.
 - **What worked:** unknown throws stayed fatal Invariants, while stable typed
   Unsupported reasons preserved hybrid behavior for known capability gaps.
   The nine legal dynamic-box/tagged-union cases, two mutation-prepass misses,
@@ -359,7 +368,10 @@ exit and remains within that slice's locked files.
   known failures, with one baseline-known case now passing, zero new
   regressions, and an unchanged baseline. The hybrid gate is green with 0
   Invariants; strict remains intentionally red on the six typed Unsupported
-  units and all 37 legacy-emitted bodies.
+  units and all 37 legacy-emitted bodies. The exact
+  `tests/differential/corpus/closures/10-mutual.js` probe now compiles through
+  IR and prints `true\ntrue`; the #2788, #2795, and #3529 focused suites pin
+  valid Wasm, boolean identity, and an emitted `<module-init>` IR outcome.
 
 ## Required validation
 
