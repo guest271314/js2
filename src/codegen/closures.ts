@@ -1928,6 +1928,7 @@ export function compileArrowAsClosure(
     closureName,
     isNamedFuncExpr: !!isNamedFuncExpr,
     constructible:
+      noJsHost(ctx) &&
       ts.isFunctionExpression(arrow) &&
       arrow.asteriskToken === undefined &&
       !(arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false),

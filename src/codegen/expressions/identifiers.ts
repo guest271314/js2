@@ -1127,6 +1127,7 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
   ) {
     const valueDecl = ctx.checker.getSymbolAtLocation(id)?.valueDeclaration;
     const isOrdinaryFunctionDecl =
+      noJsHost(ctx) &&
       valueDecl !== undefined &&
       ts.isFunctionDeclaration(valueDecl) &&
       valueDecl.asteriskToken === undefined &&

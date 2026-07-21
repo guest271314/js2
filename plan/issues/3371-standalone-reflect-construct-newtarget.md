@@ -3,7 +3,7 @@ id: 3371
 title: "standalone: Reflect.construct (with NewTarget) refused — ~160 tests (proto-from-ctor-realm, subclassing) on the #1472 Phase-C refusal path"
 status: done
 created: 2026-07-17
-updated: 2026-07-20
+updated: 2026-07-21
 completed: 2026-07-20
 sprint: Backlog
 priority: medium
@@ -117,12 +117,14 @@ literal argument lists are synthesized into a `new Target(...args)` expression;
 unresolved array-like and arbitrary carrier shapes remain fail-loud under
 **#3371**.
 
-Ordinary functions now use a nominal constructible closure subtype while arrows
-and method closures keep the existing callable-only wrapper. This gives the
-host-free `__reflect_is_constructor` helper a real runtime discriminator and
-keeps the Test262 probe honest: ordinary functions return true, arrows and
-`Date.prototype.getYear` return false. The extra subtype preserves the shared
-field-0 funcref ABI, so existing call dispatch still works.
+Ordinary functions use a nominal constructible closure subtype only in
+host-free targets, while arrows and method closures keep the existing
+callable-only wrapper. This gives the host-free `__reflect_is_constructor`
+helper a real runtime discriminator and keeps the Test262 probe honest:
+ordinary functions return true, arrows and `Date.prototype.getYear` return
+false. The JS-host lane keeps its established wrapper ABI; applying the marker
+there changed closure nominal types unnecessarily and caused 29 illegal-cast
+transitions in the merge-group Test262 run.
 
 DataView and runtime-kinded TypedArray views gained an append-only
 `constructProto` carrier slot. A distinct object-valued `NewTarget.prototype`
@@ -150,6 +152,18 @@ prefix, matching JavaScript's ignored-surplus-arguments rule.
   shorter-formal harness callback.
 - Every successful standalone probe validates as Wasm and has zero imports.
 - Unsupported args-list shapes refuse with **#3371** and no `#1472` cite.
+
+## Merge-queue follow-up (2026-07-21)
+
+- Bisected the 29 host `illegal_cast` transitions to the constructible-wrapper
+  change in this implementation: 26 existing async/dynamic-import failures had
+  become uncatchable traps and three Annex B function-block-scoping tests had
+  regressed from pass to trap.
+- Scoped constructor-marker wrappers to host-free targets. The exact 29-path
+  cluster now has zero `illegal_cast` rows; all three Annex B regressions pass,
+  while the existing non-pass rows return to ordinary runtime-error categories.
+- The complete focused #3371 suite remains green (15/15), including the three
+  standalone original-harness representatives and host ABI regression probes.
 
 ## Acceptance Criteria
 

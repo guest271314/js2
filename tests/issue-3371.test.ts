@@ -10,6 +10,9 @@ const REPRESENTATIVES = [
   "built-ins/DataView/custom-proto-if-object-is-used.js",
 ] as const;
 
+const HOST_ABI_PASS = "annexB/language/function-code/block-decl-func-block-scoping.js";
+const HOST_ABI_NONTRAP = "language/expressions/await/await-awaits-thenable-not-callable.js";
+
 async function runStandalone(source: string): Promise<number> {
   const result = await compile(source, { target: "standalone", skipSemanticDiagnostics: true });
   expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
@@ -213,5 +216,17 @@ describe("#3371 standalone Reflect.construct", () => {
         }
       `),
     ).resolves.toBe(9);
+  });
+});
+
+describe("#3371 host closure ABI", () => {
+  it("keeps ordinary function declarations callable through the original harness", { timeout: 60_000 }, async () => {
+    const result = await runTest262File(resolve("test262/test", HOST_ABI_PASS), "issue-3371", 45_000);
+    expect(result.status, result.error ?? result.reason).toBe("pass");
+  });
+
+  it("does not turn an existing dynamic-import failure into an uncatchable cast", { timeout: 60_000 }, async () => {
+    const result = await runTest262File(resolve("test262/test", HOST_ABI_NONTRAP), "issue-3371", 45_000);
+    expect(result.error ?? "").not.toMatch(/illegal cast/i);
   });
 });
