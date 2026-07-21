@@ -2056,6 +2056,25 @@ function isPhase1StatementList(
     // Phase 2 extension: an `if (cond)` with NO else, split by whether the
     // then-arm unconditionally terminates — mirroring `lowerStatementList`'s
     // `thenArmTerminates` fork in `from-ast.ts` exactly (#1979).
+    // (#2856 calendar residual) A converging top-level `if/else` followed by
+    // more statements is already representable by the structured `if.stmt`
+    // instruction used inside loop/body buffers. Keep this arm deliberately
+    // narrower than the tail-CFG path below: neither branch may return out of
+    // the function, and branch-local declarations do not escape. This is the
+    // exact shape of calendar::onDay's selection-state update before its two
+    // trailing render calls.
+    if (ts.isIfStatement(s) && s.elseStatement) {
+      if (!isPhase1ConditionExpr(s.expression, scope, localClasses)) {
+        return shapeNo("nontail-ifelse-cond", s.expression);
+      }
+      if (!isPhase1BodyStatement(s.thenStatement, new Set(scope), localClasses, /* inLoop */ false)) {
+        return shapeNo("nontail-ifelse-then", s.thenStatement);
+      }
+      if (!isPhase1BodyStatement(s.elseStatement, new Set(scope), localClasses, /* inLoop */ false)) {
+        return shapeNo("nontail-ifelse-else", s.elseStatement);
+      }
+      continue;
+    }
     if (ts.isIfStatement(s) && !s.elseStatement) {
       if (!isPhase1ConditionExpr(s.expression, scope, localClasses)) return shapeNo("nontail-if-cond", s.expression);
       if (thenArmTerminates(s.thenStatement)) {
@@ -3472,7 +3491,7 @@ function obviousModuleValueFamily(expr: ts.Expression): ObviousModuleValueFamily
     const whenFalse = obviousModuleValueFamily(candidate.whenFalse);
     return whenTrue !== undefined && whenTrue === whenFalse ? whenTrue : undefined;
   }
-  if (ts.isCallExpression(candidate) && isExactF64ModuleToStringCall(candidate)) return "string";
+  if (ts.isCallExpression(candidate) && isExactF64ScalarToStringCall(candidate)) return "string";
   if (ts.isCallExpression(candidate) && exactModuleMapMethod(candidate) === "get") return "extern";
   return currentModuleBindingResolver?.scalarExpressionFamily(candidate);
 }
@@ -3519,17 +3538,21 @@ function exactModuleMapMethod(expr: ts.CallExpression): string | undefined {
   return receiver?.valueKind.kind === "extern" && receiver.valueKind.className === "Map" ? callee.name.text : undefined;
 }
 
-/** The one scalar-module method whose current lowering is representation-safe. */
-function isExactF64ModuleToStringCall(expr: ts.CallExpression): boolean {
+/**
+ * The one scalar method whose current host-string lowering is
+ * representation-safe. The receiver proof deliberately covers numeric call
+ * results as well as direct module globals/aliases: calendar::renderCal calls
+ * `priceOf(...module-derived args).toString()`, whose result is checker-proven
+ * f64 even though provenance scanning still sees the module arguments.
+ */
+function isExactF64ScalarToStringCall(expr: ts.CallExpression): boolean {
   if (currentModuleBindingResolver?.supportsHostNumberToString !== true) return false;
   if (expr.questionDotToken || expr.arguments.length !== 0) return false;
   const callee = unwrapPhase1Parens(expr.expression);
   if (!ts.isPropertyAccessExpression(callee) || callee.questionDotToken || callee.name.text !== "toString") {
     return false;
   }
-  return (
-    moduleBinding(callee.expression)?.valueKind.kind === "f64" || moduleScalarAliasFamily(callee.expression) === "f64"
-  );
+  return expressionIsProvenNumber(callee.expression);
 }
 
 /**
@@ -4089,7 +4112,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         return true;
       }
       if (expressionTouchesScalarModuleBinding(expr.expression.expression)) {
-        if (!isExactF64ModuleToStringCall(expr)) {
+        if (!isExactF64ScalarToStringCall(expr)) {
           return shapeNo("expr-module-scalar-method", expr);
         }
         return isPhase1Expr(expr.expression.expression, scope, localClasses);

@@ -1052,3 +1052,162 @@ describe("#2856 Capability C — unsupported writes reject before claim", () => 
     expect(result.irPostClaimErrors ?? []).toStrictEqual([]);
   });
 });
+
+describe("#2856 calendar residual prework", () => {
+  it("stringifies an exact numeric call result that retains module provenance", async () => {
+    const { result, exports } = await compileAndInstantiate(`
+      let base: number = 100;
+      function price(delta: number): number { return base + delta; }
+      export function digits(delta: number): number { return price(delta).toString().length; }
+    `);
+
+    expect(result.irCompiledFuncs ?? []).toContain("price");
+    expect(result.irCompiledFuncs ?? []).toContain("digits");
+    expect(exports.digits!(23)).toBe(3);
+    expect(exports.digits!(-95)).toBe(1);
+  });
+
+  it("keeps toString arguments outside the exact scalar formatter claim", async () => {
+    const result = await compile(
+      `
+        let base: number = 15;
+        function numberValue(delta: number): number { return delta; }
+        export function radix(): string { return numberValue(base).toString(16); }
+      `,
+      { experimentalIR: true, trackFallbacks: true },
+    );
+
+    expect(result.success, result.errors[0]?.message).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toStrictEqual([]);
+    for (const name of ["radix"]) {
+      expect(result.irCompiledFuncs ?? []).not.toContain(name);
+    }
+  });
+
+  it("lowers a converging top-level if/else before trailing statements", async () => {
+    const { result, exports } = await compileAndInstantiate(`
+      export function choose(value: number): number {
+        let selected: number = 0;
+        if (value > 0) {
+          selected = 1;
+        } else if (value < 0) {
+          selected = 2;
+        } else {
+          selected = 3;
+        }
+        return selected + 10;
+      }
+    `);
+
+    expect(result.irCompiledFuncs ?? []).toContain("choose");
+    expect(exports.choose!(4)).toBe(11);
+    expect(exports.choose!(-4)).toBe(12);
+    expect(exports.choose!(0)).toBe(13);
+  });
+
+  it("does not route a terminating non-tail if/else through if.stmt", async () => {
+    const result = await compile(
+      `
+        export function early(value: number): number {
+          if (value > 0) return 1;
+          else value = value + 1;
+          return value;
+        }
+      `,
+      { experimentalIR: true, trackFallbacks: true },
+    );
+
+    expect(result.success, result.errors[0]?.message).toBe(true);
+    expect(result.irCompiledFuncs ?? []).not.toContain("early");
+    expect(result.irPostClaimErrors ?? []).toStrictEqual([]);
+  });
+
+  it("assigns an extern module slot from an exact same-file factory", async () => {
+    const result = await compile(
+      `
+        let node: HTMLElement | null = null;
+        function makeNode(): HTMLElement {
+          const created = document.body;
+          created.textContent = "made";
+          return created;
+        }
+        export function install(): boolean {
+          node = makeNode();
+          return node !== null;
+        }
+      `,
+      {
+        fileName: "issue-2856-calendar-factory.ts",
+        experimentalIR: true,
+        trackFallbacks: true,
+      },
+    );
+
+    expect(result.success, result.errors[0]?.message).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toStrictEqual([]);
+    expect(result.irCompiledFuncs ?? []).toContain("makeNode");
+    expect(result.irCompiledFuncs ?? []).toContain("install");
+    expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
+
+    const document = { body: { kind: "body", textContent: "" } };
+    const built = buildImports(result.imports, { ...ENV_STUB, document }, result.stringPool);
+    const imports: WebAssembly.Imports = { env: built.env, string_constants: built.string_constants };
+    imports["wasm:js-string"] = JS_STRING as unknown as WebAssembly.ModuleImports;
+    const { instance } = await WebAssembly.instantiate(result.binary, imports);
+    built.setExports?.(instance.exports as Record<string, Function>);
+    expect((instance.exports.install as () => number)()).toBe(1);
+    expect(document.body.textContent).toBe("made");
+  });
+
+  it("rejects unproven same-file factory returns before claiming the writer", async () => {
+    const result = await compile(
+      `
+        let node: HTMLElement | null = null;
+        function asserted(): HTMLElement { return 1 as unknown as HTMLElement; }
+        function mutable(): HTMLElement { let value = document.body; return value; }
+        function branching(flag: boolean): HTMLElement {
+          if (flag) return document.body;
+          return document.documentElement;
+        }
+        function forwarded(value: HTMLElement): HTMLElement { return value; }
+        function aliasedForward(value: HTMLElement): HTMLElement {
+          const result = value;
+          return result;
+        }
+        function destructuredWrite(): HTMLElement {
+          const result = document.body;
+          [result] = [1 as unknown as HTMLElement];
+          return result;
+        }
+        function nullable(): HTMLElement | null { return document.body; }
+        export function writeAsserted(): void { node = asserted(); }
+        export function writeMutable(): void { node = mutable(); }
+        export function writeBranching(): void { node = branching(true); }
+        export function writeForwarded(): void { node = forwarded(document.body); }
+        export function writeAliasedForward(): void { node = aliasedForward(document.body); }
+        export function writeDestructured(): void { node = destructuredWrite(); }
+        export function writeNullable(): void { node = nullable(); }
+      `,
+      {
+        fileName: "issue-2856-calendar-factory-negatives.ts",
+        experimentalIR: true,
+        trackFallbacks: true,
+        skipSemanticDiagnostics: true,
+      },
+    );
+
+    expect(result.success, result.errors[0]?.message).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toStrictEqual([]);
+    for (const name of [
+      "writeAsserted",
+      "writeMutable",
+      "writeBranching",
+      "writeForwarded",
+      "writeAliasedForward",
+      "writeDestructured",
+      "writeNullable",
+    ]) {
+      expect(result.irCompiledFuncs ?? []).not.toContain(name);
+    }
+  });
+});

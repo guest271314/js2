@@ -990,6 +990,16 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       lowerTryStatement(s, cx);
       continue;
     }
+    // (#2856 calendar residual) A non-tail `if/else` whose arms are plain
+    // body statements is a converging statement, not a tail CFG split. Reuse
+    // the existing structured `if.stmt` lowering, then continue with the
+    // trailing statements. The selector admits exactly the body shapes this
+    // helper can lower, so returns that would need CFG termination stay on the
+    // legacy path.
+    if (ts.isIfStatement(s) && s.elseStatement) {
+      lowerIfBodyStatement(s, cx);
+      continue;
+    }
     // Phase 2: early-return `if` with no else + subsequent statements.
     // Structurally: `if (cond) <tail>; <rest>` ≡ `if (cond) <tail> else { <rest> }`.
     // The then-arm lowers to its own block that terminates in `return`

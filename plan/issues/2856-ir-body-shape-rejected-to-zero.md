@@ -1470,6 +1470,58 @@ established pattern), zero post-claim demotions, bank via
 host-gated off), but re-verify per slice that `call-graph-closure` and
 `external-call` stay 0.
 
+### Calendar residual implementation notes (2026-07-21)
+
+The three non-callback calendar gaps are implemented as a deliberately narrow
+preparation slice for the measured **4 → 1** step after A+B1/B2 lands:
+
+- `renderCal`'s `priceOf(...).toString()` is admitted only when the checker
+  proves the receiver numeric and the call is the exact zero-argument,
+  non-optional scalar formatter already supported by `number_toString`. This is
+  provenance-based rather than syntax-based because the receiver is a module
+  call result, while radix overloads and optional calls remain pre-claim
+  rejections.
+- `onDay`'s top-level non-tail `if/else` reuses the existing structured
+  `if.stmt` lowering. Both branches must fit the existing branch-body subset,
+  function returns remain excluded, and each branch is selected with an
+  isolated scope so branch-local declarations cannot leak across the join.
+  This avoids adding a second CFG encoding for a shape the IR already
+  represents.
+- Calendar `main`'s assignments from the local `el(...)` helper are accepted
+  only through exact same-file extern-factory provenance. The callee must be a
+  direct top-level function with an explicit non-null extern-class return,
+  one final return source, and no mutation of a returned local. Its source must
+  recursively trace to an already-proven host extern value. Branching returns,
+  forwarded parameters, mutable locals, nullable annotations, optional calls,
+  and cross-file helpers remain rejected. The proof deliberately lives in
+  module binding analysis, where the global write's expected storage type and
+  source provenance are both available.
+
+Focused tests cover runtime behavior and `irCompiledFuncs` genuine-emission
+anti-vacuity for all three positive shapes plus pre-claim negatives. On the
+B0-only base used for this preparation commit, the fallback baseline is
+intentionally unchanged:
+the newly selected `onDay` routes to `call-graph-closure` until `renderCal`'s
+callback arguments are unlocked by B2, while `renderCal` and `main` still stop
+at their arrow expressions. Therefore the residual slice is to be measured
+and banked only after the callback prerequisite lands; do not record the
+intermediate routing shuffle as a new floor.
+
+Validation on the B0 base:
+
+- `pnpm run typecheck` passes.
+- The focused residual suite passes 6/6, and the combined module-binding,
+  host-extern, guard-tail, and structured-control-flow suites pass 85/85.
+- A direct compile of the live
+  `website/playground/examples/dom/calendar.ts` validates as Wasm with no
+  post-claim demotions.
+- `--shape-diag` reports 11 body-shape rejections: calendar `renderCal` and
+  `main` now stop only at `ArrowFunction`; `onDay` has left the bucket.
+- The default gate fails in the expected pre-stack shape
+  (`body-shape-rejected` 12 → 11, `call-graph-closure` 0 → 1) because `onDay`
+  calls the still-arrow-blocked `renderCal`. The baseline JSON remains
+  untouched; B2 removes that temporary closure before this slice is banked.
+
 ### At corpus-zero — the promotion question (answered)
 
 Do **NOT** add `body-shape-rejected` to `STRICT_IR_REASONS` at corpus-zero.
