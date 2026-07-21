@@ -3559,6 +3559,32 @@ function exactModuleMapMethod(expr: ts.CallExpression): string | undefined {
 }
 
 /**
+ * #3517: certify the sole erased-generic constructor shape admitted by the
+ * module-init selector. This deliberately requires the NewExpression itself
+ * to initialize a direct top-level `const`; wrappers, locals, `let`, runtime
+ * arguments, shadowed `Map`, and non-extern storage all retain the generic
+ * constructor rejection.
+ */
+function isExactModuleMapGenericInitializer(expr: ts.NewExpression): boolean {
+  const resolver = currentModuleBindingResolver;
+  if (!currentSubjectIsModuleInit || resolver === null) return false;
+  if (!ts.isIdentifier(expr.expression) || expr.expression.text !== "Map") return false;
+  if (expr.typeArguments?.length !== 2 || (expr.arguments?.length ?? 0) !== 0) return false;
+  if (!resolver.isAmbientBinding(expr.expression) || !resolver.externCallArgumentsMatch(expr)) return false;
+
+  const declaration = expr.parent;
+  if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== expr) return false;
+  if (!ts.isIdentifier(declaration.name)) return false;
+  const declarationList = declaration.parent;
+  if (!ts.isVariableDeclarationList(declarationList) || !(declarationList.flags & ts.NodeFlags.Const)) return false;
+  const statement = declarationList.parent;
+  if (!ts.isVariableStatement(statement) || !ts.isSourceFile(statement.parent)) return false;
+
+  const storage = resolver(declaration.name);
+  return storage?.valueKind.kind === "extern" && storage.valueKind.className === "Map";
+}
+
+/**
  * The one scalar method whose current host-string lowering is
  * representation-safe. The receiver proof deliberately covers numeric call
  * results as well as direct module globals/aliases: calendar::renderCal calls
@@ -4292,7 +4318,15 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     }
     if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName))
       return shapeNo("expr-new-ctor-unknown", expr.expression);
-    if (expr.typeArguments && expr.typeArguments.length > 0) return shapeNo("expr-new-type-args", expr); // defer generics
+    // Type arguments are erased before lowering, but accepting them in the
+    // general constructor surface would silently widen generic local classes
+    // and shadowable builtin names. The one certified exception is the direct
+    // module initializer `const cache = new Map<K, V>()`: its ambient
+    // constructor identity, extern Map storage, arity, and host ABI are all
+    // checker-proven by the shared module-binding resolver.
+    if (expr.typeArguments && expr.typeArguments.length > 0 && !isExactModuleMapGenericInitializer(expr)) {
+      return shapeNo("expr-new-type-args", expr);
+    }
     if (currentModuleBindingResolver && !currentModuleBindingResolver.externCallArgumentsMatch(expr)) {
       return shapeNo("expr-new-module-extern-call-brand", expr);
     }
