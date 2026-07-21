@@ -107,7 +107,16 @@ export interface ImportDescriptor {
 }
 
 export type { ExportSignature, TypedArrayKind } from "./ir/types.js";
+export type {
+  IrInvariantCode,
+  IrObservedOutcome,
+  IrOutcomePolicy,
+  IrOutcomePolicyVerdict,
+  IrPreparationOutcome,
+  IrUnsupportedCode,
+} from "./ir/outcomes.js";
 import type { ExportSignature } from "./ir/types.js";
+import type { IrObservedOutcome } from "./ir/outcomes.js";
 
 /**
  * The output of a `compile*` call: the compiled Wasm binary plus the artifacts
@@ -213,6 +222,12 @@ export interface CompileResult {
    * cost for this field.
    */
   irFirstSkipped?: readonly string[];
+  /**
+   * #3519 — typed terminal outcome for every attempted source IR unit.
+   * Present only when `trackIrOutcomes` is enabled, including on failed
+   * results once codegen has begun.
+   */
+  irOutcomes?: readonly IrObservedOutcome[];
 }
 
 /** A single compile diagnostic (error or warning) with its source position. */
@@ -447,6 +462,11 @@ export interface CompileOptions {
    * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
+  /**
+   * #3519 — collect the typed per-unit IR terminal ledger. This does not
+   * change hybrid routing or enable IR-only compilation.
+   */
+  trackIrOutcomes?: boolean;
   /**
    * (#2973) Opt this compile out of the `JS2WASM_IR_FIRST` compile-once
    * inversion, regardless of the ambient env flag. Semantics-critical

@@ -644,8 +644,13 @@ function detectRawWasiImports(source: string): { rawWasi: Set<string>; memAccess
   return { rawWasi, memAccessors };
 }
 
-/** The canonical empty failure result. #1927 — replaces the inline copies. */
-function failResult(errors: CompileError[]): CompileResult {
+type FailureTelemetry = Pick<
+  CompileResult,
+  "fallbackCounts" | "irPostClaimErrors" | "irCompiledFuncs" | "irFirstSkipped" | "irOutcomes"
+>;
+
+/** The canonical failure result, retaining any telemetry codegen already produced. */
+function failResult(errors: CompileError[], telemetry: Partial<FailureTelemetry> = {}): CompileResult {
   return {
     binary: new Uint8Array(0),
     wat: "",
@@ -657,6 +662,7 @@ function failResult(errors: CompileError[]): CompileResult {
     imports: [],
     hasMain: false,
     hasTopLevelStatements: false,
+    ...telemetry,
   };
 }
 
@@ -763,6 +769,8 @@ function buildCodegenOptions(
     // revert. Forwarded to ALL drivers now (#1927); `generateMultiModule`
     // ignores it until #2138 wires the IR overlay into the multi generator.
     experimentalIR: options.experimentalIR !== false,
+    // #3519 — opt-in typed terminal ledger; routing remains hybrid.
+    trackIrOutcomes: options.trackIrOutcomes === true,
     // (#2973) Forward the IR-first opt-out. The eval / new Function host shims
     // set this so a post-claim IR-first hard error in a sub-compile is not
     // swallowed by the shim's fallback catch into a silent wrong answer.
@@ -964,6 +972,8 @@ function runPipeline(input: PipelineInput): CompileResult {
   let capturedIrCompiledFuncs: import("./index.js").CompileResult["irCompiledFuncs"];
   // (#2138) IR-first skip telemetry — populated when IR-first is active (default as of #3143).
   let capturedIrFirstSkipped: import("./index.js").CompileResult["irFirstSkipped"];
+  // #3519 — retain terminal outcomes even when a later codegen/emit check fails.
+  let capturedIrOutcomes: import("./index.js").CompileResult["irOutcomes"];
   try {
     if (useLinear) {
       mod = multiAst
@@ -1012,6 +1022,7 @@ function runPipeline(input: PipelineInput): CompileResult {
         }
       }
       capturedIrCompiledFuncs = result.irCompiledFuncs;
+      capturedIrOutcomes = result.irOutcomes;
       capturedIrFirstSkipped = multiAst
         ? undefined // #2138 M0 multi overlay is compile-twice only; it never enables IR-first body skipping
         : (result as ReturnType<typeof generateModule>).irFirstSkipped;
@@ -1028,7 +1039,13 @@ function runPipeline(input: PipelineInput): CompileResult {
       }
       // #1921 — gate on severity, not a "Codegen error:" message prefix.
       if (result.errors.some(isFatalCodegenDiagnostic)) {
-        return failResult(errors);
+        return failResult(errors, {
+          fallbackCounts: capturedFallbackCounts,
+          irPostClaimErrors: capturedIrPostClaimErrors,
+          irCompiledFuncs: capturedIrCompiledFuncs,
+          irFirstSkipped: capturedIrFirstSkipped,
+          irOutcomes: capturedIrOutcomes,
+        });
       }
     }
   } catch (e) {
@@ -1041,7 +1058,13 @@ function runPipeline(input: PipelineInput): CompileResult {
       `Codegen error: ${e instanceof Error ? e.message : String(e)}`,
       "error",
     );
-    return failResult(errors);
+    return failResult(errors, {
+      fallbackCounts: capturedFallbackCounts,
+      irPostClaimErrors: capturedIrPostClaimErrors,
+      irCompiledFuncs: capturedIrCompiledFuncs,
+      irFirstSkipped: capturedIrFirstSkipped,
+      irOutcomes: capturedIrOutcomes,
+    });
   }
 
   // Step 2b: Apply C ABI transformations if requested (linear target only).
@@ -1084,7 +1107,13 @@ function runPipeline(input: PipelineInput): CompileResult {
       `Binary emit error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
       "error",
     );
-    return failResult(errors);
+    return failResult(errors, {
+      fallbackCounts: capturedFallbackCounts,
+      irPostClaimErrors: capturedIrPostClaimErrors,
+      irCompiledFuncs: capturedIrCompiledFuncs,
+      irFirstSkipped: capturedIrFirstSkipped,
+      irOutcomes: capturedIrOutcomes,
+    });
   }
 
   // Step 3b: Optimize — applied by the async entry adapters via applyOptimize,
@@ -1137,6 +1166,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     irPostClaimErrors: capturedIrPostClaimErrors,
     irCompiledFuncs: capturedIrCompiledFuncs,
     irFirstSkipped: capturedIrFirstSkipped,
+    irOutcomes: capturedIrOutcomes,
   };
 }
 

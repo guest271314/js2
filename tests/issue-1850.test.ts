@@ -272,11 +272,17 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
     expect(verifyIrBackendLegality(fn, "linear")).toEqual([]);
   });
 
-  it("promotes verifier fallback diagnostics to hard Codegen errors in test builds only", () => {
+  it("promotes typed verifier invariants while leaving Unsupported builds as warnings", () => {
     const verifyDiag = formatIrPathFallbackDiagnostic({
       func: "claimed",
       message: "post-hygiene verify: duplicate SSA def",
       kind: "verify",
+      outcome: {
+        kind: "invariant",
+        code: "verifier-failure",
+        stage: "verify",
+        detail: "post-hygiene verify: duplicate SSA def",
+      },
     });
     expect(verifyDiag.severity).toBe("error");
     expect(verifyDiag.message).toMatch(/^Codegen error: IR path failed for claimed:/);
@@ -285,6 +291,12 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
       func: "claimed",
       message: "ir/from-ast: feature not in slice",
       kind: "build",
+      outcome: {
+        kind: "unsupported",
+        code: "late-preparation-unsupported",
+        stage: "build",
+        detail: "ir/from-ast: feature not in slice",
+      },
     });
     expect(buildDiag.severity).toBe("warning");
     expect(buildDiag.message).toMatch(/^IR path failed for claimed:/);

@@ -134,6 +134,14 @@ import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
 import { definedFuncAt, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
+import {
+  classifyIrFailure,
+  IrInvariantError,
+  IrUnsupportedError,
+  type IrInvariantCode,
+  type IrPreparationFailure,
+  type IrPreparationStage,
+} from "./outcomes.js";
 
 export interface IrIntegrationReport {
   readonly compiled: readonly string[];
@@ -143,7 +151,41 @@ export interface IrIntegrationReport {
 export interface IrIntegrationError {
   readonly func: string;
   readonly message: string;
-  readonly kind?: "verify" | "build" | "lower" | "backend-legality";
+  readonly kind: "verify" | "build" | "lower" | "backend-legality";
+  readonly outcome: IrPreparationFailure;
+}
+
+function legacyIntegrationKind(stage: IrPreparationStage): "verify" | "build" | "lower" | "backend-legality" {
+  if (stage === "verify") return "verify";
+  if (stage === "backend-legality") return "backend-legality";
+  if (stage === "lower" || stage === "patch") return "lower";
+  return "build";
+}
+
+function integrationFailure(func: string, outcome: IrPreparationFailure): IrIntegrationError {
+  return {
+    func,
+    message: outcome.detail,
+    kind: legacyIntegrationKind(outcome.stage),
+    outcome,
+  };
+}
+
+function invariantIntegrationFailure(
+  func: string,
+  code: IrInvariantCode,
+  stage: Exclude<IrPreparationStage, "select">,
+  detail: string,
+): IrIntegrationError {
+  return integrationFailure(func, { kind: "invariant", code, stage, detail });
+}
+
+function caughtIntegrationFailure(
+  func: string,
+  error: unknown,
+  stage: Exclude<IrPreparationStage, "select">,
+): IrIntegrationError {
+  return integrationFailure(func, classifyIrFailure(error, stage));
 }
 
 /**
@@ -332,7 +374,9 @@ export function compileIrPathFunctions(
       });
       const mainErrors = verifyIrFunction(result.main);
       if (mainErrors.length > 0) {
-        for (const e of mainErrors) errors.push({ func: name, message: e.message, kind: "verify" });
+        for (const e of mainErrors) {
+          errors.push(invariantIntegrationFailure(name, "verifier-failure", "verify", e.message));
+        }
         continue;
       }
       // Slice 3 (#1169c): verify each lifted function before pushing.
@@ -340,7 +384,9 @@ export function compileIrPathFunctions(
       for (const lifted of result.lifted) {
         const liftedErrors = verifyIrFunction(lifted);
         if (liftedErrors.length > 0) {
-          for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
+          for (const e of liftedErrors) {
+            errors.push(invariantIntegrationFailure(lifted.name, "verifier-failure", "verify", e.message));
+          }
           anyLiftedFailed = true;
         }
       }
@@ -351,7 +397,7 @@ export function compileIrPathFunctions(
         built.push({ name: lifted.name, fn: lifted, synthesized: true });
       }
     } catch (e) {
-      errors.push({ func: name, message: e instanceof Error ? e.message : String(e), kind: "build" });
+      errors.push(caughtIntegrationFailure(name, e, "build"));
     }
   }
 
@@ -468,7 +514,9 @@ export function compileIrPathFunctions(
           });
           const mainErrors = verifyIrFunction(result.main);
           if (mainErrors.length > 0) {
-            for (const e of mainErrors) errors.push({ func: memberName, message: e.message, kind: "verify" });
+            for (const e of mainErrors) {
+              errors.push(invariantIntegrationFailure(memberName, "verifier-failure", "verify", e.message));
+            }
             continue;
           }
           // Class method bodies should not produce lifted closures in Phase B
@@ -478,7 +526,9 @@ export function compileIrPathFunctions(
           for (const lifted of result.lifted) {
             const liftedErrors = verifyIrFunction(lifted);
             if (liftedErrors.length > 0) {
-              for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
+              for (const e of liftedErrors) {
+                errors.push(invariantIntegrationFailure(lifted.name, "verifier-failure", "verify", e.message));
+              }
               anyLiftedFailed = true;
             }
           }
@@ -489,7 +539,7 @@ export function compileIrPathFunctions(
             built.push({ name: lifted.name, fn: lifted, synthesized: true });
           }
         } catch (e) {
-          errors.push({ func: memberName, message: e instanceof Error ? e.message : String(e), kind: "build" });
+          errors.push(caughtIntegrationFailure(memberName, e, "build"));
         }
       }
     }
@@ -522,19 +572,35 @@ export function compileIrPathFunctions(
   if (moduleInitClaim) {
     try {
       if (!ctx.mod.functions.some((f) => f.name === "__module_init")) {
-        throw new Error("module-init: no legacy __module_init slot to patch (legacy collected no init statements)");
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: no legacy __module_init slot to patch (legacy collected no init statements)",
+        );
       }
       if (ctx.staticInitExprs.length > 0) {
-        throw new Error("module-init: static class initializers present — legacy body carries them");
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: static class initializers present — legacy body carries them",
+        );
       }
       if ((ctx.liveFuncBindingGlobals?.size ?? 0) > 0) {
-        throw new Error("module-init: live function-binding seeds present — legacy body carries them");
+        throw new IrUnsupportedError(
+          "module-init-legacy-coupling",
+          "build",
+          "module-init: live function-binding seeds present — legacy body carries them",
+        );
       }
       const population = collectModuleInitPopulation(sourceFile);
       if (!ctx.wasi) {
         for (const s of population) {
           if (ts.isThrowStatement(s)) {
-            throw new Error("module-init: top-level throw is dropped by legacy outside WASI — keeping legacy body");
+            throw new IrUnsupportedError(
+              "module-init-legacy-coupling",
+              "build",
+              "module-init: top-level throw is dropped by legacy outside WASI — keeping legacy body",
+            );
           }
         }
       }
@@ -557,13 +623,17 @@ export function compileIrPathFunctions(
       });
       const mainErrors = verifyIrFunction(result.main);
       if (mainErrors.length > 0) {
-        for (const e of mainErrors) errors.push({ func: MODULE_INIT_UNIT_NAME, message: e.message, kind: "verify" });
+        for (const e of mainErrors) {
+          errors.push(invariantIntegrationFailure(MODULE_INIT_UNIT_NAME, "verifier-failure", "verify", e.message));
+        }
       } else {
         let anyLiftedFailed = false;
         for (const lifted of result.lifted) {
           const liftedErrors = verifyIrFunction(lifted);
           if (liftedErrors.length > 0) {
-            for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
+            for (const e of liftedErrors) {
+              errors.push(invariantIntegrationFailure(lifted.name, "verifier-failure", "verify", e.message));
+            }
             anyLiftedFailed = true;
           }
         }
@@ -575,11 +645,7 @@ export function compileIrPathFunctions(
         }
       }
     } catch (e) {
-      errors.push({
-        func: MODULE_INIT_UNIT_NAME,
-        message: e instanceof Error ? e.message : String(e),
-        kind: "build",
-      });
+      errors.push(caughtIntegrationFailure(MODULE_INIT_UNIT_NAME, e, "build"));
     }
   }
 
@@ -597,7 +663,9 @@ export function compileIrPathFunctions(
     const postErrors = verifyIrFunction(optimized);
     if (postErrors.length > 0) {
       for (const e of postErrors) {
-        errors.push({ func: entry.name, message: `post-hygiene verify: ${e.message}`, kind: "verify" });
+        errors.push(
+          invariantIntegrationFailure(entry.name, "verifier-failure", "verify", `post-hygiene verify: ${e.message}`),
+        );
       }
       continue;
     }
@@ -639,7 +707,9 @@ export function compileIrPathFunctions(
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
-        errors.push({ func: before.name, message: `post-inline verify: ${e.message}`, kind: "verify" });
+        errors.push(
+          invariantIntegrationFailure(before.name, "verifier-failure", "verify", `post-inline verify: ${e.message}`),
+        );
       }
       continue;
     }
@@ -693,7 +763,9 @@ export function compileIrPathFunctions(
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
-        errors.push({ func: fn.name, message: `post-mono verify: ${e.message}`, kind: "verify" });
+        errors.push(
+          invariantIntegrationFailure(fn.name, "verifier-failure", "verify", `post-mono verify: ${e.message}`),
+        );
       }
       continue;
     }
@@ -928,14 +1000,23 @@ export function compileIrPathFunctions(
           })()
         : ctx.funcMap.get(name);
       if (funcIdx === undefined) {
-        errors.push({ func: name, message: `no funcIdx allocated for ${name}` });
+        errors.push(
+          invariantIntegrationFailure(name, "missing-function-slot", "patch", `no funcIdx allocated for ${name}`),
+        );
         continue;
       }
       // #1916 S2 — definedFuncAt/replaceDefinedFuncAt are the positional
       // read/write chokepoints (func-space.ts).
       const existing = definedFuncAt(ctx, funcIdx);
       if (!existing) {
-        errors.push({ func: name, message: `funcIdx ${funcIdx} out of local range for ${name}` });
+        errors.push(
+          invariantIntegrationFailure(
+            name,
+            "missing-function-slot",
+            "patch",
+            `funcIdx ${funcIdx} out of local range for ${name}`,
+          ),
+        );
         continue;
       }
 
@@ -964,10 +1045,14 @@ export function compileIrPathFunctions(
       // dedups on shape, so the IR-lowered void unit lands on the same
       // index; a mismatch means the lowering went wrong — keep legacy.
       if ((entry.classMember || entry.moduleInit) && wasmFunc.typeIdx !== existing.typeIdx) {
-        errors.push({
-          func: name,
-          message: `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
-        });
+        errors.push(
+          invariantIntegrationFailure(
+            name,
+            "abi-type-index-mismatch",
+            "patch",
+            `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
+          ),
+        );
         continue;
       }
       // Tail-call optimization parity with the legacy AST path (#602): the IR
@@ -995,12 +1080,14 @@ export function compileIrPathFunctions(
           finalBody.pop();
         }
         if (bodyContainsReturnClassOp(finalBody)) {
-          errors.push({
-            func: name,
-            message:
+          errors.push(
+            invariantIntegrationFailure(
+              name,
+              "abi-type-index-mismatch",
+              "lower",
               "module-init body contains a non-trailing return-class op — appended init epilogues would be skipped; keeping legacy body",
-            kind: "lower",
-          });
+            ),
+          );
           continue;
         }
       } else {
@@ -1015,20 +1102,7 @@ export function compileIrPathFunctions(
       });
       compiled.push(name);
     } catch (e) {
-      errors.push({
-        func: name,
-        message: e instanceof Error ? e.message : String(e),
-        // (#2134) "emission-schedule verify" marks a failure of the
-        // independent schedule checker in lower.ts — classify it "verify" so
-        // it is a HARD failure under CI/test (`irVerifierHardFailureEnabled`)
-        // while remaining a demote-to-legacy warning in production.
-        kind:
-          e instanceof Error && e.message.includes("backend legality failed")
-            ? "backend-legality"
-            : e instanceof Error && e.message.includes("emission-schedule verify")
-              ? "verify"
-              : "lower",
-      });
+      errors.push(caughtIntegrationFailure(name, e, "lower"));
     }
   }
 
@@ -1718,16 +1792,20 @@ function makeResolver(
       // host import rather than a defined helper.
       const helperIdx = ctx.nativeStrHelpers.get(ref.name);
       if (helperIdx !== undefined) return helperIdx;
-      throw new Error(`ir/integration: unknown function ref "${ref.name}"`);
+      throw new IrInvariantError("unknown-function-ref", "lower", `ir/integration: unknown function ref "${ref.name}"`);
     },
     resolveGlobal(ref: IrGlobalRef): number {
       const localIdx = ctx.mod.globals.findIndex((g) => g.name === ref.name);
-      if (localIdx < 0) throw new Error(`ir/integration: unknown global ref "${ref.name}"`);
+      if (localIdx < 0) {
+        throw new IrInvariantError("unknown-global-ref", "lower", `ir/integration: unknown global ref "${ref.name}"`);
+      }
       return ctx.numImportGlobals + localIdx;
     },
     resolveType(ref: IrTypeRef): number {
       const idx = ctx.mod.types.findIndex((t) => "name" in t && (t as { name?: string }).name === ref.name);
-      if (idx < 0) throw new Error(`ir/integration: unknown type ref "${ref.name}"`);
+      if (idx < 0) {
+        throw new IrInvariantError("unknown-type-ref", "lower", `ir/integration: unknown type ref "${ref.name}"`);
+      }
       return idx;
     },
     internFuncType(type: FuncTypeDef): number {

@@ -76,6 +76,8 @@ export function createCodegenContext(
     // #1923 — IR post-claim demotions; always collected (cheap), mirroring
     // fallbackCounts. Surfaced on CompileResult.irPostClaimErrors for the gate.
     irPostClaimErrors: [],
+    // #3519 — normal compiles pay no ledger allocation cost.
+    irOutcomes: options?.trackIrOutcomes ? [] : undefined,
     lastKnownNode: null,
     externClasses: new Map(),
     pseudoExternClasses: new Map(),

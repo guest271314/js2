@@ -86,6 +86,7 @@ import {
   verifyEmissionSchedule,
   type IrEffects,
 } from "./effects.js";
+import { IrInvariantError } from "./outcomes.js";
 import type { BlockType, FuncTypeDef, Instr, LocalDef, ValType, WasmFunction } from "./types.js";
 export type {
   IrBoxedLowering,
@@ -434,7 +435,9 @@ export function lowerIrFunctionBody<S, Slot>(
   const legalityErrors = verifyIrBackendLegality(func, emitter.backend);
   if (legalityErrors.length > 0) {
     const shown = legalityErrors.slice(0, 3).map((err) => err.message);
-    throw new Error(
+    throw new IrInvariantError(
+      "backend-legality-failure",
+      "backend-legality",
       `ir/lower: ${emitter.backend} backend legality failed for ${func.name}: ${shown.join("; ")}` +
         (legalityErrors.length > shown.length ? ` (+${legalityErrors.length - shown.length} more)` : ""),
     );
@@ -752,7 +755,9 @@ export function lowerIrFunctionBody<S, Slot>(
       // production — a tripwire that can never miscompile silently.
       const scheduleViolations = verifyEmissionSchedule(instrs, emissionIdx, isLazyAt, collectIrUses, fxCache);
       if (scheduleViolations.length > 0) {
-        throw new Error(
+        throw new IrInvariantError(
+          "verifier-failure",
+          "verify",
           `emission-schedule verify: ${scheduleViolations[0]!.reason}` +
             (scheduleViolations.length > 1 ? ` (+${scheduleViolations.length - 1} more)` : "") +
             ` in ${func.name} [#2134]`,

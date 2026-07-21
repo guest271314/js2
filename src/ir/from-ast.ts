@@ -76,6 +76,7 @@ import {
   stringIndexProvenBelow,
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
+import { IrUnsupportedError } from "./outcomes.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
@@ -106,6 +107,10 @@ import {
   type IrValueId,
 } from "./nodes.js";
 import type { ValType } from "./types.js";
+
+function unsupportedVoidCallExpression(detail: string): never {
+  throw new IrUnsupportedError("void-call-expression", "build", detail);
+}
 
 /**
  * Slice 10 (#1169i) — the from-ast view of one extern-class entry. Mirrors
@@ -2649,7 +2654,7 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     if (callResult === null) {
       // Unreachable: expression position (statementPosition=false) throws
       // before returning null.
-      throw new Error(`ir/from-ast: void call in expression position (${cx.funcName})`);
+      unsupportedVoidCallExpression(`ir/from-ast: void call in expression position (${cx.funcName})`);
     }
     return callResult;
   }
@@ -3893,7 +3898,7 @@ function lowerImportedCall(
 
   const result = cx.builder.emitCall({ kind: "func", name: plan.targetName }, args, plan.returnType);
   if (result === null && !statementPosition) {
-    throw new Error(
+    unsupportedVoidCallExpression(
       `ir/from-ast: imported call to ${plan.targetName} returned void used as expression in ${cx.funcName}`,
     );
   }
@@ -3963,7 +3968,9 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
       // Unreachable: in expression position (statementPosition=false) every
       // void arm throws before returning null (#2856 added the null returns
       // for statement position only).
-      throw new Error(`ir/from-ast: method call produced no result in expression position (${cx.funcName})`);
+      unsupportedVoidCallExpression(
+        `ir/from-ast: method call produced no result in expression position (${cx.funcName})`,
+      );
     }
     return r;
   }
@@ -4034,7 +4041,9 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
     // STATEMENT position is legal (the recursion driver shape). Expression
     // position keeps throwing.
     if (statementPosition) return null;
-    throw new Error(`ir/from-ast: call to ${calleeName} returned void used as expression in ${cx.funcName}`);
+    unsupportedVoidCallExpression(
+      `ir/from-ast: call to ${calleeName} returned void used as expression in ${cx.funcName}`,
+    );
   }
   return result;
 }
@@ -4128,7 +4137,7 @@ function lowerClosureCall(
   cx: LowerCtx,
 ): IrValueId {
   if (signature.returnType === null) {
-    throw new Error(`ir/from-ast: void closure calls are not in value position scope (${cx.funcName})`);
+    unsupportedVoidCallExpression(`ir/from-ast: void closure calls are not in value position scope (${cx.funcName})`);
   }
   if (argExprs.length !== signature.params.length) {
     throw new Error(`ir/from-ast: closure call arity mismatch in ${cx.funcName}`);
@@ -4169,7 +4178,7 @@ function lowerNestedFuncCall(
   cx: LowerCtx,
 ): IrValueId {
   if (binding.signature.returnType === null) {
-    throw new Error(`ir/from-ast: void nested calls are not in value position scope (${cx.funcName})`);
+    unsupportedVoidCallExpression(`ir/from-ast: void nested calls are not in value position scope (${cx.funcName})`);
   }
   if (argExprs.length !== binding.signature.params.length) {
     throw new Error(`ir/from-ast: nested func call arity mismatch in ${cx.funcName}`);
@@ -4218,7 +4227,7 @@ function lowerNestedFuncCall(
   }
   const r = cx.builder.emitCall({ kind: "func", name: binding.liftedName }, args, binding.signature.returnType);
   if (r === null) {
-    throw new Error(`ir/from-ast: nested call returned void in ${cx.funcName}`);
+    unsupportedVoidCallExpression(`ir/from-ast: nested call returned void in ${cx.funcName}`);
   }
   return r;
 }
@@ -4475,7 +4484,9 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       args.push(argVal);
     }
     if (method.returnType === null && !statementPosition) {
-      throw new Error(`ir/from-ast: void super.${methodName}() used in expression position (${cx.funcName})`);
+      unsupportedVoidCallExpression(
+        `ir/from-ast: void super.${methodName}() used in expression position (${cx.funcName})`,
+      );
     }
     return cx.builder.emitClassSuperCall(parentShape, self, methodName, args, method.returnType);
   }
@@ -4605,7 +4616,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       args.push(argVal);
     }
     if (method.returnType === null && !statementPosition) {
-      throw new Error(
+      unsupportedVoidCallExpression(
         `ir/from-ast: void static method ${className}.${methodName} used in expression position (${cx.funcName})`,
       );
     }
@@ -4764,7 +4775,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
           : irVal(method.results[0]!)
         : null;
     if (resultType === null && !statementPosition) {
-      throw new Error(
+      unsupportedVoidCallExpression(
         `ir/from-ast: void method ${definingClass}.${methodName} used in expression position (${cx.funcName})`,
       );
     }
@@ -4881,7 +4892,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // before this slice from-ast threw here, demoting the caller post-claim to
   // legacy (banked in #3000-C's notes).
   if (method.returnType === null && !statementPosition) {
-    throw new Error(
+    unsupportedVoidCallExpression(
       `ir/from-ast: void method ${recvType.shape.className}.${methodName} used in expression position (${cx.funcName})`,
     );
   }
