@@ -2379,11 +2379,30 @@ export function calleeMayBeHostCallable(ctx: CodegenContext, expr: ts.Expression
     return false;
   };
 
+  // (#3488) `Object.getOwnPropertyDescriptor(o, k).get`/`.set` extracts a HOST
+  // accessor function (not a wasm closure), e.g. a builtin-proto getter like
+  // `%TypedArray%.prototype.length`. Invoked as a bare `getter()` it must reach
+  // the `__call_function` host arm, else the closure-struct dispatch nulls the
+  // cast and `struct.get`-traps on it (the `*/invoked-as-func.js` trap-gap #3441
+  // unmasked: `getter()` with undefined `this` must throw a CATCHABLE TypeError,
+  // not null-deref). Syntactic (no checker query → ratchet-safe); narrow — pure
+  // local-closure programs stay host-import-free (#1941 dual-mode).
+  const unparen = (n: ts.Expression): ts.Expression => (ts.isParenthesizedExpression(n) ? n.expression : n);
+  const isReflectiveAccessorExtraction = (node: ts.Expression): boolean => {
+    const inner = unparen(node);
+    if (!ts.isPropertyAccessExpression(inner) || (inner.name.text !== "get" && inner.name.text !== "set")) return false;
+    const recv = unparen(inner.expression);
+    if (!ts.isCallExpression(recv)) return false;
+    const callee = unparen(recv.expression);
+    return ts.isPropertyAccessExpression(callee) && callee.name.text === "getOwnPropertyDescriptor";
+  };
+
   // Unwrap `<host> || fn` / `<host> ?? fn` short-circuit fallbacks (and nested
   // chains), checking whether any reachable left operand is a host builtin.
   const initMayBeHost = (node: ts.Expression): boolean => {
     const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
     if (isHostBuiltinMember(inner)) return true;
+    if (isReflectiveAccessorExtraction(inner)) return true;
     if (
       ts.isBinaryExpression(inner) &&
       (inner.operatorToken.kind === ts.SyntaxKind.BarBarToken ||

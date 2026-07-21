@@ -1,7 +1,7 @@
 ---
 id: 3488
 title: "TypedArray compiler trap-gaps (.set / bit-precision / invoked-as-func) — unmasked by #3441, tighten the #3189 ratchet back"
-status: ready
+status: in-progress
 created: 2026-07-20
 priority: medium
 task_type: bug
@@ -10,6 +10,8 @@ goal: test262-conformance
 sprint: current
 horizon: m
 related: [3441, 3189, 3202, 3335]
+loc-budget-allow:
+  - src/codegen/expressions/calls.ts
 ---
 
 # #3488 — TypedArray trap-gaps unmasked by #3441
@@ -91,3 +93,67 @@ Filed as the #3441 fix-forward so the temporary trap-tolerance valve is provably
 transitional, not a permanent floor raise. Suggest splitting into two slices:
 (a) `invoked-as-func` reflective null-receiver TypeError (overlaps #728), and
 (b) `TypedArray.prototype.set` OOB → catchable RangeError.
+
+## Slice (a) — LANDED (reflective accessor `invoked-as-func`)
+
+**Corrected root cause (verify-first, NOT the filed "getter null-receiver guard"
+framing).** The getter body is already correct: `getter.call(undefined)` from JS
+throws a catchable `TypeError` ("Method get TypedArray.prototype.length called on
+incompatible receiver"), and both `prop-desc.js` and `invoked-as-accessor.js`
+already pass. The trap was in the **compiled call path**, not the getter and not
+the descriptor:
+
+- `var getter = Object.getOwnPropertyDescriptor(proto, "length").get; getter();`
+  resolves `.get` to a **HOST-function-valued externref** (a host callable, NOT a
+  wasm closure struct). The bare-identifier call dispatch (`call-identifier.ts`)
+  tests it against the closure-struct type, the `ref.test` fails → a null closure
+  cast, and because the raw callee is non-null the guarded null-check does **not**
+  throw — it falls through to `struct.get <closure> 0` on the null and
+  `null_deref`-traps.
+- The `__call_function` host-callable fallback arm already exists
+  (`call-identifier.ts:1625`, #1712/#3335) but is gated by
+  `calleeMayBeHostCallable` (`calls.ts`), which only recognised
+  `var f = Object.hasOwn`-style host-builtin-member inits — NOT the reflective
+  `gOPD(o, k).get`/`.set` accessor extraction. So the host arm was never emitted
+  and the trapping path ran.
+
+**Fix**: `calleeMayBeHostCallable` now recognises the syntactic
+`Object.getOwnPropertyDescriptor(o, k).get`/`.set` extraction shape (no checker
+query → oracle-ratchet-safe; narrow → `#1941` dual-mode host-import-free guarantee
+for pure local-closure programs preserved). The `__call_function` arm is then
+emitted, the reflective getter dispatches through the host, and `getter()` with an
+undefined `this` throws the CATCHABLE `TypeError` the harness asserts.
+
+**Measured (host lane, verify-first, pre vs post over all 51 `*/invoked-as-func.js`):**
+
+- `28 pass / 5 fail / 18 fail(TRAP)` → `44 pass / 5 fail / 2 fail(TRAP)`.
+- **+16 host flips**, 16 `null_deref` traps eliminated, **0 regressions**.
+- Remaining 2 traps are `intl402/NumberFormat/*` (Intl — unrelated skip-feature
+  territory); remaining fails are `TypedArrayConstructors/{from,of}` statics + an
+  Intl PluralRules test (different shapes, out of scope).
+- Broad regression sweep (62 tests: TypedArray `prop-desc` + `invoked-as-accessor`
+  + `Object.getOwnPropertyDescriptor` + RegExp `invoked-as-func`) is byte-identical
+  pre/post — zero conformance regressions.
+
+Covered by `tests/issue-3488.test.ts`.
+
+## Remaining slices (NOT in this PR — re-scope / re-file)
+
+- **(b) `TypedArray.prototype.set` OOB (+9).** Verify-first correction: this is
+  **NOT** an offset-coercion bug — offset `ToInteger` works in a statically-typed
+  `compileTypedArraySet` context (confirmed: `sample.set([42], "")` / `1.9` on a
+  real `Float64Array` passes). The listed tests fail because `sample = new TA(
+  makeCtorArg([...]))` (an `any`-typed receiver) constructs a **length-0 host view**
+  via the source-array→host-`%TypedArray%`-ctor **marshaling** gap — this is
+  **#3335 value-rep territory**, already partly guarded to a *catchable* TypeError.
+  Making these PASS needs real marshaling work (produce a correct-length view), not
+  a `.set` bounds change. Warrants its own value-rep issue.
+- **(c) `*/bit-precision.js` (null_deref).** These trap **inside the test262
+  harness catch block** (`testTypedArray.js`: `e.message += " (Testing with …)";
+  throw e`), i.e. a separate error-object/`.name`/string-concat root cause in the
+  harness rethrow path — NOT the element codec the filing guessed. Warrants its own
+  scoped issue.
+
+The `TRAP_RATCHET_TOLERANCE` / `BASELINE_TRAP_GROWTH_ALLOW` reset + full ratchet
+tightening stays blocked on (b)+(c); this PR removes the 16 `invoked-as-func`
+`null_deref` traps.
