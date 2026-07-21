@@ -427,11 +427,11 @@ function irTypeKey(t: IrType): string {
   }
   if (t.kind === "closure") {
     const ps = t.signature.params.map(irTypeKey).join(",");
-    return `c:(${ps})->${irTypeKey(t.signature.returnType)}`;
+    return `c:(${ps})->${t.signature.returnType === null ? "void" : irTypeKey(t.signature.returnType)}`;
   }
   if (t.kind === "callable") {
     const ps = t.signature.params.map(irTypeKey).join(",");
-    return `cb:(${ps})->${irTypeKey(t.signature.returnType)}`;
+    return `cb:(${ps})->${t.signature.returnType === null ? "void" : irTypeKey(t.signature.returnType)}`;
   }
   // Slice 4 (#1169d): class is keyed by name — one declaration per
   // unit, so the name uniquely identifies the shape.

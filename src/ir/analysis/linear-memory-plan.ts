@@ -873,7 +873,7 @@ function collectLayoutsFromType(type: IrType, layouts: Map<string, LinearLayoutP
     case "closure":
     case "callable":
       for (const param of type.signature.params) collectLayoutsFromType(param, layouts);
-      collectLayoutsFromType(type.signature.returnType, layouts);
+      if (type.signature.returnType !== null) collectLayoutsFromType(type.signature.returnType, layouts);
       return;
     case "union":
       for (const member of type.members) collectLayoutsFromType(member, layouts);
@@ -946,9 +946,9 @@ function linearIrTypeKey(type: IrType): string {
         .map((field) => `${JSON.stringify(field.name)}=${linearIrTypeKey(field.type)}`)
         .join(";")}`;
     case "closure":
-      return `closure:(${type.signature.params.map(linearIrTypeKey).join(",")})->${linearIrTypeKey(type.signature.returnType)}`;
+      return `closure:(${type.signature.params.map(linearIrTypeKey).join(",")})->${type.signature.returnType === null ? "void" : linearIrTypeKey(type.signature.returnType)}`;
     case "callable":
-      return `callable:(${type.signature.params.map(linearIrTypeKey).join(",")})->${linearIrTypeKey(type.signature.returnType)}`;
+      return `callable:(${type.signature.params.map(linearIrTypeKey).join(",")})->${type.signature.returnType === null ? "void" : linearIrTypeKey(type.signature.returnType)}`;
     case "extern":
       return `extern:${JSON.stringify(type.className)}`;
     case "union":

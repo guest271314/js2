@@ -1423,6 +1423,33 @@ re-bucketing `delay`'s reject to `deferred` with a recorded rationale**
 (flag to PO) rather than forcing an unsound claim — the corpus must not
 dictate an unshippable capability.
 
+#### B2 result (2026-07-21) — one ambient void event callback
+
+The measured slice is intentionally narrower than the general arrow-value
+forecast above. It checker-certifies exactly one direct, discarded ambient
+`addEventListener(type, () => { ... })` site per top-level owner, with a
+zero-parameter synchronous block-bodied void arrow, strict lexical/nesting
+guards, and symbol-proven readonly captures. Lowering reuses B0's canonical
+callable pack and crosses the host boundary through the existing
+`__make_callback` import using sentinel `-1`; the runtime produces a cached,
+nonconstructible JS arrow that returns `undefined` and ignores event arguments.
+Single and multi overlays both validate the final import name/signature and the
+deterministic lifted-name slot before claim, while captured subtype names are
+module-unique.
+
+The gate ratchets function-level `body-shape-rejected` **5 -> 4** with zero
+post-claim demotions. The exact remaining histogram is calendar `renderCal`,
+`onDay`, and `main`, plus async `delay`; module-level remains **2** and deferred
+async functions remain **4**. The 23-test B2 suite covers optimized and
+unoptimized runtime dispatch, callback identity/undefined/nonconstructibility,
+unchanged legacy positive-id dispatch, IR shape, strict negatives including
+symbol-vs-spelling capture ambiguity including destructured bindings,
+cross-source name safety, maker/lifted collision demotion, and standalone
+containment. A replay regression additionally keeps any local call component
+containing a planned B2 owner out of the IR-first skip set until final-context
+maker/lifted-name proofs complete, preventing skipped-body placeholders after a
+safe demotion. Calendar and Promise/async executor shapes are unchanged.
+
 ### Ordering and landability
 
 1. Step 0 (landed) → 2. Capability C (landed, measured −1) → 3. builtins

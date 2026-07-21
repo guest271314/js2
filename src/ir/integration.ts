@@ -77,6 +77,7 @@ import {
   lowerFunctionAstToIr,
   STRING_METHOD_TABLE,
   type IrFromAstResolver,
+  type IrHostVoidCallbackLoweringPlan,
   type IrImportedCallLoweringPlan,
   type IrTopLevelFunctionValueLoweringPlan,
   type ModuleBindingGlobal,
@@ -164,6 +165,7 @@ export interface IrTypeOverrideMap {
 export interface IrIntegrationLoweringPlans {
   readonly importedCalls: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
   readonly topLevelFunctionValues: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
+  readonly hostVoidCallbacks: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
 }
 
 export function compileIrPathFunctions(
@@ -315,6 +317,7 @@ export function compileIrPathFunctions(
         calleeTypes,
         importedCalls: loweringPlans?.importedCalls,
         topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
+        hostVoidCallbacks: loweringPlans?.hostVoidCallbacks,
         classShapes,
         // Slice 6 part 4 refactor (#1185): thread the from-ast subset
         // of the IR resolver. Replaces the per-feature `nativeStrings:
@@ -453,6 +456,7 @@ export function compileIrPathFunctions(
             calleeTypes,
             importedCalls: loweringPlans?.importedCalls,
             topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
+            hostVoidCallbacks: loweringPlans?.hostVoidCallbacks,
             classShapes,
             resolver: fromAstResolver,
             allocRegistry,
@@ -543,6 +547,7 @@ export function compileIrPathFunctions(
         calleeTypes,
         importedCalls: loweringPlans?.importedCalls,
         topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
+        hostVoidCallbacks: loweringPlans?.hostVoidCallbacks,
         classShapes,
         resolver: fromAstResolver,
         allocRegistry,
@@ -2878,11 +2883,11 @@ function irTypeKey(t: IrType): string {
   }
   if (t.kind === "closure") {
     const ps = t.signature.params.map(irTypeKey).join(",");
-    return `closure(${ps})->${irTypeKey(t.signature.returnType)}`;
+    return `closure(${ps})->${t.signature.returnType === null ? "void" : irTypeKey(t.signature.returnType)}`;
   }
   if (t.kind === "callable") {
     const ps = t.signature.params.map(irTypeKey).join(",");
-    return `callable(${ps})->${irTypeKey(t.signature.returnType)}`;
+    return `callable(${ps})->${t.signature.returnType === null ? "void" : irTypeKey(t.signature.returnType)}`;
   }
   // Slice 4 (#1169d): class is keyed by name — uniqueness across the
   // compilation unit makes this safe.
@@ -2955,7 +2960,7 @@ class ClosureStructRegistry {
     let resultTypes: ValType[];
     try {
       paramTypes = sig.params.map((p) => this.resolveValType(p));
-      resultTypes = [this.resolveValType(sig.returnType)];
+      resultTypes = sig.returnType === null ? [] : [this.resolveValType(sig.returnType)];
     } catch {
       return null;
     }
@@ -2999,7 +3004,16 @@ class ClosureStructRegistry {
     }
 
     const subIdx = this.ctx.mod.types.length;
-    const subName = `__ir_closure_${this.subCache.size}`;
+    // `compileIrPathFunctions` is invoked once per source file in the M0
+    // overlay, so this registry-local cache restarts at zero. Allocate against
+    // the module-wide struct registry to keep B2 captured subtypes unique and
+    // avoid overwriting a user class (or an earlier file's IR closure) named
+    // `__ir_closure_N`.
+    let subOrdinal = this.subCache.size;
+    let subName = `__ir_closure_${subOrdinal}`;
+    while (this.ctx.structMap.has(subName)) {
+      subName = `__ir_closure_${++subOrdinal}`;
+    }
     this.ctx.mod.types.push({
       kind: "struct",
       name: subName,
@@ -3045,7 +3059,7 @@ class ClosureStructRegistry {
 
 function sigKey(sig: IrClosureSignature): string {
   const ps = sig.params.map(irTypeKey).join(",");
-  return `(${ps})->${irTypeKey(sig.returnType)}`;
+  return `(${ps})->${sig.returnType === null ? "void" : irTypeKey(sig.returnType)}`;
 }
 
 /**

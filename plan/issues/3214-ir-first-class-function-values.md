@@ -26,9 +26,16 @@ loc-budget-allow:
   - src/ir/builder.ts
   - src/codegen/expressions/calls-closures.ts
   - src/ir/integration.ts
+  - src/ir/host-extern.ts
+  - src/ir/analysis/linear-memory-plan.ts
+  - src/ir/passes/monomorphize.ts
   - src/codegen/expressions/call-tail-dispatch.ts
   - src/codegen/async-scheduler.ts
   - src/codegen/expressions/calls.ts
+  - src/runtime.ts
+  - scripts/check-ir-fallbacks.ts
+  - scripts/ir-fallback-baseline.json
+  - tests/issue-3214-void-host-callback.test.ts
 ---
 
 # #3214 — IR: first-class function values
@@ -279,6 +286,57 @@ requires a mode-aware boundary plan rather than an unsafe cast.
   alone could not move the bucket: the prerequisite imported-call and host DOM
   capabilities now exist, so the combined A+B1 slice genuinely unlocks the
   seven benchmark entry functions.
+
+## B2 implementation result — ambient zero-argument void callbacks (2026-07-21)
+
+B2 closes the benchmark helper without widening general arrow arguments. The
+accepted shape is one direct, discarded ambient
+`receiver.addEventListener(type, () => { ... })` call in a top-level function.
+The checker proves the declaration-file method/extern receiver, exactly two
+arguments, a synchronous zero-parameter non-empty block arrow with void result,
+no lexical `this`/`arguments`/`super`/`new.target`, no nested or sibling runtime
+declarations, and symbol-exact readonly captures. User-defined same-name
+methods, options arguments, parameters, concise/async/non-void arrows, mutable
+or later-written captures, and multiple callback sites remain legacy-owned.
+
+The planned arrow lowers to B0's canonical closure family with the new exact
+`{ params: [], returnType: null }` signature; `null` means a zero-result Wasm
+function and is threaded through type equality/keys, the closure registry,
+linear planning, monomorphization, and diagnostics. The extern argument path
+alone packs that closure as the canonical callable carrier and invokes the
+existing `env.__make_callback` import with reserved id `-1`. The runtime sentinel
+returns a cached outer JS arrow, ignores host event arguments, dispatches via
+`__call_fn_0`, explicitly returns `undefined`, and is nonconstructible. Existing
+non-negative legacy `__cb_N` callbacks are unchanged.
+
+Final-context preparation is shared by single- and multi-source compilation.
+It validates the actual function-import ordinal as exactly
+`env.__make_callback: (i32, externref) -> externref`, rejects an occupied
+`<owner>__closure_0` before integration, and closes the affected local call
+component. Captured IR subtype names allocate against the module-wide struct
+registry, so separate source overlays and user structs cannot reuse or
+overwrite `__ir_closure_N`. Because those final proofs require the completed
+legacy import/function registries, every selected local call component that
+contains a planned B2 owner remains compile-twice under IR-first; a later safe
+demotion can therefore never expose an unreachable skipped-body placeholder.
+
+### Measured result
+
+- `tests/issue-3214-void-host-callback.test.ts`: **23/23**. Runtime dispatch
+  twice, sentinel identity/cache, distinct-closure identity, `undefined`,
+  arity zero, `Reflect.construct` rejection, and unchanged positive-id legacy
+  dispatch; optimized/unoptimized genuine IR execution; exact
+  `-1`/maker/zero-result shape; strict pre-claim negatives including
+  symbol-vs-spelling capture ambiguity (including destructured bindings);
+  wrong maker/lifted-name collision demotion; cross-source subtype uniqueness;
+  IR-first skipped-slot containment; and standalone containment.
+- The production gate genuinely IR-emits `addBenchCard` and ratchets
+  `body-shape-rejected` **5 -> 4**. Module-level remains **2**, async-function
+  remains **4**, and every post-claim bucket remains zero.
+- The four residual body rejections are exactly calendar `renderCal`, `onDay`,
+  and `main`, plus async `delay`. B2 does not widen Calendar, Promise executors,
+  async callbacks, general arrow storage/escape, callback parameters, or
+  multiple host callback sites.
 
 ## Sequenced acceptance criteria
 

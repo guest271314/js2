@@ -58,7 +58,7 @@ import { fileURLToPath } from "node:url";
 import { analyzeFiles } from "../src/checker/index.js";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
-import { makeIrHostGlobalResolver } from "../src/ir/host-extern.js";
+import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../src/ir/host-extern.js";
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
@@ -247,6 +247,7 @@ async function aggregate(): Promise<{
         trackFallbacks: true,
         jsHostExterns: true,
         resolveHostGlobal: makeIrHostGlobalResolver(checker),
+        hostVoidCallbacks: makeIrHostVoidCallbackResolver(checker),
         importedFunctions,
         resolveModuleBinding: makeIrModuleBindingResolver(checker, {
           numberStorage: "f64",
