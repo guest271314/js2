@@ -46,6 +46,19 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 // codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
+import { collectOuterWrites } from "./closure-captures.js";
+import type {
+  IrHostVoidCallbackLoweringPlan,
+  IrImportedCallLoweringPlan,
+  IrImportedOptionalParamPlan,
+  IrTopLevelFunctionValueLoweringPlan,
+} from "./ast-lowering-plans.js";
+export type {
+  IrHostVoidCallbackLoweringPlan,
+  IrImportedCallLoweringPlan,
+  IrImportedOptionalParamPlan,
+  IrTopLevelFunctionValueLoweringPlan,
+} from "./ast-lowering-plans.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import { classifyLiteral, joinEncoding, type Encoding } from "./analysis/encoding.js";
 import { proveTypedStringAppend, proveTypedStringMethod, type TypedValueEvidence } from "./analysis/string-evidence.js";
@@ -65,6 +78,15 @@ import {
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
+import {
+  exactClosureLiftedName,
+  tryLowerPromiseDelayCall,
+  tryLowerPromiseDelayConstruction,
+  validateExactCapturePlan,
+  type ExactClosureLoweringOptions,
+  type IrPromiseDelayLoweringHost,
+  type IrPromiseDelayLoweringPlans,
+} from "./promise-delay-lowering.js";
 import {
   asVal,
   closureSignatureEquals,
@@ -436,6 +458,8 @@ export interface AstToIrOptions {
   readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
   /** (#3214 B2) Exact ambient-host void arrows, keyed by their AST node. */
   readonly hostVoidCallbacks?: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
+  /** (#2856) Exact Promise-delay construction/timer/resolve node plans. */
+  readonly promiseDelays?: IrPromiseDelayLoweringPlans;
   /**
    * Slice 4 (#1169d): map from class name to that class's IR shape
    * (fields + methods + constructor signature). Consulted when lowering
@@ -491,38 +515,6 @@ export interface AstToIrOptions {
    * unsupported storage still demotes.
    */
   readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
-}
-
-export interface IrImportedOptionalParamPlan {
-  readonly constantDefault?:
-    | { readonly kind: "f64"; readonly value: number }
-    | { readonly kind: "i32"; readonly value: number };
-  readonly hasExpressionDefault?: boolean;
-}
-
-export interface IrImportedCallLoweringPlan {
-  readonly ownerName: string;
-  readonly targetName: string;
-  readonly params: readonly IrType[];
-  readonly returnType: IrType | null;
-  readonly optionalParams: ReadonlyMap<number, IrImportedOptionalParamPlan>;
-  readonly needsArgc: boolean;
-}
-
-export interface IrTopLevelFunctionValueLoweringPlan {
-  readonly ownerName: string;
-  readonly targetName: string;
-  readonly signature: IrClosureSignature;
-  readonly trampolineName: string;
-  readonly cacheGlobalName: string;
-}
-
-export interface IrHostVoidCallbackLoweringPlan {
-  readonly ownerName: string;
-  readonly signature: IrClosureSignature;
-  readonly captureNames: ReadonlySet<string>;
-  /** Exact source-order lift ordinal collision-proved before integration. */
-  readonly liftedOrdinal: number;
 }
 
 /**
@@ -760,6 +752,7 @@ export function lowerFunctionAstToIr(
     importedCalls: options.importedCalls,
     topLevelFunctionValues: options.topLevelFunctionValues,
     hostVoidCallbacks: options.hostVoidCallbacks,
+    promiseDelays: options.promiseDelays,
     classShapes: options.classShapes,
     resolver: options.resolver,
     lifted,
@@ -1430,6 +1423,7 @@ interface LowerCtx {
   readonly importedCalls?: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
   readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
   readonly hostVoidCallbacks?: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
+  readonly promiseDelays?: IrPromiseDelayLoweringPlans;
   /** Slice 4 (#1169d) — class shape registry, keyed by className. */
   readonly classShapes?: ReadonlyMap<string, IrClassShape>;
   /**
@@ -3906,7 +3900,21 @@ function lowerImportedCall(
   return result;
 }
 
+function makePromiseDelayLoweringHost(cx: LowerCtx): IrPromiseDelayLoweringHost {
+  return {
+    builder: cx.builder,
+    funcName: cx.funcName,
+    lowerExpr: (expr, expected) => lowerExpr(expr, cx, expected),
+    lowerClosure: (expr, signature, captures, exact) =>
+      lowerClosureExpressionWithSignature(expr, signature, captures, cx, exact),
+  };
+}
+
 function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
+  const promiseDelay = tryLowerPromiseDelayCall(expr, statementPosition, cx.promiseDelays, () =>
+    makePromiseDelayLoweringHost(cx),
+  );
+  if (promiseDelay !== undefined) return promiseDelay;
   // Optional call (`fn?.()` / `obj?.method()`, #1281). The IR has no
   // short-circuit primitive for nullable callees, and at this point we
   // haven't yet lowered the callee/receiver to inspect its IrType. The
@@ -4231,6 +4239,8 @@ function lowerNestedFuncCall(
  * calls dispatch correctly.
  */
 function lowerNewExpression(expr: ts.NewExpression, cx: LowerCtx): IrValueId {
+  const promiseDelay = tryLowerPromiseDelayConstruction(expr, cx.promiseDelays, () => makePromiseDelayLoweringHost(cx));
+  if (promiseDelay !== undefined) return promiseDelay;
   if (!ts.isIdentifier(expr.expression)) {
     throw new Error(`ir/from-ast: only direct constructor names supported in slice 4 (${cx.funcName})`);
   }
@@ -7974,8 +7984,9 @@ function lowerClosureExpressionWithSignature(
   signature: IrClosureSignature,
   expectedReadonlyCaptures: ReadonlySet<string> | undefined,
   cx: LowerCtx,
+  exact?: ExactClosureLoweringOptions,
 ): IrValueId {
-  const captures = analyseCaptures(expr, cx);
+  const captures = analyseCaptures(expr, cx, exact?.orderedReadonlyCaptures);
   if (expectedReadonlyCaptures) {
     const actual = new Set(captures.map((capture) => capture.name));
     if (
@@ -7983,11 +7994,12 @@ function lowerClosureExpressionWithSignature(
       actual.size !== expectedReadonlyCaptures.size ||
       [...actual].some((name) => !expectedReadonlyCaptures.has(name))
     ) {
-      throw new Error(`ir/from-ast: host void callback capture proof diverged (${cx.funcName})`);
+      throw new Error(`ir/from-ast: exact closure capture proof diverged (${cx.funcName})`);
     }
   }
 
-  const liftedName = `${cx.funcName}__closure_${cx.liftedCounter.value++}`;
+  const liftedName = exactClosureLiftedName(cx.funcName, cx.liftedCounter.value, exact?.expectedLiftedName);
+  cx.liftedCounter.value++;
 
   // Materialize capture args. Mutable captures need a refcell; if the
   // outer doesn't already have one (a sibling closure may have built
@@ -8034,7 +8046,15 @@ function lowerClosureExpressionWithSignature(
 
   // Lift body. The lifted function takes (__self: IrType.closure,
   // ...sig.params) and reads captures via `closure.cap`.
-  const lifted = liftClosureBody(liftedName, expr, signature, captures, captureFieldTypes, cx);
+  const lifted = liftClosureBody(
+    liftedName,
+    expr,
+    signature,
+    captures,
+    captureFieldTypes,
+    cx,
+    exact?.allowConciseVoidBody === true,
+  );
   cx.lifted.push(lifted);
 
   return cx.builder.emitClosureNew({ kind: "func", name: liftedName }, signature, captureFieldTypes, captureArgs);
@@ -8119,6 +8139,7 @@ function liftNestedFunction(
     importedCalls: cx.importedCalls,
     topLevelFunctionValues: cx.topLevelFunctionValues,
     hostVoidCallbacks: cx.hostVoidCallbacks,
+    promiseDelays: cx.promiseDelays,
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
@@ -8165,6 +8186,7 @@ function liftClosureBody(
   captures: readonly NestedCapture[],
   captureFieldTypes: readonly IrType[],
   cx: LowerCtx,
+  allowConciseVoidBody = false,
 ): IrFunction {
   const builder = new IrFunctionBuilder(
     liftedName,
@@ -8205,6 +8227,7 @@ function liftClosureBody(
     importedCalls: cx.importedCalls,
     topLevelFunctionValues: cx.topLevelFunctionValues,
     hostVoidCallbacks: cx.hostVoidCallbacks,
+    promiseDelays: cx.promiseDelays,
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
@@ -8229,7 +8252,12 @@ function liftClosureBody(
 
   if (ts.isArrowFunction(expr) && !ts.isBlock(expr.body)) {
     if (signature.returnType === null) {
-      throw new Error(`ir/from-ast: void host callbacks must be block-bodied (${liftedName})`);
+      if (!allowConciseVoidBody) {
+        throw new Error(`ir/from-ast: void host callbacks must be block-bodied (${liftedName})`);
+      }
+      lowerDiscardedExpression(expr.body, innerCx);
+      builder.terminate({ kind: "return", values: [] });
+      return builder.finish({ signature, captureFieldTypes: [...captureFieldTypes] });
     }
     // Concise body — wrap as `return <expr>`.
     const v = lowerExpr(expr.body, innerCx, signature.returnType);
@@ -8262,6 +8290,7 @@ function liftClosureBody(
 function analyseCaptures(
   fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression,
   cx: LowerCtx,
+  orderedCaptureNames?: readonly string[],
 ): NestedCapture[] {
   const referenced = new Set<string>();
   const written = new Set<string>();
@@ -8306,8 +8335,19 @@ function analyseCaptures(
 
   const outerWrites = collectOuterWrites(fn);
 
+  if (orderedCaptureNames) {
+    validateExactCapturePlan(
+      orderedCaptureNames,
+      referenced,
+      ownParams,
+      (name) => (cx.scope.get(name)?.kind === "local" ? "local" : cx.scope.has(name) ? "other" : undefined),
+      cx.funcName,
+    );
+  }
+
   const captures: NestedCapture[] = [];
-  for (const name of referenced) {
+  const captureOrder: Iterable<string> = orderedCaptureNames ?? referenced;
+  for (const name of captureOrder) {
     if (ownParams.has(name)) continue;
     const binding = cx.scope.get(name);
     if (!binding) continue;
@@ -8334,50 +8374,6 @@ function analyseCaptures(
     });
   }
   return captures;
-}
-
-/**
- * Slice 3 (#1169c): walk the OUTER function body to find any
- * identifier-LHS write to a name. Used to upgrade captures to mutable
- * when the outer mutates a captured variable (even if the closure
- * body itself is read-only). Conservative: any write anywhere in the
- * outer counts.
- */
-function collectOuterWrites(fn: ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression): Set<string> {
-  const writes = new Set<string>();
-  let outer: ts.Node | undefined = fn.parent;
-  while (
-    outer &&
-    !ts.isFunctionDeclaration(outer) &&
-    !ts.isFunctionExpression(outer) &&
-    !ts.isArrowFunction(outer) &&
-    !ts.isSourceFile(outer)
-  ) {
-    outer = outer.parent;
-  }
-  if (!outer || !("body" in outer) || !outer.body) return writes;
-  const body = outer.body as ts.Node;
-  const visit = (node: ts.Node): void => {
-    if (node === fn) return;
-    if (ts.isBinaryExpression(node)) {
-      const op = node.operatorToken.kind;
-      if (
-        op === ts.SyntaxKind.EqualsToken ||
-        (op >= ts.SyntaxKind.PlusEqualsToken && op <= ts.SyntaxKind.CaretEqualsToken)
-      ) {
-        if (ts.isIdentifier(node.left)) writes.add(node.left.text);
-      }
-    }
-    if (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) {
-      const op = node.operator;
-      if (op === ts.SyntaxKind.PlusPlusToken || op === ts.SyntaxKind.MinusMinusToken) {
-        if (ts.isIdentifier(node.operand)) writes.add(node.operand.text);
-      }
-    }
-    forEachChild(node, visit);
-  };
-  forEachChild(body, visit);
-  return writes;
 }
 
 // ---------------------------------------------------------------------------

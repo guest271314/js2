@@ -62,6 +62,9 @@ import { closureSignatureEquals, type IrClosureSignature, type IrType } from "./
 import type { IrImportedFunctionResolver, IrResolvedFunctionTarget } from "./imported-functions.js";
 import type { IrHostDateSnapshotResolver } from "./host-date.js";
 import type { IrHostVoidCallbackResolver } from "./host-extern.js";
+import type { IrPromiseDelayResolver } from "./promise-delay.js";
+import { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_NAME } from "./module-init.js";
+export { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_NAME } from "./module-init.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type {
@@ -401,6 +404,13 @@ export interface IrSelectionOptions {
   readonly hostVoidCallbacks?: IrHostVoidCallbackResolver;
   /** Exact checker-certified ambient zero-arg Date snapshots (Calendar). */
   readonly hostDateSnapshots?: IrHostDateSnapshotResolver;
+  /**
+   * (#2856 async-delay slice) Exact checker-certified
+   * `new Promise<number>((resolve) => { setTimeout(...); })` construction.
+   * Omitted by bare-selector and host-free/M0 callers, so generic arrow/new
+   * selection remains unchanged outside the one production proof.
+   */
+  readonly promiseDelays?: IrPromiseDelayResolver;
 }
 
 /**
@@ -4246,6 +4256,18 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // constructorParams).
   if (ts.isNewExpression(expr)) {
     if (!ts.isIdentifier(expr.expression)) return shapeNo("expr-new-callee-nonident", expr.expression);
+    // (#2856 async-delay slice) Intercept the exact checker-certified
+    // Promise<number> timer construction before the generic constructor arm
+    // rejects its type argument and arrow.  The resolver has already proven
+    // the whole nested relationship; selection only rechecks that its two
+    // transitive executor captures are live in this function scope.
+    const promiseDelay = currentSelectionOptions?.promiseDelays?.resolve(expr);
+    if (promiseDelay) {
+      for (const capture of promiseDelay.executorCaptureNames) {
+        if (!scope.has(capture)) return shapeNo("expr-promise-delay-capture-scope", expr);
+      }
+      return true;
+    }
     const ctorName = expr.expression.text;
     if (currentModuleBindingResolver?.isDirectModuleBinding(expr.expression)) {
       return shapeNo("expr-new-module-binding-callee", expr.expression);
@@ -4633,63 +4655,6 @@ function isPhase1BinaryOp(op: ts.SyntaxKind): boolean {
  *
  * (The helpers below are exported for Slice 2's integration.)
  */
-/** (#3142) The synthetic claim-unit name for the module-level statement list. */
-export const MODULE_INIT_UNIT_NAME = "<module-init>";
-
-/**
- * (#3142) The module-init population: every top-level statement that is not
- * a function / class / type / import / export declaration — i.e. the
- * statements the legacy path routes into `__module_init` (approximated
- * syntactically; the legacy collection in `declarations.ts` additionally
- * drops some side-effect-free forms, which only makes the assessment
- * conservative). Exported so Slice 2's integration lowers EXACTLY the
- * population the selector assessed — one definition, no drift.
- */
-export function collectModuleInitPopulation(sourceFile: ts.SourceFile): ts.Statement[] {
-  const population: ts.Statement[] = [];
-  for (const stmt of sourceFile.statements) {
-    if (
-      ts.isFunctionDeclaration(stmt) ||
-      ts.isClassDeclaration(stmt) ||
-      ts.isInterfaceDeclaration(stmt) ||
-      ts.isTypeAliasDeclaration(stmt) ||
-      ts.isImportDeclaration(stmt) ||
-      ts.isImportEqualsDeclaration(stmt) ||
-      ts.isExportDeclaration(stmt) ||
-      ts.isExportAssignment(stmt) ||
-      ts.isEmptyStatement(stmt)
-    ) {
-      // Declaration statements are owned by the existing declaration
-      // machinery (`compileDeclarations` / class collection / export glue) —
-      // not module-init work. NOTE: `enum` and `namespace` declarations
-      // deliberately STAY in the population (they generate runtime code) and
-      // reject via the body-shape gate's unhandled-statement arm.
-      continue;
-    }
-    population.push(stmt);
-  }
-  return population;
-}
-
-/**
- * (#3142) Wrap the module-init population in a synthetic void
- * `<module-init>` FunctionDeclaration. Shared by the selector's Gate-2
- * call-graph scan and Slice 2's from-ast lowering so both see the same
- * unit shape. Factory nodes are only ever walked downward via
- * `forEachChild`, so the missing parent/position info is inert.
- */
-export function makeModuleInitSynthetic(population: readonly ts.Statement[]): ts.FunctionDeclaration {
-  return ts.factory.createFunctionDeclaration(
-    /* modifiers */ undefined,
-    /* asteriskToken */ undefined,
-    MODULE_INIT_UNIT_NAME,
-    /* typeParameters */ undefined,
-    /* parameters */ [],
-    /* type */ undefined,
-    ts.factory.createBlock([...population], /* multiLine */ true),
-  );
-}
-
 function assessModuleInit(
   sourceFile: ts.SourceFile,
   claimedFuncs: ReadonlySet<string>,
@@ -4769,6 +4734,12 @@ function buildLocalCallGraph(
       // stable signature. Walk into the args (which may contain real
       // calls), but don't mark the outer as having an external call.
       if (ts.isNewExpression(node)) {
+        // The exact Promise-delay resolver owns every call nested below this
+        // construction (Promise executor, timer callback, and resolve call).
+        // Treat it as one certified leaf instead of reporting setTimeout /
+        // resolve as external identifier calls.  Uncertified `new Promise`
+        // shapes retain the ordinary graph behavior below.
+        if (currentSelectionOptions?.promiseDelays?.resolve(node)) return;
         if (
           ts.isIdentifier(node.expression) &&
           (localClasses.has(node.expression.text) ||

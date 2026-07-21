@@ -77,10 +77,8 @@ import {
   IR_STRING_COMPARE_FN,
   lowerFunctionAstToIr,
   STRING_METHOD_TABLE,
+  type AstToIrOptions,
   type IrFromAstResolver,
-  type IrHostVoidCallbackLoweringPlan,
-  type IrImportedCallLoweringPlan,
-  type IrTopLevelFunctionValueLoweringPlan,
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
@@ -163,11 +161,9 @@ export interface IrTypeOverrideMap {
 }
 
 /** Exact AST-node plans shared by selection and AST-to-IR lowering. */
-export interface IrIntegrationLoweringPlans {
-  readonly importedCalls: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
-  readonly topLevelFunctionValues: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
-  readonly hostVoidCallbacks: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
-}
+export type IrIntegrationLoweringPlans = Required<
+  Pick<AstToIrOptions, "importedCalls" | "topLevelFunctionValues" | "hostVoidCallbacks" | "promiseDelays">
+>;
 
 export function compileIrPathFunctions(
   ctx: CodegenContext,
@@ -323,6 +319,7 @@ export function compileIrPathFunctions(
         importedCalls: loweringPlans?.importedCalls,
         topLevelFunctionValues: loweringPlans?.topLevelFunctionValues,
         hostVoidCallbacks: loweringPlans?.hostVoidCallbacks,
+        promiseDelays: loweringPlans?.promiseDelays,
         classShapes,
         // Slice 6 part 4 refactor (#1185): thread the from-ast subset
         // of the IR resolver. Replaces the per-feature `nativeStrings:

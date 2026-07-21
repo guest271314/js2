@@ -60,6 +60,7 @@ import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
 import { makeIrHostDateSnapshotResolver } from "../src/ir/host-date.js";
 import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../src/ir/host-extern.js";
+import { makeIrPromiseDelayResolver } from "../src/ir/promise-delay.js";
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
@@ -250,6 +251,7 @@ async function aggregate(): Promise<{
         resolveHostGlobal: makeIrHostGlobalResolver(checker),
         hostVoidCallbacks: makeIrHostVoidCallbackResolver(checker),
         hostDateSnapshots: makeIrHostDateSnapshotResolver(checker),
+        promiseDelays: makeIrPromiseDelayResolver(checker),
         importedFunctions,
         resolveModuleBinding: makeIrModuleBindingResolver(checker, {
           numberStorage: "f64",
