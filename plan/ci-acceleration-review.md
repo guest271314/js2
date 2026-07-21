@@ -52,6 +52,26 @@ Other implemented pipeline reductions:
   `equivalence-gate` is a status fan-in instead of a second checkout/install
   plus eight artifact uploads and downloads.
 
+Production merge-group run 29810082992 then validated the 106-job matrix. The
+Test262 workflow took 13:09 end to end, split across the critical path as:
+
+| phase                                                | wall  | notes                                                           |
+| ---------------------------------------------------- | ----: | --------------------------------------------------------------- |
+| workflow start → first shard                         |  0:39 | change detection plus matrix release                            |
+| first shard start → last shard finish                |  7:47 | 106 jobs; the final standalone job started 50 s after the first |
+| post-shard regression gate                           |  4:41 | ran in parallel with the 0:45 report merge                      |
+| └ merge-base cache lookup                            |  3:40 | six fetch/probe attempts, including five 30 s sleeps             |
+| └ checkout, setup, install, baseline fetch, and diff |  1:01 | all remaining regression-gate work                              |
+
+The cache poll was therefore 78% of the post-shard gate and 28% of the entire
+workflow. It also waited on cache entries that can never appear when the
+predecessor is doc-only and intentionally ran no shards. The workflow now makes
+one immediate exact-base probe against the freshly cloned baseline repository,
+then falls through without sleeping to the nearest cached ancestor. The later
+predecessor-group artifact lookup remains the strongest exact fallback. This
+keeps distance-0 reuse when it is already available without turning a cache
+miss into a multi-minute critical-path stall.
+
 Running js-host then standalone on one runner remains a poor fit for the serial
 queue and available capacity: it saves setup work but serializes two compiler-
 heavy lanes while idle runners are available. Pairing is a contingency only if
