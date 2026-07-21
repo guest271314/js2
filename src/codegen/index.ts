@@ -28,7 +28,13 @@ import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
 import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
-import { IrInvariantError, type IrObservedOutcome, type IrPreparationFailure } from "../ir/outcomes.js";
+import {
+  classifyIrFailure,
+  IrInvariantError,
+  IrUnsupportedError,
+  type IrObservedOutcome,
+  type IrPreparationFailure,
+} from "../ir/outcomes.js";
 import {
   certifyImportedIrCall,
   effectiveIrParamTypeNode,
@@ -1564,9 +1570,10 @@ interface IrOverlayPlan {
     // coarse gate.
     moduleInit?: import("../ir/select.js").IrModuleInitAssessment;
   };
-  readonly trackFallbacks: boolean;
+  /** Verbose histogram switch; outcome collection is independent of logging. */
+  readonly logFallbacks: boolean;
   /** #3519 — pre-integration terminal failures keyed by legacy synthetic name. */
-  readonly preparationFailures: ReadonlyMap<string, IrPreparationFailure>;
+  readonly preparationFailures: Map<string, IrPreparationFailure>;
   readonly declByName: ReadonlyMap<string, ts.FunctionDeclaration>;
   /** Checker-certified A+B1 imported-call sites, keyed by exact AST node. */
   readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
@@ -1590,6 +1597,10 @@ interface ObservedIrUnit {
   readonly line: number;
   readonly column: number;
   readonly staticClassMember: boolean;
+  /** Whether the direct frontend owns a concrete executable body/initializer. */
+  readonly legacyBodyAvailable: boolean;
+  /** Census-level refusal for executable units the selector cannot represent. */
+  readonly directFailure?: IrPreparationFailure;
 }
 
 const AUTO_TIMER_SHIM_MARKER = "// #1501 timer host-import shim (auto-injected)";
@@ -1637,11 +1648,15 @@ function collectObservedIrUnits(sourceFile: ts.SourceFile, selection?: IrSelecti
   const ordinals = new Map<string, number>();
   const timerShimEnd = autoTimerShimEnd(sourceFile);
   let unnamed = 0;
+  let anonymousClass = 0;
+  let firstStaticInitialization: ts.Node | undefined;
   const push = (
     matchName: string,
     unitKind: ObservedIrUnit["unitKind"],
     node: ts.Node,
     staticClassMember = false,
+    directFailure?: IrPreparationFailure,
+    legacyBodyAvailable = true,
   ): void => {
     const ordinalKey = `${unitKind}\u0000${matchName}`;
     const ordinal = ordinals.get(ordinalKey) ?? 0;
@@ -1656,60 +1671,109 @@ function collectObservedIrUnits(sourceFile: ts.SourceFile, selection?: IrSelecti
       line: pos.line + 1,
       column: pos.character + 1,
       staticClassMember,
+      legacyBodyAvailable,
+      ...(directFailure ? { directFailure } : {}),
     });
   };
 
   for (const statement of sourceFile.statements) {
     if (ts.isFunctionDeclaration(statement)) {
+      // Overload signatures and ambient declarations allocate no executable
+      // legacy slot, so they are not source-unit denominator entries.
+      if (!statement.body) continue;
       if (timerShimEnd !== null && statement.getStart(sourceFile) < timerShimEnd) continue;
       push(statement.name?.text ?? `<unnamed:${unnamed++}>`, "function", statement);
       continue;
     }
-    if (!ts.isClassDeclaration(statement) || !statement.name) continue;
+    if (!ts.isClassDeclaration(statement)) continue;
+    const isAnonymous = !statement.name;
+    const className = statement.name?.text ?? `<anonymous-default-class:${anonymousClass++}>`;
+    const anonymousFailure: IrPreparationFailure | undefined = isAnonymous
+      ? {
+          kind: "unsupported",
+          code: "anonymous-class",
+          stage: "select",
+          detail: `${className} has no stable direct-codegen class identity for IR patching`,
+        }
+      : undefined;
+    let hasExecutableConstructor = false;
+    let firstInstanceInitializer: ts.PropertyDeclaration | undefined;
     for (const member of statement.members) {
-      const name = observedClassMemberName(statement.name.text, member);
+      const isStatic = hasStaticModifier(member);
+      if (
+        (ts.isClassStaticBlockDeclaration(member) ||
+          (ts.isPropertyDeclaration(member) && isStatic && member.initializer)) &&
+        firstStaticInitialization === undefined
+      ) {
+        firstStaticInitialization = member;
+      }
+      if (ts.isPropertyDeclaration(member) && !isStatic && member.initializer && !firstInstanceInitializer) {
+        firstInstanceInitializer = member;
+      }
+      const name = observedClassMemberName(className, member);
       if (name === null) continue;
       const functionalMember = member as
         | ts.ConstructorDeclaration
         | ts.MethodDeclaration
         | ts.GetAccessorDeclaration
         | ts.SetAccessorDeclaration;
-      const isStatic =
-        functionalMember.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword) ?? false;
-      push(name, "class-member", member, isStatic);
+      if (!functionalMember.body) continue;
+      if (ts.isConstructorDeclaration(functionalMember)) hasExecutableConstructor = true;
+      push(name, "class-member", member, isStatic, anonymousFailure);
+    }
+    if (!hasExecutableConstructor && firstInstanceInitializer) {
+      push(`${className}_new`, "class-member", firstInstanceInitializer, false, {
+        kind: "unsupported",
+        code: "implicit-class-initializer",
+        stage: "select",
+        detail: `${className} has instance field initialization owned by an implicit direct constructor`,
+      });
     }
   }
 
   const modulePopulation = collectModuleInitPopulation(sourceFile);
-  if ((selection?.moduleInit?.stmtCount ?? modulePopulation.length) > 0) {
-    const first = modulePopulation[0] ?? sourceFile;
-    push(MODULE_INIT_UNIT_NAME, "module-init", first);
+  if ((selection?.moduleInit?.stmtCount ?? modulePopulation.length) > 0 || firstStaticInitialization) {
+    const first = modulePopulation[0] ?? firstStaticInitialization ?? sourceFile;
+    push(
+      MODULE_INIT_UNIT_NAME,
+      "module-init",
+      first,
+      false,
+      firstStaticInitialization
+        ? {
+            kind: "unsupported",
+            code: "static-class-initialization",
+            stage: "select",
+            detail: "class static initialization is still emitted by the direct module-init path",
+          }
+        : undefined,
+    );
   }
   return units;
 }
 
-function recordWholeSourceInvariant(ctx: CodegenContext, sourceFile: ts.SourceFile, error: IrInvariantError): void {
+function recordWholeSourceFailure(ctx: CodegenContext, sourceFile: ts.SourceFile, failure: IrPreparationFailure): void {
   if (ctx.irOutcomes === undefined || ctx.irOutcomes.some((outcome) => outcome.file === sourceFile.fileName)) return;
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
   for (const unit of collectObservedIrUnits(sourceFile)) {
-    ctx.irOutcomes.push({
-      key: unit.key,
-      file: sourceFile.fileName,
-      unitKind: unit.unitKind,
-      displayName: unit.displayName,
-      ordinal: unit.ordinal,
-      line: unit.line,
-      column: unit.column,
-      backend: "wasmgc",
-      target,
-      legacyBodyEmitted: false,
-      irBodyEmitted: false,
-      kind: "invariant",
-      code: error.code,
-      stage: error.stage,
-      detail: error.message,
-      ...(error.cause === undefined ? {} : { cause: error.cause }),
-    });
+    ctx.irOutcomes.push(
+      observedFailure(
+        {
+          key: unit.key,
+          file: sourceFile.fileName,
+          unitKind: unit.unitKind,
+          displayName: unit.displayName,
+          ordinal: unit.ordinal,
+          line: unit.line,
+          column: unit.column,
+          backend: "wasmgc",
+          target,
+          legacyBodyEmitted: false,
+          irBodyEmitted: false,
+        },
+        failure,
+      ),
+    );
   }
 }
 
@@ -1770,7 +1834,8 @@ function recordObservedIrOutcomes(
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
   const keys = new Set(ctx.irOutcomes.map((outcome) => outcome.key));
   for (const unit of collectObservedIrUnits(sourceFile, plan.selection)) {
-    const legacyBodyEmitted = !(unit.unitKind === "function" && irSkipBodies?.has(unit.matchName));
+    const legacyBodyEmitted =
+      unit.legacyBodyAvailable && !(unit.unitKind === "function" && irSkipBodies?.has(unit.matchName));
     const base = {
       key: unit.key,
       file: sourceFile.fileName,
@@ -1793,6 +1858,8 @@ function recordObservedIrOutcomes(
         stage: "patch",
         detail: `duplicate terminal outcome key ${unit.key}`,
       });
+    } else if (unit.directFailure) {
+      outcome = observedFailure(base, unit.directFailure);
     } else if (!selectionContainsUnit(plan.selection, unit)) {
       const fallback = fallbackByName.get(unit.matchName);
       const reason = unit.unitKind === "module-init" ? plan.selection.moduleInit?.reason : fallback?.reason;
@@ -2119,8 +2186,8 @@ function planIrOverlay(
   // affected node kinds. Telemetry mode (`JS2WASM_LOG_IR_FALLBACKS=1`)
   // continues to enable the histogram log; the strict set additionally
   // forces collection.
-  const trackFallbacks =
-    ctx.irOutcomes !== undefined || process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
+  const logFallbacks = process.env.JS2WASM_LOG_IR_FALLBACKS === "1" || STRICT_IR_REASONS.size > 0;
+  const collectFallbacks = ctx.irOutcomes !== undefined || logFallbacks;
   const preparationFailures = new Map<string, IrPreparationFailure>();
   // (#2856) Host-extern claiming: mode gate + checker-backed ambient-global
   // resolution. Selection runs BEFORE `collectDeclaredGlobals` /
@@ -2159,7 +2226,7 @@ function planIrOverlay(
     ast.sourceFile,
     {
       experimentalIR: true,
-      trackFallbacks,
+      trackFallbacks: collectFallbacks,
       jsHostExterns,
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
@@ -2226,7 +2293,7 @@ function planIrOverlay(
   const overrideMap = new Map<string, { params: IrType[]; returnType: IrType | null }>();
   const declByName = new Map<string, ts.FunctionDeclaration>();
   for (const stmt of ast.sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) declByName.set(stmt.name.text, stmt);
   }
   for (const name of selection.funcs) {
     const fn = declByName.get(name);
@@ -2376,14 +2443,20 @@ function planIrOverlay(
   if (jsHostExterns && options.importedFunctions) {
     for (const [ownerName, declaration] of declByName) {
       if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
-      let planningFailed = false;
+      let planningFailure: IrPreparationFailure | undefined;
       const visit = (node: ts.Node): void => {
-        if (planningFailed) return;
+        if (planningFailure) return;
         if (node !== declaration && ts.isFunctionLike(node)) return;
         if (ts.isCallExpression(node)) {
           const certified = certifyImportedIrCall(node, options.importedFunctions);
           if (certified) {
             try {
+              if (
+                process.env.JS2WASM_TEST_INJECT_IR_IMPORTED_PLAN_THROW === "1" ||
+                process.env.JS2WASM_TEST_INJECT_IR_IMPORTED_PLAN_THROW === ownerName
+              ) {
+                throw new Error(`injected imported-call planning failure for ${ownerName}`);
+              }
               const params = certified.target.declaration.parameters.map((parameter) =>
                 resolvePositionType(effectiveIrParamTypeNode(parameter), undefined, ctx, classShapes),
               );
@@ -2393,10 +2466,18 @@ function planIrOverlay(
                   ? null
                   : resolvePositionType(returnNode, undefined, ctx, classShapes);
               if (returnType === null && !importedVoidCallIsDiscarded(node, declaration)) {
-                throw new Error("void imported result is used in a value context");
+                throw new IrUnsupportedError(
+                  "imported-call-planning-unsupported",
+                  "resolve",
+                  "void imported result is used in a value context",
+                );
               }
               if (returnType?.kind === "callable") {
-                throw new Error("callable imported results are outside A+B1");
+                throw new IrUnsupportedError(
+                  "imported-call-planning-unsupported",
+                  "resolve",
+                  "callable imported results are outside A+B1",
+                );
               }
               const optionalParams = new Map<number, IrImportedOptionalParamPlan>();
               for (const optional of ctx.funcOptionalParams.get(certified.target.targetName) ?? []) {
@@ -2424,8 +2505,8 @@ function planIrOverlay(
                   cacheGlobalName: `__fn_closure_${functionArgument.target.targetName}`,
                 });
               }
-            } catch {
-              planningFailed = true;
+            } catch (error) {
+              planningFailure = classifyIrFailure(error, "resolve");
               return;
             }
           }
@@ -2433,13 +2514,8 @@ function planIrOverlay(
         ts.forEachChild(node, visit);
       };
       visit(declaration.body);
-      if (planningFailed) {
-        preparationFailures.set(ownerName, {
-          kind: "unsupported",
-          code: "imported-call-planning-unsupported",
-          stage: "resolve",
-          detail: "checker-certified imported-call planning could not preserve the source ABI",
-        });
+      if (planningFailure) {
+        preparationFailures.set(ownerName, planningFailure);
         safeSelection.funcs.delete(ownerName);
         for (const [call, plan] of importedCalls) {
           if (plan.ownerName === ownerName) importedCalls.delete(call);
@@ -2508,7 +2584,7 @@ function planIrOverlay(
     classShapes,
     overrideMap,
     safeSelection,
-    trackFallbacks,
+    logFallbacks,
     preparationFailures,
     declByName,
     importedCalls,
@@ -2529,7 +2605,7 @@ function consumeIrOverlayReport(
   sourceFile: ts.SourceFile,
   irSkipBodies?: ReadonlySet<string>,
 ): void {
-  const { selection, trackFallbacks } = plan;
+  const { selection, logFallbacks } = plan;
   // #3000 — aggregate genuine emission across every source-file overlay. A
   // selector claim alone is not evidence that an existing function slot was
   // patched successfully.
@@ -2577,7 +2653,7 @@ function consumeIrOverlayReport(
 
   // #1169q — retain the existing selector-fallback log format, now once per
   // source file for a multi-module compilation.
-  if (trackFallbacks && selection.fallbacks) {
+  if (logFallbacks && selection.fallbacks) {
     const total = selection.funcs.size + selection.fallbacks.length;
     const reasonHist: Record<string, number> = {};
     for (const fb of selection.fallbacks) {
@@ -3395,7 +3471,13 @@ export function generateModule(
 
     // Third pass: compile function bodies
     const actuallySkipped = compileDeclarations(ctx, ast.sourceFile, irSkipBodies);
-    if (irFirst) irFirstSkipped = actuallySkipped ?? [];
+    if (irFirst) {
+      irFirstSkipped = actuallySkipped ?? [];
+      // Reconcile against what declaration compilation actually skipped, not
+      // merely what the planner requested. The terminal ledger and skipped-slot
+      // trap must describe the body that really shipped.
+      irSkipBodies = new Set(irFirstSkipped);
+    }
 
     // (#1602) Rebuild object-method-as-closure trampoline bodies against the
     // method's now-final signature (param types/order may have been re-resolved
@@ -3432,7 +3514,13 @@ export function generateModule(
         plan.safeSelection,
       );
       safeSelection = prepareHostDateSnapshotLowering(ctx, ast.sourceFile, plan.hostDateImportsByOwner, safeSelection);
-      safeSelection = preparePromiseDelayLowering(ctx, ast.sourceFile, plan.promiseDelays, safeSelection);
+      safeSelection = preparePromiseDelayLowering(
+        ctx,
+        ast.sourceFile,
+        plan.promiseDelays,
+        safeSelection,
+        plan.preparationFailures,
+      );
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes, {
         importedCalls: plan.importedCalls,
         topLevelFunctionValues: plan.topLevelFunctionValues,
@@ -3966,7 +4054,7 @@ export function generateModule(
     // Must run after all other passes since they can introduce invalid coercions.
     fixupExternConvertAny(ctx);
   } catch (e) {
-    if (e instanceof IrInvariantError) recordWholeSourceInvariant(ctx, ast.sourceFile, e);
+    recordWholeSourceFailure(ctx, ast.sourceFile, classifyIrFailure(e, "build"));
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
@@ -5600,7 +5688,13 @@ export function generateMultiModule(
         safeSelection = prepareMultiIrImportedLowering(ctx, sourceFile, plan, safeSelection);
         safeSelection = prepareHostVoidCallbackLowering(ctx, sourceFile, plan.hostVoidCallbacks, safeSelection);
         safeSelection = prepareHostDateSnapshotLowering(ctx, sourceFile, plan.hostDateImportsByOwner, safeSelection);
-        safeSelection = preparePromiseDelayLowering(ctx, sourceFile, plan.promiseDelays, safeSelection);
+        safeSelection = preparePromiseDelayLowering(
+          ctx,
+          sourceFile,
+          plan.promiseDelays,
+          safeSelection,
+          plan.preparationFailures,
+        );
         const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes, {
           importedCalls: plan.importedCalls,
           topLevelFunctionValues: plan.topLevelFunctionValues,
@@ -5865,6 +5959,8 @@ export function generateMultiModule(
     // subtype of anyref). Mirror the single-module pipeline at line 1053.
     fixupExternConvertAny(ctx);
   } catch (e) {
+    const failure = classifyIrFailure(e, "build");
+    for (const sourceFile of multiAst.sourceFiles) recordWholeSourceFailure(ctx, sourceFile, failure);
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 

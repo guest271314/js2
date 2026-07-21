@@ -223,9 +223,18 @@ describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
 
     const errors = verifyIrBackendLegality(fn, "bytecode");
     expect(errors.some((e) => /instr string\.const/.test(e.message))).toBe(true);
-    expect(() =>
-      lowerIrFunctionBody(fn, minimalResolver(), new BytecodeEmitter(), new BytecodeTypeConverter()),
-    ).toThrow(/bytecode backend legality failed.*string\.const/);
+    try {
+      lowerIrFunctionBody(fn, minimalResolver(), new BytecodeEmitter(), new BytecodeTypeConverter());
+      throw new Error("expected backend legality producer to throw");
+    } catch (error) {
+      expect(error).toMatchObject({
+        name: "IrInvariantError",
+        kind: "invariant",
+        code: "backend-legality-failure",
+        stage: "backend-legality",
+      });
+      expect(error).toHaveProperty("message", expect.stringMatching(/bytecode backend legality failed.*string\.const/));
+    }
   });
 
   it("#2954: accepts a core-op (const) whole-function lowering through the linear boundary", () => {

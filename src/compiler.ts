@@ -413,17 +413,37 @@ function remapDiagnosticPosition(
     return diag.file.getLineAndCharacterOfPosition(processedStart);
   }
   const origOffset = Math.min(Math.max(0, positionMap.toInputOffset(processedStart)), originalSource.length);
+  return originalLineAndCharacter(originalSource, origOffset);
+}
+
+function originalLineAndCharacter(source: string, offset: number): { line: number; character: number } {
   // Resolve line/column from the original text. Counting newlines is O(offset)
   // but diagnostics are few; a shared line-start index would be premature here.
   let line = 0;
   let lastNewline = -1;
-  for (let i = 0; i < origOffset; i++) {
-    if (originalSource.charCodeAt(i) === 10 /* \n */) {
+  for (let i = 0; i < offset; i++) {
+    if (source.charCodeAt(i) === 10 /* \n */) {
       line++;
       lastNewline = i;
     }
   }
-  return { line, character: origOffset - lastNewline - 1 };
+  return { line, character: offset - lastNewline - 1 };
+}
+
+/** Map opt-in IR ledger locations through the same preprocessor map as diagnostics. */
+function remapIrOutcomePositions(
+  outcomes: NonNullable<CompileResult["irOutcomes"]>,
+  processedFile: ts.SourceFile,
+  originalSource: string,
+  positionMap: PositionMap,
+): NonNullable<CompileResult["irOutcomes"]> {
+  if (positionMap.isIdentity) return outcomes;
+  return outcomes.map((outcome) => {
+    const processedOffset = processedFile.getPositionOfLineAndCharacter(outcome.line - 1, outcome.column - 1);
+    const originalOffset = Math.min(Math.max(0, positionMap.toInputOffset(processedOffset)), originalSource.length);
+    const original = originalLineAndCharacter(originalSource, originalOffset);
+    return { ...outcome, line: original.line + 1, column: original.character + 1 };
+  });
 }
 
 function isGuardedNullablePrimitiveDiagnostic(diag: ts.Diagnostic, checker: ts.TypeChecker): boolean {
@@ -1490,7 +1510,7 @@ export function compileSourceSync(
   const emitSourceMap = options.sourceMap === true;
   const sourcesContent = new Map<string, string>();
   sourcesContent.set(effectiveFileName, source);
-  return runPipeline({
+  const result = runPipeline({
     userSourceFiles: [ast.sourceFile],
     entryAst: ast,
     multiAst: null,
@@ -1510,6 +1530,10 @@ export function compileSourceSync(
     runEarlyErrorsOnAllowJs: true,
     options,
   });
+  if (result.irOutcomes) {
+    result.irOutcomes = remapIrOutcomePositions(result.irOutcomes, ast.sourceFile, source, positionMap);
+  }
+  return result;
 }
 
 /**

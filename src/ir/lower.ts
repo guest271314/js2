@@ -749,10 +749,9 @@ export function lowerIrFunctionBody<S, Slot>(
       // schedule: pairwise over emitted effectful instrs, program order must
       // be preserved for conflicting effects (an algorithmically separate
       // re-derivation, so an anchor-pass bug cannot hide itself). The throw
-      // is caught by the integration loop; the "emission-schedule verify"
-      // marker classifies it kind "verify" → HARD failure under CI/test
-      // (`irVerifierHardFailureEnabled`), demote-to-legacy warning in
-      // production — a tripwire that can never miscompile silently.
+      // is caught by the integration loop and typed as a verifier Invariant.
+      // Invariants are hard failures in hybrid and IR-only policy alike, so
+      // this tripwire can never miscompile silently or demote by environment.
       const scheduleViolations = verifyEmissionSchedule(instrs, emissionIdx, isLazyAt, collectIrUses, fxCache);
       if (scheduleViolations.length > 0) {
         throw new IrInvariantError(

@@ -112,7 +112,6 @@ export type {
   IrObservedOutcome,
   IrOutcomePolicy,
   IrOutcomePolicyVerdict,
-  IrPreparationOutcome,
   IrUnsupportedCode,
 } from "./ir/outcomes.js";
 import type { ExportSignature } from "./ir/types.js";

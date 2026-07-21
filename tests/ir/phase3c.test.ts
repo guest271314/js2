@@ -114,12 +114,14 @@ describe("#1167c — monomorphize (unit)", () => {
 
     // One clone produced (the first tuple keeps the original callee).
     expect(result.cloneSignatures.size).toBe(1);
+    expect(result.cloneOrigins.size).toBe(1);
 
     // Clone name starts with `identity$` regardless of which tuple (f64 vs
     // externref) won the first-keeps-original slot — our canonical sort is
     // lexicographic over the ValType kind, so the winner depends on member
     // kind spelling; both the test and the impl must not hardcode that.
     const cloneName = [...result.cloneSignatures.keys()][0]!;
+    expect(result.cloneOrigins.get(cloneName)).toBe("identity");
     expect(cloneName.startsWith("identity$")).toBe(true);
 
     // One of the two callers now targets the clone, the other still hits

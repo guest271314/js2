@@ -21,21 +21,42 @@ parent: 3518
 depends_on: [3143]
 related: [1376, 1923, 2855, 3090, 3153, 3341]
 origin: "#3518 R0 — remove fallback telemetry blind spots before changing compilation ownership"
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/context/types.ts
+  - src/compiler.ts
+  - src/codegen/ir-overlay-finalize.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
+  - src/ir/lower.ts
+  - src/ir/passes/monomorphize.ts
+  - src/ir/select.ts
+  - src/ir/verify-alloc.ts
 files:
   - src/ir/outcomes.ts
   - src/ir/index.ts
   - src/ir/select.ts
   - src/ir/from-ast.ts
   - src/ir/integration.ts
+  - src/ir/lower.ts
+  - src/ir/passes/monomorphize.ts
+  - src/ir/verify-alloc.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/index.ts
+  - src/codegen/ir-overlay-finalize.ts
   - src/index.ts
   - src/compiler.ts
   - scripts/check-ir-only.ts
   - scripts/ir-only-baseline.json
   - package.json
   - .github/workflows/ci.yml
+  - tests/issue-1850.test.ts
+  - tests/ir/alloc-provenance.test.ts
+  - tests/ir/phase3c.test.ts
+  - tests/issue-1923.test.ts
+  - tests/issue-3341-slice-b.test.ts
+  - tests/issue-3519-ir-only-gate.test.ts
   - tests/issue-3519-ir-outcomes.test.ts
 ---
 
@@ -80,33 +101,26 @@ R0 makes those omissions impossible to hide. It complements
 `check:ir-fallbacks`; it does not redefine a playground baseline as language
 coverage.
 
-## Typed contract
+## Typed terminal contract
 
-Add `src/ir/outcomes.ts` and make it the only policy-bearing classification:
+Add `src/ir/outcomes.ts` and make the observed terminal ledger the only
+policy-bearing classification. Preparation failures use the same closed
+Unsupported/Invariant code unions internally; there is no second exported
+generic outcome contract:
 
 ```ts
-export type IrPreparationOutcome<TPrepared> =
-  | { readonly kind: "prepared"; readonly prepared: TPrepared }
-  | {
-      readonly kind: "unsupported";
-      readonly code: IrUnsupportedCode;
-      readonly stage: "select" | "resolve" | "build";
-      readonly detail: string;
-    }
-  | {
-      readonly kind: "invariant";
-      readonly code: IrInvariantCode;
-      readonly stage: "resolve" | "build" | "verify" | "lower" | "backend-legality" | "patch";
-      readonly detail: string;
-    };
+export type IrObservedOutcome =
+  | (IrObservedOutcomeBase & { readonly kind: "emitted"; readonly stage: "patch" })
+  | (IrObservedOutcomeBase & IrPreparationFailure);
 ```
 
 Exact field names may follow repository conventions, but the discriminants and
 policy meanings are acceptance requirements:
 
-- `Prepared` means the current unit completed the IR preparation/integration
-  contract. Until R2 it may still be patched into a legacy-created slot, so R0
-  telemetry must report `legacyBodyEmitted: boolean` separately.
+- `emitted` means the current unit completed the IR preparation/integration
+  contract and patched its target slot. Until R2 it may still be patched into
+  a legacy-created slot, so R0 telemetry reports
+  `legacyBodyEmitted: boolean` separately.
 - `Unsupported` is a source capability decision with a stable code and source
   location. It is warning/legacy-eligible only in hybrid mode and fatal in
   IR-only mode.
@@ -128,7 +142,7 @@ with the source-qualified `IrUnitId` and `ProgramAbiMap`.
 
 ## Implementation plan
 
-### 1. Make selection and preparation return typed outcomes
+### 1. Make selection and preparation produce typed terminal evidence
 
 **`src/ir/select.ts`**
 
@@ -153,7 +167,7 @@ with the source-qualified `IrUnitId` and `ProgramAbiMap`.
   test still needs it; it must not define IR-only policy. Record its removal in
   the R9 checklist.
 - Existing hybrid `Unsupported` routing remains a warning while its legacy
-  body is available. Every typed `Invariant` and a missing Prepared patch stay
+  body is available. Every typed `Invariant` and a missing emitted patch stay
   hard errors with stable diagnostic codes. The gate's IR-only policy rejects
   Unsupported outcomes without changing production routing in this slice.
 
@@ -194,7 +208,7 @@ position` build limitation to a typed
   is an Invariant and fails the gate.
 - Preserve outcomes through `success:false` and `failResult(...)`; fatal
   skipped-slot/invariant evidence must not disappear when compilation fails.
-- Unit-accounting invariant: inventoried units = Prepared + Unsupported +
+- Unit-accounting invariant: inventoried units = emitted + Unsupported +
   Invariant. A claimed-but-missing, emitted-without-outcome, or duplicated unit
   is fatal.
 
@@ -251,7 +265,7 @@ R9 promotes the strict command to a required gate.
 
 Start with a named `single-host` lane over the five audited import-free example
 entries. The pre-#3517 audit found **5 entries / 37 terminal source units / 29
-Prepared-or-emitted / 8 Unsupported / 0 Invariants**:
+emitted / 8 Unsupported / 0 Invariants**:
 
 - `select/async-function`: 4
 - `select/module-init:body-shape-rejected`: 1 (expected to disappear when
@@ -262,16 +276,16 @@ Prepared-or-emitted / 8 Unsupported / 0 Invariants**:
 This is seed evidence, not a value to copy blindly. Re-run after #3517, commit
 the exact nonzero baseline, record entry/unit denominators, and add later named
 lanes rather than claiming five examples represent the compiler. The gate must
-reject an empty corpus, zero terminal units, zero Prepared units, duplicate
+reject an empty corpus, zero terminal units, zero emitted units, duplicate
 observational keys, missing terminal outcomes, invariant growth, unsupported
-growth, and a Prepared/emitted-floor regression. Unsupported decreases and
-Prepared increases are bankable progress.
+growth, and an emitted-floor regression. Unsupported decreases and emitted
+increases are bankable progress.
 
 ### 4. Policy tests
 
 **`tests/issue-3519-ir-outcomes.test.ts`** must include:
 
-1. A fully supported free function produces one terminal `Prepared` outcome,
+1. A fully supported free function produces one terminal `emitted` outcome,
    with no fatal diagnostics and complete accounting; both policy evaluators
    consume that same observation.
 2. A selector-rejected source shape succeeds via legacy in production hybrid
@@ -289,13 +303,13 @@ Prepared increases are bankable progress.
    fixtures are each counted and fail; none can reach a skip/continue arm.
 8. Module-init and class-member attempts appear in accounting even though they
    remain compile-twice until R3/R4.
-9. Gate anti-vacuity rejects empty input, missing telemetry, zero Prepared
+9. Gate anti-vacuity rejects empty input, missing telemetry, zero emitted
    units, duplicate keys, missing terminal units, unsupported growth, and a
-   Prepared/emitted-floor regression; it accepts only bankable progress.
+   emitted-floor regression; it accepts only bankable progress.
 
 ## Acceptance criteria
 
-- [ ] `Prepared` / `Unsupported` / `Invariant` are the only policy-bearing IR
+- [ ] `emitted` / `Unsupported` / `Invariant` are the only policy-bearing IR
       preparation outcomes; every outcome has a stable code and stage.
 - [ ] `STRICT_IR_BUILD_ERRORS` substring matching is deleted and its existing
       three strict cases are covered by typed invariant codes.

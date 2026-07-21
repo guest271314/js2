@@ -89,6 +89,8 @@ export interface MonomorphizeResult {
   readonly module: IrModule;
   /** Map from clone name → signature. Empty when the pass made no changes. */
   readonly cloneSignatures: ReadonlyMap<string, MonomorphizeCloneSignature>;
+  /** Explicit clone name → source callee identity for source-owner rollup. */
+  readonly cloneOrigins: ReadonlyMap<string, string>;
 }
 
 /**
@@ -143,7 +145,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   }
 
   if (callSites.length === 0) {
-    return { module: mod, cloneSignatures: new Map() };
+    return { module: mod, cloneSignatures: new Map(), cloneOrigins: new Map() };
   }
 
   // -------------------------------------------------------------------------
@@ -218,7 +220,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   }
 
   if (planByCallee.size === 0) {
-    return { module: mod, cloneSignatures: new Map() };
+    return { module: mod, cloneSignatures: new Map(), cloneOrigins: new Map() };
   }
 
   // -------------------------------------------------------------------------
@@ -235,7 +237,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     newInstrs += plans.length * calleeSize;
   }
   if (newInstrs > originalSize * GROWTH_BUDGET) {
-    return { module: mod, cloneSignatures: new Map() };
+    return { module: mod, cloneSignatures: new Map(), cloneOrigins: new Map() };
   }
 
   // -------------------------------------------------------------------------
@@ -243,6 +245,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   // -------------------------------------------------------------------------
   const clonedFuncs: IrFunction[] = [];
   const cloneSignatures = new Map<string, MonomorphizeCloneSignature>();
+  const cloneOrigins = new Map<string, string>();
   for (const [calleeName, plans] of planByCallee) {
     const callee = byName.get(calleeName)!;
     for (const plan of plans) {
@@ -252,6 +255,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
         params: plan.argTypes,
         returnType,
       });
+      cloneOrigins.set(plan.cloneName, calleeName);
     }
   }
 
@@ -294,6 +298,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   return {
     module: { functions: [...rewrittenFuncs, ...clonedFuncs] },
     cloneSignatures,
+    cloneOrigins,
   };
 }
 

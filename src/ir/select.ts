@@ -523,6 +523,7 @@ export function planIrCompilation(
       if (
         ts.isFunctionDeclaration(stmt) &&
         stmt.name &&
+        stmt.body &&
         !stmt.asteriskToken &&
         stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
       ) {
@@ -557,11 +558,14 @@ export function planIrCompilation(
   // below fills `declByName` incrementally, which would miss later-declared
   // callees). Module-level for the usual isPhase1* threading reason.
   for (const stmt of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.name) declByName.set(stmt.name.text, stmt);
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) declByName.set(stmt.name.text, stmt);
   }
   currentDynScanDecls = declByName;
   for (const stmt of sourceFile.statements) {
     if (!ts.isFunctionDeclaration(stmt)) continue;
+    // Ambient declarations and overload signatures have no executable body
+    // and no direct-codegen slot. Only the implementation joins selection.
+    if (!stmt.body) continue;
     if (!stmt.name) {
       if (trackFallbacks) unnamedCount++;
       continue;
@@ -645,9 +649,11 @@ export function planIrCompilation(
         | ts.GetAccessorDeclaration
         | ts.SetAccessorDeclaration;
       if (ts.isConstructorDeclaration(member)) {
+        if (!member.body) continue;
         memberName = `${className}_new`;
         memberNode = member;
       } else if (ts.isMethodDeclaration(member)) {
+        if (!member.body) continue;
         if (!member.name) {
           // Defensive — TS parser always populates `.name` for
           // MethodDeclaration; the `null` branch is unreachable in practice.
@@ -665,6 +671,7 @@ export function planIrCompilation(
         memberName = `${className}_${methodNameRaw}`;
         memberNode = member;
       } else if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) {
+        if (!member.body) continue;
         // #3000-B: get/set accessors. The legacy path (`class-bodies.ts`)
         // registers them under DISTINCT `${className}_get_${prop}` /
         // `${className}_set_${prop}` funcMap keys — a getter and a setter of
@@ -4897,10 +4904,11 @@ function collectLocalClosureBindings(fn: ts.FunctionDeclaration): Set<string> {
   // worst case is a false negative on the external-call check, which
   // would just mean the outer falls back to legacy.
   const visit = (node: ts.Node): void => {
-    if (node !== fn && isFunctionLike(node)) return;
     if (ts.isFunctionDeclaration(node) && node !== fn && node.name) {
       names.add(node.name.text);
+      return;
     }
+    if (node !== fn && isFunctionLike(node)) return;
     if (ts.isVariableStatement(node)) {
       const isConst = !!(node.declarationList.flags & ts.NodeFlags.Const);
       if (isConst) {

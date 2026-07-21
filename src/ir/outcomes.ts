@@ -12,6 +12,9 @@ export type IrPreparationStage = "select" | "resolve" | "build" | "verify" | "lo
 
 export type IrUnsupportedCode =
   | IrFallbackReason
+  | "anonymous-class"
+  | "implicit-class-initializer"
+  | "static-class-initialization"
   | "void-call-expression"
   | "type-resolution-unsupported"
   | "imported-call-planning-unsupported"
@@ -33,6 +36,10 @@ export type IrInvariantCode =
   | "type-map-failure"
   | "duplicate-unit-outcome"
   | "missing-terminal-outcome"
+  | "allocation-provenance-failure"
+  | "tagged-union-validation-failure"
+  | "synthetic-owner-missing"
+  | "pass-output-mismatch"
   | "unexpected-internal-throw";
 
 export type IrPreparationFailure =
@@ -50,10 +57,6 @@ export type IrPreparationFailure =
       readonly detail: string;
       readonly cause?: unknown;
     };
-
-export type IrPreparationOutcome<TPrepared> =
-  | { readonly kind: "prepared"; readonly prepared: TPrepared }
-  | IrPreparationFailure;
 
 export class IrUnsupportedError extends Error {
   readonly kind = "unsupported" as const;
