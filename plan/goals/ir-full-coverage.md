@@ -8,6 +8,10 @@ typed diagnostic, and the direct AST→Wasm front-end is deleted.**
 - **Track:** Compiler architecture / IR retirement
 - **Tracking epic:** [#3518](../issues/3518-ir-only-default-and-direct-frontend-retirement.md)
 - **First executable slice:** [#3519](../issues/3519-ir-only-typed-outcomes-and-honest-gate.md)
+- **Allocated ownership spine:** [#3520](../issues/3520-ir-r1-source-qualified-identity-program-abi.md)
+  → [#3521](../issues/3521-ir-r2-prepared-program-free-function-compile-once.md)
+  → [#3522](../issues/3522-ir-r3-classes-closures-compile-once.md) →
+  [#3523](../issues/3523-ir-r4-module-init-compile-once.md)
 - **Target:** `pnpm run check:ir-only` passes across the authoritative corpus
   and both backends; the hybrid/direct path and its escape hatches no longer
   exist; the #3090 reachability audit reports no direct-front-end survivors.
@@ -62,10 +66,13 @@ milestone. The retirement now follows #3518's dependency spine:
    `CompileResult.errors`, named corpus denominators, classes, and module init.
    Later retirement slices expand that same schema to inline equivalence and
    the other production lanes before the fail-closed default flip.
-2. **R1 — identity/ABI:** source-qualified `IrUnitId` and `ProgramAbiMap`.
-3. **R2 — ownership:** a `PreparedIrProgram` built before body emission; free
-   functions compile once without an allowlist.
-4. **R3/R4 — remaining unit kinds:** classes and module init compile once.
+2. **R1 / #3520 — identity/ABI:** source-qualified `IrUnitId` and
+   `ProgramAbiMap`.
+3. **R2 / #3521 — ownership:** a `PreparedIrProgram` built before body
+   emission; free functions compile once without an allowlist.
+4. **R3 / #3522 then R4 / #3523 — remaining unit kinds:** classes/closures
+   compile once before their ordered static intents feed compile-once module
+   init.
 5. **R5 — whole program:** multi-source/M0, collisions, imports, fast mode, and
    one program-owned module-init plan.
 6. **R6 — semantics:** typed intrinsic contracts and IR entry points for each
@@ -90,6 +97,10 @@ evidence.
 | --------- | ---------------------------------------------------------------- | ------- | ----------- | -------------------------------------------------- |
 | **3518**  | IR-only default and direct front-end retirement                  | current | in-progress | Active tracking epic, R0–R10                       |
 | **3519**  | IR-only R0: typed preparation outcomes and honest readiness gate | current | ready       | First executable slice                             |
+| **3520**  | IR-only R1: source-qualified identity and whole-program ABI      | current | blocked     | Depends on #3519                                   |
+| **3521**  | IR-only R2: Prepared free-function compile-once ownership        | current | blocked     | Depends on #3520                                   |
+| **3522**  | IR-only R3: compile-once classes, members, and closures          | current | blocked     | Depends on #3521                                   |
+| **3523**  | IR-only R4: typed ordered module-init compile-once ownership     | current | blocked     | Depends on #3521 and #3522                         |
 | **3090**  | Retire direct front-end after IR-only reachability gates close   | current | blocked     | R10 deletion ledger                                |
 | **3143**  | IR-first default flip                                            | 71      | done        | Historical default-on hybrid milestone             |
 | **3142**  | IR module-init overlay adoption                                  | 72      | done        | Historical claim/patch milestone; not compile-once |

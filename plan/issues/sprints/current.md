@@ -24,9 +24,17 @@ updated: 2026-07-21
 2. **#3517 (active stacked slice)** — retire the last measured Algorithms
    module-init `Map` residual. This closes a corpus count, not R4 compile-once
    module ownership.
-3. **#3518 R1 next** — source-qualified `IrUnitId` + `ProgramAbiMap`. Allocate a
-   child issue only after R0 fixes the outcome boundary; do not implement from
-   the epic prose in parallel with R0.
+3. **#3520 (R1, blocked on #3519)** — source-qualified identity and a
+   whole-program `ProgramAbiMap`. This is the first ownership slice after R0.
+4. **#3521 (R2, blocked on #3520)** — `PreparedIrProgram` and compile-once
+   ownership for single-source top-level free functions.
+5. **#3522 (R3, blocked on #3521)** — exhaustive class/member/closure census
+   and compile-once ownership, including constructor support units.
+6. **#3523 (R4, blocked on #3521 and #3522)** — typed ordered module-init
+   planning, one body emission, and planned host/deferred/WASI invocation.
+
+Only #3519 is ready now. The R1–R4 files are dispatch specifications, not
+authorization to bypass their dependencies or implement directly from #3518.
 
 Program owner: **#3518**. Deletion ledger: **#3090**, blocked until R9. The
 function fallback-corpus epic **#2855 is done** and is not a claimable tail

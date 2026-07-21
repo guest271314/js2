@@ -6,32 +6,32 @@ pick any "ready" item and start.
 
 ## TOP PRIORITY — IR-only default and direct-front-end retirement (stakeholder directive, 2026-07-21)
 
-Tracking epic **#3518**. First executable slice **#3519** is `ready`; all later
-ownership/deletion work depends on its typed truth channel. Current compiler
-state is default-on hybrid: 0 measured function `body-shape-rejected` does not
-mean IR-only, class/module/M0/linear ownership is incomplete, and 59,676
-frontend-only fn-lines remain reachable.
+Tracking epic **#3518**. First executable slice **#3519** is `ready`; concrete
+R1–R4 issues #3520–#3523 are blocked behind its typed truth channel. Current
+compiler state is default-on hybrid: 0 measured function
+`body-shape-rejected` does not mean IR-only, class/module/M0/linear ownership
+is incomplete, and 59,676 frontend-only fn-lines remain reachable.
 
 ```text
-#3143 (done) ──> #3519 R0
-                     |
-                     v
-              R1 IrUnitId + ProgramAbiMap
-                     |
-                     v
-              R2 PreparedIrProgram
-                /       |       \
-          R3 classes  R4 module  R6 runtime intents
-                \       |       /
-                 R5 whole-program multi
-                          |
-                 R7 async/unsupported
-                          |
-                 R8 shared linear IR
-                          |
-                 R9 fail-closed default
-                          |
-                 R10 #3090 deletion
+#3143 (done) ──> #3519 R0 ──> #3520 R1 identity/ABI
+                                      |
+                                      v
+                             #3521 R2 Prepared program
+                                /                 \
+                               v                   v
+                      #3522 R3 classes       R6 runtime intents
+                               |                   |
+                               v                   v
+                      #3523 R4 module        R7 async/unsupported
+                               |                   |
+                               v                   |
+                      R5 whole-program multi       v
+                               |          R8 shared linear IR
+                               \                  /
+                                v                v
+                                 R9 fail-closed default
+                                          |
+                                 R10 #3090 deletion
 ```
 
 | Issue / slice | Priority | Status               | Dependency / decision                                                  |
@@ -39,9 +39,11 @@ frontend-only fn-lines remain reachable.
 | #3518         | critical | in-progress          | Tracking epic; not a one-shot dev claim                                |
 | #3519 / R0    | critical | **ready**            | Depends on #3143; #2855/#3341 supply history and invariant precedent   |
 | #3517         | high     | in-progress          | Last measured module `Map` residual; closes a corpus count, not R4     |
-| R1–R2         | critical | pending child issues | Sequential after R0; identity/ABI before prepare-before-emit ownership |
-| R3 / R4 / R6  | critical | pending child issues | Parallel only after R2; classes, module init, runtime families         |
-| R5 / R7 / R8  | critical | pending child issues | Integration sequence: multi → async/unsupported → shared linear        |
+| #3520 / R1    | critical | blocked              | Depends on #3519; source-qualified identities and whole-program ABI    |
+| #3521 / R2    | critical | blocked              | Depends on #3520; Prepared free-function compile-once ownership        |
+| #3522 / R3    | critical | blocked              | Depends on #3521; exhaustive classes, members, closures, support units |
+| #3523 / R4    | critical | blocked              | Depends on #3521/#3522; ordered module-init and startup ownership      |
+| R5 / R6–R8    | critical | pending child issues | Multi, runtime semantics, async policy, then shared linear integration |
 | R9            | critical | blocked              | Requires R3–R8; removes hybrid and all escape hatches                  |
 | #3090 / R10   | high     | blocked              | Requires R9 plus a refreshed reachability audit                        |
 

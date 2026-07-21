@@ -1,0 +1,297 @@
+---
+id: 3523
+title: "IR-only R4: typed ordered module-init compile-once ownership"
+status: blocked
+sprint: current
+created: 2026-07-21
+updated: 2026-07-21
+priority: critical
+horizon: xl
+complexity: XL
+feasibility: hard
+reasoning_effort: max
+task_type: refactor
+area: ir, codegen, modules
+language_feature: compiler-internals
+es_edition: multi
+goal: ir-full-coverage
+lane: ir-retirement-r4
+model: gpt-5.6-sol
+parent: 3518
+depends_on: [3521, 3522]
+related: [1789, 2796, 2931, 2965, 2992, 3142, 3517, 3518]
+origin: "#3518 R4 — replace compile-first/patch-later __module_init with typed ordered prepare-before-emit ownership"
+files:
+  - src/ir/module-init.ts
+  - src/ir/program.ts
+  - src/ir/prepare.ts
+  - src/ir/from-ast.ts
+  - src/ir/select.ts
+  - src/ir/integration.ts
+  - src/codegen/declarations.ts
+  - src/codegen/index.ts
+  - src/codegen/context/types.ts
+  - tests/issue-3523-ir-module-init-compile-once.test.ts
+---
+
+# #3523 — IR-only R4: typed ordered module-init compile-once ownership
+
+## Objective
+
+Make top-level evaluation a typed, ordered unit of `PreparedIrProgram` before
+any body emitter runs. A non-empty single-source program receives exactly one
+terminal module-init outcome:
+
+- **Prepared** — lower and emit one IR-owned `__module_init` body;
+- **Unsupported** — under the temporary hybrid policy, compile one direct body;
+- **Invariant** — fail before publication; never retain or patch another body.
+
+Replace the current filter-a-statement-list, compile direct twice, then patch by
+the string `__module_init` model. Preserve observable source order, TDZ and live
+binding behavior, class static evaluation, host/deferred/WASI startup policy,
+and exactly-once side effects. R4 is complete only when a Prepared module-init
+has `direct=0, IR=1` and an Unsupported module-init has `direct=1, IR=0`.
+
+## Current evidence
+
+The existing module-init claim is an overlay over a legacy ABI and body:
+
+- `src/ir/module-init.ts:8-27` only filters a `SourceFile` into a flat statement
+  population. It excludes class declarations and therefore cannot represent
+  their ordered static field/block effects. At `:30-40` it wraps that population
+  in a synthetic function named `<module-init>`.
+- `src/codegen/declarations.ts:2076-2105` mutates TDZ analysis state and
+  allocates `__tdz_*` globals before module-init compilation.
+- `src/codegen/declarations.ts:2108-2117` derives three side channels — module
+  statements, reassigned-function live seeds, and class static initializers —
+  rather than one ordered program plan.
+- `src/codegen/declarations.ts:2119-2148` snapshots four order-sensitive maps
+  solely because the body is compiled twice. `compileModuleInitBody` at
+  `:2150-2229` emits all live seeds, then all static initializers/blocks, then
+  all module statements through direct `compileExpression` / `compileStatement`.
+- The first direct compile occurs at `src/codegen/declarations.ts:2232-2237`;
+  the second occurs at `:2351-2360` after top-level functions populate the
+  inlining registry. Both mutate compiler state even though only the later body
+  is shipped.
+- `src/codegen/declarations.ts:2366-2441` allocates `__module_init`, exports it
+  for `deferTopLevelInit`, or wires it to the Wasm start section. Multi-source
+  compilation currently replaces earlier same-name exports at `:2420-2430`.
+- `src/ir/integration.ts:498-580` refuses static initializers and live-function
+  seeds, requires legacy-allocated numeric/boolean globals, and builds IR only
+  after the direct slot exists. Build failure demotes back to that body.
+- `src/ir/integration.ts:921-970` finds `__module_init` by flat display name,
+  checks its legacy-created type index, and patches the existing function.
+- `src/codegen/index.ts:3750-3863` subsequently mutates the body for the
+  in-module flag and WASI idempotency guard. At `:3865-4043`, `_start` selection
+  and reactor/error tails locate `main`/`__module_init` by name and decide when
+  initialization runs.
+
+#3142 made a narrow initializer population claimable. #3517 removes the last
+measured Algorithms initializer residual. Neither proves compile-once
+ownership, includes the omitted side channels, or makes the legacy slot dead.
+
+## Typed `ModuleInitPlan` contract
+
+R4 adds one source-qualified `ModuleInitPlan` to the R2 `PreparedIrProgram`.
+The plan is built from source positions plus R1 identities/ABI slots; it is not
+reconstructed from mutable codegen queues. It records, in semantic order:
+
+1. **Instantiation/prelude intents** — function live-binding seeds and other
+   hoisted binding state that must exist before user evaluation.
+2. **Binding storage and TDZ intents** — `IrBindingId`, planned global/local
+   storage, initialization state, mutability, and source-located TDZ actions.
+3. **Ordered evaluation entries** — variable initializers, executable
+   statements, class evaluation, static fields, and static blocks, each with a
+   source ordinal and the owning `IrUnitId` / `IrClassId`.
+4. **Export/live-alias intents** — the canonical binding/slot an export or
+   reassigned function observes; aliases do not create a second initializer.
+5. **Invocation policy** — ordinary host Wasm start, deferred host export,
+   standalone, or WASI `_start`/export guard, including exactly-once rules.
+
+The plan must explicitly represent an empty/non-executable module. An empty
+plan is accounted for without emitting a bogus function. No entry may be
+silently dropped because it has no direct-codegen queue representation.
+
+## Ordering and ownership invariants
+
+1. Build TDZ/storage, function/class ABI, closure captures, static intents, and
+   invocation policy before either backend emits a body. All indices come from
+   `ProgramAbiMap`; no lookup of `__module_init` or a source binding by name may
+   allocate or discover ABI during lowering.
+2. Preserve JavaScript evaluation order across interleaved statements and
+   class declarations. Static fields/blocks run at their class evaluation
+   position, not as an unordered queue before every top-level statement.
+3. Prelude live-function seeds occur before the first observable top-level
+   read, once per canonical binding/global. Reassignments update the same
+   planned binding and export aliases observe it live.
+4. TDZ flags/storage exist before evaluation, and each successful declaration
+   transitions its binding once. An early read throws; a later read observes
+   the initialized value. A failed initializer cannot look initialized.
+5. A Prepared plan is sealed before emission. Any later missing binding, ABI
+   slot, static entry, runtime intent, lifted function, or backend legality
+   failure is an Invariant and cannot demote to the direct body.
+6. An Unsupported plan is decided before emission and compiles direct exactly
+   once. R2/R3's complete unit inventory replaces the first pass's closure and
+   inlining discovery purpose; restoring two direct passes is forbidden.
+7. Startup wiring consumes a planned init slot. Ordinary host start,
+   `deferTopLevelInit`, standalone, and WASI may choose different invocation
+   adapters, but no configuration may invoke the semantic body twice or omit
+   it when an exported entry is called first.
+8. Source-unit counters and backend-emission counters reconcile separately.
+   Support wrappers, start guards, and `_start` are named support units; they do
+   not inflate the one module-init source-unit denominator.
+
+## Bounded landing sequence
+
+### Commit 1 — ordered plan and parity inventory, no routing change
+
+- Define `ModuleInitPlan`, entry kinds, invocation policy, and verifier.
+- Build the plan beside existing queues and compare its order, bindings,
+  statics, TDZ actions, live seeds, exports, and invocation mode in telemetry.
+- Add failure injection for missing/duplicate/reordered entries and prove
+  inventory equals one terminal outcome before touching body routing.
+
+### Commit 2 — prepare/lower module init and make fallback one-pass
+
+- Extend from-AST lowering for every planned top-level entry and static intent.
+- Prepare/verify the complete unit before body emission and seal its runtime /
+  support intents.
+- Emit Prepared through IR once. When policy permits Unsupported fallback,
+  compile the direct body once after program preparation; remove the snapshot /
+  restore and first-pass discovery dependency.
+
+### Commit 3 — planned ABI/start wiring and overlay retirement
+
+- Allocate/resolve the init slot through `ProgramAbiMap` and drive Wasm start,
+  deferred-host export, standalone, and WASI adapters from invocation policy.
+- Remove flat-name slot discovery, legacy type-index parity patching, and both
+  direct-body passes from the Prepared route.
+- Delete obsolete module-init claim/patch queues only after parity and
+  anti-vacuity evidence is green. Keep the one-pass direct implementation for
+  temporary typed Unsupported policy until R9/R10.
+
+## File ownership and locks
+
+One developer owns `src/ir/module-init.ts`, `src/ir/from-ast.ts`,
+`src/ir/select.ts`, `src/ir/integration.ts`, `src/codegen/declarations.ts`,
+`src/codegen/index.ts`, `src/codegen/context/types.ts`, and the R2 Prepared-
+program modules for the entire R4 landing. These files jointly encode ordering,
+storage, slot, and invocation invariants and must not be split across parallel
+implementation branches.
+
+R3 must land first because it owns class/static-intent and closure inventory.
+R5 owns multi-source aggregation; R6 owns runtime-provider semantic entry
+points. Coordinate adjacent changes, but do not absorb either scope into R4.
+
+## Anti-vacuity tests
+
+`tests/issue-3523-ir-module-init-compile-once.test.ts` must prove:
+
+1. Interleave observable statements, variable initializers, class declarations,
+   static fields, and static blocks. The event log matches source order and
+   each event occurs once in ordinary host, deferred host, standalone, and WASI.
+2. A reassigned top-level function is readable before reassignment, aliases /
+   exports observe the same live binding afterward, and one canonical global is
+   seeded once even through multiple aliases (#2931).
+3. `let`/`const` reads before initialization throw, post-initialization reads
+   succeed, and a throwing initializer does not set its TDZ flag.
+4. Static fields/blocks preserve `this`, inheritance, and surrounding binding
+   visibility; they are represented inside the plan rather than rejected or
+   prepended through `ctx.staticInitExprs`.
+5. Repeated `Object.defineProperty`, `freeze`, `seal`, and
+   `preventExtensions` operations see the correct program-order state without
+   snapshot/restore. A counter seam proves no compiler-side init pass runs twice
+   (#2965).
+6. A Prepared module records `direct=0, IR=1`; a forced typed Unsupported
+   module records `direct=1, IR=0`; post-Prepared failure emits neither a direct
+   replacement nor a publishable artifact.
+7. An empty/type-only/function-only module records an explicit non-executable
+   outcome and adds no `__module_init`, start function, or duplicate export.
+8. Top-level throw and side-effect failure surface once with the intended
+   source location; the old non-WASI silently-dropped-throw condition cannot
+   become parity evidence.
+9. `deferTopLevelInit` exports one callable init without a Wasm start section;
+   the normal host path uses start once; WASI calling any exported entry first
+   still initializes once and `_start` does not repeat it (#1789/#2796).
+10. A test seam that deletes a static entry, changes an ordinal, duplicates a
+    live seed, resolves by display name, or invokes both start adapters fails
+    reconciliation. Simple numeric module-init success alone is vacuous.
+
+Run adjacent regressions from `tests/issue-3142.test.ts`,
+`tests/issue-2965.test.ts`, `tests/issue-2796.test.ts`,
+`tests/issue-1789-standalone-module-init.test.ts`, `tests/issue-2992.test.ts`,
+and `tests/issue-3505-host-compilemulti-harness-callable-init.test.ts`. The last
+is a no-regression check only; it does not close R5 multi-source ownership.
+
+## Acceptance criteria
+
+- [ ] Every single-source program has one typed, source-qualified module-init
+      outcome before emission; its plan accounts for statements, bindings,
+      statics, live seeds, exports, TDZ actions, and invocation policy.
+- [ ] Prepared module init emits once through IR and never calls direct
+      `compileStatement` / `compileExpression`, patches a legacy-created slot,
+      or depends on first-pass compiler mutations.
+- [ ] Typed Unsupported module init emits direct once only while hybrid policy
+      exists. Invariants and post-Prepared failures are fatal in every policy.
+- [ ] Observable top-level/class/static order, TDZ, live bindings, exports,
+      side effects, exceptions, and exactly-once behavior match the semantic
+      contract across host, deferred host, standalone, and WASI.
+- [ ] The two-pass snapshot/restore machinery, module-init name lookup, and
+      class/live-seed rejection gates are absent from the Prepared route.
+- [ ] `ProgramAbiMap` owns the init function, globals, aliases, and support
+      slots; startup adapters consume those identities without display-name
+      collision or late allocation.
+- [ ] Per-unit and per-emitter counters reconcile for executable and empty
+      modules; the readiness gate fails on missing/duplicate outcomes.
+- [ ] Full module-init/equivalence/cross-backend tests, typecheck, lint/format,
+      merge-group Test262, standalone floor, and Wasm validation are
+      net-non-negative.
+
+## Risks and mitigations
+
+- **Source-order regression:** current queues partition statics from statements.
+  Use immutable source ordinals and an order verifier; do not infer order from
+  registration timing.
+- **TDZ/export ABI drift:** moving state allocation can shift globals or expose
+  aliases too early. Plan canonical binding slots in R1 and test early/late
+  reads plus throwing initialization.
+- **Initialization transaction leak:** preparation or lowering may mutate
+  compiler state before terminal policy. Seal intents and emit into an isolated
+  transaction that publishes only after verification.
+- **Double invocation:** Wasm start, deferred export, WASI guards, and `_start`
+  currently live in different phases. Represent one invocation policy and
+  assert exactly one semantic call per configuration.
+- **Accidental R5 coupling:** current `compileMulti` accumulates and replaces
+  same-name init exports. Keep R4 acceptance single-source and retain an
+  explicit multi-source no-regression test until R5 owns aggregation.
+
+## Out of scope
+
+- Whole-program multi-source/M0 ordering, cross-file imports, cycles, or
+  duplicate `__module_init` aggregation (R5).
+- Replacing runtime/builtin implementations with semantic IR intrinsics (R6).
+- Async/top-level-await ownership or the final unsupported-source policy (R7).
+- Shared linear consumption (R8), escape-hatch removal/default flip (R9), or
+  direct-handler deletion (#3090/R10).
+- Treating #3517's last measured initializer or #3142's narrow claim population
+  as proof that this structural issue is already complete.
+
+## Required completion evidence
+
+```bash
+pnpm exec vitest run tests/issue-3523-ir-module-init-compile-once.test.ts tests/issue-3142.test.ts tests/issue-2965.test.ts tests/issue-2796.test.ts tests/issue-1789-standalone-module-init.test.ts tests/issue-2992.test.ts tests/issue-3505-host-compilemulti-harness-callable-init.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+pnpm run check:ir-only -- --policy=hybrid
+pnpm run check:ir-only -- --policy=ir-only --json
+pnpm run check:ir-fallbacks -- --verbose
+pnpm run typecheck
+pnpm run lint
+pnpm run format:check
+node scripts/equivalence-gate.mjs
+pnpm exec vitest run tests/cross-backend-diff.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+```
+
+The PR report must include the ordered plan dump, terminal outcome, direct/IR
+emission counts, support-unit counts, startup invocation count for every mode,
+and before/after proof that no legacy slot was created or patched for a
+Prepared module. A green numeric initializer with no statics, TDZ, aliases, or
+startup-mode matrix does not close R4.

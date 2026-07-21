@@ -97,6 +97,18 @@ prepare-before-emit migration rather than another fallback-count sweep:
 - [#3519](../3519-ir-only-typed-outcomes-and-honest-gate.md) — **ready,
   critical, current**: typed Prepared/Unsupported/Invariant outcomes and an
   honest IR-only gate. First executable slice.
+- [#3520](../3520-ir-r1-source-qualified-identity-program-abi.md) — **blocked,
+  critical, current**: R1 source-qualified identities and whole-program ABI;
+  depends on #3519.
+- [#3521](../3521-ir-r2-prepared-program-free-function-compile-once.md) —
+  **blocked, critical, current**: R2 Prepared-program ownership and compile-once
+  top-level free functions; depends on #3520.
+- [#3522](../3522-ir-r3-classes-closures-compile-once.md) — **blocked,
+  critical, current**: R3 exhaustive classes/members/closures and support-unit
+  ownership; depends on #3521.
+- [#3523](../3523-ir-r4-module-init-compile-once.md) — **blocked, critical,
+  current**: R4 typed ordered module-init and exactly-once startup; depends on
+  #3521 and #3522.
 - [#3090](../3090-shrink-codegen-delete-dormant-legacy-handlers.md) — blocked
   R10 deletion ledger. The remaining ~59,676 frontend fn-lines are still
   reachable and may be deleted only after #3518 R9.

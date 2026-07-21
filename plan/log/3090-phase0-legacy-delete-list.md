@@ -65,8 +65,8 @@ on four structural facts:
   `collectLocalCallEdges`). Safe-by-construction: everything else compiles
   twice. The historical proposal was to widen this allowlist and delete
   per-kind handlers incrementally. The measured 28.1% ceiling disproved that as
-  the retirement path: #3518 R2 replaces it with prepare-before-emit ownership,
-  and R9 clears G1 globally before deletion.
+  the retirement path: #3521 (R2) replaces it with prepare-before-emit
+  ownership, and R9 clears G1 globally before deletion.
 - **G2 — whole-function claim unit keeps every handler live.** The selector
   claims `FunctionDeclaration`s; any rejection (every non-zero bucket in
   `plan/log/ir-adoption.md`, every `mixed`/`direct-only`/`deferred` kind in
@@ -80,7 +80,7 @@ on four structural facts:
   `__module_init` slot. The legacy module-init body is nevertheless emitted
   first, and a rejection or integration failure retains it. Claimable (or a
   zero module histogram) therefore does not clear deletion reachability.
-  #3518 R4 must prepare module init before emission; R9 removes fallback.
+  #3523 (R4) must prepare module init before emission; R9 removes fallback.
 - **G4 — runtime emission enters through legacy dispatch.** ~47K fn-lines of
   stdlib behavior emission (`array-methods`, `property-access`, `object-ops`,
   `native-regex`, `string-ops`, `json-*`, `dataview`, `map-runtime`…) are
@@ -102,9 +102,9 @@ causes the whole function to retain legacy, and an IR overlay may patch a body
 that was already emitted. **No frontend handler is deletable from the flip,
 function-corpus zero, or module claimability alone.** #3518 replaces incremental
 allowlist-to-deletion speculation with a prepare-before-emit whole-program
-sequence: typed outcomes → program identity/ABI → PreparedIrProgram → classes /
-module / multi / runtime / async / linear → fail-closed default → this audit's
-R10 deletion.
+sequence: #3519 typed outcomes → #3520 identity/ABI → #3521 PreparedIrProgram →
+#3522 classes/closures → #3523 module init → multi/runtime/async/linear →
+fail-closed default → this audit's R10 deletion.
 
 **Consequence:** "deletable today with zero capability change" =
 the **unreferenced set (~2.1K fn-lines)** — everything else is conditional.
@@ -202,7 +202,8 @@ adoption labels:
 1. Establish typed Prepared/Unsupported/Invariant outcomes and an honest
    readiness gate (#3519).
 2. Build source-qualified whole-program identity/ABI and prepare all supported
-   units before backend/body emission (#3518 R1–R8).
+   units before backend/body emission (#3520 R1 → #3521 R2 → #3522 R3 → #3523
+   R4, followed by #3518 R5–R8).
 3. Make fail-closed IR-only the sole production policy and remove hybrid/
    compile-twice escape hatches (#3518 R9).
 4. Re-run this reachability audit against that committed state. Delete only the

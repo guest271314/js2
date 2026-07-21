@@ -18,7 +18,7 @@ goal: ir-full-coverage
 lane: ir-retirement
 model: gpt-5.6-sol
 depends_on: [3519]
-related: [1373b, 2855, 2950, 3090, 3142, 3143, 3341, 3517]
+related: [1373b, 2855, 2950, 3090, 3142, 3143, 3341, 3517, 3520, 3521, 3522, 3523]
 origin: "2026-07-21 explicit user directive: enable IR-only by default and retire the old direct codegen path"
 ---
 
@@ -94,16 +94,17 @@ Additional blockers:
 
 ## Dependency spine
 
-Every row is an independently reviewable landing. R1–R10 receive child issue
-IDs before dispatch; this epic owns their order and acceptance boundaries.
+Every row is an independently reviewable landing. R1–R4 now have concrete
+child issues; R5–R10 receive child issue IDs before dispatch. This epic owns
+their order and acceptance boundaries.
 
 | Slice          | Outcome                                                                                               | Depends on                     | Exit evidence                                                                                                                                                   |
 | -------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **R0 — #3519** | Typed `Prepared` / `Unsupported` / `Invariant` outcomes plus an honest `check:ir-only` readiness gate | #3143; informed by #2855/#3341 | No TypeMap or compile failures are skipped; `result.errors` and every unit outcome are accounted for; hybrid vs IR-only policy is tested                        |
-| **R1**         | Source-qualified `IrUnitId` and a whole-program `ProgramAbiMap`                                       | R0                             | Same-named units across files/classes cannot collide; signatures, globals, imports, types, exports, and synthetic units are planned once                        |
-| **R2**         | `PreparedIrProgram` and prepare-before-emit compile-once pipeline                                     | R1                             | Prepared free functions never call legacy body compilation; unsupported units are decided before any body emitter side effect                                   |
-| **R3**         | Classes and class members are Prepared/compile-once                                                   | R2                             | Constructors, instance/static methods, fields, inheritance, wrappers, and type indices no longer depend on legacy body compilation                              |
-| **R4**         | Module init is Prepared/compile-once                                                                  | R2, R3                         | One program-owned module-init unit replaces the compile-first/patch-later `__module_init` overlay, including top-level binding/TDZ/export effects               |
+| **R1 — #3520** | Source-qualified `IrUnitId` and a whole-program `ProgramAbiMap`                                       | #3519                          | Same-named units across files/classes cannot collide; signatures, globals, imports, types, exports, and synthetic units are planned once                        |
+| **R2 — #3521** | `PreparedIrProgram` and prepare-before-emit compile-once pipeline                                     | #3520                          | Prepared free functions never call legacy body compilation; unsupported units are decided before any body emitter side effect                                   |
+| **R3 — #3522** | Classes and class members are Prepared/compile-once                                                   | #3521                          | Constructors, instance/static methods, fields, inheritance, wrappers, and type indices no longer depend on legacy body compilation                              |
+| **R4 — #3523** | Module init is Prepared/compile-once                                                                  | #3521, #3522                   | One program-owned module-init unit replaces the compile-first/patch-later `__module_init` overlay, including top-level binding/TDZ/export effects               |
 | **R5**         | Whole-program multi-source/M0 ownership                                                               | R1–R4                          | Cross-file calls/imports, fast mode, collisions, module init, and class members use one `PreparedIrProgram`; no per-source overlay loop remains                 |
 | **R6**         | Semantic intrinsic contract and IR entry points for runtime/builtin families                          | R2                             | The ~47K runtime/builtin emission lines are reached from typed IR intents, never AST dispatch; families land in measured sub-slices                             |
 | **R7**         | Async ownership plus explicit unsupported-source policy                                               | R2, R6                         | #1373b async residuals are Prepared; deliberately unsupported `eval`/`Function`/`with`/other deferred syntax fails source-located and cannot fall back          |
@@ -111,9 +112,10 @@ IDs before dispatch; this epic owns their order and acceptance boundaries.
 | **R9**         | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8                          | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
 | **R10**        | Reachability-proven direct-front-end deletion                                                         | R9                             | Re-run #3090 audit; delete the ~59,676 frontend-only fn-lines and dispatch roots; zero direct AST→Wasm reachability remains                                     |
 
-R3 and R4 may proceed in parallel after R2. Runtime-family sub-slices in R6
-may proceed in parallel once their semantic intent is fixed. R5, R8, and R9
-are integration barriers, not parallel deletion opportunities.
+R4 follows R3 because its ordered plan consumes the class/static-intent census
+owned by #3522. Runtime-family sub-slices in R6 may proceed in parallel after
+R2 once their semantic intent is fixed. R5, R8, and R9 are integration
+barriers, not parallel deletion opportunities.
 
 ## Program rules
 
