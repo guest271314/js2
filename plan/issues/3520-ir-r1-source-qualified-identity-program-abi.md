@@ -25,18 +25,48 @@ origin: "#3518 R1 — replace display-name identity before preparation ownership
 files:
   - src/ir/identity.ts
   - src/ir/program-abi.ts
+  - src/ir/index.ts
   - src/ir/nodes.ts
   - src/ir/builder.ts
+  - src/ir/ast-lowering-plans.ts
   - src/ir/from-ast.ts
+  - src/ir/imported-functions.ts
+  - src/ir/module-bindings.ts
+  - src/ir/promise-delay-lowering.ts
   - src/ir/propagate.ts
   - src/ir/type-evidence.ts
   - src/ir/select.ts
   - src/ir/integration.ts
+  - src/ir/lower.ts
+  - src/ir/verify.ts
+  - src/ir/verify-alloc.ts
+  - src/ir/analysis/encoding.ts
+  - src/ir/analysis/escape.ts
+  - src/ir/analysis/linear-memory-plan.ts
+  - src/ir/analysis/ownership.ts
+  - src/ir/analysis/stack-alloc.ts
+  - src/ir/analysis/string-evidence.ts
+  - src/ir/backend/contract.ts
+  - src/ir/backend/legality.ts
+  - src/ir/backend/linear-integration.ts
+  - src/ir/backend/porffor/assembler.ts
+  - src/ir/backend/porffor/compat.ts
+  - src/ir/backend/porffor/integration.ts
+  - src/ir/backend/porffor/sink.ts
+  - src/ir/backend/porffor/type-converter.ts
+  - src/ir/passes/dead-code.ts
   - src/ir/passes/inline-small.ts
   - src/ir/passes/monomorphize.ts
+  - src/ir/passes/simplify-cfg.ts
+  - src/ir/passes/tagged-union-types.ts
+  - src/ir/passes/tagged-unions.ts
+  - src/codegen/class-member-keys.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
+  - src/codegen/ir-first-gate.ts
+  - src/codegen/ir-overlay-finalize.ts
   - src/codegen/index.ts
+  - src/codegen/stdlib-selfhost.ts
   - tests/issue-3520-ir-unit-identity.test.ts
 ---
 
@@ -157,19 +187,35 @@ adapter is the only string-keyed compatibility boundary. It must:
 - Cross-check the R0 outcome ledger: every observational label maps to exactly
   one `IrUnitId`; inventory count and terminal-outcome count remain equal.
 
-### Commit 2 — key IR references, analyses, and passes by identity
+### Commit 2 — key source planning and analyses by identity
 
-- Replace name-keyed local-call/type maps in `propagate.ts`,
-  `type-evidence.ts`, `select.ts`, `from-ast.ts`, and `integration.ts` with IDs.
+- Replace source-unit string keys in `propagate.ts`, `type-evidence.ts`,
+  `select.ts`, `ast-lowering-plans.ts`, imported/module-binding plans,
+  promise-delay ownership, IR-first call-graph closure, class-member keys, and
+  self-host selection with structural IDs.
+- Key recursion/SCC, escape/ownership, string-evidence, and linear-memory-plan
+  source ownership by identity. Property names, intrinsic names, and layout
+  field names remain labels and must not be mechanically converted.
+- Keep existing selection results, preparation order, and diagnostics stable;
+  this commit changes lookup identity only.
+
+### Commit 3 — key IR references, passes, and backends by identity
+
+- Replace name-keyed local-call/type maps in `from-ast.ts`, `integration.ts`,
+  lowering, verification, overlay finalization, and backend contracts with
+  IDs.
 - Put an `IrUnitId` on every `IrFunction`; make direct calls carry a typed
   callable binding ID. Keep `name` only as a display/debug field.
 - Key inlining, recursion/SCC analysis, monomorphization, and clone edit tables
   by identity. A clone receives a derived ID; its display name may retain the
   current format.
+- Make WasmGC, linear integration, and the Porffor adapter consume the same
+  binding identity. Backend-local scratch labels and concrete export strings
+  remain explicit labels below the ABI boundary.
 - Keep runtime/helper string references behind a typed intrinsic/import binding
   variant until R6; do not invent source IDs for runtime providers.
 
-### Commit 3 — ABI map and legacy-slot adapter
+### Commit 4 — ABI map and legacy-slot adapter
 
 - Plan/import/intern every ABI entry once, then feed current declaration and
   integration code through the compatibility adapter.
@@ -183,15 +229,19 @@ adapter is the only string-keyed compatibility boundary. It must:
 ## File ownership and locks
 
 The implementing agent owns the files listed in frontmatter for the duration
-of R1. In particular, lock `src/ir/nodes.ts`, `src/ir/from-ast.ts`,
-`src/ir/select.ts`, `src/ir/integration.ts`, the two named passes, and
-`src/codegen/index.ts` as one identity change. Do not split those files across
-parallel developers.
+of R1. The expanded lock is deliberate: a repository audit found source-unit
+string keys in AST lowering plans, imported/module binding plans,
+promise-delay ownership, IR-first call graphs, analysis passes, overlay
+finalization, and the Porffor adapter in addition to the initially named core
+files. Lock `src/ir/nodes.ts`, every typed-reference consumer, the listed
+passes/backends, and `src/codegen/index.ts` as one identity change. Do not split
+those files across parallel developers.
 
 New identity/ABI modules are preferred over growing `codegen/index.ts`.
-Changes in codegen context are adapter plumbing only. Coordinate before
-touching backend-linear/Porffor files; whole-program multi consumption belongs
-to R5 and shared backend conversion belongs to R8.
+Changes in codegen context are adapter plumbing only. R1 may thread identity
+through backend-linear/Porffor contracts, but it must not change backend
+ownership or lowering behavior; whole-program multi consumption belongs to R5
+and shared backend conversion belongs to R8.
 
 ## Anti-vacuity tests
 
