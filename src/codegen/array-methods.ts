@@ -1549,7 +1549,7 @@ export function compileArrayMethodCall(
       result = compileArrayFlat(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "flatMap":
-      result = compileArrayFlatMap(ctx, fctx, methodAccess, callExpr);
+      result = compileArrayFlatMap(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "set": {
       const setResult = compileTypedArraySet(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -7912,18 +7912,17 @@ function compileArrayLastIndexOf(
  * deeper recursion, and heterogeneous array/scalar unions stay deferred to the
  * larger #2717 follow-up.
  */
-function tryCompileArrayFlatNativeDepth1(
+/**
+ * (#2717) Precondition for the native depth-1 flatten: the outer vec's element
+ * must be a `ref`/`ref_null` to an INNER vec struct (an array-of-arrays), and
+ * that inner vec must resolve to a concrete backing array type. Returns the
+ * inner vec + array type indices, or null when the shape is not a homogeneous
+ * nested array (scalar / externref / mixed elements → the caller falls back).
+ */
+function canFlattenVecElem(
   ctx: CodegenContext,
-  fctx: FunctionContext,
-  propAccess: ts.PropertyAccessExpression,
-  callExpr: ts.CallExpression,
-  vecTypeIdx: number,
-  arrTypeIdx: number,
   elemType: ValType,
-): ValType | null {
-  // Default depth only — an explicit `depth` argument falls through to refusal.
-  if (callExpr.arguments.length > 0) return null;
-  // Outer element must be a ref to an inner vec struct.
+): { innerVecTypeIdx: number; innerArrTypeIdx: number } | null {
   if (elemType.kind !== "ref" && elemType.kind !== "ref_null") return null;
   const innerVecTypeIdx = (elemType as { typeIdx?: number }).typeIdx;
   if (innerVecTypeIdx === undefined) return null;
@@ -7931,8 +7930,28 @@ function tryCompileArrayFlatNativeDepth1(
   if (innerArrTypeIdx < 0) return null;
   const innerArrDef = ctx.mod.types[innerArrTypeIdx];
   if (!innerArrDef || innerArrDef.kind !== "array") return null;
+  return { innerVecTypeIdx, innerArrTypeIdx };
+}
 
-  const outerVec = allocLocal(fctx, `__arr_flat_ov_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+/**
+ * (#2717) Emit a native depth-1 flatten of an outer vec-of-vecs. The outer vec
+ * value must be BOTH on the Wasm stack AND stored in the `outerVec` local (the
+ * caller tees it and, for a user receiver, null-guards it first). Consumes the
+ * stack value; returns a fresh inner-element vec holding every non-null inner
+ * vec's elements concatenated in order.
+ *
+ * Shared by `Array.prototype.flat()` (outer vec = the receiver) and the
+ * `Array.prototype.flatMap()` native arm (outer vec = the native `map` result).
+ */
+function emitFlattenDepth1FromVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  outerVec: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  innerVecTypeIdx: number,
+  innerArrTypeIdx: number,
+): ValType {
   const outerData = allocLocal(fctx, `__arr_flat_od_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const outerLen = allocLocal(fctx, `__arr_flat_ol_${fctx.locals.length}`, { kind: "i32" });
   const total = allocLocal(fctx, `__arr_flat_tot_${fctx.locals.length}`, { kind: "i32" });
@@ -7949,10 +7968,7 @@ function tryCompileArrayFlatNativeDepth1(
   });
   const pos = allocLocal(fctx, `__arr_flat_pos_${fctx.locals.length}`, { kind: "i32" });
 
-  // receiver -> outerVec (null-guarded), then unpack len/data.
-  compileExpression(ctx, fctx, propAccess.expression);
-  fctx.body.push({ op: "local.tee", index: outerVec });
-  emitReceiverNullGuard(ctx, fctx, outerVec);
+  // outer vec is on the stack (also in `outerVec`): unpack len/data.
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: outerLen });
   fctx.body.push({ op: "local.get", index: outerVec });
@@ -8075,6 +8091,151 @@ function tryCompileArrayFlatNativeDepth1(
 }
 
 /**
+ * (#3363) Native depth-1 homogeneous nested-array flatten for `arr.flat()` on
+ * the host-free lanes. Default depth only (an explicit `depth` argument falls
+ * through to the loud refusal); the outer element must be a nested vec.
+ */
+function tryCompileArrayFlatNativeDepth1(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  // Default depth only — an explicit `depth` argument falls through to refusal.
+  if (callExpr.arguments.length > 0) return null;
+  const pre = canFlattenVecElem(ctx, elemType);
+  if (!pre) return null;
+
+  const outerVec = allocLocal(fctx, `__arr_flat_ov_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  // receiver -> outerVec (null-guarded), leaving the vec on the stack for the flatten.
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.tee", index: outerVec });
+  emitReceiverNullGuard(ctx, fctx, outerVec);
+  return emitFlattenDepth1FromVec(
+    ctx,
+    fctx,
+    outerVec,
+    vecTypeIdx,
+    arrTypeIdx,
+    pre.innerVecTypeIdx,
+    pre.innerArrTypeIdx,
+  );
+}
+
+/**
+ * (#2717) True iff `cbArg` is an INLINE arrow/function-expression whose body
+ * syntactically contains a bare empty array literal `[]`. The native flatMap arm
+ * refuses these a-priori — see the guard in {@link tryCompileFlatMapNative} for
+ * why (an empty `[]` under flatMap's union contextual type mistypes the closure).
+ * A named-function-reference callback is not inline → returns false (it compiles
+ * as its own correctly-typed function).
+ */
+function inlineCallbackHasEmptyArrayLiteral(cbArg: ts.Expression): boolean {
+  if (!ts.isArrowFunction(cbArg) && !ts.isFunctionExpression(cbArg)) return false;
+  let found = false;
+  const walk = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isArrayLiteralExpression(n) && n.elements.length === 0) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, walk);
+  };
+  walk(cbArg.body);
+  return found;
+}
+
+/**
+ * (#2717) Native `arr.flatMap(cb, thisArg?)` for the host-free lanes.
+ *
+ * `flatMap(cb)` is spec-equivalent to `map(cb).flat(1)`, so we compile the native
+ * `map` directly (its arg layout — arg0 = cb, arg1 = thisArg — matches flatMap's)
+ * and dispatch on the RESULT vec's element type — the ground truth for what the
+ * callback returned:
+ *   - element is a nested vec (callback returned arrays) → depth-1 flatten;
+ *   - element is a concrete scalar / non-array ref (callback returned a scalar or
+ *     a plain object) → `flatMap` ≡ `map` (a depth-1 flatten of non-arrays is the
+ *     identity), so the map result IS the answer;
+ *   - element is `externref`/`anyref` (dynamic — could be an array at runtime) →
+ *     drop + refuse loudly (a runtime-heterogeneous flatten is out of scope; never
+ *     a silent-wrong result), per the #2711 policy.
+ *
+ * Compiling `map` unconditionally (rather than into a throwaway buffer) mirrors
+ * the working `map(cb).flat()` codegen exactly; only the rare dynamic-return case
+ * leaves dead map code before the caller's `unreachable`, which is well-typed.
+ */
+function tryCompileFlatMapNative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
+
+  // (#2717) A-priori guard: an inline callback whose body contains a bare empty
+  // array literal `[]` is compiled — under flatMap's `U | readonly U[]`
+  // contextual type — to a closure whose empty `[]` resolves to a DIFFERENT vec
+  // type than a sibling non-empty array in the same conditional, yielding an
+  // invalid closure (a Wasm fallthru type error). The static return type does NOT
+  // discriminate this (both branches report `number[]`), and the invalid closure
+  // is a global module side effect the native `map` cannot roll back — so this
+  // MUST be caught before compiling map. Refuse loudly instead. Over-conservative
+  // (also refuses a benign always-`[]` callback), but never emits invalid Wasm;
+  // no real test262 flatMap callback uses a bare-`[]` shape. Named-function-ref
+  // callbacks are exempt — they compile as their own function, correctly typed,
+  // outside flatMap's union context. (The underlying conditional-empty-array
+  // vec-type bug is tracked separately, out of scope here.)
+  if (inlineCallbackHasEmptyArrayLiteral(callExpr.arguments[0]!)) return null;
+
+  const mapType = compileArrayMap(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  if (!mapType || (mapType.kind !== "ref" && mapType.kind !== "ref_null")) {
+    // map couldn't type its result; the caller's unreachable keeps the body valid.
+    return null;
+  }
+  const mapVecTypeIdx = (mapType as { typeIdx?: number }).typeIdx;
+  if (mapVecTypeIdx === undefined) return null;
+  const mapArrTypeIdx = getArrTypeIdxFromVec(ctx, mapVecTypeIdx);
+  const mapArrDef = mapArrTypeIdx >= 0 ? ctx.mod.types[mapArrTypeIdx] : undefined;
+  const mapElemType = mapArrDef && mapArrDef.kind === "array" ? mapArrDef.element : undefined;
+
+  // Callback returned arrays → flatten the map result depth-1.
+  const pre = mapElemType ? canFlattenVecElem(ctx, mapElemType) : null;
+  if (pre) {
+    const mapVec = allocLocal(fctx, `__arr_flatmap_mv_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: mapVecTypeIdx,
+    });
+    fctx.body.push({ op: "local.tee", index: mapVec });
+    return emitFlattenDepth1FromVec(
+      ctx,
+      fctx,
+      mapVec,
+      mapVecTypeIdx,
+      mapArrTypeIdx,
+      pre.innerVecTypeIdx,
+      pre.innerArrTypeIdx,
+    );
+  }
+
+  // Dynamic element (externref/anyref) — could be an array at runtime; a native
+  // depth-1 flatten would need per-element runtime IsArray. Out of scope → drop
+  // the map result and refuse loudly.
+  if (mapElemType && (mapElemType.kind === "externref" || mapElemType.kind === "anyref")) {
+    fctx.body.push({ op: "drop" });
+    return null;
+  }
+
+  // Concrete non-array element (scalar or plain-object ref): flatMap ≡ map.
+  return mapType;
+}
+
+/**
  * Compile arr.flat(depth?) — delegates to __array_flat host import (#1136).
  * Converts WasmGC vec receiver to externref, passes depth arg, returns externref.
  */
@@ -8157,23 +8318,30 @@ function compileArrayFlatMap(
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
   callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
 ): ValType | null {
   if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
 
-  // (#2717) `flatMap` has no Wasm-native arm — it delegates to the host
-  // `__array_flatMap` import, which is unsatisfiable under `--target
-  // standalone`/`wasi` (no JS host) and traps at instantiation. Per the #2711
-  // fail-loud policy, refuse loudly instead of emitting the unsatisfiable import.
-  // A native arm (callback invocation + depth-1 flatten of scalar-or-array
-  // returns) is a separate follow-up. Host/gc mode is unchanged.
+  // (#2717) On the host-free lanes `flatMap` has no host `__array_flatMap` to
+  // satisfy. `flatMap(cb)` ≡ `map(cb).flat(1)`, so try the native arm first
+  // (reuses the native `map` + the #3363 depth-1 flatten); it applies when the
+  // callback provably returns arrays. Otherwise fall through to the loud refusal
+  // below (scalar / union / externref returns), per the #2711 fail-loud policy.
+  // Host/gc mode is unchanged — it keeps the fast `__array_flatMap` import path.
   if (ctx.standalone || ctx.wasi) {
+    const native = tryCompileFlatMapNative(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+    if (native) return native;
     reportError(
       ctx,
       callExpr,
-      `Codegen error: Array.prototype.flatMap() is not yet supported in --target standalone/wasi ` +
-        `(#2717) — there is no Wasm-native arm and emitting the host import __array_flatMap ` +
-        `would produce a module that traps at instantiation. Recompile without --target ` +
-        `standalone, or avoid flatMap() in standalone/WASI code.`,
+      `Codegen error: Array.prototype.flatMap() with a non-array-returning callback is not yet ` +
+        `supported in --target standalone/wasi (#2717) — the native arm handles callbacks that ` +
+        `return arrays (flatMap ≡ map+flat(1)); scalar/union/dynamic returns would need a ` +
+        `runtime-heterogeneous flatten. Emitting the host import __array_flatMap would produce a ` +
+        `module that traps at instantiation. Recompile without --target standalone, or have the ` +
+        `flatMap callback return an array.`,
     );
     // Non-null type + `unreachable` so the #1919 speculative wrapper commits and
     // the diagnostic is not rolled back into a silent default (see compileArrayFlat).
