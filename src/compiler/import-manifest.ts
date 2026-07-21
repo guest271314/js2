@@ -135,6 +135,14 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // string-if-either-is-string rule come free from JS `+`. (#2058)
   if (name === "__host_add") return { type: "host_add" };
 
+  // Host BigInt-mixed binary operator for a BigInt combined with a
+  // dynamically-object/any operand whose ToNumeric may reduce to a BigInt
+  // (`Object(2n) * 2n`, `{valueOf(){return 2n}} - 2n`). The i32 opcode selects
+  // the operator; struct operands are ToPrimitive-reduced via the in-module
+  // dispatcher, then JS applies ToNumeric + the mix-TypeError check + BigInt
+  // arithmetic. (#3481)
+  if (name === "__host_bigint_binop") return { type: "host_bigint_binop" };
+
   // Host relational compare for two externref operands (§7.2.13 IsLessThan).
   // Returns a 4-way result -1/0/1/2 (2 = NaN/undefined-incomparable) so the
   // four relational operators (<,<=,>,>=) map without separate imports, and
