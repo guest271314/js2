@@ -79,6 +79,11 @@ import {
   type IrTypeRef,
 } from "../nodes.js";
 import { buildTypeMap, type LatticeType } from "../propagate.js";
+import {
+  makeIrAmbientBindingPredicate,
+  makeIrDeclaredPrimitiveExpressionClassifier,
+  makeIrPrimitiveExpressionClassifier,
+} from "../module-bindings.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, planIrCompilation } from "../select.js";
 import { buildRecursiveTypeEvidence } from "../type-evidence.js";
 import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
@@ -189,7 +194,16 @@ export function compileLinearIrFunctions(
   const evidenceChecker = overlayCertifiedCheckerTypes(ctx.checker, recursiveTypeEvidence.checkerTypeOverrides);
   const selection = planIrCompilation(
     sourceFile,
-    { experimentalIR: true, trackFallbacks: true, recursiveTypeEvidence },
+    {
+      experimentalIR: true,
+      trackFallbacks: true,
+      recursiveTypeEvidence,
+      classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
+      classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
+      isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
+      supportsSymbolicMathHelpers: false,
+      supportsLiteralStringReplace: false,
+    },
     recursiveTypeEvidence.typeMap,
   );
   for (const fallback of selection.fallbacks ?? []) {

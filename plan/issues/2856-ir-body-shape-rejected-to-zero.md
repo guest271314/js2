@@ -24,12 +24,15 @@ loc-budget-allow:
   - scripts/check-ir-fallbacks.ts
   - scripts/ir-fallback-baseline.json
   - src/codegen/index.ts
+  - src/ir/backend/linear-integration.ts
+  - src/ir/capability.ts
   - src/ir/from-ast.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
   - src/ir/module-bindings.ts
   - src/ir/select.ts
   - tests/issue-2856-module-bindings.test.ts
+  - tests/issue-2856-builtins-component.test.ts
 ---
 
 # #2856 — IR: `body-shape-rejected` → 0
@@ -1284,6 +1287,42 @@ pre-claim consumer guards); 52 adjacent #3142 module-init, C3 Map,
 extern-in-IR, #3343, selector-attribution, and non-terminating-guard tests green;
 full equivalence gate at 1,607 passing / 36 known failures with no new
 regressions; typecheck clean; fallback baseline ratcheted to 13.
+
+### Builtins component result (2026-07-21) — Math, `~`, `toFixed`, and `replace`
+
+The next independently measurable component clears
+`website/playground/examples/js/builtins.ts::main` without widening general
+dynamic coercion:
+
+- One exact-arity Math table is shared by the selector, call-graph scan, and
+  builder. `abs`/`sqrt`/`floor`/`ceil`/`trunc` remain direct Wasm unary ops;
+  `sin`/`cos`/`exp`/`log`/`log2`, `pow`, and `atan2` lower to the existing
+  symbolic self-hosted `Math_<method>` functions. Checker identity preserves
+  ambient `Math`; module/local/parameter shadows and wrong arities reject
+  before claim. Every argument must be checker-proven numeric.
+- Unary `~` is now a partial claim lowering through the established
+  `js.bitxor(value, -1)` ToInt32 composite. Only checker-proven numbers enter
+  it, keeping string, boolean, bigint, symbol, and dynamic coercions on the
+  legacy path.
+- Number `.toFixed(digits)` lowers through `number_toFixed` only in the
+  host-string lane and only for one integer literal in `[0, 100]`. Dynamic,
+  out-of-range, native-string, fast, standalone, and WASI forms remain
+  pre-claim rejections.
+- String `.replace(search, replacement)` reuses the existing string-method
+  backend plan for exactly two literal-string arguments. RegExp, callback,
+  custom/coercive, wrong-arity, and unsupported linear forms remain
+  legacy-owned; class/extern methods with the same name keep their ordinary
+  dispatch.
+
+Measured gate result: function-level `body-shape-rejected` **13 → 12**;
+`builtins.ts::main` appears in `irCompiledFuncs`; module-level remains **2**;
+all post-claim build/verify/lower/backend buckets remain zero. Validation:
+12 focused component tests covering the real playground source, direct and
+self-hosted Math parity, ToInt32 edge cases, literal formatting/replacement,
+shadow/arity/type/backend negatives, receiver-name collisions, linear
+pre-claim routing, and representation-mode gates; typecheck and the fallback
+gate clean; full equivalence gate at 1,607 passing / 36 known failures with no
+new regressions.
 
 ### Capability A (M) — imported-callee calls (first half of the 8 mains)
 

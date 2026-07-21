@@ -63,7 +63,7 @@ import {
   stringIndexProvenBelow,
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
-import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, mathUnaryToIrOp } from "./select.js";
+import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
   asVal,
@@ -4246,7 +4246,9 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     return null;
   }
 
-  // (#1371) Math.<whitelisted>(arg) — pure-Wasm f64 unary op. Recognise
+  // (#1371/#2856) Exact-arity Math builtin. Direct Wasm unary ops remain
+  // direct; transcendental methods call the self-hosted Math_<method> helper
+  // already registered by the legacy declaration scan.
   // the shape BEFORE lowering the receiver, because `Math` is a host
   // global with no IR type binding (lowerExpr on `Math` would throw
   // "unknown identifier"). The selector's `isPhase1Expr` already
@@ -4258,18 +4260,29 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   if (
     ts.isIdentifier(expr.expression.expression) &&
     expr.expression.expression.text === "Math" &&
-    !receiverIsDirectModuleBinding
+    !receiverIsDirectModuleBinding &&
+    cx.scope.get("Math") === undefined &&
+    // The self-host stdlib builder has no checker-backed ambient callback;
+    // user-source builds do, and an explicit `false` preserves shadow safety.
+    cx.resolver?.isAmbientBinding?.(expr.expression.expression) !== false
   ) {
-    const irOp = mathUnaryToIrOp(methodName);
-    if (irOp !== null && expr.arguments.length === 1) {
-      const arg = lowerExpr(expr.arguments[0]!, cx, irVal({ kind: "f64" }));
-      const argType = cx.builder.typeOf(arg);
-      if (argType.kind !== "val" || argType.val.kind !== "f64") {
-        throw new Error(
-          `ir/from-ast: Math.${methodName} arg must be f64, got ${describeIrType(argType)} (${cx.funcName})`,
-        );
-      }
-      return cx.builder.emitUnary(irOp, arg, irVal({ kind: "f64" }));
+    const plan = IR_MATH_METHOD_TABLE[methodName];
+    if (plan !== undefined && expr.arguments.length === plan.arity) {
+      const args = expr.arguments.map((argExpr) => {
+        const arg = lowerExpr(argExpr, cx, irVal({ kind: "f64" }));
+        const argType = cx.builder.typeOf(arg);
+        if (argType.kind !== "val" || argType.val.kind !== "f64") {
+          throw new Error(
+            `ir/from-ast: Math.${methodName} arg must be f64, got ${describeIrType(argType)} (${cx.funcName})`,
+          );
+        }
+        return arg;
+      });
+      if ("op" in plan) return cx.builder.emitUnary(plan.op, args[0]!, irVal({ kind: "f64" }));
+      const result = cx.builder.emitCall({ kind: "func", name: plan.helper }, args, irVal({ kind: "f64" }));
+      if (result === null)
+        throw new Error(`ir/from-ast: Math.${methodName} helper produced no result (${cx.funcName})`);
+      return result;
     }
     throw new Error(`ir/from-ast: Math.${methodName} not in IR whitelist (${cx.funcName})`);
   }
@@ -4350,6 +4363,28 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     return r;
   }
 
+  // #2856 builtins slice — a bounded literal fraction-digits argument needs
+  // no runtime RangeError guard. Host-string mode owns number_toFixed's
+  // `(f64, f64) -> externref` ABI; native-string modes stay pre-claim
+  // deferred until the front-end has a representation-polymorphic formatter.
+  if (
+    methodName === "toFixed" &&
+    expr.arguments.length === 1 &&
+    ts.isNumericLiteral(expr.arguments[0]!) &&
+    recvType.kind === "val" &&
+    recvType.val.kind === "f64" &&
+    cx.resolver?.hasHostNumberToString?.() === true
+  ) {
+    const digits = Number(expr.arguments[0]!.text.replace(/_/g, ""));
+    if (!Number.isInteger(digits) || digits < 0 || digits > 100) {
+      throw new Error(`ir/from-ast: number.toFixed digits not a bounded integer literal (${cx.funcName})`);
+    }
+    const digitValue = cx.builder.emitConst({ kind: "f64", value: digits }, irVal({ kind: "f64" }));
+    const r = cx.builder.emitCall({ kind: "func", name: "number_toFixed" }, [recv, digitValue], { kind: "string" });
+    if (r === null) throw new Error(`ir/from-ast: number_toFixed produced no result in ${cx.funcName}`);
+    return r;
+  }
+
   // Slice 13c (#1232) — String prototype method dispatch. When the receiver
   // is `IrType.string`, look up the method in the synthetic String pseudo-
   // extern registry (#1238) and dispatch to either the native helper
@@ -4357,6 +4392,13 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   // the active string backend. Returns null when the method isn't supported
   // by Phase 1 (caller falls through to the existing `string` arm below).
   if (recvType.kind === "string") {
+    if (
+      methodName === "replace" &&
+      (expr.arguments.length !== 2 ||
+        !expr.arguments.every((arg) => ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)))
+    ) {
+      throw new Error(`ir/from-ast: String.replace requires two literal-string arguments (${cx.funcName})`);
+    }
     const r = lowerStringMethodCall(methodName, recv, expr.expression.expression, expr.arguments, cx);
     if (r !== null) return r;
     // Method not in slice 13c table — fall through to the recvType.kind !== "class"
@@ -4685,6 +4727,11 @@ export const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
     hostArgs: [{ kind: "externref" }, { kind: "f64" }],
     result: irVal({ kind: "i32" }),
     requiredArgs: 1,
+  },
+  replace: {
+    hostArgs: [{ kind: "externref" }, { kind: "externref" }],
+    result: { kind: "string" },
+    requiredArgs: 2,
   },
 };
 
@@ -6455,6 +6502,14 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         throw new Error(`ir/from-ast: unary '!' expects bool in ${cx.funcName}`);
       }
       return cx.builder.emitUnary("i32.eqz", rand, irVal({ kind: "i32" }));
+    }
+    case ts.SyntaxKind.TildeToken: {
+      const randType = typeOfValue(rand, cx);
+      if (asVal(randType)?.kind !== "f64") {
+        throw new Error(`ir/from-ast: unary '~' expects a proven number in ${cx.funcName}`);
+      }
+      const minusOne = cx.builder.emitConst({ kind: "f64", value: -1 }, irVal({ kind: "f64" }));
+      return cx.builder.emitBinary("js.bitxor", rand, minusOne, irVal({ kind: "f64" }));
     }
     default:
       throw new Error(`ir/from-ast: unsupported prefix operator ${ts.SyntaxKind[expr.operator]} in ${cx.funcName}`);
