@@ -5,7 +5,7 @@ import ts from "typescript";
 
 import { analyzeSource } from "../src/checker/index.js";
 import { compile, type IrObservedOutcome } from "../src/index.js";
-import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
+import { lowerFunctionAstToIr, type IrFromAstResolver } from "../src/ir/from-ast.js";
 import type { IrClassShape, IrType } from "../src/ir/nodes.js";
 import { classifyIrFailure, evaluateIrOutcomePolicy, type IrUnsupportedCode } from "../src/ir/outcomes.js";
 import { instantiateWithRuntime } from "./equivalence/helpers.js";
@@ -51,6 +51,7 @@ function lowerDirect(source: string): void {
 function expectLowerInvariant(
   source: string,
   calleeTypes: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>,
+  resolver?: IrFromAstResolver,
 ): void {
   const ast = analyzeSource(source, "producer-seam-invariant.ts");
   const declaration = ast.sourceFile.statements.find(
@@ -61,7 +62,7 @@ function expectLowerInvariant(
 
   let thrown: unknown;
   try {
-    lowerFunctionAstToIr(declaration!, { exported: true, checker: ast.checker, calleeTypes });
+    lowerFunctionAstToIr(declaration!, { exported: true, checker: ast.checker, calleeTypes, resolver });
   } catch (error) {
     thrown = error;
   }
@@ -99,11 +100,24 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
       source: `export function test(): number { return 0 == "" ? 1 : 0; }`,
     },
     {
+      name: "mixed strict string equality",
+      code: "operand-coercion-unsupported" as const,
+      source: `export function test(): number { return 0 === "" ? 1 : 0; }`,
+    },
+    {
       name: "object/number relational coercion",
       code: "operand-coercion-unsupported" as const,
       source: `
         class Box { valueOf(): number { return 1; } }
         export function test(): number { return new Box() > 0 ? 1 : 0; }
+      `,
+    },
+    {
+      name: "object identity representation",
+      code: "operand-coercion-unsupported" as const,
+      source: `
+        class Box {}
+        export function test(): number { return new Box() === new Box() ? 1 : 0; }
       `,
     },
     {
@@ -220,6 +234,21 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
         export function test(): number { return ${operator}value() ? 1 : 0; }
       `,
       new Map([["value", { params: [], returnType: carrier }]]),
+    );
+  });
+
+  it("keeps a checker-string RHS carrier contradiction invariant at string +=", () => {
+    expectLowerInvariant(
+      `
+        function text(): string { return "value"; }
+        export function test(): string {
+          let output = "";
+          for (let i = 0; i < 1; i++) output += text();
+          return output;
+        }
+      `,
+      new Map([["text", { params: [], returnType: F64 }]]),
+      { resolveString: () => ({ kind: "externref" }) },
     );
   });
 

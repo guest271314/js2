@@ -6604,6 +6604,11 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
         : cx.builder.emitSlotReadAs(binding.slotIndex, logicalType);
     const rhsValue = lowerExpr(rhs, cx, logicalType);
     const rhsType = cx.builder.typeOf(rhsValue);
+    if (checkerOperandFamily(rhs, cx) === "string" && rhsType.kind !== "string") {
+      throw new Error(
+        `ir/from-ast: checker-string RHS for "${id.text} +=" has contradictory carrier ${describeIrType(rhsType)} (${cx.funcName})`,
+      );
+    }
     const proof = proveTypedStringAppend(
       typedValueEvidence(id, binding.type, binding.stringEncoding, cx, logicalType),
       typedValueEvidence(rhs, rhsType, inferStringEncoding(rhs, cx), cx),
@@ -7003,12 +7008,7 @@ function isSupportedPrimitiveFamily(
  * Missing/unknown checker evidence cannot justify hiding a malformed carrier
  * as Unsupported.
  */
-function checkerProvesBinaryCoercionGap(
-  op: ts.SyntaxKind,
-  left: ts.Expression,
-  right: ts.Expression,
-  cx: LowerCtx,
-): boolean {
+function checkerProvesBinarySourceCapabilityGap(left: ts.Expression, right: ts.Expression, cx: LowerCtx): boolean {
   const leftFamily = checkerOperandFamily(left, cx);
   const rightFamily = checkerOperandFamily(right, cx);
   if (
@@ -7020,17 +7020,12 @@ function checkerProvesBinaryCoercionGap(
     return false;
   }
   if (isSupportedPrimitiveFamily(leftFamily) && leftFamily === rightFamily) return false;
-  // Strict equality never performs source coercion. A valid mixed strict
-  // comparison needs a selector/lowering capability decision of its own; it
-  // cannot justify relabelling a carrier contradiction as coercion here.
-  if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
-    return false;
-  }
-  // A shared non-primitive/unsupported family is too coarse to prove that the
-  // operator will coerce (object-object loose equality, for example, is an
-  // identity comparison). Be conservative: only distinct proven families
-  // establish the residual coercion capability gap.
-  return leftFamily !== rightFamily;
+  // Every other checker-proven family pair is valid source whose representation
+  // is not promised by the primitive fast path. This includes strict and
+  // object-object equality even though those operators do not coerce: they are
+  // capability gaps, not evidence that a carrier producer contradicted an
+  // already-supported homogeneous primitive promise.
+  return true;
 }
 
 /**
@@ -7352,7 +7347,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   if (lt.kind === "string" || rt.kind === "string") {
     if (lt.kind !== "string" || rt.kind !== "string") {
       const detail = `ir/from-ast: mixed string/non-string operand for '${ts.tokenToString(op)}' is not in slice 1 (${cx.funcName})`;
-      if (checkerProvesBinaryCoercionGap(op, expr.left, expr.right, cx)) {
+      if (checkerProvesBinarySourceCapabilityGap(expr.left, expr.right, cx)) {
         throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
       }
       throw new Error(detail);
@@ -7402,7 +7397,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     // producer's promise and must remain an invariant backstop. The Set
     // iterator numeric-value path exercises that distinction.
     const detail = `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`;
-    if (checkerProvesBinaryCoercionGap(op, expr.left, expr.right, cx)) {
+    if (checkerProvesBinarySourceCapabilityGap(expr.left, expr.right, cx)) {
       throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
     }
     throw new Error(detail);
