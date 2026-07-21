@@ -118,7 +118,7 @@ describe("#3519 typed IR terminal outcomes", () => {
         displayName: "first",
         kind: "unsupported",
         stage: "select",
-        code: "body-shape-rejected",
+        code: "typed-array-constructor-unsupported",
       }),
     ]);
   });
@@ -137,7 +137,7 @@ describe("#3519 typed IR terminal outcomes", () => {
         displayName: "find",
         kind: "unsupported",
         stage: "select",
-        code: "body-shape-rejected",
+        code: "array-method-unsupported",
       }),
     ]);
   });
