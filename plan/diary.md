@@ -315,13 +315,14 @@ boundary instead of being excused. Sprint bookkeeping drift was also repaired:
 16 completed issues were normalized into sprint 73, and all unfinished work was
 carried forward without retagging it to a numbered sprint.
 
-### 2026-07-21 — v0.64.0 proxy metadata follow-up
+### 2026-07-21 — v0.64.1 proxy metadata correction
 
 Post-publish verification found that `js2wasm@0.64.0` still depended on
 `@loopdive/js2@0.60.1`: the release script bumped the proxy package version but
-not its dependency. #3516 carries the repair into the current sprint: update the
-dependency in the same release transaction, reject mismatched tag publishes,
-and supersede the immutable npm metadata with a patch release.
+not its dependency. #3516 repaired the release transaction, added a tag-publish
+lockstep check, and superseded the immutable npm metadata with v0.64.1. The
+published `js2wasm@0.64.1` proxy now depends exactly on
+`@loopdive/js2@0.64.1`, and npm, JSR, and the GitHub release were verified.
 
 ## Sprint 74 (2026-07-21) — IR R0 truth boundary
 
@@ -338,6 +339,9 @@ bodies. The broader #3518 program remains open: #3520 is the next ready R1
 slice, and R2–R8 stay blocked behind it and their dependency chain.
 
 The previous v0.64.1 patch is published and verified, including the matching
-`js2wasm` proxy dependency on `@loopdive/js2@0.64.1`. Sprint 74 closes at a
-clean R0 boundary; v0.65.0 is cut from the resulting `main` before execution
-pauses.
+`js2wasm` proxy dependency on `@loopdive/js2@0.64.1`. PR #3483's advisory
+merge-group differential then caught one lost boolean brand in
+`closures/10-mutual.js`; PR #3486 retained the brand through IR and boxed it
+with `__box_boolean`, restoring the 99 / 104 differential floor without a
+baseline update. Sprint 74 closes at that corrected R0 boundary; v0.65.0 is cut
+from the resulting `main` before execution pauses.
