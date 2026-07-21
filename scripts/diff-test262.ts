@@ -542,6 +542,21 @@ export interface TrapCategoryGrowth {
    * timed out. They are unknown baseline outcomes, not observed trap growth.
    */
   unknownBaselineTimeouts: Record<TrapCategory, string[]>;
+  /**
+   * Candidate traps with no corresponding baseline row. An absent row carries
+   * no runtime evidence, so it cannot establish that the candidate newly traps.
+   */
+  unknownBaselineMissingRows: Record<TrapCategory, string[]>;
+}
+
+export interface TrapCategoryGrowthOptions {
+  /**
+   * Treat candidate-only rows as unknown instead of newly trapping. Enable this
+   * for baseline artifacts that are expected to cover the same Test262 corpus:
+   * there an absent row is an incomplete observation, not evidence of a new
+   * test. The pure helper defaults to strict candidate-only/new-test semantics.
+   */
+  missingBaselineRowsAreUnknown?: boolean;
 }
 
 /**
@@ -565,11 +580,11 @@ export interface TrapCategoryGrowth {
  * filter (#1222). This prevents a flaky pass→trap flip on an identical binary
  * from tripping the ratchet.
  *
- * A baseline `compile_timeout` is also not an observed runtime outcome. If the
- * candidate compiles that file and exposes a trap, the ratchet must not claim a
- * new trap: the predecessor run did not establish that the file was trap-free.
- * Such rows stay visible in the compile-time recovery diagnostics, while the
- * hard ratchet remains unchanged for every baseline row that reached runtime.
+ * A baseline `compile_timeout` or an absent baseline row is also not an observed
+ * runtime outcome. If the candidate compiles that file and exposes a trap, the
+ * ratchet must not claim a new trap: the predecessor run did not establish that
+ * the file was trap-free. Such rows stay visible in diagnostics, while the hard
+ * ratchet remains unchanged for every baseline row that reached runtime.
  */
 export function evaluateTrapCategoryGrowth(
   baseline: Map<string, TrapRatchetRow>,
@@ -582,6 +597,7 @@ export function evaluateTrapCategoryGrowth(
    * wedging the merge queue. Growth fails only when it EXCEEDS the tolerance.
    */
   tolerancePerCategory = 0,
+  options: TrapCategoryGrowthOptions = {},
 ): TrapCategoryGrowth {
   const zero = () => Object.fromEntries(TRAP_ERROR_CATEGORIES.map((c) => [c, 0])) as Record<TrapCategory, number>;
   const baseCounts = zero();
@@ -594,6 +610,9 @@ export function evaluateTrapCategoryGrowth(
     TrapCategory,
     string[]
   >;
+  const unknownBaselineMissingRows = Object.fromEntries(
+    TRAP_ERROR_CATEGORIES.map((c) => [c, [] as string[]]),
+  ) as Record<TrapCategory, string[]>;
 
   const isTrap = (cat: string | undefined): cat is TrapCategory =>
     !!cat && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(cat);
@@ -605,6 +624,12 @@ export function evaluateTrapCategoryGrowth(
   for (const [file, row] of newer) {
     if (row.status === "compile_timeout" || !isTrap(row.error_category)) continue;
     const base = baseline.get(file);
+    // A missing shard/artifact row says nothing about the baseline runtime
+    // outcome. Treat it as unknown rather than manufacturing trap growth.
+    if (!base && options.missingBaselineRowsAreUnknown) {
+      unknownBaselineMissingRows[row.error_category].push(file);
+      continue;
+    }
     // A compile timeout never observed the baseline's runtime behavior. A
     // subsequent trap is therefore unknown, not evidence that this change
     // introduced one. Keep it out of category growth and report it separately.
@@ -635,7 +660,14 @@ export function evaluateTrapCategoryGrowth(
       );
     }
   }
-  return { failures, baseCounts, newCounts, newlyTrapping, unknownBaselineTimeouts };
+  return {
+    failures,
+    baseCounts,
+    newCounts,
+    newlyTrapping,
+    unknownBaselineTimeouts,
+    unknownBaselineMissingRows,
+  };
 }
 
 interface TestResult {
@@ -1828,21 +1860,27 @@ async function run(
     for (const note of loaded.notes) console.log(note);
   }
   const effectiveTrapTolerance = Math.max(trapTolerance, trapAllowance?.count ?? 0);
-  const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, effectiveTrapTolerance);
+  const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, effectiveTrapTolerance, {
+    // CI compares artifacts for the same pinned Test262 corpus. A missing
+    // baseline row is therefore an incomplete predecessor observation, not a
+    // newly-added test whose first observed result should ratchet.
+    missingBaselineRowsAreUnknown: true,
+  });
   console.log(
     `=== Trap categories (baseline → candidate): ` +
       TRAP_ERROR_CATEGORIES.map((c) => `${c} ${trapGrowth.baseCounts[c]}→${trapGrowth.newCounts[c]}`).join(", ") +
       ` (#3189 ratchet) ===`,
   );
-  const trapTimeoutUnknowns = TRAP_ERROR_CATEGORIES.flatMap((category) =>
-    trapGrowth.unknownBaselineTimeouts[category].map((file) => ({ category, file })),
-  );
-  if (trapTimeoutUnknowns.length > 0) {
+  const trapBaselineUnknowns = TRAP_ERROR_CATEGORIES.flatMap((category) => [
+    ...trapGrowth.unknownBaselineTimeouts[category].map((file) => ({ category, file, baseline: "compile_timeout" })),
+    ...trapGrowth.unknownBaselineMissingRows[category].map((file) => ({ category, file, baseline: "absent" })),
+  ]);
+  if (trapBaselineUnknowns.length > 0) {
     console.log(
-      `=== Trap baseline unknowns (compile_timeout → trap; excluded from #3189, retained in CT recovery diagnostics): ${trapTimeoutUnknowns.length} ===`,
+      `=== Trap baseline unknowns (absent/compile_timeout → trap; excluded from #3189): ${trapBaselineUnknowns.length} ===`,
     );
-    for (const { category, file } of trapTimeoutUnknowns) {
-      console.log(`  ${category}: ${file}`);
+    for (const { category, file, baseline: baselineStatus } of trapBaselineUnknowns) {
+      console.log(`  ${category}: ${file} (baseline ${baselineStatus})`);
     }
   }
   for (const reason of trapGrowth.failures) {
