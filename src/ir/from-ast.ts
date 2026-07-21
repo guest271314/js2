@@ -1178,7 +1178,7 @@ function lowerDiscardedExpression(expr: ts.Expression, cx: LowerCtx): void {
       void lowerMethodCall(expr, cx, /* statementPosition */ true);
       return;
     }
-    if (ts.isIdentifier(expr.expression)) {
+    if (ts.isIdentifier(expr.expression) || expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
       void lowerCall(expr, cx, /* statementPosition */ true);
       return;
     }
