@@ -2,6 +2,7 @@
 
 import { ts } from "../ts-api.js";
 import {
+  compareIrIdentity,
   getIrInventoryScannerMetadata,
   type IrClassId,
   type IrClassRecord,
@@ -11,6 +12,38 @@ import {
   type IrUnitInventory,
   type IrUnitRecord,
 } from "./identity.js";
+
+/** Exact structural identity retained across a temporary name-keyed API. */
+export interface IrLegacyUnitProjectionEntry {
+  readonly unitId: IrUnitId;
+  readonly legacyName: string;
+}
+
+export type IrLegacyUnitProjectionInvariantCode =
+  | "duplicate-unit-id"
+  | "duplicate-legacy-name"
+  | "invalid-legacy-name"
+  | "missing-unit"
+  | "missing-legacy-name"
+  | "mismatched-pair"
+  | "duplicate-result-correlation"
+  | "foreign-result-correlation"
+  | "unconsumed-result-correlation";
+
+export class IrLegacyUnitProjectionInvariantError extends Error {
+  constructor(
+    readonly code: IrLegacyUnitProjectionInvariantCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "IrLegacyUnitProjectionInvariantError";
+  }
+}
+
+/** A name-keyed legacy result carrying its structural owner sidecar. */
+export interface IrLegacyNamedUnitResult<TResult> extends IrLegacyUnitProjectionEntry {
+  readonly result: TResult;
+}
 
 /**
  * Exact AST identity seam consumed by source planning.
@@ -108,6 +141,189 @@ class IrReadonlyMap<K, V> implements ReadonlyMap<K, V> {
 
 function readonlyIdentityMap<K, V>(values: ReadonlyMap<K, V>): ReadonlyMap<K, V> {
   return new IrReadonlyMap(values);
+}
+
+function legacyProjectionInvariant(code: IrLegacyUnitProjectionInvariantCode, message: string): never {
+  throw new IrLegacyUnitProjectionInvariantError(code, message);
+}
+
+function compareProjectionEntry(a: IrLegacyUnitProjectionEntry, b: IrLegacyUnitProjectionEntry): number {
+  const identityOrder = compareIrIdentity(a.unitId, b.unitId);
+  if (identityOrder !== 0) return identityOrder;
+  return a.legacyName < b.legacyName ? -1 : a.legacyName > b.legacyName ? 1 : 0;
+}
+
+/**
+ * Immutable one-to-one compatibility view for one exact active population.
+ *
+ * Every translating API returns the complete pair. Callers cannot obtain an
+ * optional name and substitute a display/runtime label when correlation is
+ * absent. Entries are canonicalized by structural identity independently of
+ * producer insertion order; the raw directional maps remain private.
+ */
+export class IrLegacyUnitProjection {
+  readonly entries: readonly IrLegacyUnitProjectionEntry[];
+  readonly #entryByUnitId: ReadonlyMap<IrUnitId, IrLegacyUnitProjectionEntry>;
+  readonly #entryByLegacyName: ReadonlyMap<string, IrLegacyUnitProjectionEntry>;
+
+  /** @internal Construct through {@link buildIrLegacyUnitProjection}. */
+  constructor(entries: readonly IrLegacyUnitProjectionEntry[]) {
+    const canonical = entries.map((entry) => {
+      if (typeof entry.legacyName !== "string" || entry.legacyName.length === 0) {
+        return legacyProjectionInvariant(
+          "invalid-legacy-name",
+          "legacy unit projection names must be non-empty strings",
+        );
+      }
+      return Object.freeze({ unitId: entry.unitId, legacyName: entry.legacyName });
+    });
+    canonical.sort(compareProjectionEntry);
+
+    const entryByUnitId = new Map<IrUnitId, IrLegacyUnitProjectionEntry>();
+    for (const entry of canonical) {
+      if (entryByUnitId.has(entry.unitId)) {
+        legacyProjectionInvariant(
+          "duplicate-unit-id",
+          `unit ${entry.unitId} occurs more than once in the legacy unit projection`,
+        );
+      }
+      entryByUnitId.set(entry.unitId, entry);
+    }
+
+    const entryByLegacyName = new Map<string, IrLegacyUnitProjectionEntry>();
+    for (const entry of canonical) {
+      const previous = entryByLegacyName.get(entry.legacyName);
+      if (previous) {
+        legacyProjectionInvariant(
+          "duplicate-legacy-name",
+          `legacy name ${JSON.stringify(entry.legacyName)} maps to both ${previous.unitId} and ${entry.unitId}`,
+        );
+      }
+      entryByLegacyName.set(entry.legacyName, entry);
+    }
+
+    this.entries = Object.freeze(canonical);
+    this.#entryByUnitId = readonlyIdentityMap(entryByUnitId);
+    this.#entryByLegacyName = readonlyIdentityMap(entryByLegacyName);
+    Object.freeze(this);
+  }
+
+  /** Optional membership probe that retains the complete structural/name pair. */
+  getByUnitId(unitId: IrUnitId): IrLegacyUnitProjectionEntry | undefined {
+    return this.#entryByUnitId.get(unitId);
+  }
+
+  /** Optional membership probe that retains the complete structural/name pair. */
+  getByLegacyName(legacyName: string): IrLegacyUnitProjectionEntry | undefined {
+    return this.#entryByLegacyName.get(legacyName);
+  }
+
+  requireUnit(unitId: IrUnitId): IrLegacyUnitProjectionEntry {
+    const entry = this.getByUnitId(unitId);
+    if (!entry) {
+      return legacyProjectionInvariant("missing-unit", `unit ${unitId} has no legacy unit projection`);
+    }
+    return entry;
+  }
+
+  requireLegacyName(legacyName: string): IrLegacyUnitProjectionEntry {
+    const entry = this.getByLegacyName(legacyName);
+    if (!entry) {
+      return legacyProjectionInvariant(
+        "missing-legacy-name",
+        `legacy name ${JSON.stringify(legacyName)} has no structural unit projection`,
+      );
+    }
+    return entry;
+  }
+
+  requirePair(pair: IrLegacyUnitProjectionEntry): IrLegacyUnitProjectionEntry {
+    const byUnit = this.getByUnitId(pair.unitId);
+    if (!byUnit) {
+      return legacyProjectionInvariant("missing-unit", `unit ${pair.unitId} has no legacy unit projection`);
+    }
+    const byName = this.getByLegacyName(pair.legacyName);
+    if (!byName) {
+      return legacyProjectionInvariant(
+        "missing-legacy-name",
+        `legacy name ${JSON.stringify(pair.legacyName)} has no structural unit projection`,
+      );
+    }
+    if (byUnit !== byName) {
+      return legacyProjectionInvariant(
+        "mismatched-pair",
+        `unit ${pair.unitId} and legacy name ${JSON.stringify(pair.legacyName)} are not one projection pair`,
+      );
+    }
+    return byUnit;
+  }
+
+  startResultCorrelation<TResult>(): IrLegacyUnitResultCorrelation<TResult> {
+    return new IrLegacyUnitResultCorrelation<TResult>(this);
+  }
+}
+
+/** Validate and canonicalize one active legacy compatibility population. */
+export function buildIrLegacyUnitProjection(entries: readonly IrLegacyUnitProjectionEntry[]): IrLegacyUnitProjection {
+  return new IrLegacyUnitProjection(entries);
+}
+
+/**
+ * Exactly-once correlation for results returned by one projected legacy call.
+ *
+ * The result sidecar must carry both the original unit ID and the returned
+ * legacy name. Completion rejects any active unit for which no result was
+ * consumed; its output is ordered by the projection rather than event arrival.
+ */
+export class IrLegacyUnitResultCorrelation<TResult> {
+  readonly #projection: IrLegacyUnitProjection;
+  readonly #resultByUnitId = new Map<IrUnitId, IrLegacyNamedUnitResult<TResult>>();
+  #completed: ReadonlyMap<IrUnitId, IrLegacyNamedUnitResult<TResult>> | undefined;
+
+  /** @internal Start through {@link IrLegacyUnitProjection.startResultCorrelation}. */
+  constructor(projection: IrLegacyUnitProjection) {
+    this.#projection = projection;
+  }
+
+  consume(result: IrLegacyNamedUnitResult<TResult>): IrLegacyNamedUnitResult<TResult> {
+    const entry = this.#projection.getByUnitId(result.unitId);
+    if (!entry || entry.legacyName !== result.legacyName) {
+      return legacyProjectionInvariant(
+        "foreign-result-correlation",
+        `legacy result ${result.unitId} / ${JSON.stringify(result.legacyName)} does not belong to this projection`,
+      );
+    }
+    if (this.#resultByUnitId.has(result.unitId)) {
+      return legacyProjectionInvariant(
+        "duplicate-result-correlation",
+        `legacy result ${JSON.stringify(result.legacyName)} was correlated more than once for unit ${result.unitId}`,
+      );
+    }
+    const correlated = Object.freeze({
+      unitId: result.unitId,
+      legacyName: result.legacyName,
+      result: result.result,
+    });
+    this.#resultByUnitId.set(result.unitId, correlated);
+    return correlated;
+  }
+
+  complete(): ReadonlyMap<IrUnitId, IrLegacyNamedUnitResult<TResult>> {
+    if (this.#completed) return this.#completed;
+    const unconsumed = this.#projection.entries.filter((entry) => !this.#resultByUnitId.has(entry.unitId));
+    if (unconsumed.length > 0) {
+      return legacyProjectionInvariant(
+        "unconsumed-result-correlation",
+        `legacy results were not correlated for ${unconsumed
+          .map((entry) => `${entry.unitId} / ${JSON.stringify(entry.legacyName)}`)
+          .join(", ")}`,
+      );
+    }
+    this.#completed = readonlyIdentityMap(
+      new Map(this.#projection.entries.map((entry) => [entry.unitId, this.#resultByUnitId.get(entry.unitId)!])),
+    );
+    return this.#completed;
+  }
 }
 
 function planningIdentityInvariant(code: IrPlanningIdentityInvariantCode, message: string): never {
