@@ -1,0 +1,632 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+
+import type { IrBindingId, IrClassId, IrUnitId, IrUnitInventory } from "./identity.js";
+
+export type ProgramAbiSlotPolicy = "required" | "alias" | "none";
+/** The three independent index spaces owned by ModuleAssembler. */
+export type ProgramAbiSlotSpace = "function" | "global" | "type";
+/** Namespaces exposed by the temporary string-keyed legacy compatibility view. */
+export type ProgramAbiLegacyNamespace = ProgramAbiSlotSpace | "export";
+
+export interface ProgramAbiCallableSignature {
+  readonly params: readonly string[];
+  readonly result: string | null;
+}
+
+export type ProgramAbiIntent =
+  | {
+      readonly kind: "callable";
+      readonly origin: "source" | "import" | "runtime" | "support";
+      readonly signature: ProgramAbiCallableSignature;
+      readonly unitId?: IrUnitId;
+    }
+  | {
+      readonly kind: "global";
+      readonly origin: "source" | "import" | "runtime" | "support";
+      readonly valueType: string;
+      readonly mutable: boolean;
+    }
+  | {
+      readonly kind: "type";
+      readonly shapeKey: string;
+    }
+  | {
+      readonly kind: "export";
+      readonly externalName: string;
+      readonly targetId: IrBindingId;
+    }
+  | {
+      readonly kind: "class";
+      readonly classId: IrClassId;
+      readonly layoutKey: string;
+    }
+  | {
+      readonly kind: "support";
+      readonly role: string;
+    };
+
+type ProgramAbiSlottedIntent = Exclude<ProgramAbiIntent, { readonly kind: "export" | "support" }>;
+type ProgramAbiAliasIntent = Exclude<ProgramAbiIntent, { readonly kind: "export" | "support" }>;
+type ProgramAbiNonExportIntent = Exclude<ProgramAbiIntent, { readonly kind: "export" }>;
+type ProgramAbiExportIntent = Extract<ProgramAbiIntent, { readonly kind: "export" }>;
+
+/** Numeric structural order supplied by the inventory/planning owner. */
+export interface ProgramAbiOrderKey {
+  /** Dependency-first source order from {@link IrUnitInventory.sources}. */
+  readonly sourceOrder: number;
+  /** Stable declaration/binding order within that source. */
+  readonly declarationOrder: number;
+}
+
+interface ProgramAbiPlanBase<TIntent extends ProgramAbiIntent> {
+  readonly id: IrBindingId;
+  /** Stable whole-program planning order; never inferred from encoded IDs or insertion. */
+  readonly order: ProgramAbiOrderKey;
+  /** Diagnostic/legacy label only. Structural IDs remain the semantic key. */
+  readonly displayName: string;
+  readonly intent: TIntent;
+}
+
+export type ProgramAbiPlanEntry =
+  | (ProgramAbiPlanBase<ProgramAbiSlottedIntent> & {
+      readonly slotPolicy: "required";
+      readonly slotSpace: ProgramAbiSlotSpace;
+      readonly aliasOf?: never;
+    })
+  | (ProgramAbiPlanBase<ProgramAbiAliasIntent> & {
+      readonly slotPolicy: "alias";
+      readonly aliasOf: IrBindingId;
+      readonly slotSpace?: never;
+    })
+  | (ProgramAbiPlanBase<ProgramAbiNonExportIntent> & {
+      readonly slotPolicy: "none";
+      readonly slotSpace?: never;
+      readonly aliasOf?: never;
+    })
+  | (ProgramAbiPlanBase<ProgramAbiExportIntent> & {
+      readonly slotPolicy: "alias";
+      readonly aliasOf: IrBindingId;
+      readonly slotSpace?: never;
+    });
+
+/** A finalized raw index reported by ModuleAssembler; this seam never allocates. */
+export interface ProgramAbiFinalIndex {
+  readonly space: ProgramAbiSlotSpace;
+  readonly index: number;
+}
+
+export type ProgramAbiInvariantCode =
+  | "duplicate-binding-plan"
+  | "invalid-plan-order"
+  | "duplicate-plan-order"
+  | "invalid-slot-policy"
+  | "missing-source-unit"
+  | "unknown-inventory-unit"
+  | "unknown-inventory-class"
+  | "inventory-source-order-mismatch"
+  | "planning-sealed"
+  | "planning-not-sealed"
+  | "binding-complete"
+  | "unknown-binding"
+  | "missing-alias-target"
+  | "alias-cycle"
+  | "alias-intent-kind-mismatch"
+  | "alias-signature-mismatch"
+  | "alias-contract-mismatch"
+  | "alias-slot-space-mismatch"
+  | "intent-slot-space-mismatch"
+  | "export-target-mismatch"
+  | "invalid-export-target"
+  | "duplicate-export-name"
+  | "alias-final-binding"
+  | "slotless-final-binding"
+  | "duplicate-final-binding"
+  | "final-index-space-mismatch"
+  | "final-index-collision"
+  | "unresolved-required-binding"
+  | "missing-legacy-name"
+  | "ambiguous-legacy-name"
+  | "no-internal-wasm-name";
+
+export class ProgramAbiInvariantError extends Error {
+  constructor(
+    readonly code: ProgramAbiInvariantCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ProgramAbiInvariantError";
+  }
+}
+
+const indexKey = (finalIndex: ProgramAbiFinalIndex): string => `${finalIndex.space}:${finalIndex.index}`;
+const legacyKey = (namespace: ProgramAbiLegacyNamespace, name: string): string => `${namespace}\u0000${name}`;
+const orderKey = (order: ProgramAbiOrderKey): string => `${order.sourceOrder}:${order.declarationOrder}`;
+
+function compareOrder(a: ProgramAbiOrderKey, b: ProgramAbiOrderKey): number {
+  return a.sourceOrder - b.sourceOrder || a.declarationOrder - b.declarationOrder;
+}
+
+function validOrderComponent(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function intentSlotSpace(intent: ProgramAbiIntent): ProgramAbiSlotSpace | null {
+  if (intent.kind === "callable") return "function";
+  if (intent.kind === "global") return "global";
+  if (intent.kind === "type" || intent.kind === "class") return "type";
+  return null;
+}
+
+function intentLegacyNamespace(intent: ProgramAbiIntent): ProgramAbiLegacyNamespace | null {
+  if (intent.kind === "export") return "export";
+  return intentSlotSpace(intent);
+}
+
+function callableSignaturesEqual(a: ProgramAbiCallableSignature, b: ProgramAbiCallableSignature): boolean {
+  return (
+    a.result === b.result && a.params.length === b.params.length && a.params.every((param, i) => param === b.params[i])
+  );
+}
+
+function freezePlan(entry: ProgramAbiPlanEntry): ProgramAbiPlanEntry {
+  const intent =
+    entry.intent.kind === "callable"
+      ? {
+          ...entry.intent,
+          signature: {
+            params: Object.freeze([...entry.intent.signature.params]),
+            result: entry.intent.signature.result,
+          },
+        }
+      : { ...entry.intent };
+  return Object.freeze({
+    ...entry,
+    order: Object.freeze({ ...entry.order }),
+    intent: Object.freeze(intent),
+  }) as ProgramAbiPlanEntry;
+}
+
+function aliasContractsMatch(alias: ProgramAbiIntent, canonical: ProgramAbiIntent): boolean {
+  if (alias.kind !== canonical.kind) return false;
+  if (alias.kind === "callable" && canonical.kind === "callable") {
+    return callableSignaturesEqual(alias.signature, canonical.signature);
+  }
+  if (alias.kind === "global" && canonical.kind === "global") {
+    return alias.valueType === canonical.valueType && alias.mutable === canonical.mutable;
+  }
+  if (alias.kind === "type" && canonical.kind === "type") return alias.shapeKey === canonical.shapeKey;
+  if (alias.kind === "class" && canonical.kind === "class") {
+    return alias.classId === canonical.classId && alias.layoutKey === canonical.layoutKey;
+  }
+  return alias.kind !== "support" && alias.kind !== "export";
+}
+
+/**
+ * Shadow identity/intention ledger for the eventual whole-program ABI.
+ *
+ * R1a does not populate this from production codegen yet. It proves the
+ * planning/final-index boundary and invariants without changing allocation or
+ * routing. ModuleAssembler remains the sole owner of every Wasm index space.
+ */
+export class ProgramAbiMap {
+  private readonly planned = new Map<IrBindingId, ProgramAbiPlanEntry>();
+  private readonly orderOwners = new Map<string, IrBindingId>();
+  private readonly finalIndices = new Map<IrBindingId, ProgramAbiFinalIndex>();
+  private readonly finalIndexOwners = new Map<string, IrBindingId>();
+  private readonly sourceOrders = new Map<IrUnitInventory["sources"][number]["id"], number>();
+  private readonly units = new Map<IrUnitId, IrUnitInventory["allUnits"][number]>();
+  private readonly classes = new Map<IrClassId, IrUnitInventory["classes"][number]>();
+  private sealed = false;
+  private complete = false;
+
+  constructor(readonly inventory: IrUnitInventory) {
+    for (const source of inventory.sources) this.sourceOrders.set(source.id, source.order);
+    for (const unit of inventory.allUnits) this.units.set(unit.id, unit);
+    for (const classRecord of inventory.classes) this.classes.set(classRecord.id, classRecord);
+  }
+
+  plan(entry: ProgramAbiPlanEntry): void {
+    if (this.sealed) {
+      throw new ProgramAbiInvariantError("planning-sealed", `cannot plan ${entry.id} after ABI planning was sealed`);
+    }
+    if (this.planned.has(entry.id)) {
+      throw new ProgramAbiInvariantError("duplicate-binding-plan", `binding ${entry.id} was planned more than once`);
+    }
+    if (
+      !entry.order ||
+      !validOrderComponent(entry.order.sourceOrder) ||
+      !validOrderComponent(entry.order.declarationOrder)
+    ) {
+      throw new ProgramAbiInvariantError(
+        "invalid-plan-order",
+        `binding ${entry.id} has invalid structural order ${JSON.stringify(entry.order)}`,
+      );
+    }
+    const structuralOrder = orderKey(entry.order);
+    const previousOrderOwner = this.orderOwners.get(structuralOrder);
+    if (previousOrderOwner) {
+      throw new ProgramAbiInvariantError(
+        "duplicate-plan-order",
+        `bindings ${previousOrderOwner} and ${entry.id} share structural order ${structuralOrder}`,
+      );
+    }
+
+    if (entry.intent.kind === "support" && entry.slotPolicy !== "none") {
+      throw new ProgramAbiInvariantError(
+        "invalid-slot-policy",
+        `support binding ${entry.id} must use slot policy none`,
+      );
+    }
+    if (entry.intent.kind === "export" && entry.slotPolicy !== "alias") {
+      throw new ProgramAbiInvariantError(
+        "invalid-slot-policy",
+        `export binding ${entry.id} must alias a callable or global binding`,
+      );
+    }
+    const runtimeEntry = entry as ProgramAbiPlanEntry & {
+      readonly aliasOf?: IrBindingId;
+      readonly slotSpace?: ProgramAbiSlotSpace;
+    };
+    if (entry.slotPolicy !== "required" && runtimeEntry.slotSpace !== undefined) {
+      throw new ProgramAbiInvariantError(
+        "invalid-slot-policy",
+        `non-allocating binding ${entry.id} cannot reserve ${runtimeEntry.slotSpace} index space`,
+      );
+    }
+    if (entry.slotPolicy !== "alias" && runtimeEntry.aliasOf !== undefined) {
+      throw new ProgramAbiInvariantError(
+        "invalid-slot-policy",
+        `non-alias binding ${entry.id} cannot target ${runtimeEntry.aliasOf}`,
+      );
+    }
+    if (entry.slotPolicy === "required") {
+      const expectedSpace = intentSlotSpace(entry.intent);
+      if (expectedSpace === null || entry.slotSpace !== expectedSpace) {
+        throw new ProgramAbiInvariantError(
+          "intent-slot-space-mismatch",
+          `binding ${entry.id} has ${entry.intent.kind} intent but plans ${entry.slotSpace}`,
+        );
+      }
+    }
+    this.validateInventoryMembership(entry);
+    this.planned.set(entry.id, freezePlan(entry));
+    this.orderOwners.set(structuralOrder, entry.id);
+  }
+
+  entries(): readonly ProgramAbiPlanEntry[] {
+    return Object.freeze([...this.planned.values()].sort((a, b) => compareOrder(a.order, b.order)));
+  }
+
+  get(id: IrBindingId): ProgramAbiPlanEntry | undefined {
+    return this.planned.get(id);
+  }
+
+  sealPlan(): void {
+    if (this.sealed) return;
+    const entries = this.entries();
+    const exportNames = new Map<string, IrBindingId>();
+    for (const entry of entries) {
+      if (entry.intent.kind !== "export") continue;
+      const previous = exportNames.get(entry.intent.externalName);
+      if (previous) {
+        throw new ProgramAbiInvariantError(
+          "duplicate-export-name",
+          `exports ${previous} and ${entry.id} share external name ${entry.intent.externalName}`,
+        );
+      }
+      exportNames.set(entry.intent.externalName, entry.id);
+    }
+
+    for (const entry of entries) {
+      if (entry.slotPolicy !== "alias") continue;
+      const directTarget = this.planned.get(entry.aliasOf);
+      if (!directTarget) {
+        throw new ProgramAbiInvariantError(
+          "missing-alias-target",
+          `alias ${entry.id} targets unplanned binding ${entry.aliasOf}`,
+        );
+      }
+      const canonical = this.canonicalEntry(entry.id);
+      if (canonical.slotPolicy !== "required") {
+        throw new ProgramAbiInvariantError(
+          "alias-slot-space-mismatch",
+          `alias ${entry.id} resolves to slotless binding ${canonical.id}`,
+        );
+      }
+
+      if (entry.intent.kind === "export") {
+        const declaredTarget = this.planned.get(entry.intent.targetId);
+        if (!declaredTarget) {
+          throw new ProgramAbiInvariantError(
+            "missing-alias-target",
+            `export ${entry.id} declares unplanned target ${entry.intent.targetId}`,
+          );
+        }
+        if (entry.intent.targetId !== entry.aliasOf) {
+          throw new ProgramAbiInvariantError(
+            "export-target-mismatch",
+            `export ${entry.id} target ${entry.intent.targetId} disagrees with alias ${entry.aliasOf}`,
+          );
+        }
+        if (declaredTarget.intent.kind !== "callable" && declaredTarget.intent.kind !== "global") {
+          throw new ProgramAbiInvariantError(
+            "invalid-export-target",
+            `export ${entry.id} directly targets ${declaredTarget.intent.kind} binding ${declaredTarget.id}`,
+          );
+        }
+        if (canonical.intent.kind !== "callable" && canonical.intent.kind !== "global") {
+          throw new ProgramAbiInvariantError(
+            "invalid-export-target",
+            `export ${entry.id} resolves to ${canonical.intent.kind} binding ${canonical.id}`,
+          );
+        }
+        continue;
+      }
+
+      if (entry.intent.kind !== canonical.intent.kind) {
+        throw new ProgramAbiInvariantError(
+          "alias-intent-kind-mismatch",
+          `alias ${entry.id} has ${entry.intent.kind} intent but resolves to ${canonical.intent.kind} binding ${canonical.id}`,
+        );
+      }
+      const expectedSpace = intentSlotSpace(entry.intent);
+      if (expectedSpace === null || canonical.slotSpace !== expectedSpace) {
+        throw new ProgramAbiInvariantError(
+          "alias-slot-space-mismatch",
+          `alias ${entry.id} expects ${expectedSpace ?? "no index"} but resolves to ${canonical.slotSpace}`,
+        );
+      }
+      if (!aliasContractsMatch(entry.intent, canonical.intent)) {
+        const code = entry.intent.kind === "callable" ? "alias-signature-mismatch" : "alias-contract-mismatch";
+        throw new ProgramAbiInvariantError(
+          code,
+          `${entry.intent.kind} alias ${entry.id} does not match canonical binding ${canonical.id}`,
+        );
+      }
+    }
+    this.sealed = true;
+  }
+
+  get planningSealed(): boolean {
+    return this.sealed;
+  }
+
+  assertPlanSealed(): void {
+    if (!this.sealed) {
+      throw new ProgramAbiInvariantError("planning-not-sealed", "legacy ABI view requires a sealed ProgramAbiMap plan");
+    }
+  }
+
+  /** Record a finalized allocator-owned index; this method never allocates. */
+  bindFinalIndex(id: IrBindingId, finalIndex: ProgramAbiFinalIndex): void {
+    if (!this.sealed) {
+      throw new ProgramAbiInvariantError("planning-not-sealed", `cannot bind ${id} before ABI planning is sealed`);
+    }
+    if (this.complete) {
+      throw new ProgramAbiInvariantError("binding-complete", `cannot bind ${id} after ABI binding completed`);
+    }
+    const entry = this.requireEntry(id);
+    if (entry.slotPolicy === "alias") {
+      throw new ProgramAbiInvariantError(
+        "alias-final-binding",
+        `alias ${id} must resolve through ${entry.aliasOf}; it cannot own a final index`,
+      );
+    }
+    if (entry.slotPolicy === "none") {
+      throw new ProgramAbiInvariantError("slotless-final-binding", `slotless binding ${id} cannot own a final index`);
+    }
+    if (entry.slotSpace !== finalIndex.space || !Number.isSafeInteger(finalIndex.index) || finalIndex.index < 0) {
+      throw new ProgramAbiInvariantError(
+        "final-index-space-mismatch",
+        `binding ${id} planned ${entry.slotSpace} but received ${finalIndex.space}:${finalIndex.index}`,
+      );
+    }
+    if (this.finalIndices.has(id)) {
+      throw new ProgramAbiInvariantError("duplicate-final-binding", `binding ${id} was bound more than once`);
+    }
+    const occupant = this.finalIndexOwners.get(indexKey(finalIndex));
+    if (occupant) {
+      throw new ProgramAbiInvariantError(
+        "final-index-collision",
+        `bindings ${occupant} and ${id} cannot share non-alias index ${indexKey(finalIndex)}`,
+      );
+    }
+    const frozen = Object.freeze({ ...finalIndex });
+    this.finalIndices.set(id, frozen);
+    this.finalIndexOwners.set(indexKey(finalIndex), id);
+  }
+
+  /** Require every canonical required intention to have a finalized index. */
+  finishBinding(): void {
+    if (!this.sealed) {
+      throw new ProgramAbiInvariantError("planning-not-sealed", "cannot finish ABI binding before planning is sealed");
+    }
+    for (const entry of this.entries()) {
+      if (entry.slotPolicy === "required" && !this.finalIndices.has(entry.id)) {
+        throw new ProgramAbiInvariantError(
+          "unresolved-required-binding",
+          `required binding ${entry.id} has no final ModuleAssembler index`,
+        );
+      }
+    }
+    this.complete = true;
+  }
+
+  canonicalId(id: IrBindingId): IrBindingId {
+    return this.canonicalEntry(id).id;
+  }
+
+  resolveFinalIndex(id: IrBindingId): ProgramAbiFinalIndex | undefined {
+    const canonical = this.canonicalEntry(id);
+    return canonical.slotPolicy === "required" ? this.finalIndices.get(canonical.id) : undefined;
+  }
+
+  private validateInventoryMembership(entry: ProgramAbiPlanEntry): void {
+    if (entry.intent.kind === "callable") {
+      if (entry.intent.origin === "source" && entry.intent.unitId === undefined) {
+        throw new ProgramAbiInvariantError(
+          "missing-source-unit",
+          `source callable binding ${entry.id} must identify its inventoried unit`,
+        );
+      }
+      if (entry.intent.unitId !== undefined) {
+        const unit = this.units.get(entry.intent.unitId);
+        if (!unit) {
+          throw new ProgramAbiInvariantError(
+            "unknown-inventory-unit",
+            `callable binding ${entry.id} references unit ${entry.intent.unitId} outside this inventory`,
+          );
+        }
+        this.assertInventorySourceOrder(entry, unit.sourceId);
+      }
+    }
+
+    if (entry.intent.kind === "class") {
+      const classRecord = this.classes.get(entry.intent.classId);
+      if (!classRecord) {
+        throw new ProgramAbiInvariantError(
+          "unknown-inventory-class",
+          `class binding ${entry.id} references class ${entry.intent.classId} outside this inventory`,
+        );
+      }
+      this.assertInventorySourceOrder(entry, classRecord.sourceId);
+    }
+  }
+
+  private assertInventorySourceOrder(
+    entry: ProgramAbiPlanEntry,
+    sourceId: IrUnitInventory["sources"][number]["id"],
+  ): void {
+    const inventoryOrder = this.sourceOrders.get(sourceId);
+    if (inventoryOrder !== entry.order.sourceOrder) {
+      throw new ProgramAbiInvariantError(
+        "inventory-source-order-mismatch",
+        `binding ${entry.id} plans source order ${entry.order.sourceOrder}, expected ${inventoryOrder ?? "unknown"}`,
+      );
+    }
+  }
+
+  private requireEntry(id: IrBindingId): ProgramAbiPlanEntry {
+    const entry = this.planned.get(id);
+    if (!entry) throw new ProgramAbiInvariantError("unknown-binding", `binding ${id} was not planned`);
+    return entry;
+  }
+
+  private canonicalEntry(id: IrBindingId): ProgramAbiPlanEntry {
+    let current = this.requireEntry(id);
+    const visited = new Set<IrBindingId>();
+    while (current.slotPolicy === "alias") {
+      if (visited.has(current.id)) {
+        throw new ProgramAbiInvariantError("alias-cycle", `alias cycle includes binding ${current.id}`);
+      }
+      visited.add(current.id);
+      const target = this.planned.get(current.aliasOf);
+      if (!target) {
+        throw new ProgramAbiInvariantError(
+          "missing-alias-target",
+          `alias ${current.id} targets unplanned binding ${current.aliasOf}`,
+        );
+      }
+      current = target;
+    }
+    return current;
+  }
+}
+
+/**
+ * The only name-keyed compatibility view intended for the legacy frontend.
+ * It is namespace-aware and observes finalized indices without mutating codegen.
+ */
+export class LegacyAbiAdapter {
+  private readonly byLegacyName = new Map<string, readonly IrBindingId[]>();
+  private readonly internalNames = new Map<IrBindingId, string>();
+
+  constructor(readonly abi: ProgramAbiMap) {
+    abi.assertPlanSealed();
+    const entries = abi.entries();
+    const grouped = new Map<string, IrBindingId[]>();
+    for (const entry of entries) {
+      const namespace = intentLegacyNamespace(entry.intent);
+      if (namespace === null) continue;
+      const name = entry.intent.kind === "export" ? entry.intent.externalName : entry.displayName;
+      const key = legacyKey(namespace, name);
+      const ids = grouped.get(key);
+      if (ids) ids.push(entry.id);
+      else grouped.set(key, [entry.id]);
+    }
+    for (const [key, ids] of grouped) this.byLegacyName.set(key, Object.freeze([...ids]));
+
+    const canonicalBySpaceAndName = new Map<string, IrBindingId[]>();
+    const reservedBySpace = new Map<ProgramAbiSlotSpace, Set<string>>();
+    const usedBySpace = new Map<ProgramAbiSlotSpace, Set<string>>();
+    for (const space of ["function", "global", "type"] as const) {
+      reservedBySpace.set(space, new Set());
+      usedBySpace.set(space, new Set());
+    }
+    for (const entry of entries) {
+      if (entry.slotPolicy !== "required") continue;
+      const key = legacyKey(entry.slotSpace, entry.displayName);
+      const ids = canonicalBySpaceAndName.get(key);
+      if (ids) ids.push(entry.id);
+      else canonicalBySpaceAndName.set(key, [entry.id]);
+      reservedBySpace.get(entry.slotSpace)!.add(entry.displayName);
+    }
+    for (const [key, ids] of canonicalBySpaceAndName) {
+      const separator = key.indexOf("\u0000");
+      const space = key.slice(0, separator) as ProgramAbiSlotSpace;
+      const name = key.slice(separator + 1);
+      const reserved = reservedBySpace.get(space)!;
+      const used = usedBySpace.get(space)!;
+      if (ids.length === 1) {
+        this.internalNames.set(ids[0]!, name);
+        used.add(name);
+        continue;
+      }
+      for (const id of ids) {
+        const encoded = encodeURIComponent(id);
+        let candidate = `${name}__ir_${encoded}`;
+        let discriminator = 0;
+        while (reserved.has(candidate) || used.has(candidate)) {
+          candidate = `__ir_identity_${encoded}_${discriminator++}`;
+        }
+        this.internalNames.set(id, candidate);
+        used.add(candidate);
+      }
+    }
+  }
+
+  /** Resolve one namespace/name to its canonical structural owner, never an alias record. */
+  resolveUniqueLegacyName(namespace: ProgramAbiLegacyNamespace, name: string): IrBindingId {
+    const ids = this.byLegacyName.get(legacyKey(namespace, name)) ?? [];
+    if (ids.length === 0) {
+      throw new ProgramAbiInvariantError("missing-legacy-name", `legacy ABI ${namespace} name ${name} was not planned`);
+    }
+    const canonicalIds = new Set(ids.map((id) => this.abi.canonicalId(id)));
+    if (canonicalIds.size !== 1) {
+      throw new ProgramAbiInvariantError(
+        "ambiguous-legacy-name",
+        `legacy ABI ${namespace} name ${name} matches ${canonicalIds.size} canonical structural owners`,
+      );
+    }
+    return canonicalIds.values().next().value!;
+  }
+
+  resolveFinalIndex(namespace: ProgramAbiLegacyNamespace, name: string): ProgramAbiFinalIndex | undefined {
+    return this.abi.resolveFinalIndex(this.resolveUniqueLegacyName(namespace, name));
+  }
+
+  /** Preserve a canonical spelling; qualify only same-index-space collisions. */
+  internalWasmName(id: IrBindingId): string {
+    const entry = this.abi.get(id);
+    if (!entry) throw new ProgramAbiInvariantError("unknown-binding", `binding ${id} was not planned`);
+    const canonicalId = this.abi.canonicalId(id);
+    const name = this.internalNames.get(canonicalId);
+    if (!name) {
+      throw new ProgramAbiInvariantError(
+        "no-internal-wasm-name",
+        `binding ${id} does not resolve to a canonical allocator-owned index`,
+      );
+    }
+    return name;
+  }
+}

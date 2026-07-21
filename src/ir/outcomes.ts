@@ -7,6 +7,7 @@
  * detail remains available only to make failures actionable.
  */
 import type { IrFallbackReason } from "./select.js";
+import type { IrSourceId, IrUnitId } from "./identity.js";
 
 export type IrPreparationStage = "select" | "resolve" | "build" | "verify" | "lower" | "backend-legality" | "patch";
 
@@ -127,6 +128,10 @@ export type IrObservedTarget = "gc" | "linear" | "standalone" | "wasi";
 interface IrObservedOutcomeBase {
   /** Observational label only. R1 replaces this with source-qualified identity. */
   readonly key: string;
+  /** R1 structural source identity. Compiler-produced rows always populate it. */
+  readonly sourceId?: IrSourceId;
+  /** R1 structural terminal-unit identity. Compiler-produced rows always populate it. */
+  readonly unitId?: IrUnitId;
   readonly file: string;
   readonly unitKind: IrObservedUnitKind;
   readonly displayName: string;
