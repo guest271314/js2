@@ -343,5 +343,11 @@ The previous v0.64.1 patch is published and verified, including the matching
 merge-group differential then caught one lost boolean brand in
 `closures/10-mutual.js`; PR #3486 retained the brand through IR and boxed it
 with `__box_boolean`, restoring the 99 / 104 differential floor without a
-baseline update. Sprint 74 closes at that corrected R0 boundary; v0.65.0 is cut
-from the resulting `main` before execution pauses.
+baseline update. Sprint 74 closed at that corrected R0 boundary,
+`a9b276c0eed97b2ce29b7ccaa29ebc5f4853e08d`, and the exact `sprint/74` tag is
+published there. Authoritative merge-group Test262 run 29857062450 passed at
+the same SHA: JS-host remained 30,282 / 43,099 and standalone improved by 13
+passes to 28,149 / 43,106. The close harvest cross-referenced all >50-row
+failure families and filed only one new Markdown owner: Backlog #3531 for 216
+standalone array-concat/JS-array host-import leaks. v0.65.0 is cut from the
+resulting `main` before execution pauses.

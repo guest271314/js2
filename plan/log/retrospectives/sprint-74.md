@@ -48,3 +48,19 @@ widening either the differential or equivalence baseline.
 `IrUnitId` and `ProgramAbiMap`; R2–R8 remain blocked behind R1 and their declared
 dependency chain. The v0.65.0 release follows this sprint boundary; execution
 pauses after that release is published and verified.
+
+The fresh close harvest mapped all normalized Test262 clusters above 50 rows
+to existing Markdown owners except one. Backlog issue #3531 now owns the 216
+standalone rows that leak `__array_concat_any`, `__js_array_new`, and
+`__js_array_push`.
+
+## Close validation
+
+- PR #3486 merged as `a9b276c0eed97b2ce29b7ccaa29ebc5f4853e08d`,
+  which is also the published `sprint/74` tag target.
+- Authoritative Test262 merge-group run
+  [29857062450](https://github.com/loopdive/js2/actions/runs/29857062450)
+  passed at that SHA, including the nonempty merged-report job.
+- JS-host closed at **30,282 / 43,099**, unchanged from Sprint 73. Standalone
+  closed at **28,149 / 43,106**, a **+13-pass** improvement with no total-count
+  change.
