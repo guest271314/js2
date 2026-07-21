@@ -2193,7 +2193,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // reads compose with slice-1 string ops.
     if (!isConst && cx.mutatedLets.has(name)) {
       const slotValType = asVal(inferred);
-      if (slotValType !== null && slotValType.kind !== "ref" && slotValType.kind !== "ref_null") {
+      if (slotValType !== null) {
         const slotIndex = cx.builder.declareSlot(name, slotValType);
         cx.builder.emitSlotWrite(slotIndex, value);
         cx.scope.set(name, { kind: "slot", slotIndex, type: inferred, ...(stringEncoding ? { stringEncoding } : {}) });
@@ -2217,9 +2217,10 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
           continue;
         }
       }
-      // Fall through to local binding for non-slot-eligible types —
-      // the lowerer will catch any subsequent assignment and throw,
-      // landing the function back on the legacy path.
+      // Fall through only for representations without a concrete ValType.
+      // A later assignment then remains an invariant: the mutation pre-pass
+      // promised that every mutable binding with a slot representation was
+      // materialized above.
     }
     cx.scope.set(name, { kind: "local", value, type: inferred, ...(stringEncoding ? { stringEncoding } : {}) });
   }
@@ -2568,7 +2569,9 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     if (hintVal && (hintVal.kind === "externref" || hintVal.kind === "ref_null")) {
       return cx.builder.emitConst({ kind: "null", ty: hint }, hint);
     }
-    throw new Error(
+    throw new IrUnsupportedError(
+      "nullish-value-unsupported",
+      "build",
       `ir/from-ast: bare 'null' in non-reference context (${describeIrType(hint)}) is not supported in IR (${cx.funcName})`,
     );
   }
@@ -5101,7 +5104,15 @@ function lowerStringMethodCall(
   args: ts.NodeArray<ts.Expression>,
   cx: LowerCtx,
 ): IrValueId | null {
-  const sig = STRING_METHOD_TABLE[methodName];
+  // The signature table is a plain object, so inherited Object.prototype
+  // names (notably `toString` and `valueOf`) must not masquerade as
+  // StringMethodSig entries. Such names are selector-owned unsupported
+  // methods; if one reaches this backstop, return null so the normal method
+  // capability invariant reports it instead of leaking a raw TypeError while
+  // reading `hostArgs.length` from the inherited function.
+  const sig = Object.prototype.hasOwnProperty.call(STRING_METHOD_TABLE, methodName)
+    ? STRING_METHOD_TABLE[methodName]
+    : undefined;
   if (!sig) return null;
 
   if (args.length < sig.requiredArgs || args.length > sig.hostArgs.length) {
@@ -5363,7 +5374,11 @@ function lowerPropertyAssignment(expr: ts.BinaryExpression, cx: LowerCtx): void 
     return;
   }
 
-  throw new Error(`ir/from-ast: property assignment on ${describeIrType(recvType)} is not in slice 4 (${cx.funcName})`);
+  throw new IrUnsupportedError(
+    "property-write-unsupported",
+    "build",
+    `ir/from-ast: property assignment on ${describeIrType(recvType)} is not in slice 4 (${cx.funcName})`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -6592,7 +6607,9 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
       typedValueEvidence(rhs, rhsType, inferStringEncoding(rhs, cx), cx),
     );
     if (!proof) {
-      throw new Error(
+      throw new IrUnsupportedError(
+        "string-evidence-unsupported",
+        "build",
         `ir/from-ast: typed string += requires checker/producer string and encoding evidence for "${id.text}" (${cx.funcName})`,
       );
     }
@@ -6817,7 +6834,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         return cx.builder.emitUnary("f64.neg", negToNumber, irVal({ kind: "f64" }));
       }
       if (asVal(randType)?.kind !== "f64") {
-        throw new Error(`ir/from-ast: unary '-' expects number in ${cx.funcName}`);
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: unary '-' expects number in ${cx.funcName}`,
+        );
       }
       return cx.builder.emitUnary("f64.neg", rand, irVal({ kind: "f64" }));
     }
@@ -6835,7 +6856,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         return plusToNumber;
       }
       if (asVal(randType)?.kind !== "f64") {
-        throw new Error(`ir/from-ast: unary '+' expects number in ${cx.funcName}`);
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: unary '+' expects number in ${cx.funcName}`,
+        );
       }
       return rand;
     }
@@ -6850,7 +6875,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         return cx.builder.emitUnary("i32.eqz", t, irVal({ kind: "i32" }));
       }
       if (asVal(randType)?.kind !== "i32") {
-        throw new Error(`ir/from-ast: unary '!' expects bool in ${cx.funcName}`);
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: unary '!' expects bool in ${cx.funcName}`,
+        );
       }
       return cx.builder.emitUnary("i32.eqz", rand, irVal({ kind: "i32" }));
     }
@@ -7231,7 +7260,9 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // back to legacy.
   if (lt.kind === "string" || rt.kind === "string") {
     if (lt.kind !== "string" || rt.kind !== "string") {
-      throw new Error(
+      throw new IrUnsupportedError(
+        "operand-coercion-unsupported",
+        "build",
         `ir/from-ast: mixed string/non-string operand for '${ts.tokenToString(op)}' is not in slice 1 (${cx.funcName})`,
       );
     }
@@ -7273,9 +7304,24 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   const ltVal = asVal(lt);
   const rtVal = asVal(rt);
   if (!ltVal || !rtVal || ltVal.kind !== rtVal.kind) {
-    throw new Error(
-      `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`,
-    );
+    // A representation mismatch is a stable capability gap only when the TS
+    // evidence says JavaScript coercion is genuinely required (for example,
+    // number-vs-boolean or object-vs-number). If both operands are provably
+    // the same primitive, their different IR representations contradict the
+    // producer's promise and must remain an invariant backstop. The Set
+    // iterator numeric-value path exercises that distinction.
+    const lProof = proveAdditiveOperand(expr.left, cx);
+    const rProof = proveAdditiveOperand(expr.right, cx);
+    const requiresJsCoercion =
+      lProof !== "no-checker" &&
+      rProof !== "no-checker" &&
+      (lProof === "unprovable" || rProof === "unprovable" || lProof !== rProof);
+    const detail =
+      `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`;
+    if (requiresJsCoercion) {
+      throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
+    }
+    throw new Error(detail);
   }
 
   const isF64 = ltVal.kind === "f64";
@@ -7699,7 +7745,11 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
   if (neverUndefinedRep && !staticTypeMayBeUndefined()) {
     return cx.builder.emitConst({ kind: "bool", value: isStrictNeq }, irVal({ kind: "i32" }));
   }
-  throw new Error(`ir/from-ast: undefined-compare on ${describeIrType(t)} not in IR scope (${cx.funcName})`);
+  throw new IrUnsupportedError(
+    "nullish-value-unsupported",
+    "build",
+    `ir/from-ast: undefined-compare on ${describeIrType(t)} not in IR scope (${cx.funcName})`,
+  );
 }
 
 function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
@@ -7711,6 +7761,19 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   if (expr.left.kind === ts.SyntaxKind.NullKeyword) other = expr.right;
   else if (expr.right.kind === ts.SyntaxKind.NullKeyword) other = expr.left;
   else return null;
+
+  // `null === undefined` is intercepted by the null fold before the strict
+  // undefined lowering gets a chance to recognize the ambient identifier.
+  // Phase 1 has no first-class undefined value to materialize here, so record
+  // the precise representation gap rather than recursing into the identifier
+  // arm and surfacing an "identifier not in scope" invariant.
+  if (ts.isIdentifier(other) && other.text === "undefined" && !cx.scope.has("undefined")) {
+    throw new IrUnsupportedError(
+      "nullish-value-unsupported",
+      "build",
+      `ir/from-ast: null/undefined comparison has no first-class undefined representation (${cx.funcName})`,
+    );
+  }
 
   // Lower the non-null side to learn its IrType AND keep any side effects
   // emitted (the IR DCE pass drops the unused result if the producing
