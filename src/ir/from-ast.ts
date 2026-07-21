@@ -6836,11 +6836,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         return cx.builder.emitUnary("f64.neg", negToNumber, irVal({ kind: "f64" }));
       }
       if (asVal(randType)?.kind !== "f64") {
-        throw new IrUnsupportedError(
-          "operand-coercion-unsupported",
-          "build",
-          `ir/from-ast: unary '-' expects number in ${cx.funcName}`,
-        );
+        const detail = `ir/from-ast: unary '-' expects number in ${cx.funcName}`;
+        if (checkerProvesUnaryCoercionGap(expr, cx)) {
+          throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
+        }
+        throw new Error(detail);
       }
       return cx.builder.emitUnary("f64.neg", rand, irVal({ kind: "f64" }));
     }
@@ -6858,11 +6858,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         return plusToNumber;
       }
       if (asVal(randType)?.kind !== "f64") {
-        throw new IrUnsupportedError(
-          "operand-coercion-unsupported",
-          "build",
-          `ir/from-ast: unary '+' expects number in ${cx.funcName}`,
-        );
+        const detail = `ir/from-ast: unary '+' expects number in ${cx.funcName}`;
+        if (checkerProvesUnaryCoercionGap(expr, cx)) {
+          throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
+        }
+        throw new Error(detail);
       }
       return rand;
     }
@@ -6877,11 +6877,11 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
         return cx.builder.emitUnary("i32.eqz", t, irVal({ kind: "i32" }));
       }
       if (asVal(randType)?.kind !== "i32") {
-        throw new IrUnsupportedError(
-          "operand-coercion-unsupported",
-          "build",
-          `ir/from-ast: unary '!' expects bool in ${cx.funcName}`,
-        );
+        const detail = `ir/from-ast: unary '!' expects bool in ${cx.funcName}`;
+        if (checkerProvesUnaryCoercionGap(expr, cx)) {
+          throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
+        }
+        throw new Error(detail);
       }
       return cx.builder.emitUnary("i32.eqz", rand, irVal({ kind: "i32" }));
     }
@@ -6955,6 +6955,95 @@ function proveAdditiveOperand(node: ts.Expression, cx: LowerCtx): "number" | "st
   const checker = cx.checker;
   if (!checker) return "no-checker";
   return classifyPrimitiveProof(checker.getTypeAtLocation(node));
+}
+
+/**
+ * Checker-owned source family used only to classify a representation
+ * contradiction at a residual coercion gate. This is deliberately broader
+ * than {@link classifyPrimitiveProof}: additive specialization needs a
+ * number/string proof, while an invariant backstop must also distinguish a
+ * proven boolean from an unknown/object source.
+ */
+type CheckerOperandFamily = "number" | "string" | "boolean" | "other" | "unknown" | "no-checker";
+
+function classifyCheckerOperandFamily(type: ts.Type): Exclude<CheckerOperandFamily, "no-checker"> {
+  if (type.isUnion()) {
+    if (type.types.length === 0) return "unknown";
+    const families = type.types.map(classifyCheckerOperandFamily);
+    const first = families[0]!;
+    return first !== "unknown" && families.every((family) => family === first) ? first : "unknown";
+  }
+  const flags = type.flags;
+  if (flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) return "unknown";
+  if (flags & ts.TypeFlags.NumberLike) return "number";
+  if (flags & STRING_PROOF_FLAGS) return "string";
+  if (flags & ts.TypeFlags.BooleanLike) return "boolean";
+  return "other";
+}
+
+function checkerOperandFamily(node: ts.Expression, cx: LowerCtx): CheckerOperandFamily {
+  const checker = cx.checker;
+  if (!checker) return "no-checker";
+  try {
+    return classifyCheckerOperandFamily(checker.getTypeAtLocation(node));
+  } catch {
+    return "unknown";
+  }
+}
+
+function isSupportedPrimitiveFamily(
+  family: CheckerOperandFamily,
+): family is Extract<CheckerOperandFamily, "number" | "string" | "boolean"> {
+  return family === "number" || family === "string" || family === "boolean";
+}
+
+/**
+ * A mismatched pair is a capability exit only when source evidence proves the
+ * operands do not belong to the same already-supported primitive family.
+ * Missing/unknown checker evidence cannot justify hiding a malformed carrier
+ * as Unsupported.
+ */
+function checkerProvesBinaryCoercionGap(
+  op: ts.SyntaxKind,
+  left: ts.Expression,
+  right: ts.Expression,
+  cx: LowerCtx,
+): boolean {
+  const leftFamily = checkerOperandFamily(left, cx);
+  const rightFamily = checkerOperandFamily(right, cx);
+  if (
+    leftFamily === "no-checker" ||
+    rightFamily === "no-checker" ||
+    leftFamily === "unknown" ||
+    rightFamily === "unknown"
+  ) {
+    return false;
+  }
+  if (isSupportedPrimitiveFamily(leftFamily) && leftFamily === rightFamily) return false;
+  // Strict equality never performs source coercion. A valid mixed strict
+  // comparison needs a selector/lowering capability decision of its own; it
+  // cannot justify relabelling a carrier contradiction as coercion here.
+  if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
+    return false;
+  }
+  // A shared non-primitive/unsupported family is too coarse to prove that the
+  // operator will coerce (object-object loose equality, for example, is an
+  // identity comparison). Be conservative: only distinct proven families
+  // establish the residual coercion capability gap.
+  return leftFamily !== rightFamily;
+}
+
+/**
+ * Unary `+`/`-` already lower number, boolean and string source families;
+ * unary `!` already lowers boolean. If one of those proven families arrives
+ * with an incompatible carrier, the producer contract is broken and the
+ * caller must keep the failure as an Invariant.
+ */
+function checkerProvesUnaryCoercionGap(expr: ts.PrefixUnaryExpression, cx: LowerCtx): boolean {
+  const family = checkerOperandFamily(expr.operand, cx);
+  if (family === "no-checker" || family === "unknown") return false;
+  if (expr.operator === ts.SyntaxKind.ExclamationToken) return family !== "boolean";
+  return family !== "number" && family !== "boolean" && family !== "string";
 }
 
 /**
@@ -7262,11 +7351,11 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // back to legacy.
   if (lt.kind === "string" || rt.kind === "string") {
     if (lt.kind !== "string" || rt.kind !== "string") {
-      throw new IrUnsupportedError(
-        "operand-coercion-unsupported",
-        "build",
-        `ir/from-ast: mixed string/non-string operand for '${ts.tokenToString(op)}' is not in slice 1 (${cx.funcName})`,
-      );
+      const detail = `ir/from-ast: mixed string/non-string operand for '${ts.tokenToString(op)}' is not in slice 1 (${cx.funcName})`;
+      if (checkerProvesBinaryCoercionGap(op, expr.left, expr.right, cx)) {
+        throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
+      }
+      throw new Error(detail);
     }
     switch (op) {
       case ts.SyntaxKind.PlusToken:
@@ -7312,14 +7401,8 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     // the same primitive, their different IR representations contradict the
     // producer's promise and must remain an invariant backstop. The Set
     // iterator numeric-value path exercises that distinction.
-    const lProof = proveAdditiveOperand(expr.left, cx);
-    const rProof = proveAdditiveOperand(expr.right, cx);
-    const requiresJsCoercion =
-      lProof !== "no-checker" &&
-      rProof !== "no-checker" &&
-      (lProof === "unprovable" || rProof === "unprovable" || lProof !== rProof);
     const detail = `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`;
-    if (requiresJsCoercion) {
+    if (checkerProvesBinaryCoercionGap(op, expr.left, expr.right, cx)) {
       throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
     }
     throw new Error(detail);

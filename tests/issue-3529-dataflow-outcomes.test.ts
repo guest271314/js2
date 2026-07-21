@@ -6,8 +6,12 @@ import ts from "typescript";
 import { analyzeSource } from "../src/checker/index.js";
 import { compile, type IrObservedOutcome } from "../src/index.js";
 import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
-import type { IrClassShape } from "../src/ir/nodes.js";
-import { classifyIrFailure, type IrUnsupportedCode } from "../src/ir/outcomes.js";
+import type { IrClassShape, IrType } from "../src/ir/nodes.js";
+import { classifyIrFailure, evaluateIrOutcomePolicy, type IrUnsupportedCode } from "../src/ir/outcomes.js";
+import { instantiateWithRuntime } from "./equivalence/helpers.js";
+
+const F64: IrType = { kind: "val", val: { kind: "f64" } };
+const EXTERNREF: IrType = { kind: "val", val: { kind: "externref" } };
 
 function terminalFor(result: Awaited<ReturnType<typeof compile>>, displayName = "test"): IrObservedOutcome {
   expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
@@ -18,13 +22,16 @@ function terminalFor(result: Awaited<ReturnType<typeof compile>>, displayName = 
 
 async function expectBuildUnsupported(source: string, code: IrUnsupportedCode): Promise<void> {
   const result = await compile(source, { fileName: `${code}.ts`, trackIrOutcomes: true });
-  expect(terminalFor(result)).toMatchObject({
+  const outcome = terminalFor(result);
+  expect(outcome).toMatchObject({
     kind: "unsupported",
     code,
     stage: "build",
     legacyBodyEmitted: true,
     irBodyEmitted: false,
   });
+  expect(evaluateIrOutcomePolicy([outcome], "hybrid").ready).toBe(true);
+  expect(evaluateIrOutcomePolicy([outcome], "ir-only").ready).toBe(false);
 }
 
 function directDeclaration(source: string): ts.FunctionDeclaration {
@@ -39,6 +46,49 @@ function directDeclaration(source: string): ts.FunctionDeclaration {
 
 function lowerDirect(source: string): void {
   lowerFunctionAstToIr(directDeclaration(source), { exported: true });
+}
+
+function expectLowerInvariant(
+  source: string,
+  calleeTypes: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>,
+): void {
+  const ast = analyzeSource(source, "producer-seam-invariant.ts");
+  const declaration = ast.sourceFile.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === "test",
+  );
+  expect(declaration).toBeDefined();
+
+  let thrown: unknown;
+  try {
+    lowerFunctionAstToIr(declaration!, { exported: true, checker: ast.checker, calleeTypes });
+  } catch (error) {
+    thrown = error;
+  }
+
+  expect(thrown).toBeInstanceOf(Error);
+  const outcome = classifyIrFailure(thrown, "build");
+  expect(outcome).toMatchObject({
+    kind: "invariant",
+    code: "unexpected-internal-throw",
+    stage: "build",
+  });
+  const observed: IrObservedOutcome = {
+    key: "producer-seam-invariant::function::test#0",
+    file: "producer-seam-invariant.ts",
+    unitKind: "function",
+    displayName: "test",
+    ordinal: 0,
+    line: 1,
+    column: 1,
+    backend: "wasmgc",
+    target: "gc",
+    legacyBodyEmitted: true,
+    irBodyEmitted: false,
+    ...outcome,
+  };
+  expect(evaluateIrOutcomePolicy([observed], "hybrid").ready).toBe(false);
+  expect(evaluateIrOutcomePolicy([observed], "ir-only").ready).toBe(false);
 }
 
 describe("#3529 P2 — typed dataflow outcomes", () => {
@@ -135,6 +185,42 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
       kind: "emitted",
       irBodyEmitted: true,
     });
+    const instance = await instantiateWithRuntime(result);
+    expect((instance.exports.test as () => number)()).toBe(3);
+  });
+
+  it("keeps a checker-string carrier contradiction invariant at the mixed-string gate", () => {
+    expectLowerInvariant(
+      `
+        function text(): string { return "value"; }
+        export function test(): number { return "value" == text() ? 1 : 0; }
+      `,
+      new Map([["text", { params: [], returnType: F64 }]]),
+    );
+  });
+
+  it("keeps a checker-boolean carrier contradiction invariant at the general binary gate", () => {
+    expectLowerInvariant(
+      `
+        function predicate(): boolean { return true; }
+        export function test(): number { return true == predicate() ? 1 : 0; }
+      `,
+      new Map([["predicate", { params: [], returnType: F64 }]]),
+    );
+  });
+
+  it.each([
+    ["-", "number", EXTERNREF],
+    ["+", "number", EXTERNREF],
+    ["!", "boolean", F64],
+  ] as const)("keeps unary %s with a checker-%s carrier contradiction invariant", (operator, sourceType, carrier) => {
+    expectLowerInvariant(
+      `
+        function value(): ${sourceType} { return ${sourceType === "boolean" ? "true" : "1"}; }
+        export function test(): number { return ${operator}value() ? 1 : 0; }
+      `,
+      new Map([["value", { params: [], returnType: carrier }]]),
+    );
   });
 
   it("constructs an exact local class named Date before consulting the ambient extern registry", () => {
@@ -211,15 +297,6 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
       kind: "invariant",
       code: "unexpected-internal-throw",
       stage: "build",
-    });
-  });
-
-  it("keeps an unknown producer throw classified as an invariant", () => {
-    expect(classifyIrFailure(new Error("malformed promised IR shape"), "build")).toMatchObject({
-      kind: "invariant",
-      code: "unexpected-internal-throw",
-      stage: "build",
-      detail: "malformed promised IR shape",
     });
   });
 });
