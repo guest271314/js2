@@ -3,8 +3,9 @@ id: 3109
 title: "Test-helper consolidation: 132 test files re-declare compileAndRun (10+ signature variants) across 292k test LOC"
 status: ready
 sprint: current
+assignee: ttraenkler/dev-serve
 created: 2026-07-09
-updated: 2026-07-13
+updated: 2026-07-22
 priority: high
 # 2026-07-12 (#3182 groom): elevated Backlog/medium → current/high.
 # Re-measured: 133 test files declare their own compileAndRun today.
@@ -146,3 +147,38 @@ clean. Zero `src/` changes.
 **Count:** 132 → 19 (slice 1) → 39 (this slice) removed; **~67 local
 definitions remain** (all singleton bodies by exact hash — next slice needs
 normalized/semantic clustering or opts-threading).
+
+### Slice 3 (ttraenkler/dev-serve, 2026-07-22) — 10 files, 3 helpers
+
+Same identical-body method, applied to the remaining **code-identical (modulo
+comments/whitespace)** clusters found by comment-stripped body-hash grouping over
+the 90 files that still declared a local `compileAndRun`:
+
+- `compileAndRunIRVariant(source, fnName, args, experimentalIR)` — the 6
+  `tests/equivalence/ir-slice*` IR-vs-legacy files (`ir-slice10-{map-set,
+  extern-regexp,error,typed-array,date}` + `ir-slice4-classes`). All 6 had a
+  byte-identical local `compileAndRun` **and** a byte-identical local `ENV_STUB`
+  (bare no-op `console_log_*` stubs); the helper embeds the stub inline.
+- `compileAndRunHoistExports(source)` — issue-298 + var-hoisting (2 files):
+  guard on non-empty `result.binary` (NOT `result.success` — var-hoisting trips
+  a benign TS "used before assigned" diagnostic), `buildImports` host object,
+  return exports.
+- `compileAndRunVecSetExports(source)` — issue-1441 + issue-1057 (2 files):
+  sync `new Module`/`Instance` + `setExports` wiring for the `__vec_len`
+  `constructor === Array` lookup, return `test()`.
+
+Each migrated file deletes its local helper (+ orphaned `compile`/`buildImports`
+imports + `ENV_STUB`) and imports the shared function under the
+`{ X as compileAndRun }` alias, so every call site is unchanged.
+
+**Parity proof:** the 10 files ran green post-migration — `vitest run` = 10
+files / **52 tests, all pass**. The migration is byte-for-byte behavior-
+preserving (bodies verified identical modulo comments before migration), so no
+pass→fail drift is possible. Scoped `tsc --noEmit`, `biome lint`, and
+`prettier --check` all clean. Zero `src/` changes.
+
+**Count:** 132 → 19 → 39 → **52 removed**; **80 local definitions remain**
+(the residual is genuine singleton/near-singleton bodies — the string-normalized
+clustering finds only ~4 more 2-file groups whose bodies differ in error-message
+code, needing opts-threading or per-file equivalence review to migrate safely).
+Issue stays `ready` until ≥100 of 132 removed (acceptance criterion 1).

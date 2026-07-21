@@ -335,3 +335,72 @@ export async function compileAndRunTestNumber(src: string): Promise<number> {
   const { instance } = await WebAssembly.instantiate(r.binary, imports);
   return (instance.exports as Record<string, Function>).test() as number;
 }
+
+/**
+ * Cluster Q (6 files — the `tests/equivalence/ir-slice*` IR-vs-legacy pairs):
+ * compile with `{ experimentalIR }`, throw `compile failed: <first message>`,
+ * instantiate against bare no-op `env.console_log_*` stub imports, then call an
+ * arbitrary named export with the given args and return its result. Callers pass
+ * `experimentalIR` true/false to compare the IR path against legacy. Byte-for-byte
+ * identical to the local `compileAndRun` + `ENV_STUB` these files declared.
+ */
+export async function compileAndRunIRVariant(
+  source: string,
+  fnName: string,
+  args: ReadonlyArray<string | number | boolean>,
+  experimentalIR: boolean,
+): Promise<unknown> {
+  const r = await compile(source, { experimentalIR });
+  if (!r.success) {
+    throw new Error(`compile failed: ${r.errors[0]?.message ?? "<unknown>"}`);
+  }
+  const imports = buildImports(
+    r.imports,
+    {
+      console_log_number: () => {},
+      console_log_string: () => {},
+      console_log_bool: () => {},
+    },
+    r.stringPool,
+  );
+  const { instance } = await WebAssembly.instantiate(r.binary, imports);
+  const fn = instance.exports[fnName] as (...a: unknown[]) => unknown;
+  return fn(...args);
+}
+
+/**
+ * Cluster R (2 files — issue-298, var-hoisting): compile with
+ * `{ fileName: "test.ts" }`, guard on a non-empty `result.binary` (NOT
+ * `result.success` — var hoisting trips a TS "used before assigned" diagnostic
+ * that is not a real codegen failure), link the full {@link buildImports} host
+ * object, and return the exports.
+ */
+export async function compileAndRunHoistExports(source: string): Promise<Record<string, Function>> {
+  const result = await compile(source, { fileName: "test.ts" });
+  if (!result.binary || result.binary.length === 0) {
+    throw new Error(`Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
+  }
+  const imports = buildImports(result.imports, undefined, result.stringPool);
+  const { instance } = await WebAssembly.instantiate(result.binary, imports);
+  return instance.exports as Record<string, Function>;
+}
+
+/**
+ * Cluster S (2 files — issue-1441, issue-1057): compile with
+ * `{ fileName: "test.ts" }`, throw `Compile error: <first message>`, link the
+ * full {@link buildImports} host object via the synchronous
+ * `new WebAssembly.Module`/`Instance` path, then wire `setExports` so the runtime
+ * can reach `__vec_len` for the `constructor === Array` lookup on vec wrapper
+ * structs (#1441), and return the `test` export's result.
+ */
+export async function compileAndRunVecSetExports(source: string): Promise<any> {
+  const result = await compile(source, { fileName: "test.ts" });
+  if (!result.success) {
+    throw new Error(`Compile error: ${result.errors?.[0]?.message}`);
+  }
+  const imports = buildImports(result.imports, undefined, result.stringPool);
+  const mod = new WebAssembly.Module(result.binary);
+  const instance = new WebAssembly.Instance(mod, imports);
+  imports.setExports?.(instance.exports as Record<string, Function>);
+  return (instance.exports as any).test();
+}
