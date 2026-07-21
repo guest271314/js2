@@ -15,26 +15,29 @@ updated: 2026-07-21
 
 ## Top of the sprint — IR retirement
 
-1. **#3519 (R0, ready, critical)** — typed Prepared/Unsupported/Invariant
-   outcomes and an honest `check:ir-only` gate. It blocks every ownership/default
-   change because the present telemetry can miss TypeMap failures,
-   `result.errors`, and compile failures. R0 proves the schema on a named,
-   bounded single-host lane; #3518 expands it to inline equivalence and the
-   other production lanes before R9.
-2. **#3517 (active stacked slice)** — retire the last measured Algorithms
+1. **#3529 (R0a, in-progress, critical)** — restore the 154 full-equivalence
+   compile regressions exposed by strict typed outcomes: 141 explicit
+   capability decisions and 13 true invariant fixes. Unknown throws stay
+   Invariant; the equivalence baseline does not expand.
+2. **#3519 (R0b, blocked, critical)** — typed
+   Prepared/Unsupported/Invariant outcomes and an honest `check:ir-only` gate.
+   It resumes after #3529 restores parity. Hybrid must be green with complete
+   accounting; strict remains red only on explicit typed blockers.
+3. **#3517 (active stacked slice)** — retire the last measured Algorithms
    module-init `Map` residual. This closes a corpus count, not R4 compile-once
    module ownership.
-3. **#3518 R1 next** — source-qualified `IrUnitId` + `ProgramAbiMap`. Allocate a
-   child issue only after R0 fixes the outcome boundary; do not implement from
-   the epic prose in parallel with R0.
+4. **#3518 R1 next** — source-qualified `IrUnitId` + `ProgramAbiMap`. Allocate a
+   child issue only after R0a/R0b fix and validate the outcome boundary; do not
+   implement from the epic prose in parallel with R0.
 
 Program owner: **#3518**. Deletion ledger: **#3090**, blocked until R9. The
 function fallback-corpus epic **#2855 is done** and is not a claimable tail
 task.
 
-Sprint acceptance for this lane is the #3519 hybrid gate with complete
-denominators, plus an intentionally non-green IR-only report that names every
-remaining typed blocker. “Function bucket zero” is not an IR-only status.
+Sprint acceptance for this lane is #3529 at zero new equivalence failures,
+followed by the #3519 hybrid gate with complete denominators and an
+intentionally non-green IR-only report that names every remaining typed
+blocker. “Function bucket zero” is not an IR-only status.
 
 ## Parallel protected lane — standalone-vs-js-host Test262 gap
 

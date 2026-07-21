@@ -1,7 +1,7 @@
 ---
 id: 3519
 title: "IR-only R0: typed preparation outcomes and an honest readiness gate"
-status: ready
+status: blocked
 sprint: current
 created: 2026-07-21
 updated: 2026-07-21
@@ -18,8 +18,8 @@ goal: ir-full-coverage
 lane: ir-retirement-r0
 model: gpt-5.6-sol
 parent: 3518
-depends_on: [3143]
-related: [1376, 1923, 2855, 3090, 3153, 3341]
+depends_on: [3143, 3529]
+related: [1376, 1923, 2855, 3090, 3153, 3341, 3529]
 origin: "#3518 R0 — remove fallback telemetry blind spots before changing compilation ownership"
 loc-budget-allow:
   - src/codegen/index.ts
@@ -79,6 +79,16 @@ legacy code. It introduces a policy evaluator over observed outcomes:
 The production routing remains unchanged until #3518 R2/R9. “IR-only” in R0 is
 an opt-in verdict over telemetry, not a new public compile option or a
 compatibility promise.
+
+## Current blocker (2026-07-21)
+
+#3529 is the typed-producer parity prerequisite exposed by this issue's full
+equivalence run: strict unknown-throw-to-Invariant classification revealed 154
+previously demoted compile failures (141 capability gaps and 13 true
+invariants). Keep this issue blocked until #3529 restores the committed
+equivalence baseline without weakening classification. The hybrid gate may be
+accepted only after it is green with zero Invariants; strict remains expected
+to be red on explicit typed Unsupported blockers.
 
 ## Why the current gate is insufficient
 

@@ -5,7 +5,8 @@ status: blocked
 # Phase 0 (audit) landed 2026-07-10; Phase 2 (unreferenced/dead deletions,
 # slices 2a/2b/2d/2e) is EXHAUSTED as of the 2026-07-16 Phase 2f re-run — the
 # residue is exactly the 16 deliberate keeps in the dead-export baseline (see
-# "## Phase 2f" below). Every remaining deletion is hard-gated on #3518 R0–R9:
+# "## Phase 2f" below). Every remaining deletion is hard-gated on #3518 R0a–R9
+# (including the #3529 typed-producer parity prerequisite):
 # typed outcome coverage, prepare-before-emit ownership for every unit kind,
 # whole-program M0/runtime/linear consumption, and fail-closed IR-only default.
 # BLOCKED until R9 lands and a fresh reachability audit proves exact targets
@@ -23,7 +24,7 @@ area: codegen
 language_feature: compiler-internals
 es_edition: n/a
 goal: ir-full-coverage
-related: [2855, 2856, 3142, 3143, 3518, 3519]
+related: [2855, 2856, 3142, 3143, 3518, 3519, 3529]
 ---
 
 # #3090 — Retire the direct front-end after IR-only reachability gates close
@@ -34,7 +35,9 @@ related: [2855, 2856, 3142, 3143, 3518, 3519]
 > init, multi-source/M0, and direct linear lowering. #3518 is the gate-clearing
 > program; this issue is its R10 deletion ledger. Do not dispatch deletion
 > slices before #3518 R9 makes IR-only fail-closed and a refreshed reachability
-> audit proves the exact targets dead.
+> audit proves the exact targets dead. #3529 must first restore equivalence
+> parity while preserving strict typed Invariant classification; neither
+> reclassification nor baseline expansion is reachability evidence.
 
 ## Why (motivation)
 

@@ -10,7 +10,10 @@ per-function detail to `.tmp/legacy-reachability.json`, prints the tables below)
 > roughly **47K runtime/builtin entry fn-lines**. None of the frontend handlers
 > is deletion-ready: hybrid compile-twice reachability remains for free
 > functions, classes, module init, multi-source/M0, and linear. Run the audit
-> again only after #3518 R9 establishes fail-closed IR-only ownership.
+> again only after #3518 R9 establishes fail-closed IR-only ownership. R0 now
+> starts with #3529 typed-producer equivalence parity before #3519's honest gate;
+> neither capability reclassification nor equivalence-baseline expansion is
+> evidence that a handler became unreachable.
 
 ## What was measured
 
