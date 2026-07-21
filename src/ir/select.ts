@@ -5344,8 +5344,9 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       const builtinReceiverFamily =
         checkerReceiverFamily ??
         (scalarReceiverFamily === "f64" ? "number" : scalarReceiverFamily === "boolean" ? "boolean" : undefined);
-      const isNumberReceiver = builtinReceiverFamily === "number" || expressionIsProvenNumber(builtinReceiver);
-      const isStringReceiver = builtinReceiverFamily === "string" || expressionIsProvenString(builtinReceiver);
+      const provenReceiverFamily = currentSelectionOptions?.classifyPrimitiveExpression?.(builtinReceiver);
+      const isNumberReceiver = provenReceiverFamily === "number" || expressionIsProvenNumber(builtinReceiver);
+      const isStringReceiver = provenReceiverFamily === "string" || expressionIsProvenString(builtinReceiver);
       if (currentSelectionOptions?.isArrayExpression?.(builtinReceiver) === true) {
         if (expr.expression.name.text !== "push") {
           return capabilityNo("array-method-unsupported", "expr-array-method-not-lowerable", expr);
@@ -5386,7 +5387,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       if (
         expr.expression.name.text === "toString" &&
         expr.arguments.length === 0 &&
-        expressionIsProvenNumber(builtinReceiver) &&
+        isNumberReceiver &&
         currentModuleBindingResolver?.supportsHostNumberToString === true
       ) {
         if (!isPhase1Expr(builtinReceiver, scope, localClasses)) return false;

@@ -138,6 +138,18 @@ const PRECLAIM_CASES: ReadonlyArray<{
 ];
 
 describe("#3529 selector preclaim capability parity", () => {
+  it("keeps checker-proven computed numbers on the supported toString path", async () => {
+    const result = await compile(`export function test(): string { return Math.pow(2, 10).toString(); }`, {
+      fileName: "computed-number-tostring.ts",
+      trackIrOutcomes: true,
+    });
+    expect(outcomes(result).find((outcome) => outcome.displayName === "test")).toMatchObject({
+      kind: "emitted",
+      stage: "patch",
+      irBodyEmitted: true,
+    });
+  });
+
   it.each(PRECLAIM_CASES)("types $name before AST-to-IR build", async ({ code, source }) => {
     const result = await compile(source, { fileName: `${code}.ts`, trackIrOutcomes: true });
     expectSelectUnsupported(outcomes(result), "test", code);
