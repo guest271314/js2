@@ -290,14 +290,17 @@ requires a mode-aware boundary plan rather than an unsafe cast.
 ## B2 implementation result — ambient zero-argument void callbacks (2026-07-21)
 
 B2 closes the benchmark helper without widening general arrow arguments. The
-accepted shape is one direct, discarded ambient
-`receiver.addEventListener(type, () => { ... })` call in a top-level function.
+accepted shape is a direct, discarded ambient
+`receiver.addEventListener(type, () => { ... })` call in a top-level function;
+the Calendar follow-up permits multiple independently certified sibling sites
+when they are the owner's only runtime declarations.
 The checker proves the declaration-file method/extern receiver, exactly two
 arguments, a synchronous zero-parameter non-empty block arrow with void result,
-no lexical `this`/`arguments`/`super`/`new.target`, no nested or sibling runtime
-declarations, and symbol-exact readonly captures. User-defined same-name
+no lexical `this`/`arguments`/`super`/`new.target`, no nested or non-certified
+sibling runtime declarations, and symbol-exact readonly captures. User-defined same-name
 methods, options arguments, parameters, concise/async/non-void arrows, mutable
-or later-written captures, and multiple callback sites remain legacy-owned.
+or later-written captures, unsupported sibling runtime declarations, and any
+non-certified callback site remain legacy-owned.
 
 The planned arrow lowers to B0's canonical closure family with the new exact
 `{ params: [], returnType: null }` signature; `null` means a zero-result Wasm
@@ -312,8 +315,8 @@ non-negative legacy `__cb_N` callbacks are unchanged.
 Final-context preparation is shared by single- and multi-source compilation.
 It validates the actual function-import ordinal as exactly
 `env.__make_callback: (i32, externref) -> externref`, rejects an occupied
-`<owner>__closure_0` before integration, and closes the affected local call
-component. Captured IR subtype names allocate against the module-wide struct
+`<owner>__closure_N` before integration for every planned source-order site,
+and closes the affected local call component. Captured IR subtype names allocate against the module-wide struct
 registry, so separate source overlays and user structs cannot reuse or
 overwrite `__ir_closure_N`. Because those final proofs require the completed
 legacy import/function registries, every selected local call component that
@@ -322,21 +325,33 @@ demotion can therefore never expose an unreachable skipped-body placeholder.
 
 ### Measured result
 
-- `tests/issue-3214-void-host-callback.test.ts`: **23/23**. Runtime dispatch
+- `tests/issue-3214-void-host-callback.test.ts`: **29/29**. Runtime dispatch
   twice, sentinel identity/cache, distinct-closure identity, `undefined`,
   arity zero, `Reflect.construct` rejection, and unchanged positive-id legacy
   dispatch; optimized/unoptimized genuine IR execution; exact
-  `-1`/maker/zero-result shape; strict pre-claim negatives including
-  symbol-vs-spelling capture ambiguity (including destructured bindings);
-  wrong maker/lifted-name collision demotion; cross-source subtype uniqueness;
-  IR-first skipped-slot containment; and standalone containment.
+  `-1`/maker/zero-result shape; two sibling sites with distinct capture/value
+  types and deterministic source-order `_0`/`_1` lifting; strict pre-claim
+  negatives including symbol-vs-spelling capture ambiguity (including
+  destructured bindings), nested sibling declarations, and mixed
+  certified/non-certified sites; wrong maker/lifted-name collision demotion;
+  cross-source subtype uniqueness; IR-first skipped-slot containment; and
+  standalone containment.
 - The production gate genuinely IR-emits `addBenchCard` and ratchets
   `body-shape-rejected` **5 -> 4**. Module-level remains **2**, async-function
   remains **4**, and every post-claim bucket remains zero.
-- The four residual body rejections are exactly calendar `renderCal`, `onDay`,
-  and `main`, plus async `delay`. B2 does not widen Calendar, Promise executors,
-  async callbacks, general arrow storage/escape, callback parameters, or
-  multiple host callback sites.
+- Before the Calendar follow-up, the four residual body rejections were exactly
+  calendar `renderCal`, `onDay`, and `main`, plus async `delay`. B2 does not
+  widen Promise executors, async callbacks, general arrow storage/escape, or
+  callback parameters.
+
+The Calendar follow-up retains the same callback ABI and admits only multiple
+independently certified sibling event sites. It assigns deterministic
+source-order lift ordinals, validates every final lifted name, and still rejects
+the whole owner for any nested or non-certified sibling declaration. Together
+with the Calendar residual lowering recorded in #2856, the live source now
+genuinely IR-emits all callback owners and ratchets `body-shape-rejected`
+**4 → 1**; the only remaining rejection is async `delay`, with zero post-claim
+demotions.
 
 ## Sequenced acceptance criteria
 

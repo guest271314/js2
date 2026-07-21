@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-21",
   "unintended": {
-    "body-shape-rejected": 4
+    "body-shape-rejected": 1
   },
   "deferred": {
     "async-function": 4

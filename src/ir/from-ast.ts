@@ -521,6 +521,8 @@ export interface IrHostVoidCallbackLoweringPlan {
   readonly ownerName: string;
   readonly signature: IrClosureSignature;
   readonly captureNames: ReadonlySet<string>;
+  /** Exact source-order lift ordinal collision-proved before integration. */
+  readonly liftedOrdinal: number;
 }
 
 /**
@@ -2852,10 +2854,29 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
     }
   }
 
-  const elemVT = asVal(elementType);
+  // Calendar's fixed day-name table is the one non-scalar vec admitted by
+  // this slice. In the JS-host string lane `IrType.string` is already carried
+  // as externref; emit the existing abstract coercion (lowering elides it for
+  // that representation) and reuse the canonical `$arr/$vec_externref`
+  // family. Native-string and host-free lanes are selector-gated and retain a
+  // defensive demotion here.
+  const storedElementIds =
+    elementType.kind === "string"
+      ? elementIds.map((id) => {
+          if (cx.resolver?.stringIsExternref?.() !== true) {
+            throw new Error(`ir/from-ast: string array literal needs the host externref carrier (${cx.funcName})`);
+          }
+          return cx.builder.emitCoerceToExternref(id);
+        })
+      : elementIds;
+  const storedElementType = elementType.kind === "string" ? irVal({ kind: "externref" }) : elementType;
+
+  const elemVT = asVal(storedElementType);
   if (!elemVT) {
     // Non-scalar (object/closure/...) element types are out of scope for this slice.
-    throw new Error(`ir/from-ast: array literal element type ${elementType.kind} not in #1804 scope (${cx.funcName})`);
+    throw new Error(
+      `ir/from-ast: array literal element type ${storedElementType.kind} not in #1804 scope (${cx.funcName})`,
+    );
   }
   const vec = cx.resolver?.resolveVecForElement?.(elemVT);
   if (!vec) {
@@ -2863,7 +2884,7 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
   }
   const vecValueType =
     cx.resolver?.resolveVecValueTypeForElement?.(elemVT) ?? ({ kind: "ref", typeIdx: vec.vecStructTypeIdx } as ValType);
-  return cx.builder.emitVecNewFixed(elementIds, elementType, irVal(vecValueType));
+  return cx.builder.emitVecNewFixed(storedElementIds, storedElementType, irVal(vecValueType));
 }
 
 /**
@@ -7940,7 +7961,8 @@ function lowerHostVoidCallbackExpression(
     !ts.isBlock(expr.body) ||
     expr.parameters.length !== 0 ||
     plan.signature.params.length !== 0 ||
-    plan.signature.returnType !== null
+    plan.signature.returnType !== null ||
+    cx.liftedCounter.value !== plan.liftedOrdinal
   ) {
     throw new Error(`ir/from-ast: malformed host void callback plan (${cx.funcName})`);
   }

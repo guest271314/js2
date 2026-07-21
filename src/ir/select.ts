@@ -60,6 +60,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
 import { closureSignatureEquals, type IrClosureSignature, type IrType } from "./nodes.js";
 import type { IrImportedFunctionResolver, IrResolvedFunctionTarget } from "./imported-functions.js";
+import type { IrHostDateSnapshotResolver } from "./host-date.js";
 import type { IrHostVoidCallbackResolver } from "./host-extern.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
@@ -363,6 +364,13 @@ export interface IrSelectionOptions {
    */
   readonly supportsLiteralStringReplace?: boolean;
   /**
+   * True only when the active backend can materialise a fixed array of
+   * checker-proven strings as an externref vec. The default is false: native
+   * strings and host-free lanes use a different string carrier and must stay
+   * on the legacy path instead of failing after an IR claim.
+   */
+  readonly supportsHostStringArrayLiterals?: boolean;
+  /**
    * (#3053 U2) True iff the unified gc member-read primitive `__dyn_member_get`
    * (#3053 U0) has a SOUND body in this compile config. The gc `$AnyValue` body
    * reads via native `__extern_get` and re-boxes with the native honest
@@ -391,6 +399,8 @@ export interface IrSelectionOptions {
    * not widen accidentally outside the production/gate shared proof.
    */
   readonly hostVoidCallbacks?: IrHostVoidCallbackResolver;
+  /** Exact checker-certified ambient zero-arg Date snapshots (Calendar). */
+  readonly hostDateSnapshots?: IrHostDateSnapshotResolver;
 }
 
 /**
@@ -3642,6 +3652,13 @@ function expressionIsProvenNumber(expr: ts.Expression, seen = new Set<ts.Variabl
   const candidate = unwrapPhase1Parens(expr);
   if (ts.isNumericLiteral(candidate)) return true;
   if (ts.isIdentifier(candidate)) {
+    // The module-binding resolver has already proved the shared slot and all
+    // of its writes numeric. Do not re-audit the declaration initializer as a
+    // local alias: host-produced numeric initializers such as
+    // `new Date().getFullYear()` are intentionally outside this helper's
+    // narrow call-expression recursion, but their module slot is still an
+    // exact f64 value.
+    if (moduleBinding(candidate)?.valueKind.kind === "f64") return true;
     const checkerProvesNumber = currentSelectionOptions?.classifyPrimitiveExpression?.(candidate) === "number";
     if (currentModuleBindingResolver?.scalarExpressionFamily(candidate) !== "f64" && !checkerProvesNumber) return false;
     const declaration = currentModuleBindingResolver?.localVariableDeclaration(candidate);
@@ -4240,12 +4257,14 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     ) {
       return shapeNo("expr-new-extern-shadow", expr.expression);
     }
-    // Calendar's module initializer uses the legacy native Date struct path,
-    // not the extern-class registry consumed by from-ast. Keep the whole
-    // synthetic unit legacy-owned until Date has an IR-native constructor;
-    // otherwise selection would claim and build would demote post-claim.
+    // Date is native-struct-owned in legacy, while this slice deliberately
+    // lowers only checker-certified host snapshots through synthetic extern
+    // imports. Module init and every broader Date shape remain legacy-owned.
     if (currentSubjectIsModuleInit && ctorName === "Date") {
       return shapeNo("expr-new-module-native-date", expr);
+    }
+    if (ctorName === "Date" && !currentSelectionOptions?.hostDateSnapshots?.(expr)) {
+      return shapeNo("expr-new-date-snapshot-shape", expr);
     }
     if (!localClasses.has(ctorName) && !isKnownExternClass(ctorName))
       return shapeNo("expr-new-ctor-unknown", expr.expression);
@@ -4375,10 +4394,33 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         family = elementFamily;
       }
     }
+    const primitiveFamilies = new Set<IrPrimitiveExpressionFamily>();
+    let everyElementPrimitive = expr.elements.length > 0;
     for (const el of expr.elements) {
       if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
       if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope
       if (!isPhase1Expr(el, scope, localClasses)) return false;
+      const family =
+        currentSelectionOptions?.classifyPrimitiveExpression?.(el) ??
+        (ts.isStringLiteral(el) || el.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral
+          ? "string"
+          : ts.isNumericLiteral(el)
+            ? "number"
+            : el.kind === ts.SyntaxKind.TrueKeyword || el.kind === ts.SyntaxKind.FalseKeyword
+              ? "boolean"
+              : undefined);
+      if (family) primitiveFamilies.add(family);
+      else everyElementPrimitive = false;
+    }
+    if (everyElementPrimitive && primitiveFamilies.size > 1) {
+      return shapeNo("expr-arraylit-mixed-primitive-family", expr);
+    }
+    if (
+      everyElementPrimitive &&
+      primitiveFamilies.has("string") &&
+      currentSelectionOptions?.supportsHostStringArrayLiterals !== true
+    ) {
+      return shapeNo("expr-arraylit-string-backend", expr);
     }
     return true;
   }

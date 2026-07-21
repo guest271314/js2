@@ -58,6 +58,7 @@ import { fileURLToPath } from "node:url";
 import { analyzeFiles } from "../src/checker/index.js";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../src/ir/select.js";
+import { makeIrHostDateSnapshotResolver } from "../src/ir/host-date.js";
 import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../src/ir/host-extern.js";
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
@@ -248,6 +249,7 @@ async function aggregate(): Promise<{
         jsHostExterns: true,
         resolveHostGlobal: makeIrHostGlobalResolver(checker),
         hostVoidCallbacks: makeIrHostVoidCallbackResolver(checker),
+        hostDateSnapshots: makeIrHostDateSnapshotResolver(checker),
         importedFunctions,
         resolveModuleBinding: makeIrModuleBindingResolver(checker, {
           numberStorage: "f64",
@@ -258,6 +260,7 @@ async function aggregate(): Promise<{
         classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(checker),
         supportsSymbolicMathHelpers: true,
         supportsLiteralStringReplace: true,
+        supportsHostStringArrayLiterals: true,
       },
       typeMap,
     );

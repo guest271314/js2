@@ -45,6 +45,7 @@ import type {
   IrTopLevelFunctionValueLoweringPlan,
 } from "../ir/from-ast.js";
 import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../ir/host-extern.js"; // (#2856/#3214)
+import { makeIrHostDateSnapshotResolver } from "../ir/host-date.js";
 import {
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
@@ -1593,8 +1594,10 @@ interface IrOverlayPlan {
   readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
   /** Bare same-file function values admitted only at certified HOF positions. */
   readonly topLevelFunctionValues: Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
-  /** Exact ambient addEventListener void arrows admitted by B2. */
+  /** Exact ambient addEventListener void arrows admitted by B2/Calendar. */
   readonly hostVoidCallbacks: Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
+  /** Synthetic host-Date import names required by each certified owner. */
+  readonly hostDateImportsByOwner: ReadonlyMap<string, ReadonlySet<string>>;
   readonly importedFunctionResolver?: IrImportedFunctionResolver;
 }
 
@@ -1826,6 +1829,19 @@ function computeIrFirstSkipSet(
       if (!retained.funcs.has(name)) skip.delete(name);
     }
   }
+  // Synthetic Date imports need the same post-declaration exact-slot proof as
+  // B2's callback maker. Keep every affected local component compile-twice so
+  // an occupied Date_new/Date_get* name can demote safely to its legacy body.
+  if (plan.hostDateImportsByOwner.size > 0 && skip.size > 0) {
+    const retained = closeMultiIrBlockedComponent(
+      _sourceFile,
+      plan.safeSelection,
+      new Set(plan.hostDateImportsByOwner.keys()),
+    );
+    for (const name of skip) {
+      if (!retained.funcs.has(name)) skip.delete(name);
+    }
+  }
   return skip;
 }
 
@@ -1871,6 +1887,7 @@ function planIrOverlay(
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ast.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
   const resolveHostVoidCallback = jsHostExterns ? makeIrHostVoidCallbackResolver(ast.checker) : undefined;
+  const resolveHostDateSnapshot = jsHostExterns ? makeIrHostDateSnapshotResolver(ast.checker) : undefined;
   // (#3053 U2) The gc `__dyn_member_get` body is sound in every config EXCEPT
   // fast host-js-string (`fast && !standalone && !wasi`): there the carrier is
   // the gc `$AnyValue` but strings are host js-string externrefs, so the native
@@ -1888,11 +1905,13 @@ function planIrOverlay(
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
       ...(resolveHostVoidCallback ? { hostVoidCallbacks: resolveHostVoidCallback } : {}),
+      ...(resolveHostDateSnapshot ? { hostDateSnapshots: resolveHostDateSnapshot } : {}),
       ...(resolveModuleBinding ? { resolveModuleBinding } : {}),
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
+      supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
       ...(jsHostExterns && options.importedFunctions ? { importedFunctions: options.importedFunctions } : {}),
       // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
       // async engine ($AsyncFrame drive / host-drive) declines it — the
@@ -2058,6 +2077,7 @@ function planIrOverlay(
   const importedCalls = new Map<ts.CallExpression, IrImportedCallLoweringPlan>();
   const topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
   const hostVoidCallbacks = new Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>();
+  const hostDateImportsByOwner = new Map<string, Set<string>>();
   if (jsHostExterns && options.importedFunctions) {
     for (const [ownerName, declaration] of declByName) {
       if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
@@ -2132,6 +2152,7 @@ function planIrOverlay(
   if (resolveHostVoidCallback) {
     for (const [ownerName, declaration] of declByName) {
       if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
+      let liftedOrdinal = 0;
       const visit = (node: ts.Node): void => {
         if (node !== declaration && ts.isFunctionLike(node)) return;
         if (ts.isCallExpression(node)) {
@@ -2141,8 +2162,31 @@ function planIrOverlay(
               ownerName,
               signature: { params: [], returnType: null },
               captureNames: certified.captureNames,
+              liftedOrdinal: liftedOrdinal++,
             });
             return;
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(declaration.body);
+    }
+  }
+  if (resolveHostDateSnapshot) {
+    for (const [ownerName, declaration] of declByName) {
+      if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
+      const visit = (node: ts.Node): void => {
+        if (node !== declaration && ts.isFunctionLike(node)) return;
+        if (ts.isNewExpression(node)) {
+          const certified = resolveHostDateSnapshot(node);
+          if (certified) {
+            let imports = hostDateImportsByOwner.get(ownerName);
+            if (!imports) hostDateImportsByOwner.set(ownerName, (imports = new Set()));
+            imports.add("Date_new");
+            for (const call of certified.getterCalls) {
+              const access = call.expression;
+              if (ts.isPropertyAccessExpression(access)) imports.add(`Date_${access.name.text}`);
+            }
           }
         }
         ts.forEachChild(node, visit);
@@ -2160,6 +2204,7 @@ function planIrOverlay(
     importedCalls,
     topLevelFunctionValues,
     hostVoidCallbacks,
+    hostDateImportsByOwner,
     ...(options.importedFunctions ? { importedFunctionResolver: options.importedFunctions } : {}),
   };
 }
@@ -2526,6 +2571,94 @@ function hasExactHostVoidCallbackMakerImport(ctx: CodegenContext): boolean {
   return false;
 }
 
+interface HostDateImportSignature {
+  readonly params: readonly ValType[];
+  readonly results: readonly ValType[];
+}
+
+const HOST_DATE_IMPORT_SIGNATURES = new Map<string, HostDateImportSignature>([
+  ["Date_new", { params: [], results: [{ kind: "externref" }] }],
+  ["Date_getDate", { params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
+  ["Date_getMonth", { params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
+  ["Date_getFullYear", { params: [{ kind: "externref" }], results: [{ kind: "f64" }] }],
+]);
+
+function hasExactHostDateImport(ctx: CodegenContext, name: string, signature: HostDateImportSignature): boolean {
+  const idx = ctx.funcMap.get(name);
+  if (idx === undefined || idx < 0 || idx >= ctx.numImportFuncs) return false;
+  let functionIndex = 0;
+  for (const imported of ctx.mod.imports) {
+    if (imported.desc.kind !== "func") continue;
+    if (functionIndex++ !== idx) continue;
+    if (imported.module !== "env" || imported.name !== name) return false;
+    const type = ctx.mod.types[imported.desc.typeIdx];
+    return (
+      type?.kind === "func" &&
+      type.params.length === signature.params.length &&
+      type.results.length === signature.results.length &&
+      type.params.every((param, i) => param.kind === signature.params[i]!.kind) &&
+      type.results.every((result, i) => result.kind === signature.results[i]!.kind)
+    );
+  }
+  return false;
+}
+
+/**
+ * Materialise and prove the synthetic host-Date ABI after legacy declaration
+ * collection. Occupied symbolic names demote the affected local component
+ * before IR build; missing names are registered as one late-import batch.
+ */
+function prepareHostDateSnapshotLowering(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  plan: IrOverlayPlan,
+  selection: IrSelection,
+): IrSelection {
+  if (plan.hostDateImportsByOwner.size === 0) return selection;
+  const blocked = new Set<string>();
+
+  // Prove every pre-existing occupant before mutating the import section. This
+  // prevents a wrong Date_get* collision from leaving a partially-added
+  // Date_new import behind on the legacy fallback path.
+  for (const [owner, names] of plan.hostDateImportsByOwner) {
+    if (!selection.funcs.has(owner)) continue;
+    for (const name of names) {
+      const signature = HOST_DATE_IMPORT_SIGNATURES.get(name);
+      if (!signature || (ctx.funcMap.has(name) && !hasExactHostDateImport(ctx, name, signature))) {
+        blocked.add(owner);
+        break;
+      }
+    }
+  }
+
+  const retainedSelection =
+    blocked.size === 0 ? selection : closeMultiIrBlockedComponent(sourceFile, selection, blocked);
+  const needed = new Set<string>();
+  for (const [owner, names] of plan.hostDateImportsByOwner) {
+    if (!retainedSelection.funcs.has(owner)) continue;
+    for (const name of names) needed.add(name);
+  }
+  let requestedLateImport = false;
+  for (const name of needed) {
+    const signature = HOST_DATE_IMPORT_SIGNATURES.get(name)!;
+    if (!ctx.funcMap.has(name)) requestedLateImport = true;
+    ensureLateImport(ctx, name, [...signature.params], [...signature.results]);
+  }
+  if (requestedLateImport) flushLateImportShifts(ctx, null);
+
+  for (const [owner, names] of plan.hostDateImportsByOwner) {
+    if (!retainedSelection.funcs.has(owner)) continue;
+    for (const name of names) {
+      const signature = HOST_DATE_IMPORT_SIGNATURES.get(name)!;
+      if (!hasExactHostDateImport(ctx, name, signature)) {
+        blocked.add(owner);
+        break;
+      }
+    }
+  }
+  return blocked.size === 0 ? retainedSelection : closeMultiIrBlockedComponent(sourceFile, retainedSelection, blocked);
+}
+
 function closeMultiIrBlockedComponent(
   sourceFile: ts.SourceFile,
   selection: IrSelection,
@@ -2559,10 +2692,10 @@ function closeMultiIrBlockedComponent(
 }
 
 /**
- * Apply B2's final-context safety proof after legacy declaration/import
- * collection. This is shared by single- and multi-file compilation: planning
- * cannot prove the eventual import slot/signature or whether a user function
- * occupies the deterministic lifted name.
+ * Apply B2/Calendar's final-context safety proof after legacy declaration /
+ * import collection. This is shared by single- and multi-file compilation:
+ * planning cannot prove the eventual import slot/signature or whether a user
+ * function occupies any deterministic source-order lifted name.
  */
 function prepareHostVoidCallbackLowering(
   ctx: CodegenContext,
@@ -2580,7 +2713,7 @@ function prepareHostVoidCallbackLowering(
     for (const callback of activePlans) blocked.add(callback.ownerName);
   }
   for (const callback of activePlans) {
-    const liftedName = `${callback.ownerName}__closure_0`;
+    const liftedName = `${callback.ownerName}__closure_${callback.liftedOrdinal}`;
     if (ctx.funcMap.has(liftedName) || ctx.mod.functions.some((fn) => fn.name === liftedName)) {
       blocked.add(callback.ownerName);
     }
@@ -3149,7 +3282,8 @@ export function generateModule(
       // classShapes → overrideMap → safeSelection → new.target gate).
       const plan = irPlan ?? planIrOverlay(ctx, ast);
       const { selection, classShapes, overrideMap, trackFallbacks } = plan;
-      const safeSelection = prepareHostVoidCallbackLowering(ctx, ast.sourceFile, plan, plan.safeSelection);
+      let safeSelection = prepareHostVoidCallbackLowering(ctx, ast.sourceFile, plan, plan.safeSelection);
+      safeSelection = prepareHostDateSnapshotLowering(ctx, ast.sourceFile, plan, safeSelection);
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes, {
         importedCalls: plan.importedCalls,
         topLevelFunctionValues: plan.topLevelFunctionValues,
@@ -5311,6 +5445,7 @@ export function generateMultiModule(
         let safeSelection = makeMultiIrSafeSelection(ctx, plan, sourceFile, safety);
         safeSelection = prepareMultiIrImportedLowering(ctx, sourceFile, plan, safeSelection);
         safeSelection = prepareHostVoidCallbackLowering(ctx, sourceFile, plan, safeSelection);
+        safeSelection = prepareHostDateSnapshotLowering(ctx, sourceFile, plan, safeSelection);
         const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes, {
           importedCalls: plan.importedCalls,
           topLevelFunctionValues: plan.topLevelFunctionValues,

@@ -66,6 +66,7 @@
 
 import {
   asValueId,
+  forEachNestedBuffer,
   type IrBlock,
   type IrBranch,
   type IrFunction,
@@ -111,6 +112,26 @@ function inlineIntoFunction(
   recursiveSet: ReadonlySet<string>,
   registry?: AllocSiteRegistry,
 ): IrFunction {
+  // Nested instruction buffers have their own def/use walk and can retain
+  // caller values defined outside the buffer. `callerRename` is intentionally
+  // flat; applying it only to an instruction's direct operands leaves those
+  // nested uses stale, while applying it blindly inside every buffer risks
+  // rewriting a buffer-local id that happens to share a test-built namespace.
+  // Keep such callers on ordinary symbolic calls until the IR has an explicit
+  // scoped rename primitive. The shared exhaustive buffer authority makes this
+  // barrier cover for/while, if, try, and for-of together. It runs before any
+  // fresh ids or allocation forks, so a rejected caller is byte-for-byte
+  // unchanged. Body-bearing callees are already rejected by `canInline`.
+  for (const block of caller.blocks) {
+    for (const instr of block.instrs) {
+      let hasNestedBuffer = false;
+      forEachNestedBuffer(instr, () => {
+        hasNestedBuffer = true;
+      });
+      if (hasNestedBuffer) return caller;
+    }
+  }
+
   const originalSize = countInstrs(caller);
   let nextValueId = caller.valueCount;
   let currentSize = originalSize;

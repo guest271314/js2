@@ -27,10 +27,14 @@ loc-budget-allow:
   - src/ir/backend/linear-integration.ts
   - src/ir/capability.ts
   - src/ir/from-ast.ts
+  - src/ir/host-date.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
   - src/ir/module-bindings.ts
+  - src/ir/passes/inline-small.ts
   - src/ir/select.ts
+  - tests/issue-2856-inline-small-buffer-caller.test.ts
+  - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-2856-module-bindings.test.ts
   - tests/issue-2856-builtins-component.test.ts
 ---
@@ -1440,15 +1444,17 @@ module-unique.
 The gate ratchets function-level `body-shape-rejected` **5 -> 4** with zero
 post-claim demotions. The exact remaining histogram is calendar `renderCal`,
 `onDay`, and `main`, plus async `delay`; module-level remains **2** and deferred
-async functions remain **4**. The 23-test B2 suite covers optimized and
+async functions remain **4**. The 29-test B2 suite covers optimized and
 unoptimized runtime dispatch, callback identity/undefined/nonconstructibility,
-unchanged legacy positive-id dispatch, IR shape, strict negatives including
-symbol-vs-spelling capture ambiguity including destructured bindings,
-cross-source name safety, maker/lifted collision demotion, and standalone
-containment. A replay regression additionally keeps any local call component
-containing a planned B2 owner out of the IR-first skip set until final-context
-maker/lifted-name proofs complete, preventing skipped-body placeholders after a
-safe demotion. Calendar and Promise/async executor shapes are unchanged.
+unchanged legacy positive-id dispatch, distinct per-site values and capture
+shapes, IR shape, strict negatives including symbol-vs-spelling capture
+ambiguity including destructured bindings, nested/non-certified sibling
+declarations, cross-source name safety, maker/lifted collision demotion, and
+standalone containment. A replay regression additionally keeps any local call
+component containing a planned B2 owner out of the IR-first skip set until
+final-context maker/lifted-name proofs complete, preventing skipped-body
+placeholders after a safe demotion. Promise/async executor shapes are
+unchanged.
 
 ### Ordering and landability
 
@@ -1521,6 +1527,52 @@ Validation on the B0 base:
   (`body-shape-rejected` 12 → 11, `call-graph-closure` 0 → 1) because `onDay`
   calls the still-arrow-blocked `renderCal`. The baseline JSON remains
   untouched; B2 removes that temporary closure before this slice is banked.
+
+### Calendar 4→1 implementation result (2026-07-21)
+
+The prepared Calendar shapes are now banked on the exact B2 stack. Four narrow
+pieces complete the live source without widening the Promise/async surface:
+
+- B2 callback planning now accepts multiple independently checker-certified
+  sibling `addEventListener` sites. Every lifted callback receives a stable
+  source-order ordinal, every `<owner>__closure_N` name is final-context
+  validated, and any uncertified/nested sibling declaration rejects the owner
+  before claim.
+- Homogeneous string-literal array expressions lower to the existing
+  externref-vector family only in JS-host, non-native-string mode. Each element
+  uses the established string-to-externref coercion; mixed, sparse, spread,
+  annotated-carrier, callback-use, native-string, standalone, WASI, and linear
+  shapes remain pre-claim rejections.
+- Exact ambient `new Date()` snapshots with only zero-argument `getDate`,
+  `getMonth`, and `getFullYear` reads lower through synthetic JS-host imports.
+  Selection is checker-certified and symbol-exact; aliases, escapes, writes,
+  optional calls, constructor arguments, unsupported methods, shadowed Date,
+  nested ownership, and host-free targets reject before claim. Final-context
+  preparation runs after callback preparation, registers only the retained
+  component's exact imports as one batch, and demotes the entire connected
+  component on any name/signature collision without leaving partial imports.
+  This host-only path follows JavaScript's local-time getter semantics; legacy
+  native Date behavior is unchanged.
+- `inlineSmall` now treats any caller containing nested instruction buffers as
+  a conservative inlining barrier. This prevents result-id rewrites from
+  leaving stale uses inside loop/if/while bodies; ordinary buffer-free inlining
+  remains enabled.
+
+The 23-test Calendar residual suite proves runtime behavior, strict negative
+containment, final-context Date/callback collision ordering, deterministic
+parallel compilation, and the live source itself. The direct anti-vacuity
+compile genuinely IR-emits `renderCal` plus closures 0–2, `onDay`, and `main`
+plus closures 0–3; its Wasm validates, its Date import set is exactly
+`Date_new`, `Date_getDate`, `Date_getMonth`, and `Date_getFullYear`, and
+`irPostClaimErrors` is empty. The nested-buffer inliner regression also
+executes and validates with zero post-claim demotions.
+
+The production gate ratchets function-level `body-shape-rejected` **4 → 1**.
+Calendar contributes no residual; `--shape-diag` identifies the sole remaining
+rejection as async `delay` (`expr-new-type-args:NewExpression`). Deferred
+`async-function` remains **4**, module-level `body-shape-rejected` remains
+**2**, all post-claim buckets remain zero, and no rejection is reclassified
+into another unintended bucket.
 
 ### At corpus-zero — the promotion question (answered)
 
