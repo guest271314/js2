@@ -21,6 +21,13 @@ accounting. Strict remains intentionally non-green on those six typed blockers
 and the separately reported 37 legacy-emitted bodies; R0 does not claim that
 the compiler is IR-only.
 
+PR #3483's merge-group differential workflow exposed one release-boundary
+regression that branch protection did not block: inferred mutually recursive
+boolean returns lost their i32 brand before an `externref` console call, moving
+the corpus from 99 / 104 to 98 / 104. Follow-up PR #3486 fixed the producer
+seam with the canonical `__box_boolean` helper and restored 99 / 104 without
+widening either the differential or equivalence baseline.
+
 ## Process lessons
 
 - Run full equivalence early when changing failure classification: focused
@@ -31,6 +38,9 @@ the compiler is IR-only.
   green hybrid policy is evidence of honest fallback, not strict readiness.
 - Keep baseline cleanup separate from recovery work; the one newly passing
   known case can be ratcheted without obscuring the zero-regression result.
+- Treat an advisory differential failure as release-blocking evidence even
+  when branch protection permits the queue merge. Close the sprint only after
+  the defect is fixed and a fresh merge-group run proves the restored floor.
 
 ## Carry-over
 
@@ -38,3 +48,19 @@ the compiler is IR-only.
 `IrUnitId` and `ProgramAbiMap`; R2–R8 remain blocked behind R1 and their declared
 dependency chain. The v0.65.0 release follows this sprint boundary; execution
 pauses after that release is published and verified.
+
+The fresh close harvest mapped all normalized Test262 clusters above 50 rows
+to existing Markdown owners except one. Backlog issue #3531 now owns the 216
+standalone rows that leak `__array_concat_any`, `__js_array_new`, and
+`__js_array_push`.
+
+## Close validation
+
+- PR #3486 merged as `a9b276c0eed97b2ce29b7ccaa29ebc5f4853e08d`,
+  which is also the published `sprint/74` tag target.
+- Authoritative Test262 merge-group run
+  [29857062450](https://github.com/loopdive/js2/actions/runs/29857062450)
+  passed at that SHA, including the nonempty merged-report job.
+- JS-host closed at **30,282 / 43,099**, unchanged from Sprint 73. Standalone
+  closed at **28,149 / 43,106**, a **+13-pass** improvement with no total-count
+  change.
