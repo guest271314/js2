@@ -17,7 +17,8 @@
 // What it does (the plain `pnpm version` experience, but covering BOTH packages
 // in a single commit + tag):
 //   1. Resolve a concrete target version V.
-//   2. Bump root + packages/js2wasm package.json to V (no per-package commit/tag).
+//   2. Bump root + packages/js2wasm package.json to V and pin the proxy's
+//      @loopdive/js2 dependency to V (no per-package commit/tag).
 //   3. Make ONE commit `release: vV` with both package.jsons (+ lockfile if it
 //      changed) and ONE annotated tag `vV` pointing at it.
 //   4. It does NOT push — pushing the tag before the PR merges would fire
@@ -28,13 +29,33 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const releaseScriptPath = fileURLToPath(import.meta.url);
+const __dirname = dirname(releaseScriptPath);
 const repoRoot = resolve(__dirname, "..");
 const proxyDir = join(repoRoot, "packages", "js2wasm");
 
 function readVersion(dir) {
   const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
   return pkg.version;
+}
+
+export function pinProxyDependency(pkg, version) {
+  if (typeof pkg.dependencies?.["@loopdive/js2"] !== "string") {
+    throw new Error('proxy package.json must depend on "@loopdive/js2"');
+  }
+  return {
+    ...pkg,
+    dependencies: {
+      ...pkg.dependencies,
+      "@loopdive/js2": version,
+    },
+  };
+}
+
+function setProxyDependency(dir, version) {
+  const path = join(dir, "package.json");
+  const pkg = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, `${JSON.stringify(pinProxyDependency(pkg, version), null, 2)}\n`);
 }
 
 function fail(msg) {
@@ -124,6 +145,7 @@ function main() {
 
   setVersion(repoRoot, target);
   setVersion(proxyDir, target);
+  setProxyDependency(proxyDir, target);
 
   // Bump the JSR manifest (jsr.json) in lockstep too. It carries its OWN
   // "version" field that pnpm/setVersion never touches — so without this,
@@ -137,14 +159,20 @@ function main() {
   // Assert both ended up identical — guards against pnpm version surprises.
   const newRoot = readVersion(repoRoot);
   const newProxy = readVersion(proxyDir);
-  if (newRoot !== target || newProxy !== target) {
-    fail(`lockstep bump failed: root=${newRoot} proxy=${newProxy} expected=${target}`);
+  const proxyPkg = JSON.parse(readFileSync(join(proxyDir, "package.json"), "utf8"));
+  const newProxyDependency = proxyPkg.dependencies?.["@loopdive/js2"];
+  if (newRoot !== target || newProxy !== target || newProxyDependency !== target) {
+    fail(
+      `lockstep bump failed: root=${newRoot} proxy=${newProxy} ` +
+        `proxy dependency=${newProxyDependency} expected=${target}`,
+    );
   }
 
   console.log(
     `\nBumped both packages to ${target}:\n` +
       `  - package.json (@loopdive/js2)            → ${newRoot}\n` +
-      `  - packages/js2wasm/package.json (proxy)   → ${newProxy}\n`,
+      `  - packages/js2wasm/package.json (proxy)   → ${newProxy}\n` +
+      `  - proxy dependency on @loopdive/js2       → ${newProxyDependency}\n`,
   );
 
   // Stage exactly the files the bump touches: both package.jsons plus the
@@ -169,9 +197,11 @@ function main() {
   console.log(
     `     history), push the tag to trigger publish:\n` +
       `       git push origin ${tag}\n` +
-      `     publish-npm.yml's verify-version job confirms tag == both package.json`,
+      `     publish-npm.yml's verify-version job confirms the tag, manifests,`,
   );
-  console.log(`     versions before publishing. See docs/releasing.md.`);
+  console.log(`     and proxy dependency all match before publishing. See docs/releasing.md.`);
 }
 
-main();
+if (resolve(process.argv[1] || "") === releaseScriptPath) {
+  main();
+}

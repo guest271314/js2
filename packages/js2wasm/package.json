@@ -41,7 +41,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@loopdive/js2": "0.60.1"
+    "@loopdive/js2": "0.64.0"
   },
   "author": "Thomas Tränkler <git@thomas.traenkler.com>",
   "license": "Apache-2.0 WITH LLVM-exception",
