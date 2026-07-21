@@ -1,5 +1,6 @@
 import { expect } from "vitest";
 import { compile, type CompileResult } from "../../src/index.js";
+import { isWasiErrorName } from "../../src/codegen/registry/error-types.js";
 import { buildStringConstants, buildImports as buildRuntimeImports } from "../../src/runtime.js";
 import ts from "typescript";
 import { readFileSync } from "node:fs";
@@ -210,6 +211,31 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
       return Object.getOwnPropertyDescriptor(obj, prop);
     },
   };
+
+  // #3529 P5 — manual-instantiation equivalence tests still need faithful
+  // host constructors for the eight built-in Error-family manifest imports.
+  // Reuse the production resolver for only those exact descriptors so
+  // constructor argument trimming, AggregateError, and native prototypes stay
+  // aligned with `src/runtime.ts::buildImports` without turning this compact
+  // helper into an unrestricted second runtime implementation.
+  const errorConstructorImports = result.imports.filter((descriptor) => {
+    if (descriptor.module !== "env" || descriptor.kind !== "func" || !descriptor.name.startsWith("__new_")) {
+      return false;
+    }
+    const errorName = descriptor.name.slice("__new_".length);
+    if (!isWasiErrorName(errorName)) return false;
+    if (descriptor.intent.type === "extern_class") {
+      return descriptor.intent.action === "new" && descriptor.intent.className === errorName;
+    }
+    // AggregateError owns a specialised runtime builtin because its iterable
+    // `errors` argument and optional cause cannot use the generic extern-class
+    // constructor bridge.
+    return descriptor.intent.type === "builtin" && descriptor.intent.name === descriptor.name;
+  });
+  if (errorConstructorImports.length > 0) {
+    Object.assign(env, buildRuntimeImports(errorConstructorImports, undefined, result.stringPool).env);
+  }
+
   return {
     env,
     "wasm:js-string": jsStringPolyfill,
