@@ -12,6 +12,7 @@ export * from "./verify-alloc.js";
 export * from "./lower.js";
 export * from "./backend/legality.js";
 export * from "./select.js";
+export * from "./select-identity.js";
 export * from "./from-ast.js";
 export * from "./integration.js";
 export * from "./analysis/encoding.js";

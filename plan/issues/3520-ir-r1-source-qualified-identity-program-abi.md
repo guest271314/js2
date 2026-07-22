@@ -6,6 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: symphony/3520-r1-planning-identity
+pr: 3496
 last_merged_pr: 3490
 sprint: current
 created: 2026-07-21
@@ -686,6 +687,32 @@ projection, outcome, multi-source, and linear tests. Typecheck, lint,
 formatting, diff, and LOC-budget checks pass. Selection, feature plans,
 IR-first closure, and final outcome correlation still need to retain IDs
 through their remaining legacy calls.
+
+Stage 4 adds the structural selector and a fail-closed legacy projection:
+
+- `planIrCompilationByIdentity` keys function/member claims, fallbacks,
+  recursive evidence, and local call edges by `IrUnitId`; class-member facts
+  also retain their exact `IrClassId`, while names remain compatibility labels;
+- exact terminal/class/module ownership is validated against the authoritative
+  context. Missing or mismatched joins raise typed planning invariants instead
+  of becoming name lookups, plain errors, or silent omissions;
+- the structural receiving population includes unnamed functions, anonymous
+  class members, and implicit-constructor terminals even when an existing
+  direct failure keeps them outside the claim set;
+- duplicate function/class labels and repeated class-shape descriptors never
+  choose first/last wins. The adapter omits ambiguous occupants and re-closes
+  their local-call component with the existing host-versus-standalone caller
+  policy before producing the still-name-keyed `IrSelection`; and
+- the structural selector reuses the production selector predicates and has a
+  direct unambiguous projection-parity test. This checkpoint is additive; the
+  production overlay has not switched to it yet.
+
+The Stage 4 selector suite passes **12/12**. The combined #3520, #3142,
+#3143, and #3529 selector/preclaim matrix passes **192/192**. Typecheck, lint,
+formatting, diff, and LOC-budget checks pass. The standalone #1169q control
+retains its pre-existing async fallback-expectation mismatch (**9/10**); no
+selector semantics changed. No local Test262 run or baseline refresh was
+performed.
 
 ### R1a validation evidence
 
