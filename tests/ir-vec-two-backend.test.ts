@@ -29,9 +29,11 @@ import { lowerIrFunctionToWasm } from "../src/ir/lower.js";
 import { emitBinary } from "../src/emit/binary.js";
 import { defaultOperationsForLayout, irVal, planLinearVectorLayout, type IrLowerResolver } from "../src/ir/index.js";
 import type { BlockType, Instr, ValType, WasmFunction, WasmModule } from "../src/ir/types.js";
+import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
 const wasmgc = new WasmGcEmitter();
 const linear = new LinearEmitter();
+const irIdentities = createTestIrFunctionIdentityFactory("ir-vec-two-backend");
 
 const gcVec: IrVecLowering = {
   vecStructTypeIdx: 7,
@@ -289,7 +291,11 @@ describe("#2954 whole-function lowering through LinearEmitter runs in linear mem
     );
     if (!decl) throw new Error(`no function ${name} in source`);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return lowerFunctionAstToIr(decl, { exported: true, calleeTypes: calleeTypes as any }).main;
+    return lowerFunctionAstToIr(decl, {
+      ownerUnitId: irIdentities.next(name).unitId,
+      exported: true,
+      calleeTypes: calleeTypes as any,
+    }).main;
   }
 
   /** Wrap one lowered WasmFunction (index 0, exported) in a linear-memory module. */

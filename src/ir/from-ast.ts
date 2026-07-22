@@ -80,6 +80,7 @@ import {
   stringIndexProvenBelow,
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
+import { allocateLiftedFunctionArtifact, type IrFunctionIdentity, type IrUnitId } from "./identity.js";
 import { IrUnsupportedError } from "./outcomes.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
@@ -401,8 +402,8 @@ export interface IrFromAstResolver {
 
 export interface AstToIrOptions {
   readonly exported?: boolean;
-  /** Authoritative terminal owner for exact feature-plan consumption. */
-  readonly ownerUnitId?: IrImportedCallLoweringPlan["ownerUnitId"];
+  /** Authoritative identity for the main artifact and exact feature-plan owner. */
+  readonly ownerUnitId: IrUnitId;
   /**
    * #1370 Phase B: explicit name for the lowered function. Required for
    * MethodDeclaration (where `.name` is `PropertyName`, not Identifier)
@@ -555,7 +556,7 @@ export function lowerFunctionAstToIr(
     // VOID method (setters carry no source-level return type).
     | ts.GetAccessorDeclaration
     | ts.SetAccessorDeclaration,
-  options: AstToIrOptions = {},
+  options: AstToIrOptions,
 ): LoweredFunctionResult {
   // #1370 Phase B: name resolution.
   //
@@ -665,7 +666,7 @@ export function lowerFunctionAstToIr(
 
   // Slice 14 (#1228) — void functions have zero result types; pass `[]`.
   const builder = new IrFunctionBuilder(
-    name,
+    { unitId: options.ownerUnitId, name },
     returnType === null ? [] : [returnType],
     options.exported ?? false,
     options.allocRegistry,
@@ -1451,7 +1452,7 @@ interface LowerCtx {
   readonly builder: IrFunctionBuilder;
   readonly scope: Map<string, ScopeBinding>;
   readonly funcName: string;
-  readonly ownerUnitId?: IrImportedCallLoweringPlan["ownerUnitId"];
+  readonly ownerUnitId: IrUnitId;
   // Slice 14 (#1228) — `null` means the enclosing function is void.
   // `lowerTail` checks this to accept bare `return;` / fall-through tails.
   readonly returnType: IrType | null;
@@ -8204,8 +8205,9 @@ function lowerClosureExpressionWithSignature(
     }
   }
 
-  const liftedName = exactClosureLiftedName(cx.funcName, cx.liftedCounter.value, exact?.expectedLiftedName);
-  cx.liftedCounter.value++;
+  const liftedIdentity = allocateLiftedFunctionArtifact(cx, (ordinal) =>
+    exactClosureLiftedName(cx.funcName, ordinal, exact?.expectedLiftedName),
+  );
 
   // Materialize capture args. Mutable captures need a refcell; if the
   // outer doesn't already have one (a sibling closure may have built
@@ -8253,7 +8255,7 @@ function lowerClosureExpressionWithSignature(
   // Lift body. The lifted function takes (__self: IrType.closure,
   // ...sig.params) and reads captures via `closure.cap`.
   const lifted = liftClosureBody(
-    liftedName,
+    liftedIdentity,
     expr,
     signature,
     captures,
@@ -8263,7 +8265,12 @@ function lowerClosureExpressionWithSignature(
   );
   cx.lifted.push(lifted);
 
-  return cx.builder.emitClosureNew({ kind: "func", name: liftedName }, signature, captureFieldTypes, captureArgs);
+  return cx.builder.emitClosureNew(
+    { kind: "func", name: liftedIdentity.name },
+    signature,
+    captureFieldTypes,
+    captureArgs,
+  );
 }
 
 /**
@@ -8290,13 +8297,16 @@ function lowerNestedFunctionDeclaration(fn: ts.FunctionDeclaration, cx: LowerCtx
   const signature: IrClosureSignature = { params, returnType };
 
   const captures = analyseCaptures(fn, cx);
-  const liftedName = `${cx.funcName}__nested_${innerName}_${cx.liftedCounter.value++}`;
+  const liftedIdentity = allocateLiftedFunctionArtifact(
+    cx,
+    (ordinal) => `${cx.funcName}__nested_${innerName}_${ordinal}`,
+  );
 
-  const lifted = liftNestedFunction(liftedName, fn, signature, captures, cx);
+  const lifted = liftNestedFunction(liftedIdentity, fn, signature, captures, cx);
   cx.lifted.push(lifted);
 
   // Add to the OUTER scope.
-  cx.scope.set(innerName, { kind: "nestedFunc", liftedName, signature, captures });
+  cx.scope.set(innerName, { kind: "nestedFunc", liftedName: liftedIdentity.name, signature, captures });
 }
 
 /**
@@ -8306,16 +8316,17 @@ function lowerNestedFunctionDeclaration(fn: ts.FunctionDeclaration, cx: LowerCtx
  * dereferences them via refcell.get on read.
  */
 function liftNestedFunction(
-  liftedName: string,
+  liftedIdentity: IrFunctionIdentity,
   fn: ts.FunctionDeclaration,
   signature: IrClosureSignature,
   captures: readonly NestedCapture[],
   cx: LowerCtx,
 ): IrFunction {
+  const liftedName = liftedIdentity.name;
   if (signature.returnType === null) {
     throw new Error(`ir/from-ast: void nested function signatures are outside slice 3 (${liftedName})`);
   }
-  const builder = new IrFunctionBuilder(liftedName, [signature.returnType], false, cx.allocRegistry);
+  const builder = new IrFunctionBuilder(liftedIdentity, [signature.returnType], false, cx.allocRegistry);
   const scope = new Map<string, ScopeBinding>();
 
   // Prepend capture params before the user's params.
@@ -8387,7 +8398,7 @@ function innerName(fn: ts.FunctionDeclaration): string {
  * lowerer can emit the correct `ref.cast` on closure.cap.
  */
 function liftClosureBody(
-  liftedName: string,
+  liftedIdentity: IrFunctionIdentity,
   expr: ts.ArrowFunction | ts.FunctionExpression,
   signature: IrClosureSignature,
   captures: readonly NestedCapture[],
@@ -8395,8 +8406,9 @@ function liftClosureBody(
   cx: LowerCtx,
   allowConciseVoidBody = false,
 ): IrFunction {
+  const liftedName = liftedIdentity.name;
   const builder = new IrFunctionBuilder(
-    liftedName,
+    liftedIdentity,
     signature.returnType === null ? [] : [signature.returnType],
     false,
     cx.allocRegistry,

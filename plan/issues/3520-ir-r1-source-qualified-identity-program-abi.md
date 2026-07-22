@@ -34,6 +34,7 @@ files:
   - src/ir/planning-identity.ts
   - src/ir/program-abi.ts
   - src/ir/index.ts
+  - src/ir/contract.ts
   - src/ir/nodes.ts
   - src/ir/outcomes.ts
   - src/ir/builder.ts
@@ -89,6 +90,12 @@ files:
   - src/codegen/ir-overlay-safety.ts
   - src/codegen/index.ts
   - src/codegen/stdlib-selfhost.ts
+  - docs/ir/ir-contract.md
+  - docs/ir/ir-module.schema.json
+  - benchmarks/allocation-policy-proof.ts
+  - tests/helpers/ir-identities.ts
+  - tests/backend-contract.test.ts
+  - tests/issue-3520-function-artifact-identity.test.ts
   - tests/issue-3520-ir-unit-identity.test.ts
   - tests/issue-3520-program-abi.test.ts
   - tests/issue-3520-legacy-unit-projection.test.ts
@@ -829,6 +836,47 @@ or baseline refresh was performed.
 Commit 2 is complete. `IrFunction`/`IrFuncRef`, pass edit tables, verification,
 and backend callable references remain the next Commit 3 boundary; whole-
 program ABI binding and the legacy slot adapter remain Commit 4.
+
+Stage 8 begins Commit 3 by making function-artifact identity total:
+
+- every `IrFunction` now carries its required `IrUnitId`; the builder accepts
+  the structural ID and compatibility label atomically, and WasmGC integration
+  rejects a selected function, class member, or module initializer that lacks
+  its exact prepared identity;
+- main functions retain their terminal owner ID. Lifted closures and nested
+  functions derive IDs from `{ parentId, "lifted-closure", ordinal }`, with
+  label and ID allocated from the same counter. Monomorphization clones derive
+  from the callee ID and canonical clone-plan ordinal rather than clone names;
+- the linear integration seam supplies the same owner IDs, and every other
+  production pass copy preserves `unitId`. Repeated benchmark construction now
+  uses explicit, stable artifact IDs rather than process-order counters;
+- the self-host cache stores an `Omit<IrFunction, "unitId">` template, checks
+  resolver/dialect/type-index eligibility before lookup, fingerprints the
+  template input, and rematerializes a fresh artifact with the caller's live
+  support ID; and
+- the frozen interchange contract is now v2.0. Serialized functions and
+  coverage rows both require `unitId`; `name` is documented as the temporary
+  compatibility/reference label while callable/global/type references remain
+  symbolic in this bounded sub-slice.
+
+The #3520/backend/phase3c matrix passes **168/168**; including the repeated-
+benchmark identity proof, the focused matrix has **174 passing** with one
+intentional skip. The compatibility matrix passes **233/233** and the cross-
+backend differential suite passes **29/29**. Full equivalence remains **1,608
+passing / 35 failing** against 36 known baseline failures: there are no new
+regressions and one baseline failure now passes; the baseline is intentionally
+unchanged. Hybrid IR-only readiness remains **31 emitted / 6 typed Unsupported
+/ 0 Invariants** across 37 terminal units, and the fallback gate has zero
+unintended, post-claim, or module-level increases. The separate six-file
+known-base matrix is **51 passing / 11 known failures** on this branch versus
+**50 passing / 12 failures** on exact control `7906aa8a80327c`: all 11 branch
+failures reproduce identically, while the required-identity fixture migration
+fixes one stale scaffold failure. Typecheck, lint, formatting, diff, and LOC-
+budget checks pass. No local Test262 run or baseline refresh was performed.
+
+Commit 3.1 is complete. Typed callable binding/reference migration, structural
+pass edit tables, and backend binding consumption remain the next Commit 3
+sub-slices; whole-program ABI binding and the legacy slot adapter remain Commit 4.
 
 ### R1a validation evidence
 

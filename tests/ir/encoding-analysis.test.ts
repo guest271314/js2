@@ -22,7 +22,9 @@ import {
   type Encoding,
   type IrType,
 } from "../../src/ir/index.js";
+import { createTestIrFunctionIdentityFactory } from "../helpers/ir-identities.js";
 
+const identities = createTestIrFunctionIdentityFactory("ir/encoding-analysis");
 const STR: IrType = { kind: "string" };
 const NS = ALLOC_NAMESPACES.encoding;
 
@@ -80,7 +82,7 @@ describe("#1588 — classifyLiteral", () => {
 describe("#1588 — analyzeEncoding pass", () => {
   it("annotates a string literal's alloc site with its classification", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const s = b.emitStringConst("hi");
     b.terminate({ kind: "return", values: [s] });
@@ -93,7 +95,7 @@ describe("#1588 — analyzeEncoding pass", () => {
 
   it("annotates a non-ASCII literal as utf8-guaranteed", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const s = b.emitStringConst("café");
     b.terminate({ kind: "return", values: [s] });
@@ -106,7 +108,7 @@ describe("#1588 — analyzeEncoding pass", () => {
 
   it("concat of two ASCII literals stays ascii", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const a = b.emitStringConst("foo");
     const c = b.emitStringConst("bar");
@@ -122,7 +124,7 @@ describe("#1588 — analyzeEncoding pass", () => {
 
   it("concat of ascii + utf8 joins to utf8-guaranteed", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const a = b.emitStringConst("foo"); // ascii
     const c = b.emitStringConst("café"); // utf8
@@ -138,7 +140,7 @@ describe("#1588 — analyzeEncoding pass", () => {
 
   it("concat with an untracked (param) operand is conservatively wtf16", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     const p = b.addParam("s", STR); // no origin rule → wtf16
     b.openBlock();
     const lit = b.emitStringConst("x"); // ascii
@@ -154,7 +156,7 @@ describe("#1588 — analyzeEncoding pass", () => {
 
   it("is read-only — the IR function is structurally unchanged", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const s = b.emitStringConst("hi");
     b.terminate({ kind: "return", values: [s] });
@@ -168,7 +170,7 @@ describe("#1588 — analyzeEncoding pass", () => {
 
   it("is idempotent — re-running yields the same annotation", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const s = b.emitStringConst("hi");
     b.terminate({ kind: "return", values: [s] });
@@ -192,7 +194,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
   it("JSON.parse / JSON.stringify results are utf8-guaranteed", () => {
     for (const fnName of ["JSON_parse", "JSON_stringify"]) {
       const reg = new AllocSiteRegistry();
-      const b = new IrFunctionBuilder("f", [STR], false, reg);
+      const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
       const arg = b.addParam("x", STR);
       b.openBlock();
       const r = b.emitCall({ kind: "func", name: fnName }, [arg], STR)!;
@@ -206,7 +208,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
   it("encoding-preserving string methods propagate the receiver encoding", () => {
     // ASCII receiver → toUpperCase stays ascii.
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const recv = b.emitStringConst("hello"); // ascii
     const r = b.emitCall({ kind: "func", name: "string_toUpperCase" }, [recv], STR)!;
@@ -218,7 +220,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
 
   it("native-mode method prefix (__str_) also propagates", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const recv = b.emitStringConst("café"); // utf8-guaranteed
     const r = b.emitCall({ kind: "func", name: "__str_trim" }, [recv], STR)!;
@@ -230,7 +232,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
 
   it("slice is conservatively wtf16 (code-unit indices can split a pair)", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const recv = b.emitStringConst("hello"); // ascii receiver
     const r = b.emitCall({ kind: "func", name: "string_slice" }, [recv], STR)!;
@@ -242,7 +244,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
 
   it("an unknown string-returning call is conservatively wtf16", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const r = b.emitCall({ kind: "func", name: "someUserFunc" }, [], STR)!;
     b.terminate({ kind: "return", values: [r] });
@@ -253,7 +255,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
 
   it("a non-string-returning call gets no string alloc id / no annotation", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [irVal({ kind: "f64" })], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [irVal({ kind: "f64" })], false, reg);
     b.openBlock();
     const r = b.emitCall({ kind: "func", name: "numFunc" }, [], irVal({ kind: "f64" }))!;
     b.terminate({ kind: "return", values: [r] });
@@ -265,7 +267,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
 
   it("TextDecoder.decode (extern.call) is utf8-guaranteed", () => {
     const reg = new AllocSiteRegistry();
-    const b = new IrFunctionBuilder("f", [STR], false, reg);
+    const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     const buf = b.addParam("buf", irVal({ kind: "externref" }));
     b.openBlock();
     const r = b.emitExternCall("TextDecoder", "decode", buf, [], STR)!;

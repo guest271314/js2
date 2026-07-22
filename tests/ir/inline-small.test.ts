@@ -20,6 +20,9 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../../src/index.js";
 import { asBlockId, asValueId, irVal, verifyIrFunction, type IrFunction, type IrValueId } from "../../src/ir/index.js";
 import { inlineSmall } from "../../src/ir/passes/inline-small.js";
+import { createTestIrFunctionIdentityFactory } from "../helpers/ir-identities.js";
+
+const irIdentities = createTestIrFunctionIdentityFactory("ir/inline-small");
 
 // ---------------------------------------------------------------------------
 // Unit-test helpers
@@ -36,7 +39,7 @@ const BOOL = irVal({ kind: "i32" });
 // 1 param + 4 instrs + return. Well under the 10-instr limit.
 function makeAbsCallee(): IrFunction {
   return {
-    name: "abs",
+    ...irIdentities.next("abs"),
     params: [{ value: id(0), type: F64, name: "x" }],
     resultTypes: [F64],
     blocks: [
@@ -68,7 +71,7 @@ function makeAbsCallee(): IrFunction {
 // Caller: `run(n) = abs(n)`. Single-block, single call, returns the result.
 function makeRunCaller(): IrFunction {
   return {
-    name: "run",
+    ...irIdentities.next("run"),
     params: [{ value: id(0), type: F64, name: "n" }],
     resultTypes: [F64],
     blocks: [
@@ -154,7 +157,7 @@ describe("#1167b — inlineSmall (unit)", () => {
     // `rec(x) = rec(x)` — trivially recursive, single-block, returns via
     // the recursive call's result. canInline must reject it.
     const rec: IrFunction = {
-      name: "rec",
+      ...irIdentities.next("rec"),
       params: [{ value: id(0), type: F64, name: "x" }],
       resultTypes: [F64],
       blocks: [
@@ -178,7 +181,7 @@ describe("#1167b — inlineSmall (unit)", () => {
       valueCount: 2,
     };
     const caller: IrFunction = {
-      name: "run",
+      ...irIdentities.next("run"),
       params: [{ value: id(0), type: F64, name: "n" }],
       resultTypes: [F64],
       blocks: [
@@ -210,7 +213,7 @@ describe("#1167b — inlineSmall (unit)", () => {
   it("skips a multi-block callee", () => {
     // A two-block callee is rejected by canInline regardless of size.
     const multi: IrFunction = {
-      name: "two",
+      ...irIdentities.next("two"),
       params: [{ value: id(0), type: F64, name: "x" }],
       resultTypes: [F64],
       blocks: [
@@ -233,7 +236,7 @@ describe("#1167b — inlineSmall (unit)", () => {
       valueCount: 1,
     };
     const caller: IrFunction = {
-      name: "run",
+      ...irIdentities.next("run"),
       params: [{ value: id(0), type: F64, name: "n" }],
       resultTypes: [F64],
       blocks: [
@@ -275,7 +278,7 @@ describe("#1167b — inlineSmall (unit)", () => {
       });
     }
     const large: IrFunction = {
-      name: "large",
+      ...irIdentities.next("large"),
       params: [],
       resultTypes: [F64],
       blocks: [
@@ -291,7 +294,7 @@ describe("#1167b — inlineSmall (unit)", () => {
       valueCount: 11,
     };
     const caller: IrFunction = {
-      name: "run",
+      ...irIdentities.next("run"),
       params: [],
       resultTypes: [F64],
       blocks: [
@@ -320,7 +323,7 @@ describe("#1167b — inlineSmall (unit)", () => {
 
   it("returns the same module reference when nothing is inlinable", () => {
     const only: IrFunction = {
-      name: "f",
+      ...irIdentities.next("f"),
       params: [{ value: id(0), type: F64, name: "n" }],
       resultTypes: [F64],
       blocks: [

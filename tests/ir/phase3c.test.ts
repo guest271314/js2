@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import {
   asBlockId,
   asValueId,
+  createDerivedIrUnitId,
   irDynamic,
   irVal,
   lowerIrFunctionToWasm,
@@ -34,6 +35,9 @@ import { monomorphize } from "../../src/ir/passes/monomorphize.js";
 import { runTaggedUnions, taggedUnions } from "../../src/ir/passes/tagged-unions.js";
 import { UnionStructRegistry } from "../../src/ir/passes/tagged-union-types.js";
 import type { StructTypeDef, ValType } from "../../src/ir/types.js";
+import { createTestIrFunctionIdentityFactory } from "../helpers/ir-identities.js";
+
+const irIdentities = createTestIrFunctionIdentityFactory("ir/phase3c");
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -50,7 +54,7 @@ const I32 = irVal({ kind: "i32" });
 /** Build a simple identity callee whose body is empty (return param). */
 function makeIdentity(name: string, paramType = F64): IrFunction {
   return {
-    name,
+    ...irIdentities.next(name),
     params: [{ value: id(0), type: paramType, name: "x" }],
     resultTypes: [paramType],
     blocks: [
@@ -74,7 +78,7 @@ function makeIdentity(name: string, paramType = F64): IrFunction {
  */
 function makeCallerPassingParam(callerName: string, calleeName: string, argType = F64): IrFunction {
   return {
-    name: callerName,
+    ...irIdentities.next(callerName),
     params: [{ value: id(0), type: argType, name: "n" }],
     resultTypes: [argType],
     blocks: [
@@ -153,6 +157,14 @@ describe("#1167c — monomorphize (unit)", () => {
     // The clone function exists in the module and verifies.
     const cloneFn = result.module.functions.find((f) => f.name === cloneName)!;
     expect(cloneFn).toBeDefined();
+    expect(cloneFn.unitId).toBe(
+      createDerivedIrUnitId({
+        parentId: identity.unitId,
+        role: "monomorphization-clone",
+        ordinal: 0,
+      }),
+    );
+    expect(cloneFn.unitId).not.toBe(identity.unitId);
     expect(verifyIrFunction(cloneFn)).toEqual([]);
   });
 
@@ -172,7 +184,7 @@ describe("#1167c — monomorphize (unit)", () => {
   it("skips recursive callees", () => {
     // `rec` calls itself — computeRecursiveSet rejects it.
     const rec: IrFunction = {
-      name: "rec",
+      ...irIdentities.next("rec"),
       params: [{ value: id(0), type: F64, name: "n" }],
       resultTypes: [F64],
       blocks: [
@@ -208,7 +220,7 @@ describe("#1167c — monomorphize (unit)", () => {
     // `double(n) = n + n` — `f64.add` consumes the param. Retyping to
     // externref would invalidate the operator. isMonomorphizable rejects.
     const doubler: IrFunction = {
-      name: "double",
+      ...irIdentities.next("double"),
       params: [{ value: id(0), type: F64, name: "n" }],
       resultTypes: [F64],
       blocks: [
@@ -246,7 +258,7 @@ describe("#1167c — monomorphize (unit)", () => {
     // Budget cap = 2.5 new instrs. Adding 3 clones (one per extra tuple) = 3
     // new instrs → 3 > 2.5 → pass abandons.
     const t: IrFunction = {
-      name: "t",
+      ...irIdentities.next("t"),
       params: [{ value: id(0), type: F64, name: "x" }],
       resultTypes: [F64],
       blocks: [
@@ -284,7 +296,7 @@ describe("#1167c — monomorphize (unit)", () => {
     // so the denominator is large enough for 3 clones × 1 instr = 3 new
     // instrs to fit under the 1.5× cap.
     const callee = (name: string, bodyInstr: IrInstr): IrFunction => ({
-      name,
+      ...irIdentities.next(name),
       params: [{ value: id(0), type: F64, name: "x" }],
       resultTypes: [F64],
       blocks: [
@@ -309,7 +321,7 @@ describe("#1167c — monomorphize (unit)", () => {
     const pads: IrFunction[] = [];
     for (let i = 0; i < 10; i++) {
       pads.push({
-        name: `pad_${i}`,
+        ...irIdentities.next(`pad_${i}`),
         params: [],
         resultTypes: [F64],
         blocks: [
@@ -364,7 +376,7 @@ describe("#1167c — taggedUnions (unit)", () => {
   it("accepts box-to-dynamic without consulting the tagged-union registry", () => {
     const dynamicType = irDynamic();
     const fn: IrFunction = {
-      name: "boxDynamic",
+      ...irIdentities.next("boxDynamic"),
       params: [{ value: id(0), type: F64, name: "value" }],
       resultTypes: [dynamicType],
       blocks: [
@@ -397,7 +409,7 @@ describe("#1167c — taggedUnions (unit)", () => {
 
   it("keeps the invariant backstop for box targets outside union or dynamic", () => {
     const fn: IrFunction = {
-      name: "boxInvalid",
+      ...irIdentities.next("boxInvalid"),
       params: [{ value: id(0), type: F64, name: "value" }],
       resultTypes: [F64],
       blocks: [
@@ -429,7 +441,7 @@ describe("#1167c — taggedUnions (unit)", () => {
     const paramId = asValueId(0);
     const testResult = asValueId(1);
     const fn: IrFunction = {
-      name: "discriminate",
+      ...irIdentities.next("discriminate"),
       params: [{ value: paramId, type: unionType, name: "v" }],
       resultTypes: [I32],
       blocks: [
@@ -500,7 +512,7 @@ describe("#1167c — taggedUnions (unit)", () => {
     const paramId = asValueId(0);
     const testResult = asValueId(1);
     const fn: IrFunction = {
-      name: "bad",
+      ...irIdentities.next("bad"),
       params: [{ value: paramId, type: unionType, name: "v" }],
       resultTypes: [I32],
       blocks: [

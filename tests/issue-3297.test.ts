@@ -23,7 +23,9 @@ import {
 import { PORFFOR_KIND_NAMES, porfforRendererOutputText, type PorfforNode } from "../src/ir/backend/porffor/compat.js";
 import { lowerIrModuleToPorffor } from "../src/ir/backend/porffor/integration.js";
 import { loadOptionalPorffor } from "../src/ir/backend/porffor/loader.js";
+import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
+const identities = createTestIrFunctionIdentityFactory("issue-3297");
 const here = dirname(fileURLToPath(import.meta.url));
 const porfforRoot = process.env.JS2WASM_PORFFOR_ROOT ?? join(here, "../vendor/Porffor");
 const hasOptionalPorffor = existsSync(join(porfforRoot, "compiler/ir.js"));
@@ -64,14 +66,14 @@ const DIFF_SOURCE = `
 function effectFunctions(): IrFunction[] {
   const global = { kind: "global" as const, name: "trace" };
 
-  const left = new IrFunctionBuilder("left", [F64]);
+  const left = new IrFunctionBuilder(identities.next("left"), [F64]);
   left.openBlock();
   const one = left.emitConst({ kind: "f64", value: 1 }, F64);
   left.emitGlobalSet(global, one);
   const ten = left.emitConst({ kind: "f64", value: 10 }, F64);
   left.terminate({ kind: "return", values: [ten] });
 
-  const right = new IrFunctionBuilder("right", [F64]);
+  const right = new IrFunctionBuilder(identities.next("right"), [F64]);
   right.openBlock();
   const oldTrace = right.emitGlobalGet(global, F64);
   const scale = right.emitConst({ kind: "f64", value: 10 }, F64);
@@ -82,7 +84,7 @@ function effectFunctions(): IrFunction[] {
   const three = right.emitConst({ kind: "f64", value: 3 }, F64);
   right.terminate({ kind: "return", values: [three] });
 
-  const ordered = new IrFunctionBuilder("ordered", [F64], true);
+  const ordered = new IrFunctionBuilder(identities.next("ordered"), [F64], true);
   ordered.openBlock();
   const zero = ordered.emitConst({ kind: "f64", value: 0 }, F64);
   ordered.emitGlobalSet(global, zero);
@@ -95,14 +97,14 @@ function effectFunctions(): IrFunction[] {
   const result = ordered.emitBinary("f64.add", weighted, finalTrace, F64);
   ordered.terminate({ kind: "return", values: [result] });
 
-  const twice = new IrFunctionBuilder("twice", [F64]);
+  const twice = new IrFunctionBuilder(identities.next("twice"), [F64]);
   const input = twice.addParam("x", F64);
   twice.openBlock();
   const multiplier = twice.emitConst({ kind: "f64", value: 2 }, F64);
   const doubled = twice.emitBinary("f64.mul", input, multiplier, F64);
   twice.terminate({ kind: "return", values: [doubled] });
 
-  const directArgs = new IrFunctionBuilder("directArgs", [F64], true);
+  const directArgs = new IrFunctionBuilder(identities.next("directArgs"), [F64], true);
   directArgs.openBlock();
   const six = directArgs.emitConst({ kind: "f64", value: 6 }, F64);
   const seven = directArgs.emitConst({ kind: "f64", value: 7 }, F64);
@@ -121,11 +123,14 @@ function frontendFunction(source: string, name: string): IrFunction {
       ts.isFunctionDeclaration(statement) && statement.name?.text === name,
   );
   if (!declaration) throw new Error(`missing function ${name}`);
-  return lowerFunctionAstToIr(declaration, { exported: true }).main;
+  return lowerFunctionAstToIr(declaration, {
+    exported: true,
+    ownerUnitId: identities.next(name).unitId,
+  }).main;
 }
 
 function selectAndConvertFunction(): IrFunction {
-  const builder = new IrFunctionBuilder("selectConvert", [F64], true);
+  const builder = new IrFunctionBuilder(identities.next("selectConvert"), [F64], true);
   const condition = builder.addParam("condition", I32);
   const value = builder.addParam("value", I32);
   builder.openBlock();
@@ -137,7 +142,7 @@ function selectAndConvertFunction(): IrFunction {
 }
 
 function unreachableFunction(): IrFunction {
-  const builder = new IrFunctionBuilder("never", []);
+  const builder = new IrFunctionBuilder(identities.next("never"), []);
   builder.openBlock();
   builder.terminate({ kind: "unreachable" });
   return builder.finish();
@@ -242,7 +247,7 @@ describe("#3297 Porffor scalar/control-flow sink", () => {
 
   it("requires the shared memory plan before heap emission", () => {
     const shape: IrObjectShape = { fields: [{ name: "value", type: F64 }] };
-    const builder = new IrFunctionBuilder("heapRejected", [{ kind: "object", shape }]);
+    const builder = new IrFunctionBuilder(identities.next("heapRejected"), [{ kind: "object", shape }]);
     builder.openBlock();
     const value = builder.emitConst({ kind: "f64", value: 1 }, F64);
     const object = builder.emitObjectNew(shape, [value]);

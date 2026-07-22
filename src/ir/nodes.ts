@@ -14,6 +14,7 @@
 // Phase 2 & 3 widen the Instr and Terminator sets.
 
 import type { ValType } from "./types.js";
+import type { IrFunctionIdentity } from "./identity.js";
 // #2949 slice 1 — the canonical JS-type tag enum, from the dependency-free
 // leaf `ir/js-tag.ts` (#3113 moved it below the IR layer so IR core files
 // consume it without the IR→codegen import inversion). Type-only:
@@ -2534,8 +2535,7 @@ export interface IrParam {
   readonly name: string;
 }
 
-export interface IrFunction {
-  readonly name: string;
+export interface IrFunction extends IrFunctionIdentity {
   readonly params: readonly IrParam[];
   readonly resultTypes: readonly IrType[];
   /** Entry block is always `blocks[0]`. */

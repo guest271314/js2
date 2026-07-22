@@ -22,9 +22,25 @@ export type IrBindingId = string & { readonly [irBindingIdBrand]: "IrBindingId" 
 export type IrLexicalOwnerId = IrUnitId | IrClassId;
 export type IrSourceKind = "entry" | "source" | "library" | "synthetic";
 
+/** Structural function identity plus its temporary compatibility/reference label. */
+export interface IrFunctionIdentity {
+  readonly unitId: IrUnitId;
+  readonly name: string;
+}
+
+export interface IrLiftedFunctionArtifactIdentity extends IrFunctionIdentity {
+  readonly ordinal: number;
+}
+
+export interface IrLiftedFunctionArtifactOwner {
+  readonly ownerUnitId: IrUnitId;
+  readonly liftedCounter: { value: number };
+}
+
 /** Closed role families for compiler/pass-created executable units. */
 export type IrSyntheticUnitRole =
   | `compiler-unit:${CompilerSourceProducer}:${string}`
+  | `stdlib-selfhost:${string}`
   | "lifted-closure"
   | "monomorphization-clone";
 /** Compiler-created class roles live in a namespace separate from source classes. */
@@ -224,6 +240,19 @@ export function createIrUnitId(input: CreateIrUnitIdInput): IrUnitId {
 /** Derive a unit identity from semantic compiler role, never a display label. */
 export function createDerivedIrUnitId(input: CreateDerivedIrUnitIdInput): IrUnitId {
   return `ir-unit:v1:derived:${identityComponent(input.parentId)}:${identityComponent(input.role)}:${canonicalNumber(input.ordinal, "derived unit ordinal")}` as IrUnitId;
+}
+
+/** Allocate a lifted artifact's label and structural identity from one ordinal. */
+export function allocateLiftedFunctionArtifact(
+  owner: IrLiftedFunctionArtifactOwner,
+  displayNameForOrdinal: (ordinal: number) => string,
+): IrLiftedFunctionArtifactIdentity {
+  const ordinal = owner.liftedCounter.value++;
+  return {
+    unitId: createDerivedIrUnitId({ parentId: owner.ownerUnitId, role: "lifted-closure", ordinal }),
+    name: displayNameForOrdinal(ordinal),
+    ordinal,
+  };
 }
 
 export function createIrClassId(input: CreateIrClassIdInput): IrClassId {

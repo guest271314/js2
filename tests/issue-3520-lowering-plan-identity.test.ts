@@ -7,35 +7,16 @@ import type {
   IrImportedCallLoweringPlan,
   IrTopLevelFunctionValueLoweringPlan,
 } from "../src/ir/ast-lowering-plans.js";
-import {
-  lowerFunctionAstToIr,
-  type AstToIrOptions,
-  type IrExternClassMeta,
-  type LoweredFunctionResult,
-} from "../src/ir/from-ast.js";
-import { createIrSourceId, createIrUnitId, type IrUnitId } from "../src/ir/identity.js";
+import { lowerFunctionAstToIr, type IrExternClassMeta, type LoweredFunctionResult } from "../src/ir/from-ast.js";
+import type { IrUnitId } from "../src/ir/identity.js";
 import { irVal, type IrClosureSignature, type IrType } from "../src/ir/nodes.js";
 import { ts } from "../src/ts-api.js";
+import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
-const SOURCE_ID = createIrSourceId({ kind: "entry", order: 0, sourceKey: "tests/issue-3520-lowering-plan.ts" });
-const OWNER_ID = createIrUnitId({
-  sourceId: SOURCE_ID,
-  lexicalOwnerId: null,
-  kind: "top-level-function",
-  ordinal: 0,
-});
-const STALE_OWNER_ID = createIrUnitId({
-  sourceId: SOURCE_ID,
-  lexicalOwnerId: null,
-  kind: "top-level-function",
-  ordinal: 1,
-});
-const TARGET_ID = createIrUnitId({
-  sourceId: SOURCE_ID,
-  lexicalOwnerId: null,
-  kind: "top-level-function",
-  ordinal: 2,
-});
+const irIdentities = createTestIrFunctionIdentityFactory("issue-3520-lowering-plan");
+const OWNER_ID = irIdentities.unit(0);
+const STALE_OWNER_ID = irIdentities.unit(1);
+const TARGET_ID = irIdentities.unit(2);
 
 const F64: IrType = irVal({ kind: "f64" });
 const NUMBER_SIGNATURE: IrClosureSignature = { params: [], returnType: F64 };
@@ -64,70 +45,72 @@ function firstDescendant<T extends ts.Node>(node: ts.Node, predicate: (candidate
   return match;
 }
 
-function withOwner(ownerUnitId: IrUnitId | undefined): Pick<AstToIrOptions, "ownerUnitId"> {
+function planOwnerEvidence(ownerUnitId: IrUnitId | undefined): { readonly ownerUnitId?: IrUnitId } {
   return ownerUnitId === undefined ? {} : { ownerUnitId };
 }
 
 function importedCallFixture(): {
-  lower(ownerUnitId: IrUnitId | undefined, planOwnerUnitId: IrUnitId): LoweredFunctionResult;
-  plan(planOwnerUnitId: IrUnitId): IrImportedCallLoweringPlan;
+  lower(planOwnerUnitId: IrUnitId | undefined): LoweredFunctionResult;
+  plan(planOwnerUnitId: IrUnitId | undefined): IrImportedCallLoweringPlan;
 } {
   const declaration = sourceFunction(`export function owner(): number { return importedTarget(); }`);
   const call = firstDescendant(declaration, ts.isCallExpression);
-  const plan = (ownerUnitId: IrUnitId): IrImportedCallLoweringPlan => ({
-    ownerUnitId,
-    ownerName: "owner",
-    targetUnitId: TARGET_ID,
-    targetName: "importedTarget",
-    params: [],
-    returnType: F64,
-    optionalParams: new Map(),
-    needsArgc: false,
-  });
+  const plan = (ownerUnitId: IrUnitId | undefined): IrImportedCallLoweringPlan =>
+    ({
+      ...planOwnerEvidence(ownerUnitId),
+      ownerName: "owner",
+      targetUnitId: TARGET_ID,
+      targetName: "importedTarget",
+      params: [],
+      returnType: F64,
+      optionalParams: new Map(),
+      needsArgc: false,
+    }) as IrImportedCallLoweringPlan;
   return {
     plan,
-    lower: (ownerUnitId, planOwnerUnitId) =>
+    lower: (planOwnerUnitId) =>
       lowerFunctionAstToIr(declaration, {
+        ownerUnitId: OWNER_ID,
         exported: true,
-        ...withOwner(ownerUnitId),
         importedCalls: new Map([[call, plan(planOwnerUnitId)]]),
       }),
   };
 }
 
 function functionValueFixture(): {
-  lower(ownerUnitId: IrUnitId | undefined, planOwnerUnitId: IrUnitId): LoweredFunctionResult;
-  plan(planOwnerUnitId: IrUnitId): IrTopLevelFunctionValueLoweringPlan;
+  lower(planOwnerUnitId: IrUnitId | undefined): LoweredFunctionResult;
+  plan(planOwnerUnitId: IrUnitId | undefined): IrTopLevelFunctionValueLoweringPlan;
 } {
   const declaration = sourceFunction(`export function owner() { return target; }`);
   const target = firstDescendant(
     declaration,
     (node): node is ts.Identifier => ts.isIdentifier(node) && node.text === "target",
   );
-  const plan = (ownerUnitId: IrUnitId): IrTopLevelFunctionValueLoweringPlan => ({
-    ownerUnitId,
-    ownerName: "owner",
-    targetUnitId: TARGET_ID,
-    targetName: "target",
-    signature: NUMBER_SIGNATURE,
-    trampolineName: "__fn_tramp_target_cached",
-    cacheGlobalName: "__fn_closure_target",
-  });
+  const plan = (ownerUnitId: IrUnitId | undefined): IrTopLevelFunctionValueLoweringPlan =>
+    ({
+      ...planOwnerEvidence(ownerUnitId),
+      ownerName: "owner",
+      targetUnitId: TARGET_ID,
+      targetName: "target",
+      signature: NUMBER_SIGNATURE,
+      trampolineName: "__fn_tramp_target_cached",
+      cacheGlobalName: "__fn_closure_target",
+    }) as IrTopLevelFunctionValueLoweringPlan;
   return {
     plan,
-    lower: (ownerUnitId, planOwnerUnitId) =>
+    lower: (planOwnerUnitId) =>
       lowerFunctionAstToIr(declaration, {
+        ownerUnitId: OWNER_ID,
         exported: true,
         returnTypeOverride: CALLABLE_NUMBER,
-        ...withOwner(ownerUnitId),
         topLevelFunctionValues: new Map([[target, plan(planOwnerUnitId)]]),
       }),
   };
 }
 
 function callbackFixture(): {
-  lower(ownerUnitId: IrUnitId | undefined, planOwnerUnitId: IrUnitId): LoweredFunctionResult;
-  plan(planOwnerUnitId: IrUnitId): IrHostVoidCallbackLoweringPlan;
+  lower(planOwnerUnitId: IrUnitId | undefined): LoweredFunctionResult;
+  plan(planOwnerUnitId: IrUnitId | undefined): IrHostVoidCallbackLoweringPlan;
 } {
   const declaration = sourceFunction(`
     export function owner(target: EventTarget): void {
@@ -143,22 +126,23 @@ function callbackFixture(): {
     methods: new Map([["addEventListener", { params: [externref, externref, externref], results: [] }]]),
     properties: new Map(),
   };
-  const plan = (ownerUnitId: IrUnitId): IrHostVoidCallbackLoweringPlan => ({
-    ownerUnitId,
-    ownerName: "owner",
-    signature: VOID_SIGNATURE,
-    captureNames: new Set(),
-    liftedOrdinal: 0,
-  });
+  const plan = (ownerUnitId: IrUnitId | undefined): IrHostVoidCallbackLoweringPlan =>
+    ({
+      ...planOwnerEvidence(ownerUnitId),
+      ownerName: "owner",
+      signature: VOID_SIGNATURE,
+      captureNames: new Set(),
+      liftedOrdinal: 0,
+    }) as IrHostVoidCallbackLoweringPlan;
   return {
     plan,
-    lower: (ownerUnitId, planOwnerUnitId) =>
+    lower: (planOwnerUnitId) =>
       lowerFunctionAstToIr(declaration, {
+        ownerUnitId: OWNER_ID,
         exported: true,
         paramTypeOverrides: [{ kind: "extern", className: "EventTarget" }],
         returnTypeOverride: null,
         resolver: { getExternClassInfo: (className) => (className === "EventTarget" ? eventTarget : undefined) },
-        ...withOwner(ownerUnitId),
         hostVoidCallbacks: new Map([[callback, plan(planOwnerUnitId)]]),
       }),
   };
@@ -174,12 +158,10 @@ describe("#3520 lowering-plan owner identity", () => {
     (kind, makeFixture, lifts) => {
       const fixture = makeFixture();
 
-      expect(() => fixture.lower(undefined, OWNER_ID)).toThrow(
-        `${kind} plan cannot be consumed without an authoritative ownerUnitId`,
-      );
-      expect(() => fixture.lower(OWNER_ID, STALE_OWNER_ID)).toThrow(`stale ${kind} plan owner`);
+      expect(() => fixture.lower(undefined)).toThrow(`stale ${kind} plan owner undefined`);
+      expect(() => fixture.lower(STALE_OWNER_ID)).toThrow(`stale ${kind} plan owner`);
 
-      const lowered = fixture.lower(OWNER_ID, OWNER_ID);
+      const lowered = fixture.lower(OWNER_ID);
       expect(lowered.main.name).toBe("owner");
       expect(lowered.lifted).toHaveLength(lifts);
     },
@@ -189,7 +171,7 @@ describe("#3520 lowering-plan owner identity", () => {
     const imported = importedCallFixture();
     const importedPlan = imported.plan(OWNER_ID);
     expect(importedPlan.targetUnitId).toBe(TARGET_ID);
-    const importedIr = imported.lower(OWNER_ID, OWNER_ID);
+    const importedIr = imported.lower(OWNER_ID);
     expect(importedIr.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
       expect.objectContaining({ kind: "call", target: { kind: "func", name: importedPlan.targetName } }),
     );
@@ -197,7 +179,7 @@ describe("#3520 lowering-plan owner identity", () => {
     const functionValue = functionValueFixture();
     const functionValuePlan = functionValue.plan(OWNER_ID);
     expect(functionValuePlan.targetUnitId).toBe(TARGET_ID);
-    const functionValueIr = functionValue.lower(OWNER_ID, OWNER_ID);
+    const functionValueIr = functionValue.lower(OWNER_ID);
     expect(functionValueIr.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
       expect.objectContaining({
         kind: "global.get",

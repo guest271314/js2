@@ -9,9 +9,11 @@ import { lowerFunctionAstToIr, type IrFromAstResolver } from "../src/ir/from-ast
 import type { IrClassShape, IrType } from "../src/ir/nodes.js";
 import { classifyIrFailure, evaluateIrOutcomePolicy, type IrUnsupportedCode } from "../src/ir/outcomes.js";
 import { instantiateWithRuntime } from "./equivalence/helpers.js";
+import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
 const F64: IrType = { kind: "val", val: { kind: "f64" } };
 const EXTERNREF: IrType = { kind: "val", val: { kind: "externref" } };
+const irIdentities = createTestIrFunctionIdentityFactory("issue-3529-dataflow-outcomes");
 
 function terminalFor(result: Awaited<ReturnType<typeof compile>>, displayName = "test"): IrObservedOutcome {
   expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
@@ -45,7 +47,10 @@ function directDeclaration(source: string): ts.FunctionDeclaration {
 }
 
 function lowerDirect(source: string): void {
-  lowerFunctionAstToIr(directDeclaration(source), { exported: true });
+  lowerFunctionAstToIr(directDeclaration(source), {
+    ownerUnitId: irIdentities.next("test").unitId,
+    exported: true,
+  });
 }
 
 function expectLowerInvariant(
@@ -62,7 +67,13 @@ function expectLowerInvariant(
 
   let thrown: unknown;
   try {
-    lowerFunctionAstToIr(declaration!, { exported: true, checker: ast.checker, calleeTypes, resolver });
+    lowerFunctionAstToIr(declaration!, {
+      ownerUnitId: irIdentities.next("test").unitId,
+      exported: true,
+      checker: ast.checker,
+      calleeTypes,
+      resolver,
+    });
   } catch (error) {
     thrown = error;
   }
@@ -277,6 +288,7 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
         export function test(): Date { return new Date(); }
       `),
       {
+        ownerUnitId: irIdentities.next("test").unitId,
         exported: true,
         returnTypeOverride: { kind: "class", shape: dateShape },
         classShapes: new Map([["Date", dateShape]]),
@@ -297,6 +309,7 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
           export function test(): Local { return new Date(); }
         `),
         {
+          ownerUnitId: irIdentities.next("test").unitId,
           exported: true,
           returnTypeOverride: { kind: "class", shape: localShape },
           classShapes: new Map([["Local", localShape]]),

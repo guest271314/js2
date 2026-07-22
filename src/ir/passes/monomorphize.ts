@@ -67,6 +67,7 @@ import {
 } from "../nodes.js";
 import type { ValType } from "../types.js";
 import type { AllocSiteRegistry } from "../alloc-registry.js";
+import { createDerivedIrUnitId, type IrUnitId } from "../identity.js";
 import { forkAllocInInstr } from "./alloc-discipline.js";
 
 /** Maximum number of distinct type tuples we'll clone a single callee for. */
@@ -187,6 +188,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   // the callee's param count is a bug upstream — skip the callee entirely.
   // -------------------------------------------------------------------------
   interface ClonePlan {
+    readonly cloneUnitId: IrUnitId;
     readonly cloneName: string;
     readonly argTypes: readonly IrType[];
     readonly calls: readonly CallSite[];
@@ -214,7 +216,16 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
       const baseName = `${calleeName}$${nameSuffixFor(group.argTypes)}`;
       const cloneName = uniquifyName(baseName, usedNames);
       usedNames.add(cloneName);
-      plans.push({ cloneName, argTypes: group.argTypes, calls: group.calls });
+      plans.push({
+        cloneUnitId: createDerivedIrUnitId({
+          parentId: callee.unitId,
+          role: "monomorphization-clone",
+          ordinal: i - 1,
+        }),
+        cloneName,
+        argTypes: group.argTypes,
+        calls: group.calls,
+      });
     }
     if (plans.length > 0) planByCallee.set(calleeName, plans);
   }
@@ -249,7 +260,13 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   for (const [calleeName, plans] of planByCallee) {
     const callee = byName.get(calleeName)!;
     for (const plan of plans) {
-      const { fn: clone, returnType } = cloneWithParamTypes(callee, plan.cloneName, plan.argTypes, registry);
+      const { fn: clone, returnType } = cloneWithParamTypes(
+        callee,
+        plan.cloneUnitId,
+        plan.cloneName,
+        plan.argTypes,
+        registry,
+      );
       clonedFuncs.push(clone);
       cloneSignatures.set(plan.cloneName, {
         params: plan.argTypes,
@@ -499,6 +516,7 @@ function uniquifyName(base: string, used: ReadonlySet<string>): string {
  */
 function cloneWithParamTypes(
   callee: IrFunction,
+  cloneUnitId: IrUnitId,
   cloneName: string,
   newParamTypes: readonly IrType[],
   registry?: AllocSiteRegistry,
@@ -544,6 +562,7 @@ function cloneWithParamTypes(
   const returnType = deriveReturnType(returnValueId, newParams, oldBlock.instrs, callee);
 
   const fn: IrFunction = {
+    unitId: cloneUnitId,
     name: cloneName,
     params: newParams,
     resultTypes: [returnType],

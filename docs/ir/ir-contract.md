@@ -1,4 +1,4 @@
-# The IR interchange contract — v1.0
+# The IR interchange contract — v2.0
 
 > **Normative.** The #3030 contract is the union of this document,
 > [`ir-module.schema.json`](ir-module.schema.json), and the exported
@@ -32,12 +32,15 @@ One JSON document per compiled module.
   them); negative zero serializes as the string `"-0"`.
 - `i64` constants serialize as **decimal strings** (JSON numbers cannot carry
   64-bit integers losslessly).
-- A binary encoding is an explicit **v2 non-goal** (JSON gzips well; modules
+- A binary encoding remains out of scope (JSON gzips well; modules
   are per-file).
 
 ## D2 — Versioning
 
-`IR_FORMAT_VERSION = "1.0"` (exported from `src/ir/contract.ts`).
+`IR_FORMAT_VERSION = "2.0"` (exported from `src/ir/contract.ts`). Version 2
+makes every serialized function and coverage row carry its required structural
+`unitId`. Display `name` remains the temporary compatibility/reference label
+for the still-named v2 references described in D3.2.
 
 - **Additive** (minor bump): new instruction kinds, new optional fields, new
   enum members appended at the END of their table.
@@ -60,10 +63,11 @@ One JSON document per compiled module.
    instruction `result`), definitions dominate uses, and every block ends
    with exactly one terminator. There are no Φ nodes — branches pass values
    into target block-arg slots.
-2. **Symbolic names only.** Functions, globals, and types are referenced by
-   name (`IrFuncRef`/`IrGlobalRef`/`IrTypeRef`). No funcIdx / globalIdx /
-   typeIdx appears anywhere in a serialized document (D5 closes the one
-   historical leak inside `IrType`; see T2).
+2. **Structural function artifacts, symbolic references.** Functions and their
+   coverage rows are joined by `unitId`. Calls, globals, and types still use
+   symbolic compatibility names (`IrFuncRef`/`IrGlobalRef`/`IrTypeRef`) in this
+   v2 schema. No funcIdx / globalIdx / typeIdx appears anywhere in a serialized
+   document (D5 closes the one historical leak inside `IrType`; see T2).
 3. **Verified per-instruction `resultType`.** Every value-producing
    instruction carries its result type, and the verifier **re-derives** it
    from operand types per the §"Node inventory" rules (#1924).
@@ -79,15 +83,17 @@ One JSON document per compiled module.
    classification") is part of this contract; instruction order within a
    block is program order, and any reordering the compiler performed
    respected the classification (#2134). Effects are _derived_ (published
-   table), not serialized per instruction in v1.0.
+   table), not serialized per instruction in v2.0.
 6. **Source positions.** Instructions and terminators may carry
    `site: {line, column}` (1-based line, 0-based column, in the `source`
    file named by the header). Alloc-site provenance rides on `alloc`
-   (module-global stable id, ADR-0013).
-7. **Honest coverage manifest.** The document header lists EVERY function
+   (module-global stable id, ADR-0013). Every serialized function also carries
+   its canonical `IrUnitId`; the display name remains a compatibility/reference
+   label until symbolic references become structural.
+7. **Complete coverage manifest.** The document header lists EVERY function
    in the module with `carrier: "ir" | "legacy"`. Only `"ir"` functions
-   have serialized bodies; the contract ships at partial coverage and grows
-   (#2855/#2950/#2949) — it does not lie about what it covers.
+   have serialized bodies; the contract reports partial coverage explicitly
+   while that coverage grows (#2855/#2950/#2949).
 
 ## D4 — Exclusions (never serialized)
 
@@ -160,11 +166,11 @@ consumer treats them as opaque.
 
 ```
 IrModuleDocument
-├─ irVersion: "1.0"
+├─ irVersion: "2.0"
 ├─ source?: string
-├─ coverage: [{name, carrier: "ir"|"legacy", exported, reason?}]   (D3.7)
+├─ coverage: [{unitId, name, carrier: "ir"|"legacy", exported, reason?}]   (D3.7)
 └─ functions: [IrFunctionDoc]           (exactly the carrier:"ir" entries)
-   ├─ name, exported, funcKind?: "regular"|"generator"|"async"
+   ├─ unitId, name, exported, funcKind?: "regular"|"generator"|"async"
    ├─ params: [{value: ValueId, name, type: IrType}]
    ├─ resultTypes: [IrType]
    ├─ slots?: [{index, name, type: ScalarVal-only ValType}]        (D4)
@@ -355,9 +361,9 @@ boxed, dynamic`.
 
 ## Slice status
 
-| Slice | What                                                        | Status at v1.0 freeze                                        |
+| Slice | What                                                        | Status at v2.0                                               |
 | ----- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| T1    | this document + schema + `IR_FORMAT_VERSION`                | **frozen** (2026-07-04)                                      |
+| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v2 identity revision** (#3520)                             |
 | T2    | purge module-relative indices from in-memory `IrType` (D5)  | open — until then, affected functions are `carrier:"legacy"` |
 | T3    | `serializeIrModule`/`deserializeIrModule` + `--emit-ir`     | open                                                         |
 | T4    | verifier re-derivation of the §Node-inventory rules (#1924) | open — D3.3 effective from here                              |

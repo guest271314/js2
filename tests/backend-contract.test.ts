@@ -108,7 +108,7 @@ describe("five-part contract surface (#3029-S1)", () => {
 
 describe("IR interchange contract surface (#3030-T1)", () => {
   it("exports the frozen format version", () => {
-    expect(IR_FORMAT_VERSION).toBe("1.0");
+    expect(IR_FORMAT_VERSION).toBe("2.0");
     expect(IR_FORMAT_VERSION).toMatch(/^\d+\.\d+$/);
   });
 
@@ -129,5 +129,7 @@ describe("IR interchange contract surface (#3030-T1)", () => {
     expect(scalars).toContain("externref");
     expect(scalars).not.toContain("ref");
     expect(scalars).not.toContain("ref_null");
+    expect(schema.$defs.function.required).toContain("unitId");
+    expect(schema.$defs.coverageEntry.required).toContain("unitId");
   });
 });

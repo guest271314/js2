@@ -406,6 +406,17 @@ export function compileIrPathFunctions(
     readonly moduleInit?: boolean;
   }
   const built: BuiltFn[] = [];
+  const requireArtifactUnitId = (declaration: ts.Node, displayName: string) => {
+    const unitId = integrationPopulation?.ownerUnitIdByDeclaration.get(declaration);
+    if (!unitId) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "build",
+        `ir/integration: ${displayName} has no exact artifact identity`,
+      );
+    }
+    return unitId;
+  };
   const verifyBuiltArtifact = (
     fn: IrFunction,
     ownerName: string,
@@ -436,11 +447,11 @@ export function compileIrPathFunctions(
       if (process.env.JS2WASM_TEST_INJECT_IR_BUILD_THROW) {
         throw new Error(`ir/from-ast: injected test build failure (${name})`);
       }
-      const ownerUnitId = integrationPopulation?.ownerUnitIdByDeclaration.get(stmt);
+      const ownerUnitId = requireArtifactUnitId(stmt, name);
       const o = overrides?.get(name);
       const result = lowerFunctionAstToIr(stmt, {
         exported: hasExportModifier(stmt),
-        ...(ownerUnitId ? { ownerUnitId } : {}),
+        ownerUnitId,
         paramTypeOverrides: o?.params,
         returnTypeOverride: o?.returnType,
         calleeTypes,
@@ -590,7 +601,7 @@ export function compileIrPathFunctions(
           }
           const paramTypeOverrides = isCtorMember ? classShape.constructorParams : descriptor!.params;
           const returnTypeOverride = isCtorMember ? undefined : descriptor!.returnType;
-          const ownerUnitId = integrationPopulation?.ownerUnitIdByDeclaration.get(member);
+          const ownerUnitId = requireArtifactUnitId(member, memberName);
           // #3000-C: a constructor is NOT passed `__self` — it allocates the
           // instance itself (`constructorClassShape` drives the `class.alloc` +
           // `return this` synthesis in from-ast). Methods/accessors get the
@@ -598,7 +609,7 @@ export function compileIrPathFunctions(
           const result = lowerFunctionAstToIr(member, {
             exported: false, // class members are not directly exported
             funcName: memberName,
-            ...(ownerUnitId ? { ownerUnitId } : {}),
+            ownerUnitId,
             ...(isCtorMember
               ? { constructorClassShape: classShape, paramTypeOverrides }
               : {
@@ -706,10 +717,18 @@ export function compileIrPathFunctions(
       }
       const moduleBindings = buildModuleBindingsMap(ctx, population, moduleBindingResolver);
       const synthetic = makeModuleInitSynthetic(population);
+      const moduleInitUnitId = integrationPopulation?.moduleInitUnitId;
+      if (!moduleInitUnitId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          "ir/integration: selected module init has no exact artifact identity",
+        );
+      }
       const result = lowerFunctionAstToIr(synthetic, {
         exported: false,
         funcName: MODULE_INIT_UNIT_NAME,
-        ...(integrationPopulation?.moduleInitUnitId ? { ownerUnitId: integrationPopulation.moduleInitUnitId } : {}),
+        ownerUnitId: moduleInitUnitId,
         returnTypeOverride: null,
         moduleInitUnit: true,
         moduleBindings,

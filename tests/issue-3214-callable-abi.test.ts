@@ -20,10 +20,12 @@ import { lowerIrFunctionBody, wasmValueTypeConverter, type IrLowerResolver } fro
 import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
 import { buildTypeMap } from "../src/ir/propagate.js";
 import { planIrCompilation } from "../src/ir/select.js";
+import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
 type CompileOptions = NonNullable<Parameters<typeof compile>[1]>;
 
 const F64: IrType = irVal({ kind: "f64" });
+const identities = createTestIrFunctionIdentityFactory("issue-3214-callable-abi");
 
 const ISSUE_2859_PROGRAM = `
 function apply(fn: () => number): number {
@@ -304,7 +306,7 @@ describe("#3214 B0 — canonical callable ABI", () => {
     expect(irTypeEquals(callable, { kind: "callable", signature: { params: [], returnType: F64 } })).toBe(true);
     expect(irTypeEquals(callable, closure)).toBe(false);
 
-    const callBuilder = new IrFunctionBuilder("linearCallableCall", [F64]);
+    const callBuilder = new IrFunctionBuilder(identities.next("linearCallableCall"), [F64]);
     const callee = callBuilder.addParam("fn", callable);
     callBuilder.openBlock();
     const called = callBuilder.emitClosureCall(callee, [], F64);
@@ -324,7 +326,7 @@ describe("#3214 B0 — canonical callable ABI", () => {
       ),
     ).toThrow(/linear backend legality failed/);
 
-    const packBuilder = new IrFunctionBuilder("linearCallablePack", [F64]);
+    const packBuilder = new IrFunctionBuilder(identities.next("linearCallablePack"), [F64]);
     const internal = packBuilder.addParam("internal", closure);
     packBuilder.openBlock();
     packBuilder.emitCallablePack(internal, signature);
@@ -344,7 +346,7 @@ describe("#3214 B0 — canonical callable ABI", () => {
     ).toThrow(/linear backend legality failed/);
 
     const mismatched: IrClosureSignature = { params: [F64], returnType: F64 };
-    const mismatchBuilder = new IrFunctionBuilder("exactPackOnly", []);
+    const mismatchBuilder = new IrFunctionBuilder(identities.next("exactPackOnly"), []);
     const value = mismatchBuilder.addParam("internal", closure);
     mismatchBuilder.openBlock();
     expect(() => mismatchBuilder.emitCallablePack(value, mismatched)).toThrow(/exact closure signature/);
@@ -541,6 +543,7 @@ describe("#3214 B0 — canonical callable ABI", () => {
     expect(declaration).toBeDefined();
     const lowered = lowerFunctionAstToIr(declaration!, {
       exported: true,
+      ownerUnitId: identities.next("test").unitId,
       paramTypeOverrides: [],
       returnTypeOverride: F64,
       calleeTypes: new Map([["apply", { params: [callable, F64], returnType: F64 }]]),
