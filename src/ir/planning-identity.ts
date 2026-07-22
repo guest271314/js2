@@ -60,6 +60,7 @@ export interface IrPlanningIdentityContext {
   readonly sourceFileBySourceId: ReadonlyMap<IrSourceId, ts.SourceFile>;
   readonly unitIdByDeclaration: ReadonlyMap<ts.Node, IrUnitId>;
   readonly declarationByUnitId: ReadonlyMap<IrUnitId, ts.Node>;
+  readonly unitByUnitId: ReadonlyMap<IrUnitId, IrUnitRecord>;
   readonly terminalByUnitId: ReadonlyMap<IrUnitId, IrTerminalUnitRecord>;
   readonly classIdByDeclaration: ReadonlyMap<ts.ClassDeclaration | ts.ClassExpression, IrClassId>;
   readonly declarationByClassId: ReadonlyMap<IrClassId, ts.ClassDeclaration | ts.ClassExpression>;
@@ -85,7 +86,9 @@ export type IrPlanningIdentityInvariantCode =
   | "duplicate-class-declaration"
   | "missing-class-declaration"
   | "invalid-module-init"
-  | "duplicate-module-init";
+  | "duplicate-module-init"
+  | "unowned-planning-owner"
+  | "missing-planning-owner";
 
 export class IrPlanningIdentityInvariantError extends Error {
   constructor(
@@ -343,6 +346,96 @@ export function requireIrPlanningSourceId(
   );
 }
 
+function requireIrPlanningTerminalRecord(
+  identityContext: IrPlanningIdentityContext,
+  sourceId: IrSourceId,
+  terminalOwnerId: IrUnitId,
+): IrTerminalUnitRecord {
+  const terminal = identityContext.terminalByUnitId.get(terminalOwnerId);
+  const inventoryRecord = identityContext.unitByUnitId.get(terminalOwnerId);
+  if (!terminal || inventoryRecord !== terminal || !terminal.terminal || terminal.terminalOwnerId !== terminal.id) {
+    return planningIdentityInvariant(
+      "missing-planning-owner",
+      `planning owner ${terminalOwnerId} is not an exact terminal inventory record`,
+    );
+  }
+  if (terminal.sourceId !== sourceId) {
+    return planningIdentityInvariant(
+      "source-record-mismatch",
+      `planning owner ${terminalOwnerId} belongs to source ${terminal.sourceId}, not ${sourceId}`,
+    );
+  }
+  return terminal;
+}
+
+/**
+ * Require the R0 terminal owner for an exact AST node.
+ *
+ * The nearest scanner-indexed unit boundary is authoritative. In particular,
+ * an unowned support boundary must not fall through to an outer unit or the
+ * source module-init unit. Module init is used only when no enclosing unit was
+ * captured for the node at all.
+ */
+export function requireIrPlanningOwnerUnitId(identityContext: IrPlanningIdentityContext, node: ts.Node): IrUnitId {
+  const sourceFile = node.getSourceFile();
+  const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+  if (identityContext.sourceFileBySourceId.get(sourceId) !== sourceFile) {
+    return planningIdentityInvariant(
+      "source-record-mismatch",
+      `source ${sourceId} does not resolve back to the exact planning SourceFile`,
+    );
+  }
+
+  for (let current: ts.Node | undefined = node; current; current = current.parent) {
+    const unitId = identityContext.unitIdByDeclaration.get(current);
+    if (unitId === undefined) continue;
+
+    const unit = identityContext.unitByUnitId.get(unitId);
+    if (!unit || identityContext.declarationByUnitId.get(unitId) !== current) {
+      return planningIdentityInvariant(
+        "missing-planning-owner",
+        `indexed declaration does not resolve to exact inventory unit ${unitId}`,
+      );
+    }
+    if (unit.sourceId !== sourceId) {
+      return planningIdentityInvariant(
+        "source-record-mismatch",
+        `indexed unit ${unitId} belongs to source ${unit.sourceId}, not ${sourceId}`,
+      );
+    }
+    if (unit.terminalOwnerId === null) {
+      return planningIdentityInvariant(
+        "unowned-planning-owner",
+        `indexed support unit ${unitId} has no R0 terminal owner`,
+      );
+    }
+    if (unit.terminal && unit.terminalOwnerId !== unit.id) {
+      return planningIdentityInvariant("missing-planning-owner", `terminal unit ${unit.id} does not own itself`);
+    }
+    return requireIrPlanningTerminalRecord(identityContext, sourceId, unit.terminalOwnerId).id;
+  }
+
+  const moduleInitUnitId = identityContext.moduleInitUnitIdBySourceFile.get(sourceFile);
+  if (moduleInitUnitId === undefined || identityContext.moduleInitUnitIdBySourceId.get(sourceId) !== moduleInitUnitId) {
+    return planningIdentityInvariant(
+      "missing-planning-owner",
+      `source ${sourceId} has no exact source-owned module-init planning unit`,
+    );
+  }
+  const moduleInit = requireIrPlanningTerminalRecord(identityContext, sourceId, moduleInitUnitId);
+  if (
+    moduleInit.kind !== "module-init" ||
+    moduleInit.observedKind !== "module-init" ||
+    moduleInit.lexicalOwnerId !== null
+  ) {
+    return planningIdentityInvariant(
+      "missing-planning-owner",
+      `source-owned planning unit ${moduleInitUnitId} is not a structural module-init terminal`,
+    );
+  }
+  return moduleInit.id;
+}
+
 /**
  * Validate and expose the exact declaration identities captured while one
  * inventory was built. Passing a rebuilt/copied inventory is rejected: source
@@ -579,6 +672,7 @@ export function buildIrPlanningIdentityContext(inventory: IrUnitInventory): IrPl
     sourceFileBySourceId: readonlyIdentityMap(sourceFileBySourceId),
     unitIdByDeclaration: readonlyIdentityMap(unitIdByDeclaration),
     declarationByUnitId: readonlyIdentityMap(declarationByUnitId),
+    unitByUnitId: readonlyIdentityMap(unitsById),
     terminalByUnitId: readonlyIdentityMap(terminalByUnitId),
     classIdByDeclaration: readonlyIdentityMap(classIdByDeclaration),
     declarationByClassId: readonlyIdentityMap(declarationByClassId),
