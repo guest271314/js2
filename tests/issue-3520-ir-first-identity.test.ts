@@ -134,13 +134,13 @@ describe("#3520 identity-keyed IR-first local-call edges", () => {
     const owner = unitId(context, topLevelFunction(fixture, "owner"));
     const destructureOwner = unitId(context, topLevelFunction(fixture, "destructureOwner"));
     const box = fixture.statements.find(ts.isClassDeclaration)!;
-    const constructor = box.members.find(ts.isConstructorDeclaration)!;
+    const constructorMember = box.members.find(ts.isConstructorDeclaration)!;
     const method = box.members.find(
       (member): member is ts.MethodDeclaration =>
         ts.isMethodDeclaration(member) && ts.isIdentifier(member.name) && member.name.text === "method",
     )!;
     const getter = box.members.find(ts.isGetAccessorDeclaration)!;
-    const constructorId = unitId(context, constructor);
+    const constructorId = unitId(context, constructorMember);
     const methodId = unitId(context, method);
     const getterId = unitId(context, getter);
     const moduleInitId = context.moduleInitUnitIdBySourceFile.get(fixture)!;
