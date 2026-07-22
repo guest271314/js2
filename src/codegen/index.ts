@@ -27,7 +27,7 @@ import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule 
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
 import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
-import { buildLegacyProjectedTypeMap, type LatticeType } from "../ir/propagate.js";
+import type { LatticeType } from "../ir/propagate.js";
 import {
   classifyIrFailure,
   IrInvariantError,
@@ -39,7 +39,6 @@ import {
   certifyImportedIrCall,
   effectiveIrParamTypeNode,
   effectiveIrReturnTypeNode,
-  planIrCompilation,
   irClosureSignatureFromFunctionTypeNode,
   type IrFallbackReason,
   type IrSelection,
@@ -94,6 +93,7 @@ import {
   prepareHostVoidCallbackLowering,
   preparePromiseDelayLowering,
 } from "./ir-overlay-finalize.js";
+import * as irOverlayIdentity from "./ir-overlay-identity.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
 import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -1550,7 +1550,7 @@ export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
 // ---------------------------------------------------------------------------
 
 interface IrOverlayPlan {
-  readonly identityContext: IrPlanningIdentityContext;
+  readonly identityPlan: irOverlayIdentity.IrOverlayIdentityPlan;
   readonly selection: import("../ir/select.js").IrSelection;
   readonly classShapes: Map<string, import("../ir/nodes.js").IrClassShape>;
   readonly overrideMap: Map<string, { params: IrType[]; returnType: IrType | null }>;
@@ -1769,7 +1769,7 @@ function recordObservedIrOutcomes(
 
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
   const keys = new Set(ctx.irOutcomes.map((outcome) => outcome.key));
-  for (const unit of collectObservedIrUnits(sourceFile, plan.identityContext)) {
+  for (const unit of collectObservedIrUnits(sourceFile, plan.identityPlan.identityContext)) {
     const legacyBodyEmitted =
       unit.legacyBodyAvailable && !(unit.unitKind === "function" && irSkipBodies?.has(unit.matchName));
     const base = {
@@ -2099,12 +2099,12 @@ function planIrOverlay(
     readonly importedFunctions?: IrImportedFunctionResolver;
   } = {},
 ): IrOverlayPlan {
-  let typeMap;
+  let identityMaps: irOverlayIdentity.IrOverlayIdentityMaps;
   try {
     if (process.env.JS2WASM_TEST_INJECT_IR_TYPEMAP_THROW === "1") {
       throw new Error("injected TypeMap failure");
     }
-    typeMap = buildLegacyProjectedTypeMap(ast.sourceFile, ast.checker, identityContext);
+    identityMaps = irOverlayIdentity.buildIrOverlayIdentityMaps(ast.sourceFile, ast.checker, identityContext);
   } catch (error) {
     throw new IrInvariantError(
       "type-map-failure",
@@ -2179,8 +2179,9 @@ function planIrOverlay(
   // claim-then-demote). The carrier keying in `ensureDynMemberGet` matches
   // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
   const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
-  const selection = planIrCompilation(
+  const identityPlan = irOverlayIdentity.planIrOverlayByIdentity(
     ast.sourceFile,
+    identityContext,
     {
       experimentalIR: true,
       trackFallbacks: collectFallbacks,
@@ -2208,8 +2209,9 @@ function planIrOverlay(
       supportsAsyncIr: ctx.supportsAsyncIr,
       asyncEngineClaims: (fn) => asyncEngineWouldActivate(ctx, fn),
     },
-    typeMap,
+    identityMaps,
   );
+  const selection = identityPlan.selectionProjection.selection;
   // #1530 — when a rejection reason is listed in STRICT_IR_REASONS,
   // promote every fallback with that reason to a hard compile error
   // instead of letting the legacy path silently catch it. The set
@@ -2246,14 +2248,8 @@ function planIrOverlay(
   // constructed with `[]` results and the lowerer can accept bare
   // `return;` / fall-through tails.
   const overrideMap = new Map<string, { params: IrType[]; returnType: IrType | null }>();
-  const declByName = new Map<string, ts.FunctionDeclaration>();
-  for (const stmt of ast.sourceFile.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) declByName.set(stmt.name.text, stmt);
-  }
-  for (const name of selection.funcs) {
-    const fn = declByName.get(name);
-    if (!fn) continue;
-    const entry = typeMap.get(name);
+  const declByName = identityPlan.declarationByLegacyName;
+  for (const { unitId, legacyName: name, declaration, typeEntry: entry } of identityPlan.functionClaims) {
     try {
       // Slice 7a (#1169f) — generator functions return an externref
       // (the JS Generator-like object built by `__create_generator`)
@@ -2264,7 +2260,7 @@ function planIrOverlay(
       // signature. Bypass `resolvePositionType` for the return type
       // — `Generator<T>` doesn't resolve as `IrType.object` and
       // would otherwise drop the generator from `safeSelection`.
-      const isGenerator = !!fn.asteriskToken;
+      const isGenerator = !!declaration.asteriskToken;
       // (#1373b C-1) IR-claimed async fns (sync-pass-through model) register
       // the raw `T` unwrapped from the `Promise<T>` annotation — matching
       // the declaration pre-pass's `unwrapPromiseType` result type, so the
@@ -2272,9 +2268,9 @@ function planIrOverlay(
       // call-site contract stays intact). The selector only claims asyncs
       // with an explicit `Promise<T>` annotation, so the unwrap is non-null
       // for every claimed async fn.
-      const isAsyncFn = !isGenerator && hasAsyncModifier(fn);
-      const asyncUnwrapped = isAsyncFn ? unwrapPromiseTypeNode(fn.type) : null;
-      const effectiveReturnNode = isAsyncFn ? (asyncUnwrapped ?? undefined) : fn.type;
+      const isAsyncFn = !isGenerator && hasAsyncModifier(declaration);
+      const asyncUnwrapped = isAsyncFn ? unwrapPromiseTypeNode(declaration.type) : null;
+      const effectiveReturnNode = isAsyncFn ? (asyncUnwrapped ?? undefined) : declaration.type;
       // Slice 14 (#1228) — VoidKeyword return: bypass resolvePositionType
       // (it has no representation for void in IrType) and set returnType
       // to null. The lowerer treats null returnType as "no result".
@@ -2287,11 +2283,12 @@ function planIrOverlay(
             ? null
             : resolvePositionType(effectiveReturnNode, entry?.returnType, ctx, classShapes);
       const params: IrType[] = [];
-      for (let i = 0; i < fn.parameters.length; i++) {
-        const p = fn.parameters[i]!;
+      for (let i = 0; i < declaration.parameters.length; i++) {
+        const p = declaration.parameters[i]!;
         params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapes));
       }
       overrideMap.set(name, { params, returnType });
+      identityPlan.safeFunctionUnitIds.add(unitId);
     } catch (e) {
       // Selector claimed a function whose types can't be resolved —
       // skip the IR path for this one. Fall through to legacy.
@@ -2343,7 +2340,7 @@ function planIrOverlay(
     classMembers?: ReadonlySet<string>;
     moduleInit?: import("../ir/select.js").IrModuleInitAssessment;
   } = {
-    funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
+    funcs: irOverlayIdentity.projectIrSafeFunctionNames(identityPlan.safeFunctionUnitIds, identityPlan),
     classMembers: selection.classMembers,
     // (#3142 Slice 2) Forward the module-init claim. A resolve-time drop of
     // one of the unit's callees is self-limiting: the integration builds
@@ -2386,6 +2383,7 @@ function planIrOverlay(
       });
     }
     safeSelection.funcs.clear();
+    identityPlan.safeFunctionUnitIds.clear();
     safeSelection.classMembers = new Set();
     // (#3142 Slice 2) The module-init unit routes through legacy too.
     safeSelection.moduleInit = undefined;
@@ -2472,6 +2470,7 @@ function planIrOverlay(
       if (planningFailure) {
         preparationFailures.set(ownerName, planningFailure);
         safeSelection.funcs.delete(ownerName);
+        irOverlayIdentity.dropIrSafeFunctionByLegacyName(identityPlan, ownerName);
         for (const [call, plan] of importedCalls) {
           if (plan.ownerName === ownerName) importedCalls.delete(call);
         }
@@ -2535,7 +2534,7 @@ function planIrOverlay(
     }
   }
   return {
-    identityContext,
+    identityPlan,
     selection,
     classShapes,
     overrideMap,
