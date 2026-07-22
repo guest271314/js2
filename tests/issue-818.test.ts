@@ -7,7 +7,18 @@
  * needed type coercion for their parameters.
  */
 import { describe, it, expect } from "vitest";
-import { compileAndRunTestNumber as compileAndRun } from "./helpers/compile.js";
+import { compile } from "../src/index.js";
+import { buildImports } from "../src/runtime.js";
+
+async function compileAndRun(src: string): Promise<number> {
+  const result = await compile(src, { fileName: "test.ts" });
+  if (!result.success) {
+    throw new Error(`Compile error: ${result.errors.map((e) => e.message).join("; ")}`);
+  }
+  const imports = buildImports(result.imports, undefined, result.stringPool);
+  const { instance } = await WebAssembly.instantiate(result.binary, imports);
+  return (instance.exports as any).test();
+}
 
 describe("Issue #818: fctx is not defined in array closure callbacks", () => {
   it("forEach with closure callback compiles without error", async () => {
