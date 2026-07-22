@@ -716,3 +716,65 @@ cross-statement eval-promotion family (broad-impact, needs a full-CI window) and
 `__anon_#_method` global-get numeric desync, `Parent_new` tail-call, `__new_function_#`
 funcref-cast). The 8 files here still need genuine resizable-ArrayBuffer support
 to reach `pass`.
+
+---
+
+## Landed: boxed-capture funcref-cell self-carrier rebuild — 68-file `Function.prototype.toString` cluster (sr-3024, 2026-07-22)
+
+**PR:** `issue-3024-toString-closure-funcref` — eliminates the largest live
+invalid-Wasm cluster: **68** `built-ins/Function/prototype/toString/*` files that
+failed Wasm validation at *instantiate* (they bucket as `fail`, not
+`compile_error`, which is why the earlier `compile_error`-only harvests
+undercounted — see the 2026-07-22 dev-serve handoff).
+
+### Root cause (verified: `Array.prototype.push` monkeypatch pinned the emit site + type dump)
+
+The test262 `nativeFunctionMatcher.js` harness defines mutually-recursive
+module-`const` closures (`assertToStringOrNativeFunction` → `assertNativeFunction`
+→ `validateNativeFunctionSource` → inner `eat`/`test`/…). Such a closure is boxed
+into a ref cell whose field-0 stores a **bare funcref**, and its lifted self
+carrier is a no-capture funcref-WRAPPER struct `(struct (field funcref))`. In
+`compileClosureCall` (`calls-closures.ts` boxed-capture branch) the recorded
+`boxed.valType` stale-reads `externref` while the cell field-0 is genuinely
+`funcref`, so the legacy path emitted `any.convert_extern` on the unwrapped
+funcref — `any.convert_extern[0] expected type externref, found struct.get of
+type funcref` — followed by a struct `emitGuardedRefCast` (also invalid on a
+funcref). Confirmed by dumping `boxed.valType={externref}`, `cellField0={funcref}`,
+`selfStruct.fields=[funcref only]`, `funcType.params=[ref <wrapper>, externref]`.
+
+### Fix (`calls-closures.ts` only; +37/-4)
+
+Trust the ACTUAL ref-cell field-0 type (`refCellValueType`) instead of the stale
+`boxed.valType`: when it is `funcref` AND the lifted self carrier is a
+single-funcref-field wrapper (`isSingleFuncRefWrapperStruct`), rebuild the self
+carrier by wrapping the funcref back with `struct.new` — never
+`any.convert_extern` / struct-guarded-cast. Guarded so a self carrier that holds
+real capture fields never takes it.
+
+### Proofs
+
+- 68-file cluster: **CE → valid Wasm on BOTH lanes** (gc `__closure_24` and
+  standalone `__closure_11` were INVALID; both now VALID).
+- **+11 host passes** (files whose `assert.sameValue("" + fn, expected)` matches
+  and never invoke the native matcher); status tally over the 80-file dir went
+  `compile_error 80 → 0`.
+- **Byte-inert / zero-regression** (airtight): the old branch on a funcref cell
+  ALWAYS emitted invalid Wasm, so only previously-invalid modules are touched —
+  no previously-valid module changes. Confirmed byte-identical (sha256) across a
+  10-program closure-heavy corpus (incl. mutually-recursive even/odd, which uses
+  externref cells and correctly does NOT take the new branch).
+- New `tests/issue-3024-tostring-closure-funcref.test.ts` (asserts
+  `status !== "compile_error"` and the `any.convert_extern … funcref` signature
+  is gone) passes.
+
+### Still open (roll forward → #3534)
+
+Files that INVOKE the native matcher (`bound-function.js`,
+`built-in-function-object.js`, …) now **validate but TRAP at runtime**
+(`illegal cast` inside `validateNativeFunctionSource` as it constructs its
+cross-referencing inner closures) — a DISTINCT construct-site funcref-cell RTT
+desync (#2873 star-topology family), proven NOT caused by this call-site fix
+(dev-serve's "valid" reference layout traps identically; its "VALID" only meant
+`WebAssembly.compile`, never a matcher run). Tracked in **#3534** with the
+unified closure-funcref-cell representation design plan. dev-serve's 34-file
+`class C { c = fn }` cluster is the value-read instance of the same family.
