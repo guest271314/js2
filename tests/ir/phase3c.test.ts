@@ -22,6 +22,7 @@ import {
   asValueId,
   createDerivedIrUnitId,
   irDynamic,
+  irUnitFuncRef,
   irVal,
   lowerIrFunctionToWasm,
   verifyIrFunction,
@@ -76,7 +77,11 @@ function makeIdentity(name: string, paramType = F64): IrFunction {
  * externref argument. The argument is the caller's own param (of `argType`),
  * so the call site's arg-type tuple depends on `argType`.
  */
-function makeCallerPassingParam(callerName: string, calleeName: string, argType = F64): IrFunction {
+function makeCallerPassingParam(
+  callerName: string,
+  callee: Pick<IrFunction, "unitId" | "name">,
+  argType = F64,
+): IrFunction {
   return {
     ...irIdentities.next(callerName),
     params: [{ value: id(0), type: argType, name: "n" }],
@@ -89,7 +94,7 @@ function makeCallerPassingParam(callerName: string, calleeName: string, argType 
         instrs: [
           {
             kind: "call",
-            target: { kind: "func", name: calleeName },
+            target: irUnitFuncRef(callee),
             args: [id(0)],
             result: id(1),
             resultType: argType,
@@ -111,8 +116,8 @@ describe("#1167c — monomorphize (unit)", () => {
   it("clones a callee invoked with two distinct arg-type tuples", () => {
     // identity called from a f64 caller AND an externref caller — two tuples.
     const identity = makeIdentity("identity", F64);
-    const callerNum = makeCallerPassingParam("run_num", "identity", F64);
-    const callerStr = makeCallerPassingParam("run_str", "identity", EXTERNREF);
+    const callerNum = makeCallerPassingParam("run_num", identity, F64);
+    const callerStr = makeCallerPassingParam("run_str", identity, EXTERNREF);
 
     const result = monomorphize({ functions: [identity, callerNum, callerStr] });
     expect(result.module).not.toBe({ functions: [identity, callerNum, callerStr] });
@@ -165,14 +170,16 @@ describe("#1167c — monomorphize (unit)", () => {
       }),
     );
     expect(cloneFn.unitId).not.toBe(identity.unitId);
+    const cloneCall = numCall.target.name === cloneName ? numCall : strCall;
+    expect(cloneCall.target.binding).toEqual({ kind: "unit", unitId: cloneFn.unitId });
     expect(verifyIrFunction(cloneFn)).toEqual([]);
   });
 
   it("leaves a callee with a single arg-type tuple untouched", () => {
     // Both callers invoke identity with f64 — no specialization needed.
     const identity = makeIdentity("identity", F64);
-    const callerA = makeCallerPassingParam("a", "identity", F64);
-    const callerB = makeCallerPassingParam("b", "identity", F64);
+    const callerA = makeCallerPassingParam("a", identity, F64);
+    const callerB = makeCallerPassingParam("b", identity, F64);
 
     const mod = { functions: [identity, callerA, callerB] };
     const result = monomorphize(mod);
@@ -183,8 +190,9 @@ describe("#1167c — monomorphize (unit)", () => {
 
   it("skips recursive callees", () => {
     // `rec` calls itself — computeRecursiveSet rejects it.
+    const recIdentity = irIdentities.next("rec");
     const rec: IrFunction = {
-      ...irIdentities.next("rec"),
+      ...recIdentity,
       params: [{ value: id(0), type: F64, name: "n" }],
       resultTypes: [F64],
       blocks: [
@@ -195,7 +203,7 @@ describe("#1167c — monomorphize (unit)", () => {
           instrs: [
             {
               kind: "call",
-              target: { kind: "func", name: "rec" },
+              target: irUnitFuncRef(recIdentity),
               args: [id(0)],
               result: id(1),
               resultType: F64,
@@ -208,8 +216,8 @@ describe("#1167c — monomorphize (unit)", () => {
       valueCount: 2,
     };
     // Two callers with distinct arg types: one f64, one externref.
-    const callerNum = makeCallerPassingParam("run_num", "rec", F64);
-    const callerStr = makeCallerPassingParam("run_str", "rec", EXTERNREF);
+    const callerNum = makeCallerPassingParam("run_num", rec, F64);
+    const callerStr = makeCallerPassingParam("run_str", rec, EXTERNREF);
 
     const result = monomorphize({ functions: [rec, callerNum, callerStr] });
     // Recursive → no clone despite distinct call tuples.
@@ -244,8 +252,8 @@ describe("#1167c — monomorphize (unit)", () => {
       exported: false,
       valueCount: 2,
     };
-    const callerA = makeCallerPassingParam("run_a", "double", F64);
-    const callerB = makeCallerPassingParam("run_b", "double", EXTERNREF);
+    const callerA = makeCallerPassingParam("run_a", doubler, F64);
+    const callerB = makeCallerPassingParam("run_b", doubler, EXTERNREF);
 
     const result = monomorphize({ functions: [doubler, callerA, callerB] });
     expect(result.cloneSignatures.size).toBe(0);
@@ -276,10 +284,10 @@ describe("#1167c — monomorphize (unit)", () => {
       valueCount: 2,
     };
     const callers: IrFunction[] = [
-      makeCallerPassingParam("c1", "t", F64),
-      makeCallerPassingParam("c2", "t", I32),
-      makeCallerPassingParam("c3", "t", EXTERNREF),
-      makeCallerPassingParam("c4", "t", irVal({ kind: "f32" })),
+      makeCallerPassingParam("c1", t, F64),
+      makeCallerPassingParam("c2", t, I32),
+      makeCallerPassingParam("c3", t, EXTERNREF),
+      makeCallerPassingParam("c4", t, irVal({ kind: "f32" })),
     ];
     const result = monomorphize({ functions: [t, ...callers] });
     // Guard fires → no clones.
@@ -346,12 +354,12 @@ describe("#1167c — monomorphize (unit)", () => {
     }
 
     const callers = [
-      makeCallerPassingParam("a_num", "a", F64),
-      makeCallerPassingParam("a_str", "a", EXTERNREF),
-      makeCallerPassingParam("b_num", "b", F64),
-      makeCallerPassingParam("b_str", "b", EXTERNREF),
-      makeCallerPassingParam("c_num", "c", F64),
-      makeCallerPassingParam("c_str", "c", EXTERNREF),
+      makeCallerPassingParam("a_num", a, F64),
+      makeCallerPassingParam("a_str", a, EXTERNREF),
+      makeCallerPassingParam("b_num", b, F64),
+      makeCallerPassingParam("b_str", b, EXTERNREF),
+      makeCallerPassingParam("c_num", c, F64),
+      makeCallerPassingParam("c_str", c, EXTERNREF),
     ];
 
     const result = monomorphize({ functions: [a, b, c, ...pads, ...callers] });

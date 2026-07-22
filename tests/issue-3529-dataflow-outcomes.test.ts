@@ -5,6 +5,8 @@ import ts from "typescript";
 
 import { analyzeSource } from "../src/checker/index.js";
 import { compile, type IrObservedOutcome } from "../src/index.js";
+import { collectIrDirectCallLoweringPlans } from "../src/ir/ast-lowering-plans.js";
+import { irUnitFuncRef } from "../src/ir/callable-bindings.js";
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "../src/ir/from-ast.js";
 import type { IrClassShape, IrType } from "../src/ir/nodes.js";
 import { classifyIrFailure, evaluateIrOutcomePolicy, type IrUnsupportedCode } from "../src/ir/outcomes.js";
@@ -64,14 +66,25 @@ function expectLowerInvariant(
       ts.isFunctionDeclaration(statement) && statement.name?.text === "test",
   );
   expect(declaration).toBeDefined();
+  const ownerIdentity = irIdentities.next("test");
+  const directCalls = collectIrDirectCallLoweringPlans(
+    declaration!,
+    ownerIdentity.unitId,
+    new Map(
+      [...calleeTypes].map(([calleeName, signature]) => [
+        calleeName,
+        { target: irUnitFuncRef(irIdentities.next(`callee:${calleeName}`)), signature },
+      ]),
+    ),
+  );
 
   let thrown: unknown;
   try {
     lowerFunctionAstToIr(declaration!, {
-      ownerUnitId: irIdentities.next("test").unitId,
+      ownerUnitId: ownerIdentity.unitId,
       exported: true,
       checker: ast.checker,
-      calleeTypes,
+      directCalls,
       resolver,
     });
   } catch (error) {

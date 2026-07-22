@@ -14,7 +14,7 @@
 // Phase 2 & 3 widen the Instr and Terminator sets.
 
 import type { ValType } from "./types.js";
-import type { IrFunctionIdentity } from "./identity.js";
+import type { IrBindingId, IrFunctionIdentity, IrUnitId } from "./identity.js";
 // #2949 slice 1 — the canonical JS-type tag enum, from the dependency-free
 // leaf `ir/js-tag.ts` (#3113 moved it below the IR layer so IR core files
 // consume it without the IR→codegen import inversion). Type-only:
@@ -30,14 +30,23 @@ import type { IrStringConcatMode, IrStringEncoding } from "./string-runtime.js";
 // pipeline embeds raw funcIdx / globalIdx integers in emitted instructions,
 // so any late import addition must re-walk every body via
 // `shiftLateImportIndices` to rewrite those integers. The IR instead emits
-// a symbolic `IrFuncRef { name }`; lowering resolves it to a concrete index
-// AFTER all imports are finalized, making the shift pass a no-op on the
-// IR path.
+// a symbolic `IrFuncRef` with a structural callable binding; lowering resolves
+// it to a concrete index AFTER all imports are finalized, making the shift
+// pass a no-op on the IR path. `name` remains only a compatibility/debug label.
+
+/** Closed structural identity for every direct-callable IR target. */
+export type IrCallableBinding =
+  | { readonly kind: "unit"; readonly unitId: IrUnitId }
+  | { readonly kind: "import"; readonly module: string; readonly field: string }
+  | { readonly kind: "runtime"; readonly symbol: string }
+  | { readonly kind: "intrinsic"; readonly symbol: string }
+  | { readonly kind: "support"; readonly bindingId: IrBindingId };
 
 export interface IrFuncRef {
   readonly kind: "func";
-  /** Unique function name (same namespace as `ctx.funcMap`). */
+  /** Compatibility/debug label; never the semantic lookup key. */
   readonly name: string;
+  readonly binding: IrCallableBinding;
 }
 
 export interface IrGlobalRef {
@@ -196,10 +205,10 @@ export interface IrClassMethodDescriptor {
  *                        not listed.
  *   - `constructorParams` user-visible param list for `new C(...)`.
  *
- * Class methods themselves are NOT IR-claimable in slice 4 — they remain
- * on the legacy class-bodies path. The IR only references them by name
- * (`<className>_<methodName>`) at call-site lowering, where the resolver
- * maps the name to the legacy-allocated funcIdx.
+ * Class methods themselves are NOT IR-claimable in slice 4 — they remain on
+ * the legacy class-bodies path. The call site carries the class descriptor and
+ * member key; the resolver returns a typed callable reference for the selected
+ * legacy-allocated slot.
  */
 export interface IrClassShape {
   readonly className: string;
@@ -1156,8 +1165,8 @@ export interface IrInstrObjectSet extends IrInstrBase {
 // ---------------------------------------------------------------------------
 
 /**
- * Materialize a closure value. `liftedFunc` names the lifted top-level
- * function (registered in the IR module as a synthesized BuiltFn).
+ * Materialize a closure value. `liftedFunc` structurally identifies the lifted
+ * top-level function (registered in the IR module as a synthesized BuiltFn).
  * `signature` is the caller-visible signature (used to look up its allocation
  * wrapper + exact funcref type). `captures` populates an optional
  * captured subtype's fields parallel to `captureFieldTypes`; an empty capture
@@ -1433,9 +1442,9 @@ export interface IrInstrClassInstanceOf extends IrInstrBase {
  * (#3144) Static method call `C.m(args)` on a locally-declared user class.
  * No receiver: legacy compiles a static method WITHOUT a `self` param
  * (`class-bodies.ts` — `methodParams = isStatic ? [] : [self]`), so the
- * lowering emits args then `call $<className>_<methodName>` (resolved via
- * `IrClassLowering.methodFuncName`, i.e. the collision-relocated funcMap
- * key). `shape` is the class named at the call site; an inherited static
+ * lowering emits args then a call resolved via `IrClassLowering.methodFunc`.
+ * Its typed binding selects the slot; its name remains the compatibility key
+ * for the current backend adapter. `shape` is the class named at the call site; an inherited static
  * resolves through the same key thanks to legacy's inherited-member key
  * propagation. Result type: the descriptor's `returnType` (null → void).
  */

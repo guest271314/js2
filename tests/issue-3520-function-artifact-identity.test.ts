@@ -59,6 +59,19 @@ describe("#3520 IR function artifact identity", () => {
     );
     expect(secondLifted.unitId).not.toBe(firstLifted.unitId);
 
+    const firstClosureNew = first.main.blocks
+      .flatMap((block) => block.instrs)
+      .find((instr) => instr.kind === "closure.new");
+    const secondClosureNew = second.main.blocks
+      .flatMap((block) => block.instrs)
+      .find((instr) => instr.kind === "closure.new");
+    expect(firstClosureNew).toMatchObject({
+      liftedFunc: { kind: "func", name: firstLifted.name, binding: { kind: "unit", unitId: firstLifted.unitId } },
+    });
+    expect(secondClosureNew).toMatchObject({
+      liftedFunc: { kind: "func", name: secondLifted.name, binding: { kind: "unit", unitId: secondLifted.unitId } },
+    });
+
     const artifacts = new Map<IrUnitId, string>([
       [firstLifted.unitId, firstLifted.name],
       [secondLifted.unitId, secondLifted.name],

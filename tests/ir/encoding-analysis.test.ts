@@ -17,6 +17,9 @@ import {
   IrFunctionBuilder,
   analyzeEncoding,
   classifyLiteral,
+  irImportFuncRef,
+  irRuntimeFuncRef,
+  irUnitFuncRef,
   joinEncoding,
   irVal,
   type Encoding,
@@ -197,12 +200,26 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
       const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
       const arg = b.addParam("x", STR);
       b.openBlock();
-      const r = b.emitCall({ kind: "func", name: fnName }, [arg], STR)!;
+      const r = b.emitCall(irImportFuncRef("env", fnName), [arg], STR)!;
       b.terminate({ kind: "return", values: [r] });
       const fn = b.finish();
       analyzeEncoding(fn, reg);
       expect(callEnc(reg, fn)).toBe("utf8-guaranteed");
     }
+  });
+
+  it("does not classify a source unit from a builtin-looking compatibility label", () => {
+    const reg = new AllocSiteRegistry();
+    const b = new IrFunctionBuilder(identities.next("caller"), [STR], false, reg);
+    const arg = b.addParam("x", STR);
+    b.openBlock();
+    const r = b.emitCall(irUnitFuncRef(identities.next("JSON_stringify")), [arg], STR)!;
+    b.terminate({ kind: "return", values: [r] });
+    const fn = b.finish();
+
+    analyzeEncoding(fn, reg);
+
+    expect(callEnc(reg, fn)).toBe("wtf16");
   });
 
   it("encoding-preserving string methods propagate the receiver encoding", () => {
@@ -211,7 +228,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
     const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const recv = b.emitStringConst("hello"); // ascii
-    const r = b.emitCall({ kind: "func", name: "string_toUpperCase" }, [recv], STR)!;
+    const r = b.emitCall(irRuntimeFuncRef("string_toUpperCase"), [recv], STR)!;
     b.terminate({ kind: "return", values: [r] });
     const fn = b.finish();
     analyzeEncoding(fn, reg);
@@ -223,7 +240,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
     const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const recv = b.emitStringConst("café"); // utf8-guaranteed
-    const r = b.emitCall({ kind: "func", name: "__str_trim" }, [recv], STR)!;
+    const r = b.emitCall(irRuntimeFuncRef("__str_trim"), [recv], STR)!;
     b.terminate({ kind: "return", values: [r] });
     const fn = b.finish();
     analyzeEncoding(fn, reg);
@@ -235,7 +252,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
     const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
     const recv = b.emitStringConst("hello"); // ascii receiver
-    const r = b.emitCall({ kind: "func", name: "string_slice" }, [recv], STR)!;
+    const r = b.emitCall(irRuntimeFuncRef("string_slice"), [recv], STR)!;
     b.terminate({ kind: "return", values: [r] });
     const fn = b.finish();
     analyzeEncoding(fn, reg);
@@ -246,7 +263,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
     const reg = new AllocSiteRegistry();
     const b = new IrFunctionBuilder(identities.next("f"), [STR], false, reg);
     b.openBlock();
-    const r = b.emitCall({ kind: "func", name: "someUserFunc" }, [], STR)!;
+    const r = b.emitCall(irUnitFuncRef(identities.next("someUserFunc")), [], STR)!;
     b.terminate({ kind: "return", values: [r] });
     const fn = b.finish();
     analyzeEncoding(fn, reg);
@@ -257,7 +274,7 @@ describe("#1588 Phase 2 — call-result origins + method propagation", () => {
     const reg = new AllocSiteRegistry();
     const b = new IrFunctionBuilder(identities.next("f"), [irVal({ kind: "f64" })], false, reg);
     b.openBlock();
-    const r = b.emitCall({ kind: "func", name: "numFunc" }, [], irVal({ kind: "f64" }))!;
+    const r = b.emitCall(irUnitFuncRef(identities.next("numFunc")), [], irVal({ kind: "f64" }))!;
     b.terminate({ kind: "return", values: [r] });
     const fn = b.finish();
     analyzeEncoding(fn, reg);

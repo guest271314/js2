@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://loopdive.github.io/js2wasm/ir/ir-module.schema.json",
-  "title": "js2wasm IR interchange module (v2.0)",
+  "title": "js2wasm IR interchange module (v3.0)",
   "description": "One serialized IR module (#3030 D1). Normative companion: docs/ir/ir-contract.md — the schema is the syntax gate; per-instruction operand/result typing is enforced by the IR verifier (the semantic conformance checker). Enum tables are append-only with frozen order (D2); any shape change requires an IR_FORMAT_VERSION bump.",
   "type": "object",
   "properties": {
@@ -181,10 +181,65 @@
       "required": ["className", "fields", "methods", "constructorParams"],
       "additionalProperties": false
     },
+    "callableBinding": {
+      "description": "Closed structural identity for a direct callable target. Compatibility names do not participate in identity.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "unit" },
+            "unitId": { "type": "string", "pattern": "^ir-unit:v1:" }
+          },
+          "required": ["kind", "unitId"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "import" },
+            "module": { "type": "string", "minLength": 1 },
+            "field": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "module", "field"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "runtime" },
+            "symbol": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "symbol"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "intrinsic" },
+            "symbol": { "type": "string", "minLength": 1 }
+          },
+          "required": ["kind", "symbol"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "const": "support" },
+            "bindingId": { "type": "string", "pattern": "^ir-binding:v1:" }
+          },
+          "required": ["kind", "bindingId"],
+          "additionalProperties": false
+        }
+      ]
+    },
     "funcRef": {
       "type": "object",
-      "properties": { "kind": { "const": "func" }, "name": { "type": "string" } },
-      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "const": "func" },
+        "name": { "type": "string", "minLength": 1 },
+        "binding": { "$ref": "#/$defs/callableBinding" }
+      },
+      "required": ["kind", "name", "binding"],
       "additionalProperties": false
     },
     "globalRef": {

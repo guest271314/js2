@@ -14,7 +14,9 @@ import { compile, type CompileResult } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 import { verifyIrBackendLegality } from "../src/ir/backend/legality.js";
 import { LinearEmitter } from "../src/ir/backend/linear-emitter.js";
+import { collectIrDirectCallLoweringPlans } from "../src/ir/ast-lowering-plans.js";
 import { IrFunctionBuilder } from "../src/ir/builder.js";
+import { irUnitFuncRef } from "../src/ir/callable-bindings.js";
 import { irTypeEquals, irVal, type IrClosureSignature, type IrType } from "../src/ir/nodes.js";
 import { lowerIrFunctionBody, wasmValueTypeConverter, type IrLowerResolver } from "../src/ir/lower.js";
 import { lowerFunctionAstToIr } from "../src/ir/from-ast.js";
@@ -541,12 +543,27 @@ describe("#3214 B0 — canonical callable ABI", () => {
     );
     const declaration = sourceFile.statements.find(ts.isFunctionDeclaration);
     expect(declaration).toBeDefined();
+    const ownerIdentity = identities.next("test");
+    const applyIdentity = identities.next("apply");
+    const directCalls = collectIrDirectCallLoweringPlans(
+      declaration!,
+      ownerIdentity.unitId,
+      new Map([
+        [
+          "apply",
+          {
+            target: irUnitFuncRef(applyIdentity),
+            signature: { params: [callable, F64], returnType: F64 },
+          },
+        ],
+      ]),
+    );
     const lowered = lowerFunctionAstToIr(declaration!, {
       exported: true,
-      ownerUnitId: identities.next("test").unitId,
+      ownerUnitId: ownerIdentity.unitId,
       paramTypeOverrides: [],
       returnTypeOverride: F64,
-      calleeTypes: new Map([["apply", { params: [callable, F64], returnType: F64 }]]),
+      directCalls,
     });
     const instrs = lowered.main.blocks.flatMap((block) => block.instrs);
     const closureNew = instrs.find((instr) => instr.kind === "closure.new");

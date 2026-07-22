@@ -14,7 +14,8 @@
 //   4. Branch arg arity: each `br`/`br_if` passes exactly as many args as the
 //      target block declares.
 //   5. Symbolic refs: the only references to functions/globals/types in
-//      instructions are IrFuncRef/IrGlobalRef/IrTypeRef (no raw indices).
+//      instructions are structurally-bound IrFuncRef/IrGlobalRef/IrTypeRef
+//      values (no raw indices or legacy name-only callable refs).
 //
 // On failure, returns a list of `IrVerifyError`s rather than throwing, so
 // callers can decide whether to bail or fall back to the legacy path.
@@ -163,9 +164,76 @@ export interface IrVerifyError {
   readonly block?: number;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function callableReferenceProblem(value: unknown): string | null {
+  if (!isRecord(value)) return "must be an IrFuncRef object";
+  if (value.kind !== "func") return 'must have kind "func"';
+  if (!nonEmptyString(value.name)) return "must carry a non-empty compatibility name";
+  if (!("binding" in value)) {
+    return "is missing required callable binding; legacy name-only refs are not valid IR";
+  }
+  if (!isRecord(value.binding)) return "has a malformed callable binding object";
+
+  const binding = value.binding;
+  switch (binding.kind) {
+    case "unit":
+      return nonEmptyString(binding.unitId) && binding.unitId.startsWith("ir-unit:v1:")
+        ? null
+        : "has a malformed unit callable binding";
+    case "import":
+      return nonEmptyString(binding.module) && nonEmptyString(binding.field)
+        ? null
+        : "has a malformed import callable binding";
+    case "runtime":
+      return nonEmptyString(binding.symbol) ? null : "has a malformed runtime callable binding";
+    case "intrinsic":
+      return nonEmptyString(binding.symbol) ? null : "has a malformed intrinsic callable binding";
+    case "support":
+      return nonEmptyString(binding.bindingId) && binding.bindingId.startsWith("ir-binding:v1:")
+        ? null
+        : "has a malformed support callable binding";
+    default:
+      return "has an unknown callable binding kind";
+  }
+}
+
+/** Verify direct callable refs in every nested instruction buffer. */
+function verifyCallableReferences(func: IrFunction, errors: IrVerifyError[]): void {
+  for (const block of func.blocks) {
+    for (const instr of block.instrs) {
+      forEachInstrDeep(instr, (nested) => {
+        let site: string;
+        let ref: unknown;
+        if (nested.kind === "call") {
+          site = "call target";
+          ref = nested.target;
+        } else if (nested.kind === "closure.new") {
+          site = "closure.new liftedFunc";
+          ref = nested.liftedFunc;
+        } else {
+          return;
+        }
+        const problem = callableReferenceProblem(ref);
+        if (problem !== null) {
+          errors.push({ message: `${site} ${problem}`, func: func.name, block: block.id as number });
+        }
+      });
+    }
+  }
+}
+
 export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
   const errors: IrVerifyError[] = [];
   const defs = new Set<IrValueId>();
+
+  verifyCallableReferences(func, errors);
 
   for (const p of func.params) {
     if (defs.has(p.value)) {

@@ -63,6 +63,8 @@
 
 import { ts } from "../ts-api.js";
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "../ir/from-ast.js";
+import { collectIrDirectCallLoweringPlans, type IrDirectCallTarget } from "../ir/ast-lowering-plans.js";
+import { irIntrinsicFuncRef, irRuntimeFuncRef } from "../ir/callable-bindings.js";
 import { irVal, type IrFunction, type IrType } from "../ir/nodes.js";
 import { createDerivedIrUnitId, createIrSourceId, type IrSyntheticUnitRole, type IrUnitId } from "../ir/identity.js";
 import type { Instr, ValType } from "../ir/types.js";
@@ -79,6 +81,12 @@ import { addFuncType } from "./registry/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 
 const F64: IrType = irVal({ kind: "f64" });
+
+function selfHostedCalleeRef(name: string) {
+  return name.startsWith(VEC_ELEM_SET_PREFIX) || name === NATIVE_CHARCODEAT_FN
+    ? irIntrinsicFuncRef(name)
+    : irRuntimeFuncRef(name);
+}
 
 /**
  * #3161 — a self-hosted builtin with an explicit typed signature. The
@@ -365,6 +373,19 @@ export function buildSelfHostedIr(def: SelfHostedFuncDef, unitId: IrUnitId, from
     funcName: def.name,
     exported: false,
     calleeTypes: def.calleeTypes,
+    directCalls: collectIrDirectCallLoweringPlans(
+      fnDecl,
+      unitId,
+      new Map<string, IrDirectCallTarget>(
+        [...def.calleeTypes].map(([name, signature]) => [
+          name,
+          {
+            target: selfHostedCalleeRef(name),
+            signature,
+          },
+        ]),
+      ),
+    ),
     paramTypeOverrides: def.paramTypes,
     returnTypeOverride: def.returnType,
     // (#3256) string-family dialect: the caller-supplied ctx-bound resolver
@@ -491,6 +512,11 @@ function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): nu
   };
   const resolver: IrLowerResolver = {
     resolveFunc(ref) {
+      if (ref.binding.kind === "unit") {
+        throw new Error(
+          `stdlib-selfhost: ${name} cannot resolve source unit ${ref.binding.unitId} / ${ref.name} through the runtime provider`,
+        );
+      }
       // (#3257 Tier-2) `__vec_elem_set_<vecTypeIdx>` — element-store helper
       // with full legacy grow semantics, materialized on demand (mirrors
       // integration.ts's arm: append-only defined function, never an import,
@@ -498,8 +524,8 @@ function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): nu
       // ABI takes an i32 index — a TS-source caller must declare that exact
       // sig in calleeTypes and produce an i32 arg (e.g. a comparison result);
       // f64 index arithmetic needs an `__arri_*`-style f64-ABI wrapper.
-      if (ref.name.startsWith(VEC_ELEM_SET_PREFIX)) {
-        const vecTypeIdx = Number(ref.name.slice(VEC_ELEM_SET_PREFIX.length));
+      if (ref.binding.kind === "intrinsic" && ref.binding.symbol.startsWith(VEC_ELEM_SET_PREFIX)) {
+        const vecTypeIdx = Number(ref.binding.symbol.slice(VEC_ELEM_SET_PREFIX.length));
         const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
         if (helperIdx === null) {
           throw new Error(`stdlib-selfhost: ${name} cannot materialize ${ref.name} (not a recognisable vec struct)`);
@@ -509,7 +535,7 @@ function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): nu
       // (#3256) Guarded native charCodeAt — materialized on demand, same
       // append-only defined-function discipline as integration.ts's arm
       // (never an import, no existing funcIdx shifts; idempotent via funcMap).
-      if (ref.name === NATIVE_CHARCODEAT_FN) {
+      if (ref.binding.kind === "intrinsic" && ref.binding.symbol === NATIVE_CHARCODEAT_FN) {
         const helperIdx = ensureNativeCharCodeAtHelper(ctx);
         if (helperIdx === null) {
           throw new Error(
@@ -518,13 +544,19 @@ function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): nu
         }
         return helperIdx;
       }
-      const idx = ctx.funcMap.get(ref.name);
+      const adapterName =
+        ref.binding.kind === "runtime" || ref.binding.kind === "intrinsic"
+          ? ref.binding.symbol
+          : ref.binding.kind === "import"
+            ? ref.binding.field
+            : ref.name;
+      const idx = ctx.funcMap.get(adapterName);
       if (idx !== undefined) return idx;
       // (#3256 Tier-1) makeResolver's name-fallback: native-string kernels
       // (`__str_flatten`, `__str_substring`, …) live in `ctx.nativeStrHelpers`,
       // not `ctx.funcMap`; re-resolve by name against the post-shift function
       // table first, helpers map last (see resolveNativeStrHelper).
-      const helperIdx = resolveNativeStrHelper(ctx, ref.name);
+      const helperIdx = resolveNativeStrHelper(ctx, adapterName);
       if (helperIdx !== null) return helperIdx;
       throw new Error(
         `stdlib-selfhost: ${name} calls "${ref.name}" but it is not registered yet — ` +

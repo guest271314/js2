@@ -25,6 +25,7 @@ import {
   type IrTypeRef,
 } from "../../nodes.js";
 import type { IrLoweredBody, IrLowerResolver } from "../../lower.js";
+import type { IrUnitId } from "../../identity.js";
 import type { FuncHandle, FuncTypeDef, GlobalHandle, TypeHandle, ValType } from "../../types.js";
 import type { ModuleAssembler } from "../contract.js";
 import type { IrVecLowering, LinearMemoryFieldLowering, LinearVecLowering, PlannedObjectLowering } from "../handles.js";
@@ -111,6 +112,7 @@ export class PorfforModuleAssembler
   private readonly typeConverter = new PorfforTypeConverter();
   private readonly funcsByHandle = new Map<FuncHandle, FunctionEntry>();
   private readonly funcsByName = new Map<string, FunctionEntry>();
+  private readonly funcsByUnitId = new Map<IrUnitId, FunctionEntry>();
   private readonly globalsByHandle = new Map<GlobalHandle, GlobalEntry>();
   private readonly globalsByName = new Map<string, GlobalEntry>();
   private readonly typesByHandle = new Map<TypeHandle, TypeEntry>();
@@ -185,8 +187,12 @@ export class PorfforModuleAssembler
 
   /** Declare an IR function and freeze its scalar signature before bodies lower. */
   declareIrFunction(func: IrFunction): FuncHandle {
+    if (this.funcsByUnitId.has(func.unitId)) {
+      throw new Error(`porffor assembler: duplicate IR function unit '${func.unitId}'`);
+    }
     const handle = this.declareFunc(func.name);
     const entry = this.requireFunc(handle);
+    this.funcsByUnitId.set(func.unitId, entry);
     entry.signature = {
       name: func.name,
       params: func.params.map((param) => this.oneSlot(param.type, `param ${param.name} of ${func.name}`)),
@@ -366,11 +372,32 @@ export class PorfforModuleAssembler
   }
 
   resolveFunc(ref: IrFuncRef): number {
-    const arrayRuntime = linearArrayRuntimeKind(ref.name);
-    if (arrayRuntime) return this.ensureLinearArrayRuntime(ref.name, arrayRuntime);
-    const handle = this.lookupFunc(ref.name);
-    if (handle === undefined) throw new Error(`porffor assembler: unresolved function '${ref.name}'`);
-    return handle;
+    switch (ref.binding.kind) {
+      case "unit": {
+        const entry = this.funcsByUnitId.get(ref.binding.unitId);
+        if (!entry) {
+          throw new Error(`porffor assembler: unresolved function unit '${ref.binding.unitId}' (${ref.name})`);
+        }
+        return entry.handle;
+      }
+      case "runtime":
+      case "intrinsic": {
+        const symbol = ref.binding.symbol;
+        const arrayRuntime = linearArrayRuntimeKind(symbol);
+        if (arrayRuntime) return this.ensureLinearArrayRuntime(symbol, arrayRuntime);
+        const entry = this.funcsByName.get(symbol);
+        if (!entry?.stackRuntime && !entry?.linearArrayRuntime) {
+          throw new Error(`porffor assembler: unresolved ${ref.binding.kind} '${symbol}'`);
+        }
+        return entry.handle;
+      }
+      case "import":
+        throw new Error(
+          `porffor assembler: imported function '${ref.binding.module}.${ref.binding.field}' is unsupported`,
+        );
+      case "support":
+        throw new Error(`porffor assembler: unresolved support binding '${ref.binding.bindingId}'`);
+    }
   }
 
   resolveGlobal(ref: IrGlobalRef): number {

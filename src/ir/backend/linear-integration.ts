@@ -40,6 +40,7 @@
 import { ts } from "../../ts-api.js";
 import type { LinearContext } from "../../codegen-linear/context.js";
 import { LINEAR_GENERIC_OBJECT_TAG } from "../../codegen-linear/layout.js";
+import { FMOD_FN } from "../../codegen/fmod.js";
 import {
   LINEAR_IR_STRING_CHAR_AT_FN,
   LINEAR_IR_STRING_CHAR_CODE_AT_FN,
@@ -48,6 +49,8 @@ import {
   linearStringLiteralInstrs,
 } from "../../codegen-linear/runtime.js";
 import { IR_STRING_COMPARE_FN, lowerFunctionAstToIr, type IrFromAstResolver, typeNodeToIr } from "../from-ast.js";
+import { collectIrDirectCallLoweringPlans, type IrDirectCallTarget } from "../ast-lowering-plans.js";
+import { irUnitFuncRef } from "../callable-bindings.js";
 import { lowerIrFunctionBody, type IrLowerResolver } from "../lower.js";
 import { AllocSiteRegistry } from "../alloc-registry.js";
 import {
@@ -159,6 +162,23 @@ export interface LinearIrSourceOwner {
 export interface LinearIrSourceOwnerIndex {
   readonly owners: readonly LinearIrSourceOwner[];
   readonly projection: IrLegacyUnitProjection;
+}
+
+/** Resolve an inventoried source artifact onto the linear backend's physical slot label. */
+function linearOwnerSlotName(ctx: LinearContext, owner: LinearIrSourceOwner): string | null {
+  let enclosingClass: ts.ClassDeclaration | undefined;
+  for (let node: ts.Node | undefined = owner.declaration; node; node = node.parent) {
+    if (ts.isClassDeclaration(node)) {
+      enclosingClass = node;
+      break;
+    }
+  }
+  const className = enclosingClass?.name?.text;
+  if (className && owner.legacyName === `${className}_new`) {
+    const constructorName = ctx.classLayouts.get(className)?.ctorFuncName;
+    if (constructorName && ctx.funcMap.has(constructorName)) return constructorName;
+  }
+  return ctx.funcMap.has(owner.legacyName) ? owner.legacyName : null;
 }
 
 function linearOwnerInvariant(code: IrPlanningIdentityInvariantCode, message: string): never {
@@ -273,7 +293,7 @@ export function compileLinearIrFunctions(
   let memoryPlan = planLinearMemory(irModule, allocRegistry, allocationPolicy);
   let helperStartFuncIdx = 0;
   for (const funcIdx of ctx.funcMap.values()) helperStartFuncIdx = Math.max(helperStartFuncIdx, funcIdx + 1);
-  const { resolver, helpers, bindMemoryPlan } = makeLinearIrResolver(ctx, helperStartFuncIdx);
+  const { resolver, helpers, bindMemoryPlan, bindUnitFunc } = makeLinearIrResolver(ctx, helperStartFuncIdx);
   const result: LinearIrResult = {
     funcs,
     compiled,
@@ -323,6 +343,10 @@ export function compileLinearIrFunctions(
     recursiveTypeEvidence.typeMap,
   );
   const ownerIndex = indexLinearIrSourceOwners(sourceFile, identityContext);
+  for (const owner of ownerIndex.owners) {
+    const slotName = linearOwnerSlotName(ctx, owner);
+    if (slotName) bindUnitFunc(owner.ownerUnitId, slotName);
+  }
   const ownerByUnitId = new Map(ownerIndex.owners.map((owner) => [owner.ownerUnitId, owner] as const));
   const recordRejection = (owner: LinearIrSourceOwner, rejection: LinearIrRejection): void => {
     ownerIndex.projection.requirePair({ unitId: owner.ownerUnitId, legacyName: rejection.func });
@@ -430,6 +454,14 @@ export function compileLinearIrFunctions(
     for (const owner of pending) {
       const { ownerUnitId, legacyName: name, declaration: decl, exported } = owner;
       try {
+        const directCallTargets = new Map<string, IrDirectCallTarget>();
+        for (const [calleeName, signature] of calleeTypes) {
+          const callee = ownerIndex.projection.requireLegacyName(calleeName);
+          directCallTargets.set(calleeName, {
+            target: irUnitFuncRef({ unitId: callee.unitId, name: calleeName }),
+            signature,
+          });
+        }
         // Build through the SAME shared from-ast as WasmGC. The narrowed
         // linear resolver exposes the landed L2 vec/aggregate and L3 string
         // shapes; every other representation-dependent family still throws
@@ -440,6 +472,7 @@ export function compileLinearIrFunctions(
           funcName: name,
           ownerUnitId,
           calleeTypes,
+          directCalls: collectIrDirectCallLoweringPlans(decl, ownerUnitId, directCallTargets),
           paramTypeOverrides: ownTypes.get(ownerUnitId)?.params,
           returnTypeOverride: ownTypes.get(ownerUnitId)?.returnType,
           resolver,
@@ -630,6 +663,7 @@ function makeLinearIrResolver(
   resolver: IrLowerResolver & IrFromAstResolver;
   helpers: LinearIrHelper[];
   bindMemoryPlan(plan: LinearMemoryPlan): void;
+  bindUnitFunc(unitId: IrUnitId, legacyName: string): void;
 } {
   const helpers: LinearIrHelper[] = [];
   const helperByShape = new Map<string, number>();
@@ -637,6 +671,7 @@ function makeLinearIrResolver(
   const refCells = new Map<string, LinearRefCellLowering>();
   const f64IrType = irVal({ kind: "f64" });
   const provisionalF64VectorLayout = planLinearVectorLayout(f64IrType);
+  const unitFuncIdxById = new Map<IrUnitId, number>();
   let memoryPlan: LinearMemoryPlan | undefined;
 
   const resolveRuntimeFunc = (name: string): number => {
@@ -646,6 +681,28 @@ function makeLinearIrResolver(
     const localIdx = ctx.mod.functions.findIndex((func) => func.name === name);
     if (localIdx < 0) throw new Error(`linear-ir: runtime helper '${name}' missing`);
     return ctx.numImportFuncs + localIdx;
+  };
+
+  const resolveImportFunc = (module: string, field: string): number => {
+    let funcIdx = 0;
+    for (const imported of ctx.mod.imports) {
+      if (imported.desc.kind !== "func") continue;
+      if (imported.module === module && imported.name === field) return funcIdx;
+      funcIdx++;
+    }
+    throw new Error(`linear-ir: imported function '${module}.${field}' missing`);
+  };
+
+  const bindUnitFunc = (unitId: IrUnitId, legacyName: string): void => {
+    const funcIdx = ctx.funcMap.get(legacyName);
+    if (funcIdx === undefined) {
+      throw new Error(`linear-ir: no pre-assigned function slot for source unit '${unitId}' (${legacyName})`);
+    }
+    const previous = unitFuncIdxById.get(unitId);
+    if (previous !== undefined && previous !== funcIdx) {
+      throw new Error(`linear-ir: source unit '${unitId}' was bound to multiple function slots`);
+    }
+    unitFuncIdxById.set(unitId, funcIdx);
   };
 
   const ensureAggregateHelper = (
@@ -730,38 +787,42 @@ function makeLinearIrResolver(
 
   const resolver: IrLowerResolver & IrFromAstResolver = {
     resolveFunc(ref: IrFuncRef): number {
-      // #2956 L3: from-ast keeps string comparison/method choice abstract.
-      // Resolve those names onto the canonical linear UTF-8 runtime here.
-      if (ref.name === IR_STRING_COMPARE_FN) return resolveRuntimeFunc("__str_cmp");
-      if (
-        ref.name === LINEAR_IR_STRING_CHAR_AT_FN ||
-        ref.name === LINEAR_IR_STRING_CHAR_CODE_AT_FN ||
-        ref.name === LINEAR_IR_STRING_APPEND_ASCII_FN ||
-        ref.name === "__str_slice"
-      ) {
-        return resolveRuntimeFunc(ref.name);
-      }
-      // (#2956 L2) Vec MUTATION rides from-ast's element-store helper call
-      // `__vec_elem_set_<vecStructTypeIdx>` (the C2 path — element store and
-      // `.push` both emit it). On linear the sentinel typeIdx is always 0
-      // (the f64VecLayout below), and the direct runtime's
-      // `__arr_set(ptr:i32, idx:i32, val:f64) -> void` has the SAME
-      // signature and the same grow-on-OOB / zero-fill-gap / len-extension
-      // semantics as the WasmGC `ensureVecElemSet` helper (a negative-index
-      // no-op and #1977 forwarding resolution are safe supersets). Map the
-      // helper name onto it — name-based, funcIdx-shift safe.
-      if (ref.name.startsWith("__vec_elem_set_")) {
-        const arrSet = ctx.funcMap.get("__arr_set");
-        if (arrSet === undefined) {
-          throw new Error(`linear-ir: __arr_set runtime helper missing for '${ref.name}'`);
+      switch (ref.binding.kind) {
+        case "unit": {
+          const idx = unitFuncIdxById.get(ref.binding.unitId);
+          if (idx === undefined) {
+            throw new Error(`linear-ir: no function slot for source unit '${ref.binding.unitId}' (${ref.name})`);
+          }
+          return idx;
         }
-        return arrSet;
+        case "import":
+          return resolveImportFunc(ref.binding.module, ref.binding.field);
+        case "runtime":
+          return resolveRuntimeFunc(ref.binding.symbol);
+        case "intrinsic": {
+          const symbol = ref.binding.symbol;
+          // #2956 L3: from-ast keeps string comparison/method choice abstract.
+          // Resolve those intrinsics onto the canonical linear UTF-8 runtime.
+          if (symbol === IR_STRING_COMPARE_FN) return resolveRuntimeFunc("__str_cmp");
+          if (
+            symbol === LINEAR_IR_STRING_CHAR_AT_FN ||
+            symbol === LINEAR_IR_STRING_CHAR_CODE_AT_FN ||
+            symbol === LINEAR_IR_STRING_APPEND_ASCII_FN ||
+            symbol === "__str_slice" ||
+            symbol === "__arr_get" ||
+            symbol === "__arr_len" ||
+            symbol === FMOD_FN
+          ) {
+            return resolveRuntimeFunc(symbol);
+          }
+          // (#2956 L2) Vec mutation is an abstract element-store request. On
+          // linear it maps to the canonical grow-on-OOB array runtime.
+          if (symbol.startsWith("__vec_elem_set_")) return resolveRuntimeFunc("__arr_set");
+          throw new Error(`linear-ir: unsupported intrinsic '${symbol}' (${ref.name})`);
+        }
+        case "support":
+          throw new Error(`linear-ir: support binding '${ref.binding.bindingId}' is outside the claimed scope`);
       }
-      const idx = ctx.funcMap.get(ref.name);
-      if (idx === undefined) {
-        throw new Error(`linear-ir: no funcIdx for '${ref.name}' (selector claimed a call outside funcMap)`);
-      }
-      return idx;
     },
     resolveGlobal(ref: IrGlobalRef): number {
       const idx = ctx.moduleGlobals.get(ref.name);
@@ -973,6 +1034,7 @@ function makeLinearIrResolver(
   return {
     resolver,
     helpers,
+    bindUnitFunc,
     bindMemoryPlan(plan: LinearMemoryPlan): void {
       if (memoryPlan) throw new Error("linear-ir: memory plan already bound");
       memoryPlan = plan;

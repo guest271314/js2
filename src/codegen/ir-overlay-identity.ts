@@ -2,6 +2,7 @@
 
 import { ts } from "../ts-api.js";
 import type { IrIntegrationLoweringPlans } from "../ir/ast-lowering-plans.js";
+import { irUnitFuncRef } from "../ir/callable-bindings.js";
 import type { IrUnitId } from "../ir/identity.js";
 import {
   makeIrIdentityImportedFunctionResolver,
@@ -253,10 +254,13 @@ export function makeIrFeaturePlanIdentity(
     kind: "imported-call" | "top-level-value",
     node: ts.Expression,
     legacyTarget: IrResolvedFunctionTarget,
-  ): { ownerUnitId: IrUnitId; targetUnitId: IrUnitId } => ({
-    ownerUnitId: requireIrOverlayFunctionUnitId(identityPlan, ownerName),
-    targetUnitId: requireIrIdentityImportedTarget(resolver, kind, node, legacyTarget).targetUnitId,
-  });
+  ) => {
+    const resolved = requireIrIdentityImportedTarget(resolver, kind, node, legacyTarget);
+    return {
+      ownerUnitId: requireIrOverlayFunctionUnitId(identityPlan, ownerName),
+      target: irUnitFuncRef({ unitId: resolved.targetUnitId, name: resolved.targetName }),
+    };
+  };
   return {
     owner: (ownerName: string): IrUnitId => requireIrOverlayFunctionUnitId(identityPlan, ownerName),
     imported: (ownerName: string, node: ts.Expression, legacyTarget: IrResolvedFunctionTarget) =>
@@ -269,6 +273,8 @@ export function makeIrFeaturePlanIdentity(
 export function projectIrIntegrationLoweringPlans(
   plan: {
     readonly identityPlan: IrOverlayIdentityPlan;
+    readonly overrideMapByUnitId: IrIntegrationLoweringPlans["signaturesByUnitId"];
+    readonly directCalls?: IrIntegrationLoweringPlans["directCalls"];
   } & Pick<
     IrIntegrationLoweringPlans,
     "importedCalls" | "topLevelFunctionValues" | "hostVoidCallbacks" | "promiseDelays"
@@ -287,6 +293,8 @@ export function projectIrIntegrationLoweringPlans(
     identityContext: plan.identityPlan.identityContext,
     ownerProjection,
     ownerUnitIdByLegacyName,
+    directCalls: plan.directCalls ?? new Map(),
+    signaturesByUnitId: plan.overrideMapByUnitId,
     importedCalls: plan.importedCalls,
     topLevelFunctionValues: plan.topLevelFunctionValues,
     hostVoidCallbacks: plan.hostVoidCallbacks,

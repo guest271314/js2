@@ -26,7 +26,8 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
-import { asVal, irDynamic, isDynamic, irVal, type IrType } from "../ir/nodes.js";
+import { irSupportFuncRef } from "../ir/callable-bindings.js";
+import { asVal, irDynamic, isDynamic, irVal, type IrFuncRef, type IrType } from "../ir/nodes.js";
 import type { LatticeType } from "../ir/propagate.js";
 import {
   classifyIrFailure,
@@ -1834,10 +1835,10 @@ function planIrImportedLowering(
                 ...(optional.hasExpressionDefault ? { hasExpressionDefault: true } : {}),
               });
             }
+            const importedIdentity = planIdentity.imported(ownerName, node.expression, certified.target);
             importedCalls.set(node, {
-              ...planIdentity.imported(ownerName, node.expression, certified.target),
+              ...importedIdentity,
               ownerName,
-              targetName: certified.target.targetName,
               params,
               returnType,
               optionalParams,
@@ -1846,12 +1847,24 @@ function planIrImportedLowering(
                 ctx.funcOptionalParams.has(certified.target.targetName),
             });
             for (const functionArgument of certified.functionArguments) {
+              const valueIdentity = planIdentity.value(ownerName, functionArgument.argument, functionArgument.target);
+              if (valueIdentity.target.binding.kind !== "unit") {
+                throw new IrInvariantError(
+                  "selection-preparation-mismatch",
+                  "resolve",
+                  `function-value target ${valueIdentity.target.name} has no exact source-unit binding`,
+                );
+              }
+              const trampolineName = `__fn_tramp_${functionArgument.target.targetName}_cached`;
               topLevelFunctionValues.set(functionArgument.argument, {
-                ...planIdentity.value(ownerName, functionArgument.argument, functionArgument.target),
+                ...valueIdentity,
                 ownerName,
-                targetName: functionArgument.target.targetName,
                 signature: functionArgument.signature,
-                trampolineName: `__fn_tramp_${functionArgument.target.targetName}_cached`,
+                trampoline: irSupportFuncRef(
+                  valueIdentity.target.binding.unitId,
+                  "function-value-trampoline",
+                  trampolineName,
+                ),
                 cacheGlobalName: `__fn_closure_${functionArgument.target.targetName}`,
               });
             }
@@ -2651,11 +2664,13 @@ interface MultiIrGraphSafety {
 
 function multiIrTargetHasExactRegistryEntry(
   ctx: CodegenContext,
-  targetUnitId: IrUnitId,
-  targetName: string,
+  targetRef: IrFuncRef,
   identityContext: IrPlanningIdentityContext,
   safety: MultiIrGraphSafety,
 ): boolean {
+  if (targetRef.binding.kind !== "unit") return false;
+  const targetUnitId = targetRef.binding.unitId;
+  const targetName = targetRef.name;
   const target = identityContext.declarationByUnitId.get(targetUnitId);
   const terminal = identityContext.terminalByUnitId.get(targetUnitId);
   if (
@@ -2707,29 +2722,13 @@ function makeMultiIrSafeSelection(
 
   for (const callPlan of plan.importedCalls.values()) {
     requireMultiIrOwnerClaim(plan, callPlan.ownerUnitId, callPlan.ownerName);
-    if (
-      !multiIrTargetHasExactRegistryEntry(
-        ctx,
-        callPlan.targetUnitId,
-        callPlan.targetName,
-        plan.identityPlan.identityContext,
-        safety,
-      )
-    ) {
+    if (!multiIrTargetHasExactRegistryEntry(ctx, callPlan.target, plan.identityPlan.identityContext, safety)) {
       blocked.add(callPlan.ownerUnitId);
     }
   }
   for (const valuePlan of plan.topLevelFunctionValues.values()) {
     requireMultiIrOwnerClaim(plan, valuePlan.ownerUnitId, valuePlan.ownerName);
-    if (
-      !multiIrTargetHasExactRegistryEntry(
-        ctx,
-        valuePlan.targetUnitId,
-        valuePlan.targetName,
-        plan.identityPlan.identityContext,
-        safety,
-      )
-    ) {
+    if (!multiIrTargetHasExactRegistryEntry(ctx, valuePlan.target, plan.identityPlan.identityContext, safety)) {
       blocked.add(valuePlan.ownerUnitId);
     }
   }
@@ -2822,19 +2821,19 @@ function prepareMultiIrImportedLowering(
   for (const valuePlan of plan.topLevelFunctionValues.values()) {
     requireMultiIrOwnerClaim(plan, valuePlan.ownerUnitId, valuePlan.ownerName);
     if (!retained.has(valuePlan.ownerUnitId) || blocked.has(valuePlan.ownerUnitId)) continue;
-    const funcIdx = ctx.funcMap.get(valuePlan.targetName);
+    const funcIdx = ctx.funcMap.get(valuePlan.target.name);
     if (
       funcIdx === undefined ||
       funcIdx < ctx.numImportFuncs ||
-      definedFuncAt(ctx, funcIdx)?.name !== valuePlan.targetName
+      definedFuncAt(ctx, funcIdx)?.name !== valuePlan.target.name
     ) {
       blocked.add(valuePlan.ownerUnitId);
       continue;
     }
-    const singleton = ensureFuncClosureSingleton(ctx, valuePlan.targetName, funcIdx, false);
+    const singleton = ensureFuncClosureSingleton(ctx, valuePlan.target.name, funcIdx, false);
     const trampoline = singleton ? definedFuncAt(ctx, singleton.trampolineFuncIdx) : undefined;
     const cache = singleton ? ctx.mod.globals[localGlobalIdx(ctx, singleton.cacheGlobalIdx)] : undefined;
-    if (!singleton || trampoline?.name !== valuePlan.trampolineName || cache?.name !== valuePlan.cacheGlobalName) {
+    if (!singleton || trampoline?.name !== valuePlan.trampoline.name || cache?.name !== valuePlan.cacheGlobalName) {
       blocked.add(valuePlan.ownerUnitId);
     }
   }

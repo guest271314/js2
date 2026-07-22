@@ -2,11 +2,21 @@
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  IrHostVoidCallbackLoweringPlan,
-  IrImportedCallLoweringPlan,
-  IrTopLevelFunctionValueLoweringPlan,
+import {
+  collectIrDirectCallLoweringPlans,
+  type IrDirectCallTarget,
+  type IrDirectCallLoweringPlan,
+  type IrHostVoidCallbackLoweringPlan,
+  type IrImportedCallLoweringPlan,
+  type IrTopLevelFunctionValueLoweringPlan,
 } from "../src/ir/ast-lowering-plans.js";
+import {
+  irImportFuncRef,
+  irIntrinsicFuncRef,
+  irRuntimeFuncRef,
+  irSupportFuncRef,
+  irUnitFuncRef,
+} from "../src/ir/callable-bindings.js";
 import { lowerFunctionAstToIr, type IrExternClassMeta, type LoweredFunctionResult } from "../src/ir/from-ast.js";
 import type { IrUnitId } from "../src/ir/identity.js";
 import { irVal, type IrClosureSignature, type IrType } from "../src/ir/nodes.js";
@@ -59,8 +69,7 @@ function importedCallFixture(): {
     ({
       ...planOwnerEvidence(ownerUnitId),
       ownerName: "owner",
-      targetUnitId: TARGET_ID,
-      targetName: "importedTarget",
+      target: irUnitFuncRef({ unitId: TARGET_ID, name: "importedTarget" }),
       params: [],
       returnType: F64,
       optionalParams: new Map(),
@@ -90,10 +99,9 @@ function functionValueFixture(): {
     ({
       ...planOwnerEvidence(ownerUnitId),
       ownerName: "owner",
-      targetUnitId: TARGET_ID,
-      targetName: "target",
+      target: irUnitFuncRef({ unitId: TARGET_ID, name: "target" }),
       signature: NUMBER_SIGNATURE,
-      trampolineName: "__fn_tramp_target_cached",
+      trampoline: irSupportFuncRef(OWNER_ID, "function-value-trampoline", "__fn_tramp_target_cached"),
       cacheGlobalName: "__fn_closure_target",
     }) as IrTopLevelFunctionValueLoweringPlan;
   return {
@@ -104,6 +112,32 @@ function functionValueFixture(): {
         exported: true,
         returnTypeOverride: CALLABLE_NUMBER,
         topLevelFunctionValues: new Map([[target, plan(planOwnerUnitId)]]),
+      }),
+  };
+}
+
+function directCallFixture(): {
+  lower(planOwnerUnitId: IrUnitId | undefined, target?: IrDirectCallLoweringPlan["target"]): LoweredFunctionResult;
+  plan(planOwnerUnitId: IrUnitId | undefined, target?: IrDirectCallLoweringPlan["target"]): IrDirectCallLoweringPlan;
+} {
+  const declaration = sourceFunction(`export function owner(): number { return target(); }`);
+  const call = firstDescendant(declaration, ts.isCallExpression);
+  const plan = (
+    ownerUnitId: IrUnitId | undefined,
+    target = irUnitFuncRef({ unitId: TARGET_ID, name: "target" }),
+  ): IrDirectCallLoweringPlan =>
+    ({
+      ...planOwnerEvidence(ownerUnitId),
+      target,
+      signature: NUMBER_SIGNATURE,
+    }) as IrDirectCallLoweringPlan;
+  return {
+    plan,
+    lower: (planOwnerUnitId, target) =>
+      lowerFunctionAstToIr(declaration, {
+        ownerUnitId: OWNER_ID,
+        exported: true,
+        directCalls: new Map([[call, plan(planOwnerUnitId, target)]]),
       }),
   };
 }
@@ -151,6 +185,7 @@ function callbackFixture(): {
 describe("#3520 lowering-plan owner identity", () => {
   it.each([
     ["imported call", importedCallFixture, 0],
+    ["direct call", directCallFixture, 0],
     ["top-level function value", functionValueFixture, 0],
     ["host void callback", callbackFixture, 1],
   ] as const)(
@@ -170,15 +205,15 @@ describe("#3520 lowering-plan owner identity", () => {
   it("retains structural target IDs while emitting legacy backend names", () => {
     const imported = importedCallFixture();
     const importedPlan = imported.plan(OWNER_ID);
-    expect(importedPlan.targetUnitId).toBe(TARGET_ID);
+    expect(importedPlan.target.binding).toEqual({ kind: "unit", unitId: TARGET_ID });
     const importedIr = imported.lower(OWNER_ID);
     expect(importedIr.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
-      expect.objectContaining({ kind: "call", target: { kind: "func", name: importedPlan.targetName } }),
+      expect.objectContaining({ kind: "call", target: importedPlan.target }),
     );
 
     const functionValue = functionValueFixture();
     const functionValuePlan = functionValue.plan(OWNER_ID);
-    expect(functionValuePlan.targetUnitId).toBe(TARGET_ID);
+    expect(functionValuePlan.target.binding).toEqual({ kind: "unit", unitId: TARGET_ID });
     const functionValueIr = functionValue.lower(OWNER_ID);
     expect(functionValueIr.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
       expect.objectContaining({
@@ -187,5 +222,86 @@ describe("#3520 lowering-plan owner identity", () => {
         resultType: CALLABLE_NUMBER,
       }),
     );
+
+    const direct = directCallFixture();
+    const directPlan = direct.plan(OWNER_ID);
+    const directIr = direct.lower(OWNER_ID);
+    expect(directIr.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
+      expect.objectContaining({ kind: "call", target: directPlan.target }),
+    );
+  });
+
+  it("rejects label-compatible imported-source targets without a unit binding", () => {
+    const imported = importedCallFixture();
+    const malformedImported = {
+      ...imported.plan(OWNER_ID),
+      target: irImportFuncRef("env", "importedTarget"),
+    };
+    expect(() => {
+      const declaration = sourceFunction(`export function owner(): number { return importedTarget(); }`);
+      const call = firstDescendant(declaration, ts.isCallExpression);
+      lowerFunctionAstToIr(declaration, {
+        ownerUnitId: OWNER_ID,
+        exported: true,
+        importedCalls: new Map([[call, malformedImported]]),
+      });
+    }).toThrow("is not backed by an exact unit");
+  });
+
+  it("retains exact provider bindings for compiler-helper call plans", () => {
+    const direct = directCallFixture();
+    const providers = [
+      irRuntimeFuncRef("target"),
+      irIntrinsicFuncRef("target"),
+      irImportFuncRef("env", "target"),
+      irSupportFuncRef(OWNER_ID, "direct-call-provider", "target"),
+    ];
+    for (const provider of providers) {
+      const lowered = direct.lower(OWNER_ID, provider);
+      expect(lowered.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
+        expect.objectContaining({ kind: "call", target: provider }),
+      );
+    }
+  });
+
+  it("collects direct calls in nested bodies from validated targets without deriving a label identity", () => {
+    const declaration = sourceFunction(`
+      export function owner(): number {
+        function nested(): number { return target(); }
+        return target() + nested();
+      }
+    `);
+    const exactTarget: IrDirectCallTarget = {
+      target: irUnitFuncRef({ unitId: TARGET_ID, name: "target" }),
+      signature: NUMBER_SIGNATURE,
+    };
+    const plans = collectIrDirectCallLoweringPlans(declaration, OWNER_ID, new Map([["target", exactTarget]]));
+    expect(plans.size).toBe(2);
+    expect([...plans.values()].map((plan) => plan.target)).toEqual([exactTarget.target, exactTarget.target]);
+
+    const nestedOnly = sourceFunction(`
+      export function owner(): number {
+        function nested(): number { return target(); }
+        return nested();
+      }
+    `);
+    const nestedPlans = collectIrDirectCallLoweringPlans(nestedOnly, OWNER_ID, new Map([["target", exactTarget]]));
+    const lowered = lowerFunctionAstToIr(nestedOnly, {
+      ownerUnitId: OWNER_ID,
+      exported: true,
+      directCalls: nestedPlans,
+    });
+    expect(lowered.lifted).toHaveLength(1);
+    expect(lowered.lifted[0]!.blocks.flatMap((block) => block.instrs)).toContainEqual(
+      expect.objectContaining({ kind: "call", target: exactTarget.target }),
+    );
+
+    const provider = irIntrinsicFuncRef("target");
+    const providerPlans = collectIrDirectCallLoweringPlans(
+      declaration,
+      OWNER_ID,
+      new Map([["target", { target: provider, signature: NUMBER_SIGNATURE } satisfies IrDirectCallTarget]]),
+    );
+    expect([...providerPlans.values()].map((plan) => plan.target)).toEqual([provider, provider]);
   });
 });

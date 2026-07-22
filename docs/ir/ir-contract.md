@@ -1,4 +1,4 @@
-# The IR interchange contract — v2.0
+# The IR interchange contract — v3.0
 
 > **Normative.** The #3030 contract is the union of this document,
 > [`ir-module.schema.json`](ir-module.schema.json), and the exported
@@ -37,10 +37,11 @@ One JSON document per compiled module.
 
 ## D2 — Versioning
 
-`IR_FORMAT_VERSION = "2.0"` (exported from `src/ir/contract.ts`). Version 2
-makes every serialized function and coverage row carry its required structural
-`unitId`. Display `name` remains the temporary compatibility/reference label
-for the still-named v2 references described in D3.2.
+`IR_FORMAT_VERSION = "3.0"` (exported from `src/ir/contract.ts`). Version 3
+makes every `IrFuncRef` carry a required structural `IrCallableBinding`.
+Function and coverage `unitId` fields introduced in version 2 remain required.
+Display `name` is a compatibility/debug label and never establishes callable
+identity or provider classification.
 
 - **Additive** (minor bump): new instruction kinds, new optional fields, new
   enum members appended at the END of their table.
@@ -63,11 +64,14 @@ for the still-named v2 references described in D3.2.
    instruction `result`), definitions dominate uses, and every block ends
    with exactly one terminator. There are no Φ nodes — branches pass values
    into target block-arg slots.
-2. **Structural function artifacts, symbolic references.** Functions and their
-   coverage rows are joined by `unitId`. Calls, globals, and types still use
-   symbolic compatibility names (`IrFuncRef`/`IrGlobalRef`/`IrTypeRef`) in this
-   v2 schema. No funcIdx / globalIdx / typeIdx appears anywhere in a serialized
-   document (D5 closes the one historical leak inside `IrType`; see T2).
+2. **Structural function artifacts and references.** Functions and their
+   coverage rows are joined by `unitId`. Every `IrFuncRef` identifies a source
+   unit, import, runtime symbol, intrinsic, or compiler support binding through
+   a closed `IrCallableBinding`; its `name` is compatibility/debug data only.
+   Globals and types remain symbolic named references (`IrGlobalRef` and
+   `IrTypeRef`). No funcIdx / globalIdx / typeIdx appears anywhere in a
+   serialized document (D5 closes the one historical leak inside `IrType`; see
+   T2).
 3. **Verified per-instruction `resultType`.** Every value-producing
    instruction carries its result type, and the verifier **re-derives** it
    from operand types per the §"Node inventory" rules (#1924).
@@ -83,13 +87,12 @@ for the still-named v2 references described in D3.2.
    classification") is part of this contract; instruction order within a
    block is program order, and any reordering the compiler performed
    respected the classification (#2134). Effects are _derived_ (published
-   table), not serialized per instruction in v2.0.
+   table), not serialized per instruction in v3.0.
 6. **Source positions.** Instructions and terminators may carry
    `site: {line, column}` (1-based line, 0-based column, in the `source`
    file named by the header). Alloc-site provenance rides on `alloc`
    (module-global stable id, ADR-0013). Every serialized function also carries
-   its canonical `IrUnitId`; the display name remains a compatibility/reference
-   label until symbolic references become structural.
+   its canonical `IrUnitId`; the display name remains compatibility/debug data.
 7. **Complete coverage manifest.** The document header lists EVERY function
    in the module with `carrier: "ir" | "legacy"`. Only `"ir"` functions
    have serialized bodies; the contract reports partial coverage explicitly
@@ -148,25 +151,33 @@ contain a `ref`/`ref_null` leaf are manifest-listed as `carrier: "legacy"`
 Brands (`signed`, `boolean`, `symbol`, `bigint`) serialize explicitly when
 present.
 
-## Name namespaces
+## Reference domains
 
-Three flat, module-scoped namespaces, each owned by the module assembler
-(#3029-S4 invariant A6) and shared with the in-memory compiler's
-`ctx.funcMap` / global map / `ctx.typeNames`:
+Function references are structural. `IrFuncRef.binding` is exactly one of:
 
-- **func** — targeted by `IrFuncRef` (`call.target`, `closure.new.liftedFunc`).
-- **global** — targeted by `IrGlobalRef` (`global.get/set.target`).
-- **type** — targeted by `IrTypeRef` (D5 symbolic `ref` leaves).
+- `unit {unitId}` — one source or compiler-created function artifact;
+- `import {module, field}` — one declared module import;
+- `runtime {symbol}` — one compiler runtime symbol;
+- `intrinsic {symbol}` — one semantic intrinsic whose provider is selected
+  below the IR boundary; or
+- `support {bindingId}` — one compiler-owned support callable.
 
-Names are unique within their namespace. Class-derived names follow the
-legacy conventions (`<className>_new`, `<className>_<methodName>`) — a
-consumer treats them as opaque.
+`IrFuncRef.name` is retained for compatibility and diagnostics but is excluded
+from binding equality and semantic provider selection. Version-3 legacy
+adapters may consult it only after resolving the structural binding domain, to
+join an exact unit/support binding to a pre-existing physical slot; they may
+not classify a callable or choose a provider from the label. Runtime,
+intrinsic, and import resolution uses `symbol` or `{module, field}` directly.
+In contrast, globals and types still use the flat module-scoped symbolic names
+in `IrGlobalRef` (`global.get/set.target`) and `IrTypeRef` (D5 symbolic `ref`
+leaves). Those remaining named namespaces are owned by the module assembler
+(#3029-S4 invariant A6).
 
 ## Document layout
 
 ```
 IrModuleDocument
-├─ irVersion: "2.0"
+├─ irVersion: "3.0"
 ├─ source?: string
 ├─ coverage: [{unitId, name, carrier: "ir"|"legacy", exported, reason?}]   (D3.7)
 └─ functions: [IrFunctionDoc]           (exactly the carrier:"ir" entries)
@@ -222,7 +233,7 @@ must not diverge (T4 acceptance).
 
 | kind         | operands | immediates          | result rule                                            | effects      |
 | ------------ | -------- | ------------------- | ------------------------------------------------------ | ------------ |
-| `call`       | `args[]` | `target: FuncRef`   | the named function's declared return type (∅ for void) | full barrier |
+| `call`       | `args[]` | `target: FuncRef`   | the bound callable's declared return type (∅ for void) | full barrier |
 | `global.get` | —        | `target: GlobalRef` | the named global's declared type                       | reads heap   |
 | `global.set` | `value`  | `target: GlobalRef` | ∅; `τ(value)` = global's type                          | writes heap  |
 | `slot.read`  | —        | `slotIndex`         | `val` of the slot's declared ValType                   | slot-read    |
@@ -361,9 +372,9 @@ boxed, dynamic`.
 
 ## Slice status
 
-| Slice | What                                                        | Status at v2.0                                               |
+| Slice | What                                                        | Status at v3.0                                               |
 | ----- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v2 identity revision** (#3520)                             |
+| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v3 callable-binding revision** (#3520)                     |
 | T2    | purge module-relative indices from in-memory `IrType` (D5)  | open — until then, affected functions are `carrier:"legacy"` |
 | T3    | `serializeIrModule`/`deserializeIrModule` + `--emit-ir`     | open                                                         |
 | T4    | verifier re-derivation of the §Node-inventory rules (#1924) | open — D3.3 effective from here                              |

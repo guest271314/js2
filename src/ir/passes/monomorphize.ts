@@ -68,6 +68,7 @@ import {
 import type { ValType } from "../types.js";
 import type { AllocSiteRegistry } from "../alloc-registry.js";
 import { createDerivedIrUnitId, type IrUnitId } from "../identity.js";
+import { irUnitFuncRef } from "../callable-bindings.js";
 import { forkAllocInInstr } from "./alloc-discipline.js";
 
 /** Maximum number of distinct type tuples we'll clone a single callee for. */
@@ -282,7 +283,10 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   interface Edit {
     readonly blockIdx: number;
     readonly instrIdx: number;
-    readonly newTarget: string;
+    readonly newTarget: {
+      readonly unitId: IrUnitId;
+      readonly name: string;
+    };
   }
   const edits = new Map<string, Edit[]>();
   for (const [, plans] of planByCallee) {
@@ -296,7 +300,10 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
         arr.push({
           blockIdx: call.blockIdx,
           instrIdx: call.instrIdx,
-          newTarget: plan.cloneName,
+          newTarget: {
+            unitId: plan.cloneUnitId,
+            name: plan.cloneName,
+          },
         });
       }
     }
@@ -603,9 +610,13 @@ function deriveReturnType(
 
 function applyEdits(
   fn: IrFunction,
-  edits: ReadonlyArray<{ readonly blockIdx: number; readonly instrIdx: number; readonly newTarget: string }>,
+  edits: ReadonlyArray<{
+    readonly blockIdx: number;
+    readonly instrIdx: number;
+    readonly newTarget: { readonly unitId: IrUnitId; readonly name: string };
+  }>,
 ): IrFunction {
-  const edited = new Map<string, string>(); // key = "blockIdx:instrIdx" → newTarget
+  const edited = new Map<string, { readonly unitId: IrUnitId; readonly name: string }>();
   for (const e of edits) edited.set(`${e.blockIdx}:${e.instrIdx}`, e.newTarget);
 
   const newBlocks: IrBlock[] = fn.blocks.map((block, blockIdx) => {
@@ -615,7 +626,7 @@ function applyEdits(
       const newTarget = edited.get(key);
       if (!newTarget) return instr;
       if (instr.kind !== "call") return instr; // should never happen
-      const newRef: IrFuncRef = { kind: "func", name: newTarget };
+      const newRef: IrFuncRef = irUnitFuncRef(newTarget);
       blockChanged = true;
       return { ...instr, target: newRef };
     });

@@ -2,8 +2,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { buildIrUnitInventory, type IrUnitId } from "../src/ir/identity.js";
-import { irVal, type IrType, type IrValueId } from "../src/ir/nodes.js";
+import { buildIrUnitInventory, createDerivedIrUnitId, type IrUnitId } from "../src/ir/identity.js";
+import { irVal, type IrFuncRef, type IrType, type IrValueId } from "../src/ir/nodes.js";
 import {
   buildIrPlanningIdentityContext,
   IrPlanningIdentityInvariantError,
@@ -116,7 +116,7 @@ function expectPlanningError(run: () => unknown, code: IrPlanningIdentityInvaria
   expect(caught).toMatchObject({ code });
 }
 
-function loweringHost(ownerUnitId: IrUnitId | undefined): IrPromiseDelayLoweringHost {
+function loweringHost(ownerUnitId: IrUnitId | undefined, calls?: IrFuncRef[]): IrPromiseDelayLoweringHost {
   let nextValue = 0;
   const types = new Map<IrValueId, IrType>();
   const value = (type: IrType): IrValueId => {
@@ -125,7 +125,10 @@ function loweringHost(ownerUnitId: IrUnitId | undefined): IrPromiseDelayLowering
     return id;
   };
   const builder: IrPromiseDelayLoweringHost["builder"] = {
-    emitCall: (_target, _args, resultType) => (resultType === null ? null : value(resultType)),
+    emitCall: (target, _args, resultType) => {
+      calls?.push(target);
+      return resultType === null ? null : value(resultType);
+    },
     emitCallablePack: () => value(irVal({ kind: "externref" })),
     typeOf: (id) => {
       const type = types.get(id);
@@ -172,6 +175,15 @@ describe("#3520 Promise-delay plan identity", () => {
     expect([planA.ownerUnitId, planB.ownerUnitId]).toEqual([idA, idB]);
     expect([planA.ownerName, planB.ownerName]).toEqual(["delay", "delay"]);
     expect([planA.executorLiftedName, planB.executorLiftedName]).toEqual(["delay__closure_0", "delay__closure_0"]);
+    expect(planA.executorTarget.binding).toEqual({
+      kind: "unit",
+      unitId: createDerivedIrUnitId({ parentId: idA, role: "lifted-closure", ordinal: 0 }),
+    });
+    expect(planB.executorTarget.binding).toEqual({
+      kind: "unit",
+      unitId: createDerivedIrUnitId({ parentId: idB, role: "lifted-closure", ordinal: 0 }),
+    });
+    expect(planB.executorTarget.binding).not.toEqual(planA.executorTarget.binding);
   });
 
   it("filters certification and plan construction by exact selected IDs, never owner labels", () => {
@@ -272,5 +284,22 @@ describe("#3520 Promise-delay plan identity", () => {
     }
     for (const consume of staleConsumers) expect(consume).toThrow("stale Promise delay plan owner");
     for (const consume of matchingConsumers) expect(consume()).toEqual(expect.any(Number));
+
+    const calls: IrFuncRef[] = [];
+    expect(tryLowerPromiseDelayConstruction(certified.construction, plans, () => loweringHost(delayId, calls))).toEqual(
+      expect.any(Number),
+    );
+    expect(tryLowerPromiseDelayCall(certified.timerCall, true, plans, () => loweringHost(delayId, calls))).toEqual(
+      expect.any(Number),
+    );
+    expect(tryLowerPromiseDelayCall(certified.resolveCall, true, plans, () => loweringHost(delayId, calls))).toEqual(
+      expect.any(Number),
+    );
+    expect(calls.map((target) => target.binding)).toEqual([
+      { kind: "import", module: "env", field: "Promise_new" },
+      { kind: "import", module: "env", field: "__box_number" },
+      { kind: "import", module: "env", field: "__timer_set_timeout" },
+      { kind: "import", module: "env", field: "__call_1_f64" },
+    ]);
   });
 });

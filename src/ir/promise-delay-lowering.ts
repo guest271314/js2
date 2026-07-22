@@ -2,8 +2,9 @@
 
 import { ts } from "../ts-api.js";
 import type { IrFunctionBuilder } from "./builder.js";
-import type { IrSourceId, IrUnitId } from "./identity.js";
-import { asVal, irVal, type IrClosureSignature, type IrType, type IrValueId } from "./nodes.js";
+import { irImportFuncRef, irUnitFuncRef } from "./callable-bindings.js";
+import { createDerivedIrUnitId, type IrSourceId, type IrUnitId } from "./identity.js";
+import { asVal, irVal, type IrClosureSignature, type IrFuncRef, type IrType, type IrValueId } from "./nodes.js";
 import {
   IrPlanningIdentityInvariantError,
   requireIrPlanningSourceId,
@@ -26,6 +27,8 @@ export interface IrPromiseDelayLoweringPlan {
   readonly timerSignature: IrClosureSignature;
   readonly executorCaptureNames: readonly string[];
   readonly timerCaptureNames: readonly string[];
+  readonly executorTarget: IrFuncRef;
+  readonly timerTarget: IrFuncRef;
   readonly executorLiftedName: string;
   readonly timerLiftedName: string;
 }
@@ -39,6 +42,7 @@ export interface IrPromiseDelayLoweringPlans {
 export interface ExactClosureLoweringOptions {
   readonly orderedReadonlyCaptures?: readonly string[];
   readonly expectedLiftedName?: string;
+  readonly expectedLiftedTarget?: IrFuncRef;
   readonly allowConciseVoidBody?: boolean;
 }
 
@@ -255,6 +259,7 @@ export function buildIrPromiseDelayLoweringPlans(
       );
     }
     const executorLiftedName = `${ownerName}__closure_${certification.executorOrdinal}`;
+    const timerLiftedName = `${executorLiftedName}__closure_${certification.timerOrdinal}`;
     const plan: IrPromiseDelayLoweringPlan = {
       ownerUnitId,
       ownerName,
@@ -267,8 +272,24 @@ export function buildIrPromiseDelayLoweringPlans(
       timerSignature: { params: [], returnType: null },
       executorCaptureNames: certification.executorCaptureNames,
       timerCaptureNames: certification.timerCaptureNames,
+      executorTarget: irUnitFuncRef({
+        unitId: createDerivedIrUnitId({
+          parentId: ownerUnitId,
+          role: "lifted-closure",
+          ordinal: certification.executorOrdinal,
+        }),
+        name: executorLiftedName,
+      }),
+      timerTarget: irUnitFuncRef({
+        unitId: createDerivedIrUnitId({
+          parentId: ownerUnitId,
+          role: "lifted-closure",
+          ordinal: certification.timerOrdinal,
+        }),
+        name: timerLiftedName,
+      }),
       executorLiftedName,
-      timerLiftedName: `${executorLiftedName}__closure_${certification.timerOrdinal}`,
+      timerLiftedName,
     };
     constructions.set(certification.construction, plan);
     timers.set(certification.timerCall, plan);
@@ -314,7 +335,7 @@ function lowerResolveCall(
     throw new Error(`ir/from-ast: Promise resolve value is not f64 (${host.funcName})`);
   }
   const result = host.builder.emitCall(
-    { kind: "func", name: "__call_1_f64" },
+    irImportFuncRef("env", "__call_1_f64"),
     [resolve, value],
     irVal({ kind: "f64" }),
   );
@@ -342,6 +363,7 @@ function lowerTimerCall(
   const timerClosure = host.lowerClosure(plan.timerCallback, plan.timerSignature, new Set(plan.timerCaptureNames), {
     orderedReadonlyCaptures: plan.timerCaptureNames,
     expectedLiftedName: plan.timerLiftedName,
+    expectedLiftedTarget: plan.timerTarget,
     allowConciseVoidBody: true,
   });
   const packedTimer = host.builder.emitCallablePack(timerClosure, plan.timerSignature);
@@ -350,13 +372,13 @@ function lowerTimerCall(
     throw new Error(`ir/from-ast: Promise delay timeout is not f64 (${host.funcName})`);
   }
   const boxedDelay = host.builder.emitCall(
-    { kind: "func", name: "__box_number" },
+    irImportFuncRef("env", "__box_number"),
     [delay],
     irVal({ kind: "externref" }),
   );
   if (boxedDelay === null) throw new Error(`ir/from-ast: __box_number produced no value (${host.funcName})`);
   const timerResult = host.builder.emitCall(
-    { kind: "func", name: "__timer_set_timeout" },
+    irImportFuncRef("env", "__timer_set_timeout"),
     [packedTimer, boxedDelay],
     irVal({ kind: "externref" }),
   );
@@ -398,9 +420,10 @@ export function tryLowerPromiseDelayConstruction(
   const executor = host.lowerClosure(plan.executor, plan.executorSignature, new Set(plan.executorCaptureNames), {
     orderedReadonlyCaptures: plan.executorCaptureNames,
     expectedLiftedName: plan.executorLiftedName,
+    expectedLiftedTarget: plan.executorTarget,
   });
   const packedExecutor = host.builder.emitCallablePack(executor, plan.executorSignature);
-  const promise = host.builder.emitCall({ kind: "func", name: "Promise_new" }, [packedExecutor], {
+  const promise = host.builder.emitCall(irImportFuncRef("env", "Promise_new"), [packedExecutor], {
     kind: "extern",
     className: "Promise",
   });

@@ -36,6 +36,7 @@ files:
   - src/ir/index.ts
   - src/ir/contract.ts
   - src/ir/nodes.ts
+  - src/ir/callable-bindings.ts
   - src/ir/outcomes.ts
   - src/ir/builder.ts
   - src/ir/ast-lowering-plans.ts
@@ -96,6 +97,8 @@ files:
   - tests/helpers/ir-identities.ts
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
+  - tests/issue-3520-callable-binding.test.ts
+  - tests/issue-3520-callable-preregistration.test.ts
   - tests/issue-3520-ir-unit-identity.test.ts
   - tests/issue-3520-program-abi.test.ts
   - tests/issue-3520-legacy-unit-projection.test.ts
@@ -116,6 +119,10 @@ files:
   - tests/issue-3520-promise-plan-identity.test.ts
   - tests/issue-3520-selfhost-cache-identity.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
+loc-budget-allow:
+  - src/ir/integration.ts
+  - src/ir/from-ast.ts
+  - src/ir/nodes.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
@@ -877,6 +884,80 @@ budget checks pass. No local Test262 run or baseline refresh was performed.
 Commit 3.1 is complete. Typed callable binding/reference migration, structural
 pass edit tables, and backend binding consumption remain the next Commit 3
 sub-slices; whole-program ABI binding and the legacy slot adapter remain Commit 4.
+
+Stage 9 completes the Commit 3.2 callable-binding checkpoint:
+
+- every `IrFuncRef` carries a required closed binding domain: exact source or
+  compiler unit, declared import, runtime symbol, intrinsic, or structurally
+  derived support binding. Factories validate and freeze those references;
+  the verifier rejects legacy name-only calls and lifted-function references,
+  including refs nested inside buffered control-flow instructions;
+- source direct calls are planned at their exact `CallExpression` sites and
+  carry the target `IrUnitId` plus signature. Imported calls, top-level
+  function values, closure trampolines, lifted functions, Promise support,
+  class dispatch, and monomorphized clone calls retain their structural target
+  or provider binding instead of reconstructing identity from a label;
+- WasmGC binds source-unit refs through an exact unit-to-slot table and never
+  falls back to a same-labelled runtime/helper slot. Linear Wasm and Porffor
+  bind source units by ID as well; runtime, intrinsic, and import dispatch use
+  their structural symbol or module field. The remaining compatibility label
+  use is confined to the temporary exact unit/support-to-legacy-slot adapter;
+- helper preregistration and string-encoding analysis classify by binding
+  domain and symbol. Source functions deliberately named like string,
+  dynamic-boxing, or undefined-check helpers do not register or resolve the
+  corresponding provider; and
+- the interchange contract is now v3.0. Schema and documentation require the
+  closed callable binding union while retaining `name` only as compatibility
+  and diagnostic metadata.
+
+The changed-file matrix passes **115/115** with two intentional skips. The
+binding-aware backend/self-host matrix passes **50/50** with one optional
+Porffor skip; the class inheritance/collision matrix passes **21/21**; and the
+linear/cross-backend regression matrix passes **35/35**, including all 29
+differential cases. Typecheck and diff checks pass, and the protected Test262
+log and equivalence baseline are unchanged. The LOC allowance records this
+checkpoint's required contract threading; extracting the remaining legacy
+adapter machinery is follow-up work rather than part of this paused slice.
+
+Commit 3.2 is ready for review. Structural inline/monomorphization edit maps,
+integration evidence maps, and the final Program ABI slot adapter remain for
+Commit 3.3 and Commit 4 before R1 can close.
+
+## Resume checkpoint
+
+- **Branch:** `symphony/3520-r1-planning-identity`
+- **Draft PR:** `#3496`
+- **Resume from:** the branch tip containing Stage 9 / Commit 3.2. The pushed
+  worktree is expected to be clean; no stash or local-only patch is required.
+- **First task:** replace the remaining source-function `byName` tables in
+  `src/ir/passes/inline-small.ts` and `src/ir/passes/monomorphize.ts` with
+  `IrUnitId`/callable-binding maps. Recursion detection, rewrite sites, clone
+  plans, and pass-output reconciliation must all use the same structural key.
+- **Then:** migrate integration verifier/error/pass bookkeeping to IDs, thread
+  support/import bindings through the backend ABI tables, and replace the
+  temporary exact-unit/support-to-legacy-label slot join with `ProgramAbiMap`
+  resolution. Only after those steps should R1 acceptance be reevaluated.
+- **Do not touch:** `benchmarks/results/test262-run.log` or
+  `scripts/equivalence-baseline.json`. No local Test262 run is required for
+  this checkpoint.
+- **Known unrelated control:** two #2956 L3 string/charCode fixtures remain
+  pre-existing failures; binding-affected linear cases and the 29-case
+  cross-backend suite pass.
+- **Not rerun after Stage 9:** the full equivalence gate and fallback/readiness
+  ratchets. Run them before declaring R1 complete; do not infer completion from
+  the focused matrices below.
+
+Minimum resume validation:
+
+```bash
+pnpm run typecheck
+pnpm run check:loc-budget
+pnpm exec vitest run tests/issue-3520*.test.ts tests/issue-2138-multi-module-ir-overlay.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+pnpm exec vitest run tests/linear-integration.test.ts tests/cross-backend-diff.test.ts tests/issue-3000-c.test.ts tests/issue-3000-e.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+pnpm run check:ir-only -- --policy=hybrid
+pnpm run check:ir-fallbacks -- --verbose
+node scripts/equivalence-gate.mjs
+```
 
 ### R1a validation evidence
 

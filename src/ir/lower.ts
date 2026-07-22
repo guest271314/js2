@@ -87,6 +87,7 @@ import {
   type IrEffects,
 } from "./effects.js";
 import { IrInvariantError } from "./outcomes.js";
+import { irImportFuncRef, irRuntimeFuncRef } from "./callable-bindings.js";
 import type { BlockType, FuncTypeDef, Instr, LocalDef, ValType, WasmFunction } from "./types.js";
 export type {
   IrBoxedLowering,
@@ -1085,10 +1086,7 @@ export function lowerIrFunctionBody<S, Slot>(
     // (the legacy validator will then surface the type mismatch and we
     // haven't masked any other contract violation).
     try {
-      const idx = resolver.resolveFunc({
-        kind: "func",
-        name: "__unbox_number",
-      });
+      const idx = resolver.resolveFunc(irRuntimeFuncRef("__unbox_number"));
       emitter.pushRaw(out, { op: "call", funcIdx: idx });
     } catch {
       // resolver doesn't know __unbox_number — fall through unchanged
@@ -1822,10 +1820,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({
-            kind: "func",
-            name: cl.constructorFuncName,
-          }),
+          funcIdx: resolver.resolveFunc(cl.constructorFunc),
         });
         return;
       }
@@ -1890,10 +1885,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({
-            kind: "func",
-            name: cl.methodFuncName(instr.methodName),
-          }),
+          funcIdx: resolver.resolveFunc(cl.methodFunc(instr.methodName)),
         });
         return;
       }
@@ -1911,7 +1903,7 @@ export function lowerIrFunctionBody<S, Slot>(
         emitValue(instr.self, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({ kind: "func", name: cl.initFuncName }),
+          funcIdx: resolver.resolveFunc(cl.initFunc),
         });
         emitter.pushRaw(out, { op: "drop" });
         return;
@@ -1929,10 +1921,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({
-            kind: "func",
-            name: cl.methodFuncName(instr.methodName),
-          }),
+          funcIdx: resolver.resolveFunc(cl.methodFunc(instr.methodName)),
         });
         return;
       }
@@ -1998,10 +1987,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc({
-            kind: "func",
-            name: cl.methodFuncName(instr.methodName),
-          }),
+          funcIdx: resolver.resolveFunc(cl.methodFunc(instr.methodName)),
         });
         return;
       }
@@ -2107,7 +2093,7 @@ export function lowerIrFunctionBody<S, Slot>(
           // `(externref, externref) → void`.
           importName = "__gen_push_ref";
         }
-        const fnIdx = resolver.resolveFunc({ kind: "func", name: importName });
+        const fnIdx = resolver.resolveFunc(irRuntimeFuncRef(importName));
         // Stack: buffer, value → (void); call __gen_push_*.
         emitter.pushRaw(out, {
           op: "local.get",
@@ -2125,10 +2111,7 @@ export function lowerIrFunctionBody<S, Slot>(
         if (func.generatorBufferSlot === undefined) {
           throw new Error(`ir/lower: gen.epilogue requires func.generatorBufferSlot (${func.name})`);
         }
-        const fnIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__create_generator",
-        });
+        const fnIdx = resolver.resolveFunc(irRuntimeFuncRef("__create_generator"));
         emitter.pushRaw(out, {
           op: "local.get",
           index: slotWasmIdx(func.generatorBufferSlot),
@@ -2148,10 +2131,7 @@ export function lowerIrFunctionBody<S, Slot>(
         if (func.generatorBufferSlot === undefined) {
           throw new Error(`ir/lower: gen.yieldStar requires func.generatorBufferSlot (${func.name})`);
         }
-        const fnIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__gen_yield_star",
-        });
+        const fnIdx = resolver.resolveFunc(irRuntimeFuncRef("__gen_yield_star"));
         emitter.pushRaw(out, {
           op: "local.get",
           index: slotWasmIdx(func.generatorBufferSlot),
@@ -2178,10 +2158,7 @@ export function lowerIrFunctionBody<S, Slot>(
         if (func.generatorBufferSlot === undefined) {
           throw new Error(`ir/lower: gen.setReturn requires func.generatorBufferSlot (${func.name})`);
         }
-        const setReturnIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__gen_set_return",
-        });
+        const setReturnIdx = resolver.resolveFunc(irRuntimeFuncRef("__gen_set_return"));
         const valueT = asVal(typeOf(instr.value));
         // buffer (arg 0)
         emitter.pushRaw(out, {
@@ -2193,13 +2170,13 @@ export function lowerIrFunctionBody<S, Slot>(
         if (valueT?.kind === "f64") {
           emitter.pushRaw(out, {
             op: "call",
-            funcIdx: resolver.resolveFunc({ kind: "func", name: "__box_number" }),
+            funcIdx: resolver.resolveFunc(irRuntimeFuncRef("__box_number")),
           });
         } else if (valueT?.kind === "i32") {
           emitter.pushRaw(out, { op: "f64.convert_i32_s" });
           emitter.pushRaw(out, {
             op: "call",
-            funcIdx: resolver.resolveFunc({ kind: "func", name: "__box_number" }),
+            funcIdx: resolver.resolveFunc(irRuntimeFuncRef("__box_number")),
           });
         } else if (valueT?.kind === "ref" || valueT?.kind === "ref_null") {
           emitter.emitToExternref(out);
@@ -2348,7 +2325,7 @@ export function lowerIrFunctionBody<S, Slot>(
       }
       case "iter.new": {
         const fnName = instr.async ? "__async_iterator" : "__iterator";
-        const funcIdx = resolver.resolveFunc({ kind: "func", name: fnName });
+        const funcIdx = resolver.resolveFunc(irRuntimeFuncRef(fnName));
         emitValue(instr.iterable, out);
         emitter.pushRaw(out, { op: "call", funcIdx });
         return;
@@ -2369,10 +2346,7 @@ export function lowerIrFunctionBody<S, Slot>(
         );
       }
       case "iter.return": {
-        const funcIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__iterator_return",
-        });
+        const funcIdx = resolver.resolveFunc(irRuntimeFuncRef("__iterator_return"));
         emitValue(instr.iter, out);
         emitter.pushRaw(out, { op: "call", funcIdx });
         return;
@@ -2381,18 +2355,9 @@ export function lowerIrFunctionBody<S, Slot>(
         // Mirror of forof.vec but using the iterator protocol. The lowerer
         // emits the `block { loop { ... } }` Wasm pattern documented on
         // `IrInstrForOfIter` in `nodes.ts`.
-        const iteratorIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__iterator",
-        });
-        const iteratorNextIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__iterator_next",
-        });
-        const iteratorReturnIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__iterator_return",
-        });
+        const iteratorIdx = resolver.resolveFunc(irRuntimeFuncRef("__iterator"));
+        const iteratorNextIdx = resolver.resolveFunc(irRuntimeFuncRef("__iterator_next"));
+        const iteratorReturnIdx = resolver.resolveFunc(irRuntimeFuncRef("__iterator_return"));
 
         // #1584 (a0-tail): out-of-subset (embeds an Instr[] loop body). S = Instr[].
         const wasmOut = requireInstrSink(out);
@@ -2644,10 +2609,7 @@ export function lowerIrFunctionBody<S, Slot>(
         // iteration yields code points: a well-formed surrogate pair is ONE
         // 2-code-unit element. The cursor advances by the element's `len`
         // (1, or 2 for a pair) below instead of a fixed +1.
-        const charAtIdx = resolver.resolveFunc({
-          kind: "func",
-          name: "__str_charAt_cp",
-        });
+        const charAtIdx = resolver.resolveFunc(irRuntimeFuncRef("__str_charAt_cp"));
         // The AnyString struct's `len` field is at index 0 (matches
         // `nativeStringType` in src/codegen/native-strings.ts).
         // We recover the typeIdx from the SSA value's IrType — must be
@@ -2770,14 +2732,14 @@ export function lowerIrFunctionBody<S, Slot>(
       // them up by name.
       case "extern.new": {
         const importName = `${instr.className}_new`;
-        const fn = resolver.resolveFunc({ kind: "func", name: importName });
+        const fn = resolver.resolveFunc(irImportFuncRef("env", importName));
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       case "extern.call": {
         const importName = `${instr.className}_${instr.method}`;
-        const fn = resolver.resolveFunc({ kind: "func", name: importName });
+        const fn = resolver.resolveFunc(irImportFuncRef("env", importName));
         emitValue(instr.receiver, out);
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, { op: "call", funcIdx: fn });
@@ -2785,14 +2747,14 @@ export function lowerIrFunctionBody<S, Slot>(
       }
       case "extern.prop": {
         const importName = `${instr.className}_get_${instr.property}`;
-        const fn = resolver.resolveFunc({ kind: "func", name: importName });
+        const fn = resolver.resolveFunc(irImportFuncRef("env", importName));
         emitValue(instr.receiver, out);
         emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
       case "extern.propSet": {
         const importName = `${instr.className}_set_${instr.property}`;
-        const fn = resolver.resolveFunc({ kind: "func", name: importName });
+        const fn = resolver.resolveFunc(irImportFuncRef("env", importName));
         emitValue(instr.receiver, out);
         emitValue(instr.value, out);
         emitter.pushRaw(out, { op: "call", funcIdx: fn });
@@ -2819,7 +2781,7 @@ export function lowerIrFunctionBody<S, Slot>(
           throw new Error(`ir/lower: resolver cannot emit string.const for regex flags (${func.name})`);
         }
         for (const o of flagsOps) emitter.pushRaw(out, o);
-        const fn = resolver.resolveFunc({ kind: "func", name: "RegExp_new" });
+        const fn = resolver.resolveFunc(irImportFuncRef("env", "RegExp_new"));
         emitter.pushRaw(out, { op: "call", funcIdx: fn });
         return;
       }
