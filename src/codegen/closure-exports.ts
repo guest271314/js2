@@ -614,7 +614,28 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
     // at local i+2, extras are args[closureArity..arity) at locals
     // [closureArity+2 .. arity+2).
     const setupInstrs: Instr[] = [
-      { op: "i32.const", value: entry.closureArity },
+      // `__apply_closure` presets the ACTUAL count before choosing a padded
+      // dispatcher. Preserve min(actual, formals); ordinary direct/host calls
+      // enter with the -1 sentinel and retain the historical formal count.
+      { op: "global.get", index: argcGlobalIdx },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "global.get", index: argcGlobalIdx },
+          { op: "i32.const", value: entry.closureArity },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "global.get", index: argcGlobalIdx }],
+            else: [{ op: "i32.const", value: entry.closureArity }],
+          },
+        ],
+        else: [{ op: "i32.const", value: entry.closureArity }],
+      },
       { op: "global.set", index: argcGlobalIdx },
     ];
     if (arity > entry.closureArity) {
@@ -867,6 +888,10 @@ export function emitClosureArityExport(ctx: CodegenContext): void {
     name: "__closure_arity",
     desc: { kind: "func", index: funcIdx },
   });
+  // Native in-module callers (notably `__apply_closure`) need the same
+  // classifier the JS wrapper uses. Register the canonical function index so
+  // reserve-then-fill runtimes can call it without introducing another ABI.
+  ctx.funcMap.set("__closure_arity", funcIdx);
 }
 
 /**

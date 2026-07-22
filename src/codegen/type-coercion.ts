@@ -1907,6 +1907,46 @@ export function coerceType(
       }
     }
 
+    // (#2608 / #3098) A native string crossing an open property/call boundary
+    // may be carried by `$AnyValue` tag 5. Recover only an actual native-string
+    // payload. Generic ToString here would corrupt null/undefined sentinels and
+    // silently stringify unrelated objects at every typed-string boundary.
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      ctx.nativeStrings &&
+      toIdx === ctx.anyStrTypeIdx &&
+      ctx.anyStrTypeIdx >= 0 &&
+      ctx.anyValueTypeIdx >= 0
+    ) {
+      const anyValueTypeIdx = ctx.anyValueTypeIdx;
+      const priorElse = elseBranch;
+      const loadAnyValueStringPayload = (): Instr[] => [
+        { op: "local.get", index: tmpAnyLocal },
+        { op: "ref.cast", typeIdx: anyValueTypeIdx },
+        { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 4 },
+        { op: "any.convert_extern" },
+      ];
+      elseBranch = [
+        { op: "local.get", index: tmpAnyLocal },
+        { op: "ref.test", typeIdx: anyValueTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } },
+          then: [
+            ...loadAnyValueStringPayload(),
+            { op: "ref.test", typeIdx: toIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } },
+              then: [...loadAnyValueStringPayload(), { op: "ref.cast_null", typeIdx: toIdx }],
+              else: [{ op: "ref.null", typeIdx: toIdx }],
+            },
+          ],
+          else: priorElse,
+        },
+      ];
+    }
+
     const resultType: ValType = { kind: "ref_null", typeIdx: toIdx };
     fctx.body.push({
       op: "if",

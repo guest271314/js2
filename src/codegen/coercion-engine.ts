@@ -399,7 +399,11 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
     addUnionImports(ctx);
     const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
     if (isTruthyIdx !== undefined) {
-      sink.push({ op: "call", funcIdx: isTruthyIdx });
+      // Registering a late helper can shift every subsequent function index.
+      // Always re-read the canonical map entry before emitting the call; using
+      // the provisional index is observably wrong in large standalone graphs
+      // such as Acorn, where TokenType.keyword is an externref union.
+      sink.push({ op: "call", funcIdx: ctx.funcMap.get("__is_truthy") ?? isTruthyIdx });
       return sink;
     }
     // Fallback: non-null → true.
@@ -418,6 +422,23 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
     }
     // Native string ref — empty string is falsy (check len > 0 after flatten).
     if (valType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
+      // A nullable native string uses null as the in-band undefined carrier.
+      // Calling __str_flatten on that null traps before ToBoolean can return
+      // false (Acorn's TokenType.keyword is the canonical case: most token
+      // types store undefined, keyword tokens store a string). Route nullable
+      // strings through the canonical dynamic truthiness helper, which handles
+      // null/undefined and empty/non-empty native strings without dereference.
+      if (kind === "ref_null") {
+        addUnionImports(ctx);
+        const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+        if (isTruthyIdx !== undefined) {
+          const finalTruthyIdx = ctx.funcMap.get("__is_truthy") ?? isTruthyIdx;
+          sink.push({ op: "extern.convert_any" }, { op: "call", funcIdx: finalTruthyIdx });
+          return sink;
+        }
+        sink.push({ op: "ref.is_null" }, { op: "i32.eqz" });
+        return sink;
+      }
       const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
       if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
         sink.push(

@@ -3380,7 +3380,15 @@ function tryEmitPinnedStructMemberSet(
 
   // Evaluate the value, coerce/box to externref.
   const valResult = compileExpression(ctx, fctx, value);
-  if (valResult && valResult.kind !== "externref") {
+  if (valResult && ctx.booleanPropertyNames.has(propName)) {
+    // #2847: a dynamic method bridge may already have boxed an untyped
+    // boolean-returning closure as numeric externref 0/1. The whole-program
+    // property analysis proves this write is boolean, so normalize through
+    // ToBoolean and re-box with the boolean brand before it reaches the
+    // member-set dispatcher/sidecar.
+    ensureI32Condition(fctx, valResult, ctx);
+    coerceType(ctx, fctx, { kind: "i32", boolean: true }, { kind: "externref" });
+  } else if (valResult && valResult.kind !== "externref") {
     coerceType(ctx, fctx, valResult, { kind: "externref" });
   } else if (!valResult) {
     fctx.body.push({ op: "ref.null.extern" });
@@ -3936,6 +3944,9 @@ function compilePropertyAssignment(
 
   const fieldIdx = fields.findIndex((f) => f.name === fieldName);
   if (fieldIdx === -1) return null;
+  const presenceFieldIdx = fields[fieldIdx]!.presenceTracked
+    ? fields.findIndex((field) => field.name === `$has_${fieldName}`)
+    : -1;
 
   const structSelfType: ValType = { kind: "ref_null", typeIdx: structTypeIdx };
   const structObjResult = compileExpression(ctx, fctx, target.expression, structSelfType);
@@ -3970,8 +3981,27 @@ function compilePropertyAssignment(
         { op: "local.get", index: tmpRecv },
         { op: "local.get", index: tmpVal },
         { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
+        ...(presenceFieldIdx >= 0
+          ? ([
+              { op: "local.get", index: tmpRecv },
+              { op: "i32.const", value: 1 },
+              { op: "struct.set", typeIdx: structTypeIdx, fieldIdx: presenceFieldIdx },
+            ] as Instr[])
+          : []),
       ],
     });
+  } else if (presenceFieldIdx >= 0) {
+    // Preserve the receiver as well as the RHS so the hidden presence slot can
+    // be marked after the real field write.
+    fctx.body.push({ op: "local.set", index: tmpVal });
+    const tmpRecv = allocLocal(fctx, `__prop_recv_${fctx.locals.length}`, structSelfType);
+    fctx.body.push({ op: "local.set", index: tmpRecv });
+    fctx.body.push({ op: "local.get", index: tmpRecv });
+    fctx.body.push({ op: "local.get", index: tmpVal });
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+    fctx.body.push({ op: "local.get", index: tmpRecv });
+    fctx.body.push({ op: "i32.const", value: 1 });
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: presenceFieldIdx });
   } else {
     fctx.body.push({ op: "local.tee", index: tmpVal });
     fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
@@ -4015,7 +4045,10 @@ function compilePropertyAssignmentExternSet(
   // Compile value as externref and save
   const valResult = compileExpression(ctx, fctx, value);
   if (!valResult) return null;
-  if (valResult.kind !== "externref") {
+  if (ctx.booleanPropertyNames.has(propName)) {
+    ensureI32Condition(fctx, valResult, ctx);
+    coerceType(ctx, fctx, { kind: "i32", boolean: true }, { kind: "externref" });
+  } else if (valResult.kind !== "externref") {
     coerceType(ctx, fctx, valResult, { kind: "externref" });
   }
   const valLocal = allocLocal(fctx, `__paset_val_${fctx.locals.length}`, { kind: "externref" });

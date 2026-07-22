@@ -136,6 +136,7 @@ import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import {
   classExpressionDefinesOwnName,
+  chainRootIsGrowable,
   classifyPlainCtorReceiverNamespace,
   compileExternPropertyGet,
   emitExternrefBackedOwnFieldRead,
@@ -569,7 +570,7 @@ export function tryPinnedAndDeleteAwareDynamicGet(
         : undefined;
     const pinned = pinnedThis ?? resolveReceiverStruct(ctx, fctx, expr.expression);
     if (pinned !== undefined) {
-      const routed = tryEmitPinnedStructMemberGet(ctx, fctx, expr, propName);
+      const routed = tryEmitPinnedStructMemberGet(ctx, fctx, expr, propName, pinned);
       if (routed !== undefined) return routed;
     }
   }
@@ -3797,7 +3798,13 @@ export function finalizeStructAndDynamicMemberGet(
         : findAlternateStructsForField(ctx, propName, -1).find(
             (candidate) => candidate.structTypeIdx === structObjTypeIdx,
           );
-    if (!typeName && exactStructField) {
+    // Growable object-literal variables intentionally use the open host object
+    // selected by #2837. Their checker type still describes the original
+    // closed literal, so reading an "exact" field from that stale struct would
+    // bypass late-added nested properties such as Acorn's descriptor `.get`
+    // closures. The dynamic path is authoritative for the whole chain.
+    const growableObjectChain = chainRootIsGrowable(ctx, expr.expression);
+    if (!typeName && exactStructField && !growableObjectChain) {
       const structExprType = compileExpression(ctx, fctx, expr.expression);
       if (structExprType?.kind === "ref_null") {
         emitNullGuardedStructGet(

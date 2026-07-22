@@ -848,6 +848,10 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       paramTypes = [{ kind: "externref" }, { kind: "externref" }];
       returnType = { kind: "externref" };
       break;
+    case "Object.hasOwn":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
     // (#2933) Namespace static-method VALUE reads for the fixed-arity `Reflect.*`
     // methods that the standalone CALL path already backs with a simple
     // externref/i32 native (calls.ts §"Reflect API"). The value closure calls
@@ -1037,6 +1041,17 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       closureFctx.body.push({ op: "local.get", index: 1 });
       closureFctx.body.push({ op: "local.get", index: 2 });
       closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
+    } else if (key === "Object.hasOwn") {
+      const hasOwnIdx = ensureLateImport(
+        ctx,
+        "__object_hasOwn",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      if (hasOwnIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: hasOwnIdx });
     } else if (key === "Reflect.get") {
       // (#2933) Same native the 2-arg standalone `Reflect.get(target, key)` call
       // path uses (calls.ts). The value closure is fixed 2-arg — the optional

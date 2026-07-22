@@ -139,6 +139,38 @@ export function makeIrArrayExpressionPredicate(checker: ts.TypeChecker): (expr: 
 }
 
 /**
+ * Build a checker-backed proof that an expression has the ambient lib
+ * `RegExp` type. Host-free backends use this only to keep RegExp prototype
+ * calls on the native legacy path; user classes that happen to be named
+ * `RegExp` must retain normal IR class dispatch.
+ */
+export function makeIrRegExpExpressionPredicate(checker: ts.TypeChecker): (expr: ts.Expression) => boolean {
+  const isAmbientRegExp = (type: ts.Type): boolean => {
+    const symbol = type.aliasSymbol ?? type.getSymbol();
+    if (symbol?.getName() !== "RegExp") return false;
+    const declarations = symbol.getDeclarations() ?? [];
+    return (
+      declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+    );
+  };
+
+  return (expr) => {
+    try {
+      const type = checker.getTypeAtLocation(unwrapParens(expr));
+      if (type.isUnion()) {
+        const members = type.types.filter(
+          (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Never)) === 0,
+        );
+        return members.length > 0 && members.every(isAmbientRegExp);
+      }
+      return isAmbientRegExp(type);
+    } catch {
+      return false;
+    }
+  };
+}
+
+/**
  * Build a checker-only ambient-binding predicate. Unlike the full module
  * binding resolver, this exposes no source storage capability, so backends
  * without module-global lowering can still distinguish the real lib `Math`

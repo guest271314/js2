@@ -3336,7 +3336,7 @@ export function compileNativeStringMethodCall(
   // backend-created static RegExp materializes the same native capture vec as
   // `.exec`. Global/all-match semantics stay refused below.
   if (ctx.standalone && method === "match") {
-    const matchResult = tryCompileStandaloneStringMatch(ctx, fctx, expr, propAccess);
+    const matchResult = tryCompileStandaloneStringMatch(ctx, fctx, expr, propAccess, receiverOverride);
     if (matchResult !== undefined) return matchResult;
   }
 
@@ -3345,7 +3345,7 @@ export function compileNativeStringMethodCall(
   // (for-of / spread consume it via the #2169 native-vec path). Non-global,
   // string-arg, and dynamic-flags forms fall through to the refusal below.
   if (ctx.standalone && method === "matchAll") {
-    const matchAllResult = tryCompileStandaloneStringMatchAll(ctx, fctx, expr, propAccess);
+    const matchAllResult = tryCompileStandaloneStringMatchAll(ctx, fctx, expr, propAccess, receiverOverride);
     if (matchAllResult !== undefined) return matchAllResult;
   }
 
@@ -3354,7 +3354,7 @@ export function compileNativeStringMethodCall(
   // -1) instead of the host regex engine. The string-coercion form (string
   // argument) is not a RegExp value and falls through to the refusal below.
   if (ctx.standalone && method === "search") {
-    const searchResult = tryCompileStandaloneStringSearch(ctx, fctx, expr, propAccess);
+    const searchResult = tryCompileStandaloneStringSearch(ctx, fctx, expr, propAccess, receiverOverride);
     if (searchResult !== undefined) return searchResult;
   }
 
@@ -3363,7 +3363,7 @@ export function compileNativeStringMethodCall(
   // to the pure-WasmGC matcher (returns the rebuilt NativeString). `$`-pattern /
   // function replacers and the string-coercion form fall through to the refusal.
   if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
-    const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
+    const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess, receiverOverride);
     if (replaceResult !== undefined) return replaceResult;
   }
 
@@ -3371,7 +3371,7 @@ export function compileNativeStringMethodCall(
   // static, non-capturing, non-nullable RegExp routes through the pure-WasmGC
   // matcher and returns the same native string vec shape as string split.
   if (ctx.standalone && method === "split") {
-    const splitResult = tryCompileStandaloneStringSplit(ctx, fctx, expr, propAccess);
+    const splitResult = tryCompileStandaloneStringSplit(ctx, fctx, expr, propAccess, receiverOverride);
     if (splitResult !== undefined) return splitResult;
   }
 

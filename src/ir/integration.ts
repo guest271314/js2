@@ -87,6 +87,7 @@ import {
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
+  makeIrRegExpExpressionPredicate,
   type IrModuleBindingIdentity,
   type IrModuleBindingResolver,
 } from "./module-bindings.js";
@@ -280,6 +281,7 @@ export function compileIrPathFunctions(
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ctx.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
   const isArrayExpression = makeIrArrayExpressionPredicate(ctx.checker);
+  const isRegExpExpression = makeIrRegExpExpressionPredicate(ctx.checker);
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
@@ -290,6 +292,7 @@ export function compileIrPathFunctions(
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
+      isRegExpExpression,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
