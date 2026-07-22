@@ -79,6 +79,7 @@ files:
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/ir-first-gate.ts
+  - src/codegen/ir-overlay-identity.ts
   - src/codegen/ir-overlay-finalize.ts
   - src/codegen/index.ts
   - src/codegen/stdlib-selfhost.ts
@@ -87,6 +88,8 @@ files:
   - tests/issue-3520-legacy-unit-projection.test.ts
   - tests/issue-3520-propagation-identity.test.ts
   - tests/issue-3520-context-integration.test.ts
+  - tests/issue-3520-imported-target-identity.test.ts
+  - tests/issue-3520-overlay-selection-identity.test.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
@@ -713,6 +716,40 @@ formatting, diff, and LOC-budget checks pass. The standalone #1169q control
 retains its pre-existing async fallback-expectation mismatch (**9/10**); no
 selector semantics changed. No local Test262 run or baseline refresh was
 performed.
+
+Stage 5 moves the production overlay onto that structural selector boundary and
+adds exact imported-target identity without changing the legacy lowering API:
+
+- production builds one `IrUnitTypeMap`, selects through
+  `planIrCompilationByIdentity`, and retains the exact selection, omitted IDs,
+  declaration/type rows, and safe `IrUnitId` population throughout override
+  preparation;
+- the still-name-keyed override, integration, and slot interfaces receive only
+  the validated unambiguous projection. Within-source duplicate labels are
+  omitted before preparation, and safe names are projected only from the
+  retained safe IDs;
+- every preparation-time removal keeps the structural safe-ID population and
+  its legacy projection synchronized. The old independent selector call,
+  independently projected TypeMap, and last-wins top-level declaration scan
+  are no longer used by the production overlay;
+- the imported-function resolver now has an additive structural form that
+  resolves checker-selected declarations to exact `targetUnitId` values.
+  Cross-source same-label targets remain distinct and are marked ambiguous
+  only at the final legacy compatibility projection; and
+- the existing two-argument imported resolver preserves its behavior, while
+  cloned, stale, duplicate, or out-of-population source objects fail with typed
+  planning invariants in the structural form.
+
+The combined Stage 5 matrix passes **265/265** across all #3520 identity,
+projection, context, selector, and overlay suites plus #3214 callable/imported
+callback coverage, #3142 module-init, #3143 IR-first, #3529 selector preclaim,
+and #2138 multi-module overlay. Typecheck, lint, formatting, diff, and
+LOC-budget checks pass. No local Test262 run or baseline refresh was performed.
+
+The next Stage 6 slice must add `ownerUnitId` and `targetUnitId` to the AST
+lowering plans and construct them from this retained structural owner/target
+state. Imported-call, function-value, host-callback, Promise, module-binding,
+class, blocked-component, and outcome consumers are not yet fully ID-keyed.
 
 ### R1a validation evidence
 
