@@ -2,11 +2,20 @@
 
 import { ts } from "../ts-api.js";
 import type { IrFunctionBuilder } from "./builder.js";
+import type { IrSourceId, IrUnitId } from "./identity.js";
 import { asVal, irVal, type IrClosureSignature, type IrType, type IrValueId } from "./nodes.js";
+import {
+  IrPlanningIdentityInvariantError,
+  requireIrPlanningSourceId,
+  type IrPlanningIdentityContext,
+  type IrPlanningIdentityInvariantCode,
+} from "./planning-identity.js";
 import type { IrPromiseDelayCertification, IrPromiseDelayResolver } from "./promise-delay.js";
 
 /** Exact node-identity plan produced only for the certified Promise delay. */
 export interface IrPromiseDelayLoweringPlan {
+  readonly ownerUnitId: IrUnitId;
+  /** Compatibility label used only for current lifted/backend names. */
   readonly ownerName: string;
   readonly construction: ts.NewExpression;
   readonly executor: ts.ArrowFunction & { readonly body: ts.Block };
@@ -39,6 +48,7 @@ type PromiseDelayBuilder = Pick<IrFunctionBuilder, "emitCall" | "emitCallablePac
 export interface IrPromiseDelayLoweringHost {
   readonly builder: PromiseDelayBuilder;
   readonly funcName: string;
+  readonly ownerUnitId: IrUnitId | undefined;
   lowerExpr(expr: ts.Expression, expected: IrType): IrValueId;
   lowerClosure(
     expr: ts.ArrowFunction,
@@ -48,32 +58,205 @@ export interface IrPromiseDelayLoweringHost {
   ): IrValueId;
 }
 
+function planningInvariant(code: IrPlanningIdentityInvariantCode, message: string): never {
+  throw new IrPlanningIdentityInvariantError(code, message);
+}
+
+interface ValidatedPromiseDelayOwnerPopulation {
+  readonly sourceId: IrSourceId;
+  readonly sourceFile: ts.SourceFile;
+  readonly declarationByUnitId: ReadonlyMap<IrUnitId, ts.FunctionDeclaration>;
+}
+
+function isTopLevelFunctionUnitKind(kind: string, lexicalOwnerId: unknown): boolean {
+  return kind === "top-level-function" || (kind === "synthetic-support" && lexicalOwnerId === null);
+}
+
+/**
+ * Revalidate the mutable AST against the authoritative inventory before using
+ * exact declaration objects as Promise owners. This deliberately checks the
+ * complete executable top-level FunctionDeclaration population, not only the
+ * selected subset, so a cloned/reparsed or subsequently mutated AST cannot be
+ * partially accepted through an otherwise valid unit ID.
+ */
+function validatePromiseDelayOwnerPopulation(
+  sourceFile: ts.SourceFile,
+  identityContext: IrPlanningIdentityContext,
+): ValidatedPromiseDelayOwnerPopulation {
+  const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+  if (identityContext.sourceFileBySourceId.get(sourceId) !== sourceFile) {
+    return planningInvariant(
+      "source-record-mismatch",
+      `Promise-delay source ${sourceFile.fileName} does not resolve back to its exact planning SourceFile`,
+    );
+  }
+
+  const expectedIds: IrUnitId[] = [];
+  const expectedIdSet = new Set<IrUnitId>();
+  for (const unit of identityContext.inventory.allUnits) {
+    if (unit.sourceId !== sourceId || !isTopLevelFunctionUnitKind(unit.kind, unit.lexicalOwnerId)) continue;
+    const declaration = identityContext.declarationByUnitId.get(unit.id);
+    if (!declaration || !ts.isFunctionDeclaration(declaration)) {
+      return planningInvariant(
+        "missing-unit-declaration",
+        `Promise-delay top-level function unit ${unit.id} has no exact FunctionDeclaration`,
+      );
+    }
+    expectedIds.push(unit.id);
+    expectedIdSet.add(unit.id);
+  }
+
+  const currentIds: IrUnitId[] = [];
+  const declarationByUnitId = new Map<IrUnitId, ts.FunctionDeclaration>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isFunctionDeclaration(statement)) continue;
+    const unitId = identityContext.unitIdByDeclaration.get(statement);
+    if (!statement.body) {
+      if (unitId !== undefined && expectedIdSet.has(unitId)) {
+        return planningInvariant(
+          "unit-record-mismatch",
+          `Promise-delay owner unit ${unitId} no longer has its inventoried executable body`,
+        );
+      }
+      continue;
+    }
+    const unit = unitId === undefined ? undefined : identityContext.unitByUnitId.get(unitId);
+    if (
+      unitId === undefined ||
+      !unit ||
+      unit.sourceId !== sourceId ||
+      !expectedIdSet.has(unitId) ||
+      identityContext.declarationByUnitId.get(unitId) !== statement ||
+      statement.parent !== sourceFile ||
+      statement.getSourceFile() !== sourceFile
+    ) {
+      return planningInvariant(
+        "missing-unit-declaration",
+        `Promise-delay source ${sourceFile.fileName} contains an unindexed executable FunctionDeclaration`,
+      );
+    }
+    currentIds.push(unitId);
+    declarationByUnitId.set(unitId, statement);
+  }
+
+  if (currentIds.length !== expectedIds.length || currentIds.some((unitId, index) => unitId !== expectedIds[index])) {
+    return planningInvariant(
+      "unit-record-mismatch",
+      `Promise-delay source ${sourceFile.fileName} no longer matches its authoritative function population`,
+    );
+  }
+  return { sourceId, sourceFile, declarationByUnitId };
+}
+
+function requirePromiseDelayOwnerDeclaration(
+  ownerUnitId: IrUnitId,
+  population: ValidatedPromiseDelayOwnerPopulation,
+  identityContext: IrPlanningIdentityContext,
+): ts.FunctionDeclaration {
+  const declaration = population.declarationByUnitId.get(ownerUnitId);
+  const unit = identityContext.unitByUnitId.get(ownerUnitId);
+  if (
+    !declaration ||
+    !unit ||
+    unit.sourceId !== population.sourceId ||
+    identityContext.unitIdByDeclaration.get(declaration) !== ownerUnitId ||
+    identityContext.declarationByUnitId.get(ownerUnitId) !== declaration
+  ) {
+    return planningInvariant(
+      "unit-record-mismatch",
+      `selected Promise-delay owner ${ownerUnitId} is not an exact top-level FunctionDeclaration in ${population.sourceFile.fileName}`,
+    );
+  }
+  return declaration;
+}
+
 export function collectIrPromiseDelayOwners(
   sourceFile: ts.SourceFile,
-  selectedOwners: ReadonlySet<string>,
+  selectedOwnerUnitIds: ReadonlySet<IrUnitId>,
   resolver: IrPromiseDelayResolver | undefined,
-): ReadonlyMap<string, IrPromiseDelayCertification> {
-  const byOwner = new Map<string, IrPromiseDelayCertification>();
+  identityContext: IrPlanningIdentityContext,
+): ReadonlyMap<IrUnitId, IrPromiseDelayCertification> {
+  const population = validatePromiseDelayOwnerPopulation(sourceFile, identityContext);
+  for (const ownerUnitId of selectedOwnerUnitIds) {
+    requirePromiseDelayOwnerDeclaration(ownerUnitId, population, identityContext);
+  }
+
+  const byOwner = new Map<IrUnitId, IrPromiseDelayCertification>();
   if (!resolver) return byOwner;
   for (const statement of sourceFile.statements) {
-    if (!ts.isFunctionDeclaration(statement) || !statement.name || !selectedOwners.has(statement.name.text)) continue;
+    if (!ts.isFunctionDeclaration(statement) || !statement.name || !statement.body) continue;
+    const ownerUnitId = identityContext.unitIdByDeclaration.get(statement);
+    if (ownerUnitId === undefined || !selectedOwnerUnitIds.has(ownerUnitId)) continue;
+    requirePromiseDelayOwnerDeclaration(ownerUnitId, population, identityContext);
     const certification = resolver.resolveOwner(statement);
-    if (certification) byOwner.set(statement.name.text, certification);
+    if (certification) {
+      if (certification.owner !== statement) {
+        return planningInvariant(
+          "unit-record-mismatch",
+          `Promise-delay certification for ${ownerUnitId} returned a different owner declaration`,
+        );
+      }
+      byOwner.set(ownerUnitId, certification);
+    }
   }
   return byOwner;
 }
 
 export function buildIrPromiseDelayLoweringPlans(
-  byOwner: ReadonlyMap<string, IrPromiseDelayCertification>,
-  selectedOwners: ReadonlySet<string>,
+  byOwner: ReadonlyMap<IrUnitId, IrPromiseDelayCertification>,
+  selectedOwnerUnitIds: ReadonlySet<IrUnitId>,
+  identityContext: IrPlanningIdentityContext,
 ): IrPromiseDelayLoweringPlans {
   const constructions = new Map<ts.NewExpression, IrPromiseDelayLoweringPlan>();
   const timers = new Map<ts.CallExpression, IrPromiseDelayLoweringPlan>();
   const resolves = new Map<ts.CallExpression, IrPromiseDelayLoweringPlan>();
-  for (const [ownerName, certification] of byOwner) {
-    if (!selectedOwners.has(ownerName)) continue;
+
+  const populationBySourceId = new Map<IrSourceId, ValidatedPromiseDelayOwnerPopulation>();
+  const requirePopulationForOwner = (ownerUnitId: IrUnitId): ValidatedPromiseDelayOwnerPopulation => {
+    const unit = identityContext.unitByUnitId.get(ownerUnitId);
+    if (!unit) {
+      return planningInvariant(
+        "unit-record-mismatch",
+        `Promise-delay owner ${ownerUnitId} is absent from the authoritative planning inventory`,
+      );
+    }
+    let population = populationBySourceId.get(unit.sourceId);
+    if (!population) {
+      const sourceFile = identityContext.sourceFileBySourceId.get(unit.sourceId);
+      if (!sourceFile) {
+        return planningInvariant(
+          "source-record-mismatch",
+          `Promise-delay owner ${ownerUnitId} belongs to a source without an exact planning SourceFile`,
+        );
+      }
+      population = validatePromiseDelayOwnerPopulation(sourceFile, identityContext);
+      populationBySourceId.set(unit.sourceId, population);
+    }
+    requirePromiseDelayOwnerDeclaration(ownerUnitId, population, identityContext);
+    return population;
+  };
+
+  for (const ownerUnitId of selectedOwnerUnitIds) requirePopulationForOwner(ownerUnitId);
+  for (const [ownerUnitId, certification] of byOwner) {
+    const population = requirePopulationForOwner(ownerUnitId);
+    const declaration = requirePromiseDelayOwnerDeclaration(ownerUnitId, population, identityContext);
+    if (certification.owner !== declaration) {
+      return planningInvariant(
+        "unit-record-mismatch",
+        `Promise-delay certification for ${ownerUnitId} does not retain its exact owner declaration`,
+      );
+    }
+    if (!selectedOwnerUnitIds.has(ownerUnitId)) continue;
+    const ownerName = declaration.name?.text;
+    if (!ownerName || certification.owner.name !== declaration.name || certification.owner.body !== declaration.body) {
+      return planningInvariant(
+        "unit-record-mismatch",
+        `Promise-delay certification owner ${ownerUnitId} no longer has its exact named function shape`,
+      );
+    }
     const executorLiftedName = `${ownerName}__closure_${certification.executorOrdinal}`;
     const plan: IrPromiseDelayLoweringPlan = {
+      ownerUnitId,
       ownerName,
       construction: certification.construction,
       executor: certification.executor,
@@ -94,12 +277,26 @@ export function buildIrPromiseDelayLoweringPlans(
   return { constructions, timers, resolves };
 }
 
+function requireMatchingPromiseDelayOwner(plan: IrPromiseDelayLoweringPlan, host: IrPromiseDelayLoweringHost): void {
+  if (host.ownerUnitId === undefined) {
+    throw new Error(
+      `ir/from-ast: Promise delay plan cannot be consumed without an authoritative ownerUnitId (${host.funcName})`,
+    );
+  }
+  if (plan.ownerUnitId !== host.ownerUnitId) {
+    throw new Error(
+      `ir/from-ast: stale Promise delay plan owner ${plan.ownerUnitId} does not match ${host.ownerUnitId} (${host.funcName})`,
+    );
+  }
+}
+
 function lowerResolveCall(
   expr: ts.CallExpression,
   plan: IrPromiseDelayLoweringPlan,
   host: IrPromiseDelayLoweringHost,
   statementPosition: boolean,
 ): IrValueId {
+  requireMatchingPromiseDelayOwner(plan, host);
   if (
     expr !== plan.resolveCall ||
     !statementPosition ||
@@ -131,6 +328,7 @@ function lowerTimerCall(
   host: IrPromiseDelayLoweringHost,
   statementPosition: boolean,
 ): IrValueId {
+  requireMatchingPromiseDelayOwner(plan, host);
   if (
     expr !== plan.timerCall ||
     !statementPosition ||
@@ -186,6 +384,7 @@ export function tryLowerPromiseDelayConstruction(
   const plan = plans?.constructions.get(expr);
   if (!plan) return undefined;
   const host = makeHost();
+  requireMatchingPromiseDelayOwner(plan, host);
   if (
     expr !== plan.construction ||
     expr.arguments?.length !== 1 ||

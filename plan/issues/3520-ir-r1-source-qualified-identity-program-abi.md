@@ -29,6 +29,7 @@ required_by: [3521, 3525]
 related: [1983, 2138, 2930, 3142, 3143, 3518, 3529]
 origin: "#3518 R1 — replace display-name identity before preparation ownership changes"
 files:
+  - scripts/check-ir-fallbacks.ts
   - src/ir/identity.ts
   - src/ir/planning-identity.ts
   - src/ir/program-abi.ts
@@ -45,6 +46,8 @@ files:
   - src/ir/type-evidence.ts
   - src/ir/select.ts
   - src/ir/integration.ts
+  - src/ir/integration-identity.ts
+  - src/ir/integration-report.ts
   - src/ir/lower.ts
   - src/ir/verify.ts
   - src/ir/verify-alloc.ts
@@ -79,8 +82,11 @@ files:
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/ir-first-gate.ts
+  - src/codegen/ir-class-shapes.ts
   - src/codegen/ir-overlay-identity.ts
   - src/codegen/ir-overlay-finalize.ts
+  - src/codegen/ir-overlay-outcomes.ts
+  - src/codegen/ir-overlay-safety.ts
   - src/codegen/index.ts
   - src/codegen/stdlib-selfhost.ts
   - tests/issue-3520-ir-unit-identity.test.ts
@@ -91,6 +97,18 @@ files:
   - tests/issue-3520-imported-target-identity.test.ts
   - tests/issue-3520-lowering-plan-identity.test.ts
   - tests/issue-3520-overlay-selection-identity.test.ts
+  - tests/issue-3520-class-shape-identity.test.ts
+  - tests/issue-3520-fallback-gate-identity.test.ts
+  - tests/issue-3520-integration-population-identity.test.ts
+  - tests/issue-3520-integration-report-evidence.test.ts
+  - tests/issue-3520-linear-owner-identity.test.ts
+  - tests/issue-3520-module-binding-class-identity.test.ts
+  - tests/issue-3520-outcome-correlation-identity.test.ts
+  - tests/issue-3520-overlay-finalize-identity.test.ts
+  - tests/issue-3520-overlay-safety-identity.test.ts
+  - tests/issue-3520-promise-plan-identity.test.ts
+  - tests/issue-3520-selfhost-cache-identity.test.ts
+  - tests/issue-2856-calendar-residuals.test.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
@@ -771,10 +789,46 @@ module-level increases, and hybrid IR-only readiness remains **31 emitted / 6
 typed Unsupported / 0 Invariants** across 37 terminal units. Typecheck, lint,
 formatting, diff, and LOC-budget checks pass.
 
-The next Stage 7 slice must make Promise plans, module-binding uses, local-class
-evidence, blocked-component closure, and terminal outcome correlation retain
-their exact owner/class IDs. `IrFunction`/`IrFuncRef`, passes, and backends
-remain the following Commit 3 boundary.
+Stage 7 completes Commit 2's source-planning identity migration:
+
+- Promise-delay plans, module-binding uses, local-class evidence, host-Date
+  snapshot plans, and the linear source seam retain exact owner/class IDs.
+  Name-keyed lowering and slot APIs are reached only through their validated
+  legacy projections;
+- blocked-component closure, IR-first skip selection, multi-source safety, and
+  terminal outcome correlation are ID-keyed. Named compiler results cannot
+  satisfy a foreign or same-labelled unit, and closure is computed over the
+  full safe function population before the requested skip subset is projected;
+- class shapes are indexed by `IrClassId` with exact checker-selected
+  declarations and parent identities. The remaining class-shape name map is a
+  checked compatibility view rather than semantic identity;
+- integration validates the exact selected function, class-member, compiler
+  support, and module-init AST populations. Finalization also proves that
+  callback, Promise, and Date sites remain reachable from their exact active
+  owners. Replaced, detached, or reordered AST populations fail with typed
+  planning invariants instead of matching by text or span;
+- integration reports distinguish terminal compiled owners from synthetic
+  artifacts and reconcile every logical error event with all public error
+  objects. Raw compiled/error labels are telemetry only and cannot prove
+  terminal success or patch safety;
+- the fallback gate now carries the graph-wide identity inventory, context,
+  unit types, and structural selection through its accounting, projecting to
+  labels only for the final stable histogram; and
+- new identity plumbing was extracted from `planIrOverlay` and
+  `generateMultiModule`. Both functions are smaller than the pre-Stage-7 HEAD,
+  so the checkpoint adds no new god-function size debt.
+
+The complete #3520 matrix passes **145/145** and the compatibility matrix
+passes **249/249**. Hybrid IR-only readiness remains **31 emitted / 6 typed
+Unsupported / 0 Invariants** across 37 terminal units. The fallback gate has
+zero unintended, post-claim, or module-level increases. Typecheck, formatting,
+diff, and LOC-budget checks pass; the six existing god-file baseline failures
+remain, while both functions touched by this stage shrink. No local Test262 run
+or baseline refresh was performed.
+
+Commit 2 is complete. `IrFunction`/`IrFuncRef`, pass edit tables, verification,
+and backend callable references remain the next Commit 3 boundary; whole-
+program ABI binding and the legacy slot adapter remain Commit 4.
 
 ### R1a validation evidence
 

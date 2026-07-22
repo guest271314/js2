@@ -14,7 +14,11 @@ import {
 
 export type { IrIdentityImportedFunctionResolver } from "../ir/imported-functions.js";
 import { IrInvariantError } from "../ir/outcomes.js";
-import type { IrPlanningIdentityContext } from "../ir/planning-identity.js";
+import {
+  buildIrLegacyUnitProjection,
+  type IrLegacyUnitProjection,
+  type IrPlanningIdentityContext,
+} from "../ir/planning-identity.js";
 import {
   buildIrUnitTypeMap,
   projectIrUnitTypeMapToLegacy,
@@ -42,6 +46,8 @@ export interface IrOverlayIdentityPlan {
   readonly identitySelection: IrIdentitySelection;
   readonly selectionProjection: IrLegacySelectionProjection;
   readonly functionClaims: readonly IrOverlayIdentityFunctionClaim[];
+  /** Complete unambiguous terminal projection, including rejected units and module init. */
+  readonly unitIdByLegacyName: ReadonlyMap<string, IrUnitId>;
   readonly functionUnitIdByLegacyName: ReadonlyMap<string, IrUnitId>;
   readonly declarationByLegacyName: ReadonlyMap<string, ts.FunctionDeclaration>;
   readonly safeFunctionUnitIds: Set<IrUnitId>;
@@ -80,6 +86,7 @@ export function planIrOverlayByIdentity(
   const identitySelection = planIrCompilationByIdentity(sourceFile, identityContext, options, maps.unitTypeMap);
   const selectionProjection = projectIrSelectionToLegacy(identitySelection);
   const functionClaims: IrOverlayIdentityFunctionClaim[] = [];
+  const unitIdByLegacyName = new Map<string, IrUnitId>();
   const functionUnitIdByLegacyName = new Map<string, IrUnitId>();
   const declarationByLegacyName = new Map<string, ts.FunctionDeclaration>();
 
@@ -106,11 +113,27 @@ export function planIrOverlayByIdentity(
     declarationByLegacyName.set(legacyName, declaration);
   }
 
+  for (const [unitId, unit] of identitySelection.units) {
+    if (selectionProjection.omittedUnitIds.has(unitId)) continue;
+    if (unitIdByLegacyName.has(unit.legacyMatchName)) {
+      mismatch(`legacy terminal label ${unit.legacyMatchName} has more than one structural owner`);
+    }
+    unitIdByLegacyName.set(unit.legacyMatchName, unitId);
+  }
+  if (identitySelection.moduleInit) {
+    const { unitId, legacyMatchName } = identitySelection.moduleInit;
+    if (unitIdByLegacyName.has(legacyMatchName)) {
+      mismatch(`module-init label ${legacyMatchName} collides with a structural source unit`);
+    }
+    unitIdByLegacyName.set(legacyMatchName, unitId);
+  }
+
   return {
     identityContext,
     identitySelection,
     selectionProjection,
     functionClaims,
+    unitIdByLegacyName,
     functionUnitIdByLegacyName,
     declarationByLegacyName,
     safeFunctionUnitIds: new Set(),
@@ -138,6 +161,21 @@ export function projectIrSafeFunctionNames(
   return names;
 }
 
+/** Replace the retained function population without permitting a dropped owner to reappear. */
+export function retainIrSafeFunctionUnitIds(
+  identityPlan: IrOverlayIdentityPlan,
+  retainedUnitIds: ReadonlySet<IrUnitId>,
+): Set<string> {
+  for (const unitId of retainedUnitIds) {
+    if (!identityPlan.safeFunctionUnitIds.has(unitId)) {
+      mismatch(`IR finalization attempted to resurrect dropped function unit ${unitId}`);
+    }
+  }
+  identityPlan.safeFunctionUnitIds.clear();
+  for (const unitId of retainedUnitIds) identityPlan.safeFunctionUnitIds.add(unitId);
+  return projectIrSafeFunctionNames(identityPlan.safeFunctionUnitIds, identityPlan);
+}
+
 /** Remove a projected owner while keeping the exact safe-ID population aligned. */
 export function dropIrSafeFunctionByLegacyName(identityPlan: IrOverlayIdentityPlan, legacyName: string): void {
   const unitId = identityPlan.functionUnitIdByLegacyName.get(legacyName);
@@ -152,6 +190,15 @@ export function requireIrOverlayFunctionUnitId(
 ): IrUnitId {
   const unitId = identityPlan.functionUnitIdByLegacyName.get(legacyName);
   if (!unitId) mismatch(`IR preparation owner ${legacyName} has no retained structural unit identity`);
+  return unitId;
+}
+
+export function requireIrOverlayUnitId(
+  identityPlan: Pick<IrOverlayIdentityPlan, "unitIdByLegacyName">,
+  legacyName: string,
+): IrUnitId {
+  const unitId = identityPlan.unitIdByLegacyName.get(legacyName);
+  if (!unitId) mismatch(`IR preparation unit ${legacyName} has no retained structural identity`);
   return unitId;
 }
 
@@ -221,17 +268,98 @@ export function makeIrFeaturePlanIdentity(
 
 export function projectIrIntegrationLoweringPlans(
   plan: {
-    readonly identityPlan: Pick<IrOverlayIdentityPlan, "functionUnitIdByLegacyName">;
+    readonly identityPlan: IrOverlayIdentityPlan;
   } & Pick<
     IrIntegrationLoweringPlans,
     "importedCalls" | "topLevelFunctionValues" | "hostVoidCallbacks" | "promiseDelays"
   >,
+  selection: {
+    readonly funcs: ReadonlySet<string>;
+    readonly classMembers?: ReadonlySet<string>;
+    readonly moduleInit?: { readonly stmtCount: number; readonly reason: string | null };
+  },
 ): IrIntegrationLoweringPlans {
+  const ownerProjection = buildIrIntegrationOwnerProjection(plan.identityPlan, selection);
+  const ownerUnitIdByLegacyName = new Map(
+    ownerProjection.entries.map(({ legacyName, unitId }) => [legacyName, unitId]),
+  );
   return {
-    ownerUnitIdByLegacyName: plan.identityPlan.functionUnitIdByLegacyName,
+    identityContext: plan.identityPlan.identityContext,
+    ownerProjection,
+    ownerUnitIdByLegacyName,
     importedCalls: plan.importedCalls,
     topLevelFunctionValues: plan.topLevelFunctionValues,
     hostVoidCallbacks: plan.hostVoidCallbacks,
     promiseDelays: plan.promiseDelays,
   };
+}
+
+/** Validate the exact terminal population passed through the legacy integration seam. */
+export function buildIrIntegrationOwnerProjection(
+  identityPlan: IrOverlayIdentityPlan,
+  selection: {
+    readonly funcs: ReadonlySet<string>;
+    readonly classMembers?: ReadonlySet<string>;
+    readonly moduleInit?: { readonly stmtCount: number; readonly reason: string | null };
+  },
+): IrLegacyUnitProjection {
+  return buildPreparedOwnerProjection(identityPlan, selection, false);
+}
+
+/** Structural membership for terminal reconciliation, including static-member policy rows. */
+export function collectIrPreparedSelectionUnitIds(
+  identityPlan: IrOverlayIdentityPlan,
+  selection: {
+    readonly funcs: ReadonlySet<string>;
+    readonly classMembers?: ReadonlySet<string>;
+    readonly moduleInit?: { readonly stmtCount: number; readonly reason: string | null };
+  },
+): ReadonlySet<IrUnitId> {
+  return new Set(buildPreparedOwnerProjection(identityPlan, selection, true).entries.map(({ unitId }) => unitId));
+}
+
+function buildPreparedOwnerProjection(
+  identityPlan: IrOverlayIdentityPlan,
+  selection: {
+    readonly funcs: ReadonlySet<string>;
+    readonly classMembers?: ReadonlySet<string>;
+    readonly moduleInit?: { readonly stmtCount: number; readonly reason: string | null };
+  },
+  includeStaticClassMembers: boolean,
+): IrLegacyUnitProjection {
+  const entries: { unitId: IrUnitId; legacyName: string }[] = [];
+  const structural = identityPlan.identitySelection;
+  const omitted = identityPlan.selectionProjection.omittedUnitIds;
+
+  const addSelected = (
+    legacyNames: ReadonlySet<string> | undefined,
+    claims: ReadonlyMap<IrUnitId, { readonly unitId: IrUnitId; readonly legacyMatchName: string }> | undefined,
+    kind: "function" | "class member",
+    include: (unitId: IrUnitId) => boolean = () => true,
+  ): void => {
+    const expected = new Set(legacyNames ?? []);
+    for (const claim of claims?.values() ?? []) {
+      if (omitted.has(claim.unitId) || !expected.delete(claim.legacyMatchName) || !include(claim.unitId)) continue;
+      entries.push({ unitId: claim.unitId, legacyName: claim.legacyMatchName });
+    }
+    if (expected.size > 0) {
+      mismatch(`prepared IR ${kind} names have no exact structural projection: ${[...expected].sort().join(", ")}`);
+    }
+  };
+
+  addSelected(selection.funcs, structural.funcs, "function");
+  addSelected(selection.classMembers, structural.classMembers, "class member", (unitId) => {
+    if (includeStaticClassMembers) return true;
+    return identityPlan.identityContext.terminalByUnitId.get(unitId)?.staticClassMember !== true;
+  });
+
+  const moduleSelected = selection.moduleInit?.reason === null && (selection.moduleInit.stmtCount ?? 0) > 0;
+  if (moduleSelected) {
+    const moduleInit = structural.moduleInit;
+    if (!moduleInit || moduleInit.reason !== null || moduleInit.stmtCount === 0) {
+      mismatch("prepared IR module init has no exact structural projection");
+    }
+    entries.push({ unitId: moduleInit.unitId, legacyName: moduleInit.legacyMatchName });
+  }
+  return buildIrLegacyUnitProjection(entries);
 }

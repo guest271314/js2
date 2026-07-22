@@ -48,17 +48,20 @@ import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statem
 import { IrFunctionBuilder } from "./builder.js";
 import { collectOuterWrites } from "./closure-captures.js";
 import {
+  requireMatchingModuleBindingOwner,
   requireMatchingLoweringPlanOwner,
   type IrHostVoidCallbackLoweringPlan,
   type IrImportedCallLoweringPlan,
   type IrImportedOptionalParamPlan,
   type IrTopLevelFunctionValueLoweringPlan,
+  type ModuleBindingGlobal,
 } from "./ast-lowering-plans.js";
 export type {
   IrHostVoidCallbackLoweringPlan,
   IrImportedCallLoweringPlan,
   IrImportedOptionalParamPlan,
   IrTopLevelFunctionValueLoweringPlan,
+  ModuleBindingGlobal,
 } from "./ast-lowering-plans.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
 import { classifyLiteral, joinEncoding, type Encoding } from "./analysis/encoding.js";
@@ -528,23 +531,6 @@ export interface AstToIrOptions {
    * unsupported storage still demotes.
    */
   readonly moduleBindings?: ReadonlyMap<string, ModuleBindingGlobal>;
-}
-
-/**
- * (#3142 Slice 2) One module-scope binding's legacy storage description.
- * Built by the integration layer from `ctx.moduleGlobals` / `ctx.mod.globals`.
- */
-export interface ModuleBindingGlobal {
-  /** The Wasm global's symbolic name (`__mod_<name>`), resolvable by the
-   *  lowerer's `resolveGlobal`. */
-  readonly globalName: string;
-  /** The `__tdz_<name>` flag global when legacy tracks a TDZ flag for this
-   *  binding, else null. The declaration lowering mirrors legacy
-   *  `emitTdzInit`: after the value write, set the flag to 1. */
-  readonly tdzGlobalName: string | null;
-  /** The binding's logical IR type. `extern<C>` is Wasm-identical to the
-   *  legacy externref global while retaining the checker-derived brand. */
-  readonly type: IrType;
 }
 
 /**
@@ -2053,6 +2039,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // the IR closure binding below would keep it purely local to the init
     // body — the observable storage would never be written. Demote.
     const moduleBinding = cx.moduleBindings?.get(name);
+    if (moduleBinding) requireMatchingModuleBindingOwner(moduleBinding, cx.ownerUnitId, cx.funcName);
     if (moduleBinding && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))) {
       throw new Error(
         `ir/from-ast: module-level closure binding '${name}' not in module-init Slice 2 scope (${cx.funcName})`,
@@ -2484,6 +2471,7 @@ function moduleStorageCompatible(actual: IrType, expected: IrType): boolean {
 
 /** Emit the legacy module-global TDZ check followed by the symbolic read. */
 function lowerResolvedModuleBindingRead(name: string, binding: ModuleBindingGlobal, cx: LowerCtx): IrValueId {
+  requireMatchingModuleBindingOwner(binding, cx.ownerUnitId, cx.funcName);
   if (binding.type.kind === "extern") {
     assertNotDeferred(
       hostExternCapability(cx.resolver?.jsHostExterns?.() === true),
@@ -3951,6 +3939,7 @@ function makePromiseDelayLoweringHost(cx: LowerCtx): IrPromiseDelayLoweringHost 
   return {
     builder: cx.builder,
     funcName: cx.funcName,
+    ownerUnitId: cx.ownerUnitId,
     lowerExpr: (expr, expected) => lowerExpr(expr, cx, expected),
     lowerClosure: (expr, signature, captures, exact) =>
       lowerClosureExpressionWithSignature(expr, signature, captures, cx, exact),
@@ -6542,12 +6531,14 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
   if (!binding) {
     const readable = cx.resolver?.resolveModuleBinding?.(id);
     if (readable) {
+      requireMatchingModuleBindingOwner(readable, cx.ownerUnitId, cx.funcName);
       const writable = cx.resolver?.resolveModuleBinding?.(id, rhs);
       if (!writable) {
         throw new Error(
           `ir/from-ast: assignment to readonly or representation-incompatible module binding "${id.text}" in ${cx.funcName}`,
         );
       }
+      requireMatchingModuleBindingOwner(writable, cx.ownerUnitId, cx.funcName);
       const newValue = lowerExpr(rhs, cx, writable.type);
       const newType = cx.builder.typeOf(newValue);
       if (!moduleStorageCompatible(newType, writable.type)) {

@@ -69,6 +69,9 @@ export { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
 import type {
   IrDeclaredPrimitiveExpressionFamily,
+  IrLegacyLocalClassExpressionResolver,
+  IrLegacyModuleBindingResolver,
+  IrLocalClassExpressionResolver,
   IrModuleBindingResolver,
   IrPrimitiveExpressionFamily,
 } from "./module-bindings.js";
@@ -361,7 +364,7 @@ export interface IrSelectionOptions {
    * Passing `writeValue` additionally proves mutability and supported
    * write-side representation before the selector claims the function.
    */
-  readonly resolveModuleBinding?: IrModuleBindingResolver;
+  readonly resolveModuleBinding?: IrModuleBindingResolver | IrLegacyModuleBindingResolver;
   /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
    *  strictNoHostImports). Gates the host-extern capability. */
   readonly jsHostExterns?: boolean;
@@ -455,7 +458,7 @@ export interface IrSelectionOptions {
    * results; bare selector callers omit it and use the conservative syntax
    * proofs below.
    */
-  readonly resolveLocalClassExpression?: (expression: ts.Expression) => string | undefined;
+  readonly resolveLocalClassExpression?: IrLocalClassExpressionResolver | IrLegacyLocalClassExpressionResolver;
   /**
    * #3529 P1/P4 structural target-capability seam. P1 stays independent of
    * backend/legality.ts; P4 wires its exported capability predicate here.
@@ -1099,7 +1102,7 @@ let forInitLeakedNames = new Set<string>();
 
 // Current-run checker resolvers. A null host resolver means host-free/deferred.
 let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
-let currentModuleBindingResolver: IrModuleBindingResolver | null = null;
+let currentModuleBindingResolver: IrModuleBindingResolver | IrLegacyModuleBindingResolver | null = null;
 // C3's Map.get result is deliberately carried as externref until a strict
 // undefined check proves the value branch. Keep the local names visible to
 // consumer guards so truthiness/logical/nullish uses reject before claim.
@@ -3605,7 +3608,7 @@ function unwrapPhase1Parens(expr: ts.Expression): ts.Expression {
 }
 
 /** Resolve an exact checker-owned module binding, independent of representation. */
-function moduleBinding(expr: ts.Expression): ReturnType<IrModuleBindingResolver> {
+function moduleBinding(expr: ts.Expression): ReturnType<IrLegacyModuleBindingResolver> {
   const candidate = unwrapPhase1Parens(expr);
   if (!ts.isIdentifier(candidate)) return undefined;
   return currentModuleBindingResolver?.(candidate);
@@ -3629,7 +3632,7 @@ function isUnshadowedUndefinedIdentifier(expr: ts.Expression, scope: ReadonlySet
 }
 
 /** Resolve an exact module identifier whose shared legacy slot is externref-shaped. */
-function moduleExternBinding(expr: ts.Expression): ReturnType<IrModuleBindingResolver> {
+function moduleExternBinding(expr: ts.Expression): ReturnType<IrLegacyModuleBindingResolver> {
   const binding = moduleBinding(expr);
   return binding?.valueKind.kind === "extern" ? binding : undefined;
 }
@@ -4817,7 +4820,8 @@ function localClassValueIsUnshadowed(name: string, scope: ReadonlySet<string>): 
 
 function localClassNameForExpression(expression: ts.Expression, scope: ReadonlySet<string>): string | null {
   const candidate = unwrapProjectionExpression(expression);
-  const checkerClassName = currentSelectionOptions?.resolveLocalClassExpression?.(candidate);
+  const checkerClass = currentSelectionOptions?.resolveLocalClassExpression?.(candidate);
+  const checkerClassName = typeof checkerClass === "string" ? checkerClass : checkerClass?.legacyName;
   if (checkerClassName !== undefined && currentLocalClassDeclarations.has(checkerClassName)) {
     return checkerClassName;
   }

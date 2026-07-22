@@ -12,6 +12,7 @@ import {
   type IrUnitInventory,
   type IrUnitRecord,
 } from "./identity.js";
+import { collectModuleInitPopulation } from "./module-init.js";
 
 /** Exact structural identity retained across a temporary name-keyed API. */
 export interface IrLegacyUnitProjectionEntry {
@@ -67,6 +68,8 @@ export interface IrPlanningIdentityContext {
   /** Module init is structurally owned by its source, not by an arbitrary AST anchor. */
   readonly moduleInitUnitIdBySourceId: ReadonlyMap<IrSourceId, IrUnitId>;
   readonly moduleInitUnitIdBySourceFile: ReadonlyMap<ts.SourceFile, IrUnitId>;
+  /** Exact top-level statement population captured once for later stale-AST validation. */
+  readonly moduleInitPopulationBySourceFile: ReadonlyMap<ts.SourceFile, readonly ts.Statement[]>;
 }
 
 export type IrPlanningIdentityInvariantCode =
@@ -460,6 +463,7 @@ export function buildIrPlanningIdentityContext(inventory: IrUnitInventory): IrPl
 
   const sourceIdBySourceFile = new Map<ts.SourceFile, IrSourceId>();
   const sourceFileBySourceId = new Map<IrSourceId, ts.SourceFile>();
+  const moduleInitPopulationBySourceFile = new Map<ts.SourceFile, readonly ts.Statement[]>();
   for (let index = 0; index < inventory.sources.length; index++) {
     const source = inventory.sources[index]!;
     const scannedSource = scanned.sources[index]!;
@@ -480,6 +484,16 @@ export function buildIrPlanningIdentityContext(inventory: IrUnitInventory): IrPl
     }
     sourceIdBySourceFile.set(scannedSource.sourceFile, source.id);
     sourceFileBySourceId.set(source.id, scannedSource.sourceFile);
+    const moduleInitPopulation = collectModuleInitPopulation(scannedSource.sourceFile);
+    for (const statement of moduleInitPopulation) {
+      if (statement.parent !== scannedSource.sourceFile || statement.getSourceFile() !== scannedSource.sourceFile) {
+        return planningIdentityInvariant(
+          "invalid-module-init",
+          `module-init statement at ${statement.pos} is detached from source ${source.id}`,
+        );
+      }
+    }
+    moduleInitPopulationBySourceFile.set(scannedSource.sourceFile, Object.freeze(moduleInitPopulation));
   }
 
   const unitsById = new Map<IrUnitId, IrUnitRecord>();
@@ -678,5 +692,6 @@ export function buildIrPlanningIdentityContext(inventory: IrUnitInventory): IrPl
     declarationByClassId: readonlyIdentityMap(declarationByClassId),
     moduleInitUnitIdBySourceId: readonlyIdentityMap(moduleInitUnitIdBySourceId),
     moduleInitUnitIdBySourceFile: readonlyIdentityMap(moduleInitUnitIdBySourceFile),
+    moduleInitPopulationBySourceFile: readonlyIdentityMap(moduleInitPopulationBySourceFile),
   });
 }

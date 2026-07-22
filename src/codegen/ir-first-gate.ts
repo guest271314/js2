@@ -374,6 +374,12 @@ export function collectLocalCallEdgesByIdentity(
   identityContext: IrPlanningIdentityContext,
 ): IrIdentityLocalCallEdges {
   const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+  if (identityContext.sourceFileBySourceId.get(sourceId) !== sourceFile) {
+    throw new IrPlanningIdentityInvariantError(
+      "source-record-mismatch",
+      `source ${sourceId} does not resolve back to the exact planning SourceFile`,
+    );
+  }
   const unitById = new Map(identityContext.inventory.allUnits.map((unit) => [unit.id, unit]));
   const requireDeclarationUnitId = (declaration: ts.Node): IrUnitId => {
     const unitId = identityContext.unitIdByDeclaration.get(declaration);
@@ -393,12 +399,44 @@ export function collectLocalCallEdgesByIdentity(
   };
 
   const candidatesByName = new Map<string, IrUnitId[]>();
+  const activeTopLevelFunctionIds = new Set<IrUnitId>();
   for (const statement of sourceFile.statements) {
-    if (!ts.isFunctionDeclaration(statement) || !statement.name || !statement.body) continue;
+    if (!ts.isFunctionDeclaration(statement) || !statement.body) continue;
     const unitId = requireDeclarationUnitId(statement);
+    if (identityContext.declarationByUnitId.get(unitId) !== statement) {
+      throw new IrPlanningIdentityInvariantError(
+        "unit-record-mismatch",
+        `top-level function ${unitId} is not its exact declaration for ${sourceId}`,
+      );
+    }
+    activeTopLevelFunctionIds.add(unitId);
+    if (!statement.name) continue;
     const candidates = candidatesByName.get(statement.name.text) ?? [];
     candidates.push(unitId);
     candidatesByName.set(statement.name.text, candidates);
+  }
+  for (const unit of identityContext.inventory.allUnits) {
+    const declaration = identityContext.declarationByUnitId.get(unit.id);
+    const representsTopLevelFunction =
+      unit.kind === "top-level-function" ||
+      (unit.kind === "synthetic-support" &&
+        unit.lexicalOwnerId === null &&
+        declaration !== undefined &&
+        ts.isFunctionDeclaration(declaration) &&
+        declaration.parent === sourceFile);
+    if (unit.sourceId !== sourceId || !representsTopLevelFunction) continue;
+    if (
+      !declaration ||
+      !ts.isFunctionDeclaration(declaration) ||
+      declaration.getSourceFile() !== sourceFile ||
+      !declaration.body ||
+      !activeTopLevelFunctionIds.has(unit.id)
+    ) {
+      throw new IrPlanningIdentityInvariantError(
+        "missing-unit-declaration",
+        `function unit ${unit.id} is absent from the active top-level population for ${sourceId}`,
+      );
+    }
   }
   for (const candidates of candidatesByName.values()) candidates.sort(compareIrIdentity);
 
@@ -453,6 +491,22 @@ export function collectLocalCallEdgesByIdentity(
   collectBoundaries(sourceFile);
 
   const modulePopulation = collectModuleInitPopulation(sourceFile);
+  const authoritativeModulePopulation = identityContext.moduleInitPopulationBySourceFile.get(sourceFile);
+  if (!authoritativeModulePopulation) {
+    throw new IrPlanningIdentityInvariantError(
+      "source-record-mismatch",
+      `source ${sourceId} has no authoritative module-init population`,
+    );
+  }
+  if (
+    modulePopulation.length !== authoritativeModulePopulation.length ||
+    modulePopulation.some((statement, index) => statement !== authoritativeModulePopulation[index])
+  ) {
+    throw new IrPlanningIdentityInvariantError(
+      "invalid-module-init",
+      `source ${sourceId} has a stale active module-init population`,
+    );
+  }
   const moduleInitId = identityContext.moduleInitUnitIdBySourceFile.get(sourceFile);
   if (modulePopulation.length > 0 && !moduleInitId) {
     throw new IrPlanningIdentityInvariantError(
