@@ -22,6 +22,7 @@ loc-budget-allow:
   - src/codegen/index.ts
   - src/codegen/property-access.ts
   - src/codegen/destructuring-params.ts
+  - src/codegen/expressions/calls-closures.ts
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
