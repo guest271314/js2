@@ -78,10 +78,10 @@ import {
   IR_STRING_COMPARE_FN,
   lowerFunctionAstToIr,
   STRING_METHOD_TABLE,
-  type AstToIrOptions,
   type IrFromAstResolver,
   type ModuleBindingGlobal,
 } from "./from-ast.js";
+import type { IrIntegrationLoweringPlans } from "./ast-lowering-plans.js";
 import {
   makeIrArrayExpressionPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
@@ -246,11 +246,6 @@ export interface IrTypeOverrideMap {
   // `from-ast.ts` so the IR builder can be constructed with `[]` results.
   get(name: string): { readonly params: readonly IrType[]; readonly returnType: IrType | null } | undefined;
 }
-
-/** Exact AST-node plans shared by selection and AST-to-IR lowering. */
-export type IrIntegrationLoweringPlans = Required<
-  Pick<AstToIrOptions, "importedCalls" | "topLevelFunctionValues" | "hostVoidCallbacks" | "promiseDelays">
->;
 
 export function compileIrPathFunctions(
   ctx: CodegenContext,
@@ -442,9 +437,11 @@ export function compileIrPathFunctions(
       if (process.env.JS2WASM_TEST_INJECT_IR_BUILD_THROW) {
         throw new Error(`ir/from-ast: injected test build failure (${name})`);
       }
+      const ownerUnitId = loweringPlans?.ownerUnitIdByLegacyName.get(name);
       const o = overrides?.get(name);
       const result = lowerFunctionAstToIr(stmt, {
         exported: hasExportModifier(stmt),
+        ...(ownerUnitId ? { ownerUnitId } : {}),
         paramTypeOverrides: o?.params,
         returnTypeOverride: o?.returnType,
         calleeTypes,

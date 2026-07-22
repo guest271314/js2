@@ -1,7 +1,18 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import { ts } from "../ts-api.js";
+import type { IrIntegrationLoweringPlans } from "../ir/ast-lowering-plans.js";
 import type { IrUnitId } from "../ir/identity.js";
+import {
+  makeIrIdentityImportedFunctionResolver,
+  projectIrIdentityImportedFunctionResolverToLegacy,
+  type IrIdentityImportedFunctionResolver,
+  type IrIdentityResolvedFunctionTarget,
+  type IrImportedFunctionResolver,
+  type IrResolvedFunctionTarget,
+} from "../ir/imported-functions.js";
+
+export type { IrIdentityImportedFunctionResolver } from "../ir/imported-functions.js";
 import { IrInvariantError } from "../ir/outcomes.js";
 import type { IrPlanningIdentityContext } from "../ir/planning-identity.js";
 import {
@@ -133,4 +144,94 @@ export function dropIrSafeFunctionByLegacyName(identityPlan: IrOverlayIdentityPl
   if (!unitId || !identityPlan.safeFunctionUnitIds.delete(unitId)) {
     mismatch(`IR preparation owner ${legacyName} has no retained structural unit identity`);
   }
+}
+
+export function requireIrOverlayFunctionUnitId(
+  identityPlan: Pick<IrOverlayIdentityPlan, "functionUnitIdByLegacyName">,
+  legacyName: string,
+): IrUnitId {
+  const unitId = identityPlan.functionUnitIdByLegacyName.get(legacyName);
+  if (!unitId) mismatch(`IR preparation owner ${legacyName} has no retained structural unit identity`);
+  return unitId;
+}
+
+/** Correlate a legacy certification with the exact resolver at the same AST site. */
+export function requireIrIdentityImportedTarget(
+  resolver: IrIdentityImportedFunctionResolver,
+  kind: "imported-call" | "top-level-value",
+  node: ts.Expression,
+  legacyTarget: IrResolvedFunctionTarget,
+): IrIdentityResolvedFunctionTarget {
+  if (!ts.isIdentifier(node)) mismatch(`${kind} certification did not retain an identifier target`);
+  const target =
+    kind === "imported-call"
+      ? resolver.resolveImportedFunctionTarget(node)
+      : resolver.resolveTopLevelFunctionValueTarget(node);
+  if (
+    !target ||
+    target.legacyProjection !== "unambiguous" ||
+    target.targetName !== legacyTarget.targetName ||
+    target.declaration !== legacyTarget.declaration
+  ) {
+    mismatch(`${kind} target at ${node.getSourceFile().fileName}:${node.pos} diverged across identity projection`);
+  }
+  return target;
+}
+
+export function projectIrOverlayImportedResolver(
+  resolver: IrIdentityImportedFunctionResolver | undefined,
+): IrImportedFunctionResolver | undefined {
+  return resolver ? projectIrIdentityImportedFunctionResolverToLegacy(resolver) : undefined;
+}
+
+export function makeIrOverlayImportedResolver(
+  checker: ts.TypeChecker,
+  identityContext: IrPlanningIdentityContext,
+): IrIdentityImportedFunctionResolver {
+  const sourceFiles = identityContext.inventory.sources.map((source) => {
+    const sourceFile = identityContext.sourceFileBySourceId.get(source.id);
+    if (!sourceFile) mismatch(`imported resolver source ${source.id} has no exact planning SourceFile`);
+    return sourceFile;
+  });
+  return makeIrIdentityImportedFunctionResolver(checker, sourceFiles, identityContext);
+}
+
+/** Pre-bind exact owner/target validation for feature-plan construction. */
+export function makeIrFeaturePlanIdentity(
+  identityPlan: IrOverlayIdentityPlan,
+  resolver: IrIdentityImportedFunctionResolver,
+) {
+  const target = (
+    ownerName: string,
+    kind: "imported-call" | "top-level-value",
+    node: ts.Expression,
+    legacyTarget: IrResolvedFunctionTarget,
+  ): { ownerUnitId: IrUnitId; targetUnitId: IrUnitId } => ({
+    ownerUnitId: requireIrOverlayFunctionUnitId(identityPlan, ownerName),
+    targetUnitId: requireIrIdentityImportedTarget(resolver, kind, node, legacyTarget).targetUnitId,
+  });
+  return {
+    owner: (ownerName: string): IrUnitId => requireIrOverlayFunctionUnitId(identityPlan, ownerName),
+    imported: (ownerName: string, node: ts.Expression, legacyTarget: IrResolvedFunctionTarget) =>
+      target(ownerName, "imported-call", node, legacyTarget),
+    value: (ownerName: string, node: ts.Expression, legacyTarget: IrResolvedFunctionTarget) =>
+      target(ownerName, "top-level-value", node, legacyTarget),
+  };
+}
+
+export function projectIrIntegrationLoweringPlans(
+  plan: {
+    readonly identityPlan: Pick<IrOverlayIdentityPlan, "functionUnitIdByLegacyName">;
+  } & Pick<
+    IrIntegrationLoweringPlans,
+    "importedCalls" | "topLevelFunctionValues" | "hostVoidCallbacks" | "promiseDelays"
+  >,
+): IrIntegrationLoweringPlans {
+  return {
+    ownerUnitIdByLegacyName: plan.identityPlan.functionUnitIdByLegacyName,
+    importedCalls: plan.importedCalls,
+    topLevelFunctionValues: plan.topLevelFunctionValues,
+    hostVoidCallbacks: plan.hostVoidCallbacks,
+    promiseDelays: plan.promiseDelays,
+  };
 }

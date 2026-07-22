@@ -43,7 +43,6 @@ import {
   type IrFallbackReason,
   type IrSelection,
 } from "../ir/select.js";
-import { makeIrImportedFunctionResolver, type IrImportedFunctionResolver } from "../ir/imported-functions.js";
 import type {
   IrHostVoidCallbackLoweringPlan,
   IrImportedCallLoweringPlan,
@@ -1568,9 +1567,8 @@ interface IrOverlayPlan {
   /** #3519 — pre-integration terminal failures keyed by legacy synthetic name. */
   readonly preparationFailures: Map<string, IrPreparationFailure>;
   readonly declByName: ReadonlyMap<string, ts.FunctionDeclaration>;
-  /** Checker-certified A+B1 imported-call sites, keyed by exact AST node. */
+  /** Checker-certified A+B1 imported-call and function-value sites. */
   readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
-  /** Bare same-file function values admitted only at certified HOF positions. */
   readonly topLevelFunctionValues: Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
   /** Exact ambient addEventListener void arrows admitted by B2/Calendar. */
   readonly hostVoidCallbacks: Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
@@ -1578,7 +1576,7 @@ interface IrOverlayPlan {
   readonly hostDateImportsByOwner: ReadonlyMap<string, ReadonlySet<string>>;
   /** Exact Promise-delay plans, keyed separately by each owned AST call. */
   readonly promiseDelays: IrPromiseDelayLoweringPlans;
-  readonly importedFunctionResolver?: IrImportedFunctionResolver;
+  readonly importedFunctionResolver?: irOverlayIdentity.IrIdentityImportedFunctionResolver;
 }
 
 function irSelectionContainsHostDateOwner(selection: IrSelection, ownerName: string): boolean {
@@ -2096,9 +2094,11 @@ function planIrOverlay(
   identityContext: IrPlanningIdentityContext,
   options: {
     readonly resolveModuleBindings?: boolean;
-    readonly importedFunctions?: IrImportedFunctionResolver;
+    readonly importedFunctions?: irOverlayIdentity.IrIdentityImportedFunctionResolver;
   } = {},
 ): IrOverlayPlan {
+  const identityImportedFunctions = options.importedFunctions;
+  const legacyImportedFunctions = irOverlayIdentity.projectIrOverlayImportedResolver(identityImportedFunctions);
   let identityMaps: irOverlayIdentity.IrOverlayIdentityMaps;
   try {
     if (process.env.JS2WASM_TEST_INJECT_IR_TYPEMAP_THROW === "1") {
@@ -2201,7 +2201,7 @@ function planIrOverlay(
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
       ...backendCapabilitySelectionOptions,
-      ...(jsHostExterns && options.importedFunctions ? { importedFunctions: options.importedFunctions } : {}),
+      ...(jsHostExterns && legacyImportedFunctions ? { importedFunctions: legacyImportedFunctions } : {}),
       // (#1373b C-1) Async claim gate: IR claims an async fn IFF the ONE
       // async engine ($AsyncFrame drive / host-drive) declines it — the
       // legacy sync-pass-through population. Engine-activated functions keep
@@ -2393,7 +2393,8 @@ function planIrOverlay(
   const topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
   const hostVoidCallbacks = new Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>();
   const hostDateImportsByOwner = new Map<string, Set<string>>();
-  if (jsHostExterns && options.importedFunctions) {
+  if (jsHostExterns && identityImportedFunctions) {
+    const planIdentity = irOverlayIdentity.makeIrFeaturePlanIdentity(identityPlan, identityImportedFunctions);
     for (const [ownerName, declaration] of declByName) {
       if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
       let planningFailure: IrPreparationFailure | undefined;
@@ -2401,7 +2402,7 @@ function planIrOverlay(
         if (planningFailure) return;
         if (node !== declaration && ts.isFunctionLike(node)) return;
         if (ts.isCallExpression(node)) {
-          const certified = certifyImportedIrCall(node, options.importedFunctions);
+          const certified = certifyImportedIrCall(node, legacyImportedFunctions);
           if (certified) {
             try {
               if (
@@ -2440,6 +2441,7 @@ function planIrOverlay(
                 });
               }
               importedCalls.set(node, {
+                ...planIdentity.imported(ownerName, node.expression, certified.target),
                 ownerName,
                 targetName: certified.target.targetName,
                 params,
@@ -2451,6 +2453,7 @@ function planIrOverlay(
               });
               for (const functionArgument of certified.functionArguments) {
                 topLevelFunctionValues.set(functionArgument.argument, {
+                  ...planIdentity.value(ownerName, functionArgument.argument, functionArgument.target),
                   ownerName,
                   targetName: functionArgument.target.targetName,
                   signature: functionArgument.signature,
@@ -2490,6 +2493,7 @@ function planIrOverlay(
           const certified = resolveHostVoidCallback(node);
           if (certified) {
             hostVoidCallbacks.set(certified.callback, {
+              ownerUnitId: irOverlayIdentity.requireIrOverlayFunctionUnitId(identityPlan, ownerName),
               ownerName,
               signature: { params: [], returnType: null },
               captureNames: certified.captureNames,
@@ -3483,12 +3487,15 @@ export function generateModule(
         safeSelection,
         plan.preparationFailures,
       );
-      const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes, {
-        importedCalls: plan.importedCalls,
-        topLevelFunctionValues: plan.topLevelFunctionValues,
-        hostVoidCallbacks: plan.hostVoidCallbacks,
-        promiseDelays: plan.promiseDelays,
-      });
+      const loweringPlans = irOverlayIdentity.projectIrIntegrationLoweringPlans(plan);
+      const report = compileIrPathFunctions(
+        ctx,
+        ast.sourceFile,
+        safeSelection,
+        overrideMap,
+        classShapes,
+        loweringPlans,
+      );
       consumeIrOverlayReport(ctx, report, plan, safeSelection, ast.sourceFile, irSkipBodies);
     }
 
@@ -5631,7 +5638,7 @@ export function generateMultiModule(
       const hostImportedFunctions =
         ctx.standalone || ctx.wasi || ctx.strictNoHostImports
           ? undefined
-          : makeIrImportedFunctionResolver(multiAst.checker, multiAst.sourceFiles);
+          : irOverlayIdentity.makeIrOverlayImportedResolver(multiAst.checker, irPlanningIdentityContext!);
       const occupiedFunctionNameCounts = new Map<string, number>();
       for (const fn of ctx.mod.functions) {
         occupiedFunctionNameCounts.set(fn.name, (occupiedFunctionNameCounts.get(fn.name) ?? 0) + 1);
@@ -5666,12 +5673,9 @@ export function generateMultiModule(
           safeSelection,
           plan.preparationFailures,
         );
-        const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, plan.overrideMap, plan.classShapes, {
-          importedCalls: plan.importedCalls,
-          topLevelFunctionValues: plan.topLevelFunctionValues,
-          hostVoidCallbacks: plan.hostVoidCallbacks,
-          promiseDelays: plan.promiseDelays,
-        });
+        const { overrideMap, classShapes } = plan;
+        const loweringPlans = irOverlayIdentity.projectIrIntegrationLoweringPlans(plan);
+        const report = compileIrPathFunctions(ctx, sourceFile, safeSelection, overrideMap, classShapes, loweringPlans);
         consumeIrOverlayReport(ctx, report, plan, safeSelection, sourceFile);
       }
       // A+B1 may create callback singleton trampolines after the legacy

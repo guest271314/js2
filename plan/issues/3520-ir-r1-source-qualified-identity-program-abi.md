@@ -89,6 +89,7 @@ files:
   - tests/issue-3520-propagation-identity.test.ts
   - tests/issue-3520-context-integration.test.ts
   - tests/issue-3520-imported-target-identity.test.ts
+  - tests/issue-3520-lowering-plan-identity.test.ts
   - tests/issue-3520-overlay-selection-identity.test.ts
 ---
 
@@ -746,10 +747,34 @@ callback coverage, #3142 module-init, #3143 IR-first, #3529 selector preclaim,
 and #2138 multi-module overlay. Typecheck, lint, formatting, diff, and
 LOC-budget checks pass. No local Test262 run or baseline refresh was performed.
 
-The next Stage 6 slice must add `ownerUnitId` and `targetUnitId` to the AST
-lowering plans and construct them from this retained structural owner/target
-state. Imported-call, function-value, host-callback, Promise, module-binding,
-class, blocked-component, and outcome consumers are not yet fully ID-keyed.
+Stage 6 carries structural identity through the first exact lowering plans:
+
+- imported-call, top-level function-value, and host-callback plans now retain a
+  required `ownerUnitId`; imported/function-value plans also retain the exact
+  checker-selected `targetUnitId`;
+- multi-source production creates the exact imported resolver from the
+  authoritative planning context, gives selection only its explicit
+  ambiguity-rejecting legacy adapter, and correlates every named certification
+  back to the exact resolver at the same AST node before constructing a plan;
+- integration receives the validated owner-ID projection alongside the
+  remaining name-keyed plan maps and supplies the exact active owner to the
+  AST lowerer. Imported calls, function values, host callbacks, and their
+  nested lifted bodies reject missing or mismatched owner IDs before emitting
+  IR; and
+- target IDs remain side-by-side with the current symbolic backend names. This
+  stage does not claim that `IrFuncRef` or backend slot lookup is structural
+  yet; that is Commit 3 work.
+
+The expanded structural/overlay/feature matrix passes **269/269**. The
+fallback gate remains unchanged with zero unintended, post-claim, or
+module-level increases, and hybrid IR-only readiness remains **31 emitted / 6
+typed Unsupported / 0 Invariants** across 37 terminal units. Typecheck, lint,
+formatting, diff, and LOC-budget checks pass.
+
+The next Stage 7 slice must make Promise plans, module-binding uses, local-class
+evidence, blocked-component closure, and terminal outcome correlation retain
+their exact owner/class IDs. `IrFunction`/`IrFuncRef`, passes, and backends
+remain the following Commit 3 boundary.
 
 ### R1a validation evidence
 

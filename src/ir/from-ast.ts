@@ -47,11 +47,12 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
 import { collectOuterWrites } from "./closure-captures.js";
-import type {
-  IrHostVoidCallbackLoweringPlan,
-  IrImportedCallLoweringPlan,
-  IrImportedOptionalParamPlan,
-  IrTopLevelFunctionValueLoweringPlan,
+import {
+  requireMatchingLoweringPlanOwner,
+  type IrHostVoidCallbackLoweringPlan,
+  type IrImportedCallLoweringPlan,
+  type IrImportedOptionalParamPlan,
+  type IrTopLevelFunctionValueLoweringPlan,
 } from "./ast-lowering-plans.js";
 export type {
   IrHostVoidCallbackLoweringPlan,
@@ -397,6 +398,8 @@ export interface IrFromAstResolver {
 
 export interface AstToIrOptions {
   readonly exported?: boolean;
+  /** Authoritative terminal owner for exact feature-plan consumption. */
+  readonly ownerUnitId?: IrImportedCallLoweringPlan["ownerUnitId"];
   /**
    * #1370 Phase B: explicit name for the lowered function. Required for
    * MethodDeclaration (where `.name` is `PropertyName`, not Identifier)
@@ -464,11 +467,9 @@ export interface AstToIrOptions {
    * for void; calls in statement position (`f();`) are fine.
    */
   readonly calleeTypes?: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
-  /** (#3214 A) Exact imported direct calls certified by the shared selector. */
+  /** (#3214) Exact imported-call, function-value, and host-callback AST-site plans. */
   readonly importedCalls?: ReadonlyMap<ts.CallExpression, IrImportedCallLoweringPlan>;
-  /** (#3214 B1) Exact bare top-level function-value sites, keyed by AST node. */
   readonly topLevelFunctionValues?: ReadonlyMap<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
-  /** (#3214 B2) Exact ambient-host void arrows, keyed by their AST node. */
   readonly hostVoidCallbacks?: ReadonlyMap<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>;
   /** (#2856) Exact Promise-delay construction/timer/resolve node plans. */
   readonly promiseDelays?: IrPromiseDelayLoweringPlans;
@@ -794,6 +795,7 @@ export function lowerFunctionAstToIr(
     builder,
     scope,
     funcName: name,
+    ownerUnitId: options.ownerUnitId,
     returnType,
     calleeTypes: options.calleeTypes,
     importedCalls: options.importedCalls,
@@ -1463,6 +1465,7 @@ interface LowerCtx {
   readonly builder: IrFunctionBuilder;
   readonly scope: Map<string, ScopeBinding>;
   readonly funcName: string;
+  readonly ownerUnitId?: IrImportedCallLoweringPlan["ownerUnitId"];
   // Slice 14 (#1228) — `null` means the enclosing function is void.
   // `lowerTail` checks this to accept bare `return;` / fall-through tails.
   readonly returnType: IrType | null;
@@ -1636,6 +1639,7 @@ function sameScopeStorage(a: StringEncodingScopeBinding, b: ScopeBinding | undef
  * `ensureFuncClosureSingleton`; IR owns only the lazy access sequence.
  */
 function lowerTopLevelFunctionValue(plan: IrTopLevelFunctionValueLoweringPlan, cx: LowerCtx): IrValueId {
+  requireMatchingLoweringPlanOwner("top-level function value", plan.ownerUnitId, cx.ownerUnitId, cx.funcName);
   const cache = { kind: "global" as const, name: plan.cacheGlobalName };
   const cached = cx.builder.emitGlobalGet(cache, irVal({ kind: "externref" }));
   const isNull = cx.builder.emitRefIsNull(cached);
@@ -3810,18 +3814,6 @@ function phase1PropertyName(name: ts.PropertyName): string | null {
 }
 
 /**
- * Lower a direct call to a locally-declared function. The callee's signature
- * comes from `calleeTypes` (seeded by the Phase-2 TypeMap via the caller).
- * If the callee isn't in the map, the selector's call-graph closure was
- * violated — we throw so the caller can fall back to the legacy path.
- *
- * Arg type mismatch is fatal too: the selector is supposed to keep the
- * whole strongly-connected component on the IR path only when the types
- * are consistent. If we land here with a mismatch, the TypeMap was stale
- * or the propagation pass converged on a dynamic type that the selector
- * ignored — both are bugs.
- */
-/**
  * #3000-E: the SSA value of the current `this` binding (the allocated instance
  * in a ctor, or the `__self` param in a method). Throws if `this` isn't bound —
  * `super` outside a class member never reaches here (the selector rejects it).
@@ -3908,6 +3900,7 @@ function lowerImportedCall(
   cx: LowerCtx,
   statementPosition: boolean,
 ): IrValueId | null {
+  requireMatchingLoweringPlanOwner("imported call", plan.ownerUnitId, cx.ownerUnitId, cx.funcName);
   if (expr.arguments.length > plan.params.length || expr.arguments.some(ts.isSpreadElement)) {
     throw new Error(`ir/from-ast: imported call shape diverged after certification (${cx.funcName})`);
   }
@@ -8188,6 +8181,7 @@ function lowerHostVoidCallbackExpression(
   plan: IrHostVoidCallbackLoweringPlan,
   cx: LowerCtx,
 ): IrValueId {
+  requireMatchingLoweringPlanOwner("host void callback", plan.ownerUnitId, cx.ownerUnitId, cx.funcName);
   if (
     !ts.isBlock(expr.body) ||
     expr.parameters.length !== 0 ||
@@ -8355,6 +8349,7 @@ function liftNestedFunction(
     builder,
     scope,
     funcName: liftedName,
+    ownerUnitId: cx.ownerUnitId,
     returnType: signature.returnType,
     calleeTypes: cx.calleeTypes,
     importedCalls: cx.importedCalls,
@@ -8443,6 +8438,7 @@ function liftClosureBody(
     builder,
     scope,
     funcName: liftedName,
+    ownerUnitId: cx.ownerUnitId,
     returnType: signature.returnType,
     calleeTypes: cx.calleeTypes,
     importedCalls: cx.importedCalls,
