@@ -1,7 +1,8 @@
 ---
 id: 3548
 title: "Standalone: then-callback closure with branch-guarded module-fn calls traps null-deref — the ~193-row 'async continuation threw' Promise cluster"
-status: ready
+status: done
+assignee: ttraenkler/fable-3417
 sprint: current
 priority: high
 horizon: m
@@ -13,10 +14,47 @@ goal: standalone-mode
 parents: [3178]
 related: [3417, 3442, 3443, 3542, 3545, 2865]
 created: 2026-07-23
+completed: 2026-07-23
+# (#3102) In-subsystem growth: the null-guarded ToBoolean helper belongs in
+# native-strings (next to the other __str_* helpers); the widening lands in
+# the inference module; the arm wiring in the coercion engine.
+loc-budget-allow:
+  - src/codegen/native-strings.ts
+  - src/codegen/coercion-engine.ts
+  - src/codegen/declarations/param-return-inference.ts
 origin: "2026-07-23 fable-3417 umbrella triage: third head of the F2-unmasked standalone async FAIL surface, after #3538 (280) and #3542 (130)."
 ---
 
 # #3548 — then-closure branch-call null-deref (the 193-row cluster)
+
+## FIXED (2026-07-23, fable-3417) — two coupled halves; measured flips
+
+1. **Inference soundness** (`src/codegen/declarations/param-return-inference.ts`,
+   `inferParamTypeFromCallSites`): an under-applied call site now records
+   `sawUnderApplied`, and a non-nullable `ref` inference widens to
+   `ref_null` of the SAME type (approved direction — nullable, NOT
+   externref; keeps the precise type + fast paths). The zero-arg pad then
+   emits a plain `ref.null` the callee accepts.
+2. **Null-guarded string ToBoolean** (`src/codegen/native-strings.ts`
+   `ensureStrTruthyHelper` + the coercion-engine arm): with the param now
+   nullable, `if (err)` in the callee routed the nullable string through
+   `__str_flatten(null)` — a second trap. `ref_null` strings now ToBoolean
+   via `__str_truthy` (null → falsy, rope-len > 0 otherwise, no flatten);
+   the non-null `ref` arm keeps its historical flatten path byte-identical.
+
+**Permanent repro**: `tests/issue-3548.test.ts` (4 cases — the 2-line
+collapsed repro, truthiness triple T/F/F, the canonical $DONE template shape
+completing on the zero-arg PASS path, fully-applied no-regression).
+
+**Measured corpus flips** (stride-4 over the 193-row cluster, real files via
+the #3469 channel): **2 → 20 of 49 PASS** (+18 measured; est. ~70–80 of the
+193). The **residual 29 are the OTHER sub-family** — `illegal cast [in
+__then_fulfill_*]`, a then-reaction-wrapper marshalling defect, NOT the
+arity fill — route via #3443 (standalone illegal-cast tracker) / a follow-up
+umbrella slice. Honest sizing: corpus-wide static candidates ≈ 106 rows
+(hundreds, not thousands); the fix is justified on SOUNDNESS — a
+documented-but-false assumption emitting a guaranteed trap on the ubiquitous
+optional-argument shape — not on corpus yield.
 
 ## Problem (measured)
 

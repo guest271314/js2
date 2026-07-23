@@ -40,7 +40,7 @@ import { boxToAny } from "./value-tags.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
-import { ensureAnyToStringHelper } from "./native-strings.js";
+import { ensureAnyToStringHelper, ensureStrTruthyHelper } from "./native-strings.js";
 import { getBoolToStringEmitter, getNativeStringRefFromExternrefEmitter } from "./string-emitter-registry.js";
 import {
   compileExpression,
@@ -418,6 +418,18 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
     }
     // Native string ref — empty string is falsy (check len > 0 after flatten).
     if (valType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
+      // (#3548) NULLABLE string: `__str_flatten(null)` traps — a nullable
+      // string param (an under-applied call site's `undefined`, now inferred
+      // `ref_null` by inferParamTypeFromCallSites) must be FALSY when null.
+      // Route through the null-guarded `__str_truthy` helper. The non-null
+      // `ref` arm below keeps its historical flatten path byte-identical.
+      if (kind === "ref_null") {
+        const truthyIdx = ensureStrTruthyHelper(ctx);
+        if (truthyIdx !== undefined) {
+          sink.push({ op: "call", funcIdx: truthyIdx });
+          return sink;
+        }
+      }
       const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
       if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
         sink.push(
