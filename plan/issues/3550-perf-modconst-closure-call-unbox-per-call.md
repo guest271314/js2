@@ -23,12 +23,12 @@ Median of 7 runs after warmup, gc/host lane, 5M-call hot loops. OLD =
 pre-#3505 main (`4e870095`), NEW = post-#3505 (+#3547 branch — the stopgap
 removal is byte-inert so the delta is entirely the #3534 representation):
 
-| shape | OLD | NEW | delta |
-|---|---|---|---|
-| `const add = (a,b)=>a+b` called 5M× from an exported fn | 4.80ms | 8.36–8.52ms | **+77% rel, ~+0.74ns/call abs** |
-| mutually-recursive `even`/`odd` (200k × depth 20) | 6.88ms | 9.05–9.68ms | **+32–41%** |
+| shape                                                              | OLD    | NEW         | delta                                           |
+| ------------------------------------------------------------------ | ------ | ----------- | ----------------------------------------------- |
+| `const add = (a,b)=>a+b` called 5M× from an exported fn            | 4.80ms | 8.36–8.52ms | **+77% rel, ~+0.74ns/call abs**                 |
+| mutually-recursive `even`/`odd` (200k × depth 20)                  | 6.88ms | 9.05–9.68ms | **+32–41%**                                     |
 | HOF: module-const closure passed as typed param, called 5M× inside | 3.43ms | 3.43–3.45ms | ~0 (param carries the precise ref — unaffected) |
-| fn-DECLARATION control, same 5M loop | 4.66ms | 4.73–4.92ms | ~noise (direct calls — unaffected) |
+| fn-DECLARATION control, same 5M loop                               | 4.66ms | 4.73–4.92ms | ~noise (direct calls — unaffected)              |
 
 Cause: under the #3534 invariant the `$__mod_<name>` binding stays `externref`
 for life; a call from any function OTHER than the declaring scope re-does
