@@ -25,7 +25,13 @@ import {
 } from "../array-object-proto.js";
 import { undefinedExternInstrs } from "../any-helpers.js";
 import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "../builtin-fn-meta.js";
-import { emitVariadicStringConcat } from "../builtin-scaffold.js";
+import {
+  allocJoinFoldLocals,
+  emitStringJoinFold,
+  emitVariadicStringConcat,
+  nativeStringRepr,
+} from "../builtin-scaffold.js";
+import { emitThrowRangeError } from "../js-errors.js";
 import {
   isSymbolSpeciesKeyExpression,
   resolveBuiltinReceiverName,
@@ -36,7 +42,7 @@ import {
 import { compileArrowAsClosure } from "../closures.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
-import { allocLocal } from "../context/locals.js";
+import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import { rollbackSpeculative, snapshotSpeculative } from "../context/speculative.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitGlobalThisGopdFold } from "../dyn-read.js";
@@ -66,6 +72,7 @@ import {
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
   ensureStrToCharVecHelper,
+  nativeStringLiteralInstrs,
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import {
@@ -3210,4 +3217,287 @@ export function compileBuiltinStaticCall(
     return { kind: "externref" };
   }
   return undefined;
+}
+
+/**
+ * (#3541) `String.fromCharCode` / `String.fromCodePoint` invoked REFLECTIVELY —
+ * `.call(thisArg, …codes)` or `.apply(thisArg, codesArray)` — on the native
+ * string lanes (`ctx.nativeStrings`, standalone/WASI).
+ *
+ * Why this exists: the generic reflective path wraps the builtin static in a
+ * closure and routes through the runtime apply machinery, which cannot spread
+ * a native `$vec` argv into the builtin's variadic lowering — the result is a
+ * null string and the first consumer null-derefs in `__str_concat`. That is
+ * the SOLE remaining gate on the 311 `built-ins/RegExp/property-escapes`
+ * baseline rows (every one runs `regExpUtils.js`'s `buildString`, whose two
+ * `String.fromCodePoint.apply(null, <array>)` calls die here). See
+ * plan/issues/3541-standalone-fromcodepoint-apply-vec-null.md.
+ *
+ * Lowering:
+ *   - `.call(thisArg, a, b)`  → direct `String.fromX(a, b)` (§22.1.2.* never
+ *     reads `this`); thisArg is evaluated first for argument order.
+ *   - `.apply(thisArg)`       → `""` (empty code-unit list).
+ *   - `.apply(thisArg, arr)`  → runtime fold over the native vec: per element
+ *     load → ToUint16 (`fromCharCode`) or the §22.1.2.2 integral/[0,0x10FFFF]
+ *     RangeError guard (`fromCodePoint`) → the 1-char native helper → shared
+ *     `emitStringJoinFold` concat (sep "", `""` for the empty/null array).
+ *
+ * Precision gates (fall through to the legacy path, `undefined`):
+ *   - host lane (js-string) — untouched, it has a working host `.apply`;
+ *   - thisArg / argsArray not re-eval-safe (identifier, literal, null, …) —
+ *     bailing after compilation would double side effects on the legacy
+ *     recompile;
+ *   - argsArray does not compile to a native `$vec` of f64/i32/i8/i16/externref
+ *     elements (the compiled value is dropped; the gate above makes that safe).
+ */
+export function tryCompileFromCharCodeFamilyReflective(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  innerExpr: ts.Expression,
+  isCall: boolean,
+): InnerResult | undefined {
+  if (!ctx.nativeStrings || ctx.nativeStrTypeIdx < 0) return undefined;
+  let target: ts.Expression = innerExpr;
+  while (ts.isParenthesizedExpression(target) || ts.isAsExpression(target) || ts.isNonNullExpression(target)) {
+    target = target.expression;
+  }
+  if (!ts.isPropertyAccessExpression(target)) return undefined;
+  if (!ts.isIdentifier(target.expression) || target.expression.text !== "String") return undefined;
+  const mName = target.name.text;
+  if (mName !== "fromCharCode" && mName !== "fromCodePoint") return undefined;
+  const isFromCodePoint = mName === "fromCodePoint";
+  ensureNativeStringHelpers(ctx);
+  const repr = nativeStringRepr(ctx);
+  const helperIdx = ctx.nativeStrHelpers.get(isFromCodePoint ? "__str_fromCodePoint" : "__str_fromCharCode");
+  if (repr === undefined || helperIdx === undefined) return undefined;
+
+  const dropCompiled = (t: ValType | null): void => {
+    if (t !== null) fctx.body.push({ op: "drop" });
+  };
+
+  // `.call(thisArg, …codes)` → direct family call (reuses the #2088 fold and
+  // the #2601/#2875 per-argument coercion + guards wholesale).
+  if (isCall) {
+    if (expr.arguments.length > 0) dropCompiled(compileExpression(ctx, fctx, expr.arguments[0]!));
+    const synthetic = ts.factory.createCallExpression(
+      target as ts.LeftHandSideExpression,
+      undefined,
+      expr.arguments.slice(1),
+    );
+    ts.setTextRange(synthetic, expr);
+    (synthetic as { parent?: ts.Node }).parent = expr.parent;
+    return compileExpression(ctx, fctx, synthetic);
+  }
+
+  // `.apply()` / `.apply(thisArg)` — §: argArray absent → empty list → "".
+  if (expr.arguments.length < 2) {
+    if (expr.arguments.length === 1) dropCompiled(compileExpression(ctx, fctx, expr.arguments[0]!));
+    fctx.body.push(...repr.literal(""));
+    return repr.resultType;
+  }
+
+  const thisArg = expr.arguments[0]!;
+  let argsVal: ts.Expression = expr.arguments[1]!;
+  while (ts.isParenthesizedExpression(argsVal) || ts.isAsExpression(argsVal) || ts.isNonNullExpression(argsVal)) {
+    argsVal = argsVal.expression;
+  }
+  const reEvalSafe = (e: ts.Expression): boolean =>
+    ts.isIdentifier(e) ||
+    e.kind === ts.SyntaxKind.NullKeyword ||
+    e.kind === ts.SyntaxKind.TrueKeyword ||
+    e.kind === ts.SyntaxKind.FalseKeyword ||
+    ts.isNumericLiteral(e) ||
+    ts.isStringLiteralLike(e);
+  if (!reEvalSafe(thisArg) || !(reEvalSafe(argsVal) || ts.isArrayLiteralExpression(argsVal))) {
+    return undefined;
+  }
+
+  dropCompiled(compileExpression(ctx, fctx, thisArg));
+
+  const argType = compileExpression(ctx, fctx, argsVal);
+  if (argType === null) return null;
+  if (argType.kind !== "ref" && argType.kind !== "ref_null") {
+    fctx.body.push({ op: "drop" });
+    return undefined; // re-eval-safe by the gate above
+  }
+  const vecTypeIdx = argType.typeIdx;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) {
+    fctx.body.push({ op: "drop" });
+    return undefined;
+  }
+  const arrDef = ctx.mod.types[arrTypeIdx] as { kind: "array"; element: ValType };
+  const elemType = arrDef.element;
+  if (
+    elemType.kind !== "f64" &&
+    elemType.kind !== "i32" &&
+    elemType.kind !== "i8" &&
+    elemType.kind !== "i16" &&
+    elemType.kind !== "externref"
+  ) {
+    fctx.body.push({ op: "drop" });
+    return undefined;
+  }
+
+  // vec destructure — a null argArray spreads as the empty list (len stays 0).
+  const vecTmp = allocLocal(fctx, `__fccapply_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const dataTmp = allocLocal(fctx, `__fccapply_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
+  const foldLocals = allocJoinFoldLocals(fctx, repr, "fccapply");
+  fctx.body.push({ op: "local.set", index: vecTmp });
+  fctx.body.push({ op: "local.get", index: vecTmp });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: foldLocals.lenTmp },
+    ],
+    else: [
+      { op: "local.get", index: vecTmp },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: foldLocals.lenTmp },
+      { op: "local.get", index: vecTmp },
+      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+      { op: "local.set", index: dataTmp },
+    ],
+  });
+  fctx.body.push(...repr.literal(""));
+  fctx.body.push({ op: "local.set", index: foldLocals.resultTmp });
+  fctx.body.push(...repr.literal(""));
+  fctx.body.push({ op: "local.set", index: foldLocals.sepTmp });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: foldLocals.iTmp });
+
+  // elem → 1-char string. Built via a body swap so emitThrowRangeError (a
+  // late-import-bearing emitter) targets the buffer; registered with
+  // ctx.liveBodies so a later late-import shift still fixes baked indices
+  // (the #2088 family pattern), and de-registered after the splice.
+  const elemBuf: Instr[] = [];
+  ctx.liveBodies.add(elemBuf);
+  const savedBody = fctx.body;
+  fctx.body = elemBuf;
+  try {
+    const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+    elemBuf.push({ op: "local.get", index: dataTmp });
+    elemBuf.push({ op: "local.get", index: foldLocals.iTmp });
+    elemBuf.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
+    if (elemType.kind === "externref") {
+      // Boxed-any element → numeric code via the shared coercion engine
+      // (unboxes `__box_number` payloads; undefined → NaN).
+      coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+    }
+    const elemIsF64 = elemType.kind === "f64" || elemType.kind === "externref";
+    if (isFromCodePoint) {
+      if (elemIsF64) {
+        // §22.1.2.2 2b/2c — non-integral (incl. NaN) or out-of-[0,0x10FFFF]
+        // code points throw RangeError (mirrors the direct-call family arm).
+        const cpTmp = allocTempLocal(fctx, { kind: "f64" });
+        elemBuf.push({ op: "local.tee", index: cpTmp });
+        elemBuf.push({ op: "local.get", index: cpTmp });
+        elemBuf.push({ op: "f64.trunc" });
+        elemBuf.push({ op: "f64.ne" });
+        elemBuf.push({ op: "local.get", index: cpTmp });
+        elemBuf.push({ op: "f64.const", value: 0 });
+        elemBuf.push({ op: "f64.lt" });
+        elemBuf.push({ op: "local.get", index: cpTmp });
+        elemBuf.push({ op: "f64.const", value: 0x10ffff });
+        elemBuf.push({ op: "f64.gt" });
+        elemBuf.push({ op: "i32.or" });
+        elemBuf.push({ op: "i32.or" });
+        const throwBuf: Instr[] = [];
+        fctx.body = throwBuf;
+        emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+        fctx.body = elemBuf;
+        elemBuf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
+        elemBuf.push({ op: "local.get", index: cpTmp });
+        elemBuf.push({ op: "i32.trunc_sat_f64_s" });
+        releaseTempLocal(fctx, cpTmp);
+      } else {
+        // Integral by construction; range-check in the i32 domain.
+        const cpTmp = allocTempLocal(fctx, { kind: "i32" });
+        elemBuf.push({ op: "local.tee", index: cpTmp });
+        elemBuf.push({ op: "i32.const", value: 0 });
+        elemBuf.push({ op: "i32.lt_s" });
+        elemBuf.push({ op: "local.get", index: cpTmp });
+        elemBuf.push({ op: "i32.const", value: 0x10ffff });
+        elemBuf.push({ op: "i32.gt_s" });
+        elemBuf.push({ op: "i32.or" });
+        const throwBuf: Instr[] = [];
+        fctx.body = throwBuf;
+        emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+        fctx.body = elemBuf;
+        elemBuf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
+        elemBuf.push({ op: "local.get", index: cpTmp });
+        releaseTempLocal(fctx, cpTmp);
+      }
+    } else if (elemIsF64) {
+      // fromCharCode: §7.1.8 ToUint16 in the f64 domain BEFORE the i32
+      // conversion (the #2875 slice-5 pattern — NaN/±Inf → 0, |x| ≥ 2^31 keeps
+      // its true modulo; a bare trunc_sat saturates first and gets both wrong).
+      const u16Tmp = allocTempLocal(fctx, { kind: "f64" });
+      elemBuf.push({ op: "f64.trunc" });
+      elemBuf.push({ op: "local.tee", index: u16Tmp });
+      elemBuf.push({ op: "local.get", index: u16Tmp });
+      elemBuf.push({ op: "f64.const", value: 65536 });
+      elemBuf.push({ op: "f64.div" });
+      elemBuf.push({ op: "f64.floor" });
+      elemBuf.push({ op: "f64.const", value: 65536 });
+      elemBuf.push({ op: "f64.mul" });
+      elemBuf.push({ op: "f64.sub" });
+      elemBuf.push({ op: "i32.trunc_sat_f64_s" });
+      releaseTempLocal(fctx, u16Tmp);
+    }
+    // i32/i8/i16 fromCharCode: the helper's low-16 mask IS ToUint16.
+    elemBuf.push({ op: "call", funcIdx: helperIdx });
+  } finally {
+    fctx.body = savedBody;
+  }
+
+  // (#3224-style) Bounds-check against the physical backing: a grown/sparse
+  // array's logical length can exceed it; an absent index spreads as
+  // `undefined` — RangeError for fromCodePoint (NaN is not integral), code 0
+  // for fromCharCode.
+  const oobBuf: Instr[] = [];
+  if (isFromCodePoint) {
+    ctx.liveBodies.add(oobBuf);
+    fctx.body = oobBuf;
+    try {
+      emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+    } finally {
+      fctx.body = savedBody;
+    }
+    oobBuf.push(...repr.literal(""));
+  } else {
+    oobBuf.push({ op: "i32.const", value: 0 });
+    oobBuf.push({ op: "call", funcIdx: helperIdx });
+  }
+  const boundsCheckedElem: Instr[] = [
+    { op: "local.get", index: dataTmp },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: repr.resultType },
+      then: [...oobBuf],
+      else: [
+        { op: "local.get", index: foldLocals.iTmp },
+        { op: "local.get", index: dataTmp },
+        { op: "array.len" },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: repr.resultType },
+          then: elemBuf,
+          else: [...oobBuf],
+        },
+      ],
+    },
+  ];
+
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, boundsCheckedElem);
+  ctx.liveBodies.delete(elemBuf);
+  ctx.liveBodies.delete(oobBuf);
+  fctx.body.push({ op: "local.get", index: foldLocals.resultTmp });
+  return repr.resultType;
 }
