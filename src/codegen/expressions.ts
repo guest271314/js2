@@ -351,11 +351,7 @@ function asyncAssignedSymbolsInFile(ctx: CodegenContext, sf: ts.SourceFile): Rea
       const assigned = ctx.checker.getSymbolAtLocation(node.left);
       if (assigned) set.add(assigned);
     }
-    // (#3437) Use the shared forEachChild helper so this per-file scan — the
-    // exact O(call-sites × file-size) walk #3433 memoized — is counted by the
-    // compile-work budget meter (a future regression that de-memoizes it would
-    // re-explode this count and fail the gate).
-    forEachChild(node, visit);
+    forEachChild(node, visit); // #3437: shared helper so this per-file scan is counted by the compile-work budget meter
   };
   visit(sf);
   cache.set(sf, set);
