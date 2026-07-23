@@ -1080,12 +1080,33 @@ async function doCompile(
   // section, and the exec path below calls it right after `setExports` so
   // top-level code runs against a fully-wired runtime. Aligned with
   // compiler-fork-worker.mjs + tests/test262-runner.ts (#1251 both-paths
-  // rule). Standalone/wasi/linear targets keep their own `_start` init model.
+  // rule). Wasi/linear targets keep their own `_start` init model.
   // compileMulti fixture graphs follow the same host rule after #3505: its
   // progressively accumulated dependency-order initializers retain only the
   // final `__module_init` export, so the graph can be wired before that one
   // initializer runs without producing duplicate Wasm exports.
-  const deferOpt = target || (!originalHarness && inferModuleStrictArguments) ? {} : { deferTopLevelInit: true };
+  //
+  // (#2860 F3) The STANDALONE lane joins the defer rule. Under the `(start)`
+  // model a top-level throw — which in originalHarness mode is EVERY runtime
+  // failure, since all test code is top-level — surfaces out of
+  // `WebAssembly.instantiate` with `instance === null`, so the #2962 native
+  // exception-render path (`__exn_render_prepare`/`__exn_render_char`, which
+  // needs a live instance) is unreachable and ~8,600 heterogeneous standalone
+  // failures collapse onto the one opaque "wasm exception during module init"
+  // label. Deferring init makes the throw happen at the explicit
+  // `__module_init()` call below, with a live instance, so the real failure
+  // signature (Test262Error message, TypeError, …) is rendered. Verdicts are
+  // unchanged (same scoring rule, richer error text); the only measured flips
+  // are ≤7 corpus-wide runtime-negative tests whose thrown error TYPE becomes
+  // observable via the tag and now correctly scores pass.
+  // oracle-version-exempt: same re-hosting exemption as the #3123 host-lane
+  // arm below — the EXISTING instantiate-throw classification moves to the
+  // explicit __module_init call site; the scoring rule is byte-identical, so
+  // rows are re-LABELLED (error text), not re-scored by policy.
+  const deferOpt =
+    (target && target !== "standalone") || (!originalHarness && inferModuleStrictArguments)
+      ? {}
+      : { deferTopLevelInit: true };
   if (hasFixtureGraph(fixtureFiles)) {
     if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
       throw new Error("fixture graph requires an original-harness entryFile");
