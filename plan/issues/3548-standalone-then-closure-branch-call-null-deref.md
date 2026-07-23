@@ -2,7 +2,7 @@
 id: 3548
 title: "Standalone: then-callback closure with branch-guarded module-fn calls traps null-deref — the ~193-row 'async continuation threw' Promise cluster"
 status: done
-assignee: ttraenkler/fable-3417
+assignee: ttraenkler/sendev-3548
 sprint: current
 priority: high
 horizon: m
@@ -27,7 +27,20 @@ origin: "2026-07-23 fable-3417 umbrella triage: third head of the F2-unmasked st
 
 # #3548 — then-closure branch-call null-deref (the 193-row cluster)
 
-## FIXED (2026-07-23, fable-3417) — two coupled halves; measured flips
+## FIXED (2026-07-23, started fable-3417, landed sendev-3548) — two coupled halves; measured flips
+
+### Why the fix is UPSTREAM (inference), not at the pad site — hold this line
+
+A non-nullable `(ref N)` has **no undefined inhabitant** — there is nothing a
+zero-arg pad could legally push (`pushDefaultValue`'s "ref" case documents
+the `ref.null` + `ref.as_non_null` landmine explicitly). So patching the pad
+is impossible; the *inference* that produced a non-nullable type for a
+sometimes-absent param is what is unsound. Widening to `ref null N` (not
+externref) keeps the precise type and the string fast paths. Rejected
+alternatives: a sentinel/optional-param transform (a workaround over an
+inference that is still wrong), and never-narrowing declared-function params
+(the narrowing is a deliberate hot-path optimisation; the bug is only the
+under-applied case).
 
 1. **Inference soundness** (`src/codegen/declarations/param-return-inference.ts`,
    `inferParamTypeFromCallSites`): an under-applied call site now records
@@ -46,13 +59,20 @@ origin: "2026-07-23 fable-3417 umbrella triage: third head of the F2-unmasked st
 collapsed repro, truthiness triple T/F/F, the canonical $DONE template shape
 completing on the zero-arg PASS path, fully-applied no-regression).
 
-**Measured corpus flips** (stride-4 over the 193-row cluster, real files via
-the #3469 channel): **2 → 20 of 49 PASS** (+18 measured; est. ~70–80 of the
-193). The **residual 29 are the OTHER sub-family** — `illegal cast [in
-__then_fulfill_*]`, a then-reaction-wrapper marshalling defect, NOT the
-arity fill — route via #3443 (standalone illegal-cast tracker) / a follow-up
-umbrella slice. Honest sizing: corpus-wide static candidates ≈ 106 rows
-(hundreds, not thousands); the fix is justified on SOUNDNESS — a
+**Measured corpus flips** (stride-4 over the 193-row cluster — 49 files,
+sorted by path, every 4th — run locally via the #3469 channel,
+`TEST262_TARGET=standalone` + `TEST262_PATH_FILTER`): **0 → 19 of 49 PASS**.
+"Before" is the 2026-07-23 promoted standalone baseline (oracle v9, all 193
+cluster rows FAIL by definition); "after" is the local rerun on this branch
+(results jsonl 20260723-155434). Extrapolated ≈ 75 of the 193. The
+**residual 30 all fail with ONE signature**: `illegal cast [in
+__then_fulfill_*/__then_reject_*]` — the then-reaction-wrapper marshalling
+defect. Only 9 of the 30 showed illegal-cast originally; the other 21 were
+null-deref rows whose arity-fill trap fired FIRST and masked the cast
+defect. So the arity fix fully retires its own signature in the sample and
+UNMASKS the #3443 lane (route residuals there / a follow-up umbrella
+slice). Honest sizing: corpus-wide static candidates ≈ 106 rows (hundreds,
+not thousands); the fix is justified on SOUNDNESS — a
 documented-but-false assumption emitting a guaranteed trap on the ubiquitous
 optional-argument shape — not on corpus yield.
 

@@ -57,9 +57,12 @@ the canonical `$DONE('msg')`/`$DONE()` template shape is just where the
 corpus exercises under-applied+string-applied functions). Fixed in child
 **#3548** (done): under-applied call sites make a non-nullable ref param
 inference NULLABLE + a null-guarded `__str_truthy` ToBoolean for nullable
-strings. Measured stride-4: 2 → 20 of 49 PASS. **Residual 29 = the
-`illegal cast [in __then_fulfill_*]` then-reaction-wrapper sub-family** —
-a distinct marshalling defect, the next open head here (also #3443).
+strings. Measured stride-4: 0 → 19 of 49 PASS (baseline: all cluster rows
+FAIL on the 2026-07-23 promote; ≈75 of 193 extrapolated). **Residual 30
+all now fail as `illegal cast [in __then_fulfill_*]`** — the
+then-reaction-wrapper sub-family (only 9 showed it originally; 21 were
+masked behind the arity trap) — a distinct marshalling defect, the next
+open head here (also #3443).
 
 ## Decomposition 2026-07-17 (fable-3178) — child issues #3386–#3391
 
