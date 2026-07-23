@@ -21,6 +21,7 @@ import { noJsHost } from "../js-errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import { addFuncType, addImport, localGlobalIdx, resolveWasmType } from "../index.js";
+import { refCellValueType } from "../registry/types.js";
 import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
@@ -306,6 +307,21 @@ function emitRootFuncrefDispatch(
   fctx.body.push(...funcDispatch);
 }
 
+/**
+ * (#3024) True when `typeIdx` is a no-capture closure funcref-WRAPPER struct —
+ * exactly one field whose type is `funcref` (`(struct (field funcref))`). This is
+ * the self carrier for a closure that keeps no environment in its self struct, so
+ * it can be losslessly reconstructed from a bare funcref via `struct.new`. Guards
+ * the #3024 rebuild so a self carrier that DOES hold capture fields (which
+ * `struct.new` from a lone funcref would leave under-populated) never takes it.
+ */
+function isSingleFuncRefWrapperStruct(ctx: CodegenContext, typeIdx: number): boolean {
+  const def = ctx.mod.types[typeIdx];
+  if (!def || def.kind !== "struct") return false;
+  const fields = (def as { fields: { type: ValType }[] }).fields;
+  return fields.length === 1 && fields[0]?.type.kind === "funcref";
+}
+
 /** Compile a call to a closure variable: closureVar(args...) */
 export function compileClosureCall(
   ctx: CodegenContext,
@@ -341,12 +357,29 @@ export function compileClosureCall(
       const castType: ValType = { kind: "ref_null", typeIdx: selfStructTypeIdx };
       const castLocal = allocLocal(fctx, `__closure_cast_${fctx.locals.length}`, castType);
       fctx.body.push({ op: "local.get", index: localIdx });
-      // struct.get $refCell $value — unwrap to underlying externref/ref
+      // struct.get $refCell $value — unwrap to underlying value.
       fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
-      if (boxed.valType.kind === "externref") {
-        fctx.body.push({ op: "any.convert_extern" });
+      // (#3024) The ref cell may store the closure as a BARE FUNCREF: a
+      // mutually-recursive `const` closure (e.g. the test262
+      // `nativeFunctionMatcher` `eat`→`test` pair) whose self carrier is a
+      // no-capture funcref-WRAPPER struct `(struct (field funcref))`. There
+      // `boxed.valType` stale-reads `externref` while the cell field-0 is
+      // genuinely `funcref`, so the legacy path emitted `any.convert_extern` on
+      // a funcref (invalid — funcref is not in the anyref hierarchy) followed by
+      // a struct `emitGuardedRefCast` (also invalid). Trust the ACTUAL cell
+      // field type: when it is `funcref` AND the lifted self carrier is a
+      // single-funcref-field wrapper, rebuild the self carrier by wrapping the
+      // funcref back into that wrapper via `struct.new`. Byte-inert for every
+      // other cell shape — the funcref-cell call path was 100% invalid Wasm.
+      const cellFieldType = refCellValueType(ctx, boxed.refCellTypeIdx);
+      if (cellFieldType?.kind === "funcref" && isSingleFuncRefWrapperStruct(ctx, selfStructTypeIdx)) {
+        fctx.body.push({ op: "struct.new", typeIdx: selfStructTypeIdx });
+      } else {
+        if (boxed.valType.kind === "externref") {
+          fctx.body.push({ op: "any.convert_extern" });
+        }
+        emitGuardedRefCast(fctx, selfStructTypeIdx);
       }
-      emitGuardedRefCast(fctx, selfStructTypeIdx);
       fctx.body.push({ op: "local.set", index: castLocal });
       effectiveLocalIdx = castLocal;
     } else if (localType?.kind === "externref") {
