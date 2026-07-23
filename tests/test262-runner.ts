@@ -4159,7 +4159,16 @@ async function runOriginalHarnessVariant(
         emitWat: false,
         skipSemanticDiagnostics: true,
         inferModuleStrictArguments: meta.flags?.includes("module") === true,
-        ...(target ? { target } : { deferTopLevelInit: true }),
+        // (#2860 F3) Standalone joins the host lane's deferTopLevelInit rule
+        // (mirrors scripts/test262-worker.mjs doCompile): under the `(start)`
+        // model every top-level throw — i.e. every runtime failure in
+        // original-harness mode — surfaced from WebAssembly.instantiate with
+        // instance === null, making the #2962 native exception render
+        // unreachable and collapsing ~8,600 standalone failures onto the
+        // opaque "wasm exception during module init" label. The exec path
+        // below already calls the exported __module_init after setExports.
+        ...(target ? { target } : {}),
+        ...(target === undefined || target === "standalone" ? { deferTopLevelInit: true } : {}),
       });
     } catch (error) {
       compileMs = performance.now() - compileStarted;
@@ -4539,14 +4548,21 @@ export async function runSyntheticTest262File(
       // `__module_init`, no wasm `(start)` section) so top-level code runs
       // AFTER `setExports` has wired the runtime — aligned with
       // `scripts/compiler-fork-worker.mjs` (#1251 both-paths rule). The
-      // standalone/wasi lane keeps its own `_start` model and is untouched.
+      // wasi/linear lanes keep their own `_start` model and are untouched.
+      // (#2860 F3) The STANDALONE lane joins the defer rule (mirrors the
+      // worker's doCompile): under `(start)` a top-level throw surfaced from
+      // instantiate with instance === null, so the #2962 native exception
+      // render was unreachable and standalone failures collapsed onto the
+      // opaque "wasm exception during module init" label. The exec path
+      // below already calls the exported __module_init after setExports.
       // MODULE-GOAL tests are EXCLUDED: the multi-module (FIXTURE) link
       // already synthesizes per-module init plumbing, and adding the
       // deferred-export flag there emitted a SECOND `__module_init` export in
       // one binary — V8 rejects it ("Duplicate export name '__module_init'"),
       // which is exactly the 6-file `language/module-code/*` regression that
       // parked the stack PR #2835/#2839 in the merge queue.
-      ...(target ? { target } : moduleGoal ? {} : { deferTopLevelInit: true }),
+      ...(target ? { target } : {}),
+      ...(moduleGoal || (target !== undefined && target !== "standalone") ? {} : { deferTopLevelInit: true }),
       // #1251: align with the sharded runner — both `scripts/compiler-fork-worker.mjs`
       // (the production path that records the committed JSONL) and `tests/test262-vitest.test.ts`
       // FIXTURE multi-compile pass `skipSemanticDiagnostics: true`. Without this flag,
