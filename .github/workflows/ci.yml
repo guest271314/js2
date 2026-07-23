@@ -400,6 +400,20 @@ jobs:
             pnpm exec vitest run "$test_file" --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
           done
 
+      - name: Required guard suite (#3552)
+        # Untouched root test files do NOT run at PR time — the #3008
+        # two-layer design runs only PR-touched tests/*.test.ts per PR and
+        # defers the full ~2,100-file suite (~9 CPU-hours) to the post-merge
+        # issue-tests.yml detector, which detects but does not enforce. #3503
+        # proved the gap on 2026-07-23: it regressed tests/issue-3471.test.ts
+        # WITHOUT touching it — green PR, red main, fixed forward in #3551.
+        # This step runs the SMALL curated manifest of invariant-guard tests
+        # (tests/guard-suite.json — entry criteria in its $comment: <60s per
+        # file, no test262 harness inputs, green on main, guards a prior
+        # silent main regression) on every PR, merge group, and push. Total
+        # budget ~2 minutes; it is NOT the full-suite gate #3008 rejected.
+        run: node scripts/run-guard-suite.mjs
+
       - name: Conformance numbers in sync (#1522)
         run: pnpm run sync:conformance:check
 
