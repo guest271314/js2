@@ -9,10 +9,10 @@
   "src/codegen/regex/vm.ts#classMatch",
   "src/codegen/regex/vm.ts#isLineTerminator",
   "src/codegen/regex/vm.ts#isWordChar",
+  "src/codegen/regex/vm.ts#regexStepBudget",
   "src/codegen/regex/vm.ts#runAt",
   "src/codegen/regex/vm.ts#search",
   "src/codegen/regexp-standalone.ts#quickJsLibRegexpEngineConfig",
-  "src/codegen/value-tags.ts#emitIsUndefF64",
   "src/codegen/value-tags.ts#jsStaticType",
   "src/codegen/value-tags.ts#pushUndefF64"
 ]
