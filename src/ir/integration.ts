@@ -1539,18 +1539,30 @@ export function compileIrPathFunctions(
     compiled.push(patch.entry.name);
   }
 
-  // (#3551) Stub orphaned fresh slots. A fresh slot (mono clone / lifted fn)
-  // whose owner failed after allocation — at lower time or via the cascade
-  // above — would otherwise be emitted with an EMPTY body: invalid Wasm for
-  // any non-void signature, and reachable when a HEALTHY owner committed a
-  // body that calls the failed owner's clone. A lone `unreachable` validates
+  // (#3551) Stub orphaned empty slots. Two slot families can be stranded
+  // BODYLESS when their owner fails after allocation (at lower time or via
+  // the cascade above): fresh slots (mono clones / lifted fns), and
+  // pre-allocated slots whose legacy body was empty (a branch-hoisted nested
+  // declaration — the guard's empty-slot fall-through case, where the IR body
+  // was the only body on offer). An empty body is invalid Wasm for any
+  // signature WITH results, and the slot can be reachable (a HEALTHY owner
+  // may have committed a body that calls it). A lone `unreachable` validates
   // against every signature, keeps the rest of the module working, and traps
-  // only on a path that actually enters the orphaned artifact.
+  // only on a path that actually enters the orphaned artifact. Empty VOID
+  // bodies are already valid Wasm (fall-through) — leave those as-is rather
+  // than converting today's silent no-op into a trap.
+  const stubIfOrphanedEmpty = (funcIdx: number): void => {
+    const orphan = definedFuncAt(ctx, funcIdx);
+    if (!orphan || orphan.body.length > 0) return;
+    const typeDef = ctx.mod.types[orphan.typeIdx];
+    if (!typeDef || typeDef.kind !== "func" || typeDef.results.length === 0) return;
+    replaceDefinedFuncAt(ctx, funcIdx, { ...orphan, body: [{ op: "unreachable" }] });
+  };
   for (const slot of freshSlots) {
-    if (!failedOwners.has(slot.ownerName)) continue;
-    const orphan = definedFuncAt(ctx, slot.funcIdx);
-    if (!orphan || orphan.body.length > 0) continue;
-    replaceDefinedFuncAt(ctx, slot.funcIdx, { ...orphan, body: [{ op: "unreachable" }] });
+    if (failedOwners.has(slot.ownerName)) stubIfOrphanedEmpty(slot.funcIdx);
+  }
+  for (const patch of pendingPatches) {
+    if (failedOwners.has(patch.entry.ownerName)) stubIfOrphanedEmpty(patch.funcIdx);
   }
 
   const dropTerminal = process.env.JS2WASM_TEST_DROP_IR_TERMINAL;
