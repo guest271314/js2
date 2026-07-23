@@ -175,7 +175,46 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
   // void — the resume function carries the async result through the promise, not
   // its wasm return value. Mirrors the generator arm above.
   if (fctx.asyncDriveReturn) {
-    const { resultPromiseLocal, fulfillFuncIdx } = fctx.asyncDriveReturn;
+    const hook = fctx.asyncDriveReturn;
+    const { resultPromiseLocal, fulfillFuncIdx } = hook;
+    // (#2906 3c-ii) return-through-finally: when this `return` sits inside a
+    // try/finally region (buildStateBody armed `pendingFinalizer`), evaluate
+    // the operand FIRST (§14.15.3 ordering), replay the region's await-free
+    // finalizer, then settle. The region local resets to 0 before the replay
+    // (a throw in the finally must not re-enter the region — same rule as the
+    // inline finally leads) and `pendingFinalizer` is cleared during it (a
+    // `return` inside the finally settles directly — its completion overrides).
+    const finalizer = hook.pendingFinalizer;
+    if (finalizer !== undefined && finalizer.length > 0) {
+      const tmp = allocLocal(fctx, `__async_ret_${fctx.locals.length}`, { kind: "externref" });
+      if (stmt.expression) {
+        const t = compileExpression(ctx, fctx, stmt.expression);
+        if (t !== null && t !== undefined) {
+          coerceType(ctx, fctx, t as ValType, { kind: "externref" });
+        } else {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+      } else {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      fctx.body.push({ op: "local.set", index: tmp });
+      if (hook.handlerLocal !== undefined) {
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "local.set", index: hook.handlerLocal });
+      }
+      hook.pendingFinalizer = undefined;
+      try {
+        for (const f of finalizer) compileStatement(ctx, fctx, f);
+      } finally {
+        hook.pendingFinalizer = finalizer;
+      }
+      fctx.body.push({ op: "local.get", index: resultPromiseLocal });
+      fctx.body.push({ op: "local.get", index: tmp });
+      fctx.body.push({ op: "call", funcIdx: fulfillFuncIdx });
+      fctx.body.push({ op: "drop" }); // __promise_fulfill returns the value
+      fctx.body.push({ op: "return" });
+      return;
+    }
     fctx.body.push({ op: "local.get", index: resultPromiseLocal });
     if (stmt.expression) {
       const t = compileExpression(ctx, fctx, stmt.expression);
