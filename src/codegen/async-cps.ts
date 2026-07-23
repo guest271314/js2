@@ -1374,13 +1374,24 @@ function lowerChunk(
   return { segs: st.segments, tail: st.lead, sawReturnAwait: st.sawReturnAwait };
 }
 
-/** One `[pre-chunk, try/catch]` group of the (multi-region) 3c shape. */
+/** One `[pre-chunk, try/catch(/finally)]` group of the (multi-region) 3c shape. */
 interface TryCatchGroup {
   /** Await-capable chunk of statements BEFORE this group's try (handler 0). */
   readonly pre: TryCatchChunk;
   readonly tryChunk: TryCatchChunk;
   readonly catchChunk: TryCatchChunk;
   readonly catchParamName: string | null;
+  /**
+   * (#2906 3c-ii-b) The group's await-free `finally` body, or null. A combined
+   * try/catch/finally group mints TWO handler regions: the catch region
+   * (catchState + this finalizer — covers the TRY chunk: abrupt → catch,
+   * `return`/`return await` → finalizer replay then settle) and a
+   * finally-only region (this finalizer, no catchState — covers the CATCH
+   * chunk: a throw there replays the finalizer in the reject route; a
+   * `return` there replays it via the return hook). Normal completions run
+   * the finalizer as inline handler-0 leads at the try/catch exits.
+   */
+  readonly finallyStmts: ts.Statement[] | null;
 }
 
 /**
@@ -1417,7 +1428,15 @@ export function analyzeTryCatchAsync(
   for (const tryIdx of tryIdxs) {
     const tryStmt = body.statements[tryIdx] as ts.TryStatement;
     if (!tryStmt.catchClause) return null; // awaited try/finally → the Gap-3 linear path
-    if (tryStmt.finallyBlock) return null; // try/catch/finally — 3c-ii-b follow-up
+    // (#2906 3c-ii-b) try/catch/FINALLY: admitted when the finally is
+    // await-free (the Gap-3 invariant — replays must not suspend).
+    let finallyStmts: ts.Statement[] | null = null;
+    if (tryStmt.finallyBlock) {
+      for (const f of tryStmt.finallyBlock.statements) {
+        if (countAwaitsInStatement(f, awaitSet) > 0) return null; // await-in-finally
+      }
+      finallyStmts = [...tryStmt.finallyBlock.statements];
+    }
     const decl = tryStmt.catchClause.variableDeclaration;
     if (decl !== undefined && !ts.isIdentifier(decl.name)) return null; // destructured catch param
     const catchParamName = decl !== undefined ? (decl.name as ts.Identifier).text : null;
@@ -1429,7 +1448,7 @@ export function analyzeTryCatchAsync(
     if (tryChunk.sawReturnAwait && tryIdx !== tryIdxs[tryIdxs.length - 1]) return null; // later trys unreachable on the try path — keep bounded
     const catchChunk = lowerChunk(tryStmt.catchClause.block.statements, awaitSet);
     if (catchChunk === null) return null;
-    groups.push({ pre, tryChunk, catchChunk, catchParamName });
+    groups.push({ pre, tryChunk, catchChunk, catchParamName, finallyStmts });
     total += pre.segs.length + tryChunk.segs.length + catchChunk.segs.length;
     cursor = tryIdx + 1;
   }
@@ -1481,42 +1500,56 @@ export function planTryCatchCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
     }
   };
 
-  for (let g = 0; g < shape.groups.length; g++) {
-    const group = shape.groups[g]!;
-    const r = g + 1; // 1-based dense region id
+  let nextRegionId = 1; // regions must be dense 1..N (validateAsyncCfg)
+  for (const group of shape.groups) {
+    const fin = group.finallyStmts;
+    // Region ids: `r` = the catch region (covers the TRY chunk; carries the
+    // catchState AND — for a combined try/catch/finally — the finalizer, so
+    // the return hook / settleSent replay run F on `return` from the try).
+    // `rFin` = the finally-only region (covers the CATCH chunk of a combined
+    // group; a throw there replays F in the reject route, a `return` there
+    // replays F via the hook). Catch-only groups keep one region (rFin = 0 ⇒
+    // catch chunk handler 0, byte-identical to 3c-ii-a).
+    const r = nextRegionId++;
+    const rFin = fin !== null ? nextRegionId++ : 0;
     // Pre chunk (handler 0), its tail fused into the first try state.
     pushSuspendChain(group.pre.segs, 0);
     pendingLeads.push(...asLead(group.pre.tail, 0));
     // Try chunk (handler r).
     pushSuspendChain(group.tryChunk.segs, r);
     // Try-exit: deliver the last try await (handler r — a rejection routes to
-    // this region's catch), run the try tail, jump to the join.
+    // this region's catch), run the try tail (+ the inline finalizer, NOT
+    // in-region — a throw inside F must not re-run it), jump to the join.
     const tryExitId = states.length;
     const catchEntry = tryExitId + 1;
     const catchCount = group.catchChunk.segs.length === 0 ? 1 : group.catchChunk.segs.length + 1;
     const join = catchEntry + catchCount;
+    const finLeads = fin !== null ? asLead(fin, 0) : [];
     states.push({
       id: tryExitId,
       resumeFrom: pendingResume,
-      lead: group.tryChunk.sawReturnAwait ? [] : asLead(group.tryChunk.tail, r),
+      lead: group.tryChunk.sawReturnAwait ? [] : [...asLead(group.tryChunk.tail, r), ...finLeads],
       terminator: group.tryChunk.sawReturnAwait ? { kind: "settleSent" } : { kind: "goto", target: join },
     });
     pendingResume = null;
     pendingLeads = [];
-    // Catch chain (handler 0 — no enclosing region; a throw here rejects).
+    // Catch chain (handler rFin: 0 for catch-only groups — a throw rejects
+    // directly; the finally-only region id for combined groups — a throw
+    // replays F in the reject route first). The inline F leads at the exit
+    // cover the catch chain's NORMAL completion.
     if (group.catchChunk.segs.length === 0) {
       states.push({
         id: catchEntry,
         resumeFrom: null,
-        lead: asLead(group.catchChunk.tail, 0),
+        lead: [...asLead(group.catchChunk.tail, rFin), ...finLeads],
         terminator: { kind: "goto", target: join },
       });
     } else {
-      pushSuspendChain(group.catchChunk.segs, 0);
+      pushSuspendChain(group.catchChunk.segs, rFin);
       states.push({
         id: states.length,
         resumeFrom: pendingResume,
-        lead: group.catchChunk.sawReturnAwait ? [] : asLead(group.catchChunk.tail, 0),
+        lead: group.catchChunk.sawReturnAwait ? [] : [...asLead(group.catchChunk.tail, rFin), ...finLeads],
         terminator: group.catchChunk.sawReturnAwait ? { kind: "settleSent" } : { kind: "goto", target: join },
       });
       pendingResume = null;
@@ -1525,10 +1558,13 @@ export function planTryCatchCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPl
     handlers.push({
       id: r,
       parent: 0,
-      finalizer: [],
+      finalizer: fin ?? [],
       catchState: catchEntry,
       ...(group.catchParamName !== null ? { catchParamName: group.catchParamName } : {}),
     });
+    if (fin !== null) {
+      handlers.push({ id: rFin, parent: 0, finalizer: fin });
+    }
     // Invariant: the next state pushed is the join (states.length === join).
   }
   // Post chunk.

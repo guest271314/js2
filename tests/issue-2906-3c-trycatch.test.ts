@@ -456,6 +456,177 @@ export function getCap(): number { return cap; }`),
   });
 });
 
+// #2906 3c-ii-b — COMBINED try/catch/finally regions. A combined group mints
+// TWO handler regions: the catch region (catchState + the finalizer — covers
+// the TRY chunk: abrupt → catch, `return`/`return await` → finalizer replay
+// then settle) and a finally-only region (finalizer, no catchState — covers
+// the CATCH chunk: a throw there replays the finalizer in the reject route, a
+// `return` there replays it via the hook). Normal completions run the
+// finalizer as inline handler-0 leads at the try/catch exits. Producer-only:
+// every emitter mechanism (route, reject-tail replay, return hook, settleSent
+// replay) already handles the two regions generically.
+describe("#2906 3c-ii-b — combined try/catch/finally (wasi lane)", () => {
+  it("fulfil path: catch skipped, finalizer once", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    const x = await Promise.resolve(4);
+    cap = x as number;
+  } catch (e) {
+    cap = -1;
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(104);
+  });
+
+  it("rejection: catch runs, then the finalizer", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    await Promise.reject(new Error("x"));
+    cap = 1;
+  } catch (e) {
+    cap = 42;
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(142);
+  });
+
+  it("a throw INSIDE the catch replays the finalizer before rejecting", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    await Promise.reject(new Error("a"));
+  } catch (e) {
+    cap = 5;
+    throw new Error("b");
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(105);
+  });
+
+  it("return inside the TRY runs the finalizer once, before the settle", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    const x = await Promise.resolve(50);
+    return x as number;
+  } catch (e) {
+    return -1;
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1050);
+  });
+
+  it("return inside the CATCH runs the finalizer once, before the settle", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    await Promise.reject(new Error("y"));
+    return 1;
+  } catch (e) {
+    return 42;
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1042);
+  });
+
+  it("an await INSIDE the catch suspends/resumes; finalizer after", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    await Promise.reject(new Error("z"));
+    cap = 1;
+  } catch (e) {
+    const r = await Promise.resolve(8);
+    cap = 42 + (r as number);
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(150);
+  });
+
+  it("a REJECTED await inside the catch replays the finalizer before rejecting", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    await Promise.reject(new Error("p"));
+    cap = 1;
+  } catch (e) {
+    await Promise.reject(new Error("q"));
+    cap = 2;
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(100);
+  });
+
+  it("return await inside the TRY: finalizer once via the settleSent replay", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    return await Promise.resolve(77);
+  } catch (e) {
+    return -1;
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1077);
+  });
+});
+
 describe("#2906 3c — try/catch-around-await drive (standalone carrier lane)", () => {
   it("the core rejection→catch case drives on standalone too", async () => {
     expect(
