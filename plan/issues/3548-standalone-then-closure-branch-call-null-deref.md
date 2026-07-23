@@ -32,7 +32,43 @@ separate sub-cause — verify, #3443-adjacent).
 **NOT the #3542 null-reason echo** — re-probed post-#3542: a stride-6 sample
 (33 files) still traps identically.
 
-## Minimal repro (probe-bisected 2026-07-23 — surprisingly tight)
+## COLLAPSED root cause (WAT-confirmed, same day) — it is an ARITY-FILL bug; promises/closures are irrelevant
+
+The WAT of the trapping closure ends:
+
+```wat
+;; $DONE("m") branch: builds the native string, call — fine.  Then:
+ref.null 6        ;; the ZERO-ARG $DONE() call's missing-argument fill
+ref.as_non_null   ;; ← TRAPS unconditionally
+call $DONE
+```
+
+When a module-level function is called BOTH with a string literal AND with
+zero args, the param is inferred as a NON-NULLABLE native-string ref; the
+zero-arg site fills the missing argument with `ref.null` and then coerces
+through `ref.as_non_null` — an unconditional null-deref trap **on the
+zero-arg (usually the PASS) path**. Per spec a missing argument is
+`undefined`. Two-line module-scope repro (standalone, traps in
+`__module_init`):
+
+```js
+function d(x) { console.log('called'); }
+d('m');
+d();     // RuntimeError: dereferencing a null pointer
+```
+
+The Promise/then/closure/comparison ingredients in the original fence were
+all incidental — they only determined WHERE the trap surfaced
+(`__closure_N ← __then_fulfill_*`). The corpus hits it constantly because
+the canonical test262 template calls `$DONE('msg')` on failure paths and
+bare `$DONE()` on the pass path. Scope note: this likely affects MORE than
+the async cluster — any standalone function under-applied at one site and
+string-applied at another; measure corpus-wide when fixing. Fix direction:
+the param typing must degrade to a nullable/undefined-capable carrier when
+any call site under-applies (or the fill must pass the canonical undefined),
+never a trapping non-null cast.
+
+## Original bisection fence (kept for the record; superseded by the above)
 
 ```js
 function $DONE(x) { console.log("OK"); }
