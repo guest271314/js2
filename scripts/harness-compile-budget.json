@@ -1,0 +1,7 @@
+{
+  "forEachChildCalls": 98089,
+  "marginPct": 15,
+  "fixtureCallSites": 120,
+  "updated": "2026-07-23",
+  "note": "Deterministic shared-forEachChild traversal count for the #3437 representative harness assembly. Reseed with `npx tsx scripts/check-harness-compile-budget.ts --update` when a slowdown is intentional and justified. See the script header."
+}
