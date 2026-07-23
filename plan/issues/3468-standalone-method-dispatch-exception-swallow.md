@@ -1,7 +1,8 @@
 ---
 id: 3468
 title: "Standalone: method calls on function objects silently swallow assertions (assert.sameValue/throws never fire) — root cause is function-object own-property gap, NOT a catch_all swallow"
-status: in-progress
+status: done
+completed: 2026-07-24
 spec: complete
 assignee: ttraenkler/sendev-3468-f1
 created: 2026-07-19
@@ -39,6 +40,11 @@ regressions-allow:
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)
+
+> **F1 LANDED (#3523, 2026-07-24)** — standalone honest floor 27,557 (was 31,188
+> inflated); 3,545 vacuous passes now honest + tracker-routed; 4 CEs tracked in
+> #3559; classifier fold cured the false-oob ratchet trip. Remaining
+> C-complete/reflection routing is future scope. Issue closed `done`.
 
 > **Folds under #2860** (standalone↔host gap umbrella); cross-refs #3417
 > (oracle-v8 reclassification). Origin: the Cluster C / C1 finding in the
