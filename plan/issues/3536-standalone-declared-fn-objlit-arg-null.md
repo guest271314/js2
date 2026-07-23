@@ -138,6 +138,17 @@ any.convert_extern → ref.test <shape>` can then NEVER match → else-arm
    withdraws the claim via a NEW soft `abi-signature-parity` unsupported code
    (warning channel, not a compile error) and the legacy body/ABI stays.
    Class-member/module-init keep their pre-existing hard-invariant semantics.
+   **CI-found refinement (first PR run):** the guard is scoped to slots with a
+   REAL legacy body (`existing.body.length > 0`). The original exemption's
+   claim was half-true: a lifted branch-hoisted nested declaration
+   (`if (x) { function inner(){…} }`) has an EMPTY pre-allocated slot with a
+   placeholder typeIdx (probe: `test__nested_inner_0: IR=10 legacy=0
+legacyBodyLen=0`), where the IR body is the ONLY body — withdrawing there
+   left an empty function and an invalid module (the var-hoisting-scope /
+   scope-and-error-handling equivalence regressions) and needlessly
+   de-claimed 3 playground units (the #3519 readiness-floor trip). Empty
+   slots keep the pre-#3536 patch behavior; the narrowed guard resolves both
+   CI failures while all 8 repro shapes stay fixed.
 3. **O1(ii) deliberately NOT taken here:** with 1+2 the two measured defects
    are fixed at their causes; the generic `emitGuardedRefCast` silent-null
    else-arm was not even the emitting site in the traced cases (the pattern

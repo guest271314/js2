@@ -1404,11 +1404,14 @@ export function compileIrPathFunctions(
             "patch",
             `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
           );
-        } else {
-          // Top-level function: an EXPECTED, recoverable divergence (the IR
-          // legitimately cannot express e.g. a shape-struct param) — a soft
-          // withdraw-the-claim fallback, NOT a compile error. The legacy body
-          // stays; callers keep the ABI they compiled against.
+          continue;
+        }
+        if (existing.body.length > 0) {
+          // Top-level function WITH a real legacy body: an EXPECTED,
+          // recoverable divergence (the IR legitimately cannot express e.g. a
+          // shape-struct param) — a soft withdraw-the-claim fallback, NOT a
+          // compile error. The legacy body stays; callers keep the ABI they
+          // compiled against.
           markOwnerFailure(
             entry.ownerName,
             name,
@@ -1419,8 +1422,15 @@ export function compileIrPathFunctions(
             ),
             "patch",
           );
+          continue;
         }
-        continue;
+        // EMPTY pre-allocated slot (e.g. a lifted branch-hoisted nested
+        // declaration whose slot carries a placeholder typeIdx and no body):
+        // this is the original exemption's TRUE case — the IR body is the
+        // ONLY body, so withdrawing would leave an empty function and an
+        // invalid module (the 2026-07-23 #3536 CI regressions:
+        // var-hoisting-scope / scope-and-error-handling). Fall through and
+        // patch as before.
       }
       // Tail-call optimization parity with the legacy AST path (#602): the IR
       // `return` lowering never rewrites a trailing `call`/`call_ref` into
