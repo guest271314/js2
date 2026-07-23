@@ -25,6 +25,17 @@ loc-budget-allow:
   - src/codegen/context/types.ts
   - src/codegen/index.ts
   - src/codegen/declarations.ts
+# (#3303) Ceiling for the stakeholder-ruled F1 de-inflation. DERIVED, not
+# round: 3,637 measured wasm-change regressions (merge_group run 30043224652,
+# vs standalone baseline dbc0162 @2026-07-23T20:20Z, oracle v9=v9) + 13
+# (measured pass→compile_timeout flake rows this run — each can complete on
+# the re-run and convert into a counted regression; conversion bound = all 13)
+# + 25 (ORACLE_REBASE_DRIFT_TOLERANCE, scripts/diff-test262.ts — the repo's
+# codified bound for unavoidable main-side baseline drift during a
+# re-baseline window) = 3,675. Hard-fails above the ceiling (#3303).
+regressions-allow:
+  count: 3675
+  reason: "#3468 F1 stakeholder-ruled assert-harness de-inflation: 3,637 measured vacuous-pass→honest-fail flips (97.5% assertion-time throws; incl. 4 latent #3559 CEs, stakeholder-signed-off) + 13 measured timeout-flake conversion bound + 25 codified drift tolerance"
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)
@@ -456,6 +467,66 @@ the honest number. The floor mechanism is the COMMITTED file
 intentional downward re-seed is an in-PR edit of that file) — no GitHub
 Actions variable involved. The measured delta, tracker routing, and the
 re-baseline edit are recorded below once the merge_group run completes.
+
+## F1 MEASUREMENT (2026-07-23, merge_group run 30043224652) — the honest numbers
+
+PR #3523 parked as designed; the ONLY failed step was **"Standalone regression
+guard (#1897)"**. Measured (run-log-authoritative, reproduced exactly by a
+local rediff of the run's merged JSONL vs the dbc0162 baseline):
+
+- **Honest floor: host_free_pass = 27,557 / 48,088 full corpus** (official
+  scope 27,093 / 43,106). Baseline was 31,188 → delta −3,631.
+- Guard-exact: **3,637 wasm-change regressions, 18 improvements, net −3,619**;
+  13 pass→compile_timeout flake rows excluded by the guard.
+- **The #2097 high-water floor PASSED**: 27,557 vs mark 25,453 (floor 25,403),
+  **+2,104 headroom** — the mark never ratcheted up with recent standalone
+  gains, so NO highwater reseed is needed. The de-inflation lands entirely via
+  the #1897/#3303 rebase-mode path.
+- Host lane: catastrophic guard PASS (7 raw drift regressions) — corpus-scale
+  confirmation of host byte-neutrality.
+
+**Split of the 3,637** (= 3,633 fail + 4 compile_error):
+- 3,545 (97.5%) assertion-time `Test262Error` throws — the designed
+  vacuous→honest-fail flips. Cohorts: 2,328 value/behavior mismatches
+  (assertions now compare real values), 1,016 expected-throw-NOT-thrown
+  (assert.throws fires; builtin lacks the spec validation throw — Temporal
+  480, annexB 96, TypedArray 83…), 137 async continuation, 31 promise, 45
+  misc.
+- 75 missing-capability TypeErrors ("X is not yet callable as a value" 32,
+  property-on-null 33, …).
+- 17 trap-category rows, only 11 REAL traps (7 null_deref, 4 illegal_cast —
+  both categories SHRANK overall: 295→287, 397→376). The ratchet's oob 39→43
+  "+4" was 100% classifier misclassification (assertion TEXT containing "out
+  of bounds"), fixed by the v10 classifyError reorder in this PR — post-fix
+  all four trap categories shrink vs baseline, so no trap-growth-allow is
+  needed.
+- 4 compile_error — the #2043-class latent bug exposed by the keep-arm
+  (**#3559**): `local index out of range at '__cb_0'`. Root-caused to
+  `call-identifier.ts`'s nested-lifted-fn call-site else-arm baking
+  `local.get cap.outerLocalIdx` (the DECLARING fctx's index) when called from
+  a method-call-arg callback (cbFctx) — the #2029 cross-fctx rescue covers
+  only accessor-promoted globals, and the naive #1177 localMap-first fix was
+  reverted for causing 100+ regressions. Minimal repro: retained
+  `assert.throws = fn` × IIFE with TDZ-referencing inner fn + callback; the 4
+  tests are let/const/using `function-local-closure-{get,set}-before-
+  initialization.js`. Carried inside the allowance with explicit stakeholder
+  sign-off; fix tracked separately.
+
+**Tracker routing (cohort-level, per the ruling):**
+- **#2860** (standalone↔host umbrella, established home of the routed
+  de-masked census): the 3,454 demasked semantic-gap rows (2,328 mismatch +
+  1,016 missing-throw + 45 misc + 33 property-on-null + 32
+  builtin-as-value). Temporal (820 rows) is the proposals-scope subcluster.
+- **#3442/#2865**: 137 async-continuation rows.
+- **#2903/#3390**: 31 promise rows.
+- **#3443**: 4 illegal_cast traps (flatMap/flat/sort poisoned-input callbacks).
+- **#1781**: 7 null_deref traps (module-init + bind/callback dispatch).
+- **#3178** (iterables): no separate standalone cohort — iterable failures
+  surface inside the async-continuation texts routed above.
+- **#3559** (new, filed with this PR): the #2043-class callback cross-fctx
+  capture bug (the 4 CEs) — full root cause + inlined minimal repro in
+  `plan/issues/3559-callback-cross-fctx-capture-local-index.md`; carried
+  inside the allowance with explicit stakeholder sign-off (2026-07-23).
 
 ## PR-shepherd resolution (2026-07-20) — land captured-closure substrate; keep harness rollout blocked
 
