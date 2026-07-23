@@ -796,6 +796,19 @@ export interface FunctionContext {
    */
   boxedTdzFlags?: Map<string, { refCellTypeIdx: number; localIdx: number }>;
   /**
+   * (#3546) Locals in `__module_init` that SHADOW a module-global binding for a
+   * top-level closure declaration (`const/let/var f = () => …` at module
+   * level): name → the shadow local's index. The declaration dual-stores
+   * (local + `$__mod_<name>` global); a later TOP-LEVEL reassignment resolves
+   * to the local via `localMap` and would otherwise update only the shadow —
+   * every OTHER function's read/call of the binding goes through the global,
+   * which silently kept the FIRST closure. Assignment's local arm consults
+   * this map (exact name→index match, so genuine function-locals and
+   * block-scoped shadows never match) and re-syncs the global after the local
+   * write.
+   */
+  moduleBindingShadowLocals?: Map<string, number>;
+  /**
    * Stack of catch rethrow info. Each entry tracks a catch variable name and the
    * current depth (number of block-like structures) from the catch boundary.
    */
