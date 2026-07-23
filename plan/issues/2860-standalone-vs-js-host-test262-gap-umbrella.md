@@ -451,3 +451,48 @@ object`, positional null-deref TypeErrors, eval-shim #2928 refusals.
 8,610 rows, re-run the error-signature census on the standalone lane and
 re-weight the priority ladder — the de-masked buckets land in the EXISTING
 children (no new slices expected beyond what the ladder already tracks).
+
+## 2026-07-23 — routed de-masked census (fable-2860; lead-steered weighting)
+
+1,077-row stride-8 census of the 8,610 masked rows, run locally against the
+fixed compile path, **weighted by addressable fail→PASS potential** (lead
+steer: fail→skip is landing-%-NEUTRAL, so skip-features are an explicit
+zero-value bucket; #3468 own-property rows route to the fable-exposed
+clustering effort; async rows route to fable-3417's ladder — never sum the
+two ladders):
+
+| bucket (sampled → extrapolated)                                                                    |         rows | routing                                                                                                                     |
+| -------------------------------------------------------------------------------------------------- | -----------: | --------------------------------------------------------------------------------------------------------------------------- |
+| addressable                                                                                        | 516 → ~4,125 | the ladder below                                                                                                            |
+| zero-value skip-feature (Temporal, eval #2928, `with`/annexB eval-code, SAB, ShadowRealm, $262.\*) | 299 → ~2,390 | none (%-neutral)                                                                                                            |
+| #3468 own-property family                                                                          | 199 → ~1,591 | HANDED to fable-exposed (`.tmp/handover-3468-ownprop.txt`)                                                                  |
+| async-flagged                                                                                      |    60 → ~480 | fable-3417's async cohort (do NOT double-count vs their 88-row module-init-trap bucket — different measures of one surface) |
+| already-pass drift                                                                                 |      3 → ~24 | clears on promote                                                                                                           |
+
+**Addressable, by family (the re-weighted ladder):** Array/prototype ~664
+(#3169/#3170/#3180/#3185) · TypedArray/prototype ~520 (#2872/#3177) ·
+RegExp/property-escapes ~311 exact (#3536 → #3541) · TypedArrayCtors/internals
+~168 (#3177) · defineProperty ~160 + defineProperties ~144 + create ~64
+(#3251/#2984/#2992) · String/prototype ~104 (#2875) · Iterator/prototype ~80
+(NEW-1 residual) · class ~128 (#2873). The "Cannot convert undefined or null
+to object" (~368) cluster is PARKED: its majority shape (prop-desc/name/length
+method-as-value reads) converts, if fixed alone, into the #3468 own-property
+signature — fail→fail, %-neutral — so it waits on the fable-exposed outcome.
+
+## 2026-07-23 — #3536 landed, #3541 carved (the property-escapes chain)
+
+**#3536 (done)** fixed the biggest single addressable signature's cleanest
+sub-family at its root: standalone call boundaries for declared functions
+with object-literal arguments (silent-null param via the dynamic-$Object /
+narrowed-struct mismatch, plus the IR overlay's post-hoc ABI replacement
+emitting invalid wasm — the patch-time typeIdx parity guard now covers
+top-level functions). Measured: 8/8 repro shapes fixed, 0 regressions across
+the full battery, but only **2/198 direct census flips** — the naive
+~1,190-row extrapolation for the signature was ~600× optimistic (the lead's
+measure-don't-extrapolate steer, vindicated). The 311-row property-escapes
+family now blocks on exactly ONE pre-existing defect — **#3541**
+(`String.fromCodePoint.apply(null, vec)` → null → `__str_concat` null-deref,
+plus an illegal-cast sibling in the same `buildString` harness function).
+All 311 rows run that one function, so #3541 is the measured gate on the
+family; the remaining 138 re-measured null-deref rows distribute over
+TypedArray-internals-class defects (#2872/#3177 territory).
