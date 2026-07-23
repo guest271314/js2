@@ -1196,8 +1196,35 @@ return-await-in-try — every completion path observes F exactly once in spec
 order (104/142/105/1050/1042/150/100/1077). Byte matrix: all 8 controls
 unchanged across 3 lanes.
 
-**Remaining after 3c-ii-b:** nested regions (3c-iii — static handler tagging
-covers nested try/CATCH: tag the inner catch chunk with the ENCLOSING region
-id + set `parent`, lift the validator; nested finalizer CHAINS on one abrupt
-need the reject tail to replay all enclosing finalizers innermost-first and
-stay banked). D4 (#2864) still waits on 3c-iii.
+## Slice 3c-iii — NESTED try/catch regions (LANDED, 2026-07-23, fable dev-laneB, stacked on 3c-ii-b)
+
+**The static-tagging prediction held — producer + validator only, zero
+emitter/route changes.** The recognizer/builder generalize to a RECURSIVE
+region-body model (`RegionBody` = alternating linear chunks and groups;
+`lowerRegionBody` recurses into try blocks; `buildBody(region, enclosing)`
+tags every chunk with the innermost active region id and recurses with the
+group's own id for its try body). An inner group's region carries
+`parent = enclosing`; its CATCH chunk is tagged with the ENCLOSING region id
+— so an abrupt in the inner catch (sync throw OR rejected await) escalates to
+the outer catch through the SAME flat id-dispatch route: the parent chain is
+encoded statically in the handler tags, no dynamic walk. Region ids stay
+dense via the running counter (inner ids > parent ids; handlers sorted by id
+before return since recursion pushes inner-first). `validateAsyncCfg` lifts
+`parent !== 0` for FINALIZER-FREE regions only (a nested region with a
+finalizer would need innermost-first finalizer-chain replay — the producer
+never emits one: combined finally groups stay depth-0 with pure try bodies,
+and this gate keeps it that way).
+
+**Measured:** 6 new tests (38/38 total): inner-catch handles (42), throw /
+rejected-await in the inner catch escalate to the outer catch (142/142),
+post-inner-group abrupt hits the outer catch (105), fulfil-through with
+pre/mid/post leads + post await (125), three-level nesting (7). Byte matrix:
+all 8 controls STILL identical — the recursive-builder rewrite reproduces
+byte-exact output for every single-group shape.
+
+**3c is now COMPLETE for the bounded model.** Still banked beyond it: nested
+finalizer chains (multiple enclosing finallys replaying innermost-first on
+one abrupt), await-in-finally, destructured catch params, awaited try/catch
+inside a CATCH block (lowerChunk bails it). **D4 (#2864 sync-generator
+convergence) is now UNBLOCKED** per the alignment decision there — the
+catch-region routing + completion replay it needs exist on the async lane.

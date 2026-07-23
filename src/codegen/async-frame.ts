@@ -1055,8 +1055,20 @@ function validateAsyncCfg(cfg: AsyncCfgPlan): string | null {
   for (let i = 0; i < cfg.handlers.length; i++) {
     const h = cfg.handlers[i]!;
     if (h.id !== i + 1) return `handler ids not dense (handlers[${i}].id === ${h.id})`;
-    // Nested regions need parent-chain replay in the catch — 3c-iii follow-up.
-    if (h.parent !== 0) return `nested handler region ${h.id} (parent ${h.parent}) not yet supported`;
+    // (#2906 3c-iii) Nested regions are admitted for FINALIZER-FREE regions
+    // only: the nesting is encoded statically in the handler tags (an inner
+    // catch chunk is tagged with the enclosing region id), so the flat
+    // id-dispatch route needs no parent-chain walk. A nested region WITH a
+    // finalizer would need innermost-first finalizer-chain replay on one
+    // abrupt — not modeled; the producer never emits it, and this gate keeps
+    // it that way.
+    if (h.parent !== 0) {
+      if (h.finalizer.length > 0) {
+        return `nested handler region ${h.id} (parent ${h.parent}) with a finalizer not supported`;
+      }
+      if (h.parent < 1 || h.parent > cfg.handlers.length) return `handler ${h.id} parent ${h.parent} out of range`;
+      if (h.parent >= h.id) return `handler ${h.id} parent ${h.parent} must be an earlier region`;
+    }
     // (#2906 3c) A routed catch region: the route enters catchState like a goto,
     // so it must exist and carry no resume prelude.
     if (h.catchState !== undefined) {
