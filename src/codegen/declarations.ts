@@ -115,6 +115,31 @@ import {
  * No-op when every slot classifies as `"other"` so non-TypedArray modules
  * accumulate no metadata.
  */
+/**
+ * (#3468 F1) Builtin/special function-value member names that must KEEP their
+ * existing (dropped, no-op) standalone lowering when written at top level on a
+ * function declaration — never re-route them into the closure-own-property side
+ * table (which would shadow the builtin). `.prototype` IS excluded here:
+ * `.prototype` is owned end-to-end by the #2660 S2/S3 fnctor machinery — for a
+ * RECONSTRUCT-classified fnctor the S2 keep-arm `continue`s before this one, and
+ * for a non-reconstruct fnctor S2 deliberately declines (the scoped gate that
+ * fixed the species-`Ctor.prototype`-identity ejection). Routing that declined
+ * write into the side-table bag instead would give `F.prototype` a SECOND,
+ * S3-invisible storage with divergent identity — so it keeps its existing
+ * dropped lowering (guarded by issue-2660-s2's "S2 off" test).
+ */
+const STANDALONE_FN_STATIC_KEEP_EXCLUDED = new Set([
+  "name",
+  "length",
+  "call",
+  "apply",
+  "bind",
+  "constructor",
+  "prototype",
+  "caller",
+  "arguments",
+]);
+
 function recordExportSignature(
   ctx: CodegenContext,
   exportName: string,
@@ -1579,6 +1604,48 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         if (ctx.standalone && isFnctorPrototypeAssignTarget(ctx, expr.left)) {
           ctx.moduleInitStatements.push(stmt);
           continue;
+        }
+        // (#3468 F1) STANDALONE counterpart of the #2671 keep below (which is
+        // gated `!ctx.standalone`): a top-level `F.<name> = …` static property
+        // write on a top-level FUNCTION DECLARATION — the test262 assert-harness
+        // shape (`assert.sameValue = function(){…}`, `assert._isSameValue = …`).
+        // `F` is a function, not a module global, so the generic root-identifier
+        // check below dropped the statement from `__module_init` under
+        // standalone: the own property silently never existed, so
+        // `assert.sameValue(1,2)` invoked `undefined` and every assertion was a
+        // VACUOUS PASS (#3468 root cause). The SAME write already worked from
+        // inside a function body — only the top-level collection dropped it —
+        // and the #3468 closure-own-property side table makes the ordinary
+        // `__extern_set` write-arm store it on the function value. Keep it in
+        // `__module_init` so that arm runs. Scoped exactly like the #2671 host
+        // arm: DIRECT bare-identifier receiver only (`F.prototype.m = …` chains
+        // stay excluded — non-identifier receiver); `.prototype` is already kept
+        // by the #2660 S2 arm above. Host/GC is untouched (that lane uses the
+        // `!ctx.standalone` arm below), so it stays byte-identical.
+        if (
+          ctx.standalone &&
+          ts.isPropertyAccessExpression(expr.left) &&
+          !ts.isPrivateIdentifier(expr.left.name) &&
+          // Non-builtin, non-special property names only. `.prototype` is
+          // already kept by the #2660 S2 arm above (it `continue`d), so it never
+          // reaches here; the rest are builtin function metadata/methods whose
+          // top-level write keeps its existing (dropped, no-op) lowering to
+          // avoid shadowing the builtin.
+          !STANDALONE_FN_STATIC_KEEP_EXCLUDED.has(expr.left.name.text)
+        ) {
+          let sReceiver: ts.Expression = expr.left.expression;
+          while (
+            ts.isParenthesizedExpression(sReceiver) ||
+            ts.isAsExpression(sReceiver) ||
+            ts.isNonNullExpression(sReceiver) ||
+            ts.isTypeAssertionExpression(sReceiver)
+          ) {
+            sReceiver = sReceiver.expression;
+          }
+          if (ts.isIdentifier(sReceiver) && ctx.topLevelFunctionNames.has(sReceiver.text)) {
+            ctx.moduleInitStatements.push(stmt);
+            continue;
+          }
         }
         // (#2671) `F.<prop> = …` — a STATIC property write on a top-level
         // FUNCTION DECLARATION (`Test262Error.thrower = function () {…}`, the

@@ -15,14 +15,28 @@
  * `$Object` "bag" reached by `ref.eq` on the closure identity, reusing the
  * existing `$Object` prop machinery.
  *
- * This PR deliberately lands the first runtime slice for CAPTURING closures,
- * verified through the DYNAMIC member path (a receiver via an `any`-typed
- * local). Capturing closures have their own concrete struct subtypes, so the
- * runtime can enable them without also enabling shared noncapturing wrappers.
- * Routing the noncapturing top-level test262 `function assert(){}` harness into
- * the substrate is a separate rollout: its merge-group measurement correctly
- * exposed thousands of pre-existing assertion failures and cannot land without
- * fixing those semantics or an explicitly approved oracle transition.
+ * ## Two parts (#3468 F1 — the full rollout, per the 2026-07-23 stakeholder ruling)
+ * 1. **Runtime substrate** — the closure-own-property side table, reached via
+ *    the DYNAMIC member path (`__extern_set`/`__extern_get`/
+ *    `__extern_method_call` → the closure arms). The carrier classifier now
+ *    covers ALL closure wrapper structs (base-wrapper `ref.test` chain), not
+ *    just capturing subtypes — shared noncapturing wrappers (the harness
+ *    receiver shape) carry own properties too.
+ * 2. **Top-level front-end routing** — a `F.<name> = …` write on a top-level
+ *    FUNCTION DECLARATION (the test262 `assert.sameValue = function(){…}`
+ *    shape) was DROPPED under standalone: the #2671 keep that retains such
+ *    statements in `__module_init` was gated `!ctx.standalone`. So
+ *    `assert.sameValue` never stored and `assert.sameValue(1,2)` invoked
+ *    `undefined` → every assertion was a VACUOUS PASS. A standalone counterpart
+ *    keep (declarations.ts) retains the statement so the ordinary write-arm
+ *    records it in the side table. Reads and calls on a function receiver
+ *    already routed dynamically. Exclusions: `.name`/`.length`/`.call`/
+ *    `.apply`/`.bind`/`.prototype`/`.constructor`, class statics, non-identifier
+ *    receivers. gc/host is untouched (byte-identical).
+ *
+ * The harness assertions FIRING (instead of vacuous-passing) is the designed,
+ * stakeholder-ruled floor de-inflation — the exposed failures are measured from
+ * the merge-group run and routed to trackers; see the issue file.
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
@@ -132,7 +146,9 @@ describe("#3468 C-core — closure own-property side table (dynamic path, verifi
     expect(ret).toBe(0);
   });
 
-  it("leaves shared noncapturing wrapper structs outside this rollout", async () => {
+  it("includes shared noncapturing wrapper structs in the rollout (#3468 F1)", async () => {
+    // Flipped from the #3418 negative control: the F1 widening makes ALL
+    // closure wrappers carriers, so a noncapturing arrow round-trips too.
     const { ret } = await runStandalone(`
       export function test() {
         const fn = () => 1;
@@ -141,6 +157,75 @@ describe("#3468 C-core — closure own-property side table (dynamic path, verifi
         return (g as any).mine === 99 ? 1 : 0;
       }
     `);
-    expect(ret).toBe(0);
+    expect(ret).toBe(1);
+  });
+});
+
+describe("#3468 F1 — top-level function-declaration property write (front-end routing)", () => {
+  it("stores + reads back a top-level `F.p = v` write on a function declaration", async () => {
+    const { ret } = await runStandalone(`
+      function memo(){}
+      memo.cache = 5;
+      export function test(): number { return memo.cache; }
+    `);
+    expect(ret).toBe(5);
+  });
+
+  it("invokes a method assigned at top level on a function declaration", async () => {
+    const { ret } = await runStandalone(`
+      function assert(){}
+      assert.sv = function (a) { return a + 1; };
+      export function test(): number { return assert.sv(41); }
+    `);
+    expect(ret).toBe(42);
+  });
+});
+
+// The test262 `assert` harness — bare function-DECLARATION member ops at top
+// level, the exact shape whose vacuous passes motivated #3468. This is the
+// REGRESSION GUARD for the F1 de-inflation: these assertions must FIRE.
+describe("#3468 F1 — assert harness fires (vacuous passes correctly fail)", () => {
+  const HARNESS = `
+    function Test262Error(message) { this.message = message; }
+    function assert(mustBeTrue, message) { if (mustBeTrue === true) { return; } throw new Test262Error(message); }
+    assert._isSameValue = function (a, b) { if (a === b) { return a !== 0 || 1 / a === 1 / b; } return a !== a && b !== b; };
+    assert.sameValue = function (actual, expected, message) { if (assert._isSameValue(actual, expected)) { return; } throw new Test262Error(message); };
+  `;
+
+  it("assert.sameValue(1, 2) throws (correcting a vacuous pass)", async () => {
+    const { threw } = await runStandalone(HARNESS + `assert.sameValue(1, 2, "m");`);
+    expect(threw).toBe(true);
+  });
+
+  it("assert.sameValue(2, 2) does not throw (control)", async () => {
+    const { threw } = await runStandalone(HARNESS + `assert.sameValue(2, 2);`);
+    expect(threw).toBe(false);
+  });
+
+  it("assert.throws(TypeError, () => {}) throws when the callback does not", async () => {
+    const src =
+      HARNESS +
+      `assert.throws = function(errType, fn){ try { fn(); } catch(e){ return; } throw new Test262Error("no throw"); };
+       assert.throws(TypeError, function(){});`;
+    const { threw } = await runStandalone(src);
+    expect(threw).toBe(true);
+  });
+});
+
+describe("#3468 F1 — routing exclusions (no unintended regressions)", () => {
+  it("does not affect a class static method call (class is not a function declaration)", async () => {
+    const { ret } = await runStandalone(`
+      class C { static m(){ return 42; } }
+      export function test(): number { return C.m(); }
+    `);
+    expect(ret).toBe(42);
+  });
+
+  it("leaves fn.call / fn.apply working", async () => {
+    const { ret } = await runStandalone(`
+      function add(a, b){ return a + b; }
+      export function test(): number { return add.call(null, 3, 4) + add.apply(null, [10, 20]); }
+    `);
+    expect(ret).toBe(37);
   });
 });

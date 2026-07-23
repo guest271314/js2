@@ -13,17 +13,25 @@
  * properties) never invokes anything under standalone — assertions become
  * vacuous passes (#3468 root cause).
  *
- * ## The fix (Approach C-core)
+ * ## The fix (Approach C-core + F1 full-closure rollout)
  * Keep closures as-is and give those three dead arms a fallback: a runtime,
- * closure-identity-keyed side table mapping each property-carrying CAPTURING
- * closure to a fresh `$Object` "bag" that holds its own properties. The initial
- * mergeable slice deliberately excludes shared noncapturing wrapper structs:
- * current-main's test262 harness reaches the dynamic path with noncapturing
- * `assert` functions, and enabling those truthfully de-masks thousands of
- * pre-existing semantic failures. Capturing closure structs have distinct
- * subtype identities, so this is a principled runtime boundary rather than a
- * harness-name exception. The bag reuses the existing `$Object` prop machinery
- * (`__new_plain_object` + `__extern_get`/`__extern_set`).
+ * closure-identity-keyed side table mapping each property-carrying closure to a
+ * fresh `$Object` "bag" that holds its own properties. The bag reuses the
+ * existing `$Object` prop machinery (`__new_plain_object` + `__extern_get`/
+ * `__extern_set`), so reads/writes/method-calls on a function value work exactly
+ * as they do on a plain object.
+ *
+ * (#3468 F1, 2026-07-23 stakeholder ruling) The carrier set covers ALL closure
+ * wrapper structs — including shared noncapturing wrappers, i.e. the test262
+ * `function assert(){}` harness receiver. The first merged slice (#3418) had
+ * deliberately narrowed carriers to capturing subtypes because enabling the
+ * harness truthfully de-masks pre-existing semantic failures (assertions start
+ * FIRING instead of vacuous-passing). The stakeholder ruled to land the honest
+ * de-inflation: widen the carriers, measure the exposed failures from the
+ * merge-group run, route them to trackers by cluster, and re-baseline the
+ * standalone floor DOWN to the truthful number. Identity keying stays correct
+ * for noncapturing declarations: each top-level function's wrapper struct is
+ * instantiated once and reused by reference, so `ref.eq` identity holds.
  *
  * The table is a singly-linked list of `$ClosurePropEntry { next; key; bag }`
  * rooted at the module global `$__closure_prop_head`. Append = prepend (O(1));
@@ -35,8 +43,8 @@
  * function's own funcIdx is NOT in `funcMap` while its body is being built
  * (`registerNative` mints at registration time, after the body array is
  * constructed) — and `__is_closure_prop_carrier`'s `ref.test` chain needs the
- * COMPLETE captured-closure subtype set, which is only known at FINALIZE. So,
- * exactly like `reserveApplyClosure`/
+ * COMPLETE closure base-wrapper type set, which is only known at FINALIZE
+ * (`collectClosureBaseWrapperTypeIdxs`). So, exactly like `reserveApplyClosure`/
  * `fillApplyClosure` (#1888) and the accessor drivers (#1719): reserve the five
  * helper funcIdxs with `unreachable` stubs at object-runtime-emit time (so the
  * `__extern_*` arms bake a stable `call <idx>`), then fill the real bodies in
@@ -57,6 +65,7 @@
  */
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import { undefinedExternInstrs } from "./any-helpers.js";
+import { collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
 import type { CodegenContext } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
@@ -235,20 +244,16 @@ export function fillClosurePropHelpers(ctx: CodegenContext): void {
   const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
 
   // ── __is_closure_prop_carrier(externref value) -> i32 ──
-  // Match only concrete CAPTURING closure structs: they are subtypes with
-  // capture fields beyond the wrapper's field-0 funcref. Do not test the shared
-  // root wrappers here — a root test would also accept every noncapturing
-  // top-level harness function and recreate the measured #3418 floor breach.
-  // Constant 0 when the module has no capturing closures.
+  // (#3468 F1) ref.test chain over the closure BASE-wrapper types (same set as
+  // `__is_closure`/`__typeof_function` via `collectClosureBaseWrapperTypeIdxs`);
+  // a base-root test also matches every capturing subtype instance, so this
+  // subsumes the previously narrowed capturing-only carrier set. This is the
+  // stakeholder-ruled widening that lets shared noncapturing wrappers — the
+  // test262 `assert` harness receiver — carry own properties, which makes the
+  // harness assertions FIRE (honest floor de-inflation; see the issue file).
+  // Constant 0 when the module has no closures.
   {
-    const carrierTypeIdxs: number[] = [];
-    for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-      if (!info?.hasCaptures) continue;
-      const typeDef = ctx.mod.types[typeIdx];
-      if (typeDef?.kind === "struct") {
-        carrierTypeIdxs.push(typeIdx);
-      }
-    }
+    const carrierTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
