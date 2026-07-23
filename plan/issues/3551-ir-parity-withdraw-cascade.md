@@ -85,13 +85,18 @@ references still carries the ABI the body was compiled against.
    carriers. One level is a fixpoint: a cascade-withdrawn caller passed the
    guard itself (IR typeIdx == legacy typeIdx), so keeping its legacy body
    changes nothing about the ABI its own callers compiled against.
-3. **Stub orphaned fresh slots**: a mono-clone/lifted slot whose owner failed
-   after allocation would be emitted with an EMPTY body (invalid Wasm for any
-   non-void signature, and reachable from a healthy owner's committed body).
-   Fill with a lone `unreachable` — validates against every signature,
-   localizes the failure to paths that actually enter the orphan. This
-   mitigates the one hazard class the cascade makes more frequent (it
-   pre-exists for ordinary lower-stage owner failures).
+3. **Stub orphaned empty slots**: two slot families can be stranded bodyless
+   when their owner fails after allocation — fresh slots (mono clones /
+   lifted fns) and pre-allocated slots with an empty legacy body (a
+   branch-hoisted nested declaration, the guard's empty-slot fall-through
+   case, e.g. cascade-withdrawn because its body called a parity-withdrawn
+   function). An empty body is invalid Wasm for any signature WITH results
+   and can be reachable from a healthy owner's committed body. Fill with a
+   lone `unreachable` — validates against every signature, localizes the
+   failure to paths that actually enter the orphan. Empty VOID bodies are
+   valid fall-through Wasm and are left as-is (no silent-no-op → trap
+   conversion). This mitigates the one hazard class the cascade makes more
+   frequent (it pre-exists for ordinary lower-stage owner failures).
 
 Why not revert #3503: it fixed a real standalone defect (#3536) that stays
 fixed (its guard + tests are untouched and still green). Why not withdraw at
