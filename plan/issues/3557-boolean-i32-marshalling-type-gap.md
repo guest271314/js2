@@ -2,7 +2,7 @@
 id: 3557
 title: "booleans cross the host boundary as i32 0/1 — systemic wrong-TYPE marshalling (boolean brand lost in struct-field type inference)"
 status: ready
-sprint: Backlog
+sprint: current
 priority: medium
 horizon: m
 feasibility: hard
