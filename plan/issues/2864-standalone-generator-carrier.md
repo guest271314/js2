@@ -15,6 +15,8 @@ horizon: xl
 related: [2860, 680, 2865]
 umbrella: 2860
 architect_spec: candidate
+loc-budget-allow:
+  - src/codegen/generators-native.ts
 ---
 
 # Standalone: Wasm-native generator carrier (sync)
