@@ -57,6 +57,7 @@ import {
   planAsyncCfg,
   planAsyncGenCfg,
   planLinearAwaits,
+  tryCatchAsyncSpillInfo,
 } from "./async-cps.js";
 import { ensureNativeGeneratorResultType } from "./generators-native.js";
 import { undefinedExternInstrs } from "./any-helpers.js"; // (#3178) canonical undefined for the done-result value
@@ -76,6 +77,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import {
   ERROR_FIELD,
   MODE_FIELD,
+  MODE_NEXT,
   MODE_THROW,
   PARAM_FIELD_OFFSET,
   RESULT_DONE_FIELD,
@@ -625,8 +627,12 @@ export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclar
     // non-spill-safe field (e.g. a non-nullable ref with no inert default) would
     // make the frame layout invalid, so those fall back to legacy.
     const loop = computeLoopSpills(ctx, fn, plan);
-    if (loop === null) return false;
-    return loop.spillTypes.every(isSpillSafeType);
+    if (loop !== null) return loop.spillTypes.every(isSpillSafeType);
+    // (#2906 3c) try/catch-around-await shape (native drive lane only) — same
+    // widened spill-safe rule as the loop machine.
+    const tc = computeTryCatchSpills(ctx, fn, plan);
+    if (tc !== null) return tc.spillTypes.every(isSpillSafeType);
+    return false;
   }
   // Parity with asyncFnNeedsCps: a lone `await Promise.all(...)`/`.race`/… already
   // yields a real Promise — keep it on the legacy identity path.
@@ -711,6 +717,57 @@ function computeForAwaitSpills(
 }
 
 /**
+ * (#2906 3c) The spill layout for the bounded try/catch-around-await shape:
+ * EVERY own body local, conservatively (the catch chain can read pre-try
+ * locals after any number of suspends, so per-await liveness buys little), a
+ * resume-binding name typed via {@link resumeBindingValType} (matching the
+ * SENT-coercion target), others via `resolveSpillLocalValType` defaulting to
+ * externref — the same widened rule the 3a loop machine uses — PLUS the catch
+ * param (externref: the exn-tag payload / rejection reason). Returns `null`
+ * when the body is not the bounded shape, or when the catch param SHADOWS an
+ * own local / fn param (the shared local slot would alias — bounded slice).
+ */
+function computeTryCatchSpills(
+  ctx: CodegenContext,
+  decl: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+): { spillNames: string[]; spillTypes: ValType[] } | null {
+  const info = tryCatchAsyncSpillInfo(decl, plan);
+  if (info === null) return null;
+  const declByName = collectVarDeclsByName(decl);
+  // `collectVarDeclsByName` also picks up the CATCH clause's own
+  // variableDeclaration (it IS a ts.VariableDeclaration) — that entry is the
+  // catch param itself, not a shadowing body local.
+  const isCatchClauseDecl = (node: ts.VariableDeclaration): boolean =>
+    node.parent !== undefined && ts.isCatchClause(node.parent);
+  const paramNames = new Set<string>();
+  for (const p of decl.parameters) if (ts.isIdentifier(p.name)) paramNames.add(p.name.text);
+  if (info.catchParamName !== null) {
+    const existing = declByName.get(info.catchParamName);
+    if (existing !== undefined && !isCatchClauseDecl(existing)) return null; // shadows a body local
+    if (paramNames.has(info.catchParamName)) return null; // shadows a fn param
+  }
+  const rbTypeByName = new Map<string, ValType>();
+  for (const seg of info.segments) {
+    if (seg.resumeBinding) rbTypeByName.set(seg.resumeBinding.name, resumeBindingValType(ctx, seg.resumeBinding));
+  }
+  const spillNames: string[] = [];
+  const spillTypes: ValType[] = [];
+  for (const [name, node] of declByName) {
+    if (paramNames.has(name)) continue;
+    if (isCatchClauseDecl(node)) continue; // the catch param spill is added below (externref)
+    const rbType = rbTypeByName.get(name);
+    spillNames.push(name);
+    spillTypes.push(rbType ?? resolveSpillLocalValType(ctx, node) ?? { kind: "externref" });
+  }
+  if (info.catchParamName !== null) {
+    spillNames.push(info.catchParamName);
+    spillTypes.push({ kind: "externref" });
+  }
+  return { spillNames, spillTypes };
+}
+
+/**
  * The body locals that are live across ANY await and so must be spilled into the
  * frame (the multi-await generalization of the generator's `bodySpills`).
  *
@@ -772,9 +829,12 @@ function computeAsyncSpills(
   if (linear === null) {
     // (#2906 slice 3a) `while`-with-await loop: widened spill set (all loop
     // own-locals). (#2906 slice 3b) for-await drive: loop own-locals + the
-    // synthetic async-iterator carrier local. Returns empty for any other body.
+    // synthetic async-iterator carrier local. (#2906 3c) try/catch-around-await:
+    // widened own-local set + the catch param. Returns empty for any other body.
     return (
-      computeLoopSpills(ctx, decl, plan) ?? computeForAwaitSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] }
+      computeLoopSpills(ctx, decl, plan) ??
+      computeForAwaitSpills(ctx, decl, plan) ??
+      computeTryCatchSpills(ctx, decl, plan) ?? { spillNames: [], spillTypes: [] }
     );
   }
   const paramSet = new Set(paramNames);
@@ -987,8 +1047,16 @@ function validateAsyncCfg(cfg: AsyncCfgPlan): string | null {
   for (let i = 0; i < cfg.handlers.length; i++) {
     const h = cfg.handlers[i]!;
     if (h.id !== i + 1) return `handler ids not dense (handlers[${i}].id === ${h.id})`;
-    // Nested regions need parent-chain replay in the catch — 3c follow-up.
+    // Nested regions need parent-chain replay in the catch — 3c-iii follow-up.
     if (h.parent !== 0) return `nested handler region ${h.id} (parent ${h.parent}) not yet supported`;
+    // (#2906 3c) A routed catch region: the route enters catchState like a goto,
+    // so it must exist and carry no resume prelude.
+    if (h.catchState !== undefined) {
+      if (!inRange(h.catchState)) return `handler ${h.id} catchState ${h.catchState} out of range`;
+      if (cfg.states[h.catchState]!.resumeFrom !== null) {
+        return `handler ${h.id} catchState ${h.catchState} has a resume prelude (route enters it like a goto)`;
+      }
+    }
   }
   return null;
 }
@@ -1056,7 +1124,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         // always see the same segment shape.
         asyncGenDelegatesForPlan(ctx, info.decl, isStandalonePromiseActive(ctx) ? "carrier" : "awaitFree"),
       )
-    : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host });
+    : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host, allowTryCatch: !info.host });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
     info.resumeFuncIdx = -1;
@@ -1350,6 +1418,14 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     { op: "i32.const", value: v },
     { op: "local.set", index: inSrcTryLocal },
   ];
+  // (#2906 3c) ROUTED dispatcher: when any region carries a catchState, the
+  // per-call try/catch moves INSIDE the re-dispatch loop
+  // (`block { loop { try { chain } catch { route } } }`) so an abrupt
+  // completion can become a state transition into the region's catch chain
+  // (`br` back to the loop). Every arm's br-to-loop depth shifts by +1 (the
+  // try wraps the chain). Plans without a catchState keep the pre-3c
+  // `try { block { loop { chain } } } catch` wrap BYTE-IDENTICALLY.
+  const routedDispatch = cfg.handlers.some((h) => h.catchState !== undefined);
 
   // Emit a state's resume prelude: re-throw a rejected predecessor await
   // (MODE_THROW — arming its handler region first so the finalizer runs), then
@@ -1424,7 +1500,9 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     // arm's own `if`, br1..br(st.id) = the enclosing if-chain arms, br(st.id+1)
     // = if(state==0), br(st.id+2) = the loop. Valid because state ids are dense
     // and equal to their if-chain nesting depth (validateAsyncCfg).
-    const loopDepth = st.id + 2;
+    // (#2906 3c) The routed dispatcher wraps the chain in an in-loop `try`,
+    // adding one block level — the single depth-accounting site.
+    const loopDepth = st.id + (routedDispatch ? 3 : 2);
     try {
       // Reset the handler-region local at arm entry (a resume enters here
       // fresh; a fast-path advance may re-dispatch from an in-region state).
@@ -1954,47 +2032,116 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // Wrap the whole `block { loop { if-chain } }` dispatch in `try`/`catch $exn`.
   // Suspend / settle `return`s exit cleanly (a `return` in `try` skips `catch`),
   // so only a real throw reaches the handler.
-  const dispatch: Instr[] = [
-    {
+  //
+  // (#2906 3c) The shared reject tail (also the routed dispatcher's default
+  // route): replay any region's await-free finalizer, reject the result
+  // promise, and (async gens) re-point at the synthetic COMPLETED arm.
+  const rejectTail: Instr[] = [
+    // (#2906 Gap 3) run the finally before rejecting, if the throw crossed
+    // the try region (inline no-op array when the body has no finally).
+    ...catchFinallyInstrs,
+    { op: "local.get", index: resultPromiseLocal },
+    { op: "local.get", index: reasonLocal },
+    { op: "call", funcIdx: settleRejectIdx },
+    { op: "drop" },
+    // (#3178) §27.6.3.5 AsyncGeneratorStart step 4.f–g: an uncaught throw
+    // COMPLETES an async generator ([[AsyncGeneratorState]] = "completed")
+    // in addition to rejecting the current result promise. Re-point
+    // frame.STATE at the synthetic leads-free COMPLETED arm so a
+    // subsequent `.next()` fulfills `{value: undefined, done: true}`
+    // instead of re-driving the throwing step and rejecting again (the
+    // 280-test yield*-GetIterator/next error-semantics cohort surfaced
+    // by the F2 async-completion channel, #3417). NOT the settleDone
+    // state — that one carries trailing body statements as leads and
+    // would re-execute them. Plain async FUNCTIONS are untouched (no
+    // re-entry exists; gate keeps their bytes identical).
+    ...(info.asyncGen && info.completedStateId !== undefined
+      ? setStateI32FromConst(info, frameLocal, STATE_FIELD, info.completedStateId)
+      : []),
+  ];
+  if (routedDispatch) {
+    // (#2906 3c) ROUTED dispatcher: `block { loop { try { chain } catch $exn {
+    // route } } }`. The route turns an abrupt completion raised while a
+    // catch-carrying region is active into a STATE TRANSITION: bind the reason
+    // to the catch param (local now, spill for later suspends), consume the
+    // throw (MODE=NEXT — the prelude re-throw arm must not re-fire on stale
+    // MODE inside the catch chain), point STATE at the region's catch entry,
+    // and `br` the loop (depth 2 from inside the route's `if`: if=0, try=1,
+    // loop=2). No active region (or a region without a catchState) falls
+    // through to the shared reject tail, exactly the pre-3c behavior.
+    const route: Instr[] = [{ op: "local.set", index: reasonLocal }];
+    for (const region of cfg.handlers) {
+      if (region.catchState === undefined) continue;
+      const bindInstrs: Instr[] = [];
+      if (region.catchParamName !== undefined) {
+        const paramLocal = resumeFctx.localMap.get(region.catchParamName);
+        if (paramLocal !== undefined) {
+          bindInstrs.push({ op: "local.get", index: reasonLocal }, { op: "local.set", index: paramLocal });
+        }
+        const spillIdx = info.spillNames.indexOf(region.catchParamName);
+        if (spillIdx >= 0) {
+          bindInstrs.push(
+            { op: "local.get", index: frameLocal },
+            { op: "local.get", index: reasonLocal },
+            { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: info.spillFieldOffset + spillIdx },
+          );
+        }
+      }
+      route.push(
+        { op: "local.get", index: inSrcTryLocal },
+        { op: "i32.const", value: region.id },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            ...bindInstrs,
+            ...setStateI32FromConst(info, frameLocal, MODE_FIELD, MODE_NEXT),
+            ...setStateI32FromConst(info, frameLocal, STATE_FIELD, region.catchState),
+            { op: "br", depth: 2 }, // if(0) → try(1) → loop(2): re-dispatch
+          ],
+        },
+      );
+    }
+    route.push(...rejectTail);
+    resumeFctx.body.push({
       op: "block",
       blockType: { kind: "empty" },
-      body: [{ op: "loop", blockType: { kind: "empty" }, body: chain }],
-    },
-  ];
-  resumeFctx.body.push({
-    op: "try",
-    blockType: { kind: "empty" },
-    body: dispatch,
-    catches: [
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "try",
+              blockType: { kind: "empty" },
+              body: chain,
+              catches: [{ tagIdx: exnTag, body: route }],
+            },
+          ],
+        },
+      ],
+    });
+  } else {
+    const dispatch: Instr[] = [
       {
-        tagIdx: exnTag,
-        body: [
-          { op: "local.set", index: reasonLocal },
-          // (#2906 Gap 3) run the finally before rejecting, if the throw crossed
-          // the try region (inline no-op array when the body has no finally).
-          ...catchFinallyInstrs,
-          { op: "local.get", index: resultPromiseLocal },
-          { op: "local.get", index: reasonLocal },
-          { op: "call", funcIdx: settleRejectIdx },
-          { op: "drop" },
-          // (#3178) §27.6.3.5 AsyncGeneratorStart step 4.f–g: an uncaught throw
-          // COMPLETES an async generator ([[AsyncGeneratorState]] = "completed")
-          // in addition to rejecting the current result promise. Re-point
-          // frame.STATE at the synthetic leads-free COMPLETED arm so a
-          // subsequent `.next()` fulfills `{value: undefined, done: true}`
-          // instead of re-driving the throwing step and rejecting again (the
-          // 280-test yield*-GetIterator/next error-semantics cohort surfaced
-          // by the F2 async-completion channel, #3417). NOT the settleDone
-          // state — that one carries trailing body statements as leads and
-          // would re-execute them. Plain async FUNCTIONS are untouched (no
-          // re-entry exists; gate keeps their bytes identical).
-          ...(info.asyncGen && info.completedStateId !== undefined
-            ? setStateI32FromConst(info, frameLocal, STATE_FIELD, info.completedStateId)
-            : []),
-        ],
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [{ op: "loop", blockType: { kind: "empty" }, body: chain }],
       },
-    ],
-  });
+    ];
+    resumeFctx.body.push({
+      op: "try",
+      blockType: { kind: "empty" },
+      body: dispatch,
+      catches: [
+        {
+          tagIdx: exnTag,
+          body: [{ op: "local.set", index: reasonLocal }, ...rejectTail],
+        },
+      ],
+    });
+  }
 
   resumePlaceholder.locals = resumeFctx.locals;
   resumePlaceholder.body = resumeFctx.body;

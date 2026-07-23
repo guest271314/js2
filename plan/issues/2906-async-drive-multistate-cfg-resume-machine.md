@@ -1,7 +1,8 @@
 ---
 id: 2906
 title: "Standalone: generalize the async drive layer → multi-state, CFG-aware CPS resume machine (unlocks try/finally-across-await, for-await, multi-await)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-laneB
 created: 2026-07-01
 priority: high
 feasibility: hard
@@ -14,6 +15,9 @@ horizon: xl
 related: [2895, 2867, 2864, 2865, 2367]
 umbrella: 2860
 architect_spec: authored
+loc-budget-allow:
+  - src/codegen/async-cps.ts
+  - src/codegen/async-frame.ts
 ---
 
 # Generalize the async drive layer to a multi-state CFG-aware CPS resume machine
@@ -1033,3 +1037,76 @@ This is the native-`$Promise` identity-preservation family (cf. #3134), below th
 async-frame lane — the yield-await classifier cannot reach it. `any`-typed runtime
 thenables need a runtime thenable probe in the settle arm (the #3120 follow-up).
 Issue stays `in-progress` for the remaining 3d-iii edges + the slice-1d carrier widen.
+
+## Slice 3c-i — try/CATCH-around-await: catch regions as states + the routed dispatcher (LANDED, 2026-07-23, fable dev-laneB)
+
+**Scope shipped (native drive lane — wasi + standalone-carrier; host lane
+byte-identical):** `try { …await… } catch (e) { … }` now DRIVES. Verify-first:
+the shape previously fell to the AG0 sync unwrap, which read the rejected
+`$Promise`'s field 1 — the REASON — as the awaited VALUE (measured `cap=NaN`,
+catch never entered, on every rejection probe); now all 12 wasi probes + 2
+standalone probes match spec (catch entered with the reason bound: 42/45/50/
+142/…; fulfil paths keep the try continuation).
+
+### What landed (the 3c design's step 1 + the catchState half of step 2)
+
+- **Routed dispatcher** — `block { loop { try { chain } catch $exn { route } } }`,
+  exactly the design's restructure, but **conditional**: only a plan whose
+  handlers carry a `catchState` gets it. Every pre-3c plan (linear, Gap-3
+  try/finally, 3a/3b loops, async gens) keeps the old
+  `try { block { loop { chain } } } catch` wrap **byte-identically** (proven:
+  7-program × 3-lane sha256 matrix unchanged; only the newly-admitted shape
+  differs, and only on wasi/standalone — gc is byte-identical even for it).
+  The depth shift is the designed single site (`loopDepth = st.id + (routed ?
+  3 : 2)` in `buildStateBody`).
+- **Route** = state transition: for the active region id (the existing
+  `__async_in_try` local — the prelude re-throw arm already arms it), bind the
+  reason to the catch param (local + spill field, so it survives catch-chain
+  suspends), **consume the throw (MODE=NEXT** — without this the stale
+  MODE_THROW would re-fire the next prelude's re-throw arm), STATE=catchState,
+  `br` the loop. No active region → the pre-3c reject tail (region finalizer
+  replay + settle-reject + the #3178 async-gen COMPLETED repoint), now shared
+  by both dispatcher shapes. One mechanism covers all three abrupt sources:
+  sync-REJECTED classify, pending reject step-adapter delivery (both →
+  prelude re-throw), and a synchronous `throw` in an in-try lead.
+- **`AsyncHandlerRegion.catchState`/`catchParamName`** (async-cps.ts) +
+  `validateAsyncCfg`: catchState in range and NO resume prelude (route enters
+  it like a goto).
+- **Producer `planTryCatchCfg`** (+ `analyzeTryCatchAsync` / `lowerChunk`):
+  bounded shape = flat body, ONE top-level try/catch (no finally, no awaited
+  try/finally elsewhere — a nested region would claim the same handler id 1),
+  pre/try/catch/post chunks each linear-canonical, awaits allowed in ALL
+  chunks (including the catch — its chain suspends/resumes normally; its
+  handler is 0, so a throw there rejects the result promise). Catch param:
+  plain identifier or absent; a destructured param bails.
+- **Spills `computeTryCatchSpills`**: the 3a widened rule (every own body
+  local; resume bindings typed via `resumeBindingValType`) + the catch param
+  (externref). Gate: `asyncFnNeedsDrive` accepts the shape when every spill is
+  spill-safe; `planAsyncCfg` gains `allowTryCatch` (set `!info.host`, like
+  `allowLoops`). NOTE: `collectVarDeclsByName` picks up the CATCH clause's own
+  variableDeclaration (it IS a `ts.VariableDeclaration`) — the spill/shadow
+  logic must exempt it (this initially self-rejected every bound catch).
+
+### Measured
+
+- 14/14 new tests (`tests/issue-2906-3c-trycatch.test.ts`): rejection→catch,
+  fulfil-continues, pre-try await + catch-on-2nd, await-inside-catch,
+  post-join on both paths, sync-throw-in-lead, throw-in-catch (rejects, no
+  loop), unbound catch, widened spills, genuinely-PENDING reject/fulfil, and
+  2 standalone-carrier duplicates.
+- Async corpus: 243 passing across 31 files; 14 failures ALL pre-existing on
+  unmodified main (issue-2906-gap3-tryfinally ×3, issue-2980 ×2 — a
+  wasi-import leak on throw paths that predates this branch — plus 1672 ×5 /
+  2865 ×2 / symbol-async-iterator ×2). Byte matrix above.
+
+### Remaining (banked, unchanged from the design)
+
+- **3c-ii — return-through-finally + finallyState**: the `replay` terminator,
+  `MODE=RETURN; ABRUPT=value; goto(finallyState)` for `return` inside a try,
+  `try/catch/finally` combined regions. The routed dispatcher + route are the
+  substrate; this is planner + one new terminator.
+- **3c-iii — nested regions**: lift `validateAsyncCfg`'s `parent !== 0`
+  rejection once the route walks the parent chain; sibling regions (two
+  sequential try/catches) need the producer to admit >1 region first.
+- The D4 sync-generator convergence (#2864) waits on 3c-ii/iii per the
+  alignment decision there.
