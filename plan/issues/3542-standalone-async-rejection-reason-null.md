@@ -15,9 +15,27 @@ parents: [3178]
 related: [3417, 3538, 1326, 2865, 3228]
 created: 2026-07-23
 completed: 2026-07-23
+# (#3102) Intended growth: the fix replaces the catch_all arm INSIDE
+# wrapAsyncCallInTryCatch, which lives in expressions.ts — net +14 lines,
+# mostly the WHY comment. Extracting the wrapper is out of scope here.
+loc-budget-allow:
+  - src/codegen/expressions.ts
 ---
 
 # #3542 — standalone async-fn rejection reason is always NULL
+
+## Method note — the signature was manufactured DOWNSTREAM of the defect
+
+The load-bearing lesson of this issue: **the corpus error text was produced
+by the test harness REACTING to the bug, not by the bug itself.** The defect
+was a null rejection reason; the "Cannot destructure 'null' or 'undefined'"
+signature came from the test TEMPLATE's own rejection handler
+(`({ constructor }) => …`) destructuring that null. Grepping the compiler for
+the signature string finds the (correct!) RequireObjectCoercible throw
+helper and sends you chasing a phantom destructuring bug. When triaging a
+cluster, always probe what the HANDLER received before trusting the message
+— a signature can be an echo. (Same family as the #3468 vacuous-pass and
+#2860 `(start)`-throw-masking lessons: harness-reaction artifacts.)
 
 ## Problem (measured, verify-first)
 
