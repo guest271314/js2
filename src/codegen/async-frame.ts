@@ -59,6 +59,7 @@ import {
   planLinearAwaits,
 } from "./async-cps.js";
 import { ensureNativeGeneratorResultType } from "./generators-native.js";
+import { undefinedExternInstrs } from "./any-helpers.js"; // (#3178) canonical undefined for the done-result value
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3 / #2710) stable-regime minting
 import {
   type AsyncDriveRuntime,
@@ -326,6 +327,17 @@ export interface AsyncFrameInfo {
    * the shared resume dispatch. Set in `ensureAsyncResumeFunction`; async-gen only.
    */
   settleDoneStateId?: number;
+  /**
+   * (#3178) The synthetic COMPLETED pseudo-state id (== `cfg.states.length`,
+   * one past the dense real ids). Its dispatch arm fulfils `{value: undefined,
+   * done: true}` and RUNS NO LEADS — unlike the real `settleDone` state, which
+   * carries any trailing body statements after the last yield as leads, so
+   * re-pointing STATE at it re-executes body code (§27.6.3.x forbids: a
+   * completed generator runs no further body). The uncaught-throw catch and
+   * the `.return()`/`.throw()` drivers complete the frame by pointing STATE
+   * here. Set in `ensureAsyncResumeFunction`; async-gen only.
+   */
+  completedStateId?: number;
   /**
    * (#2865) Capture-cell metadata of a NESTED producer (lifted with captures
    * as leading params — nested-declarations.ts). The frame captures the cells
@@ -1065,6 +1077,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   if (info.asyncGen) {
     const doneState = cfg.states.find((s) => s.terminator.kind === "settleDone");
     if (doneState !== undefined) info.settleDoneStateId = doneState.id;
+    // (#3178) Reserve the synthetic COMPLETED pseudo-state id (leads-free
+    // `{value: undefined, done: true}` arm appended past the dense real ids by
+    // `buildStateArm`'s base case). See the AsyncFrameInfo field doc.
+    info.completedStateId = cfg.states.length;
   }
 
   // Host backend never touches the native scheduler (no `$Promise` struct, no
@@ -1785,7 +1801,12 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           // `next()`-promise with `{value: undefined, done: true}`.
           const resultTypeIdx = info.asyncGenResultTypeIdx!;
           out.push({ op: "local.get", index: resultPromiseLocal });
-          out.push({ op: "ref.null.extern" }); // value = undefined
+          // value = undefined. (#3178) Under the S1 undefined-singleton regime
+          // a null externref reads back as JS *null* — `{ value: undefined,
+          // done: true }` must carry the canonical undefined singleton or
+          // `assert.sameValue(result.value, undefined)` fails on the completed
+          // result. Legacy regime keeps the null extern (byte-identical).
+          for (const i of undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } satisfies Instr]) out.push(i);
           out.push({ op: "i32.const", value: 1 }); // done = true
           out.push({ op: "struct.new", typeIdx: resultTypeIdx });
           out.push({ op: "extern.convert_any" });
@@ -1827,7 +1848,39 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // generator trampoline. Recursion depth == state id (dense, validated), so
   // each arm's `br`-to-loop depth is `id + 2` inside `buildStateBody`.
   const buildStateArm = (i: number): Instr[] => {
-    if (i >= cfg.states.length) return [{ op: "unreachable" }];
+    if (i >= cfg.states.length) {
+      // (#3178) Synthetic COMPLETED arm (async gens only): fulfil `{value:
+      // undefined, done: true}` and RUN NO LEADS. The real settleDone state
+      // carries trailing body statements as leads, so completion (uncaught
+      // throw / `.return()` / `.throw()`) must NOT re-dispatch there —
+      // §27.6.3.x: a completed generator executes no further body. Terminal
+      // arm; anything else is a machine bug (unreachable).
+      if (info.asyncGen && info.completedStateId !== undefined) {
+        const completedBody = trackDetached([
+          { op: "local.get", index: resultPromiseLocal },
+          ...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" } satisfies Instr]),
+          { op: "i32.const", value: 1 }, // done = true
+          { op: "struct.new", typeIdx: info.asyncGenResultTypeIdx! },
+          { op: "extern.convert_any" },
+          { op: "call", funcIdx: settleFulfillIdx },
+          { op: "drop" },
+          { op: "return" },
+        ]);
+        return [
+          { op: "local.get", index: frameLocal },
+          { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: STATE_FIELD },
+          { op: "i32.const", value: info.completedStateId },
+          { op: "i32.eq" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: completedBody,
+            else: [{ op: "unreachable" }],
+          },
+        ];
+      }
+      return [{ op: "unreachable" }];
+    }
     const st = cfg.states[i]!;
     const then = trackDetached(buildStateBody(st));
     return [
@@ -1924,6 +1977,20 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           { op: "local.get", index: reasonLocal },
           { op: "call", funcIdx: settleRejectIdx },
           { op: "drop" },
+          // (#3178) §27.6.3.5 AsyncGeneratorStart step 4.f–g: an uncaught throw
+          // COMPLETES an async generator ([[AsyncGeneratorState]] = "completed")
+          // in addition to rejecting the current result promise. Re-point
+          // frame.STATE at the synthetic leads-free COMPLETED arm so a
+          // subsequent `.next()` fulfills `{value: undefined, done: true}`
+          // instead of re-driving the throwing step and rejecting again (the
+          // 280-test yield*-GetIterator/next error-semantics cohort surfaced
+          // by the F2 async-completion channel, #3417). NOT the settleDone
+          // state — that one carries trailing body statements as leads and
+          // would re-execute them. Plain async FUNCTIONS are untouched (no
+          // re-entry exists; gate keeps their bytes identical).
+          ...(info.asyncGen && info.completedStateId !== undefined
+            ? setStateI32FromConst(info, frameLocal, STATE_FIELD, info.completedStateId)
+            : []),
         ],
       },
     ],
@@ -2621,7 +2688,12 @@ function emitAsyncGenReturnThrowHelpers(ctx: CodegenContext, info: AsyncFrameInf
   const resultTypeIdx = ensureNativeGeneratorResultType(ctx, { kind: "externref" });
   const frameRef: ValType = { kind: "ref", typeIdx: info.stateTypeIdx };
   const promiseRef: ValType = { kind: "ref", typeIdx: promiseTypeIdx };
-  const doneStateId = info.settleDoneStateId ?? 0;
+  // (#3178) Prefer the synthetic leads-free COMPLETED arm: the real settleDone
+  // state carries trailing body statements (after the last yield) as leads, so
+  // completing the frame by re-pointing STATE there made a subsequent `.next()`
+  // re-execute body code — §27.6.3.8/.9 require a completed generator to run
+  // no further body. settleDoneStateId kept as fallback for safety.
+  const doneStateId = info.completedStateId ?? info.settleDoneStateId ?? 0;
 
   // Shared prologue: cast the carrier, mint a fresh pending result promise, store
   // it into `frame.result_promise`. Leaves the frame ref in $f (local 2) and the

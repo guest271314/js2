@@ -22,6 +22,8 @@ import { UNDEF_F64_BITS } from "./value-tags.js"; // (#3315)
 import { addImport, addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { compileObjectLiteralAsExternref } from "./literals.js";
+// (#3178) done/value reads on native IteratorResult structs — late-bound via
+// shared.ts (a static member-get-dispatch.ts import here is an eval-time cycle).
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureExternRestObject } from "./object-runtime.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
@@ -37,6 +39,7 @@ import {
   ensureBindingLocals,
   ensureLateImport,
   flushLateImportShifts,
+  reserveMemberGetDispatchLate,
   valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo } from "./type-coercion.js";
@@ -737,11 +740,38 @@ export function destructureParamObjectExternref(
     getIdx = ctx.funcMap.get("__extern_get");
     if (getIdx === undefined) continue;
 
-    fctx.body.push({ op: "local.get", index: paramIdx });
-    // #1623 — nativeStrings has a -1 sentinel global index; materialize the
-    // key string inline as externref instead of `global.get -1`.
-    for (const instr of stringConstantExternrefInstrs(ctx, propNameText)) fctx.body.push(instr);
-    fctx.body.push({ op: "call", funcIdx: getIdx });
+    // (#3178) `done`/`value` destructured off a native generator IteratorResult:
+    // raw `__extern_get` only understands $Object receivers, so
+    // `.then(({ done, value }) => …)` on an async-gen `next()` result read
+    // undefined/undefined (the 280-test yield*-error template family, #3417 F2
+    // harvest). Route these two keys through the finalize-filled
+    // `__get_member_<name>` dispatcher (#2674) instead — it enumerates every
+    // struct candidate owning the field at FINALIZE (so gen-result structs
+    // registered after this destructure site still get an arm), boxes the
+    // boolean-branded `done` via `__box_boolean` (#3050) and the sentinel f64
+    // `value` undefined-aware (#2979), and falls back to `__extern_get` for
+    // every non-struct receiver — identical semantics there. Other keys keep
+    // the raw `__extern_get` read (minimal dispatch surface; widen only with
+    // corpus evidence). Not under wasi (matches the property-access gate).
+    let readViaDispatcher = false;
+    if (!ctx.wasi && (propNameText === "done" || propNameText === "value")) {
+      const dispIdx = reserveMemberGetDispatchLate(ctx, propNameText, fctx);
+      if (dispIdx !== undefined) {
+        // Re-read post-reserve: the reserve may add late imports and shift indices.
+        const refreshedGetIdx = ctx.funcMap.get("__extern_get");
+        if (refreshedGetIdx !== undefined) getIdx = refreshedGetIdx;
+        fctx.body.push({ op: "local.get", index: paramIdx });
+        fctx.body.push({ op: "call", funcIdx: dispIdx });
+        readViaDispatcher = true;
+      }
+    }
+    if (!readViaDispatcher) {
+      fctx.body.push({ op: "local.get", index: paramIdx });
+      // #1623 — nativeStrings has a -1 sentinel global index; materialize the
+      // key string inline as externref instead of `global.get -1`.
+      for (const instr of stringConstantExternrefInstrs(ctx, propNameText)) fctx.body.push(instr);
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+    }
 
     const elemType: ValType = { kind: "externref" };
 
