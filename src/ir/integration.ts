@@ -1372,23 +1372,65 @@ export function compileIrPathFunctions(
       // body stays in place; the IR's effort goes uncommitted but no
       // regression occurs.
       //
-      // Top-level FunctionDeclarations don't need this check — their
-      // pre-allocated body was empty and no legacy callers depend on
-      // the slot's prior typeIdx.
+      // (#3536) Top-level FunctionDeclarations now share the guard too. The
+      // old exemption assumed "no legacy callers depend on the slot's prior
+      // typeIdx" — false: `__module_init` (and any legacy-compiled body) that
+      // calls the function has ALREADY emitted its call-argument coercions
+      // against the collect-time signature (`getFuncParamTypes` at that
+      // moment), and those bodies are not re-visited after this patch. A
+      // call-site-narrowed implicit-`any` param (a shape-struct ValType from
+      // inferParamTypeFromCallSites) that the IR re-types as externref left
+      // the module INVALID (V8: "call[0] expected type externref, found …")
+      // or, one fixup later, silently passed a closed struct into a
+      // dynamic-reading body → every member read `undefined`. `addFuncType`
+      // dedups on shape, so an identical signature lands on the identical
+      // typeIdx and the guard is a no-op for the common case; a mismatch
+      // means the IR resolved a DIFFERENT ABI than the one already-compiled
+      // callers bake — keep the legacy body (the IR's effort goes
+      // uncommitted, recorded on the ledger; no regression occurs).
       // (#3142 Slice 2) `__module_init` shares the guard: its slot's
       // `()->()` typeIdx was interned by compileDeclarations and the wasm
       // `start` section / `_start` wrapper depend on it. `addFuncType`
       // dedups on shape, so the IR-lowered void unit lands on the same
       // index; a mismatch means the lowering went wrong — keep legacy.
-      if ((entry.classMember || entry.moduleInit) && wasmFunc.typeIdx !== existing.typeIdx) {
-        markOwnerInvariant(
-          entry.ownerName,
-          name,
-          "abi-type-index-mismatch",
-          "patch",
-          `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
-        );
-        continue;
+      if (wasmFunc.typeIdx !== existing.typeIdx) {
+        if (entry.classMember || entry.moduleInit) {
+          // Pre-#3536 semantics unchanged: for these units a mismatch means
+          // the lowering itself went wrong — a hard invariant.
+          markOwnerInvariant(
+            entry.ownerName,
+            name,
+            "abi-type-index-mismatch",
+            "patch",
+            `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
+          );
+          continue;
+        }
+        if (existing.body.length > 0) {
+          // Top-level function WITH a real legacy body: an EXPECTED,
+          // recoverable divergence (the IR legitimately cannot express e.g. a
+          // shape-struct param) — a soft withdraw-the-claim fallback, NOT a
+          // compile error. The legacy body stays; callers keep the ABI they
+          // compiled against.
+          markOwnerFailure(
+            entry.ownerName,
+            name,
+            new IrUnsupportedError(
+              "abi-signature-parity",
+              "resolve",
+              `function typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
+            ),
+            "patch",
+          );
+          continue;
+        }
+        // EMPTY pre-allocated slot (e.g. a lifted branch-hoisted nested
+        // declaration whose slot carries a placeholder typeIdx and no body):
+        // this is the original exemption's TRUE case — the IR body is the
+        // ONLY body, so withdrawing would leave an empty function and an
+        // invalid module (the 2026-07-23 #3536 CI regressions:
+        // var-hoisting-scope / scope-and-error-handling). Fall through and
+        // patch as before.
       }
       // Tail-call optimization parity with the legacy AST path (#602): the IR
       // `return` lowering never rewrites a trailing `call`/`call_ref` into

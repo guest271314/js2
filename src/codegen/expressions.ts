@@ -1430,7 +1430,11 @@ function compileExpressionInner(
   }
 
   if (ts.isObjectLiteralExpression(expr)) {
-    return compileObjectLiteral(ctx, fctx, expr);
+    // (#3536) Forward the Wasm-level expected type: a literal in call-ARGUMENT
+    // position whose callee param was call-site-narrowed to this literal's own
+    // shape struct must construct THAT struct, not divert to the dynamic
+    // $Object path off its `any` TS-contextual type (see compileObjectLiteral).
+    return compileObjectLiteral(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isArrayLiteralExpression(expr)) {
