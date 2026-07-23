@@ -729,13 +729,13 @@ measured contract and a de-risked slice plan, mirroring the 3b banking.
 `async function* g(){ yield await Promise.resolve(1); yield 2 }` consumed by
 `for await (const x of g())`, compiled three ways:
 
-| target             | result                                                                                                                                                                      |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **wasi**           | **compile FAILS** — `function-body.ts:1016` gate: *"native generator lowering currently supports only sequential numeric yields in standalone/WASI targets (#680)."*        |
-| **standalone**     | **compile FAILS** — same #680 gate.                                                                                                                                        |
-| **gc (JS host)**   | compiles, but imports `__create_async_generator`, `__gen_create_buffer`, `__gen_push_f64`, `__gen_push_ref`, `__async_iterator`, `__iterator_next`, `Promise_resolve`, … — **host-backed, not host-free.** |
+| target           | result                                                                                                                                                                                                     |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **wasi**         | **compile FAILS** — `function-body.ts:1016` gate: _"native generator lowering currently supports only sequential numeric yields in standalone/WASI targets (#680)."_                                       |
+| **standalone**   | **compile FAILS** — same #680 gate.                                                                                                                                                                        |
+| **gc (JS host)** | compiles, but imports `__create_async_generator`, `__gen_create_buffer`, `__gen_push_f64`, `__gen_push_ref`, `__async_iterator`, `__iterator_next`, `Promise_resolve`, … — **host-backed, not host-free.** |
 
-Even a *plain-numeric* `async function*(){ yield 1; yield 2 }` fails in wasi: an
+Even a _plain-numeric_ `async function*(){ yield 1; yield 2 }` fails in wasi: an
 `async function*` routes through the generator-buffer path
 (`function-body.ts` `isGenerator` branch, ~L1012), whose standalone arm is the
 #680 numeric-only native-generator lowering + the `__create_async_generator`
@@ -747,24 +747,24 @@ comment at `function-body.ts:1087`).
 ### Why "planner-only `settleYield` + queue" is wrong (three missing substrates)
 
 1. **No host-free async-gen PRODUCER object.** The drive machine
-   (`emitAsyncFrameStateMachine`) drives an async *function* to completion,
+   (`emitAsyncFrameStateMachine`) drives an async _function_ to completion,
    settling **one** `result_promise`, and returns that promise. An async
-   *generator* is **called → returns an async-iterator object** (not a promise,
+   _generator_ is **called → returns an async-iterator object** (not a promise,
    not driven to completion), whose `next(v)` allocates a **fresh** pending
-   promise, drives the frame to the next `yield`, and settles *that* promise with
+   promise, drives the frame to the next `yield`, and settles _that_ promise with
    `{value, done:false}`. There is no such object host-free: even **sync**
    generator objects are built by the **host** import `__create_generator`
-   (host-free sync generators only work when for-of drives the resume *inline* via
+   (host-free sync generators only work when for-of drives the resume _inline_ via
    `emitNativeGeneratorToVec` — there is no escaping object). So a host-free
    async-gen object is strictly harder than a host-free sync-gen object, which
-   itself does not exist. `settleYield` needs *a promise to settle that a
-   re-entrant `next()` created* — that `next()` is the missing piece.
+   itself does not exist. `settleYield` needs _a promise to settle that a
+   re-entrant `next()` created_ — that `next()` is the missing piece.
 
 2. **No async-iterator for-await CONSUMER.** The 3b carrier drives a **sync**
-   `__iterator` over a **boxed array** and `await`s each *element*
+   `__iterator` over a **boxed array** and `await`s each _element_
    (`Await(value)`); `it.next()` is synchronous `(done, value)`. Consuming an
    async generator is a **different** protocol: `p = it.next()` returns a
-   **Promise**, you `await p` (suspend on the *next()-promise*), then read
+   **Promise**, you `await p` (suspend on the _next()-promise_), then read
    `done`/`value` from the resolved `IteratorResult`. `forAwaitNeedsDrive` gates
    on `oracle.elementFactOf(source)` being a boxed **array** element — `g()`
    (a call returning an AsyncGenerator) is not an array, so for-await over an
@@ -772,7 +772,7 @@ comment at `function-body.ts:1087`).
    promise, read IteratorResult fields via emit hooks) is required — a sibling of
    `planForAwaitCfg`, not a tweak to it.
 
-3. **The #680 routing gate.** `async function*` must be *intercepted before* the
+3. **The #680 routing gate.** `async function*` must be _intercepted before_ the
    generator-buffer branch and routed to a new host-free async-gen emitter
    (`function-body.ts` `isGenerator` arm, gated like 3b's
    `isStandalonePromiseActive`), or it errors out before any of the above runs.
@@ -791,14 +791,14 @@ the **current-next()-promise** slot (mutable — `next()` overwrites it per call
     added to `AsyncCfgTerminator` (async-cps.ts) + `validateAsyncCfg`
     (async-frame.ts). Emitter: build `IteratorResult{value, done:0}`, `fulfill`
     the frame's current `result_promise` with it, `STATE = resumeState`, spill,
-    `return`. (Do NOT ship it dead — land it *with* its producer + a test that
+    `return`. (Do NOT ship it dead — land it _with_ its producer + a test that
     exercises it, per the #2367 graveyard rule; slice-3 only shipped goto/condGoto
     unreachable because 3a exercised them in the same effort.)
   - **New planner** `planAsyncGenCfg(fn, plan)`: number a mixed `yield`/`await`
     body into states — each `await e` → `suspend` (resume writes SENT), each
     `yield e` → `settleYield` (resume-on-next), body completion →
     `settleDone` (a `settleUndefined` sibling that settles `{value:ret,
-    done:1}`). Bounded first shape: linear body, identifier bindings, the same
+done:1}`). Bounded first shape: linear body, identifier bindings, the same
     spill-safe-type gate as slice 1/3a.
   - **New call-site** `emitAsyncGenerator`: build the frame parked at STATE=0
     **without** kicking resume; return a native async-gen **carrier** (the frame
@@ -817,13 +817,13 @@ the **current-next()-promise** slot (mutable — `next()` overwrites it per call
     delivers `1` then `2` then `done`, `imports [] `. This proves suspend+settle
     without needing the consumer slice. Inject-throw probes on the
     suspend/settle arms (a rejected awaited promise inside the gen must reject the
-    *current* next()-promise).
+    _current_ next()-promise).
 - **3d-ii — async-iterator for-await CONSUMER.** `planForAwaitAsyncCfg` sibling of
   `planForAwaitCfg`: `it = source` (the async gen IS its own async iterator);
   head emits `p = <per-gen next>(it)`; `suspend(await p)`; resume reads
   `res.done`/`res.value` from the awaited `IteratorResult` via emit hooks;
   back-edge `goto(head)`. Gate for-await on an async-iterator source
-  (`oracle` async-iterable fact). This is what makes the *task's* headline proof —
+  (`oracle` async-iterable fact). This is what makes the _task's_ headline proof —
   `for await (const x of g())` → `[1,2]`, imports `[]` — pass end-to-end.
 - **3d-iii — edges (bank):** `return()`/`throw()` on the async gen; `yield*`
   (async delegation); yielded-thenable adoption (`yield await` vs `yield P` —
@@ -859,7 +859,7 @@ on the drain**. Previously this hit the #680 native-generator gate
 
 - **`async-cps.ts`** — `planAsyncGenCfg(fn)` + `isBoundedAsyncGenBody(fn)`. Two
   new `AsyncCfgTerminator` kinds: **`settleYield`** (`{value|fromSent,
-  resumeState}`) fulfils the current `next()`-promise `{value, done:false}` and
+resumeState}`) fulfils the current `next()`-promise `{value, done:false}` and
   suspends (NO reaction registered — the next `next()` kick is the sole
   resumption driver); **`settleDone`** fulfils `{undefined, done:true}` at body
   end. `yield await P` lowers to `suspend(P) → settleYield(fromSent)`; the await
@@ -893,6 +893,7 @@ move — this slice does not touch it.
 
 **Bounded slice (everything else → legacy gen path / #680, never a wrong
 machine).** A FLAT body of `yield <E>` statements where `E` is plain / `await
+
 <P>` / absent; NO own-local declarations (a local crossing a yield needs the
 frame-spill widening the linear/loop drives already have — params ARE fine,
 captured in frame fields); no `yield*`, no yields nested in expressions/control
@@ -920,9 +921,9 @@ gap3-tryfinally throw-path, 2× promise-combinators host, 2× issue-2865 AG0 was
 **pre-existing on origin/main** — verified identical failure set in a base
 worktree. `tsc --noEmit` clean.
 
-**Answers the 3d dispatch questions.** *Does async-gen drive host-free now?*
+**Answers the 3d dispatch questions.** _Does async-gen drive host-free now?_
 **Yes** — for the bounded producer shape, in wasi, imports `[]`, with genuine
-suspension. *Is 3d-ii / #2865 unblocked?* **Yes** — the frame carrier +
+suspension. _Is 3d-ii / #2865 unblocked?_ **Yes** — the frame carrier +
 `__async_gen_next_<name>` driver + settleYield/settleDone suspend-resume
 substrate are exactly what the `for await (x of g())` consumer (3d-ii) drives:
 that headline is now a consumer-side wiring slice (dispatch
@@ -981,7 +982,8 @@ gen. `planAsyncCfg` gained a `ctx` param and tries `planForAwaitAsyncCfg` **befo
 the 3b array carrier; it self-gates to async-gen sources (returns `null` otherwise),
 so an array for-await falls through **byte-identically**. The consumer's frame layout
 is the SAME as a 3b for-await (own-locals + iterator spill), so `computeForAwaitSpills`
-+ the spill-safe gate are reused unchanged.
+
+- the spill-safe gate are reused unchanged.
 
 **Byte-inertness proof (the −16/−29 discipline).** sha256 of 6 programs (plainSync /
 plainAsync / arrayForAwait / numArrayForAwait / whileAwait / asyncGenConsumer) ×
@@ -1004,9 +1006,9 @@ ONLY failures (3× gap3-tryfinally throw-path, 2× promise-combinators, 2× issu
 each is a non-async-gen program compiled **byte-identically to base** (proven by the
 hash probe), so it cannot be a 3d-ii regression. `tsc --noEmit` clean.
 
-**Answers the dispatch questions.** *Does `for await (x of asyncGen())` work
-host-free now?* **Yes** — bounded shape, wasi, imports `[]`, with genuine
-suspend/resume across the consumer↔producer boundary. *What's left for 3d-iii?*
+**Answers the dispatch questions.** _Does `for await (x of asyncGen())` work
+host-free now?_ **Yes** — bounded shape, wasi, imports `[]`, with genuine
+suspend/resume across the consumer↔producer boundary. _What's left for 3d-iii?_
 `next(v)` argument delivery into the pending yield's SENT_FIELD; `.throw()`/`.return()`
 close-forwarding; the concurrent-`next()` result-promise QUEUE (a single
 current-promise slot suffices for the serial for-await drive proven here);
@@ -1060,7 +1062,7 @@ standalone probes match spec (catch entered with the reason bound: 42/45/50/
   7-program × 3-lane sha256 matrix unchanged; only the newly-admitted shape
   differs, and only on wasi/standalone — gc is byte-identical even for it).
   The depth shift is the designed single site (`loopDepth = st.id + (routed ?
-  3 : 2)` in `buildStateBody`).
+3 : 2)` in `buildStateBody`).
 - **Route** = state transition: for the active region id (the existing
   `__async_in_try` local — the prelude re-throw arm already arms it), bind the
   reason to the catch param (local + spill field, so it survives catch-chain
@@ -1129,13 +1131,12 @@ standalone probes match spec (catch entered with the reason bound: 42/45/50/
   region), replays, then settles. `pendingFinalizer` clears during the replay
   so a `return` inside the finally settles directly (its completion
   overrides). Admission is native-gated end-to-end: `LowerState.
-  allowReturnInTry` → `planLinearAwaits(fn, plan, opts)` (default reject —
+allowReturnInTry` → `planLinearAwaits(fn, plan, opts)` (default reject —
   every host-lane caller byte-identical) → set by `asyncFnNeedsDrive`,
   `planAsyncCfg` (`AsyncCfgOptions.allowReturnInTry = !info.host`) and
   `computeAsyncSpills` (from `buildAsyncFrameInfo`'s `hostImports ===
-  undefined`) so gate, producer, and spill computation see the SAME plan.
-  Deferred within this lane: `return await P` inside the try (the L653 bail
-  stays — its settle is a TERMINATOR, needs the same replay before settleSent).
+undefined`) so gate, producer, and spill computation see the SAME plan.
+  `return await P` inside the try landed in the SAME slice (see below).
 - **Sibling try/catch regions** — the 3c producer generalizes to ANY number of
   sequential top-level try/catches: `analyzeTryCatchAsync` walks
   `[chunk, try/catch]* chunk` groups, `planTryCatchCfg` rebuilt as a running
@@ -1154,7 +1155,19 @@ matrix: all 8 control programs (incl. the 3c-i try/catch shape) byte-identical
 to the 3c-i base across 3 lanes. Async corpus re-run: 89+36 passing, failures
 identical to the pre-existing main set.
 
-**Remaining after 3c-ii-a:** try/catch/finally combined regions +
-`return await`-in-try (3c-ii-b, needs the replay on the settleSent terminator
-or the full finallyState machinery); nested regions (3c-iii). D4 (#2864)
-still waits on those.
+- **`return await P` inside try/finally** (same PR): the `settleSent`
+  terminator replays the state's region finalizer BEFORE fulfilling — the
+  delivered value sits stably in SENT (an await-free finalizer cannot
+  overwrite it), region local reset first (throw-in-finally rejects without
+  re-entering the region). `linearPlanToCfg` already drops the inline tail
+  for `isReturnAwait` states, so the replay is the ONLY finalizer run — no
+  double-execution. The L653 bail lifts under the same `allowReturnInTry`
+  gate. 4 more tests (24/24 total): sync/pending fulfil (finalizer exactly
+  once, before settle — 1042), rejection via the reject route (1), leads +
+  return-await (1052). Byte matrix still identical on all 8 controls.
+
+**Remaining after 3c-ii:** try/catch/finally COMBINED regions (a region with
+both catchState and a finalizer — the catch chain must run the finally on all
+its completion paths; needs a finally-only sibling region or the full
+finallyState machinery); nested regions (3c-iii). D4 (#2864) still waits on
+those.

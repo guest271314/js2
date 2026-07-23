@@ -1800,6 +1800,20 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         }
         case "settleSent": {
           // `return await P` — fulfil the result promise with SENT directly.
+          // (#2906 3c-ii-b) When this settle state was entered from an IN-REGION
+          // await (`return await P` inside a try/finally), replay the region's
+          // await-free finalizer BEFORE fulfilling — the delivered value sits
+          // stably in SENT (the finalizer cannot await, so nothing overwrites
+          // it). Region local resets first: a throw inside the finally rejects
+          // WITHOUT re-entering the region (same rule as the inline finally
+          // leads and the return hook's replay). Empty finalizers (the 3c
+          // catch-only regions) emit nothing — byte-identical.
+          const settleRegion = st.resumeFrom !== null && st.resumeFrom.handler !== 0 ? st.resumeFrom.handler : 0;
+          const settleFin = settleRegion !== 0 ? cfg.handlers[settleRegion - 1]?.finalizer : undefined;
+          if (settleFin !== undefined && settleFin.length > 0) {
+            if (hasHandlers) out.push(...setHandler(0));
+            for (const f of settleFin) compileStatement(ctx, resumeFctx, f);
+          }
           out.push({ op: "local.get", index: resultPromiseLocal });
           out.push({ op: "local.get", index: frameLocal });
           out.push({

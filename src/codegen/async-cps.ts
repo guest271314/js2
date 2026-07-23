@@ -665,7 +665,10 @@ function lowerLinearStatements(
 
     // The await must be DIRECTLY one of the three canonical positions.
     if (ts.isReturnStatement(stmt) && stmt.expression === awaitNode) {
-      if (awaitInTry) return false; // `return await` in a try → return-through-finally, follow-up
+      // (#2906 3c-ii-b) `return await P` in a try/finally: the settleSent
+      // terminator replays the region's finalizer before fulfilling (native
+      // drive lane only — historical reject elsewhere).
+      if (awaitInTry && !st.allowReturnInTry) return false;
       st.segments.push({
         leadStmts,
         awaitedExpr: awaitNode.expression,

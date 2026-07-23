@@ -373,6 +373,87 @@ export function kick(): number { f() as any; return 0; }
 export function getCap(): number { return cap; }`),
     ).toBe(142);
   });
+
+  // (#2906 3c-ii-b) `return await P` inside try/finally — the settleSent
+  // terminator replays the region's finalizer BEFORE fulfilling (the value
+  // sits stably in SENT; the finalizer cannot await). linearPlanToCfg drops
+  // the inline tail for isReturnAwait states, so the replay is the ONLY run.
+  it("return await inside try/finally: finalizer exactly once, before the settle (sync fulfil)", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    return await Promise.resolve(42);
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1042);
+  });
+
+  it("return await inside try/finally: genuinely-pending fulfil replays once on resume", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    return await Promise.resolve(41).then((v: number) => v + 1);
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1042);
+  });
+
+  it("return await inside try/finally: a rejection still replays via the reject route", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    return await Promise.reject(new Error("x"));
+  } finally {
+    flag = flag + 1;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return flag; }`),
+    ).toBe(1);
+  });
+
+  it("leads before the return-await run once; finalizer once", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    const a = await Promise.resolve(10);
+    return await Promise.resolve((a as number) + 42);
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1052);
+  });
 });
 
 describe("#2906 3c — try/catch-around-await drive (standalone carrier lane)", () => {
