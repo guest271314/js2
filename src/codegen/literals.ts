@@ -3487,20 +3487,14 @@ function isExprFreeOfReference(expr: ts.Node, name: string): boolean {
 }
 
 /**
- * (#3532) Resolve the element wasm type for a bare empty array literal `[]`
- * from its contextual type. Handles a direct `Array<T>` / `ReadonlyArray<T>`
- * context AND a UNION contextual type (e.g. flatMap's callback return
- * `U | readonly U[]`) that contains array member(s): the `[]` must adopt the
- * array member's element type so it registers the SAME vec type as a sibling
- * non-empty array literal in the same conditional (`cond ? [] : [x]`). Without
- * this, a union context falls through to the `externref` default while the
- * sibling `[x]` resolves to a concrete numeric vec, producing an invalid
- * closure (a Wasm fallthru type error).
- *
- * Only adopts a union's array element type when EVERY array member resolves to
- * the same wasm element type (otherwise the choice is ambiguous — e.g.
- * `number[] | string[]` — and we keep the externref default). Returns undefined
- * when no concrete array element type can be determined.
+ * (#3532) Element wasm type for a bare empty `[]` from its contextual type.
+ * Handles a direct `Array<T>`/`ReadonlyArray<T>` context AND a UNION context
+ * (e.g. flatMap's `U | readonly U[]`) with array member(s), so `[]` adopts the
+ * array member's element type and registers the SAME vec type as a sibling
+ * `[x]` in the same conditional (`cond ? [] : [x]`) — otherwise the union falls
+ * through to `externref` while `[x]` is a numeric vec → invalid closure. Only
+ * adopts a union's element type when EVERY array member resolves to the same
+ * wasm type (ambiguous otherwise, e.g. `number[] | string[]` → keep externref).
  */
 function resolveEmptyArrayElemWasm(ctx: CodegenContext, ctxType: ts.Type): ValType | undefined {
   const fromArrayType = (t: ts.Type): ValType | undefined => {
