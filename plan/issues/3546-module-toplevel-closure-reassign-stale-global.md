@@ -4,6 +4,7 @@ title: "codegen: module TOP-LEVEL closure reassignment writes only the __module_
 status: done
 assignee: ttraenkler/fable-3546
 completed: 2026-07-23
+pr: 3512
 sprint: Backlog
 created: 2026-07-23
 priority: medium
