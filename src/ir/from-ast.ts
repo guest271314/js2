@@ -4492,7 +4492,22 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
     }
     return boxed;
   }
-  throw new Error(`ir/from-ast: ${where} expects ${expected.kind} but got ${describeIrType(t)} (${cx.funcName})`);
+  // (#3553) A leftover mismatch here is DESIGNED non-claimability, not a
+  // compiler invariant: the doc block above explicitly rejects e.g. a native-
+  // strings `(ref $AnyString)` value in an externref host-arg position so the
+  // function "falls back to legacy" (which owns the native lowering — for
+  // `new RegExp`/`RegExp.test` under `target: standalone` that is the native
+  // regex engine). #3483's typed-outcome boundary classifies any plain
+  // `Error` escaping build as `invariant`/`unexpected-internal-throw` — a
+  // HARD compile error — which turned this designed fallback into a CE
+  // (80/178 red in tests/issue-1539-standalone-regex.test.ts). Throw the
+  // typed Unsupported error instead, like the sibling coercion sites #3483
+  // itself migrated (see the `operand-coercion-unsupported` throws below).
+  throw new IrUnsupportedError(
+    "operand-coercion-unsupported",
+    "build",
+    `ir/from-ast: ${where} expects ${expected.kind} but got ${describeIrType(t)} (${cx.funcName})`,
+  );
 }
 
 /**
