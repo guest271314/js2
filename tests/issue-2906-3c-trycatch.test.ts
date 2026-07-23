@@ -627,6 +627,148 @@ export function getCap(): number { return cap; }`),
   });
 });
 
+// #2906 3c-iii — NESTED try/catch regions. The producer lowers try blocks
+// RECURSIVELY: an inner group's region carries `parent`, and its CATCH chunk
+// is tagged with the ENCLOSING region id — so an abrupt in the inner catch
+// escalates to the outer catch through the SAME flat id-dispatch route (the
+// parent chain is encoded statically in the handler tags; no dynamic walk).
+// Bounded: nested regions are finalizer-free (validateAsyncCfg enforces);
+// combined try/catch/finally groups stay depth-0 with pure try bodies.
+describe("#2906 3c-iii — nested try/catch regions (wasi lane)", () => {
+  it("inner catch handles; outer catch untouched", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    try {
+      await Promise.reject(new Error("inner"));
+      cap = 1;
+    } catch (e) {
+      cap = 42;
+    }
+  } catch (e2) {
+    cap = -1;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(42);
+  });
+
+  it("a throw in the INNER CATCH escalates to the OUTER catch", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    try {
+      await Promise.reject(new Error("inner"));
+      cap = 1;
+    } catch (e) {
+      cap = 42;
+      throw new Error("re");
+    }
+  } catch (e2) {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(142);
+  });
+
+  it("a REJECTED await in the inner catch escalates to the outer catch", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    try {
+      await Promise.reject(new Error("inner"));
+      cap = 1;
+    } catch (e) {
+      cap = 42;
+      await Promise.reject(new Error("re2"));
+      cap = 2;
+    }
+  } catch (e2) {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(142);
+  });
+
+  it("an abrupt in the outer try AFTER the inner group hits the outer catch", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    try {
+      const a = await Promise.resolve(5);
+      cap = a as number;
+    } catch (e) {
+      cap = -1;
+    }
+    await Promise.reject(new Error("outer"));
+    cap = 1;
+  } catch (e2) {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(105);
+  });
+
+  it("fulfil-through both levels with pre/mid/post leads and a post await", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  cap = 5;
+  try {
+    const a = await Promise.resolve(0);
+    try {
+      const b = await Promise.resolve(20);
+      cap = cap + (b as number);
+    } catch (e) {
+      cap = -1;
+    }
+  } catch (e2) {
+    cap = -2;
+  }
+  const t = await Promise.resolve(100);
+  cap = cap + (t as number);
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(125);
+  });
+
+  it("three levels deep: the innermost catch handles", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    try {
+      try {
+        await Promise.reject(new Error("deep"));
+        cap = 1;
+      } catch (e) {
+        cap = 7;
+      }
+    } catch (e2) {
+      cap = -1;
+    }
+  } catch (e3) {
+    cap = -2;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(7);
+  });
+});
+
 describe("#2906 3c — try/catch-around-await drive (standalone carrier lane)", () => {
   it("the core rejection→catch case drives on standalone too", async () => {
     expect(
