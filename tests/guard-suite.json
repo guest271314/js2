@@ -37,6 +37,16 @@
       "path": "tests/issue-3551.test.ts",
       "guards": "IR ABI-parity withdrawal cascades to committed IR callers — no partial commit of a calleeTypes cluster",
       "broken_by": "#3503 partial-commit semantics"
+    },
+    {
+      "path": "tests/issue-2906-gap3-tryfinally.test.ts",
+      "guards": "wasi async try/finally runs on every completion path AND the module stays JS-host-free (no env.* imports; wasi_snapshot_preview1 system imports allowed per #2968)",
+      "broken_by": "#2968/PR #2533 (2026-07-04) invalidated the bare-{} instantiation silently — red 19 days, found+reconciled by #3558"
+    },
+    {
+      "path": "tests/issue-2980-carrier-fallback.test.ts",
+      "guards": "standalone Promise carrier lane split: all-drivable async-gen modules import-free (native $Promise), non-drivable ones host-consistent (legacy __gen_* buffer, no mixing)",
+      "broken_by": "#3132 PR-2/PR #3013 (2026-07-13) superseded the blanket #2980 fallback silently — red 10 days, found+reconciled by #3558"
     }
   ]
 }
