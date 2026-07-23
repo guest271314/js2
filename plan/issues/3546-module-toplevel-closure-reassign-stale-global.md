@@ -146,6 +146,12 @@ a real case surfaces.
   (2 fails) fail IDENTICALLY on origin/main src in this container
   (`string_constants` import harness gap / missing test262-fyi submodule) —
   pre-existing, delta zero.
-- Full equivalence dir (213 files / 1646 tests): 35 failed = the exact
-  pre-existing count documented in #3534's run on this container; matched-pair
-  name diff vs origin/main src recorded in the PR.
+- Full equivalence dir (213 files / 1646 tests): matched-pair JSON runs,
+  fixed tree vs origin/main src — **identical 35 failing tests on both, zero
+  flips in either direction** (all pre-existing in this container, matching
+  #3534's documented run). Delta exactly zero.
+- Edge probes (host lane): `export_let_reassign` PASS, `reassign_in_loop`
+  PASS (=122: first iteration reads closure 1, second reads 2 — the shape the
+  rejected precise-local alternative would break), `different_captures` PASS
+  (reassignment to a closure with a different capture set — the retype-hazard
+  shape — is valid Wasm and correct).
