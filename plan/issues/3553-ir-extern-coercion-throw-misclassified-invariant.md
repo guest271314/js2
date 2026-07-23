@@ -17,6 +17,8 @@ goal: ir-full-coverage
 related: [3519, 3483, 1539, 1169]
 files:
   - src/ir/from-ast.ts
+loc-budget-allow:
+  - src/ir/from-ast.ts
 ---
 
 # #3553 — designed extern-coercion fallback reclassified as hard invariant by #3519's typed-outcome boundary
