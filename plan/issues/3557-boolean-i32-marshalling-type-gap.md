@@ -1,7 +1,8 @@
 ---
 id: 3557
 title: "booleans cross the host boundary as i32 0/1 — systemic wrong-TYPE marshalling (boolean brand lost in struct-field type inference)"
-status: ready
+status: in-progress
+assignee: sendev-bool-marshal
 sprint: current
 priority: medium
 horizon: m
@@ -99,3 +100,82 @@ epic (#2773) owner / tech lead — NOT silently parked as an allowance:
 - `tests/dogfood/acorn-corpus.mjs` reports `quirk-bool-as-i32` ≈ 0 (fix path).
 - Full merge_group validation (batch blast-radius check) — no test262
   regression, no standalone-floor regression.
+
+## Increment landed — `!`/`!!` operator brand (2026-07-24, sendev, Opus)
+
+**Corrected root cause (traced to the emitting site, not inferred).** The
+original #2847-carryover note pointed at the struct-field getter
+(`_emitStructFieldGettersInner` / `hasBool` fork). Tracing one field
+(`generator`) through the actual WAT proved that is NOT where acorn's boolean
+fields marshal:
+
+- The `__sget_*` getter path (#1788) and `coerceType`'s i32→externref arm
+  (`type-coercion.ts:1971`, `if (from.boolean === true) __box_boolean`) **already
+  pick `__box_boolean` when the ValType carries `boolean:true`**. Verified: only
+  `prefix`/`generator` are ever struct-field getters, and both are branded — yet
+  `generator` still read `0/1` for some nodes.
+- Acorn's node boolean fields (`computed`/`async`/`optional`/…) are **dynamic
+  sidecar properties** set on open objects (`node.async = !!isAsync`), boxed to
+  externref by the dynamic-set helpers (`tryEmitDeleteAwareDynamicSet`,
+  `compilePropertyAssignmentExternSet`). Those helpers compile the RHS in its
+  natural type then `coerceType(→externref)` — which honours `boolean:true`.
+- **So the entire defect is brand-LOSS before boxing, not a boxing-site bug.**
+  Instrumenting the dynamic-set site showed the surviving loss forms:
+  - boolean **literal** RHS (`= false`) → already branded → boxes as boolean ✓
+  - **`!x` / `!!x`** (PrefixUnary) → born **unbranded** i32 (`unary.ts` returned
+    `{kind:"i32"}`) → boxed as the number `0/1` ✗ (dominant: `async`, `computed`)
+
+**Fix (contained, dual-mode).** Brand the `!`/`!!` result as
+`{kind:"i32", boolean:true}` in `src/codegen/expressions/unary.ts` — the missing
+prefix-unary member of the boolean-producing-operator family that #2712's
+`brandBooleanBinaryResult` already brands for `===`/`<`/`in`/`instanceof`. `!x` is
+definitionally a JS boolean, so this is semantically correct and structurally
+inert (still `.kind === "i32"`). Lane-agnostic: the `from.boolean` check fires in
+gc/host **and** standalone.
+
+**Measured corpus impact** (`pnpm run dogfood:acorn-corpus`, denominators honest):
+
+| input          | `quirk-bool-as-i32` before | after |
+| -------------- | -------------------------- | ----- |
+| real/acorn.mjs | 11,843                     | 6,781 |
+| real/edge.js   | 258                        | 148   |
+| corpus total   | ~12,556                    | ~7,025 (**−44 %**) |
+
+`REAL=0` unchanged (no new structural divergence); `equal` stays 0 because it is
+gated by the *separate* `quirk-sourceFile` (#2847, out of scope), present in
+every input.
+
+Test: `tests/issue-3557-not-operator-bool-brand.test.ts` (10/10) — `typeof (!x)`,
+dynamic-property write of `!!cond`, `=== false`, `JSON.stringify`, Set-element,
+plus structural-inertia guards (`!x` in arithmetic stays number; branch cond
+works; number fields unaffected).
+
+## Residual — the genuine value-rep slice (#2773), NOT ground here
+
+After the operator fix, the remaining `quirk-bool-as-i32` (acorn self-parse,
+measured per-field) is:
+
+- **`optional`: 6,427 (94 % of residual)** — acorn line 2923
+  `var optional = optionalSupported && this.eat(types.questionDot)`. The value is
+  a boolean at runtime but its boolean-ness is lost through **`&&` where one
+  operand (`this.eat(...)`) is `any`/externref-typed**, then through **variable
+  storage** (the local is not boolean-branded). `&&`/`||` return the operand type
+  and deliberately do **not** brand (branding a number would be a bug), and the
+  `any`-typed method return has already boxed as a number upstream — so this is
+  not cleanly brandable at any single site without value-rep work.
+- **`generator`: 354** — chained `node.generator = node.expression = false`
+  (acorn 3491): the inner assignment returns an already-boxed externref that the
+  outer set re-stores; the externref lost its boolean tag upstream.
+
+Both are the **"any-passage" residual**: boolean-ness dropped while a value
+transits `any`/externref before reaching the marshalling boundary. Fixing them
+means preserving a boolean tag through `&&`/`||` operand typing, `any`-typed
+method-call return boxing, and boolean-local storage — i.e. the #2773 value-rep
+brand-propagation work, explicitly out of scope for this contained increment.
+**Recommend:** keep #3557 open tracking this residual under #2773; route the
+value-rep slice deliberately (do not grind a substrate rewrite here).
+
+**Gate note:** the operator brand is exactly the typeof/boxing blast-radius class
+#1788/#2712 had to guard. PR-level test262 is a designed no-op — the real
+regression/standalone-floor gate is the **merge_group** re-validation; expect a
+possible auto-park and treat merge_group green as the acceptance evidence.
