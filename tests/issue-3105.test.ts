@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import { hashProbeAdvanceInstrs } from "../src/codegen-linear/emit-idioms.js";
+import { hashProbeAdvanceInstrs, hashProbeInitInstrs } from "../src/codegen-linear/emit-idioms.js";
 
 /**
  * #3105 slice 1 — emit-idiom builder library (linear backend).
@@ -85,5 +85,33 @@ describe("#3105 emit-idioms (linear) — hash-probe advance", () => {
     const r2 = await compile(source, { target: "linear" });
     const { instance: i2 } = await WebAssembly.instantiate(r2.binary, {});
     expect((i2.exports as { run(): number }).run()).toBe(ret);
+  });
+});
+
+/**
+ * #3105 slice 2 — hash-probe INIT (`idx = hash % cap`, the head of every
+ * open-addressing probe loop). Lifted out of the same 10 sites in
+ * `src/codegen-linear/runtime.ts` (string/numeric Map & Set) into
+ * `hashProbeInitInstrs`. Byte-identity across the corpus (including the
+ * `linear` target) is proved by `scripts/prove-emit-identity.mjs`; the Map/Set
+ * program above exercises the init path at each loop head, keeping the proof
+ * non-vacuous.
+ */
+describe("#3105 emit-idioms (linear) — hash-probe init", () => {
+  it("hashProbeInitInstrs returns the exact idx=hash%cap sequence", () => {
+    expect(hashProbeInitInstrs(4, 3, 5)).toEqual([
+      { op: "local.get", index: 4 },
+      { op: "local.get", index: 3 },
+      { op: "i32.rem_u" },
+      { op: "local.set", index: 5 },
+    ]);
+  });
+
+  it("threads distinct hash/cap/idx locals through unchanged (4 instrs, no extra ops)", () => {
+    const seq = hashProbeInitInstrs(9, 2, 7);
+    expect(seq).toHaveLength(4);
+    expect(seq[0]).toEqual({ op: "local.get", index: 9 }); // read hash
+    expect(seq[1]).toEqual({ op: "local.get", index: 2 }); // read cap
+    expect(seq[3]).toEqual({ op: "local.set", index: 7 }); // store idx
   });
 });
