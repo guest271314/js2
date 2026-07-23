@@ -75,6 +75,11 @@ imports, no host surface, #2961 gate untouched.
 
 ## Validation (measured)
 
+- Permanent repro: `tests/issue-3542.test.ts` (4 cases — sync throw,
+  throw-after-await, the for-await-dstr cluster shape, and the
+  direct/executor no-regression control; all through the real standalone
+  sink/drain channel).
+
 - Bisection probes all flip: sync-throw / throw-after-await async fns reject
   with the real TypeError (`instanceof` + `.message` hold); for-await-dstr
   rejections carry the genuine IteratorBindingInitialization TypeError.
