@@ -1,7 +1,8 @@
 ---
 id: 2906
 title: "Standalone: generalize the async drive layer → multi-state, CFG-aware CPS resume machine (unlocks try/finally-across-await, for-await, multi-await)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-laneB
 created: 2026-07-01
 priority: high
 feasibility: hard
