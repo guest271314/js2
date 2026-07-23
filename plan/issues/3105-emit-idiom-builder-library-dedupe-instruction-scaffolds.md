@@ -189,5 +189,55 @@ green; the Map/Set linear compile/run test exercises the init path at each loop
 head, keeping the proof non-vacuous).
 
 **Running total (slices 1+2): 20 of the ≥40 target idiom copies replaced.**
-Remaining: throw-guard×17 (`expressions/calls.ts`), counter-loop×21,
-proxy-guard×12, param-object×24. Issue stays `in-progress`.
+
+### Slice 3 — counter-loop ×6 (WasmGC, json-runtime.ts) — DONE (2026-07-24, dev-opus-1)
+
+**Idiom chosen:** the counted-forward loop `for (; i < bound; i += step) { body }`
+— a `block { loop { i>=bound → br_if 1; …body…; i+=step; br 0 } }` nest. First
+WasmGC-backend slice, so it creates **`src/codegen/emit-idioms.ts`** with
+`counterLoopInstrs({ i, bound, body, step? })`, returning the byte-identical
+scaffold (guard `i32.ge_s`, `br_if 1`; increment `i32.const step`/`i32.add`;
+`br 0`). The `body`'s own branch depths are preserved because the builder wraps
+it in the identical two-level nest — several sites carry their own `br_if 1`
+early-exits (digit-range / non-ws checks) that keep meaning unchanged.
+
+**Re-audit finding (the documented remaining idioms are STALE vs current main).**
+The 2026-07-09 audit's proxy-guard×12 (`object-runtime.ts`) and throw-guard×17
+(`expressions/calls.ts`) have since been **consolidated** — main now has **1**
+`ref.test $proxy` site and **1** `throw` op in calls.ts respectively, not ×12/×17.
+The one still-real duplicated idiom outside the linear runtime was the
+**counter-loop in `json-runtime.ts`**: **8** loops, of which **6 share the exact
+`i32.ge_s` counted-forward scaffold** and 2 are `i32.eqz` while-loops (excluded).
+
+**What landed:**
+
+- New `src/codegen/emit-idioms.ts` → `counterLoopInstrs`. Per-backend (#1527).
+- All **6** clean counter-loops in `src/codegen/json-runtime.ts` migrated —
+  the JSON string writer (`emitJsonQuoteString`: char-scan length loop +
+  escape-write loop) and the number parser (`emitJsonParsePrimitive`: skip-ws,
+  integer-digit, fraction-digit, exponent-digit loops). The 2 `i32.eqz`
+  while-loops are left as-is (different guard shape — not this idiom).
+- New emit-identity corpus **`scripts/emit-identity-corpus/json.ts`**
+  (JSON.stringify of an escapable string + JSON.parse of int/frac/exp) so the
+  counter-loop proof is **non-vacuous** — the native JSON runtime is emitted
+  only under standalone/wasi (the `gc`/host lane uses the V8 `JSON` import), and
+  the corpus forces those loops into the standalone/wasi binaries.
+
+**Byte-identity proof:** `prove-emit-identity` baseline (60 records) → migrate →
+`check` **IDENTICAL — all 60 match** (`json.ts::standalone` sha `cfc2888e0759`,
+`::wasi` `0772fc0a7e7f` unchanged). **Non-vacuousness verified** by a
+perturbation: temporarily flipping the builder's guard `i32.ge_s → i32.gt_s`
+drifted **exactly** `json.ts::standalone` (and wasi) and nothing else, confirming
+the corpus exercises the migrated loops and only the native lanes use them; the
+guard was reverted and `check` re-confirmed IDENTICAL. `tsc`/prettier/biome
+clean; `tests/issue-3105.test.ts` +3 (builder shape, custom-step/body-depth
+guard, standalone JSON compile+run == 14357.5) → 6 green. Functional spot-check
+(standalone): `JSON.parse` of `12345`/`-67`/`3.5`/`2e3` → `12345`/`-67`/`3.5`/
+`2000` (sign + fraction + exponent loops correct).
+
+**Running total (slices 1+2+3): 26 of the ≥40 target idiom copies replaced.**
+Remaining real duplication: the counter-loop in `array-methods.ts` (~15 loops,
+hot file — later slice) and the `param-object×24` array-method signature
+(a type refactor, not an instruction scaffold). The audit's proxy-guard/
+throw-guard idioms are already consolidated (no longer ×12/×17). Issue stays
+`in-progress`.
