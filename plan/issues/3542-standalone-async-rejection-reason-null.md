@@ -3,7 +3,7 @@ id: 3542
 title: "Standalone async-fn rejections lose the thrown value — reason is always NULL (unfinished #1326 Phase-1C payload wiring)"
 status: done
 assignee: ttraenkler/fable-3417
-sprint: current
+sprint: 75
 priority: high
 horizon: s
 feasibility: medium

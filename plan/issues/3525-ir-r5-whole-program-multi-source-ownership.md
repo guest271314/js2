@@ -2,7 +2,7 @@
 id: 3525
 title: "IR-only R5: whole-program single- and multi-source Prepared ownership"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-21
 updated: 2026-07-21
 priority: critical

@@ -2,7 +2,6 @@
 id: 2802
 title: "[DEFERRED] nested `any`-vec multi-push then read drops the first element (S3-class vec-identity edge)"
 status: ready
-assignee: ttraenkler/unassigned
 sprint: current
 priority: low
 horizon: m

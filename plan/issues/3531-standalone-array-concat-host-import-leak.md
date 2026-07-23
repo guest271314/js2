@@ -2,10 +2,11 @@
 id: 3531
 title: "standalone: retire __array_concat_any / __js_array_new / __js_array_push host-import leak (216 tests)"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-21
-updated: 2026-07-21
+updated: 2026-07-23
 priority: high
+horizon: l
 feasibility: hard
 reasoning_effort: high
 task_type: bugfix

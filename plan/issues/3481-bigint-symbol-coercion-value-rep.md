@@ -1,8 +1,7 @@
 ---
 id: 3481
 title: "bigint/symbol coercion: value-substrate ToPrimitive/ToNumeric fidelity (host ~164 fails) — architect-spec hand-off"
-status: in-progress
-assignee: ttraenkler/senior-dev
+status: ready
 created: 2026-07-20
 priority: medium
 feasibility: hard

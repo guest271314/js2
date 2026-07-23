@@ -1,8 +1,9 @@
 ---
 id: 3502
 title: "Lower landing string construction and char methods through shared IR"
-status: in-review
-sprint: current
+status: done
+completed: 2026-07-23
+sprint: 75
 created: 2026-07-20
 updated: 2026-07-20
 priority: high
@@ -15,7 +16,6 @@ area: ir, strings, codegen-linear, porffor
 goal: backend-agnostic-ir
 depends_on: [3497, 3499, 3501]
 related: [2956, 3498]
-assignee: ttraenkler/codex-3502-shared-string-build-method-lowering
 origin: "#3498 post-#3497 exact string-hash native-route probe"
 loc-budget-allow:
   - src/codegen-linear/index.ts

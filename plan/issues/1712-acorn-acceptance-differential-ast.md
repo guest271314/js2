@@ -1,7 +1,7 @@
 ---
 id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
-status: in-progress
+status: ready
 created: 2026-05-29
 updated: 2026-07-02
 priority: high

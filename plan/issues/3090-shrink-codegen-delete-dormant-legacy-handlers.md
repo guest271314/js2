@@ -11,7 +11,7 @@ status: blocked
 # whole-program M0/runtime/linear consumption, and fail-closed IR-only default.
 # BLOCKED until R9 lands and a fresh reachability audit proves exact targets
 # dead — do NOT claim for ad-hoc deletion hunting.
-sprint: current
+sprint: Backlog
 created: 2026-07-08
 updated: 2026-07-21
 priority: high

@@ -1,10 +1,9 @@
 ---
 id: 3200
 title: "default lane: Array.prototype iteration/producer generics (forEach/map/filter/flatMap) over real + array-like receivers (~204 fails)"
-status: in-progress
+status: ready
 created: 2026-07-12
 updated: 2026-07-17
-assignee: ttraenkler/fable-2
 loc-budget-allow:
   - src/runtime.ts
 priority: high

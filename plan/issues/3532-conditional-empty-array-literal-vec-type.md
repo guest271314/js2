@@ -2,7 +2,7 @@
 id: 3532
 title: "codegen: bare empty array literal `[]` in a conditional under a union contextual type mistypes the closure (invalid Wasm)"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-22
 priority: low
 horizon: m

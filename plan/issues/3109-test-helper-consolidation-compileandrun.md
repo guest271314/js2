@@ -2,7 +2,7 @@
 id: 3109
 title: "Test-helper consolidation: 132 test files re-declare compileAndRun (10+ signature variants) across 292k test LOC"
 status: done
-sprint: current
+sprint: 75
 assignee: ttraenkler/dev-serve
 created: 2026-07-09
 updated: 2026-07-22

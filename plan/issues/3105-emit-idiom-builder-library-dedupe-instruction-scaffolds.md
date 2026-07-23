@@ -1,8 +1,7 @@
 ---
 id: 3105
 title: "Emit-idiom builder library: dedupe repeated Wasm instruction scaffolds (throw-guard x17, counter-loop x21, proxy-guard x12, hash-probe x10)"
-status: in-progress
-assignee: ttraenkler/sendev-3105
+status: ready
 sprint: current
 created: 2026-07-09
 updated: 2026-07-14

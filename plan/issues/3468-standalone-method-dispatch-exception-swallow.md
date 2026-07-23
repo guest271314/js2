@@ -11,7 +11,7 @@ feasibility: hard
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: Backlog
 horizon: l
 related: [2860, 3417]
 # (#3102) C-core keeps the bulk of its logic in the NEW leaf module

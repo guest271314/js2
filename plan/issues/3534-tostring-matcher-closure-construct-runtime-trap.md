@@ -2,7 +2,7 @@
 id: 3534
 title: "codegen: mutually-recursive const-closure funcref-cell RTT desync — matcher-invoking Function.prototype.toString files trap (illegal cast) at construct site"
 status: done
-sprint: current
+sprint: 75
 assignee: ttraenkler/fable-3534
 created: 2026-07-22
 updated: 2026-07-23

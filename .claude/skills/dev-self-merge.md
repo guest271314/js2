@@ -1,6 +1,6 @@
 ---
 name: dev-self-merge
-description: Regression self-check for a green PR. Reads CI JSON, applies the hard criteria, outputs MERGE (mark task completed, stand down — server-side auto-enqueue enqueues, #2786) or ESCALATE. Devs do NOT enqueue.
+description: Merge self-check for a green PR. Reads the PR's required-check status from the checks API (the committed ci-status feed is RETIRED), outputs MERGE (mark task completed, stand down — server-side auto-enqueue enqueues, #2786) or ESCALATE. Devs do NOT enqueue.
 ---
 
 # /dev-self-merge \<N\>
@@ -78,49 +78,69 @@ After the run exits:
 
 | Outcome                                                    | Action                                                                                                                                                                                                                    |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **All required checks green**                              | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) for the self-check; on MERGE, mark the task completed and stand down — the server-side workflow enqueues (Step 5, #2786)                          |
+| **All required checks green**                              | Run Step 0 (the checks-API self-check); on MERGE, mark the task completed and stand down — the server-side workflow enqueues (Step 5, #2786)                                                                               |
 | **Drift** (mergeable_state becomes `BEHIND` while waiting) | Do NOT re-enqueue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and the `auto-enqueue` backstop re-sweeps. A clean fast-forward (`git fetch origin && git merge origin/main && git push`) is optional; never re-enqueue after — the backstop owns re-adds |
 | **CI failure** (any required check `FAILURE`)              | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI                                                                                                        |
 | **Long wait** (>10 min)                                    | Emit a `TaskUpdate` noting the unusual wait but keep waiting                                                                                                                                                              |
 | **Very long wait** (>20 min)                               | Escalate to tech lead                                                                                                                                                                                                     |
 
-The CI feed `pr-<N>.json` still drives the merge gate below — fetch it once
-CI completes:
+## Step 0 — the merge gate (checks API; the committed CI feed is RETIRED)
+
+> **The per-PR CI feed `.claude/ci-status/pr-<N>.json` is RETIRED.** The writer
+> workflows (`ci-status-feed.yml`, `ci-status-basic.yml`,
+> `ci-status-pending.yml`) are `workflow_dispatch`-only stubs; the newest feed
+> file on `main` is from the PR-471 era. A current PR will NEVER get one — do
+> not fetch it, wait for it, or treat its absence as "CI still in flight".
+> (That misread stranded two agents on 2026-07-23.) Steps 1–4 below only ever
+> applied to that feed and are kept as historical reference — do not execute
+> them.
+
+The operative gate, for EVERY PR (src or not):
 
 ```bash
-git fetch origin
-git show origin/main:.claude/ci-status/pr-<N>.json 2>/dev/null
+gh pr view <N> --json statusCheckRollup,mergeStateStatus,isDraft,labels \
+  --jq '{ mergeStateStatus, isDraft,
+          labels: [.labels[].name],
+          pending: [.statusCheckRollup[] | select(.status != null and .status != "COMPLETED") | .name],
+          failed:  [.statusCheckRollup[] | select(.conclusion == "FAILURE" or .conclusion == "failure") | .name] }'
 ```
 
-Do NOT `git merge origin/main` just to check — `git show` reads the remote ref
-without touching your working tree.
+- `pending` non-empty → CI still running. Keep the background watcher on it.
+- `failed` non-empty → diagnose with full PR context (you KNOW what you
+  changed), fix locally, push, loop back to wait-for-CI. ESCALATE to the tech
+  lead only for genuine judgment calls (see "What ESCALATE means").
+- All required checks green (per `docs/ci-policy.md` §7) + `mergeStateStatus ==
+  "CLEAN"` + not a draft + no `hold` label → **MERGE**: mark the task completed
+  and stand down (Step 5); the server-side workflow enqueues.
+- Green checks but `BEHIND`/`BLOCKED` → the Drift row above; never re-enqueue.
+- No checks at all (workflow-only / CI-config PR) → **MERGE** — stand down
+  (Step 5); the workflow enqueues, or the tech lead admin-merges a CI-only
+  change.
 
-## Step 0 — fast-path for non-test262 PRs
+> **What a green PR-level run does and does NOT tell you.** On `pull_request`,
+> `merge shard reports` and `check for test262 regressions` are DESIGNED green
+> no-ops: the heavy test262 shard matrix is merge_group-only (#2519 slim-down;
+> #3431 mg matrix; #3448/#3467 per-SHA baseline reuse), so both jobs green-skip
+> with `SHARDS_RAN: false` — their logs literally say "shards intentionally
+> skipped" / "no merged test262 report to diff". A green PR is NOT evidence
+> your PR causes no test262 regressions. The real regression/trap gates (the
+> #3467 per-SHA-merge-base diff, the catastrophic guard #1668, the standalone
+> floor/net guards #1897/#2097) run in the `merge_group` re-validation on the
+> merged state — which is why a fully-green PR can still be auto-parked
+> (#2547) with a bot `hold` label. Handle that per "If the queue rejects your
+> PR" below.
 
-If `git show origin/main:.claude/ci-status/pr-<N>.json 2>/dev/null` returns nothing, check whether Test262 was
-required for this PR:
+---
 
-```bash
-gh pr view <N> --json files --jq '[.files[].path | select(startswith("src/"))] | length'
-```
+# LEGACY — Steps 1–4 (retired ci-status feed; do NOT execute)
 
-If the result is **0** (no `src/**` changes), Test262 Sharded was not required.
-Check basic CI instead:
+These steps consumed the retired `.claude/ci-status/pr-<N>.json` feed. The
+criteria they describe (`net_per_test > 0`, 10% ratio, 50-per-bucket) are now
+enforced by CI itself: the regression-gate job runs them as a hard required
+check in the `merge_group` (#1943, #3467). Kept only as reference for the
+field semantics.
 
-```bash
-gh pr view <N> --json statusCheckRollup \
-  --jq '[.statusCheckRollup[] | select(.conclusion != null)] |
-        { total: length,
-          failed: [.[] | select(.conclusion == "FAILURE" or .conclusion == "failure")] | length }'
-```
-
-- If `failed == 0` and `total > 0`: output **MERGE** — mark the task completed and stand down (Step 5); the server-side workflow enqueues.
-- If `failed > 0`: output **ESCALATE — basic CI failed. Check which checks failed.**
-- If `total == 0` (no checks at all): output **MERGE** — workflow-only, no CI gates apply; stand down (Step 5) — the workflow enqueues, or the tech lead admin-merges a CI-only change.
-
-If `src/**` changes exist but no status file: CI is still in-flight. Wait.
-
-## Step 1 — read the feed
+## Legacy Step 1 — read the feed
 
 ```bash
 git fetch origin
@@ -137,7 +157,7 @@ Extract: `head_sha`, `net_per_test`, `regressions`, `regressions_real`,
 `regressions_wasm_change`, `wasm_identical_noise`, `compile_timeouts`,
 `improvements`, `run_url`, `baseline_stale`, `baseline_staleness_commits`.
 
-### Step 1a — baseline staleness short-circuit (#1391)
+### Legacy Step 1a — baseline staleness short-circuit (#1391)
 
 If `baseline_stale: true` is set on the feed, the regression count is
 contaminated by drift on main (tests that flipped between when the baseline
@@ -180,7 +200,7 @@ is null (older CI feed).
 Field priority (use the first non-null):
 `regressions_wasm_change` → `regressions_real` → `regressions`
 
-### Step 1b — compile_timeout flake filter
+### Legacy Step 1b — compile_timeout flake filter
 
 A `pass → compile_timeout` transition is **runner-load noise** unless the
 underlying compilation takes meaningfully long. Verified during the 2026-05-21
@@ -212,7 +232,7 @@ R_real=$((regressions - flake))
 Use `R_real` for criterion 2. Document this in your ESCALATE message if
 relevant ("8 of 12 regressions are compile_timeout flake; effective R=4").
 
-## Step 2 — SHA check
+## Legacy Step 2 — SHA check
 
 ```bash
 git rev-parse HEAD
@@ -238,7 +258,7 @@ Stop.
 > task completed and stand down — Step 5; the server-side workflow enqueues); a
 > failing criterion means ESCALATE to tech lead instead.
 
-## Step 3 — criteria (in order, stop at first failure)
+## Legacy Step 3 — criteria (in order, stop at first failure)
 
 | #   | Criterion                                                                                                   | Failure output                                                                                        |
 | --- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -261,7 +281,7 @@ R=$(jq -r '.regressions_wasm_change // .regressions_real // .regressions' .claud
 
 If `regressions` is `null` in the feed (older CI format without per-test tracking): treat criterion 2 as **pass** and skip criterion 3 (no data to bucket). Result is MERGE (stand down; workflow enqueues) if criterion 1 holds.
 
-## Step 4 — bucket regressions (only if regressions > 0)
+## Legacy Step 4 — bucket regressions (only if regressions > 0)
 
 Download the merged report artifact and ensure the baseline JSONL is cached
 locally (#1528 — the baseline is no longer committed to the repo; it's

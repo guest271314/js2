@@ -2,7 +2,7 @@
 id: 3524
 title: "String.prototype.toString non-generic receiver: doesn't throw on non-String (generic ToString), plus concat-tail illegal_cast"
 status: ready
-sprint: current
+sprint: Backlog
 priority: medium
 horizon: m
 feasibility: hard

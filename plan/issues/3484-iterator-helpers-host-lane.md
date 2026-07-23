@@ -11,7 +11,7 @@ task_type: feature
 area: codegen
 goal: test262-conformance
 model: opus
-sprint: current
+sprint: Backlog
 horizon: xl
 related: [2903]
 ---

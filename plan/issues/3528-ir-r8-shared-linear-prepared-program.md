@@ -2,7 +2,7 @@
 id: 3528
 title: "IR-only R8: linear consumes the shared Prepared IR program"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-21
 updated: 2026-07-21
 priority: critical
