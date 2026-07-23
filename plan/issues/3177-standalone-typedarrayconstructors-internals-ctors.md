@@ -1,8 +1,7 @@
 ---
 id: 3177
 title: "standalone: TypedArrayConstructors internals + ctors — integer-indexed MOP internals, ctor arg protocols, from/of, per-ctor identity (356 gap tests)"
-status: in-progress
-assignee: ttraenkler/fable-3177
+status: ready
 created: 2026-07-12
 updated: 2026-07-16
 priority: high

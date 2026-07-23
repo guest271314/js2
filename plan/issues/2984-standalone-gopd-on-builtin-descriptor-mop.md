@@ -1,7 +1,7 @@
 ---
 id: 2984
 title: "Standalone gOPD-on-builtin descriptor MOP (~178: getOwnPropertyDescriptor on builtin objects / proto receivers)"
-status: in-progress
+status: ready
 updated: 2026-07-17
 sprint: current
 priority: high
@@ -13,7 +13,6 @@ area: codegen, runtime
 goal: standalone-mode
 related: [2965, 2861, 2863, 2896, 2949, 2989]
 origin: "#2965 descriptor-cluster triage — follow-up class 1"
-assignee: ttraenkler/fable-2
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
   - src/codegen/object-runtime.ts

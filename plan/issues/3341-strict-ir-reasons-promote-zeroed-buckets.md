@@ -1,8 +1,7 @@
 ---
 id: 3341
 title: "STRICT_IR_REASONS hardening — per-reason (NOT a corpus-zero flip); doc-correction shipped, real per-reason work remains"
-status: in-progress
-assignee: ttraenkler/dev-h
+status: ready
 sprint: current
 created: 2026-07-17
 priority: medium

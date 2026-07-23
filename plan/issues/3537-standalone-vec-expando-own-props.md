@@ -14,7 +14,7 @@ language_feature: property-write, dynamic-property, arrays
 es_edition: es5
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 75
 horizon: m
 related: [3468, 3251, 2860, 3180]
 origin: "#3468 cliff clustering (2026-07-23, fable-exposed): cluster 6 — 26/458 sampled regressions (~208 projected) trace to array expando drops, NOT to RegExp .index (exec().index works; the harness arrays' `__expected.index = 0` expando is what drops)"

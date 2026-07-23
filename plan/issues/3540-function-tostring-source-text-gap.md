@@ -2,7 +2,7 @@
 id: 3540
 title: "spec gap: Function.prototype.toString source text — compiled closures stringify as `[object Object]` / callback-shim source instead of NativeFunction syntax (57/80 toString-dir fails)"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-23
 priority: medium
 horizon: l

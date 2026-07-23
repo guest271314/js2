@@ -10,7 +10,7 @@ feasibility: medium
 task_type: bugfix
 area: test262-runner
 goal: standalone
-sprint: current
+sprint: 75
 horizon: s
 umbrella: 2860
 assignee: ttraenkler/fable-2860

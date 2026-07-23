@@ -1,8 +1,7 @@
 ---
 id: 3201
 title: "default lane: Array.prototype search + structural generics (indexOf/lastIndexOf/slice/splice/sort/concat/pop) (~312 fails)"
-status: in-progress
-assignee: ttraenkler/fable-b
+status: ready
 created: 2026-07-12
 updated: 2026-07-17
 priority: high

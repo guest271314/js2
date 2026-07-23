@@ -1,7 +1,8 @@
 ---
 id: 3548
 title: "Standalone: then-callback closure with branch-guarded module-fn calls traps null-deref — the ~193-row 'async continuation threw' Promise cluster"
-status: ready
+status: done
+assignee: ttraenkler/sendev-3548
 sprint: current
 priority: high
 horizon: m
@@ -13,10 +14,67 @@ goal: standalone-mode
 parents: [3178]
 related: [3417, 3442, 3443, 3542, 3545, 2865]
 created: 2026-07-23
+completed: 2026-07-23
+# (#3102) In-subsystem growth: the null-guarded ToBoolean helper belongs in
+# native-strings (next to the other __str_* helpers); the widening lands in
+# the inference module; the arm wiring in the coercion engine.
+loc-budget-allow:
+  - src/codegen/native-strings.ts
+  - src/codegen/coercion-engine.ts
+  - src/codegen/declarations/param-return-inference.ts
 origin: "2026-07-23 fable-3417 umbrella triage: third head of the F2-unmasked standalone async FAIL surface, after #3538 (280) and #3542 (130)."
 ---
 
 # #3548 — then-closure branch-call null-deref (the 193-row cluster)
+
+## FIXED (2026-07-23, started fable-3417, landed sendev-3548) — two coupled halves; measured flips
+
+### Why the fix is UPSTREAM (inference), not at the pad site — hold this line
+
+A non-nullable `(ref N)` has **no undefined inhabitant** — there is nothing a
+zero-arg pad could legally push (`pushDefaultValue`'s "ref" case documents
+the `ref.null` + `ref.as_non_null` landmine explicitly). So patching the pad
+is impossible; the *inference* that produced a non-nullable type for a
+sometimes-absent param is what is unsound. Widening to `ref null N` (not
+externref) keeps the precise type and the string fast paths. Rejected
+alternatives: a sentinel/optional-param transform (a workaround over an
+inference that is still wrong), and never-narrowing declared-function params
+(the narrowing is a deliberate hot-path optimisation; the bug is only the
+under-applied case).
+
+1. **Inference soundness** (`src/codegen/declarations/param-return-inference.ts`,
+   `inferParamTypeFromCallSites`): an under-applied call site now records
+   `sawUnderApplied`, and a non-nullable `ref` inference widens to
+   `ref_null` of the SAME type (approved direction — nullable, NOT
+   externref; keeps the precise type + fast paths). The zero-arg pad then
+   emits a plain `ref.null` the callee accepts.
+2. **Null-guarded string ToBoolean** (`src/codegen/native-strings.ts`
+   `ensureStrTruthyHelper` + the coercion-engine arm): with the param now
+   nullable, `if (err)` in the callee routed the nullable string through
+   `__str_flatten(null)` — a second trap. `ref_null` strings now ToBoolean
+   via `__str_truthy` (null → falsy, rope-len > 0 otherwise, no flatten);
+   the non-null `ref` arm keeps its historical flatten path byte-identical.
+
+**Permanent repro**: `tests/issue-3548.test.ts` (4 cases — the 2-line
+collapsed repro, truthiness triple T/F/F, the canonical $DONE template shape
+completing on the zero-arg PASS path, fully-applied no-regression).
+
+**Measured corpus flips** (stride-4 over the 193-row cluster — 49 files,
+sorted by path, every 4th — run locally via the #3469 channel,
+`TEST262_TARGET=standalone` + `TEST262_PATH_FILTER`): **0 → 19 of 49 PASS**.
+"Before" is the 2026-07-23 promoted standalone baseline (oracle v9, all 193
+cluster rows FAIL by definition); "after" is the local rerun on this branch
+(results jsonl 20260723-155434). Extrapolated ≈ 75 of the 193. The
+**residual 30 all fail with ONE signature**: `illegal cast [in
+__then_fulfill_*/__then_reject_*]` — the then-reaction-wrapper marshalling
+defect. Only 9 of the 30 showed illegal-cast originally; the other 21 were
+null-deref rows whose arity-fill trap fired FIRST and masked the cast
+defect. So the arity fix fully retires its own signature in the sample and
+UNMASKS the #3443 lane (route residuals there / a follow-up umbrella
+slice). Honest sizing: corpus-wide static candidates ≈ 106 rows (hundreds,
+not thousands); the fix is justified on SOUNDNESS — a
+documented-but-false assumption emitting a guaranteed trap on the ubiquitous
+optional-argument shape — not on corpus yield.
 
 ## Problem (measured)
 
