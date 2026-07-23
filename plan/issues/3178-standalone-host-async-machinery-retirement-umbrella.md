@@ -16,12 +16,29 @@ task_type: architecture
 area: codegen, standalone
 language_feature: generators, async-generators, promises, async-functions
 goal: standalone-mode
-related: [1781, 2860, 3164, 3132, 3032, 2903, 2906, 2865, 2895, 1326, 2959, 2040, 3386, 3387, 3388, 3389, 3390, 3391]
-children: [3386, 3387, 3388, 3389, 3390, 3391]
+related: [1781, 2860, 3164, 3132, 3032, 2903, 2906, 2865, 2895, 1326, 2959, 2040, 3386, 3387, 3388, 3389, 3390, 3391, 3538]
+children: [3386, 3387, 3388, 3389, 3390, 3391, 3538]
 origin: "2026-07-12 architect (arch-standalone-family-plans): plan/log/standalone-gap-map.md finding — 4,456 leaky passes ride host-import shims, ~90% the generator/async-gen/Promise host machinery. This umbrella is the substrate spec + measured slice ranking the family builds on."
 ---
 
 # #3178 — UMBRELLA: standalone host async-machinery retirement
+
+## 2026-07-23 (fable-3417) — post-F2 honest-FAIL head fixed: #3538
+
+With the F2 async-completion channel landed (#3469) the standalone async
+corpus scores honestly; the single biggest newly-scored FAIL bucket was the
+**280-test** `yield-star-{getiter,next}-*` error-semantics template family
+(one error string, 35 templates × 8 contexts). Measure-first collapsed it to
+THREE coupled root causes — uncaught-throw did not complete the generator
+frame; no leads-free completion target existed (also a latent #3389 bug);
+`{done, value}` destructure off a native IteratorResult read
+undefined/undefined — fixed in child **#3538** (done): synthetic COMPLETED
+dispatch arm + catch/driver retarget + done/value destructure routed through
+the #2674 `__get_member_<name>` dispatcher + canonical-undefined done-result
+value. Probed 70/70 PASS on a stride-4 cohort sample. Residuals noted in
+#3538: untyped member reads `r.done` still leak legacy `__gen_result_*` host
+imports (separate pre-existing cohort), sync-gen STATIC typed reads surface
+0/1 / NaN.
 
 ## Decomposition 2026-07-17 (fable-3178) — child issues #3386–#3391
 
