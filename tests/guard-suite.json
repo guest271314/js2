@@ -1,0 +1,42 @@
+{
+  "$comment": [
+    "#3552 — REQUIRED per-PR guard suite, run by the `quality` job (ci.yml)",
+    "on every pull_request, merge_group, and push via",
+    "`node scripts/run-guard-suite.mjs` (`pnpm run test:guard` locally).",
+    "",
+    "Why this exists: untouched root test files do NOT run at PR time — the",
+    "#3008 two-layer design runs only PR-touched tests/*.test.ts per PR and",
+    "defers the full ~2,100-file suite (~9 CPU-hours) to the post-merge",
+    "issue-tests.yml detector, which detects but does not ENFORCE. #3503",
+    "proved the gap on 2026-07-23: it regressed tests/issue-3471.test.ts",
+    "without touching it — green PR, red main (#3551). This manifest brings",
+    "a SMALL curated set of invariant-guard tests into the required check.",
+    "",
+    "Entry criteria (all must hold):",
+    "  1. The file guards an invariant that a prior PR silently broke on",
+    "     main (regression memory, not ordinary coverage).",
+    "  2. It completes in <60s locally and needs NO test262 submodule or",
+    "     other prepared harness inputs (plain `vitest run <file>` works on",
+    "     a bare checkout + pnpm install).",
+    "  3. It is green on current main — a red entry blocks EVERY PR.",
+    "Keep the suite cheap: total budget ~2 minutes. If it outgrows that,",
+    "split the slowest entries back to post-merge and say why here."
+  ],
+  "files": [
+    {
+      "path": "tests/issue-3471.test.ts",
+      "guards": "polymorphic (any-typed) params must not be narrowed to f64 by body-usage inference; the test262 propertyHelper isSameValue shape",
+      "broken_by": "#3503 (silently, untouched — the motivating regression)"
+    },
+    {
+      "path": "tests/issue-3536.test.ts",
+      "guards": "standalone declared-fn object-literal arguments cross the call boundary intact (the counterpart invariant #3503 fixed — keeps the 3471/3536 tension resolved BOTH ways)",
+      "broken_by": "pre-#3503 main (standalone lane)"
+    },
+    {
+      "path": "tests/issue-3551.test.ts",
+      "guards": "IR ABI-parity withdrawal cascades to committed IR callers — no partial commit of a calleeTypes cluster",
+      "broken_by": "#3503 partial-commit semantics"
+    }
+  ]
+}
