@@ -1,9 +1,10 @@
 ---
 id: 2864
 title: "Standalone: no Wasm-native generator carrier — sync generators leak __create_generator/__gen_* host imports"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-laneB
 created: 2026-06-30
-updated: 2026-07-04
+updated: 2026-07-23
 priority: high
 feasibility: hard
 model: fable
