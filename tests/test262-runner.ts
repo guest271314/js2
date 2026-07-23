@@ -5064,6 +5064,23 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
   if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
 
+  // (#3468 F1) A message beginning with "Test262Error" is by construction a
+  // rendered ASSERTION THROW (the #2962 standalone exception renderer prefixes
+  // the constructor name), never a genuine Wasm trap: a real trap aborts the
+  // module with a host RuntimeError message ("out of bounds memory access",
+  // "unreachable" …) that carries no Test262Error prefix. This rule must sit
+  // BEFORE the trap regexes for exactly the #3285 reason above — assertion
+  // TEXT quoting the test's own words ("following shrink (out of bounds)
+  // Expected SameValue(«8», «0»)…") was matching /out of bounds/ etc. and
+  // mis-binning honest assertion fails as uncatchable traps, false-positive-
+  // tripping the #3189 trap ratchet (seen live on the F1 merge_group run
+  // 30043224652: 6 Test262Error rows counted as NEW oob — including
+  // Temporal/Duration/…/result-out-of-range-1.js, the SAME file the v4 fix
+  // caught for the "returned N" shape; measured baseline also carries 3 such
+  // false "unreachable" rows). Label-only relabel (no pass/fail flips) —
+  // covered by the same ORACLE_VERSION 10 bump as the #3468 F1 de-inflation.
+  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
+
   // Wasm traps
   if (/dereferencing a null/i.test(errorMsg)) return "null_deref";
   if (/illegal cast/i.test(errorMsg)) return "illegal_cast";
@@ -5080,13 +5097,9 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
 
   // (Assertion "returned N" patterns are classified at the TOP of this
   // function — before the trap regexes — see the #3285 comment there.)
-  // (#2962) A thrown Test262Error IS an assertion failure by definition. The
-  // standalone exception renderer (#2962) surfaces these as
-  // "Test262Error: <assert text>" — before it, such failures were the opaque
-  // #2870 label and fell to "other". Host-lane records are unaffected: there
-  // the payload is a real JS Error and the recorded message is `.message`
-  // WITHOUT the constructor-name prefix.
-  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
+  // (#2962/#3468 F1) The `^Test262Error` → assertion_fail rule moved to the
+  // TOP of this function, before the trap regexes — see the #3468 comment
+  // there (assertion text quoting trap words was stealing the row).
 
   // Wasm compile/validation errors (from instantiation). (#3187) Order matters:
   // classify GENUINE invalid-Wasm FIRST so an instantiation error that quotes
