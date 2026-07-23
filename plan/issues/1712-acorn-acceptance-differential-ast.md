@@ -1,9 +1,12 @@
 ---
 id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-acorn
 created: 2026-05-29
-updated: 2026-07-02
+updated: 2026-07-23
+loc-budget-allow:
+  - src/codegen/property-access-dispatch.ts
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -544,3 +547,64 @@ Landed since the last note above:
 
 This remains an integration gate satisfied by fixing its dependency gap issues,
 not by direct dispatch.
+
+## Regression 2026-07-23 (sendev-acorn) — parse regression bisected + fixed
+
+**Measured regression** (unattributed for ~6 days; the probe/corpus are not in
+the default CI sweep, `DOGFOOD_ACORN=1`-gated): `dogfood:acorn-corpus`
+**23/23 → 13/23** equal±quirks (10 inputs `compiled-parse-threw`);
+`dogfood:acorn-probe` **13/13 → 8/13** (objects.js, spread-rest.js,
+arrow-params.js, destructuring.js, classes.js `wasm-threw`) plus the
+single-construct `"function g(a, b) { return a + b; }"` → in-Wasm=null. The
+throws are GENUINE acorn SyntaxErrors: `'return' outside of function`,
+`'new.target' can only be used in functions…`, `Unexpected token` after
+`yield`.
+
+**Culprit (git bisect, first-parent b9b89b8→9bc9454, then intra-PR):** merge
+`852c40a9f516` = **PR #3267** (`codex/test262-original-harness-parity`, merged
+2026-07-18 04:50Z); exact commit **`479f747c4292ff`** "fix(test262): preserve
+widened descriptor data reads" — added an exact-struct-field read lane to
+`finalizeStructAndDynamicMemberGet` (property-access-dispatch.ts): when
+`typeName` is unrecoverable but the receiver's checker type resolves to a
+struct typeIdx with a same-named field, read `struct.get` directly instead of
+the dynamic host-MOP path.
+
+**Mechanism (measured via compile-time lane logging + minimal repros):** the
+unrestricted guard also hijacked receivers whose RUNTIME value is a growable
+host `$Object` — the anon struct exists statically but is never instantiated.
+acorn's `types$1` token table and `prototypeAccessors` descriptor tables are
+both growable-marked (depth-2 writes `types$1.parenR.updateContext = …`,
+`prototypeAccessors.inFunction.get = …`). The load-bearing break: for a
+ref_null-typed field (`prototypeAccessors.inFunction`, an inline
+`{configurable:true}` descriptor struct), `emitExternrefToStructGet`'s
+`__extern_get` fallback ref.tests the HOST result against the struct type,
+fails, and substitutes **ref.null** (defaultValueInstrs arm,
+property-access.ts:1609). So `prototypeAccessors.<k>.get = fn` wrote onto
+null, `Object.defineProperties(Parser.prototype, prototypeAccessors)`
+installed getterless accessors, and every scope predicate (`inFunction`,
+`inGenerator`, `inAsync`, `allowNewDotTarget`) answered undefined→false —
+exactly the three SyntaxErrors. Same family as #2694's warning: a read-only
+struct-slot shortcut without matching the write lane diverges.
+
+**Hypothesis audit (bisect-first discipline):** H1 (#3506 `__extern_get`
+vec-props fallthrough, merged 07-23) — **REFUTED**: regression predates it by
+5 days. H2 (re-regression of #2848) — **REFUTED as mechanism**: #2848's fix
+family (#2838/#2325 dynamic prototype-accessor dispatch) is intact; the same
+SYMPTOMS re-appeared through a new, unrelated read-lane defect. Neither
+hypothesis named the culprit; the bisect did.
+
+**Fix (this branch):** restrict the lane to defineProperty-WIDENED structs
+(`widenedVarStructMap` + `widenedDefinePropertyKeys` — the widening pre-pass
+only widens EMPTY literals, so a widened receiver's runtime value IS the
+struct and the exact-field read is sound; acorn's non-empty tables can never
+qualify). A pure revert would re-break #3267's widened-descriptor reads
+(measured: `var obj = {}; Object.defineProperty(obj,"prop",{value:2010})` read
+→ `undefined` with the lane off). Regression guard:
+`tests/issue-1712-exactfield-lane-guard.test.ts` (4 cheap tests in the DEFAULT
+sweep — the probe/corpus guards are `DOGFOOD_ACORN=1`-gated, which is why this
+landed unnoticed). Post-fix measurements: probe **13/13** (+15/15
+single-construct, up from 14/15 pre-regression), corpus **23/23**
+equal±quirks, 0 throws, 0 real gaps.
+
+`loc-budget-allow` note: +35 lines on property-access-dispatch.ts are the
+narrowed guard + the mechanism documentation comment.
