@@ -16,6 +16,8 @@ area: codegen
 language_feature: closures
 goal: correctness
 related: [3024, 3533, 2873, 3540]
+loc-budget-allow:
+  - src/codegen/statements/variables.ts
 ---
 
 # #3534 — matcher-invoking `Function.prototype.toString` files trap at runtime (construct-site funcref-cell RTT desync)
@@ -341,3 +343,12 @@ still green.
 - **#3540**: the fn-stringification gap dominating the residual toString fails.
 - `var_reassign_call` (module `let f = …; f = …; f()` returns the FIRST value)
   — assignment-path sibling, pre-existing.
+
+## LOC-budget allowance note
+
+`variables.ts` +58 lines (mostly rationale comments on the two new arms). The
+declaration path is where the retro-narrow lived, so the fix belongs there;
+the file now carries THREE copies of the null-guarded cell write-through
+pattern (#1177/#3396/this) — extracting a shared `emitBoxedCellInitStore`
+helper is a clean consolidation-plan follow-up, deliberately not bundled into
+this core-codegen PR.
