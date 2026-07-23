@@ -617,7 +617,7 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
       catches: [{ tagIdx, body: catchExn }],
       catchAll,
     });
-    releaseTempLocal(fctx, reasonLocal, { kind: "externref" });
+    releaseTempLocal(fctx, reasonLocal);
     return;
   }
   const rejectIdx = ensureLateImport(ctx, "Promise_reject", [{ kind: "externref" }], [{ kind: "externref" }]);
