@@ -18,6 +18,15 @@ assignee: ttraenkler/fable-2860
 related: [2860, 3535, 2863, 2868, 2878, 3534]
 oracle-ratchet-allow:
   - src/codegen/literals.ts
+# LOC growth is the fix itself, in the owning modules (not barrel spill):
+# the expectedType routing arm lives beside the sibling literal-routing arms
+# in compileObjectLiteral (+48 incl. its rationale comment), the ABI parity
+# guard beside the pre-existing class-member guard in the IR patch loop
+# (+42), and the 4-line forward in expressions.ts's dispatch.
+loc-budget-allow:
+  - src/codegen/literals.ts
+  - src/ir/integration.ts
+  - src/codegen/expressions.ts
 files:
   - src/codegen/expressions.ts
   - src/codegen/literals.ts
