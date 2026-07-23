@@ -1,8 +1,7 @@
 ---
 id: 2864
 title: "Standalone: no Wasm-native generator carrier — sync generators leak __create_generator/__gen_* host imports"
-status: in-progress
-assignee: ttraenkler/dev-laneB
+status: ready
 created: 2026-06-30
 updated: 2026-07-23
 priority: high
@@ -367,20 +366,15 @@ open dispatch) all pass. What was actually missing on the sync-carrier side:
 ### Remaining protocol gaps (banked slices, exact contracts)
 
 - **D2 — delegation abrupt forwarding (iterator close through yield\*)**:
-  `.return(v)` / `.throw(e)` on the OUTER while suspended in a `yield-star`
-  state must forward to the INNER (`inner.return`/`inner.throw`, §27.5.3.7
-  steps 7.b/7.c) so the inner's `finally` blocks run, then continue the
-  outer's abrupt path. Today the outer's per-state abrupt block completes the
-  outer WITHOUT closing the inner (inner finalizers silently skipped).
-  Contract: in the yield-star state's abrupt block (mode != 0), when the
-  delegation slot is non-null, drive the inner's resume once with the SAME
-  mode + abrupt/error payload (write inner's `MODE`/`ABRUPT`/`ERROR` fields,
-  call its resume fn), discard the inner's result, null the slot, then run the
-  outer's own finalizers as today. Wasm-level: mirrors F2's mode-2 wiring, one
-  extra call in the abrupt block, gated on `delegationSlots` non-empty —
-  byte-inert for non-delegating generators. Test: M3 probe shape
-  (`inner try/finally`, outer `.return()` mid-delegation → inner `log`
-  written + outer completes with the return value).
+  **LANDED 2026-07-23** (see the D2 section below). `.return(v)` / `.throw(e)`
+  on the OUTER while suspended in a `yield-star` state forwards to the INNER
+  (§27.5.3.7 steps 7.b/7.c) so the inner's `finally` blocks run, then
+  continues the outer's abrupt path. Also fixed en route: the self-suspending
+  yield-star state is now DEDICATED (never state 0, empty prelude, no resume
+  bindings), closing three protocol bugs — first-statement `yield*`
+  suspensions misclassified as NOT-STARTED by the dispatch, prelude
+  re-execution on every mid-delegation `.next()`, and resume-binding clobber
+  by mid-delegation `.next(v)` values.
 - **D3 — general-iterable `yield*`**: lives in #2173 (vec-cursor for numeric
   arrays — slice-2a there, NOT blocked by #2106; generic `{next()}` +
   `.return()` close as slice-2b, which SHOULD reuse D2's forwarding shape).
@@ -428,6 +422,93 @@ trigger — do not port the sync carrier now.** Rationale:
    frames — building async gens on `generators-native.ts` instead would be a
    third machine. Rule of thumb going forward: **new control-flow capability →
    CFG planner; carrier/value-rep capability → generators-native.**
+
+## D2 — delegation abrupt forwarding + dedicated yield-star states (landed 2026-07-23)
+
+**Scope shipped:** `.return(v)` / `.throw(e)` on the OUTER generator while
+suspended mid-`yield*` now closes the INNER native generator first — driving
+its resume once with the same abrupt mode/payloads so its `finally` blocks run
+(§27.5.3.7 steps 7.b/7.c) — then continues the outer's own abrupt path
+(finalizers → complete/throw). Verify-first (M3 probe, standalone, host-free
+asserted): inner `try { yield 1; yield 2 } finally { log = 100 }`, outer
+`yield* inner()`, `.return(7)` mid-delegation → **before:** `log` stayed 0 and
+(first-statement shape) the outer completed via the NOT-STARTED dispatch arm;
+**after:** `log === 100`, result `{7, done: true}` — matches Node exactly, as
+do `.throw()` forwarding, inner+outer finally ordering (inner first), a
+finally-thrown replacement error (return→throw completion upgrade), and the
+loop-carried two-pass close.
+
+### Why these decisions (root-cause, not symptom)
+
+- **Dedicated self-suspend state (plan builder).** A yield-star terminator
+  re-enters its OWN state on every resume (`state = THIS`), which surfaced
+  three latent protocol bugs beyond the missing close: (a) a first-statement
+  `yield*` suspends in **state 0**, which the `.return()`/`.throw()` dispatch
+  reads as NOT-STARTED (§27.5.3.4/.3.6) — it completed/threw WITHOUT resuming,
+  skipping inner AND outer finalizers; (b) the state's prelude statements
+  re-ran on every mid-delegation `.next()` (side effects repeated, measured
+  `calls=3` vs Node 1); (c) a preceding `const x = yield …` resume binding
+  re-copied `sent` per re-entry, clobbering `x` with later `.next(v)` values
+  (measured 7 vs Node 5). The `emitYield` asterisk branch now splits: if the
+  current state has prelude statements, resume bindings, or IS state 0, it is
+  finished with a `jump` and the yield-star terminator gets a fresh dedicated
+  state. It also always carries an `abruptResume` (finalizers recomputed from
+  the yield\* position's replay chain, empty outside try) so a mid-delegation
+  abrupt is handled even when the yield\* was the generator's first suspend
+  point. Applies to all three delegation kinds (native-gen / vec / iterable).
+- **Forwarding lives in the generic per-state abrupt block** (`compileState`,
+  `abruptResume` branch), gated on the state's terminator being a native-gen
+  `yield-star` AND the delegation slot being non-null at runtime — so an
+  abrupt at the plain-yield suspension BEFORE delegation starts (slot null)
+  skips it, and non-delegating generators are **byte-identical** (verified:
+  8-program × 3-lane sha256 matrix unchanged; only delegating programs differ,
+  and only in standalone/wasi — the gc lane is byte-identical even for
+  delegation, the native yield\* path being standalone-gated).
+- **Inner drive is wrapped in wasm `try`/`catch $exn`.** A mode-2 inner
+  re-throws after its finalizers (F2 wiring), and an inner `finally` that
+  itself throws surfaces a NEW error; both are caught, stored into the outer's
+  `ERROR` field, and upgrade the outer's mode to THROW — so the outer's own
+  finalizers still run before the error reaches the caller, and a `.return()`
+  whose close throws becomes a throw completion (spec). Host-mode foreign JS
+  exceptions recover via the #3050 `__get_caught_exception` catch_all when the
+  resume emitter acquired it.
+- **Inner abrupt payload:** inners are f64-gated, so the inner's `abrupt`
+  field takes the outer's `.return(v)` value when the outer carrier is f64,
+  else the undefined sentinel — unobservable either way (the inner's close
+  result is discarded; the outer completes with its OWN abrupt field, which is
+  observably equivalent for every supported shape since a yield-free `finally`
+  cannot override the return value).
+
+### Residuals (pre-existing, NOT D2)
+
+- Mid-delegation `.next(v)` does not forward `v` to the inner's `sent` field
+  (two-way communication through a running delegation) — same class as the
+  buffer-model gaps tracked under #3032; the host lane has the same behavior.
+- Generic-iterable (`$__IterRec`) close (`inner.return()` protocol for
+  non-generator iterators) is #2173 slice-2b's D2-shape reuse, unchanged here
+  (the outer now completes correctly; the foreign iterator is simply not
+  notified).
+- try/CATCH across yield (D4) stays on the host path — #2906 3c convergence.
+
+### Files (D2)
+
+- `src/codegen/generators-native.ts` — dedicated-state split + always-abrupt
+  in the `emitYield` asterisk branch; delegate-close forwarding at the top of
+  the `abruptResume` block in `compileState`.
+- `tests/issue-2864-standalone-generator-carrier.test.ts` — 10 D2 standalone
+  cases (zero-host-import asserted), covering the M3 probe, throw forwarding,
+  finally ordering, pre-delegation abrupt, finally-throw upgrade, loop-carried
+  close, done protocol, vec first-statement close, prelude-once, and
+  resume-binding survival.
+
+## Slice routing after D2 (what remains where)
+
+All remaining carrier work is tracked in OTHER issues: D3 general-iterable
+`yield*` close → #2173 slice-2b; D4 try/catch-across-yield → #2906 3c planner
+convergence; IR-lane `gen.setReturn` → #2951; boxed-any resume bindings (F1c)
+→ blocked on #2151; spread/`Array.from` precision for the boxed-any carrier —
+small, unowned, listed in F1's deferred notes. This issue stays open only as
+the umbrella record for those pointers.
 
 ### Composition with #3032 lazy-first-resume thunks
 
