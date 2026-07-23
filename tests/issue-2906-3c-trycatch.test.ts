@@ -244,6 +244,137 @@ export function getCap(): number { return cap; }`),
   });
 });
 
+// #2906 3c-ii — return-through-finally + sibling regions.
+//
+// (a) `return v` INSIDE a `try { …await… } finally { F }` was rejected by
+//     `planLinearAwaits` (return-through-finally), demoting the whole fn to
+//     AG0. The native lane now admits it (`allowReturnInTry`): the return
+//     hook evaluates the operand, replays the region's await-free finalizer
+//     (region local reset first — a throw in the finally must not re-enter
+//     the region; a `return` in the finally overrides, §14.15.3), THEN
+//     settles. Normal/throw paths keep their existing inline/reject-route
+//     replay byte-identically.
+// (b) SIBLING try/catch regions: the 3c producer generalizes to any number of
+//     sequential top-level `try/catch`es — one handler region each (dense ids,
+//     own catchState), the shared route dispatching by the region-id local.
+describe("#2906 3c-ii — return-through-finally + sibling regions (wasi lane)", () => {
+  it("return-through-finally: the finalizer runs BEFORE the settle, value kept", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(): Promise<number> {
+  try {
+    const x = await Promise.resolve(5);
+    return (x as number) + 100;
+  } finally {
+    flag = 1;
+  }
+}
+async function g(): Promise<void> {
+  const v = await f();
+  cap = (v as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1105); // 105 + finally-flag observed at settle time
+  });
+
+  it("conditional return inside the try replays the finalizer on the taken branch", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+let flag: number = 0;
+async function f(n: number): Promise<number> {
+  try {
+    const x = await Promise.resolve(n);
+    if ((x as number) > 3) { return 77; }
+    return 1;
+  } finally {
+    flag = flag + 1;
+  }
+}
+async function g(): Promise<void> {
+  const a = await f(5);
+  cap = (a as number) + flag * 1000;
+}
+export function kick(): number { g() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(1077); // finalizer ran exactly once
+  });
+
+  it("normal-completion finally stays on the inline path", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    const x = await Promise.resolve(4);
+    cap = x as number;
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(104);
+  });
+
+  it("throw-path finally stays on the reject-route replay", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    await Promise.reject(new Error("r"));
+    cap = 1;
+  } finally {
+    cap = cap + 100;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(100);
+  });
+
+  it("sibling regions: two sequential try/catches route to their own catch", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    await Promise.reject(new Error("a"));
+  } catch (e) {
+    cap = 1;
+  }
+  try {
+    await Promise.reject(new Error("b"));
+  } catch (e) {
+    cap = cap + 10;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(11);
+  });
+
+  it("sibling regions: first fulfils, second rejects — only the second catch runs", async () => {
+    expect(
+      await driveCap(`let cap: number = 0;
+async function f(): Promise<void> {
+  try {
+    const a = await Promise.resolve(100);
+    cap = a as number;
+  } catch (e) {
+    cap = -1;
+  }
+  try {
+    await Promise.reject(new Error("b"));
+  } catch (e2) {
+    cap = cap + 42;
+  }
+}
+export function kick(): number { f() as any; return 0; }
+export function getCap(): number { return cap; }`),
+    ).toBe(142);
+  });
+});
+
 describe("#2906 3c — try/catch-around-await drive (standalone carrier lane)", () => {
   it("the core rejection→catch case drives on standalone too", async () => {
     expect(

@@ -517,7 +517,11 @@ export interface LinearAwaitPlan {
  * Pure — no `ctx`/`fctx` mutation; type-eligibility (spill-safe resume-binding
  * types) is a separate gate applied by the drive layer.
  */
-export function planLinearAwaits(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): LinearAwaitPlan | null {
+export function planLinearAwaits(
+  fn: ts.FunctionLikeDeclaration,
+  plan: AsyncCpsPlan,
+  opts?: { allowReturnInTry?: boolean },
+): LinearAwaitPlan | null {
   if (plan.awaitPoints.length === 0) return null;
   const body = fn.body;
   if (body === undefined) return null;
@@ -561,6 +565,7 @@ export function planLinearAwaits(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsP
     theFinalizer: null,
     usedFinally: false,
     sawReturnAwait: false,
+    allowReturnInTry: opts?.allowReturnInTry === true,
   };
   if (!lowerLinearStatements(body.statements, st, awaitSet)) return null;
 
@@ -588,6 +593,13 @@ interface LowerState {
   /** A finally has already been consumed — a second try/finally falls back (single-try slice). */
   usedFinally: boolean;
   sawReturnAwait: boolean;
+  /**
+   * (#2906 3c-ii) Admit `return v` INSIDE a try/finally region. The emitter's
+   * `asyncDriveReturn` hook replays the active region's finalizer before the
+   * settle (native drive lane only — every other caller keeps the historical
+   * reject so admission is unchanged).
+   */
+  allowReturnInTry: boolean;
 }
 
 /**
@@ -631,7 +643,10 @@ function lowerLinearStatements(
       if (!stmt.finallyBlock) return false; // a try with no finally + await — fall back
       const finallyStmts = stmt.finallyBlock.statements;
       for (const f of finallyStmts) if (countAwaitsInStatement(f, awaitSet) > 0) return false; // await-in-finally
-      if (blockHasTopLevelReturn(stmt.tryBlock)) return false; // return-in-try (return-through-finally) — follow-up
+      // (#2906 3c-ii) return-in-try (return-through-finally): admitted on the
+      // native drive lane via the hook's finalizer replay; historical reject
+      // everywhere else (host lane byte-identical).
+      if (!st.allowReturnInTry && blockHasTopLevelReturn(stmt.tryBlock)) return false;
       st.finalizer = [...finallyStmts];
       st.theFinalizer = st.finalizer;
       st.usedFinally = true;
@@ -1054,6 +1069,12 @@ export interface AsyncCfgOptions {
    * `allowLoops`; the host lane keeps its current shapes byte-identically.
    */
   readonly allowTryCatch?: boolean;
+  /**
+   * (#2906 3c-ii) Admit `return v` inside a try/finally region on the linear
+   * plan (the emitter's return hook replays the active region's finalizer
+   * before settling). Native drive lane only.
+   */
+  readonly allowReturnInTry?: boolean;
 }
 
 /**
@@ -1069,7 +1090,7 @@ export function planAsyncCfg(
   plan: AsyncCpsPlan,
   opts: AsyncCfgOptions,
 ): AsyncCfgPlan | null {
-  const linear = planLinearAwaits(fn, plan);
+  const linear = planLinearAwaits(fn, plan, { allowReturnInTry: opts.allowReturnInTry === true });
   if (linear !== null) return linearPlanToCfg(linear);
   if (opts.allowLoops) {
     const whileCfg = planWhileLoopCfg(fn, plan);
@@ -1154,6 +1175,7 @@ function analyzeWhileAsync(
     theFinalizer: null,
     usedFinally: false,
     sawReturnAwait: false,
+    allowReturnInTry: false,
   };
   if (!lowerLinearStatements(bodyStmts, st, awaitSet)) return null;
   if (st.segments.length === 0) return null; // no canonical await in the body
@@ -1340,210 +1362,217 @@ function lowerChunk(
     theFinalizer: null,
     usedFinally: false,
     sawReturnAwait: false,
+    allowReturnInTry: false,
   };
   if (!lowerLinearStatements(statements, st, awaitSet)) return null;
-  // A try/finally INSIDE a chunk would claim handler id 1 (colliding with the
-  // 3c catch region) — bounded slice: no awaited try/finally inside the shape.
+  // A try/finally INSIDE a chunk would claim a colliding handler id — bounded
+  // slice: no awaited try/finally inside the multi-region try/catch shape.
   if (st.theFinalizer !== null) return null;
   return { segs: st.segments, tail: st.lead, sawReturnAwait: st.sawReturnAwait };
 }
 
+/** One `[pre-chunk, try/catch]` group of the (multi-region) 3c shape. */
+interface TryCatchGroup {
+  /** Await-capable chunk of statements BEFORE this group's try (handler 0). */
+  readonly pre: TryCatchChunk;
+  readonly tryChunk: TryCatchChunk;
+  readonly catchChunk: TryCatchChunk;
+  readonly catchParamName: string | null;
+}
+
 /**
- * (#2906 3c) Structural analysis of the bounded try/catch-around-await body:
- * a flat statement block with exactly ONE top-level `try { … } catch (e?) { … }`
- * (no finally, no nesting), where the try block carries ≥1 canonical await and
- * the pre/post/catch chunks are themselves linear-canonical (awaits allowed).
- * Returns `null` (→ legacy/AG0 fallback) for anything outside the slice.
+ * (#2906 3c / 3c-ii) Structural analysis of the bounded try/catch-around-await
+ * body: a flat statement block with one or more SIBLING top-level
+ * `try { … } catch (e?) { … }` statements (no finally, no nesting), each try
+ * block carrying ≥1 canonical await; the chunks between/around them and the
+ * catch blocks are themselves linear-canonical (awaits allowed). Returns
+ * `null` (→ legacy/AG0 fallback) for anything outside the slice.
  */
 export function analyzeTryCatchAsync(
   fn: ts.FunctionLikeDeclaration,
   plan: AsyncCpsPlan,
-): {
-  pre: TryCatchChunk;
-  tryChunk: TryCatchChunk;
-  catchChunk: TryCatchChunk;
-  post: TryCatchChunk;
-  catchParamName: string | null;
-  tryStmt: ts.TryStatement;
-} | null {
+): { groups: TryCatchGroup[]; post: TryCatchChunk } | null {
   if (plan.awaitPoints.length === 0) return null;
   const body = fn.body;
   if (body === undefined || !ts.isBlock(body)) return null;
   const awaitSet = new Set<ts.AwaitExpression>(plan.awaitPoints);
 
-  // Exactly one top-level try statement; it must carry ≥1 await.
-  let tryIdx = -1;
+  // Split the top level at every AWAITED try statement (an await-free try is an
+  // ordinary lead and stays inside its chunk).
+  const tryIdxs: number[] = [];
   for (let i = 0; i < body.statements.length; i++) {
     const stmt = body.statements[i]!;
     if (!ts.isTryStatement(stmt)) continue;
-    if (countAwaitsInStatement(stmt, awaitSet) === 0) continue; // await-free try — an ordinary lead
-    if (tryIdx !== -1) return null; // two awaited trys — not this shape
-    tryIdx = i;
+    if (countAwaitsInStatement(stmt, awaitSet) === 0) continue;
+    tryIdxs.push(i);
   }
-  if (tryIdx === -1) return null;
-  const tryStmt = body.statements[tryIdx] as ts.TryStatement;
-  if (!tryStmt.catchClause) return null; // try/finally → the Gap-3 linear path
-  if (tryStmt.finallyBlock) return null; // try/catch/finally — 3c-ii (return-through-finally)
-  const decl = tryStmt.catchClause.variableDeclaration;
-  if (decl !== undefined && !ts.isIdentifier(decl.name)) return null; // destructured catch param
-  const catchParamName = decl !== undefined ? (decl.name as ts.Identifier).text : null;
+  if (tryIdxs.length === 0) return null;
 
-  const pre = lowerChunk(body.statements.slice(0, tryIdx), awaitSet);
-  if (pre === null || pre.sawReturnAwait) return null; // `return await` before the try — unreachable try
-  const tryChunk = lowerChunk(tryStmt.tryBlock.statements, awaitSet);
-  if (tryChunk === null || tryChunk.segs.length === 0) return null;
-  const catchChunk = lowerChunk(tryStmt.catchClause.block.statements, awaitSet);
-  if (catchChunk === null) return null;
-  const post = lowerChunk(body.statements.slice(tryIdx + 1), awaitSet);
+  const groups: TryCatchGroup[] = [];
+  let cursor = 0;
+  let total = 0;
+  for (const tryIdx of tryIdxs) {
+    const tryStmt = body.statements[tryIdx] as ts.TryStatement;
+    if (!tryStmt.catchClause) return null; // awaited try/finally → the Gap-3 linear path
+    if (tryStmt.finallyBlock) return null; // try/catch/finally — 3c-ii-b follow-up
+    const decl = tryStmt.catchClause.variableDeclaration;
+    if (decl !== undefined && !ts.isIdentifier(decl.name)) return null; // destructured catch param
+    const catchParamName = decl !== undefined ? (decl.name as ts.Identifier).text : null;
+
+    const pre = lowerChunk(body.statements.slice(cursor, tryIdx), awaitSet);
+    if (pre === null || pre.sawReturnAwait) return null; // `return await` → the try is unreachable
+    const tryChunk = lowerChunk(tryStmt.tryBlock.statements, awaitSet);
+    if (tryChunk === null || tryChunk.segs.length === 0) return null;
+    if (tryChunk.sawReturnAwait && tryIdx !== tryIdxs[tryIdxs.length - 1]) return null; // later trys unreachable on the try path — keep bounded
+    const catchChunk = lowerChunk(tryStmt.catchClause.block.statements, awaitSet);
+    if (catchChunk === null) return null;
+    groups.push({ pre, tryChunk, catchChunk, catchParamName });
+    total += pre.segs.length + tryChunk.segs.length + catchChunk.segs.length;
+    cursor = tryIdx + 1;
+  }
+  const post = lowerChunk(body.statements.slice(cursor), awaitSet);
   if (post === null) return null;
+  total += post.segs.length;
 
-  // Every await must be accounted for by the four chunks (no stray positions).
-  const total = pre.segs.length + tryChunk.segs.length + catchChunk.segs.length + post.segs.length;
+  // Every await must be accounted for by the chunks (no stray positions).
   if (total !== plan.awaitPoints.length) return null;
 
-  return { pre, tryChunk, catchChunk, post, catchParamName, tryStmt };
+  return { groups, post };
 }
 
 /**
- * (#2906 3c) Build the CFG for the bounded try/catch shape. State layout
- * (dense ids in push order; M = pre.segs + try.segs suspend states):
- *   0..M-1      pre+try suspend chain (pre awaits handler 0, try awaits handler 1;
- *               the pre tail runs as leading statements of the first try state)
- *   M           try-exit: deliver the last try await, run the try tail,
- *               `goto(join)` — or `settleSent` for a trailing `return await`
- *   M+1..       catch chain (entry has NO resume prelude — the route enters it
- *               like a goto; its awaits are handler 0: a throw in the catch
- *               body rejects the result promise)
- *   join..      post chain → settleUndefined (or settleSent)
- * Handlers: one region { id: 1, catchState: M+1, catchParamName }.
+ * (#2906 3c / 3c-ii) Build the CFG for the bounded (multi-region sibling)
+ * try/catch shape. Per group g (region id r, in source order): the pre chunk's
+ * suspend chain (handler 0, its tail fused into the first try state's leads),
+ * the try chunk's suspend chain (handler r), a try-exit state
+ * (deliver the last try await → try tail → `goto(join)`, or `settleSent` for a
+ * trailing `return await`), then the catch chain (handler 0; entry has NO
+ * resume prelude — the route enters it like a goto) → `goto(join)`. `join` is
+ * the next group's entry (or the post chain). Handlers: one region per group
+ * `{ id: r, catchState, catchParamName? }`.
  */
 export function planTryCatchCfg(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): AsyncCfgPlan | null {
   const shape = analyzeTryCatchAsync(fn, plan);
   if (shape === null) return null;
-  const { pre, tryChunk, catchChunk, post, catchParamName } = shape;
 
   const asLead = (stmts: readonly ts.Statement[], handler: number): AsyncCfgStmt[] =>
     stmts.map((stmt) => ({ stmt, handler }));
 
-  // Fused pre+try suspend steps (the pre tail leads into the first try step).
-  interface Step {
-    readonly leads: AsyncCfgStmt[];
-    readonly seg: LinearAwaitSegment;
-    readonly handler: number;
-  }
-  const steps: Step[] = [];
-  for (const seg of pre.segs) steps.push({ leads: asLead(seg.leadStmts, 0), seg, handler: 0 });
-  for (let i = 0; i < tryChunk.segs.length; i++) {
-    const seg = tryChunk.segs[i]!;
-    steps.push({
-      leads: [...(i === 0 ? asLead(pre.tail, 0) : []), ...asLead(seg.leadStmts, 1)],
-      seg,
-      handler: 1,
-    });
-  }
-  const M = steps.length; // ≥ 1 (tryChunk.segs.length ≥ 1)
-
-  const catchEntry = M + 1;
-  const catchStateCount = catchChunk.segs.length === 0 ? 1 : catchChunk.segs.length + 1;
-  const join = catchEntry + catchStateCount;
-  const finalSettle: AsyncCfgTerminator = post.sawReturnAwait ? { kind: "settleSent" } : { kind: "settleUndefined" };
-
   const states: AsyncCfgState[] = [];
-  // Pre+try suspend chain.
-  for (let k = 0; k < M; k++) {
-    const step = steps[k]!;
+  const handlers: AsyncHandlerRegion[] = [];
+  // Leads/resume carried into the NEXT pushed suspend/settle state.
+  let pendingLeads: AsyncCfgStmt[] = [];
+  let pendingResume: AsyncResumePoint | null = null;
+
+  /** Push one suspend state per segment; the last delivers into the NEXT push. */
+  const pushSuspendChain = (segs: readonly LinearAwaitSegment[], handler: number): void => {
+    for (const seg of segs) {
+      states.push({
+        id: states.length,
+        resumeFrom: pendingResume,
+        lead: [...pendingLeads, ...asLead(seg.leadStmts, handler)],
+        terminator: { kind: "suspend", awaited: seg.awaitedExpr, resumeState: states.length + 1, handler },
+      });
+      pendingResume = { binding: seg.resumeBinding, handler };
+      pendingLeads = [];
+    }
+  };
+
+  for (let g = 0; g < shape.groups.length; g++) {
+    const group = shape.groups[g]!;
+    const r = g + 1; // 1-based dense region id
+    // Pre chunk (handler 0), its tail fused into the first try state.
+    pushSuspendChain(group.pre.segs, 0);
+    pendingLeads.push(...asLead(group.pre.tail, 0));
+    // Try chunk (handler r).
+    pushSuspendChain(group.tryChunk.segs, r);
+    // Try-exit: deliver the last try await (handler r — a rejection routes to
+    // this region's catch), run the try tail, jump to the join.
+    const tryExitId = states.length;
+    const catchEntry = tryExitId + 1;
+    const catchCount = group.catchChunk.segs.length === 0 ? 1 : group.catchChunk.segs.length + 1;
+    const join = catchEntry + catchCount;
     states.push({
-      id: k,
-      resumeFrom: k === 0 ? null : { binding: steps[k - 1]!.seg.resumeBinding, handler: steps[k - 1]!.handler },
-      lead: step.leads,
-      terminator: { kind: "suspend", awaited: step.seg.awaitedExpr, resumeState: k + 1, handler: step.handler },
+      id: tryExitId,
+      resumeFrom: pendingResume,
+      lead: group.tryChunk.sawReturnAwait ? [] : asLead(group.tryChunk.tail, r),
+      terminator: group.tryChunk.sawReturnAwait ? { kind: "settleSent" } : { kind: "goto", target: join },
     });
+    pendingResume = null;
+    pendingLeads = [];
+    // Catch chain (handler 0 — no enclosing region; a throw here rejects).
+    if (group.catchChunk.segs.length === 0) {
+      states.push({
+        id: catchEntry,
+        resumeFrom: null,
+        lead: asLead(group.catchChunk.tail, 0),
+        terminator: { kind: "goto", target: join },
+      });
+    } else {
+      pushSuspendChain(group.catchChunk.segs, 0);
+      states.push({
+        id: states.length,
+        resumeFrom: pendingResume,
+        lead: group.catchChunk.sawReturnAwait ? [] : asLead(group.catchChunk.tail, 0),
+        terminator: group.catchChunk.sawReturnAwait ? { kind: "settleSent" } : { kind: "goto", target: join },
+      });
+      pendingResume = null;
+      pendingLeads = [];
+    }
+    handlers.push({
+      id: r,
+      parent: 0,
+      finalizer: [],
+      catchState: catchEntry,
+      ...(group.catchParamName !== null ? { catchParamName: group.catchParamName } : {}),
+    });
+    // Invariant: the next state pushed is the join (states.length === join).
   }
-  // Try-exit: deliver the last try await (handler 1 — a rejection routes to the
-  // catch), then the try tail, then join (or settle with SENT for return-await).
-  const lastStep = steps[M - 1]!;
-  states.push({
-    id: M,
-    resumeFrom: { binding: lastStep.seg.resumeBinding, handler: lastStep.handler },
-    lead: tryChunk.sawReturnAwait ? [] : asLead(tryChunk.tail, 1),
-    terminator: tryChunk.sawReturnAwait ? { kind: "settleSent" } : { kind: "goto", target: join },
-  });
-  // Catch chain (handler 0 throughout — no enclosing region).
-  if (catchChunk.segs.length === 0) {
+  // Post chunk.
+  if (shape.post.segs.length === 0) {
     states.push({
-      id: catchEntry,
+      id: states.length,
       resumeFrom: null,
-      lead: asLead(catchChunk.tail, 0),
-      terminator: { kind: "goto", target: join },
+      lead: [...pendingLeads, ...asLead(shape.post.tail, 0)],
+      terminator: { kind: "settleUndefined" },
     });
   } else {
-    for (let j = 0; j < catchChunk.segs.length; j++) {
-      const seg = catchChunk.segs[j]!;
-      states.push({
-        id: catchEntry + j,
-        resumeFrom: j === 0 ? null : { binding: catchChunk.segs[j - 1]!.resumeBinding, handler: 0 },
-        lead: asLead(seg.leadStmts, 0),
-        terminator: { kind: "suspend", awaited: seg.awaitedExpr, resumeState: catchEntry + j + 1, handler: 0 },
-      });
-    }
+    pushSuspendChain(shape.post.segs, 0);
     states.push({
-      id: catchEntry + catchChunk.segs.length,
-      resumeFrom: { binding: catchChunk.segs[catchChunk.segs.length - 1]!.resumeBinding, handler: 0 },
-      lead: catchChunk.sawReturnAwait ? [] : asLead(catchChunk.tail, 0),
-      terminator: catchChunk.sawReturnAwait ? { kind: "settleSent" } : { kind: "goto", target: join },
-    });
-  }
-  // Post chain.
-  if (post.segs.length === 0) {
-    states.push({ id: join, resumeFrom: null, lead: asLead(post.tail, 0), terminator: { kind: "settleUndefined" } });
-  } else {
-    for (let j = 0; j < post.segs.length; j++) {
-      const seg = post.segs[j]!;
-      states.push({
-        id: join + j,
-        resumeFrom: j === 0 ? null : { binding: post.segs[j - 1]!.resumeBinding, handler: 0 },
-        lead: asLead(seg.leadStmts, 0),
-        terminator: { kind: "suspend", awaited: seg.awaitedExpr, resumeState: join + j + 1, handler: 0 },
-      });
-    }
-    states.push({
-      id: join + post.segs.length,
-      resumeFrom: { binding: post.segs[post.segs.length - 1]!.resumeBinding, handler: 0 },
-      lead: post.sawReturnAwait ? [] : asLead(post.tail, 0),
-      terminator: finalSettle,
+      id: states.length,
+      resumeFrom: pendingResume,
+      lead: shape.post.sawReturnAwait ? [] : asLead(shape.post.tail, 0),
+      terminator: shape.post.sawReturnAwait ? { kind: "settleSent" } : { kind: "settleUndefined" },
     });
   }
 
-  return {
-    states,
-    handlers: [
-      {
-        id: 1,
-        parent: 0,
-        finalizer: [],
-        catchState: catchEntry,
-        ...(catchParamName !== null ? { catchParamName } : {}),
-      },
-    ],
-  };
+  return { states, handlers };
 }
 
 /**
  * (#2906 3c) Spill-set inputs for the bounded try/catch shape: the shape's
- * suspend segments (for resume-binding types) and the catch-param name. The
- * widened own-local set is computed by the caller (async-frame owns
+ * suspend segments (for resume-binding types) and the catch-param names
+ * (deduped — two catches may share a name; the params are never live
+ * simultaneously so they share one externref slot). The widened own-local set
+ * is computed by the caller (async-frame owns
  * `collectVarDeclsByName`/`resolveSpillLocalValType`). Null off-shape.
  */
 export function tryCatchAsyncSpillInfo(
   fn: ts.FunctionLikeDeclaration,
   plan: AsyncCpsPlan,
-): { segments: readonly LinearAwaitSegment[]; catchParamName: string | null } | null {
+): { segments: readonly LinearAwaitSegment[]; catchParamNames: string[] } | null {
   const shape = analyzeTryCatchAsync(fn, plan);
   if (shape === null) return null;
-  return {
-    segments: [...shape.pre.segs, ...shape.tryChunk.segs, ...shape.catchChunk.segs, ...shape.post.segs],
-    catchParamName: shape.catchParamName,
-  };
+  const segments: LinearAwaitSegment[] = [];
+  const catchParamNames: string[] = [];
+  for (const g of shape.groups) {
+    segments.push(...g.pre.segs, ...g.tryChunk.segs, ...g.catchChunk.segs);
+    if (g.catchParamName !== null && !catchParamNames.includes(g.catchParamName)) {
+      catchParamNames.push(g.catchParamName);
+    }
+  }
+  segments.push(...shape.post.segs);
+  return { segments, catchParamNames };
 }
 
 // ---------------------------------------------------------------------------

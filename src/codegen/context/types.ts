@@ -593,6 +593,22 @@ export interface FunctionContext {
     promiseTypeIdx: number;
     /** `__promise_fulfill(promise, value) -> value` funcIdx. */
     fulfillFuncIdx: number;
+    /**
+     * (#2906 3c-ii) The ACTIVE handler region's await-free finalizer at the
+     * lead statement currently being compiled — set/cleared per-lead by
+     * `buildStateBody`. A `return v` compiled while this is non-empty replays
+     * it between evaluating `v` and settling (return-through-finally). Cleared
+     * during the replay itself so a `return` INSIDE the finally settles
+     * directly (the finally's completion overrides, §14.15.3).
+     */
+    pendingFinalizer?: readonly ts.Statement[];
+    /**
+     * (#2906 3c-ii) The `__async_in_try` region-id local. The replay resets it
+     * to 0 first so a throw INSIDE the replayed finally does not re-enter the
+     * same region's catch/finalizer (mirrors the inline finally leads, which
+     * are flagged not-in-try).
+     */
+    handlerLocal?: number;
   };
   /** Set of variable names that are read-only bindings (e.g. named function expression name) */
   readOnlyBindings?: Set<string>;

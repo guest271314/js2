@@ -432,6 +432,9 @@ export function buildAsyncFrameInfo(
     decl,
     plan,
     derived.length === 0 ? paramNames : paramNames.concat(derived.map((d) => d.name)),
+    // (#2906 3c-ii) The native backend admits return-in-try; the spill
+    // computation must see the SAME plan the gate/producer admitted.
+    hostImports === undefined,
   );
   const derivedSpillInit = new Map<number, number>();
   for (const d of derived) {
@@ -620,7 +623,9 @@ export function asyncFnNeedsDrive(ctx: CodegenContext, fn: ts.FunctionLikeDeclar
   }
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved promise
-  const linear = planLinearAwaits(fn, plan);
+  // (#2906 3c-ii) The native gate admits return-in-try (return-through-finally
+  // via the return hook's finalizer replay); the host gate does not.
+  const linear = planLinearAwaits(fn, plan, { allowReturnInTry: true });
   if (linear === null) {
     // (#2906 slice 3a) `while`-with-await loop shape (native drive lane only).
     // Eligible when every widened loop spill local has a spill-safe type — a
@@ -735,17 +740,17 @@ function computeTryCatchSpills(
   const info = tryCatchAsyncSpillInfo(decl, plan);
   if (info === null) return null;
   const declByName = collectVarDeclsByName(decl);
-  // `collectVarDeclsByName` also picks up the CATCH clause's own
-  // variableDeclaration (it IS a ts.VariableDeclaration) — that entry is the
-  // catch param itself, not a shadowing body local.
+  // `collectVarDeclsByName` also picks up a CATCH clause's own
+  // variableDeclaration (it IS a ts.VariableDeclaration) — those entries are
+  // the catch params themselves, not shadowing body locals.
   const isCatchClauseDecl = (node: ts.VariableDeclaration): boolean =>
     node.parent !== undefined && ts.isCatchClause(node.parent);
   const paramNames = new Set<string>();
   for (const p of decl.parameters) if (ts.isIdentifier(p.name)) paramNames.add(p.name.text);
-  if (info.catchParamName !== null) {
-    const existing = declByName.get(info.catchParamName);
+  for (const cp of info.catchParamNames) {
+    const existing = declByName.get(cp);
     if (existing !== undefined && !isCatchClauseDecl(existing)) return null; // shadows a body local
-    if (paramNames.has(info.catchParamName)) return null; // shadows a fn param
+    if (paramNames.has(cp)) return null; // shadows a fn param
   }
   const rbTypeByName = new Map<string, ValType>();
   for (const seg of info.segments) {
@@ -755,13 +760,13 @@ function computeTryCatchSpills(
   const spillTypes: ValType[] = [];
   for (const [name, node] of declByName) {
     if (paramNames.has(name)) continue;
-    if (isCatchClauseDecl(node)) continue; // the catch param spill is added below (externref)
+    if (isCatchClauseDecl(node)) continue; // catch-param spills are added below (externref)
     const rbType = rbTypeByName.get(name);
     spillNames.push(name);
     spillTypes.push(rbType ?? resolveSpillLocalValType(ctx, node) ?? { kind: "externref" });
   }
-  if (info.catchParamName !== null) {
-    spillNames.push(info.catchParamName);
+  for (const cp of info.catchParamNames) {
+    spillNames.push(cp);
     spillTypes.push({ kind: "externref" });
   }
   return { spillNames, spillTypes };
@@ -789,6 +794,9 @@ function computeAsyncSpills(
   decl: ts.FunctionLikeDeclaration,
   plan: AsyncCpsPlan,
   paramNames: string[],
+  // (#2906 3c-ii) True on the native backend — mirrors the native gate's
+  // `allowReturnInTry` so the spill computation sees the SAME linear plan.
+  allowReturnInTry = false,
 ): { spillNames: string[]; spillTypes: ValType[] } {
   // (#2865) Async GENERATOR (`async function*` — the only asterisked shape that
   // reaches the async frame): EVERY yield is a suspend point (the resume fn
@@ -825,7 +833,7 @@ function computeAsyncSpills(
     }
     return { spillNames, spillTypes };
   }
-  const linear = planLinearAwaits(decl, plan);
+  const linear = planLinearAwaits(decl, plan, { allowReturnInTry });
   if (linear === null) {
     // (#2906 slice 3a) `while`-with-await loop: widened spill set (all loop
     // own-locals). (#2906 slice 3b) for-await drive: loop own-locals + the
@@ -1124,7 +1132,11 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         // always see the same segment shape.
         asyncGenDelegatesForPlan(ctx, info.decl, isStandalonePromiseActive(ctx) ? "carrier" : "awaitFree"),
       )
-    : planAsyncCfg(ctx, info.decl, plan, { allowLoops: !info.host, allowTryCatch: !info.host });
+    : planAsyncCfg(ctx, info.decl, plan, {
+        allowLoops: !info.host,
+        allowTryCatch: !info.host,
+        allowReturnInTry: !info.host,
+      });
   if (cfg === null) {
     reportError(ctx, info.decl, "internal: async-frame resume built on an unsupported body shape (#2906 slice 1/3a)");
     info.resumeFuncIdx = -1;
@@ -1518,12 +1530,23 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       // in an in-region statement (or the terminator's own evaluation) runs the
       // region's finalizer; a throw outside (or in the inline finally itself)
       // does not.
+      // (#2906 3c-ii) While a lead is IN a region with a non-empty finalizer,
+      // arm the return hook's `pendingFinalizer` so a `return v` in that lead
+      // replays the finalizer before settling (return-through-finally).
       for (const { stmt, handler } of st.lead) {
         if (hasHandlers && handler !== curHandler) {
           curHandler = handler;
           out.push(...setHandler(curHandler));
         }
+        if (resumeFctx.asyncDriveReturn !== undefined) {
+          const fin = handler !== 0 ? cfg.handlers[handler - 1]?.finalizer : undefined;
+          resumeFctx.asyncDriveReturn.pendingFinalizer = fin !== undefined && fin.length > 0 ? fin : undefined;
+          resumeFctx.asyncDriveReturn.handlerLocal = hasHandlers ? inSrcTryLocal : undefined;
+        }
         compileStatement(ctx, resumeFctx, stmt);
+      }
+      if (resumeFctx.asyncDriveReturn !== undefined) {
+        resumeFctx.asyncDriveReturn.pendingFinalizer = undefined;
       }
 
       // (#2906 slice 3b) State-level injected step — the for-await planner uses

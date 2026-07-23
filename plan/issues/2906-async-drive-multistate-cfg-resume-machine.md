@@ -18,6 +18,8 @@ architect_spec: authored
 loc-budget-allow:
   - src/codegen/async-cps.ts
   - src/codegen/async-frame.ts
+  - src/codegen/context/types.ts
+  - src/codegen/statements/control-flow.ts
 ---
 
 # Generalize the async drive layer to a multi-state CFG-aware CPS resume machine
@@ -1110,3 +1112,49 @@ standalone probes match spec (catch entered with the reason bound: 42/45/50/
   sequential try/catches) need the producer to admit >1 region first.
 - The D4 sync-generator convergence (#2864) waits on 3c-ii/iii per the
   alignment decision there.
+
+## Slice 3c-ii-a — return-through-finally + sibling regions (LANDED, 2026-07-23, fable dev-laneB, stacked on 3c-i)
+
+**Scope shipped (native drive lane):**
+
+- **return-through-finally** — `return v` inside `try { …await… } finally { F }`
+  was a `planLinearAwaits` reject (→ AG0; measured: the value never surfaced,
+  the .then-consumer control also exposed that a `.catch/.then` CHAIN on a
+  driven promise is a separate pre-existing gap — probe consumers must await).
+  Landed WITHOUT the full finallyState machinery: the await-free finalizer
+  (the Gap-3 invariant) is REPLAYED by the return hook — `asyncDriveReturn`
+  gains `pendingFinalizer`/`handlerLocal`, armed per-lead by `buildStateBody`
+  from the lead's region id; the hook evaluates the operand FIRST (§14.15.3),
+  resets the region local (a throw in the finally must not re-enter the
+  region), replays, then settles. `pendingFinalizer` clears during the replay
+  so a `return` inside the finally settles directly (its completion
+  overrides). Admission is native-gated end-to-end: `LowerState.
+  allowReturnInTry` → `planLinearAwaits(fn, plan, opts)` (default reject —
+  every host-lane caller byte-identical) → set by `asyncFnNeedsDrive`,
+  `planAsyncCfg` (`AsyncCfgOptions.allowReturnInTry = !info.host`) and
+  `computeAsyncSpills` (from `buildAsyncFrameInfo`'s `hostImports ===
+  undefined`) so gate, producer, and spill computation see the SAME plan.
+  Deferred within this lane: `return await P` inside the try (the L653 bail
+  stays — its settle is a TERMINATOR, needs the same replay before settleSent).
+- **Sibling try/catch regions** — the 3c producer generalizes to ANY number of
+  sequential top-level try/catches: `analyzeTryCatchAsync` walks
+  `[chunk, try/catch]* chunk` groups, `planTryCatchCfg` rebuilt as a running
+  state-counter builder (invariant: after each group's catch chain,
+  `states.length === join`), one handler region per group (dense ids, own
+  `catchState`; catch params DEDUPED across regions — never live
+  simultaneously, they share one externref slot). The routed dispatcher's
+  id-equality route needed NO change. A mid-sequence `return await` in a
+  non-last try keeps the conservative bail.
+
+**Measured:** 6 new tests (20/20 total in `tests/issue-2906-3c-trycatch.test.ts`):
+return-through-finally with the finalizer observed BEFORE settle (1105),
+conditional return (finalizer exactly once, 1077), normal (104) + throw (100)
+paths unchanged, sibling both-reject (11) and fulfil+reject (142). Byte
+matrix: all 8 control programs (incl. the 3c-i try/catch shape) byte-identical
+to the 3c-i base across 3 lanes. Async corpus re-run: 89+36 passing, failures
+identical to the pre-existing main set.
+
+**Remaining after 3c-ii-a:** try/catch/finally combined regions +
+`return await`-in-try (3c-ii-b, needs the replay on the settleSent terminator
+or the full finallyState machinery); nested regions (3c-iii). D4 (#2864)
+still waits on those.
