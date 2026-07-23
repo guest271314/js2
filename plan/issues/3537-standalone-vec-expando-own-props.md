@@ -1,9 +1,10 @@
 ---
 id: 3537
 title: "standalone: expando own-properties on array ($Vec) receivers are silently dropped — writes no-op, reads answer undefined"
-status: in-progress
+status: done
 assignee: ttraenkler/fable-exposed
 created: 2026-07-23
+completed: 2026-07-23
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -112,8 +113,53 @@ Out of scope (documented boundaries):
 - elements unaffected by expando writes;
 - host lane (`gc`) byte-identical on a no-expando program.
 
-## Measured validation (record before merge)
+## Implementation notes (WHY, found during implementation)
 
-- main+fix: the 4 probe shapes flip to correct; no standalone floor loss.
-- #3468-harness+fix: the cluster-6 sample files flip fail→pass (report the
-  count — this banks against the cliff).
+The side table alone was NOT sufficient — the dynamic helpers have
+**finalize-spliced vec arms that terminally swallowed every named key before
+the miss arms could run**. Both had to be restructured to fall through:
+
+1. **Write:** `fillExternSetVecArms` (#3190) prepended an arm to `__extern_set`
+   whose vec branch ended in an unconditional `return` — a non-numeric key
+   (`ToNumber(key)` = NaN) was a silent drop. The `return` moved INSIDE the
+   numeric-key branch: numeric keys stay terminal (element write / deferred
+   grow no-op — bagging them would be incoherent with `__extern_get_idx`
+   element reads), NaN keys fall through to the composed miss arm.
+2. **Read:** `fillDynamicForinVecArms`' `__extern_get` arm (#3183) ended in
+   `getMiss(); return` for every non-"length"/non-index key. Tail removed —
+   fallthrough reaches the miss arm, whose vec branch consults the bag and
+   itself answers the identical undefined-miss sentinel on absence, so
+   no-expando programs keep byte-equal observable behavior.
+
+Composition boundary held: `closure-props.ts` (#3468-owned) untouched; the
+`buildVecOrClosureProp*` builders in `vec-props.ts` wrap the closure builders
+(vec test first, unchanged closure arm as the else/fallthrough).
+
+Verified NOT-regressions during development (verify-first):
+- `(a as any).length = 99` mutating `a.length` to 99 is PRE-EXISTING correct
+  spec behavior via the specialized length setter (not this PR's path);
+- the 7 failing tests in `tests/issue-3183.test.ts` (2) / `tests/issue-2190.test.ts`
+  (5, heterogeneous anytuple nested reads) fail IDENTICALLY on clean
+  `origin/main` src — pre-existing main breakage, not introduced here;
+- `check:godfiles` exits 1 on clean `origin/main` too (stale committed
+  profile; none of its 6 flagged functions are touched by this PR).
+
+## Measured validation (2026-07-23, CI-exact worker driver, pool 3)
+
+All four measurements ran the REAL `scripts/test262-worker.mjs` fork pool
+(originalHarness + strict-rerun + standalone verdicts):
+
+| measurement | n | result |
+| --- | --- | --- |
+| floor safety: stride-8 of the 28,655 standalone baseline passes, main@f9d8c75 vs main+fix | 3,582 | **agree 3,582 / regressions 0 / improvements 0** — byte-level additive, zero floor risk |
+| cliff bank: the 458 #3468-cliff sample regressions, harness(main+routing-revert) vs harness+fix | 458 | **26 fail→pass (every cluster-6 file), 0 fail→CE, 0 new failures** → projected **−208 of the ~3,664 cliff** |
+| today-main upside probe: 146 baseline-FAIL rows under RegExp/Array-from dirs, main vs main+fix | 146 | 0 flips either way (those fail for other reasons) |
+
+Honest accounting: this PR is **floor-NEUTRAL on current main** (the expando
+tests vacuous-pass today) and its +208 materializes when the #3468 harness
+routing lands — it is the first measured, validated shrink of the #3468 cliff
+(3,664 → ~3,456), plus the array arm of the own-property family program.
+
+Plus: 4/4 probe shapes, 13/13 guard probes, 11/11 vitest (`tests/issue-3537.test.ts`),
+28/28 in the adjacent #3418/#3468 suites, tsc clean, prettier clean,
+`check:loc-budget`/`check:coercion-sites`/`check:oracle-ratchet`/`check:stack-balance` green.
