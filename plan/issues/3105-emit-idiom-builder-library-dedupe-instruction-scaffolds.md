@@ -158,6 +158,38 @@ touched here.
 `idx = hash % cap` ×10 (same file, next obvious slice), throw-guard×17
 (`expressions/calls.ts`), counter-loop×21, proxy-guard×12, param-object×24.
 
+### Slice 2 — hash-probe init `idx = hash % cap` ×10 (linear backend) — DONE (2026-07-24, dev-opus-1)
+
+**Idiom chosen:** the open-addressing probe **init** `idx = hash % cap` — the
+head of every linear probe loop, computing the first slot from the key hash
+before the loop begins. It is the companion to slice 1's advance (loop tail);
+the "next obvious slice" the slice-1 log named.
+
+**What landed:**
+
+- New builder `hashProbeInitInstrs(hashLocal, capLocal, idxLocal): Instr[]` in
+  `src/codegen-linear/emit-idioms.ts`, returning the exact four instructions
+  `local.get hash · local.get cap · i32.rem_u · local.set idx`. Per-backend by
+  design (#1527); these are linear-memory locals with no WasmGC analogue.
+- All **10** hand-rolled init copies in `src/codegen-linear/runtime.ts` migrated
+  to `...hashProbeInitInstrs(hashLocal, capLocal, idxLocal)` — across the string
+  Map (`__map_set`/`get`/`has`/delete) & Set, and the numeric Map & Set runtimes.
+  Every copy was byte-identical (same op sequence, same `hashLocal`/`capLocal`/
+  `idxLocal` operands), **zero diverged copies** to exclude. **runtime.ts: 40
+  inline lines → 10 call sites (−30 net;** 1 import extended, 0 new import line).
+  After this slice, `codegen-linear/runtime.ts` has **zero** inline `i32.rem_u`
+  (both probe idioms — head + tail — now flow through the builders).
+
+**Byte-identity proof:** `scripts/prove-emit-identity.mjs` baseline (56
+`(file,target)` records, 14 files × 4 targets) captured pre-migration, then
+`check` after migration → **IDENTICAL — all 56 match** (incl.
+`collections.ts::linear`, sha `743dc21e7eea` unchanged). `tsc --noEmit` clean;
+`tests/issue-3105.test.ts` extended with the init-builder shape guards (5 tests
+green; the Map/Set linear compile/run test exercises the init path at each loop
+head, keeping the proof non-vacuous).
+
+**Running total (slices 1+2): 20 of the ≥40 target idiom copies replaced.**
+
 ### Slice 3 — counter-loop ×6 (WasmGC, json-runtime.ts) — DONE (2026-07-24, dev-opus-1)
 
 **Idiom chosen:** the counted-forward loop `for (; i < bound; i += step) { body }`
