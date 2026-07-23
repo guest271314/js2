@@ -8,7 +8,12 @@ created: 2026-07-18
 priority: medium
 feasibility: medium
 horizon: s
-task_type: bug
+# task_type: ci — this is a GitHub Actions workflow-resilience fix with no
+# compiler/runtime repro (the fix is pure workflow YAML). It is exempt from the
+# #2093 issue→probe coverage gate by design ("Infra/tooling/docs/process issues
+# are exempt — they have no runtime repro"); the earlier `bug` value was a
+# misclassification for a shard artifact-upload retry.
+task_type: ci
 area: ci, infra
 goal: infrastructure
 lane: A
