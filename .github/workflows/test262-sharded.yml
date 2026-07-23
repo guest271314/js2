@@ -1554,10 +1554,17 @@ jobs:
           MAIN_HEAD_TS=$(git log -1 --format=%ct origin/main 2>/dev/null || git log -1 --format=%ct main 2>/dev/null || echo 0)
           BASELINE_TS="${{ steps.fetch_baseline.outputs.baseline_ts }}"
           BASELINE_SHA="${{ steps.fetch_baseline.outputs.baseline_sha }}"
-          DIFF_M=0
-          if [ "$MAIN_HEAD_TS" != "0" ] && [ "$BASELINE_TS" != "0" ]; then
-            DIFF_M=$(( (MAIN_HEAD_TS - BASELINE_TS) / 60 ))
-          fi
+          # #3459 — compute a NON-NEGATIVE clock age from a single documented
+          # clock source (git %ct, Unix epoch SECONDS). The baselines-repo HEAD
+          # commit is produced by promote-baseline AFTER the main commit it was
+          # generated from, and on a merge_group re-validation can reflect a
+          # NEWER main state than this speculative checkout's origin/main — so
+          # the raw (MAIN_HEAD_TS - BASELINE_TS) is frequently negative, which
+          # previously printed a nonsensical "-43m clock age". The helper clamps
+          # a fresher-than-main-HEAD baseline to age 0 (with an honest stderr
+          # note) instead of emitting a negative age. Pure logic is unit-tested
+          # in tests/issue-3459-baseline-clock-age.test.ts.
+          DIFF_M=$(node scripts/baseline-clock-age.mjs "$MAIN_HEAD_TS" "$BASELINE_TS")
           echo "stale_minutes=$DIFF_M" >> "$GITHUB_OUTPUT"
 
           # Parse the baseline's recorded main-sha from the baselines-repo commit
