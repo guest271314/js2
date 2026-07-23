@@ -1270,6 +1270,7 @@ export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ObjectLiteralExpression,
+  expectedType?: ValType,
 ): ValType | null {
   // (#1239) If the literal carries any get/set accessor declarations,
   // route to the JS-host plain-object path so the runtime sees real
@@ -1431,6 +1432,53 @@ export function compileObjectLiteral(
   // failure mode the gc/host R2 fast path avoids. Gating to `ctx.standalone`
   // keeps wasi byte-identical to main (the wasi extension is a tracked
   // follow-on; see plan/issues/1901). gc/host mode is untouched (not standalone).
+  //
+  // (#3536) EXCEPT when the Wasm-level EXPECTED type is this literal's OWN
+  // shape struct. A literal in call-ARGUMENT position to a declared function
+  // whose implicit-`any` param was call-site-narrowed (inferParamTypeFromCallSites
+  // derived the param's struct FROM this literal's type) has TS-contextual type
+  // `any` — so the #1901 diversion below would build a dynamic `$Object`, and
+  // the call-boundary coercion's guarded cast (externref → shape struct) can
+  // never match → the callee's param silently arrives NULL. That is the
+  // `built-ins/RegExp/property-escapes` 311-row cluster (`buildString({...})`
+  // in regExpUtils.js) and the wider "Cannot access property on null or
+  // undefined [in <fn>]" masked family. When the literal's own struct
+  // resolution lands EXACTLY on the expected typeIdx, construct the closed
+  // struct — the same representation the var-init position already picks
+  // (`var obj = {...}; f(obj)` passes today) — so the argument matches the
+  // narrowed param by construction. Precise by design: the routing fires ONLY
+  // on typeIdx equality, so an expected `$Object` / class / vec / AnyValue
+  // type can never divert a literal that would not have lowered to that exact
+  // struct anyway.
+  if (
+    ctx.standalone &&
+    expectedType !== undefined &&
+    (expectedType.kind === "ref" || expectedType.kind === "ref_null") &&
+    expr.properties.length > 0
+  ) {
+    // oracle-ratchet-allow (#3536, granted in the issue frontmatter): this
+    // query needs the raw type IDENTITY for resolveStructName's anonTypeMap /
+    // structMap lookup — a wasm-lowering ValType question deliberately above
+    // what the oracle expresses (its header assigns struct registration to
+    // the caller).
+    let litType: ts.Type | undefined;
+    try {
+      litType = ctx.checker.getTypeAtLocation(expr);
+    } catch {
+      litType = undefined;
+    }
+    if (litType) {
+      let litStructName = resolveStructName(ctx, litType);
+      if (!litStructName) {
+        ensureStructForType(ctx, litType);
+        litStructName = resolveStructName(ctx, litType);
+      }
+      if (litStructName !== undefined && ctx.structMap.get(litStructName) === expectedType.typeIdx) {
+        ensureComputedPropertyFields(ctx, fctx, expr, litType);
+        return compileObjectLiteralForStruct(ctx, fctx, expr, litStructName);
+      }
+    }
+  }
   if (objectLiteralTakesStandaloneAnyObjectPath(ctx, expr)) {
     const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
     if (objResult) return objResult;

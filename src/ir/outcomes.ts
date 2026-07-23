@@ -25,6 +25,14 @@ export type IrUnsupportedCode =
   | "type-resolution-unsupported"
   | "imported-call-planning-unsupported"
   | "late-preparation-unsupported"
+  // (#3536) The IR-lowered function's interned typeIdx differs from the
+  // collect-time registered signature that legacy-compiled callers already
+  // baked their call-argument coercions against (e.g. an implicit-`any`
+  // param call-site-narrowed to a shape struct that the IR re-types as
+  // externref). Patching would strand those callers on a stale ABI —
+  // invalid Wasm or silent null/undefined params — so the claim is
+  // withdrawn and the legacy body kept.
+  | "abi-signature-parity"
   | "new-target-threading"
   | "static-class-member"
   | "module-init-legacy-coupling";
