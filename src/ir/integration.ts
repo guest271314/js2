@@ -1150,6 +1150,11 @@ export function compileIrPathFunctions(
   // The placeholder body is overwritten with the real lowered body in the
   // Phase-3 loop below.
   // -------------------------------------------------------------------------
+  // (#3551) Track freshly-allocated slots so an owner failure AFTER
+  // allocation (e.g. the ABI-parity withdrawal cascade in Phase 3) can stub
+  // the orphaned slot instead of leaving an EMPTY body in the module (see
+  // the stub pass after the patch loop below).
+  const freshSlots: Array<{ readonly funcIdx: number; readonly ownerName: string }> = [];
   for (const entry of healthyForLower) {
     // Top-level (non-synthesized) functions already have a funcIdx
     // allocated by `compileDeclarations`. Skip them.
@@ -1171,6 +1176,7 @@ export function compileIrPathFunctions(
       exported: false,
     });
     ctx.funcMap.set(entry.name, funcIdx);
+    freshSlots.push({ funcIdx, ownerName: entry.ownerName });
   }
 
   // -------------------------------------------------------------------------
@@ -1323,6 +1329,14 @@ export function compileIrPathFunctions(
     readonly finalBody: Instr[];
   };
   const pendingPatches: PendingPatch[] = [];
+  // (#3551) Function names withdrawn by the typeIdx-parity guard below. Every
+  // IR body was compiled against `calleeTypes` — the IR's shared view of each
+  // claimed function's signature — so when a callee's claim is withdrawn on a
+  // parity mismatch (its slot keeps the LEGACY ABI, which the mismatch just
+  // proved differs from the IR view), any committed IR caller of it would call
+  // through the wrong ABI. The cascade after this loop withdraws those callers
+  // too; collecting the names here is its input.
+  const abiDivergentNames = new Set<string>();
   for (const entry of healthyForLower) {
     const name = entry.name;
     try {
@@ -1397,6 +1411,7 @@ export function compileIrPathFunctions(
         if (entry.classMember || entry.moduleInit) {
           // Pre-#3536 semantics unchanged: for these units a mismatch means
           // the lowering itself went wrong — a hard invariant.
+          abiDivergentNames.add(name);
           markOwnerInvariant(
             entry.ownerName,
             name,
@@ -1412,6 +1427,7 @@ export function compileIrPathFunctions(
           // shape-struct param) — a soft withdraw-the-claim fallback, NOT a
           // compile error. The legacy body stays; callers keep the ABI they
           // compiled against.
+          abiDivergentNames.add(name);
           markOwnerFailure(
             entry.ownerName,
             name,
@@ -1475,6 +1491,39 @@ export function compileIrPathFunctions(
     }
   }
 
+  // (#3551) ABI-parity withdrawal CASCADE. A withdrawal above keeps the
+  // callee's LEGACY body and typeIdx — but every IR body was compiled against
+  // `calleeTypes`, the IR's shared view of each claimed function's signature,
+  // which the parity mismatch just proved DIFFERS from that legacy ABI for the
+  // withdrawn name. Committing a caller while withdrawing its callee therefore
+  // strands the caller on the wrong ABI: the #3503 partial-commit regression
+  // (tests/issue-3471.test.ts) committed `check`'s IR body — which passed raw
+  // f64 args per the IR view of `isSameValue` — while `isSameValue` withdrew
+  // to its legacy `(externref, externref)` signature, producing invalid Wasm
+  // ("call[0] expected type f64, found call of type externref") after the
+  // stack-balance repair mangled the arg coercions. So: withdraw every still-
+  // pending patch whose IR body references a parity-withdrawn name. One level
+  // is a fixpoint — a cascade-withdrawn caller PASSED the guard itself (its
+  // IR typeIdx equals its legacy typeIdx), so keeping its legacy body changes
+  // nothing about the ABI its own callers compiled against.
+  if (abiDivergentNames.size > 0) {
+    for (const patch of pendingPatches) {
+      if (failedOwners.has(patch.entry.ownerName)) continue;
+      const referenced = findReferencedFuncName(patch.entry.fn, abiDivergentNames);
+      if (referenced === undefined) continue;
+      markOwnerFailure(
+        patch.entry.ownerName,
+        patch.entry.name,
+        new IrUnsupportedError(
+          "abi-signature-parity",
+          "resolve",
+          `body references ${referenced}, whose claim was withdrawn on a typeIdx parity mismatch — the call ABI baked from calleeTypes no longer matches; keeping legacy body`,
+        ),
+        "patch",
+      );
+    }
+  }
+
   // Patch only after every artifact lowered successfully. A lifted/clone
   // failure invalidates its whole source owner, including an already-lowered
   // main artifact, so the ledger can never report emitted+fatal for one row.
@@ -1488,6 +1537,20 @@ export function compileIrPathFunctions(
       exported: patch.existing.exported,
     });
     compiled.push(patch.entry.name);
+  }
+
+  // (#3551) Stub orphaned fresh slots. A fresh slot (mono clone / lifted fn)
+  // whose owner failed after allocation — at lower time or via the cascade
+  // above — would otherwise be emitted with an EMPTY body: invalid Wasm for
+  // any non-void signature, and reachable when a HEALTHY owner committed a
+  // body that calls the failed owner's clone. A lone `unreachable` validates
+  // against every signature, keeps the rest of the module working, and traps
+  // only on a path that actually enters the orphaned artifact.
+  for (const slot of freshSlots) {
+    if (!failedOwners.has(slot.ownerName)) continue;
+    const orphan = definedFuncAt(ctx, slot.funcIdx);
+    if (!orphan || orphan.body.length > 0) continue;
+    replaceDefinedFuncAt(ctx, slot.funcIdx, { ...orphan, body: [{ op: "unreachable" }] });
   }
 
   const dropTerminal = process.env.JS2WASM_TEST_DROP_IR_TERMINAL;
@@ -1506,6 +1569,24 @@ export function compileIrPathFunctions(
 
 function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
   return !!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+/**
+ * (#3551) Scan an IR function for any symbolic reference to one of `names`.
+ * `IrFuncRef` has exactly two carriers in the instruction set — direct `call`
+ * targets and `closure.new` lifted-func refs — and terminators carry none, so
+ * a flat walk over every block's instrs is complete. Returns the first
+ * referenced name (for the withdrawal detail), or undefined when the body
+ * references none of them.
+ */
+function findReferencedFuncName(fn: IrFunction, names: ReadonlySet<string>): string | undefined {
+  for (const block of fn.blocks) {
+    for (const instr of block.instrs) {
+      if (instr.kind === "call" && names.has(instr.target.name)) return instr.target.name;
+      if (instr.kind === "closure.new" && names.has(instr.liftedFunc.name)) return instr.liftedFunc.name;
+    }
+  }
+  return undefined;
 }
 
 /**
