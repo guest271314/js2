@@ -277,7 +277,7 @@ import { emitSymbolToString, ensureSymbolRegistry } from "../symbol-native.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { compileIdentifierCall } from "./call-identifier.js";
-import { compileBuiltinStaticCall } from "./call-builtin-static.js";
+import { compileBuiltinStaticCall, tryCompileFromCharCodeFamilyReflective } from "./call-builtin-static.js";
 import { compileNamespaceStaticCall } from "./call-namespace-static.js";
 import { compileReceiverMethodCall } from "./call-receiver-method.js";
 import { compileTailDispatch } from "./call-tail-dispatch.js";
@@ -6284,6 +6284,17 @@ function compileCallExpression(
         // Slice-1 brand-check fires on the bad `this`. Standalone-gated.
         const genProtoResult = tryEmitGeneratorProtoReflectiveCall(ctx, fctx, expr, recv, isCall);
         if (genProtoResult !== undefined) return genProtoResult;
+      }
+
+      // (#3541) Reflective `String.fromCharCode/fromCodePoint` .call/.apply on
+      // the native-string lanes: the generic closure-wrapper apply machinery
+      // cannot spread a native $vec argv into the builtin's variadic lowering
+      // (null string → __str_concat null-deref — the sole gate on the 311
+      // built-ins/RegExp/property-escapes rows). Precise-match arm; falls
+      // through (undefined) for the host lane and any non-vec/unsafe shape.
+      {
+        const fccResult = tryCompileFromCharCodeFamilyReflective(ctx, fctx, expr, innerExpr, isCall);
+        if (fccResult !== undefined) return fccResult;
       }
 
       // Sub-fix 3 (#1596): Function.prototype.{apply,call}.call(fn, ...) reshape.

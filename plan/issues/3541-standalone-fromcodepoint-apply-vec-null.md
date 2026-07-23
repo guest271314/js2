@@ -1,9 +1,10 @@
 ---
 id: 3541
-title: "Standalone: String.fromCodePoint.apply(null, vec) returns null (__str_concat null-deref) — sole remaining gate on the RegExp property-escapes 311-row family"
-status: ready
+title: "Standalone: String.fromCodePoint.apply(null, vec) returns null (__str_concat null-deref) — the then-current gate on the RegExp property-escapes 311-row family"
+status: done
 created: 2026-07-23
 updated: 2026-07-23
+completed: 2026-07-23
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -13,9 +14,15 @@ goal: standalone
 sprint: current
 horizon: m
 umbrella: 2860
-related: [2860, 3536, 3535, 2088, 3138, 3139]
-files:
+assignee: ttraenkler/fable-2860
+related: [2860, 3536, 3535, 2088, 3138, 3139, 3549]
+loc-budget-allow:
+  - src/codegen/expressions/call-builtin-static.ts
   - src/codegen/expressions/calls.ts
+files:
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/expressions/calls.ts
+  - tests/issue-3541.test.ts
 ---
 
 # Standalone: `String.fromCodePoint.apply(null, vec)` returns null
@@ -83,3 +90,50 @@ before choosing):
   unicode-property RegExp matching — measure, don't assume; if the RegExp
   engine lacks the property tables, record the residual honestly).
 - Zero host-lane changes (standalone-scoped or verified byte-identical).
+
+## Implementation (landed 2026-07-23; stacked on #3536)
+
+Option 1, in the subsystem module: `tryCompileFromCharCodeFamilyReflective`
+(`src/codegen/expressions/call-builtin-static.ts`), wired as a precise-match
+arm in the `.call/.apply` dispatch of `compileCallExpression`
+(`expressions/calls.ts`). Native-string lanes only; the host lane and every
+non-matching shape fall through byte-identically.
+
+- `.call(thisArg, …codes)` → synthetic direct `String.fromX(…codes)` (reuses
+  the #2088 fold + #2601/#2875 guards wholesale; thisArg evaluated first).
+- `.apply(thisArg)` / empty array → `""`.
+- `.apply(thisArg, arr)` with a STATICALLY-typed native vec → destructure +
+  shared `emitStringJoinFold` over the elements: §7.1.8 ToUint16 in the f64
+  domain (fromCharCode) / §22.1.2.2 integral+[0,0x10FFFF] RangeError guard
+  (fromCodePoint); i8/i16/i32/f64/externref(boxed) elements; #3224-style
+  backing bounds check (absent index ⇒ undefined semantics); null argArray ⇒
+  empty list.
+- `.apply(thisArg, arr)` with an EXTERNREF value (the #3536 struct-narrowed
+  callee shape — `const lone = args.pts` reads through the dynamic member
+  path, wrapping the vec) → `any.convert_extern` + guarded 2-way `ref.test`
+  dispatch over `$vec_f64` / `$vec_externref`, nullish ⇒ empty list, other
+  non-array-like ⇒ §Function.prototype.apply TypeError.
+- Re-eval-safety gate (identifier / literal / null / single member access on
+  an identifier / array literal) so the bail-to-legacy path can never double
+  side effects.
+
+## Measured results (2026-07-23, combined #3536+#3541 tree)
+
+- All 7 repro probes pass (top-level vec, struct-field, in-function
+  struct-narrowed; each buildString body variant incl. the grown
+  `codePoints` shape that formerly hit `illegal cast`).
+- `tests/issue-3541.test.ts`: 8/8 (ToUint16, RangeError, surrogate pairs,
+  empty/absent arrays, `.call`).
+- **Full 311-row property-escapes family through the real worker: 0/311
+  flips.** The apply layer is fixed and the wall MOVED one layer deeper —
+  304/311 now die at `RangeError: regular expression step limit exceeded`
+  in the native RegExp engine matching `^\p{…}+$` over the built
+  multi-thousand-char strings; 6 are `RGI_Emoji…`/`Basic_Emoji` sequence
+  properties; 1 misc. Filed as **#3549** with the per-signature tally —
+  the honest lesson of the #3536 census (2/198 vs the ~1,190 naive
+  extrapolation) applied: this fix's direct test262 yield is whatever the
+  CI baselines show for non-PE `fromCharCode/fromCodePoint.apply` users,
+  NOT the 311.
+- Battery: typecheck · string-methods/arrow-call-apply/iife equivalence
+  (123 tests) · issue-3536+3541 tests (13) · check:ir-fallbacks ·
+  oracle-ratchet (no new checker usage) · prettier/biome — all green.

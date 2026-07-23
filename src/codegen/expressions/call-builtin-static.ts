@@ -3309,7 +3309,17 @@ export function tryCompileFromCharCodeFamilyReflective(
     e.kind === ts.SyntaxKind.FalseKeyword ||
     ts.isNumericLiteral(e) ||
     ts.isStringLiteralLike(e);
-  if (!reEvalSafe(thisArg) || !(reEvalSafe(argsVal) || ts.isArrayLiteralExpression(argsVal))) {
+  // The argsArray additionally admits `obj.prop` (single member access on an
+  // identifier — the `buildString(args){ …apply(null, args.pts) }` shape) and
+  // array literals. The bail-after-compile path only re-evaluates when the
+  // compiled type is NOT a supported vec; a getter-bearing read of that shape
+  // is already broken on the legacy path today, so the residual double-eval
+  // exposure is strictly smaller than the bug this replaces.
+  const argsReEvalSafe =
+    reEvalSafe(argsVal) ||
+    ts.isArrayLiteralExpression(argsVal) ||
+    (ts.isPropertyAccessExpression(argsVal) && ts.isIdentifier(argsVal.expression));
+  if (!reEvalSafe(thisArg) || !argsReEvalSafe) {
     return undefined;
   }
 
@@ -3317,187 +3327,279 @@ export function tryCompileFromCharCodeFamilyReflective(
 
   const argType = compileExpression(ctx, fctx, argsVal);
   if (argType === null) return null;
-  if (argType.kind !== "ref" && argType.kind !== "ref_null") {
-    fctx.body.push({ op: "drop" });
-    return undefined; // re-eval-safe by the gate above
-  }
-  const vecTypeIdx = argType.typeIdx;
-  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
-  if (arrTypeIdx < 0) {
-    fctx.body.push({ op: "drop" });
-    return undefined;
-  }
-  const arrDef = ctx.mod.types[arrTypeIdx] as { kind: "array"; element: ValType };
-  const elemType = arrDef.element;
-  if (
-    elemType.kind !== "f64" &&
-    elemType.kind !== "i32" &&
-    elemType.kind !== "i8" &&
-    elemType.kind !== "i16" &&
-    elemType.kind !== "externref"
-  ) {
-    fctx.body.push({ op: "drop" });
-    return undefined;
-  }
 
-  // vec destructure — a null argArray spreads as the empty list (len stays 0).
-  const vecTmp = allocLocal(fctx, `__fccapply_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
-  const dataTmp = allocLocal(fctx, `__fccapply_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
-  const foldLocals = allocJoinFoldLocals(fctx, repr, "fccapply");
-  fctx.body.push({ op: "local.set", index: vecTmp });
-  fctx.body.push({ op: "local.get", index: vecTmp });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [
-      { op: "i32.const", value: 0 },
-      { op: "local.set", index: foldLocals.lenTmp },
-    ],
-    else: [
-      { op: "local.get", index: vecTmp },
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
-      { op: "local.set", index: foldLocals.lenTmp },
-      { op: "local.get", index: vecTmp },
-      { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
-      { op: "local.set", index: dataTmp },
-    ],
-  });
-  fctx.body.push(...repr.literal(""));
-  fctx.body.push({ op: "local.set", index: foldLocals.resultTmp });
-  fctx.body.push(...repr.literal(""));
-  fctx.body.push({ op: "local.set", index: foldLocals.sepTmp });
-  fctx.body.push({ op: "i32.const", value: 0 });
-  fctx.body.push({ op: "local.set", index: foldLocals.iTmp });
+  const vecElemSupported = (k: string): boolean =>
+    k === "f64" || k === "i32" || k === "i8" || k === "i16" || k === "externref";
 
-  // elem → 1-char string. Built via a body swap so emitThrowRangeError (a
-  // late-import-bearing emitter) targets the buffer; registered with
-  // ctx.liveBodies so a later late-import shift still fixes baked indices
-  // (the #2088 family pattern), and de-registered after the splice.
-  const elemBuf: Instr[] = [];
-  ctx.liveBodies.add(elemBuf);
-  const savedBody = fctx.body;
-  fctx.body = elemBuf;
-  try {
-    const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
-    elemBuf.push({ op: "local.get", index: dataTmp });
-    elemBuf.push({ op: "local.get", index: foldLocals.iTmp });
-    elemBuf.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
-    if (elemType.kind === "externref") {
-      // Boxed-any element → numeric code via the shared coercion engine
-      // (unboxes `__box_number` payloads; undefined → NaN).
-      coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
-    }
-    const elemIsF64 = elemType.kind === "f64" || elemType.kind === "externref";
-    if (isFromCodePoint) {
-      if (elemIsF64) {
-        // §22.1.2.2 2b/2c — non-integral (incl. NaN) or out-of-[0,0x10FFFF]
-        // code points throw RangeError (mirrors the direct-call family arm).
-        const cpTmp = allocTempLocal(fctx, { kind: "f64" });
-        elemBuf.push({ op: "local.tee", index: cpTmp });
-        elemBuf.push({ op: "local.get", index: cpTmp });
-        elemBuf.push({ op: "f64.trunc" });
-        elemBuf.push({ op: "f64.ne" });
-        elemBuf.push({ op: "local.get", index: cpTmp });
-        elemBuf.push({ op: "f64.const", value: 0 });
-        elemBuf.push({ op: "f64.lt" });
-        elemBuf.push({ op: "local.get", index: cpTmp });
-        elemBuf.push({ op: "f64.const", value: 0x10ffff });
-        elemBuf.push({ op: "f64.gt" });
-        elemBuf.push({ op: "i32.or" });
-        elemBuf.push({ op: "i32.or" });
-        const throwBuf: Instr[] = [];
-        fctx.body = throwBuf;
-        emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
-        fctx.body = elemBuf;
-        elemBuf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
-        elemBuf.push({ op: "local.get", index: cpTmp });
-        elemBuf.push({ op: "i32.trunc_sat_f64_s" });
-        releaseTempLocal(fctx, cpTmp);
-      } else {
-        // Integral by construction; range-check in the i32 domain.
-        const cpTmp = allocTempLocal(fctx, { kind: "i32" });
-        elemBuf.push({ op: "local.tee", index: cpTmp });
-        elemBuf.push({ op: "i32.const", value: 0 });
-        elemBuf.push({ op: "i32.lt_s" });
-        elemBuf.push({ op: "local.get", index: cpTmp });
-        elemBuf.push({ op: "i32.const", value: 0x10ffff });
-        elemBuf.push({ op: "i32.gt_s" });
-        elemBuf.push({ op: "i32.or" });
-        const throwBuf: Instr[] = [];
-        fctx.body = throwBuf;
-        emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
-        fctx.body = elemBuf;
-        elemBuf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
-        elemBuf.push({ op: "local.get", index: cpTmp });
-        releaseTempLocal(fctx, cpTmp);
-      }
-    } else if (elemIsF64) {
-      // fromCharCode: §7.1.8 ToUint16 in the f64 domain BEFORE the i32
-      // conversion (the #2875 slice-5 pattern — NaN/±Inf → 0, |x| ≥ 2^31 keeps
-      // its true modulo; a bare trunc_sat saturates first and gets both wrong).
-      const u16Tmp = allocTempLocal(fctx, { kind: "f64" });
-      elemBuf.push({ op: "f64.trunc" });
-      elemBuf.push({ op: "local.tee", index: u16Tmp });
-      elemBuf.push({ op: "local.get", index: u16Tmp });
-      elemBuf.push({ op: "f64.const", value: 65536 });
-      elemBuf.push({ op: "f64.div" });
-      elemBuf.push({ op: "f64.floor" });
-      elemBuf.push({ op: "f64.const", value: 65536 });
-      elemBuf.push({ op: "f64.mul" });
-      elemBuf.push({ op: "f64.sub" });
-      elemBuf.push({ op: "i32.trunc_sat_f64_s" });
-      releaseTempLocal(fctx, u16Tmp);
-    }
-    // i32/i8/i16 fromCharCode: the helper's low-16 mask IS ToUint16.
-    elemBuf.push({ op: "call", funcIdx: helperIdx });
-  } finally {
-    fctx.body = savedBody;
-  }
+  /**
+   * Emit the destructure + join fold for ONE concrete vec type. Precondition:
+   * a `(ref null vecTypeIdx)` value is on the stack. Leaves one
+   * `repr.resultType` value. A null argArray spreads as the empty list
+   * (len stays 0 → "").
+   */
+  const emitVecSpreadFold = (vecTypeIdx: number, arrTypeIdx: number, elemType: ValType): void => {
+    const vecTmp = allocLocal(fctx, `__fccapply_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+    const dataTmp = allocLocal(fctx, `__fccapply_data_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: arrTypeIdx,
+    });
+    const foldLocals = allocJoinFoldLocals(fctx, repr, "fccapply");
+    fctx.body.push({ op: "local.set", index: vecTmp });
+    fctx.body.push({ op: "local.get", index: vecTmp });
+    fctx.body.push({ op: "ref.is_null" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: foldLocals.lenTmp },
+      ],
+      else: [
+        { op: "local.get", index: vecTmp },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
+        { op: "local.set", index: foldLocals.lenTmp },
+        { op: "local.get", index: vecTmp },
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
+        { op: "local.set", index: dataTmp },
+      ],
+    });
+    fctx.body.push(...repr.literal(""));
+    fctx.body.push({ op: "local.set", index: foldLocals.resultTmp });
+    fctx.body.push(...repr.literal(""));
+    fctx.body.push({ op: "local.set", index: foldLocals.sepTmp });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: foldLocals.iTmp });
 
-  // (#3224-style) Bounds-check against the physical backing: a grown/sparse
-  // array's logical length can exceed it; an absent index spreads as
-  // `undefined` — RangeError for fromCodePoint (NaN is not integral), code 0
-  // for fromCharCode.
-  const oobBuf: Instr[] = [];
-  if (isFromCodePoint) {
-    ctx.liveBodies.add(oobBuf);
-    fctx.body = oobBuf;
+    // elem → 1-char string. Built via a body swap so emitThrowRangeError (a
+    // late-import-bearing emitter) targets the buffer; registered with
+    // ctx.liveBodies so a later late-import shift still fixes baked indices
+    // (the #2088 family pattern), and de-registered after the splice.
+    const elemBuf: Instr[] = [];
+    ctx.liveBodies.add(elemBuf);
+    const savedBody = fctx.body;
+    fctx.body = elemBuf;
     try {
-      emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+      const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+      elemBuf.push({ op: "local.get", index: dataTmp });
+      elemBuf.push({ op: "local.get", index: foldLocals.iTmp });
+      elemBuf.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
+      if (elemType.kind === "externref") {
+        // Boxed-any element → numeric code via the shared coercion engine
+        // (unboxes `__box_number` payloads; undefined → NaN).
+        coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" });
+      }
+      const elemIsF64 = elemType.kind === "f64" || elemType.kind === "externref";
+      if (isFromCodePoint) {
+        if (elemIsF64) {
+          // §22.1.2.2 2b/2c — non-integral (incl. NaN) or out-of-[0,0x10FFFF]
+          // code points throw RangeError (mirrors the direct-call family arm).
+          const cpTmp = allocTempLocal(fctx, { kind: "f64" });
+          elemBuf.push({ op: "local.tee", index: cpTmp });
+          elemBuf.push({ op: "local.get", index: cpTmp });
+          elemBuf.push({ op: "f64.trunc" });
+          elemBuf.push({ op: "f64.ne" });
+          elemBuf.push({ op: "local.get", index: cpTmp });
+          elemBuf.push({ op: "f64.const", value: 0 });
+          elemBuf.push({ op: "f64.lt" });
+          elemBuf.push({ op: "local.get", index: cpTmp });
+          elemBuf.push({ op: "f64.const", value: 0x10ffff });
+          elemBuf.push({ op: "f64.gt" });
+          elemBuf.push({ op: "i32.or" });
+          elemBuf.push({ op: "i32.or" });
+          const throwBuf: Instr[] = [];
+          fctx.body = throwBuf;
+          emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+          fctx.body = elemBuf;
+          elemBuf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
+          elemBuf.push({ op: "local.get", index: cpTmp });
+          elemBuf.push({ op: "i32.trunc_sat_f64_s" });
+          releaseTempLocal(fctx, cpTmp);
+        } else {
+          // Integral by construction; range-check in the i32 domain.
+          const cpTmp = allocTempLocal(fctx, { kind: "i32" });
+          elemBuf.push({ op: "local.tee", index: cpTmp });
+          elemBuf.push({ op: "i32.const", value: 0 });
+          elemBuf.push({ op: "i32.lt_s" });
+          elemBuf.push({ op: "local.get", index: cpTmp });
+          elemBuf.push({ op: "i32.const", value: 0x10ffff });
+          elemBuf.push({ op: "i32.gt_s" });
+          elemBuf.push({ op: "i32.or" });
+          const throwBuf: Instr[] = [];
+          fctx.body = throwBuf;
+          emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+          fctx.body = elemBuf;
+          elemBuf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf });
+          elemBuf.push({ op: "local.get", index: cpTmp });
+          releaseTempLocal(fctx, cpTmp);
+        }
+      } else if (elemIsF64) {
+        // fromCharCode: §7.1.8 ToUint16 in the f64 domain BEFORE the i32
+        // conversion (the #2875 slice-5 pattern — NaN/±Inf → 0, |x| ≥ 2^31
+        // keeps its true modulo; a bare trunc_sat saturates first and gets
+        // both wrong).
+        const u16Tmp = allocTempLocal(fctx, { kind: "f64" });
+        elemBuf.push({ op: "f64.trunc" });
+        elemBuf.push({ op: "local.tee", index: u16Tmp });
+        elemBuf.push({ op: "local.get", index: u16Tmp });
+        elemBuf.push({ op: "f64.const", value: 65536 });
+        elemBuf.push({ op: "f64.div" });
+        elemBuf.push({ op: "f64.floor" });
+        elemBuf.push({ op: "f64.const", value: 65536 });
+        elemBuf.push({ op: "f64.mul" });
+        elemBuf.push({ op: "f64.sub" });
+        elemBuf.push({ op: "i32.trunc_sat_f64_s" });
+        releaseTempLocal(fctx, u16Tmp);
+      }
+      // i32/i8/i16 fromCharCode: the helper's low-16 mask IS ToUint16.
+      elemBuf.push({ op: "call", funcIdx: helperIdx });
     } finally {
       fctx.body = savedBody;
     }
-    oobBuf.push(...repr.literal(""));
-  } else {
-    oobBuf.push({ op: "i32.const", value: 0 });
-    oobBuf.push({ op: "call", funcIdx: helperIdx });
+
+    // (#3224-style) Bounds-check against the physical backing: a grown/sparse
+    // array's logical length can exceed it; an absent index spreads as
+    // `undefined` — RangeError for fromCodePoint (NaN is not integral),
+    // code 0 for fromCharCode.
+    const oobBuf: Instr[] = [];
+    if (isFromCodePoint) {
+      ctx.liveBodies.add(oobBuf);
+      fctx.body = oobBuf;
+      try {
+        emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+      } finally {
+        fctx.body = savedBody;
+      }
+      oobBuf.push(...repr.literal(""));
+    } else {
+      oobBuf.push({ op: "i32.const", value: 0 });
+      oobBuf.push({ op: "call", funcIdx: helperIdx });
+    }
+    const boundsCheckedElem: Instr[] = [
+      { op: "local.get", index: dataTmp },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: repr.resultType },
+        then: [...oobBuf],
+        else: [
+          { op: "local.get", index: foldLocals.iTmp },
+          { op: "local.get", index: dataTmp },
+          { op: "array.len" },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: repr.resultType },
+            then: elemBuf,
+            else: [...oobBuf],
+          },
+        ],
+      },
+    ];
+
+    emitStringJoinFold(ctx, fctx, repr, foldLocals, boundsCheckedElem);
+    ctx.liveBodies.delete(elemBuf);
+    ctx.liveBodies.delete(oobBuf);
+    fctx.body.push({ op: "local.get", index: foldLocals.resultTmp });
+  };
+
+  // Statically-typed native vec argument: fold it directly.
+  if (argType.kind === "ref" || argType.kind === "ref_null") {
+    const vecTypeIdx = argType.typeIdx;
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    if (arrTypeIdx < 0) {
+      fctx.body.push({ op: "drop" });
+      return undefined;
+    }
+    const elemType = (ctx.mod.types[arrTypeIdx] as { kind: "array"; element: ValType }).element;
+    if (!vecElemSupported(elemType.kind)) {
+      fctx.body.push({ op: "drop" });
+      return undefined;
+    }
+    emitVecSpreadFold(vecTypeIdx, arrTypeIdx, elemType);
+    return repr.resultType;
   }
-  const boundsCheckedElem: Instr[] = [
-    { op: "local.get", index: dataTmp },
-    { op: "ref.is_null" },
-    {
+
+  // EXTERNREF argument — the shape inside a struct-narrowed callee (#3536):
+  // `const lone = args.loneCodePoints` reads through the dynamic member path,
+  // so the local carries the vec WRAPPED as externref. Unwrap and dispatch on
+  // the two vec representations a JS `number[]` can take here ($vec_f64 for
+  // typed literals, $vec_externref for boxed/grown arrays); anything else is
+  // not array-like spreadable — §Function.prototype.apply step 4 TypeError.
+  if (argType.kind === "externref") {
+    const vecF64Idx = getOrRegisterVecType(ctx, "f64", { kind: "f64" });
+    const arrF64Idx = getArrTypeIdxFromVec(ctx, vecF64Idx);
+    const vecExtIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+    const arrExtIdx = getArrTypeIdxFromVec(ctx, vecExtIdx);
+    if (arrF64Idx < 0 || arrExtIdx < 0) {
+      fctx.body.push({ op: "drop" });
+      return undefined;
+    }
+    const anyTmp = allocLocal(fctx, `__fccapply_any_${fctx.locals.length}`, { kind: "anyref" });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "local.set", index: anyTmp });
+
+    const savedBody = fctx.body;
+    const buildArm = (vecIdx: number, arrIdx: number, elemType: ValType): Instr[] => {
+      const buf: Instr[] = [];
+      ctx.liveBodies.add(buf);
+      fctx.body = buf;
+      try {
+        buf.push({ op: "local.get", index: anyTmp });
+        buf.push({ op: "ref.cast_null", typeIdx: vecIdx });
+        emitVecSpreadFold(vecIdx, arrIdx, elemType);
+      } finally {
+        fctx.body = savedBody;
+      }
+      ctx.liveBodies.delete(buf);
+      return buf;
+    };
+    const f64Arm = buildArm(vecF64Idx, arrF64Idx, { kind: "f64" });
+    const extArm = buildArm(vecExtIdx, arrExtIdx, { kind: "externref" });
+    const throwArm: Instr[] = [];
+    ctx.liveBodies.add(throwArm);
+    fctx.body = throwArm;
+    try {
+      // Also covers null/undefined argArray: §Function.prototype.apply treats
+      // those as the empty list — test nullish BEFORE the TypeError.
+      throwArm.push({ op: "local.get", index: anyTmp });
+      throwArm.push({ op: "ref.is_null" });
+      const emptyArm: Instr[] = [...repr.literal("")];
+      const teBuf: Instr[] = [];
+      fctx.body = teBuf;
+      emitThrowTypeError(ctx, fctx, "TypeError: CreateListFromArrayLike called on non-object");
+      fctx.body = throwArm;
+      teBuf.push(...repr.literal("")); // unreachable filler after throw; keeps the arm typed
+      throwArm.push({
+        op: "if",
+        blockType: { kind: "val", type: repr.resultType },
+        then: emptyArm,
+        else: teBuf,
+      });
+    } finally {
+      fctx.body = savedBody;
+    }
+    ctx.liveBodies.delete(throwArm);
+
+    fctx.body.push({ op: "local.get", index: anyTmp });
+    fctx.body.push({ op: "ref.test", typeIdx: vecF64Idx });
+    fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: repr.resultType },
-      then: [...oobBuf],
+      then: f64Arm,
       else: [
-        { op: "local.get", index: foldLocals.iTmp },
-        { op: "local.get", index: dataTmp },
-        { op: "array.len" },
-        { op: "i32.lt_s" },
+        { op: "local.get", index: anyTmp },
+        { op: "ref.test", typeIdx: vecExtIdx },
         {
           op: "if",
           blockType: { kind: "val", type: repr.resultType },
-          then: elemBuf,
-          else: [...oobBuf],
+          then: extArm,
+          else: throwArm,
         },
       ],
-    },
-  ];
+    });
+    return repr.resultType;
+  }
 
-  emitStringJoinFold(ctx, fctx, repr, foldLocals, boundsCheckedElem);
-  ctx.liveBodies.delete(elemBuf);
-  ctx.liveBodies.delete(oobBuf);
-  fctx.body.push({ op: "local.get", index: foldLocals.resultTmp });
-  return repr.resultType;
+  fctx.body.push({ op: "drop" });
+  return undefined; // re-eval-safe by the gate above
 }
