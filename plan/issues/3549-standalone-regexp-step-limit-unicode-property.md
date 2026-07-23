@@ -16,6 +16,10 @@ horizon: l
 umbrella: 2860
 assignee: ttraenkler/fable-2860
 related: [2860, 3541, 3536, 2876, 3507, 2935]
+# +19 LOC in native-regex.ts IS the fix (the BUDGET local + its computation at
+# __regex_run entry, beside the step-counter it replaces) — not barrel spill.
+loc-budget-allow:
+  - src/codegen/native-regex.ts
 files:
   - src/codegen/regex/vm.ts
   - src/codegen/native-regex.ts
