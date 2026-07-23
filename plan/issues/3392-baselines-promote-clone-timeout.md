@@ -1,7 +1,7 @@
 ---
 id: 3392
 title: "promote-baseline dies at the baselines-repo clone — runs/ cache growth pushed full-blob clone past the 10-min step timeout"
-status: in-progress
+status: ready
 sprint: current
 priority: high
 goal: standalone-mode

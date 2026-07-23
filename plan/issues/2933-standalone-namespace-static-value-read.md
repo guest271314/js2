@@ -4,7 +4,6 @@ title: "Standalone: Math/JSON/Reflect/Atomics namespace static VALUE reads refus
 status: ready
 created: 2026-07-02
 updated: 2026-07-16
-assignee: ttraenkler/fable-eqfix
 priority: medium
 feasibility: medium
 task_type: feature

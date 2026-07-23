@@ -1,8 +1,7 @@
 ---
 id: 2952
 title: "IR multi-exit control flow: labeled break/continue, switch (br_table), do-while, for-in adoption"
-status: in-progress
-assignee: ttraenkler/fable-2952s2
+status: ready
 sprint: current
 created: 2026-07-02
 updated: 2026-07-04

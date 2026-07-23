@@ -1,8 +1,7 @@
 ---
 id: 3175
 title: "standalone: Number.prototype.toString(radix)/toFixed/valueOf spec semantics + prototype surface (74 gap tests)"
-status: in-progress
-assignee: ttraenkler/dev-number
+status: ready
 created: 2026-07-12
 updated: 2026-07-12
 priority: high

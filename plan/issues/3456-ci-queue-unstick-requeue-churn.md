@@ -1,7 +1,7 @@
 ---
 id: 3456
 title: "queue-unstick.yml re-enqueue churn cancels in-flight merge_group runs"
-status: in-progress
+status: ready
 sprint: current
 created: 2026-07-19
 updated: 2026-07-19

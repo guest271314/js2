@@ -1,7 +1,7 @@
 ---
 id: 3510
 title: "Publish js2 standalone on test262.fyi"
-status: in-progress
+status: ready
 sprint: current
 created: 2026-07-21
 updated: 2026-07-21

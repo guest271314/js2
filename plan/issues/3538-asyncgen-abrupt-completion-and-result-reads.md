@@ -3,7 +3,7 @@ id: 3538
 title: "Async-gen abrupt completion + IteratorResult dynamic reads — the 280-test yield*-error cohort (F2 harvest, #3417/#3178)"
 status: done
 assignee: ttraenkler/fable-3417
-sprint: current
+sprint: 75
 priority: high
 horizon: m
 feasibility: hard

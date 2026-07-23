@@ -2,7 +2,7 @@
 id: 3547
 title: "codegen: remove the #3024 funcref-cell struct.new stopgap in compileClosureCall (dead after #3534 — producer eliminated + zero-producer probe)"
 status: done
-sprint: current
+sprint: 75
 assignee: ttraenkler/fable-3534
 created: 2026-07-23
 updated: 2026-07-23

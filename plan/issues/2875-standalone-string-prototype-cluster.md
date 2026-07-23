@@ -1,8 +1,7 @@
 ---
 id: 2875
 title: "Standalone: String.prototype.* cluster (159 host-pass/standalone-fail, de-masked from #2862)"
-status: in-progress
-assignee: ttraenkler/fable-dev-3
+status: ready
 created: 2026-06-30
 updated: 2026-07-18
 priority: high

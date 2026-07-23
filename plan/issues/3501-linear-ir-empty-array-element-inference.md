@@ -1,8 +1,9 @@
 ---
 id: 3501
 title: "Infer typed linear vectors from empty-array read/write evidence"
-status: in-review
-sprint: current
+status: done
+completed: 2026-07-23
+sprint: 75
 created: 2026-07-20
 updated: 2026-07-20
 priority: high
@@ -17,7 +18,6 @@ goal: backend-agnostic-ir
 depends_on: [3497, 3499]
 related: [1804, 1977, 2956, 3478]
 origin: "2026-07-20 explicit user request: run the exact landing array-sum source through shared linear IR and Porffor native"
-assignee: ttraenkler/codex-3501-empty-array-element-inference
 files:
   - src/codegen-linear/runtime.ts
   - src/ir/analysis/linear-memory-plan.ts

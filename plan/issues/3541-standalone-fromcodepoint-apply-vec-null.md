@@ -11,7 +11,7 @@ reasoning_effort: high
 task_type: bugfix
 area: codegen
 goal: standalone
-sprint: current
+sprint: 75
 horizon: m
 umbrella: 2860
 assignee: ttraenkler/fable-2860

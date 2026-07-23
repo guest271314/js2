@@ -3,7 +3,7 @@ id: 3230
 title: "Object.defineProperty: dynamic (non-literal) descriptor read-lane — struct-widening splits read/write stores (accessor read + data write-back both leak)"
 status: blocked
 assignee: ttraenkler/opus-3022
-sprint: current
+sprint: Backlog
 priority: high
 horizon: l
 feasibility: hard

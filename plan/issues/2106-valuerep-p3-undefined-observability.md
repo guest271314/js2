@@ -3,10 +3,9 @@ id: 2106
 model: fable
 fable_role: spec
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
-status: in-progress
+status: ready
 model: fable
 fable_role: spec
-assignee: ttraenkler/opus-regexp
 sprint: current
 created: 2026-06-11
 updated: 2026-07-17

@@ -1,8 +1,7 @@
 ---
 id: 3176
 title: "standalone: JSON.parse/stringify spec residual — reviver array walk illegal-cast, SyntaxError strictness, replacer/space edges (67 gap tests)"
-status: in-progress
-assignee: ttraenkler/dev-json
+status: ready
 created: 2026-07-12
 updated: 2026-07-12
 priority: high

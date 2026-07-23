@@ -2,7 +2,7 @@
 id: 3533
 title: "codegen: class field initialized to a function value (`c = fn`) emits invalid Wasm — closure-value read reports externref but stores a raw ref"
 status: done
-sprint: current
+sprint: 75
 assignee: ttraenkler/fable-3534
 created: 2026-07-22
 updated: 2026-07-23

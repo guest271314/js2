@@ -2,7 +2,7 @@
 id: 3522
 title: "IR-only R3: compile-once classes, members, and closures"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-21
 updated: 2026-07-21
 priority: critical

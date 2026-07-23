@@ -1,8 +1,7 @@
 ---
 id: 3282
 title: "Decompose the second-level god-functions created by the Wave-B/C extractions (+ ensureAnyHelpers, + deferred object-runtime core)"
-status: in-progress
-assignee: ttraenkler/opus-1
+status: ready
 sprint: current
 created: 2026-07-14
 priority: high
