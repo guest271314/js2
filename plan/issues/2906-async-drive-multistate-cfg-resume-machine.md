@@ -1166,8 +1166,38 @@ identical to the pre-existing main set.
   once, before settle — 1042), rejection via the reject route (1), leads +
   return-await (1052). Byte matrix still identical on all 8 controls.
 
-**Remaining after 3c-ii:** try/catch/finally COMBINED regions (a region with
-both catchState and a finalizer — the catch chain must run the finally on all
-its completion paths; needs a finally-only sibling region or the full
-finallyState machinery); nested regions (3c-iii). D4 (#2864) still waits on
-those.
+## Slice 3c-ii-b — COMBINED try/catch/finally regions (LANDED, 2026-07-23, fable dev-laneB, stacked on 3c-ii)
+
+**Producer-only, as predicted by the two-region model.** A combined
+`try { …await… } catch (e) { … } finally { F }` group (F await-free — the
+Gap-3 invariant) mints TWO handler regions:
+
+- the **catch region** `r` — `catchState` + `finalizer: F`, covering the TRY
+  chunk. Abrupt-in-try → route → catch (F not yet — spec ordering); `return`
+  in try → the hook replays F; `return await` in try → the settleSent replay
+  runs F (both landed in 3c-ii and index `handlers[id-1]`, so they picked up
+  the combined region for free).
+- the **finally-only region** `rFin` — `finalizer: F`, NO catchState,
+  covering the CATCH chunk (its leads/suspends/resumeFrom all tagged `rFin`).
+  A throw / rejected await in the catch → no route branch (no catchState) →
+  the reject tail's `inSrcTry == rFin` guard replays F → reject. A `return`
+  in the catch → hook replays F.
+
+Normal completions run F as inline handler-0 leads appended at the try-exit
+and catch-exit states. Region ids stay dense via a running counter (a
+combined group consumes two ids); the route loop skips catchState-less
+regions; the reject tail's per-region guard for `r` is unreachable in the
+routed dispatcher (the route branches to the catch first) — dead but
+harmless, F never double-runs.
+
+**Measured:** 8 new tests (32/32 total): fulfil/reject/throw-in-catch/
+return-in-try/return-in-catch/await-in-catch/rejected-await-in-catch/
+return-await-in-try — every completion path observes F exactly once in spec
+order (104/142/105/1050/1042/150/100/1077). Byte matrix: all 8 controls
+unchanged across 3 lanes.
+
+**Remaining after 3c-ii-b:** nested regions (3c-iii — static handler tagging
+covers nested try/CATCH: tag the inner catch chunk with the ENCLOSING region
+id + set `parent`, lift the validator; nested finalizer CHAINS on one abrupt
+need the reject tail to replay all enclosing finalizers innermost-first and
+stay banked). D4 (#2864) still waits on 3c-iii.
