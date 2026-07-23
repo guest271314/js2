@@ -298,7 +298,11 @@ externref by construction. A3-as-audited needs no code.
 
 GC (host) lane:
 - `built-ins/Function/prototype/toString` (80 files): **11 → 23 pass (+12, 0
-  lost)**; `illegal cast` rows **67 → 0**. The 57 remaining fails are genuine
+  lost)**; `illegal cast` rows **67 → 1** (corrected in #3547: the residual 1,
+  `S15.3.4.2_A16.js`, is PRE-EXISTING with an identical signature on the
+  pre-fix baseline — a distinct `__module_init` toString.call mechanism;
+  family-attributable elimination is 66. The original "0" was read from an
+  accidentally head-truncated sweep capture). The 57 remaining fails are genuine
   Test262Error oracle verdicts from a DIFFERENT defect (`"" + fn` yields
   `[object Object]` / callback-shim source instead of NativeFunction syntax)
   → filed as **#3540**, out of scope here.

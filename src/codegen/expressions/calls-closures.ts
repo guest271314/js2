@@ -21,7 +21,6 @@ import { noJsHost } from "../js-errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import { addFuncType, addImport, localGlobalIdx, resolveWasmType } from "../index.js";
-import { refCellValueType } from "../registry/types.js";
 import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
@@ -307,21 +306,6 @@ function emitRootFuncrefDispatch(
   fctx.body.push(...funcDispatch);
 }
 
-/**
- * (#3024) True when `typeIdx` is a no-capture closure funcref-WRAPPER struct —
- * exactly one field whose type is `funcref` (`(struct (field funcref))`). This is
- * the self carrier for a closure that keeps no environment in its self struct, so
- * it can be losslessly reconstructed from a bare funcref via `struct.new`. Guards
- * the #3024 rebuild so a self carrier that DOES hold capture fields (which
- * `struct.new` from a lone funcref would leave under-populated) never takes it.
- */
-function isSingleFuncRefWrapperStruct(ctx: CodegenContext, typeIdx: number): boolean {
-  const def = ctx.mod.types[typeIdx];
-  if (!def || def.kind !== "struct") return false;
-  const fields = (def as { fields: { type: ValType }[] }).fields;
-  return fields.length === 1 && fields[0]?.type.kind === "funcref";
-}
-
 /** Compile a call to a closure variable: closureVar(args...) */
 export function compileClosureCall(
   ctx: CodegenContext,
@@ -359,27 +343,27 @@ export function compileClosureCall(
       fctx.body.push({ op: "local.get", index: localIdx });
       // struct.get $refCell $value — unwrap to underlying value.
       fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
-      // (#3024) The ref cell may store the closure as a BARE FUNCREF: a
-      // mutually-recursive `const` closure (e.g. the test262
-      // `nativeFunctionMatcher` `eat`→`test` pair) whose self carrier is a
-      // no-capture funcref-WRAPPER struct `(struct (field funcref))`. There
-      // `boxed.valType` stale-reads `externref` while the cell field-0 is
-      // genuinely `funcref`, so the legacy path emitted `any.convert_extern` on
-      // a funcref (invalid — funcref is not in the anyref hierarchy) followed by
-      // a struct `emitGuardedRefCast` (also invalid). Trust the ACTUAL cell
-      // field type: when it is `funcref` AND the lifted self carrier is a
-      // single-funcref-field wrapper, rebuild the self carrier by wrapping the
-      // funcref back into that wrapper via `struct.new`. Byte-inert for every
-      // other cell shape — the funcref-cell call path was 100% invalid Wasm.
-      const cellFieldType = refCellValueType(ctx, boxed.refCellTypeIdx);
-      if (cellFieldType?.kind === "funcref" && isSingleFuncRefWrapperStruct(ctx, selfStructTypeIdx)) {
-        fctx.body.push({ op: "struct.new", typeIdx: selfStructTypeIdx });
-      } else {
-        if (boxed.valType.kind === "externref") {
-          fctx.body.push({ op: "any.convert_extern" });
-        }
-        emitGuardedRefCast(fctx, selfStructTypeIdx);
+      // (#3547) The #3024 funcref-cell `struct.new` stopgap that used to live
+      // here (rebuild the self carrier when the cell field-0 was a bare
+      // funcref) is REMOVED on two grounds, both load-bearing:
+      //   1. The one known PRODUCER of funcref-typed "cells" is gone: those
+      //      cells were never real ref cells — the variables.ts declaration
+      //      path retyped the capture's cell local to the closure STRUCT and
+      //      re-registered that struct as `boxed.refCellTypeIdx` (field 0 =
+      //      funcref). #3534/#3505 fixed the retype at the source (the
+      //      declaration now writes THROUGH the cell and never retypes it).
+      //   2. A zero-producer probe in `getOrRegisterRefCellType` (env-gated,
+      //      see #3547's issue file for the recipe) confirmed NO ref cell is
+      //      minted over funcref or any closure-struct carrier on the
+      //      post-#3505 tree — across the closure corpus, dedicated
+      //      mutual-recursion shapes, all matcher-invoking files, and the full
+      //      `Function/prototype/toString` + class-elements test262 dirs.
+      // Cells storing closures are externref cells; the externref arm below
+      // unwraps and guard-casts them to the lifted self carrier.
+      if (boxed.valType.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" });
       }
+      emitGuardedRefCast(fctx, selfStructTypeIdx);
       fctx.body.push({ op: "local.set", index: castLocal });
       effectiveLocalIdx = castLocal;
     } else if (localType?.kind === "externref") {

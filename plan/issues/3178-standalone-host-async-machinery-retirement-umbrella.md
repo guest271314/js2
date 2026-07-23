@@ -16,8 +16,8 @@ task_type: architecture
 area: codegen, standalone
 language_feature: generators, async-generators, promises, async-functions
 goal: standalone-mode
-related: [1781, 2860, 3164, 3132, 3032, 2903, 2906, 2865, 2895, 1326, 2959, 2040, 3386, 3387, 3388, 3389, 3390, 3391, 3538]
-children: [3386, 3387, 3388, 3389, 3390, 3391, 3538]
+related: [1781, 2860, 3164, 3132, 3032, 2903, 2906, 2865, 2895, 1326, 2959, 2040, 3386, 3387, 3388, 3389, 3390, 3391, 3538, 3542]
+children: [3386, 3387, 3388, 3389, 3390, 3391, 3538, 3542]
 origin: "2026-07-12 architect (arch-standalone-family-plans): plan/log/standalone-gap-map.md finding — 4,456 leaky passes ride host-import shims, ~90% the generator/async-gen/Promise host machinery. This umbrella is the substrate spec + measured slice ranking the family builds on."
 ---
 
@@ -39,6 +39,17 @@ value. Probed 70/70 PASS on a stride-4 cohort sample. Residuals noted in
 #3538: untyped member reads `r.done` still leak legacy `__gen_result_*` host
 imports (separate pre-existing cohort), sync-gen STATIC typed reads surface
 0/1 / NaN.
+
+Second head, same day: the ~130-row `Cannot destructure/access/convert`
+cluster (98 for-await-dstr) was a DECOY message — the real defect is that
+every synchronously-unwinding standalone async-fn throw rejected with a
+**NULL reason** (`wrapAsyncCallInTryCatch`'s standalone arm never wired the
+#1326 Phase-1C catch-payload; the handler's own destructure-of-null
+manufactured the corpus message). Fixed in child **#3542** (done): a
+`catch $exn` arm uses the tag payload as the rejection reason. Probed 30/33
+PASS on a stride-4 cluster sample; 3 residuals =
+`language/arguments-object/*async-gen*` (`Cannot access property on null or
+undefined`) — distinct root cause, still open here.
 
 ## Decomposition 2026-07-17 (fable-3178) — child issues #3386–#3391
 
