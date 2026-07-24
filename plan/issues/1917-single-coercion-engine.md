@@ -1,11 +1,12 @@
 ---
 id: 1917
 title: "One coercion engine — four divergent coercion matrices disagree about lossiness"
-status: ready
+status: in-progress
+assignee: ttraenkler/sdev-1917
 sprint: current
 model: opus
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-07-24
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -15,6 +16,59 @@ language_feature: compiler-internals
 goal: correctness
 ---
 # #1917 — One coercion engine
+
+## Current state (2026-07-24, sdev-1917) — LANDED vs REMAINING
+
+**The bulk of this issue has already landed.** The stale narrative below (Problem,
+the original "Proposed approach", and the per-step Implementation sections) predates
+those merges — read this section first for the accurate status.
+
+### LANDED (on `origin/main`)
+
+- **Step 0 — single ValType `coercionPlan` table.** `src/codegen/coercion-plan.ts`
+  exists (pure `coercionPlan(from, to, {boxNumberIdx, unboxNumberIdx})`). All four
+  headline sites delegate to it: `callArgCoercionInstrs` (stack-balance.ts:1480),
+  `fixBranchType` (stack-balance.ts:903), `coercionInstrs` (type-coercion.ts:3529),
+  and `coerceType`'s scalar rows.
+- **The headline `externref→f64` divergence is GONE.** `fixBranchType` no longer
+  emits lossy `drop; f64.const 0`; it routes box/unbox through `coercionPlan` and
+  unboxes identically to the call-arg path (the acceptance-criterion-1 fix).
+- **Steps 1/2(partial)/3/4 — the JS-semantic engine.**
+  `src/codegen/coercion-engine.ts` exports `emitToString`/`compileAndEmitToString`,
+  `emitToNumber`, `emitToBoolean`, `emitStrictEq`/`emitLooseEq`/
+  `emitAnyEqFromExternTemps`, and `coercionMode`. The ToString, ToNumber, ToBoolean,
+  and equality dispatch sites migrated into it (see the per-step sections below for
+  the migration detail; those are accurate history now that they merged).
+- **Step 5 drift gate (#2108) is BUILT, WIRED, and GREEN.**
+  `scripts/check-coercion-sites.mjs` + `scripts/coercion-sites-baseline.json`,
+  run as `check:coercion-sites` in the `quality` CI job. It sanctions
+  `coercion-engine.ts`/`any-helpers.ts`/`native-strings.ts` and fails on per-file
+  vocabulary growth. It is NOT yet flipped to the hard per-token seal.
+
+### Acceptance criterion #2 — SUPERSEDED (not unfixed)
+
+The original spec asked that the `ref→f64` divergence (`coercionInstrs` →
+`f64.const NaN` vs the call-arg/branch unbox) also be forced to ValType identity.
+That is now understood to be a **deliberate provenance-dependent policy**, not an
+accidental divergence: a *bare* GC object-ref has ToNumber `NaN` (§7.1.4 — object
+with no numeric `valueOf`), whereas a ref *carrying a boxed number* must unbox.
+Forcing a single ValType-keyed answer would REGRESS one of the two. The
+`staticJsType`-hinted engine owns this split by provenance; ValType alone cannot.
+So criterion #2 is retired as originally worded — the `externref→f64` half (the
+real accidental bug) is fixed; the `ref→f64` half is correct-by-policy.
+
+### REMAINING (this branch, `issue-1917-stage-b-coercion`)
+
+- **(a) `guardedRefCast` dedup** — extract one helper for the `local.tee → ref.test
+  → if (cast_null / null)` idiom copy-pasted 4× in `coercionInstrs`
+  (type-coercion.ts) + ~6× in `coerceType`. Pure byte-neutral code-motion.
+- **(b) Stage B `emitToPrimitive` façade** over `coerceType`'s inline ref→f64
+  ToPrimitive dispatch — the actual remaining semantic close (Step 2 tail).
+  High-risk; gated on both-lane byte-SHA + full equivalence + a host test262 slice;
+  measured delta reported to the coordinator before landing.
+- **(c) Seal the #2108 gate** (per-token hard fail) after (b) lands.
+
+---
 
 ## Problem
 
