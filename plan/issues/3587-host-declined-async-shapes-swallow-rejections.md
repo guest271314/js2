@@ -1,8 +1,9 @@
 ---
 id: 3587
 title: "Host lane: async shapes the host-drive engine declines (try/catch across await, non-linear bodies) silently SWALLOW awaited rejections — execution continues past the await"
-status: ready
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/fable-3587
+sprint: current
 created: 2026-07-25
 updated: 2026-07-25
 priority: critical
