@@ -15,6 +15,8 @@ area: codegen, closures, emit
 language_feature: compiler-internals
 goal: test262-conformance
 related: [2043, 3349]
+loc-budget-allow:
+  - src/codegen/closures.ts
 ---
 
 # #3378 — `deepEqual.js` fails to compile: stale LOCAL index in nested closures
