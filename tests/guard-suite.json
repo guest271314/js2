@@ -57,6 +57,11 @@
       "path": "tests/issue-680.test.ts",
       "guards": "a basic standalone generator (function* g(){yield 1;yield 2;return 3}) + a caller doing g.next() compiles host-free (native __GenState state machine, no __gen_* imports) and runs (1235); default-target generators are native too",
       "broken_by": "#3341/#3519 (PR #3249, 2026-07-17) promoted the generator IR path's host-only unknown-function-ref AND the caller's untyped '.next() not in slice 4' throw to HARD compile errors — broke basic standalone generators for 7 days, invisible outside required checks (#3008); found+fixed by #680"
+    },
+    {
+      "path": "tests/issue-3565.test.ts",
+      "guards": "three DESIGNED demote-to-legacy sites compile (fall back to legacy) instead of hard-erroring — TypedArray element STORE (lowerElementStore), slice-12 element ACCESS on an extern receiver (lowerElementAccess), and the verify.ts #1798 return-value gate — AND a GENERIC invariant (block-id/type desync, injected build throw) STILL hard-fails (no masking of real invalid-Wasm)",
+      "broken_by": "#3341/#3519 (PR #3249, 2026-07-17) made outcome.kind==='invariant' a hard compile error, silently promoting these 3 documented 'clean throw → legacy' demotes; #680 exempted only the generator+method-call cases, leaving these 3 hard for ~7 days (invisible outside required checks, #3008); found+fixed by #3565"
     }
   ]
 }

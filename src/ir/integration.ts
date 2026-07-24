@@ -130,7 +130,7 @@ import {
   planIrCompilation,
   type IrSelection,
 } from "./select.js";
-import { verifyIrFunction } from "./verify.js";
+import { verifyIrFunction, type IrVerifyError } from "./verify.js";
 import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
@@ -180,6 +180,29 @@ function invariantIntegrationFailure(
   detail: string,
 ): IrIntegrationError {
   return integrationFailure(func, { kind: "invariant", code, stage, detail });
+}
+
+/**
+ * (#3565) Classify a verify-stage error into an integration failure. The #1798
+ * return-value gate marks its errors `demote: true` — a DESIGNED demote-to-legacy
+ * signal (a return/early.return whose type or arity would emit invalid Wasm), NOT
+ * a compiler invariant. Those flow to an `unsupported` outcome (warning → keep the
+ * legacy body), restoring the pre-#3341 behavior the gate's own doc documents.
+ * EVERY other verify error (SSA scope, dominance, branch/instr type rules, block-id
+ * shape) is a genuine invalid-IR invariant and stays a hard `verifier-failure` —
+ * so #3341's invalid-Wasm-catching purpose is preserved.
+ */
+function verifyIntegrationFailure(func: string, e: IrVerifyError, detailPrefix = ""): IrIntegrationError {
+  const detail = `${detailPrefix}${e.message}`;
+  if (e.demote) {
+    return integrationFailure(func, {
+      kind: "unsupported",
+      code: "return-type-legacy-coupling",
+      stage: "verify",
+      detail,
+    });
+  }
+  return invariantIntegrationFailure(func, "verifier-failure", "verify", detail);
 }
 
 function caughtIntegrationFailure(
@@ -465,7 +488,7 @@ export function compileIrPathFunctions(
       const mainErrors = verifyBuiltArtifact(result.main, name, false);
       if (mainErrors.length > 0) {
         for (const e of mainErrors) {
-          errors.push(invariantIntegrationFailure(name, "verifier-failure", "verify", e.message));
+          errors.push(verifyIntegrationFailure(name, e));
         }
         continue;
       }
@@ -475,14 +498,7 @@ export function compileIrPathFunctions(
         const liftedErrors = verifyBuiltArtifact(lifted, name, true);
         if (liftedErrors.length > 0) {
           for (const e of liftedErrors) {
-            errors.push(
-              invariantIntegrationFailure(
-                name,
-                "verifier-failure",
-                "verify",
-                `synthetic artifact ${lifted.name}: ${e.message}`,
-              ),
-            );
+            errors.push(verifyIntegrationFailure(name, e, `synthetic artifact ${lifted.name}: `));
           }
           anyLiftedFailed = true;
         }
@@ -634,7 +650,7 @@ export function compileIrPathFunctions(
           const mainErrors = verifyBuiltArtifact(result.main, memberName, false);
           if (mainErrors.length > 0) {
             for (const e of mainErrors) {
-              errors.push(invariantIntegrationFailure(memberName, "verifier-failure", "verify", e.message));
+              errors.push(verifyIntegrationFailure(memberName, e));
             }
             continue;
           }
@@ -646,14 +662,7 @@ export function compileIrPathFunctions(
             const liftedErrors = verifyBuiltArtifact(lifted, memberName, true);
             if (liftedErrors.length > 0) {
               for (const e of liftedErrors) {
-                errors.push(
-                  invariantIntegrationFailure(
-                    memberName,
-                    "verifier-failure",
-                    "verify",
-                    `synthetic artifact ${lifted.name}: ${e.message}`,
-                  ),
-                );
+                errors.push(verifyIntegrationFailure(memberName, e, `synthetic artifact ${lifted.name}: `));
               }
               anyLiftedFailed = true;
             }
@@ -750,7 +759,7 @@ export function compileIrPathFunctions(
       const mainErrors = verifyBuiltArtifact(result.main, MODULE_INIT_UNIT_NAME, false);
       if (mainErrors.length > 0) {
         for (const e of mainErrors) {
-          errors.push(invariantIntegrationFailure(MODULE_INIT_UNIT_NAME, "verifier-failure", "verify", e.message));
+          errors.push(verifyIntegrationFailure(MODULE_INIT_UNIT_NAME, e));
         }
       } else {
         let anyLiftedFailed = false;
@@ -758,14 +767,7 @@ export function compileIrPathFunctions(
           const liftedErrors = verifyBuiltArtifact(lifted, MODULE_INIT_UNIT_NAME, true);
           if (liftedErrors.length > 0) {
             for (const e of liftedErrors) {
-              errors.push(
-                invariantIntegrationFailure(
-                  MODULE_INIT_UNIT_NAME,
-                  "verifier-failure",
-                  "verify",
-                  `synthetic artifact ${lifted.name}: ${e.message}`,
-                ),
-              );
+              errors.push(verifyIntegrationFailure(MODULE_INIT_UNIT_NAME, e, `synthetic artifact ${lifted.name}: `));
             }
             anyLiftedFailed = true;
           }

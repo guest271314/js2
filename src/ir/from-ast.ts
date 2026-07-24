@@ -3571,7 +3571,16 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   }
   // TypedArray views need the legacy per-view value conversions.
   if (cx.resolver?.isTypedArrayViewExpr?.(lhs.expression)) {
-    throw new Error(`ir/from-ast: element store on a TypedArray view not in IR scope (${cx.funcName})`);
+    // (#3565) DESIGNED demote (see this function's doc: "Demotes (clean throw →
+    // legacy) for: TypedArray-view receivers"). Typed UNSUPPORTED so the plain
+    // `throw new Error` is not classified as the untyped `unexpected-internal-throw`
+    // invariant that #3341/#3519 hard-error — a selector-claimed function with a
+    // TypedArray element store must fall back to the legacy body, not fail compile.
+    throw new IrUnsupportedError(
+      "element-store-unsupported",
+      "build",
+      `ir/from-ast: element store on a TypedArray view not in IR scope (${cx.funcName})`,
+    );
   }
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
@@ -3790,7 +3799,15 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
     }
   }
 
-  throw new Error(
+  // (#3565) DESIGNED slice-12 residual demote — an element READ on a
+  // receiver/index shape not yet in IR scope (e.g. `extern<HTMLCollection>[i]`)
+  // must fall back to the legacy body. Typed UNSUPPORTED so it is not classified
+  // as the untyped `unexpected-internal-throw` invariant that #3341/#3519
+  // hard-error. (The internal `produced no value` / `unexpected IrType` throws
+  // above are genuine invariants — they stay plain `Error` → hard.)
+  throw new IrUnsupportedError(
+    "element-access-unsupported",
+    "build",
     `ir/from-ast: element access on ${describeIrType(recvType)} with index ${ts.SyntaxKind[arg.kind]} not in slice 12 (${cx.funcName})`,
   );
 }
