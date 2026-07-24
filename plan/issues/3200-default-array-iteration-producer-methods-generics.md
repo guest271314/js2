@@ -1,11 +1,13 @@
 ---
 id: 3200
 title: "default lane: Array.prototype iteration/producer generics (forEach/map/filter/flatMap) over real + array-like receivers (~204 fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-opus-arrayhof
 created: 2026-07-12
-updated: 2026-07-17
+updated: 2026-07-24
 loc-budget-allow:
   - src/runtime.ts
+  - src/codegen/array-methods.ts
 priority: high
 feasibility: hard
 task_type: bug
