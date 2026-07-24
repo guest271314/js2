@@ -2,8 +2,10 @@
 id: 3576
 title: "deepEqual.js `format` closure fails Wasm validation — call_ref arity mismatch (need 4, got 3)"
 status: ready
+assignee: ttraenkler/dev-opus-arrayhof
 sprint: current
 created: 2026-07-24
+updated: 2026-07-24
 priority: high
 feasibility: hard
 model: opus
@@ -13,7 +15,8 @@ task_type: bugfix
 area: codegen, closures, array-methods, emit
 language_feature: compiler-internals
 goal: test262-conformance
-related: [3378, 2043]
+blocked-on: "REPRODUCE needs #3559 (#3378 stale-local fix — on plain main the #3378 RangeError aborts before the arity error is reached); EDIT of array-methods.ts needs #3560 landed. Both in the merge queue 2026-07-24. Do repro→WAT-trace→pad→verify→PR in ONE clean pass on main once both land."
+related: [3378, 3559, 3560, 3563, 2873, 2043]
 ---
 
 # #3576 — `deepEqual.js` `format` closure: `call_ref` arity mismatch (need 4, got 3)
@@ -99,6 +102,90 @@ then determining whether the arity is wrong on the callback CONSTRUCTION side
 pushing too few args). Likely lives in `src/codegen/array-methods.ts`
 (callback-wrapper / trampoline ABI) and/or `src/codegen/closures/*`
 (funcref-as-closure wrapper types).
+
+## Mechanism analysis + fix candidate (dev-opus-arrayhof, 2026-07-24)
+
+**Read-only source trace — NOT yet verified against the live repro (blocked on
+#3559; see blockers). Documented durably so the fix survives a fresh re-spawn.**
+
+### The 4-param funcref IS the array-callback ABI → it is a .map/.filter callback
+
+`(env, value, index, array)` = `(ref null <closure_struct>) externref externref
+externref` is *exactly* the spec-arity-3 array-callback ABI (map/filter/forEach
+callbacks receive `value, index, array`; +1 for the closure env). A plain
+`(mappers[i]||String)(sub)` call would be a 1-user-arg funcref (2 params), not
+4. So the failing `call_ref` is an **array-method callback invocation**, and
+"got 3" = `env + value + index` pushed with the trailing **`array`** arg missing.
+
+### Where the under-push happens: `buildClosureCallInstrs` (array-methods.ts:~4957)
+
+That trampoline pushes the callback args **gated on `numParams`**
+(`= closureInfo.paramTypes.length`):
+
+- `value` if `numParams >= 1` (~line 5015)
+- `index` if `numParams >= 2` (~line 5033)
+- **`array` if `numParams >= 3` (~line 5040)**  ← the skipped slot
+
+and the `call_ref` uses `closureInfo.funcTypeIdx` (~line 5055). So it pushes
+`numParams + 1` values but the call_ref demands `arity(funcTypeIdx)`. These
+match **only when `arity(funcTypeIdx) === paramTypes.length + 1`**.
+
+### The divergence: shared canonical-wrapper closureInfo (closures.ts:~2155, #2873-adjacent)
+
+`setupArrayCallback` (array-methods.ts:~4804) resolves
+`closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx)` off the callback
+value's **struct type**. Per `closures.ts:~2155`, that struct can be a **shared
+"canonical wrapper root"** used by multiple closures with the same param
+*types* (e.g. all-externref params) but different declared *arities*. So a
+2-declared-param callback (`(sub, i) => …`) can resolve to a `closureInfo`
+whose `funcTypeIdx` is a **4-param** wrapper (inherited from a 3-user-param
+sibling that shares the canonical wrapper) while its `paramTypes.length` is 2.
+Result: `buildClosureCallInstrs` pushes `env + sub + i` = 3, the shared
+`funcTypeIdx` needs 4 → **`need 4, got 3`**. Same shared-wrapper / RTT-arity
+hazard family as #2873. (`ClosureInfo` sets `funcTypeIdx: liftedFuncTypeIdx`
+and `paramTypes: arrowParams` *together* at construction — closures.ts:~2142 —
+so the divergence is NOT a single arrow's own registration; it is introduced by
+the **shared-struct lookup** returning a sibling's `closureInfo`.)
+
+### Fix candidate — arity-pad to the funcref's ACTUAL arity (mirrors #3563)
+
+In `buildClosureCallInstrs`, push callback args up to the **actual arity of
+`closureInfo.funcTypeIdx`**, not `numParams`. For each param slot beyond
+`numParams` (the `array` slot = `loop.vecTmp`, then any tail), emit the spec
+value if known else the **missing-trailing-arg default** per param type —
+exactly dev-d-1's `padMissingArg` helper in PR #3563 (`fix(#3024)`,
+`src/codegen/index.ts emitMethodDispatch`): `__get_undefined` /
+`ref.null.extern` for externref, sNaN / typed-zero otherwise. A `call_ref` MUST
+push exactly the funcref's declared arity, so padding-to-`funcTypeIdx`-arity is
+**always correct** and byte-inert whenever `arity == paramTypes.length + 1`
+(the common case). Alternative (heavier): make `setupArrayCallback` reconcile
+the resolved `closureInfo` so a shared-wrapper lookup can't return a sibling's
+higher-arity `funcTypeIdx` — prefer the trampoline arity-pad first.
+
+### Verification still needed (do these when unblocked)
+
+1. **Reproduce** with #3559 applied (the repro above). Dump WAT
+   (`emitWat:true`); locate the failing `call_ref` at `__closure_6 @+15349`;
+   read its `funcTypeIdx` arity and the callback's `closureInfo.paramTypes.length`
+   at that site — **confirm** the `4 vs 3` divergence and that it is the shared
+   canonical-wrapper lookup (not a construction-side over-build).
+2. Apply the `buildClosureCallInstrs` arity-pad; re-run repro →
+   `WebAssembly.compile` passes (no `need 4, got 3`).
+3. Full real-harness combo (`assert.js + sta.js + propertyHelper.js +
+   compareArray.js + deepEqual.js` + trivial body) validates (`__closure_28`).
+4. Equivalence suite (broad closure/array-method surface) + no test262 JS-host
+   regression.
+
+### Blockers (both in the merge queue 2026-07-24)
+
+- **REPRODUCE → #3559** (#3378 stale-local fix): OPEN. On plain `main` the
+  #3378 `RangeError` aborts binary emit before `WebAssembly.compile` runs.
+- **EDIT → #3560** (array-methods.ts, a #3200 flatMap slice): OPEN in queue.
+  Branch/edit `array-methods.ts` from a `main` that includes #3560 (and #3561,
+  already merged) to avoid a rebase.
+
+Per tech-lead decision 2026-07-24: **defer, single clean pass on main once both
+land** (don't predecessor-stack at low budget).
 
 ## Acceptance criteria
 
