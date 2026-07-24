@@ -1511,16 +1511,16 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       ctx.moduleInitStatements.push(stmt);
       continue;
     }
-    // (#2968) A top-level `throw` under `--target wasi`: collect it into
-    // `__module_init` so the statement actually executes at module load and its
-    // exception propagates out to `_start`, where the uncaught-exception printer
-    // (addWasiStartExport) renders it to stderr + `proc_exit(1)`. Without this
-    // there is no `ThrowStatement` case, so a bare top-level `throw` was silently
-    // dropped — it emitted no code at all and the program exited 0. Gated on
-    // `ctx.wasi` so JS-host / plain-standalone output stays byte-identical (their
-    // pre-existing top-level-throw drop is out of scope for this issue).
+    // (#2968) A top-level `throw`: collect it into `__module_init` so it really
+    // executes at module load — WASI surfaces it via `_start`'s uncaught printer,
+    // host/standalone via the `start` section (or the exported `__module_init`
+    // under `deferTopLevelInit`). Without this arm it emitted NO code at all.
+    // (#3585) The `ctx.wasi` gate is REMOVED: #2968 scoped the arm to WASI for
+    // byte-identity, but the drop is a SILENT WRONG ANSWER — a module whose only
+    // statement is `throw` scores PASS in the JS-HOST lane too. Exhaustive A/B
+    // over the whole exposed population (40 files) is +5/−0 in each lane.
     if (ts.isThrowStatement(stmt)) {
-      if (ctx.wasi) ctx.moduleInitStatements.push(stmt);
+      ctx.moduleInitStatements.push(stmt);
       continue;
     }
     // Module-level expression statements with side effects:
