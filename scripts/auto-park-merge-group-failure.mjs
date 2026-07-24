@@ -69,25 +69,108 @@ export function prNumberFromQueueBranch(branch) {
   return m ? Number(m[1]) : null;
 }
 
-// Classify a run from its jobs list. A merge-group run that the queue CANCELLED
-// (group rebuilt) reports run-level `failure` but has NO job with
-// conclusion === "failure" (jobs are cancelled/success/skipped). A GENUINE
-// failure has >= 1 failed job. Returns { realFailure, failedJobs }.
+// INFRA steps — a failure HERE says nothing about the merged state's health.
+// Motivating incident (2026-07-24): two parks landed the same day with textually
+// identical comments ("Failed checks: - check for test262 regressions", no run
+// URL, no step name). #3566 was BOGUS — the shard-artifact download 403'd, the
+// verdict step never ran, and the PR merged cleanly once unparked. #3563 was
+// CORRECT — the verdict ran and caught a real uncatchable-trap regression. Two
+// opposite situations, indistinguishable from the comment, each costing a full
+// manual investigation.
+//
+// Patterns are deliberately TIGHT. Widening this list makes the bot park LESS,
+// which is the dangerous direction (a real regression slips into main). When in
+// doubt, leave a step out so it classifies as non-infra and parks.
+export const INFRA_STEP_PATTERNS = [
+  /^set up job$/i,
+  /^complete job$/i,
+  /^post\s/i, // actions' generated post-run steps ("Post Checkout")
+  /^(check ?out)\b/i,
+  /^set ?up (node|pnpm|python|java|go|ruby)\b/i,
+  /^initialize containers$/i,
+  /^stop containers$/i,
+  /\bdownload\b[^\n]*\bartifacts?\b/i, // "Download shard artifacts"
+  /\bupload\b[^\n]*\bartifacts?\b/i,
+  /\bartifacts?\b[^\n]*\bdownload\b/i,
+];
+
+// Is this step name a setup/infra step (as opposed to a verdict step)?
+// Unknown / empty names are NOT infra — they must fall through to parking.
+export function isInfraStep(name) {
+  if (typeof name !== "string") return false;
+  const n = name.trim();
+  if (!n) return false;
+  return INFRA_STEP_PATTERNS.some((re) => re.test(n));
+}
+
+// Classify a run from its jobs list.
+//
+// (1) CANCELLATION vs REAL FAILURE — a merge-group run that the queue CANCELLED
+//     (group rebuilt) reports run-level `failure` but has NO job with
+//     conclusion === "failure" (jobs are cancelled/success/skipped). A GENUINE
+//     failure has >= 1 failed job.
+//
+// (2) INFRA vs VERDICT (step awareness) — among genuinely-failed jobs, look at
+//     which STEP failed. If EVERY failed step across EVERY failed job is a
+//     recognised setup/infra step, the verdict never ran and parking would be
+//     bogus (the #3566 shape).
+//
+// CONSERVATIVE BY CONSTRUCTION: we skip parking only on POSITIVE evidence that
+// every failure was infra. A failed job whose failing step we cannot identify
+// (`steps` absent/empty — e.g. the API response was trimmed) is
+// `unclassifiable` and forces a park. Being wrong in the permissive direction
+// lets a real regression into main; being wrong in the strict direction costs
+// one label removal.
 export function classifyRun(jobs) {
-  const failedJobs = (jobs || []).filter((j) => j && j.conclusion === "failure").map((j) => j.name);
-  return { realFailure: failedJobs.length > 0, failedJobs };
+  const failed = (jobs || []).filter((j) => j && j.conclusion === "failure");
+  const failedJobs = failed.map((j) => j.name);
+  const failedDetails = failed.map((j) => ({
+    job: j.name,
+    url: j.html_url || null,
+    failedSteps: (Array.isArray(j.steps) ? j.steps : [])
+      .filter((s) => s && s.conclusion === "failure")
+      .map((s) => s.name),
+  }));
+  const realFailure = failed.length > 0;
+  const unclassifiable = failedDetails.some((d) => d.failedSteps.length === 0);
+  const infraOnly =
+    realFailure && !unclassifiable && failedDetails.every((d) => d.failedSteps.every((s) => isInfraStep(s)));
+  return {
+    realFailure,
+    failedJobs,
+    failedDetails,
+    unclassifiable,
+    infraOnly,
+    shouldPark: realFailure && !infraOnly,
+  };
+}
+
+// Render the "Failed checks:" block — job name, the step(s) that actually
+// failed, and the job URL. This is the half that turns a park comment from
+// "something failed" into an actionable pointer.
+export function renderFailureLines(failedDetails) {
+  return (failedDetails || [])
+    .map((d) => {
+      const steps = d.failedSteps.length ? ` — failing step: ${d.failedSteps.join(", ")}` : " — failing step: unknown";
+      const url = d.url ? ` ([job log](${d.url}))` : "";
+      return `- ${d.job}${steps}${url}`;
+    })
+    .join("\n");
 }
 
 // --- gh-backed actions ------------------------------------------------------
 
 function fetchJobs(runId) {
   // Paginate so a 114-job test262 matrix is fully covered.
+  // `steps[]` carries the per-step `conclusion` — that is what makes the
+  // infra-vs-verdict call possible (#3590). `html_url` gives the park comment a
+  // direct pointer to the failing job log.
   const out = gh([
     "api",
     "--paginate",
     `repos/${REPO}/actions/runs/${runId}/jobs?per_page=100`,
     "--jq",
-    ".jobs[] | {name, conclusion}",
+    ".jobs[] | {name, conclusion, html_url, steps: [(.steps // [])[] | {name, conclusion}]}",
   ]);
   // --jq with --paginate streams one JSON object per line.
   return out
@@ -108,9 +191,11 @@ function prHasHoldLabel(prNumber) {
   }
 }
 
-function park(prNumber, failedJobs) {
+function park(prNumber, failedDetails, runUrl) {
+  const failedJobs = failedDetails.map((d) => d.job);
   if (DRY) {
     console.log(`auto-park: DRY RUN — would park #${prNumber} (failed: ${failedJobs.join(", ")})`);
+    console.log(renderFailureLines(failedDetails));
     return;
   }
   // Idempotent: if already held, do nothing (avoids re-commenting on requeues).
@@ -134,7 +219,11 @@ function park(prNumber, failedJobs) {
 auto-parked: failed required CI in the merge_group — a real test262/quality regression only surfaces on the merged state, so this PR cycles forever in the queue otherwise (#2547). Fix the failure and remove the \`${HOLD_LABEL}\` label to re-enqueue.
 
 Failed checks:
-${failedJobs.map((n) => `- ${n}`).join("\n")}`;
+${renderFailureLines(failedDetails)}
+
+Run: ${runUrl}
+
+<sub>The failing STEP is named above (#3590). If it is a setup/infra step rather than a verdict step, the verdict never ran and this park may be spurious — confirm against the run before removing \`${HOLD_LABEL}\`.</sub>`;
   const comment = ghMaybe(["pr", "comment", String(prNumber), "--repo", REPO, "--body", body]);
   console.log(
     `auto-park: parked #${prNumber} (label=${label.ok} comment=${comment.ok}) — failed: ${failedJobs.join(", ")}`,
@@ -167,31 +256,141 @@ function selfCheck() {
   eq(prNumberFromQueueBranch(undefined), null, "undefined -> null");
 
   // Real-vs-cancellation classification.
+  const pick = (r) => ({
+    realFailure: r.realFailure,
+    failedJobs: r.failedJobs,
+    infraOnly: r.infraOnly,
+    unclassifiable: r.unclassifiable,
+    shouldPark: r.shouldPark,
+  });
   eq(
-    classifyRun([
-      { name: "quality", conclusion: "success" },
-      { name: "merge shard reports", conclusion: "failure" },
-    ]),
-    { realFailure: true, failedJobs: ["merge shard reports"] },
-    "real failure: one failed job",
+    pick(
+      classifyRun([
+        { name: "quality", conclusion: "success" },
+        { name: "merge shard reports", conclusion: "failure" },
+      ]),
+    ),
+    {
+      realFailure: true,
+      failedJobs: ["merge shard reports"],
+      infraOnly: false,
+      unclassifiable: true,
+      shouldPark: true,
+    },
+    "real failure: one failed job (no steps -> unclassifiable -> park)",
   );
   eq(
-    classifyRun([
-      { name: "quality", conclusion: "cancelled" },
-      { name: "test262 shard 1", conclusion: "cancelled" },
-      { name: "test262 shard 2", conclusion: "success" },
-    ]),
-    { realFailure: false, failedJobs: [] },
+    pick(
+      classifyRun([
+        { name: "quality", conclusion: "cancelled" },
+        { name: "test262 shard 1", conclusion: "cancelled" },
+        { name: "test262 shard 2", conclusion: "success" },
+      ]),
+    ),
+    { realFailure: false, failedJobs: [], infraOnly: false, unclassifiable: false, shouldPark: false },
     "cancellation: zero failed jobs (queue rebuild) -> do not park",
   );
-  eq(classifyRun([]), { realFailure: false, failedJobs: [] }, "empty jobs -> do not park");
   eq(
-    classifyRun([
-      { name: "a", conclusion: "failure" },
-      { name: "b", conclusion: "failure" },
+    pick(classifyRun([])),
+    { realFailure: false, failedJobs: [], infraOnly: false, unclassifiable: false, shouldPark: false },
+    "empty jobs -> do not park",
+  );
+
+  // (#3590) Step awareness — the two shapes that were indistinguishable on
+  // 2026-07-24.
+  eq(isInfraStep("Download shard artifacts"), true, "infra: download shard artifacts");
+  eq(isInfraStep("Set up job"), true, "infra: set up job");
+  eq(isInfraStep("Checkout"), true, "infra: checkout");
+  eq(isInfraStep("Post Checkout"), true, "infra: post-step");
+  eq(isInfraStep("check for test262 regressions"), false, "verdict: regression check is NOT infra");
+  eq(isInfraStep("Run standalone floor gate"), false, "verdict: floor gate is NOT infra");
+  eq(isInfraStep(""), false, "empty step name is NOT infra");
+  eq(isInfraStep(undefined), false, "missing step name is NOT infra");
+
+  eq(
+    pick(
+      classifyRun([
+        {
+          name: "check for test262 regressions",
+          conclusion: "failure",
+          steps: [
+            { name: "Set up job", conclusion: "success" },
+            { name: "Download shard artifacts", conclusion: "failure" },
+            { name: "Compare against baseline", conclusion: "skipped" },
+          ],
+        },
+      ]),
+    ),
+    {
+      realFailure: true,
+      failedJobs: ["check for test262 regressions"],
+      infraOnly: true,
+      unclassifiable: false,
+      shouldPark: false,
+    },
+    "#3566 shape: artifact download failed, verdict never ran -> DO NOT park",
+  );
+  eq(
+    pick(
+      classifyRun([
+        {
+          name: "check for test262 regressions",
+          conclusion: "failure",
+          steps: [
+            { name: "Download shard artifacts", conclusion: "success" },
+            { name: "Compare against baseline", conclusion: "failure" },
+          ],
+        },
+      ]),
+    ),
+    {
+      realFailure: true,
+      failedJobs: ["check for test262 regressions"],
+      infraOnly: false,
+      unclassifiable: false,
+      shouldPark: true,
+    },
+    "#3563 shape: verdict step failed -> MUST park",
+  );
+  eq(
+    pick(
+      classifyRun([
+        {
+          name: "j1",
+          conclusion: "failure",
+          steps: [{ name: "Download shard artifacts", conclusion: "failure" }],
+        },
+        {
+          name: "j2",
+          conclusion: "failure",
+          steps: [{ name: "Compare against baseline", conclusion: "failure" }],
+        },
+      ]),
+    ),
+    { realFailure: true, failedJobs: ["j1", "j2"], infraOnly: false, unclassifiable: false, shouldPark: true },
+    "mixed infra + verdict -> park (any verdict failure wins)",
+  );
+  eq(
+    pick(
+      classifyRun([
+        { name: "j1", conclusion: "failure", steps: [{ name: "Download shard artifacts", conclusion: "failure" }] },
+        { name: "j2", conclusion: "failure", steps: [] },
+      ]),
+    ),
+    { realFailure: true, failedJobs: ["j1", "j2"], infraOnly: false, unclassifiable: true, shouldPark: true },
+    "infra + UNCLASSIFIABLE job -> park conservatively",
+  );
+  eq(
+    renderFailureLines([
+      { job: "check for test262 regressions", url: "https://x/job/1", failedSteps: ["Compare against baseline"] },
     ]),
-    { realFailure: true, failedJobs: ["a", "b"] },
-    "multiple failed jobs collected",
+    "- check for test262 regressions — failing step: Compare against baseline ([job log](https://x/job/1))",
+    "render: job + step + url",
+  );
+  eq(
+    renderFailureLines([{ job: "quality", url: null, failedSteps: [] }]),
+    "- quality — failing step: unknown",
+    "render: unknown step, no url",
   );
 
   if (failures) {
@@ -235,15 +434,29 @@ if (isMain()) {
   }
 
   const jobs = fetchJobs(runId);
-  const { realFailure, failedJobs } = classifyRun(jobs);
+  const { realFailure, failedJobs, failedDetails, infraOnly, unclassifiable } = classifyRun(jobs);
   if (!realFailure) {
     console.log(
       `auto-park: run ${runId} (PR #${prNumber}) has 0 failed jobs of ${jobs.length} — CANCELLATION (queue rebuild), NOT parking.`,
     );
     process.exit(0);
   }
+  const runUrl = `https://github.com/${REPO}/actions/runs/${runId}`;
+  console.log(renderFailureLines(failedDetails));
+  if (infraOnly) {
+    // (#3590) Every failed step is a recognised setup/infra step, so the verdict
+    // never ran — this is the #3566 shape (shard-artifact download 403'd) and a
+    // park here would be bogus. The run is still red, so the queue ejects the PR
+    // and `auto-enqueue` re-adds it; that retry is the correct response to a
+    // transient infra failure.
+    console.log(
+      `auto-park: run ${runId} (PR #${prNumber}) failed ONLY in setup/infra steps — verdict never ran, NOT parking. See ${runUrl}`,
+    );
+    process.exit(0);
+  }
   console.log(
-    `auto-park: run ${runId} (${runJson.name}) for PR #${prNumber} has ${failedJobs.length} genuinely-failed job(s) — parking.`,
+    `auto-park: run ${runId} (${runJson.name}) for PR #${prNumber} has ${failedJobs.length} genuinely-failed job(s)` +
+      `${unclassifiable ? " (at least one failing step unidentifiable — parking conservatively)" : ""} — parking.`,
   );
-  park(prNumber, failedJobs);
+  park(prNumber, failedDetails, runUrl);
 }
