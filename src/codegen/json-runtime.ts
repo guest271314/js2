@@ -66,53 +66,39 @@ const SURR_HIGH_HI = 0xdbff;
 const SURR_LOW_LO = 0xdc00; // low (trailing) surrogate range 0xDC00..0xDFFF
 const SURR_LOW_HI = 0xdfff;
 
+const I32: ValType = { kind: "i32" };
+
+// __json_quote_string local index layout, shared by the sizing and fill passes:
+//  1 flat  2 data  3 end  4 i  5 c  6 outLen  7 out  8 w  9 off  10 nib  11 nb
+const L_FLAT = 1;
+const L_DATA = 2;
+const L_END = 3;
+const L_I = 4;
+const L_C = 5;
+const L_OUTLEN = 6;
+const L_OUT = 7;
+const L_W = 8;
+const L_OFF = 9;
+const L_NIB = 10;
+const L_NB = 11;
+
 /**
- * Emit `__json_quote_string(s: externref) -> externref` and register it in
- * `ctx.funcMap`. Idempotent. Must run after `ensureNativeStringHelpers` (called
- * here) so `__str_flatten` exists, and before any function body that calls it.
- *
- * Algorithm: flatten the input to a `$NativeString`, walk its `[off, off+len)`
- * code units twice — first to size the output buffer, then to fill it — so the
- * output `$__str_data` is allocated exactly once at the right capacity.
+ * Instr builders for `__json_quote_string`, factored out of `emitJsonQuoteString`
+ * so neither function trips the per-function LOC ceiling (#3400). `d` is the
+ * `$__str_data` (array (mut i16)) type index. Returns only the pieces the outer
+ * emitter assembles; the smaller helpers stay closed over `d` internally.
  */
-export function emitJsonQuoteString(ctx: CodegenContext): number {
-  const existing = ctx.funcMap.get("__json_quote_string");
-  if (existing !== undefined) return existing;
-
-  ensureNativeStringHelpers(ctx);
-  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
-  const strTypeIdx = ctx.nativeStrTypeIdx; // $NativeString (FlatString): len, off, data
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx; // (array (mut i16))
-  const i32: ValType = { kind: "i32" };
-  const extern: ValType = { kind: "externref" };
-
-  const strRef = nativeStringType(ctx);
-  const typeIdx = addFuncType(ctx, [extern], [strRef]);
-  const funcIdx = mintDefinedFunc(ctx);
-  ctx.funcMap.set("__json_quote_string", funcIdx);
-
-  // params: 0 s:externref
-  // locals:
-  //  1 flat:ref $NativeString   2 data:ref $__str_data   3 end:i32   4 i:i32
-  //  5 c:i32   6 outLen:i32   7 out:ref $__str_data   8 w:i32 (write cursor)
-  //  9 off:i32  10 nib:i32 (scratch nibble)  11 nb:i32 (neighbor code unit)
-  const L_FLAT = 1;
-  const L_DATA = 2;
-  const L_END = 3;
-  const L_I = 4;
-  const L_C = 5;
-  const L_OUTLEN = 6;
-  const L_OUT = 7;
-  const L_W = 8;
-  const L_OFF = 9;
-  const L_NIB = 10;
-  const L_NB = 11;
-
+function qQuoteBuilders(d: number): {
+  getC: Instr[];
+  putConst: (v: number) => Instr[];
+  widthExpr: Instr[];
+  fillCharDispatch: Instr[];
+} {
   // c = data[i]
   const getC: Instr[] = [
     { op: "local.get", index: L_DATA },
     { op: "local.get", index: L_I },
-    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "array.get_u", typeIdx: d },
     { op: "local.set", index: L_C },
   ];
 
@@ -121,7 +107,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
     { op: "local.get", index: L_OUT },
     { op: "local.get", index: L_W },
     ...valueInstrs,
-    { op: "array.set", typeIdx: strDataTypeIdx },
+    { op: "array.set", typeIdx: d },
     { op: "local.get", index: L_W },
     { op: "i32.const", value: 1 },
     { op: "i32.add" },
@@ -160,7 +146,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
     ...localInRange(L_C, SURR_HIGH_LO, SURR_HIGH_HI), // c is a high surrogate?
     {
       op: "if",
-      blockType: { kind: "val", type: i32 },
+      blockType: { kind: "val", type: I32 },
       // High: escape unless the NEXT unit (i+1 < end) is a low surrogate.
       then: [
         { op: "local.get", index: L_I },
@@ -170,13 +156,13 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         { op: "i32.lt_u" },
         {
           op: "if",
-          blockType: { kind: "val", type: i32 },
+          blockType: { kind: "val", type: I32 },
           then: [
             { op: "local.get", index: L_DATA },
             { op: "local.get", index: L_I },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
-            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "array.get_u", typeIdx: d },
             { op: "local.set", index: L_NB },
             ...localInRange(L_NB, SURR_LOW_LO, SURR_LOW_HI),
           ],
@@ -188,7 +174,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         ...localInRange(L_C, SURR_LOW_LO, SURR_LOW_HI), // c is a low surrogate?
         {
           op: "if",
-          blockType: { kind: "val", type: i32 },
+          blockType: { kind: "val", type: I32 },
           // Low: escape unless the PREV unit (i > off) is a high surrogate.
           then: [
             { op: "local.get", index: L_I },
@@ -196,13 +182,13 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
             { op: "i32.gt_u" },
             {
               op: "if",
-              blockType: { kind: "val", type: i32 },
+              blockType: { kind: "val", type: I32 },
               then: [
                 { op: "local.get", index: L_DATA },
                 { op: "local.get", index: L_I },
                 { op: "i32.const", value: 1 },
                 { op: "i32.sub" },
-                { op: "array.get_u", typeIdx: strDataTypeIdx },
+                { op: "array.get_u", typeIdx: d },
                 { op: "local.set", index: L_NB },
                 ...localInRange(L_NB, SURR_HIGH_LO, SURR_HIGH_HI),
               ],
@@ -214,27 +200,6 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         },
       ],
     },
-  ];
-
-  // Shared preamble: flatten s, load data/off, compute end = off + len.
-  const preamble: Instr[] = [
-    { op: "local.get", index: 0 },
-    { op: "any.convert_extern" },
-    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
-    { op: "call", funcIdx: flattenIdx },
-    { op: "ref.cast", typeIdx: strTypeIdx },
-    { op: "local.set", index: L_FLAT },
-    { op: "local.get", index: L_FLAT },
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }, // data
-    { op: "local.set", index: L_DATA },
-    { op: "local.get", index: L_FLAT },
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }, // off
-    { op: "local.set", index: L_OFF },
-    { op: "local.get", index: L_FLAT },
-    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }, // len
-    { op: "local.get", index: L_OFF },
-    { op: "i32.add" },
-    { op: "local.set", index: L_END }, // end = off + len (exclusive)
   ];
 
   // width(c): '"','\',\b\t\n\f\r -> 2 ; ctrl (<0x20) or lone surrogate -> 6 ;
@@ -255,7 +220,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
     { op: "i32.or" },
     {
       op: "if",
-      blockType: { kind: "val", type: i32 },
+      blockType: { kind: "val", type: I32 },
       then: [{ op: "i32.const", value: 2 }],
       else: [
         { op: "local.get", index: L_C },
@@ -263,13 +228,13 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         { op: "i32.lt_s" },
         {
           op: "if",
-          blockType: { kind: "val", type: i32 },
+          blockType: { kind: "val", type: I32 },
           then: [{ op: "i32.const", value: 6 }],
           else: [
             ...escapeSurr,
             {
               op: "if",
-              blockType: { kind: "val", type: i32 },
+              blockType: { kind: "val", type: I32 },
               then: [{ op: "i32.const", value: 6 }],
               else: [{ op: "i32.const", value: 1 }],
             },
@@ -277,36 +242,6 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         },
       ],
     },
-  ];
-
-  // Pass 1: outLen = 2 + Σ width(c)
-  const sizingLoop: Instr[] = [
-    { op: "i32.const", value: 2 },
-    { op: "local.set", index: L_OUTLEN },
-    { op: "local.get", index: L_OFF },
-    { op: "local.set", index: L_I },
-    ...counterLoopInstrs({
-      i: L_I,
-      bound: [{ op: "local.get", index: L_END }],
-      body: [
-        ...getC,
-        { op: "local.get", index: L_OUTLEN },
-        ...widthExpr,
-        { op: "i32.add" },
-        { op: "local.set", index: L_OUTLEN },
-      ],
-    }),
-  ];
-
-  // Allocate out buffer (outLen), w=0, write opening quote.
-  const allocOut: Instr[] = [
-    { op: "i32.const", value: 0 },
-    { op: "local.get", index: L_OUTLEN },
-    { op: "array.new", typeIdx: strDataTypeIdx },
-    { op: "local.set", index: L_OUT },
-    { op: "i32.const", value: 0 },
-    { op: "local.set", index: L_W },
-    ...putConst(C_QUOTE),
   ];
 
   // short escape: backslash + letter
@@ -324,7 +259,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
       { op: "i32.lt_s" },
       {
         op: "if",
-        blockType: { kind: "val", type: i32 },
+        blockType: { kind: "val", type: I32 },
         then: [{ op: "local.get", index: L_NIB }, { op: "i32.const", value: C_ZERO }, { op: "i32.add" }],
         else: [{ op: "local.get", index: L_NIB }, { op: "i32.const", value: C_LC_A_MINUS_10 }, { op: "i32.add" }],
       },
@@ -424,6 +359,88 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         },
       ],
     },
+  ];
+
+  return { getC, putConst, widthExpr, fillCharDispatch };
+}
+
+/**
+ * Emit `__json_quote_string(s: externref) -> externref` and register it in
+ * `ctx.funcMap`. Idempotent. Must run after `ensureNativeStringHelpers` (called
+ * here) so `__str_flatten` exists, and before any function body that calls it.
+ *
+ * Algorithm: flatten the input to a `$NativeString`, walk its `[off, off+len)`
+ * code units twice — first to size the output buffer, then to fill it — so the
+ * output `$__str_data` is allocated exactly once at the right capacity.
+ */
+export function emitJsonQuoteString(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__json_quote_string");
+  if (existing !== undefined) return existing;
+
+  ensureNativeStringHelpers(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
+  const strTypeIdx = ctx.nativeStrTypeIdx; // $NativeString (FlatString): len, off, data
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx; // (array (mut i16))
+  const i32: ValType = { kind: "i32" };
+  const extern: ValType = { kind: "externref" };
+
+  const strRef = nativeStringType(ctx);
+  const typeIdx = addFuncType(ctx, [extern], [strRef]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.funcMap.set("__json_quote_string", funcIdx);
+
+  // params: 0 s:externref; locals L_FLAT..L_NB (see the module index layout).
+  const { getC, putConst, widthExpr, fillCharDispatch } = qQuoteBuilders(strDataTypeIdx);
+
+  // Shared preamble: flatten s, load data/off, compute end = off + len.
+  const preamble: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "ref.cast", typeIdx: strTypeIdx },
+    { op: "local.set", index: L_FLAT },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }, // data
+    { op: "local.set", index: L_DATA },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }, // off
+    { op: "local.set", index: L_OFF },
+    { op: "local.get", index: L_FLAT },
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }, // len
+    { op: "local.get", index: L_OFF },
+    { op: "i32.add" },
+    { op: "local.set", index: L_END }, // end = off + len (exclusive)
+  ];
+
+  // Pass 1: outLen = 2 + Σ width(c)
+  const sizingLoop: Instr[] = [
+    { op: "i32.const", value: 2 },
+    { op: "local.set", index: L_OUTLEN },
+    { op: "local.get", index: L_OFF },
+    { op: "local.set", index: L_I },
+    ...counterLoopInstrs({
+      i: L_I,
+      bound: [{ op: "local.get", index: L_END }],
+      body: [
+        ...getC,
+        { op: "local.get", index: L_OUTLEN },
+        ...widthExpr,
+        { op: "i32.add" },
+        { op: "local.set", index: L_OUTLEN },
+      ],
+    }),
+  ];
+
+  // Allocate out buffer (outLen), w=0, write opening quote.
+  const allocOut: Instr[] = [
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: L_OUTLEN },
+    { op: "array.new", typeIdx: strDataTypeIdx },
+    { op: "local.set", index: L_OUT },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: L_W },
+    ...putConst(C_QUOTE),
   ];
 
   // Pass 2: fill
