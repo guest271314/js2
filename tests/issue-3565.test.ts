@@ -73,6 +73,22 @@ describe("#3565 — restore IR designed demote-to-legacy contracts", () => {
     );
   });
 
+  it("site 4: compound-assign with a non-f64 RHS demotes to legacy AND runs (the issue-2079 shape)", async () => {
+    // `s += v` where v is an externref yielded by a generator for-of — the f64
+    // slot is fine but the RHS coercion is legacy-only. Must demote + run =3.
+    const src =
+      `function* g(){ yield 1; yield 2; return 3; }\n` +
+      `export function test(): number { let s = 0; for (const v of g()) s += v; return s; }`;
+    const r: any = await compile(src, { ...COMPILE_OPTS, target: "standalone" });
+    expect(r.success).toBe(true);
+    expect(hardIrErrors(r)).toHaveLength(0);
+    const pc = (r.irPostClaimErrors ?? []).map((e: any) => e.message);
+    expect(pc.some((m: string) => m.includes("compound assign RHS must be f64"))).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    (instance.exports as any).__module_init?.();
+    expect((instance.exports as any).test()).toBe(3);
+  });
+
   it("site 3: verify #1798 return-type mismatch is tagged as a DESIGNED demote (demote:true)", () => {
     const STRING: IrType = { kind: "string" };
     const F64 = irVal({ kind: "f64" });

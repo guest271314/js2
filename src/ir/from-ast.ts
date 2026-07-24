@@ -6718,7 +6718,18 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
   const rhsValue = lowerExpr(rhs, cx, binding.type);
   const rhsType = cx.builder.typeOf(rhsValue);
   if (asVal(rhsType)?.kind !== "f64") {
-    throw new Error(`ir/from-ast: compound assign RHS must be f64 (got ${describeIrType(rhsType)}) in ${cx.funcName}`);
+    // (#3565) DESIGNED demote: the f64 slot is fine, but the RHS lowered to a
+    // non-f64 (e.g. an externref value yielded by a generator in `s += v`). The
+    // numeric coercion is legacy-only, so this is a not-yet-adopted construct,
+    // NOT a builder↔finalize desync. Typed UNSUPPORTED so it demotes to the
+    // legacy body instead of the untyped `unexpected-internal-throw` invariant
+    // #3341/#3519 hard-error (measured casualty: tests/issue-2079 — legacy
+    // compiles+runs =3). The f64-slot/string-append arms above are unaffected.
+    throw new IrUnsupportedError(
+      "compound-assign-unsupported",
+      "build",
+      `ir/from-ast: compound assign RHS must be f64 (got ${describeIrType(rhsType)}) in ${cx.funcName}`,
+    );
   }
 
   let binop: IrBinop;

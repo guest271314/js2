@@ -40,9 +40,14 @@ export type IrUnsupportedCode =
   //   - `return-type-legacy-coupling` — the verify.ts #1798 return-value gate:
   //     a return/early.return whose value type or arity would emit invalid Wasm;
   //     the gate exists PRECISELY to demote to the legacy body (see verify.ts).
+  //   - `compound-assign-unsupported` — `x += v` on an f64 slot whose RHS lowers
+  //     to a non-f64 (e.g. an externref generator value): the numeric coercion
+  //     is legacy-only. Measured casualty: tests/issue-2079 (a for-of over a
+  //     generator, `s += v`) hard-erroring where legacy compiles+runs (=3).
   | "element-store-unsupported"
   | "element-access-unsupported"
   | "return-type-legacy-coupling"
+  | "compound-assign-unsupported"
   | "string-evidence-unsupported"
   | "type-resolution-unsupported"
   | "imported-call-planning-unsupported"

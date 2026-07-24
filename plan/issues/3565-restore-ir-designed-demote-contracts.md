@@ -1,6 +1,6 @@
 ---
 id: 3565
-title: "IR over-promotion: restore 3 documented demote-to-legacy contracts (#3341/#3519) — element-store, element-access slice-12, verify #1798 return gate"
+title: "IR over-promotion: restore 4 documented demote-to-legacy contracts (#3341/#3519) — element-store, element-access slice-12, verify #1798 return gate, compound-assign non-f64 RHS"
 status: done
 sprint: current
 created: 2026-07-24
@@ -10,12 +10,15 @@ horizon: m
 feasibility: medium
 task_type: bug
 area: codegen
-language_feature: ir-fallback, typed-arrays, element-access, verify
+language_feature: ir-fallback, typed-arrays, element-access, verify, compound-assign
 es_edition: es2015
 goal: ir-full-coverage
-related: [680, 3341, 3519, 3008, 3552]
+related: [680, 2079, 3341, 3519, 3008, 3552]
 assignee: ttraenkler/agent-a63dab458f1a10042
-origin: "2026-07-24 STRICT-IR over-promotion sweep (continues #680): measured probe over 5322 corpus files found 3 designed-demote sites hard-erroring where legacy compiles fine."
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
+origin: "2026-07-24 STRICT-IR over-promotion sweep (continues #680): measured probe over 5322 corpus files + a bounded standalone-test audit found 4 designed-demote sites hard-erroring where legacy compiles fine (the 4th, compound-assign, flips tests/issue-2079 green)."
 ---
 
 # #3565 — restore IR designed demote-to-legacy contracts broken by #3341/#3519
@@ -36,7 +39,7 @@ the generic `unexpected-internal-throw` / `verifier-failure` invariant → hard,
 ref + `.next()` method-call throw) but left these three, which regressed
 silently for ~7 days — invisible outside the required checks (#3008 gap).
 
-The three sites:
+The four sites:
 
 1. **`lowerElementStore` TypedArray-view store** (src/ir/from-ast.ts) — the
    per-view value conversions (ToUint8/clamp/packing) are legacy-only; doc says
@@ -47,6 +50,12 @@ The three sites:
    early.return whose value type or arity would emit invalid Wasm; the gate's
    own comment: "Flagging it here demotes the function to legacy … instead of
    emitting an invalid module."
+4. **`lowerCompoundAssign` non-f64 RHS** (src/ir/from-ast.ts) — `s += v` on an
+   f64 slot whose RHS lowers to a non-f64 (e.g. an externref value yielded by a
+   generator for-of); the numeric coercion is legacy-only. **Found by a bounded
+   standalone-test audit** (the #2 lane): `tests/issue-2079` was silently red on
+   main — this site flips it (and its 12 siblings) green. Legacy compiles+runs
+   the case correctly (`s += it.next().value` → 3).
 
 ## Measured evidence (current main, two-compile-per-file probe: IR-overlay vs `experimentalIR:false`)
 
@@ -74,12 +83,14 @@ The whole point of `#3341`/`#3519` making `invariant` hard is to catch invalid-W
 emission (real bugs). So the fix types **only** the three documented-demote
 throws distinctly, leaving every generic invariant a hard error:
 
-- `src/ir/outcomes.ts` — three new `IrUnsupportedCode`s:
+- `src/ir/outcomes.ts` — four new `IrUnsupportedCode`s:
   `element-store-unsupported`, `element-access-unsupported`,
-  `return-type-legacy-coupling`; widen the `unsupported` failure `stage` to
-  admit `"verify"` (a verify-stage designed demote is legitimately unsupported).
-- `src/ir/from-ast.ts` — the TypedArray-view store throw and the slice-12
-  element-access terminal throw become `IrUnsupportedError` (→ warning → legacy).
+  `return-type-legacy-coupling`, `compound-assign-unsupported`; widen the
+  `unsupported` failure `stage` to admit `"verify"` (a verify-stage designed
+  demote is legitimately unsupported).
+- `src/ir/from-ast.ts` — the TypedArray-view store throw, the slice-12
+  element-access terminal throw, and the compound-assign non-f64-RHS throw
+  become `IrUnsupportedError` (→ warning → legacy).
   In `lowerElementAccess`, the sibling _internal_ throws (`produced no value`,
   `unexpected IrType`) stay plain `Error` → hard (genuine invariants).
   **Knowingly left hard (pending measurement):** `lowerElementStore` has
