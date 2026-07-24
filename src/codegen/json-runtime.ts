@@ -15,6 +15,9 @@
  *   - escape `\b` (U+0008), `\t` (U+0009), `\n` (U+000A), `\f` (U+000C),
  *     `\r` (U+000D) with their short forms
  *   - escape every other control char U+0000–U+001F as `\u00XX`
+ *   - escape a **lone** UTF-16 surrogate (unpaired U+D800–U+DFFF) as `\uXXXX`
+ *     (well-formed JSON.stringify, ES2019 §25.5.4.3); copy the two code units
+ *     of a valid high+low pair through verbatim
  *   - copy all other code units verbatim
  *
  * Result is returned as an `externref` (the WasmGC `$NativeString` widened via
@@ -55,6 +58,13 @@ const C_LC_R = 114; // 'r'
 const C_LC_U = 117; // 'u'
 const C_ZERO = 48; // '0'
 const C_LC_A_MINUS_10 = 87; // 'a' - 10  (for hex digit a-f)
+// UTF-16 surrogate ranges (well-formed JSON.stringify, ES2019 §25.5.4.3):
+// a lone surrogate code unit must be escaped as \uXXXX; a valid high+low pair
+// is copied through verbatim (the astral code point).
+const SURR_HIGH_LO = 0xd800; // high (leading) surrogate range 0xD800..0xDBFF
+const SURR_HIGH_HI = 0xdbff;
+const SURR_LOW_LO = 0xdc00; // low (trailing) surrogate range 0xDC00..0xDFFF
+const SURR_LOW_HI = 0xdfff;
 
 /**
  * Emit `__json_quote_string(s: externref) -> externref` and register it in
@@ -85,7 +95,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
   // locals:
   //  1 flat:ref $NativeString   2 data:ref $__str_data   3 end:i32   4 i:i32
   //  5 c:i32   6 outLen:i32   7 out:ref $__str_data   8 w:i32 (write cursor)
-  //  9 off:i32  10 nib:i32 (scratch nibble)
+  //  9 off:i32  10 nib:i32 (scratch nibble)  11 nb:i32 (neighbor code unit)
   const L_FLAT = 1;
   const L_DATA = 2;
   const L_END = 3;
@@ -96,6 +106,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
   const L_W = 8;
   const L_OFF = 9;
   const L_NIB = 10;
+  const L_NB = 11;
 
   // c = data[i]
   const getC: Instr[] = [
@@ -125,6 +136,86 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
     { op: "i32.eq" },
   ];
 
+  // (local at `idx`) is in the inclusive unsigned range [lo, hi]  (leaves i32)
+  const localInRange = (idx: number, lo: number, hi: number): Instr[] => [
+    { op: "local.get", index: idx },
+    { op: "i32.const", value: lo },
+    { op: "i32.ge_u" },
+    { op: "local.get", index: idx },
+    { op: "i32.const", value: hi },
+    { op: "i32.le_u" },
+    { op: "i32.and" },
+  ];
+
+  // Well-formed JSON.stringify (ES2019 §25.5.4.3, feature well-formed-json-
+  // stringify): a code unit at data[i] that is a LONE surrogate must be escaped
+  // as \uXXXX; a code unit that is part of a valid high+low pair is copied
+  // verbatim. This predicate leaves i32 (1 = c is a lone surrogate → escape).
+  //
+  // Adjacency is unambiguous: a high surrogate pairs forward with the
+  // immediately-following low; a low pairs backward with the immediately-
+  // preceding high. Both passes (sizing + fill) iterate the same indices with
+  // the same bounds, so they compute identical decisions. Uses L_NB scratch.
+  const escapeSurr: Instr[] = [
+    ...localInRange(L_C, SURR_HIGH_LO, SURR_HIGH_HI), // c is a high surrogate?
+    {
+      op: "if",
+      blockType: { kind: "val", type: i32 },
+      // High: escape unless the NEXT unit (i+1 < end) is a low surrogate.
+      then: [
+        { op: "local.get", index: L_I },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "local.get", index: L_END },
+        { op: "i32.lt_u" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: i32 },
+          then: [
+            { op: "local.get", index: L_DATA },
+            { op: "local.get", index: L_I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataTypeIdx },
+            { op: "local.set", index: L_NB },
+            ...localInRange(L_NB, SURR_LOW_LO, SURR_LOW_HI),
+          ],
+          else: [{ op: "i32.const", value: 0 }], // no next unit → lone high
+        },
+        { op: "i32.eqz" }, // escape = !nextIsLow
+      ],
+      else: [
+        ...localInRange(L_C, SURR_LOW_LO, SURR_LOW_HI), // c is a low surrogate?
+        {
+          op: "if",
+          blockType: { kind: "val", type: i32 },
+          // Low: escape unless the PREV unit (i > off) is a high surrogate.
+          then: [
+            { op: "local.get", index: L_I },
+            { op: "local.get", index: L_OFF },
+            { op: "i32.gt_u" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: i32 },
+              then: [
+                { op: "local.get", index: L_DATA },
+                { op: "local.get", index: L_I },
+                { op: "i32.const", value: 1 },
+                { op: "i32.sub" },
+                { op: "array.get_u", typeIdx: strDataTypeIdx },
+                { op: "local.set", index: L_NB },
+                ...localInRange(L_NB, SURR_HIGH_LO, SURR_HIGH_HI),
+              ],
+              else: [{ op: "i32.const", value: 0 }], // no prev unit → lone low
+            },
+            { op: "i32.eqz" }, // escape = !prevIsHigh
+          ],
+          else: [{ op: "i32.const", value: 0 }], // not a surrogate → not escaped
+        },
+      ],
+    },
+  ];
+
   // Shared preamble: flatten s, load data/off, compute end = off + len.
   const preamble: Instr[] = [
     { op: "local.get", index: 0 },
@@ -146,7 +237,8 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
     { op: "local.set", index: L_END }, // end = off + len (exclusive)
   ];
 
-  // width(c): '"','\',\b\t\n\f\r -> 2 ; other ctrl (<0x20) -> 6 ; else 1
+  // width(c): '"','\',\b\t\n\f\r -> 2 ; ctrl (<0x20) or lone surrogate -> 6 ;
+  // else 1 (verbatim, incl. code units of a valid surrogate pair)
   const widthExpr: Instr[] = [
     ...cEq(C_QUOTE),
     ...cEq(C_BACKSLASH),
@@ -173,7 +265,15 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
           op: "if",
           blockType: { kind: "val", type: i32 },
           then: [{ op: "i32.const", value: 6 }],
-          else: [{ op: "i32.const", value: 1 }],
+          else: [
+            ...escapeSurr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: i32 },
+              then: [{ op: "i32.const", value: 6 }],
+              else: [{ op: "i32.const", value: 1 }],
+            },
+          ],
         },
       ],
     },
@@ -212,25 +312,11 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
   // short escape: backslash + letter
   const emitShort = (letter: number): Instr[] => [...putConst(C_BACKSLASH), ...putConst(letter)];
 
-  // \u00XX for control chars (c is 0x00..0x1f so high hex nibbles are 0,0,0..1)
-  const emitUnicode: Instr[] = [
-    ...putConst(C_BACKSLASH),
-    ...putConst(C_LC_U),
-    ...putConst(C_ZERO),
-    ...putConst(C_ZERO),
-    // high nibble = (c >> 4) & 0xf  → always 0 or 1 → '0'+n
-    ...put([
+  // Emit one hex digit for nibble `(c >> shift) & 0xf`, mapped '0'-'9'/'a'-'f'.
+  const emitHexNibble = (shift: number): Instr[] =>
+    put([
       { op: "local.get", index: L_C },
-      { op: "i32.const", value: 4 },
-      { op: "i32.shr_u" },
-      { op: "i32.const", value: 0xf },
-      { op: "i32.and" },
-      { op: "i32.const", value: C_ZERO },
-      { op: "i32.add" },
-    ]),
-    // low nibble = c & 0xf  → '0'+n (n<10) else 'a'+(n-10)
-    ...put([
-      { op: "local.get", index: L_C },
+      ...(shift > 0 ? [{ op: "i32.const", value: shift } as Instr, { op: "i32.shr_u" } as Instr] : []),
       { op: "i32.const", value: 0xf },
       { op: "i32.and" },
       { op: "local.tee", index: L_NIB },
@@ -242,7 +328,19 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
         then: [{ op: "local.get", index: L_NIB }, { op: "i32.const", value: C_ZERO }, { op: "i32.add" }],
         else: [{ op: "local.get", index: L_NIB }, { op: "i32.const", value: C_LC_A_MINUS_10 }, { op: "i32.add" }],
       },
-    ]),
+    ]);
+
+  // \uXXXX for control chars (U+0000–U+001F) and lone surrogates. All four hex
+  // nibbles are emitted with the full 0-9/a-f mapping — for control chars the
+  // top two nibbles are 0, reproducing the prior `\u00XX`; for surrogates the
+  // top nibble is `d`, giving e.g. `\ud834`.
+  const emitUnicode: Instr[] = [
+    ...putConst(C_BACKSLASH),
+    ...putConst(C_LC_U),
+    ...emitHexNibble(12),
+    ...emitHexNibble(8),
+    ...emitHexNibble(4),
+    ...emitHexNibble(0),
   ];
 
   // copy verbatim
@@ -299,7 +397,18 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
                                   op: "if",
                                   blockType: { kind: "empty" },
                                   then: emitUnicode,
-                                  else: emitVerbatim,
+                                  // Not a control char: a lone surrogate is
+                                  // escaped \uXXXX; everything else (incl. the
+                                  // units of a valid pair) is copied verbatim.
+                                  else: [
+                                    ...escapeSurr,
+                                    {
+                                      op: "if",
+                                      blockType: { kind: "empty" },
+                                      then: emitUnicode,
+                                      else: emitVerbatim,
+                                    },
+                                  ],
                                 },
                               ],
                             },
@@ -353,6 +462,7 @@ export function emitJsonQuoteString(ctx: CodegenContext): number {
       { count: 1, type: i32 }, // L_W
       { count: 1, type: i32 }, // L_OFF
       { count: 1, type: i32 }, // L_NIB
+      { count: 1, type: i32 }, // L_NB
     ],
     body,
     exported: false,
