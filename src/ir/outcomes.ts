@@ -21,6 +21,12 @@ export type IrUnsupportedCode =
   | "nullish-value-unsupported"
   | "operand-coercion-unsupported"
   | "property-write-unsupported"
+  // (#680) A method call whose receiver/method the IR method-call lowering does
+  // not yet handle (`.m(...) on <type> not in slice 4`) — the sibling of
+  // `property-write-unsupported`. A not-yet-adopted construct, NOT a bug, so it
+  // demotes to the legacy path as a warning; it must NOT fall into the untyped
+  // `unexpected-internal-throw` invariant (which #3341/#3519 hard-error).
+  | "method-call-unsupported"
   | "string-evidence-unsupported"
   | "type-resolution-unsupported"
   | "imported-call-planning-unsupported"

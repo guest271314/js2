@@ -52,6 +52,11 @@
       "path": "tests/issue-2961.test.ts",
       "guards": "standalone host-import leak scan (warning severity): a non-allowlisted leak (user extern class → env::Widget_*) WARNS + still emits (floor-neutral); an allowlisted import (Math_random) is silent; console.log is host-free (native strings+console); the wasi strict path stays a hard error",
       "broken_by": "native strings + native console retired the __str_from_mem string bridge, so the old console.log leak example went host-free and the 4 console.log assertions silently rotted — a #3558-class invisible stale guard; refreshed to the durable extern-class example + folded into the required gate by #3561"
+    },
+    {
+      "path": "tests/issue-680.test.ts",
+      "guards": "a basic standalone generator (function* g(){yield 1;yield 2;return 3}) + a caller doing g.next() compiles host-free (native __GenState state machine, no __gen_* imports) and runs (1235); default-target generators are native too",
+      "broken_by": "#3341/#3519 (PR #3249, 2026-07-17) promoted the generator IR path's host-only unknown-function-ref AND the caller's untyped '.next() not in slice 4' throw to HARD compile errors — broke basic standalone generators for 7 days, invisible outside required checks (#3008); found+fixed by #680"
     }
   ]
 }

@@ -1523,12 +1523,60 @@ function explicitlyDisabledEnv(v: string | undefined): boolean {
   return v === "0" || v === "false";
 }
 
-export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
+// (#680 / #3341) The host-only generator/async-generator buffer imports that
+// `addGeneratorImports` (registry/imports.ts) intentionally does NOT register
+// under `--target standalone`/`wasi` (it early-returns there). In those targets
+// the native #680 `__GenState` state machine lowers generators host-free, so an
+// IR generator path that still emits a ref to one of these names (src/ir/
+// from-ast.ts) is referencing a TARGET-UNAVAILABLE host import — NOT a
+// builder↔finalize desync. Keep this list in lockstep with `addGeneratorImports`.
+function isHostOnlyGeneratorImportName(name: string): boolean {
+  return (
+    name.startsWith("__gen_") ||
+    name === "__create_generator" ||
+    name === "__create_async_generator" ||
+    name === "__get_caught_exception"
+  );
+}
+
+/**
+ * (#680) True when a hard IR-build INVARIANT is actually a reference to a host
+ * import that the CURRENT TARGET intentionally omits, not a builder↔finalize
+ * desync. #3341 promoted the `unknown-function-ref` name-repoint invariant to a
+ * hard compile error on the premise that "no valid TS source can produce an
+ * unresolvable ref on a correctly-claimed function" — validated on the gc-target
+ * playground corpus, which MISSED the standalone-target dimension: a basic
+ * `function* g(){ yield 1 }` under `--target standalone` makes the IR generator
+ * path emit a ref to the host-only `__gen_create_buffer`, which standalone never
+ * registers, so it hard-errored instead of demoting to the working native path
+ * (regressed #680, bisected to #3341 / PR #3249).
+ *
+ * Scoped PRECISELY (per the fix decision): fires ONLY when the target lacks JS
+ * host imports AND the unresolved FUNCTION-ref name is in the host-only
+ * generator-import family. A genuine desync — an unknown ref to an IR-builder-
+ * created `$…` entity, ANY unknown global/type ref, or ANY unknown ref in a
+ * host/gc build where these imports DO register — is not matched and still
+ * hard-errors.
+ */
+function isTargetOmittedHostImportInvariant(
+  err: IrIntegrationError,
+  ctx?: Pick<CodegenContext, "standalone" | "wasi">,
+): boolean {
+  if (!ctx || !(ctx.standalone || ctx.wasi)) return false;
+  if (err.outcome.kind !== "invariant" || err.outcome.code !== "unknown-function-ref") return false;
+  const name = /unknown function ref "([^"]+)"/.exec(err.message)?.[1];
+  return name !== undefined && isHostOnlyGeneratorImportName(name);
+}
+
+export function formatIrPathFallbackDiagnostic(
+  err: IrIntegrationError,
+  ctx?: Pick<CodegenContext, "standalone" | "wasi">,
+): {
   readonly message: string;
   readonly severity: "error" | "warning";
 } {
   const body = `IR path failed for ${err.func}: ${err.message} [IR-FALLBACK]`;
-  const hard = err.outcome.kind === "invariant";
+  const hard = err.outcome.kind === "invariant" && !isTargetOmittedHostImportInvariant(err, ctx);
   return {
     message: hard ? `Codegen error: ${body}` : body,
     severity: hard ? "error" : "warning",
@@ -2585,7 +2633,7 @@ function consumeIrOverlayReport(
       func: err.func,
       message: err.message,
     });
-    const diag = formatIrPathFallbackDiagnostic(err);
+    const diag = formatIrPathFallbackDiagnostic(err, ctx);
     // #2138 — only the single-source IR-first path can omit a legacy body. The
     // multi-module overlay never passes a skip set and therefore always keeps
     // the ordinary warning demotion available.

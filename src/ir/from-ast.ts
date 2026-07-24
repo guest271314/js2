@@ -4529,6 +4529,23 @@ function coerceToExpectedExtern(value: IrValueId, expected: ValType, cx: LowerCt
  */
 const IR_CONSOLE_METHODS: ReadonlySet<string> = new Set(["log", "warn", "error", "info", "debug"]);
 
+/**
+ * (#680) Typed UNSUPPORTED throw for a method call the IR method-call lowering
+ * does not yet handle, mirroring the sibling property-write "not in slice 4"
+ * throw (see `ir/from-ast: property assignment ... not in slice 4`). A plain
+ * `Error` here would classify as the untyped `unexpected-internal-throw`
+ * invariant, which #3341/#3519 promote to a HARD compile error — regressing e.g.
+ * a standalone `g.next()` from a legacy demotion to a compile failure. A
+ * not-yet-adopted lowering is UNSUPPORTED → warning/legacy.
+ */
+function throwMethodCallNotInSlice(methodName: string, recvType: IrType, funcName: string): never {
+  throw new IrUnsupportedError(
+    "method-call-unsupported",
+    "build",
+    `ir/from-ast: method call .${methodName}(...) on ${describeIrType(recvType)} not in slice 4 (${funcName})`,
+  );
+}
+
 function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = false): IrValueId | null {
   if (!ts.isPropertyAccessExpression(expr.expression) || !ts.isIdentifier(expr.expression.name)) {
     throw new Error(`ir/from-ast: malformed method call in ${cx.funcName}`);
@@ -4938,9 +4955,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   }
 
   if (recvType.kind !== "class") {
-    throw new Error(
-      `ir/from-ast: method call .${methodName}(...) on ${describeIrType(recvType)} not in slice 4 (${cx.funcName})`,
-    );
+    throwMethodCallNotInSlice(methodName, recvType, cx.funcName);
   }
   // (#3144) memberKind-filtered + parent-chain-walking lookup: getter/
   // setter/static descriptors never resolve as instance methods, and an
