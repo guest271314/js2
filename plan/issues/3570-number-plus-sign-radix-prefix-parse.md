@@ -9,7 +9,7 @@ feasibility: easy
 task_type: bugfix
 area: codegen
 goal: standalone
-sprint: current
+sprint: 76
 horizon: s
 model: opus
 assignee: ttraenkler/dev-std-date-math

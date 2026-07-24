@@ -3,7 +3,7 @@ id: 3552
 title: "CI gap: untouched guard tests run in NO required check — #3503 landed a red tests/issue-3471.test.ts on main; add a curated required guard suite to `quality`"
 status: done
 created: 2026-07-23
-updated: 2026-07-23
+updated: 2026-07-24
 completed: 2026-07-23
 priority: high
 feasibility: medium
@@ -11,7 +11,7 @@ reasoning_effort: max
 task_type: infra
 area: ci
 goal: core-semantics
-sprint: current
+sprint: 76
 horizon: s
 assignee: ttraenkler/senior-dev-3551
 related: [3551, 3503, 3008, 3471]

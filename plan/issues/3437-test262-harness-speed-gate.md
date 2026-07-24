@@ -4,7 +4,7 @@ title: "CI speed gate: enforce test262 harness compile-time budget so a harness 
 status: done
 completed: 2026-07-24
 task_type: ci
-sprint: current
+sprint: 76
 priority: high
 horizon: m
 related: [3433, 1942, 3267, 3370]

@@ -398,7 +398,7 @@ the script, not by editing settings manually.
 
 ## 9. Relationship to the `dev-self-merge` skill
 
-`.claude/skills/dev-self-merge.md` defines a hook-based gate that reads
+`.claude/skills/dev-self-merge/SKILL.md` defines a hook-based gate that reads
 `.claude/ci-status/pr-<N>.json` and decides whether an agent invokes
 `gh pr merge <N> --admin --merge`.
 

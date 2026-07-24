@@ -3,7 +3,7 @@ id: 3548
 title: "Standalone: then-callback closure with branch-guarded module-fn calls traps null-deref — the ~193-row 'async continuation threw' Promise cluster"
 status: done
 assignee: ttraenkler/sendev-3548
-sprint: current
+sprint: 76
 priority: high
 horizon: m
 feasibility: hard

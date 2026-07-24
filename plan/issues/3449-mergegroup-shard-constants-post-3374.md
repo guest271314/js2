@@ -3,7 +3,7 @@ id: 3449
 title: "ci(#3431 follow-up): re-derive merge_group shard constants from post-#3374 timings"
 status: done
 completed: 2026-07-24
-sprint: current
+sprint: 76
 created: 2026-07-19
 updated: 2026-07-24
 priority: medium

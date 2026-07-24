@@ -3,7 +3,7 @@ id: 3379
 title: "baseline-summary-sync staleness guard measures the in-repo file, not public/ → busy queue skips the sync forever"
 status: done
 completed: 2026-07-24
-sprint: current
+sprint: 76
 created: 2026-07-17
 priority: high
 feasibility: easy

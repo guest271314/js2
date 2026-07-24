@@ -4,7 +4,7 @@ title: "promote-baseline dies at the baselines-repo clone — runs/ cache growth
 status: done
 completed: 2026-07-24
 task_type: infrastructure
-sprint: current
+sprint: 76
 priority: high
 goal: standalone-mode
 feasibility: easy

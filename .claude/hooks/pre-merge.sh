@@ -48,7 +48,7 @@ BLOCKED: No test proof found. Before merging to main:
 
 1. On your dev branch: git merge main
 2. On your dev branch: run equiv tests
-3. Create proof: see .claude/skills/test-and-merge.md step 7
+3. Create proof: see .claude/skills/test-and-merge/SKILL.md step 7
 
 Tests must pass ON THE INTEGRATED BRANCH before merging to main.
 MSG

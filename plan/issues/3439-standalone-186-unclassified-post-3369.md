@@ -4,7 +4,7 @@ title: "Classify the 186 standalone failures #3369 exposed; ratchet --max-unclas
 status: done
 completed: 2026-07-24
 assignee: ttraenkler/dev-opus-2
-sprint: current
+sprint: 76
 created: 2026-07-18
 updated: 2026-07-24
 priority: high

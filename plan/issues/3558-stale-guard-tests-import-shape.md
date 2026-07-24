@@ -4,13 +4,13 @@ title: Two guard tests red on main for 10–19 days — import-shape assertions 
 status: done
 created: 2026-07-23
 completed: 2026-07-23
-updated: 2026-07-23
+updated: 2026-07-24
 priority: high
 task_type: bug
 feasibility: hard
 horizon: s
 goal: standalone
-sprint: current
+sprint: 76
 assignee: ttraenkler/senior-dev
 ---
 

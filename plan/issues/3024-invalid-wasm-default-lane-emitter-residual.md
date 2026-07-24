@@ -4,7 +4,7 @@ title: "codegen: invalid Wasm binary emission residual — default (JS-host) lan
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-13
+updated: 2026-07-24
 priority: high
 horizon: m
 feasibility: medium
@@ -22,6 +22,10 @@ loc-budget-allow:
   - src/codegen/property-access.ts
   - src/codegen/destructuring-params.ts
   - src/codegen/expressions/calls-closures.ts
+  - src/codegen/statements/for-of-destructuring.ts
+  - src/codegen/declarations.ts
+func-budget-allow:
+  - src/codegen/declarations.ts::collectDeclarations
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
@@ -35,7 +39,7 @@ several `standalone-invalid-wasm-*` issues already tracked (#2039, #2878,
 #2934 — all standalone-target-specific), this bucket is on the **default
 `gc` target**, so it's a distinct residual not covered by those.
 
-> **Re-anchor (#3187, 2026-07-12):** this **131** figure is the *genuine*
+> **Re-anchor (#3187, 2026-07-12):** this **131** figure is the _genuine_
 > validator-error subset (harvested by the `invalid Wasm binary` /
 > `Compiling function … failed` text). It is **not** the raw
 > `error_category: "wasm_compile"` bucket, which carried **~448** records
@@ -723,7 +727,7 @@ to reach `pass`.
 
 **PR:** `issue-3024-toString-closure-funcref` — eliminates the largest live
 invalid-Wasm cluster: **68** `built-ins/Function/prototype/toString/*` files that
-failed Wasm validation at *instantiate* (they bucket as `fail`, not
+failed Wasm validation at _instantiate_ (they bucket as `fail`, not
 `compile_error`, which is why the earlier `compile_error`-only harvests
 undercounted — see the 2026-07-22 dev-serve handoff).
 
@@ -815,13 +819,13 @@ Bisected the confirmed failing assembly down to `nativeFunctionMatcher.js`
 **alone**, then reduced further. The trigger is **module-function-layout
 sensitive**, not source-shape sensitive:
 
-| variant                                                     | result           |
-| ---------------------------------------------------------- | ---------------- |
-| raw `nativeFunctionMatcher.js`, NO exported function        | **INVALID-FUNCREF** |
-| same + any `export function test(){ return 1; }`            | **VALID**        |
-| same + a call to `assertToStringOrNativeFunction`           | **VALID**        |
-| byte-identical `validateNativeFunctionSource` alone + call  | VALID            |
-| byte-identical all-three funcs (17-220) + export            | VALID            |
+| variant                                                    | result              |
+| ---------------------------------------------------------- | ------------------- |
+| raw `nativeFunctionMatcher.js`, NO exported function       | **INVALID-FUNCREF** |
+| same + any `export function test(){ return 1; }`           | **VALID**           |
+| same + a call to `assertToStringOrNativeFunction`          | **VALID**           |
+| byte-identical `validateNativeFunctionSource` alone + call | VALID               |
+| byte-identical all-three funcs (17-220) + export           | VALID               |
 
 Adding **one exported function shifts the function-index space and the bug
 vanishes.** This is the `addUnionImports` / late-import funcIdx-shift class
@@ -843,6 +847,117 @@ NOT the "quick per-root-cause singleton" this issue's residual was framed as.
 Confirmed repro for the next owner: `[assert.js, sta.js, nativeFunctionMatcher.js,
 <any toString test>]` OR the raw `nativeFunctionMatcher.js` with NO exported
 function. Suggest routing to `senior-developer`.
+
+---
+
+## Fresh re-measurement (agent-a3fa3add / Opus 4.8, 2026-07-24)
+
+Re-harvested current `origin/main` (post the merged 68-file `toString` cluster,
+#3509/#3547) via `runTest262File` (default gc lane, full harness) over the
+baseline candidate set = 529 `compile_error`-official ∪ 58 `fail`/`reached_test=false`-official
+= 587 candidates. Detected invalid-Wasm by the `wasm_compile` classifier
+signature (`/invalid Wasm binary|Compiling function/i`).
+
+**LIVE COUNT: 97 invalid-Wasm files / 587 candidates** (reconciles: dev-serve's
+202 minus the merged 68-file toString cluster minus later slices).
+
+### Top coarse validator-error buckets (op+types; fn/assert stripped)
+
+| count | signature                                                              | cluster                                                      |
+| ----: | ---------------------------------------------------------------------- | ------------------------------------------------------------ |
+|    14 | `global.set` expected `(ref null T)`, found `local.get` externref      | computed-property-names + Object.assign/keys/Reflect.ownKeys |
+|    11 | `global.set` expected externref, found `local.tee` `(ref null T)`      | for-of / for-await-of array-rest destructuring               |
+|     2 | `global.set` expected `(ref null T)`, found `call` f64                 | class ident-name-method-def-new-escaped                      |
+|    10 | not enough arguments on the stack for call                             | `__call_next`/`__call_return`/`C_method` (iterator + super)  |
+|     9 | `struct.get` expected `(ref null T)`, found `local.get` `(ref null T)` | RangeError / DataView buffer-verified                        |
+|     8 | `f64.add`/`f64.sub` expected f64, found `global.get` i32/i64           | ++/-- on boolean(i32)/bigint(i64) globals                    |
+|     5 | `call` expected externref, found `local.tee` i32                       | Uint8Array toBase64/toHex                                    |
+|     4 | `local.set` expected `(ref null T)`, found `struct.get` f64            | `__closure` toLocaleString                                   |
+|     4 | type error in fallthru (expected `(ref null T)`, got i32)              | `__closure_24`                                               |
+
+The first 3 rows (27 files) are ONE family: a **module-level global whose slot
+type disagrees with the value stored into it** (a global-write coercion desync,
+distinct from #3343's control-flow aliasing). Remaining rows are ≤3-file
+per-root-cause singletons. By failing fn: 58 `__module_init`, 10 `__closure`,
+9 `__cb`, 6 `fn`, 5 `__call_next`, 3 `__call_return`, 3 `Parent_new`.
+
+### Landed: module-global slot-type-vs-stored-value desync (agent-a3fa3add / Opus 4.8, 2026-07-24)
+
+**PR:** `issue-3024-invalid-wasm-remeasure` — clears **25 of the 27-file
+module-global slot-desync family** (Bucket A object-literal-runtime-computed-key,
+14 + Bucket B for-of array-rest destructuring-assignment, 11). Full 587-candidate
+re-harvest: **97 → 72 still-invalid**, exactly these 25, **zero new invalid
+signatures**.
+
+#### Root cause (one family, two write paths — verified by WAT)
+
+A module-level `var`/`let` becomes a Wasm module global whose declared slot type
+is derived from the STATIC TS type, but the value actually stored can have a
+different Wasm representation, and the write site did not coerce.
+
+- **Bucket A** — `var o = { a, [foo()]: v }` (RUNTIME computed key).
+  `compileObjectLiteral` builds these as a host `$Object` (externref) via
+  `_hasRuntimeComputedKey`, but `moduleInitForcesExternref` (declarations.ts) did
+  NOT mirror that predicate, so the global stayed struct-typed →
+  `global.set expected (ref null N), found externref` (the read's
+  `extern.convert_any` on the struct slot was invalid too — masked by the
+  validator stopping at the first error). Literal computed keys `[1]` still fold
+  to a static struct, unchanged.
+- **Bucket B** — `var x, y; for ([x, ...y] of …) {}`. `emitGlobalSyncWriteback`
+  (for-of-destructuring.ts) did a raw `local.get; global.set`; the rest slice
+  materializes a `(ref null vec)` local while the untyped `var y` global is
+  `externref` → `global.set expected externref, found (ref null N)`.
+
+Distinct from #3343 (control-flow module-global ALIASING); this is a value/slot
+TYPE desync at the write.
+
+#### Fix (three files; mirrors existing precedents)
+
+- `src/codegen/statements/for-of-destructuring.ts` — `emitGlobalSyncWriteback`
+  coerces local→global type before `global.set` (mirrors the binding-form
+  `syncDestructuredLocalsToGlobals`, destructuring.ts). All 10 call sites pass
+  `ctx`.
+- `src/codegen/declarations.ts` — `moduleInitForcesExternref` returns externref
+  for a runtime-computed-key literal (mirrors the function-local
+  `resolveSpillLocalValType`, variables.ts).
+- `src/codegen/literals.ts` — export `_hasRuntimeComputedKey`.
+
+Both guards fire ONLY on shapes that were ALWAYS invalid Wasm before (a
+type-mismatch that can't validate), so **no previously-valid module changes**
+(byte-inert). `narrow-A` confirms literal-computed-key `[1]` cases stay on the
+struct path.
+
+#### Proofs
+
+- **17 real run-pass gains** + 8 CE→fail (valid Wasm now; fail on DISTINCT
+  semantics — proxy-keys, put-const/let, symbol computed keys,
+  frozen/sealed/non-extensible `Object.assign` — improvements, not regressions).
+- Full 587-candidate re-harvest: 97 → 72, exactly these 25, **0 new invalid
+  signatures**.
+- **Standalone lane (criterion #2):** the 25 fixed files also validate on
+  `--target standalone` (21 pass + 4 valid-but-fail); the only invalid remaining
+  are the 2 deferred class files (invalid on BOTH lanes, untouched). Both guards
+  are lane-agnostic and fire only on already-invalid shapes → no new standalone
+  invalid.
+- Adjacent suites green (61 tests): issue-2602-forof-assign-rest, computed-props,
+  issue-2804 (spread host path), issue-3024/-incdec-element/-packed-array-dstr,
+  issue-2934, issue-3241, issue-1128-dstr-tdz.
+- New `tests/issue-3024-module-global-slot-desync.test.ts` (5 tests) passes.
+
+#### Still open (roll forward — NOT this PR)
+
+- The 2 `class ident-name-method-def-new-escaped` files
+  (`global.set expected (ref null T), found call f64`) — a class-expression-to-
+  global desync, distinct root cause.
+- The remaining ~72 default-lane invalid-Wasm files: the per-root-cause
+  singletons in the map above (`not enough arguments on the stack for call`
+  iterator/super, `struct.get (ref null T)` RangeError/DataView, `f64.add/sub`
+  ++/-- on boolean(i32)/bigint(i64) globals, Uint8Array toBase64/toHex,
+  `__closure` toLocaleString, `__closure_24` fallthru).
+  - **Update:** the `not enough arguments on the stack for call` row is now
+    split — the **iterator** half (8 files, `__call_next`/`__call_return`) is
+    cleared by the sibling slice recorded immediately below; only the
+    **super/`C_method`** + `DisposableStack.move` files remain from that row.
 
 ---
 
@@ -885,10 +1000,22 @@ parameterless iterator methods (the common case: `extraParams = []` → no chang
   (CE eliminated). They now **`fail` on DISTINCT feature gaps** — Iterator.zip
   null-deref, AsyncFromSyncIterator promise handling — NOT a pass gain (0 new
   passes; this is a CE-elimination slice like the #3024 packed-array slice).
-- Full 587-candidate re-harvest ON THIS BRANCH (base = `origin/main`, so the 25
-  module-global files of the sibling PR #3558 are still counted here): **97 → 89
-  invalid-Wasm, exactly these 8, 0 new signatures**. (When both PRs land, main is
-  97 − 25 − 8 = 64.) Standalone re-check on the 8 files: no new invalid.
+- **Provenance of the harvest numbers:** the 587-candidate re-harvest below was
+  measured **pre-merge**, on the branch based at `def8f82` — i.e. BEFORE the
+  sibling module-global PR (#3558) landed on `main`, so its 25 files were still
+  counted in that run: **97 → 89 invalid-Wasm, exactly these 8, 0 new
+  signatures**. With both slices landed the arithmetic is 97 − 25 − 8 = 64.
+  These figures were NOT re-measured after this merge (a 587-candidate harvest is
+  near-full-test262, out of scope for a dev branch); post-merge evidence is the
+  test/repro set below.
+- Standalone re-check on the 8 files: no new invalid.
+
+### Post-merge revalidation (merge of `origin/main`, 2026-07-24)
+
+`src/codegen/index.ts` auto-merged with no conflict across the 54 intervening
+main commits; the only conflict was this issue file (both sides appended
+sections — resolved as a union, main's content first). Re-validated on the
+merged tree — see the `## Test Results` section appended below.
 
 ### Still open (roll forward — distinct root causes, NOT this PR)
 
