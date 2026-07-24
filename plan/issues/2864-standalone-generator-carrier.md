@@ -18,6 +18,16 @@ umbrella: 2860
 architect_spec: candidate
 loc-budget-allow:
   - src/codegen/generators-native.ts
+func-budget-allow:
+  # D4 (+10 LOC): buildNativeGeneratorPlan must now compute the REAL fallthrough
+  # state instead of assuming states.length-1. That assumption only holds for a
+  # straight-line body — every structural lowering (lowerFor/lowerWhile/
+  # lowerDoWhile/lowerIf and #3050's lowerTryRegion) reserves its exit/join state
+  # BEFORE the nested body, so a loop/if/try-TAIL body leaves the fallthrough at a
+  # lower id. Deriving it correctly is inherently a few lines inside the planner;
+  # extracting it would split the state-reservation invariant across two units.
+  # Same rationale as the D2 loc-budget-allow grant (#2662 precedent).
+  - src/codegen/generators-native.ts::buildNativeGeneratorPlan
 ---
 
 # Standalone: Wasm-native generator carrier (sync)
