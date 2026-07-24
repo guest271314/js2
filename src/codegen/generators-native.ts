@@ -251,6 +251,26 @@ interface NativeGeneratorState {
 
 interface NativeGeneratorPlan {
   states: NativeGeneratorState[];
+  /**
+   * (#2864 D4) Id of the state that COMPLETES the generator — the state whose
+   * terminator is the final `done`, or the dedicated empty placeholder minted
+   * for it when the fallthrough carries trailing statements.
+   *
+   * This is **not** `states.length - 1`. Every structural lowering
+   * (`for`/`while`/`do`/`if`, and the #3050 try-region) reserves its exit/join
+   * state BEFORE lowering the nested body, so a generator body that ENDS in one
+   * of those leaves the fallthrough cursor at a LOWER id than the last reserved
+   * state — and the last reserved state is then a LIVE yield successor. The
+   * pre-D4 `states.length - 1` therefore aliased "generator completed" onto a
+   * real suspension point, which made `buildNativeGeneratorDispatch`'s
+   * `suspended = state != START && state != doneState` test report DONE for a
+   * genuinely suspended generator: `.throw(e)` / `.return(v)` took the
+   * §27.5.3.4 already-completed arm and never resumed, so an enclosing `catch`
+   * across the yield was skipped and the error escaped raw. Measured on
+   * standalone + wasi for `try { yield … } catch {}` as the whole body, the
+   * same inside `for`/`while`, and nested loops under one try.
+   */
+  doneState: number;
   spills: string[];
   /**
    * (#2864 F1b) The wasm ValType for each spilled local, keyed by name. A local
@@ -1387,15 +1407,24 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   // (#3050) When the final fallthrough state carries trailing statements
   // (`… yield x; trailing();`), it doubles as BOTH the last executable state
-  // and the completed-generator dispatch target (doneState = last id) — so
-  // every post-completion `.next()` re-dispatched into it and RE-RAN the
-  // trailing prelude (observable via a `unreachable += 1` after the last
-  // yield, GeneratorPrototype/throw/try-*-following-*). Mint a DEDICATED empty
-  // done state in that case; generators whose final state is already empty
-  // keep their exact state graph (byte-identical).
-  if (states[curId]!.statements.length > 0) {
-    reserveState(); // empty placeholder — its default terminator IS `done`
-  }
+  // and the completed-generator dispatch target — so every post-completion
+  // `.next()` re-dispatched into it and RE-RAN the trailing prelude
+  // (observable via a `unreachable += 1` after the last yield,
+  // GeneratorPrototype/throw/try-*-following-*). Mint a DEDICATED empty done
+  // state in that case; generators whose final state is already empty keep
+  // their exact state graph (byte-identical).
+  //
+  // (#2864 D4) `doneState` is the id of the state that COMPLETES the generator,
+  // which is the final fallthrough cursor (or the placeholder just minted for
+  // it) — NOT `states.length - 1`. Those coincide only for a straight-line
+  // body: every structural lowering (`for`/`while`/`do`/`if`/try-region)
+  // reserves its exit/join state BEFORE the nested body's states, so a body
+  // ENDING in one leaves the fallthrough at a LOWER id than the last reserved
+  // state. See the doneState note in `NativeGeneratorPlan`.
+  const doneState =
+    states[curId]!.statements.length > 0
+      ? reserveState() // empty placeholder — its default terminator IS `done`
+      : curId;
 
   // (#3050) Apply the runtime-throw route stamps now that every state object is
   // final (finishState rebuilds them, so stamping placeholders would be lost).
@@ -1478,6 +1507,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   return {
     states,
+    doneState,
     spills,
     spillTypes,
     elemValType,
@@ -2497,7 +2527,10 @@ export function registerNativeGenerator(
     undefWidenedPatternBindings:
       plan.undefWidenedPatternBindings.size > 0 ? plan.undefWidenedPatternBindings : undefined,
     yieldCount,
-    doneState: plan.states.length - 1, // the final `done` state id
+    // (#2864 D4) The state that COMPLETES the generator, taken from the plan —
+    // NOT `states.length - 1`, which aliases onto a live yield successor for any
+    // body ending in a loop / if / try-region (see `NativeGeneratorPlan.doneState`).
+    doneState: plan.doneState,
     elemValType,
     delegationSlots: delegationSlots.length > 0 ? delegationSlots : undefined,
     vecDelegationSlots: vecDelegationSlots.length > 0 ? vecDelegationSlots : undefined,
