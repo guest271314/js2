@@ -16,6 +16,21 @@ related: [3370, 3417, 3335, 3189]
 
 # #3420 — non-writable Array element write traps `oob` instead of throwing TypeError
 
+> **RE-SCOPE (2026-07-24).** Per measurement, this splits into two very
+> different-sized pieces:
+> - **Tractable now (narrow):** the **2-test `filter`/`map` `Symbol.species`
+>   result-backing** slice — the HOF result array's element store traps `oob`
+>   instead of honoring the (species-constructed) result backing. That is a
+>   bounded result-array-write fix, dev/Fable-tier.
+> - **NOT tractable as a point-fix (the bulk):** general **frozen / non-writable
+>   Array element write** semantics (strict→TypeError, sloppy→no-op) require the
+>   **#2744 extensibility-slot substrate** (per-element `[[Writable]]` +
+>   frozen/sealed/preventExtensions queries on the fast array-store path). This
+>   is senior-dev / Fable-tier substrate, not a scoped codegen tweak.
+>
+> Kept `status: ready` but **flagged**: only the narrow species-result slice is
+> dev-claimable; the frozen-write bulk is blocked on #2744. `model: fable` stays.
+
 ## Problem
 Under the honest v8 harness, `propertyHelper.js::verifyProperty` and frozen-array
 tests exercise writes to non-writable / frozen Array elements. Instead of throwing a
