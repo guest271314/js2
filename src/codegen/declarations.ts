@@ -1515,7 +1515,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     // executes at module load — WASI surfaces it via `_start`'s uncaught printer,
     // host/standalone via the `start` section (or the exported `__module_init`
     // under `deferTopLevelInit`). Without this arm it emitted NO code at all.
-    // (#3585) The `ctx.wasi` gate is REMOVED: #2968 scoped the arm to WASI for
+    // (#3592) The `ctx.wasi` gate is REMOVED: #2968 scoped the arm to WASI for
     // byte-identity, but the drop is a SILENT WRONG ANSWER — a module whose only
     // statement is `throw` scores PASS in the JS-HOST lane too. Exhaustive A/B
     // over the whole exposed population (40 files) is +5/−0 in each lane.

@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3585 RC1 — a bare top-level `throw` statement must actually execute.
+ * #3592 RC1 — a bare top-level `throw` statement must actually execute.
  *
  * `compileDeclarations` had a `ThrowStatement` arm gated on `ctx.wasi` (#2968),
  * so in the JS-host and standalone lanes a top-level `throw` was collected into
@@ -40,7 +40,7 @@ async function initThrows(source: string, target?: "standalone"): Promise<boolea
   }
 }
 
-describe("#3585 RC1 — top-level throw is not silently dropped", () => {
+describe("#3592 RC1 — top-level throw is not silently dropped", () => {
   for (const target of [undefined, "standalone"] as const) {
     const lane = target ?? "host";
 
