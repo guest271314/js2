@@ -1,9 +1,7 @@
 ---
 id: 680
 title: "Wasm-native generators (state machines) with optional JS host fallback"
-status: done
-completed: 2026-07-24
-assignee: ttraenkler/dev-opus-2
+status: ready
 created: 2026-03-20
 updated: 2026-07-24
 priority: high
@@ -297,7 +295,13 @@ for completeness, treat as a low-priority #680 follow-up, not a conformance slic
 
 Marked `status: done` but the test262 harvest shows **398 live failures still citing #680** in the error field. Premature close — reopened as `ready`. See the sprint-73 harvest note.
 
-## Resolution (2026-07-24, dev-opus-2) — #3341/#3519 STRICT-IR regression fixed
+## Regression-fix slice (2026-07-24, dev-opus-2) — #3341/#3519 STRICT-IR regression fixed; #680 STAYS OPEN
+
+**Scope: this is a REGRESSION FIX under #680, NOT a completion.** #680 the
+umbrella feature still has **364 live test262 failures** citing it (the broader
+native-generator scope — for-of/spread/delegation/async-gen edges), so the issue
+stays `status: ready`. This slice fixes ONLY the specific #3341/#3519 STRICT-IR
+regression that broke *basic* standalone generator compilation.
 
 Surfaced by the invisible-guard-test audit (`tests/issue-680.test.ts` silently
 red on main, outside required checks — the #3008 gap). **A basic standalone
