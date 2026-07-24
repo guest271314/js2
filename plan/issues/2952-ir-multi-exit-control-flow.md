@@ -16,6 +16,14 @@ language_feature: statements
 goal: ir-full-coverage
 related: [2949, 2135, 2134, 2856]
 origin: "2026-07-02 July Fable audit §1 (all six '(future)' direct-only statement rows share one structural blocker)"
+# Slice 3 (labeled break/continue) necessarily grows the three IR core files:
+# new statement arms live in the from-ast dispatchers + selector walks and the
+# iterClose obligation in the lowering ctrlStack — the same files slices 1/2
+# extended. +199 LOC total, all feature-intrinsic (no barrel/driver code).
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/select.ts
+  - src/ir/lower.ts
 ---
 
 # #2952 — six direct-only statement kinds share one structural blocker
