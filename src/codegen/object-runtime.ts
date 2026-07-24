@@ -5006,6 +5006,14 @@ function collectStandaloneArrayCarrierTypeIdxs(ctx: CodegenContext): number[] {
     if (typeDef?.kind !== "struct") continue;
     const name = typeDef.name ?? "";
     if (isNonArrayByteVecName(name)) continue; // (#2047) §7.2.2 — never an array
+    // (#3562) `__vec_base` is the ABSTRACT common supertype every concrete
+    // `__vec_*` (incl. the byte vecs `__vec_i32_byte`/`__vec_i8_byte`) declares
+    // `(sub final __vec_base …)`. A `ref.test` against it matches EVERY vec —
+    // including the byte vecs #2047 deliberately excludes at the leaf level — so
+    // `Array.isArray(new ArrayBuffer(8)) / new Uint8Array(2)` wrongly returned
+    // `true`. Never add the base as a positive carrier; the concrete leaf vec
+    // types below are the real array carriers.
+    if (name === "__vec_base") continue;
     if (name.startsWith("__vec_") || name === "__template_vec_externref") carriers.add(typeIdx);
   }
   return Array.from(carriers).sort((a, b) => a - b);
