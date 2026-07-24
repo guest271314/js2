@@ -2,7 +2,7 @@
 id: 3565
 title: "IR over-promotion: restore 4 documented demote-to-legacy contracts (#3341/#3519) — element-store, element-access slice-12, verify #1798 return gate, compound-assign non-f64 RHS"
 status: done
-sprint: current
+sprint: 76
 created: 2026-07-24
 completed: 2026-07-24
 priority: medium

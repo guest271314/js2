@@ -3,7 +3,7 @@ id: 3404
 title: "Baseline promote is blocked by a single test262 shard artifact-upload flake — tolerate ≥N-1 shards or retry the upload"
 status: done
 completed: 2026-07-24
-sprint: current
+sprint: 76
 created: 2026-07-18
 priority: medium
 feasibility: medium
