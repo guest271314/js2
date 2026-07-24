@@ -80,8 +80,18 @@ throws distinctly, leaving every generic invariant a hard error:
   admit `"verify"` (a verify-stage designed demote is legitimately unsupported).
 - `src/ir/from-ast.ts` — the TypedArray-view store throw and the slice-12
   element-access terminal throw become `IrUnsupportedError` (→ warning → legacy).
-  The sibling _internal_ throws (`produced no value`, `unexpected IrType`) stay
-  plain `Error` → hard (genuine invariants).
+  In `lowerElementAccess`, the sibling _internal_ throws (`produced no value`,
+  `unexpected IrType`) stay plain `Error` → hard (genuine invariants).
+  **Knowingly left hard (pending measurement):** `lowerElementStore` has
+  further siblings under the SAME "Demotes (clean throw → legacy)" doc contract
+  (packed/exotic-element vec, non-vec receiver, optional-store `a?.[i]=v`,
+  non-coercible value). They are NOT converted here: the measured probe (5322
+  files) showed only the TypedArray-view throw firing, and under-converting is
+  the correct risk posture — a loud hard-fail is safe, whereas converting a
+  throw that might be catching a genuine desync would silently mask a bug (the
+  exact thing #3341 exists to prevent). If a future measurement shows one of
+  these firing on valid code, convert it then with the same distinct-code
+  pattern. This is a deliberate scope call, not an oversight.
 - `src/ir/verify.ts` — tag the #1798 return/early.return arity+type errors with
   `demote: true` (a discriminator on `IrVerifyError`). Every other verify error
   (SSA scope, dominance, branch/instr type rules, block-id shape) is untagged

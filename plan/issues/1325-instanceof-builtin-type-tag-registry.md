@@ -3,7 +3,7 @@ id: 1325
 title: "instanceof against built-in types: compile-time type-tag registry eliminates JS host for common cases"
 status: ready
 created: 2026-05-07
-updated: 2026-06-19
+updated: 2026-07-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +12,11 @@ area: codegen
 language_feature: instanceof
 goal: standalone-mode
 sprint: Backlog
+# (#1325 Date/RegExp slice) the Date/RegExp cases land in
+# `nativeBuiltinInstanceOfTypeIdxs`, which lives in the instanceof god-file;
+# +17 LOC for the two switch cases + imports is the fix itself, not barrel spill.
+loc-budget-allow:
+  - src/codegen/expressions/identifiers.ts
 ---
 # #1325 — instanceof built-in type-tag registry
 
@@ -123,3 +128,57 @@ End-to-end behavioural tests:
 ## Frontmatter reconcile (2026-06-12)
 
 Was `in-progress` with no open PR, no active agent, and no Suspended Work section (session died sprints 42-52). Reset to `ready` during the sprint-62 issue review; re-validate against current main before claiming (#2148).
+
+## Progress (2026-07-24, dev-std-3) — headline cases verified done + Date/RegExp slice landed
+
+**Verify-first re-measure against current main (the #2148 note vindicated).** The
+headline acceptance criteria are ALREADY MET on main — all host-free, no
+`__instanceof` import:
+
+- `[] instanceof Array`, `{} instanceof Array === false`
+- `new TypeError() instanceof Error` / `instanceof TypeError`
+- `catch (e) { e instanceof TypeError }`, `new Error() instanceof Error`
+- `new Map()/Set()/WeakMap()/WeakSet() instanceof <same>`
+
+The mechanism for a **dynamic (`any`-typed / opaque function-param) LHS** in
+standalone is `nativeBuiltinInstanceOfTypeIdxs` (`expressions/identifiers.ts`,
+#2916): it maps a builtin ctor name → the WasmGC struct type idx of its native
+representation and `emitNativeInstanceOfMembership` answers via `ref.test`
+(host-free). A statically-typed LHS is already covered by `tryStaticInstanceOf`.
+
+**This slice adds `Date` and `RegExp`** to that map — both lower to distinct
+WasmGC structs standalone (`$__Date`, one i64 field; `$__StandaloneRegExp`), so
+`ref.test` against their (idempotent, type-only registered) struct type answers
+`x instanceof Date` / `x instanceof RegExp` host-free even for a dynamic LHS.
+Measured flips (fail→pass, all host-free, zero false positives — negatives like
+`{} instanceof Date`, `Date instanceof RegExp`, `123 instanceof Date` stay
+`false`):
+
+- `const d: any = new Date(); d instanceof Date` — was `0`, now `1`
+- `function f(d:any){return d instanceof Date} f(new Date())` — was `0`, now `1`
+  (cross-function opaque param; the runtime `ref.test` path)
+- `const r: any = /a/ | new RegExp("a"); r instanceof RegExp` — was `0`, now `1`
+- opaque-param RegExp — was `0`, now `1`
+
+Host/gc mode is untouched (the branch is `noJsHost`-gated → byte-identical).
+Tests: `tests/issue-1325.test.ts` (new standalone describe block, 11 cases).
+
+### Remaining (per-rep construction-tagging — NOT this slice, follow-on)
+
+The residual is scattered **per-representation** work, each its own increment
+(measured 2026-07-24, all `any`-typed dynamic LHS, standalone):
+
+- `Promise`, `ArrayBuffer`, `DataView`, and the concrete `TypedArray` views
+  (`Int8Array`…`BigUint64Array`) — each lowers to its own rep; needs the
+  matching struct type idx wired into `nativeBuiltinInstanceOfTypeIdxs` (or a
+  brand where the rep is shared, e.g. TypedArray views share `$Vec` with plain
+  arrays today — #2893/#2872).
+- `x instanceof Object` — NOT a clean universal `ref.test`: native strings are
+  also GC structs, so a naive "any struct → Object" over-matches; needs a
+  struct-minus-string-minus-boxed-primitive discriminator (Slice-A #2916
+  deferral).
+- `func instanceof Function` currently **traps** on a closure LHS (separate
+  from the `undefined`-return edges) — needs a guarded cast.
+- `Map`/`Set` through a truly-opaque param still answer `0` (they pass only via
+  the static-type path today; the native-collection structs share `$Map`, so a
+  runtime `ref.test` is imprecise until a per-collection brand lands).
