@@ -188,7 +188,10 @@ function isKnownNonCallable(ctx: CodegenContext, arg: ts.Expression): boolean {
     ts.TypeFlags.BooleanLike |
     ts.TypeFlags.NumberLike |
     ts.TypeFlags.StringLike |
-    ts.TypeFlags.BigIntLike;
+    ts.TypeFlags.BigIntLike |
+    // A symbol is never callable → spec-correct §23.1.3.* step-3 TypeError for
+    // every array HOF (e.g. `[].flatMap(Symbol())`, `[].map(Symbol())`). (#3200)
+    ts.TypeFlags.ESSymbolLike;
   if (tsType.flags & NON_CALLABLE_FLAGS) return true;
   // (#2934 host-bridge A) A plain OBJECT type with NO call and NO construct
   // signatures is statically non-callable — `arr.map(new Object())`
@@ -8380,6 +8383,14 @@ function compileArrayFlatMap(
   arrTypeIdx: number,
   elemType: ValType,
 ): ValType | null {
+  // §23.1.3.11 step 3: IsCallable(mapperFunction) is false → throw TypeError,
+  // BEFORE any flatten work. Mirrors map/filter/forEach; covers the missing
+  // callback (`[].flatMap()`) and known-non-callable args (`{}`, `0`, `null`,
+  // `Symbol()`, …). Placed above the standalone arm so both lanes get it.
+  if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.flatMap")) {
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
   if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
 
   // (#2717) On the host-free lanes `flatMap` has no host `__array_flatMap` to
