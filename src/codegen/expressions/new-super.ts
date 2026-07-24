@@ -626,18 +626,28 @@ function compileSuperMethodCallCore(
   }
 
   // Push this as first argument.
+  // (#3024) A STATIC method has no `this` local, so nothing is pushed here and
+  // the parent's compiled function has NO receiver param either. The self offset
+  // below must therefore track what we ACTUALLY pushed — hardcoding 1 made every
+  // `super.m(arg)` in a static method emit a call one argument short
+  // (`not enough arguments on the stack for call (need N, got N-1)` = invalid
+  // Wasm): the first real arg was mis-binned as an "extra" and dropped, and the
+  // pad loop started past the end so it padded nothing.
   const selfIdx = fctx.localMap.get("this");
-  if (selfIdx !== undefined) {
+  const pushedSelf = selfIdx !== undefined;
+  if (pushedSelf) {
     fctx.body.push({ op: "local.get", index: selfIdx });
   }
+  // 1 when a receiver occupies param 0, 0 in a static context (none pushed).
+  const selfOffset = pushedSelf ? 1 : 0;
 
   // Push remaining arguments with type hints.
   const paramTypes = getFuncParamTypes(ctx, funcIdx);
-  // User-visible param count excludes self (param 0).
-  const superParamCount = paramTypes ? paramTypes.length - 1 : expr.arguments.length;
+  // User-visible param count excludes the receiver, when there is one.
+  const superParamCount = paramTypes ? paramTypes.length - selfOffset : expr.arguments.length;
   for (let i = 0; i < expr.arguments.length; i++) {
     if (i < superParamCount) {
-      compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + 1]); // +1 to skip self
+      compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + selfOffset]); // skip self when present
     } else {
       // Extra argument beyond method's parameter count — evaluate for
       // side effects (JS semantics) and discard the result.
@@ -647,9 +657,11 @@ function compileSuperMethodCallCore(
       }
     }
   }
-  // Pad missing arguments with defaults (skip self param at index 0).
+  // Pad missing arguments with defaults. We have filled param slots
+  // [0, selfOffset + args.length), so resume there (#3024: was hardcoded +1,
+  // which over-skipped one slot in a static context).
   if (paramTypes) {
-    for (let i = expr.arguments.length + 1; i < paramTypes.length; i++) {
+    for (let i = expr.arguments.length + selfOffset; i < paramTypes.length; i++) {
       pushDefaultValue(fctx, paramTypes[i]!, ctx);
     }
   }
@@ -741,7 +753,19 @@ export function compileSuperPropertyAccess(
       const getterName = `${ancestor}_get_${propName}`;
       const funcIdx = ctx.funcMap.get(getterName);
       if (funcIdx !== undefined) {
-        // Push this as argument to the getter
+        // Push this as argument to the getter.
+        // (#3024) NOTE — in a STATIC method there is no `this` local, so nothing
+        // is pushed here while the call is emitted regardless, leaving the stack
+        // short (`not enough arguments on the stack for call (need 1, got 0)` =
+        // invalid Wasm). That is DELIBERATELY not padded here: a static getter
+        // is currently compiled instance-shaped (`Base_get_x (param (ref null
+        // <Base>))`), so padding the receiver with the type default emits
+        // `ref.null; ref.as_non_null`, which TRAPS at runtime — trading invalid
+        // Wasm for a guaranteed trap. The sibling `super.<plain static field>`
+        // read has the same underlying gap and silently yields `f64.const 0`
+        // today. Both need static-super property reads to model the CLASS as the
+        // receiver, which is a distinct root cause from the call-arity fix in
+        // compileSuperMethodCallCore above. Tracked separately.
         const selfIdx = fctx.localMap.get("this");
         if (selfIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: selfIdx });
