@@ -91,7 +91,7 @@ export function prNumberFromQueueBranch(branch) {
 // this repo is pure transfer — none computes a verdict. If a verdict step is
 // ever named "Download and compare …", this list must be tightened, because
 // that is the direction that lets a regression through.
-// `tests/issue-3590-auto-park-step-aware.test.ts` pins the real names so a
+// `tests/issue-3597-auto-park-step-aware.test.ts` pins the real names so a
 // workflow rename surfaces here.
 export const INFRA_STEP_PATTERNS = [
   /^set up job$/i,
@@ -106,7 +106,7 @@ export const INFRA_STEP_PATTERNS = [
   /\b(download|upload)\b[^\n]*\bartifacts?\b/i,
   // Both orders — "Retry shard artifact upload on transient flake (#3404)" puts
   // the noun FIRST, which an artifact-then-download-only pattern missed (caught
-  // by the real-step-name cases in tests/issue-3590-auto-park-step-aware.test.ts).
+  // by the real-step-name cases in tests/issue-3597-auto-park-step-aware.test.ts).
   /\bartifacts?\b[^\n]*\b(download|upload)\b/i,
 ];
 
@@ -179,7 +179,7 @@ export function renderFailureLines(failedDetails) {
 function fetchJobs(runId) {
   // Paginate so a 114-job test262 matrix is fully covered.
   // `steps[]` carries the per-step `conclusion` — that is what makes the
-  // infra-vs-verdict call possible (#3590). `html_url` gives the park comment a
+  // infra-vs-verdict call possible (#3597). `html_url` gives the park comment a
   // direct pointer to the failing job log.
   const out = gh([
     "api",
@@ -239,7 +239,7 @@ ${renderFailureLines(failedDetails)}
 
 Run: ${runUrl}
 
-<sub>The failing STEP is named above (#3590). If it is a setup/infra step rather than a verdict step, the verdict never ran and this park may be spurious — confirm against the run before removing \`${HOLD_LABEL}\`.</sub>`;
+<sub>The failing STEP is named above (#3597). If it is a setup/infra step rather than a verdict step, the verdict never ran and this park may be spurious — confirm against the run before removing \`${HOLD_LABEL}\`.</sub>`;
   const comment = ghMaybe(["pr", "comment", String(prNumber), "--repo", REPO, "--body", body]);
   console.log(
     `auto-park: parked #${prNumber} (label=${label.ok} comment=${comment.ok}) — failed: ${failedJobs.join(", ")}`,
@@ -312,7 +312,7 @@ function selfCheck() {
     "empty jobs -> do not park",
   );
 
-  // (#3590) Step awareness — the two shapes that were indistinguishable on
+  // (#3597) Step awareness — the two shapes that were indistinguishable on
   // 2026-07-24.
   eq(isInfraStep("Download shard artifacts"), true, "infra: download shard artifacts");
   eq(isInfraStep("Set up job"), true, "infra: set up job");
@@ -460,7 +460,7 @@ if (isMain()) {
   const runUrl = `https://github.com/${REPO}/actions/runs/${runId}`;
   console.log(renderFailureLines(failedDetails));
   if (infraOnly) {
-    // (#3590) Every failed step is a recognised setup/infra step, so the verdict
+    // (#3597) Every failed step is a recognised setup/infra step, so the verdict
     // never ran — this is the #3566 shape (shard-artifact download 403'd) and a
     // park here would be bogus. The run is still red, so the queue ejects the PR
     // and `auto-enqueue` re-adds it; that retry is the correct response to a

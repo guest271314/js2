@@ -1,5 +1,5 @@
 /**
- * #3590 — the auto-park bot must be STEP-aware.
+ * #3597 — the auto-park bot must be STEP-aware.
  *
  * Motivating incident (2026-07-24): two merge-queue parks landed the same day
  * with textually identical comments — "Failed checks: - check for test262
@@ -41,7 +41,7 @@ const job = (name: string, conclusion: string, steps?: Step[], html_url?: string
   steps,
 });
 
-describe("#3590 — auto-park step awareness", () => {
+describe("#3597 — auto-park step awareness", () => {
   describe("the two shapes that were indistinguishable on 2026-07-24", () => {
     it("#3566 shape: artifact download failed, verdict never ran → does NOT park", () => {
       const r = classifyRun([

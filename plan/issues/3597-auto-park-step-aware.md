@@ -1,5 +1,5 @@
 ---
-id: 3590
+id: 3597
 title: "auto-park bot is step-blind — infra failures park PRs indistinguishably from real regressions"
 status: done
 completed: 2026-07-25
@@ -12,7 +12,7 @@ created: 2026-07-25
 assignee: ttraenkler/dev-guard-tests
 ---
 
-# #3590 — give the auto-park bot step awareness
+# #3597 — give the auto-park bot step awareness
 
 ## Problem
 
@@ -75,7 +75,7 @@ is **park**, and we skip parking only on *positive* evidence:
 
 - `scripts/auto-park-merge-group-failure.mjs --self-check` — 23 pure-logic
   checks, no network (extended from 10).
-- `tests/issue-3590-auto-park-step-aware.test.ts` — **30 cases**, 3 ms, covering
+- `tests/issue-3597-auto-park-step-aware.test.ts` — **30 cases**, 3 ms, covering
   both motivating shapes explicitly (#3566 must NOT park, #3563 MUST park), all
   conservative-default paths, the unchanged #2547 cancellation invariant, and
   the comment rendering. Added to `tests/guard-suite.json` so a future edit to
