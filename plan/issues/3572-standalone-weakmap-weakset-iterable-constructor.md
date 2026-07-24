@@ -16,6 +16,8 @@ horizon: s
 assignee: ttraenkler/dev-mapset-opus
 parent: 2162
 related: [1103, 2162]
+loc-budget-allow:
+  - src/codegen/expressions/new-super.ts
 ---
 
 # standalone: native WeakMap/WeakSet iterable constructor (host-leak wiring gap)
