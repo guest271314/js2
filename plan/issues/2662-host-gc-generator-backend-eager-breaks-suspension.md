@@ -380,3 +380,41 @@ to speed the conformance signal, with semantics-preservation review.
 Design settled (Option ii). Build DEFERRED — multi-session epic, to be prioritized
 against s66 work with this spec in hand. **#1344 stays parked behind this epic**
 (`#1344 depends_on [1665, 2662]`).
+
+## Review (Fable, 2026-07-24)
+
+Empirical confirmation of the ESCAPING-generator residual as a **silent wrong
+VALUE** (not just wrong side-effect timing), on main `7652f0337`, default gc
+lane — and a lane-divergence data point: **standalone gets this right, host
+gets it wrong**.
+
+```ts
+function mk(): Generator<number, number, number> {
+  function* g(): Generator<number, number, number> {
+    let s = 0;
+    for (let i = 0; i < 3; i++) {
+      const t: number = yield i;
+      s = s + t;
+    }
+    return s;
+  }
+  return g(); // ← escapes the factory
+}
+export function test(): number {
+  const it = mk();
+  it.next();
+  it.next(10);
+  it.next(20);
+  return it.next(30).value; // node: 60
+}
+// node: 60 · standalone: 60 ✓ · gc host: 0 ✗ (silent)
+```
+
+The eager buffer runs the whole body up-front, so every `next(v)` SENT value
+is lost (reads as 0) — the yielded values still look right (0,1,2), only the
+accumulated return value is wrong, which makes this maximally silent. The
+same generator NOT escaping (created + driven inline in `test()`) is correct
+on both lanes (post-#3032-W6 native routing). See the review doc
+`plan/agent-context/fable-substrate-async-review-2026-07-24.md` (probes
+a4n/a4k/a4l) and the new narrow shape-gate issue #3586 (`s += yield` knocks
+even a NON-escaping generator onto the eager buffer).
