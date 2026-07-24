@@ -11,7 +11,7 @@
  *   3. Provides emitCoercedLocalSet and coerceType (used by statements and index)
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
-import { ts } from "../ts-api.js";
+import { ts, forEachChild } from "../ts-api.js";
 import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import {
   classifyAsyncConsumer,
@@ -351,7 +351,7 @@ function asyncAssignedSymbolsInFile(ctx: CodegenContext, sf: ts.SourceFile): Rea
       const assigned = ctx.checker.getSymbolAtLocation(node.left);
       if (assigned) set.add(assigned);
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit); // #3437: shared helper so this per-file scan is counted by the compile-work budget meter
   };
   visit(sf);
   cache.set(sf, set);
