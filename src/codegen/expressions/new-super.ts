@@ -2721,6 +2721,113 @@ function seedNativeSetFromArrayArg(
 }
 
 /**
+ * (#2162 / #3572) `new WeakMap()` / `new WeakSet()` and their iterable
+ * constructor forms in standalone / nativeStrings mode → the native
+ * weak-collection runtime, which reuses the Map backing store (`__map_new`
+ * yields the same `$Map`; the brand tag distinguishes them). Handled forms:
+ *   - no-arg / `null` / `undefined` (all spec-empty);
+ *   - an array LITERAL argument — WeakSet elements via `__weakset_add`, WeakMap
+ *     `[key, value]` pairs via `__map_set` (mirrors the `new Set([…])` /
+ *     `new Map([[k,v],…])` native seeding);
+ *   - (WeakSet only) a non-literal array-typed argument → runtime vec walk.
+ * Other forms (a general iterator with observable protocol steps — the
+ * `iterator-*-failure` tests) return `undefined` so the caller falls through to
+ * the generic ctor path, rather than leak a `WeakMap_new`/`WeakSet_new` host
+ * import. Returns the constructed collection's ValType when handled.
+ */
+function tryCompileNativeWeakCollectionNew(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.NewExpression,
+): ValType | undefined {
+  if (
+    !ctx.nativeStrings ||
+    !ts.isIdentifier(expr.expression) ||
+    (expr.expression.text !== "WeakMap" && expr.expression.text !== "WeakSet")
+  ) {
+    return undefined;
+  }
+  const isWeakMap = expr.expression.text === "WeakMap";
+  const wcArgs = expr.arguments ?? ([] as readonly ts.Expression[]);
+  // A single `null` / `undefined` argument is spec-equivalent to no-arg (empty).
+  const nullishArg =
+    wcArgs.length === 1 &&
+    (wcArgs[0]!.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(wcArgs[0]!) && wcArgs[0]!.text === "undefined"));
+  const wcArrArg = wcArgs.length === 1 && ts.isArrayLiteralExpression(wcArgs[0]!) ? wcArgs[0]! : undefined;
+  // WeakMap array-literal seeding requires every element to be a 2-element
+  // array literal (a `[key, value]` pair), mirroring `new Map([[k,v],…])`.
+  const seedableMapPairs =
+    isWeakMap &&
+    wcArrArg !== undefined &&
+    wcArrArg.elements.every(
+      (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
+    );
+  const seedableSetElems =
+    !isWeakMap && wcArrArg !== undefined && !wcArrArg.elements.some((e) => ts.isSpreadElement(e));
+  // WeakSet only: a non-literal array-typed argument → runtime vec walk (mirror Set).
+  const wcNonLiteralArrArg =
+    !isWeakMap && wcArgs.length === 1 && wcArrArg === undefined && !nullishArg && isArrayTypedArg(ctx, wcArgs[0]!)
+      ? wcArgs[0]!
+      : undefined;
+  const wcHandled =
+    wcArgs.length === 0 || nullishArg || seedableMapPairs || seedableSetElems || wcNonLiteralArrArg !== undefined;
+  if (!wcHandled) return undefined;
+
+  addUnionImports(ctx);
+  ensureWeakCollectionHelpers(ctx);
+  const mapNewIdx = ctx.mapHelpers.get("__map_new");
+  const mapSetIdx = ctx.mapHelpers.get("__map_set");
+  const weaksetAddIdx = ctx.mapHelpers.get("__weakset_add");
+  if (mapNewIdx === undefined || ctx.mapTypeIdx < 0) return undefined;
+
+  fctx.body.push({
+    op: "i32.const",
+    value: isWeakMap ? COLLECTION_KIND.WEAKMAP : COLLECTION_KIND.WEAKSET,
+  }); // (#3171) brand tag
+  fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+  if (seedableMapPairs && wcArrArg !== undefined && wcArrArg.elements.length > 0 && mapSetIdx !== undefined) {
+    const mTmp = allocLocal(fctx, `__wmctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
+    fctx.body.push({ op: "local.set", index: mTmp });
+    for (const el of wcArrArg.elements) {
+      // every() above narrowed each element to a 2-element array literal.
+      const pair = el as ts.ArrayLiteralExpression;
+      fctx.body.push({ op: "local.get", index: mTmp });
+      const kt = compileExpression(ctx, fctx, pair.elements[0]!);
+      coerceMapKeyToAnyref(ctx, fctx, kt);
+      const vt = compileExpression(ctx, fctx, pair.elements[1]!);
+      coerceMapKeyToAnyref(ctx, fctx, vt);
+      fctx.body.push({ op: "call", funcIdx: mapSetIdx }); // returns ref $Map
+      fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "local.get", index: mTmp });
+  } else if (
+    seedableSetElems &&
+    wcArrArg !== undefined &&
+    wcArrArg.elements.length > 0 &&
+    weaksetAddIdx !== undefined
+  ) {
+    const mTmp = allocLocal(fctx, `__wsctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
+    fctx.body.push({ op: "local.set", index: mTmp });
+    for (const el of wcArrArg.elements) {
+      if (ts.isOmittedExpression(el)) continue; // hole → undefined element
+      fctx.body.push({ op: "local.get", index: mTmp });
+      const et = compileExpression(ctx, fctx, el);
+      coerceMapKeyToAnyref(ctx, fctx, et);
+      fctx.body.push({ op: "call", funcIdx: weaksetAddIdx }); // returns ref $Map
+      fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "local.get", index: mTmp });
+  } else if (wcNonLiteralArrArg !== undefined && weaksetAddIdx !== undefined) {
+    const mTmp = allocLocal(fctx, `__wsctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
+    fctx.body.push({ op: "local.set", index: mTmp });
+    // On a non-vec / unsupported-element arg the helper leaves the empty
+    // collection on the stack (graceful: empty WeakSet, never a host leak).
+    seedNativeSetFromArrayArg(ctx, fctx, wcNonLiteralArrArg, mTmp, weaksetAddIdx);
+  }
+  return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+}
+
+/**
  * (#2162) Is `arg`'s static type an array (`T[]` / `Array<T>` / readonly array /
  * a tuple)? Used to recognise the non-literal iterable form of `new Set(arr)` /
  * `new Map(pairs)`. Conservative: only a checker-confirmed array/tuple type
@@ -2943,102 +3050,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // (#2162 / #3572) `new WeakMap()` / `new WeakSet()` and their iterable
-  // constructor forms in standalone / nativeStrings mode → the native
-  // weak-collection runtime, which reuses the Map backing store (`__map_new`
-  // yields the same `$Map`; the brand tag distinguishes them). Handled forms:
-  //   - no-arg / `null` / `undefined` (all spec-empty);
-  //   - an array LITERAL argument — WeakSet elements via `__weakset_add`,
-  //     WeakMap `[key, value]` pairs via `__map_set` (mirrors the `new Set([…])`
-  //     / `new Map([[k,v],…])` native seeding above);
-  //   - (WeakSet only) a non-literal array-typed argument → runtime vec walk.
-  // Other forms (a general iterator with observable protocol steps — the
-  // `iterator-*-failure` tests) fall through to the follow-up slice rather than
-  // leak a `WeakMap_new` / `WeakSet_new` host import.
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    (expr.expression.text === "WeakMap" || expr.expression.text === "WeakSet")
-  ) {
-    const isWeakMap = expr.expression.text === "WeakMap";
-    const wcArgs = expr.arguments ?? ([] as readonly ts.Expression[]);
-    // A single `null` / `undefined` argument is spec-equivalent to no-arg (empty).
-    const nullishArg =
-      wcArgs.length === 1 &&
-      (wcArgs[0]!.kind === ts.SyntaxKind.NullKeyword ||
-        (ts.isIdentifier(wcArgs[0]!) && wcArgs[0]!.text === "undefined"));
-    const wcArrArg = wcArgs.length === 1 && ts.isArrayLiteralExpression(wcArgs[0]!) ? wcArgs[0]! : undefined;
-    // WeakMap array-literal seeding requires every element to be a 2-element
-    // array literal (a `[key, value]` pair), mirroring `new Map([[k,v],…])`.
-    const seedableMapPairs =
-      isWeakMap &&
-      wcArrArg !== undefined &&
-      wcArrArg.elements.every(
-        (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
-      );
-    const seedableSetElems =
-      !isWeakMap && wcArrArg !== undefined && !wcArrArg.elements.some((e) => ts.isSpreadElement(e));
-    // WeakSet only: a non-literal array-typed argument → runtime vec walk (mirror Set).
-    const wcNonLiteralArrArg =
-      !isWeakMap && wcArgs.length === 1 && wcArrArg === undefined && !nullishArg && isArrayTypedArg(ctx, wcArgs[0]!)
-        ? wcArgs[0]!
-        : undefined;
-    const wcHandled =
-      wcArgs.length === 0 || nullishArg || seedableMapPairs || seedableSetElems || wcNonLiteralArrArg !== undefined;
-    if (wcHandled) {
-      addUnionImports(ctx);
-      ensureWeakCollectionHelpers(ctx);
-      const mapNewIdx = ctx.mapHelpers.get("__map_new");
-      const mapSetIdx = ctx.mapHelpers.get("__map_set");
-      const weaksetAddIdx = ctx.mapHelpers.get("__weakset_add");
-      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-        fctx.body.push({
-          op: "i32.const",
-          value: isWeakMap ? COLLECTION_KIND.WEAKMAP : COLLECTION_KIND.WEAKSET,
-        }); // (#3171) brand tag
-        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-        if (seedableMapPairs && wcArrArg !== undefined && wcArrArg.elements.length > 0 && mapSetIdx !== undefined) {
-          const mTmp = allocLocal(fctx, `__wmctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
-          fctx.body.push({ op: "local.set", index: mTmp });
-          for (const el of wcArrArg.elements) {
-            // every() above narrowed each element to a 2-element array literal.
-            const pair = el as ts.ArrayLiteralExpression;
-            fctx.body.push({ op: "local.get", index: mTmp });
-            const kt = compileExpression(ctx, fctx, pair.elements[0]!);
-            coerceMapKeyToAnyref(ctx, fctx, kt);
-            const vt = compileExpression(ctx, fctx, pair.elements[1]!);
-            coerceMapKeyToAnyref(ctx, fctx, vt);
-            fctx.body.push({ op: "call", funcIdx: mapSetIdx }); // returns ref $Map
-            fctx.body.push({ op: "drop" });
-          }
-          fctx.body.push({ op: "local.get", index: mTmp });
-        } else if (
-          seedableSetElems &&
-          wcArrArg !== undefined &&
-          wcArrArg.elements.length > 0 &&
-          weaksetAddIdx !== undefined
-        ) {
-          const mTmp = allocLocal(fctx, `__wsctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
-          fctx.body.push({ op: "local.set", index: mTmp });
-          for (const el of wcArrArg.elements) {
-            if (ts.isOmittedExpression(el)) continue; // hole → undefined element
-            fctx.body.push({ op: "local.get", index: mTmp });
-            const et = compileExpression(ctx, fctx, el);
-            coerceMapKeyToAnyref(ctx, fctx, et);
-            fctx.body.push({ op: "call", funcIdx: weaksetAddIdx }); // returns ref $Map
-            fctx.body.push({ op: "drop" });
-          }
-          fctx.body.push({ op: "local.get", index: mTmp });
-        } else if (wcNonLiteralArrArg !== undefined && weaksetAddIdx !== undefined) {
-          const mTmp = allocLocal(fctx, `__wsctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
-          fctx.body.push({ op: "local.set", index: mTmp });
-          // On a non-vec / unsupported-element arg the helper leaves the empty
-          // collection on the stack (graceful: empty WeakSet, never a host leak).
-          seedNativeSetFromArrayArg(ctx, fctx, wcNonLiteralArrArg, mTmp, weaksetAddIdx);
-        }
-        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
-      }
-    }
+  // (#2162 / #3572) `new WeakMap()` / `new WeakSet()` + iterable ctor forms →
+  // native weak-collection runtime (see tryCompileNativeWeakCollectionNew).
+  {
+    const weakCollResult = tryCompileNativeWeakCollectionNew(ctx, fctx, expr);
+    if (weakCollResult !== undefined) return weakCollResult;
   }
 
   // (#3242) `new WeakRef(target)` in standalone / nativeStrings mode → the
