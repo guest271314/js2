@@ -8,7 +8,7 @@ created: 2026-07-17
 priority: high
 feasibility: easy
 horizon: s
-task_type: bug
+task_type: infrastructure
 area: ci, infra, pages
 goal: infrastructure
 related: [3375, 1951, 2562]
