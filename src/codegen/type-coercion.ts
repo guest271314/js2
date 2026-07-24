@@ -82,6 +82,48 @@ export function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: numbe
 }
 
 /**
+ * (#1917 Stage A) Byte-neutral extraction of the guarded-ref-cast idiom that was
+ * copy-pasted across `coerceType` (~6×) and `coercionInstrs` (4×): tee the
+ * incoming (any/eq/`from`)ref into a temp, `ref.test` the target `toIdx`, and `if`
+ * it — `ref.cast_null` on success, `ref.null` on failure (so a wrong runtime
+ * struct type yields null instead of an illegal-cast trap). Returns the
+ * instruction SEQUENCE (the value to guard must already be on the stack, e.g.
+ * after a prefix `any.convert_extern` / `struct.get`). Instr[]-returning callers
+ * (`coercionInstrs`) prepend their prefix and `return`; push-style callers
+ * (`coerceType`) spread the result into `fctx.body`.
+ *
+ * Distinct from `emitGuardedRefCast` on three points these 10 sites require: it
+ * does NOT record `__lastGuardedCastBackup` (#792 — none of these sites did), it
+ * lets the caller choose the temp's ValType (`anyref` vs `eqref` vs the exact
+ * `from` type), and it appends the trailing `ref.as_non_null` only when
+ * `nonNull` (a non-null `(ref)` target). The `if` blockType is always
+ * `ref_null $toIdx`.
+ */
+function guardedRefCastInstrs(
+  fctx: FunctionContext,
+  toIdx: number,
+  opts: { tempType: ValType; nonNull: boolean },
+): Instr[] {
+  const tmp = allocTempLocal(fctx, opts.tempType);
+  const instrs: Instr[] = [
+    { op: "local.tee", index: tmp },
+    { op: "ref.test", typeIdx: toIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
+      then: [
+        { op: "local.get", index: tmp },
+        { op: "ref.cast_null", typeIdx: toIdx },
+      ],
+      else: [{ op: "ref.null", typeIdx: toIdx }],
+    },
+  ];
+  if (opts.nonNull) instrs.push({ op: "ref.as_non_null" });
+  releaseTempLocal(fctx, tmp);
+  return instrs;
+}
+
+/**
  * Callback type for compiling a string literal onto the Wasm stack.
  * Used by coerceType when it needs to push a @@toPrimitive hint string.
  * The caller (expressions.ts) passes its local compileStringLiteral function.
@@ -1388,56 +1430,25 @@ export function coerceType(
           ctx.nativeStrings &&
           (toIdxStr === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && toIdxStr === ctx.nativeStrTypeIdx));
         if (isNativeStrTarget) {
-          const tmpStr = allocTempLocal(fctx, { kind: "anyref" } as ValType);
           fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 4 }); // externval
           fctx.body.push({ op: "any.convert_extern" });
-          fctx.body.push({ op: "local.tee", index: tmpStr });
-          fctx.body.push({ op: "ref.test", typeIdx: toIdxStr });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdxStr } as ValType },
-            then: [
-              { op: "local.get", index: tmpStr },
-              { op: "ref.cast_null", typeIdx: toIdxStr },
-            ],
-            else: [{ op: "ref.null", typeIdx: toIdxStr }],
-          });
-          if (to.kind === "ref") {
-            fctx.body.push({ op: "ref.as_non_null" });
-          }
-          releaseTempLocal(fctx, tmpStr);
+          fctx.body.push(
+            ...guardedRefCastInstrs(fctx, toIdxStr, {
+              tempType: { kind: "anyref" } as ValType,
+              nonNull: to.kind === "ref",
+            }),
+          );
           return;
         }
         // Get the refval field (eqref), then guarded ref.cast to target type
         fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 3 });
         // Guard: ref.test before ref.cast to avoid illegal cast traps
-        const tmpEq = allocTempLocal(fctx, { kind: "eqref" } as ValType);
-        fctx.body.push({ op: "local.tee", index: tmpEq });
-        fctx.body.push({ op: "ref.test", typeIdx: toIdx });
-        if (to.kind === "ref_null") {
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "val", type: to },
-            then: [
-              { op: "local.get", index: tmpEq },
-              { op: "ref.cast_null", typeIdx: toIdx },
-            ],
-            else: [{ op: "ref.null", typeIdx: toIdx }],
-          });
-        } else {
-          // Non-null target: cast if test passes, otherwise unreachable (type error)
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-            then: [
-              { op: "local.get", index: tmpEq },
-              { op: "ref.cast_null", typeIdx: toIdx },
-            ],
-            else: [{ op: "ref.null", typeIdx: toIdx }],
-          });
-          fctx.body.push({ op: "ref.as_non_null" });
-        }
-        releaseTempLocal(fctx, tmpEq);
+        // Non-null `(ref)` target appends `ref.as_non_null` (nonNull); the
+        // `ref_null` target's original `if` blockType `to` is byte-identical to
+        // the helper's `ref_null $toIdx`.
+        fctx.body.push(
+          ...guardedRefCastInstrs(fctx, toIdx, { tempType: { kind: "eqref" } as ValType, nonNull: to.kind === "ref" }),
+        );
         return;
       }
       // Different struct types, neither is AnyValue.
@@ -1453,35 +1464,11 @@ export function coerceType(
       // (#2853 park fix) If from/to are same-layout sibling shapes, this guarded
       // downcast would trap post-brand — exclude both from nominal branding.
       markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromIdx, toIdx);
-      {
-        const guardFrom = from.kind === "ref_null" ? ({ kind: "anyref" } as ValType) : ({ kind: "anyref" } as ValType);
-        const tmpGuard = allocTempLocal(fctx, guardFrom);
-        fctx.body.push({ op: "local.tee", index: tmpGuard });
-        fctx.body.push({ op: "ref.test", typeIdx: toIdx });
-        if (to.kind === "ref_null") {
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "val", type: to },
-            then: [
-              { op: "local.get", index: tmpGuard },
-              { op: "ref.cast_null", typeIdx: toIdx },
-            ],
-            else: [{ op: "ref.null", typeIdx: toIdx }],
-          });
-        } else {
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-            then: [
-              { op: "local.get", index: tmpGuard },
-              { op: "ref.cast_null", typeIdx: toIdx },
-            ],
-            else: [{ op: "ref.null", typeIdx: toIdx }],
-          });
-          fctx.body.push({ op: "ref.as_non_null" });
-        }
-        releaseTempLocal(fctx, tmpGuard);
-      }
+      // `guardFrom` was always `anyref` (both ternary arms), preserved as tempType;
+      // non-null `(ref)` target appends `ref.as_non_null` via nonNull.
+      fctx.body.push(
+        ...guardedRefCastInstrs(fctx, toIdx, { tempType: { kind: "anyref" } as ValType, nonNull: to.kind === "ref" }),
+      );
       return;
     }
     return;
@@ -1503,20 +1490,11 @@ export function coerceType(
       if (!emitSafeStructConversion(ctx, fctx, fromRefIdx, toRefNullIdx)) {
         // (#2853 park fix) same-layout sibling shapes → exclude from branding.
         markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromRefIdx, toRefNullIdx);
-        // Guarded cast: ref $X → ref_null $Y — avoid illegal cast trap
-        const tmpRefNull = allocTempLocal(fctx, { kind: "anyref" } as ValType);
-        fctx.body.push({ op: "local.tee", index: tmpRefNull });
-        fctx.body.push({ op: "ref.test", typeIdx: toRefNullIdx });
-        fctx.body.push({
-          op: "if",
-          blockType: { kind: "val", type: to },
-          then: [
-            { op: "local.get", index: tmpRefNull },
-            { op: "ref.cast_null", typeIdx: toRefNullIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toRefNullIdx }],
-        });
-        releaseTempLocal(fctx, tmpRefNull);
+        // Guarded cast: ref $X → ref_null $Y — avoid illegal cast trap. Original
+        // `if` blockType `to` is byte-identical to the helper's `ref_null $toIdx`.
+        fctx.body.push(
+          ...guardedRefCastInstrs(fctx, toRefNullIdx, { tempType: { kind: "anyref" } as ValType, nonNull: false }),
+        );
       }
     }
     return;
@@ -1537,40 +1515,16 @@ export function coerceType(
         ctx.nativeStrings &&
         (toIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && toIdx === ctx.nativeStrTypeIdx));
       if (isNativeStrTarget) {
-        const tmpStr = allocTempLocal(fctx, { kind: "anyref" } as ValType);
         fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 4 }); // externval
         fctx.body.push({ op: "any.convert_extern" });
-        fctx.body.push({ op: "local.tee", index: tmpStr });
-        fctx.body.push({ op: "ref.test", typeIdx: toIdx });
-        fctx.body.push({
-          op: "if",
-          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-          then: [
-            { op: "local.get", index: tmpStr },
-            { op: "ref.cast_null", typeIdx: toIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toIdx }],
-        });
-        fctx.body.push({ op: "ref.as_non_null" });
-        releaseTempLocal(fctx, tmpStr);
+        fctx.body.push(
+          ...guardedRefCastInstrs(fctx, toIdx, { tempType: { kind: "anyref" } as ValType, nonNull: true }),
+        );
         return;
       }
       fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 3 });
       // Guarded cast: eqref → ref $X
-      const tmpUnbox = allocTempLocal(fctx, { kind: "eqref" } as ValType);
-      fctx.body.push({ op: "local.tee", index: tmpUnbox });
-      fctx.body.push({ op: "ref.test", typeIdx: toIdx });
-      fctx.body.push({
-        op: "if",
-        blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-        then: [
-          { op: "local.get", index: tmpUnbox },
-          { op: "ref.cast_null", typeIdx: toIdx },
-        ],
-        else: [{ op: "ref.null", typeIdx: toIdx }],
-      });
-      fctx.body.push({ op: "ref.as_non_null" });
-      releaseTempLocal(fctx, tmpUnbox);
+      fctx.body.push(...guardedRefCastInstrs(fctx, toIdx, { tempType: { kind: "eqref" } as ValType, nonNull: true }));
       return;
     }
     // ref_null $X → ref $Y: cast and assert non-null at runtime
@@ -1581,19 +1535,11 @@ export function coerceType(
         // (#2853 park fix) same-layout sibling shapes → exclude from branding.
         markNoBrandSiblingShapes(ctx.mod.types, ctx.noBrandShapeTypes, fromNullIdx, toNonNullIdx);
         // Guarded cast: ref_null $X → ref $Y
-        const tmpCast = allocTempLocal(fctx, { kind: "anyref" } as ValType);
-        fctx.body.push({ op: "local.tee", index: tmpCast });
-        fctx.body.push({ op: "ref.test", typeIdx: toNonNullIdx });
-        fctx.body.push({
-          op: "if",
-          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toNonNullIdx } as ValType },
-          then: [
-            { op: "local.get", index: tmpCast },
-            { op: "ref.cast_null", typeIdx: toNonNullIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toNonNullIdx }],
-        });
-        releaseTempLocal(fctx, tmpCast);
+        // nonNull: false — the trailing `ref.as_non_null` is emitted CONDITIONALLY
+        // below (the #2161 native-string-target exception), NOT unconditionally here.
+        fctx.body.push(
+          ...guardedRefCastInstrs(fctx, toNonNullIdx, { tempType: { kind: "anyref" } as ValType, nonNull: false }),
+        );
       }
     }
     // (#2161 family B0) NATIVE-STRING targets skip the non-null assert: a null
@@ -3640,23 +3586,10 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
     const vecMatIdx = vecFromExternFuncIdx(ctx, toIdx);
     if (vecMatIdx !== undefined) return [{ op: "call", funcIdx: vecMatIdx }];
     if (fctx) {
-      const tmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
-      const result: Instr[] = [
+      return [
         { op: "any.convert_extern" },
-        { op: "local.tee", index: tmp },
-        { op: "ref.test", typeIdx: toIdx },
-        {
-          op: "if",
-          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-          then: [
-            { op: "local.get", index: tmp },
-            { op: "ref.cast_null", typeIdx: toIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toIdx }],
-        },
+        ...guardedRefCastInstrs(fctx, toIdx, { tempType: { kind: "anyref" } as ValType, nonNull: false }),
       ];
-      releaseTempLocal(fctx, tmp);
-      return result;
     }
     // No fctx available — use original ref.cast (may trap as illegal_cast,
     // but that's more informative than silently returning null).
@@ -3672,23 +3605,12 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
     const vecMatIdx = vecFromExternFuncIdx(ctx, toIdx);
     if (vecMatIdx !== undefined) return [{ op: "call", funcIdx: vecMatIdx }, { op: "ref.as_non_null" }];
     if (fctx) {
-      const tmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
-      const result: Instr[] = [
+      // NOTE: no trailing `ref.as_non_null` even though `to.kind === "ref"` — this
+      // arm has always yielded a `ref_null` (nonNull: false), preserved exactly.
+      return [
         { op: "any.convert_extern" },
-        { op: "local.tee", index: tmp },
-        { op: "ref.test", typeIdx: toIdx },
-        {
-          op: "if",
-          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-          then: [
-            { op: "local.get", index: tmp },
-            { op: "ref.cast_null", typeIdx: toIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toIdx }],
-        },
+        ...guardedRefCastInstrs(fctx, toIdx, { tempType: { kind: "anyref" } as ValType, nonNull: false }),
       ];
-      releaseTempLocal(fctx, tmp);
-      return result;
     }
     // No fctx available — use ref.cast_null (passes null through instead of trapping)
     return [{ op: "any.convert_extern" }, { op: "ref.cast_null", typeIdx: toIdx }];
@@ -3697,22 +3619,7 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
   if ((from.kind === "eqref" || from.kind === "anyref") && to.kind === "ref_null") {
     const toIdx = (to as { typeIdx: number }).typeIdx;
     if (fctx) {
-      const tmp = allocTempLocal(fctx, from);
-      const result: Instr[] = [
-        { op: "local.tee", index: tmp },
-        { op: "ref.test", typeIdx: toIdx },
-        {
-          op: "if",
-          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-          then: [
-            { op: "local.get", index: tmp },
-            { op: "ref.cast_null", typeIdx: toIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toIdx }],
-        },
-      ];
-      releaseTempLocal(fctx, tmp);
-      return result;
+      return guardedRefCastInstrs(fctx, toIdx, { tempType: from, nonNull: false });
     }
     return [{ op: "ref.cast_null", typeIdx: toIdx }];
   }
@@ -3720,22 +3627,9 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
   if ((from.kind === "eqref" || from.kind === "anyref") && to.kind === "ref") {
     const toIdx = (to as { typeIdx: number }).typeIdx;
     if (fctx) {
-      const tmp = allocTempLocal(fctx, from);
-      const result: Instr[] = [
-        { op: "local.tee", index: tmp },
-        { op: "ref.test", typeIdx: toIdx },
-        {
-          op: "if",
-          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
-          then: [
-            { op: "local.get", index: tmp },
-            { op: "ref.cast_null", typeIdx: toIdx },
-          ],
-          else: [{ op: "ref.null", typeIdx: toIdx }],
-        },
-      ];
-      releaseTempLocal(fctx, tmp);
-      return result;
+      // NOTE: no trailing `ref.as_non_null` even though `to.kind === "ref"` — this
+      // arm has always yielded a `ref_null` (nonNull: false), preserved exactly.
+      return guardedRefCastInstrs(fctx, toIdx, { tempType: from, nonNull: false });
     }
     return [{ op: "ref.cast", typeIdx: toIdx }];
   }
