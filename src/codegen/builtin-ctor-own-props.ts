@@ -70,6 +70,7 @@
  *   still land) — declining is always safe.
  */
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { withSpeculativeCompile } from "./context/speculative.js";
 import { BUILTIN_CTOR_ARITY, tryEnsureNativeProtoBrand } from "./builtin-value-read.js";
 import { emitLazyNativeProtoGet } from "./native-proto.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -144,17 +145,19 @@ export function pushBuiltinCtorOwnPropSeed(
   // no registered brand keep only `length`/`name`.
   const brand = tryEnsureNativeProtoBrand(ctx, builtinName);
   if (brand === undefined) return;
-  const mark = fctx.body.length;
-  fctx.body.push({ op: "local.get", index: objLocal });
-  addStringConstantGlobal(ctx, "prototype");
-  for (const instr of stringConstantExternrefInstrs(ctx, "prototype")) fctx.body.push(instr);
-  if (!emitLazyNativeProtoGet(ctx, fctx, brand)) {
-    // Roll back the partial `prototype` sequence — leave the body exactly as it
-    // was after `name` (stack-neutral).
-    fctx.body.length = mark;
-    return;
-  }
-  fctx.body.push({ op: "f64.const", value: 0 });
-  fctx.body.push({ op: "call", funcIdx: defineIdx });
-  fctx.body.push({ op: "drop" });
+  // Speculative: `emitLazyNativeProtoGet` may decline, and it can allocate
+  // locals / late imports before doing so. A raw `body.length = mark` would undo
+  // only the body and strand those — hence the #1919 transactional helper, which
+  // rolls back body + locals + imports + errors together. On decline the body is
+  // left exactly as it was after `name` (stack-neutral).
+  withSpeculativeCompile(ctx, fctx, () => {
+    fctx.body.push({ op: "local.get", index: objLocal });
+    addStringConstantGlobal(ctx, "prototype");
+    for (const instr of stringConstantExternrefInstrs(ctx, "prototype")) fctx.body.push(instr);
+    if (!emitLazyNativeProtoGet(ctx, fctx, brand)) return { commit: false, value: undefined };
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "call", funcIdx: defineIdx });
+    fctx.body.push({ op: "drop" });
+    return { commit: true, value: undefined };
+  });
 }
