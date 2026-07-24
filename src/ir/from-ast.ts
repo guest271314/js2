@@ -1023,6 +1023,11 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       lowerDoStatement(s, cx);
       continue;
     }
+    // #2952 slice 3: `lbl: <loop>` as a non-tail statement.
+    if (ts.isLabeledStatement(s)) {
+      lowerLabeledStatement(s, cx);
+      continue;
+    }
     // Slice 9 (#1169h): throw / try as a non-tail statement.
     if (ts.isThrowStatement(s)) {
       lowerThrowStatement(s, cx);
@@ -1562,6 +1567,26 @@ interface LowerCtx {
    * across function boundaries.
    */
   readonly loopLabel?: IrLabelId;
+  /**
+   * #2952 slice 3 — source-label environment: maps a `LabeledStatement`'s
+   * label NAME to the `IrLabelId` of the loop it labels. `break lbl` /
+   * `continue lbl` resolve through this map (the id is the labeled loop's
+   * own `loopLabel`, so the lowering-time depth resolver needs no new
+   * machinery). Scoped to the labeled statement's own lowering — the map
+   * is extended on the ctx passed INTO the labeled loop and never leaks
+   * to siblings. Lifted-closure contexts are built fresh, so labels never
+   * cross a function boundary (JS labels are function-local anyway).
+   */
+  readonly labelEnv?: ReadonlyMap<string, IrLabelId>;
+  /**
+   * #2952 slice 3 — a pre-allocated label id the NEXT loop lowerer must
+   * adopt as its `loopLabel` instead of minting a fresh one. Set by
+   * `lowerLabeledStatement` so `lbl: while (...)` gives the loop the same
+   * id that `labelEnv["lbl"]` maps to. Every loop lowerer consumes it
+   * exactly once and clears it on its inner contexts (a nested unlabeled
+   * loop must NOT inherit the same id — labels are per-loop unique).
+   */
+  readonly pendingLoopLabel?: IrLabelId;
   /**
    * (#2856) Early-return barrier. Set `true` for statement buffers where a
    * Wasm-`return`-based early exit is UNSOUND: for-of bodies (an iterator-
@@ -5843,7 +5868,14 @@ function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "whi
 }
 
 function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
-  const loopCx: LowerCtx = { ...cx, scope: conservativeLoopStringEncodingScope(stmt, cx) };
+  // #2952 slice 3 — a labeled loop adopts the pre-allocated id (consumed
+  // here; cleared below so nested loops mint their own).
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const loopCx: LowerCtx = {
+    ...cx,
+    scope: conservativeLoopStringEncodingScope(stmt, cx),
+    pendingLoopLabel: undefined,
+  };
   // Capture the value id `lowerExpr` returns rather than the cond buffer's
   // last instruction result — the latter is fragile (e.g. a trailing store
   // produces no value). (#1980)
@@ -5862,9 +5894,8 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
   }
-  // #2952 slice 2 — synthesise the loop's label and thread it as the
-  // innermost loop for the body, so unlabeled break/continue resolve here.
-  const loopLabel = loopCx.builder.freshLoopLabel();
+  // #2952 slice 2 — the loop's label is threaded as the innermost loop for
+  // the body, so unlabeled break/continue resolve here.
   const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel };
   const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -5893,12 +5924,17 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
  * multi-exit-free subset and never reaches a demote channel post-claim.
  */
 function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
-  const loopCx: LowerCtx = { ...cx, scope: conservativeLoopStringEncodingScope(stmt, cx) };
+  // #2952 slice 3 — adopt a labeled statement's pre-allocated id when set.
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const loopCx: LowerCtx = {
+    ...cx,
+    scope: conservativeLoopStringEncodingScope(stmt, cx),
+    pendingLoopLabel: undefined,
+  };
   // Body first (buffer built exactly as `while`, just emitted before cond
   // at lower time). Scope mirrors the while path. (#2952 slice 2) The
   // synthesised label makes this loop the innermost break/continue target;
   // a continue falls through to the cond (post-test semantics).
-  const loopLabel = loopCx.builder.freshLoopLabel();
   const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel };
   const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6017,7 +6053,10 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   if (!stmt.condition) {
     throw new Error(`ir/from-ast: for without cond not in slice 12 (${cx.funcName})`);
   }
-  const innerCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
+  // #2952 slice 3 — adopt a labeled statement's pre-allocated id when set
+  // (consumed here; cleared so init/body contexts don't leak it inward).
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const innerCx: LowerCtx = { ...cx, scope: new Map(cx.scope), pendingLoopLabel: undefined };
 
   // 1. Init — emit inline before the for.loop instr.
   if (stmt.initializer) {
@@ -6057,9 +6096,8 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   // keeps the fast unchecked `vec.get`. Thread the proven pair onto a body-scoped
   // cx (immutable copy → no leak to siblings; nested loops accumulate outward).
   const provenPair = detectCountedLoopSafeIndex(stmt);
-  // #2952 slice 2 — synthesise the loop's label; the body cx carries it as
-  // the innermost break/continue target (a continue jumps to the update).
-  const loopLabel = loopCx.builder.freshLoopLabel();
+  // #2952 slice 2 — the loop's label; the body cx carries it as the
+  // innermost break/continue target (a continue jumps to the update).
   const bodyScope = new Map(loopCx.scope);
   const bodyCx: LowerCtx = provenPair
     ? {
@@ -6154,8 +6192,9 @@ function lowerForOfIterFromExternrefValue(
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
   // #2952 slice 2 — this loop is the innermost break/continue target.
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
-  const loopLabel = cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true };
+  // (slice 3) A labeled for-of adopts the pre-allocated id.
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true, pendingLoopLabel: undefined };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6220,8 +6259,9 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
   });
   // #2952 slice 2 — this loop is the innermost break/continue target.
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
-  const loopLabel = cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true };
+  // (slice 3) A labeled for-of adopts the pre-allocated id.
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true, pendingLoopLabel: undefined };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6288,8 +6328,9 @@ function lowerForOfVec(
   bodyScope.set(loopVarName, { kind: "slot", slotIndex: elementSlot, type: elemIrT });
   // #2952 slice 2 — this loop is the innermost break/continue target.
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
-  const loopLabel = cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true };
+  // (slice 3) A labeled for-of adopts the pre-allocated id.
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true, pendingLoopLabel: undefined };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6489,8 +6530,14 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
     return;
   }
   // #2952 slice 2 — unlabeled break / continue against the innermost loop.
+  // (slice 3) Labeled forms resolve through cx.labelEnv in the same helper.
   if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
     lowerBreakContinueStatement(stmt, cx);
+    return;
+  }
+  // #2952 slice 3 — `lbl: <loop>` nested inside a body buffer.
+  if (ts.isLabeledStatement(stmt)) {
+    lowerLabeledStatement(stmt, cx);
     return;
   }
   // (#2856 C1) Early `return` inside a body buffer — `if (v === target)
@@ -6534,16 +6581,70 @@ function lowerIfBodyStatement(stmt: ts.IfStatement, cx: LowerCtx): void {
 }
 
 /**
+ * #2952 slice 3 — lower `lbl: <loop>` (a labeled LOOP statement; labeled
+ * non-loop statements are selector-rejected — `labeled.block` is banked for
+ * the switch slice). The label id is pre-allocated HERE and handed to the
+ * loop lowerer via `cx.pendingLoopLabel`, so the loop's own `loopLabel` IS
+ * the id that `labelEnv[name]` maps to — `break lbl` / `continue lbl`
+ * become plain `br.label{label, mode}` against the loop's existing frames
+ * and the lowering-time depth resolver needs no new machinery. Multiple
+ * labels on one loop (`a: b: while …`) share a single id by recursion:
+ * the inner labeled statement sees `pendingLoopLabel` already set and
+ * binds its own name to the same id.
+ */
+function lowerLabeledStatement(stmt: ts.LabeledStatement, cx: LowerCtx): void {
+  const label = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const labelEnv = new Map(cx.labelEnv ?? []);
+  labelEnv.set(stmt.label.text, label);
+  const innerCx: LowerCtx = { ...cx, labelEnv, pendingLoopLabel: label };
+  const inner = stmt.statement;
+  if (ts.isLabeledStatement(inner)) {
+    lowerLabeledStatement(inner, innerCx);
+    return;
+  }
+  if (ts.isWhileStatement(inner)) {
+    lowerWhileStatement(inner, innerCx);
+    return;
+  }
+  if (ts.isDoStatement(inner)) {
+    lowerDoStatement(inner, innerCx);
+    return;
+  }
+  if (ts.isForStatement(inner)) {
+    lowerForStatement(inner, innerCx);
+    return;
+  }
+  if (ts.isForOfStatement(inner)) {
+    lowerForOfStatement(inner, innerCx);
+    return;
+  }
+  // Selector parity: `isPhase1LabeledStatement` only claims loop bodies.
+  throw new Error(`ir/from-ast: labeled non-loop statement not in #2952 slice 3 (${cx.funcName})`);
+}
+
+/**
  * #2952 slice 2 — lower an unlabeled `break;` / `continue;` to `br.label`
  * against the innermost enclosing loop's synthesised label (threaded on
  * `cx.loopLabel` by every loop lowerer). The selector's `inLoop` gate
  * guarantees a label is in scope and the statement is unlabeled; the
  * throws are internal-invariant assertions, not fallback paths.
+ *
+ * (slice 3) The labeled forms resolve the label NAME through
+ * `cx.labelEnv` — the id is the labeled loop's own `loopLabel`, so both
+ * forms emit the same `br.label` instr. The selector's label-set gate
+ * guarantees the name is bound by an enclosing claimed labeled loop.
  */
 function lowerBreakContinueStatement(stmt: ts.BreakStatement | ts.ContinueStatement, cx: LowerCtx): void {
   const kind = ts.isBreakStatement(stmt) ? "break" : "continue";
   if (stmt.label) {
-    throw new Error(`ir/from-ast: labeled ${kind} not in #2952 slice 2 (${cx.funcName})`);
+    const target = cx.labelEnv?.get(stmt.label.text);
+    if (target === undefined) {
+      throw new Error(
+        `ir/from-ast: ${kind} ${stmt.label.text} targets no enclosing claimed labeled loop — selector gate failed (${cx.funcName})`,
+      );
+    }
+    cx.builder.emitBrLabel(target, kind);
+    return;
   }
   if (cx.loopLabel === undefined) {
     throw new Error(`ir/from-ast: ${kind} outside a claimed loop — selector gate failed (${cx.funcName})`);
