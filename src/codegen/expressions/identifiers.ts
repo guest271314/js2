@@ -37,6 +37,7 @@ import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
 import { ensureDateStruct } from "./builtins.js"; // (#1325) native $__Date struct for host-free `instanceof Date`
 import { ensureStandaloneRegExpStruct } from "../regexp-standalone.js"; // (#1325) native RegExp struct for host-free `instanceof RegExp`
+import { getOrRegisterPromiseType } from "../async-scheduler.js"; // (#1325) native $Promise struct for host-free `instanceof Promise`
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
 import { popBody, pushBody } from "../context/bodies.js";
@@ -1685,6 +1686,13 @@ function nativeBuiltinInstanceOfTypeIdxs(ctx: CodegenContext, ctorName: string):
       // `$__StandaloneRegExp` struct; `ref.test` against it answers
       // `r instanceof RegExp` host-free. Idempotent, type-only registration.
       return keep(ensureStandaloneRegExpStruct(ctx));
+    case "Promise":
+      // (#1325) A Promise lowers to the distinct `$Promise` struct
+      // (state/value/callbacks). `ref.test` against it answers
+      // `p instanceof Promise` host-free. `getOrRegisterPromiseType` is
+      // idempotent and type-only (registers the struct type + scheduler state
+      // bookkeeping; no funcidx shift), so calling it here is compile-order-safe.
+      return keep(getOrRegisterPromiseType(ctx));
     default:
       return undefined;
   }

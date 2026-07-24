@@ -335,4 +335,53 @@ describe("#1325 instanceof Date/RegExp — standalone native (host-free)", () =>
       ),
     ).toBe(0);
   });
+
+  // ── Promise (distinct $Promise struct — same mechanism as Date/RegExp) ──
+  it("`any`-typed Promise.resolve instanceof Promise → true", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const p: any = Promise.resolve(1); return (p instanceof Promise) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("`any`-typed new Promise instanceof Promise → true", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const p: any = new Promise((res: any) => { res(1); }); return (p instanceof Promise) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("opaque function-param Promise instanceof Promise → true", async () => {
+    expect(
+      await runStandalone(
+        `function f(p: any): number { return (p instanceof Promise) ? 1 : 0; } export function test(): number { return f(Promise.resolve(1)); }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("{} instanceof Promise → false", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const o: any = {}; return (o instanceof Promise) ? 1 : 0; }`,
+      ),
+    ).toBe(0);
+  });
+
+  it("Date instance instanceof Promise → false (distinct structs)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const d: any = new Date(); return (d instanceof Promise) ? 1 : 0; }`,
+      ),
+    ).toBe(0);
+  });
+
+  it("Promise instance instanceof Date → false", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number { const p: any = Promise.resolve(1); return (p instanceof Date) ? 1 : 0; }`,
+      ),
+    ).toBe(0);
+  });
 });
