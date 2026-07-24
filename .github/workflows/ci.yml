@@ -193,6 +193,22 @@ jobs:
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
           pnpm run check:loc-budget
 
+      - name: Per-function LOC-ceiling ratchet (#3400 / R-FUNC)
+        # Function-granularity twin of check:loc-budget (#3102 slice 2): the same
+        # change-scoped, shrink-only ratchet, but keyed on FUNCTIONS over 300 LOC
+        # (measured via the TS AST). FAILS when this change-set grows a function
+        # already over 300 at its base, newly pushes one over 300, or adds a
+        # brand-new over-300 function. Grandfathers the 185-entry baseline —
+        # demands zero refactoring to land; #3108/#3111 shrink entries and the
+        # post-merge --update-on-decrease banks each drop. Intentional growth is
+        # granted per change-set via a `func-budget-allow:` frontmatter key in
+        # this PR's own plan/issues/*.md. The committed baseline
+        # (scripts/func-budget-baseline.json) is NOT read on this path and PRs
+        # must NOT commit changes to it.
+        run: |
+          git fetch --no-tags --depth=200 origin main 2>/dev/null || true
+          pnpm run check:func-budget
+
       - name: test262 harness compile-time budget gate (#3437)
         # DETERMINISTIC, load-independent pre-merge budget for source-scan compile
         # WORK: compiles a FIXED representative harness-shaped assembly and counts
@@ -303,6 +319,20 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main 2>/dev/null || true
           ISSUE_COVERAGE_BASE=origin/main pnpm run check:issue-spec-coverage
+
+      - name: Done-status integrity gate (#3474)
+        # Sibling to #2093. CHANGE-SCOPED: for each plan/issues/*.md this PR
+        # touches that is `status: done` and not `done_cited_ok: true`, counts
+        # the LIVE test262 failures citing its #NNNN across both baseline lanes
+        # (keyed on code state, not a commit-message grep, so it catches
+        # status-drift even when the fix didn't cite the issue). HARD FAILS when
+        # a done issue still has > DONE_CITE_THRESHOLD live citations — reopen it
+        # or mark it exempt. A PR touching no `done` issue does ZERO network
+        # work; a baseline-fetch failure WARNS and PASSES (safety net, never
+        # wedges the queue on a 3rd-party network blip).
+        run: |
+          git fetch --no-tags --depth=1 origin main 2>/dev/null || true
+          pnpm run check:done-status-integrity
 
       - name: Verdict-logic must bump oracle_version (#3003)
         # A test262 VERDICT-LOGIC change (how a per-test result is SCORED:

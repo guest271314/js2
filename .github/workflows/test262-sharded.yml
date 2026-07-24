@@ -2417,6 +2417,12 @@ jobs:
           # write when only the date would change. Non-fatal.
           node scripts/check-loc-budget.mjs --update || \
             echo "WARN: loc-budget baseline update failed (non-fatal)"
+          # #3400 R-FUNC twin: bank per-function shrinkage into the func-budget
+          # baseline (shrink-only floor; the PR gate is change-scoped so this
+          # committed file only serves the --all audit + no-git fallback).
+          # Non-fatal.
+          node scripts/check-func-budget.mjs --update-on-decrease || \
+            echo "WARN: func-budget baseline update failed (non-fatal)"
           # Re-derive the landing-page feature-support badges (#2665). The
           # source of truth is now website/public/feature-examples.json (the
           # canonical per-feature aggregation written by build-data.js — it
@@ -2442,6 +2448,7 @@ jobs:
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
             # #3131 — LOC-budget baseline, refreshed just above (sole writer).
             git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
+            git add -f scripts/func-budget-baseline.json 2>/dev/null || true
             # #2097 — the standalone high-water mark (raised just above when
             # conformance improved). Staged so the new floor lands atomically
             # with the refreshed summary.
@@ -2605,7 +2612,10 @@ jobs:
             # (also a pure source measure; main is its sole writer now).
             node scripts/check-loc-budget.mjs --update || \
               echo "WARN: loc-budget baseline recompute on re-anchored tip failed (non-fatal)"
+            node scripts/check-func-budget.mjs --update-on-decrease || \
+              echo "WARN: func-budget baseline recompute on re-anchored tip failed (non-fatal)"
             git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
+            git add -f scripts/func-budget-baseline.json 2>/dev/null || true
             if git diff --cached --quiet; then
               echo "Baseline already current on main (no delta after re-anchor) — nothing to push."
               PUSHED=1
