@@ -1,11 +1,12 @@
 ---
 id: 3576
 title: "deepEqual.js `format` closure fails Wasm validation — call_ref arity mismatch (need 4, got 3)"
-status: in-progress
+status: done
 assignee: ttraenkler/sdev-3576
 sprint: current
 created: 2026-07-24
 updated: 2026-07-24
+completed: 2026-07-24
 priority: high
 feasibility: hard
 model: opus
