@@ -1,9 +1,10 @@
 ---
 id: 2864
 title: "Standalone: no Wasm-native generator carrier — sync generators leak __create_generator/__gen_* host imports"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-opus5-gen
 created: 2026-06-30
-updated: 2026-07-23
+updated: 2026-07-24
 priority: high
 feasibility: hard
 model: fable
@@ -380,10 +381,13 @@ open dispatch) all pass. What was actually missing on the sync-carrier side:
 - **D3 — general-iterable `yield*`**: lives in #2173 (vec-cursor for numeric
   arrays — slice-2a there, NOT blocked by #2106; generic `{next()}` +
   `.return()` close as slice-2b, which SHOULD reuse D2's forwarding shape).
-- **D4 — try/CATCH across yield** (F2 deferral): do NOT extend the ad-hoc
-  region modeling in `generators-native.ts` for this — see the alignment
-  decision below; catch-region routing is exactly what #2906 slice 3c builds
-  for async. Trigger point for the planner convergence.
+- **D4 — try/CATCH across yield** (F2 deferral): ~~do NOT extend the ad-hoc
+  region modeling in `generators-native.ts` for this~~ — **SUPERSEDED, see the
+  D4 section below.** #3050 landed `lowerTryRegion` in `generators-native.ts`
+  (catch across yield + yielding finally) BEFORE this note was written, so the
+  "still bails / converge at the planner" framing was already stale when D4 was
+  dispatched. The remaining D4 work was a `doneState` misroute, not a missing
+  capability.
 
 ### Alignment decision: sync generators vs the #2906 AsyncCfgPlan machine
 
@@ -490,7 +494,9 @@ loop-carried two-pass close.
   non-generator iterators) is #2173 slice-2b's D2-shape reuse, unchanged here
   (the outer now completes correctly; the foreign iterator is simply not
   notified).
-- try/CATCH across yield (D4) stays on the host path — #2906 3c convergence.
+- ~~try/CATCH across yield (D4) stays on the host path — #2906 3c convergence.~~
+  **Stale** — see the D4 section below; #3050 had already landed the region
+  machinery natively.
 
 ### Files (D2)
 
@@ -502,6 +508,127 @@ loop-carried two-pass close.
   finally ordering, pre-delegation abrupt, finally-throw upgrade, loop-carried
   close, done protocol, vec first-statement close, prelude-once, and
   resume-binding survival.
+
+## D4 — try/catch across yield: `doneState` misroute (landed 2026-07-24)
+
+### Verify-first: the F2/D2 deferral note was STALE
+
+The dispatch framed D4 as "try/CATCH across a yield still bails to the host
+path (`generators-native.ts` try-statement lowering: `if (stmt.catchClause)
+fail()`) — converge onto the #2906 CFG planner." **That is not current main.**
+#3050 (`fdc11cbd`, "try-region state machine for native generators — catch
+across yield + yielding finally") landed `lowerTryRegion` in
+`generators-native.ts` well before the note was written; there is no
+`if (stmt.catchClause) fail()` anywhere in the file. No planner convergence was
+needed, and none was done.
+
+Measured on main (12-shape probe, `--target standalone`, host-free asserted,
+each compared against Node on the same source) **9/12 already passed**:
+runtime-throw-after-resume caught, `gen.throw()` routed into a catch, catch
+that re-yields, try/catch/finally across a yield, `yield` inside a catch,
+`yield` inside a finally, catch param read after a yield in the catch, nested
+try/catch across a yield, and the boxed-any carrier through a catch.
+
+The 3 that did not:
+
+| shape                                      | before                                           | now                     |
+| ------------------------------------------ | ------------------------------------------------ | ----------------------- |
+| try/catch across yield **inside a loop**   | raw wasm exception escaped (catch skipped)       | **fixed here**          |
+| `return v` inside try + yield-free finally | finally SKIPPED, silent wrong answer (15 vs 315) | spun off as **#3582**   |
+| `yield*` inside a try-region               | clean #680 CE refusal (documented bail)          | unchanged, out of scope |
+
+### Root cause (not the symptom)
+
+`registerNativeGenerator` derived `doneState: plan.states.length - 1`. That
+coincides with the final `done` state **only for a straight-line body**. Every
+structural lowering — `lowerFor` / `lowerWhile` / `lowerDoWhile` / `lowerIf`
+and the #3050 `lowerTryRegion` — reserves its exit/join state **before**
+lowering the nested body, so a body that ENDS in one of those leaves the
+fallthrough cursor at a LOWER id, and `states.length - 1` is then a **live
+yield-successor state**.
+
+Measured plans (`curId` = the state given the final `done` terminator):
+
+| body shape                         | states | fallthrough | `states.length-1` |
+| ---------------------------------- | ------ | ----------- | ----------------- |
+| straight-line (control)            | 7      | 6           | 6 ✅              |
+| `try { yield } catch {}` as body   | 5      | **3**       | 4 ❌ (yield succ) |
+| `for … { try { yield } catch {} }` | 9      | **4**       | 8 ❌ (yield succ) |
+| `if (…) { yield } else { yield }`  | 6      | **3**       | 5 ❌ (yield succ) |
+| nested `for`/`for`                 | 10     | **4**       | 9 ❌ (yield succ) |
+
+The consumer's suspension test is
+`suspended = state != START && state != doneState`
+(`generators-native-consumer.ts`). With the alias in place, a generator
+genuinely suspended at that last-reserved yield state reported **DONE**, so
+`.throw(e)` / `.return(v)` took the §27.5.3.4 _already-completed_ arm and
+**never resumed** — the enclosing `catch` across the yield never ran and the
+error escaped raw. The same alias also made the `done` terminator store a LIVE
+state id as "completed", so a post-exhaustion `.next()` re-entered live states
+(benignly idempotent for a simple loop, but it re-ran the loop's update
+expression).
+
+Why the failure looked try/catch-specific but is not: without a handler the
+already-completed arm's observable behaviour _coincides_ with the correct one
+(`.return(v)` → `{v, done:true}`, `.throw(e)` → throws `e`). Only when there is
+a finalizer/handler to run does the misroute become visible. So the bug is
+**loop/if/try-TAIL-shaped**, not try/catch-shaped, and it was latent in every
+such generator since the structural lowerings were added.
+
+### The fix
+
+`buildNativeGeneratorPlan` now returns the real `doneState` — the fallthrough
+cursor, or the dedicated empty placeholder it already minted when that state
+carries trailing statements (#3050's re-run guard) — and
+`registerNativeGenerator` consumes `plan.doneState`. Three lines of behaviour;
+the rest is the explanation above, banked at both definition sites.
+
+Safety argument, verified rather than asserted: a `yield` terminator always
+mints a FRESH successor as the new cursor, so the state that receives the final
+`done` terminator can only coincide with a suspension point when the body's
+last statement is itself a `yield` — in which case the two ids were already
+equal before this change and the pre-existing (spec-equivalent, handler-free)
+behaviour is preserved bit-for-bit.
+
+### Measured delta (8-shape × 3-lane matrix, host-free asserted)
+
+| shape                                                      | before (standalone/wasi) | after        |
+| ---------------------------------------------------------- | ------------------------ | ------------ |
+| M1 `try { yield } catch {}` as whole body, `.throw()`      | raw wasm exception       | ✅ 511       |
+| M2 `for … { try { yield } catch {} }`, `.throw()`          | raw wasm exception       | ✅ 101       |
+| M3 `while … { try { yield } catch {} }`, `.throw()`        | raw wasm exception       | ✅ 101       |
+| M8 nested `for`/`for` under one try, `.throw()`            | raw wasm exception       | ✅ 301       |
+| M4/M5/M7 `.return()` through a finally (loop/if/loop-tail) | already correct          | ✅ unchanged |
+| M6 straight-line try/catch + trailing yield (control)      | already correct          | ✅ unchanged |
+
+**4 measured shapes flip from a raw escaping exception to spec behaviour; 4
+controls unchanged.** The gc lane is untouched for every try/catch shape above
+— all still route to the eager-buffer host path (`__gen_*` present), so this is
+a standalone + wasi delta. A PLAIN loop-tail generator (no try) DOES route
+native on gc, so gc bytes change there; observable behaviour does not (see the
+handler-free coincidence above), and the byte matrix covers it.
+
+### Files (D4)
+
+- `src/codegen/generators-native.ts` — `NativeGeneratorPlan.doneState` (new,
+  with the root-cause note), computed at the final fallthrough in
+  `buildNativeGeneratorPlan`, consumed by `registerNativeGenerator`.
+- `tests/issue-2864-d4-catch-across-yield.test.ts` — standalone regression
+  suite (zero-host-import asserted).
+
+### Deferred out of D4 (each has a clean, non-silent fallback today)
+
+- **#3582** — `return v` inside a try with a yield-free finally skips the
+  finally (silent wrong answer). Root cause + the recommended fix shape are
+  recorded there.
+- **`yield*` inside a try-region** — clean #680 CE refusal
+  (`generators-native.ts`, the `unwind.some(e => e.kind !== "replay")` bail in
+  `emitYield`'s asterisk branch). Needs the delegation states to observe the
+  resume mode so an abrupt can route into the region.
+- **`return` inside a try whose finally is STATE-LOWERED** (yielding finally) —
+  clean #680 CE refusal (the `unwind.some(e => e.kind === "finally")` bail in
+  the `isReturnStatement` branch). This is the return-through-a-suspending-
+  finally path; #2906 3c-ii-b solved the analogous async case.
 
 ## Slice routing after D2 (what remains where)
 
