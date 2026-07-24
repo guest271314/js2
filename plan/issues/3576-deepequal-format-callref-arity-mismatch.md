@@ -16,6 +16,14 @@ area: codegen, closures, string-ops, nested-declarations
 language_feature: compiler-internals
 goal: test262-conformance
 related: [3378, 3559, 3560, 3563, 2873, 2043]
+# (#3102/#3131) The fix adds logic intrinsic to the tagged-template
+# known-function dispatch (string-ops.ts) and the nested-function param loop
+# (nested-declarations.ts) — the arity/rest-param handling belongs exactly in
+# those functions; extracting it to a subsystem module would add indirection
+# for a targeted bugfix. Allow the small net growth in both god-files.
+loc-budget-allow:
+  - src/codegen/string-ops.ts
+  - src/codegen/statements/nested-declarations.ts
 ---
 
 # #3576 — `deepEqual.js` `format` closure: `call_ref` arity mismatch (need 4, got 3)
