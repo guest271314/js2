@@ -21,7 +21,7 @@ import { createHash } from "crypto";
 // CI regression-gate ENFORCES the same numbers the dev-self-merge skill
 // documents (previously the hard gate was only `net_per_test >= 0`; the 10%
 // ratio and 50-per-bucket limits lived solely in skill text an agent could
-// skip). `.claude/skills/dev-self-merge.md` references these constants.
+// skip). `.claude/skills/dev-self-merge/SKILL.md` references these constants.
 //
 // - REGRESSION_RATIO_LIMIT: fail when regressions / improvements >= 10%.
 // - REGRESSION_BUCKET_LIMIT: fail when any single path bucket has > 50

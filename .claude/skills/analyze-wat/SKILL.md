@@ -1,3 +1,8 @@
+---
+name: analyze-wat
+description: Compile a source file to WAT and analyze the output for codegen inefficiencies. Use after a codegen change to verify the output is clean, when investigating performance issues, or when creating optimization issues from real compiler output.
+---
+
 # Analyze WAT Output
 
 Compile a source file to WAT and analyze the output for codegen inefficiencies.
