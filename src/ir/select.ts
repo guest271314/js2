@@ -2399,6 +2399,13 @@ function isPhase1StatementListInScope(
       if (!isPhase1DoStatement(s, scope, localClasses)) return shapeNo("nontail-do", s);
       continue;
     }
+    // #2952 slice 3 — `lbl: <loop>` as a non-tail statement. The label set
+    // starts empty here: a top-level statement list is never inside a loop,
+    // so no outer labels can be in scope.
+    if (ts.isLabeledStatement(s)) {
+      if (!isPhase1LabeledStatement(s, scope, localClasses, NO_LABELS)) return shapeNo("nontail-labeled", s);
+      continue;
+    }
     // Slice 9 (#1169h) — throw / try as a non-tail statement. A throw
     // doesn't fall through, but the selector accepts it in non-tail
     // position and the lowerer emits a `throw` instr followed by an
@@ -2468,8 +2475,9 @@ function isPhase1TryStatement(
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
   inLoop: boolean = false,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
-  return withProjectionEvidenceScope(() => isPhase1TryStatementInScope(stmt, scope, localClasses, inLoop));
+  return withProjectionEvidenceScope(() => isPhase1TryStatementInScope(stmt, scope, localClasses, inLoop, labels));
 }
 
 function isPhase1TryStatementInScope(
@@ -2479,6 +2487,8 @@ function isPhase1TryStatementInScope(
   // #2952 slice 2 — propagated so a break/continue inside a try nested in a
   // loop is claimable (the lowerer inlines crossed finallys before the br).
   inLoop: boolean = false,
+  // #2952 slice 3 — enclosing labeled-loop names, same propagation.
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
   if (!stmt.catchClause && !stmt.finallyBlock) return shapeNo("try-missing-handler", stmt);
 
@@ -2493,7 +2503,7 @@ function isPhase1TryStatementInScope(
       withLexicalValueBindingScope(stmt.tryBlock.statements, () => {
         const tryScope = new Set(scope);
         for (const s of stmt.tryBlock.statements) {
-          if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop)) return shapeNo("try-body-stmt", s);
+          if (!isPhase1BodyStatement(s, tryScope, localClasses, inLoop, labels)) return shapeNo("try-body-stmt", s);
         }
         return true;
       }),
@@ -2516,7 +2526,8 @@ function isPhase1TryStatementInScope(
             catchScope.add(v.name.text);
           }
           for (const s of stmt.catchClause!.block.statements) {
-            if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop)) return shapeNo("try-catch-body-stmt", s);
+            if (!isPhase1BodyStatement(s, catchScope, localClasses, inLoop, labels))
+              return shapeNo("try-catch-body-stmt", s);
           }
           return true;
         }),
@@ -2529,7 +2540,7 @@ function isPhase1TryStatementInScope(
         withLexicalValueBindingScope(stmt.finallyBlock!.statements, () => {
           const finallyScope = new Set(scope);
           for (const s of stmt.finallyBlock!.statements) {
-            if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop))
+            if (!isPhase1BodyStatement(s, finallyScope, localClasses, inLoop, labels))
               return shapeNo("try-finally-body-stmt", s);
           }
           return true;
@@ -2557,11 +2568,21 @@ function isPhase1TryStatementInScope(
  *   - bare-identifier init (`for (x of arr)` without `let`/`const`).
  *   - missing initializer.
  */
-function isPhase1ForOf(stmt: ts.ForOfStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
-  return withProjectionEvidenceScope(() => isPhase1ForOfInScope(stmt, scope, localClasses));
+function isPhase1ForOf(
+  stmt: ts.ForOfStatement,
+  scope: Set<string>,
+  localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
+): boolean {
+  return withProjectionEvidenceScope(() => isPhase1ForOfInScope(stmt, scope, localClasses, labels));
 }
 
-function isPhase1ForOfInScope(stmt: ts.ForOfStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
+function isPhase1ForOfInScope(
+  stmt: ts.ForOfStatement,
+  scope: Set<string>,
+  localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
+): boolean {
   if (stmt.awaitModifier) return false;
   if (!ts.isVariableDeclarationList(stmt.initializer)) return false;
   const flags = stmt.initializer.flags;
@@ -2585,7 +2606,7 @@ function isPhase1ForOfInScope(stmt: ts.ForOfStatement, scope: Set<string>, local
   // targets the loop label, not a function exit).
   earlyReturnBarrierDepth++;
   try {
-    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true);
+    return isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true, labels);
   } finally {
     earlyReturnBarrierDepth--;
   }
@@ -2601,20 +2622,22 @@ function isPhase1WhileStatement(
   stmt: ts.WhileStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
-  return withProjectionEvidenceScope(() => isPhase1WhileStatementInScope(stmt, scope, localClasses));
+  return withProjectionEvidenceScope(() => isPhase1WhileStatementInScope(stmt, scope, localClasses, labels));
 }
 
 function isPhase1WhileStatementInScope(
   stmt: ts.WhileStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
   if (!isPhase1ConditionExpr(stmt.expression, scope, localClasses)) return false;
   // (#2856 C1) while bodies admit the early-return arm.
   earlyReturnLoopDepth++;
   try {
-    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true, labels);
   } finally {
     earlyReturnLoopDepth--;
   }
@@ -2634,23 +2657,56 @@ function isPhase1DoStatement(
   stmt: ts.DoStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
-  return withProjectionEvidenceScope(() => isPhase1DoStatementInScope(stmt, scope, localClasses));
+  return withProjectionEvidenceScope(() => isPhase1DoStatementInScope(stmt, scope, localClasses, labels));
 }
 
 function isPhase1DoStatementInScope(
   stmt: ts.DoStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
   if (!isPhase1ConditionExpr(stmt.expression, scope, localClasses)) return false;
   // (#2856 C1) do-while bodies admit the early-return arm.
   earlyReturnLoopDepth++;
   try {
-    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true);
+    return isPhase1BodyStatement(stmt.statement, new Set(scope), localClasses, /* inLoop (#2952 s2) */ true, labels);
   } finally {
     earlyReturnLoopDepth--;
   }
+}
+
+/** #2952 slice 3 — empty label set (the default for non-labeled contexts). */
+const NO_LABELS: ReadonlySet<string> = new Set();
+
+/**
+ * #2952 slice 3 — shape-check `lbl: <loop>`. Only labeled LOOPS are
+ * claimed (while / do / for / for-of, plus nested labels `a: b: while` —
+ * all names bind the same loop). A labeled NON-loop statement
+ * (`lbl: { ... break lbl; }`) needs a `labeled.block` IR kind — banked
+ * for the switch slice, since a switch's `break` targets exactly that
+ * frame shape — and demotes to legacy here. Backed by
+ * `lowerLabeledStatement` in from-ast — selector↔builder parity.
+ */
+function isPhase1LabeledStatement(
+  stmt: ts.LabeledStatement,
+  scope: Set<string>,
+  localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string>,
+): boolean {
+  const bound = new Set(labels);
+  let inner: ts.Statement = stmt;
+  while (ts.isLabeledStatement(inner)) {
+    bound.add(inner.label.text);
+    inner = inner.statement;
+  }
+  if (ts.isWhileStatement(inner)) return isPhase1WhileStatement(inner, scope, localClasses, bound);
+  if (ts.isDoStatement(inner)) return isPhase1DoStatement(inner, scope, localClasses, bound);
+  if (ts.isForStatement(inner)) return isPhase1ForStatement(inner, scope, localClasses, bound);
+  if (ts.isForOfStatement(inner)) return isPhase1ForOf(inner, scope, localClasses, bound);
+  return shapeNo("labeled-non-loop", inner);
 }
 
 /**
@@ -2677,14 +2733,16 @@ function isPhase1ForStatement(
   stmt: ts.ForStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
-  return withProjectionEvidenceScope(() => isPhase1ForStatementInScope(stmt, scope, localClasses));
+  return withProjectionEvidenceScope(() => isPhase1ForStatementInScope(stmt, scope, localClasses, labels));
 }
 
 function isPhase1ForStatementInScope(
   stmt: ts.ForStatement,
   scope: ReadonlySet<string>,
   localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
   // Cond must be present (no infinite loops in slice 12).
   if (!stmt.condition) return shapeNo("for-missing-cond", stmt);
@@ -2736,7 +2794,7 @@ function isPhase1ForStatementInScope(
   earlyReturnLoopDepth++;
   try {
     return (
-      isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true) ||
+      isPhase1BodyStatement(stmt.statement, innerScope, localClasses, /* inLoop (#2952 s2) */ true, labels) ||
       shapeNo("for-body", stmt.statement)
     );
   } finally {
@@ -2837,13 +2895,17 @@ function isPhase1BodyStatement(
   // unlabeled break/continue binds the innermost loop, so it is claimable
   // exactly when that innermost loop is itself on the IR path.
   inLoop: boolean = false,
+  // #2952 slice 3 — the label NAMES bound by enclosing CLAIMED labeled
+  // loops. Travels the exact same paths as `inLoop`; gates the labeled
+  // break/continue arm. Mirrors from-ast's `cx.labelEnv` keys.
+  labels: ReadonlySet<string> = NO_LABELS,
 ): boolean {
   if (ts.isBlock(stmt)) {
     return withProjectionEvidenceScope(() =>
       withLexicalValueBindingScope(stmt.statements, () => {
         const inner = new Set(scope);
         for (const s of stmt.statements) {
-          if (!isPhase1BodyStatement(s, inner, localClasses, inLoop)) return false;
+          if (!isPhase1BodyStatement(s, inner, localClasses, inLoop, labels)) return false;
         }
         return true;
       }),
@@ -2961,14 +3023,14 @@ function isPhase1BodyStatement(
     return shapeNo("body-exprstmt-other", stmt.expression);
   }
   if (ts.isForOfStatement(stmt)) {
-    return isPhase1ForOf(stmt, scope, localClasses);
+    return isPhase1ForOf(stmt, scope, localClasses, labels);
   }
   // Slice 12 (#1280) — nested while / for inside a body buffer.
   if (ts.isWhileStatement(stmt)) {
-    return isPhase1WhileStatement(stmt, scope, localClasses);
+    return isPhase1WhileStatement(stmt, scope, localClasses, labels);
   }
   if (ts.isForStatement(stmt)) {
-    if (!isPhase1ForStatement(stmt, scope, localClasses)) return false;
+    if (!isPhase1ForStatement(stmt, scope, localClasses, labels)) return false;
     // (#2856) Record the leak so a SIBLING for-init may re-declare it.
     if (stmt.initializer && ts.isVariableDeclarationList(stmt.initializer)) {
       for (const d of stmt.initializer.declarations) {
@@ -2982,7 +3044,11 @@ function isPhase1BodyStatement(
   }
   // #2952 slice 1 — nested `do { body } while (cond)` inside a body buffer.
   if (ts.isDoStatement(stmt)) {
-    return isPhase1DoStatement(stmt, scope, localClasses);
+    return isPhase1DoStatement(stmt, scope, localClasses, labels);
+  }
+  // #2952 slice 3 — `lbl: <loop>` nested inside a body buffer.
+  if (ts.isLabeledStatement(stmt)) {
+    return isPhase1LabeledStatement(stmt, scope, localClasses, labels);
   }
   // Slice 9 (#1169h) — throw / try inside a body statement list.
   // Accepting these here lets a try body / catch body / finally body
@@ -2993,7 +3059,7 @@ function isPhase1BodyStatement(
     return isPhase1ThrowStatement(stmt, scope, localClasses);
   }
   if (ts.isTryStatement(stmt)) {
-    return isPhase1TryStatement(stmt, scope, localClasses, inLoop);
+    return isPhase1TryStatement(stmt, scope, localClasses, inLoop, labels);
   }
   // #2952 slice 2 — statement-level `if` inside a body buffer (lowered as
   // the void `if.stmt` IR instr — NOT the top-level block-CFG rewrite).
@@ -3003,14 +3069,14 @@ function isPhase1BodyStatement(
     if (!isPhase1ConditionExpr(stmt.expression, scope, localClasses)) return shapeNo("body-if-cond", stmt.expression);
     if (
       !withProjectionEvidenceScope(() =>
-        isPhase1BodyStatement(stmt.thenStatement, new Set(scope), localClasses, inLoop),
+        isPhase1BodyStatement(stmt.thenStatement, new Set(scope), localClasses, inLoop, labels),
       )
     )
       return false;
     if (
       stmt.elseStatement &&
       !withProjectionEvidenceScope(() =>
-        isPhase1BodyStatement(stmt.elseStatement!, new Set(scope), localClasses, inLoop),
+        isPhase1BodyStatement(stmt.elseStatement!, new Set(scope), localClasses, inLoop, labels),
       )
     ) {
       return false;
@@ -3018,11 +3084,15 @@ function isPhase1BodyStatement(
     return true;
   }
   // #2952 slice 2 — unlabeled break / continue: claimable exactly when an
-  // enclosing CLAIMED loop binds them (labeled forms are slice 3). Backed
-  // by `lowerBreakContinueStatement` in from-ast (br.label against the
-  // innermost loop's synthesised label) — selector↔builder parity.
+  // enclosing CLAIMED loop binds them. (slice 3) Labeled forms are
+  // claimable when the label is bound by an enclosing CLAIMED labeled
+  // loop (`labels` mirrors from-ast's `cx.labelEnv`). Backed by
+  // `lowerBreakContinueStatement` — selector↔builder parity.
   if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
-    if (stmt.label) return shapeNo("body-labeled-break-continue", stmt);
+    if (stmt.label) {
+      if (labels.has(stmt.label.text)) return true;
+      return shapeNo("body-labeled-break-continue", stmt);
+    }
     if (!inLoop) return shapeNo("body-break-continue-outside-loop", stmt);
     return true;
   }
