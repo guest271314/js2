@@ -1573,7 +1573,15 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             localIdx < fctx.params.length
               ? fctx.params[localIdx]?.type
               : fctx.locals[localIdx - fctx.params.length]?.type;
-          if (matchedClosureInfo && slotTypeForCast?.kind === "externref") {
+          if (slotTypeForCast?.kind === "externref") {
+            // Slot stays a raw externref here whether a signature MATCHED but
+            // the #962 guard kept it externref (#3432) OR nothing matched
+            // (#3460, the else-arm below) — either way the value can be a
+            // foreign/bridge/null callable (`var f = obj.missingFn`). Record the
+            // decl so `calleeMayBeHostCallable` emits the #1712 __call_function
+            // arm; without it the closure-struct dispatch nulls the guarded cast
+            // and `struct.get`-traps (uncatchable) where spec wants a catchable
+            // TypeError. Arm emission is !standalone&&!wasi-gated → #1941 holds.
             (ctx.skippedClosureRecastDecls ??= new Set()).add(decl);
           }
           if (matchedClosureInfo && slotTypeForCast?.kind !== "externref") {
