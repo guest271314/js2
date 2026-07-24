@@ -15,6 +15,13 @@ area: codegen
 goal: maintainability
 subtask_of: 3182
 related: [3112, 3274, 3105, 3259]
+# Slice B relocates the byte-identical equality tails (__any_eq/__any_strict_eq)
+# out of the SANCTIONED any-helpers.ts into the sibling any-eq-helpers.ts. The
+# coercion-sites gate can't see the sanctioned-source decrease, so it reads the
+# net-zero move as +2/+2 growth. prove-emit-identity 60/60 proves it's a pure
+# relocation, not new hand-rolled coercion.
+coercion-sites-allow:
+  - src/codegen/any-eq-helpers.ts
 ---
 
 # #3282 — the next god-function decomposition wave (post Wave-B/C)
