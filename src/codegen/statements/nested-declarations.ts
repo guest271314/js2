@@ -259,7 +259,35 @@ export function compileNestedFunctionDeclaration(
     return false;
   };
   const paramTypes: ValType[] = [];
-  for (const p of stmt.parameters) {
+  for (let pi = 0; pi < stmt.parameters.length; pi++) {
+    const p = stmt.parameters[pi]!;
+    // (#3576) Rest parameter `...args: T[]` → a single `(ref null $__vec_elem)`
+    // param, AND register it in `ctx.funcRestParams` so call sites (notably the
+    // tagged-template known-function dispatch in string-ops.ts) pack the
+    // trailing arguments into the vec instead of pushing them as positional
+    // slots. Top-level `declarations.ts` already does this; the nested-function
+    // path was silently missing it, so a nested rest tag function (e.g.
+    // deepEqual.js `lazyResult(strings, ...subs)`) got a fixed-arity funcType
+    // with NO rest info — under-arity tag calls then under-pushed the stack
+    // (`call ... need N, got N-1`, a hard Wasm-validation failure).
+    if (p.dotDotDotToken) {
+      const restParamType = ctx.checker.getTypeAtLocation(p);
+      const typeArgs = ctx.checker.getTypeArguments(restParamType as ts.TypeReference);
+      const elemTsType = typeArgs[0];
+      const elemType: ValType = elemTsType ? resolveWasmType(ctx, elemTsType) : { kind: "f64" };
+      const elemKey =
+        elemType.kind === "ref" || elemType.kind === "ref_null" ? `ref_${elemType.typeIdx}` : elemType.kind;
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      paramTypes.push({ kind: "ref_null", typeIdx: vecTypeIdx });
+      ctx.funcRestParams.set(funcName, {
+        restIndex: pi,
+        elemType,
+        arrayTypeIdx: arrTypeIdx,
+        vecTypeIdx,
+      });
+      continue;
+    }
     const paramType = ctx.checker.getTypeAtLocation(p);
     let wasmType: ValType = restBindingOverridesToExternref(p)
       ? { kind: "externref" }

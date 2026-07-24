@@ -1,8 +1,8 @@
 ---
 id: 3576
 title: "deepEqual.js `format` closure fails Wasm validation — call_ref arity mismatch (need 4, got 3)"
-status: ready
-assignee: ttraenkler/dev-opus-arrayhof
+status: in-progress
+assignee: ttraenkler/sdev-3576
 sprint: current
 created: 2026-07-24
 updated: 2026-07-24
@@ -12,10 +12,9 @@ model: opus
 horizon: l
 reasoning_effort: high
 task_type: bugfix
-area: codegen, closures, array-methods, emit
+area: codegen, closures, string-ops, nested-declarations
 language_feature: compiler-internals
 goal: test262-conformance
-blocked-on: "REPRODUCE needs #3559 (#3378 stale-local fix — on plain main the #3378 RangeError aborts before the arity error is reached); EDIT of array-methods.ts needs #3560 landed. Both in the merge queue 2026-07-24. Do repro→WAT-trace→pad→verify→PR in ONE clean pass on main once both land."
 related: [3378, 3559, 3560, 3563, 2873, 2043]
 ---
 
@@ -197,3 +196,75 @@ land** (don't predecessor-stack at low budget).
   binary); update #3378 accordingly.
 - No regression in the JS-host test262 pass rate; validate on the full
   equivalence suite (broad closure/array-method codegen surface).
+
+## RESOLUTION — verified mechanism + fix (sdev-3576, 2026-07-24)
+
+**dev-c-1's read-only writeup above (buildClosureCallInstrs / array-callback
+trampoline / shared canonical wrapper) is DISPROVEN by measurement.** Once the
+repro was runnable (post #3559), instrumenting `buildClosureCallInstrs` showed
+all 4 array-callback dispatches in `__closure_6` are consistent
+(`funcArity=2, numParams=1, pushed=2`) — the failing `call_ref` is NOT an
+array-method callback at all. The real mechanism, WAT-traced + instrument-
+confirmed:
+
+### Root cause — tagged-template call to a nested REST function
+
+`__closure_6` is `assert.deepEqual.format`. Its body calls the nested function
+`lazyResult(strings, ...subs)` as a **tagged template** (`lazyResult`...``) at
+9 sites with VARYING substitution counts (1 sub at lines 106/110/113/…, 2 subs
+at 119/138). `lazyResult` has a rest param `...subs` AND a TDZ-flagged capture
+(`usage`, a `let`). Its lifted wasm signature is 4 params:
+`[usageVal, usageTdzFlag, strings, subsVec]`.
+
+Two independent gaps made the tagged-template call under-push the stack:
+
+1. **`nested-declarations.ts` never registered the rest param in
+   `ctx.funcRestParams`** (the top-level `declarations.ts:801` path does; the
+   nested path was missing the `dotDotDotToken` arm). So `restInfo` was absent
+   and the tagged-template dispatch treated the single `subsVec` param as
+   positional sub slots — dropping the vec-packing and under-arity-ing.
+2. **`string-ops.ts` tagged-template KNOWN-FUNC dispatch** pushed only the VALUE
+   captures (never the TDZ-flag boxes) and computed `captureCount` as the value
+   count only — so `strings`/substitutions landed at the wrong wasm slots and
+   the TDZ-flag param was never supplied. → `call ... need 4, got 3`.
+
+The naive "pad-to-arity" candidate from the writeup is **semantically wrong
+here**: padding the `subsVec` slot with `undefined` produces a valid binary that
+silently renders a spurious trailing element in `subs`.
+
+### Fix (3 coupled parts)
+
+- `src/codegen/statements/nested-declarations.ts` — add the `dotDotDotToken`
+  arm to the param loop: lower `...args` to one `(ref null $vec)` param **and**
+  register it in `ctx.funcRestParams` (mirrors `declarations.ts`).
+- `src/codegen/string-ops.ts` KNOWN-FUNC tagged-template path — push the boxed
+  TDZ-flag capture refs after the value captures (minimal replication of
+  `call-identifier.ts`, gated on `tdzFlaggedNested.length > 0` so the common
+  no-TDZ tag stays byte-inert), set `captureCount = values + tdzFlags`, and
+  offset `strings` / positional-subs / rest-packing by that captureCount.
+
+### Verification (measured, not extrapolated)
+
+- `stub-assert + deepEqual.js` repro → `WebAssembly.compile` **OK** (arity error
+  gone). ✓ (primary acceptance criterion)
+- Isolation battery (`.tmp`): nested rest tag with no / const / let(TDZ) capture
+  all render byte-correct vs node; **direct** calls to nested rest functions
+  (`f("p",1,2,3)`) now render correctly — these were **BROKEN on `main`**
+  (`undefined` / null-deref), so the fix is a strict improvement across the
+  whole nested-rest-function surface, not just deepEqual.
+- Equivalence suite (changed paths: tagged templates, rest params, closures,
+  array callbacks, nested recursion): no NEW failures. The 2 failures observed
+  (`optional-direct-closure-call`, an unrelated `?.()` IR-slice-11 fallback)
+  reproduce identically on `main` — pre-existing, not this change.
+
+### Known-orthogonal follow-up (NOT #3576, pre-existing on main)
+
+A nested rest tag whose BODY uses the rest param as an ARRAY (`subs.map(...)` /
+`subs[i]`) — as `lazyResult`'s `acceptMappers` does — mis-reads the tagged-
+template `strings` param (a template-object struct coerced to externref):
+`strings.join(...)` returns `undefined`. This reproduces on `main` too (worse:
+null-deref), is independent of the arity fix (direct calls with `.map` render
+correctly — only the tagged-template-strings path is affected), and blocks the
+full runtime RENDERING of `format`. It does not affect the #3576 acceptance
+criterion (validation). Carve a separate issue for the template-struct /
+late-import interaction.
