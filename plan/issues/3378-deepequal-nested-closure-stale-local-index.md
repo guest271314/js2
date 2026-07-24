@@ -180,7 +180,13 @@ format→lazyResult→acceptMappers→toString→stringFromTemplate skeleton all
 compile cleanly), so it needs its own investigation.
 
 **Consequence for AC #1/#2**: this fix is *necessary but not sufficient* for a
-fully-valid deepEqual binary — the arity bug still blocks it. Recommend a new
-issue for the `call_ref` arity mismatch and landing this fix as the stale-local
-half. The `Cannot access 'contents'` warnings are pre-existing, non-fatal
-(severity: warning), present on main, and orthogonal to this fix.
+fully-valid deepEqual binary — the arity bug still blocks it. The `call_ref`
+arity mismatch is now tracked as **#3576** (filed 2026-07-24 with the
+controlled-experiment evidence). deepEqual.js → valid binary (this issue's AC
+#1/#2) needs **both #3378 (this, landed via PR #3559) AND #3576**. This issue
+stays `in-progress` until #3576 lands. The `Cannot access 'contents'` warnings
+are pre-existing, non-fatal (severity: warning), present on main, and
+orthogonal to this fix.
+
+**Status:** bug #1 (stale-local crash) FIXED via PR #3559 (fork branch
+`issue-3378-spurious-property-name-capture`); remaining AC blocker = #3576.
