@@ -193,6 +193,19 @@ jobs:
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
           pnpm run check:loc-budget
 
+      - name: test262 harness compile-time budget gate (#3437)
+        # DETERMINISTIC, load-independent pre-merge budget for source-scan compile
+        # WORK: compiles a FIXED representative harness-shaped assembly and counts
+        # shared-forEachChild traversals (src/ts-api.ts). The oracle-v8 harness
+        # switch tanked CI via an O(call-sites × file-size) per-file scan (#3433,
+        # fixed by #3374) that was INVISIBLE until the merge queue crawled. Unlike
+        # the wall-clock #1942 guard (flaky, post-merge), this count is a pure
+        # function of the AST + scans, so it gates that regression class HERE,
+        # before the queue. Rebank an intentional slowdown with
+        # `pnpm run check:harness-compile-budget -- --update`. Budget:
+        # scripts/harness-compile-budget.json (set from post-#3433 main).
+        run: pnpm run check:harness-compile-budget
+
       - name: IR adoption table freshness (#2145)
         # Fails when plan/log/ir-adoption.md drifts from its generator data or
         # from the IrFallbackReason union in src/ir/select.ts. Regenerate with
