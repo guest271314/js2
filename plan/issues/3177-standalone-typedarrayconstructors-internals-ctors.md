@@ -63,6 +63,14 @@ loc-budget-allow:
   # arm already extend (extracting that dispatch chain is the #3182 epic's call,
   # not this slice's).
   - src/codegen/expressions/call-receiver-method.ts
+# func-budget-allow (slice 5): the of/from two-arm was EXTRACTED to a new
+# module-level `tryEmitTaStaticOfFrom` (~130 LOC, under the 300 ceiling), so the
+# already-over-300 `compileReceiverMethodCall` grows only +6 — the minimal
+# gated dispatch call (`if (…) { const r = tryEmitTaStaticOfFrom(…); if (r) …}`).
+# The god-function itself is not further splittable in this slice (the #3182
+# consolidation epic owns that); +6 for a new method dispatch is intended.
+func-budget-allow:
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
 # coercion-sites-allow: the NEW module's 4 uses (number_toString ×2,
 # __str_to_number, __unbox_number) are the exact §7.1.21
 # CanonicalNumericIndexString round-trip + the finalize-safe ToNumber the
