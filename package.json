@@ -118,6 +118,7 @@
     "check:coercion-sites": "node scripts/check-coercion-sites.mjs",
     "check:test262-hard-errors": "node scripts/check-test262-hard-errors.mjs",
     "check:issue-spec-coverage": "node scripts/check-issue-spec-coverage.mjs",
+    "check:done-status-integrity": "node scripts/check-done-status-integrity.mjs",
     "check:verdict-oracle": "node scripts/check-verdict-oracle-bump.mjs",
     "check:issues": "node scripts/update-issues.mjs --check",
     "test:diff": "npx tsx scripts/diff-test.ts",
