@@ -24,6 +24,12 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/ir/select.ts
   - src/ir/lower.ts
+# The ctrlStack frames, resolveBrLabel iterClose obligation and forof.iter
+# frame changes necessarily live inside the closure-based lowering driver
+# (they share its emitter/resolver/slot state): +31 / +6 lines.
+func-budget-allow:
+  - src/ir/lower.ts::lowerIrFunctionBody
+  - src/ir/lower.ts::emitInstrTree
 ---
 
 # #2952 — six direct-only statement kinds share one structural blocker
