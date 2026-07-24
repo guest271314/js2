@@ -93,14 +93,6 @@ const EXTRA_CTOR_ARITY: Record<string, number> = { AggregateError: 2 };
 const HOST_FLAG_CONFIGURABLE = 0x04;
 
 /**
- * `true` when `builtinName` names a builtin CONSTRUCTOR (not a namespace like
- * `Math`/`JSON`/`Reflect`, which own no `length`/`name`/`prototype`).
- */
-export function isSeedableBuiltinCtorCarrier(builtinName: string): boolean {
-  return builtinName in BUILTIN_CTOR_ARITY || builtinName in EXTRA_CTOR_ARITY;
-}
-
-/**
  * Emit — into `fctx.body`, which the caller has already swapped to the
  * carrier's lazy-init body — the `__defineProperty_value` calls that install
  * `length` / `name` / `prototype` on the carrier object held in `objLocal`.
