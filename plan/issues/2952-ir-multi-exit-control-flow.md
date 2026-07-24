@@ -382,9 +382,12 @@ work, not control-flow, and belongs with the keys-iteration design).
 - Loop-heavy blast radius: issue-1280 / issue-2136 / issue-1169n /
   issue-1169h / issue-1182 / issue-1183 — 85/86; the 1 fail is the
   pre-existing `??` hard-error above, identical on pristine main.
-- Scoped test262 sweep (labeled/break/continue/do-while/while dirs,
-  main↔branch outcome diff): see below.
-- `npx tsc --noEmit` clean.
+- Scoped test262 sweep (labeled/break/continue/do-while/while dirs, 142
+  files via `runTest262File`, main↔branch outcome diff): **ZERO lines** —
+  125 pass / 17 fail identical on both sides (the 17 are pre-existing on
+  main), so the newly-IR-claimed labeled shapes are behavior-equivalent
+  to legacy across the whole labeled-statement surface.
+- `npx tsc --noEmit` clean (pre- and post-merge of upstream/main).
 
 ## Test Results (slice 2)
 
