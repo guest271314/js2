@@ -3,7 +3,7 @@ id: 3551
 title: "IR ABI-parity withdrawal must cascade to committed IR callers — #3503 partial-commit broke tests/issue-3471.test.ts on main (invalid Wasm: expected f64, found externref)"
 status: done
 created: 2026-07-23
-updated: 2026-07-23
+updated: 2026-07-24
 completed: 2026-07-23
 priority: high
 feasibility: hard
@@ -11,7 +11,7 @@ reasoning_effort: max
 task_type: bugfix
 area: ir
 goal: ir-full-coverage
-sprint: current
+sprint: 76
 horizon: m
 assignee: ttraenkler/senior-dev-3551
 related: [3503, 3536, 3471, 3552, 1370, 3142]

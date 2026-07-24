@@ -10,7 +10,7 @@ feasibility: medium
 task_type: feature
 area: codegen
 goal: standalone
-sprint: current
+sprint: 76
 horizon: m
 related: [2860, 2861, 1907, 1888]
 umbrella: 2860

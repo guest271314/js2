@@ -3,7 +3,7 @@ id: 3459
 title: "merge_group drift check reports negative baseline clock age (-43m) — clock-skew bug in instrumentation"
 status: done
 completed: 2026-07-24
-sprint: current
+sprint: 76
 created: 2026-07-19
 updated: 2026-07-24
 priority: low

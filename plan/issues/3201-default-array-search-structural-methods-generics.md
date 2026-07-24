@@ -13,7 +13,7 @@ area: codegen
 es_edition: multi
 language_feature: array-methods
 goal: builtin-methods
-sprint: current
+sprint: 76
 horizon: m
 umbrella: 3185
 related: [3185, 3169, 3180, 2036]

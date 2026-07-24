@@ -3,7 +3,7 @@ id: 3400
 title: "R-FUNC: per-function LOC ceiling ratchet (check:func-budget) — enforce the 300-LOC function criterion (#3102 slice 2)"
 status: done
 completed: 2026-07-24
-sprint: current
+sprint: 76
 created: 2026-07-18
 updated: 2026-07-24
 priority: high
