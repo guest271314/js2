@@ -307,11 +307,11 @@ completed steps 1-9, you are violating this protocol. Go back and do them.
 
 - `CLAUDE.md` — team config, merge protocol, memory budget
 - `plan/method/team-setup.md` — roster, capacity limits
-- `.claude/skills/dev-self-merge.md` — what devs do after push
-- `.claude/skills/merge-wave.md` — batched merges
-- `.claude/skills/handle-regression.md` — when a merge breaks something
-- `.claude/skills/create-issue.md` — filing new issues
-- `.claude/skills/architect-spec.md` — hard-issue pre-work
-- `.claude/skills/sprint-wrap-up.md` — end of sprint
+- `.claude/skills/dev-self-merge/SKILL.md` — what devs do after push
+- `.claude/skills/merge-wave/SKILL.md` — batched merges
+- `.claude/skills/handle-regression/SKILL.md` — when a merge breaks something
+- `.claude/skills/create-issue/SKILL.md` — filing new issues
+- `.claude/skills/architect-spec/SKILL.md` — hard-issue pre-work
+- `.claude/skills/sprint-wrap-up/SKILL.md` — end of sprint
 - `.claude/memory/feedback_tasklist_sync_unreliable.md` — why SendMessage is canonical
 - `.claude/memory/feedback_diary_and_sprints_before_compact.md` — hygiene before /compact
