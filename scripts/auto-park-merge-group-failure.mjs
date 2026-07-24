@@ -61,7 +61,7 @@ function ghMaybe(args) {
 
 // Parse a merge-queue ref into its PR number. The merge queue names its
 // synthetic branches `gh-readonly-queue/<base>/pr-<N>-<headSha>` (confirmed in
-// merge-group-sweeper.yml / queue-unstick.yml). Returns the PR number or null
+// merge-group-sweeper.yml). Returns the PR number or null
 // for any branch that is not a queue ref (we must never park on those).
 export function prNumberFromQueueBranch(branch) {
   if (typeof branch !== "string") return null;
