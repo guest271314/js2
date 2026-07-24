@@ -15,6 +15,8 @@ model: opus
 assignee: ttraenkler/dev-std-date-math
 parent: 1836
 related: [1335, 1836, 2160]
+loc-budget-allow:
+  - src/codegen/parse-number-native.ts
 ---
 
 # #3570 — Number('+0x10') parses instead of NaN (residual of #1836)
