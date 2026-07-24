@@ -234,7 +234,7 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
   {
     version: 11,
     note:
-      "#3594 — the #3189 uncatchable-trap ratchet now treats a `compile_error` " +
+      "#3595 — the #3189 uncatchable-trap ratchet now treats a `compile_error` " +
       "baseline as BASELINE-UNKNOWN, alongside the `compile_timeout`, " +
       "missing-row and identical-`wasm_sha` exclusions it already had. " +
       "Rationale is the one already written in diff-test262.ts for " +

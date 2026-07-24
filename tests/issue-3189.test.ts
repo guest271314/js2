@@ -134,12 +134,12 @@ describe("#3189 — trap-category growth ratchet", () => {
     expect(r.unknownBaselineTimeouts.null_deref).toEqual(["unknown.js"]);
   });
 
-  // (#3594) A `compile_error` baseline is the same class of can't-testify as a
+  // (#3595) A `compile_error` baseline is the same class of can't-testify as a
   // `compile_timeout`: an invalid-Wasm module never instantiated, so
   // `__module_init` never ran and never had the chance to trap. Evidence: the
   // #3593 minimized repro traps IDENTICALLY with and without the PR that made
   // the file compile — the trap pre-existed the change that merely reached it.
-  it("(#3594) treats compile_error → trap as an unknown baseline runtime outcome", () => {
+  it("(#3595) treats compile_error → trap as an unknown baseline runtime outcome", () => {
     const base = mk({
       "null.js": { status: "compile_error", error_category: "wasm_compile" },
       "oob.js": { status: "compile_error", error_category: "wasm_compile" },
@@ -160,7 +160,7 @@ describe("#3189 — trap-category growth ratchet", () => {
   // regressions. A baseline that actually ran (pass/fail) and now traps is
   // still a hard failure. Getting this wrong permissively would be worse than
   // the problem the exclusion solves.
-  it("(#3594) still FAILS on a genuine pass → trap transition", () => {
+  it("(#3595) still FAILS on a genuine pass → trap transition", () => {
     const base = mk({ "observed.js": { status: "pass", wasm_sha: "before" } });
     const cur = mk({ "observed.js": { status: "fail", error_category: "null_deref", wasm_sha: "after" } });
     const r = evaluateTrapCategoryGrowth(base, cur);
@@ -169,7 +169,7 @@ describe("#3189 — trap-category growth ratchet", () => {
     expect(r.newlyTrapping.null_deref).toEqual(["observed.js"]);
   });
 
-  it("(#3594) still FAILS on a genuine fail → trap transition", () => {
+  it("(#3595) still FAILS on a genuine fail → trap transition", () => {
     const base = mk({ "observed.js": { status: "fail", error_category: "assertion_fail", wasm_sha: "before" } });
     const cur = mk({ "observed.js": { status: "fail", error_category: "null_deref", wasm_sha: "after" } });
     const r = evaluateTrapCategoryGrowth(base, cur);
@@ -178,7 +178,7 @@ describe("#3189 — trap-category growth ratchet", () => {
     expect(r.newlyTrapping.null_deref).toEqual(["observed.js"]);
   });
 
-  it("(#3594) a compile_error-unknown trap does not hide genuine observed growth", () => {
+  it("(#3595) a compile_error-unknown trap does not hide genuine observed growth", () => {
     const base = mk({
       "unknown.js": { status: "compile_error", error_category: "wasm_compile" },
       "observed.js": { status: "pass", wasm_sha: "before" },

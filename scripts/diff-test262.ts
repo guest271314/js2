@@ -634,7 +634,7 @@ export function evaluateTrapCategoryGrowth(
     // subsequent trap is therefore unknown, not evidence that this change
     // introduced one. Keep it out of category growth and report it separately.
     //
-    // (#3594) `compile_error` is the SAME class of baseline-can't-testify: an
+    // (#3595) `compile_error` is the SAME class of baseline-can't-testify: an
     // invalid-Wasm module never instantiated, so `__module_init` never ran and
     // never had the opportunity to trap. A later trap on that file is therefore
     // *unknown*, not *introduced* — exactly the rationale already written above
