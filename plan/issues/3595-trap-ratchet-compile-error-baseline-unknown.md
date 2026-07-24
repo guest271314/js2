@@ -1,5 +1,5 @@
 ---
-id: 3594
+id: 3595
 title: "ci: trap ratchet must treat a compile_error baseline as baseline-unknown (it never instantiated, so it never had the chance to trap)"
 status: done
 completed: 2026-07-25
@@ -17,7 +17,7 @@ goal: correctness
 related: [3189, 3563, 3593]
 ---
 
-# #3594 — trap ratchet: `compile_error` baseline is baseline-unknown
+# #3595 — trap ratchet: `compile_error` baseline is baseline-unknown
 
 ## Problem
 
