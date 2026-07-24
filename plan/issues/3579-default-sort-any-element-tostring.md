@@ -24,6 +24,10 @@ related: [3185, 3201, 2502, 3251]
 loc-budget-allow:
   - src/codegen/array-methods.ts
   - src/codegen/declarations/import-collector.ts
+# (#3400 R-FUNC per-function ceiling) The any/union sort-import arm adds two
+# branches to the import-collector's dispatch visitor. Grant the function.
+func-budget-allow:
+  - src/codegen/declarations/import-collector.ts::unifiedVisitNode
 origin: "2026-07-24 #3201 measurement — contained default-sort slice split out of #3201"
 ---
 
