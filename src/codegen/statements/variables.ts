@@ -1573,7 +1573,24 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             localIdx < fctx.params.length
               ? fctx.params[localIdx]?.type
               : fctx.locals[localIdx - fctx.params.length]?.type;
-          if (matchedClosureInfo && slotTypeForCast?.kind === "externref") {
+          if (slotTypeForCast?.kind === "externref") {
+            // The slot stays a raw externref in this whole (callable-typed
+            // initializer produced externref) block — in TWO ways:
+            //  - (#3432) a signature MATCHED but the #962 guard keeps the slot
+            //    externref (the destructive recast is skipped), or
+            //  - (#3460) NO registered closure signature matched at all, so the
+            //    else-arm below leaves `stackType = closureType` (externref).
+            // Either way the value can be a FOREIGN / bridge-wrapped / null
+            // callable (`var f = obj.missingFn`, `var format = compareArray.format`).
+            // Record the decl so `calleeMayBeHostCallable` emits the #1712
+            // `__call_function` host arm at direct-call sites; without it the
+            // closure-struct dispatch nulls the guarded root cast and
+            // `struct.get` traps "dereferencing a null pointer" (UNCATCHABLE)
+            // where the spec wants a catchable TypeError. The arm emission is
+            // itself `!standalone && !wasi`-gated (call-identifier.ts), so the
+            // #1941 dual-mode "no host imports in pure closure programs"
+            // guarantee is preserved (pure local closures produce a closure
+            // STRUCT, not externref, and never enter this block).
             (ctx.skippedClosureRecastDecls ??= new Set()).add(decl);
           }
           if (matchedClosureInfo && slotTypeForCast?.kind !== "externref") {
