@@ -1,5 +1,5 @@
 ---
-id: 3597
+id: 3598
 title: "check:issue-ids should detect collisions against OPEN PRs, not only main — the gap that silently parks PRs"
 status: ready
 sprint: current
@@ -12,10 +12,10 @@ task_type: ci
 area: ci, merge-queue
 goal: release-pipeline
 related: [2531, 2547, 1616]
-origin: "PR-queue shepherd, 2026-07-24. Two duplicate-id collisions in one hour; the second was invisible at PR level and only surfaced as a merge_group auto-park."
+origin: "PR-queue shepherd, 2026-07-24. Three duplicate-id collisions in ~90 min; one was invisible at PR level and surfaced as a merge_group auto-park, and one slipped past --allocate's own open-PR scan."
 ---
 
-# #3597 — the issue-id gate checks `main` but not open PRs, so collisions surface as merge-queue parks
+# #3598 — the issue-id gate checks `main` but not open PRs, so collisions surface as merge-queue parks
 
 ## Problem
 
@@ -41,7 +41,7 @@ The collision only materialises once the first one merges. Depending on timing:
   needs a human/shepherd to diagnose, and a parked PR is skipped by
   `auto-enqueue`, so it strands until someone intervenes.
 
-## Evidence — both collisions, 2026-07-24, within one hour
+## Evidence — three collisions, 2026-07-24, within ~90 minutes
 
 **Collision A — id 3584** (`plan/issues/3584-*`): PR #3577 vs PR #3579. Caught at
 PR level, but only because #3577 merged first. `--allocate` had reserved the id
@@ -59,6 +59,23 @@ Issue integrity + link gate (#1616)
 
 …which auto-parked #3581 with a `hold`. Reserved at `22:30:26Z`; #3581 opened
 ~5 min later.
+
+**Collision C — id 3597, and it caught THIS issue file.** While the present issue
+was being written it was itself allocated id 3597 — which PR #3585
+(`plan/issues/3597-auto-park-step-aware.md`, opened `23:15:13Z`) had already
+taken. This file was renumbered to **#3598**; #3585 was ~12 min earlier and keeps 3597.
+
+Collision C is the most informative of the three, because **`--allocate` should
+have prevented it and did not**. PR #3585 was already open when
+`claim-issue.mjs --allocate` handed out 3597 at `23:27:46Z`, yet the open-PR scan
+did not see its added file. So the open-PR scan is not merely _absent from the
+gate_ (the headline problem) — it is **also unreliable in the allocator**, whether
+through caching, pagination, an API hiccup, or the file arriving in a push after
+the PR was opened. Whatever the mechanism, it means the reservation ref cannot be
+treated as authoritative on its own, which strengthens the case for enforcing at
+the gate: **verification at merge-decision time beats reservation at allocation
+time.** A manual per-PR scan for the replacement id (3598) found it genuinely
+free.
 
 ## Root cause of the collisions themselves (why this will recur)
 
