@@ -83,6 +83,10 @@ Two-part gap:
 
 ## Measured (default gc lane, fork-per-file)
 
+**Permanent conformance repro (#2093):**
+`test262/test/built-ins/Array/prototype/sort/S15.4.4.11_A2.1_T3.js` (the flipped
+file) + the regression guard `tests/issue-2502-sort-externref.test.ts`.
+
 - `built-ins/Array/prototype/sort`: **47→48… (dir 8→9 pass), +1 genuine flip
   `S15.4.4.11_A2.1_T3` (mixed `[-1, obj, 1, "X", …]` ToString sort), 0
   regressions.** (Other A2.* are comparator-path sorts — `.sort(cmp)` via
