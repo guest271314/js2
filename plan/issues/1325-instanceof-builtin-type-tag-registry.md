@@ -163,22 +163,34 @@ Measured flips (fail→pass, all host-free, zero false positives — negatives l
 Host/gc mode is untouched (the branch is `noJsHost`-gated → byte-identical).
 Tests: `tests/issue-1325.test.ts` (new standalone describe block, 11 cases).
 
-### Remaining (per-rep construction-tagging — NOT this slice, follow-on)
+## Progress (2026-07-24, dev-std-3, slice 2) — Promise landed; per-rep map measured
 
-The residual is scattered **per-representation** work, each its own increment
-(measured 2026-07-24, all `any`-typed dynamic LHS, standalone):
+`Promise` added to `nativeBuiltinInstanceOfTypeIdxs` via
+`getOrRegisterPromiseType` (the distinct `$Promise` struct — state/value/
+callbacks; exported, idempotent, type-only). Flips `p instanceof Promise` 0→1
+host-free for a dynamic LHS (`Promise.resolve(1)`, `new Promise(...)`,
+cross-function opaque param); 5 negatives stay false (no false positives:
+`{} instanceof Promise`, `Date instanceof Promise`, `123`, `Promise instanceof
+Date`, `[]`). `noJsHost`-gated → host/gc byte-identical. Tests:
+`tests/issue-1325.test.ts` (+6 Promise cases, 30 total).
 
-- `Promise`, `ArrayBuffer`, `DataView`, and the concrete `TypedArray` views
-  (`Int8Array`…`BigUint64Array`) — each lowers to its own rep; needs the
-  matching struct type idx wired into `nativeBuiltinInstanceOfTypeIdxs` (or a
-  brand where the rep is shared, e.g. TypedArray views share `$Vec` with plain
-  arrays today — #2893/#2872).
-- `x instanceof Object` — NOT a clean universal `ref.test`: native strings are
-  also GC structs, so a naive "any struct → Object" over-matches; needs a
-  struct-minus-string-minus-boxed-primitive discriminator (Slice-A #2916
-  deferral).
-- `func instanceof Function` currently **traps** on a closure LHS (separate
-  from the `undefined`-return edges) — needs a guarded cast.
-- `Map`/`Set` through a truly-opaque param still answer `0` (they pass only via
-  the static-type path today; the native-collection structs share `$Map`, so a
-  runtime `ref.test` is imprecise until a per-collection brand lands).
+**Measured per-rep map for the rest (verify-first, 2026-07-24) — the remaining
+types are NOT contained `ref.test` slices; they are value-rep substrate:**
+
+| type | rep | verdict |
+| --- | --- | --- |
+| `Date` | distinct `$__Date` struct | ✅ landed (#3547) |
+| `RegExp` | distinct `$__StandaloneRegExp` struct | ✅ landed (#3547) |
+| `Promise` | distinct `$Promise` struct | ✅ landed (this slice) |
+| `ArrayBuffer` | **byte `$Vec`** (shared with plain arrays / DataView — `dataview-native.ts:17,3422`) | ❌ substrate — `ref.test $Vec` false-positives on arrays/DataView; needs a brand field |
+| `DataView` | **byte `$Vec`** (same pun) | ❌ substrate — same shared-`$Vec` imprecision |
+| `Int8Array`…`BigUint64Array` | **shared `$__ta_view`** (length/buf/byteOffset, NO kind field) | ❌ substrate — one struct for all TA kinds; `int8 instanceof Uint8Array` can't be distinguished until a kind brand lands (#2893/#2872) |
+| `Map`/`Set`/`WeakMap`/`WeakSet` (opaque LHS) | shared `$Map` backing | ❌ substrate — pass only via static-type path; runtime `ref.test $Map` is cross-collection imprecise |
+| `Object` (universal) | any GC struct incl. native strings | ❌ needs struct-minus-string-minus-boxed discriminator (Slice-A #2916 deferral) |
+| `Function` (closure LHS) | closure struct | ❌ currently **traps** — needs a guarded cast |
+
+**Conclusion:** every distinct-struct builtin (Date/RegExp/Promise) is now
+host-free; the residual is uniformly blocked on a **per-rep brand** for
+struct-sharing families (ArrayBuffer/DataView/TypedArray/Map-Set) — value-rep
+substrate, not a dev-sized `nativeBuiltinInstanceOfTypeIdxs` case. Route the
+brand work with #2893/#2872 (TypedArray) and the collection value-rep track.
