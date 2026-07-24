@@ -15,7 +15,7 @@ func-budget-allow:
   # which was already at its per-function ceiling (#3400 / R-FUNC). The guard
   # broadening itself is net-zero; only the comment grows the function.
   - src/codegen/statements/variables.ts::compileVariableStatement
-sprint: current
+sprint: 76
 created: 2026-07-19
 updated: 2026-07-24
 priority: medium

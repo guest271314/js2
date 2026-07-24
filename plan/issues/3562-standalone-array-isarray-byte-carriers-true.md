@@ -4,7 +4,7 @@ title: "standalone: Array.isArray(ArrayBuffer/Uint8Array) returns true (should b
 status: done
 completed: 2026-07-24
 assignee: ttraenkler/dev-opus-2
-sprint: current
+sprint: 76
 created: 2026-07-24
 priority: medium
 horizon: m

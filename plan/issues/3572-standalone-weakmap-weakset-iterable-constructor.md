@@ -11,7 +11,7 @@ task_type: conformance
 area: codegen
 language_feature: collections
 goal: standalone
-sprint: current
+sprint: 76
 horizon: s
 assignee: ttraenkler/dev-mapset-opus
 parent: 2162

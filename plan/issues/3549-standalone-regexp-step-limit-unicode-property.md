@@ -3,7 +3,7 @@ id: 3549
 title: "Standalone: native RegExp step limit exceeded on `\\p{...}+` over long strings — measured 304/311 gate on RegExp property-escapes"
 status: done
 created: 2026-07-23
-updated: 2026-07-23
+updated: 2026-07-24
 completed: 2026-07-23
 priority: high
 feasibility: hard
@@ -11,7 +11,7 @@ reasoning_effort: max
 task_type: bugfix
 area: codegen
 goal: standalone
-sprint: current
+sprint: 76
 horizon: l
 umbrella: 2860
 assignee: ttraenkler/fable-2860

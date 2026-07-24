@@ -7,7 +7,7 @@ status: done
 completed: 2026-07-24
 model: fable
 fable_role: spec
-sprint: current
+sprint: 76
 created: 2026-06-11
 updated: 2026-07-24
 split_note: "2026-07-24 (lead-approved split): the P3 headline deliverable — the observable-`undefined` channel — SHIPPED via PR #1701 (commit 347f3c79a). Marked `done` against that shipped scope. The OPEN value-rep numeric-leg remainder (S1 standalone $undefined singleton + S2 sNaN + S3 number|undefined→externref + S4 union-collapse + typeof-null) is atomic fable/value-rep substrate and is carved into #3580 (tagged value-rep-substrate). Full diagnosis history stays in this body; #3580 is the live tracker for the remainder."

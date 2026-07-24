@@ -3,7 +3,7 @@ id: 3569
 title: "Standalone JSON.stringify: well-formed surrogate escaping (lone surrogate → \\uXXXX)"
 status: done
 assignee: ttraenkler/agent-json-object-reflect
-sprint: current
+sprint: 76
 created: 2026-07-24
 updated: 2026-07-24
 completed: 2026-07-24

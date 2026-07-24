@@ -4,7 +4,7 @@ title: "codegen: bare empty array literal `[]` in a conditional under a union co
 status: done
 completed: 2026-07-24
 assignee: ttraenkler/dev-opus-2
-sprint: current
+sprint: 76
 created: 2026-07-22
 priority: low
 horizon: m

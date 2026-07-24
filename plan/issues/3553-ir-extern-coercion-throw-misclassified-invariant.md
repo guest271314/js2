@@ -5,9 +5,9 @@ status: done
 assignee: ttraenkler/fable-3549
 created: 2026-07-23
 completed: 2026-07-23
-updated: 2026-07-23
+updated: 2026-07-24
 priority: high
-sprint: current
+sprint: 76
 horizon: s
 feasibility: medium
 reasoning_effort: max

@@ -4,7 +4,7 @@ title: "test(#2961): refresh stale standalone leak-scan guard test (console.log 
 status: done
 completed: 2026-07-24
 assignee: ttraenkler/dev-opus-2
-sprint: current
+sprint: 76
 created: 2026-07-24
 priority: medium
 horizon: s
