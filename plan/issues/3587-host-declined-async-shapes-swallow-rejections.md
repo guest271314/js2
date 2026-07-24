@@ -1,7 +1,8 @@
 ---
 id: 3587
 title: "Host lane: async shapes the host-drive engine declines (try/catch across await, non-linear bodies) silently SWALLOW awaited rejections — execution continues past the await"
-status: in-progress
+status: done
+completed: 2026-07-25
 assignee: ttraenkler/fable-3587
 sprint: current
 created: 2026-07-25
@@ -108,3 +109,84 @@ a silent miscompile into a refusal.
 - A regression test for rejection delivery through try/catch, `.catch`, and
   the two-callback `.then` on both engine-claimed and previously-declined
   shapes.
+
+## Implementation Notes (2026-07-25, fable-3587)
+
+**Both directions (a) and (b) landed** — direction (a) turned out to be nearly
+free, because the machinery already existed and was only _gated off_:
+
+1. **Claim (a): host lane drives try/catch-across-await.** The #2906 3c CFG
+   machine (catch regions as states, `catchState` routing, the routed
+   dispatcher `block{loop{try{chain}catch{route}}}`) is backend-agnostic by
+   construction — rejection delivery rides the reject step adapter
+   (ERROR_FIELD + MODE_THROW), the resume prelude re-throw, and the route,
+   none of which touch the settle backend. It was disabled on host purely as
+   incremental scoping (`allowTryCatch: !info.host`, "same rationale as
+   allowLoops"). Changes:
+   - `asyncFnNeedsHostDrive` (async-frame.ts): on a null linear plan, admit
+     `computeTryCatchSpills` shapes (same spill-safe rule as the native lane) —
+     predicate and producer stay in lockstep;
+   - `ensureAsyncResumeFunction`: `allowTryCatch: true` on both lanes
+     (`allowLoops` / `allowReturnInTry` remain native-only — loops on host are
+     "correct but need their own corpus check", per the #2906 note);
+   - **`catch_all` parity (new)**: the legacy try/catch lowering catches
+     FOREIGN JS exceptions (a host import throwing, e.g. TypeError from a
+     property op / JSON.parse) via `catch_all` + `__get_caught_exception`. The
+     routed dispatcher on host now carries the same arm (route body
+     `structuredClone`d — never alias one Instr[] into two branches), so a
+     sync host throw inside a driven try keeps legacy semantics. The import is
+     pre-registered BEFORE any state body is built — registering late would
+     shift defined-func indices baked into detached instr arrays the shift
+     walker cannot reach (finalizer bodies ride plain local arrays until final
+     assembly).
+
+2. **Refuse loudly (b): the residual cannot silently mis-execute.**
+   `reportDeclinedAsyncRejectionHazard` (async-activation.ts) fires a
+   source-located compile error when a declined async
+   declaration/arrow/fn-expr (i) genuinely suspends (statically-resolved
+   awaits cannot reject) and (ii) has a suspension point lexically inside a
+   `try` block. Hooked at `maybeActivateAsync`, the closure activation path
+   (closures.ts), AND `asyncEngineWouldActivate` — the last one matters
+   because the IR C-1 selector claims exactly the engine-declined population
+   and compiles `await` as the same rejection-swallowing sync pass-through;
+   the guard fires on the selector probe, so neither downstream lane can
+   silently proceed. Deduped per declaration (WeakSet keyed by ctx).
+
+**Blast radius measured before choosing error severity** (compile-only sweep
+of all 139 test262 files containing `await`+`try`): 119 now compile clean
+(claimed), 15 CE for unrelated pre-existing reasons, and exactly **5 trip the
+loud refusal — all 5 already `fail` in the baseline** (3×
+`try-reject-finally-reject` = await-in-finally, genuinely undrivable; 2×
+dynamic-import for-await agen). Zero pass→CE flips.
+
+### Remaining silently-wrong async surface (honest residue)
+
+- **Async METHODS (class + object-literal)**: the engine cannot claim them at
+  ANY shape yet (#2957 phase-3 residue), so the loud refusal deliberately
+  excludes them — a guard there would refuse the whole population, not a
+  residue. Awaited rejections in async methods are still silently swallowed.
+- **Declined shapes with no `try`** (await in a plain `while`, await nested in
+  expressions/`if`): still silently sync-executed; a rejection leaks as
+  unhandledRejection and execution continues. Claiming loops on host
+  (`allowLoops`) is the natural next slice — the machine handles them, they
+  need a corpus check.
+- Async fn-exprs passed directly as call arguments were probe-verified to
+  route through the closure activation path and get claimed (probe c: 17 ✓);
+  a host-API callback position that routes via `compileArrowAsCallback`
+  specifically was not exhaustively audited.
+- **Claimed linear host shapes** keep the pre-3c non-routed dispatcher, which
+  has no `catch_all` arm — a sync host JS exception in a lead escapes the
+  machine and strands the result promise pending (pre-existing, unchanged; the
+  routed/try-catch population does have the arm).
+
+## Test Results
+
+- `tests/issue-3587-async-rejection-delivery.test.ts` — 14/14: a5b (7), a5c
+  (9531, no leak), claimed control, await-in-catch, rethrow-rejects,
+  catch+finally ordering, nested, catch_all host-throw parity, `.catch`
+  handler, sibling groups, unhandled-rejection-rejects-result, async arrow
+  claim, loud-refusal CE, no-refusal-for-static-awaits.
+- Scoped suites green: async-await, issue-1042(-host-drive), issue-2967,
+  issue-2906-{3c,multiawait,gap3}, async-census, issue-2957, issue-2174,
+  issue-2635, issue-2856, equivalence async-function / async-iteration /
+  for-await-of / promise-chains / scope-and-error-handling / try-catch-\*.
