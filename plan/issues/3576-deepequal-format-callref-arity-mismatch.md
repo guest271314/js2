@@ -24,6 +24,11 @@ related: [3378, 3559, 3560, 3563, 2873, 2043]
 loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/statements/nested-declarations.ts
+# (#3400 / R-FUNC) Same rationale as loc-budget-allow: the added arity/rest-param
+# handling lives inside these two functions by construction.
+func-budget-allow:
+  - src/codegen/string-ops.ts::compileTaggedTemplateExpression
+  - src/codegen/statements/nested-declarations.ts::compileNestedFunctionDeclaration
 ---
 
 # #3576 — `deepEqual.js` `format` closure: `call_ref` arity mismatch (need 4, got 3)
