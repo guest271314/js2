@@ -1,7 +1,9 @@
 ---
 id: 3562
 title: "standalone: Array.isArray(ArrayBuffer/Uint8Array) returns true (should be false per §7.2.2) — tests/issue-2047 red on main"
-status: ready
+status: done
+completed: 2026-07-24
+assignee: ttraenkler/dev-opus-2
 sprint: current
 created: 2026-07-24
 priority: medium
@@ -13,6 +15,8 @@ language_feature: array-isarray, typed-arrays
 es_edition: es2015
 goal: test262-conformance
 related: [2047]
+loc-budget-allow:
+  - src/codegen/object-runtime.ts
 origin: "2026-07-24 invisible-guard-test audit (dev-opus-2): tests/issue-2047.test.ts silently red on main (outside required checks, #3008 gap) — surfaced alongside #680/#2961 in the same audit."
 ---
 
@@ -76,3 +80,40 @@ was 7 days old).
   `false` in `--target standalone`; `tests/issue-2047.test.ts` green.
 - Bisect SHA recorded.
 - `tests/issue-2047.test.ts` added to `tests/guard-suite.json`.
+
+## Resolution (2026-07-24, dev-opus-2) — CONTAINED, WAT-confirmed
+
+**Root cause (not the fable shared-struct-rep substrate — the byte vecs are
+DISTINCT types).** The standalone `Array.isArray` native predicate
+(`__extern_is_array`, finalize-filled by `fillExternIsArray` →
+`collectStandaloneArrayCarrierTypeIdxs`, `src/codegen/object-runtime.ts`)
+`ref.test`s the value against the array-carrier type list. WAT-confirmed: type
+index 0 in every module is `$__vec_base = (sub (struct (field $length (mut
+i32))))` — the ABSTRACT common supertype that EVERY concrete `$__vec_*` declares
+`(sub final $__vec_base …)`, **including** the byte vecs `$__vec_i32_byte`
+(ArrayBuffer) and `$__vec_i8_byte` (Uint8Array). `collectStandaloneArrayCarrier
+TypeIdxs` added `$__vec_base` to the carrier list via its `name.startsWith(
+"__vec_")` check, so `ref.test (ref 0)` matched the byte-vec subtypes by WasmGC
+subtyping → `Array.isArray` true — **defeating #2047's leaf-level exclusion**
+(which correctly drops the specific `__vec_i32_byte`/`__vec_i8_byte` type IDs,
+but the base subsumes them). DataView is correctly `false` because it's a
+distinct `$__dv_window` wrapper, not a `$__vec_base` subtype.
+
+**Attribution.** The `$__vec_base` common-supertype WasmGC refactor silently
+defeated #2047's leaf-exclusion; the isArray carrier collector was never updated
+to exclude the new abstract base. Regression is >2026-07-04 (predates the shallow
+local git history; not bisected to an exact SHA per the mechanism being
+sufficient) — another weeks-old invisible one outside required checks (#3008),
+found by the same audit as #680/#2961.
+
+**Fix (1 line + comment).** In `collectStandaloneArrayCarrierTypeIdxs`, skip the
+abstract base: `if (name === "__vec_base") continue;` before the `__vec_*`
+carrier add. The concrete leaf vec types remain the real array carriers, so real
+arrays still answer `true`; the byte-vec subtypes are no longer subsumed.
+
+**Verified.** `Array.isArray(new ArrayBuffer(8)/new DataView(…)/new
+Uint8Array(2))` → `false`; `Array.isArray([1,2,3])` → `true`; combined shape → 0
+(was 5). `tests/issue-2047.test.ts` 8/8 green; tsc clean. Folded into the
+required guard suite (`tests/guard-suite.json`, #3552) to close the #3008
+invisibility. Broad-impact-wise it only narrows the standalone isArray carrier
+set (removes a wrongly-included abstract base) — merge_group-validated.
