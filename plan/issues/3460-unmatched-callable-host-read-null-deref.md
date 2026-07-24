@@ -10,6 +10,11 @@ loc-budget-allow:
   # slot, #1941 dual-mode gating). The god-file was already at its ratchet
   # limit, so the necessary explanatory comment needs an explicit allowance.
   - src/codegen/statements/variables.ts
+func-budget-allow:
+  # Same +8 explanatory-comment lines land inside compileVariableStatement,
+  # which was already at its per-function ceiling (#3400 / R-FUNC). The guard
+  # broadening itself is net-zero; only the comment grows the function.
+  - src/codegen/statements/variables.ts::compileVariableStatement
 sprint: current
 created: 2026-07-19
 updated: 2026-07-24
