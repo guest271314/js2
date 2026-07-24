@@ -15,7 +15,7 @@ Across 69 development sprints and **2,700+ merged pull requests**, js2wasm has g
 ### Conformance
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 30,360 / 43,095 (70.4 %)
+**test262 conformance**: 30,351 / 43,105 (70.4 %)
 <!-- AUTO:conformance-end -->
 
 - Automated conformance tracking with historical trend data and a public [conformance report](https://js2.loopdive.com/benchmarks/report.html)
