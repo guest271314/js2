@@ -81,17 +81,33 @@ export function prNumberFromQueueBranch(branch) {
 // Patterns are deliberately TIGHT. Widening this list makes the bot park LESS,
 // which is the dangerous direction (a real regression slips into main). When in
 // doubt, leave a step out so it classifies as non-infra and parks.
+// The transfer-verb entries are grounded in the REAL step inventory, harvested
+// 2026-07-25 from .github/workflows/test262-sharded.yml — not guessed:
+//   "Download shard artifacts"            "Upload shard artifacts"
+//   "Download merged reports (…)"         "Upload merged reports"
+//   "Download just-landed group artifact" "Upload regressions report"
+// Three of those carry no "artifact" token at all, so an artifact-word-only
+// pattern would have MISSED the #3566 class. Every `^Download`/`^Upload` step in
+// this repo is pure transfer — none computes a verdict. If a verdict step is
+// ever named "Download and compare …", this list must be tightened, because
+// that is the direction that lets a regression through.
+// `tests/issue-3590-auto-park-step-aware.test.ts` pins the real names so a
+// workflow rename surfaces here.
 export const INFRA_STEP_PATTERNS = [
   /^set up job$/i,
   /^complete job$/i,
-  /^post\s/i, // actions' generated post-run steps ("Post Checkout")
+  /^post\s/i, // actions' generated post-run steps ("Post Run actions/checkout@v5")
   /^(check ?out)\b/i,
+  /^run actions\/(checkout|setup-node|setup-python|setup-java|cache|download-artifact|upload-artifact)\b/i,
   /^set ?up (node|pnpm|python|java|go|ruby)\b/i,
   /^initialize containers$/i,
   /^stop containers$/i,
-  /\bdownload\b[^\n]*\bartifacts?\b/i, // "Download shard artifacts"
-  /\bupload\b[^\n]*\bartifacts?\b/i,
-  /\bartifacts?\b[^\n]*\bdownload\b/i,
+  /^(download|upload)\s/i, // transfer steps (see inventory above)
+  /\b(download|upload)\b[^\n]*\bartifacts?\b/i,
+  // Both orders — "Retry shard artifact upload on transient flake (#3404)" puts
+  // the noun FIRST, which an artifact-then-download-only pattern missed (caught
+  // by the real-step-name cases in tests/issue-3590-auto-park-step-aware.test.ts).
+  /\bartifacts?\b[^\n]*\b(download|upload)\b/i,
 ];
 
 // Is this step name a setup/infra step (as opposed to a verdict step)?

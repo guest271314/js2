@@ -158,6 +158,42 @@ describe("#3590 — auto-park step awareness", () => {
       expect(isInfraStep(null as unknown as string)).toBe(false);
       expect(isInfraStep(42 as unknown as string)).toBe(false);
     });
+
+    // GROUNDING: these are the ACTUAL step names, harvested 2026-07-25 from
+    // .github/workflows/test262-sharded.yml and from a real jobs-API response
+    // (run 30131351838). Three of the transfer steps carry no "artifact" token,
+    // so an artifact-word-only pattern would have missed the #3566 class
+    // entirely. If a workflow rename breaks one of these, it surfaces HERE
+    // rather than as another manual park investigation.
+    it.each([
+      "Download shard artifacts",
+      "Upload shard artifacts",
+      "Upload merged reports",
+      "Download merged reports (full-matrix path)",
+      "Download merged reports (merge_group artifact, #3448)",
+      "Download just-landed group artifact (#3467)",
+      "Upload regressions report",
+      "Retry shard artifact upload on transient flake (#3404)",
+      "Run actions/checkout@v5",
+      "Post Run actions/checkout@v5",
+      "Setup Node and pnpm (cached)",
+      "Post Setup Node and pnpm (cached)",
+    ])("real workflow step %j classifies as infra", (name) => {
+      expect(isInfraStep(name)).toBe(true);
+    });
+
+    // Real VERDICT step names from the same run — these must never be infra, or
+    // a genuine regression would slip through unparked.
+    it.each([
+      "Issue-ID fresh-claim gate (#2531)",
+      "Lint, format, and typecheck (parallel)",
+      "Dead-export gate (#3090 Phase 2)",
+      "Required guard suite (#3552)",
+      "Promote merged artifacts to stable baseline",
+      "Push baseline artifacts to js2wasm-baselines repo",
+    ])("real workflow step %j is NOT infra", (name) => {
+      expect(isInfraStep(name)).toBe(false);
+    });
   });
 
   describe("the park comment is actionable", () => {
