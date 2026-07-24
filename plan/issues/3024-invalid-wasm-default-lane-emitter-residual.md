@@ -885,8 +885,10 @@ parameterless iterator methods (the common case: `extraParams = []` → no chang
   (CE eliminated). They now **`fail` on DISTINCT feature gaps** — Iterator.zip
   null-deref, AsyncFromSyncIterator promise handling — NOT a pass gain (0 new
   passes; this is a CE-elimination slice like the #3024 packed-array slice).
-- Full 587-candidate re-harvest: 72 → 64 invalid-Wasm, exactly these 8, 0 new
-  signatures. Standalone re-check: no new invalid.
+- Full 587-candidate re-harvest ON THIS BRANCH (base = `origin/main`, so the 25
+  module-global files of the sibling PR #3558 are still counted here): **97 → 89
+  invalid-Wasm, exactly these 8, 0 new signatures**. (When both PRs land, main is
+  97 − 25 − 8 = 64.) Standalone re-check on the 8 files: no new invalid.
 
 ### Still open (roll forward — distinct root causes, NOT this PR)
 
