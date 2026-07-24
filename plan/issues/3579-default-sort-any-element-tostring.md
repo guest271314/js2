@@ -28,6 +28,13 @@ loc-budget-allow:
 # branches to the import-collector's dispatch visitor. Grant the function.
 func-budget-allow:
   - src/codegen/declarations/import-collector.ts::unifiedVisitNode
+# (#2108 coercion-site drift) The host boxed-any sort stringify REUSES the
+# existing `__extern_toString` runtime ToString (the same primitive emitToString
+# wraps) — +1 hand-rolled coercion vocabulary in array-methods.ts, intentional
+# (calling the coercion-engine wrapper needs a ts.Type the oracle can't vend;
+# direct primitive reuse is the ratchet-clean path). Grant the file.
+coercion-sites-allow:
+  - src/codegen/array-methods.ts
 origin: "2026-07-24 #3201 measurement — contained default-sort slice split out of #3201"
 ---
 
