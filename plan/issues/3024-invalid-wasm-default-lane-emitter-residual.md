@@ -4,7 +4,7 @@ title: "codegen: invalid Wasm binary emission residual — default (JS-host) lan
 status: ready
 sprint: current
 created: 2026-07-03
-updated: 2026-07-13
+updated: 2026-07-24
 priority: high
 horizon: m
 feasibility: medium
@@ -877,4 +877,76 @@ distinct from #3343's control-flow aliasing). Remaining rows are ≤3-file
 per-root-cause singletons. By failing fn: 58 `__module_init`, 10 `__closure`,
 9 `__cb`, 6 `fn`, 5 `__call_next`, 3 `__call_return`, 3 `Parent_new`.
 
-**In progress:** root-causing the 27-file module-global slot-desync family.
+### Landed: module-global slot-type-vs-stored-value desync (agent-a3fa3add / Opus 4.8, 2026-07-24)
+
+**PR:** `issue-3024-invalid-wasm-remeasure` — clears **25 of the 27-file
+module-global slot-desync family** (Bucket A object-literal-runtime-computed-key,
+14 + Bucket B for-of array-rest destructuring-assignment, 11). Full 587-candidate
+re-harvest: **97 → 72 still-invalid**, exactly these 25, **zero new invalid
+signatures**.
+
+#### Root cause (one family, two write paths — verified by WAT)
+
+A module-level `var`/`let` becomes a Wasm module global whose declared slot type
+is derived from the STATIC TS type, but the value actually stored can have a
+different Wasm representation, and the write site did not coerce.
+
+- **Bucket A** — `var o = { a, [foo()]: v }` (RUNTIME computed key).
+  `compileObjectLiteral` builds these as a host `$Object` (externref) via
+  `_hasRuntimeComputedKey`, but `moduleInitForcesExternref` (declarations.ts) did
+  NOT mirror that predicate, so the global stayed struct-typed →
+  `global.set expected (ref null N), found externref` (the read's
+  `extern.convert_any` on the struct slot was invalid too — masked by the
+  validator stopping at the first error). Literal computed keys `[1]` still fold
+  to a static struct, unchanged.
+- **Bucket B** — `var x, y; for ([x, ...y] of …) {}`. `emitGlobalSyncWriteback`
+  (for-of-destructuring.ts) did a raw `local.get; global.set`; the rest slice
+  materializes a `(ref null vec)` local while the untyped `var y` global is
+  `externref` → `global.set expected externref, found (ref null N)`.
+
+Distinct from #3343 (control-flow module-global ALIASING); this is a value/slot
+TYPE desync at the write.
+
+#### Fix (three files; mirrors existing precedents)
+
+- `src/codegen/statements/for-of-destructuring.ts` — `emitGlobalSyncWriteback`
+  coerces local→global type before `global.set` (mirrors the binding-form
+  `syncDestructuredLocalsToGlobals`, destructuring.ts). All 10 call sites pass
+  `ctx`.
+- `src/codegen/declarations.ts` — `moduleInitForcesExternref` returns externref
+  for a runtime-computed-key literal (mirrors the function-local
+  `resolveSpillLocalValType`, variables.ts).
+- `src/codegen/literals.ts` — export `_hasRuntimeComputedKey`.
+
+Both guards fire ONLY on shapes that were ALWAYS invalid Wasm before (a
+type-mismatch that can't validate), so **no previously-valid module changes**
+(byte-inert). `narrow-A` confirms literal-computed-key `[1]` cases stay on the
+struct path.
+
+#### Proofs
+
+- **17 real run-pass gains** + 8 CE→fail (valid Wasm now; fail on DISTINCT
+  semantics — proxy-keys, put-const/let, symbol computed keys,
+  frozen/sealed/non-extensible `Object.assign` — improvements, not regressions).
+- Full 587-candidate re-harvest: 97 → 72, exactly these 25, **0 new invalid
+  signatures**.
+- **Standalone lane (criterion #2):** the 25 fixed files also validate on
+  `--target standalone` (21 pass + 4 valid-but-fail); the only invalid remaining
+  are the 2 deferred class files (invalid on BOTH lanes, untouched). Both guards
+  are lane-agnostic and fire only on already-invalid shapes → no new standalone
+  invalid.
+- Adjacent suites green (61 tests): issue-2602-forof-assign-rest, computed-props,
+  issue-2804 (spread host path), issue-3024/-incdec-element/-packed-array-dstr,
+  issue-2934, issue-3241, issue-1128-dstr-tdz.
+- New `tests/issue-3024-module-global-slot-desync.test.ts` (5 tests) passes.
+
+#### Still open (roll forward — NOT this PR)
+
+- The 2 `class ident-name-method-def-new-escaped` files
+  (`global.set expected (ref null T), found call f64`) — a class-expression-to-
+  global desync, distinct root cause.
+- The remaining ~72 default-lane invalid-Wasm files: the per-root-cause
+  singletons in the map above (`not enough arguments on the stack for call`
+  iterator/super, `struct.get (ref null T)` RangeError/DataView, `f64.add/sub`
+  ++/-- on boolean(i32)/bigint(i64) globals, Uint8Array toBase64/toHex,
+  `__closure` toLocaleString, `__closure_24` fallthru).

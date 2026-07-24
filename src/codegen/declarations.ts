@@ -33,6 +33,7 @@ import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized ow
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { compileFunctionBody, registerInlinableFunction } from "./function-body.js";
+import { _hasRuntimeComputedKey } from "./literals.js"; // (#3024) module-global externref routing for runtime-computed-key literals
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import {
   addArrayIteratorImports,
@@ -1299,6 +1300,17 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const widened = ctx.widenedTypeProperties.get(name);
       if ((!widened || widened.length === 0) && !ctx.shapeMap.has(name)) return true;
     }
+    // (#3024) A literal with a RUNTIME computed key (`[expr]` that neither folds
+    // to a compile-time string nor names a well-known Symbol — e.g.
+    // `{ a: 'A', [foo()]: 'B' }`) is built as a host `$Object` (externref) by the
+    // literals.ts routing (`_hasRuntimeComputedKey`, compileObjectLiteral). The
+    // receiving module GLOBAL must be externref to match; otherwise the externref
+    // is stored into a struct-typed global (`global.set expected (ref null N),
+    // found externref` — invalid Wasm) and the read side's `extern.convert_any`
+    // is likewise invalid on the struct slot. Mirrors the function-local sites
+    // (statements/variables.ts `resolveSpillLocalValType`), keeping the module
+    // global in lockstep with the same routing predicate.
+    if (_hasRuntimeComputedKey(ctx, decl.initializer)) return true;
     for (const p of decl.initializer.properties) {
       if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) return true;
       if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
