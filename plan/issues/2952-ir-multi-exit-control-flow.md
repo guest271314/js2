@@ -486,3 +486,18 @@ auto-park rule (c), a confirmed flake/collateral may be re-admitted.
 Remove the `hold` and let `auto-enqueue` re-admit #2596 (do NOT re-enqueue by
 hand). No branch change is required. Escalated to the tech lead for the
 label removal per auto-park protocol.
+
+## Review (Fable, 2026-07-24)
+
+Priority escalation recommended (2026-07-24 IR-migration review,
+`plan/agent-context/fable-ir-review-2026-07-24.md` §4): this issue is on the
+**critical path of #3518's R9 fail-closed flip** — a compiler that hard-fails
+`switch`, labeled break/continue, and `for-in` cannot flip IR-only — yet it
+is `ready`/unstarted since 2026-07-02 and is NOT in the R1–R8 dependency
+spine. Its structural work (Design A: label ids on nested-buffer nodes +
+`IrInstrBrLabel`/`IrInstrBrTable`) depends on neither R1 (#3520) nor R2
+(#3521), so it can proceed **now, in parallel** with the spine. Note that
+slices 1–2 have partially landed (unlabeled break/continue + do-while are
+`mixed` in the adoption matrix); the remaining scope is labeled forms
+(slice 3), `SwitchStatement`, and `ForInStatement`. Suggested first step:
+the architect-spec slice picking Design A vs B, then dispatch.

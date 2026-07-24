@@ -6819,6 +6819,14 @@ function compileArrayDefaultToStringSort(
 ): ValType | null {
   const isNumeric = elemType.kind === "f64" || elemType.kind === "i32";
   const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0;
+  // (#3579) HOST default sort only supports numeric or externref (boxed-any /
+  // js-string) elements. A ref/ref_null (struct) element cannot flow into the
+  // `string_compare(externref, externref)` host import, so bail to the caller's
+  // no-op rather than emit an invalid `string_compare(ref struct, …)`. (Native
+  // mode already bailed above for the externref case.)
+  if (!native && !isNumeric && elemType.kind !== "externref") {
+    return null;
+  }
 
   // #2379 — in NATIVE-string mode this ToString sort's non-numeric branch
   // `ref.cast`s each `array.get` element to `$AnyString` (see `stringifyTail`),
@@ -6842,6 +6850,18 @@ function compileArrayDefaultToStringSort(
   let compareIdx: number | undefined;
   let numToStrIdx: number | undefined;
   let anyStrTypeIdx = -1;
+  // (#3579) HOST mode, non-numeric (boxed-`any`/externref element) branch: the
+  // element must be ToString'd via the runtime `__extern_toString` before the
+  // string comparison. Previously `stringifyTail` assumed the element was ALREADY
+  // a string (`ref.as_non_null` only) — true for `string[]` but NOT for an
+  // `any[]` whose elements are boxed numbers/undefined, so `string_compare` on
+  // raw boxed values could not order them and the default sort silently no-op'd
+  // (`[10,9,1].sort()` on an untyped array stayed unordered). `__extern_toString`
+  // is the SAME runtime primitive `emitToString`'s dynamic branch wraps and is
+  // already used directly in this file (compileArrayJoinExtern); reusing it needs
+  // no `ts.Type`/checker query. Ensured BEFORE the `string_compare` funcMap lookup
+  // so the captured `compareIdx` reflects any import-insertion index shift.
+  let externToStrIdx: number | undefined;
   if (native) {
     ensureNativeStringHelpers(ctx);
     anyStrTypeIdx = ctx.anyStrTypeIdx;
@@ -6852,8 +6872,13 @@ function compileArrayDefaultToStringSort(
       numToStrIdx = ctx.funcMap.get("number_toString");
     }
   } else {
-    compareIdx = ctx.funcMap.get("string_compare");
     cmpStrType = { kind: "externref" };
+    if (!isNumeric) {
+      externToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (externToStrIdx === undefined) return null;
+    }
+    compareIdx = ctx.funcMap.get("string_compare");
     if (isNumeric) numToStrIdx = ctx.funcMap.get("number_toString");
   }
   if (compareIdx === undefined || (isNumeric && numToStrIdx === undefined)) {
@@ -6891,6 +6916,19 @@ function compileArrayDefaultToStringSort(
   // Stringify an element value (already on the stack as elemType) to cmpStrType.
   const stringifyTail = (): Instr[] => {
     if (!isNumeric) {
+      if (!native && externToStrIdx !== undefined && elemType.kind === "externref") {
+        // (#3579) HOST boxed-`any`/string element → runtime ToString before the
+        // string comparison. A real string passes through (`ToString(str)===str`);
+        // a boxed number/undefined is stringified ("10"/"undefined"), so an
+        // untyped-array default sort orders by ToString per §23.1.3.30 instead of
+        // no-op'ing. Pass the RAW (nullable) externref straight to
+        // `__extern_toString` — it handles null (`String(null)`→"null"), so a
+        // `new Array(N)` all-holes array must NOT be `ref.as_non_null`'d first
+        // (that traps on the null holes; #2502 regression). Only the externref
+        // (boxed-any) element kind is retargeted — every other kind keeps its
+        // exact prior lowering (no regression surface).
+        return [{ op: "call", funcIdx: externToStrIdx }];
+      }
       // String element: ensure non-null, and (native) cast NativeString → AnyString.
       const out: Instr[] = [{ op: "ref.as_non_null" }];
       if (native) out.push({ op: "ref.cast", typeIdx: anyStrTypeIdx });
