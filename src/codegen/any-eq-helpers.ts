@@ -10,24 +10,47 @@
  * environment is unchanged (prove-emit-identity across gc/standalone/wasi). The
  * standalone/wasi-gated reference-identity reconciliation (#2175 V2-S3) inside
  * `__any_strict_eq` moves verbatim WITH its `ctx.standalone || ctx.wasi` guard.
+ *
+ * The loose-eq and strict-eq(+relational) registrars are split into two private
+ * functions (each < the #3400 per-function LOC ceiling) so the decomposition
+ * does not merely relocate the god-code into one new large function; the exported
+ * `registerAnyEqHelpers` calls them in the SAME registration order
+ * (eq -> strict_eq -> lt -> gt -> le -> ge), preserving funcIdx assignment.
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 
+/** The `ensureAnyHelpers` `addHelper` closure, threaded in as a callback. */
+type AddHelper = (
+  name: string,
+  params: ValType[],
+  results: ValType[],
+  body: Instr[],
+  locals?: { name: string; type: ValType }[],
+) => void;
+
 /**
- * (#3282 slice) The equality & relational-comparison operators over `$AnyValue`.
- * Registration order (eq → strict_eq → lt → gt → le → ge) is preserved exactly,
- * so funcIdx assignment — and therefore the emitted Wasm — is unchanged.
+ * (#3282 slice) Register the equality & relational-comparison operators over
+ * `$AnyValue`. Order (eq -> strict_eq -> lt -> gt -> le -> ge) is preserved
+ * exactly, so funcIdx assignment — and the emitted Wasm — is unchanged.
  */
 export function registerAnyEqHelpers(
   ctx: CodegenContext,
-  addHelper: (
-    name: string,
-    params: ValType[],
-    results: ValType[],
-    body: Instr[],
-    locals?: { name: string; type: ValType }[],
-  ) => void,
+  addHelper: AddHelper,
+  anyRefNull: ValType,
+  anyTypeIdx: number,
+  toF64Idx: number,
+  strToNumIdx: number,
+  tag5ToNumber: (opIdx: number) => Instr[],
+  tag5ValueEqThen: () => Instr[],
+): void {
+  registerAnyLooseEqHelper(addHelper, anyRefNull, anyTypeIdx, toF64Idx, strToNumIdx, tag5ToNumber, tag5ValueEqThen);
+  registerAnyStrictEqAndComparisonHelpers(ctx, addHelper, anyRefNull, anyTypeIdx, toF64Idx, tag5ValueEqThen);
+}
+
+/** Loose equality (`==`, §7.2.15): `__any_eq`. */
+function registerAnyLooseEqHelper(
+  addHelper: AddHelper,
   anyRefNull: ValType,
   anyTypeIdx: number,
   toF64Idx: number,
@@ -294,7 +317,17 @@ export function registerAnyEqHelpers(
       { name: "anyB", type: { kind: "anyref" } },
     ],
   );
+}
 
+/** Strict equality (`===`) + relational comparisons (`<`,`>`,`<=`,`>=`). */
+function registerAnyStrictEqAndComparisonHelpers(
+  ctx: CodegenContext,
+  addHelper: AddHelper,
+  anyRefNull: ValType,
+  anyTypeIdx: number,
+  toF64Idx: number,
+  tag5ValueEqThen: () => Instr[],
+): void {
   // __any_strict_eq(a, b) -> i32
   // Strict equality (===): different tags always return 0 (no cross-type coercion). (#296)
   addHelper(
