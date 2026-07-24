@@ -843,3 +843,52 @@ NOT the "quick per-root-cause singleton" this issue's residual was framed as.
 Confirmed repro for the next owner: `[assert.js, sta.js, nativeFunctionMatcher.js,
 <any toString test>]` OR the raw `nativeFunctionMatcher.js` with NO exported
 function. Suggest routing to `senior-developer`.
+
+---
+
+## Landed: iterator next/return dispatcher missing-arg pad (agent-a3fa3add / Opus 4.8, 2026-07-24)
+
+**PR:** `issue-3024-iterator-super-arity` — clears the **8-file
+`__call_next`/`__call_return` arity sub-cluster** (`not enough arguments on the
+stack for call (need 2, got 1)`).
+
+### Root cause (verified — minimal repro)
+
+`emitMethodDispatch` (`src/codegen/index.ts`) generates the module-level
+iterator-protocol dispatchers `__call_next`/`__call_return`
+(`(externref) -> externref`). For each user struct with a `<struct>_next` /
+`<struct>_return` method it emitted `local.get; ref.cast; call <method>` — passing
+ONLY the receiver. A user iterator method with a formal parameter
+(`next(value) {…}` / `return(value) {…}`) has an EXTRA wasm param (receiver +
+value), so the call was one argument short → `not enough arguments on the stack
+for call (need 2, got 1)` = invalid Wasm. Parameterless `next()`/`return()` were
+fine (1 param, 1 arg).
+
+Minimal repro (default gc lane → invalid): a class with
+`next(v) { … }` + `[Symbol.iterator]() { return this; }` used in a for-of.
+`next()` control (no param) → VALID.
+
+### Fix (`index.ts`, `emitMethodDispatch`)
+
+The dispatcher structurally represents a protocol call with NO value argument
+(its own signature is `(externref) -> externref`), so pad each param beyond the
+receiver with the "missing trailing arg" default: real host `undefined` for an
+externref (untyped-JS) value param when `__get_undefined` is already imported
+(else `ref.null.extern`, byte-identical standalone); the f64 sNaN sentinel /
+typed zero otherwise — matching the normal missing-arg convention. Byte-inert for
+parameterless iterator methods (the common case: `extraParams = []` → no change).
+
+### Proofs / honest measurement
+
+- Repro: `next(v)`, `return(v)` → VALID (were invalid); `next()` control unchanged.
+- All 8 `__call_next`/`__call_return` test262 files flip **invalid-Wasm → valid**
+  (CE eliminated). They now **`fail` on DISTINCT feature gaps** — Iterator.zip
+  null-deref, AsyncFromSyncIterator promise handling — NOT a pass gain (0 new
+  passes; this is a CE-elimination slice like the #3024 packed-array slice).
+- Full 587-candidate re-harvest: 72 → 64 invalid-Wasm, exactly these 8, 0 new
+  signatures. Standalone re-check: no new invalid.
+
+### Still open (roll forward — distinct root causes, NOT this PR)
+
+- `super.x` in a static method (`C_method`, 1 file) and `DisposableStack.move`
+  (`__closure_9`, 1 file) — separate arity mechanisms, not the dispatcher.
