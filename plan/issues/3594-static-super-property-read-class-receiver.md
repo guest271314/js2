@@ -1,5 +1,5 @@
 ---
-id: 3589
+id: 3594
 title: "codegen: static `super.<prop>` reads model no receiver — static members are compiled instance-shaped (silent 0 for fields, invalid Wasm for getters)"
 status: ready
 sprint: current
@@ -24,7 +24,7 @@ loc-budget-allow:
   - src/codegen/expressions/new-super.ts
 ---
 
-# #3589 — static `super.<prop>` reads have no receiver to pass
+# #3594 — static `super.<prop>` reads have no receiver to pass
 
 Split out of the #3024 umbrella while landing the static-super **call-arity**
 fix (`compileSuperMethodCallCore`, branch `issue-3024-static-super-arity`). That
@@ -150,3 +150,17 @@ Whoever fixes this **must update both** to assert the correct values (`13` and
   slice, this is a **general correctness bug** — any `super.<prop>` in a static
   method is affected. Measure the corpus footprint with denominators before
   claiming a number.
+
+## Note — renumbered from #3589
+
+Originally filed as **#3589**, which collided with
+`plan/issues/3589-assert-harness-null-deref-unmasked-by-3563.md` (PR #3582,
+merged first — id reserved on `origin/issue-assignments` at
+2026-07-24T22:30:26Z, ~5 min before this branch's PR was opened). The collision
+was caught by the `--check` duplicate-id gate in the `merge_group`, which
+auto-parked PR #3581 with a `hold`.
+
+Renumbered to **#3594** (fresh id via `claim-issue.mjs --allocate`) by the
+PR-queue shepherd, since the authoring session was unreachable. Purely
+mechanical: file rename plus the `id:` frontmatter and the heading. No other
+file referenced this id, and no source, test or expectation was touched.
