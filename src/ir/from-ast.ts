@@ -3571,7 +3571,16 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   }
   // TypedArray views need the legacy per-view value conversions.
   if (cx.resolver?.isTypedArrayViewExpr?.(lhs.expression)) {
-    throw new Error(`ir/from-ast: element store on a TypedArray view not in IR scope (${cx.funcName})`);
+    // (#3565) DESIGNED demote (see this function's doc: "Demotes (clean throw →
+    // legacy) for: TypedArray-view receivers"). Typed UNSUPPORTED so the plain
+    // `throw new Error` is not classified as the untyped `unexpected-internal-throw`
+    // invariant that #3341/#3519 hard-error — a selector-claimed function with a
+    // TypedArray element store must fall back to the legacy body, not fail compile.
+    throw new IrUnsupportedError(
+      "element-store-unsupported",
+      "build",
+      `ir/from-ast: element store on a TypedArray view not in IR scope (${cx.funcName})`,
+    );
   }
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
@@ -3790,7 +3799,15 @@ function lowerElementAccess(expr: ts.ElementAccessExpression, cx: LowerCtx): IrV
     }
   }
 
-  throw new Error(
+  // (#3565) DESIGNED slice-12 residual demote — an element READ on a
+  // receiver/index shape not yet in IR scope (e.g. `extern<HTMLCollection>[i]`)
+  // must fall back to the legacy body. Typed UNSUPPORTED so it is not classified
+  // as the untyped `unexpected-internal-throw` invariant that #3341/#3519
+  // hard-error. (The internal `produced no value` / `unexpected IrType` throws
+  // above are genuine invariants — they stay plain `Error` → hard.)
+  throw new IrUnsupportedError(
+    "element-access-unsupported",
+    "build",
     `ir/from-ast: element access on ${describeIrType(recvType)} with index ${ts.SyntaxKind[arg.kind]} not in slice 12 (${cx.funcName})`,
   );
 }
@@ -6701,7 +6718,18 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
   const rhsValue = lowerExpr(rhs, cx, binding.type);
   const rhsType = cx.builder.typeOf(rhsValue);
   if (asVal(rhsType)?.kind !== "f64") {
-    throw new Error(`ir/from-ast: compound assign RHS must be f64 (got ${describeIrType(rhsType)}) in ${cx.funcName}`);
+    // (#3565) DESIGNED demote: the f64 slot is fine, but the RHS lowered to a
+    // non-f64 (e.g. an externref value yielded by a generator in `s += v`). The
+    // numeric coercion is legacy-only, so this is a not-yet-adopted construct,
+    // NOT a builder↔finalize desync. Typed UNSUPPORTED so it demotes to the
+    // legacy body instead of the untyped `unexpected-internal-throw` invariant
+    // #3341/#3519 hard-error (measured casualty: tests/issue-2079 — legacy
+    // compiles+runs =3). The f64-slot/string-append arms above are unaffected.
+    throw new IrUnsupportedError(
+      "compound-assign-unsupported",
+      "build",
+      `ir/from-ast: compound assign RHS must be f64 (got ${describeIrType(rhsType)}) in ${cx.funcName}`,
+    );
   }
 
   let binop: IrBinop;

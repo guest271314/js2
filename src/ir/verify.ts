@@ -161,6 +161,17 @@ export interface IrVerifyError {
   readonly message: string;
   readonly func: string;
   readonly block?: number;
+  /**
+   * (#3565) When true, this verify error is a DESIGNED demote-to-legacy signal,
+   * not a compiler invariant — the integration layer classifies it as
+   * `unsupported` (warning → keep legacy body) rather than the hard `invariant`
+   * that #3341/#3519 promoted. Set ONLY on the #1798 return-value gate
+   * (return/early.return arity + type mismatch), whose whole purpose is to
+   * demote a function that would otherwise emit invalid Wasm. Every other verify
+   * error (SSA scope, dominance, branch/instr type rules, block-id shape) is a
+   * genuine invalid-IR invariant and stays a hard error.
+   */
+  readonly demote?: boolean;
 }
 
 export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
@@ -234,6 +245,7 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
         message: `return arity ${t.values.length} != declared result arity ${func.resultTypes.length}`,
         func: func.name,
         block: block.id as number,
+        demote: true, // (#3565) #1798 gate — DESIGNED demote-to-legacy, not an invariant
       });
       continue;
     }
@@ -248,6 +260,7 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
             `result ${describeKind(declared)}`,
           func: func.name,
           block: block.id as number,
+          demote: true, // (#3565) #1798 gate — DESIGNED demote-to-legacy, not an invariant
         });
       }
     }
@@ -267,6 +280,7 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
             message: `early.return arity ${arity} != declared result arity ${func.resultTypes.length}`,
             func: func.name,
             block: block.id as number,
+            demote: true, // (#3565) #1798 gate — DESIGNED demote-to-legacy, not an invariant
           });
           return;
         }
@@ -280,6 +294,7 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
               `result ${describeKind(func.resultTypes[0]!)}`,
             func: func.name,
             block: block.id as number,
+            demote: true, // (#3565) #1798 gate — DESIGNED demote-to-legacy, not an invariant
           });
         }
       });
