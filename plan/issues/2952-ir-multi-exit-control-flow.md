@@ -324,9 +324,9 @@ frames already use. That plus `labeled.block` for non-loop labels and
   try-finally-break probes all pass (core-Wasm `br` is backend-identical).
 - Wider equivalence sweep (11 loop-relevant suites, 158 tests): 87 pass;
   all 71 fails verified PRE-EXISTING on current origin/main (70 × the
-  `__unbox_number` harness import-stub gap in tests/ir-*-equivalence — the
+  `__unbox_number` harness import-stub gap in tests/ir-\*-equivalence — the
   same gap slice 1 documented; 1 × arguments-capture `expected 30 to be
-  33` in arguments-nested-and-loops) — reproduced identically on main.
+33` in arguments-nested-and-loops) — reproduced identically on main.
 
 ## Test Results (slice 1)
 
@@ -380,7 +380,7 @@ a single changed path.
    path the merge_group uses) scoped to the 4 files at HEAD: **4 pass / 4
    (100%)**.
 4. **Full do-while blast radius neutral**: 113 drivable test262 do-while tests
-   have *identical outcomes* at merge-base vs HEAD (24 COMPILE_FAIL, 56 OK, 25
+   have _identical outcomes_ at merge-base vs HEAD (24 COMPILE_FAIL, 56 OK, 25
    WASM_EXN — all pre-existing break/continue/negative cases, unchanged). No
    do-while test's status flips, so the IR do-while lowering is
    behaviour-equivalent to the direct path and does not poison any worker.
@@ -402,3 +402,18 @@ auto-park rule (c), a confirmed flake/collateral may be re-admitted.
 Remove the `hold` and let `auto-enqueue` re-admit #2596 (do NOT re-enqueue by
 hand). No branch change is required. Escalated to the tech lead for the
 label removal per auto-park protocol.
+
+## Review (Fable, 2026-07-24)
+
+Priority escalation recommended (2026-07-24 IR-migration review,
+`plan/agent-context/fable-ir-review-2026-07-24.md` §4): this issue is on the
+**critical path of #3518's R9 fail-closed flip** — a compiler that hard-fails
+`switch`, labeled break/continue, and `for-in` cannot flip IR-only — yet it
+is `ready`/unstarted since 2026-07-02 and is NOT in the R1–R8 dependency
+spine. Its structural work (Design A: label ids on nested-buffer nodes +
+`IrInstrBrLabel`/`IrInstrBrTable`) depends on neither R1 (#3520) nor R2
+(#3521), so it can proceed **now, in parallel** with the spine. Note that
+slices 1–2 have partially landed (unlabeled break/continue + do-while are
+`mixed` in the adoption matrix); the remaining scope is labeled forms
+(slice 3), `SwitchStatement`, and `ForInStatement`. Suggested first step:
+the architect-spec slice picking Design A vs B, then dispatch.
