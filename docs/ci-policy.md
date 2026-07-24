@@ -171,6 +171,52 @@ Two test262 workflows currently run on PRs:
 For one-off sharded runs outside the normal PR/merge_group path,
 `workflow_dispatch` is the supported entry point.
 
+### Merge-queue wedge recovery — manual, one-shot only (#3456)
+
+GitHub's merge queue has a rare silent-wedge failure mode: the head entry
+sits in `AWAITING_CHECKS`, the synthetic
+`gh-readonly-queue/main/pr-<N>-<sha>` branch exists, but the `merge_group`
+workflow runs are never created (webhooks silently don't fire). Nothing
+self-heals for ~3h (entry timeout), and the next head often wedges the same
+way.
+
+**There is no automated unsticker.** The old `queue-unstick.yml` /
+`scripts/unstick-merge-queue.mjs` cron re-enqueued a "wedged" head
+automatically, but **a dequeue + re-enqueue rebuilds the merge group and
+CANCELS the in-flight `merge_group` run** (memory
+`project_merge_queue_requeue_cancels_run`). Even with its gates (12-min
+stall + de-alias + a zero-`merge_group`-runs guard) the loop still produced
+sustained cancellation churn during the 2026-07-18/19 recovery-PR drain — a
+false-wedge detection cancels a live run, the head re-wedges, and it fires
+again. It was removed in #3456. `auto-enqueue.yml` (grace 0) is the
+responsive enqueuer; the shepherd/cron sweep is the backstop.
+
+**Recovery for a genuinely dangling head** (confirmed `AWAITING_CHECKS`
+with **zero** `merge_group` runs for its SHA for >12 min) is a **single,
+manual, human/shepherd-initiated kick — never a loop**:
+
+```bash
+# Confirm the head is dangling first: AWAITING_CHECKS + zero merge_group runs.
+gh api graphql -f query='{repository(owner:"loopdive",name:"js2wasm"){
+  mergeQueue(branch:"main"){entries(first:5){nodes{
+    pullRequest{number id} state position enqueuedAt}}}}}'
+gh api 'repos/loopdive/js2wasm/actions/runs?event=merge_group&per_page=20' \
+  -q '.workflow_runs[].head_branch'   # look for /pr-<N>-
+
+# If dangling, dequeue + re-enqueue ONCE (App/user token, not GITHUB_TOKEN —
+# a bot-token re-enqueue does not fire merge_group runs). Never repeat this
+# in a loop; a push to main also rebuilds groups if this does not take.
+PRID=<node-id-from-above>
+gh api graphql -f query="mutation{dequeuePullRequest(input:{id:\"$PRID\"}){clientMutationId}}"
+sleep 8
+gh api graphql -f query="mutation{enqueuePullRequest(input:{pullRequestId:\"$PRID\"}){clientMutationId}}"
+```
+
+If a single kick does not re-fire the runs, the historical last resort is
+admin-merging a few green low-risk PRs (repeated pushes to `main` rebuild
+all groups on fresh bases) — **not** a ruleset disable/re-enable, which can
+deepen the wedge. See the `project_dev_session_infra_gotchas` fix ladder.
+
 ### Both lanes are gated — host AND standalone (#1897)
 
 The 57-shard matrix runs **two** test262 targets per chunk: `js-host` (the
