@@ -193,6 +193,22 @@ jobs:
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
           pnpm run check:loc-budget
 
+      - name: Per-function LOC-ceiling ratchet (#3400 / R-FUNC)
+        # Function-granularity twin of check:loc-budget (#3102 slice 2): the same
+        # change-scoped, shrink-only ratchet, but keyed on FUNCTIONS over 300 LOC
+        # (measured via the TS AST). FAILS when this change-set grows a function
+        # already over 300 at its base, newly pushes one over 300, or adds a
+        # brand-new over-300 function. Grandfathers the 185-entry baseline —
+        # demands zero refactoring to land; #3108/#3111 shrink entries and the
+        # post-merge --update-on-decrease banks each drop. Intentional growth is
+        # granted per change-set via a `func-budget-allow:` frontmatter key in
+        # this PR's own plan/issues/*.md. The committed baseline
+        # (scripts/func-budget-baseline.json) is NOT read on this path and PRs
+        # must NOT commit changes to it.
+        run: |
+          git fetch --no-tags --depth=200 origin main 2>/dev/null || true
+          pnpm run check:func-budget
+
       - name: IR adoption table freshness (#2145)
         # Fails when plan/log/ir-adoption.md drifts from its generator data or
         # from the IrFallbackReason union in src/ir/select.ts. Regenerate with

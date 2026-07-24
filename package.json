@@ -104,6 +104,7 @@
     "check:oracle-ratchet": "node scripts/check-oracle-ratchet.mjs",
     "check:pushraw": "node scripts/check-pushraw.mjs",
     "check:loc-budget": "node scripts/check-loc-budget.mjs",
+    "check:func-budget": "node scripts/check-func-budget.mjs",
     "check:dead-exports": "node scripts/audit-legacy-reachability.mjs --check",
     "check:godfiles": "node scripts/profile-godfiles.mjs --check",
     "profile:godfiles": "node scripts/profile-godfiles.mjs",
