@@ -534,6 +534,12 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
   const L_TEXP = 16; // i32: total decimal exponent (expSign*exp + intDrop - fracCount)
   const L_POW = 17; // f64: 10^|totalExp|
   const L_INTDROP = 18; // i32: integer digits dropped past the ~15-sig-digit cap
+  // (#3570) i32: 1 iff an explicit '+'/'-' sign char was consumed. A
+  // NonDecimalIntegerLiteral (0x/0o/0b) is INVALID with any leading sign
+  // (§7.1.4.1), so `Number('+0x10')`/`Number('-0x10')` must be NaN. The old
+  // radix guard keyed on `sign==1`, which admits the '+' case (it leaves
+  // sign=+1); this flag distinguishes "no sign" from "explicit +".
+  const L_SAWSIGN = 19;
 
   const getC: Instr[] = [
     { op: "local.get", index: L_DATA },
@@ -644,6 +650,8 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
       then: [
         { op: "f64.const", value: -1 },
         { op: "local.set", index: L_SIGN },
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: L_SAWSIGN },
         { op: "local.get", index: L_I },
         { op: "i32.const", value: 1 },
         { op: "i32.add" },
@@ -657,6 +665,8 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
           op: "if",
           blockType: { kind: "empty" },
           then: [
+            { op: "i32.const", value: 1 },
+            { op: "local.set", index: L_SAWSIGN },
             { op: "local.get", index: L_I },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
@@ -675,7 +685,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
     //     original start with sign==1; to keep it simple we allow it whenever
     //     two chars remain — sign already shifted i, and a signed 0x is NaN per
     //     spec, so guard on sign==1. ---
-    ...emitRadixPrefixParse(L_I, L_END, L_DATA, L_C, L_SIGN, L_RADIX, L_DIG, L_RESULT, L_SAW, strDataTypeIdx),
+    ...emitRadixPrefixParse(L_I, L_END, L_DATA, L_C, L_SAWSIGN, L_RADIX, L_DIG, L_RESULT, L_SAW, strDataTypeIdx),
 
     // --- decimal mantissa ---
     { op: "i64.const", value: 0n },
@@ -879,6 +889,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
       { name: "texp", type: i32 },
       { name: "pow", type: f64 },
       { name: "intDrop", type: i32 },
+      { name: "sawSign", type: i32 },
     ],
     body,
     exported: false,
@@ -947,7 +958,7 @@ function emitRadixPrefixParse(
   L_END: number,
   L_DATA: number,
   L_C: number,
-  L_SIGN: number,
+  L_SAWSIGN: number,
   L_RADIX: number,
   L_DIG: number,
   L_RESULT: number,
@@ -1050,10 +1061,13 @@ function emitRadixPrefixParse(
   ];
   void L_SAW;
   return [
-    // guard: sign==1 (no sign consumed) && i+1 < end && data[i]=='0'
-    { op: "local.get", index: L_SIGN },
-    { op: "f64.const", value: 1 },
-    { op: "f64.eq" },
+    // guard: NO sign char consumed (sawSign==0) && i+1 < end && data[i]=='0'.
+    // (#3570) A NonDecimalIntegerLiteral admits no leading sign, so both
+    // '+0x10' and '-0x10' must fall through to the decimal scanner → NaN. The
+    // old `sign==1` test let '+' through (it leaves sign=+1); keying on the
+    // explicit sawSign flag rejects both signs.
+    { op: "local.get", index: L_SAWSIGN },
+    { op: "i32.eqz" },
     { op: "local.get", index: L_I },
     { op: "i32.const", value: 1 },
     { op: "i32.add" },
