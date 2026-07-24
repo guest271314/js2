@@ -24,6 +24,8 @@ loc-budget-allow:
   - src/codegen/expressions/calls-closures.ts
   - src/codegen/statements/for-of-destructuring.ts
   - src/codegen/declarations.ts
+func-budget-allow:
+  - src/codegen/declarations.ts::collectDeclarations
 ---
 
 # #3024 — invalid Wasm binary emission residual (default lane)
