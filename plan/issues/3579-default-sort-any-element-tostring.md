@@ -15,6 +15,15 @@ language_feature: array-methods
 goal: builtin-methods
 umbrella: 3185
 related: [3185, 3201, 2502, 3251]
+# (#3102 LOC ratchet) The host ToString-sort fix adds the boxed-any stringify
+# arm to compileArrayDefaultToStringSort (array-methods.ts, +38) and the any/
+# union sort-import registration to the import-collector (+18) — both behavioral
+# arms in existing god-files, not a new subsystem. Grant this change-set the
+# allowance. NOTE: block list — the gate's parseFrontmatterList does not read a
+# multi-line flow array.
+loc-budget-allow:
+  - src/codegen/array-methods.ts
+  - src/codegen/declarations/import-collector.ts
 origin: "2026-07-24 #3201 measurement — contained default-sort slice split out of #3201"
 ---
 
