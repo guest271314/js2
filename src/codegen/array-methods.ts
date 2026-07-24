@@ -7,7 +7,7 @@
  * shared.ts (NOT expressions.ts) to avoid circular dependencies.
  */
 import { ts } from "../ts-api.js";
-import { isBooleanType, isStringType } from "../checker/type-mapper.js";
+import { isBooleanType, isStringType, isVoidType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
@@ -19,8 +19,10 @@ import {
   addStringImports,
   addUnionImports,
   resolveWasmType,
+  resolveWasmTypeForClosureReturn,
   typedArrayPackedSignedness,
 } from "./index.js";
+import { getClosureFuncSelfTypeIdx, getOrCreateFuncRefWrapperTypes } from "./closures/funcref-wrapper-types.js";
 import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
 import { emitTypedArraySetBoundsCheck } from "./typed-array-set-bounds.js";
@@ -59,7 +61,7 @@ import { emitNativeNumberFormat } from "./number-format-native.js";
 import { ensureNativeArrayHof } from "./hof-native.js";
 import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
-import { coerceType, coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
+import { coerceType, coercionInstrs, defaultValueInstrs, emitGuardedRefCast } from "./type-coercion.js";
 
 // (#3264) Array.prototype-borrow subsystem extracted to array-prototype-borrow.ts;
 // re-export the two public entries so existing importers keep resolving.
@@ -4709,6 +4711,54 @@ function compileThisArg(
 }
 
 /**
+ * (#3015) Resolve the canonical funcref-wrapper closure for a DYNAMIC
+ * function-typed callback value that compiled to an opaque `externref` — i.e. a
+ * function PARAMETER (`function run(cb){ return arr.some(cb); }`), the one
+ * callback shape that still routed through the `__call_1_*` / `__call_2_*` host
+ * bridge. In standalone (host-free) mode that import makes the module
+ * non-instantiable, so those tests never ran.
+ *
+ * The value IS a wasm closure struct at runtime (the caller passed an arrow /
+ * function value), so we recover a native `call_ref` by resolving the
+ * callback SIGNATURE's canonical wrapper via `getOrCreateFuncRefWrapperTypes` —
+ * the SAME cache-keyed wrapper the arrow value-site registers, so the runtime
+ * closure struct (a subtype of the wrapper root) casts and calls cleanly. We
+ * return the `ClosureInfo` plus the lifted self carrier (the wrapper root) that
+ * the externref is cast to.
+ *
+ * Returns `undefined` (→ host-bridge fallback, unchanged) when the callback has
+ * no single resolvable call signature.
+ */
+function resolveDynamicCallbackClosure(
+  ctx: CodegenContext,
+  cbArg: ts.Expression,
+): { closureInfo: ClosureInfo; selfStructTypeIdx: number } | undefined {
+  // oracle-ratchet-allow (#3015): the wrapper cache key is a wasm-lowering
+  // ValType question (`resolveWasmType`), deliberately ABOVE `ctx.oracle`. This
+  // mirrors `compileArrowAsClosure`'s `computeClosureWrapperSig` lowering so the
+  // key MATCHES the arrow value-site's — they share the wrapper struct + func
+  // type, which is exactly what makes the runtime `ref.cast` + `call_ref` valid.
+  const cbType = ctx.checker.getTypeAtLocation(cbArg);
+  const sigs = cbType.getCallSignatures();
+  if (sigs.length !== 1) return undefined;
+  const sig = sigs[0]!;
+  const paramValTypes: ValType[] = [];
+  for (const p of sig.parameters) {
+    const loc = p.valueDeclaration ?? p.declarations?.[0] ?? cbArg;
+    paramValTypes.push(resolveWasmType(ctx, ctx.checker.getTypeOfSymbolAtLocation(p, loc)));
+  }
+  const retTsType = ctx.checker.getReturnTypeOfSignature(sig);
+  const results: ValType[] =
+    isVoidType(retTsType) || (retTsType.flags & ts.TypeFlags.Never) !== 0
+      ? []
+      : [resolveWasmTypeForClosureReturn(ctx, retTsType)];
+  const wrapper = getOrCreateFuncRefWrapperTypes(ctx, paramValTypes, results);
+  if (!wrapper) return undefined;
+  const selfStructTypeIdx = getClosureFuncSelfTypeIdx(ctx, wrapper.liftedFuncTypeIdx) ?? wrapper.structTypeIdx;
+  return { closureInfo: wrapper.closureInfo, selfStructTypeIdx };
+}
+
+/**
  * Compile the callback argument and set up either a closure (call_ref) path
  * or a host bridge fallback. Returns null if setup fails (error pushed).
  *
@@ -4742,6 +4792,32 @@ function setupArrayCallback(
     closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
     if (closureInfo) {
       closureTmp = allocLocal(fctx, `__arr_${tag}_clcb_${fctx.locals.length}`, cbResult);
+      fctx.body.push({ op: "local.set", index: closureTmp });
+    }
+  } else if (ctx.standalone && cbResult && cbResult.kind === "externref") {
+    // (#3015) Standalone: a dynamic function-typed callback value (a function
+    // PARAMETER, e.g. `arr.some(cb)`) arrives as an opaque externref and would
+    // otherwise route through the `__call_1_*`/`__call_2_*` host bridge — a
+    // host import that is not instantiable host-free. Recover a native
+    // `call_ref` via the callback signature's canonical funcref wrapper. Host
+    // mode is untouched (this branch is standalone-gated) and keeps the bridge
+    // as its fast path per the dual-mode principle.
+    const dyn = resolveDynamicCallbackClosure(ctx, cbArg);
+    if (dyn) {
+      closureInfo = dyn.closureInfo;
+      closureTypeIdx = dyn.selfStructTypeIdx;
+      // The externref callback value is on the stack: convert it to the wrapper
+      // self carrier and store a NON-NULL closure ref. The native invocation
+      // path (`buildClosureCallInstrs` / reduce) pushes `closureTmp` as the
+      // `call_ref` self argument, whose param type is `(ref root)` — non-null,
+      // matching the arrow branch's `(ref …)` `closureTmp`.
+      fctx.body.push({ op: "any.convert_extern" });
+      emitGuardedRefCast(fctx, dyn.selfStructTypeIdx);
+      fctx.body.push({ op: "ref.as_non_null" });
+      closureTmp = allocLocal(fctx, `__arr_${tag}_dyncb_${fctx.locals.length}`, {
+        kind: "ref",
+        typeIdx: dyn.selfStructTypeIdx,
+      });
       fctx.body.push({ op: "local.set", index: closureTmp });
     }
   }
