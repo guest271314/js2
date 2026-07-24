@@ -45,8 +45,10 @@ import {
   ensureTaDynCopyWithinHelper,
   ensureTaDynFillHelper,
   ensureTaDynReverseHelper,
+  ensureTaFromArrayLikeHelper,
   isDataViewAccessor,
 } from "../dataview-native.js";
+import { ensureNativeArrayFromIterN, ensureNativeArrayFromMapped } from "../iterator-native.js";
 import { tryCompileNativeGeneratorMethodCall } from "../generators-native.js";
 import { NATIVE_HOF_METHODS } from "../hof-native.js";
 import {
@@ -2696,6 +2698,118 @@ export function compileReceiverMethodCall(
           ensureDvAccessorHelper(ctx, methodName);
         }
         flushLateImportShifts(ctx, fctx);
+        // (#3177 slice 5) `%TypedArray%.of` / `%TypedArray%.from` STATIC methods
+        // on a `$__ta_ctor` receiver VALUE (the testWithTypedArrayConstructors
+        // harness shape: `TA.of(v0,…)` / `TA.from(src[, mapfn[, thisArg]])`).
+        // Runtime `ref.test $__ta_ctor` two-arm: a TA-constructor receiver builds
+        // a fresh same-kind dyn-view (`__ta_from_arraylike` over an indexable
+        // carrier — the packed `of` args as a `$ObjVec`, or the `from` source
+        // normalized via `__array_from_iter_n` / `__array_from_mapped`); ANY
+        // other runtime value (Array.of/from, user objects) falls through to the
+        // ordinary dispatcher, byte-identical to today. noJsHost + a live TA ctor
+        // type only, so host/gc and TA-free modules are inert.
+        if (noJsHost(ctx) && ctx.taCtorTypeIdx >= 0 && (methodName === "of" || methodName === "from")) {
+          const taFromIdx = ensureTaFromArrayLikeHelper(ctx);
+          if (taFromIdx !== undefined) {
+            // Receiver (the ctor value) → local.
+            const recvT2 = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+            if (recvT2 && recvT2.kind !== "externref") coerceType(ctx, fctx, recvT2, { kind: "externref" });
+            else if (recvT2 === null) fctx.body.push({ op: "ref.null.extern" });
+            const recvLocal = allocLocal(fctx, `__tastat_recv_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: recvLocal });
+            // Args → locals (evaluated once, spec order — the else arm reuses them).
+            const staticArgLocals: number[] = [];
+            for (const arg of dispatchArgs) {
+              const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+              if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+              else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+              const aLocal = allocLocal(fctx, `__tastat_arg_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: aLocal });
+              staticArgLocals.push(aLocal);
+            }
+            // THEN arm: build an indexable carrier, then __ta_from_arraylike(recv, carrier).
+            const thenArm: Instr[] = [];
+            {
+              const savedT = fctx.body;
+              fctx.body = thenArm;
+              const carrierLocal = allocLocal(fctx, `__tastat_carrier_${fctx.locals.length}`, { kind: "externref" });
+              if (methodName === "of") {
+                // Pack the of-args into a native `$ObjVec` (read by __extern_*).
+                const { newIdx, pushIdx } = ensureObjVecBuilders(ctx);
+                fctx.body.push({ op: "call", funcIdx: newIdx });
+                fctx.body.push({ op: "local.set", index: carrierLocal });
+                for (const aLocal of staticArgLocals) {
+                  fctx.body.push({ op: "local.get", index: carrierLocal });
+                  fctx.body.push({ op: "local.get", index: aLocal });
+                  fctx.body.push({ op: "call", funcIdx: pushIdx });
+                }
+              } else {
+                // from(src[, mapfn[, thisArg]]): normalize src (+ optional mapfn)
+                // to a carrier the array-like reader consumes. A present,
+                // non-nullish mapfn routes through __array_from_mapped (composes
+                // __array_from_iter_n + __hof_map); no/undefined mapfn drains via
+                // __array_from_iter_n directly.
+                const iterNIdx = ensureNativeArrayFromIterN(ctx);
+                const src = staticArgLocals[0];
+                if (src === undefined) {
+                  const { newIdx } = ensureObjVecBuilders(ctx);
+                  fctx.body.push({ op: "call", funcIdx: newIdx });
+                  fctx.body.push({ op: "local.set", index: carrierLocal });
+                } else if (dispatchArgs.length >= 2) {
+                  const mappedIdx = ensureNativeArrayFromMapped(ctx);
+                  const nullishIdx = ctx.funcMap.get("__nullish_to_null");
+                  const mapfn = staticArgLocals[1]!;
+                  const thisArg = staticArgLocals[2];
+                  const iterArm: Instr[] = [
+                    { op: "local.get", index: src },
+                    { op: "f64.const", value: -1 },
+                    { op: "call", funcIdx: iterNIdx },
+                    { op: "local.set", index: carrierLocal },
+                  ];
+                  if (mappedIdx !== undefined) {
+                    const mapArm: Instr[] = [
+                      { op: "local.get", index: src },
+                      { op: "local.get", index: mapfn },
+                      thisArg !== undefined ? { op: "local.get", index: thisArg } : { op: "ref.null.extern" },
+                      { op: "call", funcIdx: mappedIdx },
+                      { op: "local.set", index: carrierLocal },
+                    ];
+                    fctx.body.push({ op: "local.get", index: mapfn });
+                    if (nullishIdx !== undefined) fctx.body.push({ op: "call", funcIdx: nullishIdx });
+                    fctx.body.push({ op: "ref.is_null" });
+                    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: iterArm, else: mapArm });
+                  } else {
+                    for (const ins of iterArm) fctx.body.push(ins);
+                  }
+                } else {
+                  fctx.body.push({ op: "local.get", index: src });
+                  fctx.body.push({ op: "f64.const", value: -1 });
+                  fctx.body.push({ op: "call", funcIdx: iterNIdx });
+                  fctx.body.push({ op: "local.set", index: carrierLocal });
+                }
+              }
+              fctx.body.push({ op: "local.get", index: recvLocal });
+              fctx.body.push({ op: "local.get", index: carrierLocal });
+              fctx.body.push({ op: "call", funcIdx: taFromIdx });
+              fctx.body = savedT;
+            }
+            // ELSE arm: the ordinary dynamic dispatcher (recv + args), i.e. what
+            // this call site does today for these method names.
+            const elseArm: Instr[] = [{ op: "local.get", index: recvLocal }];
+            for (const aLocal of staticArgLocals) elseArm.push({ op: "local.get", index: aLocal });
+            elseArm.push({ op: "call", funcIdx: dispatchIdx });
+            fctx.body.push({ op: "local.get", index: recvLocal });
+            fctx.body.push({ op: "any.convert_extern" });
+            fctx.body.push({ op: "ref.test", typeIdx: ctx.taCtorTypeIdx });
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: thenArm,
+              else: elseArm,
+            });
+            return { kind: "externref" };
+          }
+        }
         // (#2872) A mutating `%TypedArray%.prototype` method on a receiver
         // that is a `$__ta_dyn_view` at RUNTIME (a dynamically-constructed TA
         // — `new TA([…]).fill(8, 1)` / `.copyWithin(0,2)` / `.reverse()` in
