@@ -4938,7 +4938,16 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   }
 
   if (recvType.kind !== "class") {
-    throw new Error(
+    // (#680) Typed as UNSUPPORTED (not a plain Error), mirroring the sibling
+    // property-write "not in slice 4" throw (~L5418). A plain Error here would
+    // classify as the untyped `unexpected-internal-throw` invariant, which
+    // #3341/#3519 promote to a hard compile error — that regressed a basic
+    // standalone `function* g(){ yield 1 }` caller doing `g.next()` (the
+    // `.next(...) on externref` method call) from a legacy demotion to a hard
+    // failure. A not-yet-adopted method-call lowering is UNSUPPORTED → warning.
+    throw new IrUnsupportedError(
+      "method-call-unsupported",
+      "build",
       `ir/from-ast: method call .${methodName}(...) on ${describeIrType(recvType)} not in slice 4 (${cx.funcName})`,
     );
   }
