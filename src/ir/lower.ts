@@ -1064,6 +1064,9 @@ export function lowerIrFunctionBody<S, Slot>(
       // above this one); one OUTSIDE is inlined after (frame below).
       if (frame.kind !== "continue" && frame.iterCloseSlot !== undefined) {
         emitter.emitLocalGet(frame.iterCloseSlot, out);
+        // Frames with iterCloseSlot exist only under backends whose
+        // legality admits forof.iter (same raw-call emission iter.return uses).
+        // pushraw-ok(#2952): plain call op, mirrors the iter.return arm
         emitter.pushRaw(out, {
           op: "call",
           funcIdx: resolver.resolveFunc({ kind: "func", name: "__iterator_return" }),

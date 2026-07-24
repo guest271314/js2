@@ -388,6 +388,12 @@ work, not control-flow, and belongs with the keys-iteration design).
   main), so the newly-IR-claimed labeled shapes are behavior-equivalent
   to legacy across the whole labeled-statement surface.
 - `npx tsc --noEmit` clean (pre- and post-merge of upstream/main).
+- **Linear target capability flip**: the linear backend used to FAIL LOUD
+  on labeled break/continue (#1937 fail-loud lists); the IR path now
+  claims labeled loops and `br.label` lowers to core-Wasm `br`
+  (backend-identical), so linear compiles AND runs them — verified by
+  probe (4/4) and the flipped tests in `tests/linear-break-continue.test.ts`
+  / `tests/linear-controlflow.test.ts` (59/59 post-flip).
 
 ## Test Results (slice 2)
 
