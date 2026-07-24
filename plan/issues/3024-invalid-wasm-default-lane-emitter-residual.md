@@ -843,3 +843,38 @@ NOT the "quick per-root-cause singleton" this issue's residual was framed as.
 Confirmed repro for the next owner: `[assert.js, sta.js, nativeFunctionMatcher.js,
 <any toString test>]` OR the raw `nativeFunctionMatcher.js` with NO exported
 function. Suggest routing to `senior-developer`.
+
+---
+
+## Fresh re-measurement (agent-a3fa3add / Opus 4.8, 2026-07-24)
+
+Re-harvested current `origin/main` (post the merged 68-file `toString` cluster,
+#3509/#3547) via `runTest262File` (default gc lane, full harness) over the
+baseline candidate set = 529 `compile_error`-official ∪ 58 `fail`/`reached_test=false`-official
+= 587 candidates. Detected invalid-Wasm by the `wasm_compile` classifier
+signature (`/invalid Wasm binary|Compiling function/i`).
+
+**LIVE COUNT: 97 invalid-Wasm files / 587 candidates** (reconciles: dev-serve's
+202 minus the merged 68-file toString cluster minus later slices).
+
+### Top coarse validator-error buckets (op+types; fn/assert stripped)
+
+| count | signature | cluster |
+| ----: | --------- | ------- |
+| 14 | `global.set` expected `(ref null T)`, found `local.get` externref | computed-property-names + Object.assign/keys/Reflect.ownKeys |
+| 11 | `global.set` expected externref, found `local.tee` `(ref null T)` | for-of / for-await-of array-rest destructuring |
+|  2 | `global.set` expected `(ref null T)`, found `call` f64 | class ident-name-method-def-new-escaped |
+| 10 | not enough arguments on the stack for call | `__call_next`/`__call_return`/`C_method` (iterator + super) |
+|  9 | `struct.get` expected `(ref null T)`, found `local.get` `(ref null T)` | RangeError / DataView buffer-verified |
+|  8 | `f64.add`/`f64.sub` expected f64, found `global.get` i32/i64 | ++/-- on boolean(i32)/bigint(i64) globals |
+|  5 | `call` expected externref, found `local.tee` i32 | Uint8Array toBase64/toHex |
+|  4 | `local.set` expected `(ref null T)`, found `struct.get` f64 | `__closure` toLocaleString |
+|  4 | type error in fallthru (expected `(ref null T)`, got i32) | `__closure_24` |
+
+The first 3 rows (27 files) are ONE family: a **module-level global whose slot
+type disagrees with the value stored into it** (a global-write coercion desync,
+distinct from #3343's control-flow aliasing). Remaining rows are ≤3-file
+per-root-cause singletons. By failing fn: 58 `__module_init`, 10 `__closure`,
+9 `__cb`, 6 `fn`, 5 `__call_next`, 3 `__call_return`, 3 `Parent_new`.
+
+**In progress:** root-causing the 27-file module-global slot-desync family.
