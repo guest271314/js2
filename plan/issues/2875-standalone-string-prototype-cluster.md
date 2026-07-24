@@ -349,3 +349,45 @@ ToString now correct across all reflective String methods.
   — a separate, shared slice (also fixes the pre-existing `*.call(undefined)
 throws` assertions in `issue-2875*.test.ts`, which fail on main today).
 - RegExp-arg family (~114), case family (25), substring/slice/normalize.
+
+## Slice B (LANDED, dev-std-4) — undefined-receiver RequireObjectCoercible
+
+The `undefined`-receiver residual flagged above is now fixed for all four wired
+reflective String proto member-body families. Root cause confirmed by
+measurement on `origin/main`: under the #2106 `undefinedSingleton` regime
+(default-on in standalone) `undefined` is a DISTINCT non-null sentinel externref,
+so the glue's bare `ref.is_null` RequireObjectCoercible guard caught `null` but
+MISSED `undefined` — `charAt.call(undefined)` etc. silently ToString'd it to
+`"undefined"` and returned a value instead of throwing a TypeError.
+
+**Fix** (`src/codegen/array-object-proto.ts`): a shared
+`emitStringRequireObjectCoercible` helper OR-s in the canonical native
+`__extern_is_undefined` predicate alongside the `ref.is_null` test, applied to
+all four families (index-accessor `charAt`/`at`/`charCodeAt`/`codePointAt`;
+search-numeric `indexOf`/`lastIndexOf`; search-boolean
+`includes`/`startsWith`/`endsWith`; `trim`/`trimStart`/`trimEnd`). The native is
+registered up front (`ensureStringRocUndefinedNative` → `ensureObjectRuntime` +
+`flushLateImportShifts`) so its funcIdx is post-shift-correct at the guard site.
+Host-free (native predicate, no host import). Gated on `undefinedSingletonActive`
+— host lane and the non-singleton regime keep the bare `ref.is_null` (undefined
+≡ `ref.null` there), so byte-identical.
+
+**Measured impact** (standalone lane, base-vs-head diff, 0 regressions):
+
+- **+6 test262 files** flip FAIL→PASS:
+  `{charAt,charCodeAt,indexOf,lastIndexOf,trimEnd,trimStart}/this-value-not-obj-coercible.js`.
+- **+3 committed vitest tests** fixed (previously RED on main):
+  `charAt.call(undefined) throws`, `lastIndexOf.call(undefined,'a') throws`,
+  `endsWith.call(undefined,'') throws`.
+- Byte-neutral for the host lane and for standalone programs outside the
+  reflective-String-closure blast radius (5/5 sample hashes identical).
+
+Covered by `tests/issue-2875-slice-b-undefined-roc.test.ts` (20 cases: all 12
+wired members throw on undefined, null-receiver + valid-receiver regression
+guards). `tsc --noEmit` clean.
+
+**Still residual (unchanged, NOT this slice):** the `at`/`codePointAt`
+out-of-range `=== undefined` return-value comparison (a separate return-path
+undefined-singleton mismatch), the case family (`toUpperCase`/`toLowerCase`,
+un-wired), the RegExp-arg family (~114), and the #2862 ToPrimitive
+object-receiver bucket.
