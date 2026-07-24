@@ -1072,7 +1072,7 @@ function _hasDisposalMethod(expr: ts.ObjectLiteralExpression): boolean {
  * fields from compile-time names only, so these literals must take the host
  * plain-object path, which evaluates the key expression at runtime.
  */
-function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+export function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
   for (const p of expr.properties) {
     if (!ts.isPropertyAssignment(p) && !ts.isMethodDeclaration(p)) continue;
     if (!ts.isComputedPropertyName(p.name)) continue;
