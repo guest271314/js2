@@ -1,9 +1,10 @@
 ---
 id: 3201
 title: "default lane: Array.prototype search + structural generics (indexOf/lastIndexOf/slice/splice/sort/concat/pop) (~312 fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-opus-search
 created: 2026-07-12
-updated: 2026-07-17
+updated: 2026-07-24
 priority: high
 feasibility: hard
 task_type: bug
