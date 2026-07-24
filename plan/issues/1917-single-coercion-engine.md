@@ -821,3 +821,37 @@ method args (~690), RegExp, and class/destructuring coercion. That is the exact
 dropping substantially as a coarse post-unification check; the String/Number
 slice is owned by **#2160** (`depends_on: [1917]`). Drift note + breakdown in
 **#2503** (Harvest update 2026-06-24).
+
+## Stage A + Stage B outcome — criterion #2 RATIFIED, relocation → #3578 (sdev-1917, 2026-07-24)
+
+**Stage A LANDED (PR #3562):** extracted one `guardedRefCastInstrs` helper
+replacing the 11 copy-pasted `tee → ref.test → if (cast_null / null)` guarded-cast
+idioms in `type-coercion.ts` (7 in `coerceType`, 4 in `coercionInstrs`); net −106
+lines, byte-neutral (0 Wasm-SHA diffs across 62 both-lane binaries).
+
+**Criterion #2 is RATIFIED as SUPERSEDED (coordinator, 2026-07-24)** — it is NOT a
+bug and NOT in scope. The `ref→f64` split — a *bare* GC object-ref ToNumber → NaN
+(§7.1.4, `Number(object without valueOf)`) vs a ref *carrying a boxed number* →
+unbox — is spec-correct provenance-dependent behaviour, not the accidental
+divergence #1917 was filed to fix (that one — `externref→f64` in `fixBranchType`,
+lossy `drop; f64.const 0` — is already GONE via Step 0's `coercionPlan`
+delegation). Forcing ValType-level identity between the two rows would REGRESS
+correct semantics. Do NOT equalize them.
+
+**Stage B measured outcome — byte-neutral extraction PROVEN feasible; clean
+relocation deferred to #3578.** Lifting the ~440-line `ref→f64`
+ToNumber/OrdinaryToPrimitive dispatch (`coerceType` ~2333–2772) into a dedicated
+`emitRefToNumberPrimitive` is byte-neutral (0 diffs across 62 both-lane binaries +
+24 ToPrimitive exercisers identical, tsc clean). BUT a **same-file** extraction is
+structurally self-defeating: it GROWS `type-coercion.ts` by ~+34 LOC (wrapper
+overhead → trips the #3102 LOC ratchet) and leaves the #2108 count unchanged. The
+value only materialises by relocating the dispatch OUT into the #2108-sanctioned
+`coercion-engine.ts` — which is blocked by the `coercion-engine.ts ⇄
+type-coercion.ts` module-init cycle (the reverse import is the exact TDZ hazard the
+line-~2660 comment and #3324 avoid) and needs the lazy-emitter-registry pattern
+(already at `coercion-engine.ts:~691`) plus relocating 4 non-exported helpers.
+That XL/high-risk relocation + the Stage C #2108 seal is now **#3578**
+(`depends_on: [1917]`). #1917's core (single `coercionPlan` table + 4-site
+delegation + the `coercion-engine.ts` `emitTo*`/equality engine + #2108 drift
+gate) plus Stage A dedup is complete; the relocation is the last refinement,
+owned by #3578.
