@@ -4,6 +4,12 @@ title: "Uncatchable null_deref trap when a typed callable var (no matched closur
 status: done
 assignee: ttraenkler/dev-opus-arrayhof
 completed: 2026-07-24
+loc-budget-allow:
+  # +8 lines: the fix broadens one guard condition in this god-file's
+  # closure-recast-skip block and documents WHY (matched vs no-match externref
+  # slot, #1941 dual-mode gating). The god-file was already at its ratchet
+  # limit, so the necessary explanatory comment needs an explicit allowance.
+  - src/codegen/statements/variables.ts
 sprint: current
 created: 2026-07-19
 updated: 2026-07-24
