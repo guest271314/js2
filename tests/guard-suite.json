@@ -67,6 +67,11 @@
       "path": "tests/issue-3565.test.ts",
       "guards": "four DESIGNED demote-to-legacy sites compile (fall back to legacy) instead of hard-erroring — TypedArray element STORE (lowerElementStore), slice-12 element ACCESS on an extern receiver (lowerElementAccess), the verify.ts #1798 return-value gate, and compound-assign with a non-f64 RHS (the issue-2079 generator for-of `s += v` shape, runs =3) — AND a GENERIC invariant (block-id/type desync, injected build throw) STILL hard-fails (no masking of real invalid-Wasm)",
       "broken_by": "#3341/#3519 (PR #3249, 2026-07-17) made outcome.kind==='invariant' a hard compile error, silently promoting these 4 documented 'clean throw → legacy' demotes; #680 exempted only the generator+method-call cases, leaving these 4 hard for ~7 days (invisible outside required checks, #3008); found+fixed by #3565"
+    },
+    {
+      "path": "tests/issue-3590-auto-park-step-aware.test.ts",
+      "guards": "the auto-park bot's infra-vs-verdict step classification: an infra-only merge_group failure (artifact download) must NOT park, a verdict-step failure MUST park, and anything unclassifiable parks conservatively — plus the unchanged #2547 cancellation invariant (0 failed jobs never parks). 30 cases, 3ms",
+      "broken_by": "not a prior main regression but a prior INCIDENT: on 2026-07-24 the bot emitted two textually identical park comments for opposite situations — #3566 (artifact download 403'd, verdict never ran, merged cleanly once unparked) and #3563 (verdict ran, caught a real uncatchable-trap regression). Held PRs are SKIPPED by auto-enqueue, so a wrong park strands the PR. Guarded here because the classification is only correct in one direction: widening INFRA_STEP_PATTERNS makes the bot park LESS, which is how a real regression reaches main (#3590)"
     }
   ]
 }
