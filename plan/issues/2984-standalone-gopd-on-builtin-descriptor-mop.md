@@ -1,7 +1,8 @@
 ---
 id: 2984
 title: "Standalone gOPD-on-builtin descriptor MOP (~178: getOwnPropertyDescriptor on builtin objects / proto receivers)"
-status: in-progress
+status: done
+completed: 2026-07-24
 updated: 2026-07-24
 assignee: ttraenkler/dev-opus5-mop
 sprint: current
@@ -21,6 +22,16 @@ loc-budget-allow:
 ---
 
 # #2984 — standalone gOPD-on-builtin descriptor MOP
+
+> **RESIDUAL — `status: done` here closes the ISSUE FILE, not the work.** This
+> is an `horizon: xl` issue and eight slices have landed against it. The
+> 2026-07-24 re-measurement (below) shows the newly-identified RUNTIME axis
+> still has, under `test/built-ins/` alone, **199 native-proto + 62 namespace +
+> 48 global-`this` + 27 TypedArray-ctor** `hasOwnProperty`-miss rows open, plus
+> the `__extern_set` non-writable-store gap that gates the `{writable:true}`
+> families. **A successor issue must be filed** for that axis — do not read
+> this `done` as "the standalone descriptor MOP is finished". See "The next
+> slice on this axis" at the end of the top section.
 
 ## Slice "ctor-carrier own props" LANDED (2026-07-24, dev-opus5-mop) — the runtime (any-param receiver) axis
 
@@ -119,9 +130,38 @@ The one hold-out is `AggregateError/prototype/prop-desc.js`, which fails BEFORE
 `verifyProperty` on `assert.sameValue(typeof AggregateError.prototype,
 'object')` — unrelated, pre-existing.
 
+**Regression sweep — 2,137 files** (the touched ctor dirs + the MOP-sensitive
+`Object/{getOwnPropertyNames,getOwnPropertyDescriptor{,s},keys,freeze,seal,
+prototype}` dirs), diffed **local-vs-local**, i.e. the SAME runner in the SAME
+process shape with the seed force-disabled behind a temporary env switch vs
+enabled:
+
+- **0 regressions** (pass → non-pass)
+- **0 changed error signatures** on fail→fail rows — so the #3439 hard-0
+  unclassified-root-causes gate has nothing new to park on
+- **+50 improvements**, of which 46 are in the target set and **all 4 outside it
+  are directly attributable to the seeded `prototype`**:
+  `Error/prototype/S15.11.3.1_A{1,2,4}_T1.js` (`Error.hasOwnProperty('prototype')`
+  / `delete Error.prototype === false`) and `Object/prototype/S15.2.3.1_A3.js`
+  (`delete Object.prototype === false`).
+
+> **Do NOT diff a local sweep against the committed standalone baseline JSONL.**
+> I tried that first and got a plausible-looking "0 regressions / +118
+> improvements" — it is **contaminated**. The baseline comes from the sharded CI
+> worker (`scripts/test262-worker.mjs`); a local in-process `runTest262File` run
+> differs on things unrelated to any code change (the `L:N ` error-prefix, and a
+> large `standalone target emitted host imports: env::X` (#2961) population that
+> does not reproduce locally). 611 rows showed a changed signature purely from
+> that. Local-vs-local with the change force-disabled is the only sound control.
+
+`prove-emit-identity`: **IDENTICAL** — all 60 (file,target) emits across
+gc/standalone/wasi/linear match the pre-change baseline.
+
 `tests/issue-2984-ctor-carrier-own-props.test.ts` 11/11, asserting each
 attribute and value **independently** (numeric `length`, object-identity
 `prototype`) rather than trusting a test262 verdict — see the honesty note.
+Related suites: 2984 ×6 + 3006 + 2896 = 85/85; #1888 guardrails 23/23;
+`check:loc-budget` OK; `check:oracle-ratchet` +0/+0.
 
 ### HONESTY NOTE — how much of the +49 is earned (read this before citing it)
 
