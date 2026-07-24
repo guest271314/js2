@@ -97,14 +97,14 @@ describe("#3164 — generator function expressions go native (standalone, host-f
     ).toBe(33);
   });
 
-  // SKIPPED (#3584) — REAL REGRESSION, not a stale expectation. Bisected to
+  // SKIPPED (#3591) — REAL REGRESSION, not a stale expectation. Bisected to
   // 1fbb1810 `feat(#3032): W6 … (#3356)` (2026-07-19); green at its parent
   // 8bc6e1c3. A module-scope generator fn-expr is lifted TWICE (the two
   // `compileModuleInitBody` passes, declarations.ts:2312 + :2438) with two
   // different state-struct types; the `.next()` open dispatch is emitted inline
   // BETWEEN the passes and so `ref.test`s only pass 1's dead type → the #1344
   // TypeError arm fires. `for-of` survives because its GENSTATE arm is filled at
-  // finalize. Re-enable with the fix — see plan/issues/3584-*.md.
+  // finalize. Re-enable with the fix — see plan/issues/3591-*.md.
   it.skip("var-assigned fn-expr: .next().value through any", async () => {
     expect(
       await runHostFree(`
@@ -163,7 +163,7 @@ describe("#3164 — generator function expressions go native (standalone, host-f
     ).toBe(11);
   });
 
-  // SKIPPED (#3584) — same stale-pass-1-state-type regression as above.
+  // SKIPPED (#3591) — same stale-pass-1-state-type regression as above.
   it.skip("named fn-expr without self-reference is admitted", async () => {
     expect(
       await runHostFree(`
@@ -176,7 +176,7 @@ describe("#3164 — generator function expressions go native (standalone, host-f
     ).toBe(3);
   });
 
-  // SKIPPED (#3584) — same stale-pass-1-state-type regression as above.
+  // SKIPPED (#3591) — same stale-pass-1-state-type regression as above.
   it.skip("identifier params thread through the state struct", async () => {
     expect(
       await runHostFree(`

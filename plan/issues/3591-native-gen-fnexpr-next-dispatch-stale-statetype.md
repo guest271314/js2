@@ -1,5 +1,5 @@
 ---
-id: 3584
+id: 3591
 title: "Native generator fn-expr: .next() dispatch tests a stale pass-1 state-struct type (4 silent regressions from #3032 W6)"
 status: ready
 sprint: current
@@ -11,7 +11,7 @@ created: 2026-07-24
 assignee: null
 ---
 
-# #3584 — `.next()` on a variable-bound generator function expression throws TypeError (standalone)
+# #3591 — `.next()` on a variable-bound generator function expression throws TypeError (standalone)
 
 ## Summary
 
@@ -162,8 +162,31 @@ this issue's PR by folding both suites into the required guard suite
 
 - [ ] Shapes B, C, G above return their expected values host-free (zero `env`
       imports) in the standalone lane.
-- [ ] The four `it.skip`ped cases are re-enabled (search `#3584` in
+- [ ] The four `it.skip`ped cases are re-enabled (search `#3591` in
       `tests/issue-3164.test.ts` and `tests/issue-3386.test.ts`) and pass.
 - [ ] `tests/issue-3164.test.ts` (13) and `tests/issue-3386.test.ts` (17) are
       fully green, still in `tests/guard-suite.json`.
 - [ ] No new `env` imports in the standalone lane for any generator shape.
+
+## Related
+
+- **#3586** (`s += yield` compound-assign not claimed by the native generator —
+  eager-buffer fallback), filed by the substrate + async review in PR #3578. Same
+  native-generator territory as this issue's shape-gate work; worth reading
+  together, since both concern which generator shapes the native path actually
+  claims.
+
+## Note — renumbered from #3584
+
+This issue was originally filed as **#3584**, which collided with
+`plan/issues/3584-auto-enqueue-blind-to-workflow-touching-prs.md` (PR #3577,
+merged first — id reserved on `origin/issue-assignments` at 2026-07-24T22:05:41Z,
+~29 min before this branch's PR was opened). The `check:issue-ids:against-main`
+gate (#2531) caught it at PR level once #3577 landed on `main`.
+
+Renumbered to **#3591** (fresh id via `claim-issue.mjs --allocate`) by the
+PR-queue shepherd, since the authoring session was unreachable. The change is
+purely mechanical — file rename plus id/reference rewrites in
+`tests/issue-3164.test.ts`, `tests/issue-3386.test.ts` and
+`tests/guard-suite.json`. **No test expectation, assertion or source behaviour
+was touched.**
