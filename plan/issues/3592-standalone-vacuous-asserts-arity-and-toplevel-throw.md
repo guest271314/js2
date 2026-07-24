@@ -1,5 +1,5 @@
 ---
-id: 3585
+id: 3592
 title: "Silent wrong answers: top-level `throw` dropped in every non-WASI lane; under-applied calls through `__apply_closure` never happen (standalone)"
 status: in-progress
 sprint: current

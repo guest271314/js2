@@ -832,7 +832,7 @@ function collectClosureArityEntries(
 }
 
 /**
- * (#3585) INLINE twin of {@link emitClosureArityExport} for the IN-WASM dynamic
+ * (#3592) INLINE twin of {@link emitClosureArityExport} for the IN-WASM dynamic
  * call bridge `__apply_closure`. Leaves an `i32` on the stack: the DECLARED
  * formal count of the closure in `valueLocal`, or `-1` when it is not a
  * registered closure. Returns `undefined` when the module has no closures (the
@@ -883,7 +883,7 @@ function buildClosureArityProbe(
 }
 
 /**
- * (#3585) Build `__apply_closure`'s UNDER-APPLICATION widening: replace the
+ * (#3592) Build `__apply_closure`'s UNDER-APPLICATION widening: replace the
  * bridge's dispatch index `n` (the raw argument count) with
  * `max(n, declaredArity(fn))`, appending the three probe locals to `locals`.
  * Returns `[]` — and appends nothing — when the module has no closures, so such

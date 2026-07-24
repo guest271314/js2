@@ -76,7 +76,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
-import { buildApplyClosureArityWidening } from "./closure-exports.js"; // (#3585) under-application widening
+import { buildApplyClosureArityWidening } from "./closure-exports.js"; // (#3592) under-application widening
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { reserveClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
@@ -4672,7 +4672,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
 
   const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
 
-  // (#3585) An UNDER-APPLIED call (`assert.sameValue(a, b)` into a 3-formal
+  // (#3592) An UNDER-APPLIED call (`assert.sameValue(a, b)` into a 3-formal
   // `sameValue`) matched no `__call_fn_method_N` arm and silently returned the
   // undefined sentinel — it never happened. Rationale: see the builder.
   const widen = buildApplyClosureArityWidening(ctx, locals, 0, 3, 3);
@@ -4729,7 +4729,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   const objVecPushIdx2 = ctx.funcMap.get("__objvec_push");
   if (ctx.boundFnTypeIdx >= 0 && objVecNewIdx2 !== undefined && objVecPushIdx2 !== undefined) {
     const bfIdx = ctx.boundFnTypeIdx;
-    // Locals appended after `n` (+ the #3585 arity-probe trio when emitted);
+    // Locals appended after `n` (+ the #3592 arity-probe trio when emitted);
     // params fn/recv/args = 0..2, n = 3. Indices are derived from
     // `locals.length`, so they follow the probe automatically.
     const bfLocal = 3 + locals.length;

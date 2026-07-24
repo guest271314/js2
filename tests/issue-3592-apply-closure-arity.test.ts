@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3585 RC2 — an UNDER-APPLIED call through the in-Wasm `__apply_closure` bridge
+ * #3592 RC2 — an UNDER-APPLIED call through the in-Wasm `__apply_closure` bridge
  * must actually happen.
  *
  * `fillApplyClosure` dispatched on the raw argument count, but
@@ -43,7 +43,7 @@ const THROWER = `function Host() {}
 Host.m3 = function (a, b, c) { throw new Error("fired"); };
 Host.m1 = function (a) { throw new Error("fired"); };`;
 
-describe("#3585 RC2 — __apply_closure dispatches at max(argc, declaredArity)", () => {
+describe("#3592 RC2 — __apply_closure dispatches at max(argc, declaredArity)", () => {
   it("invokes a 3-formal function-object static called with 2 args", async () => {
     expect(await outcome(THROWER, `Host.m3(1, 2)`)).toBe(2);
   });
