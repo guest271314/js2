@@ -4,7 +4,7 @@ title: "IR multi-exit control flow: labeled break/continue, switch (br_table), d
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-04
+updated: 2026-07-25
 priority: medium
 horizon: l
 feasibility: hard
@@ -302,6 +302,82 @@ a crossing `br` skips it) — the for-of break frame needs a finally-like
 frames already use. That plus `labeled.block` for non-loop labels and
 `IrInstrSwitch`/`br_table` are their own slice.
 
+## Slice 3 — labeled break/continue on labeled LOOPS, implemented (2026-07-25, fable-2952)
+
+Scope: `lbl: while/do/for/for-of` + `break lbl` / `continue lbl`, at
+top-level and body-buffer statement positions, incl. multi-label
+(`a: b: while`) and labels bound by loops nested inside other loop bodies.
+**No new IR kind** — the design insight is that a labeled loop's label IS
+the loop's existing `loopLabel`:
+
+- **from-ast** (`lowerLabeledStatement`): pre-allocates the id and hands it
+  to the loop lowerer via `cx.pendingLoopLabel` (consumed exactly once per
+  loop; cleared on inner ctxs so nested unlabeled loops mint fresh ids —
+  two loops sharing an id would mis-resolve). The name→id map travels on
+  `cx.labelEnv`, scoped to the labeled statement's own lowering.
+  `lowerBreakContinueStatement` resolves labeled forms through it and emits
+  the SAME `br.label{label, mode}` as slice 2 — the A3 depth resolver,
+  verifier label-env walk, `bufferHasBrLabel` continue-block scan, effects/
+  DCE/monomorphize/inline handling all apply unchanged (labels were already
+  semantic ids, not depths — exactly why A2 stored no depth).
+- **selector** (`isPhase1LabeledStatement` + a `labels: ReadonlySet<string>`
+  param threaded alongside `inLoop` through body/try/loop walks): labeled
+  break/continue claimable iff the name is bound by an enclosing CLAIMED
+  labeled loop. Labeled NON-loop statements (`lbl: { break lbl; }`) reject
+  (`labeled-non-loop`) — they need `labeled.block`, banked for the switch
+  slice (a switch `break` targets exactly that frame shape). Out-of-scope
+  labels reject (`body-labeled-break-continue`, unchanged reason string).
+- **lower.ts — the ONE new lowering obligation** (exactly the hazard the
+  slice-2 bank predicted): a labeled branch CROSSING an inner `forof.iter`
+  loop skips the loop's own `__iterator_return` call (it sits past the
+  frame the br jumps over). The forof.iter break frame now carries
+  `iterCloseSlot`; `resolveBrLabel` emits `local.get <iterSlot>; call
+__iterator_return` for every such frame it crosses without matching.
+  Scan order = inside-out, so a finally inside the for-of body inlines
+  before the close and one outside inlines after — ECMA-262 §14.7.5.7
+  interleaving by construction. A br that TARGETS the forof frame (break
+  of the for-of itself) matches before the cross-check and lands AT the
+  existing close call — no double close (tested). Unlabeled code can never
+  cross a loop frame (innermost binds), so existing output is untouched.
+
+**Byte-inertness (measured)**: all 13 `website/playground/examples` files
+byte-identical (sha256) main↔branch. Ratchet unchanged (no labeled
+statements in the corpus); `check:ir-fallbacks` OK.
+
+**Pre-existing failure noted (NOT this slice)**: `tests/issue-1169n.test.ts`
+"`??` with non-null lhs" fails identically on pristine main (`'??' on
+non-reference lhs (f64) is not supported in IR [IR-FALLBACK]` as a hard
+error instead of a demote) — reproduced byte-identically via
+`.tmp/probe-1169n.mts` against `/workspace` main. Unrelated to labels.
+
+**Remaining (slice 4+)**: `IrInstrSwitch` + `br_table` (+ `labeled.block`
+for both switch-break and labeled non-loop blocks — one new-kind
+exhaustiveness sweep covers both), then for-in (`__object_keys` iteration,
+pairs with #2964 — deliberately split out: it is host-import/substrate
+work, not control-flow, and belongs with the keys-iteration design).
+
+## Test Results (slice 3)
+
+- `tests/issue-2952-slice3.test.ts` — 17/17: selector claims (labeled
+  break/continue, multi-label, body-nested labeled loop; negatives:
+  labeled non-loop block, out-of-scope label), runtime semantics (nested
+  break with exact counts, continue-outer skips rest + runs update /
+  re-runs while cond, do-while labeled break, multi-label `break b`
+  exits the while — verified against V8, break across try/finally with
+  exact finally counts, labeled break crossing for-of vec, dead code
+  after labeled break), and IteratorClose (crossing break closes the
+  inner iterator exactly once mid-iteration; crossing continue closes
+  per outer iteration — 3 iterators/3 closes; break TARGETING the
+  for-of closes exactly once — no double close).
+- Slice-1/2 suites re-run: 44/44 (two slice-3-boundary negatives flipped
+  to positives, as designed).
+- Loop-heavy blast radius: issue-1280 / issue-2136 / issue-1169n /
+  issue-1169h / issue-1182 / issue-1183 — 85/86; the 1 fail is the
+  pre-existing `??` hard-error above, identical on pristine main.
+- Scoped test262 sweep (labeled/break/continue/do-while/while dirs,
+  main↔branch outcome diff): see below.
+- `npx tsc --noEmit` clean.
+
 ## Test Results (slice 2)
 
 - `tests/issue-2952-slice2.test.ts` — 21/21 (selector claims incl. both
@@ -324,9 +400,9 @@ frames already use. That plus `labeled.block` for non-loop labels and
   try-finally-break probes all pass (core-Wasm `br` is backend-identical).
 - Wider equivalence sweep (11 loop-relevant suites, 158 tests): 87 pass;
   all 71 fails verified PRE-EXISTING on current origin/main (70 × the
-  `__unbox_number` harness import-stub gap in tests/ir-*-equivalence — the
+  `__unbox_number` harness import-stub gap in tests/ir-\*-equivalence — the
   same gap slice 1 documented; 1 × arguments-capture `expected 30 to be
-  33` in arguments-nested-and-loops) — reproduced identically on main.
+33` in arguments-nested-and-loops) — reproduced identically on main.
 
 ## Test Results (slice 1)
 
@@ -380,7 +456,7 @@ a single changed path.
    path the merge_group uses) scoped to the 4 files at HEAD: **4 pass / 4
    (100%)**.
 4. **Full do-while blast radius neutral**: 113 drivable test262 do-while tests
-   have *identical outcomes* at merge-base vs HEAD (24 COMPILE_FAIL, 56 OK, 25
+   have _identical outcomes_ at merge-base vs HEAD (24 COMPILE_FAIL, 56 OK, 25
    WASM_EXN — all pre-existing break/continue/negative cases, unchanged). No
    do-while test's status flips, so the IR do-while lowering is
    behaviour-equivalent to the direct path and does not poison any worker.
