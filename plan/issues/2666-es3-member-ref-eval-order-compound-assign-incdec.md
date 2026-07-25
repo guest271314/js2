@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 es_edition: multi
 language_feature: compound-assignment, increment-decrement, evaluation-order
-goal: es5-complete
+goal: es5
 sprint: 67
 ---
 

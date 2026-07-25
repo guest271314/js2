@@ -3,7 +3,7 @@ id: 3631
 title: "eval returns `undefined` when the last statement is not an ExpressionStatement — completion value not implemented"
 status: ready
 sprint: current
-goal: es5-complete
+goal: es5
 priority: medium
 horizon: m
 feasibility: medium

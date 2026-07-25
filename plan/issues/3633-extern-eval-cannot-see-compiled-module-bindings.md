@@ -3,7 +3,7 @@ id: 3633
 title: "__extern_eval evaluates in a scope containing none of the compiled module's bindings (184 test262 tests die on `assert is not defined`)"
 status: ready
 sprint: current
-goal: es5-complete
+goal: es5
 priority: high
 horizon: l
 feasibility: hard

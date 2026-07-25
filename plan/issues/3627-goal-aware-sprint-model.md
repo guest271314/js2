@@ -17,7 +17,7 @@ sprint: current
 
 # Goal-aware sprint model
 
-**Stakeholder ask (three rounds):**
+**Stakeholder ask (four rounds):**
 
 > _"Change the sprint model to allow referencing goals in addition to issues. If
 > a goal is added to a sprint, all its issues will be worked on in the priority
@@ -36,6 +36,11 @@ sprint: current
 > **definition of done** that _could_ be that. If not, it will just stay open and
 > **carry over to the next sprint** at the end of a sprint if not said
 > otherwise — and that's fine."
+
+> _"An issue should be attributable to **more than one goal**, and also always
+> state **which ES edition** and **mode** (standalone, js host) it is applicable
+> to if it is specific to a mode. If the goal of a sprint is **'es5-conformance
+> standalone'**, all issues that apply here should be drawn into the sprint."_
 
 **Answer to the literal question, up front: a goal stays SEPARATE from an issue,
 and `goal:` already _is_ the parent link being asked for — 3,056 of 3,178 issues
@@ -174,7 +179,7 @@ dod: # D7 — every goal has a definition of done, of a declared kind
   lane: host # REQUIRED for kind: measured (D7c)
   bucket: "ES5" # MUST state exclusive-vs-cumulative intent explicitly
   target: 100
-partition_of: es5-complete # subset of the SAME population — expands transitively (D8)
+partition_of: es5 # subset of the SAME population — expands transitively (D8)
 depends_on: [es3-complete] # ordering edge only — does NOT expand (D8)
 aliases: [] # legacy `goal:` values that resolve here
 ---
@@ -267,14 +272,14 @@ members, directly contradicting the stakeholder's "all its issues will be worked
 on in the priority given." Instead emit a **loud warning** when one goal
 contributes > 40 net-new tasks, and let the operator decide.
 
-### D5 — The `es5-complete` contract (its first real use)
+### D5 — The `es5` contract (its first real use)
 
 **Verified at time of writing: no `plan/goals/es5*.md` exists, and the string
-`es5-complete` appears nowhere under `plan/`.** The census agent's output has
+`es5` appears nowhere under `plan/`.** The census agent's output has
 not landed, so this is stated as a contract, not an inference about another
 agent's work.
 
-D4 has a sharp edge for a brand-new goal: if `es5-complete`'s members are
+D4 has a sharp edge for a brand-new goal: if `es5`'s members are
 bulk-created as `status: backlog`, **actionable-only expansion surfaces zero of
 them** and the feature is a no-op on its first real use.
 
@@ -442,18 +447,18 @@ relations:
 | axis           | field                        | means                                                   | expands into the queue? |
 | -------------- | ---------------------------- | ------------------------------------------------------- | ----------------------- |
 | **dependency** | `depends_on: [es3-complete]` | ordering / readiness — an edge in the existing goal DAG | **NO**                  |
-| **partition**  | `partition_of: es5-complete` | a scope-restricted subset of the _same_ population      | **YES, transitively**   |
+| **partition**  | `partition_of: es5` | a scope-restricted subset of the _same_ population      | **YES, transitively**   |
 
-**Why dependency must not expand.** If scheduling `es5-complete` also dragged in
+**Why dependency must not expand.** If scheduling `es5` also dragged in
 every member of `es3-complete` — and transitively `compilable`, `core-semantics`,
 … — one goal would pull most of the backlog. Dependencies exist to tell you
 _what to schedule first_, which is an operator decision, not an automatic one.
-Adding `es5-complete` while `es3-complete` is unmet should produce a **warning**
+Adding `es5` while `es3-complete` is unmet should produce a **warning**
 ("depends on es3-complete, currently 83 % — schedule that first?"), never a
 silent expansion.
 
 **Why partition must expand.** A subgoal is not separate work; it is a
-_narrower view of the same work_. `es5-static` ⊂ `es5-complete`. Scheduling the
+_narrower view of the same work_. `es5-static` ⊂ `es5`. Scheduling the
 parent must reach the child's members, or the hierarchy is decorative. This is
 the "hierarchical" property the stakeholder asked for.
 
@@ -474,8 +479,8 @@ the narrower bucket.
   and sibling partitions of the same parent must be **disjoint**. Overlapping
   siblings double-count and make the parent's roll-up wrong.
 - A goal may carry both `partition_of` and `depends_on` — they are orthogonal
-  (`es5-complete` is not a partition of anything, and depends on
-  `es3-complete`; `es5-static` is a partition of `es5-complete` and inherits
+  (`es5` is not a partition of anything, and depends on
+  `es3-complete`; `es5-static` is a partition of `es5` and inherits
   nothing from the dependency).
 
 ### D9 — Ordering: "most important and ready first"
@@ -574,7 +579,7 @@ parallel field.
 
 **(b) The DAG becomes machine-checkable — but scope the promise.** Once a goal
 can be `done`, `goal-graph.md`'s prose rule ("a goal is activatable when all its
-dependencies are met") becomes computable: `es5-complete` is `activatable` when
+dependencies are met") becomes computable: `es5` is `activatable` when
 `es3-complete` is `done`. `activatable`/`blocked` therefore become **derived**
 states, not hand-set ones.
 
@@ -594,24 +599,192 @@ ASCII DAG and the "Goal Status Summary" table are hand-drawn prose. So:
   frontmatter has no counterpart in the hand-drawn DAG, so the prose cannot
   silently diverge from the data.
 
+### D12 — `goal:` becomes multi-valued, accepting scalar OR list
+
+**Decision: the reader normalizes `goal:` to an array. A scalar stays legal
+forever as a one-element list. There is no migration.**
+
+Measured: **3,056 issues carry a scalar `goal:`; exactly 0 use list form.** A
+rewrite would touch 3,056 files for zero functional gain, so the change is
+entirely in `normalizeGoalRefs()` (D-plan) — `String` → `[String]`, `Array` →
+itself.
+
+**Measured hazard — do NOT accept a bare comma-separated form.** Five existing
+`goal:` values already contain a comma (`real-world-compat,`, `performance,`,
+`native-messaging,` — trailing-comma typos, part of the 512 dangling set). If
+`goal: a, b` parsed as two goals, those five silently become multi-goal issues
+pointing at garbage. **Multi-valued requires explicit YAML list syntax**
+(`goal: [a, b]` or block form); a bare comma remains one value and is caught by
+`check:goal-refs` as dangling.
+
+**Four existing readers must be updated in the same PR** or they silently see
+`"[a, b]"` as a single goal name: `scripts/sync-goal-issue-tables.mjs`
+(groups by raw value), `scripts/assign-issue-goals.mjs`,
+`scripts/update-issues.mjs`, `scripts/symphony.mjs`. All should call the shared
+`normalizeGoalRefs()` from `goal-model.mjs`.
+
+Note this makes an issue appear in **several** goal issue-tables — correct and
+intended, but `sync-goal-issue-tables.mjs` currently assumes one row per issue
+per corpus, so its dedupe (`byId`, keyed by issue id) must move to a
+`(goal, issue)` key.
+
+### D13 — `edition:` and `mode:` describe APPLICABILITY, not ownership
+
+**Decision: two new optional issue fields. Neither is required, and `n/a` is
+first-class.**
+
+```yaml
+edition: es5 # ≤es3 | es5 | es2015 … es2026 | n/a   (single value; see below)
+mode: both # standalone | js-host | both | n/a
+```
+
+Measured: **neither field exists in any issue frontmatter today** — both are
+genuinely new, so there is no legacy form to accept.
+
+Three constraints, in order of how easily they are got wrong:
+
+1. **Applicability ≠ ownership.** "descriptor `[[Set]]` doesn't check
+   `[[Writable]]`" fixes ES5 tests in _both_ modes; it is not "owned" by a mode.
+   These fields answer "what does fixing this affect?", never "who runs it."
+   Keeping them orthogonal to `goal:` is the whole point — otherwise we have
+   re-invented the single-owner problem D12 just removed.
+2. **`n/a` must not be a forced choice.** A large share of the corpus is infra
+   with no edition and no mode — `ci-hardening` (69 issues), `maintainability`
+   (99), `test-infrastructure` (123), tooling, dashboards. Making these fields
+   required would generate thousands of meaningless values, and a predicate that
+   matched `n/a` loosely would sweep infra work into a conformance sprint. So:
+   **absent and `n/a` both mean "not applicable", and a predicate never matches
+   them unless it names `n/a` explicitly.**
+3. **`edition` is a single value with `≤` semantics applied by the predicate,
+   not by the field.** An issue is tagged with the **earliest** edition whose
+   tests it affects (descriptor bugs ⇒ `es5`, even though ES2015 tests also
+   exercise them). The predicate then decides whether it wants `== es5` or
+   `<= es5`. Putting the ordering in the predicate rather than the tag is what
+   keeps the exclusive-bucket ambiguity visible instead of buried.
+
+**Prefer hand-set over derived.** These could in principle be inferred from
+which test262 paths an issue cites — but #3621 showed the classifier mis-bucketed
+4,144 tests, and a derived tag would have inherited that silently. Hand-set with
+a `check:goal-refs` warning for conformance issues missing `edition:` is the
+honest trade. Add both fields to `SCHEMA.md` under "Classification Fields".
+
+### D14 — A goal may declare a PREDICATE, not just a member list
+
+**Decision: a goal's membership is `members` ∪ `selector`, where `selector` is a
+predicate over issue attributes. Either may be omitted. This is the round-4
+centrepiece.**
+
+```yaml
+selector:
+  edition: { lte: es5 } # or {eq: es5}, or a list
+  mode: [standalone, both] # `both` MUST be included — see below
+  status: [ready, in-progress] # optional; D4's filter applies regardless
+```
+
+`es5-conformance-standalone` is then a goal nobody tags — it _is_
+`edition ≤ es5 AND mode ∈ {standalone, both}`.
+
+**This dissolves problems already in this spec:**
+
+- **The 512 dangling refs shrink to "legacy explicit tags only."** A predicate
+  goal has no membership list, so it cannot dangle. `aliases:` (D2) is still
+  needed, but only for goals that keep an explicit `members`/`goal:` tag.
+- **It removes a forced choice the census already hit.** Verified in
+  `plan/goals/es5.md`, written by `dev-es5-census`: _"Standalone lane —
+  ES5 is 5,273 / 8,931 = 59 % … **it trails host by 1,226 tests and is tracked by
+  the `standalone` goals**."_ That sentence exists **only** because an issue
+  could hold one goal. Under D12 + D14 the standalone ES5 work is simply
+  `edition: es5, mode: standalone` and appears in both goals with no retagging.
+- **`es5-static` / `es5-standalone` / `es5-host` / `es3-complete` become free** —
+  four goals over one set of issue attributes, which is exactly the partition
+  (D8) I previously had to defer to the census.
+
+**Predicate hygiene:**
+
+- **`both` is the trap.** A selector for `mode: standalone` that omits `both`
+  misses every dual-mode issue — which is most real semantics work. Make
+  `mode: standalone` **expand** to `{standalone, both}` in the evaluator, and
+  require an explicit `mode: {eq: standalone}` to mean strictly-standalone-only.
+  Defaulting to the wrong one here silently halves a goal.
+- A selector matching **nothing** is a hard error, not an empty goal (same
+  class of bug as D7d's vacuous `all-issues-done`).
+- `members` ∪ `selector` is a **union**, never an intersection — otherwise an
+  explicitly-added issue outside the predicate would be silently dropped.
+- Selectors match on issue attributes only, never on other goals — no recursive
+  selectors, so evaluation stays a single pass.
+
+#### The stability question: re-evaluate, and therefore `--prune` is now REQUIRED
+
+Membership is computed, so it moves as issues are edited. **Decision:
+re-evaluate on every sync, do not snapshot.** Reasons:
+
+1. **Snapshotting reintroduces exactly the drift this model was built to avoid.**
+   A frozen member list is an assertion that goes stale, which is the #2860
+   failure mode wearing new clothes.
+2. **Re-evaluation is already the existing behaviour.** `sync-current-tasklist.mjs`
+   recomputes the whole queue from frontmatter on every run; issues already
+   enter and leave as their `status` changes. Predicate goals add no new
+   category of churn.
+3. **A correction should take effect.** If an issue's `edition` was wrong and
+   someone fixes it, the queue _should_ follow. That is the feature.
+
+**But re-evaluation exposes a real asymmetry I have to correct from my own
+earlier text.** I deferred `--prune` to a follow-up (D6 edge cases) on the
+grounds that no-prune was pre-existing behaviour. **With predicate goals that
+becomes unsafe**: the sync only ever _upserts_, so an issue that leaves a
+predicate keeps its task forever. Additions would appear and removals would
+not — strictly worse than either snapshot or clean re-evaluation, and invisible.
+
+So, promoted from follow-up to **in-scope**:
+
+- The sync **prunes** tasks whose issue no longer matches any scheduled goal.
+- **Never prune a task that is `in_progress` or has a non-empty `owner`** —
+  that would yank work out from under a running agent. Instead retag its
+  subject `[OUT-OF-SCOPE]` and report it; a human decides.
+- Every sync **reports adds and removes explicitly** (`+3 −1 via es5-static`).
+  Movement must be visible, never silent. This is the concrete form of the
+  lead's instinct, and it is what makes re-evaluation safe rather than merely
+  current.
+
 ---
 
 ## Worked example: ES3 / ES5 (the intended first use)
 
-Verified from `website/public/benchmarks/results/test262-editions.json`
-(host lane, committed 2026-07-19):
+> **STALE-NUMBER WARNING — read this before quoting any figure here.** An
+> earlier revision of this spec quoted `ES5 = 9,000 / 3,958 / 13,075` from the
+> committed `test262-editions.json` (2026-07-19). **Those numbers were produced
+> by a broken classifier.** PR **#3621** (merged) fixed a 2,048-byte
+> frontmatter-read window that was mis-bucketing **4,144 ES2015+ tests as ES5**.
+> `13,075 − 4,144 = 8,931` — exactly the census figure. Anything derived from
+> the pre-#3621 artifact is wrong by that margin.
 
-| bucket  |  pass |  fail |  ce | total  | pct  |
-| ------- | ----: | ----: | --: | ------ | ---- |
-| `≤ ES3` |   226 |    47 |   0 | 273    | 83 % |
-| `ES5`   | 9,000 | 3,958 | 117 | 13,075 | 69 % |
+Authoritative source is now the census in **#3626** / `plan/goals/es5.md`
+(measured 2026-07-25 against the CI baselines in `loopdive/js2wasm-baselines`):
+
+| bucket / lane          |  pass |  fail | total | pct  |
+| ---------------------- | ----: | ----: | ----: | ---- |
+| `ES5` host             | 6,499 | 2,432 | 8,931 | 73 % |
+| `ES5` host, reachable¹ | 6,162 | 1,772 | 7,934 | 78 % |
+| `ES5` standalone       | 5,273 |     — | 8,931 | 59 % |
+| `≤ ES3` host           |     — |    43 |     — | —    |
+
+¹ excluding the 660 failures that require `eval` (512) or `with` (148).
+
+**Two consequences for this spec.** First, **a `dod.source` must be versioned
+or dated** — a `measured` DoD silently changed meaning when #3621 landed, and
+nothing flagged it. `check:goal-refs` should record the artifact's generating
+commit alongside the value, so a classifier change surfaces as a DoD change
+rather than a silent retarget. Second, **prefer hand-set `edition:` on issues
+over deriving it from test data** (D13): derived values inherit whatever the
+classifier currently says, including its bugs.
 
 **The buckets are EXCLUSIVE, not cumulative.** `EDITION_ORDER = [0, 5, 2015, …]`
 in `scripts/generate-editions.ts:315` assigns each test exactly one edition, so
-the ES5 bucket does **not** contain the 273 ≤ES3 tests. "100 % ES5" is therefore
-ambiguous between the ES5 bucket alone (13,075) and everything through ES5
-(13,348). **Every goal file MUST state which it means in `dod.bucket`** —
-this ambiguity silently changes the target by 273 tests.
+the ES5 bucket does **not** contain the ≤ES3 tests. "100 % ES5" is therefore
+ambiguous between the ES5 bucket alone and everything through ES5. **Every goal
+file MUST state which it means in `dod.bucket`**, and a predicate (D14) must
+write `edition <= ES5` explicitly when that is the intent — `edition == ES5`
+means something materially different.
 
 The stakeholder's instinct (ES3 as a separate goal ES5 depends on) resolves it
 correctly, and decomposes into:
@@ -620,12 +793,12 @@ correctly, and decomposes into:
 es3-complete          dod{kind: measured, lane: host, bucket: "≤ ES3", target: 100}
                       47 failures. Genuinely completable near-term.
 
-es5-static            partition_of: es5-complete
+es5-static            partition_of: es5
                       depends_on: [es3-complete]
                       dod{kind: measured, lane: host, bucket: "ES5 minus <census predicate>", target: 100}
                       ES5 bucket MINUS interpreter-dependent tests. Reachable now.
 
-es5-complete          depends_on: [es3-complete, runtime-eval]
+es5          depends_on: [es3-complete, runtime-eval]
                       dod{kind: measured, lane: host, bucket: "ES5", target: 100}
                       The remainder needs eval / new Function ⇒ the interpreter.
 ```
@@ -638,7 +811,7 @@ forever.
 **Do not hardcode the exclusion predicate as "eval and new Function."** The
 brief's own instruction is to take the exact partition from the census
 (`dev-es5-census`), which had not landed at time of writing (verified: no
-`plan/goals/es5*.md`, no `es5-complete` string under `plan/`). `2927`
+`plan/goals/es5*.md`, no `es5` string under `plan/`). `2927`
 (interpreter foundation) and `2928` (E2 self-compile canary) are the existing
 interpreter work the partition should depend on.
 
@@ -683,7 +856,7 @@ gap.
   `source`/`bucket` — do it in follow-ups, starting with the ES3/ES5 set, not in
   bulk here.
 
-**File: `plan/goals/es3-complete.md`, `es5-static.md`, `es5-complete.md` (NEW)**
+**File: `plan/goals/es3-complete.md`, `es5-static.md`, `es5.md` (NEW)**
 
 - Create per the worked example. **Blocked on the `dev-es5-census` output** for
   the exact `es5-static` exclusion predicate — do not guess it.
@@ -818,6 +991,24 @@ Single shared reader so the two consumers cannot disagree about membership.
 - **D11 checks:** `state: superseded` without `superseded_by:`;
   `state: abandoned`/`paused` without `reason:`; a `depends_on` edge with no
   counterpart in `goal-graph.md`'s hand-drawn DAG (warn — D11b).
+- **D12 checks:** a `goal:` value containing a bare comma (the 5 known
+  trailing-comma typos — never silently split it into a list).
+- **D13 checks:** an unknown `edition:`/`mode:` value; warn when a conformance
+  issue (`goal` in a conformance goal, or `area: codegen`) omits `edition:`.
+- **D14 checks:** a `selector` matching zero issues (hard error — vacuous goal);
+  a selector naming an unknown attribute; a `dod.source` whose recorded
+  generating commit differs from the current artifact's (the #3621 trap — the
+  DoD silently retargeted).
+
+**File: `scripts/sync-current-tasklist.mjs` (D14 additions)**
+
+- Evaluate `selector` predicates against the issue corpus; membership is
+  `members ∪ selector`. `mode: standalone` expands to `{standalone, both}`
+  unless written as `{eq: standalone}`.
+- **Prune** tasks that no longer match any scheduled goal — **except** tasks
+  that are `in_progress` or have a non-empty `owner`, which are retagged
+  `[OUT-OF-SCOPE]` and reported instead.
+- Report `+N −M via <goal>` on every run so membership movement is visible.
 - **D8 checks:** `partition_of` cycles or multiple parents (must be a tree);
   a `partition_of` target that does not exist; sibling partitions whose
   `dod.bucket` predicates overlap (double-counts the parent roll-up); a
@@ -865,6 +1056,19 @@ Single shared reader so the two consumers cannot disagree about membership.
 15. **D10:** after `freeze-sprint.mjs --force`, an unfinished goal is still
     `sprint: current`, and `sprints/N.md` records its metric **delta**, not a
     completion claim.
+16. **D12:** an issue with `goal: [a, b]` appears in **both** goals' tables and
+    is queued once (task keyed by issue id — no duplicate).
+17. **D12:** `goal: real-world-compat,` stays **one** dangling value; it is
+    never split into a list.
+18. **D14:** a goal with `selector: {edition: {lte: es5}, mode: [standalone, both]}`
+    queues an issue tagged `edition: es5, mode: both` and one tagged
+    `mode: standalone` — and does **not** queue `mode: js-host`.
+19. **D14:** `mode: standalone` in a selector matches `mode: both` issues;
+    `mode: {eq: standalone}` does not.
+20. **D14:** an issue whose `edition` is corrected so it leaves a predicate has
+    its task pruned — **unless** the task is `in_progress`/owned, which is
+    retagged `[OUT-OF-SCOPE]` and reported, never deleted.
+21. **D14:** a selector matching zero issues is a hard error, not an empty goal.
 
 ### Edge cases
 
@@ -934,7 +1138,9 @@ children reachable when `standalone-mode` is scheduled.
   issue.
 - **Triaging the 63 dangling goal names.** This issue ships the gate and the
   baseline; the triage is a follow-up.
-- **`--prune` for orphaned tasks.** Follow-up.
+- ~~**`--prune` for orphaned tasks.** Follow-up.~~ **Promoted to in-scope by
+  D14** — predicate membership makes removals routine, and upsert-only would
+  make them invisible.
 - **Scheduling any goal.** Landing the mechanism must change no behaviour.
 - **Promoting the existing 29 goals to `dod.kind: measured`.** All land as
   `asserted`; per-goal promotion is a follow-up requiring a real, resolvable
