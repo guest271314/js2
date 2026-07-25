@@ -179,7 +179,7 @@ dod: # D7 — every goal has a definition of done, of a declared kind
   lane: host # REQUIRED for kind: measured (D7c)
   bucket: "ES5" # MUST state exclusive-vs-cumulative intent explicitly
   target: 100
-partition_of: es5-complete # subset of the SAME population — expands transitively (D8)
+partition_of: es5 # subset of the SAME population — expands transitively (D8)
 depends_on: [es3-complete] # ordering edge only — does NOT expand (D8)
 aliases: [] # legacy `goal:` values that resolve here
 ---
@@ -272,14 +272,14 @@ members, directly contradicting the stakeholder's "all its issues will be worked
 on in the priority given." Instead emit a **loud warning** when one goal
 contributes > 40 net-new tasks, and let the operator decide.
 
-### D5 — The `es5-complete` contract (its first real use)
+### D5 — The `es5` contract (its first real use)
 
 **Verified at time of writing: no `plan/goals/es5*.md` exists, and the string
-`es5-complete` appears nowhere under `plan/`.** The census agent's output has
+`es5` appears nowhere under `plan/`.** The census agent's output has
 not landed, so this is stated as a contract, not an inference about another
 agent's work.
 
-D4 has a sharp edge for a brand-new goal: if `es5-complete`'s members are
+D4 has a sharp edge for a brand-new goal: if `es5`'s members are
 bulk-created as `status: backlog`, **actionable-only expansion surfaces zero of
 them** and the feature is a no-op on its first real use.
 
@@ -447,18 +447,18 @@ relations:
 | axis           | field                        | means                                                   | expands into the queue? |
 | -------------- | ---------------------------- | ------------------------------------------------------- | ----------------------- |
 | **dependency** | `depends_on: [es3-complete]` | ordering / readiness — an edge in the existing goal DAG | **NO**                  |
-| **partition**  | `partition_of: es5-complete` | a scope-restricted subset of the _same_ population      | **YES, transitively**   |
+| **partition**  | `partition_of: es5` | a scope-restricted subset of the _same_ population      | **YES, transitively**   |
 
-**Why dependency must not expand.** If scheduling `es5-complete` also dragged in
+**Why dependency must not expand.** If scheduling `es5` also dragged in
 every member of `es3-complete` — and transitively `compilable`, `core-semantics`,
 … — one goal would pull most of the backlog. Dependencies exist to tell you
 _what to schedule first_, which is an operator decision, not an automatic one.
-Adding `es5-complete` while `es3-complete` is unmet should produce a **warning**
+Adding `es5` while `es3-complete` is unmet should produce a **warning**
 ("depends on es3-complete, currently 83 % — schedule that first?"), never a
 silent expansion.
 
 **Why partition must expand.** A subgoal is not separate work; it is a
-_narrower view of the same work_. `es5-static` ⊂ `es5-complete`. Scheduling the
+_narrower view of the same work_. `es5-static` ⊂ `es5`. Scheduling the
 parent must reach the child's members, or the hierarchy is decorative. This is
 the "hierarchical" property the stakeholder asked for.
 
@@ -479,8 +479,8 @@ the narrower bucket.
   and sibling partitions of the same parent must be **disjoint**. Overlapping
   siblings double-count and make the parent's roll-up wrong.
 - A goal may carry both `partition_of` and `depends_on` — they are orthogonal
-  (`es5-complete` is not a partition of anything, and depends on
-  `es3-complete`; `es5-static` is a partition of `es5-complete` and inherits
+  (`es5` is not a partition of anything, and depends on
+  `es3-complete`; `es5-static` is a partition of `es5` and inherits
   nothing from the dependency).
 
 ### D9 — Ordering: "most important and ready first"
@@ -579,7 +579,7 @@ parallel field.
 
 **(b) The DAG becomes machine-checkable — but scope the promise.** Once a goal
 can be `done`, `goal-graph.md`'s prose rule ("a goal is activatable when all its
-dependencies are met") becomes computable: `es5-complete` is `activatable` when
+dependencies are met") becomes computable: `es5` is `activatable` when
 `es3-complete` is `done`. `activatable`/`blocked` therefore become **derived**
 states, not hand-set ones.
 
@@ -690,7 +690,7 @@ selector:
   goal has no membership list, so it cannot dangle. `aliases:` (D2) is still
   needed, but only for goals that keep an explicit `members`/`goal:` tag.
 - **It removes a forced choice the census already hit.** Verified in
-  `plan/goals/es5-complete.md`, written by `dev-es5-census`: _"Standalone lane —
+  `plan/goals/es5.md`, written by `dev-es5-census`: _"Standalone lane —
   ES5 is 5,273 / 8,931 = 59 % … **it trails host by 1,226 tests and is tracked by
   the `standalone` goals**."_ That sentence exists **only** because an issue
   could hold one goal. Under D12 + D14 the standalone ES5 work is simply
@@ -758,7 +758,7 @@ So, promoted from follow-up to **in-scope**:
 > `13,075 − 4,144 = 8,931` — exactly the census figure. Anything derived from
 > the pre-#3621 artifact is wrong by that margin.
 
-Authoritative source is now the census in **#3626** / `plan/goals/es5-complete.md`
+Authoritative source is now the census in **#3626** / `plan/goals/es5.md`
 (measured 2026-07-25 against the CI baselines in `loopdive/js2wasm-baselines`):
 
 | bucket / lane          |  pass |  fail | total | pct  |
@@ -793,12 +793,12 @@ correctly, and decomposes into:
 es3-complete          dod{kind: measured, lane: host, bucket: "≤ ES3", target: 100}
                       47 failures. Genuinely completable near-term.
 
-es5-static            partition_of: es5-complete
+es5-static            partition_of: es5
                       depends_on: [es3-complete]
                       dod{kind: measured, lane: host, bucket: "ES5 minus <census predicate>", target: 100}
                       ES5 bucket MINUS interpreter-dependent tests. Reachable now.
 
-es5-complete          depends_on: [es3-complete, runtime-eval]
+es5          depends_on: [es3-complete, runtime-eval]
                       dod{kind: measured, lane: host, bucket: "ES5", target: 100}
                       The remainder needs eval / new Function ⇒ the interpreter.
 ```
@@ -811,7 +811,7 @@ forever.
 **Do not hardcode the exclusion predicate as "eval and new Function."** The
 brief's own instruction is to take the exact partition from the census
 (`dev-es5-census`), which had not landed at time of writing (verified: no
-`plan/goals/es5*.md`, no `es5-complete` string under `plan/`). `2927`
+`plan/goals/es5*.md`, no `es5` string under `plan/`). `2927`
 (interpreter foundation) and `2928` (E2 self-compile canary) are the existing
 interpreter work the partition should depend on.
 
@@ -856,7 +856,7 @@ gap.
   `source`/`bucket` — do it in follow-ups, starting with the ES3/ES5 set, not in
   bulk here.
 
-**File: `plan/goals/es3-complete.md`, `es5-static.md`, `es5-complete.md` (NEW)**
+**File: `plan/goals/es3-complete.md`, `es5-static.md`, `es5.md` (NEW)**
 
 - Create per the worked example. **Blocked on the `dev-es5-census` output** for
   the exact `es5-static` exclusion predicate — do not guess it.

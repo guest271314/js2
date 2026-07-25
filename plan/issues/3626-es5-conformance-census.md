@@ -1,10 +1,10 @@
 ---
 id: 3626
-title: "ES5 conformance census — root-caused work plan for the es5-complete goal (+ edition-classifier fix)"
+title: "ES5 conformance census — root-caused work plan for the es5 goal (+ edition-classifier fix)"
 status: done
 completed: 2026-07-25
 sprint: current
-goal: es5-complete
+goal: es5
 priority: high
 horizon: m
 feasibility: medium
@@ -303,7 +303,7 @@ with no open PR, which usually means stalled rather than active.
 
 ## 6. Goal tagging — scope and two incidental findings
 
-**15 host-lane, ES5-primary issues** carry `goal: es5-complete` (plus this
+**15 host-lane, ES5-primary issues** carry `goal: es5` (plus this
 census issue): #671, #739, #2200, #2552, #2666, #2668, #2726, #2737, #2742,
 #2747, #3230, #3420, #3434, #3475, #3540.
 
