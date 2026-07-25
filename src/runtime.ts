@@ -13966,23 +13966,67 @@ assert._isSameValue = isSameValue;
             }
           }
         }
+        // (#3486) A registered fnctor instance's `.constructor` back-pointer.
+        // `function MyError(m){this.message=m}; new MyError()` lowers to a
+        // bespoke `$__fnctor_MyError` struct; the instance → ctor-closure link
+        // is recorded by the `__register_fnctor_instance` import (#1712). Answer
+        // `.constructor` with the SAME closure the bare `MyError` identifier
+        // resolves to, wrapped through the identity-stable `_hostCallableCache`
+        // so (a) `typeof inst.constructor === "function"` holds, (b) `.name`
+        // reads the codegen-stamped sidecar name, and (c) the wrapper unwraps
+        // to its closure target in `_hostStrictEqual`, which is what compiled
+        // `===` on two externrefs routes through (`__host_eq`). That makes
+        // `thrown.constructor === MyError` — the identity check inside
+        // test262's `assert.throws` — genuinely true.
+        //
+        // Placed BEFORE the vec arm below: both are `_isWasmStruct` arms and the
+        // instance→ctor link is the more specific identity. It cannot claim a
+        // genuine vec (a vec is never a registered fnctor instance) and cannot
+        // claim a class instance (those return through the sidecar / `__sget_`
+        // paths above, long before here).
+        if (key === "constructor" && obj != null && _isWasmStruct(obj) && _canBeWeakKey(obj)) {
+          const ctorClosure = _fnctorInstanceCtor.get(obj);
+          if (ctorClosure != null) {
+            return ctorClosure;
+          }
+        }
         // #1057 — vec wrapper structs (results of String.prototype.split,
         // Array.prototype.map, etc.) must report `.constructor === Array`.
         // Only fire AFTER _safeGet and __sget_ fallback return nothing —
         // class instances with sidecar constructors or struct getters are
-        // already handled above. Use __vec_len to positively identify vec
-        // wrappers: it returns a number for vecs and throws for non-vecs.
-        // (fieldNames === null was too broad — closure structs also lack
-        // field names, causing 1545 range_error regressions.)
+        // already handled above.
+        //
+        // (#3486) Gate on the POSITIVE `__is_vec` discriminator, not on
+        // `typeof __vec_len(obj) === "number"`. That old test was VACUOUS:
+        // `__vec_len`'s not-a-vec default is `0` (see the ref.test dispatch
+        // chain in codegen/vec-access-exports.ts — it returns 0, it does not
+        // throw), and `typeof 0 === "number"`, so EVERY WasmGC struct reaching
+        // this arm was reported as an Array. That is the root cause of #3486:
+        // a caught `new MyError()` answered `.constructor.name === "Array"`.
+        // The same vacuity was already fixed at the other `__vec_len` call
+        // sites by #2836; this arm was missed. `__is_vec` is emitted by the
+        // same pass as `__vec_len` (`_emitVecAccessExportsInner`), so the
+        // legacy branch below is reachable only if that pass half-emitted;
+        // it is kept so such a module keeps its pre-#3486 bytes rather than
+        // silently losing `vec.constructor === Array`.
         if (key === "constructor" && obj != null && _isWasmStruct(obj)) {
           const exports = callbackState?.getExports();
+          const isVec = exports?.__is_vec as ((v: any) => number) | undefined;
           const vecLen = exports?.__vec_len;
-          if (typeof vecLen === "function") {
+          if (typeof isVec === "function") {
+            try {
+              if (isVec(obj) === 1) {
+                // (#779c) Return sandbox.Array when test262 sandbox is active,
+                // so `vec.constructor === Array` (sandbox.Array) holds.
+                return globalSandbox?.Array ?? Array;
+              }
+            } catch {
+              // Not a vec wrapper — fall through
+            }
+          } else if (typeof vecLen === "function") {
             try {
               const len = vecLen(obj);
               if (typeof len === "number") {
-                // (#779c) Return sandbox.Array when test262 sandbox is active,
-                // so `vec.constructor === Array` (sandbox.Array) holds.
                 return globalSandbox?.Array ?? Array;
               }
             } catch {

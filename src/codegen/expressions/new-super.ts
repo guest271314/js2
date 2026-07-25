@@ -10,6 +10,8 @@ import {
   emitFuncRefAsClosure,
   isOwnParamName,
 } from "../closures.js";
+import { emitCachedFuncClosureAccess } from "../closures/method-trampolines.js"; // (#3486) fnctor ctor-closure singleton
+import { popBody, pushBody } from "../context/bodies.js"; // (#3486) detached operand buffer
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -1468,8 +1470,69 @@ function compileNewFunctionDeclaration(
   // prologue instrs through currentFunc.body, and after attachment through
   // ctx.mod.functions.
   if (!ctx.standalone && !ctx.wasi) {
-    const ctorGlobalIdx = ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName);
-    if (ctorGlobalIdx !== undefined) {
+    // (#3486) Resolve the ctor-closure OPERAND of the registration.
+    //
+    // The original (#1712) form required a pre-existing closure global. BOTH of
+    // its sources are populated lazily by an earlier identifier-as-VALUE read of
+    // `funcName`, so whether the link got emitted at all depended on COMPILE
+    // ORDER — and in the shape test262 actually uses,
+    //
+    //     function DummyError() {}
+    //     var prop = function () { throw new DummyError(); };
+    //     assert.throws(DummyError, function () { base[prop()] *= expr(); });
+    //
+    // the `new DummyError()` compiles BEFORE the `DummyError` argument does, so
+    // no global existed at this point, the gate missed, and — because the
+    // synthesized ctor is built exactly once and cached in `funcConstructorMap`
+    // — the link was permanently absent. Instances then had NO `.constructor`
+    // back-pointer, which is one half of #3486.
+    //
+    // Emit the identifier's own cached-closure ACCESS instead: the same
+    // `emitCachedFuncClosureAccess` helper identifiers.ts uses for a bare
+    // `DummyError` mention, with the same `constructible` flag (unconditionally
+    // false in the host lane — see `isOrdinaryFunctionDecl`'s `noJsHost` gate),
+    // so the value registered is reference-identical to the one every later
+    // mention yields. That fixes both failure modes at once: it creates the
+    // singleton on demand (no compile-order dependency) and it evaluates the
+    // lazy cache HERE, so the registered value is never the `null` the global
+    // still holds before its own first value read.
+    //
+    // Emitted into a detached buffer (pushBody/popBody, which records the
+    // buffer in `savedBodies` so late-import shift walkers still reach it) and
+    // spliced back only on success — a helper that declines midway must not
+    // leave a partial operand on the ctor's stack.
+    const modGlobalIdx = ctx.moduleGlobals.get(funcName);
+    const declFuncIdx = ctx.funcMap.get(funcName);
+    const saved = pushBody(ctorFctx);
+    let operand: Instr[] | undefined;
+    if (modGlobalIdx !== undefined) {
+      // `var Parser = function(){}` — the module global already HOLDS the
+      // closure (it is not a lazy cache), so read it directly, as before.
+      ctorFctx.body.push({ op: "global.get", index: modGlobalIdx });
+      const gdef = ctx.mod.globals[localGlobalIdx(ctx, modGlobalIdx)];
+      if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
+        ctorFctx.body.push({ op: "extern.convert_any" });
+      }
+      operand = ctorFctx.body;
+    } else if (declFuncIdx !== undefined && declFuncIdx >= ctx.numImportFuncs) {
+      const closureType = emitCachedFuncClosureAccess(ctx, ctorFctx, funcName, declFuncIdx);
+      if (closureType) {
+        if (closureType.kind !== "externref" && closureType.kind !== "ref_extern") {
+          ctorFctx.body.push({ op: "extern.convert_any" });
+        }
+        operand = ctorFctx.body;
+      }
+    }
+    popBody(ctorFctx, saved);
+    if (operand !== undefined) {
+      // Park the closure in a scratch local BEFORE the register import is
+      // added: `emitCachedFuncClosureAccess` bakes a trampoline funcIdx, and
+      // the single terminal `flushLateImportShifts` below must repair it in
+      // the SAME buffer sweep that fixes the `call` target (#2608 "one
+      // terminal flush, never mid-emission").
+      const ctorTmp = allocLocal(ctorFctx, `__fnctor_ctor_${ctorFctx.locals.length}`, { kind: "externref" });
+      ctorFctx.body.push(...operand);
+      ctorFctx.body.push({ op: "local.set", index: ctorTmp });
       ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
       // Apply the deferred index shift NOW (same discipline as every other
       // ensureLateImport caller in this file) so the `call` below targets the
@@ -1479,11 +1542,7 @@ function compileNewFunctionDeclaration(
       if (regIdx !== undefined) {
         ctorFctx.body.push({ op: "local.get", index: selfLocal });
         ctorFctx.body.push({ op: "extern.convert_any" });
-        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx });
-        const gdef = ctx.mod.globals[localGlobalIdx(ctx, ctorGlobalIdx)];
-        if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
-          ctorFctx.body.push({ op: "extern.convert_any" });
-        }
+        ctorFctx.body.push({ op: "local.get", index: ctorTmp });
         ctorFctx.body.push({ op: "call", funcIdx: regIdx });
       }
     }
