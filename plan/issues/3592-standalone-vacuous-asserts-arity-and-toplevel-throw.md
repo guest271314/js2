@@ -392,8 +392,12 @@ bucket (`super-spread-receiver`) was empty in the OFF arm and populated in the
 ON arm — it is a **pre-existing bucket definition**, not a new one.
 
 **This refutes the earlier expectation that 3/15 flips would need a new
-`Test262:AsyncTestFailure:Test262Error: …SameValue…` bucket.** All 23 (at N=3,020)
-/ 30-odd `AsyncTestFailure` rows classify. The reason is structural: the
+`Test262:AsyncTestFailure:Test262Error: …SameValue…` bucket.** Every
+`AsyncTestFailure` row classifies — that is what "0 unclassified in both arms at
+N = 4,000" means; a spot check at an intermediate N routed all 23 such rows then
+present into `class-prototype-private-descriptor`, `generator-async-iteration`,
+`standalone-iterator-protocol`, `object-property-semantics` and
+`eval-new-function`. The reason is structural: the
 standalone bucket matchers are predominantly **path**-based
 (`class-prototype-private-descriptor` matches `language/statements/class`,
 `/class/`, `private`, …), so a _new error signature on an already-covered path_
