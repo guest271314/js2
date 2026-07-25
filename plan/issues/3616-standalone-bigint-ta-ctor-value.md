@@ -1,10 +1,11 @@
 ---
 id: 3616
 title: "standalone: BigInt64Array / BigUint64Array are null in VALUE position — 627 type_error rows"
-status: in-progress
+status: done
 assignee: ttraenkler/opus-typeerror-lane
 created: 2026-07-25
 updated: 2026-07-25
+completed: 2026-07-25
 priority: high
 feasibility: medium
 reasoning_effort: high
