@@ -209,12 +209,27 @@ export function changeSetNumericAllowances(repoRoot, base, key) {
 
 /**
  * Minimal YAML-frontmatter reader for a `key:` block carrying nested `count:`
- * and `reason:` scalars (block form only — the shape documented on
- * `changeSetNumericAllowances`). Returns:
- *   - undefined        when `key:` is absent (no declaration at all),
- *   - null             when `key:` is present but malformed (missing/invalid
- *                      count or missing reason) — callers should warn loudly,
- *   - {count, reason}  for a valid declaration.
+ * and `reason:` scalars, plus an OPTIONAL nested `tests:` list (block form only
+ * — the shape documented on `changeSetNumericAllowances`). Returns:
+ *   - undefined               when `key:` is absent (no declaration at all),
+ *   - null                    when `key:` is present but malformed
+ *                             (missing/invalid count or missing reason) —
+ *                             callers should warn loudly,
+ *   - {count, reason, tests}  for a valid declaration (`tests` is `[]` when the
+ *                             nested list is absent).
+ *
+ * The nested `tests:` list (#3596) is what lets a caller MACHINE-CHECK a
+ * reclassification claim — the declaration must name the affected tests so the
+ * gate can verify each against the baseline, rather than trusting a bare count.
+ * It is optional here so pre-existing count+reason declarations (#3303/#3370)
+ * keep parsing unchanged; requiring it is the caller's policy decision.
+ *
+ * Shape:
+ *   trap-growth-allow:
+ *     count: 1
+ *     reason: "..."
+ *     tests:
+ *       - test/built-ins/Iterator/zip/iterables-iteration.js
  */
 export function parseFrontmatterCountReason(text, key) {
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -224,16 +239,49 @@ export function parseFrontmatterCountReason(text, key) {
     if (!lines[i].startsWith(`${key}:`)) continue;
     let count;
     let reason;
+    const tests = [];
+    /** Which nested list key we are currently consuming `- item` lines for. */
+    let collecting = null;
     for (let j = i + 1; j < lines.length; j++) {
       if (/^\s*$/.test(lines[j]) || /^\s*#/.test(lines[j])) continue; // blank / comment line inside the block
+      // A nested list item belongs to the most recently opened nested list key
+      // (only `tests:` today). Consume it rather than treating it as a dedent,
+      // which is what previously ended the block at the first `- item`.
+      const item = lines[j].match(/^\s+-\s+(.+)$/);
+      if (item) {
+        if (collecting === "tests") {
+          const v = unquote(item[1].trim());
+          if (v) tests.push(v);
+          continue;
+        }
+        break; // a list under a key we don't understand ⇒ end of block
+      }
       const lm = lines[j].match(/^\s+([A-Za-z_-]+):\s*(.*)$/);
-      if (!lm) break; // dedent / list item ⇒ end of the nested block
+      if (!lm) break; // dedent ⇒ end of the nested block
       const v = unquote(lm[2].trim());
-      if (lm[1] === "count") count = /^[0-9]+$/.test(v) ? Number.parseInt(v, 10) : NaN;
-      else if (lm[1] === "reason") reason = v;
+      if (lm[1] === "count") {
+        count = /^[0-9]+$/.test(v) ? Number.parseInt(v, 10) : NaN;
+        collecting = null;
+      } else if (lm[1] === "reason") {
+        reason = v;
+        collecting = null;
+      } else if (lm[1] === "tests") {
+        // Inline form (`tests: [a, b]`) or block form (items on following lines).
+        if (v.startsWith("[")) {
+          for (const it of v.replace(/^\[/, "").replace(/\]$/, "").split(",")) {
+            const t = unquote(it.trim());
+            if (t) tests.push(t);
+          }
+          collecting = null;
+        } else {
+          collecting = "tests";
+        }
+      } else {
+        collecting = null;
+      }
     }
     const valid = Number.isInteger(count) && count > 0 && typeof reason === "string" && reason.length > 0;
-    return valid ? { count, reason } : null;
+    return valid ? { count, reason, tests } : null;
   }
   return undefined;
 }

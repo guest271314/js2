@@ -11,6 +11,7 @@ import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 import { ts } from "../ts-api.js";
 import { emitCachedFuncClosureAccess } from "./closures.js";
+import { pushBuiltinCtorOwnPropSeed } from "./builtin-ctor-own-props.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
@@ -137,16 +138,37 @@ export function emitBuiltinConstructorIdentity(
     ctx.builtinObjectGlobals.set(key, globalIdx);
   }
 
+  // (#2984 ctor-carrier own props) The carrier is materialized through a local
+  // so the §17/§20 own data properties (`length`/`name`/`prototype`) can be
+  // installed on it before it is published to the global. Without them the
+  // carrier is an EMPTY `$Object`, and every RUNTIME descriptor query
+  // test262's `verifyProperty` makes through its any-typed harness parameter
+  // (`hasOwnProperty`, `gOPD`, for-in, write, delete) answers "absent".
+  const objLocal = allocLocal(fctx, `__builtin_ctor_${builtinName}_obj_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+  const initBody: Instr[] = [
+    { op: "call", funcIdx: newObjectIdx },
+    { op: "local.set", index: objLocal },
+  ];
+
+  // (#2182 pattern) `savedBody` is detached during the swap; register it in
+  // `liveBodies` so a late-import funcidx shift walks it too.
+  const savedBody = fctx.body;
+  fctx.body = initBody;
+  ctx.liveBodies.add(savedBody);
+  try {
+    pushBuiltinCtorOwnPropSeed(ctx, fctx, builtinName, objLocal);
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push({ op: "global.set", index: globalIdx });
+  } finally {
+    fctx.body = savedBody;
+    ctx.liveBodies.delete(savedBody);
+  }
+
   fctx.body.push({ op: "global.get", index: globalIdx });
   fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [
-      { op: "call", funcIdx: newObjectIdx },
-      { op: "global.set", index: globalIdx },
-    ],
-  });
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: initBody, else: [] });
   fctx.body.push({ op: "global.get", index: globalIdx });
   return { kind: "externref" };
 }
@@ -317,6 +339,11 @@ export function emitBuiltinNamespaceObject(
       coerceTopToExternref(fctx, valueType);
       fctx.body.push({ op: "call", funcIdx: setIdx });
     }
+    // (#2984 ctor-carrier own props) The Error-family / `Array` / `Object`
+    // carriers are CONSTRUCTOR objects, so they also own `length`/`name`/
+    // `prototype`. No-op for the true namespaces (`Math`/`JSON`/`Reflect`),
+    // which own none of the three.
+    pushBuiltinCtorOwnPropSeed(ctx, fctx, builtinName, objLocal);
     fctx.body.push({ op: "local.get", index: objLocal });
     fctx.body.push({ op: "global.set", index: globalIdx });
   } finally {

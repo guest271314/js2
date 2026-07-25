@@ -13,6 +13,12 @@ created: 2026-07-25
 # but its call site + import still add 8 LOC to the object-runtime.ts god-file.
 loc-budget-allow:
   - src/codegen/object-runtime.ts
+# Carried from the RC1 PR that landed on main (kept through the add/add merge).
+trap-growth-allow:
+  count: 1
+  reason: "#3596 reclassification: fixing the dropped top-level `throw` lets await-dynamic-import-rejection.js run past the point it previously stopped, reaching a pre-existing latent unreachable trap. Baseline status is `fail` (negative_test_fail) — the module DID instantiate and return a verdict, so this is the #3596 baseline-did-testify branch, not the #3595 never-instantiated class. fail -> fail, flavour only; the test has never passed. PR net +16 pass, all other trap categories flat."
+  tests:
+    - test/language/module-code/top-level-await/await-dynamic-import-rejection.js
 ---
 
 ## Problem

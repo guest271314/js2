@@ -337,8 +337,6 @@ describe("linear fail-loud on unsupported constructs (#1937)", () => {
       `export async function f(): Promise<number> { return await g(); }
        async function g(): Promise<number> { return 1; }`,
     ],
-    ["labeled break", `export function f(): number { L: for (let i=0;i<2;i+=1) { break L; } return 1; }`],
-    ["labeled continue", `export function f(): number { L: for (let i=0;i<2;i+=1) { continue L; } return 1; }`],
     [
       "switch case fall-through (non-empty body)",
       `export function f(x: number): number { let r=0; switch(x){ case 1: r=1; case 2: r=2; break; } return r; }`,
@@ -358,6 +356,21 @@ describe("linear fail-loud on unsupported constructs (#1937)", () => {
       ).toBe(true);
     });
   }
+
+  // #2952 slice 3 — labeled break/continue moved OUT of the fail-loud list:
+  // the IR path now claims labeled loops and lowers `br.label` to core-Wasm
+  // `br` (backend-identical), so the linear target compiles AND runs them.
+  it("labeled break now compiles and runs on linear (#2952 slice 3)", async () => {
+    const e = await compileLinear(`export function f(): number { L: for (let i=0;i<2;i+=1) { break L; } return 1; }`);
+    expect(e.f()).toBe(1);
+  });
+
+  it("labeled continue now compiles and runs on linear (#2952 slice 3)", async () => {
+    const e = await compileLinear(
+      `export function f(): number { L: for (let i=0;i<2;i+=1) { continue L; } return 1; }`,
+    );
+    expect(e.f()).toBe(1);
+  });
 
   it("empty statements compile without a diagnostic", async () => {
     const e = await compileLinear(`
