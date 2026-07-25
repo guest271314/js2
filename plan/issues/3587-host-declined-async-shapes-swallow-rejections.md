@@ -17,6 +17,9 @@ language_feature: async, promises
 goal: async-model
 related: [1042, 1796, 2906, 2967, 1373b, 3545]
 origin: "2026-07-25 Fable substrate/async review (plan/agent-context/fable-substrate-async-review-2026-07-24.md), probes a5b/a5c/a5d"
+loc-budget-allow:
+  - src/codegen/async-frame.ts
+  - src/codegen/closures.ts
 ---
 
 # Declined async shapes swallow rejections on the default (gc host) lane
