@@ -16,6 +16,11 @@
 import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
 import { createHash } from "crypto";
+// (#3613) A checker that answers for 0 of N inputs is a BROKEN checker, not a
+// clean result. `trapInnermostFrame` is exactly such a checker and its
+// 100 %-unverifiable rate on the CI grammar is what silently produced the
+// "0 verified unmasked pre-existing traps" reading in the #3601 park.
+import { warnIfVerifierVacuous } from "./lib/verifier-guard.mjs";
 
 // #1943 — single source of truth for the documented merge thresholds, so the
 // CI regression-gate ENFORCES the same numbers the dev-self-merge skill
@@ -1100,6 +1105,27 @@ export function evaluateDevacuificationAllowance(opts: {
   // claimed as de-vacuified callee defects (per-file OFF/ON evidence recorded
   // in the declaring issue). Trap flips outside this list are never excused.
   const declaredTraps = new Set(allowance.tests ?? []);
+
+  // (#3613) VACUOUS-VERIFIER GUARD. `trapInnermostFrame` is the machine check
+  // that makes a declared trap excusal trustworthy; if it can answer for NONE
+  // of the trap candidates, the "verified 0" it reports is a parser-coverage
+  // failure, not evidence of a clean population. That exact blindness produced
+  // the #3601 park's "0 verified unmasked pre-existing traps" (the CI worker's
+  // `[in name() ← …]` grammar was unparsed). Warn LOUDLY instead of returning
+  // a silent zero. The excusal itself stays conservative — an unverifiable
+  // trap is still refused — so this is a diagnostic, not a gate relaxation.
+  const trapCandidates = candidates.filter(
+    (r) => !!r.error_category && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(r.error_category),
+  );
+  const framed = trapCandidates.filter((r) => trapInnermostFrame(r.error) !== null);
+  const vacuityWarning = warnIfVerifierVacuous({
+    name: "trapInnermostFrame",
+    population: trapCandidates.length,
+    verified: framed.length,
+    hint: "trap-message frame-grammar drift — the local runner renders `in name() at source L…` while the CI worker renders `[in name() ← caller ← …]`; a third renderer would be invisible the same way",
+  });
+  if (vacuityWarning) notes.push(vacuityWarning);
+
   const excusable = candidates.filter((r) => isDevacuificationExcusableFlip(r, declaredTraps));
   const where = allowance.sources.join(", ");
   if (excusable.length > allowance.count) {
