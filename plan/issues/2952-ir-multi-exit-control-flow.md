@@ -34,6 +34,12 @@ loc-budget-allow:
 func-budget-allow:
   - src/ir/lower.ts::lowerIrFunctionBody
   - src/ir/lower.ts::emitInstrTree
+  # Slice 4: renameInstrOperands legitimately grows with every new
+  # buffer-bearing IR kind (+30 for the switch/labeled.block deep-rename
+  # arms — same per-kind pattern as if.stmt/try). verifyBlock/walkBuffer
+  # were NOT granted: the per-instr structural checks were split out into
+  # `verifyInstrStructure` instead (see the slice-4 notes).
+  - src/ir/passes/inline-small.ts::renameInstrOperands
 ---
 
 # #2952 — six direct-only statement kinds share one structural blocker
