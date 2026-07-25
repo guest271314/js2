@@ -10,7 +10,7 @@ pr: 3496
 last_merged_pr: 3490
 sprint: current
 created: 2026-07-21
-updated: 2026-07-22
+updated: 2026-07-25
 priority: critical
 horizon: l
 complexity: L
@@ -946,6 +946,31 @@ Commit 3.3 and Commit 4 before R1 can close.
 - **Not rerun after Stage 9:** the full equivalence gate and fallback/readiness
   ratchets. Run them before declaring R1 complete; do not infer completion from
   the focused matrices below.
+
+### 2026-07-25 resume state
+
+- Pulled `origin/main` to `6f3e4358033ab8`, then merged it into the continuation
+  branch at `30e3553f48b972`. Draft PR #3496 now has a current-main checkpoint.
+  The main checkout's existing Test262 log change and `.capc-worktree` link
+  were left untouched.
+- Reconciled current-main #3565 verifier demotions with #3520's grouped
+  terminal-evidence ledger. Public diagnostic order stays stable, while a
+  mixed verifier event selects a real invariant as its terminal
+  representative. Current-main #2952's new iterator-close call is also typed
+  as a runtime binding instead of reintroducing a name-only `IrFuncRef`.
+- Merge validation is green: **64/64** focused #2138/#3519/#3520/#3565/#680
+  tests, **71/71** #2952 control-flow tests, TypeScript with incremental output
+  disabled, scoped Biome lint, Prettier, and diff checks on the resolved files.
+- The pre-dispatch gate correctly reported the existing
+  `ttraenkler/codex-r1` claim and active #3518 dependency; this is the same R1
+  continuation, not a competing dispatch. Three isolated, pushed Symphony
+  worktrees now own disjoint Commit 3.3 lanes:
+  `symphony/3520-c33-inline`, `symphony/3520-c33-monomorphize`, and
+  `symphony/3520-c33-integration`.
+- Commit 3.3 must also absorb current-main #3551: its ABI-withdrawal cascade
+  currently uses `abiDivergentNames`, `findReferencedFuncName`, and name-owned
+  orphan-slot records. Those must become exact callable/unit and owner-ID
+  maps while preserving withdrawal and orphan-slot stubbing behavior.
 
 Minimum resume validation:
 
