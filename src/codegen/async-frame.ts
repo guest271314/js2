@@ -92,7 +92,7 @@ import {
 import { ensureI32Condition, resolveWasmType } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getOrRegisterRefCellType } from "./registry/types.js";
-import { coerceType, compileExpression, compileStatement } from "./shared.js";
+import { coerceType, compileExpression, compileStatement, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { resolveSpillLocalValType } from "./statements/variables.js";
 
 /**
@@ -219,7 +219,21 @@ export function asyncFnNeedsHostDrive(
   // field (buildAsyncFrameInfo `spillCellInfo`) — no pattern-shape decline
   // remains.
   const linear = planLinearAwaits(fn, plan);
-  if (linear === null) return false;
+  if (linear === null) {
+    // (#3587) try/catch-across-await — the #2906 3c CFG machine (catch regions
+    // as states + routed dispatcher) drives this shape on the HOST settle
+    // backend too: rejection delivery is backend-agnostic (the reject step
+    // adapter stashes ERROR + MODE_THROW, the resume prelude re-throws, the
+    // route enters the catch chain). Before this, the shape fell to the legacy
+    // synchronous pass-through, which CANNOT deliver an awaited rejection —
+    // execution continued straight past the rejected await and the catch never
+    // ran (the exact construct signalling "I care about this rejection" was
+    // what disabled rejection handling). Same widened spill-safe rule as the
+    // native lane.
+    const tc = computeTryCatchSpills(ctx, fn, plan);
+    if (tc !== null) return tc.spillTypes.every(isSpillSafeType);
+    return false;
+  }
   // Parity with asyncFnNeedsCps/asyncFnNeedsDrive: a lone `await Promise.all(...)`
   // already yields a real Promise the legacy identity path resolves correctly.
   if (linear.segments.length === 1 && awaitedExprIsPromiseCombinator(linear.segments[0]!.awaitedExpr)) return false;
@@ -1146,7 +1160,10 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
       )
     : planAsyncCfg(ctx, info.decl, plan, {
         allowLoops: !info.host,
-        allowTryCatch: !info.host,
+        // (#3587) try/catch-across-await is admitted on BOTH settle backends —
+        // the host gate (`asyncFnNeedsHostDrive`) mirrors this via
+        // `computeTryCatchSpills`, keeping predicate and producer in lockstep.
+        allowTryCatch: true,
         allowReturnInTry: !info.host,
       });
   if (cfg === null) {
@@ -1450,6 +1467,17 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
   // try wraps the chain). Plans without a catchState keep the pre-3c
   // `try { block { loop { chain } } } catch` wrap BYTE-IDENTICALLY.
   const routedDispatch = cfg.handlers.some((h) => h.catchState !== undefined);
+  // (#3587) HOST-lane `catch_all` reason source, pre-registered BEFORE any
+  // state body / finalizer body is built: registering it later would shift
+  // defined-function indices already baked into detached instr arrays the
+  // shift walker cannot reach (the finalizer bodies ride plain local arrays
+  // until final assembly). Import indices are append-stable, so capturing the
+  // number here is safe. No-op (pure funcMap lookup) when already registered.
+  let hostGetCaughtIdx: number | undefined;
+  if (info.host && routedDispatch) {
+    hostGetCaughtIdx = ensureLateImport(ctx, "__get_caught_exception", [], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, resumeFctx);
+  }
 
   // Emit a state's resume prelude: re-throw a rejected predecessor await
   // (MODE_THROW — arming its handler region first so the finalizer runs), then
@@ -2118,7 +2146,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
     // and `br` the loop (depth 2 from inside the route's `if`: if=0, try=1,
     // loop=2). No active region (or a region without a catchState) falls
     // through to the shared reject tail, exactly the pre-3c behavior.
-    const route: Instr[] = [{ op: "local.set", index: reasonLocal }];
+    const routeCore: Instr[] = [];
     for (const region of cfg.handlers) {
       if (region.catchState === undefined) continue;
       const bindInstrs: Instr[] = [];
@@ -2136,7 +2164,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
           );
         }
       }
-      route.push(
+      routeCore.push(
         { op: "local.get", index: inSrcTryLocal },
         { op: "i32.const", value: region.id },
         { op: "i32.eq" },
@@ -2152,7 +2180,27 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
         },
       );
     }
-    route.push(...rejectTail);
+    routeCore.push(...rejectTail);
+    // `catch $exn`: the thrown reason is on the stack.
+    const route: Instr[] = [{ op: "local.set", index: reasonLocal }, ...routeCore];
+    // (#3587) HOST lane `catch_all` parity: the legacy try/catch lowering also
+    // catches FOREIGN JS exceptions (a host import throwing, e.g. a TypeError
+    // from a property op) via `catch_all` + `__get_caught_exception`. Without
+    // this arm, claiming a try/catch shape on the host backend would let a
+    // synchronous host throw inside the try region ESCAPE the machine (result
+    // promise strands pending) where the legacy path caught it. The arm
+    // retrieves the recorded exception and runs an identical route —
+    // `structuredClone`d, never aliased (one Instr[] must not sit in two
+    // branches; DCE/late-import walkers would double-remap it). Native lane
+    // (`wasi`/`standalone`) has no JS sidecar — no catch_all, byte-identical.
+    let catchAllRoute: Instr[] | undefined;
+    if (info.host && hostGetCaughtIdx !== undefined) {
+      catchAllRoute = [
+        { op: "call", funcIdx: hostGetCaughtIdx },
+        { op: "local.set", index: reasonLocal },
+        ...(structuredClone(routeCore) as Instr[]),
+      ];
+    }
     resumeFctx.body.push({
       op: "block",
       blockType: { kind: "empty" },
@@ -2166,6 +2214,7 @@ export function ensureAsyncResumeFunction(ctx: CodegenContext, info: AsyncFrameI
               blockType: { kind: "empty" },
               body: chain,
               catches: [{ tagIdx: exnTag, body: route }],
+              ...(catchAllRoute !== undefined ? { catchAll: catchAllRoute } : {}),
             },
           ],
         },

@@ -606,6 +606,16 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const u of collectForOfBodyUses(instr.then)) recordUse(u, -1);
         for (const u of collectForOfBodyUses(instr.else)) recordUse(u, -1);
       }
+      // #2952 slice 4 — labeled block / switch clause buffers: same -1
+      // convention as if.stmt arms.
+      if (instr.kind === "labeled.block") {
+        for (const u of collectForOfBodyUses(instr.body)) recordUse(u, -1);
+      }
+      if (instr.kind === "switch") {
+        for (const body of instr.bodies) {
+          for (const u of collectForOfBodyUses(body)) recordUse(u, -1);
+        }
+      }
     }
     for (const u of collectTerminatorUses(block)) recordUse(u, blockId);
   }
@@ -831,6 +841,15 @@ export function lowerIrFunctionBody<S, Slot>(
     if (instr.kind === "if.stmt") {
       for (const sub of instr.then) allocLocalForInstr(sub);
       for (const sub of instr.else) allocLocalForInstr(sub);
+    }
+    // #2952 slice 4 — labeled block / switch clause buffers.
+    if (instr.kind === "labeled.block") {
+      for (const sub of instr.body) allocLocalForInstr(sub);
+    }
+    if (instr.kind === "switch") {
+      for (const body of instr.bodies) {
+        for (const sub of body) allocLocalForInstr(sub);
+      }
     }
   };
   for (const block of func.blocks) {
@@ -2519,6 +2538,98 @@ export function lowerIrFunctionBody<S, Slot>(
         emitter.emitIf({ kind: "empty" }, thenBody, elseBody, out);
         return;
       }
+      // #2952 slice 4 — break-only labeled frame (`lbl: { ... break lbl; }`).
+      // One Wasm block; the frame binds the label for mode "break" only.
+      case "labeled.block": {
+        const bodySink: S = emitter.newSink();
+        ctrlStack.push({ kind: "break", label: instr.label });
+        emitBufferAsStatements(instr.body, bodySink);
+        ctrlStack.pop();
+        emitter.emitBlock({ kind: "empty" }, bodySink, out);
+        return;
+      }
+      // #2952 slice 4 — switch over literal tests: the block-per-case
+      // ladder documented on IrInstrSwitch (nodes.ts). Dispatch is an
+      // eq-chain (or br_table for a dense-int i32 disc); bodies are laid
+      // out in source order so fallthrough is the natural block exit.
+      case "switch": {
+        // #1584 (a0-tail): out-of-subset — the dispatch chain embeds raw
+        // i32/f64 consts + br_table, so S = Instr[] (same idiom as the
+        // forof.* arms; the bytecode backend rejects `switch` in legality).
+        requireInstrSink(out);
+        const n = instr.bodies.length;
+        // Evaluate the discriminant exactly once into its slot (§14.12.9).
+        emitValue(instr.disc, out);
+        emitter.emitLocalSet(slotWasmIdx(instr.discSlot), out);
+        if (n === 0) return; // `switch (x) {}` — disc side effects only
+
+        const discT = typeOf(instr.disc);
+        const discK = asVal(discT)?.kind;
+        if (discK !== "i32" && discK !== "f64") {
+          throw new Error(`ir/lower: switch disc must be i32/f64, got ${discT.kind} (${func.name})`);
+        }
+        const defaultIdx = instr.tests.findIndex((t) => t === null);
+        // From inside the dispatch (innermost) block: br k lands at the
+        // start of bodies[k]; br n exits the switch entirely.
+        const noMatchDepth = defaultIdx >= 0 ? defaultIdx : n;
+
+        const dispatch: Instr[] = [];
+        // br_table fast path: i32 disc, every test an int32, dense span.
+        const nonNullTests = instr.tests.filter((t): t is number => t !== null);
+        const allInt32 = nonNullTests.every((t) => Number.isInteger(t) && t >= -0x80000000 && t <= 0x7fffffff);
+        const span = nonNullTests.length > 0 ? Math.max(...nonNullTests) - Math.min(...nonNullTests) + 1 : 0;
+        const useBrTable = discK === "i32" && allInt32 && nonNullTests.length >= 2 && span <= 128;
+        if (useBrTable) {
+          const min = Math.min(...nonNullTests);
+          const targets: number[] = new Array(span).fill(noMatchDepth);
+          for (let k = 0; k < instr.tests.length; k++) {
+            const t = instr.tests[k];
+            if (t === null) continue;
+            // First matching clause wins on duplicate tests (source order).
+            if (targets[t - min] === noMatchDepth) targets[t - min] = k;
+          }
+          dispatch.push({ op: "local.get", index: slotWasmIdx(instr.discSlot) });
+          if (min !== 0) {
+            dispatch.push({ op: "i32.const", value: min });
+            dispatch.push({ op: "i32.sub" });
+          }
+          dispatch.push({ op: "br_table", targets, defaultDepth: noMatchDepth });
+        } else {
+          for (let k = 0; k < instr.tests.length; k++) {
+            const t = instr.tests[k]!;
+            if (t === null) continue; // default: no comparison
+            if (discK === "i32" && !Number.isInteger(t)) continue; // can never match an i32 disc
+            dispatch.push({ op: "local.get", index: slotWasmIdx(instr.discSlot) });
+            if (discK === "i32") {
+              dispatch.push({ op: "i32.const", value: t });
+              dispatch.push({ op: "i32.eq" });
+            } else {
+              dispatch.push({ op: "f64.const", value: t });
+              dispatch.push({ op: "f64.eq" });
+            }
+            emitter.emitBrIf(k, dispatch as unknown as S);
+          }
+          emitter.emitBr(noMatchDepth, dispatch as unknown as S);
+        }
+
+        // Wrap the ladder inside-out; body k sits after block bk's end.
+        // ctrl frames while emitting body k: the exit break-frame plus one
+        // plain per still-open case block (b(k+1)..b(n-1)) — popped one per
+        // step so depths derived by resolveBrLabel stay exact.
+        ctrlStack.push({ kind: "break", label: instr.breakLabel });
+        for (let i = 0; i < n - 1; i++) ctrlStack.push({ kind: "plain" });
+        let cur: Instr[] = dispatch;
+        for (let k = 0; k < n; k++) {
+          const wrapped: Instr[] = [];
+          emitter.emitBlock({ kind: "empty" }, cur as unknown as S, wrapped as unknown as S);
+          emitBufferAsStatements(instr.bodies[k]!, wrapped as unknown as S);
+          if (k < n - 1) ctrlStack.pop(); // close b(k+1)'s plain frame
+          cur = wrapped;
+        }
+        ctrlStack.pop(); // break frame
+        emitter.emitBlock({ kind: "empty" }, cur as unknown as S, out);
+        return;
+      }
       case "try": {
         // Build:
         //   try
@@ -3397,6 +3508,12 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [];
     case "if.stmt":
       return [instr.cond];
+    // #2952 slice 4 — labeled.block has no operands; switch surfaces its
+    // disc (clause-buffer uses via `collectForOfBodyUses`).
+    case "labeled.block":
+      return [];
+    case "switch":
+      return [instr.disc];
     // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
     // The lowering Phase C (#1373b) will inflate these into CPS-form
     // microtask-queue calls; until then they're never emitted by

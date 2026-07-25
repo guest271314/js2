@@ -361,6 +361,265 @@ function describeKind(t: IrType): string {
   return t.kind;
 }
 
+/**
+ * Per-instruction structural (type-system) rules: loop/if condValue i32
+ * contracts, switch shape rules, and the tagged-union box/unbox/dyn.*
+ * operand checks. Extracted from the `walkBuffer` scope walk (#2952
+ * slice 4) — these need only the instruction and its operand types
+ * (`operandIrType` scans the whole function), none of the walk state
+ * (label envs, buffer position), so the walk calls this once per
+ * instruction and stays a pure SSA/label-scope walker.
+ */
+function verifyInstrStructure(
+  instr: IrInstr,
+  func: IrFunction,
+  block: IrBlock,
+  localDefs: ReadonlySet<IrValueId>,
+  errors: IrVerifyError[],
+): void {
+  // The lowerer emits an unconditional `i32.eqz` on a loop `condValue`, so
+  // a non-i32 cond produces invalid Wasm that bricks the whole module.
+  // Reject it here (the lowerer's #1980 fix throws a fallback before
+  // reaching this, but the verifier is the structural backstop — the
+  // #1850 gap that let this through silently). (#1980)
+  if (instr.kind === "while.loop" || instr.kind === "for.loop") {
+    const condT = operandIrType(func, block, instr.condValue, localDefs);
+    if (condT && asVal(condT)?.kind !== "i32") {
+      errors.push({
+        message: `${instr.kind} condValue must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
+
+  // #2952 slice 2 — if.stmt cond must be i32 (same backstop rationale).
+  if (instr.kind === "if.stmt") {
+    const condT = operandIrType(func, block, instr.cond, localDefs);
+    if (condT && asVal(condT)?.kind !== "i32") {
+      errors.push({
+        message: `if.stmt cond must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
+
+  // #2952 slice 4 — switch structural rules: disc must be numeric (the
+  // lowerer emits i32.eq / f64.eq against literal tests), the tests/bodies
+  // arrays must be parallel, and at most one default.
+  if (instr.kind === "switch") {
+    const discT = operandIrType(func, block, instr.disc, localDefs);
+    const discK = discT ? asVal(discT)?.kind : undefined;
+    if (discT && discK !== "i32" && discK !== "f64") {
+      errors.push({
+        message: `switch disc must be i32/f64, got ${discK ?? discT.kind}`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+    if (instr.tests.length !== instr.bodies.length) {
+      errors.push({
+        message: `switch tests (${instr.tests.length}) and bodies (${instr.bodies.length}) must be parallel`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+    if (instr.tests.filter((t) => t === null).length > 1) {
+      errors.push({
+        message: `switch has more than one default clause`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
+
+  // Structural checks for the tagged-union instructions. These are
+  // type-system-level, not SSA-scope — misuse should surface here rather
+  // than silently lowering to a trap.
+  if (instr.kind === "box") {
+    if (instr.toType.kind === "dynamic") {
+      // #2949 R1 — box-to-dynamic erases any concrete value into the
+      // boxed-any carrier. Re-boxing an already-dynamic value is
+      // provably redundant (the intended node is a move or an unbox) —
+      // reject it so a producer bug surfaces here, not as a double-boxed
+      // runtime value.
+      const operandIr = operandIrType(func, block, instr.value, localDefs);
+      if (operandIr && operandIr.kind === "dynamic") {
+        errors.push({
+          message: `box operand is already dynamic — re-boxing a dynamic value is invalid (#2949)`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    } else if (instr.toType.kind !== "union") {
+      errors.push({
+        message: `box target must be a union or dynamic IrType, got ${instr.toType.kind}`,
+        func: func.name,
+        block: block.id as number,
+      });
+    } else {
+      // box requires the operand's ValType to be a member of the union.
+      const operandT = operandValType(func, block, instr.value, localDefs);
+      if (operandT && !unionContains(instr.toType.members, operandT)) {
+        errors.push({
+          // #1926 — members are IrTypes; describe each member's ValType kind.
+          message: `box operand type ${operandT.kind} is not a member of union<${instr.toType.members.map((m) => asVal(m)?.kind ?? m.kind).join(",")}>`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    }
+  }
+  if (instr.kind === "unbox" || instr.kind === "tag.test") {
+    const operandIr = operandIrType(func, block, instr.value, localDefs);
+    if (operandIr && operandIr.kind === "dynamic") {
+      // #2949 R2/R3 — dynamic operands discriminate on the JS partition,
+      // so `jsTag` is REQUIRED (the ValType `tag` cannot distinguish
+      // e.g. String from Object — both are reference-shaped).
+      if (instr.jsTag === undefined) {
+        errors.push({
+          message: `${instr.kind} on a dynamic operand requires jsTag (#2949)`,
+          func: func.name,
+          block: block.id as number,
+        });
+      } else {
+        const payload = jsTagUnboxKind(instr.jsTag);
+        // R2 — Null/Undefined are singleton partitions with no payload:
+        // unboxing them is invalid (identity is observed via tag.test).
+        if (instr.kind === "unbox" && payload === null) {
+          errors.push({
+            message: `unbox with payload-less JsTag ${JsTag[instr.jsTag]} is invalid — use tag.test (#2949)`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+        // When the producer also wrote a ValType `tag`, it must be
+        // consistent with the partition's payload kind: exact for the
+        // scalar partitions, ref-shaped for String/Object/Function.
+        if (instr.tag && payload !== null) {
+          const k = instr.tag.kind;
+          const refShaped =
+            k === "ref" ||
+            k === "ref_null" ||
+            k === "externref" ||
+            k === "ref_extern" ||
+            k === "eqref" ||
+            k === "anyref" ||
+            k === "funcref";
+          const consistent = payload === "ref" ? refShaped : k === payload;
+          if (!consistent) {
+            errors.push({
+              message: `${instr.kind} tag ${k} is inconsistent with jsTag ${JsTag[instr.jsTag]} (payload kind ${payload}) (#2949)`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+        }
+      }
+    } else if (operandIr && operandIr.kind !== "union") {
+      errors.push({
+        message: `${instr.kind} operand must be a union or dynamic IrType, got ${operandIr.kind}`,
+        func: func.name,
+        block: block.id as number,
+      });
+    } else if (operandIr) {
+      // Union operand (V1) — the ValType `tag` is REQUIRED (#2949 made
+      // the field optional on the node because dynamic operands use
+      // `jsTag` instead) and must name a member of the union.
+      if (!instr.tag) {
+        errors.push({
+          message: `${instr.kind} on a union operand requires a ValType tag`,
+          func: func.name,
+          block: block.id as number,
+        });
+      } else if (!unionContains(operandIr.members, instr.tag)) {
+        errors.push({
+          // #1926 — members are IrTypes; describe each member's ValType kind.
+          message: `${instr.kind} tag ${instr.tag.kind} is not a member of union<${operandIr.members.map((m) => asVal(m)?.kind ?? m.kind).join(",")}>`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    }
+  }
+  // #2949 S5.1 — dyn.truthy is ToBoolean on the boxed-any carrier: the
+  // operand MUST be dynamic (a concrete scalar has an inline ToBoolean
+  // and must not route through the carrier helper). Result is i32,
+  // already enforced structurally by the loop/if condValue rules.
+  if (instr.kind === "dyn.truthy") {
+    const operandIr = operandIrType(func, block, instr.value, localDefs);
+    if (operandIr && operandIr.kind !== "dynamic") {
+      errors.push({
+        message: `dyn.truthy operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
+  // #2949 S5.3 — dyn.to_number is ToNumber on the boxed-any carrier → f64:
+  // the operand MUST be dynamic (a concrete numeric operand converts to f64
+  // inline and must not route through the carrier ToNumber helper). Result
+  // is f64, consumed by the numeric-abstract relational compare.
+  if (instr.kind === "dyn.to_number") {
+    const operandIr = operandIrType(func, block, instr.value, localDefs);
+    if (operandIr && operandIr.kind !== "dynamic") {
+      errors.push({
+        message: `dyn.to_number operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
+  // #2949 S5.2 — dyn.eq compares TWO boxed-any carriers via the canonical
+  // `__any_strict_eq`/`__any_eq` helpers (which take `(ref null $AnyValue,
+  // ref null $AnyValue)`). BOTH operands MUST be dynamic — the producer
+  // boxes any concrete operand into the carrier before this node, so a
+  // non-dynamic operand here is a producer bug (a concrete-vs-concrete
+  // `===` has an inline `i32.eq`/`f64.eq` and must never route through the
+  // carrier helper). Result is i32, satisfying downstream condValue rules.
+  if (instr.kind === "dyn.eq") {
+    for (const operand of [instr.lhs, instr.rhs]) {
+      const operandIr = operandIrType(func, block, operand, localDefs);
+      if (operandIr && operandIr.kind !== "dynamic") {
+        errors.push({
+          message: `dyn.eq operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    }
+  }
+  // #3053 U1 / #2949 S5.4 — dyn.member_get reads a member off a boxed-any
+  // receiver via `__dyn_member_get(recv, key)`, which takes and returns the
+  // carrier. BOTH operands MUST be dynamic (the producer boxes the receiver
+  // and the property key into the carrier first) and the RESULT must be
+  // dynamic (the honest-boxed read value) — anything else is a producer bug
+  // that would mis-shape the reader ABI.
+  if (instr.kind === "dyn.member_get") {
+    for (const [label, operand] of [
+      ["recv", instr.recv],
+      ["key", instr.key],
+    ] as const) {
+      const operandIr = operandIrType(func, block, operand, localDefs);
+      if (operandIr && operandIr.kind !== "dynamic") {
+        errors.push({
+          message: `dyn.member_get ${label} must be a dynamic IrType, got ${operandIr.kind} (#3053 U1)`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    }
+    if (instr.resultType === null || instr.resultType.kind !== "dynamic") {
+      errors.push({
+        message: `dyn.member_get result must be a dynamic IrType, got ${instr.resultType?.kind ?? "null"} (#3053 U1)`,
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
+}
+
 function verifyBlock(
   func: IrFunction,
   block: IrBlock,
@@ -431,10 +690,23 @@ function verifyBlock(
   // cond/update buffers do NOT (no statement can occur there), and try/if
   // buffers inherit unchanged (break out of a try is legal — the lowerer
   // inlines crossed finallys).
-  const walkBuffer = (instrs: readonly IrInstr[], labelsInScope: ReadonlySet<IrLabelId>): void => {
+  // (#2952 slice 4) `breakOnlyInScope` — labels bound by enclosing
+  // `labeled.block` / `switch` frames: valid targets for mode "break"
+  // ONLY (JS grammar — `continue` must target a loop; the from-ast layer
+  // never emits a continue against these, this is the structural backstop).
+  const walkBuffer = (
+    instrs: readonly IrInstr[],
+    labelsInScope: ReadonlySet<IrLabelId>,
+    breakOnlyInScope: ReadonlySet<IrLabelId> = new Set(),
+  ): void => {
     const withLabel = (l: IrLabelId | undefined): ReadonlySet<IrLabelId> => {
       if (l === undefined) return labelsInScope;
       const next = new Set(labelsInScope);
+      next.add(l);
+      return next;
+    };
+    const withBreakOnly = (l: IrLabelId): ReadonlySet<IrLabelId> => {
+      const next = new Set(breakOnlyInScope);
       next.add(l);
       return next;
     };
@@ -447,19 +719,6 @@ function verifyBlock(
       // would spuriously read as use-before-def. (#1844)
       if (instr.kind === "while.loop" || instr.kind === "for.loop") {
         walkBuffer(instr.cond, labelsInScope);
-        // The lowerer emits an unconditional `i32.eqz` on `condValue`, so a
-        // non-i32 cond produces invalid Wasm that bricks the whole module.
-        // Reject it here (the lowerer's #1980 fix throws a fallback before
-        // reaching this, but the verifier is the structural backstop — the
-        // #1850 gap that let this through silently). (#1980)
-        const condT = operandIrType(func, block, instr.condValue, localDefs);
-        if (condT && asVal(condT)?.kind !== "i32") {
-          errors.push({
-            message: `${instr.kind} condValue must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
-            func: func.name,
-            block: block.id as number,
-          });
-        }
       }
 
       // #2952 slice 2 — br.label rules: (a) the label must be bound by an
@@ -468,9 +727,14 @@ function verifyBlock(
       // emitting after a break/continue, so trailing instrs are a producer
       // bug, not dead code to tolerate).
       if (instr.kind === "br.label") {
-        if (!labelsInScope.has(instr.label)) {
+        // (slice 4) break may additionally target a labeled.block / switch
+        // frame; continue must target a loop label.
+        const bound = labelsInScope.has(instr.label) || (instr.mode === "break" && breakOnlyInScope.has(instr.label));
+        if (!bound) {
           errors.push({
-            message: `br.label(${instr.label as number}, ${instr.mode}) targets no enclosing loop label`,
+            message: `br.label(${instr.label as number}, ${instr.mode}) targets no enclosing ${
+              instr.mode === "break" ? "loop/block/switch" : "loop"
+            } label`,
             func: func.name,
             block: block.id as number,
           });
@@ -484,210 +748,16 @@ function verifyBlock(
         }
       }
 
-      // #2952 slice 2 — if.stmt cond must be i32: the lowerer emits a Wasm
-      // `if` directly on it (same backstop rationale as the loop condValue
-      // check above).
-      if (instr.kind === "if.stmt") {
-        const condT = operandIrType(func, block, instr.cond, localDefs);
-        if (condT && asVal(condT)?.kind !== "i32") {
-          errors.push({
-            message: `if.stmt cond must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
-            func: func.name,
-            block: block.id as number,
-          });
-        }
-      }
-
       // Use-before-def check (params + block args always count). Nested-body
       // uses additionally see anything registered in `localDefs` so far,
       // which by construction includes the outer values defined before the
       // enclosing nesting instr.
       for (const u of collectUses(instr)) checkUse(u);
 
-      // Structural checks for the tagged-union instructions. These are
-      // type-system-level, not SSA-scope — misuse should surface here rather
-      // than silently lowering to a trap.
-      if (instr.kind === "box") {
-        if (instr.toType.kind === "dynamic") {
-          // #2949 R1 — box-to-dynamic erases any concrete value into the
-          // boxed-any carrier. Re-boxing an already-dynamic value is
-          // provably redundant (the intended node is a move or an unbox) —
-          // reject it so a producer bug surfaces here, not as a double-boxed
-          // runtime value.
-          const operandIr = operandIrType(func, block, instr.value, localDefs);
-          if (operandIr && operandIr.kind === "dynamic") {
-            errors.push({
-              message: `box operand is already dynamic — re-boxing a dynamic value is invalid (#2949)`,
-              func: func.name,
-              block: block.id as number,
-            });
-          }
-        } else if (instr.toType.kind !== "union") {
-          errors.push({
-            message: `box target must be a union or dynamic IrType, got ${instr.toType.kind}`,
-            func: func.name,
-            block: block.id as number,
-          });
-        } else {
-          // box requires the operand's ValType to be a member of the union.
-          const operandT = operandValType(func, block, instr.value, localDefs);
-          if (operandT && !unionContains(instr.toType.members, operandT)) {
-            errors.push({
-              // #1926 — members are IrTypes; describe each member's ValType kind.
-              message: `box operand type ${operandT.kind} is not a member of union<${instr.toType.members.map((m) => asVal(m)?.kind ?? m.kind).join(",")}>`,
-              func: func.name,
-              block: block.id as number,
-            });
-          }
-        }
-      }
-      if (instr.kind === "unbox" || instr.kind === "tag.test") {
-        const operandIr = operandIrType(func, block, instr.value, localDefs);
-        if (operandIr && operandIr.kind === "dynamic") {
-          // #2949 R2/R3 — dynamic operands discriminate on the JS partition,
-          // so `jsTag` is REQUIRED (the ValType `tag` cannot distinguish
-          // e.g. String from Object — both are reference-shaped).
-          if (instr.jsTag === undefined) {
-            errors.push({
-              message: `${instr.kind} on a dynamic operand requires jsTag (#2949)`,
-              func: func.name,
-              block: block.id as number,
-            });
-          } else {
-            const payload = jsTagUnboxKind(instr.jsTag);
-            // R2 — Null/Undefined are singleton partitions with no payload:
-            // unboxing them is invalid (identity is observed via tag.test).
-            if (instr.kind === "unbox" && payload === null) {
-              errors.push({
-                message: `unbox with payload-less JsTag ${JsTag[instr.jsTag]} is invalid — use tag.test (#2949)`,
-                func: func.name,
-                block: block.id as number,
-              });
-            }
-            // When the producer also wrote a ValType `tag`, it must be
-            // consistent with the partition's payload kind: exact for the
-            // scalar partitions, ref-shaped for String/Object/Function.
-            if (instr.tag && payload !== null) {
-              const k = instr.tag.kind;
-              const refShaped =
-                k === "ref" ||
-                k === "ref_null" ||
-                k === "externref" ||
-                k === "ref_extern" ||
-                k === "eqref" ||
-                k === "anyref" ||
-                k === "funcref";
-              const consistent = payload === "ref" ? refShaped : k === payload;
-              if (!consistent) {
-                errors.push({
-                  message: `${instr.kind} tag ${k} is inconsistent with jsTag ${JsTag[instr.jsTag]} (payload kind ${payload}) (#2949)`,
-                  func: func.name,
-                  block: block.id as number,
-                });
-              }
-            }
-          }
-        } else if (operandIr && operandIr.kind !== "union") {
-          errors.push({
-            message: `${instr.kind} operand must be a union or dynamic IrType, got ${operandIr.kind}`,
-            func: func.name,
-            block: block.id as number,
-          });
-        } else if (operandIr) {
-          // Union operand (V1) — the ValType `tag` is REQUIRED (#2949 made
-          // the field optional on the node because dynamic operands use
-          // `jsTag` instead) and must name a member of the union.
-          if (!instr.tag) {
-            errors.push({
-              message: `${instr.kind} on a union operand requires a ValType tag`,
-              func: func.name,
-              block: block.id as number,
-            });
-          } else if (!unionContains(operandIr.members, instr.tag)) {
-            errors.push({
-              // #1926 — members are IrTypes; describe each member's ValType kind.
-              message: `${instr.kind} tag ${instr.tag.kind} is not a member of union<${operandIr.members.map((m) => asVal(m)?.kind ?? m.kind).join(",")}>`,
-              func: func.name,
-              block: block.id as number,
-            });
-          }
-        }
-      }
-      // #2949 S5.1 — dyn.truthy is ToBoolean on the boxed-any carrier: the
-      // operand MUST be dynamic (a concrete scalar has an inline ToBoolean
-      // and must not route through the carrier helper). Result is i32,
-      // already enforced structurally by the loop/if condValue rules.
-      if (instr.kind === "dyn.truthy") {
-        const operandIr = operandIrType(func, block, instr.value, localDefs);
-        if (operandIr && operandIr.kind !== "dynamic") {
-          errors.push({
-            message: `dyn.truthy operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
-            func: func.name,
-            block: block.id as number,
-          });
-        }
-      }
-      // #2949 S5.3 — dyn.to_number is ToNumber on the boxed-any carrier → f64:
-      // the operand MUST be dynamic (a concrete numeric operand converts to f64
-      // inline and must not route through the carrier ToNumber helper). Result
-      // is f64, consumed by the numeric-abstract relational compare.
-      if (instr.kind === "dyn.to_number") {
-        const operandIr = operandIrType(func, block, instr.value, localDefs);
-        if (operandIr && operandIr.kind !== "dynamic") {
-          errors.push({
-            message: `dyn.to_number operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
-            func: func.name,
-            block: block.id as number,
-          });
-        }
-      }
-      // #2949 S5.2 — dyn.eq compares TWO boxed-any carriers via the canonical
-      // `__any_strict_eq`/`__any_eq` helpers (which take `(ref null $AnyValue,
-      // ref null $AnyValue)`). BOTH operands MUST be dynamic — the producer
-      // boxes any concrete operand into the carrier before this node, so a
-      // non-dynamic operand here is a producer bug (a concrete-vs-concrete
-      // `===` has an inline `i32.eq`/`f64.eq` and must never route through the
-      // carrier helper). Result is i32, satisfying downstream condValue rules.
-      if (instr.kind === "dyn.eq") {
-        for (const operand of [instr.lhs, instr.rhs]) {
-          const operandIr = operandIrType(func, block, operand, localDefs);
-          if (operandIr && operandIr.kind !== "dynamic") {
-            errors.push({
-              message: `dyn.eq operand must be a dynamic IrType, got ${operandIr.kind} (#2949)`,
-              func: func.name,
-              block: block.id as number,
-            });
-          }
-        }
-      }
-      // #3053 U1 / #2949 S5.4 — dyn.member_get reads a member off a boxed-any
-      // receiver via `__dyn_member_get(recv, key)`, which takes and returns the
-      // carrier. BOTH operands MUST be dynamic (the producer boxes the receiver
-      // and the property key into the carrier first) and the RESULT must be
-      // dynamic (the honest-boxed read value) — anything else is a producer bug
-      // that would mis-shape the reader ABI.
-      if (instr.kind === "dyn.member_get") {
-        for (const [label, operand] of [
-          ["recv", instr.recv],
-          ["key", instr.key],
-        ] as const) {
-          const operandIr = operandIrType(func, block, operand, localDefs);
-          if (operandIr && operandIr.kind !== "dynamic") {
-            errors.push({
-              message: `dyn.member_get ${label} must be a dynamic IrType, got ${operandIr.kind} (#3053 U1)`,
-              func: func.name,
-              block: block.id as number,
-            });
-          }
-        }
-        if (instr.resultType === null || instr.resultType.kind !== "dynamic") {
-          errors.push({
-            message: `dyn.member_get result must be a dynamic IrType, got ${instr.resultType?.kind ?? "null"} (#3053 U1)`,
-            func: func.name,
-            block: block.id as number,
-          });
-        }
-      }
+      // Per-instruction structural (type-system) rules — extracted so the
+      // scope walk stays readable (#2952 slice 4; the checks need only the
+      // instr + operand types, none of the walk state).
+      verifyInstrStructure(instr, func, block, localDefs, errors);
 
       if (instr.result !== null) {
         if (defs.has(instr.result)) {
@@ -708,17 +778,22 @@ function verifyBlock(
       // (#2952 slice 2) Loop BODY buffers extend the label environment with
       // the loop's label; every other buffer inherits it unchanged.
       if (instr.kind === "while.loop") {
-        walkBuffer(instr.body, withLabel(instr.loopLabel));
+        walkBuffer(instr.body, withLabel(instr.loopLabel), breakOnlyInScope);
       } else if (instr.kind === "for.loop") {
-        walkBuffer(instr.body, withLabel(instr.loopLabel));
-        walkBuffer(instr.update, labelsInScope);
+        walkBuffer(instr.body, withLabel(instr.loopLabel), breakOnlyInScope);
+        walkBuffer(instr.update, labelsInScope, breakOnlyInScope);
       } else if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
-        walkBuffer(instr.body, withLabel(instr.loopLabel));
+        walkBuffer(instr.body, withLabel(instr.loopLabel), breakOnlyInScope);
+      } else if (instr.kind === "labeled.block") {
+        // (#2952 slice 4) break-only label frames.
+        walkBuffer(instr.body, labelsInScope, withBreakOnly(instr.label));
+      } else if (instr.kind === "switch") {
+        for (const body of instr.bodies) walkBuffer(body, labelsInScope, withBreakOnly(instr.breakLabel));
       } else {
         // Non-loop buffer-bearing kinds (if / if.stmt / try). Loops are
         // handled above so their cond buffer (already walked) isn't
         // re-walked here.
-        forEachNestedBuffer(instr, (buffer) => walkBuffer(buffer, labelsInScope));
+        forEachNestedBuffer(instr, (buffer) => walkBuffer(buffer, labelsInScope, breakOnlyInScope));
       }
     }
   };
@@ -911,6 +986,12 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [];
     case "if.stmt":
       return [instr.cond];
+    // #2952 slice 4 — labeled.block has no operands; switch surfaces only
+    // its disc (clause buffers are walked via the buffer recursion).
+    case "labeled.block":
+      return [];
+    case "switch":
+      return [instr.disc];
     // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
     // The verifier sees their operands as plain SSA uses; lowering
     // (Phase C, #1373b) will define the per-arm SSA scope.

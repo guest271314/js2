@@ -485,20 +485,6 @@ describe("linear-controlflow: unsupported constructs fail loud (#1937)", () => {
       }`,
     ],
     [
-      "switch case fall-through from non-empty body",
-      `export function test(n: number): number {
-        let r: number = 0;
-        switch (n) {
-          case 0:
-            r = r + 1;
-          case 1:
-            r = r + 10;
-            break;
-        }
-        return r;
-      }`,
-    ],
-    [
       "break outside any loop",
       `export function test(): number {
         break;
@@ -520,6 +506,25 @@ describe("linear-controlflow: unsupported constructs fail loud (#1937)", () => {
     // At least one diagnostic must carry a real source position (#1937
     // threads getLineAndCharacterOfPosition into linear diagnostics).
     expect(errors.some((e) => e.line > 0)).toBe(true);
+  });
+
+  it("switch fallthrough from a non-empty body now compiles and runs on linear (#2952 slice 4)", async () => {
+    const e = await compileLinear(`
+      export function test(n: number): number {
+        let r: number = 0;
+        switch (n) {
+          case 0:
+            r = r + 1;
+          case 1:
+            r = r + 10;
+            break;
+        }
+        return r;
+      }
+    `);
+    expect(e.test(0)).toBe(11); // case 0 falls into case 1
+    expect(e.test(1)).toBe(10);
+    expect(e.test(2)).toBe(0);
   });
 
   it("labeled break now compiles and runs on linear (#2952 slice 3)", async () => {

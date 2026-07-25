@@ -86,7 +86,11 @@ import { addFunctionOwnLocals, registerOwnLocalsCollector } from "./binding-info
 // pulls the `async-cps`/`async-frame` chain which imports back into `closures`
 // (a cycle), so it must evaluate after this module's other deps are loaded to
 // avoid perturbing the init order of the coercion-engine/string-ops chain.
-import { planAsyncClosureActivation, emitAsyncClosureBody } from "./async-activation.js";
+import {
+  planAsyncClosureActivation,
+  emitAsyncClosureBody,
+  reportDeclinedAsyncRejectionHazard,
+} from "./async-activation.js";
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#2865) async-gen fn-expr producer
 // (#3164) Native generator FUNCTION EXPRESSIONS (standalone/wasi): the lifted
 // closure body emits the state-struct factory instead of the eager-buffer host
@@ -1934,6 +1938,11 @@ export function compileArrowAsClosure(
   const asyncDecision = isAsync && !isGenerator ? planAsyncClosureActivation(ctx, arrow, /*isAsync*/ true) : null;
   if (asyncDecision) {
     closureReturnType = { kind: "externref" };
+  } else if (isAsync && !isGenerator) {
+    // (#3587) Declined async arrow/fn-expr with a genuinely-suspending await
+    // inside a `try`: refuse loudly instead of silently compiling the legacy
+    // pass-through that cannot deliver awaited rejections.
+    reportDeclinedAsyncRejectionHazard(ctx, arrow);
   }
 
   // 2. Analyze captured variables (referenced/written free vars, outer-write +

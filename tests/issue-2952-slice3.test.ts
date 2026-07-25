@@ -148,7 +148,7 @@ describe("#2952 slice 3 — selector claims (labeled loops)", () => {
     expect(claimed.has("test")).toBe(true);
   });
 
-  it("does NOT claim a labeled non-loop block (labeled.block is banked for the switch slice)", () => {
+  it("claims a labeled non-loop block (boundary lifted by slice 4's labeled.block)", () => {
     const claimed = selectionFor(`
       export function test(): number {
         let n = 0;
@@ -159,7 +159,7 @@ describe("#2952 slice 3 — selector claims (labeled loops)", () => {
         return n;
       }
     `);
-    expect(claimed.has("test")).toBe(false);
+    expect(claimed.has("test")).toBe(true);
   });
 
   it("does NOT claim a break whose label is out of scope", () => {

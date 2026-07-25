@@ -2,7 +2,7 @@
 id: 3585
 title: "Standalone: `m.get(k) === lit` false in direct call-result position (true via a local); an any-keyed Map poisons even typed Maps module-wide"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-25
 updated: 2026-07-25
 priority: high

@@ -125,6 +125,28 @@ integer, mandatory reason, declared in the granting issue's frontmatter,
 change-set scoped (an allowance that lands on `main` grants nothing to later
 PRs), ceiling-not-blank-cheque, and declarations do not sum.
 
+### The declaration's SHAPE selects the contract — not the run mode
+
+The verification is **not** conditioned on rebase vs non-rebase. It is
+conditioned on whether the declaration opted in:
+
+| declaration            | rebase mode                   | non-rebase mode               |
+| ---------------------- | ----------------------------- | ----------------------------- |
+| **has `tests:`**       | **verified** (#3596 contract) | **verified** (#3596 contract) |
+| **bare `count:` only** | accepted (#3370, unchanged)   | refused as uncheckable        |
+
+Why shape and not mode: whether a PR happens to land during an oracle
+re-baseline is **not predictable by the person writing the frontmatter**. Having
+identical frontmatter enforced strictly or loosely depending on timing is a trap
+nobody could anticipate from reading it — and it is exactly what happened on
+#3583 (see the field-exercise note below).
+
+This is **strictly additive**. Verification can only ever _refuse_ a declaration,
+never admit one the ceiling alone would have rejected, so opting in cannot weaken
+anything. And a bare `count:` keeps #3370 semantics exactly, so existing
+rebase-mode declarations cannot start hard-failing mid-re-baseline — which is why
+the check is not simply made unconditional.
+
 ## Changes
 
 - `scripts/lib/change-scope.mjs` — `parseFrontmatterCountReason` gained an
@@ -170,8 +192,44 @@ named `fail → trap` reclassification is honoured.
   and reads as a confident "not present". **Use `grep -a`.** This produced a
   wrong conclusion about the valve's existence once during this very
   investigation.
-- Follow-up: #3563 and #3583 are expected to need **no declaration** — their
-  newly-trapping files have `compile_error` baselines, which #3595 excludes
-  outright. Re-check each against main once #3595 lands and clear the holds if
-  the gate no longer fires. Only a file with a genuine `fail` baseline should
-  ever reach for this issue's mechanism.
+- Outcome of the two motivating parks:
+  - **#3563** — newly-trapping file had a `compile_error` baseline ⇒ excluded by
+    #3595. Merged with **no declaration**, as it should have.
+  - **#3583** — newly-trapping file had a **`fail`** baseline
+    (`negative_test_fail`), so #3595 correctly does not cover it. Declared a
+    bounded +1 naming `await-dynamic-import-rejection.js`; merged.
+
+## ⚠️ The non-rebase path is NOT yet field-exercised
+
+**Do not read #3583's merge as proof this works in production.** It is not, and
+assuming otherwise was a real mistake made while landing this.
+
+#3583 merged with its `trap-growth-allow` honoured, but the `merge_group`
+artifact shows the summary line labelled **`(#3370)`**, not `(#3596)`:
+
+```
+ORACLE forward-bump auto-rebase (#3086) — comparing across oracle versions (baseline v10 → new v11)
+=== Trap categories: … unreachable 2→3 (#3189 ratchet) ===
+=== trap-growth-allow (#3370): maximum category growth 1 within declared per-category ceiling 1 … ===
+```
+
+An oracle **v10 → v11** bump happened to be in flight, so `rebaseMode` was true
+and the declaration was honoured by the **pre-existing #3370 path**.
+`evaluateTrapReclassification` never executed, and the `tests:` list went
+unverified in that run.
+
+Two things follow:
+
+1. The declaration **was** load-bearing — `unreachable 2→3` with
+   `TRAP_RATCHET_TOLERANCE: 0` would have failed the gate without it. So the
+   mechanism was necessary; only the _verification half_ was skipped.
+2. This valve is **unit-proven, not field-proven**. It carries 11 unit tests plus
+   CLI-level tests, but no real `merge_group` has taken the non-rebase path yet.
+   **When a genuine `fail → trap` reclassification eventually lands outside a
+   re-baseline, pull the regressions artifact and confirm the label reads
+   `(#3596)`.** That is the run that actually validates it — a green gate alone
+   says nothing about _which_ mechanism passed it.
+
+That gap is what motivated the shape-driven contract above: mode is incidental
+and unpredictable to the declaration's author, so it must not decide how strictly
+the declaration is enforced.
