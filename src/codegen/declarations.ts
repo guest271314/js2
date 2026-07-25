@@ -1559,6 +1559,40 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         ctx.moduleInitStatements.push(stmt);
         continue;
       }
+      // (#3615) Top-level bare property/element READ — `o.p;`, `o["p"];`,
+      // `void o.p;`. Matched no case in this allow-list, so the statement was
+      // silently dropped from `__module_init` and the read NEVER HAPPENED.
+      //
+      // The read is observable. §13.3.2.1 evaluates the MemberExpression to a
+      // Reference and §6.2.5.5 GetValue calls `[[Get]]` on it, which (a) invokes
+      // the getter for an accessor property and (b) throws a TypeError when the
+      // base is null/undefined. Dropping it is a SILENT WRONG ANSWER of exactly
+      // the shape #2992 (top-level `delete`) and #3592 (top-level `throw`) fixed:
+      // the same read INSIDE a function body has always worked — only the
+      // top-level collection dropped it — so this is a collection gap, not a
+      // property-read lowering gap. The decisive control uses a side effect
+      // rather than a throw, removing all exception machinery from the picture:
+      //
+      //   let hit = 0;
+      //   const o = { get p() { hit = 1; return 1; } };
+      //   o.p;               // hit stayed 0 — the getter never ran
+      //   const v = o.p;     // hit became 1
+      //
+      // In the conformance number this is a VACUOUS PASS: a test whose entire
+      // point is "reading this property must throw/observe", written as a bare
+      // `obj.prop;` statement, ran to completion and scored `pass`.
+      //
+      // Kept UNCONDITIONALLY, matching the #2992 / #3592 arms rather than trying
+      // to predict which reads are side-effecting: whether the base is nullish
+      // and whether the property is an accessor are both runtime facts (the
+      // receiver is routinely `any`), so any static narrowing here would
+      // reintroduce the same silent drop for the cases it mispredicts. Reads
+      // that genuinely have no effect lower to a value that is immediately
+      // dropped, exactly as they already do inside a function body.
+      if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+        ctx.moduleInitStatements.push(stmt);
+        continue;
+      }
       if (ts.isBinaryExpression(expr)) {
         const opKind = expr.operatorToken.kind;
         const isAssignOp =
