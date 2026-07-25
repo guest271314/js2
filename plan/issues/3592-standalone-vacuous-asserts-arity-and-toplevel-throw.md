@@ -16,10 +16,13 @@ loc-budget-allow:
   - src/codegen/object-runtime.ts
 # Carried from the RC1 PR that landed on main (kept through the add/add merge).
 trap-growth-allow:
-  count: 1
-  reason: "#3596 reclassification: fixing the dropped top-level `throw` lets await-dynamic-import-rejection.js run past the point it previously stopped, reaching a pre-existing latent unreachable trap. Baseline status is `fail` (negative_test_fail) — the module DID instantiate and return a verdict, so this is the #3596 baseline-did-testify branch, not the #3595 never-instantiated class. fail -> fail, flavour only; the test has never passed. PR net +16 pass, all other trap categories flat."
+  count: 3
+  reason: "#3596 reclassifications (fail -> trap flavour changes on tests that never passed; every baseline row testifies non-pass). (1) RC1 carried: await-dynamic-import-rejection.js, baseline fail/negative_test_fail, reached a pre-existing latent unreachable trap. (2-4) #3601 merge_group park partition: the RC2 de-vacuification lets three baseline-FAIL tests run further into pre-existing traps — defineProperties/15.2.3.7-6-a-113.js (baseline assertion_fail -> illegal_cast) and the two RegExp match-indices tests (baseline type_error -> null_deref). Verified locally: all three fail identically with the widening disabled (.tmp/mg-3601/partition.json)."
   tests:
     - test/language/module-code/top-level-await/await-dynamic-import-rejection.js
+    - test/built-ins/Object/defineProperties/15.2.3.7-6-a-113.js
+    - test/built-ins/RegExp/match-indices/indices-array-non-unicode-match.js
+    - test/built-ins/RegExp/match-indices/indices-array-unicode-match.js
 # #3592 RC2 landing (2026-07-25, lead-sanctioned honest-floor de-inflation).
 # Ceiling for the ONE-TIME conversion of vacuous standalone passes into honest
 # fails, consumed by scripts/diff-test262.ts on the standalone lane only.
@@ -32,7 +35,73 @@ trap-growth-allow:
 # gate (re-measure and re-declare).
 standalone-devacuification-allow:
   count: 6000
-  reason: "#3592 RC2: __apply_closure now dispatches at max(argc, declaredArity), so under-applied harness assertions actually run. One-time honest-floor de-inflation; measured basis in this issue's 'RC2 re-measure' section (N=4,000 A/B, 18.9% of sampled standalone passes vacuous, 0 widening-introduced invalid Wasm)."
+  reason: "#3592 RC2: __apply_closure now dispatches at max(argc, declaredArity), so under-applied harness assertions actually run. One-time honest-floor de-inflation; measured basis in this issue's 'RC2 re-measure' section (N=4,000 A/B, 18.9% of sampled standalone passes vacuous, 0 widening-introduced invalid Wasm). The nested tests list names the 65 vacuous-pass -> trap flips from the #3601 merge_group park: per-file OFF/ON vacuity evidence in the '## #3601 park partition' section (all 65: widening-OFF pass, widening-ON trap, callee-innermost frame; 20/20 shape-representative correct-arity bypass controls trap identically with the widening DISABLED, so every trap is a pre-existing callee defect the vacuous pass never reached — tracked as the missing-receiver-brand-check cluster issue). The gate machine-checks each named flip on the live CI row: baseline pass + trap category + NON-dispatcher innermost frame; un-named pass->trap flips still hard-fail."
+  tests:
+    - test/annexB/built-ins/escape/to-primitive-err.js
+    - test/annexB/built-ins/unescape/to-primitive-err.js
+    - test/built-ins/Array/prototype/copyWithin/return-abrupt-from-this-length-as-symbol.js
+    - test/built-ins/Array/prototype/copyWithin/return-abrupt-from-this-length.js
+    - test/built-ins/Array/prototype/fill/return-abrupt-from-this-length-as-symbol.js
+    - test/built-ins/Array/prototype/fill/return-abrupt-from-this-length.js
+    - test/built-ins/Array/prototype/find/return-abrupt-from-this-length.js
+    - test/built-ins/Array/prototype/findLast/return-abrupt-from-property.js
+    - test/built-ins/Array/prototype/findLast/return-abrupt-from-this-length-as-symbol.js
+    - test/built-ins/Array/prototype/findLast/return-abrupt-from-this-length.js
+    - test/built-ins/Array/prototype/findLastIndex/return-abrupt-from-property.js
+    - test/built-ins/Array/prototype/findLastIndex/return-abrupt-from-this-length-as-symbol.js
+    - test/built-ins/Array/prototype/findLastIndex/return-abrupt-from-this-length.js
+    - test/built-ins/Array/prototype/with/index-bigger-or-eq-than-length.js
+    - test/built-ins/ArrayBuffer/prototype/maxByteLength/invoked-as-accessor.js
+    - test/built-ins/Date/prototype/Symbol.toPrimitive/called-as-function.js
+    - test/built-ins/Date/prototype/Symbol.toPrimitive/hint-invalid.js
+    - test/built-ins/Date/prototype/no-date-value.js
+    - test/built-ins/Date/prototype/setFullYear/15.9.5.40_1.js
+    - test/built-ins/Date/prototype/toString/non-date-receiver.js
+    - test/built-ins/DisposableStack/prototype/move/returns-new-disposablestack-that-contains-moved-resources.js
+    - test/built-ins/Function/15.3.5.4_2-97gs.js
+    - test/built-ins/Function/prototype/Symbol.hasInstance/this-val-poisoned-prototype.js
+    - test/built-ins/Function/prototype/Symbol.hasInstance/this-val-prototype-non-obj.js
+    - test/built-ins/Function/prototype/Symbol.hasInstance/value-get-prototype-of-err.js
+    - test/built-ins/Iterator/concat/non-constructible.js
+    - test/built-ins/Object/defineProperty/15.2.3.6-4-117.js
+    - test/built-ins/Proxy/deleteProperty/targetdesc-is-not-configurable.js
+    - test/built-ins/Proxy/getOwnPropertyDescriptor/result-is-undefined-target-is-not-extensible.js
+    - test/built-ins/Proxy/getOwnPropertyDescriptor/result-is-undefined-targetdesc-is-not-configurable.js
+    - test/built-ins/Proxy/getOwnPropertyDescriptor/result-type-is-not-object-nor-undefined.js
+    - test/built-ins/Proxy/getOwnPropertyDescriptor/resultdesc-is-not-configurable-targetdesc-is-configurable.js
+    - test/built-ins/String/prototype/replaceAll/replaceValue-call-abrupt.js
+    - test/built-ins/String/prototype/replaceAll/replaceValue-call-tostring-abrupt.js
+    - test/built-ins/String/prototype/split/valueOf-is-called-for-limit-argument.js
+    - test/built-ins/Symbol/for/to-string-err.js
+    - test/built-ins/ThrowTypeError/throws-type-error.js
+    - test/built-ins/TypedArray/prototype/join/BigInt/return-abrupt-from-separator-symbol.js
+    - test/built-ins/TypedArray/prototype/join/BigInt/return-abrupt-from-separator.js
+    - test/built-ins/TypedArray/prototype/join/return-abrupt-from-separator-symbol.js
+    - test/built-ins/TypedArray/prototype/join/return-abrupt-from-separator.js
+    - test/built-ins/TypedArrayConstructors/BigInt64Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/BigUint64Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Float32Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Float64Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Int16Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Int32Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Int8Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Uint16Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Uint32Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Uint8Array/prototype/not-typedarray-object.js
+    - test/built-ins/TypedArrayConstructors/Uint8ClampedArray/prototype/not-typedarray-object.js
+    - test/language/eval-code/direct/func-decl-fn-body-cntns-arguments-lex-bind-declare-arguments-and-assign.js
+    - test/language/eval-code/direct/func-decl-fn-body-cntns-arguments-lex-bind-declare-arguments.js
+    - test/language/eval-code/direct/func-expr-fn-body-cntns-arguments-lex-bind-declare-arguments-and-assign.js
+    - test/language/eval-code/direct/func-expr-fn-body-cntns-arguments-lex-bind-declare-arguments.js
+    - test/language/eval-code/direct/meth-fn-body-cntns-arguments-lex-bind-declare-arguments-and-assign.js
+    - test/language/eval-code/direct/meth-fn-body-cntns-arguments-lex-bind-declare-arguments.js
+    - test/language/expressions/class/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
+    - test/language/expressions/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js
+    - test/language/expressions/class/elements/private-fields-proxy-default-handler-throws.js
+    - test/language/statements/class/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js
+    - test/language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js
+    - test/language/statements/class/elements/privatefieldset-evaluation-order-1.js
+    - test/language/statements/class/subclass/derived-class-return-override-with-null.js
 ---
 
 ## Problem
@@ -549,6 +618,144 @@ The reported standalone number goes DOWN on purpose: the fix converts fake
    new ON-arm signatures route into pre-existing path-based
    `STANDALONE_ROOT_CAUSE_BUCKETS`. Residual full-corpus risk accepted (a new
    signature on an uncovered path would park; fix-forward on the branch).
+
+## #3601 park partition (2026-07-25) — trap-ratchet second-order effect
+
+The first merge_group run of PR loopdive/js2#3601 auto-parked. The headline
+estimate was VALIDATED (Net −5,088 pass, predicted 4,814 ± 400; 5,049 flips
+excused under the 6,000 ceiling). The park was a SECOND-ORDER effect: the
+de-vacuified calls reach pre-existing trap defects, and `pass → trap` flips
+were not covered — the #3189 ratchet failed (`null_deref` +17, `illegal_cast`
++40), cascading into the #1897 coarse net check (−24 < −15). Regression bucket
+signature of the parked run: `13860c1c3ec21268` (5,114 non-CT files) — an
+unrelated PR parking with this identical signature is stale-floor collateral,
+not that PR's bug.
+
+### Why "0 verified unmasked pre-existing traps" — a verification-coverage gap
+
+`trapInnermostFrame` parsed only the LOCAL runner's grammar
+(`… in name() at source L…`). The CI worker renders frames as
+`[in name() ← caller ← …]` (`scripts/test262-worker.mjs` `describeWasmError`),
+so every CI trap row read as frameless and was conservatively refused. The
+frames were present all along. Fixed: the parser now covers both grammars
+(remedy = strengthen the verification, not widen the excusal).
+
+### Partition (exact, from the run's own shard artifacts vs the run-time baseline commit `27c5c797`)
+
+| population                                        |  count | routing                                                       |
+| ------------------------------------------------- | -----: | ------------------------------------------------------------- |
+| newly-trapping, baseline **pass** (vacuous)       | **65** | named trap tier of `standalone-devacuification-allow` (below) |
+| newly-trapping, baseline **fail** (did testify)   |  **3** | named `trap-growth-allow` (#3596), count 3                    |
+| baseline compile_error / compile_timeout / absent |  **0** | #3595 already excludes                                        |
+
+The 65 baseline-pass flips ARE the 65 residual regressions exactly
+(pass→compile_error = 0, other = 0).
+
+### Discriminator — INSIDE (unmasked callee defect) vs OUTSIDE (dispatcher-introduced)
+
+Empirical OFF/ON A/B over all 68 files (`.tmp/mg-3601/ab-partition.mts`,
+widening toggled via a local codegen-time switch, same runner, same process):
+
+- **INSIDE 65 / OUTSIDE 0** among baseline-pass files: every one is
+  widening-OFF **pass** (vacuous — the callee never ran), widening-ON **trap**,
+  with a CALLEE-innermost frame. Dispatcher-innermost (`__call_fn_method_N`)
+  count: **0 of 65**.
+- The 3 baseline-fail files fail identically with the widening OFF (not caused
+  by the widening; flavour-only reclassifications).
+
+**Correct-arity bypass controls — 20/20 category (a):** for one representative
+of EVERY distinct shape family (TypedArrayCtors accessors, Array return-abrupt,
+TypedArray join, Date brand, Symbol.hasInstance, eval-code/direct, class/dstr
+gen-meth, private fields ×2, derived-class-return, DisposableStack/deepEqual,
+Iterator.concat, Function 15.3.5.4, Proxy gOPD, ThrowTypeError, Symbol.for,
+String.split, escape/unescape, Array.with oob), the SAME call made with an
+explicit third argument (exact arity — dispatch needs no widening) and the
+widening DISABLED traps **identically** — same trap class, same innermost
+frame, same source line. Plus two arity-clean probes (no under-applied call
+anywhere in the program) reproduce the TypedArray-accessor `cast failure` and
+`Date.prototype` `null reference` on a compiler build predating the fix. The
+"well-formed but wrong values" dispatcher hypothesis is refuted: these are
+genuine pre-existing callee defects — **missing receiver brand checks on
+standalone builtins** — tracked as cluster issue #3610.
+
+### Mechanism extension (per the coordinator ruling)
+
+A `pass → trap` flip is excusable ONLY when ALL of: (1) NAMED in the
+declaration's nested `tests:` list (this file's frontmatter — change-scoped,
+self-removing); (2) baseline row is `pass`; (3) the live CI row's innermost
+frame is extractable and is NOT the dispatcher. Un-named `pass → trap` flips
+still hard-fail the #3189 ratchet — the mechanism cannot generalise to
+"pass → trap is acceptable".
+
+### Per-file vacuity evidence (65 files; OFF = widening disabled)
+
+| test                                                                                                    | trap         | OFF  | ON   | innermost frame                          |
+| ------------------------------------------------------------------------------------------------------- | ------------ | ---- | ---- | ---------------------------------------- |
+| `annexB/built-ins/escape/to-primitive-err.js`                                                           | illegal_cast | pass | fail | `__closure_41`                           |
+| `annexB/built-ins/unescape/to-primitive-err.js`                                                         | illegal_cast | pass | fail | `__closure_41`                           |
+| `built-ins/Array/prototype/copyWithin/return-abrupt-from-this-length-as-symbol.js`                      | illegal_cast | pass | fail | `__closure_35`                           |
+| `built-ins/Array/prototype/copyWithin/return-abrupt-from-this-length.js`                                | illegal_cast | pass | fail | `__closure_39`                           |
+| `built-ins/Array/prototype/fill/return-abrupt-from-this-length-as-symbol.js`                            | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/Array/prototype/fill/return-abrupt-from-this-length.js`                                      | illegal_cast | pass | fail | `__closure_38`                           |
+| `built-ins/Array/prototype/find/return-abrupt-from-this-length.js`                                      | illegal_cast | pass | fail | `__closure_38`                           |
+| `built-ins/Array/prototype/findLast/return-abrupt-from-property.js`                                     | illegal_cast | pass | fail | `__closure_39`                           |
+| `built-ins/Array/prototype/findLast/return-abrupt-from-this-length-as-symbol.js`                        | illegal_cast | pass | fail | `__closure_37`                           |
+| `built-ins/Array/prototype/findLast/return-abrupt-from-this-length.js`                                  | illegal_cast | pass | fail | `__closure_38`                           |
+| `built-ins/Array/prototype/findLastIndex/return-abrupt-from-property.js`                                | illegal_cast | pass | fail | `__closure_39`                           |
+| `built-ins/Array/prototype/findLastIndex/return-abrupt-from-this-length-as-symbol.js`                   | illegal_cast | pass | fail | `__closure_37`                           |
+| `built-ins/Array/prototype/findLastIndex/return-abrupt-from-this-length.js`                             | illegal_cast | pass | fail | `__closure_43`                           |
+| `built-ins/Array/prototype/with/index-bigger-or-eq-than-length.js`                                      | oob          | pass | fail | `__closure_37`                           |
+| `built-ins/ArrayBuffer/prototype/maxByteLength/invoked-as-accessor.js`                                  | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/Date/prototype/Symbol.toPrimitive/called-as-function.js`                                     | null_deref   | pass | fail | `__closure_42`                           |
+| `built-ins/Date/prototype/Symbol.toPrimitive/hint-invalid.js`                                           | null_deref   | pass | fail | `__closure_48`                           |
+| `built-ins/Date/prototype/no-date-value.js`                                                             | null_deref   | pass | fail | `__closure_34`                           |
+| `built-ins/Date/prototype/setFullYear/15.9.5.40_1.js`                                                   | null_deref   | pass | fail | `__closure_34`                           |
+| `built-ins/Date/prototype/toString/non-date-receiver.js`                                                | null_deref   | pass | fail | `__closure_38`                           |
+| `built-ins/DisposableStack/prototype/move/returns-new-disposablestack-that-contains-moved-resources.js` | null_deref   | pass | fail | `toString`                               |
+| `built-ins/Function/15.3.5.4_2-97gs.js`                                                                 | null_deref   | pass | fail | `f`                                      |
+| `built-ins/Function/prototype/Symbol.hasInstance/this-val-poisoned-prototype.js`                        | null_deref   | pass | fail | `__closure_40`                           |
+| `built-ins/Function/prototype/Symbol.hasInstance/this-val-prototype-non-obj.js`                         | null_deref   | pass | fail | `__closure_43`                           |
+| `built-ins/Function/prototype/Symbol.hasInstance/value-get-prototype-of-err.js`                         | null_deref   | pass | fail | `__closure_41`                           |
+| `built-ins/Iterator/concat/non-constructible.js`                                                        | null_deref   | pass | fail | `__fnctor___js2wasm_Iterator_concat_new` |
+| `built-ins/Object/defineProperty/15.2.3.6-4-117.js`                                                     | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/Proxy/deleteProperty/targetdesc-is-not-configurable.js`                                      | null_deref   | pass | fail | `__closure_38`                           |
+| `built-ins/Proxy/getOwnPropertyDescriptor/result-is-undefined-target-is-not-extensible.js`              | null_deref   | pass | fail | `__closure_38`                           |
+| `built-ins/Proxy/getOwnPropertyDescriptor/result-is-undefined-targetdesc-is-not-configurable.js`        | null_deref   | pass | fail | `__closure_38`                           |
+| `built-ins/Proxy/getOwnPropertyDescriptor/result-type-is-not-object-nor-undefined.js`                   | null_deref   | pass | fail | `__closure_41`                           |
+| `built-ins/Proxy/getOwnPropertyDescriptor/resultdesc-is-not-configurable-targetdesc-is-configurable.js` | null_deref   | pass | fail | `__closure_38`                           |
+| `built-ins/String/prototype/replaceAll/replaceValue-call-abrupt.js`                                     | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/String/prototype/replaceAll/replaceValue-call-tostring-abrupt.js`                            | illegal_cast | pass | fail | `__closure_43`                           |
+| `built-ins/String/prototype/split/valueOf-is-called-for-limit-argument.js`                              | null_deref   | pass | fail | `__closure_38`                           |
+| `built-ins/Symbol/for/to-string-err.js`                                                                 | null_deref   | pass | fail | `__closure_37`                           |
+| `built-ins/ThrowTypeError/throws-type-error.js`                                                         | null_deref   | pass | fail | `__closure_35`                           |
+| `built-ins/TypedArray/prototype/join/BigInt/return-abrupt-from-separator-symbol.js`                     | illegal_cast | pass | fail | `__closure_56`                           |
+| `built-ins/TypedArray/prototype/join/BigInt/return-abrupt-from-separator.js`                            | illegal_cast | pass | fail | `__closure_59`                           |
+| `built-ins/TypedArray/prototype/join/return-abrupt-from-separator-symbol.js`                            | illegal_cast | pass | fail | `__closure_56`                           |
+| `built-ins/TypedArray/prototype/join/return-abrupt-from-separator.js`                                   | illegal_cast | pass | fail | `__closure_59`                           |
+| `built-ins/TypedArrayConstructors/BigInt64Array/prototype/not-typedarray-object.js`                     | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/BigUint64Array/prototype/not-typedarray-object.js`                    | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Float32Array/prototype/not-typedarray-object.js`                      | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Float64Array/prototype/not-typedarray-object.js`                      | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Int16Array/prototype/not-typedarray-object.js`                        | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Int32Array/prototype/not-typedarray-object.js`                        | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Int8Array/prototype/not-typedarray-object.js`                         | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Uint16Array/prototype/not-typedarray-object.js`                       | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Uint32Array/prototype/not-typedarray-object.js`                       | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Uint8Array/prototype/not-typedarray-object.js`                        | illegal_cast | pass | fail | `__closure_34`                           |
+| `built-ins/TypedArrayConstructors/Uint8ClampedArray/prototype/not-typedarray-object.js`                 | illegal_cast | pass | fail | `__closure_34`                           |
+| `language/eval-code/direct/func-decl-fn-body-cntns-arguments-lex-bind-declare-arguments-and-assign.js`  | illegal_cast | pass | fail | `f`                                      |
+| `language/eval-code/direct/func-decl-fn-body-cntns-arguments-lex-bind-declare-arguments.js`             | illegal_cast | pass | fail | `f`                                      |
+| `language/eval-code/direct/func-expr-fn-body-cntns-arguments-lex-bind-declare-arguments-and-assign.js`  | illegal_cast | pass | fail | `__closure_32`                           |
+| `language/eval-code/direct/func-expr-fn-body-cntns-arguments-lex-bind-declare-arguments.js`             | illegal_cast | pass | fail | `__closure_32`                           |
+| `language/eval-code/direct/meth-fn-body-cntns-arguments-lex-bind-declare-arguments-and-assign.js`       | illegal_cast | pass | fail | `__anon_0_f`                             |
+| `language/eval-code/direct/meth-fn-body-cntns-arguments-lex-bind-declare-arguments.js`                  | illegal_cast | pass | fail | `__anon_0_f`                             |
+| `language/expressions/class/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js`                | illegal_cast | pass | fail | `__anonClass_0_method`                   |
+| `language/expressions/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js`         | illegal_cast | pass | fail | `C_method`                               |
+| `language/expressions/class/elements/private-fields-proxy-default-handler-throws.js`                    | null_deref   | pass | fail | `__closure_34`                           |
+| `language/statements/class/dstr/gen-meth-dflt-ary-init-iter-get-err-array-prototype.js`                 | illegal_cast | pass | fail | `C_method`                               |
+| `language/statements/class/dstr/gen-meth-static-dflt-ary-init-iter-get-err-array-prototype.js`          | illegal_cast | pass | fail | `C_method`                               |
+| `language/statements/class/elements/privatefieldset-evaluation-order-1.js`                              | illegal_cast | pass | fail | `C_init`                                 |
+| `language/statements/class/subclass/derived-class-return-override-with-null.js`                         | null_deref   | pass | fail | `Derived_init`                           |
 
 ## Follow-up
 

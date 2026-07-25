@@ -1018,15 +1018,22 @@ export function isVacuousReclassification(base: TestResult | undefined, cur: Tes
 export const DEVACUIFICATION_ALLOW_KEY = "standalone-devacuification-allow";
 
 /**
- * #3592 — the innermost wasm frame of an enriched trap message. The runner's
- * `enrichErrorMessage` (tests/test262-runner.ts) renders traps as
- * `<msg> in <leaf>() at source L<n> (via <caller>@L<n> ← …)`, so the FIRST
- * `in <name>()` occurrence names the trap site (innermost frame). Returns
- * null when the message carries no recognizable frame.
+ * #3592 — the innermost wasm frame of an enriched trap message. TWO renderers
+ * produce these strings, both trap-first (innermost frame named right after
+ * `in`):
+ *   - the local runner's `enrichErrorMessage` (tests/test262-runner.ts):
+ *     `<msg> in <leaf>() at source L<n> (via <caller>@L<n> ← …)`
+ *   - the CI worker (scripts/test262-worker.mjs `describeWasmError`):
+ *     `<msg> [in <leaf>() ← <caller> ← …]`
+ * The first `in <name>()` occurrence (space- OR bracket-prefixed) names the
+ * trap site. Parsing ONLY the space form was the #3601-park verification-
+ * coverage gap: every CI trap row read as frameless, so zero unmasked
+ * pre-existing traps could be verified. Returns null when the message carries
+ * no recognizable frame.
  */
 export function trapInnermostFrame(error: string | undefined): string | null {
   if (!error) return null;
-  const m = / in ([A-Za-z0-9_$.]+)\(\)/.exec(error);
+  const m = /[[ ]in ([A-Za-z0-9_$.]+)\(\)/.exec(error);
   return m ? m[1]! : null;
 }
 
@@ -1044,11 +1051,30 @@ export function isDispatcherIntroducedTrap(error: string | undefined): boolean {
 /**
  * #3592 — is this pass→X regression row excusable under a declared
  * de-vacuification allowance? See DEVACUIFICATION_ALLOW_KEY for the contract.
+ *
+ * Two tiers (#3601 park ruling):
+ *   - a NON-TRAP `pass → fail` flip is excusable under the ceiling alone (an
+ *     ordinary honest assertion failure surfacing);
+ *   - a TRAP flip is excusable ONLY when (1) it is NAMED in the declaration's
+ *     nested `tests:` list (`declaredTraps`), (2) its innermost frame is
+ *     extractable, and (3) that frame is NOT the dispatcher. Naming makes the
+ *     claim per-test and change-scoped (the declaring PR carries the OFF/ON
+ *     vacuity evidence for each named file in its issue doc); the frame check
+ *     machine-verifies — on the live CI row — that the trap fires inside the
+ *     callee's own code (the de-vacuified call finally reaching a genuine
+ *     callee defect), not inside the widening's own argument conversion. A
+ *     `pass → trap` flip OUTSIDE the named cluster is NEVER excused and still
+ *     hard-fails the #3189 ratchet: this mechanism must not generalise to
+ *     "pass → trap is acceptable".
  */
-export function isDevacuificationExcusableFlip(r: { to: string; error?: string; error_category?: string }): boolean {
+export function isDevacuificationExcusableFlip(
+  r: { file?: string; to: string; error?: string; error_category?: string },
+  declaredTraps?: Set<string>,
+): boolean {
   if (r.to !== "fail") return false;
   const isTrap = !!r.error_category && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(r.error_category);
   if (!isTrap) return true;
+  if (!declaredTraps || !r.file || !declaredTraps.has(r.file)) return false;
   return trapInnermostFrame(r.error) !== null && !isDispatcherIntroducedTrap(r.error);
 }
 
@@ -1070,7 +1096,11 @@ export function evaluateDevacuificationAllowance(opts: {
   const { allowance, candidates } = opts;
   const failures: string[] = [];
   const notes: string[] = [];
-  const excusable = candidates.filter(isDevacuificationExcusableFlip);
+  // #3601 — the declaration's nested `tests:` list names the pass→trap files
+  // claimed as de-vacuified callee defects (per-file OFF/ON evidence recorded
+  // in the declaring issue). Trap flips outside this list are never excused.
+  const declaredTraps = new Set(allowance.tests ?? []);
+  const excusable = candidates.filter((r) => isDevacuificationExcusableFlip(r, declaredTraps));
   const where = allowance.sources.join(", ");
   if (excusable.length > allowance.count) {
     failures.push(
@@ -1089,8 +1119,8 @@ export function evaluateDevacuificationAllowance(opts: {
   if (excusedFiles.size > 0) {
     notes.push(
       `=== standalone-devacuification-allow (#3592): excused ${excusedFiles.size} of ceiling ${allowance.count} declared pass→fail de-vacuification flips ` +
-        `(${trapExcludedFiles.size} verified unmasked pre-existing trap(s) also excluded from the #3189 ratchet) — ` +
-        `reason: ${allowance.reason} (declared in ${where}). Dispatcher-innermost traps and pass→compile_error flips are NOT excused. ===`,
+        `(${trapExcludedFiles.size} NAMED + frame-verified de-vacuified trap(s) also excluded from the #3189 ratchet) — ` +
+        `reason: ${allowance.reason} (declared in ${where}). Un-named pass→trap flips, dispatcher-innermost traps and pass→compile_error flips are NOT excused. ===`,
     );
   }
   return { excusedFiles, trapExcludedFiles, failures, notes };
