@@ -19,6 +19,10 @@ import {
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import { collectShapes } from "../shape-inference.js";
+// (#3623) Total classification of top-level ExpressionStatements, so the
+// allow-list's fall-through leaves evidence instead of silently dropping an
+// observable statement (the #1268/#2671/#2992/#3366/#3468/#3592/#3615 class).
+import { classifyTopLevelExpressionStatement } from "./module-init-collection.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { asyncFnNeedsHostDrive, asyncGenDrivableUnderCarrier, asyncGenStem } from "./async-frame.js";
@@ -1795,6 +1799,29 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // one representation across all source files in the shared realm.
         if (targetName && (targetName === "globalThis" || ctx.moduleGlobals.has(targetName))) {
           ctx.moduleInitStatements.push(stmt);
+        }
+      }
+      // (#3623) THE FALL-THROUGH IS NO LONGER SILENT.
+      //
+      // Everything above is an ALLOW-LIST. Historically anything it did not
+      // name simply fell off the end of this block and was dropped with no
+      // diagnostic — the statement never happened, the program produced a
+      // silent wrong answer, and any test covering it became a VACUOUS PASS.
+      // That has happened at least SIX times (#1268, #2671, #2992, #3366,
+      // #3468, #3592 RC1, #3615), each fixed by adding one more arm; a seventh
+      // arm does not stop the eighth. Its sharpest instance: the dropped
+      // top-level `throw` (#3592 RC1) broke the throw-probe technique used to
+      // DETECT vacuous passes — the mechanism disabled its own detector.
+      //
+      // Classify TOTALLY instead. `inert` is an explicit deny-list of shapes
+      // that provably run no user code; anything else that was not collected
+      // is recorded as `unhandled` so it is visible instead of vanishing.
+      // Behaviour is unchanged — nothing new is collected here — but the drop
+      // now leaves evidence.
+      if (!ctx.moduleInitStatements.includes(stmt)) {
+        const c = classifyTopLevelExpressionStatement(stmt.expression);
+        if (c.disposition === "unhandled") {
+          (ctx.droppedModuleInitShapes ??= new Map()).set(c.shape, (ctx.droppedModuleInitShapes.get(c.shape) ?? 0) + 1);
         }
       }
     }

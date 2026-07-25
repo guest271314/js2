@@ -1977,6 +1977,16 @@ export interface CodegenContext {
   /** Module-level variable initializers (compiled into __module_init) */
   moduleInitStatements: ts.Statement[];
   /**
+   * (#3623) Top-level ExpressionStatement shapes that the `collectDeclarations`
+   * allow-list did NOT collect and that are not provably inert — shape label →
+   * count. The allow-list has silently dropped an observable statement at least
+   * six times (#1268, #2671, #2992, #3366, #3468, #3592 RC1, #3615), each a
+   * silent wrong answer that turned its test into a vacuous pass. Recording the
+   * fall-through makes the seventh visible instead of invisible; the map is
+   * empty for every program whose top-level statements are all handled.
+   */
+  droppedModuleInitShapes?: Map<string, number>;
+  /**
    * (#2976) Module-level dedupe of the value-closure artifacts for a
    * capture-carrying nested function declaration: funcName → its ONE custom
    * closure struct type and trampoline. Previously every reference site

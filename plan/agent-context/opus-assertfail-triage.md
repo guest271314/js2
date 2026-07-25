@@ -153,7 +153,7 @@ survive an A/B, and the fix is already written.
 
 ## 7.2 The issue's "Where to look" is WRONG — do not start there
 
-`plan/issues/3615-*.md` says the drop is "inside the property-read lowering".
+`plan/issues/3615-accessor-in-statement-position-never-invoked.md` says the drop is "inside the property-read lowering".
 It is not. **The property-read lowering is fine.** Measured A/B (probe
 `.tmp/probe-3615.mts` vs `.tmp/probe-3615b.mts`), standalone, hit-counter
 control:
@@ -231,7 +231,7 @@ small enough for an **exhaustive** A/B rather than a sample.
 2. **Report the directions separately.** Only the vacuous-pass direction is
    real (§7.4a). Any pass→fail flip must be declared through the named
    machine-checked `standalone-devacuification-allow` in
-   `plan/issues/3592-*.md` (`count:` + a `tests:` list of exact paths), never
+   `plan/issues/3592-standalone-vacuous-asserts-arity-and-toplevel-throw.md` (`count:` + a `tests:` list of exact paths), never
    quietly absorbed.
 3. **Both lanes.** This one really is dual-lane — `collectDeclarations` is
    lane-independent and the arm is ungated, so the JS-host lane (30,405/43,098,
@@ -264,7 +264,7 @@ src/codegen/declarations.ts: 2569 > 2535 (+34)
 Two legitimate resolutions — pick deliberately, do NOT reflex to the escape:
 
 - **Grant the allowance** (probably right): add to the frontmatter of
-  `plan/issues/3615-*.md` —
+  `plan/issues/3615-accessor-in-statement-position-never-invoked.md` —
   ```yaml
   loc-budget-allow:
     - src/codegen/declarations.ts
