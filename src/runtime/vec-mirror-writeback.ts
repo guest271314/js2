@@ -78,31 +78,42 @@ export function vecForMirror(v: unknown): unknown {
   return _vecMirrorSource.get(v as object);
 }
 
+/** Shared no-mirrors result — `__extern_method_call` / `__call_function` are HOT paths; the common case must not allocate. */
+const NO_MIRRORS: readonly VecMirrorSnapshot[] = Object.freeze([]);
+
 /**
- * Snapshot the lengths of every vec mirror reachable from `values`, BEFORE a
- * host call. Returns an empty array (no allocation beyond the constant) when
- * none of the values is a mirror — the overwhelmingly common case.
+ * Snapshot the lengths of every vec mirror among `receiver` + `args`, BEFORE a
+ * host call. Receiver and args are passed SEPARATELY (rather than as one
+ * spread array) precisely because these bridges are hot: the overwhelmingly
+ * common case — no mirror anywhere — costs one WeakMap probe per value and
+ * allocates nothing.
  */
-export function snapshotVecMirrors(values: readonly unknown[], exports: Exports): VecMirrorSnapshot[] {
-  if (!exports) return [];
+export function snapshotVecMirrors(
+  receiver: unknown,
+  args: readonly unknown[],
+  exports: Exports,
+): readonly VecMirrorSnapshot[] {
+  if (!exports) return NO_MIRRORS;
   const lenFn = exports.__vec_len as ((v: unknown) => number) | undefined;
-  if (typeof lenFn !== "function") return [];
+  if (typeof lenFn !== "function") return NO_MIRRORS;
   let snaps: VecMirrorSnapshot[] | undefined;
-  for (const v of values) {
-    if (v == null || typeof v !== "object") continue;
+  const consider = (v: unknown): void => {
+    if (v == null || typeof v !== "object") return;
     const vec = _vecMirrorSource.get(v as object);
-    if (vec === undefined) continue;
+    if (vec === undefined) return;
     let vecLen: number;
     try {
       vecLen = lenFn(vec);
     } catch {
-      continue;
+      return;
     }
-    if (typeof vecLen !== "number" || vecLen < 0) continue;
+    if (typeof vecLen !== "number" || vecLen < 0) return;
     const mirror = v as unknown[];
     (snaps ??= []).push({ mirror, vec, mirrorLen: mirror.length, vecLen });
-  }
-  return snaps ?? [];
+  };
+  consider(receiver);
+  for (const a of args) consider(a);
+  return snaps ?? NO_MIRRORS;
 }
 
 /**

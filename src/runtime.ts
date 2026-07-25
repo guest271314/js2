@@ -10599,7 +10599,7 @@ assert._isSameValue = isSameValue;
           // (#3603 S1) `Array.prototype.push.call(vec, x)` arrives as obj=push,
           // method="call", args[0]=the vec's `__make_iterable` mirror — bracket
           // the dispatch so the mutation reaches the vec (silent no-op before).
-          const mirrorSnaps = snapshotVecMirrors([dispatchRecv, ...wrappedArgs], exports);
+          const mirrorSnaps = snapshotVecMirrors(dispatchRecv, wrappedArgs, exports);
           const ret = fn.apply(dispatchRecv, wrappedArgs);
           reconcileVecMirrors(mirrorSnaps, exports, _unwrapForHost);
           // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
@@ -11225,7 +11225,7 @@ assert._isSameValue = isSameValue;
           // (#3603 S1) `Function.prototype.call.bind(Array.prototype.push)` lands
           // here as `__call_function(boundCall, null, [vecMirror, item])` — same
           // bracket, so the uncurried push reaches the vec.
-          const mirrorSnaps = snapshotVecMirrors([wrappedThis, ...wrappedArgs], exports);
+          const mirrorSnaps = snapshotVecMirrors(wrappedThis, wrappedArgs, exports);
           const ret = Reflect.apply(fn, wrappedThis, wrappedArgs);
           reconcileVecMirrors(mirrorSnaps, exports, _unwrapForHost);
           return _unwrapForHost(ret);
