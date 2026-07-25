@@ -50,6 +50,14 @@ Three further instances of the same family surfaced while building this:
   so on the standalone lane every `Test262Error` surfaced locally as the opaque
   #2870 label while CI reported the real assertion text. Two copies of one
   policy, "kept in sync" by a comment.
+  **State this correctly, because the weaker framing is what let it survive:
+  this was a VERDICT divergence, not "local output is ugly".**
+  `originalNegativeMatches` decides a runtime-negative verdict by searching the
+  reported detail for `meta.negative.type`, and the opaque label contains no
+  type name — so a standalone runtime-negative test that threw exactly the
+  RIGHT error scored `fail` locally and `pass` in CI. Local pass/fail was
+  therefore not fully trustworthy either, which is a much larger claim than a
+  cosmetic one and is why it deserved a fix rather than a triage workaround.
 - **#3615** (new, found by the truth table on its first run) — a property read
   in expression-statement position never invokes the accessor, so
   `var o = { get p() { throw new Test262Error("x"); } }; o.p;` scores a
@@ -257,16 +265,28 @@ SCRIPT-vs-TEST gap that would leave the anti-vacuity guard itself unguarded.
    `it.fails` entries; the codegen fix is not this issue's lane.
 2. **Parse-negative coincidental passes (audit class P3, ~150–300 estimated).**
    The documented policy is "any static rejection satisfies SyntaxError"
-   (`scripts/negative-verdict.mjs`). The residue is tests rejected for an
-   _unrelated_ reason — typically a capability refusal ("Unsupported method
-   call: …", "…is unsupported") rather than a static/syntax rejection. A
-   principled tightening is to refuse capability-refusal diagnostics as
-   evidence of early-error detection. **Not landed here**: it is a verdict-logic
+   (`scripts/negative-verdict.mjs`), which makes a rejection for an _unrelated_
+   reason score a conformance pass.
+
+   > **The discriminator, stated plainly: a CAPABILITY REFUSAL is not evidence
+   > of early-error detection; a STATIC/SYNTAX REJECTION is.**
+   >
+   > "Unsupported method call: `.foo()`", "…is unsupported", "Unsupported
+   > expression in linear backend: …" all mean _we cannot compile this_. They do
+   > NOT mean _this program is statically invalid_. A `negative: SyntaxError`
+   > test rejected with one of those was not detected — it was merely refused,
+   > and scoring it `pass` credits the compiler for a capability gap. Only
+   > diagnostics that assert the program is ill-formed (TS parse diagnostics,
+   > the ES early-error codes in `ES_EARLY_ERROR_CODES`) satisfy the
+   > expectation.
+
+   **Not landed here**: it is a verdict-logic
    change requiring an `ORACLE_VERSION` bump, a full-corpus measurement of the
    4,561 parse-negative passes (~2 CPU-hours; the passes carry no recorded
    diagnostic, so they must be re-run to classify), and a declared
    change-scoped allowance for the intentional de-inflation — i.e. its own
    landing, on the #3592 RC2 recipe.
+
 3. **Host `(0, eval)` fallback passes (audit class P4, ~75 estimated).** Bounded
    and low-severity; the honest fix is to mark a result whose validation went
    through the host `eval` fallback rather than compiled code, so the class is
@@ -275,16 +295,14 @@ SCRIPT-vs-TEST gap that would leave the anti-vacuity guard itself unguarded.
    required check: it needs a network baseline fetch and ~1 min of compiles, and
    a flaky fetch must not gate PRs. `pnpm run detect:vacuity` is the manual
    entry point.
-5. **Mechanise "the test must go red without the fix".** The syntax gate in (5)
-   above catches ONE shape; the general class is "this regression test does not
-   actually exercise the code under test". The right mechanisation is a
-   mutation-style check: for a PR that adds `tests/issue-N.test.ts` alongside a
-   `src/` change, re-run the new test against the PR's **merge-base compiler**
-   and require it to FAIL. That is a real, cheap oracle (no mutation operators
-   to design — the "mutant" is main), and it is exactly the manual step the
-   `assertion_fail` dev performed by hand. It needs a two-checkout CI job, so it
-   is its own issue rather than a rider here. Until then the norm is: **remove
-   the fix, confirm the test goes red, say so in the PR.**
+5. **#3619 — mechanise "the test must go red without the fix".** FILED. The
+   syntax gate in (5) above catches ONE shape; the general class is "this
+   regression test does not actually exercise the code under test", and it has
+   no detector today beyond an agent remembering. #3619 specifies the two-
+   checkout CI job: run a PR's NEW test files against the PR's **merge-base
+   compiler** and require FAIL. No mutation operators to design — the mutant is
+   `main`. Until it lands the norm stays manual: **remove the fix, confirm the
+   test goes red, say so in the PR.**
 6. **`.name` through a parameter is `undefined` on standalone (#3618)** —
    corrupts failure TEXT (924 heterogeneous rows collapsed onto one string
    during triage). Anything in this area that classifies by message text is

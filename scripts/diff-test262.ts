@@ -20,7 +20,7 @@ import { createHash } from "crypto";
 // clean result. `trapInnermostFrame` is exactly such a checker and its
 // 100 %-unverifiable rate on the CI grammar is what silently produced the
 // "0 verified unmasked pre-existing traps" reading in the #3601 park.
-import { warnIfVerifierVacuous } from "./lib/verifier-guard.mjs";
+import { guardedFilter } from "./lib/verifier-guard.mjs";
 
 // #1943 — single source of truth for the documented merge thresholds, so the
 // CI regression-gate ENFORCES the same numbers the dev-self-merge skill
@@ -1117,11 +1117,8 @@ export function evaluateDevacuificationAllowance(opts: {
   const trapCandidates = candidates.filter(
     (r) => !!r.error_category && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(r.error_category),
   );
-  const framed = trapCandidates.filter((r) => trapInnermostFrame(r.error) !== null);
-  const vacuityWarning = warnIfVerifierVacuous({
+  const { warning: vacuityWarning } = guardedFilter(trapCandidates, (r) => trapInnermostFrame(r.error) !== null, {
     name: "trapInnermostFrame",
-    population: trapCandidates.length,
-    verified: framed.length,
     hint: "trap-message frame-grammar drift — the local runner renders `in name() at source L…` while the CI worker renders `[in name() ← caller ← …]`; a third renderer would be invisible the same way",
   });
   if (vacuityWarning) notes.push(vacuityWarning);

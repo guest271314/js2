@@ -100,3 +100,38 @@ export function assertVerifierNotVacuous(c) {
   const { vacuous, message } = checkVerifierCoverage(c);
   if (vacuous && message) throw new Error(message);
 }
+
+/**
+ * The ergonomic form for the shape almost every gate in this repo has:
+ * "run a predicate over a population and act on the ones it could answer for".
+ * Doing the counting here means a caller cannot forget the guard — the warning
+ * comes back in the same call that produces the filtered set.
+ *
+ * ```js
+ * const { matched, warning } = guardedFilter(trapRows, (r) => frameOf(r) !== null, {
+ *   name: "trapInnermostFrame",
+ *   hint: "trap-message frame-grammar drift",
+ * });
+ * if (warning) notes.push(warning);   // loud, not silent
+ * ```
+ *
+ * Applies to any gate that answers "how many of these can I verify?" —
+ * baseline-row matchers, error classifiers, frame/stack parsers, allowance
+ * validators, corpus scanners. If the answer is "none of a non-empty set", the
+ * gate is far more likely broken than the input uniformly clean.
+ *
+ * @template T
+ * @param {readonly T[]} population
+ * @param {(item: T) => boolean} canVerify
+ * @param {{ name: string; hint?: string; log?: (msg: string) => void; quiet?: boolean }} opts
+ * @returns {{ matched: T[]; unmatched: T[]; warning: string | null; rate: number }}
+ */
+export function guardedFilter(population, canVerify, opts) {
+  const matched = [];
+  const unmatched = [];
+  for (const item of population) (canVerify(item) ? matched : unmatched).push(item);
+  const coverage = { name: opts.name, population: population.length, verified: matched.length, hint: opts.hint };
+  const { message, rate } = checkVerifierCoverage(coverage);
+  if (message && !opts.quiet) (opts.log ?? ((m) => console.error(m)))(message);
+  return { matched, unmatched, warning: message, rate };
+}

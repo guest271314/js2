@@ -24,6 +24,7 @@ import {
   VACUOUS_VERIFIER_MIN_POPULATION,
   assertVerifierNotVacuous,
   checkVerifierCoverage,
+  guardedFilter,
   warnIfVerifierVacuous,
 } from "../scripts/lib/verifier-guard.mjs";
 
@@ -73,6 +74,40 @@ describe("#3613 vacuous-verifier guard", () => {
   it("assertVerifierNotVacuous throws, for callers whose whole output would be the silent zero", () => {
     expect(() => assertVerifierNotVacuous({ name: "probe", population: 40, verified: 0 })).toThrow(/VACUOUS VERIFIER/);
     expect(() => assertVerifierNotVacuous({ name: "probe", population: 40, verified: 40 })).not.toThrow();
+  });
+
+  // The reusable form. It exists so a gate author CANNOT forget the guard: the
+  // warning comes back from the same call that produces the filtered set,
+  // instead of being a separate step someone has to remember.
+  describe("guardedFilter — the reusable form for any gate", () => {
+    const rows = [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }];
+
+    it("partitions AND warns when the predicate answers for none of a non-empty set", () => {
+      const r = guardedFilter(rows, () => false, { name: "someParser", quiet: true });
+      expect(r.matched).toEqual([]);
+      expect(r.unmatched).toHaveLength(4);
+      expect(r.warning).toMatch(/VACUOUS VERIFIER/);
+      expect(r.warning).toMatch(/someParser/);
+      expect(r.rate).toBe(0);
+    });
+
+    it("stays quiet when the predicate answers for at least one", () => {
+      const r = guardedFilter(rows, (x) => x.id === 2, { name: "someParser", quiet: true });
+      expect(r.matched).toEqual([{ id: 2 }]);
+      expect(r.warning).toBeNull();
+      expect(r.rate).toBe(0.25);
+    });
+
+    it("stays quiet on an EMPTY population — nothing to verify is not verifying nothing", () => {
+      const r = guardedFilter([], () => false, { name: "someParser", quiet: true });
+      expect(r.warning).toBeNull();
+    });
+
+    it("is LOUD by default (the whole point) and routes through the log channel", () => {
+      const lines: string[] = [];
+      guardedFilter(rows, () => false, { name: "someParser", log: (m) => lines.push(m) });
+      expect(lines).toHaveLength(1);
+    });
   });
 });
 
