@@ -99,9 +99,44 @@ issue #3592's frontmatter — machine-consumed by `scripts/diff-test262.ts`.)
 A trap is strictly worse than a wrong answer (crash-free goal,
 `plan/goals/goal-graph.md`): it aborts the whole module and poisons every
 assertion after it. The 65 are only the tests whose FIRST newly-executed
-assertion hits the defect — the same missing brand checks likely underlie part
-of the pre-existing standalone trap population (282 null_deref / 377
-illegal_cast baseline rows).
+assertion hits the defect.
+
+### The reusable generalisation (read this before writing any receiver-keyed arm)
+
+**This was never a missing runtime check. It was the type system asserting
+something false about a specific value, and codegen believing it.**
+
+`lib.d.ts` declares `interface DateConstructor { prototype: Date }` (and the
+same shape for every builtin: `Uint8ClampedArrayConstructor.prototype:
+Uint8ClampedArray`, …). So `checker.getTypeAtLocation(Date.prototype)` answers
+**`Date`** — a true statement about the _declared_ type and a false statement
+about the _value_, which is an ordinary object with no `[[DateValue]]` slot.
+Any codegen arm that discriminates its receiver by **type name**
+(`objType.getSymbol()?.name`, `ctx.oracle.builtinReceiverOf`) therefore emits
+the **instance** lowering for a **non-instance** value: an unconditional
+`ref.cast` to the backing struct, or a bare `struct.get` on what is actually
+null. Both are uncatchable traps.
+
+The invariant to hold: **a `ref.cast` is a claim that the value's runtime
+representation is known. A TS type name is not that evidence.** Where the two
+can diverge you need either
+
+- a **compile-time** decision, when the divergence is statically decidable and
+  the spec's answer is unconditional (this issue: `<Ctor>.prototype.<member>`
+  provably lacks the slot, so the TypeError is emitted directly and the check
+  costs nothing at runtime); or
+- a **runtime** brand test (`receiver-brand.ts`'s `emitReceiverBrandCheck` —
+  non-trapping `ref.test` + catchable TypeError on the miss), when it is not.
+
+Never the bare cast.
+
+**Every receiver-name-keyed arm in `src/codegen/` carries this latent shape**
+— there are ~68 `getSymbol()?.name` sites. #3062 had already hand-patched two
+members (`byteLength`/`byteOffset`) before anyone named the pattern; this
+issue generalised it; **#3620 is the same shape again in a different
+subsystem** (a generator state field typed from the checker's inferred tuple
+type while the runtime value is a plain vec, producing an unconditional
+`ref.cast` that traps). Expect more.
 
 ## Acceptance criteria
 
@@ -122,7 +157,7 @@ illegal_cast baseline rows).
 
 ### Root cause (measured, not assumed)
 
-The clusters were assumed to need a *runtime* brand check. Measurement says the
+The clusters were assumed to need a _runtime_ brand check. Measurement says the
 first and largest slice needs **no runtime check at all** — the receiver is
 statically decidable.
 
@@ -184,10 +219,10 @@ JS-host lane is a separate required gate at 30,405 and is not broken here.
 Re-ran all 65 `standalone-devacuification-allow` tests before/after on this
 branch (`runTest262File(..., "standalone")`):
 
-| | before | after |
-| --- | ---: | ---: |
+|                                                      | before |  after |
+| ---------------------------------------------------- | -----: | -----: |
 | trap-category failures (illegal_cast/null_deref/oob) | **65** | **49** |
-| pass | 0 | **14** |
+| pass                                                 |      0 | **14** |
 
 - **14 trap → pass**: 11 `TypedArrayConstructors/*/prototype/not-typedarray-object.js`,
   `ArrayBuffer/prototype/maxByteLength/invoked-as-accessor.js`,
@@ -218,14 +253,14 @@ Census of the standalone baseline JSONL (461 trap rows at the pre-#3592
 baseline; 753 post-landing) by innermost frame shows the trap population is
 **heterogeneous** and mostly NOT missing receiver brand checks:
 
-| bucket | count | in this lane? |
-| --- | ---: | --- |
-| `illegal cast [in __module_init()]` | 79 | no |
-| `illegal cast [in C_method() ← __module_init]` (class-dstr gen-methods) | 69+19 | no |
-| async continuation `illegal cast` (Promise combinators / for-await dstr) | 111 | no |
-| `illegal cast [in __closure ← __closure ← __call_fn_method_3 ← __apply_closure]` (abrupt-completion payload) | 40 | partly (Slice 3) |
-| `illegal cast [… ← __call_accessor_get ← __extern_get]` (compound-assign poisoned accessor) | 30 | no |
-| `<Ctor>.prototype.<member>` static receiver | 12 baseline + 4 unmasked | **yes — fixed** |
+| bucket                                                                                                       |                    count | in this lane?    |
+| ------------------------------------------------------------------------------------------------------------ | -----------------------: | ---------------- |
+| `illegal cast [in __module_init()]`                                                                          |                       79 | no               |
+| `illegal cast [in C_method() ← __module_init]` (class-dstr gen-methods)                                      |                    69+19 | no               |
+| async continuation `illegal cast` (Promise combinators / for-await dstr)                                     |                      111 | no               |
+| `illegal cast [in __closure ← __closure ← __call_fn_method_3 ← __apply_closure]` (abrupt-completion payload) |                       40 | partly (Slice 3) |
+| `illegal cast [… ← __call_accessor_get ← __extern_get]` (compound-assign poisoned accessor)                  |                       30 | no               |
+| `<Ctor>.prototype.<member>` static receiver                                                                  | 12 baseline + 4 unmasked | **yes — fixed**  |
 
 Do not expect a brand-check mechanism to move the other buckets; they need
 their own root-cause work (the class-dstr and async-continuation buckets are
@@ -241,7 +276,7 @@ the two big rocks).
    OrdinaryHasInstance error paths; not a prototype-receiver shape.
 3. **`Proxy` gOPD / deleteProperty invariant checks** (5 tests, null_deref).
 4. **`Array.prototype.{fill,copyWithin,find,findLast,findLastIndex}`
-   return-abrupt** (11 tests) — the trap is on the *thrown value*, not the
+   return-abrupt** (11 tests) — the trap is on the _thrown value_, not the
    receiver; despite the issue's original grouping this is an
    abrupt-completion-payload defect, not a brand check.
 5. **Non-trap correctness gaps found while measuring** (wrong value, no trap):

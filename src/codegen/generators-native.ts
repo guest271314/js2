@@ -2366,10 +2366,38 @@ export function registerNativeGenerator(
     // (#2864 F2) `gen.throw(e)` payload — externref regardless of carrier.
     { name: "error", type: { kind: "externref" }, mutable: true },
   ];
-  for (let i = 0; i < paramTypes.length; i++) {
+  // (#3620) A BINDING-PATTERN parameter's state field must be typed at the
+  // value's actual wasm-boundary representation (`externref`), NOT at the TS
+  // type the checker infers for the pattern.
+  //
+  // Why: for `*m([x] = [1])` the checker infers the parameter as the TUPLE
+  // `[number]`, so `resolveWasmType` mints a `$__tuple_N` struct and the caller
+  // passed one — until the parameter gained a DEFAULT. A defaulted parameter is
+  // widened to `externref` at the wasm boundary (the callee must be able to see
+  // "argument absent"), which removes the call site's tuple conversion, and the
+  // in-callee default materialization emits the array literal in its natural
+  // `$__vec_f64` shape. The state field still claimed `$__tuple_N`, so the
+  // factory's param→field coercion emitted an unconditional
+  // `ref.cast (ref null $__tuple_N)` over a value that is now never a tuple —
+  // an UNCATCHABLE `illegal cast` that aborted the module.
+  //
+  // This is the same defect shape as #3610: a `ref.cast` justified by a static
+  // type that no longer describes the runtime value. The fix is the same in
+  // spirit — do not assert what is not guaranteed. The resume prelude's
+  // destructuring reader already dispatches dynamically over
+  // tuple-struct / vec / generic-iterable receivers (`ref.test` cascade), so an
+  // `externref` field is exactly what it is built to consume.
+  //
+  // Keyed off the synthetic `__genarg{i}` name minted above for binding-pattern
+  // params (#2920) — the one place that already distinguishes them, so the
+  // name/type arrays cannot drift apart.
+  const stateParamTypes = paramTypes.map((t, i) =>
+    (paramNames[i] ?? "").startsWith("__genarg") ? ({ kind: "externref" } as ValType) : t,
+  );
+  for (let i = 0; i < stateParamTypes.length; i++) {
     stateFields.push({
       name: `param_${paramNames[i] ?? i}`,
-      type: paramTypes[i]!,
+      type: stateParamTypes[i]!,
       mutable: false,
     });
   }
@@ -2512,7 +2540,11 @@ export function registerNativeGenerator(
     stateTypeIdx,
     resultTypeIdx,
     paramNames,
-    paramTypes,
+    // (#3620) The STATE-FIELD types, not the caller's declared param types —
+    // the resume prelude allocates its `param_*` locals from this array and
+    // must agree with the field it `struct.get`s. Identical to `paramTypes`
+    // except for binding-pattern params (widened to `externref` above).
+    paramTypes: stateParamTypes,
     paramFieldOffset: PARAM_FIELD_OFFSET,
     sentFieldIdx: SENT_FIELD,
     modeFieldIdx: MODE_FIELD,
