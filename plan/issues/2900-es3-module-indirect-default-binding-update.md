@@ -1,9 +1,9 @@
 ---
 id: 2900
 title: "≤ES3 (edition bucket): module indirect default-export binding update returns wrong value"
-status: done
+status: ready
 priority: high
-sprint: 69
+sprint: current
 created: 2026-06-30
 completed: 2026-07-02
 feasibility: hard
@@ -182,3 +182,39 @@ Split into three issues (each independently valuable and testable):
 live-binding still fail). Repro scripts used for this analysis are ephemeral
 (`.tmp/`); the key controls are the `.ts`-fixture probes above (no `.js`/allowJs
 needed to reproduce RC2 and RC3).
+
+## REOPENED 2026-07-25 — still failing, and the failure mode has CHANGED
+
+Marked `done` on 2026-07-02, but the target test **still fails today** — with an
+error that does not match this issue's description. Reopened (`status: ready`,
+`sprint: current`); `completed:` left as history.
+
+Measured against a **force-fetched** baseline (`--force`; the bare command is a
+silent no-op, see #3629):
+
+```
+test/language/module-code/eval-gtbndng-indirect-update-dflt.js
+  status : fail
+  category: type_error
+  error  : TypeError: sameValue is not a function
+```
+
+**Contributes to #3628 (close the ≤ES3 edition)** — 1 of only 3 issues between
+the host lane and a closed ≤ES3 edition (currently 230/273, 84.2 %).
+
+### The error suggests this is no longer a module-binding bug
+
+`sameValue is not a function` means the **harness's `assert` object lost its
+method** — the test never reaches the binding semantics this issue is about. So
+the original fix may well have worked, and a _different_, later defect is now
+masking it.
+
+That symptom is the signature of the **own-properties-on-function-objects**
+class (assert.\* methods read as `undefined` ⇒ never invoked). See the
+lane-parity F1 finding and #3468. Related: the same class produced the ~5,000
+vacuous standalone passes fixed on 2026-07-25 via #3592.
+
+**So: diagnose before implementing.** If the cause is the harness class, this
+issue should be re-pointed (or closed as blocked on that defect) rather than
+re-implementing module-binding logic that may already be correct. Verify on the
+CI path — `runTest262File`'s category and location are unreliable.

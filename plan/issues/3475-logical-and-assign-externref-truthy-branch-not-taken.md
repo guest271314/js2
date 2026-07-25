@@ -13,7 +13,7 @@ task_type: bug
 area: codegen
 language_feature: property-write, defineProperty, dynamic-property
 es_edition: es2021
-goal: test262-conformance
+goal: es5-complete
 related: [3430]
 origin: "Discovered 2026-07-20 while implementing #3430 (strict compound/logical assignment [[Set]]-failure-throws fix). Isolated as a pre-existing, unrelated bug — NOT caused by the #3430 fix (reproduces identically with #3430's diff removed)."
 ---
