@@ -27,6 +27,30 @@ origin: "opus-typeerror-lane triage of the post-#3592 standalone type_error fami
 # reading its descriptors from somewhere other than the table it iterates.
 loc-budget-allow:
   - src/codegen/dataview-native.ts
+standalone-devacuification-allow:
+  count: 30
+  reason: "#3616: making BigInt64Array/BigUint64Array real VALUES in standalone
+    de-vacuifies the test262 `testWithBigIntTypedArrayConstructors` harness. Its
+    callbacks previously received a null TA, so `new TA(...)` was null and every
+    callback body was dead — the row passed without asserting anything. With a
+    real ctor the bodies execute and pre-existing downstream defects surface as
+    ordinary honest assertion failures. Measured basis: a 22-row deterministic
+    stride sample of the BigInt TypedArray corpus (14 baseline-fail + 8
+    baseline-pass) gave 2 fail->pass gains and 1 pass->fail flip, i.e. 1 of 8
+    sampled baseline-passes (12.5%); the corpus holds 28 baseline passes, so the
+    point estimate is ~4 flips. The sole observed flip
+    (TypedArray/prototype/byteLength/BigInt/resizable-array-buffer-fixed.js) was
+    verified through the CI-equivalent path (assembleOriginalHarness ->
+    CompilerPool('unified') -> test262-worker.mjs) and is category
+    `assertion_fail` — NOT a trap category — reading `Test262Error: following
+    shrink (out of bounds) Expected SameValue(«16», «0») to be true`, i.e. a
+    genuine pre-existing byteLength-after-out-of-bounds-resize defect the vacuous
+    pass never reached. No `tests:` list is needed because no pass->trap flip was
+    observed; any trap flip remains unexcused and still hard-fails #3189. The
+    ceiling of 30 covers the wide binomial interval on n=8 (upper bound ~15 over
+    the 28-pass BigInt corpus) plus margin for the two extra
+    ensureTypedArrayViewNativeProtoGlue registrations now performed by the
+    TA_CTOR_KINDS-driven loops in any module carrying a dynamic TA view."
 ---
 
 # #3616 — standalone: BigInt TypedArray constructors are `null` in VALUE position
@@ -57,9 +81,9 @@ through to the `reportSilentFallback("const-fallback",
 
 The host/gc lane was already fixed by **#3087** — `identifiers.ts:834-862`
 routes the same two names through `__extern_get(globalThis, name)`, and its
-comment says outright *"Covers the BigInt views too (not in the standalone
+comment says outright _"Covers the BigInt views too (not in the standalone
 `taCtorKindOf` list). Standalone/WASI keeps the native `$__ta_ctor` value
-below"*. The native path never grew the BigInt kinds, so only the host-free lane
+below"_. The native path never grew the BigInt kinds, so only the host-free lane
 was left behind.
 
 This is a **third residual of #2401**, distinct from the two already recorded
@@ -157,10 +181,10 @@ from the `fail` population, 8 from `pass`), standalone lane, single-threaded.
 BEFORE reproduced the CI artifact exactly (14 fail / 8 pass), so the local
 harness is faithful **for this cluster**.
 
-| | before | after |
-|---|---|---|
-| fail | 14 | 13 |
-| pass | 8 | 9 |
+|      | before | after |
+| ---- | ------ | ----- |
+| fail | 14     | 13    |
+| pass | 8      | 9     |
 
 **Gross +2 fixed, −1 regressed, net +1. 19 of 22 unchanged.**
 
@@ -183,7 +207,58 @@ gives roughly +98 gains and, at 1-in-8 of the 28 passes, roughly −3 to −4
 regressions — net positive but modest, and the confidence interval on 2/14 is
 very wide (~2 %–43 %).
 
-### The regression is NOT classifiable locally — this is the blocker
+### Do NOT read 627 as a forecast
+
+The 627-row cluster identified in "Why it costs 627 tests" is the population
+that _shares this root cause_, **not** the number of rows this fix converts.
+At a 14 % sampled hit rate the expected conversion is on the order of ~100.
+The null constructor is the FIRST rung of a ladder: removing it lets each row
+proceed to whatever defect sits behind it, and for ~6 of 7 rows that next defect
+is still fatal. Anyone planning follow-up work should treat the remaining BigInt
+corpus as a stack of distinct downstream defects needing their own triage, not
+as residue of this one.
+
+### The regression, resolved: an honest de-vacuification (CONFIRMED)
+
+Initially unclassifiable locally, and recorded here as an open question rather
+than a guess. It is now settled by re-running the row through the
+**CI-equivalent path** (`assembleOriginalHarness` → `CompilerPool(1, "unified")`
+→ `scripts/test262-worker.mjs`, harness `.tmp/run-pool.mts`):
+
+```
+status   : fail
+error    : Test262Error: following shrink (out of bounds) Expected SameValue(«16», «0») to be true
+category : assertion_fail
+frame    : null
+dispIntro: false
+```
+
+Three conclusions:
+
+1. **The earlier "frameless / `other`" reading was a `runTest262File` artifact,
+   not a property of the row.** That runner does not use `tryNativeExnRender`,
+   so the payload rendered as `uncaught Wasm-GC exception (non-stringifiable
+payload)` and mis-classified as `other`. The CI path renders the real
+   `Test262Error`.
+2. **The `at L16` attribution was also an artifact.** The real failure is deep
+   in the harness callback (`assert.sameValue(array.byteLength, expected,
+"following shrink (out of bounds)")`), not at the top-level
+   `typeof ArrayBuffer.prototype.resize` assertion. This **confirms** the
+   previously-hypothesised second-order mechanism: with a real ctor the callback
+   goes live and a pre-existing `byteLength`-after-out-of-bounds-resize defect
+   surfaces. The row was a **vacuous pass** — TA was null, so the entire callback
+   body was dead and nothing was asserted.
+3. **`assertion_fail` is not in `TRAP_ERROR_CATEGORIES`**
+   (`["null_deref", "illegal_cast", "oob", "unreachable"]`, `scripts/diff-test262.ts:246`),
+   so `isDevacuificationExcusableFlip` returns true under the declared ceiling
+   alone — the frame check applies only to trap-tier rows and is irrelevant
+   here. The #3189 trap ratchet never engages.
+
+The `standalone-devacuification-allow` ceiling declared in this file's
+frontmatter covers it. No `tests:` list is required (that is the trap tier); a
+pass→trap flip would still be unexcused and would still hard-fail #3189.
+
+### Superseded: why this was briefly blocked
 
 `resizable-array-buffer-fixed.js` now throws at L16,
 `assert.sameValue(typeof ArrayBuffer.prototype.resize, "function")` — a
@@ -216,15 +291,19 @@ settle that locally.
 
 ### Consequence
 
-Not opening the PR on this evidence. Net +1 on n=22 with one flip I cannot
-classify is too thin a basis, and the failure mode if I am wrong is a wedged
-merge queue rather than a clean park. Awaiting a decision between (a) a larger
-sample (~60–80 rows, ~1 h single-threaded) to pin the gain/regression rates,
-or (b) landing it and treating the `merge_group` floor gate as the measurement,
-per the established `park = measurement` recipe
-(`reference_f1_honest_floor_deinflation_landing_recipe`). Option (b) would need
-a `standalone-devacuification-allow` ceiling declared in this frontmatter with
-the 1-in-8 sampled basis above.
+Resolved — landing with the declared ceiling. The `merge_group` standalone floor
+gate is the authoritative measurement of the real gain/regression counts; the
+local sample's job was only to establish direction and to classify the flip
+tier, and it has done both.
+
+**Lesson worth keeping:** `runTest262File` is not the CI path and must not be
+used to classify a standalone failure's _category_ or _location_ — only its
+pass/fail status is trustworthy. Classification questions go through
+`assembleOriginalHarness` → `CompilerPool(n, "unified")` →
+`scripts/test262-worker.mjs` (see `.tmp/run-pool.mts`; it needs
+`scripts/compiler-bundle.mjs` + `scripts/runtime-bundle.mjs`, both gitignored,
+built with the two `esbuild` commands recorded in the assertion_fail lane's
+context dump).
 
 ## Source
 

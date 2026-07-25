@@ -27,16 +27,16 @@ see "Resume steps").
 
 pass→non-pass = **5,129**. Split by `error_category`:
 
-| category | n |
-|---|---|
-| assertion_fail | 4,496 |
-| other | 371 |
+| category       | n       |
+| -------------- | ------- |
+| assertion_fail | 4,496   |
+| other          | 371     |
 | **type_error** | **179** |
-| illegal_cast | 43 |
-| null_deref | 21 |
-| (none) | 15 |
-| range_error | 3 |
-| oob | 1 |
+| illegal_cast   | 43      |
+| null_deref     | 21      |
+| (none)         | 15      |
+| range_error    | 3       |
+| oob            | 1       |
 
 **My lane is only 182 of the 5,129 newly-revealed.** The bulk of my 3,038
 `type_error`s are PRE-EXISTING, not de-vacuified today. So within my lane the
@@ -44,19 +44,19 @@ highest-yield work is in the pre-existing population, not the flip set.
 
 ## Cause taxonomy — full post-landing lane (n = 3,223, 132 distinct signatures)
 
-| n | signature | verdict |
-|---|---|---|
-| 1,128 | `TypeError: Cannot access property on null or undefined at N:N` | **REAL standalone gap** — see root cause below |
-| 527 | `dynamic eval is not supported in standalone mode` | wont-fix (deliberate) |
-| 400 | `Cannot convert undefined or null to object` | unexamined |
-| 137 | `Cannot access property on null or undefined` (no loc) | unexamined |
-| 235 | `Array.prototype.<m> is not yet callable as a value in --target standalone` (34 methods; `map` alone 117) | **SECONDARY — do not chase, see below** |
-| 111 | `Cannot read properties of undefined (reading a class field)` | unexamined |
-| 83 | `Object method called on null or undefined` (annexB 64) | unexamined |
-| 78 | `Object.defineProperties unsupported descriptor shape` | narrow, self-describing |
-| 51+43 | `Cannot destructure 'X' or 'X'` (+ async variant) | unexamined |
-| 37 | `Generator.prototype.next requires that 'X' be a Generator` | unexamined |
-| 31 | `Reduce of empty array with no initial value` | unexamined |
+| n     | signature                                                                                                 | verdict                                        |
+| ----- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 1,128 | `TypeError: Cannot access property on null or undefined at N:N`                                           | **REAL standalone gap** — see root cause below |
+| 527   | `dynamic eval is not supported in standalone mode`                                                        | wont-fix (deliberate)                          |
+| 400   | `Cannot convert undefined or null to object`                                                              | unexamined                                     |
+| 137   | `Cannot access property on null or undefined` (no loc)                                                    | unexamined                                     |
+| 235   | `Array.prototype.<m> is not yet callable as a value in --target standalone` (34 methods; `map` alone 117) | **SECONDARY — do not chase, see below**        |
+| 111   | `Cannot read properties of undefined (reading a class field)`                                             | unexamined                                     |
+| 83    | `Object method called on null or undefined` (annexB 64)                                                   | unexamined                                     |
+| 78    | `Object.defineProperties unsupported descriptor shape`                                                    | narrow, self-describing                        |
+| 51+43 | `Cannot destructure 'X' or 'X'` (+ async variant)                                                         | unexamined                                     |
+| 37    | `Generator.prototype.next requires that 'X' be a Generator`                                               | unexamined                                     |
+| 31    | `Reduce of empty array with no initial value`                                                             | unexamined                                     |
 
 ### The distinction the lead asked for (spec-correct vs missing-builtin)
 
@@ -71,7 +71,7 @@ it is secondary: the call site is the real test262 harness
 
 ```js
 compareArray.format = function (arrayLike) {
-  return `[${Array.prototype.map.call(arrayLike, String).join(', ')}]`;
+  return `[${Array.prototype.map.call(arrayLike, String).join(", ")}]`;
 };
 ```
 
@@ -119,7 +119,7 @@ Why it hits 627 rows: the test262 runner's shim
 ### Verified probes (all in `.tmp/`, standalone lane)
 
 - `.tmp/t5.ts` — `[Int8Array, Uint8Array, Int32Array, Float64Array,
-  BigInt64Array, BigUint64Array]`: indices 0–3 non-null, **index 4 is `null`**
+BigInt64Array, BigUint64Array]`: indices 0–3 non-null, **index 4 is `null`**
   (returned 104). After the fix: returns 1 (all six non-null, and dynamic
   `new TA(4)` gives `.length === 4` for all six).
 - `.tmp/t3.ts` / `.tmp/t2.ts` — reproduce the exact harness shape
@@ -139,7 +139,7 @@ Why it hits 627 rows: the test262 runner's shim
 BigInt TypedArray corpus in the post-landing artifact: **pass 28 · fail 685 · CE 64**.
 Small pass surface ⇒ low regression risk, large upside. Note the 8 sampled
 passes include vacuous ones (e.g. `byteoffset-is-symbol-throws` —
-`assert.throws(TypeError, …)` is satisfied by *any* TypeError, including
+`assert.throws(TypeError, …)` is satisfied by _any_ TypeError, including
 "TA is null"), so a few of the 28 may honestly flip to fail; that must be
 measured, not assumed.
 
@@ -187,7 +187,7 @@ assertions keep failing honestly.
    `issue-3616-standalone-bigint-ta-ctor-value` is checked out; the three edits
    above are **in the working tree, uncommitted**. `git diff` to confirm.
 2. Re-claim if needed: `node scripts/claim-issue.mjs 3616
-   ttraenkler/<agent> --branch issue-3616-standalone-bigint-ta-ctor-value --force`.
+ttraenkler/<agent> --branch issue-3616-standalone-bigint-ta-ctor-value --force`.
 3. **The measurement that was interrupted** — this is the one thing that must
    finish before the PR: `npx tsx .tmp/batch.mts after.json` and diff against
    `.tmp/before.json`. BEFORE is already captured and matches CI exactly
@@ -207,7 +207,7 @@ assertions keep failing honestly.
 ## Unexamined, ranked, for whoever picks this lane up next
 
 1. **Temporal 213** rows inside the same `Cannot access property on null or
-   undefined` signature — likely the same "constructor/namespace is null as a
+undefined` signature — likely the same "constructor/namespace is null as a
    value" shape, different builtin. Cheapest next probe: repeat the `.tmp/t5.ts`
    pattern with `Temporal.*` names.
 2. **`Cannot convert undefined or null to object` (400)** — TypedArray 64,
