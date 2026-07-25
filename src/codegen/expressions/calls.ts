@@ -1301,12 +1301,10 @@ function emitReflectiveNativeProtoClosureCall(
   const selfTypeIdx = getClosureFuncSelfTypeIdx(ctx, closureInfo.funcTypeIdx) ?? closureInfo.structTypeIdx;
   const structRefT: ValType = { kind: "ref", typeIdx: selfTypeIdx };
   const closureLocal = allocLocal(fctx, `__protocall_${fctx.locals.length}`, structRefT);
-  // (#3638) …but the `ref.cast` is UNCONDITIONAL, so it is only sound when the
+  // (#3638) …but this `ref.cast` is UNCONDITIONAL, so it is sound only when the
   // receiver's RUNTIME VALUE is provably that wrapper — which the symbol-based
-  // gate above does NOT establish (an INSTANCE member read, `a.fill`, has the
-  // same static type and lowers to a null-valued dynamic read → uncatchable
-  // `illegal cast`). Receiver normalisation, and the full why, live in
-  // reflective-call-receiver.ts.
+  // gate above does NOT establish. Receiver normalisation (and why an INSTANCE
+  // member read used to trap here) lives in reflective-call-receiver.ts.
   pushReflectiveCallReceiver(ctx, fctx, receiver, closure);
   fctx.body.push({ op: "ref.cast", typeIdx: selfTypeIdx });
   fctx.body.push({ op: "local.set", index: closureLocal });
