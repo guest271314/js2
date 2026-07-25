@@ -262,6 +262,14 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
       mergeBuffer(instr.then);
       mergeBuffer(instr.else);
       break;
+    // #2952 slice 4 — labeled block / switch: union of clause buffers
+    // (disc is a plain SSA use, surfaced via directUses).
+    case "labeled.block":
+      mergeBuffer(instr.body);
+      break;
+    case "switch":
+      for (const body of instr.bodies) mergeBuffer(body);
+      break;
     // (#2856) Early return is a control effect (like throw): never
     // reordered, CSE'd, or dropped — treat as a full barrier.
     case "early.return":
@@ -525,6 +533,10 @@ export function isSideEffecting(i: IrInstr): boolean {
     // rationale as while.loop / for.loop above).
     i.kind === "br.label" ||
     i.kind === "if.stmt" ||
+    // #2952 slice 4 — labeled.block / switch are statement-level control
+    // flow whose clause buffers must be use-walked (same as if.stmt).
+    i.kind === "labeled.block" ||
+    i.kind === "switch" ||
     // Slice 10 (#1169i): extern class ops invoke host imports with
     // arbitrary side effects. Conservatively keep all five live so DCE
     // never strips a `RegExp_new` or `Uint8Array_set` whose result is

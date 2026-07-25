@@ -2358,6 +2358,62 @@ export interface IrInstrIfStmt extends IrInstrBase {
   readonly else: readonly IrInstr[];
 }
 
+/**
+ * #2952 slice 4 — a break-only labeled frame: `lbl: { ... break lbl; ... }`
+ * (a LabeledStatement wrapping a NON-loop statement). Lowers to a single
+ * Wasm `block`; `br.label{label, mode:"break"}` exits it. `continue` can
+ * never target it (JS grammar; the verifier enforces break-only binding).
+ * Labeled LOOPS do NOT use this kind — their label rides the loop's own
+ * `loopLabel` (slice 3).
+ */
+export interface IrInstrLabeledBlock extends IrInstrBase {
+  readonly kind: "labeled.block";
+  readonly label: IrLabelId;
+  readonly body: readonly IrInstr[];
+}
+
+/**
+ * #2952 slice 4 — `switch (disc) { case <literal>: ...; default: ... }`.
+ *
+ * `tests[k]` is clause k's literal test value in SOURCE order (`null` =
+ * the default clause, legal in any position). `bodies[k]` is clause k's
+ * statement buffer; per JS §14.12 a body that does not `break` FALLS
+ * THROUGH into `bodies[k+1]`.
+ *
+ * Lowering emits the classic block-per-case ladder:
+ *
+ *   block $exit            ;; breakLabel — `break` inside a case brs here
+ *     block $b(N-1) … block $b0
+ *       <dispatch: eq-chain (or br_table for dense-i32 disc) br k;
+ *        no-match: br to default clause's block, or $exit if none>
+ *     end $b0
+ *     <bodies[0]>          ;; falls into bodies[1]
+ *     end $b1
+ *     <bodies[1]>
+ *     …
+ *   end $exit
+ *
+ * Case selection uses strict equality against literal tests: numeric
+ * compare in the disc's own value type (NaN matches nothing, -0 === 0 —
+ * both correct for f64.eq/i32.eq). `breakLabel` binds break-only, exactly
+ * like `labeled.block` (an unlabeled `break` in a case targets the
+ * switch; `continue` passes through to the enclosing loop).
+ */
+export interface IrInstrSwitch extends IrInstrBase {
+  readonly kind: "switch";
+  readonly disc: IrValueId;
+  /**
+   * Slot the lowerer stores the evaluated discriminant into (declared by
+   * from-ast with the disc's ValType, same idiom as the forof.* slots) —
+   * the dispatch chain reads it once per comparison; the disc expression
+   * itself is evaluated exactly once (§14.12.9 step 1).
+   */
+  readonly discSlot: number;
+  readonly tests: readonly (number | null)[];
+  readonly bodies: readonly (readonly IrInstr[])[];
+  readonly breakLabel: IrLabelId;
+}
+
 export type IrInstr =
   | IrInstrConst
   | IrInstrCall
@@ -2436,6 +2492,9 @@ export type IrInstr =
   // #2952 slice 2 — multi-exit control flow.
   | IrInstrBrLabel
   | IrInstrIfStmt
+  // #2952 slice 4 — switch + labeled non-loop block.
+  | IrInstrLabeledBlock
+  | IrInstrSwitch
   // (#1373 Phase B) Async / await IR nodes. Currently type-only —
   // Phase C (CPS transform, follow-up #1373b) wires lowering.
   | IrInstrAwait
@@ -2662,6 +2721,14 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
       fn(instr.then);
       fn(instr.else);
       return;
+    // #2952 slice 4 — labeled block (one buffer) / switch (one per clause,
+    // in source = fallthrough order).
+    case "labeled.block":
+      fn(instr.body);
+      return;
+    case "switch":
+      for (const body of instr.bodies) fn(body);
+      return;
     // All remaining kinds carry no nested IrInstr[] buffer. The `never`
     // binding turns a newly-added buffer-bearing kind into a compile error
     // here — the single point that must know about every buffer.
@@ -2815,6 +2882,17 @@ export function mapNestedBuffers(
       const else_ = mapBuffer(instr.else);
       if (then_ === instr.then && else_ === instr.else) return instr;
       return { ...instr, then: then_, else: else_ };
+    }
+    // #2952 slice 4 — labeled block / switch.
+    case "labeled.block": {
+      const body = mapBuffer(instr.body);
+      if (body === instr.body) return instr;
+      return { ...instr, body };
+    }
+    case "switch": {
+      const bodies = instr.bodies.map((b) => mapBuffer(b));
+      if (bodies.every((b, i) => b === instr.bodies[i])) return instr;
+      return { ...instr, bodies };
     }
     // Leaf kinds carry no nested buffer — returned unchanged. (Same exhaustive
     // set as forEachNestedBuffer; the never-check enforces parity.)
@@ -3024,6 +3102,12 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [];
     case "if.stmt":
       return [instr.cond];
+    // #2952 slice 4 — labeled.block has no operands of its own; switch
+    // evaluates only its discriminant (clause-interior uses via deep walk).
+    case "labeled.block":
+      return [];
+    case "switch":
+      return [instr.disc];
     case "extern.new":
       return instr.args;
     case "extern.call":

@@ -301,6 +301,14 @@ export interface RegressionsAllowance {
   reason: string;
   /** Issue file(s) in the PR's diff that declared the allowance. */
   sources: string[];
+  /**
+   * #3596 — the test files the declaration claims are RECLASSIFIED (a failure
+   * changing flavour), not regressed. Empty when the declaration does not name
+   * any. Required for a non-rebase `trap-growth-allow` (see
+   * `evaluateTrapReclassification`), optional elsewhere for backward
+   * compatibility with the #3303/#3370 count+reason declarations.
+   */
+  tests?: string[];
 }
 
 /**
@@ -380,7 +388,7 @@ export async function readChangeScopedNumericAllowance(opts: {
     await import("./lib/change-scope.mjs");
   const overrideFile = process.env[opts.overrideEnv];
   if (overrideFile !== undefined && overrideFile !== "") {
-    let parsed: { count: number; reason: string } | null | undefined;
+    let parsed: { count: number; reason: string; tests?: string[] } | null | undefined;
     try {
       parsed = parseFrontmatterCountReason(readFileSync(overrideFile, "utf-8"), opts.key);
     } catch {
@@ -411,7 +419,14 @@ export async function readChangeScopedNumericAllowance(opts: {
     );
   }
   return {
-    allowance: { count: best.count, reason: best.reason, sources: declarations.map((d) => d.source) },
+    allowance: {
+      count: best.count,
+      reason: best.reason,
+      sources: declarations.map((d) => d.source),
+      // #3596 — the named-tests list travels with the winning declaration. The
+      // ceiling does not sum across declarations, so neither does its evidence.
+      tests: best.tests ?? [],
+    },
     notes,
   };
 }
@@ -677,6 +692,104 @@ export function evaluateTrapCategoryGrowth(
     unknownBaselineTimeouts,
     unknownBaselineMissingRows,
   };
+}
+
+/**
+ * #3596 — machine-check a `trap-growth-allow` RECLASSIFICATION claim so the
+ * allowance can be honoured on an ORDINARY (non-rebase) PR without becoming a
+ * general trap-growth escape hatch.
+ *
+ * Background: the #3189 ratchet is a strict "traps may only shrink" gate. That
+ * is right for a *regression* (a test that used to pass and now traps) but wrong
+ * for a *reclassification* — a test that already failed and merely changed the
+ * FLAVOUR of its failure, typically because a fix made the module compile far
+ * enough to reach a pre-existing latent trap. Two net-positive PRs (#3563 +11
+ * pass, #3583 +16 pass) were parked on exactly that in one evening, with no
+ * available valve: the existing allowance is gated behind `rebaseMode`, and the
+ * only other lever (`TRAP_RATCHET_TOLERANCE`) is a repo-wide variable that
+ * blinds the gate for every other PR in the queue while open.
+ *
+ * The claim is verified, not trusted. Three conditions, all required:
+ *
+ *   1. **Named** — the declaration must list the affected test files. A bare
+ *      count is not checkable and is refused.
+ *   2. **Not previously passing** — every named test must have a baseline row
+ *      whose status is NOT `pass`. A `pass → trap` transition is a real
+ *      regression and still hard-fails, which is the property that keeps this
+ *      from being an escape hatch. An absent baseline row is also refused: it
+ *      proves nothing either way.
+ *   3. **Complete** — every file actually responsible for the growth must be
+ *      named. Undeclared growth (including growth in a category the PR never
+ *      mentioned) fails, so a `count: 1` cannot silently excuse an unrelated
+ *      new trap elsewhere.
+ *
+ * Pure (no I/O) so the unit test drives it with fixture maps, mirroring
+ * `evaluateTrapCategoryGrowth` / `evaluateRegressionThresholds`.
+ */
+export function evaluateTrapReclassification(opts: {
+  allowance: RegressionsAllowance;
+  baseline: Map<string, TrapRatchetRow>;
+  growth: TrapCategoryGrowth;
+}): { failures: string[]; notes: string[] } {
+  const { allowance, baseline, growth } = opts;
+  const failures: string[] = [];
+  const notes: string[] = [];
+  const declared = allowance.tests ?? [];
+  const where = allowance.sources.join(", ");
+
+  if (declared.length === 0) {
+    failures.push(
+      `trap-growth-allow (#3596) on a non-rebase PR must NAME the reclassified tests — declare a nested ` +
+        `\`tests:\` list alongside \`count:\`/\`reason:\` in ${where}. A bare count cannot be machine-checked, ` +
+        `so it is refused outside an oracle re-baseline`,
+    );
+    return { failures, notes };
+  }
+
+  // (2) Every named test must be demonstrably NOT passing on the baseline.
+  for (const file of declared) {
+    const base = baseline.get(file);
+    if (!base) {
+      failures.push(
+        `trap-growth-allow (#3596): declared test "${file}" has NO baseline row, so the reclassification claim ` +
+          `cannot be verified (declared in ${where}). Name only tests present in the baseline`,
+      );
+      continue;
+    }
+    if (base.status === "pass") {
+      failures.push(
+        `trap-growth-allow (#3596): declared test "${file}" was "pass" on the baseline — that is a REGRESSION, ` +
+          `not a reclassification, and the #3189 ratchet still hard-fails it (declared in ${where})`,
+      );
+    }
+  }
+
+  // (3) Every file actually causing growth must have been named.
+  const declaredSet = new Set(declared);
+  const undeclared: string[] = [];
+  for (const cat of TRAP_ERROR_CATEGORIES) {
+    if (growth.newCounts[cat] - growth.baseCounts[cat] <= 0) continue;
+    for (const file of growth.newlyTrapping[cat]) {
+      if (!declaredSet.has(file)) undeclared.push(`${cat}: ${file}`);
+    }
+  }
+  if (undeclared.length > 0) {
+    const sample = undeclared.slice().sort().slice(0, 10);
+    const more = undeclared.length > sample.length ? ` (+${undeclared.length - sample.length} more)` : "";
+    failures.push(
+      `trap-growth-allow (#3596): ${undeclared.length} newly-trapping file(s) are NOT named in the declaration — ` +
+        `${sample.join(", ")}${more}. The allowance covers only what it declares; undeclared trap growth still fails`,
+    );
+  }
+
+  if (failures.length === 0) {
+    notes.push(
+      `=== trap-growth-allow (#3596): reclassification VERIFIED for ${declared.length} declared test(s) — ` +
+        `each was non-passing on the baseline, and no undeclared trap growth was observed. ` +
+        `reason: ${allowance.reason} (declared in ${where}). ===`,
+    );
+  }
+  return { failures, notes };
 }
 
 interface TestResult {
@@ -1857,17 +1970,22 @@ async function run(
   // the compiled workload. It is read only in rebase mode, remains inert for
   // same-oracle changes, and is bounded per category like the existing
   // operational tolerance.
+  // #3596 — the allowance is now read in BOTH modes. In rebase mode it behaves
+  // exactly as #3370 defined it (the oracle bump is itself the containment). On
+  // an ORDINARY same-oracle PR it is honoured only if the declaration NAMES the
+  // reclassified tests and every claim machine-checks against the baseline —
+  // see `evaluateTrapReclassification`. That keeps the strict ratchet for real
+  // regressions (pass → trap) while unblocking a genuine flavour change
+  // (fail → fail), which previously had no valve short of the repo-wide
+  // TRAP_RATCHET_TOLERANCE variable.
   const trapTolerance = Number.parseInt(process.env.TRAP_RATCHET_TOLERANCE ?? "0", 10) || 0;
-  let trapAllowance: RegressionsAllowance | null = null;
-  if (rebaseMode) {
-    const loaded = await readChangeScopedNumericAllowance({
-      key: TRAP_GROWTH_ALLOW_KEY,
-      label: "trap-growth-allow (#3370)",
-      overrideEnv: "TRAP_GROWTH_ALLOW_FILE",
-    });
-    trapAllowance = loaded.allowance;
-    for (const note of loaded.notes) console.log(note);
-  }
+  const loadedTrapAllowance = await readChangeScopedNumericAllowance({
+    key: TRAP_GROWTH_ALLOW_KEY,
+    label: rebaseMode ? "trap-growth-allow (#3370)" : "trap-growth-allow (#3596)",
+    overrideEnv: "TRAP_GROWTH_ALLOW_FILE",
+  });
+  const trapAllowance: RegressionsAllowance | null = loadedTrapAllowance.allowance;
+  for (const note of loadedTrapAllowance.notes) console.log(note);
   const effectiveTrapTolerance = Math.max(trapTolerance, trapAllowance?.count ?? 0);
   const trapGrowth = evaluateTrapCategoryGrowth(baseline, newer, effectiveTrapTolerance, {
     // CI compares artifacts for the same pinned Test262 corpus. A missing
@@ -1901,8 +2019,39 @@ async function run(
       0,
       ...TRAP_ERROR_CATEGORIES.map((c) => trapGrowth.newCounts[c] - trapGrowth.baseCounts[c]),
     );
+    // #3596 — the DECLARATION'S OWN SHAPE selects the contract, not the run mode.
+    // This matters because mode is incidental: whether a given PR happens to run
+    // during an oracle re-baseline is not something the declaration's author can
+    // predict, and it would be a trap for the same frontmatter to receive weaker
+    // enforcement purely because of when it ran.
+    //
+    //   • `tests:` PRESENT → verify it, in BOTH modes. The author opted into the
+    //     stronger contract, so it is enforced regardless of mode. Strictly a
+    //     tightening: verification can only ever refuse a declaration, never
+    //     admit one the ceiling alone would have rejected.
+    //   • `tests:` ABSENT → #3370 semantics, unchanged. A bare bounded count
+    //     remains valid in rebase mode (existing declarations keep working and
+    //     cannot start hard-failing mid-re-baseline) and is still refused
+    //     outside one, as uncheckable.
+    //
+    // Either way the check only runs when the allowance actually did some work
+    // (growth > 0) — a declaration that excused nothing needs no proof.
+    const declaredTests = trapAllowance.tests ?? [];
+    const checkedContract = declaredTests.length > 0 || !rebaseMode;
+    if (checkedContract && maxGrowth > 0) {
+      const recheck = evaluateTrapReclassification({
+        allowance: trapAllowance,
+        baseline,
+        growth: trapGrowth,
+      });
+      for (const note of recheck.notes) console.log(note);
+      for (const reason of recheck.failures) {
+        console.log(`=== GATE FAIL: ${reason} ===`);
+        gateFailed = true;
+      }
+    }
     console.log(
-      `=== trap-growth-allow (#3370): maximum category growth ${maxGrowth} within declared per-category ceiling ${trapAllowance.count} — ` +
+      `=== ${checkedContract ? "trap-growth-allow (#3596)" : "trap-growth-allow (#3370)"}: maximum category growth ${maxGrowth} within declared per-category ceiling ${trapAllowance.count} — ` +
         `reason: ${trapAllowance.reason} (declared in ${trapAllowance.sources.join(", ")}). ===`,
     );
   }

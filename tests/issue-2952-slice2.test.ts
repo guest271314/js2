@@ -377,7 +377,8 @@ describe("#2952 slice 2 — verifier rules (A-design)", () => {
     const v = b.emitConst({ kind: "f64", value: 0 }, f64);
     b.terminate({ kind: "return", values: [v] });
     const errors = verifyIrFunction(b.finish());
-    expect(errors.some((e) => e.message.includes("targets no enclosing loop label"))).toBe(true);
+    // (slice 4 wording: break may target a loop OR a block/switch frame.)
+    expect(errors.some((e) => e.message.includes("targets no enclosing loop/block/switch label"))).toBe(true);
   });
 
   it("accepts br.label bound by the enclosing loop and rejects a mid-buffer one", () => {
