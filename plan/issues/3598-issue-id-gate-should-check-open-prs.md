@@ -169,3 +169,106 @@ A pre-emptive sweep script is in use by the PR-queue shepherd — it walks every
 open PR's added issue files and compares against `main`, distinguishing
 modifications from real collisions. Cheap to run once per sweep loop until this
 gate lands.
+
+## Handover (PR-queue shepherd → incoming dev, 2026-07-25)
+
+Reassigned mid-implementation. **What survives on branch `issue-3598-gate-open-prs`
+is `scripts/lib/open-pr-issue-files.mjs` — complete and verified live.** The two
+call-site edits were lost to a `git reset --hard` that also caught uncommitted
+work (my error; the probe commits only captured a `.md`). They were verified
+working end-to-end before that, so this section records exactly what they did —
+reimplementing them is ~150 lines of mechanical work, but the _findings_ below
+are the expensive part and should not be re-derived.
+
+### Design intent — one scan, not two
+
+The root asymmetry is that `claim-issue.mjs --allocate` already scans
+`main ∪ every open PR's added issue files ∪ the reservation ref`, while the CI
+gate only ever compared against `main`. **Do not write a second scanner** — that
+guarantees drift, and the allocator's copy carries hard-won #2943 hardening
+(one batched GraphQL query instead of 1+N calls, REST `--paginate` fallback for
+
+> 100-file PRs, 3× retry with backoff, and `complete: false` on total failure so
+> callers degrade _loudly_).
+
+So the module was extracted **verbatim** from `idsFromOpenPRs`, generalised to
+return `{ byPr: Map<prNumber, paths[]>, complete }`. Paths-per-PR is the richer
+primitive: ids derive from paths, not the reverse, and the gate needs the PR
+number so a failure can _name the PR you raced_. `openPrIssueIds()` is the thin
+id-only wrapper preserving the allocator's exact `{ ids, complete }` contract.
+
+`claim-issue.mjs` then delegates to it (keeping its own loud warning at the call
+site) and drops its now-dead `PR_FILES_QUERY` / `PR_SCAN_*_TIMEOUT_MS` consts.
+**Verified after refactor:** `--allocate --dry-run` → `#3609 (scanned 3128 used
+ids; PR-scan on)`.
+
+### The gate — `check-issue-ids.mjs --against-open-prs`
+
+A `mode` alongside `against-main`, sharing an extracted `introducedFiles(base)`
+helper (present at HEAD, absent at the merge-base with base) so both modes agree
+on what "this branch added" means.
+
+Four properties, **all empirically verified against the live repo**:
+
+1. **Different filename, same id ⇒ FAIL.** Probe added
+   `3607-synthetic-collision-probe.md`; correctly reported
+   `#3607: this branch adds … but open PR #3590 already adds
+plan/issues/3607-standalone-current-summary-never-committed.md`.
+2. **Same filename ⇒ PASS.** Renamed the probe to #3590's exact filename → not
+   flagged. Two PRs touching one issue file is a modification, not a collision.
+   An id-only comparison flags all of these (a first pass flagged five, all
+   ordinary modifications) — **compare filenames**.
+3. **Self-exclusion.** `GATE_PR_NUMBER`/`PR_NUMBER` excludes the PR being
+   validated, or it always collides with itself. Verified: setting
+   `GATE_PR_NUMBER=3590` made case 1 pass.
+4. **Fail-soft.** `complete: false` ⇒ warn and `exit 0`. See below.
+
+Failure output names both sides, states the tie-break (merged/queued PR keeps the
+id; otherwise the earlier `origin/issue-assignments` reservation wins), and gives
+the `--allocate` + `git mv` recipe.
+
+### Fail-open vs fail-closed — deliberate, and it matters
+
+**Fail-OPEN (warn, exit 0).** This gate needs network on every PR; fail-closed
+would wedge _every_ PR on a GitHub blip or rate-limit, converting an outage into
+a total merge freeze. It is **additive**: `--against-main` stays hard, and the
+merged-state dup gate remains the backstop. Degrading loudly (never silently) is
+the same posture #2943 chose for the allocator, and for the same reason.
+
+### Dead ends / hazards already hit
+
+- **Rate limits & pagination** — solved by inheriting #2943's batched query +
+  REST fallback + retry. Don't reimplement naively; `gh pr view --json files`
+  silently truncates at 100 files.
+- **Renames.** A PR that _renames_ an issue file shows both paths in its file
+  list, so the old id can still appear as "added" by that PR. Not observed
+  causing a false positive (every renumber this week renamed _away from_ the
+  contested id, so the surviving path is the new one), but it is the most
+  likely false-positive source — worth a test.
+- **`grep` lies on some files.** Plain `grep` returns nothing on
+  `scripts/diff-test262.ts` (treated as binary despite clean UTF-8). Use
+  `grep -a` when auditing these scripts; it produced one confidently-wrong
+  conclusion during this work.
+- **Don't `git reset --hard` with uncommitted work.** How the call-site edits
+  were lost. Commit real work _before_ stacking throwaway probe commits.
+
+### The probe was scaffolding, not a test
+
+The synthetic-collision commits were deliberately throwaway (they add a fake
+issue file). **They should not survive to merge.** But the three behaviours they
+proved (1/2/3 above) deserve real coverage — ideally with `openPrIssueFiles`
+stubbed so the test is hermetic and needs no network, rather than hitting the
+live API.
+
+### Stale-head (Collision D) — genuinely a separate fix
+
+Collision D park-held a PR whose renumber had **already landed**: the
+`merge_group` run started before the push, so the queue validated a stale head.
+**This gate cannot fix that** — it is a PR-level check, and by construction the
+stale-head case is the queue evaluating an older commit than the branch has.
+The fix belongs where the park is _raised or acted on_: either re-evaluate a
+park against the PR's current head before applying the `hold`, or have the park
+comment state the SHA it judged so a reader can see it is stale. Recommend
+keeping it out of #3598's scope and filing it separately against the auto-park
+bot (#2547/#3597 territory) — folding it in would blur a clean PR-level gate
+with queue-lifecycle logic.
