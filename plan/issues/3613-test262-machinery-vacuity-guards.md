@@ -229,10 +229,33 @@ rather than broken.
 | what                                                | result                                                                                           |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
 | harness truth table, both lanes                     | **49/49** as designed (3 `it.fails` known-wrong = #3615)                                         |
-| machinery unit tests                                | **20/20**, 92 ms, hermetic                                                                       |
+| machinery unit tests                                | **28/28**, hermetic                                                                              |
 | render-parity tests                                 | **7/7**                                                                                          |
 | vacuity detector, host lane (n=8 seed 20260725)     | controls OK; **0 vacuous of 6 probed**, 1 drifted, 1 ineligible — consistent with the audit's ≈0 |
 | vacuity detector, standalone lane, FIRST run (n=12) | **0 probed of 12 drawn** — caught by the new guard as PROBE INERT, not reported as clean         |
+| `new (X as any)(…)` scan                            | **0 hits / 2,617 test files** — a ratchet at zero                                                |
+
+### The standalone PROBE INERT run was a real finding, not a detector bug
+
+After the attempt-factor fix (draw up to 8x the requested sample until enough
+files are actually probed), the standalone run drew **32 candidates and every
+one was ineligible for the same reason: `negative test`**. The guard's hint
+named the cause exactly — "a stale/partial JSONL can be dominated by negative
+tests" — and it was right. The local
+`.test262-cache/test262-standalone-current.jsonl` snapshot contains
+
+```
+rows 48,088  →  compile_error 43,469 | pass 4,508 | skip 108 | compile_timeout 3
+```
+
+i.e. a run in which the standalone lane was compile-erroring wholesale, so the
+only things that "passed" were negative tests (everything fails to compile ⇒
+every `negative: SyntaxError` scores pass). The real standalone floor is
+~22,394. That is a **stale local cache**, not a repo artifact — CI fetches
+fresh — but it is precisely the input that would have produced a confident
+"standalone lane: 0 % vacuous, all clean" from a detector without the guard.
+The summary now prints the ineligible-reason histogram so this diagnoses itself
+in one line.
 
 ## Why the truth table is not in the required guard suite
 

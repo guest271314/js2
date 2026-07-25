@@ -470,6 +470,16 @@ async function main() {
   console.error(`  VACUOUS:    ${report.vacuous.length}`);
   console.error(`  drifted:    ${report.drifted.length} (baseline said pass, local run disagreed)`);
   console.error(`  ineligible: ${report.ineligible.length}`);
+  // Show WHY, not just how many. A histogram dominated by one reason is a
+  // diagnosis in itself: "32x negative test" on the standalone lane is how a
+  // stale baseline (one produced when the lane was compile-erroring wholesale,
+  // so only negative tests "passed") announces itself. Without this the
+  // operator sees a bare count and has to go open the JSON.
+  const reasons: Record<string, number> = {};
+  for (const r of report.ineligible) reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
+  for (const [reason, n] of Object.entries(reasons).sort((a, b) => b[1] - a[1])) {
+    console.error(`                ${n}x ${reason}`);
+  }
   if (report.vacuousRate !== null) {
     console.error(`  rate:       ${(report.vacuousRate * 100).toFixed(1)}% of ${report.probed} probed`);
   }
