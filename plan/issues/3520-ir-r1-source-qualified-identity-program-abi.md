@@ -111,6 +111,7 @@ files:
   - tests/issue-3520-fallback-gate-identity.test.ts
   - tests/issue-3520-integration-population-identity.test.ts
   - tests/issue-3520-integration-report-evidence.test.ts
+  - tests/issue-3520-integration-pass-identity.test.ts
   - tests/issue-3520-linear-owner-identity.test.ts
   - tests/issue-3520-module-binding-class-identity.test.ts
   - tests/issue-3520-outcome-correlation-identity.test.ts
@@ -118,6 +119,7 @@ files:
   - tests/issue-3520-overlay-safety-identity.test.ts
   - tests/issue-3520-promise-plan-identity.test.ts
   - tests/issue-3520-selfhost-cache-identity.test.ts
+  - tests/issue-3520-monomorphize-identity.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
 loc-budget-allow:
   - src/ir/integration.ts
@@ -965,13 +967,35 @@ Commit 3.3 and Commit 4 before R1 can close.
 - The pre-dispatch gate correctly reported the existing
   `ttraenkler/codex-r1` claim and active #3518 dependency; this is the same R1
   continuation, not a competing dispatch. Three isolated, pushed Symphony
-  worktrees now own disjoint Commit 3.3 lanes:
+  worktrees were assigned disjoint Commit 3.3 lanes:
   `symphony/3520-c33-inline`, `symphony/3520-c33-monomorphize`, and
   `symphony/3520-c33-integration`.
-- Commit 3.3 must also absorb current-main #3551: its ABI-withdrawal cascade
-  currently uses `abiDivergentNames`, `findReferencedFuncName`, and name-owned
-  orphan-slot records. Those must become exact callable/unit and owner-ID
-  maps while preserving withdrawal and orphan-slot stubbing behavior.
+- Commit 3.3 also absorbed current-main #3551: its ABI-withdrawal cascade,
+  reference scan, and orphan-slot records now use exact callable/unit and
+  owner identities while preserving withdrawal and stubbing behavior.
+
+### Commit 3.3 completion
+
+- Integrated and pushed the three isolated lanes:
+  `5fb6df6272df26` keys inline-local resolution and recursion by `IrUnitId`;
+  `06e51c25e4873b` keys monomorphization grouping, clone provenance, growth,
+  and edit tables by identity; and `6cf2d2744ae4ee` keys integration artifact
+  ownership, failure/TU evidence, pass reconciliation, ABI withdrawal, and
+  orphan-slot ownership structurally.
+- Added exact duplicate-label/provider regressions for inline,
+  monomorphization, nested withdrawal, tagged-union attribution, and
+  synthetic-vs-terminal report classification. Runtime/import/intrinsic/
+  support lookalikes never become local unit edges.
+- Combined validation passes **209/209** across 32 focused #3520/#3529/#3551/
+  #3565/#3471/phase3c files. A strict-nullability rerun exposed and fixed an
+  impossible post-pass artifact dereference at `fa789b2cc4cbc6`; the focused
+  post-fix matrix passes **45/45**, TypeScript is green with incremental output
+  disabled, and scoped Biome, Prettier, diff, and LOC checks pass.
+- Commit 4 is active in three additional isolated, pushed worktrees:
+  `symphony/3520-c4-class-identity`,
+  `symphony/3520-c4-backend-identity`, and
+  `symphony/3520-c4-abi-session`. The cutover must publish one program-owned
+  ABI map after the index space freezes; a per-source map is not acceptable.
 
 Minimum resume validation:
 
