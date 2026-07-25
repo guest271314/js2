@@ -1,5 +1,5 @@
 ---
-id: 3619
+id: 3640
 title: "Factor standalone/WASI's linear-memory host operations (timers, fs, env, clock) into a pre-compiled, separately-linked module"
 status: backlog
 sprint: Backlog
@@ -16,7 +16,7 @@ goal: performance
 related: [1585]
 ---
 
-# #3619 — outsource the WASI reactor/syscall shim to a pre-linked module
+# #3640 — outsource the WASI reactor/syscall shim to a pre-linked module
 
 ## Context
 
@@ -34,7 +34,7 @@ test even with a warm compiler instance). A CPU profile of a single warm
 - ~5% GC, rest negligible.
 
 While investigating whether standalone/WASI-specific codegen could be
-factored out of the per-compile hot path (see #3620 for the broader
+factored out of the per-compile hot path (see #3641 for the broader
 "share the front end across targets" investigation this issue was split off
 from), one category stood out as a genuinely good candidate for **not
 regenerating from scratch on every compile**: the standalone/WASI
@@ -64,7 +64,7 @@ under a host-free target.
 ## Why it's a good candidate for factoring out
 
 Unlike the bulk of standalone/WASI-specific codegen (string representation,
-object/array layout, Map/Set/WeakMap's native runtime — see #3620's
+object/array layout, Map/Set/WeakMap's native runtime — see #3641's
 category-2 findings), this cluster interacts entirely through **linear
 memory**: `poll_oneoff`/`fd_read`/`fd_write`/`path_open`/`environ_get`/
 `clock_time_get` all take i32 pointer/length pairs into linear memory, not
@@ -102,7 +102,7 @@ support it yet.")
 Removes a chunk of the ~39% codegen-time bucket for any standalone/WASI
 program that uses timers, file I/O, or stdin — real, but bounded: it's one
 identified cluster within codegen, not the dominant cost driver (general
-expression/property/array/string compilation — see #3620 — is much larger
+expression/property/array/string compilation — see #3641 — is much larger
 and does NOT benefit from this pattern, since it's genuinely
 representation-bound rather than backend-swappable).
 
@@ -126,9 +126,9 @@ representation-bound rather than backend-swappable).
 ## Non-goals (for now)
 
 - Does not address the dominant codegen cost (string/object/array
-  representation differences) — see #3620 for that, and it isn't the same
+  representation differences) — see #3641 for that, and it isn't the same
   pattern (those differences aren't swappable-backend, they're
   representation-level, per that investigation).
 - Not committing to this shipping — this is a backlog investigation, not an
-  active work item. Revisit if/when #3620 lands or standalone compile-time
+  active work item. Revisit if/when #3641 lands or standalone compile-time
   becomes a concrete bottleneck worth the engineering cost.

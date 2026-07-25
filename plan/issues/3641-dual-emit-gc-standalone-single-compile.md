@@ -1,5 +1,5 @@
 ---
-id: 3620
+id: 3641
 title: "Investigate a dual-emit compile entry point: gc + standalone from one parse/type-check/IR-build pass"
 status: ready
 sprint: current
@@ -13,10 +13,10 @@ task_type: investigation
 area: compiler, ir
 language_feature: compiler-internals
 goal: backend-agnostic-ir
-related: [2955, 2956, 1585, 2138, 3619]
+related: [2955, 2956, 1585, 2138, 3640]
 ---
 
-# #3620 — compile `gc` and `standalone` from one parse/type-check/IR pass, diverge only at lowering
+# #3641 — compile `gc` and `standalone` from one parse/type-check/IR pass, diverge only at lowering
 
 ## This is a milestone within an existing initiative, not a new direction
 
@@ -76,7 +76,7 @@ cases.** `src/compiler.ts`'s `compileSourceSync`:
 Concretely, in `import-resolver.ts`'s `preprocessImports`: under `wasi`,
 timer-shim injection (`setTimeout`/etc.) is **suppressed entirely**, because
 standalone/WASI lowers timers natively onto a reactor
-(`poll_oneoff`-driven run loop — see #3619, split off from this
+(`poll_oneoff`-driven run loop — see #3640, split off from this
 investigation) instead of an import call. Injecting the shim unconditionally
 would shadow that native lowering. None of these four are byte-inert
 no-ops in the general case; they're real, though probably rare in practice
@@ -140,5 +140,5 @@ for actual design work.
   nearer-term, smaller payoff. The broader initiative may subsume this
   later; that's fine, this issue's job is just to name the nearer milestone
   explicitly so it doesn't get lost waiting for the larger effort to land.
-- Does not include #3619 (the standalone reactor/syscall-shim
+- Does not include #3640 (the standalone reactor/syscall-shim
   linked-module idea) — related, filed separately, backlog priority.
