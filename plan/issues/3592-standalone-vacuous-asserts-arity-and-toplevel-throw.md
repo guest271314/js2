@@ -186,6 +186,94 @@ concrete WasmGC ref type **traps** on it instead of seeing `undefined`. Before
 the fix the call simply never happened. Both are wrong; the trap is a different
 failure class and must be separated from the honest flips per the F1 recipe.
 
+> **SUPERSEDED — see "RC2 re-measure" below.** The `illegal cast` row above was
+> classified as a _widening-introduced_ invalid-Wasm class on the strength of the
+> stack trace alone. Two controls run on 2026-07-25 show it is **pre-existing**
+> and merely unmasked. The claim, and the follow-up item it generated, are
+> withdrawn.
+
+### RC2 re-measure (2026-07-25, task #10) — the blocker is REFUTED
+
+#### 1. The cited `illegal cast` is NOT caused by the widening
+
+Repro:
+`built-ins/TypedArrayConstructors/ctors-bigint/buffer-arg/byteoffset-is-negative-throws-sab.js`
+→ `RuntimeError: illegal cast in __closure_57() at source L618 (via
+__closure_50@L507 ← __call_fn_method_3@L24 ← __apply_closure@L622)`.
+
+| control                                                             | widening | arity of the `assert.throws` call | result             |
+| ------------------------------------------------------------------- | -------- | --------------------------------- | ------------------ |
+| as reported                                                         | ON       | 2 of 3 (under-applied)            | trap               |
+| **A** — add the 3rd argument (`assert.throws(RangeError, fn, "m")`) | ON       | 3 of 3 (exact)                    | **identical trap** |
+| **B** — same, plus the widening force-disabled                      | OFF      | 3 of 3 (exact)                    | **identical trap** |
+
+A defect that reproduces with the change **disabled** is not caused by the
+change. `__closure_50` is the harness's `assert.throws`; `__closure_57` is the
+test's own callback, `function () { new TA(sharedArrayBuffer, -1); }`. The
+widening's only role is that `assert.throws` now actually invokes `func()`,
+which reaches a pre-existing defect in the BigInt-TypedArray-over-SAB
+constructor path. That makes it an **honest flip that happens to surface as a
+trap**, not a new invalid-Wasm class.
+
+#### 2. The discriminator to use instead of "the trace mentions `__apply_closure`"
+
+A widening-**introduced** trap can only arise inside the dispatcher's own
+argument conversion, so it must have **`__call_fn_method_N` as the INNERMOST
+frame** — the function named right after `illegal cast in `. In the repro above
+`__call_fn_method_3` is two frames _out_, with a user closure innermost. Use the
+innermost frame, not the presence of `__apply_closure` anywhere in the chain.
+
+#### 3. The stated fix shape is not implementable as written
+
+"Give the missing-argument case its own arm in `buildArgConversion`" cannot be
+done there: `__call_fn_method_N` receives **N externrefs and no argument count**.
+Only `__apply_closure` knows how many arguments were really supplied. Any real
+fix has to live in the widening (i.e. decide _whether_ to widen), not in the
+dispatcher's per-argument conversion.
+
+#### 4. Value-correctness — verified BY VALUE, host-free
+
+The formal the real harness under-applies (`assert.throws`'s `message`) is
+**string-typed by its own body** (`message = ''` / `message += ' '`), so it is
+exactly the concrete-ref lowering the hazard was postulated about. Probe compiled
+`target: "standalone"`, **import manifest asserted empty**, instantiated with
+`{}`; the callee records which branch it took in a module global:
+
+| arm          | `seen` | `msgLen` | meaning                                              |
+| ------------ | -----: | -------: | ---------------------------------------------------- |
+| widening OFF |      0 |       -1 | the call never happened (the vacuity)                |
+| widening ON  |      1 |        0 | `message === undefined` was TRUE; `message = ''` ran |
+
+`seen === 2` would have meant the missing formal arrived as something other than
+`undefined`; it does not. Pinned by
+`tests/issue-3592-apply-closure-arity.test.ts` ("a missing STRING-typed formal
+reads as undefined in the callee (harness shape)").
+
+#### 5. A real hazard that is NOT (yet) reached — record it, do not guard it
+
+A codegen census of the blocker module's closure funcTypes
+(`JS2WASM_DUMP_CLOSURE_PARAMS=1`, uncommitted) found formals with **no undefined
+inhabitant**:
+
+```
+11x arity=2 kinds=[externref,externref]      5x arity=1 kinds=[externref]
+ 3x arity=0 kinds=[]                         1x arity=3 kinds=[externref,externref,externref]
+ 1x arity=2 kinds=[i32,ref]     ← hazard     1x arity=1 kinds=[ref]     ← hazard
+```
+
+If the bridge ever under-applies one of those, the dispatcher's own conversion
+traps: a non-nullable `(ref $T)` formal takes `any.convert_extern(null)` →
+`ref.cast $T` (**illegal cast**), and an `i32` formal takes
+`__unbox_number(null)` → NaN → `i32.trunc_f64_s` (**invalid conversion to
+integer**). This is the same "a non-nullable `(ref N)` has no undefined
+inhabitant" line #3548 established, so a pad cannot fix it — the fix would be to
+**widen only when sound** (probe returns `declArity` plus a `minSafeN` = one past
+the last formal with no undefined inhabitant; widen only when `argc >= minSafeN`).
+
+**No such trap has been observed.** Per MEASURE-NEVER-EXTRAPOLATE, no guard code
+was written. The landing agent must re-run the innermost-frame classifier on the
+fresh full-corpus A/B and implement the `minSafeN` widening **only if it fires**.
+
 ## Decision (scoping)
 
 **RC1 lands now** (this PR): exhaustively measured, purely positive, zero park
@@ -245,9 +333,11 @@ ever reserved under standalone/WASI.
 ## Follow-up
 
 1. **Land RC2 deliberately** as an honest-floor de-inflation (XL).
-2. **Fix the `undefined`-into-a-typed-formal trap** surfaced by RC2
-   (`illegal cast … ← __call_fn_method_N ← __apply_closure`): a missing formal
-   must read as `undefined`, not trap, when the callee's param lowered to a
-   concrete WasmGC ref.
+2. ~~**Fix the `undefined`-into-a-typed-formal trap** surfaced by RC2~~
+   **WITHDRAWN 2026-07-25** — measured as pre-existing (two controls; see "RC2
+   re-measure" §1). A missing formal already reads as `undefined` for the
+   concrete-ref case that actually occurs (§4). The _unreached_ `i32` /
+   non-nullable-`ref` hazard is recorded in §5 with the `minSafeN` fix sketch;
+   implement it only if the innermost-frame classifier fires on the landing run.
 3. **`verifyProperty` vacuity is unexplained** and is NOT the arity bug — it needs
    its own investigation (4,735 files call it).
