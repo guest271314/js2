@@ -12,7 +12,7 @@ horizon: l
 task_type: bugfix
 area: codegen
 language_feature: object-defineproperty, property-descriptors
-goal: es5-complete
+goal: es5
 sprint: Backlog
 test262_fail: 412
 test262_category: built-ins/Object/defineProperty, built-ins/Object/defineProperties
