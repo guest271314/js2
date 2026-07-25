@@ -214,7 +214,8 @@ Four properties, **all empirically verified against the live repo**:
 1. **Different filename, same id ⇒ FAIL.** Probe added
    `3607-synthetic-collision-probe.md`; correctly reported
    `#3607: this branch adds … but open PR #3590 already adds
-plan/issues/3607-standalone-current-summary-never-committed.md`.
+…/3607-standalone-current-summary-never-committed.md` (link-checker note:
+   path prefix elided — that file exists only in PR #3590, not on this branch).
 2. **Same filename ⇒ PASS.** Renamed the probe to #3590's exact filename → not
    flagged. Two PRs touching one issue file is a modification, not a collision.
    An id-only comparison flags all of these (a first pass flagged five, all
@@ -325,8 +326,9 @@ handed out 3597, yet the open-PR scan did not see its added file." That framing
 is subtly WRONG, and the correction matters. PR #3585's commit timeline:
 
 - at allocation time (23:27:46Z) its head was `068b33490` (pushed 23:20:41Z),
-  whose issue file was **`plan/issues/3590-auto-park-step-aware.md`** — the PR
-  was still numbered #3590;
+  whose issue file was **`3590-auto-park-step-aware.md`** (path prefix elided
+  for the link checker — that pre-rename filename no longer exists anywhere) —
+  the PR was still numbered #3590;
 - the commit `fix(#3597): renumber 3590 -> 3597` was authored **23:45:28Z — 18
   minutes AFTER the allocation**, itself resolving a _different_ collision
   (3590), and it hand-picked 3597 without consulting `--allocate` or the
