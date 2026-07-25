@@ -38,13 +38,15 @@ checkout content needed beyond the file itself):
 
 ```js
 // trivial-async.js2wasm
-function print(x) { console.log(x); }
+function print(x) {
+  console.log(x);
+}
 /*---
 flags: [async]
 ---*/
 function $DONE(err) {
-  if (err) print('Test262:AsyncTestFailure:' + err);
-  else print('Test262:AsyncTestComplete');
+  if (err) print("Test262:AsyncTestFailure:" + err);
+  else print("Test262:AsyncTestComplete");
 }
 Promise.resolve(42).then(function (v) {
   $DONE();
@@ -65,8 +67,10 @@ correctly** through the exact same CLI invocation — confirming the
 
 ```js
 // same file, but $DONE() called immediately, no Promise
-function $DONE(err) { /* ... */ }
-$DONE();  // -> exits 0, "Test262:AsyncTestComplete" observed correctly
+function $DONE(err) {
+  /* ... */
+}
+$DONE(); // -> exits 0, "Test262:AsyncTestComplete" observed correctly
 ```
 
 The failure is specific to completion signaled from inside a `.then()`
@@ -132,7 +136,7 @@ at the point those bridge functions are constructed — likely the runtime
 module's own native (outer-realm) `Promise` — while other parts of the
 pipeline (TypeScript's own type resolution of the global `Promise` type, or
 any `instanceof Promise`/`typeof x.then === 'function'` identity check done
-against the *sandboxed* constructor) may resolve to the **sandbox's**
+against the _sandboxed_ constructor) may resolve to the **sandbox's**
 `Promise` instead. A cross-realm mismatch there (native `Promise` instance
 vs. sandboxed `Promise` constructor reference) is a well-known way for
 promise-shaped dispatch logic to silently stop matching without throwing —
@@ -161,7 +165,7 @@ comparable in scale to #3349's `propertyHelper.js` finding.
    `buildOriginalHarnessSandbox`'s `sandbox.Promise` vs. the outer
    `globalThis.Promise` the worker itself runs under, and check whether the
    compiled test's `Promise.resolve(...)` return value is `instanceof` the
-   *sandbox's* `Promise` or the *outer* one.
+   _sandbox's_ `Promise` or the _outer_ one.
 2. If confirmed, the likely fix is making the compiled code's promise
    identity consistent with whichever `Promise` the worker's own
    `findMarker` polling loop (and Node's real microtask queue) actually
@@ -186,3 +190,65 @@ comparable in scale to #3349's `propertyHelper.js` finding.
   `js2-test262` shows a material pass-rate jump for that category
   specifically, not just the synthetic repros.
 - No regression in the already-passing synchronous `$DONE()` case.
+
+## Implementation Plan (Fable, 2026-07-25)
+
+### Measured scoping — the CI baseline is NOT affected; this is a CLI-lane bug
+
+Joined the 2026-07-24 baseline JSONL (47,858 rows) against test262
+metadata (all 5,473 async-flagged rows in the run set):
+
+| async-flagged rows (CI baseline, gc lane)         | count     |
+| ------------------------------------------------- | --------- |
+| pass                                              | **2,735** |
+| fail                                              | 2,527     |
+| — of which `async completion marker not observed` | **59**    |
+| compile_error / compile_timeout / skip            | 211       |
+
+So the sharded-CI worker (`scripts/test262-worker.mjs`) observes async
+completion fine — 2,735 real async passes, and only 59 "marker not
+observed" rows. Those 59 are **deterministic** (2/2 sampled reproduce
+byte-identically through `runTest262File` on an idle box:
+`built-ins/Promise/race/resolve-non-callable.js`,
+`built-ins/Promise/race/iter-returns-false-reject.js`) and cluster on
+rejection paths (`Promise/race` 19, `for-await-of` 9, `top-level-await` 5)
+— genuine promise-machinery gaps where the reject continuation never runs
+`$DONE`, not harness artifacts.
+
+**Consequence for this issue:** the "blast radius: 5,616 async files"
+estimate holds only for the **npm-shipped `js2-test262` CLI /
+test262.fyi lane** (`dist/test262-worker.js`), NOT for the CI conformance
+numbers. The divergence between the two lanes (CI worker observes markers;
+CLI does not) is itself the strongest root-cause clue: diff what
+`dist/test262-worker.js` does differently from `scripts/test262-worker.mjs`
+around the sandbox + `setExports` + marker-poll sequence.
+
+### Plan
+
+1. **Bisect the lane divergence, not the symptom.** Both lanes build a
+   `vm.createContext` sandbox including `Promise` and poll
+   `harnessOutput` for the marker with host timers. The CI lane works, so
+   "sandboxed Promise is cross-realm" cannot alone be the mechanism.
+   Instrument the CLI worker (`src/test262-worker.ts`, the source of
+   `dist/test262-worker.js`) with the trivial repro from this issue and log:
+   (a) does `__module_init` run? (b) does `Promise_resolve`'s bridge get
+   called? (c) does the `.then` callback fire (add a counter in
+   `callback_maker`)? (d) does `consoleProxy.log` receive the marker but
+   the poll loop miss it (output-array identity)?
+2. **Compare the exact `buildImports` call** in both workers: options
+   object, `setExports` timing relative to `__module_init`, and whether the
+   CLI lane calls `__module_init` at all under `deferTopLevelInit` (the CI
+   worker's #3049 C1 arm). A CLI that still relies on the `(start)` section
+   while `compile()` now defers top-level init would produce exactly
+   "sync $DONE works, microtask-dependent $DONE never fires" if the drain
+   ordering differs.
+3. Fix in the CLI worker (or `src/runtime.ts` bridge if (b)/(c) localize it
+   there), keeping the CI worker byte-identical.
+4. Regression test at the CLI level: extend
+   `tests/test262-fyi-runner.test.ts` (or `tests/issue-3574.test.ts`) with
+   the trivial `Promise.resolve().then($DONE)` repro run through the
+   shipped worker entry, plus the sync-`$DONE` control.
+5. Re-verify the 59 CI-lane "marker not observed" rows are untouched
+   (they are genuine rejection-path gaps — file/keep them under a separate
+   promise-machinery issue if this fix doesn't move them; do NOT count them
+   toward this issue's acceptance).
