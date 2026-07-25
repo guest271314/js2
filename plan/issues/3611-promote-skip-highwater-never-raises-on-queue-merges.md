@@ -68,6 +68,24 @@ permissive direction**: a floor that is too _low_ never fires, so nothing
 complains, ever. It surfaced today only because a deliberate ~5,000-test move was
 being watched closely; on an ordinary landing nobody would notice.
 
+### The same disabled workflow also breaks the documented wedge recovery
+
+This is worse than a missing maintenance backstop. The runbook's
+disaster-recovery lever for a **wedged #1897** is "dispatch
+`refresh-baseline.yml` in EMERGENCY mode" — and that dispatch **cannot execute
+at all** while the workflow is disabled. It returns HTTP 422 before doing
+anything.
+
+So the failure is not only silent, it is **latent in the recovery path**: it
+would be discovered _during an actual queue wedge_, which is exactly when there
+is no time to discover it, and when the obvious improvisation — re-enabling a
+workflow mid-incident in order to run an unconditional, guard-ignoring promote —
+is the most dangerous available version of that action.
+
+It was found here only incidentally, while attempting the _scheduled_ (normal)
+mode for an unrelated purpose. Nobody had exercised the emergency path since the
+workflow was disabled, because by design nobody exercises it until it is needed.
+
 ## Measured impact on the #3601 landing
 
 The #2097 gate reads **`full_summary.host_free_pass`** (full corpus:
@@ -136,7 +154,12 @@ without this issue the same drift resumes on the next queue merge.)
    `disabled_manually`, removing the only backstop. Either re-enable it (its
    scheduled mode is a normal, guard-respecting promote of already-merged main)
    or record explicitly why the repo runs without that safety net.
-6. The README / landing-page standalone number derives from the promoted
+6. **Correct the runbook.** The documented disaster-recovery lever for a wedged
+   #1897 is "dispatch `refresh-baseline.yml` in EMERGENCY mode" — and that
+   dispatch **cannot execute today**, because the workflow is disabled
+   (HTTP 422). Whatever is decided in (5), the runbook must not continue to
+   name a lever that would fail.
+7. The README / landing-page standalone number derives from the promoted
    measurement, never from an in-PR estimate.
 
 ## Notes
