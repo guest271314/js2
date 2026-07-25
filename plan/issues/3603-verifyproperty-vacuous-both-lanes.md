@@ -24,6 +24,89 @@ origin: "senior-dev root-cause investigation, TaskList task #11 (2026-07-25)"
 
 # #3603 — `verifyProperty` is vacuous on BOTH lanes (two distinct root causes)
 
+## STAKEHOLDER RULING
+
+> **STAKEHOLDER RULING (2026-07-26, project lead, via tech lead):** APPROVED —
+> land the host-lane de-inflation. Converting ~989 vacuously-passing host tests
+> into honest failures is authorized, accepting that the published host
+> conformance number decreases. Rationale: the assertion machinery could not
+> report failures, so the passes were fictional; a smaller true number is
+> preferred to a larger partly-fictional one. Same ruling as #3468 F1 for the
+> standalone lane. Conditional on: (a) a broader fires-once sweep confirming the
+> flips are honest, (b) every exposed failure cohort-routed to a tracker, (c) the
+> allowance sized to the measured delta plus a documented margin, (d) gross-fixed
+> and honest-regressions reported separately, never a net.
+
+**The four conditions are binding — the ruling does not survive skipping them.**
+
+| condition                                                  | status                                                                       |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| (a) broader fires-once sweep                               | **DONE** — see below                                                         |
+| (b) every exposed failure cohort-routed                    | **DONE** — #3646, #3647 (table below); corpus completeness re-checked at (c) |
+| (c) allowance = measured delta + documented margin         | **PENDING** the `merge_group` measurement (queue wedged on task #14)         |
+| (d) gross-fixed / honest-regressions separate, never a net | **PENDING** — reported with (c)                                              |
+
+### Fires-once sweep (condition a)
+
+**Question:** does the S1 write-back ever touch an array other than
+`propertyHelper.js`'s `failures`? Any such firing would be over-application and
+would get narrowed.
+
+**Method.** `JS2WASM_DEBUG_3603=1` logs every reconcile that actually mutates a
+vec. 51 tests: **3 known-firing positive controls + 48 sampled** across
+`Array/prototype`, `Object/defineProperty`, `Object/getOwnPropertyDescriptor`,
+`RegExp/prototype`, `String/prototype`, and both
+`language/{expressions,statements}/class/elements`.
+
+**Result — 6 firings, all identical in shape:**
+
+```
+[3603FIRE] vecLen=0 mirrorLen=0->1 keep=0 ["obj['m'] descriptor should not be enumerable"]
+```
+
+|                                           |                               count |
+| ----------------------------------------- | ----------------------------------: |
+| firings from the 3 positive controls      |                               **3** |
+| firings from the 48 sampled tests         | 3 (all `statements/class/elements`) |
+| firings on a **non-`failures`** array     |                               **0** |
+| firings with `vecLen != 0` or `keep != 0` |                               **0** |
+
+Every firing is a fresh `var failures = []` growing 0 → 1 with a propertyHelper
+failure message. **The over-application hypothesis (wrong vec / double replay /
+stale registration) is refuted for this sample** — each of those would appear
+here as an extra or differently-shaped firing.
+
+> **Two earlier runs of this sweep returned a false `0 firings` and were VOIDED.**
+> `ab.mts` arms A2/B install an _instrumented_ `propertyHelper.js` in which the
+> five `__push(failures, …)` sites become `__vpPush`, so `__push` is never
+> called and genuinely-failing tests return `pass`. The swap is worktree-safe
+> but **not self-safe**. Caught only because the second run embedded in-run
+> positive controls and they failed to fire. The sweep now **pre-flight-aborts**
+> unless `test262/harness` is a symlink _and_ `propertyHelper.js` carries zero
+> instrumentation markers. See `plan/probes/3603/NOTES.txt`.
+
+**Denominator discipline:** this is 51 tests across 6 areas, not 989. It
+establishes that the write-back is narrowly scoped; it does **not** by itself
+prove all corpus flips are honest. That comes from the `merge_group` bucketing
+at (c), combined with the S1-applied-vs-reverted attribution control (which used
+no harness at all and is the load-bearing evidence).
+
+### Cohort routing (condition b)
+
+Every failure cohort exposed by S1 is routed to a tracker. These are defects S1
+**exposed, not caused** — both reproduce on stock `upstream/main` with S1
+reverted, measured without the test262 harness:
+
+| cohort                                                                                                                               | tracker   | evidence                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------ | --------- | ----------------------------------------------------------------- |
+| `getOwnPropertyDescriptor(C.prototype,'m')` returns **null** when the class has computed-name fields, while `hasOwnProperty` is true | **#3646** | `.tmp/3603/attribution.mts` — identical S1-applied vs S1-reverted |
+| `propertyIsEnumerable(C.prototype,'m')` returns **true** while `gOPD().enumerable` is false — 5 reflective routes agree, it dissents | **#3647** | `.tmp/3603/enum-check.mts` — identical S1-applied vs S1-reverted  |
+
+Either defect alone makes `verifyProperty`'s enumerable check fire **correctly**.
+Corpus-level cohort completeness is pending the merge_group measurement — if the
+bucketed delta shows cohorts outside these two, they get their own trackers
+before landing.
+
 > **This issue is a ROOT CAUSE + MEASUREMENT deliverable.** No compiler change
 > is proposed here. Everything below is measured on `origin/main` @
 > `ab69ad9d20ceec` with local-vs-local A/B; nothing is extrapolated from a
@@ -590,17 +673,43 @@ a base that has since moved is the exact trap this project keeps hitting.
 So **root cause A is a live defect on current `main`, not an artifact of the
 stale base** — #3592 and #3468 did not touch it. S2 remains real work.
 
-**What IS still stale: the REACH.** The `158 / 161 sampled-passing` arm-B
-figure was measured on `ab69ad9d2` and has NOT been re-derived. Do not quote
-it, and do not scale it. Re-running it needs all three arms (A, A2, B) of
-`plan/probes/3603/ab.mts` in one clean window on one SHA — it was not run here
-because three agent lanes were active and the box's concurrency ceiling
-matters (the original host-lane run was abandoned at ~350/600 for exactly this
-reason). **Measure it before any S2 number is reported.**
+**REACH: re-measured 2026-07-26 — supersedes the stale `158 / 161`.**
 
-> Note the two halves are independent: "the mechanism still reproduces" says
-> nothing about how many tests it still gates. A cluster sharing one root cause
-> is a population, not a delta.
+Full three-arm A/B re-run in one clean window on one SHA (`5388f95d2`; only
+delta vs `upstream/main` is the HOST-lane write-back + tests/docs, and the
+`__make_iterable` path it touches is gated `!ctx.standalone`, so it is inert on
+this lane). Same 600-file uniform sample, same seed `20260725`, standalone lane:
+
+| arm                                      | n   | result                                |
+| ---------------------------------------- | --- | ------------------------------------- |
+| **A** — stock harness                    | 600 | pass **156**, fail 387, skip 53, CE 4 |
+| **A2** — instrumented, detectors REMOVED | 156 | pass **156** (0 fail)                 |
+| **B** — instrumented + detectors         | 156 | fail **152**, pass 4                  |
+
+**152 / 156 sampled standalone passes (97.4 %) are vacuous.**
+
+Arm A2 reproduces arm A **exactly** (156/156), so the 152 flips are
+attributable **solely to the detector firing**, not to the instrumentation
+perturbing compilation. That is the attribution control, and it passed.
+
+Comparison to the superseded figure — **for stability, not to be combined**:
+
+|                       | old (`ab69ad9d2`) | new (`5388f95d2`) |
+| --------------------- | ----------------- | ----------------- |
+| arm A passes (of 600) | 161               | 156               |
+| arm B vacuous         | 158               | 152               |
+| rate                  | 98.1 %            | 97.4 %            |
+
+So the reach is **essentially unchanged** — #3592 and #3468 did not reduce it.
+Root cause A gates the same population it did before. **Quote `152 / 156`, with
+its denominator; the old `158 / 161` is superseded. Do not scale either to the
+corpus** — this is a 600-file sample of the 5,067-file `verifyProperty`
+population, and a full-corpus number requires a full-corpus run.
+
+> The two halves remain independent: "the mechanism still reproduces" says
+> nothing about how many tests it gates. A cluster sharing one root cause is a
+> population, not a delta. Here both halves were measured separately and both
+> came back live.
 
 ## Reproduction
 
