@@ -10,6 +10,13 @@ feasibility: hard
 goal: standalone-gap
 related: [3610, 3592]
 created: 2026-07-25
+# +32 lines in registerNativeGenerator, of which ~24 are the comment recording
+# WHY the state field must be typed at the runtime rep (the checker-tuple vs
+# widened-externref divergence that produced the trap) — the exact knowledge a
+# future edit would otherwise undo. The ~8 executable lines type that
+# function's OWN state fields; there is no subsystem module to move them to.
+loc-budget-allow:
+  - src/codegen/generators-native.ts
 ---
 
 ## Problem
