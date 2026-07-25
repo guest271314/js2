@@ -81,7 +81,8 @@ Two directions, both bad:
   compiler failures today when the real defect is the dropped read.
 
 Not sized against the corpus here (sizing needs a full re-run; see
-`plan/issues/3613-*.md` for why that measurement was out of budget). The shape
+`plan/issues/3613-test262-machinery-vacuity-guards.md` for why that measurement
+was out of budget). The shape
 is pervasive in `built-ins/**/prop-desc.js`, the `return-abrupt-from-*` family
 and the `Symbol.toPrimitive`/`valueOf` hook tests.
 
