@@ -19,6 +19,15 @@ related: [2836, 3486, 2671, 1634, 1969, 3075]
 origin: "Follow-up sweep after #2836 (seven sites) and #3486 (an eighth that suppressed 28 tests). Two more survivors were named up front; the audit found ten."
 loc-budget-allow:
   - src/runtime.ts
+func-budget-allow:
+  # `resolveImport` is the host-import factory; five of the ten reachable
+  # discriminator sites live inside it (`__extern_join_str`, `__make_iterable`'s
+  # spread arm, `__iterator`, `__async_iterator`, `__array_concat_any`,
+  # `__crypto_get_random_values`). The +37 lines are the `_isWasmVec` guards and
+  # the comments recording the measured pre-fix answer at each one; no new
+  # branch structure. Splitting the factory is #3399's job, not this audit's —
+  # doing it here would bury a ten-site semantic fix inside a large move diff.
+  - src/runtime.ts::resolveImport
 ---
 
 # #3637 — the `__vec_len` discriminator is vacuous; audit every surviving site
