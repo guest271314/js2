@@ -497,6 +497,25 @@ shifting, no stack-balance risk, no `addUnionImports` interaction. That was a
 deliberate design constraint given this issue's `feasibility: hard` /
 regression-prone framing.
 
+### Not the same issue as #3571 — do not conflate them
+
+**#3571** ("standalone: `Function.prototype.call`/`apply`/`bind` on builtin
+methods") names the _same idiom_ and cites the _same trigger_
+(`propertyHelper.js`'s uncurryThis), so the pre-dispatch gate flags them as
+overlapping. They are **different defects on different lanes**:
+
+|                    | #3603 S1 (this)                                           | #3571                       |
+| ------------------ | --------------------------------------------------------- | --------------------------- |
+| lane               | JS host                                                   | `--target standalone`       |
+| what breaks        | the mutation is dropped — the vec mirror is a read mirror | the _dispatch itself_ fails |
+| layer              | host runtime bridge                                       | codegen                     |
+| `bind` implicated? | **no** — plain `.call` fails identically                  | yes                         |
+
+S1 changes **no codegen** and cannot fix #3571; #3571 will not fix S1. Both are
+real. The right sequence is still host-first: standalone's `__push`/`__join`
+currently _trap_ rather than no-op, and repairing standalone MOP queries before
+the host lane converts honest flips into invalid-Wasm traps.
+
 ### Deliberate non-goals (documented at the helper, not oversights)
 
 - **Length-PRESERVING in-place edits stay silent no-ops**: `sort`, `reverse`,
