@@ -172,6 +172,7 @@
     "check:issue-ids": "node scripts/check-issue-ids.mjs",
     "check:issue-ids:staged": "node scripts/check-issue-ids.mjs --staged",
     "check:issue-ids:against-main": "node scripts/check-issue-ids.mjs --against-main",
+    "check:issue-ids:against-open-prs": "node scripts/check-issue-ids.mjs --against-open-prs",
     "new:issue-id:allocate": "node scripts/claim-issue.mjs --allocate"
   },
   "dependencies": {

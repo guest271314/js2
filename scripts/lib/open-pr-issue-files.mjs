@@ -39,10 +39,31 @@ const PR_FILES_QUERY = `query($owner:String!,$name:String!,$cursor:String){
   repository(owner:$owner,name:$name){
     pullRequests(states:OPEN,first:100,after:$cursor){
       pageInfo{hasNextPage endCursor}
-      nodes{number files(first:100){pageInfo{hasNextPage} nodes{path}}}
+      nodes{number files(first:100){pageInfo{hasNextPage} nodes{path changeType}}}
     }
   }
 }`;
+
+/**
+ * Filter a PR's changed-file nodes (`{ path, changeType }`) down to the
+ * issue-file paths that will EXIST at that PR's head.
+ *
+ * DELETED entries are excluded — this is the #3598 rename-hazard fix, the top
+ * remaining false-positive source: a *detected* rename lists only the new path,
+ * but an UNdetected one (similarity too low) appears as ADDED-new + DELETED-old,
+ * so without this filter a PR that renumbered AWAY from a contested id still
+ * reads as claiming it. Same reasoning covers genuine deletions (a withdrawn
+ * issue file no longer claims its id). Pure — hermetically testable.
+ */
+export function liveIssuePaths(fileNodes) {
+  const hits = [];
+  for (const f of fileNodes || []) {
+    const path = String(f?.path || "").trim();
+    if (!path || f?.changeType === "DELETED") continue;
+    if (ISSUE_ID_RE.test(path)) hits.push(path);
+  }
+  return hits;
+}
 
 /**
  * Scan every OPEN PR for `plan/issues/<id>-<slug>.md` paths.
@@ -86,10 +107,7 @@ export function openPrIssueFiles({ repo = process.env.CLAIM_PR_REPO || "loopdive
         const prs = JSON.parse(raw)?.data?.repository?.pullRequests;
         if (!prs) throw new Error("unexpected GraphQL shape");
         for (const pr of prs.nodes || []) {
-          const hits = [];
-          for (const f of pr.files?.nodes || []) {
-            if (ISSUE_ID_RE.test(f.path || "")) hits.push(f.path);
-          }
+          const hits = liveIssuePaths(pr.files?.nodes);
           if (hits.length) byPr.set(pr.number, hits);
           if (pr.files?.pageInfo?.hasNextPage) bigPRs.push(pr.number);
         }
@@ -98,8 +116,15 @@ export function openPrIssueFiles({ repo = process.env.CLAIM_PR_REPO || "loopdive
       }
       // >100-file PRs: full file list via REST pagination (the GraphQL page
       // truncated, so whatever we collected above for this PR is incomplete).
+      // Same DELETED filter as liveIssuePaths — REST spells it status:"removed".
       for (const n of bigPRs) {
-        const raw = ghBounded(["api", `repos/${repo}/pulls/${n}/files`, "--paginate", "--jq", ".[].filename"]);
+        const raw = ghBounded([
+          "api",
+          `repos/${repo}/pulls/${n}/files`,
+          "--paginate",
+          "--jq",
+          '.[] | select(.status != "removed") | .filename',
+        ]);
         const hits = [];
         for (const p of raw.split("\n")) {
           if (ISSUE_ID_RE.test(p.trim())) hits.push(p.trim());
@@ -131,4 +156,47 @@ export function openPrIssueIds(opts) {
     }
   }
   return { ids, complete, budgetExhausted, scanTotalTimeoutMs: PR_SCAN_TOTAL_TIMEOUT_MS };
+}
+
+/**
+ * Filename-id of an issue-file path: "…/3597-x.md" → "3597", "…/779a-y.md" →
+ * "779a". Sub-issues (779a, 779b, …) are distinct ids by convention (see
+ * check-issue-ids.mjs filenameId) — a sub-issue never collides with its parent.
+ */
+export function issueFileId(path) {
+  const fname = String(path).split("/").pop() || "";
+  return fname.match(/^(\d+[a-z]?)-/i)?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * Pure collision verdict for the #3598 PR-level gate (no network — the scan
+ * result is injected, so tests are hermetic).
+ *
+ * @param introduced [{ id, fname }] — issue files this branch ADDS (present at
+ *   HEAD, absent at the merge-base with main). `id` is the filename-id.
+ * @param byPr Map<prNumber, paths[]> — from openPrIssueFiles().
+ * @param selfPr the PR under validation — excluded, or every PR would collide
+ *   with itself.
+ *
+ * A collision is the SAME id under a DIFFERENT filename in ANOTHER open PR.
+ * Same id + same filename is two PRs touching one issue file — a modification,
+ * NOT a collision (an id-only comparison flagged five innocent PRs when this
+ * was first attempted — see #3598 ## Handover).
+ */
+export function findOpenPrCollisions(introduced, byPr, { selfPr = null } = {}) {
+  const collisions = [];
+  for (const [prNumber, paths] of byPr) {
+    if (selfPr != null && Number(prNumber) === Number(selfPr)) continue;
+    for (const p of paths) {
+      const otherId = issueFileId(p);
+      if (!otherId) continue;
+      const otherFname = String(p).split("/").pop();
+      for (const { id, fname } of introduced) {
+        if (String(id).toLowerCase() === otherId && fname !== otherFname) {
+          collisions.push({ id: otherId, fname, prNumber: Number(prNumber), otherPath: p });
+        }
+      }
+    }
+  }
+  return collisions.sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10) || a.prNumber - b.prNumber);
 }
