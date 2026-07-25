@@ -39,7 +39,7 @@ several `standalone-invalid-wasm-*` issues already tracked (#2039, #2878,
 #2934 — all standalone-target-specific), this bucket is on the **default
 `gc` target**, so it's a distinct residual not covered by those.
 
-> **Re-anchor (#3187, 2026-07-12):** this **131** figure is the *genuine*
+> **Re-anchor (#3187, 2026-07-12):** this **131** figure is the _genuine_
 > validator-error subset (harvested by the `invalid Wasm binary` /
 > `Compiling function … failed` text). It is **not** the raw
 > `error_category: "wasm_compile"` bucket, which carried **~448** records
@@ -727,7 +727,7 @@ to reach `pass`.
 
 **PR:** `issue-3024-toString-closure-funcref` — eliminates the largest live
 invalid-Wasm cluster: **68** `built-ins/Function/prototype/toString/*` files that
-failed Wasm validation at *instantiate* (they bucket as `fail`, not
+failed Wasm validation at _instantiate_ (they bucket as `fail`, not
 `compile_error`, which is why the earlier `compile_error`-only harvests
 undercounted — see the 2026-07-22 dev-serve handoff).
 
@@ -819,13 +819,13 @@ Bisected the confirmed failing assembly down to `nativeFunctionMatcher.js`
 **alone**, then reduced further. The trigger is **module-function-layout
 sensitive**, not source-shape sensitive:
 
-| variant                                                     | result           |
-| ---------------------------------------------------------- | ---------------- |
-| raw `nativeFunctionMatcher.js`, NO exported function        | **INVALID-FUNCREF** |
-| same + any `export function test(){ return 1; }`            | **VALID**        |
-| same + a call to `assertToStringOrNativeFunction`           | **VALID**        |
-| byte-identical `validateNativeFunctionSource` alone + call  | VALID            |
-| byte-identical all-three funcs (17-220) + export            | VALID            |
+| variant                                                    | result              |
+| ---------------------------------------------------------- | ------------------- |
+| raw `nativeFunctionMatcher.js`, NO exported function       | **INVALID-FUNCREF** |
+| same + any `export function test(){ return 1; }`           | **VALID**           |
+| same + a call to `assertToStringOrNativeFunction`          | **VALID**           |
+| byte-identical `validateNativeFunctionSource` alone + call | VALID               |
+| byte-identical all-three funcs (17-220) + export           | VALID               |
 
 Adding **one exported function shifts the function-index space and the bug
 vanishes.** This is the `addUnionImports` / late-import funcIdx-shift class
@@ -863,17 +863,17 @@ signature (`/invalid Wasm binary|Compiling function/i`).
 
 ### Top coarse validator-error buckets (op+types; fn/assert stripped)
 
-| count | signature | cluster |
-| ----: | --------- | ------- |
-| 14 | `global.set` expected `(ref null T)`, found `local.get` externref | computed-property-names + Object.assign/keys/Reflect.ownKeys |
-| 11 | `global.set` expected externref, found `local.tee` `(ref null T)` | for-of / for-await-of array-rest destructuring |
-|  2 | `global.set` expected `(ref null T)`, found `call` f64 | class ident-name-method-def-new-escaped |
-| 10 | not enough arguments on the stack for call | `__call_next`/`__call_return`/`C_method` (iterator + super) |
-|  9 | `struct.get` expected `(ref null T)`, found `local.get` `(ref null T)` | RangeError / DataView buffer-verified |
-|  8 | `f64.add`/`f64.sub` expected f64, found `global.get` i32/i64 | ++/-- on boolean(i32)/bigint(i64) globals |
-|  5 | `call` expected externref, found `local.tee` i32 | Uint8Array toBase64/toHex |
-|  4 | `local.set` expected `(ref null T)`, found `struct.get` f64 | `__closure` toLocaleString |
-|  4 | type error in fallthru (expected `(ref null T)`, got i32) | `__closure_24` |
+| count | signature                                                              | cluster                                                      |
+| ----: | ---------------------------------------------------------------------- | ------------------------------------------------------------ |
+|    14 | `global.set` expected `(ref null T)`, found `local.get` externref      | computed-property-names + Object.assign/keys/Reflect.ownKeys |
+|    11 | `global.set` expected externref, found `local.tee` `(ref null T)`      | for-of / for-await-of array-rest destructuring               |
+|     2 | `global.set` expected `(ref null T)`, found `call` f64                 | class ident-name-method-def-new-escaped                      |
+|    10 | not enough arguments on the stack for call                             | `__call_next`/`__call_return`/`C_method` (iterator + super)  |
+|     9 | `struct.get` expected `(ref null T)`, found `local.get` `(ref null T)` | RangeError / DataView buffer-verified                        |
+|     8 | `f64.add`/`f64.sub` expected f64, found `global.get` i32/i64           | ++/-- on boolean(i32)/bigint(i64) globals                    |
+|     5 | `call` expected externref, found `local.tee` i32                       | Uint8Array toBase64/toHex                                    |
+|     4 | `local.set` expected `(ref null T)`, found `struct.get` f64            | `__closure` toLocaleString                                   |
+|     4 | type error in fallthru (expected `(ref null T)`, got i32)              | `__closure_24`                                               |
 
 The first 3 rows (27 files) are ONE family: a **module-level global whose slot
 type disagrees with the value stored into it** (a global-write coercion desync,
@@ -954,3 +954,70 @@ struct path.
   iterator/super, `struct.get (ref null T)` RangeError/DataView, `f64.add/sub`
   ++/-- on boolean(i32)/bigint(i64) globals, Uint8Array toBase64/toHex,
   `__closure` toLocaleString, `__closure_24` fallthru).
+  - **Update:** the `not enough arguments on the stack for call` row is now
+    split — the **iterator** half (8 files, `__call_next`/`__call_return`) is
+    cleared by the sibling slice recorded immediately below; only the
+    **super/`C_method`** + `DisposableStack.move` files remain from that row.
+
+---
+
+## Landed: iterator next/return dispatcher missing-arg pad (agent-a3fa3add / Opus 4.8, 2026-07-24)
+
+**PR:** `issue-3024-iterator-super-arity` — clears the **8-file
+`__call_next`/`__call_return` arity sub-cluster** (`not enough arguments on the
+stack for call (need 2, got 1)`).
+
+### Root cause (verified — minimal repro)
+
+`emitMethodDispatch` (`src/codegen/index.ts`) generates the module-level
+iterator-protocol dispatchers `__call_next`/`__call_return`
+(`(externref) -> externref`). For each user struct with a `<struct>_next` /
+`<struct>_return` method it emitted `local.get; ref.cast; call <method>` — passing
+ONLY the receiver. A user iterator method with a formal parameter
+(`next(value) {…}` / `return(value) {…}`) has an EXTRA wasm param (receiver +
+value), so the call was one argument short → `not enough arguments on the stack
+for call (need 2, got 1)` = invalid Wasm. Parameterless `next()`/`return()` were
+fine (1 param, 1 arg).
+
+Minimal repro (default gc lane → invalid): a class with
+`next(v) { … }` + `[Symbol.iterator]() { return this; }` used in a for-of.
+`next()` control (no param) → VALID.
+
+### Fix (`index.ts`, `emitMethodDispatch`)
+
+The dispatcher structurally represents a protocol call with NO value argument
+(its own signature is `(externref) -> externref`), so pad each param beyond the
+receiver with the "missing trailing arg" default: real host `undefined` for an
+externref (untyped-JS) value param when `__get_undefined` is already imported
+(else `ref.null.extern`, byte-identical standalone); the f64 sNaN sentinel /
+typed zero otherwise — matching the normal missing-arg convention. Byte-inert for
+parameterless iterator methods (the common case: `extraParams = []` → no change).
+
+### Proofs / honest measurement
+
+- Repro: `next(v)`, `return(v)` → VALID (were invalid); `next()` control unchanged.
+- All 8 `__call_next`/`__call_return` test262 files flip **invalid-Wasm → valid**
+  (CE eliminated). They now **`fail` on DISTINCT feature gaps** — Iterator.zip
+  null-deref, AsyncFromSyncIterator promise handling — NOT a pass gain (0 new
+  passes; this is a CE-elimination slice like the #3024 packed-array slice).
+- **Provenance of the harvest numbers:** the 587-candidate re-harvest below was
+  measured **pre-merge**, on the branch based at `def8f82` — i.e. BEFORE the
+  sibling module-global PR (#3558) landed on `main`, so its 25 files were still
+  counted in that run: **97 → 89 invalid-Wasm, exactly these 8, 0 new
+  signatures**. With both slices landed the arithmetic is 97 − 25 − 8 = 64.
+  These figures were NOT re-measured after this merge (a 587-candidate harvest is
+  near-full-test262, out of scope for a dev branch); post-merge evidence is the
+  test/repro set below.
+- Standalone re-check on the 8 files: no new invalid.
+
+### Post-merge revalidation (merge of `origin/main`, 2026-07-24)
+
+`src/codegen/index.ts` auto-merged with no conflict across the 54 intervening
+main commits; the only conflict was this issue file (both sides appended
+sections — resolved as a union, main's content first). Re-validated on the
+merged tree — see the `## Test Results` section appended below.
+
+### Still open (roll forward — distinct root causes, NOT this PR)
+
+- `super.x` in a static method (`C_method`, 1 file) and `DisposableStack.move`
+  (`__closure_9`, 1 file) — separate arity mechanisms, not the dispatcher.

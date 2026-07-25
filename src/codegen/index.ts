@@ -4468,7 +4468,13 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
   // Helper to emit a method dispatch export
   const emitMethodDispatch = (methodSuffix: string, exportName: string) => {
-    const entries: { structName: string; typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
+    const entries: {
+      structName: string;
+      typeIdx: number;
+      funcIdx: number;
+      resultType: ValType;
+      extraParams: ValType[];
+    }[] = [];
 
     for (const [structName] of ctx.structFields) {
       const typeIdx = ctx.structMap.get(structName);
@@ -4485,8 +4491,15 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
         funcType && funcType.kind === "func" && funcType.results.length > 0
           ? funcType.results[0]!
           : { kind: "externref" };
+      // (#3024) params[0] is the receiver; a user iterator method with a formal
+      // parameter (`next(value)` / `return(value)`) has extra params the
+      // dispatcher must pad — it always represents a protocol call with NO value
+      // argument (its own signature is `(externref) -> externref`), so the pad is
+      // the "missing trailing arg" default per param type. Without it the call is
+      // `not enough arguments on the stack for call (need 2, got 1)` (invalid Wasm).
+      const extraParams: ValType[] = funcType && funcType.kind === "func" ? funcType.params.slice(1) : [];
 
-      entries.push({ structName, typeIdx, funcIdx, resultType });
+      entries.push({ structName, typeIdx, funcIdx, resultType, extraParams });
     }
 
     if (entries.length === 0) return;
@@ -4499,10 +4512,40 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
     let current: Instr[] = [{ op: "ref.null.extern" }];
 
+    // (#3024) Pad a missing trailing method argument. The dispatcher calls
+    // `<struct>_next`/`<struct>_return` with only the receiver, so any declared
+    // formal (`next(value)`) needs a default. Iterator `.next()`/`.return()`
+    // invoked with no value → the value is `undefined`; for an externref (untyped
+    // JS) param emit the real host `undefined` when already imported (else
+    // `ref.null.extern`, byte-identical standalone). Numeric/ref params get the
+    // type's zero/f64-sentinel — matching the normal missing-arg convention.
+    const undefinedIdx = ctx.funcMap.get("__get_undefined");
+    const padMissingArg = (pt: ValType): Instr[] => {
+      switch (pt.kind) {
+        case "f64":
+          return [{ op: "i64.const", value: 0x7ff00000deadc0den }, { op: "f64.reinterpret_i64" }];
+        case "f32":
+          return [{ op: "f32.const", value: 0 }];
+        case "i32":
+        case "i8":
+        case "i16":
+          return [{ op: "i32.const", value: 0 }];
+        case "i64":
+          return [{ op: "i64.const", value: 0n }];
+        case "ref":
+          return [{ op: "ref.null", typeIdx: (pt as { typeIdx: number }).typeIdx }, { op: "ref.as_non_null" }];
+        case "ref_null":
+          return [{ op: "ref.null", typeIdx: (pt as { typeIdx: number }).typeIdx }];
+        default:
+          return undefinedIdx !== undefined ? [{ op: "call", funcIdx: undefinedIdx }] : [{ op: "ref.null.extern" }];
+      }
+    };
+
     for (const entry of entries) {
       const testAndCall: Instr[] = [
         { op: "local.get", index: 1 },
         { op: "ref.cast", typeIdx: entry.typeIdx },
+        ...entry.extraParams.flatMap(padMissingArg),
         { op: "call", funcIdx: entry.funcIdx },
       ];
 
