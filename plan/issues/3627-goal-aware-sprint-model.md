@@ -17,7 +17,7 @@ sprint: current
 
 # Goal-aware sprint model
 
-**Stakeholder ask (two rounds):**
+**Stakeholder ask (three rounds):**
 
 > _"Change the sprint model to allow referencing goals in addition to issues. If
 > a goal is added to a sprint, all its issues will be worked on in the priority
@@ -32,16 +32,25 @@ sprint: current
 > require an interpreter' first. Actually I think adding **ES3 as a goal ES5
 > depends on** would make sense."_
 
+> "What about goals that are **not measurable**? Goals should have a
+> **definition of done** that _could_ be that. If not, it will just stay open and
+> **carry over to the next sprint** at the end of a sprint if not said
+> otherwise — and that's fine."
+
 **Answer to the literal question, up front: a goal stays SEPARATE from an issue,
 and `goal:` already _is_ the parent link being asked for — 3,056 of 3,178 issues
 (96 %) carry it today. No new parent field is needed.** What is missing is three
 things a goal cannot currently do: be **scheduled** (D4), be **completed** (D7),
 and be **decomposed** (D8).
 
-The unifying claim of this spec is that a goal is separate from an issue
-precisely _because_ it completes by a different mechanism — **derived from a
-measured metric, not asserted by a human** (D7). That is what lets a goal be
-completable without inheriting the drift that afflicts umbrella issues.
+The unifying claim of this spec: a goal is separate from an issue because
+**openness means something different for each**. An open issue is a _debt_ —
+every tool treats it as needing action, which is why umbrella issues generate
+endless "merged-but-open" noise. An open goal is the _normal steady state_; it
+carries over across budget windows and nothing reports that as a defect (D10).
+Every goal still declares a **definition of done** (D7) — which _may_ be a
+machine-checked metric, but is allowed to be a human judgement, because some
+goals are genuinely not measurable and that must be first-class.
 
 ---
 
@@ -100,11 +109,14 @@ Evidence:
 2. **Different shape.** Goals form a DAG with inter-goal dependencies
    (`plan/goals/goal-graph.md`, 203 lines of ASCII DAG + a status summary
    table). Issue `depends_on:` is a flat id list.
-3. **Different lifetime and different vocabulary.** A goal's status vocabulary is
-   `Active` / `Activatable` / `Blocked` / `Partially activatable` — orthogonal
-   to the issue lifecycle `ready → in-progress → done` that
-   `reconcile-tasklist.mjs`, `freeze-sprint.mjs` and the #3474 done-status gate
-   all reason over. A goal never reaches `done` in the issue sense.
+3. **Openness means the opposite thing.** An open issue is a debt that every
+   tool treats as needing action (`reconcile-tasklist.mjs`, the #3474
+   done-status gate); an open goal is the normal steady state that carries over
+   between windows (D10). A goal _does_ complete (D7) — but via a declared
+   definition of done, and its `state:` vocabulary
+   (`active`/`activatable`/`blocked`/`done`/`abandoned`/`superseded`/`paused`,
+   D11) is deliberately not the issue lifecycle. Merging the two would force
+   every issue tool to special-case ~29 rows that never behave like issues.
 
 **Honest counter-argument, and why it does not win.** Goals-as-issues would
 inherit three real benefits: atomic id allocation via `claim-issue.mjs
@@ -151,14 +163,15 @@ decision introduces one. The prose body and the
 ---
 goal: es5-static # MUST equal the filename without .md
 title: "ES5 semantics excluding interpreter-dependent dynamic features"
-state: active # active | activatable | blocked | achieved — DERIVED for completion: derived (D7), never hand-edited
+state: active # D11 — active|activatable|blocked|done|abandoned|superseded|paused
 sprint: current # ONLY `current` or absent. A numbered sprint is REJECTED (see D6).
 priority: high # default for members that omit priority; also orders goals vs each other (D9)
 horizon: l # default for members that omit horizon
-completion: derived # derived | manual  (D7a)
-metric: # required iff completion: derived
-  source: test262-editions
-  lane: host # REQUIRED — host | standalone (D7c)
+dod: # D7 — every goal has a definition of done, of a declared kind
+  kind: measured # measured | asserted | all-issues-done
+  statement: "Every ES5-bucket test not requiring the interpreter passes on host."
+  source: test262-editions # must resolve to a real artifact, else it's `asserted` in disguise
+  lane: host # REQUIRED for kind: measured (D7c)
   bucket: "ES5" # MUST state exclusive-vs-cumulative intent explicitly
   target: 100
 partition_of: es5-complete # subset of the SAME population — expands transitively (D8)
@@ -167,9 +180,9 @@ aliases: [] # legacy `goal:` values that resolve here
 ---
 ```
 
-A `completion: manual` goal replaces `metric:` with an explicit
-`completion_checklist:` of checkable statements (D7a) — the honest shape for the
-~15 qualitative goals.
+A `kind: asserted` goal replaces `source`/`lane`/`bucket`/`target` with a
+`judge:` — the honest shape for the ~15 qualitative goals (D7a). `state:` is
+computed for `kind: measured` and persisted for `kind: asserted` (D7b).
 
 > **The `aliases:` values are illustrative only.** Which legacy names fold into
 > which goal is the **D6 follow-up triage**, not a decision made here.
@@ -310,75 +323,95 @@ this implementation:
 | needs a new goal file     | `test262-conformance` (128), `acorn-dogfood` (30)                       | create `plan/goals/<slug>.md` |
 | junk / typo               | `real-world-compat,` (2+1), `performance,` (1), `native-messaging,` (1) | fix the issue frontmatter     |
 
-### D7 — A goal completes, but by DERIVED metric, not human assertion
+### D7 — Every goal declares a DEFINITION OF DONE, of a declared kind
 
-**Decision: goals are completable. A goal's completion is _computed_ from a
-named metric against a named baseline, not flipped by hand. `state: achieved` is
-an output of the metric evaluation, never something an agent types.**
+**Decision: every goal carries a `dod:` block with an explicit `kind:`. A
+`measured` DoD is machine-evaluated and non-drifting; an `asserted` DoD is a
+human judgement and is first-class, not a defect. Being unmeasurable is a
+legitimate shape for a goal, not a reason to deny it a DoD.**
 
-I was scoped with the position that goals should not be completable because
-long-lived containers drift. **The stakeholder is right and that position was
-wrong** — but the resolution is not "give goals the issue lifecycle." It is that
-the two complete by different mechanisms:
+Two earlier framings were wrong and are retracted here:
 
-|           | completes when            | asserted by                          | can drift?                                         |
-| --------- | ------------------------- | ------------------------------------ | -------------------------------------------------- |
-| **issue** | its work merges           | a human/agent flips `status: done`   | **yes** — nobody is structurally forced to flip it |
-| **goal**  | its metric reaches target | recomputed on every baseline promote | **no** — nothing to forget                         |
+- I was scoped with "goals shouldn't be completable, because long-lived
+  containers drift." **Wrong** — goals are completable.
+- I then over-narrowed to "goal completion must be _derived from a metric_."
+  **Also wrong**, and the stakeholder's correction is the right generalisation:
+  a DoD _could_ be a metric; it need not be.
 
-This is exactly why #2860 is stuck. Its completion depends on a person asserting
-it and no such person exists. A goal whose completion is recomputed from
-conformance data has no equivalent failure mode. **Derived completion is the
-mechanism that makes goal-completability safe**, and it is available today: the
-data source already exists at
-`website/public/benchmarks/results/test262-editions.json`, regenerated by
-`scripts/generate-editions.ts` on every pages build from the promoted baseline.
+The general model:
 
-I agree with the mechanism. Three refinements it needs, each measured:
+| `dod.kind`        | completes when                                          | evaluated by                       | drifts?   |
+| ----------------- | ------------------------------------------------------- | ---------------------------------- | --------- |
+| `measured`        | an expression over conformance data reaches target      | `eval-goal-metrics.mjs` on promote | no        |
+| `all-issues-done` | its member set has no actionable issues left            | `eval-goal-metrics.mjs` on sync    | no        |
+| `asserted`        | a named human/lead judges the `dod.statement` satisfied | a person, deliberately             | n/a (D10) |
 
-**(a) Derived completion does not generalise to the existing 29 goals — make it
-opt-in.** Surveying every goal file's `- **Target**:` line, only **~4 of 29**
-have a predicate a machine can evaluate today (`full-conformance` "48,102 /
-48,102", `spec-completeness` "90 %+ pass rate", `compilable` "CE < 500",
-`crash-free` "Traps → 0"). About **9** state an _impact estimate_, not a
-completion predicate ("Estimated +1,200 tests" — that is a forecast of delta,
-and a goal is not done when it has delivered +1,200 tests). The remaining
-**~15** are irreducibly qualitative: `maintainability` ("refactors that reduce
-file size, duplication, and hidden coupling"), `contributor-readiness`,
-`developer-experience`, `observability`, `performance` ("competitive with
-JIT-compiled JavaScript"). Forcing a derived metric onto those either invents a
-fake number or leaves them permanently incompletable — which is the same drift,
-relocated. So the frontmatter carries an explicit discriminator:
+**A `measured` DoD must be EXECUTABLE, not prose.** This is the load-bearing
+constraint: a `dod.kind: measured` whose `expr` no evaluator can run is
+`asserted` wearing a costume, and it is worse than an honest `asserted` because
+it claims a rigour it does not have. `check:goal-refs` therefore rejects a
+`measured` DoD whose `source`/`bucket` do not resolve against a real artifact.
 
 ```yaml
-completion: derived # derived | manual
-metric:
-  source: test262-editions # which generated artifact
-  lane: host # host | standalone  — REQUIRED, see (c)
+dod:
+  kind: measured
+  statement: "Every test in the ≤ES3 edition bucket passes on the host lane."
+  source: test262-editions # must resolve to a real generated artifact
+  lane: host # REQUIRED — host | standalone (see (c))
   bucket: "≤ ES3"
-  target: 100 # pct
+  target: 100
 ```
 
-with `completion: manual` requiring a `completion_checklist:` of explicit,
-checkable statements. `manual` is the honest label for the 15, not a defect.
+```yaml
+dod:
+  kind: asserted
+  statement: "src/codegen/index.ts is under 2,000 lines and no module imports
+    across the layer boundary documented in docs/architecture/codegen-axes.md."
+  judge: tech-lead
+```
 
-**(b) `achieved` is NOT terminal — it can revert, and that is a feature.** A
-derived goal at 100 % un-achieves when a regression lands or when the test262
-submodule is upgraded and adds tests to its bucket. That is the correct,
-honest behaviour, but it has a hard consequence: **a goal must never be frozen,
-archived, or removed from `plan/goals/` on reaching `achieved`.** Contrast an
-issue, where `done` is a one-way door. The `state:` field is therefore always
-recomputed, never persisted as a decision — treat any hand-edited `state:` on a
-`completion: derived` goal as a lint error.
+Three measured refinements:
 
-**(c) The metric MUST name its lane, or it is unfalsifiable.** `≤ ES3` is 83 %
-on the **host** lane; there is a separate `test262-standalone-editions.json`
-with different numbers. The project's recorded history is full of
-standalone-floor figures inflated by vacuous passes and swallowed exceptions. A
-goal that declares itself `achieved` off an inflated lane is a false victory
-with a machine's authority behind it — strictly worse than an un-flipped
-umbrella issue. `metric.lane` is therefore **required**, and
-`check:goal-refs` must reject a `completion: derived` goal that omits it.
+**(a) `measured` does not generalise to the existing 29 goals — which is exactly
+why `asserted` must exist.** Surveying every goal file's `- **Target**:` line,
+only **~4 of 29** have a predicate a machine can evaluate today
+(`full-conformance` "48,102 / 48,102", `spec-completeness` "90 %+ pass rate",
+`compilable` "CE < 500", `crash-free` "Traps → 0"). About **9** state an _impact
+estimate_, not a completion predicate ("Estimated +1,200 tests" — a forecast of
+delta; a goal is not done when it has delivered +1,200 tests). The remaining
+**~15** are irreducibly qualitative: `maintainability`,
+`contributor-readiness`, `developer-experience`, `observability`, `performance`
+("competitive with JIT-compiled JavaScript"). So **~15 of 29 goals land as
+`asserted`**, and that is the honest answer rather than a gap to close.
+
+**(b) `Done` is NOT terminal for a `measured` goal — it can revert, and that is
+a feature.** A `measured` goal at 100 % un-completes when a regression lands or
+when the test262 submodule is upgraded and adds tests to its bucket. Hard
+consequence: **a goal must never be frozen, archived, or removed from
+`plan/goals/` on reaching `Done`** — contrast an issue, where `done` is a
+one-way door. For `kind: measured` the state is always recomputed, never
+persisted as a decision; a hand-edited state on a `measured` goal is a lint
+error. For `kind: asserted` the state IS the persisted decision (D11).
+
+**(c) A `measured` DoD MUST name its lane, or it is unfalsifiable.** `≤ ES3` is
+83 % on the **host** lane; there is a separate
+`test262-standalone-editions.json` with different numbers. The project's
+recorded history is full of standalone-floor figures inflated by vacuous passes
+and swallowed exceptions. A goal that declares itself `Done` off an inflated
+lane is a false victory _with a machine's authority behind it_ — strictly worse
+than an un-flipped umbrella issue. `dod.lane` is **required** for
+`kind: measured`.
+
+**(d) Keep `all-issues-done`, but guard it — it is vacuously satisfiable.** It
+is distinct from `measured` (it reads the issue corpus, not conformance data)
+and is the right DoD for goals like `ci-hardening` whose completion genuinely is
+"the work items are done." But it has a failure mode `measured` does not: **a
+goal with no members is trivially Done.** This is not hypothetical — measured,
+**`full-conformance` currently has zero member issues**, so under an unguarded
+`all-issues-done` it would report Done while the project is at 70.5 %. Guards:
+`kind: all-issues-done` requires ≥ 1 member issue to have ever existed, and
+`check:goal-refs` rejects it on a goal that also declares a `measured`-capable
+population. When in doubt, `measured` beats `all-issues-done`.
 
 ### D8 — Two decomposition axes: dependency is an EDGE, partition is a SUBSET
 
@@ -456,6 +489,94 @@ that tag, which requires no new mechanism at all.
   priority, order by `partition_of` depth (deepest/most-specific first — a
   partition is the narrower, more actionable slice), then by goal slug for
   determinism.
+
+### D10 — Carry-over is the DEFAULT, and it is what actually defuses the drift objection
+
+**Decision: a goal that is not Done at budget-window rollover simply stays
+`sprint: current`. That is the expected, unremarkable default — not an anomaly,
+not a warning, not something any tool reports as stale.**
+
+This is the real resolution of the objection I was scoped with, and it is better
+than the one I reached in D7. **My diagnosis was wrong.** #2860 and #3029 do not
+drift because they are long-lived; they drift because they are **issues**, and
+every tool that reads issues treats "still open" as a condition requiring
+action. A goal that stays open across five windows is _normal_, and once nothing
+treats openness as a defect, there is no drift signal to generate.
+
+Concretely, three tools must agree that an open goal is uninteresting:
+
+1. **`reconcile-tasklist.mjs` must never flag a goal.** **Verified: it does not
+   and structurally cannot** — the script contains **zero** references to
+   `goals` and never opens `plan/goals/`. So no exclusion code is needed. But it
+   is exactly the kind of property a future edit silently breaks, so pin it with
+   a test asserting the reconciler reports nothing for a `sprint: current` goal,
+   and a comment saying goals are deliberately out of its domain (#3627 D10).
+   **This is the single property that prevents the #2860-class false signal from
+   reappearing on goals.**
+2. **`freeze-sprint.mjs` must never re-tag a goal `sprint: {N}`.** Already
+   structural via the `plan/issues/` glob (D6). Retagging would silently _retire
+   an unfinished goal_ into a frozen retrospective record — the worst outcome,
+   because the goal disappears from the live window without anyone deciding it
+   should.
+3. **The retrospective reports goal PROGRESS, not goal completion.** Since most
+   goals span many windows, "completed goals: 0" would be the answer nearly
+   every time and is useless. `sprints/N.md` should carry, per goal in the
+   window, the **metric delta over the window** for `measured` goals (e.g.
+   "`es3-complete`: 83 % → 91 %, 47 → 25 failures") and the count of member
+   issues closed for the others. That requires snapshotting each `measured`
+   goal's value at freeze so the next freeze can difference against it — store
+   it in `sprints/N.md` itself, so the record is self-contained.
+
+### D11 — Goal states: distinguish "finished" from "no longer pursuing"
+
+**Decision: reuse the existing `- **Status**:`line's vocabulary, lifted into
+frontmatter as`state:`, extended with terminal states that record *why* a goal
+stopped.**
+
+The escape hatch the stakeholder's "if not said otherwise" implies:
+
+| state         | meaning                                  | carries over? | set by                                  |
+| ------------- | ---------------------------------------- | ------------- | --------------------------------------- |
+| `active`      | being worked                             | yes (default) | operator                                |
+| `activatable` | dependencies met, not started            | yes           | derived from DAG (D11b)                 |
+| `blocked`     | dependencies unmet                       | yes           | derived from DAG (D11b)                 |
+| `done`        | **DoD satisfied** — we finished it       | no            | `measured`: computed; `asserted`: judge |
+| `abandoned`   | deliberately stopped; DoD NOT satisfied  | no            | operator, `reason:` required            |
+| `superseded`  | replaced by another goal                 | no            | operator, `superseded_by:` required     |
+| `paused`      | deliberately not now; expected to resume | no            | operator, `reason:` required            |
+
+**Do not collapse `done` / `abandoned` / `superseded`.** All three stop
+carry-over, but conflating them destroys the reason — and the reason is the only
+thing that tells a future reader whether the goal's population is covered
+(`done`), knowingly uncovered (`abandoned`), or moved (`superseded`). A
+`superseded` goal without `superseded_by:` orphans its members; make it a hard
+error in `check:goal-refs`.
+
+Note the existing files already carry values like `Partially activatable` and
+`New (not active)` in prose. Normalize on transcription (D2); do not invent a
+parallel field.
+
+**(b) The DAG becomes machine-checkable — but scope the promise.** Once a goal
+can be `done`, `goal-graph.md`'s prose rule ("a goal is activatable when all its
+dependencies are met") becomes computable: `es5-complete` is `activatable` when
+`es3-complete` is `done`. `activatable`/`blocked` therefore become **derived**
+states, not hand-set ones.
+
+**Verified before promising it:** `plan/goals/goal-graph.md` is
+**hand-maintained** apart from a single `<!-- AUTO:conformance-start -->` block
+(the conformance line, written by `sync-conformance-numbers.mjs`). The 100-line
+ASCII DAG and the "Goal Status Summary" table are hand-drawn prose. So:
+
+- **Do** add a new `<!-- AUTO:goal-status-start -->` block to `goal-graph.md`
+  carrying the generated status/activatability table, written by
+  `eval-goal-metrics.mjs` — the same marker pattern
+  `sync-goal-issue-tables.mjs` already uses.
+- **Do not** promise to regenerate the ASCII DAG or replace the hand-written
+  Goal Status Summary. Hand-drawn structure with a generated status block beside
+  it is the honest split.
+- Cross-check the two: `check:goal-refs` warns when a `depends_on` edge in
+  frontmatter has no counterpart in the hand-drawn DAG, so the prose cannot
+  silently diverge from the data.
 
 ---
 
@@ -537,11 +658,13 @@ gap.
 - Prepend the D2 frontmatter block. Populate `goal`, `title`, `state`,
   `depends_on` from the existing prose bullets and the `goal-graph.md` "Goal
   Status Summary" table — this is transcription, not new judgement.
-- Set `completion: manual` on **all 29** in this PR. Measured: only ~4 have a
-  machine-evaluable `- **Target**:` today (D7a), and ~9 more state an _impact
-  estimate_ that must not be mistaken for a completion predicate. Converting a
-  goal to `completion: derived` is a per-goal decision requiring a real metric —
-  do it in follow-ups, starting with the ES3/ES5 set, not in bulk here.
+- Set `dod.kind: asserted` on **all 29** in this PR, transcribing the existing
+  `- **Target**:` prose into `dod.statement`. Measured: only ~4 have a
+  machine-evaluable target today (D7a), and ~9 more state an _impact estimate_
+  that must not be mistaken for a completion predicate. Promoting a goal to
+  `kind: measured` is a per-goal decision requiring a real, resolvable
+  `source`/`bucket` — do it in follow-ups, starting with the ES3/ES5 set, not in
+  bulk here.
 
 **File: `plan/goals/es3-complete.md`, `es5-static.md`, `es5-complete.md` (NEW)**
 
@@ -551,14 +674,35 @@ gap.
   Summary table (hand-maintained prose; the autogenerated block is only the
   per-goal issue table).
 
-**File: `scripts/eval-goal-metrics.mjs` (NEW) — D7**
+**File: `scripts/eval-goal-metrics.mjs` (NEW) — D7, D11b**
 
 - Reads `website/public/benchmarks/results/test262-editions.json` (and the
-  `-standalone-` variant, selected by `metric.lane`), evaluates every
-  `completion: derived` goal, and rewrites its `state:` to `achieved` or back.
+  `-standalone-` variant, selected by `dod.lane`), evaluates every
+  `dod.kind: measured` goal, and rewrites its `state:` to `done` or back to
+  `active` (D7b — the transition is bidirectional).
+- Evaluates `dod.kind: all-issues-done` against the member set, with the
+  zero-member guard (D7d). Never touches a `kind: asserted` goal's `state:`.
+- Recomputes `activatable`/`blocked` from `depends_on` + dependency states, and
+  rewrites the `<!-- AUTO:goal-status-start -->` block in `goal-graph.md`
+  (D11b). Does **not** touch the hand-drawn ASCII DAG.
 - Called from `scripts/run-pages-build.mjs` **after** `generate-editions.ts`
   (line 34) so it always reads freshly promoted data.
-- Idempotent; writes only `state:`; reports transitions both directions.
+- Idempotent; writes only `state:` and the AUTO block; reports transitions in
+  both directions.
+
+**File: `scripts/reconcile-tasklist.mjs`**
+
+- **No code change** — verified to contain zero references to `plan/goals/`, so
+  goals are already outside its domain. Add a header comment recording that this
+  is **deliberate** (#3627 D10): an open goal is the normal steady state and
+  must never be reported as stale/drifted. Pinned by a test.
+
+**File: `scripts/freeze-sprint.mjs` (D10, in addition to the D6 comment)**
+
+- Snapshot each `sprint: current` `measured` goal's current metric value into
+  `sprints/N.md` so the **next** freeze can report a per-window **delta**
+  ("83 % → 91 %, 47 → 25 failures"). Self-contained in the retro file; no new
+  state store. Report goal **progress**, never goal completion.
 - Set `sprint: current` on **no goal** in this PR. Scheduling a goal is an
   operator act; landing the mechanism must be a behavioural no-op (see
   Acceptance).
@@ -647,10 +791,16 @@ Single shared reader so the two consumers cannot disagree about membership.
 - Fails on: a goal file whose `goal:` ≠ its filename; a **numbered** `sprint:` on
   a goal (only `current` or absent is legal — D2); an alias claimed by two goals;
   an alias colliding with a real goal slug.
-- **D7 checks:** `completion: derived` without a `metric.lane` (unfalsifiable —
-  D7c); `metric.source` naming a non-existent artifact; a hand-edited `state:`
-  on a `completion: derived` goal (it is an output, not an input — D7b);
-  `completion: manual` without a `completion_checklist:`.
+- **D7 checks:** every goal has a `dod:` with a valid `kind:`; `kind: measured`
+  without `dod.lane` (unfalsifiable — D7c) or with a `dod.source` that does not
+  resolve to a real artifact (prose masquerading as executable — D7); a
+  hand-edited `state:` on a `kind: measured` goal (it is an output, not an input
+  — D7b); `kind: asserted` without `statement:` + `judge:`;
+  `kind: all-issues-done` on a goal with zero members ever (vacuously Done —
+  D7d, the `full-conformance` trap).
+- **D11 checks:** `state: superseded` without `superseded_by:`;
+  `state: abandoned`/`paused` without `reason:`; a `depends_on` edge with no
+  counterpart in `goal-graph.md`'s hand-drawn DAG (warn — D11b).
 - **D8 checks:** `partition_of` cycles or multiple parents (must be a tree);
   a `partition_of` target that does not exist; sibling partitions whose
   `metric.bucket` predicates overlap (double-counts the parent roll-up); a
@@ -683,9 +833,19 @@ Single shared reader so the two consumers cannot disagree about membership.
 10. **D8:** goal `A` is `sprint: current` with `depends_on: [B]`, `B` not
     scheduled ⇒ `B`'s members are **NOT** queued, and a warning is emitted.
 11. **D8:** a `partition_of` cycle is a hard error, not a hang.
-12. **D7:** a `completion: derived` goal reaching target flips `state:` to
-    `achieved` on recompute, and flips **back** when the metric regresses
-    (pins D7b non-terminality). A hand-edited `state:` is a lint failure.
+12. **D7:** a `kind: measured` goal reaching target flips `state:` to `done` on
+    recompute, and flips **back** when the metric regresses (pins D7b
+    non-terminality). A hand-edited `state:` on a `measured` goal is a lint
+    failure; on an `asserted` goal it is the intended write path.
+13. **D7d:** a `kind: all-issues-done` goal with zero members is **rejected**,
+    not reported Done (the `full-conformance` trap).
+14. **D10:** `reconcile-tasklist.mjs` reports **nothing** for a `sprint: current`
+    goal that has been open across several windows — no stale, no drift, no
+    merged-but-open. _This is the test that pins the #2860-class false signal out
+    of existence for goals._
+15. **D10:** after `freeze-sprint.mjs --force`, an unfinished goal is still
+    `sprint: current`, and `sprints/N.md` records its metric **delta**, not a
+    completion claim.
 
 ### Edge cases
 
