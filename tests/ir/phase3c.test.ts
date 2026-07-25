@@ -130,8 +130,9 @@ describe("#1167c — monomorphize (unit)", () => {
     // externref) won the first-keeps-original slot — our canonical sort is
     // lexicographic over the ValType kind, so the winner depends on member
     // kind spelling; both the test and the impl must not hardcode that.
-    const cloneName = [...result.cloneSignatures.keys()][0]!;
-    expect(result.cloneOrigins.get(cloneName)).toBe("identity");
+    const [cloneUnitId, cloneSignature] = [...result.cloneSignatures.entries()][0]!;
+    const cloneName = cloneSignature.name;
+    expect(result.cloneOrigins.get(cloneUnitId)).toBe(identity.unitId);
     expect(cloneName.startsWith("identity$")).toBe(true);
 
     // One of the two callers now targets the clone, the other still hits
@@ -153,7 +154,7 @@ describe("#1167c — monomorphize (unit)", () => {
     // The clone's signature matches whichever caller sends its arg to the
     // clone. Because `identity` forwards its param verbatim, the call-site
     // arg type IS the clone's param type IS the clone's return type.
-    const sig = result.cloneSignatures.get(cloneName)!;
+    const sig = result.cloneSignatures.get(cloneUnitId)!;
     expect(sig.params).toHaveLength(1);
     const cloneCallerArgType = numCall.target.name === cloneName ? F64 : EXTERNREF;
     expect(sig.params[0]).toEqual(cloneCallerArgType);
@@ -162,6 +163,7 @@ describe("#1167c — monomorphize (unit)", () => {
     // The clone function exists in the module and verifies.
     const cloneFn = result.module.functions.find((f) => f.name === cloneName)!;
     expect(cloneFn).toBeDefined();
+    expect(cloneFn.unitId).toBe(cloneUnitId);
     expect(cloneFn.unitId).toBe(
       createDerivedIrUnitId({
         parentId: identity.unitId,

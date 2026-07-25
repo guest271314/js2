@@ -83,16 +83,18 @@ const GROWTH_BUDGET = 0.5;
  * `calleeTypes` override map so downstream passes see the narrowed types.
  */
 export interface MonomorphizeCloneSignature {
+  /** Compatibility/debug label for the structurally keyed clone. */
+  readonly name: string;
   readonly params: readonly IrType[];
   readonly returnType: IrType;
 }
 
 export interface MonomorphizeResult {
   readonly module: IrModule;
-  /** Map from clone name → signature. Empty when the pass made no changes. */
-  readonly cloneSignatures: ReadonlyMap<string, MonomorphizeCloneSignature>;
-  /** Explicit clone name → source callee identity for source-owner rollup. */
-  readonly cloneOrigins: ReadonlyMap<string, string>;
+  /** Map from clone identity → signature. Empty when the pass made no changes. */
+  readonly cloneSignatures: ReadonlyMap<IrUnitId, MonomorphizeCloneSignature>;
+  /** Explicit clone identity → source callee identity for source-owner rollup. */
+  readonly cloneOrigins: ReadonlyMap<IrUnitId, IrUnitId>;
 }
 
 /**
@@ -101,23 +103,28 @@ export interface MonomorphizeResult {
  * exist or the growth budget would be exceeded.
  */
 export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): MonomorphizeResult {
-  const byName = new Map<string, IrFunction>();
-  for (const fn of mod.functions) byName.set(fn.name, fn);
+  const byUnitId = new Map<IrUnitId, IrFunction>();
+  for (const fn of mod.functions) {
+    if (byUnitId.has(fn.unitId)) {
+      throw new Error(`ir/monomorphize: duplicate function unitId ${fn.unitId}`);
+    }
+    byUnitId.set(fn.unitId, fn);
+  }
 
-  const recursiveSet = computeRecursiveSet(mod, byName);
+  const recursiveSet = computeRecursiveSet(mod, byUnitId);
 
   // -------------------------------------------------------------------------
   // Step 1 — collect every direct IR-local call site's (callee, argTypes).
   // -------------------------------------------------------------------------
   interface CallSite {
-    /** Name of the function containing the call. */
-    readonly callerName: string;
+    /** Structural identity of the function containing the call. */
+    readonly callerUnitId: IrUnitId;
     /** Zero-based block index inside the caller. */
     readonly blockIdx: number;
     /** Zero-based instruction index inside the block. */
     readonly instrIdx: number;
-    /** Name of the callee (resolved from IrFuncRef). */
-    readonly calleeName: string;
+    /** Structural identity of the callee (resolved from IrFuncRef). */
+    readonly calleeUnitId: IrUnitId;
     /** Tuple of argument types at this call site (in call-arg order). */
     readonly argTypes: readonly IrType[];
   }
@@ -127,7 +134,8 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     fn.blocks.forEach((block, blockIdx) => {
       block.instrs.forEach((instr, instrIdx) => {
         if (instr.kind !== "call") return;
-        if (!byName.has(instr.target.name)) return;
+        if (instr.target.binding.kind !== "unit") return;
+        if (!byUnitId.has(instr.target.binding.unitId)) return;
         const argTypes: IrType[] = [];
         for (const a of instr.args) {
           const t = typeOf(a);
@@ -136,10 +144,10 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
         }
         if (argTypes.length !== instr.args.length) return;
         callSites.push({
-          callerName: fn.name,
+          callerUnitId: fn.unitId,
           blockIdx,
           instrIdx,
-          calleeName: instr.target.name,
+          calleeUnitId: instr.target.binding.unitId,
           argTypes,
         });
       });
@@ -157,16 +165,16 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     readonly argTypes: readonly IrType[];
     readonly calls: CallSite[];
   }
-  const grouped = new Map<string, Map<string, TupleGroup>>();
+  const grouped = new Map<IrUnitId, Map<string, TupleGroup>>();
   for (const site of callSites) {
-    if (recursiveSet.has(site.calleeName)) continue;
-    const callee = byName.get(site.calleeName);
+    if (recursiveSet.has(site.calleeUnitId)) continue;
+    const callee = byUnitId.get(site.calleeUnitId);
     if (!callee) continue;
     if (!isMonomorphizable(callee)) continue;
-    let byKey = grouped.get(site.calleeName);
+    let byKey = grouped.get(site.calleeUnitId);
     if (!byKey) {
       byKey = new Map();
-      grouped.set(site.calleeName, byKey);
+      grouped.set(site.calleeUnitId, byKey);
     }
     const key = tupleKey(site.argTypes);
     let group = byKey.get(key);
@@ -194,12 +202,12 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     readonly argTypes: readonly IrType[];
     readonly calls: readonly CallSite[];
   }
-  const planByCallee = new Map<string, ClonePlan[]>();
-  const usedNames = new Set<string>(byName.keys());
-  for (const [calleeName, byKey] of grouped) {
+  const planByCallee = new Map<IrUnitId, ClonePlan[]>();
+  const usedNames = new Set<string>(mod.functions.map((fn) => fn.name));
+  for (const [calleeUnitId, byKey] of grouped) {
     if (byKey.size < 2) continue;
     if (byKey.size > MAX_VARIANTS_PER_CALLEE) continue;
-    const callee = byName.get(calleeName)!;
+    const callee = byUnitId.get(calleeUnitId)!;
     const plans: ClonePlan[] = [];
     // Deterministic ordering: sort by tuple key so clone names are stable.
     const entries = [...byKey.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
@@ -214,7 +222,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     // First tuple keeps the original callee. The rest get clones.
     for (let i = 1; i < entries.length; i++) {
       const [, group] = entries[i]!;
-      const baseName = `${calleeName}$${nameSuffixFor(group.argTypes)}`;
+      const baseName = `${callee.name}$${nameSuffixFor(group.argTypes)}`;
       const cloneName = uniquifyName(baseName, usedNames);
       usedNames.add(cloneName);
       plans.push({
@@ -228,7 +236,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
         calls: group.calls,
       });
     }
-    if (plans.length > 0) planByCallee.set(calleeName, plans);
+    if (plans.length > 0) planByCallee.set(calleeUnitId, plans);
   }
 
   if (planByCallee.size === 0) {
@@ -244,8 +252,8 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   // -------------------------------------------------------------------------
   const originalSize = countModuleInstrs(mod);
   let newInstrs = 0;
-  for (const [calleeName, plans] of planByCallee) {
-    const calleeSize = countInstrs(byName.get(calleeName)!);
+  for (const [calleeUnitId, plans] of planByCallee) {
+    const calleeSize = countInstrs(byUnitId.get(calleeUnitId)!);
     newInstrs += plans.length * calleeSize;
   }
   if (newInstrs > originalSize * GROWTH_BUDGET) {
@@ -256,10 +264,10 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   // Step 5 — build clones (fresh IrFunctions).
   // -------------------------------------------------------------------------
   const clonedFuncs: IrFunction[] = [];
-  const cloneSignatures = new Map<string, MonomorphizeCloneSignature>();
-  const cloneOrigins = new Map<string, string>();
-  for (const [calleeName, plans] of planByCallee) {
-    const callee = byName.get(calleeName)!;
+  const cloneSignatures = new Map<IrUnitId, MonomorphizeCloneSignature>();
+  const cloneOrigins = new Map<IrUnitId, IrUnitId>();
+  for (const [calleeUnitId, plans] of planByCallee) {
+    const callee = byUnitId.get(calleeUnitId)!;
     for (const plan of plans) {
       const { fn: clone, returnType } = cloneWithParamTypes(
         callee,
@@ -269,11 +277,12 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
         registry,
       );
       clonedFuncs.push(clone);
-      cloneSignatures.set(plan.cloneName, {
+      cloneSignatures.set(plan.cloneUnitId, {
+        name: plan.cloneName,
         params: plan.argTypes,
         returnType,
       });
-      cloneOrigins.set(plan.cloneName, calleeName);
+      cloneOrigins.set(plan.cloneUnitId, calleeUnitId);
     }
   }
 
@@ -288,14 +297,14 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
       readonly name: string;
     };
   }
-  const edits = new Map<string, Edit[]>();
+  const edits = new Map<IrUnitId, Edit[]>();
   for (const [, plans] of planByCallee) {
     for (const plan of plans) {
       for (const call of plan.calls) {
-        let arr = edits.get(call.callerName);
+        let arr = edits.get(call.callerUnitId);
         if (!arr) {
           arr = [];
-          edits.set(call.callerName, arr);
+          edits.set(call.callerUnitId, arr);
         }
         arr.push({
           blockIdx: call.blockIdx,
@@ -311,7 +320,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
 
   const rewrittenFuncs: IrFunction[] = [];
   for (const fn of mod.functions) {
-    const fnEdits = edits.get(fn.name);
+    const fnEdits = edits.get(fn.unitId);
     if (!fnEdits) {
       rewrittenFuncs.push(fn);
       continue;
@@ -330,30 +339,34 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
 // Helpers — call graph and recursion detection
 // ---------------------------------------------------------------------------
 
-/** Set of function names that participate in any call cycle (self-loops included). */
-function computeRecursiveSet(mod: IrModule, byName: ReadonlyMap<string, IrFunction>): Set<string> {
-  const edges = new Map<string, Set<string>>();
+/** Set of function identities that participate in any call cycle (self-loops included). */
+function computeRecursiveSet(mod: IrModule, byUnitId: ReadonlyMap<IrUnitId, IrFunction>): Set<IrUnitId> {
+  const edges = new Map<IrUnitId, Set<IrUnitId>>();
   for (const fn of mod.functions) {
-    const set = new Set<string>();
+    const set = new Set<IrUnitId>();
     for (const block of fn.blocks) {
       for (const instr of block.instrs) {
-        if (instr.kind === "call" && byName.has(instr.target.name)) {
-          set.add(instr.target.name);
+        if (
+          instr.kind === "call" &&
+          instr.target.binding.kind === "unit" &&
+          byUnitId.has(instr.target.binding.unitId)
+        ) {
+          set.add(instr.target.binding.unitId);
         }
       }
     }
-    edges.set(fn.name, set);
+    edges.set(fn.unitId, set);
   }
-  const recursive = new Set<string>();
+  const recursive = new Set<IrUnitId>();
   for (const fn of mod.functions) {
-    if (reachesSelf(fn.name, edges)) recursive.add(fn.name);
+    if (reachesSelf(fn.unitId, edges)) recursive.add(fn.unitId);
   }
   return recursive;
 }
 
-function reachesSelf(start: string, edges: ReadonlyMap<string, ReadonlySet<string>>): boolean {
-  const visited = new Set<string>();
-  const stack: string[] = [];
+function reachesSelf(start: IrUnitId, edges: ReadonlyMap<IrUnitId, ReadonlySet<IrUnitId>>): boolean {
+  const visited = new Set<IrUnitId>();
+  const stack: IrUnitId[] = [];
   const seed = edges.get(start);
   if (seed) for (const n of seed) stack.push(n);
   while (stack.length > 0) {
