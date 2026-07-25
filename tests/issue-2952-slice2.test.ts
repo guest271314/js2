@@ -79,7 +79,10 @@ describe("#2952 slice 2 — selector claims (claim-row backed by lowering)", () 
     expect(claimed.has("test")).toBe(true);
   });
 
-  it("does NOT claim labeled break (slice 3 boundary)", () => {
+  it("claims labeled break (boundary lifted by slice 3)", () => {
+    // Slice 2 recorded this as a NOT-claimed boundary; slice 3 adopts
+    // labeled loops, so the claim flips (see issue-2952-slice3.test.ts for
+    // the full labeled matrix).
     const claimed = selectionFor(`
       export function test(): number {
         let n = 0;
@@ -92,7 +95,7 @@ describe("#2952 slice 2 — selector claims (claim-row backed by lowering)", () 
         return n;
       }
     `);
-    expect(claimed.has("test")).toBe(false);
+    expect(claimed.has("test")).toBe(true);
   });
 
   it("does NOT claim break outside any loop (inLoop gate)", () => {
