@@ -216,6 +216,20 @@ Those are the same defect. Read-only crossings never needed the write-back,
 which is exactly why they were never broken. Convergence from two harnesses is
 much stronger evidence than either alone.
 
+### SCOPE LIMIT on "host arm done" — read this before citing 0/10
+
+`uncurry.mts` exercises `push` (length-CHANGING), `join` and `hasOwnProperty`
+(read-only). It does **not** exercise **length-PRESERVING** mutations —
+`sort` / `reverse` / `fill` / `copyWithin`, or a bare `arr[i] = x` — through the
+uncurried/reflective spellings. #3635's author states those remain **silent
+no-ops by design** in that slice.
+
+So the honest claim is **"host 0/10 for the spellings this harness covers"**,
+NOT "every host reflective-mutation spelling now works". A follow-up harness
+covering length-preserving mutation is needed before the host arm can be called
+closed outright. Recorded because 0/10 is exactly the kind of round number that
+gets quoted without its denominator.
+
 ### What remains: the STANDALONE arm only
 
 **Do not re-implement the host arm.** The remaining work is standalone, where

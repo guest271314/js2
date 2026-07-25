@@ -1,6 +1,6 @@
 ---
 id: 3642
-title: "Standalone: an instance member value-read of a builtin prototype method reads as null (`var a=[1]; a.fill`) — host half CONTESTED, see Reconciliation"
+title: "Instance member value-read of a builtin prototype method reads as null — UNCONDITIONAL on standalone, SHAPE-DEPENDENT on host (`var a: any[]` and cast-at-use)"
 status: ready
 sprint: current
 created: 2026-07-26
@@ -17,16 +17,20 @@ origin: "measured while fixing #3638 (opus-loop-c, 2026-07-25)"
 
 # Instance member value-read of a builtin method is `null`
 
-> **SCOPE CORRECTION (2026-07-26).** This issue was filed claiming the defect on
-> **BOTH** lanes. **The standalone half is confirmed. The host half is contested
-> and should NOT be relied on** — opus-loop-a measured the opposite with its own
-> positive controls, and on inspection **my host harness failed its own first
-> positive control**. See "Reconciliation" below. The title and this banner were
-> corrected rather than left standing: a cross-lane claim that turns out to be
-> single-lane is exactly the overstatement that gets a real defect dismissed.
+> **RESOLVED 2026-07-26 — two harnesses now agree exactly.** This issue was
+> filed as an unqualified "BOTH lanes" claim; opus-loop-a measured the host half
+> the other way; both of us ran positive controls. The variable turned out to be
+> neither lane nor compile mode but the **declaration shape of the receiver**.
+> Settled by running loop-a's repro verbatim under a corrected host import
+> object — every row matches its numbers.
 >
-> The **standalone** defect is real, reproduced in four independent compile
-> modes, and is what this issue tracks.
+> - **Standalone: UNCONDITIONAL.** `a.fill` reads null in every shape tried.
+> - **Host: REAL but SHAPE-DEPENDENT.** `var a: any[]` (and an `as any`
+>   cast at the use site) read null; `const a: any` and untyped shapes are fine.
+>
+> So the original "BOTH lanes" headline was an **overstatement, not an error** —
+> and my host harness *was* broken, yet the finding survived the fix. Both facts
+> are recorded below because each is a separate lesson.
 
 ## Measured (2026-07-25, `upstream/main`)
 
@@ -155,11 +159,65 @@ agreed repro verbatim, in one process, with controls on both sides.
 
 | claim                                                     | status                          |
 | --------------------------------------------------------- | ------------------------------- |
-| standalone: `a.fill` reads null                            | **CONFIRMED** (4 modes)         |
-| standalone: instance `.call` traps `illegal cast`          | **CONFIRMED** (and fixed at the call site by #3638) |
-| host: `a.fill` reads null                                  | **CONTESTED — do not rely on**  |
+| standalone: `a.fill` reads null                            | **CONFIRMED, unconditional**    |
+| standalone: instance `.call` traps `illegal cast`          | **CONFIRMED** (fixed at the call site by #3638) |
+| host: `a.fill` reads null                                  | **CONFIRMED for `var a: any[]` / cast-at-use; NOT for `const a: any` or untyped** |
 | standalone: `Array.prototype.fill.call(a,9)` works         | measured 18 here; loop-a reports a throw — **CONTESTED** |
 
 Until reconciled, treat this issue as **standalone-scoped**. The acceptance
 criteria below still stand for standalone; re-add a host arm only if the host
 claim survives a shared repro.
+
+---
+
+## RESOLUTION — shared repro, both harnesses agree
+
+opus-loop-a's repro, run **verbatim** by opus-loop-c with a corrected host path
+(`buildImports(r.imports, undefined, r.stringPool)` + `setExports`), numeric
+channel only. Every row matches loop-a's independently-observed numbers.
+
+| # | source                                                    | host                              | standalone                        |
+| - | --------------------------------------------------------- | --------------------------------- | --------------------------------- |
+| A | `const a: any = [1,1]; a.fill == null`                    | **0**                             | **1**                             |
+| B | `var a: any[] = [1,1]; a.fill == null`                    | **1**                             | **1**                             |
+| C | `const a: any = [1,1]; a.fill.call(a,9)`                  | **18** (works)                    | **2** (silent no-op)              |
+| D | `var a: any[] = [1,1]; a.fill.call(a,9)`                  | **THREW** `Cannot read properties of null (reading 'call')` | **THREW** `illegal cast` |
+| E | `const a: any; (Array.prototype.fill as any).call(a,9)`   | **18**                            | **THREW** non-stringifiable `WebAssembly.Exception` |
+| F | `var a = [1,1]; Array.prototype.fill.call(a,9)` (untyped) | **18**                            | **18**                            |
+| G | `var a = [1,1]; a.fill.call(a,9)` (untyped)               | **THREW** (same V8 message)       | **THREW** `illegal cast`          |
+| — | `CTRL return 7`                                            | **7**                             | **7**                             |
+
+### The three things this settles
+
+1. **The variable is the declaration shape, not the lane and not the compile
+   mode.** A 4-mode matrix (host/standalone × TS/JS) had already agreed with
+   itself, which killed the mode hypothesis; the shape axis is what neither of
+   us had varied.
+2. **My earlier "contested" row is explained, and both of us were right.** Row E
+   (`as any` cast at the use site) throws on standalone; row F (untyped, my
+   original spelling) returns 18. Same method, same lane, different lowering —
+   so `Array.prototype.fill.call` is *also* shape-dependent. Neither number was
+   an artifact.
+3. **`CTRL return 7` now passes on host** (it failed in my earlier harness).
+   That confirms the harness bug I diagnosed — and note the punchline: with a
+   correct import object the host null **still reproduces** for shapes B, D, G.
+   The conclusion survived the broken harness.
+
+### Two lessons, and they are different lessons
+
+- **A positive control proves the detector FIRES; it does not prove the CHANNEL
+  carries the value faithfully.** My control failed on host and I routed around
+  it. Never do that: a failing control is a finding.
+- **A control passing does not license an unqualified claim.** My host rows were
+  reproducible and still the headline was wrong, because I varied lane and mode
+  but never varied **shape**. Before writing "on BOTH lanes", ask which axes were
+  actually varied — an unvaried axis is an assumption, not a measurement.
+
+### Consequence for the fix
+
+The acceptance criteria must hold **across shapes**, not just for the spelling a
+test happens to use. Any fix should be verified against all of A–G on both
+lanes; `const a: any` passing tells you nothing about `var a: any[]`.
+
+Probe kept at `.tmp/shared-repro.mts`; loop-a's originals at
+`.tmp/3603/shape-matrix.mts` and `.tmp/3603/proto-call-row.mts` in its worktree.
