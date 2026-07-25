@@ -6,11 +6,11 @@ Everything below is measured, not inferred.
 
 ## 1. Data used
 
-| Artifact                                                                                                  | What it is                          |
-| --------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| `/workspace/.claude/worktrees/agent-aeb44e25b6597e676/.tmp/standalone-baseline.jsonl`                     | PRE-#3592 standalone (27,709 pass)  |
+| Artifact                                                                                                   | What it is                          |
+| ---------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `/workspace/.claude/worktrees/agent-aeb44e25b6597e676/.tmp/standalone-baseline.jsonl`                      | PRE-#3592 standalone (27,709 pass)  |
 | `/workspace/.claude/worktrees/agent-aeb44e25b6597e676/.tmp/mg3601/test262-standalone-results-merged.jsonl` | POST-#3592 standalone (22,621 pass) |
-| `/workspace/.claude/worktrees/agent-a9035bbe084665a85/.tmp/flipped.jsonl`                                 | the 5,114 `pass`→`fail` flips        |
+| `/workspace/.claude/worktrees/agent-a9035bbe084665a85/.tmp/flipped.jsonl`                                  | the 5,114 `pass`→`fail` flips       |
 
 Status deltas across the two: `pass` 27,709 → 22,621 · `fail` 13,236 → 18,325 ·
 `compile_error` 7,003 → 7,002. **5,114 tests flipped `pass`→`fail`** — that is
@@ -23,22 +23,22 @@ By `error_category`: `assertion_fail` 4,496 · `other` 371 · `type_error` 179 �
 
 By normalised message (top clusters):
 
-|     Count | Normalised message                                                                 |
-| --------: | ------------------------------------------------------------------------------------ |
-|       938 | `Expected a TypeError to be thrown but no exception was thrown at all`             |
-| **924**   | **`Expected a undefined but got a different error constructor with the same name`** |
-|       386 | `Expected a undefined to be thrown but no exception was thrown at all`             |
-|       222 | `Expected SameValue(«"S"», «"S"») to be true`                                       |
-|       213 | `Expected a RangeError to be thrown but no exception was thrown at all`            |
-|       181 | `Expected SameValue(«N», «N») to be true`                                           |
-|       166 | `Expected a SyntaxError to be thrown but no exception was thrown at all`           |
-|       162 | `Expected SameValue(«undefined», «N») to be true`                                   |
-|       134 | `Expected SameValue(«null», «[object Object]») to be true`                          |
-|       131 | `Expected SameValue(«undefined», «"S"») to be true`                                 |
-|       107 | `Expected SameValue(«NaN», «undefined») to be true`                                 |
-|       104 | `TypeError: Cannot access property on null or undefined`                           |
-|       101 | `Expected a ReferenceError to be thrown but no exception was thrown at all`        |
-|        75 | `Array.prototype.map is not yet callable as a value in --target standalone`        |
+|   Count | Normalised message                                                                  |
+| ------: | ----------------------------------------------------------------------------------- |
+|     938 | `Expected a TypeError to be thrown but no exception was thrown at all`              |
+| **924** | **`Expected a undefined but got a different error constructor with the same name`** |
+|     386 | `Expected a undefined to be thrown but no exception was thrown at all`              |
+|     222 | `Expected SameValue(«"S"», «"S"») to be true`                                       |
+|     213 | `Expected a RangeError to be thrown but no exception was thrown at all`             |
+|     181 | `Expected SameValue(«N», «N») to be true`                                           |
+|     166 | `Expected a SyntaxError to be thrown but no exception was thrown at all`            |
+|     162 | `Expected SameValue(«undefined», «N») to be true`                                   |
+|     134 | `Expected SameValue(«null», «[object Object]») to be true`                          |
+|     131 | `Expected SameValue(«undefined», «"S"») to be true`                                 |
+|     107 | `Expected SameValue(«NaN», «undefined») to be true`                                 |
+|     104 | `TypeError: Cannot access property on null or undefined`                            |
+|     101 | `Expected a ReferenceError to be thrown but no exception was thrown at all`         |
+|      75 | `Array.prototype.map is not yet callable as a value in --target standalone`         |
 
 The `…to be thrown but no exception was thrown at all` family (938 + 386 + 213 +
 166 + 101 ≈ 1,804) is **heterogeneous** — each is a separate missing-throw
