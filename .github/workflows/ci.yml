@@ -287,6 +287,29 @@ jobs:
         run: |
           git fetch --no-tags --depth=50 origin main 2>/dev/null || true
           GATE_BASE=origin/main pnpm run check:issue-ids:against-main
+      - name: Issue-ID open-PR collision gate (#3598)
+        # PR-vs-PR half of the id defence: two open PRs adding the same
+        # plan/issues/<id>-*.md are BOTH green against main (neither file is on
+        # main yet); the collision then surfaces only when the first merges —
+        # at best a late red re-check, at worst a merge_group auto-park (#2547)
+        # that strands the loser behind a `hold`. This step compares the
+        # branch's introduced issue files against every OTHER open PR's added
+        # issue files, via the SAME batched scan `claim-issue.mjs --allocate`
+        # uses (scripts/lib/open-pr-issue-files.mjs). Same filename in both PRs
+        # = a modification, NOT flagged; only same id under a different
+        # filename fails. FAIL-OPEN (warn, exit 0) when the scan can't run — a
+        # network-dependent gate must not be able to freeze every PR on a
+        # GitHub blip; the merge_group duplicate-id gate stays the hard
+        # backstop. pull_request only: in the merge_group the head already
+        # contains main and the dup gate above re-validates the merged tree.
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLAIM_PR_REPO: ${{ github.repository }}
+          GATE_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags --depth=50 origin main 2>/dev/null || true
+          GATE_BASE=origin/main pnpm run check:issue-ids:against-open-prs
       - name: Issue integrity vs. merged main (#2530)
         # Stale-base dup-ID gate. The check above runs on the PR's OWN tip, which
         # was cut from an older main; an id that a sibling PR has since merged is
