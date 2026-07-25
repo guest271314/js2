@@ -12,7 +12,7 @@ feasibility: medium
 task_type: ci
 area: ci, merge-queue
 goal: release-pipeline
-related: [3189, 3303, 3370, 3202, 3563, 3583, 3593]
+related: [3189, 3303, 3370, 3202, 3563, 3583, 3593, 3595]
 origin: "PR-queue shepherd, 2026-07-24. Two net-positive PRs auto-parked on a +1 trap in one evening with no available valve."
 ---
 
@@ -38,6 +38,42 @@ Both were **fail → fail** flavour changes on tests that had never passed
 (#3563's case is root-caused in #3593: a latent null-deref in the compiled
 test262 `assert` harness, which traps identically with and without the PR's
 change). Both were blocked. Neither had any way through.
+
+### Scope — this is the SECONDARY valve; #3595 is primary
+
+**Read #3595 first.** The two overlap and a future reader must be able to tell
+which to reach for.
+
+The ratchet already excludes three "the baseline cannot testify" cases: baseline
+row **absent**, baseline status **`compile_timeout`**, and identical
+**`wasm_sha`**. **#3595** adds the case that was simply missed —
+**`compile_error`**. An invalid-Wasm module was never instantiated, so
+`__module_init` never ran and never had the opportunity to trap; a later trap
+there is **unknown, not introduced**, which is verbatim the existing
+`compile_timeout` rationale. That is the more principled fix, and it is the
+_right_ one for a CE-elimination PR: without it the ratchet charges such a PR for
+a latent trap in code it has only just made reachable — punishing exactly the
+work it exists to reward. Both of the parks above are expected to dissolve under
+#3595 with **no declaration at all**.
+
+So this issue's remit is deliberately **narrower** than the parks that motivated
+it. It covers the case #3595 cannot: a baseline that **did** observe runtime
+behavior — status `fail`, module instantiated, ran to completion — and now traps.
+There the baseline legitimately testified, so exclusion would be wrong; the
+transition is real and the only honest resolution is a **bounded, named,
+machine-checked** declaration.
+
+Rule of thumb:
+
+| baseline status of the newly-trapping file                     | mechanism                                   |
+| -------------------------------------------------------------- | ------------------------------------------- |
+| `compile_error` / `compile_timeout` / absent / same `wasm_sha` | **#3595** — excluded outright, no paperwork |
+| `fail` (ran, observed, did not trap)                           | **#3596** — this issue's named declaration  |
+| `pass`                                                         | **neither** — a real regression, hard-fails |
+
+Do **not** add a `trap-growth-allow:` for a case #3595 already excludes. An
+unnecessary declaration is noise, and it wrongly implies this class needs
+paperwork when the correct answer is that the gate should not have fired.
 
 ## Why the existing levers did not work
 
@@ -134,5 +170,8 @@ named `fail → trap` reclassification is honoured.
   and reads as a confident "not present". **Use `grep -a`.** This produced a
   wrong conclusion about the valve's existence once during this very
   investigation.
-- Follow-up: #3563 and #3583 can each now declare their bounded +1 with a
-  rationale and come off `hold`.
+- Follow-up: #3563 and #3583 are expected to need **no declaration** — their
+  newly-trapping files have `compile_error` baselines, which #3595 excludes
+  outright. Re-check each against main once #3595 lands and clear the holds if
+  the gate no longer fires. Only a file with a genuine `fail` baseline should
+  ever reach for this issue's mechanism.
