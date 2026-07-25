@@ -311,7 +311,11 @@ type InstrBase =
   | { op: "if"; blockType: BlockType; then: Instr[]; else?: Instr[] }
   | { op: "br"; depth: number }
   | { op: "br_if"; depth: number }
-  | { op: "br_table" }
+  // #2952 slice 4 — full payload (was a stub the encoder rejected, #1939):
+  // pops an i32 selector; branches to targets[selector], or defaultDepth
+  // when the selector is out of range. Field names match the depth-bump
+  // walker in codegen/statements/exceptions.ts (targets / defaultDepth).
+  | { op: "br_table"; targets: number[]; defaultDepth: number }
   | { op: "return" }
   | { op: "end" }
   | { op: "call"; funcIdx: FuncHandle }

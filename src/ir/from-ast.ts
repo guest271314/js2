@@ -1028,6 +1028,11 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       lowerLabeledStatement(s, cx);
       continue;
     }
+    // #2952 slice 4: `switch (...)` as a non-tail statement.
+    if (ts.isSwitchStatement(s)) {
+      lowerSwitchStatement(s, cx);
+      continue;
+    }
     // Slice 9 (#1169h): throw / try as a non-tail statement.
     if (ts.isThrowStatement(s)) {
       lowerThrowStatement(s, cx);
@@ -1567,6 +1572,15 @@ interface LowerCtx {
    * across function boundaries.
    */
   readonly loopLabel?: IrLabelId;
+  /**
+   * #2952 slice 4 — the innermost UNLABELED-`break` target: the nearest
+   * enclosing loop OR switch (ECMA-262 §14.9 — break binds the nearest
+   * breakable statement, while continue binds the nearest LOOP, which is
+   * why this is a separate field from `loopLabel`). Loop lowerers set both
+   * to the loop's label; `lowerSwitchStatement` sets only this one (a
+   * `continue` inside a switch still targets the enclosing loop).
+   */
+  readonly breakTargetLabel?: IrLabelId;
   /**
    * #2952 slice 3 — source-label environment: maps a `LabeledStatement`'s
    * label NAME to the `IrLabelId` of the loop it labels. `break lbl` /
@@ -5896,7 +5910,7 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
   }
   // #2952 slice 2 — the loop's label is threaded as the innermost loop for
   // the body, so unlabeled break/continue resolve here.
-  const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel };
+  const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel, breakTargetLabel: loopLabel };
   const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -5935,7 +5949,7 @@ function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
   // at lower time). Scope mirrors the while path. (#2952 slice 2) The
   // synthesised label makes this loop the innermost break/continue target;
   // a continue falls through to the cond (post-test semantics).
-  const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel };
+  const bodyCx: LowerCtx = { ...loopCx, scope: new Map(loopCx.scope), loopLabel, breakTargetLabel: loopLabel };
   const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -6105,8 +6119,9 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
         scope: bodyScope,
         safeIndexedArrays: new Set([...(loopCx.safeIndexedArrays ?? []), provenPair]),
         loopLabel,
+        breakTargetLabel: loopLabel,
       }
-    : { ...loopCx, scope: bodyScope, loopLabel };
+    : { ...loopCx, scope: bodyScope, loopLabel, breakTargetLabel: loopLabel };
   const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
   });
@@ -6194,7 +6209,14 @@ function lowerForOfIterFromExternrefValue(
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
   // (slice 3) A labeled for-of adopts the pre-allocated id.
   const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true, pendingLoopLabel: undefined };
+  const bodyCx: LowerCtx = {
+    ...cx,
+    scope: bodyScope,
+    loopLabel,
+    breakTargetLabel: loopLabel,
+    noEarlyReturn: true,
+    pendingLoopLabel: undefined,
+  };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6261,7 +6283,14 @@ function lowerForOfString(stmt: ts.ForOfStatement, cx: LowerCtx, strV: IrValueId
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
   // (slice 3) A labeled for-of adopts the pre-allocated id.
   const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true, pendingLoopLabel: undefined };
+  const bodyCx: LowerCtx = {
+    ...cx,
+    scope: bodyScope,
+    loopLabel,
+    breakTargetLabel: loopLabel,
+    noEarlyReturn: true,
+    pendingLoopLabel: undefined,
+  };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6330,7 +6359,14 @@ function lowerForOfVec(
   // (#2856) …and an early-return BARRIER (iter cleanup / conservative).
   // (slice 3) A labeled for-of adopts the pre-allocated id.
   const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
-  const bodyCx: LowerCtx = { ...cx, scope: bodyScope, loopLabel, noEarlyReturn: true, pendingLoopLabel: undefined };
+  const bodyCx: LowerCtx = {
+    ...cx,
+    scope: bodyScope,
+    loopLabel,
+    breakTargetLabel: loopLabel,
+    noEarlyReturn: true,
+    pendingLoopLabel: undefined,
+  };
 
   const body = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.statement, bodyCx);
@@ -6540,6 +6576,11 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
     lowerLabeledStatement(stmt, cx);
     return;
   }
+  // #2952 slice 4 — switch nested inside a body buffer.
+  if (ts.isSwitchStatement(stmt)) {
+    lowerSwitchStatement(stmt, cx);
+    return;
+  }
   // (#2856 C1) Early `return` inside a body buffer — `if (v === target)
   // return mid;` inside a while loop. Lowers to the Wasm `return` op via
   // the `early.return` instr. Guarded against contexts where that is
@@ -6618,8 +6659,21 @@ function lowerLabeledStatement(stmt: ts.LabeledStatement, cx: LowerCtx): void {
     lowerForOfStatement(inner, innerCx);
     return;
   }
-  // Selector parity: `isPhase1LabeledStatement` only claims loop bodies.
-  throw new Error(`ir/from-ast: labeled non-loop statement not in #2952 slice 3 (${cx.funcName})`);
+  // #2952 slice 4 — `lbl: switch (...)`: the switch adopts the label as
+  // its breakLabel (via pendingLoopLabel), so `break lbl` and unlabeled
+  // `break` target the same frame.
+  if (ts.isSwitchStatement(inner)) {
+    lowerSwitchStatement(inner, innerCx);
+    return;
+  }
+  // #2952 slice 4 — any other labeled statement: a break-only
+  // `labeled.block` frame around the inner statement's buffer.
+  const blockCx: LowerCtx = { ...innerCx, scope: new Map(innerCx.scope), pendingLoopLabel: undefined };
+  const body = cx.builder.collectBodyInstrs(() => {
+    lowerStmt(inner, blockCx);
+  });
+  cx.builder.emitLabeledBlock({ label, body });
+  joinScopeStringEncodingFacts(cx.scope, [blockCx.scope]);
 }
 
 /**
@@ -6640,16 +6694,94 @@ function lowerBreakContinueStatement(stmt: ts.BreakStatement | ts.ContinueStatem
     const target = cx.labelEnv?.get(stmt.label.text);
     if (target === undefined) {
       throw new Error(
-        `ir/from-ast: ${kind} ${stmt.label.text} targets no enclosing claimed labeled loop — selector gate failed (${cx.funcName})`,
+        `ir/from-ast: ${kind} ${stmt.label.text} targets no enclosing claimed labeled statement — selector gate failed (${cx.funcName})`,
       );
     }
     cx.builder.emitBrLabel(target, kind);
     return;
   }
-  if (cx.loopLabel === undefined) {
-    throw new Error(`ir/from-ast: ${kind} outside a claimed loop — selector gate failed (${cx.funcName})`);
+  // (slice 4) Unlabeled break binds the nearest BREAKABLE (loop or
+  // switch, §14.9); unlabeled continue binds the nearest LOOP (§14.8).
+  const target = kind === "break" ? cx.breakTargetLabel : cx.loopLabel;
+  if (target === undefined) {
+    throw new Error(
+      `ir/from-ast: ${kind} outside a claimed ${kind === "break" ? "loop/switch" : "loop"} — selector gate failed (${cx.funcName})`,
+    );
   }
-  cx.builder.emitBrLabel(cx.loopLabel, kind);
+  cx.builder.emitBrLabel(target, kind);
+}
+
+/**
+ * #2952 slice 4 — lower `switch (disc) { case <numeric literal>: ... }` to
+ * the `switch` IR instr (block-per-case ladder; see IrInstrSwitch in
+ * nodes.ts). The selector admits only numeric-literal case tests, so
+ * clause selection is a compile-time table; the disc must lower to
+ * i32/f64 (ref/string/dynamic discs throw → clean legacy demote, same
+ * discipline as loop conds, #2136).
+ *
+ * Scope: per §14.12 the whole case block is ONE declaration scope shared
+ * across clauses — mirrored by a single `switchCx` scope Map reused for
+ * every clause body. Statements after a `break`/`continue` in a clause
+ * are dead and skipped (verifier requires br.label last-in-buffer).
+ */
+function lowerSwitchStatement(stmt: ts.SwitchStatement, cx: LowerCtx): void {
+  const discRaw = lowerExpr(stmt.expression, cx, irVal({ kind: "f64" }));
+  const discT = asVal(cx.builder.typeOf(discRaw));
+  if (!discT || (discT.kind !== "f64" && discT.kind !== "i32")) {
+    throw new Error(`ir/from-ast: switch disc must lower to i32/f64 in ${cx.funcName}`);
+  }
+  const discSlot = cx.builder.declareSlot("__switch_disc", discT);
+  // A labeled switch (`lbl: switch (...)`) adopts the pre-allocated label
+  // as its break target, so `break lbl` and unlabeled `break` coincide.
+  const breakLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const switchCx: LowerCtx = {
+    ...cx,
+    scope: new Map(cx.scope),
+    breakTargetLabel: breakLabel,
+    pendingLoopLabel: undefined,
+  };
+  const tests: (number | null)[] = [];
+  const bodies: (readonly IrInstr[])[] = [];
+  for (const clause of stmt.caseBlock.clauses) {
+    if (ts.isCaseClause(clause)) {
+      const v = numericLiteralValue(clause.expression);
+      if (v === null) {
+        throw new Error(
+          `ir/from-ast: switch case test must be a numeric literal — selector gate failed (${cx.funcName})`,
+        );
+      }
+      tests.push(v);
+    } else {
+      tests.push(null);
+    }
+    bodies.push(
+      cx.builder.collectBodyInstrs(() => {
+        for (const s of clause.statements) {
+          lowerStmt(s, switchCx);
+          if (ts.isBreakStatement(s) || ts.isContinueStatement(s)) break; // dead code after an abrupt exit
+        }
+      }),
+    );
+  }
+  cx.builder.emitSwitch({ disc: discRaw, discSlot, tests, bodies, breakLabel });
+  joinScopeStringEncodingFacts(cx.scope, [switchCx.scope]);
+}
+
+/**
+ * #2952 slice 4 — the numeric value of a literal case test: a plain
+ * NumericLiteral or a prefix-minus NumericLiteral. `null` for any other
+ * expression shape (the selector mirror rejects those).
+ */
+function numericLiteralValue(expr: ts.Expression): number | null {
+  if (ts.isNumericLiteral(expr)) return Number(expr.text.replace(/_/g, ""));
+  if (
+    ts.isPrefixUnaryExpression(expr) &&
+    expr.operator === ts.SyntaxKind.MinusToken &&
+    ts.isNumericLiteral(expr.operand)
+  ) {
+    return -Number(expr.operand.text.replace(/_/g, ""));
+  }
+  return null;
 }
 
 /**

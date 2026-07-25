@@ -310,6 +310,10 @@ function canInline(callee: IrFunction, recursiveSet: ReadonlySet<string>): boole
       // level anyway). Both skip conservatively.
       inst.kind === "if.stmt" ||
       inst.kind === "br.label" ||
+      // #2952 slice 4 — labeled.block / switch carry nested body buffers
+      // + callee-scoped labels; skip conservatively like if.stmt.
+      inst.kind === "labeled.block" ||
+      inst.kind === "switch" ||
       // (#2856) early.return lowers to a Wasm `return` — spliced into a
       // caller it would return from the CALLER, not simulate the callee's
       // return, so it is never inlinable.
@@ -877,6 +881,36 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       }
       if (!changed) return inst;
       return { ...inst, cond: cv, then: newThen, else: newElse };
+    }
+    // #2952 slice 4 — labeled block / switch: honest deep rename of the
+    // clause buffers (+ disc), mirroring the if.stmt pattern. (canInline
+    // skips functions containing these, so this is defensive parity.)
+    case "labeled.block": {
+      let changed = false;
+      const newBody: IrInstr[] = [];
+      for (const sub of inst.body) {
+        const renamed = renameInstrOperands(sub, rename);
+        if (renamed !== sub) changed = true;
+        newBody.push(renamed);
+      }
+      if (!changed) return inst;
+      return { ...inst, body: newBody };
+    }
+    case "switch": {
+      const dv = mapId(rename, inst.disc);
+      let changed = dv !== inst.disc;
+      const newBodies: IrInstr[][] = [];
+      for (const body of inst.bodies) {
+        const newBody: IrInstr[] = [];
+        for (const sub of body) {
+          const renamed = renameInstrOperands(sub, rename);
+          if (renamed !== sub) changed = true;
+          newBody.push(renamed);
+        }
+        newBodies.push(newBody);
+      }
+      if (!changed) return inst;
+      return { ...inst, disc: dv, bodies: newBodies };
     }
     case "for.loop": {
       const cv = mapId(rename, inst.condValue);

@@ -16,14 +16,18 @@ language_feature: statements
 goal: ir-full-coverage
 related: [2949, 2135, 2134, 2856]
 origin: "2026-07-02 July Fable audit §1 (all six '(future)' direct-only statement rows share one structural blocker)"
-# Slice 3 (labeled break/continue) necessarily grows the three IR core files:
-# new statement arms live in the from-ast dispatchers + selector walks and the
-# iterClose obligation in the lowering ctrlStack — the same files slices 1/2
-# extended. +199 LOC total, all feature-intrinsic (no barrel/driver code).
+# Slices 3+4 necessarily grow the three IR core files: new statement arms
+# live in the from-ast dispatchers + selector walks; the ctrlStack frames,
+# switch ladder and iterClose obligation in the lowering driver — the same
+# files slices 1/2 extended. All feature-intrinsic (no barrel/driver code).
 loc-budget-allow:
   - src/ir/from-ast.ts
   - src/ir/select.ts
   - src/ir/lower.ts
+  # Slice 4's two new IR kinds (switch / labeled.block) + their walker and
+  # builder arms live in the node/union + builder files by design.
+  - src/ir/nodes.ts
+  - src/ir/builder.ts
 # The ctrlStack frames, resolveBrLabel iterClose obligation and forof.iter
 # frame changes necessarily live inside the closure-based lowering driver
 # (they share its emitter/resolver/slot state): +31 / +6 lines.
@@ -369,6 +373,89 @@ for both switch-break and labeled non-loop blocks — one new-kind
 exhaustiveness sweep covers both), then for-in (`__object_keys` iteration,
 pairs with #2964 — deliberately split out: it is host-import/substrate
 work, not control-flow, and belongs with the keys-iteration design).
+
+## Slice 4 — switch + labeled.block, implemented (2026-07-25, fable-2952)
+
+Two new IR kinds (the full exhaustiveness sweep this time — slice 3 needed
+none):
+
+- **`IrInstrSwitch { disc, discSlot, tests, bodies, breakLabel }`** — the
+  disc is evaluated ONCE into `discSlot` (§14.12.9 step 1; slot idiom like
+  forof.\*); `tests[k]` is clause k's numeric literal (null = default, any
+  position); bodies lay out in source order in a block-per-case ladder so
+  fallthrough is the natural block exit. Dispatch: i32.eq/f64.eq chain
+  `br_if k`, no-match `br` to the default clause (or past everything);
+  **br_table** for a dense-int i32 disc (span ≤ 128, ≥ 2 cases, min-bias
+  via i32.sub; first-clause-wins on duplicate tests). NaN matches nothing
+  and -0 === 0 under f64.eq — §7.2.16 for free. The arm is out-of-subset
+  (`requireInstrSink`, same as forof.\*): allowed on the WasmGC + linear
+  backends (LinearEmitter's sink IS Instr[]), rejected on porffor/bytecode.
+- **`IrInstrLabeledBlock { label, body }`** — one Wasm `block` binding its
+  label BREAK-ONLY; the verifier walk now carries a second `breakOnly` env
+  (loop labels bind both modes; block/switch labels reject continue).
+- **`br_table` got its real payload** (`{targets, defaultDepth}`) in the
+  core Instr union + binary encoder + WAT printer — it had been a
+  payload-less stub the encoder failed loud on (#1939); field names match
+  the pre-existing depth-bump walker in codegen/statements/exceptions.ts.
+- **§14.8/§14.9 split**: new `cx.breakTargetLabel` (nearest loop OR
+  switch) vs `cx.loopLabel` (nearest loop). Loop lowerers set both;
+  `lowerSwitchStatement` sets only the break target — so `continue`
+  inside a switch crosses the switch frames to the loop, and unlabeled
+  `break` in a case exits the switch. Selector mirror: a `BreakScope`
+  {inSwitch, names} threaded alongside `inLoop`/`labels`.
+- **Labeled statements complete**: `lbl: switch` aliases the label onto
+  the switch's breakLabel (via `pendingLoopLabel`); every other labeled
+  non-loop statement claims via `labeled.block`. Switch clauses admit the
+  early-return arm (`case 1: return x` — a Wasm return unwinds the case
+  blocks natively; barriers still bar it).
+- Exhaustiveness: nodes (union/forEachNestedBuffer/mapNestedBuffers/
+  directUses), effects (clause-union + isSideEffecting seed), verify
+  (BOTH collectUses copies + breakOnly env + switch structural rules:
+  numeric disc, parallel tests/bodies, ≤ 1 default), lower (emit arms +
+  collectIrUses + recordUse −1 + allocLocalForInstr), monomorphize deep
+  uses, inline-small (canInline skip + honest deep rename), legality ×3.
+
+**Gotcha for future kinds (cost a full local run):** `verify.ts` has its
+OWN local `collectUses` switch with NO exhaustiveness never-check — a
+missing case falls off the end returning `undefined` and surfaces as a
+runtime `TypeError: collectUses is not a function or its return value is
+not iterable` at claim time, not a compile error. Candidate follow-up:
+fold it onto nodes.ts `directUses` or add the never-check.
+
+**Deliberately NOT taken (slice-5 bank):**
+
+- **Tail-position switch** — a function ENDING in a switch (`switch … case
+0: return 1; default: return 2;` as the last statement) is a
+  tail-position shape `isPhase1StatementList` doesn't claim (tails are
+  return/block/if). Needs a `thenArmTerminates`-style all-paths-return
+  analysis over clauses; the non-tail form (switch + trailing return)
+  covers most real code.
+- **String-literal case tests** — need string.eq dispatch; if-chain over
+  `string.eq` is straightforward once wanted.
+- **for-in** — stays split out (host-import `__object_keys` iteration,
+  pairs with #2964): it is substrate work, not control flow.
+
+## Test Results (slice 4)
+
+- `tests/issue-2952-slice4.test.ts` — 27/27: selector claims (switch with
+  breaks/fallthrough/returns, labeled block; negatives: non-literal test,
+  string tests, `continue` against a block label), runtime semantics
+  (per-case dispatch incl. non-integer/no-match, fallthrough accumulation,
+  mid-position default fallthrough, no-default no-match + empty switch,
+  NaN/-0 under f64.eq, clause returns, dead code after break), interplay
+  (break-in-switch-in-loop exits the SWITCH, continue targets the LOOP,
+  loop-in-clause break binds the loop, labeled break from a clause exits
+  the outer loop, `lbl: switch` break lbl), labeled.block (break/fall/
+  loop-inside-block), **dual-run legacy↔IR value equality on 5 shapes ×
+  all args** (the #3566/#3567/#3568 divergence guard — each shape asserts
+  the IR claim first so it can't silently compare legacy to legacy), and
+  **br_table**: builder-IR i32-disc function through the REAL pipeline
+  (verify → lower → encode → instantiate) asserting the br_table op is
+  chosen AND dispatch/fallthrough/out-of-range/below-min all run right.
+- All #2952 suites re-run together (slices 1–4 + the two linear
+  control-flow suites): see final validation record below.
+- `pnpm run check:ir-fallbacks` — OK (no unintended/post-claim growth).
+- `npx tsc --noEmit` clean.
 
 ## Test Results (slice 3)
 

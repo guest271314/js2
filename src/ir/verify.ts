@@ -431,10 +431,23 @@ function verifyBlock(
   // cond/update buffers do NOT (no statement can occur there), and try/if
   // buffers inherit unchanged (break out of a try is legal — the lowerer
   // inlines crossed finallys).
-  const walkBuffer = (instrs: readonly IrInstr[], labelsInScope: ReadonlySet<IrLabelId>): void => {
+  // (#2952 slice 4) `breakOnlyInScope` — labels bound by enclosing
+  // `labeled.block` / `switch` frames: valid targets for mode "break"
+  // ONLY (JS grammar — `continue` must target a loop; the from-ast layer
+  // never emits a continue against these, this is the structural backstop).
+  const walkBuffer = (
+    instrs: readonly IrInstr[],
+    labelsInScope: ReadonlySet<IrLabelId>,
+    breakOnlyInScope: ReadonlySet<IrLabelId> = new Set(),
+  ): void => {
     const withLabel = (l: IrLabelId | undefined): ReadonlySet<IrLabelId> => {
       if (l === undefined) return labelsInScope;
       const next = new Set(labelsInScope);
+      next.add(l);
+      return next;
+    };
+    const withBreakOnly = (l: IrLabelId): ReadonlySet<IrLabelId> => {
+      const next = new Set(breakOnlyInScope);
       next.add(l);
       return next;
     };
@@ -468,9 +481,14 @@ function verifyBlock(
       // emitting after a break/continue, so trailing instrs are a producer
       // bug, not dead code to tolerate).
       if (instr.kind === "br.label") {
-        if (!labelsInScope.has(instr.label)) {
+        // (slice 4) break may additionally target a labeled.block / switch
+        // frame; continue must target a loop label.
+        const bound = labelsInScope.has(instr.label) || (instr.mode === "break" && breakOnlyInScope.has(instr.label));
+        if (!bound) {
           errors.push({
-            message: `br.label(${instr.label as number}, ${instr.mode}) targets no enclosing loop label`,
+            message: `br.label(${instr.label as number}, ${instr.mode}) targets no enclosing ${
+              instr.mode === "break" ? "loop/block/switch" : "loop"
+            } label`,
             func: func.name,
             block: block.id as number,
           });
@@ -492,6 +510,35 @@ function verifyBlock(
         if (condT && asVal(condT)?.kind !== "i32") {
           errors.push({
             message: `if.stmt cond must be i32, got ${asVal(condT)?.kind ?? condT.kind}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+      }
+
+      // #2952 slice 4 — switch structural rules: disc must be numeric
+      // (the lowerer emits i32.eq / f64.eq against literal tests), the
+      // tests/bodies arrays must be parallel, and at most one default.
+      if (instr.kind === "switch") {
+        const discT = operandIrType(func, block, instr.disc, localDefs);
+        const discK = discT ? asVal(discT)?.kind : undefined;
+        if (discT && discK !== "i32" && discK !== "f64") {
+          errors.push({
+            message: `switch disc must be i32/f64, got ${discK ?? discT.kind}`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+        if (instr.tests.length !== instr.bodies.length) {
+          errors.push({
+            message: `switch tests (${instr.tests.length}) and bodies (${instr.bodies.length}) must be parallel`,
+            func: func.name,
+            block: block.id as number,
+          });
+        }
+        if (instr.tests.filter((t) => t === null).length > 1) {
+          errors.push({
+            message: `switch has more than one default clause`,
             func: func.name,
             block: block.id as number,
           });
@@ -708,17 +755,22 @@ function verifyBlock(
       // (#2952 slice 2) Loop BODY buffers extend the label environment with
       // the loop's label; every other buffer inherits it unchanged.
       if (instr.kind === "while.loop") {
-        walkBuffer(instr.body, withLabel(instr.loopLabel));
+        walkBuffer(instr.body, withLabel(instr.loopLabel), breakOnlyInScope);
       } else if (instr.kind === "for.loop") {
-        walkBuffer(instr.body, withLabel(instr.loopLabel));
-        walkBuffer(instr.update, labelsInScope);
+        walkBuffer(instr.body, withLabel(instr.loopLabel), breakOnlyInScope);
+        walkBuffer(instr.update, labelsInScope, breakOnlyInScope);
       } else if (instr.kind === "forof.vec" || instr.kind === "forof.iter" || instr.kind === "forof.string") {
-        walkBuffer(instr.body, withLabel(instr.loopLabel));
+        walkBuffer(instr.body, withLabel(instr.loopLabel), breakOnlyInScope);
+      } else if (instr.kind === "labeled.block") {
+        // (#2952 slice 4) break-only label frames.
+        walkBuffer(instr.body, labelsInScope, withBreakOnly(instr.label));
+      } else if (instr.kind === "switch") {
+        for (const body of instr.bodies) walkBuffer(body, labelsInScope, withBreakOnly(instr.breakLabel));
       } else {
         // Non-loop buffer-bearing kinds (if / if.stmt / try). Loops are
         // handled above so their cond buffer (already walked) isn't
         // re-walked here.
-        forEachNestedBuffer(instr, (buffer) => walkBuffer(buffer, labelsInScope));
+        forEachNestedBuffer(instr, (buffer) => walkBuffer(buffer, labelsInScope, breakOnlyInScope));
       }
     }
   };
@@ -911,6 +963,12 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [];
     case "if.stmt":
       return [instr.cond];
+    // #2952 slice 4 — labeled.block has no operands; switch surfaces only
+    // its disc (clause buffers are walked via the buffer recursion).
+    case "labeled.block":
+      return [];
+    case "switch":
+      return [instr.disc];
     // (#1373 Phase B) Async / await IR nodes — type-only in this slice.
     // The verifier sees their operands as plain SSA uses; lowering
     // (Phase C, #1373b) will define the per-arm SSA scope.
