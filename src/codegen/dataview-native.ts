@@ -2063,7 +2063,10 @@ function emitWriteBytes(
 // ---------------------------------------------------------------------------
 
 /** Per-view-name byte-decode descriptor (width, signedness, float, clamp-on-write). */
-const TA_VIEW_DECODE: Record<string, { bytes: number; signed: boolean; float: boolean; clamp: boolean }> = {
+const TA_VIEW_DECODE: Record<
+  string,
+  { bytes: number; signed: boolean; float: boolean; clamp: boolean; int64?: boolean }
+> = {
   Int8Array: { bytes: 1, signed: true, float: false, clamp: false },
   Uint8Array: { bytes: 1, signed: false, float: false, clamp: false },
   Uint8ClampedArray: { bytes: 1, signed: false, float: false, clamp: true },
@@ -2073,6 +2076,18 @@ const TA_VIEW_DECODE: Record<string, { bytes: number; signed: boolean; float: bo
   Uint32Array: { bytes: 4, signed: false, float: false, clamp: false },
   Float32Array: { bytes: 4, signed: false, float: true, clamp: false },
   Float64Array: { bytes: 8, signed: false, float: true, clamp: false },
+  // (#3613) The two BigInt views. 8-byte INTEGER elements (`int64`), NOT the
+  // bit-reinterpreted doubles `Float64Array` uses — without the flag an 8-byte
+  // non-float read would `f64.reinterpret_i64` the integer bit pattern and read
+  // back garbage. These entries exist ONLY to serve the runtime-kind dynamic
+  // dispatch (`emitDynDecodeDispatch` / `emitDynEncodeDispatch`, both driven by
+  // `TA_CTOR_KINDS`); the STATIC per-view path resolves names through
+  // `getTaViewName` over `ctx.taViewTypeMap`, and #838 gave the BigInt views a
+  // native i64-element vec instead of a `$__ta_view_<name>`, so no static
+  // `$__ta_view_BigInt64Array` is ever registered and `taViewDecode` cannot
+  // reach these rows. Adding them is therefore inert for the static lane.
+  BigInt64Array: { bytes: 8, signed: true, float: false, clamp: false, int64: true },
+  BigUint64Array: { bytes: 8, signed: false, float: false, clamp: false, int64: true },
 };
 
 /** Resolve a `$__ta_view` typeIdx to its byte-decode descriptor, or undefined. */
@@ -2448,12 +2463,22 @@ export function emitDynDecodeDispatch(
     emitReadBytes(
       ctx,
       fctx,
-      { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+      { kind: "get", bytes: desc.bytes, signed: desc.signed, float: desc.float, int64: desc.int64 },
       arrLocal,
       offLocal,
       leLocal,
       arrTypeIdx,
     );
+    if (desc.int64) {
+      // (#3613) `emitReadBytes` deliberately LEAVES the i64 on the stack for an
+      // `int64` accessor (the DataView getBigInt64 result is the i64-branded
+      // BigInt carrier). This dispatch's `if` arms are all typed `f64`, so the
+      // BigInt arms must converge to the same carrier — convert rather than
+      // reinterpret. Exact for |v| < 2^53, the range the conformance corpus's
+      // small BigInt literals occupy; the true i64 element representation is
+      // #1349/#2401(b).
+      fctx.body.push({ op: desc.signed ? "f64.convert_i64_s" : "f64.convert_i64_u" });
+    }
     fctx.body = saved;
     chain = [
       { op: "local.get", index: kindLocal },
@@ -2507,7 +2532,7 @@ export function emitDynEncodeDispatch(
     emitWriteBytes(
       ctx,
       fctx,
-      { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float },
+      { kind: "set", bytes: desc.bytes, signed: desc.signed, float: desc.float, int64: desc.int64 },
       arrLocal,
       offLocal,
       valForWrite,
