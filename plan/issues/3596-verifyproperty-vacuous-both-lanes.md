@@ -224,6 +224,19 @@ literal carrying at least one checkable field** — i.e. the exposed population 
 essentially the whole population, and the detector's static false-positive
 surface is **2 call sites out of 6,470**.
 
+> **`5,067` is an UPPER BOUND on the exposed file count, not an exact one — do
+> not scale off it.** The census matches `\bverifyProperty\s*\(` textually, and
+> the arm-B survivors proved two distinct contamination sources: (a) **comment-only
+> matches** — `// TODO: Convert to verifyProperty() format.` matches the regex
+> (2 of the 3 survivors); and (b) **calls that never execute** — e.g.
+> `built-ins/WeakRef/prototype/constructor.js` guards its call behind
+> `if (WeakRef.prototype.hasOwnProperty('constructor'))`, which is itself false
+> on standalone *for root cause A*. The effective-rate figure below (158 / 158 of
+> *executed* calls) is unaffected by this, because it is derived from actual
+> execution, not from the census. Scaling 5,067 as if it were exact is precisely
+> the over-count failure mode the project's MEASURE-NEVER-EXTRAPOLATE rule exists
+> to prevent.
+
 ## Measurement — local-vs-local A/B with a calibrated vacuity detector
 
 **Method.** Same runner, same sample, same process kind; the ONLY difference is
@@ -326,6 +339,43 @@ perturbing compilation or behaviour.
 > over-counting (100–600×) applies to this agent's own numbers too. A
 > full-corpus number requires a full-corpus run.
 
+### Result — host lane: mechanism CONFIRMED, magnitude **NOT MEASURED**
+
+The host lane's failure mode is confirmed three ways — the five `{a:1}`
+wrong-expectation rows in the symptom table all report `pass`; the three
+independent `__push` observations (`.length`, `[0]`, `__join`) all miss the
+pushed element while the native `arr.push` control passes; and the calibrated
+detector fires `VACUOUS_VERIFYPROPERTY_SWALLOWED` on the host positive control.
+
+**The corpus magnitude on the host lane is reported below only if it was
+measured; it is never estimated.** The detector is already calibrated for the
+host lane (the `posthost` control above), so completing it is three commands:
+
+```bash
+VP_LANE=host npx tsx plan/probes/3596/ab.mts armA 600 20260725
+VP_LANE=host npx tsx plan/probes/3596/ab.mts armA2   # attribution control
+VP_LANE=host npx tsx plan/probes/3596/ab.mts armB
+```
+
+**There is deliberately NO host magnitude number anywhere in this issue — do not
+substitute a guess for it, and do not treat any partial run as one.** An arm-A
+host run was started and abandoned at ~350/600 for two independent reasons, both
+disqualifying: (a) the box was at load ~19 on 8 cores with 13 foreign sweep
+processes, 2.4× the concurrency ceiling; and (b) the branch was committed to
+twice while it was in flight, so its provenance would have been "started on
+`a727b1b9`, finished on `476cd651`", which cannot be reported alongside the
+standalone numbers' clean single-SHA provenance. **No partial output was kept.**
+Arm A alone would not have yielded a vacuity count in any case — that needs all
+three arms (A, A2, B) in one clean window.
+
+The relevant point for planning is qualitative and already established: **the
+host lane is affected too, so this is a lane-parity item, not a standalone-only
+one.** The headline conformance figure is inflated over the `verifyProperty`
+population by an amount that must be measured before it is quoted. Note this
+specifically corrects the assumption that the public host number was untouched
+by the vacuity work: that was true of the **arity** bug (host received the
+equivalent fix at #2623 P-7) but is **not** true of `verifyProperty`.
+
 ## Measured NON-findings (do not re-derive)
 
 - **`transformVerifyPropertyCalls` in `tests/test262-runner.ts:1410` is NOT the
@@ -353,6 +403,15 @@ that no step makes the tree worse:
    `verifyProperty` on its own), it is a prerequisite for S2 not producing
    traps, and it has a clean unit test surface — the ten rows of the root-cause-B
    table are the acceptance criteria.
+
+   **S1 is also the only slice that can prove itself today.** The host lane's
+   vacuity is entirely S1's fault, and the detector in `plan/probes/3596/ab.mts`
+   is *already calibrated for the host lane* (the `posthost` control) — so S1
+   lands with a real before/after vacuity count from the same harness, measured
+   in one clean window. S2 has no such measurement available until S1 is in,
+   because until then every standalone flip is a trap rather than a verdict. So
+   the ordering is not merely "S2 is risky first"; it is "S1 is the slice that
+   can be measured first."
 2. **S2 — promote object literals to a runtime-queryable representation on
    standalone** (`horizon: l`/`xl`). The promotion machinery already exists —
    a computed-key write produces a real `$Object`. The slice is to trigger it
