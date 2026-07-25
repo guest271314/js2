@@ -2,7 +2,7 @@
 id: 3586
 title: "`s += yield` (yield in compound-assignment RHS) not claimed by the native generator machine: host lane silently returns 0, standalone emits env imports"
 status: ready
-sprint: Backlog
+sprint: current
 created: 2026-07-25
 updated: 2026-07-25
 priority: high
