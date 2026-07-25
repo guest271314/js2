@@ -150,13 +150,81 @@ returns null even for the **non-BigInt** views, while
 the test262 harness uses the working shape, so the yield is low. File separately
 if anyone wants it.
 
-## Test Results
+## Test Results — measured, and WEAKER than the root cause implied
 
-Pending — the before/after batch measurement was interrupted by a capacity
-pause. BEFORE is captured (`.tmp/before.json`: 14 fail / 8 pass on the 22-test
-stride sample) and matches the CI artifact exactly, confirming the local harness
-is faithful. AFTER must be run before this PR opens; see
-`plan/agent-context/opus-typeerror-family.md` for the resume steps.
+22-test deterministic stride sample of the BigInt TypedArray corpus (14 drawn
+from the `fail` population, 8 from `pass`), standalone lane, single-threaded.
+BEFORE reproduced the CI artifact exactly (14 fail / 8 pass), so the local
+harness is faithful **for this cluster**.
+
+| | before | after |
+|---|---|---|
+| fail | 14 | 13 |
+| pass | 8 | 9 |
+
+**Gross +2 fixed, −1 regressed, net +1. 19 of 22 unchanged.**
+
+Fixed (both were `fail` → `pass`):
+
+- `TypedArrayConstructors/internals/GetOwnProperty/BigInt/key-is-not-canonical-index.js`
+- `TypedArrayConstructors/ctors-bigint/object-arg/undefined-newtarget-throws.js`
+
+Regressed (`pass` → `fail`):
+
+- `TypedArray/prototype/byteLength/BigInt/resizable-array-buffer-fixed.js`
+
+### The honest reading
+
+The hit rate is **2 of 14 failing rows (14 %)**, not the near-total conversion
+the 627-row root cause suggested. The null constructor was **necessary but not
+sufficient**: most BigInt rows fail for further downstream reasons that surface
+only once the ctor is real. Naive extrapolation over the 685-row failing corpus
+gives roughly +98 gains and, at 1-in-8 of the 28 passes, roughly −3 to −4
+regressions — net positive but modest, and the confidence interval on 2/14 is
+very wide (~2 %–43 %).
+
+### The regression is NOT classifiable locally — this is the blocker
+
+`resizable-array-buffer-fixed.js` now throws at L16,
+`assert.sameValue(typeof ArrayBuffer.prototype.resize, "function")` — a
+**top-level** assertion that has nothing to do with BigInt constructors.
+Investigated rather than assumed:
+
+- A standalone probe of `typeof ArrayBuffer.prototype.resize` **throws on the
+  PRE-change compiler too** (`.tmp/t8.ts`, verified by reverting both source
+  files to `HEAD~2` and re-running). So the throwing read is **pre-existing**,
+  not introduced here.
+- The probes therefore do NOT reproduce the row's flip — the test module's
+  composition differs. The plausible mechanism is second-order: with a real
+  ctor the harness callback goes live, `ab.resize(...)` becomes reachable, and
+  the ArrayBuffer proto glue is registered differently, so the pre-existing
+  `resize` value-read gap becomes reachable. That would make the flip a
+  **consequence of de-vacuification** over a pre-existing defect — but this is
+  a hypothesis, not a verified finding, and it is not being recorded as one.
+- The payload is opaque locally: `tryNativeExnRender` returns null, so the row
+  reads as `uncaught Wasm-GC exception (non-stringifiable payload)` →
+  `classifyError` = `other`, `trapInnermostFrame` = **null (frameless)**.
+
+That last point is the blocker. Per `DEVACUIFICATION_ALLOW_KEY` in
+`scripts/diff-test262.ts`, a non-trap `pass → fail` flip is excusable under a
+declared ceiling alone — but **"a frameless trap message cannot be verified and
+is NOT excused."** The local renderer is the known-weak one (it is why the
+message is opaque at all); CI's `describeWasmError` may well classify this row
+into a trap category. If it does, and the frame is still unextractable, the row
+hard-fails the #3189 ratchet and **no declaration can excuse it**. I cannot
+settle that locally.
+
+### Consequence
+
+Not opening the PR on this evidence. Net +1 on n=22 with one flip I cannot
+classify is too thin a basis, and the failure mode if I am wrong is a wedged
+merge queue rather than a clean park. Awaiting a decision between (a) a larger
+sample (~60–80 rows, ~1 h single-threaded) to pin the gain/regression rates,
+or (b) landing it and treating the `merge_group` floor gate as the measurement,
+per the established `park = measurement` recipe
+(`reference_f1_honest_floor_deinflation_landing_recipe`). Option (b) would need
+a `standalone-devacuification-allow` ceiling declared in this frontmatter with
+the 1-in-8 sampled basis above.
 
 ## Source
 
