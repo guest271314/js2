@@ -633,7 +633,16 @@ export function evaluateTrapCategoryGrowth(
     // A compile timeout never observed the baseline's runtime behavior. A
     // subsequent trap is therefore unknown, not evidence that this change
     // introduced one. Keep it out of category growth and report it separately.
-    if (base?.status === "compile_timeout") {
+    //
+    // (#3595) `compile_error` is the SAME class of baseline-can't-testify: an
+    // invalid-Wasm module never instantiated, so `__module_init` never ran and
+    // never had the opportunity to trap. A later trap on that file is therefore
+    // *unknown*, not *introduced* — exactly the rationale already written above
+    // for `compile_timeout`. Measured evidence (#3593): the minimized repro for
+    // `Iterator/zip/iterables-iteration.js` traps identically with and without
+    // the PR that made the file compile, so the trap pre-existed the change that
+    // merely let the module reach it.
+    if (base?.status === "compile_timeout" || base?.status === "compile_error") {
       unknownBaselineTimeouts[row.error_category].push(file);
       continue;
     }
