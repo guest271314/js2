@@ -301,7 +301,24 @@ channel; the other 153 collapse onto the opaque
 message that IS legible says `NO_CHECKS`; not one says `SWALLOWED`** — which is
 exactly root cause A and confirms `__push` is never reached on standalone.
 
-<!-- ARMA2 -->
+### Attribution control (arm A2) — the flips ARE the detector
+
+"The instrumented harness fails 158 tests" is not by itself evidence that the
+detector fired; the instrumentation could simply have broken something. So a
+third arm was run over the same 161 files: **arm A2 = every structural edit of
+arm B (the `__vpChecks` counter, `__vpPush` replacing all five
+`__push(failures, …)` sites, the module-level `__vpFailMsg`) with the two
+detector `throw`s REMOVED.**
+
+| arm                                        | pass    | fail    |
+| ------------------------------------------ | ------- | ------- |
+| A — stock harness                          | **161** | 0       |
+| A2 — instrumented structure, no throws     | **161** | 0       |
+| B — instrumented structure + detectors     | 3       | **158** |
+
+Arm A2 reproduces arm A exactly (161 / 161). The 158 flips are therefore
+attributable **solely to the detector firing**, not to the instrumentation
+perturbing compilation or behaviour.
 
 > **Do NOT scale 158/161 to the 1,190-pass figure or to any corpus number.**
 > This is a 600-file uniform sample of the 5,067-file population, reported as
@@ -364,17 +381,25 @@ companion slice and is cheap now that the detector is calibrated.
 
 ## Reproduction
 
-All probes live in `.tmp/vp/` (scratch, gitignored) and are reproduced verbatim
-below so this issue is self-contained. Each is run with `npx tsx <file>` from a
-worktree root.
+Every script that produced a number above is committed at
+**`plan/probes/3596/`** (with `plan/probes/3596/NOTES.txt` giving the run order
+and the safety notes) and the raw per-file verdicts at
+**`plan/probes/3596/results/`**. `plan/` is outside the `format:check` / `lint`
+globs (`src/ tests/ scripts/`) so nothing there is executed or checked by CI.
 
 - `census.mjs` — the exact static census (no compiler involved).
 - `probe.mts` — the A/B wrong-expectation control through `runTest262File`.
-- `inner.mts` — fine-grained numeric observation channel into the compiled
-  harness (one observation per exported call; see the encoding note below).
+- `inner.mts` / `inner2.mts` — fine-grained numeric observation channel into the
+  compiled harness (one observation per exported call).
 - `inner3.mts` — the fix-boundary table (object construction shapes).
 - `uncurry.mts` — the two-lane `uncurryThis` check.
-- `ab.mts` — the calibrated A/B vacuity measurement.
+- `ab.mts` — the calibrated A/B vacuity measurement (`calibrate` / `armA` /
+  `armA2` / `armB`).
+
+`ab.mts` swaps **this worktree's** `test262/harness` symlink for a private real
+copy while it runs and restores the symlink on every exit path, so a concurrent
+agent's test262 run is never perturbed. **No committed compiler or runner code
+is touched, and there is no committed force-disable switch.**
 
 ### Observation-channel gotchas (cost real time; documented so they don't again)
 
