@@ -66,7 +66,12 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { ensureBaselineJsonl, BASELINE_CACHE_PATH, STANDALONE_BASELINE_CACHE_PATH } from "./fetch-baseline-jsonl.mjs";
+import {
+  BASELINE_CACHE_PATH,
+  STANDALONE_BASELINE_CACHE_PATH,
+  ensureBaselineJsonl,
+  ensureStandaloneBaselineJsonl,
+} from "./fetch-baseline-jsonl.mjs";
 import { checkVerifierCoverage } from "./lib/verifier-guard.mjs";
 import { parseMeta, runTest262File } from "../tests/test262-runner.js";
 import { restoreHostBuiltins } from "../tests/test262-restore-builtins.js";
@@ -221,8 +226,13 @@ async function runSource(
 // ── Candidate discovery ────────────────────────────────────────────────────
 
 async function baselinePassingFiles(lane: Lane): Promise<string[]> {
-  const cachePath = lane === "standalone" ? STANDALONE_BASELINE_CACHE_PATH : BASELINE_CACHE_PATH;
-  if (!existsSync(cachePath)) await ensureBaselineJsonl();
+  const standalone = lane === "standalone";
+  const cachePath = standalone ? STANDALONE_BASELINE_CACHE_PATH : BASELINE_CACHE_PATH;
+  // Fetch the LANE'S OWN baseline. Calling the gc fetcher for the standalone
+  // lane leaves the standalone cache absent on a fresh checkout, so the run
+  // dies with "no baseline JSONL" — which on a scheduled canary reads as
+  // infrastructure noise rather than the missing measurement it is.
+  if (!existsSync(cachePath)) await (standalone ? ensureStandaloneBaselineJsonl() : ensureBaselineJsonl());
   if (!existsSync(cachePath)) {
     throw new Error(
       `#3613: no baseline JSONL at ${cachePath}. Run \`node scripts/fetch-baseline-jsonl.mjs\` or pass --files.`,

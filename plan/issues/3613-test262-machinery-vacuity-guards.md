@@ -351,10 +351,25 @@ Did you mean 'meta'?`. That is a **TS parse diagnostic** — a genuine static
    and low-severity; the honest fix is to mark a result whose validation went
    through the host `eval` fallback rather than compiled code, so the class is
    _countable_ instead of invisible. Same landing constraints as (2).
-4. **Wire the detector into a scheduled canary.** Deliberately NOT added to a
-   required check: it needs a network baseline fetch and ~1 min of compiles, and
-   a flaky fetch must not gate PRs. `pnpm run detect:vacuity` is the manual
-   entry point.
+4. ~~**Wire the detector into a scheduled canary.**~~ **DONE** —
+   `.github/workflows/vacuity-canary.yml`: weekly + `workflow_dispatch`, both
+   lanes as a `fail-fast: false` matrix (a green host lane says nothing about
+   standalone, which is where the entire ~5,000-test #3592 class lived), report
+   uploaded as an artifact. Deliberately **advisory, not a required check**: it
+   needs a network baseline fetch and real corpus compiles, and a flaky fetch
+   must never gate a PR. The cheap hermetic half is a required check instead
+   (guard suite). `pnpm run detect:vacuity` is the manual entry point.
+
+   Exit codes are the interesting part, and each maps to a distinct action:
+   `0` clean at the ceiling · `1` rate above the ceiling (real finding) ·
+   `3` CONTROL FAILURE, no finding claimed · `4` PROBE INERT, **not** "clean".
+
+   Building the canary surfaced a real bug in the detector: the standalone lane
+   fetched the **gc** baseline, so on a fresh checkout (exactly the canary's
+   environment) the standalone job would have died with "no baseline JSONL" —
+   which on a scheduled run reads as infrastructure noise rather than as the
+   missing measurement it is. Fixed to fetch the lane's own baseline.
+
 5. **#3619 — mechanise "the test must go red without the fix".** FILED. The
    syntax gate in (5) above catches ONE shape; the general class is "this
    regression test does not actually exercise the code under test", and it has
