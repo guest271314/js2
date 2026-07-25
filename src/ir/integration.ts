@@ -1348,7 +1348,14 @@ export function compileIrPathFunctions(
     const wasCloned = monoResult.cloneOrigins.has(fn.unitId);
     const owner = ownerByArtifactUnitId.get(fn.unitId)!;
     try {
-      const changed = wasCloned || fn !== before.fn;
+      if (!before && !wasCloned) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `post-tagged-union artifact ${fn.unitId} / ${fn.name} is neither an original nor a declared clone`,
+        );
+      }
+      const changed = before === undefined || fn !== before.fn;
       const final = changed ? runHygienePasses(fn, allocRegistry) : fn;
       const verifyErrors = verifyIrFunction(final);
       if (verifyErrors.length > 0) {
