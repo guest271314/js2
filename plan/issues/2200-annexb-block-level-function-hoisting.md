@@ -29,8 +29,8 @@ origin: "2026-06-19 sprint-64 standalone failure mining: annexB/language/functio
 
 ECMA-262 **Annex B.3.3** ("Changes to FunctionDeclarationInstantiation /
 GlobalDeclarationInstantiation / EvalDeclarationInstantiation") governs the
-web-compat semantics of a `FunctionDeclaration` nested inside a *block* (not a
-function body). The spec creates an *additional, var-scoped* outer binding for
+web-compat semantics of a `FunctionDeclaration` nested inside a _block_ (not a
+function body). The spec creates an _additional, var-scoped_ outer binding for
 the block-local function name, but **only when** doing so "would not produce any
 Early Errors" — e.g. a colliding `let`/`const`/parameter binding in the
 enclosing scope cancels the Annex B hoist.
@@ -43,9 +43,9 @@ guard conditions. Two observable failures result:
    shadow (or the B.3.3 "would produce an early error" condition) should block
    the hoist, the compiler still exposes `f` in the outer scope, so a
    `ReferenceError` that the spec mandates does not throw.
-2. **Outer binding initialized too eagerly** — even when the outer binding *is*
+2. **Outer binding initialized too eagerly** — even when the outer binding _is_
    created, B.3.3 requires it to start **uninitialized** (`typeof f ===
-   "undefined"`, reading `f` before the block executes throws `ReferenceError`),
+"undefined"`, reading `f` before the block executes throws `ReferenceError`),
    then become initialized to the function value **only after** the block's
    inner `function` declaration is evaluated. The compiler initializes it at
    function entry.
@@ -73,15 +73,19 @@ the `FunctionDeclaration` with a `var F` would not produce an early error
 
 ```js
 // (A) let-shadow cancels the Annex B outer binding (B.3.3 guard).
-(function() {
+(function () {
   // Outer `f` must NOT be created — a `let f` shadow lives between.
   let threw = false;
-  try { f; } catch (e) { threw = e instanceof ReferenceError; }
+  try {
+    f;
+  } catch (e) {
+    threw = e instanceof ReferenceError;
+  }
   // assert threw === true   (compiler: f is wrongly visible → no throw)
   {
     let f = 123;
     {
-      function f() {}   // block-level fn decl, but `let f` blocks the hoist
+      function f() {} // block-level fn decl, but `let f` blocks the hoist
     }
   }
   return threw ? 1 : 0;
@@ -90,12 +94,16 @@ the `FunctionDeclaration` with a `var F` would not produce an early error
 
 ```js
 // (B) outer binding starts uninitialized, becomes the fn value after the block.
-(function() {
+(function () {
   // `f` exists (var-scoped) but is uninitialized here.
-  const before = typeof f;          // must be "undefined" (binding uninitialized)
-  { function f() { return 42; } }   // after this block, outer f === the function
-  const after = typeof f;           // must be "function"
-  return (before === "undefined" && after === "function") ? 1 : 0;
+  const before = typeof f; // must be "undefined" (binding uninitialized)
+  {
+    function f() {
+      return 42;
+    }
+  } // after this block, outer f === the function
+  const after = typeof f; // must be "function"
+  return before === "undefined" && after === "function" ? 1 : 0;
 })();
 ```
 
@@ -125,7 +133,7 @@ the enclosing scope):
    (`let`/`const`/class) binding for the name exists in an intervening scope, or
    the name is a parameter. This makes case (A) throw the spec `ReferenceError`.
 2. Make the hoisted outer binding **uninitialized at entry** (TDZ-like for the
-   var-scoped Annex B binding), and emit the *initialization-to-function-value*
+   var-scoped Annex B binding), and emit the _initialization-to-function-value_
    at the point the inner block-level declaration is evaluated, not at function
    entry. This fixes case (B).
 
@@ -157,8 +165,9 @@ compiled by the SAME path as a direct function-body declaration
 (`compileNestedFunctionDeclaration`, `statements.ts:218`), which registers `f`
 in the **module-global `ctx.funcMap`**. Identifier resolution then finds it
 unconditionally:
+
 - `src/codegen/expressions/identifiers.ts:766` — `const funcRefIdx =
-  ctx.funcMap.get(name)` resolves ANY function name as a value, regardless of
+ctx.funcMap.get(name)` resolves ANY function name as a value, regardless of
   the lexical scope it was declared in. So the outer `(f as any)` read in case A
   finds the block-nested `f` and does NOT throw (the `let f` shadow is never
   consulted).
@@ -176,6 +185,7 @@ deliberate Annex B hoist — it is an accident of `funcMap` being module-global.
 
 A spec-correct B.3.3 requires changing the **function-binding model**, not a
 localized patch:
+
 1. **Scope the visibility of a block-nested function name** so it does NOT leak
    into the module-global `funcMap` lookup at outer read sites — the resolver at
    `identifiers.ts:766` would need a lexical-scope-aware lookup (today it is a
@@ -183,7 +193,7 @@ localized patch:
 2. **Apply the B.3.3 guard** (no intervening `let`/`const`/class binding for the
    name; name is not a parameter) to decide whether to create the var-scoped
    outer binding at all (case A).
-3. **Model the outer binding lifecycle** as a var that is *uninitialized* at
+3. **Model the outer binding lifecycle** as a var that is _uninitialized_ at
    function/global entry and assigned the function value only when the inner
    block-level declaration executes (case B) — i.e. a TDZ-like var local plus a
    deferred init at the declaration's textual position.
@@ -211,12 +221,12 @@ that is the hottest identifier path and the highest regression risk.
 (`identifiers.ts:482`) resolves names in a fixed order, and **`localMap`
 (line 499, with its `tdzFlagLocals` TDZ check at 502–511) and `moduleGlobals`
 (line 592, with `tdzGlobals` at 596) are both consulted BEFORE the funcMap
-function-ref-as-value branch at line 766.** So if the Annex B *outer binding* is
+function-ref-as-value branch at line 766.** So if the Annex B _outer binding_ is
 materialised as a real var-binding (a function-local with a `tdzFlagLocals` entry,
 or — at global scope — a module global with a `tdzGlobals` entry), the read is
 intercepted by the earlier branch and the funcMap lookup at 766 is **never reached
 for that name**. The block-local function itself stays in `funcMap` and keeps
-working for *calls inside the block* and for the post-declaration assignment.
+working for _calls inside the block_ and for the post-declaration assignment.
 
 This converts the problem from "make the hottest lookup scope-aware" (tail-risk)
 into "model the Annex B outer var-binding using the existing TDZ-var machinery"
@@ -255,12 +265,12 @@ whose nearest enclosing function/global scope is `S`:
    → ReferenceError, or nothing → ReferenceError). sd1 has a **validated static
    detector** for this (`cancels=true`); reuse it verbatim.
 2. **Lifecycle when eligible (case B).** The var-scoped binding for `F` in `S` is
-   created at entry but **uninitialised** (`undefined` is the *value*, but per the
+   created at entry but **uninitialised** (`undefined` is the _value_, but per the
    FunctionDeclarationInstantiation/var semantics a `var` binding is initialised to
    `undefined` — see the subtlety note below). At the **point the block-level
    `FunctionDeclaration` is evaluated** (its textual position, when control reaches
    the block), the spec performs `SetMutableBinding(F, fobj)` on the **function-level
-   outer** binding — i.e. the outer `F` becomes the function object *only after* the
+   outer** binding — i.e. the outer `F` becomes the function object _only after_ the
    block runs.
 3. **Strict mode disables Annex B entirely** — no outer binding is ever created;
    the block function is purely block-scoped (`typeof f` outside the block is
@@ -269,17 +279,17 @@ whose nearest enclosing function/global scope is `S`:
 
 **Subtlety — `typeof f` "undefined" before the block (repro B).** Strictly, a
 plain `var f` is initialised to `undefined` at entry (so `typeof f` is
-`"undefined"` because the *value* is `undefined`, not because the binding is in
+`"undefined"` because the _value_ is `undefined`, not because the binding is in
 TDZ). But the test262 function-code cluster's dominant assertion is
 `assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not
 created prior to evaluation')` — i.e. several of these tests want a **ReferenceError
 on read before the block**, which is the TDZ behaviour, not the `undefined`-value
-behaviour. The distinction is per-test: the *function-code* skip-tests want a
+behaviour. The distinction is per-test: the _function-code_ skip-tests want a
 binding that is **absent/TDZ before the block** (read → ReferenceError) and present
-after; the *repro B* in this issue wants `typeof f === "undefined"` before. **Both
+after; the _repro B_ in this issue wants `typeof f === "undefined"` before. **Both
 are satisfied by a single mechanism: model the outer binding as a TDZ var** (a
 local + a `__tdz_f` flag, flag=0 at entry, flag=1 after the block's declaration
-runs). A *direct read* of `f` before the block emits `emitLocalTdzCheck` →
+runs). A _direct read_ of `f` before the block emits `emitLocalTdzCheck` →
 ReferenceError (satisfies the function-code cluster). A `typeof f` before the block
 is special-cased to return `"undefined"` when the flag is 0 (satisfies repro B and
 ES `typeof`-on-uninitialised… see the note in Phase 2 below). This is exactly how
@@ -288,13 +298,13 @@ ES `typeof`-on-uninitialised… see the note in Phase 2 below). This is exactly 
 ### Phased rollout (case-A guard first — it is independently shippable)
 
 **Phase 1 (case A — the cancellation guard). ~Half the cluster, lowest risk.**
-Make an *ineligible* block-nested function name **not** resolve as an outer value.
+Make an _ineligible_ block-nested function name **not** resolve as an outer value.
 Today the bug is that `funcMap.get(name)` finds it unconditionally. Phase 1 does
-NOT add an outer binding at all — it *suppresses* the accidental outer visibility
+NOT add an outer binding at all — it _suppresses_ the accidental outer visibility
 when sd1's detector says `cancels=true`, so the existing `let`/`const` TDZ binding
 (or the genuine ReferenceError fallback) takes over.
 
-**Phase 2 (case B — the uninitialised-then-init lifecycle).** For *eligible*
+**Phase 2 (case B — the uninitialised-then-init lifecycle).** For _eligible_
 block-nested functions, create the TDZ outer var-binding, mark it initialised at
 the declaration's textual position, and special-case `typeof`.
 
@@ -305,7 +315,7 @@ Phase 2 builds on Phase 1's plumbing. Ship them as two PRs; Phase 1 is the floor
 
 ### Phase 1 — case-A cancellation guard
 
-**Goal:** when a block-nested `function F` is *ineligible* for the Annex B outer
+**Goal:** when a block-nested `function F` is _ineligible_ for the Annex B outer
 binding (intervening lexical shadow or param), a read of `F` in the enclosing scope
 outside the block must NOT resolve via `funcMap`.
 
@@ -327,23 +337,23 @@ outside the block must NOT resolve via `funcMap`.
   - **Important scoping nuance:** the detector must distinguish "direct function-body
     declaration" (a top-level statement of the function body — NOT block-nested, must
     keep current unconditional hoist) from "block-nested declaration" (reached via the
-    block recursion). The recursion structure already separates these: the *direct*
+    block recursion). The recursion structure already separates these: the _direct_
     decls are handled in the first `for` loop pass at lines 917–950 over the function
-    body's own `stmts`; the *block-nested* ones are reached via the recursive descent
+    body's own `stmts`; the _block-nested_ ones are reached via the recursive descent
     at 954–1005. Only the latter are Annex B candidates. Tag candidacy at the
     descent boundary so a direct decl is never marked cancelled.
 
 **File: `src/codegen/expressions/identifiers.ts`**
 
 - At the function-ref-as-value branch (line 766, `const funcRefIdx =
-  ctx.funcMap.get(name)`), add a guard **before** the `if (funcRefIdx !== undefined
-  && …)` block at line 778: if `fctx.annexBCancelled?.has(name)` AND the read site is
-  lexically *outside* the declaring block (use the TS checker / node position: the
+ctx.funcMap.get(name)`), add a guard **before** the `if (funcRefIdx !== undefined
+&& …)` block at line 778: if `fctx.annexBCancelled?.has(name)` AND the read site is
+  lexically _outside_ the declaring block (use the TS checker / node position: the
   identifier's position is not within the block that contains the
   `FunctionDeclaration`), skip the funcMap-as-value resolution and fall through to
   the undeclared-identifier path (lines 820+), which already emits a proper
   `ReferenceError` instance for a name with no in-scope value binding.
-  - **Do not** broadly disable funcMap resolution for the name — calls/reads *inside*
+  - **Do not** broadly disable funcMap resolution for the name — calls/reads _inside_
     the block must still resolve. The position check ("is this read inside the
     declaring block?") is what keeps the block-local binding intact. sd1's detector
     already computes the block boundary; expose the block node so the read site can
@@ -361,20 +371,20 @@ outside the block must NOT resolve via `funcMap`.
 
 ### Phase 2 — case-B uninitialised-then-init lifecycle (eligible functions)
 
-**Goal:** for an *eligible* block-nested `function F`, the enclosing scope gets a
+**Goal:** for an _eligible_ block-nested `function F`, the enclosing scope gets a
 var-binding for `F` that is in TDZ before the block and holds the function value
 after.
 
 **File: `src/codegen/statements/nested-declarations.ts` (in `hoistFunctionDeclarations`)**
 
-- For an *eligible* block-nested decl (detector `cancels===false`), during the
+- For an _eligible_ block-nested decl (detector `cancels===false`), during the
   hoist pass **pre-allocate the outer binding as a TDZ var** in the enclosing
   `fctx`, mirroring `ensureLetConstBindingPatternTdzFlags`
   (`index.ts:12151`) and `hoistLetConstWithTdz`:
   - `allocLocal(fctx, F, externref)` if not already present (the function value as a
     closure is an externref/closure-struct ref — match the type
     `emitCachedFuncClosureAccess` returns; externref is the safe widening).
-  - `allocLocal(fctx, `__tdz_${F}`, { kind: "i32" })` and register it in
+  - `allocLocal(fctx, `\__tdz_${F}`, { kind: "i32" })` and register it in
     `fctx.tdzFlagLocals.set(F, flagIdx)` — flag starts 0 (uninitialised) by Wasm
     zero-init.
   - Record `F` in a new `fctx.annexBOuterBindings: Set<string>` so the
@@ -396,6 +406,7 @@ branch, lines 218–236) — the textual-position init.**
   i32.const 1
   local.set $__tdz_F              ;; mark the Annex B outer binding initialised
   ```
+
   - Gate on `fctx.annexBOuterBindings?.has(F)` so non-Annex-B function decls are
     untouched (byte-identical).
   - Because the declaration is inside a block, this init runs only when control
@@ -407,7 +418,7 @@ branch, lines 218–236) — the textual-position init.**
 
 **File: `src/codegen/expressions/identifiers.ts` (read site).**
 
-- No new code needed for the *direct read*: once `F` is in `localMap` with a
+- No new code needed for the _direct read_: once `F` is in `localMap` with a
   `tdzFlagLocals` entry, the existing branch at lines 499–511 emits
   `emitLocalTdzCheck` (or static throw / skip) automatically. `analyzeTdzAccess`
   (called at line 504) already decides check-vs-throw-vs-skip from positions, and a
@@ -418,7 +429,7 @@ branch, lines 218–236) — the textual-position init.**
 **File: `src/codegen/typeof-delete.ts` (the `typeof F` special-case).**
 
 - `compileTypeofExpression` (`typeof-delete.ts:787`) currently const-folds `typeof
-  F` to `"function"` via `staticTypeofForType` (line 863) because the TS checker
+F` to `"function"` via `staticTypeofForType` (line 863) because the TS checker
   reports `F`'s symbol as a function type (it models the hoist). For an Annex B
   outer binding this is wrong before the block runs. Add a check **before** the
   static-fold at line 860–866: if the operand is a bare identifier `F` with
@@ -446,13 +457,13 @@ flag branch) plus the reused `emitLocalTdzCheck` IR (already exists,
 ### Edge cases (both phases)
 
 - **Direct (function-body-top-level) function decls are NOT Annex B** — they keep
-  the current unconditional hoist. Only declarations reached through the *block*
+  the current unconditional hoist. Only declarations reached through the _block_
   recursion are candidates. Verify the detector never marks a direct decl.
 - **Strict mode** — Annex B is disabled. Detect strictness (module code is always
   strict; a `"use strict"` directive in the function/global body, or an enclosing
   strict scope). When strict: do not create the outer binding and do not mark
   cancelled — the block function is purely block-scoped. test262 has explicit
-  strict-mode `function-code` variants asserting *no* outer binding; treat strict as
+  strict-mode `function-code` variants asserting _no_ outer binding; treat strict as
   "skip the whole Annex B path." (sd1's detector should already gate on strictness;
   confirm.)
 - **Name collides with a real `var F` in the enclosing scope** — then the outer
@@ -471,12 +482,12 @@ flag branch) plus the reused `emitLocalTdzCheck` IR (already exists,
 - **`for`/`while` block-nested decl** — the hoist recursion already descends into
   loop bodies (lines 980–993). The outer binding is allocated once; the init runs
   each iteration (idempotent: re-sets the same closure + flag).
-- **Nested intervening blocks** — the detector must scan *all* scopes between the
+- **Nested intervening blocks** — the detector must scan _all_ scopes between the
   declaring block and the enclosing function/global for a lexical shadow, not just
   the immediate parent. sd1's detector reportedly does this ("intervening" shadow);
   confirm it walks the full chain.
 - **`funcMap` value-read inside the block stays intact** — the Phase 1 guard is
-  position-scoped to *outside* the block; calls/reads of `F` inside its own block
+  position-scoped to _outside_ the block; calls/reads of `F` inside its own block
   resolve normally.
 
 ### Regression-mitigation & validation strategy
@@ -501,28 +512,28 @@ with no cancelled/eligible Annex B function emits byte-identical Wasm. Concretel
   Wasm is unchanged — proves the gating sets are truly inert when empty.
 - **CI is the conformance authority** — the dev does NOT run full test262 locally.
   The acceptance bar is `>=120` of the ~186 `annexB/language/{function-code,
-  global-code}` flipping to pass with **no regression** in the function/block
+global-code}` flipping to pass with **no regression** in the function/block
   suites. If Phase 1 alone lands the case-A ReferenceError subset cleanly, ship it
   and let Phase 2 take the case-B `typeof`/lifecycle subset.
 
 ### Exact change list
 
-| Phase | File | Function / line | Change |
-|-------|------|-----------------|--------|
-| both | `src/codegen/context/types.ts` | `FunctionContext` | add optional `annexBCancelled?: Set<string>` and `annexBOuterBindings?: Set<string>` |
-| 1 | `src/codegen/statements/nested-declarations.ts` | `hoistFunctionDeclarations` (832; block recursion 954–1005) | run sd1's `cancels` detector for block-nested decls; on cancel, record name in `fctx.annexBCancelled` (still compile body) |
-| 1 | `src/codegen/expressions/identifiers.ts` | before funcMap-as-value branch (~778) | skip funcMap resolution for `annexBCancelled` names read *outside* the declaring block → fall to ReferenceError path (826+) |
-| 2 | `src/codegen/statements/nested-declarations.ts` | `hoistFunctionDeclarations` | for *eligible* block-nested decls, pre-allocate outer TDZ var (`allocLocal` + `__tdz_${F}` flag in `tdzFlagLocals`); record in `annexBOuterBindings` |
-| 2 | `src/codegen/statements.ts` | `compileStatement` `isFunctionDeclaration` (218–236) | at textual position, `local.set` outer binding to the closure value + set `__tdz_${F}` flag to 1 (gated on `annexBOuterBindings`) |
-| 2 | `src/codegen/typeof-delete.ts` | `compileTypeofExpression` (787; before static fold 860–866) | for `annexBOuterBindings` identifier operand, emit `if $__tdz_F → "function" else "undefined"` instead of const-folding |
-| both | `tests/issue-2200-annexb-block-fn-hoist.test.ts` | new | repros A + B in sloppy + strict mode |
+| Phase | File                                             | Function / line                                             | Change                                                                                                                                               |
+| ----- | ------------------------------------------------ | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| both  | `src/codegen/context/types.ts`                   | `FunctionContext`                                           | add optional `annexBCancelled?: Set<string>` and `annexBOuterBindings?: Set<string>`                                                                 |
+| 1     | `src/codegen/statements/nested-declarations.ts`  | `hoistFunctionDeclarations` (832; block recursion 954–1005) | run sd1's `cancels` detector for block-nested decls; on cancel, record name in `fctx.annexBCancelled` (still compile body)                           |
+| 1     | `src/codegen/expressions/identifiers.ts`         | before funcMap-as-value branch (~778)                       | skip funcMap resolution for `annexBCancelled` names read _outside_ the declaring block → fall to ReferenceError path (826+)                          |
+| 2     | `src/codegen/statements/nested-declarations.ts`  | `hoistFunctionDeclarations`                                 | for _eligible_ block-nested decls, pre-allocate outer TDZ var (`allocLocal` + `__tdz_${F}` flag in `tdzFlagLocals`); record in `annexBOuterBindings` |
+| 2     | `src/codegen/statements.ts`                      | `compileStatement` `isFunctionDeclaration` (218–236)        | at textual position, `local.set` outer binding to the closure value + set `__tdz_${F}` flag to 1 (gated on `annexBOuterBindings`)                    |
+| 2     | `src/codegen/typeof-delete.ts`                   | `compileTypeofExpression` (787; before static fold 860–866) | for `annexBOuterBindings` identifier operand, emit `if $__tdz_F → "function" else "undefined"` instead of const-folding                              |
+| both  | `tests/issue-2200-annexb-block-fn-hoist.test.ts` | new                                                         | repros A + B in sloppy + strict mode                                                                                                                 |
 
 ### Handoff
 
 sd1 holds the implementation claim and owns the validated case-A `cancels`
 detector + root-cause. This plan deliberately builds on that detector and does NOT
 re-derive it. Open question for sd1 to confirm against the detector: (a) does it
-walk the *full* intervening scope chain (not just the immediate parent) for the
+walk the _full_ intervening scope chain (not just the immediate parent) for the
 lexical shadow; (b) does it already gate on strict mode; (c) can it expose the
 declaring-block node (or a position range) so the Phase-1 read-site containment
 check is cheap. If the detector already returns the block boundary, Phase 1 is a
@@ -577,10 +588,11 @@ floor is banked regardless; Phase 2 is parked here for a focused follow-up.
 
 **Regression profile (gate bucket output, baseline e6cf3a7, signature
 `d57ce880bc38ea96`):**
+
 - categories: `wasm_compile: 625`, `null_deref: 593`, `type_error: 143`, other 41.
 - top buckets (each >50): `Array/prototype/{some 115, every 113, filter 109,
-  map 93, forEach 86, reduceRight 69, reduce 58}`, `language/statements/
-  {function/dstr 88, generators/dstr 88, async-generator/dstr 52}`.
+map 93, forEach 86, reduceRight 69, reduce 58}`, `language/statements/
+{function/dstr 88, generators/dstr 88, async-generator/dstr 52}`.
 
 **Why it is genuinely Phase 2 (not drift):** PR #1767 ran its regression gate
 against the SAME fresh baseline seconds apart and was clean (+21, signature
@@ -620,3 +632,49 @@ correct typeof-resolution fix). PR #1769 lands **docs-only** (the Phase-2 source
 was reverted to origin/main so it carries ZERO source change — Phase 1 is already
 on main via #1764); it records the deferral and creates the #2552 rework issue.
 #2200 stays `in-progress` (Phase-1 shipped, Phase-2 → #2552).
+
+---
+
+## Measured evidence — the "eval blocker" is mostly this issue (2026-07-25, #3631 partition)
+
+Partitioning the ES5 `eval`-dependent failures re-attributes the large majority
+of them to **this** issue rather than to eval.
+
+Baseline: `loopdive/js2wasm-baselines` `test262-current.jsonl`, fetched
+2026-07-25 18:21. Population = ES5-classified (post-#3626 classifier),
+`eval`-dependent (`*/eval-code/` ∪ `built-ins/eval` ∪ source matches `eval(`),
+host lane: **775 tests, 484 not passing**.
+
+| bucket                                         | tests   | share      |
+| ---------------------------------------------- | ------- | ---------- |
+| `annexB/language/eval-code/*` (**this issue**) | **380** | **78.5 %** |
+| everything else                                | 104     | 21.5 %     |
+
+Every one of the 380 carries a **constant** eval string that the folder reaches
+and then deliberately declines, on the `funcDeclNeedsDynamicEvalPath` guard —
+i.e. precisely because the body contains a block/if/switch-nested
+`FunctionDeclaration` whose B.3.3 dual-binding semantics the splice does not
+implement. Static bail-reason breakdown of the 380: 204 `direct-const |
+FunctionDeclaration`, 112 `indirect-const | FunctionDeclaration`, 64 with an
+additional `FunctionExpression`/`ForIn`/`ForOf` node.
+
+Lane split for the whole `annexB/language/eval-code` directory (469 tests):
+
+| lane                   | pass    | rate      |
+| ---------------------- | ------- | --------- |
+| host                   | 89 /469 | 19 %      |
+| standalone (host-free) | 1 /469  | **0.2 %** |
+
+Within the host lane the family splits by where the `assert` call sits:
+
+| shape                                        | pass     | rate       |
+| -------------------------------------------- | -------- | ---------- |
+| `assert` **inside** the eval string (masked) | 0 / 144  | 0 %        |
+| `assert` **outside** the eval string         | 89 / 325 | **27.4 %** |
+
+The masked half is blocked earlier by #3633 (module bindings invisible to
+`__extern_eval`) and cannot be scored against B.3.3 until that lands. Treat
+27.4 % as the honest post-unmasking predictor, **not** 100 %.
+
+**Consequence for sizing:** the ES5 `eval` programme is not worth ~484 tests to
+eval work. It is worth ~104 to eval work and ~380 to this issue plus #3633.
