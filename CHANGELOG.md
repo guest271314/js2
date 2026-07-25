@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-### Added: reusable `FyiSourceExecutor` for external test262 integrations (#3598)
+### Added: reusable `FyiSourceExecutor` for external test262 integrations (#3599)
 
 - `FyiSourceExecutor` and `runTest` are now exported from the new
   `@loopdive/js2/test262-fyi` subpath (added to `package.json`'s `exports`

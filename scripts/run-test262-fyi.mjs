@@ -20,7 +20,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FYI_ROOT = join(ROOT, "test262-fyi", "data");
 const TEST262_ROOT = join(ROOT, "test262");
 
-// (#3598) Resolved lazily, relative to THIS module's own location, not to a
+// (#3599) Resolved lazily, relative to THIS module's own location, not to a
 // path baked in at repo-checkout time. esbuild flattens `import.meta.url` to
 // wherever the bundle actually lives when this file is bundled into
 // dist/test262-fyi-cli.js for npm publishing — so a plain `join(ROOT,

@@ -13,7 +13,7 @@ import { discoverFixtureGraph } from "./test262-fixture-graph.mjs";
 import { FyiSourceExecutor, runTest } from "./run-test262-fyi.mjs";
 import { enforceTest262FyiRuntime } from "./test262-fyi-runtime.mjs";
 
-// (#3598) Re-exported so external integrations that run many files in one
+// (#3599) Re-exported so external integrations that run many files in one
 // long-lived process (see `executeTestFile`'s `executor` param below) can
 // construct and reuse a `FyiSourceExecutor` themselves, instead of paying a
 // fresh Node start + full compiler-module load on every single-file
@@ -120,7 +120,7 @@ export function parseTest262Negative(source, flags = parseTest262Flags(source)) 
   return flags.has("negative") ? true : undefined;
 }
 
-// (#3598) `executor` lets a caller that runs many files in the same process —
+// (#3599) `executor` lets a caller that runs many files in the same process —
 // e.g. a persistent server wrapping this one-shot function — supply an
 // already-running `FyiSourceExecutor` and reuse its warm compiler/worker
 // across calls instead of paying a fresh Node start + full module load per

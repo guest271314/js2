@@ -1,5 +1,5 @@
 /**
- * #3598 — external callers must be able to reuse a FyiSourceExecutor across
+ * #3599 — external callers must be able to reuse a FyiSourceExecutor across
  * many executeTestFile() calls instead of paying a fresh compiler-module
  * load + worker fork per call (measured ~2.3-2.8s of pure fixed overhead per
  * test file through the one-shot js2-test262 CLI — see #3574's investigation
@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { FyiSourceExecutor, executeTestFile } from "../scripts/test262-fyi-cli.mjs";
 
-const TEST262_ROOT = mkdtempSync(join(tmpdir(), "js2-issue-3598-"));
+const TEST262_ROOT = mkdtempSync(join(tmpdir(), "js2-issue-3599-"));
 mkdirSync(join(TEST262_ROOT, "test"), { recursive: true });
 
 // Plain, unwrapped script body — matches what test262-fyi/data's read.js
@@ -34,7 +34,7 @@ afterAll(() => {
   rmSync(TEST262_ROOT, { recursive: true, force: true });
 });
 
-describe("#3598 FyiSourceExecutor reuse", () => {
+describe("#3599 FyiSourceExecutor reuse", () => {
   afterEach(() => {
     rmSync(join(TEST262_ROOT, "test", "sample.js2wasm"), { force: true });
   });
@@ -83,7 +83,7 @@ describe("#3598 FyiSourceExecutor reuse", () => {
     });
     // No direct handle to the internal executor from this call shape — the
     // meaningful assertion is that the call completes and returns a real
-    // verdict, matching pre-#3598 one-shot behavior exactly.
+    // verdict, matching pre-#3599 one-shot behavior exactly.
     expect(typeof result.pass).toBe("boolean");
   });
 });

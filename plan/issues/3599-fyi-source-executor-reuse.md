@@ -1,5 +1,5 @@
 ---
-id: 3598
+id: 3599
 title: "expose FyiSourceExecutor reuse for external test262 integrations + fix its worker-path resolution when published"
 status: done
 completed: 2026-07-25
@@ -13,7 +13,7 @@ assignee: ttraenkler
 related: [3284, 3285, 3349, 3574]
 ---
 
-# #3598 — external executor reuse for js2-test262 + a worker-path bug it exposed
+# #3599 — external executor reuse for js2-test262 + a worker-path bug it exposed
 
 ## Problem
 
