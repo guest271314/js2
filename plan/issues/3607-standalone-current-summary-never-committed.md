@@ -1,5 +1,5 @@
 ---
-id: 3598
+id: 3607
 title: "promote-baseline writes benchmarks/results/test262-standalone-current.json but never stages it — no correct in-repo source for the CURRENT standalone rate"
 status: done
 completed: 2026-07-25
@@ -12,7 +12,7 @@ created: 2026-07-25
 assignee: ttraenkler/dev-guard-tests
 ---
 
-# #3598 — the standalone CURRENT summary never reaches `main`
+# #3607 — the standalone CURRENT summary never reaches `main`
 
 ## Problem
 
@@ -93,3 +93,16 @@ properties must be preserved there:
 The end-to-end proof is the first `promote-baseline` run on `main` after this
 merges: `benchmarks/results/test262-standalone-current.json` should appear in
 that `[skip ci]` baseline commit.
+
+## Note — renumbered from #3598
+
+Originally filed as **#3598**, colliding with
+`plan/issues/3598-issue-id-gate-should-check-open-prs.md`, which landed on `main`
+via PR #3589. The merged PR keeps the id, so this branch renumbered to **#3607**
+(fresh id via `claim-issue.mjs --allocate`, then independently verified free on
+`main` and across every open PR). Purely mechanical: file rename plus the `id:`
+frontmatter and the heading. No other file referenced this id; no workflow, test
+or behaviour was touched.
+
+This was the **seventh** duplicate-id collision of 2026-07-24/25 — see #3598 for
+the evidence base and the proposed gate fix.
