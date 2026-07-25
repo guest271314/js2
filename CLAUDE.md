@@ -109,7 +109,11 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 ## Test262
 
 - test262.test.ts has no assertions — all vitest tests pass; conformance is tracked via report
-- Skip filters: eval, with, Proxy, SharedArrayBuffer, Temporal, WeakRef, FinalizationRegistry, dynamic import(), top-level-await
+- Skip filters (#3626 — VERIFY BEFORE TRUSTING THIS LINE): `eval` and `with` are **NOT** skipped —
+  those tests run and are counted against conformance (measured 2026-07-25: 826 eval-dependent /
+  512 failures, 171 `with` / 148 failures in the ES5 bucket alone). `top-level-await` IS feature-skipped
+  in `tests/test262-runner.ts`. The remaining historical entries (Proxy, SharedArrayBuffer, Temporal,
+  WeakRef, FinalizationRegistry, dynamic `import()`) were NOT re-verified and must not be assumed skipped.
 - Many previously-skipped features now supported: TypedArray, DataView, ArrayBuffer, delete, async, generators, for-of
 - Issues #618-#634 cover current failure patterns (from 2026-03-19 error analysis)
 - parseInt import: `(externref, f64) -> f64` with NaN sentinel for missing radix
@@ -339,7 +343,10 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 
 ### Agent work dispatch
 
-- **Two lanes run concurrently — partition the queue + gate every dispatch ([plan/method/lane-partition.md](plan/method/lane-partition.md)).** The queue is split by goal (Lane A = lead/opus: runtime-eval, error-model, dogfood, core-semantics, **all CI/infra/pipeline**; Lane B = fable/porffor: backend-agnostic-ir, ir-full-coverage, Porffor #3288, value-rep, standalone-gap #2860; broad goals = claim-first-wins). **Before dispatching ANY agent on #N, run the pre-dispatch gate:** `git log origin/main --grep="#N"` (not merged), no open PR for it, not claimed by the other lane on `origin/issue-assignments`. Any hit ⇒ adopt/close/route, do NOT start a parallel impl. `claim-issue.mjs` exit 0 is advisory (shared slug) — the grep-gate is the real check. Push branches to the **`fork`** so GitHub rejects dup PRs. This is the fix for the 2026-07-17 duplication (#3310/#3311/#3341/#3308 re-implemented by both lanes).
+- **Two lanes run concurrently — partition the queue + gate every dispatch ([plan/method/lane-partition.md](plan/method/lane-partition.md)).** The queue is split by goal (Lane A = lead/opus: runtime-eval, error-model, dogfood, core-semantics, **all CI/infra/pipeline**; Lane B = fable/porffor: backend-agnostic-ir, ir-full-coverage, Porffor #3288, value-rep, standalone-gap #2860; broad goals = claim-first-wins). **Before dispatching ANY agent on #N, run `node scripts/pre-dispatch-gate.mjs <N>`** (exit 0 clear / 1 STOP / 2 caution). It checks merged-ness from the issue FILE on main, open PRs, the `origin/issue-assignments` claim ref, issues that CITE #N, and — the check the hand-run version lacked — **issues that share #N's distinctive title terms**, plus those issues' own claims. Any BLOCKER ⇒ adopt/close/route, do NOT start a parallel impl.
+  - **Do NOT rely on `git log --grep="#N"` alone.** PR numbers and issue ids share ONE sequence, so it matches `Merge pull request #N` and reads as "already merged" when it is not (hit 2026-07-25 on #3571).
+  - **It caught nothing that day because the old gate could not.** All three hand checks PASSED for #3571 while #3603's S1 slice was the same work, actively claimed by another lane — overlap by *idiom*, not by id, with neither issue citing the other.
+  - **REMAINING BLIND SPOT the script cannot close:** a lane that has started but not yet claimed or pushed leaves no trace in main, open PRs, or the claim ref. **Claim at DISPATCH time** (`claim-issue.mjs <id> <agent> --branch <b>`), not at first push, or the next dispatcher is unprotected. `claim-issue.mjs` exit 0 is advisory (shared slug). Push branches to the **`fork`** so GitHub rejects dup PRs. This is the fix for the 2026-07-17 duplication (#3310/#3311/#3341/#3308 re-implemented by both lanes).
 - **Tech lead populates TaskList** — devs self-serve from it. No per-task dispatch messages needed.
 - **Owner pins + scope are how the auto-dispatcher is steered.** The native agent-teams auto-dispatcher only auto-offers tasks with **no `owner`**, and it does **not** read role. So the tech lead encodes routing in two places the dispatcher/agents actually honor:
   - **Set `owner` immediately** on any task pinned to a specific agent (e.g. an in-flight `[CONFLICT]` for a named senior-dev, or a one-PR migration). An ownerless `in_progress` task is the #1 mis-route cause — the dispatcher re-offers it. Reconcile (`TaskUpdate status=completed` the moment a PR merges) so stale entries never get re-offered.
@@ -414,7 +421,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 30,377 / 43,095 (70.5 %)
+**test262 conformance**: 30,390 / 43,098 (70.5 %)
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

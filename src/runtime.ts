@@ -3774,6 +3774,26 @@ function _structFieldWriteback(
 }
 
 /**
+ * `key`'s descriptor on `obj` or its prototype chain, WITHOUT firing a Proxy MOP
+ * trap (bailing on a Proxy link keeps #2017's trap ordering) and without
+ * throwing on an opaque WasmGC handle. Shared by `_safeSet`'s strict pre-check
+ * (#2017 / #2745 d) and its sloppy setter-propagation arm (#2899).
+ */
+function _lookupDescriptorNoProxy(obj: any, key: PropertyKey): PropertyDescriptor | undefined {
+  try {
+    for (let cur = obj; cur != null && (typeof cur === "object" || typeof cur === "function"); ) {
+      if (_isUserProxy(cur)) return undefined;
+      const d = Object.getOwnPropertyDescriptor(cur, key);
+      if (d) return d;
+      cur = Object.getPrototypeOf(cur);
+    }
+  } catch {
+    /* opaque handle → no descriptor knowable */
+  }
+  return undefined;
+}
+
+/**
  * Safe property set: works on both JS objects and WasmGC structs.
  *
  * When `exports` is provided AND `obj` is a WasmGC struct AND `key` is a
@@ -3979,47 +3999,18 @@ function _safeSet(
     }
     return;
   }
-  // (#2017) Strict [[Set]] pre-check on a plain JS object. The issue this PR
-  // fixes is narrow: a write to a getter-only OBJECT-LITERAL accessor must throw
-  // a catchable TypeError (§13.15.2 → §10.1.9) instead of silently no-oping.
-  // Object-literal accessors are always OWN properties, so we inspect ONLY the
-  // own descriptor and throw ONLY for a genuine getter-only accessor (has `get`,
-  // no `set`). Deliberately narrowed (#2017 regression fix):
-  //   - We do NOT walk the prototype chain. The old proto-walk called
-  //     `Object.getOwnPropertyDescriptor` on each prototype, which fires a Proxy
-  //     `getOwnPropertyDescriptor` trap as an observable side-effect and changed
-  //     trap ordering (built-ins/Proxy/set/call-parameters-prototype.js).
-  //   - We do NOT throw for non-writable DATA properties. These `__extern_set_strict`
-  //     calls also fire for ordinary member writes like `Math.E = 1` /
-  //     `Number.NaN = 1`, which in sloppy/noStrict script context (the test262
-  //     default) must silently no-op, not throw (S8.5_A9, S8.12.4_A1, S8.6.1_A1).
-  //     A non-writable data-property write that the engine itself surfaces under
-  //     a genuinely-strict caller is still propagated by the catch arm below.
-  // (#2745 d) An ACCESSOR property resolved along the prototype chain whose
-  // [[Set]] is present (e.g. the %ThrowTypeError% poison on a bound function's
-  // inherited `caller`/`arguments`, §10.4.1 / §10.2.4) — its setter exception
-  // must propagate, not be swallowed by the catch below. Resolved here so the
-  // write can run and any throw be re-raised.
+  // Strict [[Set]] pre-check (§13.15.2 → §10.1.9), by resolved descriptor kind:
+  //   getter-only accessor  → throw (#2017; silent no-op was the bug)
+  //   accessor WITH a setter → let the write run, re-raise its throw (#2745 d,
+  //                            e.g. the %ThrowTypeError% poison a bound function
+  //                            inherits for `caller`/`arguments`, §10.2.4)
+  //   non-writable data      → throw (§6.2.5.6 step 3.e via #3374)
+  // Skipped entirely for a sloppy Reference, where §10.1.9.2's "[[Set]] returned
+  // false" outcomes are silent — only a THROWING setter escapes, handled in the
+  // catch below. A Proxy anywhere on the chain also skips it (no MOP traps).
   let strictAccessorWrite = false;
   if (strict && (typeof key === "string" || typeof key === "symbol") && !_isUserProxy(obj)) {
-    // Walk obj + prototype chain for the property descriptor, bailing on any
-    // user Proxy link so we never fire a Proxy MOP trap (#2017 kept the check
-    // own-only for exactly this reason; the explicit proxy guard lets us look
-    // up the chain safely now).
-    let cur: any = obj;
-    let desc: PropertyDescriptor | undefined;
-    while (cur != null && (typeof cur === "object" || typeof cur === "function")) {
-      if (_isUserProxy(cur)) {
-        desc = undefined;
-        break;
-      }
-      const d = Object.getOwnPropertyDescriptor(cur, key as PropertyKey);
-      if (d) {
-        desc = d;
-        break;
-      }
-      cur = Object.getPrototypeOf(cur);
-    }
+    const desc = _lookupDescriptorNoProxy(obj, key as PropertyKey);
     if (desc) {
       if ((desc.get || desc.set) && !desc.set) {
         // Getter-only accessor (own or inherited) → strict [[Set]] throws.
@@ -4055,6 +4046,15 @@ function _safeSet(
     // case PutValue requires the TypeError to propagate. Sloppy writes keep the
     // legacy silent fallback below.
     if (strict) throw e;
+    // (#2899) …but sloppy silence covers ONLY [[Set]] RETURNING false. §10.1.9.2
+    // step 3 CALLS the setter, and its abrupt completion propagates whatever the
+    // Reference's strictness — so `bound.caller = {}` must throw in sloppy code
+    // too (%ThrowTypeError% poison from %FunctionPrototype%). Resolved lazily on
+    // this already-exceptional path; setter-less cases stay silent below.
+    if (typeof key === "string" || typeof key === "symbol") {
+      const desc = _lookupDescriptorNoProxy(obj, key as PropertyKey);
+      if (desc && desc.set) throw e;
+    }
     // The sloppy helper retains the legacy silent fallback because this runtime
     // module is itself strict: the native assignment can throw even when the
     // compiled source Reference was non-strict.
@@ -13966,23 +13966,67 @@ assert._isSameValue = isSameValue;
             }
           }
         }
+        // (#3486) A registered fnctor instance's `.constructor` back-pointer.
+        // `function MyError(m){this.message=m}; new MyError()` lowers to a
+        // bespoke `$__fnctor_MyError` struct; the instance → ctor-closure link
+        // is recorded by the `__register_fnctor_instance` import (#1712). Answer
+        // `.constructor` with the SAME closure the bare `MyError` identifier
+        // resolves to, wrapped through the identity-stable `_hostCallableCache`
+        // so (a) `typeof inst.constructor === "function"` holds, (b) `.name`
+        // reads the codegen-stamped sidecar name, and (c) the wrapper unwraps
+        // to its closure target in `_hostStrictEqual`, which is what compiled
+        // `===` on two externrefs routes through (`__host_eq`). That makes
+        // `thrown.constructor === MyError` — the identity check inside
+        // test262's `assert.throws` — genuinely true.
+        //
+        // Placed BEFORE the vec arm below: both are `_isWasmStruct` arms and the
+        // instance→ctor link is the more specific identity. It cannot claim a
+        // genuine vec (a vec is never a registered fnctor instance) and cannot
+        // claim a class instance (those return through the sidecar / `__sget_`
+        // paths above, long before here).
+        if (key === "constructor" && obj != null && _isWasmStruct(obj) && _canBeWeakKey(obj)) {
+          const ctorClosure = _fnctorInstanceCtor.get(obj);
+          if (ctorClosure != null) {
+            return ctorClosure;
+          }
+        }
         // #1057 — vec wrapper structs (results of String.prototype.split,
         // Array.prototype.map, etc.) must report `.constructor === Array`.
         // Only fire AFTER _safeGet and __sget_ fallback return nothing —
         // class instances with sidecar constructors or struct getters are
-        // already handled above. Use __vec_len to positively identify vec
-        // wrappers: it returns a number for vecs and throws for non-vecs.
-        // (fieldNames === null was too broad — closure structs also lack
-        // field names, causing 1545 range_error regressions.)
+        // already handled above.
+        //
+        // (#3486) Gate on the POSITIVE `__is_vec` discriminator, not on
+        // `typeof __vec_len(obj) === "number"`. That old test was VACUOUS:
+        // `__vec_len`'s not-a-vec default is `0` (see the ref.test dispatch
+        // chain in codegen/vec-access-exports.ts — it returns 0, it does not
+        // throw), and `typeof 0 === "number"`, so EVERY WasmGC struct reaching
+        // this arm was reported as an Array. That is the root cause of #3486:
+        // a caught `new MyError()` answered `.constructor.name === "Array"`.
+        // The same vacuity was already fixed at the other `__vec_len` call
+        // sites by #2836; this arm was missed. `__is_vec` is emitted by the
+        // same pass as `__vec_len` (`_emitVecAccessExportsInner`), so the
+        // legacy branch below is reachable only if that pass half-emitted;
+        // it is kept so such a module keeps its pre-#3486 bytes rather than
+        // silently losing `vec.constructor === Array`.
         if (key === "constructor" && obj != null && _isWasmStruct(obj)) {
           const exports = callbackState?.getExports();
+          const isVec = exports?.__is_vec as ((v: any) => number) | undefined;
           const vecLen = exports?.__vec_len;
-          if (typeof vecLen === "function") {
+          if (typeof isVec === "function") {
+            try {
+              if (isVec(obj) === 1) {
+                // (#779c) Return sandbox.Array when test262 sandbox is active,
+                // so `vec.constructor === Array` (sandbox.Array) holds.
+                return globalSandbox?.Array ?? Array;
+              }
+            } catch {
+              // Not a vec wrapper — fall through
+            }
+          } else if (typeof vecLen === "function") {
             try {
               const len = vecLen(obj);
               if (typeof len === "number") {
-                // (#779c) Return sandbox.Array when test262 sandbox is active,
-                // so `vec.constructor === Array` (sandbox.Array) holds.
                 return globalSandbox?.Array ?? Array;
               }
             } catch {

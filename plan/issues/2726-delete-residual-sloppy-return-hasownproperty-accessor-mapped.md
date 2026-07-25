@@ -3,7 +3,7 @@ id: 2726
 title: "delete residual: sloppy return-value semantics, hasOwnProperty-after-delete, accessor descriptor configurability, mapped-arguments delete"
 status: ready
 sprint: current
-goal: test262-conformance
+goal: es5
 feasibility: medium
 depends_on: []
 priority: medium

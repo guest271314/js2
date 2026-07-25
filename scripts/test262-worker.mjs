@@ -18,6 +18,10 @@ import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bun
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
+// (#3613) ONE renderer, shared with tests/test262-runner.ts. The worker's
+// behaviour is unchanged — these bodies moved here verbatim; it is the LOCAL
+// runner that was missing the tryNativeExnRender step.
+import { safeStringifyThrown, tryNativeExnRender } from "./lib/wasm-exn-render.mjs";
 import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
@@ -1185,16 +1189,11 @@ async function doCompile(
  * the test's failure — masking the REAL signature behind a phantom TypeError and
  * collapsing ~2,014 heterogeneous standalone failures onto one string (#2862).
  */
-function safeStringifyThrown(v) {
-  try {
-    return String(v);
-  } catch {
-    const t = typeof v;
-    return t === "object" || t === "function"
-      ? "uncaught Wasm-GC exception (non-stringifiable payload)"
-      : `uncaught Wasm exception (${t})`;
-  }
-}
+// (#3613) Behaviour-identical: this body moved verbatim into the SHARED
+// renderer so the local runner cannot drift from it again. The doc comment
+// above is retained for the #2870/#2862 history.
+// oracle-version-exempt: pure de-duplication — the worker's policy is
+// unchanged (it IS the shared policy), so no baseline row can reclassify.
 
 /**
  * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
@@ -1204,23 +1203,10 @@ function safeStringifyThrown(v) {
  * `$Error_struct` renders "TypeError: boom" per §20.5.3.4 and a Test262Error
  * yields its real assertion message. Returns `null` when the exports are
  * absent (JS-host binaries), the payload renders empty, or anything throws —
- * the caller then falls back to the #2870 opaque label. Kept in sync with
- * `tryNativeExnRender` in tests/test262-runner.ts.
+ * the caller then falls back to the #2870 opaque label. (#3613) NO LONGER
+ * "kept in sync with tests/test262-runner.ts" by discipline — both lanes now
+ * import the one implementation in scripts/lib/wasm-exn-render.mjs.
  */
-function tryNativeExnRender(instance, payload) {
-  try {
-    const prep = instance?.exports?.__exn_render_prepare;
-    const chr = instance?.exports?.__exn_render_char;
-    if (typeof prep !== "function" || typeof chr !== "function") return null;
-    const len = prep(payload);
-    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
-    let out = "";
-    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
-    return out;
-  } catch {
-    return null;
-  }
-}
 
 function extractWasmExceptionMessage(err, instance) {
   if (err instanceof WebAssembly.Exception) {
