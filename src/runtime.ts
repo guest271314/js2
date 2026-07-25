@@ -3774,6 +3774,26 @@ function _structFieldWriteback(
 }
 
 /**
+ * `key`'s descriptor on `obj` or its prototype chain, WITHOUT firing a Proxy MOP
+ * trap (bailing on a Proxy link keeps #2017's trap ordering) and without
+ * throwing on an opaque WasmGC handle. Shared by `_safeSet`'s strict pre-check
+ * (#2017 / #2745 d) and its sloppy setter-propagation arm (#2899).
+ */
+function _lookupDescriptorNoProxy(obj: any, key: PropertyKey): PropertyDescriptor | undefined {
+  try {
+    for (let cur = obj; cur != null && (typeof cur === "object" || typeof cur === "function"); ) {
+      if (_isUserProxy(cur)) return undefined;
+      const d = Object.getOwnPropertyDescriptor(cur, key);
+      if (d) return d;
+      cur = Object.getPrototypeOf(cur);
+    }
+  } catch {
+    /* opaque handle → no descriptor knowable */
+  }
+  return undefined;
+}
+
+/**
  * Safe property set: works on both JS objects and WasmGC structs.
  *
  * When `exports` is provided AND `obj` is a WasmGC struct AND `key` is a
@@ -3979,47 +3999,18 @@ function _safeSet(
     }
     return;
   }
-  // (#2017) Strict [[Set]] pre-check on a plain JS object. The issue this PR
-  // fixes is narrow: a write to a getter-only OBJECT-LITERAL accessor must throw
-  // a catchable TypeError (§13.15.2 → §10.1.9) instead of silently no-oping.
-  // Object-literal accessors are always OWN properties, so we inspect ONLY the
-  // own descriptor and throw ONLY for a genuine getter-only accessor (has `get`,
-  // no `set`). Deliberately narrowed (#2017 regression fix):
-  //   - We do NOT walk the prototype chain. The old proto-walk called
-  //     `Object.getOwnPropertyDescriptor` on each prototype, which fires a Proxy
-  //     `getOwnPropertyDescriptor` trap as an observable side-effect and changed
-  //     trap ordering (built-ins/Proxy/set/call-parameters-prototype.js).
-  //   - We do NOT throw for non-writable DATA properties. These `__extern_set_strict`
-  //     calls also fire for ordinary member writes like `Math.E = 1` /
-  //     `Number.NaN = 1`, which in sloppy/noStrict script context (the test262
-  //     default) must silently no-op, not throw (S8.5_A9, S8.12.4_A1, S8.6.1_A1).
-  //     A non-writable data-property write that the engine itself surfaces under
-  //     a genuinely-strict caller is still propagated by the catch arm below.
-  // (#2745 d) An ACCESSOR property resolved along the prototype chain whose
-  // [[Set]] is present (e.g. the %ThrowTypeError% poison on a bound function's
-  // inherited `caller`/`arguments`, §10.4.1 / §10.2.4) — its setter exception
-  // must propagate, not be swallowed by the catch below. Resolved here so the
-  // write can run and any throw be re-raised.
+  // Strict [[Set]] pre-check (§13.15.2 → §10.1.9), by resolved descriptor kind:
+  //   getter-only accessor  → throw (#2017; silent no-op was the bug)
+  //   accessor WITH a setter → let the write run, re-raise its throw (#2745 d,
+  //                            e.g. the %ThrowTypeError% poison a bound function
+  //                            inherits for `caller`/`arguments`, §10.2.4)
+  //   non-writable data      → throw (§6.2.5.6 step 3.e via #3374)
+  // Skipped entirely for a sloppy Reference, where §10.1.9.2's "[[Set]] returned
+  // false" outcomes are silent — only a THROWING setter escapes, handled in the
+  // catch below. A Proxy anywhere on the chain also skips it (no MOP traps).
   let strictAccessorWrite = false;
   if (strict && (typeof key === "string" || typeof key === "symbol") && !_isUserProxy(obj)) {
-    // Walk obj + prototype chain for the property descriptor, bailing on any
-    // user Proxy link so we never fire a Proxy MOP trap (#2017 kept the check
-    // own-only for exactly this reason; the explicit proxy guard lets us look
-    // up the chain safely now).
-    let cur: any = obj;
-    let desc: PropertyDescriptor | undefined;
-    while (cur != null && (typeof cur === "object" || typeof cur === "function")) {
-      if (_isUserProxy(cur)) {
-        desc = undefined;
-        break;
-      }
-      const d = Object.getOwnPropertyDescriptor(cur, key as PropertyKey);
-      if (d) {
-        desc = d;
-        break;
-      }
-      cur = Object.getPrototypeOf(cur);
-    }
+    const desc = _lookupDescriptorNoProxy(obj, key as PropertyKey);
     if (desc) {
       if ((desc.get || desc.set) && !desc.set) {
         // Getter-only accessor (own or inherited) → strict [[Set]] throws.
@@ -4055,6 +4046,15 @@ function _safeSet(
     // case PutValue requires the TypeError to propagate. Sloppy writes keep the
     // legacy silent fallback below.
     if (strict) throw e;
+    // (#2899) …but sloppy silence covers ONLY [[Set]] RETURNING false. §10.1.9.2
+    // step 3 CALLS the setter, and its abrupt completion propagates whatever the
+    // Reference's strictness — so `bound.caller = {}` must throw in sloppy code
+    // too (%ThrowTypeError% poison from %FunctionPrototype%). Resolved lazily on
+    // this already-exceptional path; setter-less cases stay silent below.
+    if (typeof key === "string" || typeof key === "symbol") {
+      const desc = _lookupDescriptorNoProxy(obj, key as PropertyKey);
+      if (desc && desc.set) throw e;
+    }
     // The sloppy helper retains the legacy silent fallback because this runtime
     // module is itself strict: the native assignment can throw even when the
     // compiled source Reference was non-strict.
