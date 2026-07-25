@@ -58,6 +58,28 @@ returning 1/0. It is emitted by the **same pass** as `__vec_len` (both
 unconditional once `ctx.vecTypeMap` is non-empty), so it is available wherever
 `__vec_len` is.
 
+**Root cause of the BUG** is the paragraph above: a length accessor used as a
+predicate. **Root cause of its SURVIVAL** is separate and is the next section —
+these are two different failures and fixing only the first leaves the second
+free to reintroduce it.
+
+## Sizing note — this was a population, not a sample
+
+The task that opened this issue named **two** surviving sites. The enumeration
+found **ten reachable** ones, and the two named were the *least* damaging of the
+set (both masked by `__struct_field_names`; one, `looksMarshalable`, produces the
+correct outcome despite the vacuous test). The unmasked sites were the harmful
+ones: `[0].concat({x:1})` silently **dropping the argument** and
+`[{x:1}].flat()` **destroying the element** are data-loss bugs, not cosmetic
+discriminator slips.
+
+**Size by enumeration, never from a sample.** A defect class that shares one
+root cause is a *population* — every site with the shared cause is affected until
+individually proven otherwise, so the count comes from walking all of them, not
+from extrapolating the ones already noticed. Three independent misestimates the
+same day (this one under-called, a trap bucket over-called 2.7×, and a 41-vs-11
+count) all had this shape.
+
 ## Why it kept surviving review
 
 Three reinforcing reasons, all addressed here:
@@ -65,12 +87,17 @@ Three reinforcing reasons, all addressed here:
 1. **No named predicate existed.** Every site open-coded the probe, so "is this
    a vec?" had no single answer to review, and each new site was written by
    copy-pasting a neighbour.
-2. **False comments.** `_toJsArrayDeep`'s doc said "A non-vec value passes
-   through unchanged"; `tryVecLen`'s said "Returns … -1 when `x` is not a vec";
+2. **Comments that asserted a guard which did not exist — the primary survival
+   mechanism.** `_toJsArrayDeep`'s doc said "A non-vec value passes through
+   unchanged"; `tryVecLen`'s said "Returns … -1 when `x` is not a vec";
    `wrapExports`'s step list said "If `__vec_len(val)` returns a number ≥ 0 → vec
-   wrapper". All three were **false**, and all three read as if the site were
-   already guarded. (#3486 recorded the same pattern: "a false comment is what
-   let it survive review.")
+   wrapper". All three were **false**. The damning detail: these are **exactly
+   the three sites with no mask at all**. The comment was doing the mask's job
+   *in the reader's head* — a reviewer checking "is this guarded?" read the
+   comment, found the guarantee stated, and moved on. That is how one defect
+   cleared review at eight separate sites over three issues. A false comment on
+   an unguarded site is worse than no comment: it converts an obvious gap into
+   an invisible one. (#3486 recorded the same pattern one issue earlier.)
 3. **Partial masking.** Several sites sat behind a `_getStructFieldNames(v) ===
    null` pre-filter, which hides the bug for the common case (a struct with
    named fields) and leaves it live for field-less structs. That made the
