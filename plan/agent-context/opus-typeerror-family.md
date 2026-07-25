@@ -1,11 +1,19 @@
-# opus-typeerror-family — context dump (PAUSED 2026-07-25)
+# opus-typeerror-family — context dump (CLOSED 2026-07-25)
 
 Lane: standalone `type_error` (3,038) + `runtime_error` (113) + `promise_error`
-(54) + `range_error` (18). Paused mid-flight by the tech lead for box
-oversubscription. **Work in progress is committed-ready on branch
-`issue-3616-standalone-bigint-ta-ctor-value`** in worktree
-`/workspace/.claude/worktrees/agent-ac28deeda1c1e07e1/` (uncommitted at pause —
-see "Resume steps").
+(54) + `range_error` (18).
+
+**Outcome.** One root cause found, fixed and landed: **#3616** (PR #3608, merged
+`1f04fafab`) — BigInt TypedArray constructors were `null` in value position under
+standalone. Measured gross +2 / −1, net +1 on a 22-row sample; **~14 % of the
+627-row cluster converted**, which is the lane's most transferable result (see
+the symptom-label warning below). One PR-saving **negative** result recorded: the
+235 `Array.prototype.<m> is not yet callable as a value` rows are a masking
+artifact, not a gap. The rest of the lane is untouched and ranked at the bottom
+of this file.
+
+Lane closed with the fleet reduction; nothing is in flight and no claims are
+held (#3616 released as `done`). This file is the handoff.
 
 ## Data provenance
 
@@ -206,16 +214,68 @@ ttraenkler/<agent> --branch issue-3616-standalone-bigint-ta-ctor-value --force`.
 
 ## Unexamined, ranked, for whoever picks this lane up next
 
-1. **Temporal 213** rows inside the same `Cannot access property on null or
-undefined` signature — likely the same "constructor/namespace is null as a
-   value" shape, different builtin. Cheapest next probe: repeat the `.tmp/t5.ts`
-   pattern with `Temporal.*` names.
-2. **`Cannot convert undefined or null to object` (400)** — TypedArray 64,
+> **These are SYMPTOM LABELS, not causes — do not size a fix from a bucket
+> count.** Every number below is "rows sharing an error string", which is a
+> cross-section of unrelated defects, not a work item. Three independent
+> confirmations on 2026-07-25: (a) the trap lane's largest bucket dissolved into
+> unrelated defects that merely shared one stack frame; (b) the 1,128-row
+> `Cannot access property on null or undefined` signature split into ≥3
+> unrelated causes (BigInt ctors 627 / Temporal 213 / rest 288); (c) even
+> _within_ the single verified root cause of #3616, fixing it converted only
+> **14 %** of its 627 rows — the defect was necessary but not sufficient, and the
+> other ~86 % proceeded to a _different_ downstream defect. Treat each cluster as
+> a population to sample and root-cause per-cause, and expect a ladder of
+> defects behind each row rather than one fix. **Always verify with a real repro
+> before committing to a cluster** (and see the `runTest262File` warning below —
+> the category label itself can be wrong).
+
+1. **`Cannot access property on null or undefined` — 1,128 total**, the largest
+   single signature in the lane, and the proof that these labels are symptoms:
+   it splits into BigInt TypedArray ctors 627 (root-caused and fixed by #3616,
+   but only ~14 % converted), Temporal 213, and other 288 — at least three
+   unrelated causes. The 627 sub-population is **not closed**; it is now a stack
+   of downstream defects behind the fixed constructor.
+2. **Temporal 213** rows inside that same signature — plausibly the same
+   "constructor/namespace is null as a value" shape as #3616, different builtin.
+   Cheapest next probe: repeat the `.tmp/t5.ts` pattern with `Temporal.*` names.
+   Unverified.
+3. **`Cannot convert undefined or null to object` (400)** — TypedArray 64,
    Date 53, annexB 38, Symbol 21. Not yet root-caused.
-3. **`Cannot read properties of undefined (reading a class field)` (111)** —
-   evenly split language/expressions 56 / language/statements 55, so likely one
-   codegen shape.
-4. **`Object method called on null or undefined` (83)** — annexB-dominated (64).
+4. **`Cannot read properties of undefined (reading a class field)` (111)** —
+   evenly split language/expressions 56 / language/statements 55, so _possibly_
+   one codegen shape. Unverified — the even split is suggestive, not evidence.
+5. **`Object method called on null or undefined` (83)** — annexB-dominated (64).
+
+## Standing rule: `runTest262File` cannot classify a standalone failure
+
+Learned the hard way here; it cost this lane and the `assertion_fail` lane real
+time on the same day. `runTest262File` (`tests/test262-runner.ts`) is **not** the
+CI path — it does not use `tryNativeExnRender`, so a standalone Wasm-GC payload
+renders as `uncaught Wasm-GC exception (non-stringifiable payload)`. Downstream
+of that opaque string, **both the error category and the reported line number
+are wrong**: on #3616 it reported category `other`, a null innermost frame, and
+`at L16` (a top-level assertion) for a row whose real failure was
+`Test262Error: following shrink (out of bounds)` — category `assertion_fail` —
+deep inside a harness callback. That manufactured a false blocker (an apparently
+frameless trap-tier row, which no allowance can excuse).
+
+**Only pass/fail STATUS from `runTest262File` is trustworthy.** Any question
+about category, message, or location must go through the CI-equivalent path:
+
+```
+assembleOriginalHarness → CompilerPool(n, "unified") → scripts/test262-worker.mjs
+```
+
+Working harness: `.tmp/run-pool.mts` (pool size 1 for a single row). It needs two
+generated bundles that are gitignored and not in the tree:
+
+```bash
+npx esbuild scripts/compiler-bundle-entry.ts --bundle --platform=node --format=esm \
+  --outfile=scripts/compiler-bundle.mjs --external:typescript --external:binaryen \
+  --external:@typescript/native-preview '--external:@typescript/native-preview/*'
+npx esbuild src/runtime.ts --bundle --platform=node --format=esm \
+  --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
+```
 
 ## Out-of-lane handoffs
 
