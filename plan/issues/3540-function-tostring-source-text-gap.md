@@ -11,7 +11,7 @@ reasoning_effort: high
 task_type: feature
 area: codegen, runtime
 language_feature: function
-goal: es5-complete
+goal: es5
 related: [3024, 3534, 1337, 1632]
 ---
 
