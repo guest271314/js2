@@ -537,18 +537,48 @@ three-arm A/B (`VP_LANE=host` armA / armA2 / armB in `plan/probes/3603/ab.mts`)
 in one clean window on one SHA — see the provenance rules in the host-lane
 section above. **Expect the host number to go DOWN**; that is the point.
 
-### ⚠ Before starting S2 (standalone / root cause A): RE-MEASURE
+### S2 (standalone / root cause A) re-measure — MECHANISM half done, REACH half still stale
 
-The standalone numbers in this issue were taken on `ab69ad9d2`
-(2026-07-24 23:00). **#3592's arity de-vacuification landed at `bbe94d090`
-(2026-07-25 16:56) — ~18 h later** — and #3468 (standalone function-object own
-properties) closed the same day as the measured base, so its inclusion is
-unverified. Both are _standalone vacuity fixes_. The **mechanism** described in
-root cause A (object literals lower to a typed WasmGC struct with no `$Object`
-own-property table) is probably still real, but **the numbers attached to it
-are stale and its reach is unknown**. Re-run `plan/probes/3603/ab.mts` on
-current `main` before writing any code for S2; if the arm re-measures as
-resolved, say so and close that half — that is a complete result.
+**Why a re-measure was needed.** The standalone numbers in this issue were
+taken on `ab69ad9d2` (2026-07-24 23:00). **#3592's arity de-vacuification
+landed at `bbe94d090` (2026-07-25 16:56) — ~18 h later** — and #3468
+(standalone F1 / honest floor) merged at `f1195c1d7`. Both are _standalone
+vacuity fixes_, so the standalone arm's reach could have been partly or wholly
+resolved out from under the measurement. Acting on a measurement taken against
+a base that has since moved is the exact trap this project keeps hitting.
+
+**Mechanism: re-measured on current `main`, and it STILL REPRODUCES.**
+
+- Base: `upstream/main` @ `b9632af3f`. Verified by
+  `git merge-base --is-ancestor`: **`bbe94d090` (#3592) IS an ancestor**
+  (`declaredArity` is present in `src/codegen/closure-exports.ts`), and
+  **`f1195c1d7` (#3468 F1) IS an ancestor**. So both standalone vacuity fixes
+  are in the tree that was measured.
+- Probe: `plan/probes/3603/inner3.mts` (the committed fix-boundary table),
+  standalone lane, re-run unmodified.
+- Result: **bit-identical to the table in this issue.** Object literal,
+  `{}` + static-key assign, `Object.defineProperty`, a literal passed through
+  an `any` parameter, and the `Math` namespace all still report **zero own
+  properties** across all five MOP queries (`hasOwnProperty`, `gOPD`,
+  `getOwnPropertyNames`, `Object.keys`, `for-in`). The promoting shapes
+  (computed-key write, `new Object()`, `Object.create(null)`, `JSON.parse`,
+  spread) all still answer correctly, and `Object.assign({}, {a:1})` is still
+  false with `gOPD` still THROWing.
+
+So **root cause A is a live defect on current `main`, not an artifact of the
+stale base** — #3592 and #3468 did not touch it. S2 remains real work.
+
+**What IS still stale: the REACH.** The `158 / 161 sampled-passing` arm-B
+figure was measured on `ab69ad9d2` and has NOT been re-derived. Do not quote
+it, and do not scale it. Re-running it needs all three arms (A, A2, B) of
+`plan/probes/3603/ab.mts` in one clean window on one SHA — it was not run here
+because three agent lanes were active and the box's concurrency ceiling
+matters (the original host-lane run was abandoned at ~350/600 for exactly this
+reason). **Measure it before any S2 number is reported.**
+
+> Note the two halves are independent: "the mechanism still reproduces" says
+> nothing about how many tests it still gates. A cluster sharing one root cause
+> is a population, not a delta.
 
 ## Reproduction
 
