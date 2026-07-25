@@ -12,7 +12,7 @@ task_type: ci
 area: ci, merge-queue
 goal: release-pipeline
 related: [2531, 2547, 1616]
-origin: "PR-queue shepherd, 2026-07-24. Three duplicate-id collisions in ~90 min; one was invisible at PR level and surfaced as a merge_group auto-park, and one slipped past --allocate's own open-PR scan."
+origin: "PR-queue shepherd, 2026-07-24/25. FIVE duplicate-id collisions in ~3h across four lanes; THREE surfaced only as merge_group auto-parks, one of those against a stale head whose renumber had already landed."
 ---
 
 # #3598 — the issue-id gate checks `main` but not open PRs, so collisions surface as merge-queue parks
@@ -41,7 +41,7 @@ The collision only materialises once the first one merges. Depending on timing:
   needs a human/shepherd to diagnose, and a parked PR is skipped by
   `auto-enqueue`, so it strands until someone intervenes.
 
-## Evidence — three collisions, 2026-07-24, within ~90 minutes
+## Evidence — five collisions, 2026-07-24/25, within ~3 hours
 
 **Collision A — id 3584** (`plan/issues/3584-*`): PR #3577 vs PR #3579. Caught at
 PR level, but only because #3577 merged first. `--allocate` had reserved the id
@@ -65,7 +65,7 @@ was being written it was itself allocated id 3597 — which PR #3585
 (`plan/issues/3597-auto-park-step-aware.md`, opened `23:15:13Z`) had already
 taken. This file was renumbered to **#3598**; #3585 was ~12 min earlier and keeps 3597.
 
-Collision C is the most informative of the three, because **`--allocate` should
+Collision C is the most informative of the five, because **`--allocate` should
 have prevented it and did not**. PR #3585 was already open when
 `claim-issue.mjs --allocate` handed out 3597 at `23:27:46Z`, yet the open-PR scan
 did not see its added file. So the open-PR scan is not merely _absent from the
@@ -76,6 +76,41 @@ treated as authoritative on its own, which strengthens the case for enforcing at
 the gate: **verification at merge-decision time beats reservation at allocation
 time.** A manual per-PR scan for the replacement id (3598) found it genuinely
 free.
+
+**Collision D — id 3597 again, and it reached the merge queue.** After Collision
+C was resolved by renumbering this file to 3598, PR #3585 **merged**, putting
+`3597-auto-park-step-aware.md` on `main` — and PR #3589 (which then still carried
+the old `3597-issue-id-gate-*.md`) was **auto-parked** by the `merge_group`
+duplicate-id gate.
+
+Collision D exposes a failure mode that **no amount of allocation-time discipline
+can fix**: the renumber commit had _already landed on the branch_, but the
+merge-group run had started **before** that push, so the queue validated a
+**stale head** and parked a PR that was already correct. Reservation hygiene
+cannot help here — only a PR-level check that sees the _current_ head against the
+_current_ set of open PRs.
+
+**Collision E — id 3598, this file's own replacement id.** PR #3593
+(`3598-fyi-source-executor-reuse.md`, opened `00:56:47Z`) collided with this file
+once #3589 merged at `01:07:37Z`. Again invisible at PR level; again surfaced
+only as a `merge_group` auto-park. Renumbered to **#3599**.
+
+### Tally
+
+**Five collisions in ~3 hours**, across four independent lanes:
+
+| #   | id   | PRs            | surfaced at                  |
+| --- | ---- | -------------- | ---------------------------- |
+| A   | 3584 | #3577 vs #3579 | PR level (lucky)             |
+| B   | 3589 | #3582 vs #3581 | **merge queue**              |
+| C   | 3597 | #3585 vs #3589 | pre-emptive sweep            |
+| D   | 3597 | #3585 vs #3589 | **merge queue** (stale head) |
+| E   | 3598 | #3589 vs #3593 | **merge queue**              |
+
+**Three of five surfaced only in the merge queue**, each costing an auto-park,
+a diagnosis, and a manual `hold` removal. One (C) was caught only because a
+shepherd happened to run a manual sweep. Exactly one was caught by the intended
+mechanism, and that was luck of merge ordering.
 
 ## Root cause of the collisions themselves (why this will recur)
 
@@ -112,6 +147,11 @@ Design points:
 - **Fail soft on API unavailability.** The open-PR scan needs network; if it
   cannot run, warn rather than blocking every PR on a GitHub outage. The existing
   against-main check stays hard.
+- **Re-check at the head the queue actually validates.** Collision D parked a PR
+  whose renumber had already landed, because the `merge_group` run started before
+  that push. Whatever the gate reports must be derived from the head under
+  validation, and a park should be re-evaluated against the current head before a
+  human is asked to act on it.
 
 ## Acceptance criteria
 
