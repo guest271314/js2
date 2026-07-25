@@ -43,8 +43,93 @@ origin: "senior-dev root-cause investigation, TaskList task #11 (2026-07-25)"
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | (a) broader fires-once sweep                               | **DONE** — see below                                                         |
 | (b) every exposed failure cohort-routed                    | **DONE** — #3646, #3647 (table below); corpus completeness re-checked at (c) |
-| (c) allowance = measured delta + documented margin         | **PENDING** the `merge_group` measurement (queue wedged on task #14)         |
+| (c) allowance = measured delta + documented margin         | **PENDING** the `merge_group` measurement                                    |
 | (d) gross-fixed / honest-regressions separate, never a net | **PENDING** — reported with (c)                                              |
+
+### ORACLE_VERSION 11 → 12 — sanctioned, and load-bearing
+
+> **TECH-LEAD SANCTION (2026-07-26):** bump `ORACLE_VERSION` 11 → 12 with a
+> history entry, on the user's standing ruling to land this de-inflation. The
+> bump is the **mechanism** by which an approved de-inflation lands, not a
+> separate policy choice — exact #3468 F1 precedent (v9 → v10 +
+> `regressions-allow 3675`). Refusing it would not preserve a stricter gate; it
+> would make the approved landing **impossible, and silently so.**
+
+Three independent reasons it is substantively correct:
+
+1. this change **alters verdicts** (vacuous pass → honest fail) — the project
+   rule is bump-or-the-queue-wedges;
+2. #3468 F1 precedent, same recipe, same reason;
+3. it is the **only** thing that makes `rebaseMode` true, and `diff-test262.ts`
+   reads the #3303 `regressions-allow` ceiling lazily **inside**
+   `if (rebaseMode)`.
+
+**Reason 3 is why this was nearly a silent failure.** The chain:
+
+```
+well-formed regressions-allow declaration
+  → nothing demands an ORACLE bump (see blind spot below)
+  → rebaseMode false
+  → allowance NEVER CONSULTED
+  → park that looks EXACTLY like "ceiling too small"
+```
+
+We would have resized the ceiling, parked again, resized again, and never
+touched the cause. Found only by going after the reader's own output line
+(`=== regressions-allow (#3303): excused N of M declared … ===`) rather than
+trusting a red/green outcome.
+
+#### Gate blind spot (flagged, tracker queued — NOT folded into #3649)
+
+`scripts/check-verdict-oracle-bump.mjs` watches exactly five files:
+`scripts/negative-verdict.mjs`, `scripts/test262-worker.mjs`,
+`tests/test262-shared.ts`, `tests/test262-vitest.test.ts`,
+`tests/test262-runner.ts`. The `src/runtime/` tree is **not among them**, so a
+runtime-layer change can flip verdicts corpus-wide without the gate demanding a
+bump. Running it on this very PR prints the proof:
+
+```
+check-verdict-oracle-bump (#3003): diff vs origin/main; ORACLE_VERSION 11 → 12.
+  ✓ no verdict-logic files changed.
+```
+
+This PR is the existence proof. It is a **different** gate from #3649's — #3649
+is _"which contexts read an allowance"_, this is _"which file changes demand a
+bump"_ — so it gets its own tracker rather than being folded in.
+
+#### What the bump buys, and what it does not
+
+- **Supersedes**, up to the declared ceiling: the rebase drift tolerance and the
+  per-bucket concentration limit.
+- **Does NOT supersede** the #3189 trap ratchet. Non-issue here: measured trap
+  growth is **zero**. The v10 `^Test262Error` → `assertion_fail` rule already
+  binds the newly-created assertion text ahead of the trap regexes — verified
+  against the real classifier including adversarial messages that embed trap
+  vocabulary _inside_ assertion text (`…value should be out of bounds`,
+  `obj['illegal cast']…`), all binning `assertion_fail`, with genuine-trap
+  controls still binning as traps. `illegal_cast` baseline independently
+  re-derived at **75**.
+
+#### Baseline provenance (per #3648)
+
+| field                  | value                                      |
+| ---------------------- | ------------------------------------------ |
+| baselines-repo commit  | `5e377fb812f09607ab57ded00790e1a2c9368f7d` |
+| committed              | 2026-07-25T22:46:54Z                       |
+| jsonl entries / `pass` | 47,852 / **31,053**                        |
+| `illegal_cast`         | **75**                                     |
+
+Recorded as a **proxy** for what the gate reads, not the artifact itself — the
+baseline can move between fetch and gate-read (#3648). **One measurement, no
+confirmation re-run**: a re-run can legitimately return a different verdict with
+nothing changed, so re-running to confirm a disliked result would be measuring
+the baseline's motion, not the PR.
+
+> **Units warning — do not repeat this subtraction.** `30,517 / 43,099` is the
+> _scoped_ landing-page figure (`benchmarks/results/test262-current.json`,
+> `include_proposals: 0`). `30,927` and `31,053` are _unscoped_ jsonl pass
+> counts over ~47,850 entries. Subtracting across them yields a phantom −410;
+> like-for-like the baseline moved **+126**.
 
 ### Fires-once sweep (condition a)
 
