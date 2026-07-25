@@ -345,15 +345,27 @@ interface Frontmatter {
 }
 
 /**
- * Read up to 2048 bytes from a test file and parse YAML frontmatter.
+ * Read the head of a test file and parse YAML frontmatter.
  * Frontmatter is wrapped in slash-star --- ... --- star-slash markers.
+ *
+ * (#3626) The window used to be 2 KB. That silently mis-classified **4,220 of
+ * 53,273** test262 files: when the frontmatter block ends past the window, the
+ * closing-marker lookup returns -1, the file is recorded as `noFrontmatter` and
+ * `classifyEdition` takes its "legacy pre-YAML test" branch → **ES5**. The
+ * affected files are the procedurally generated ones with long `info:` blocks
+ * (class/private-method `dstr`, dynamic-import, await-using, top-level-await),
+ * so ES2015+ tests were being counted in the ES5 column — 4,144 of them.
+ * Measured largest frontmatter end offset in the whole checkout: **6,180
+ * bytes**; 64 KB is ~10x that with room for future growth. No pass/fail result
+ * changes, only which edition column a test lands in.
  */
+const FRONTMATTER_WINDOW_BYTES = 65536;
+
 function parseFrontmatter(filePath: string): Frontmatter {
   let content: string;
   try {
-    // Read only first 2KB — frontmatter averages ~900 bytes
     const fd = readFileSync(filePath);
-    content = fd.subarray(0, 2048).toString("utf-8");
+    content = fd.subarray(0, FRONTMATTER_WINDOW_BYTES).toString("utf-8");
   } catch {
     return {};
   }
