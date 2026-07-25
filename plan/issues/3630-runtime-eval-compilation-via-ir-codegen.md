@@ -7,7 +7,7 @@ priority: low
 horizon: xl
 feasibility: hard
 area: codegen, runtime
-goal: es5-complete
+goal: es5
 related: [1006, 1054, 1066, 1073, 1102, 2927, 2928]
 blocked-by: [1102, 1066]
 ---
