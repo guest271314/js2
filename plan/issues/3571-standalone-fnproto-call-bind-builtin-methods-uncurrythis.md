@@ -1,9 +1,10 @@
 ---
 id: 3571
 title: "standalone: Function.prototype.call/apply/bind on builtin methods (uncurryThis/propertyHelper blocker)"
-status: ready
+status: in-progress
 created: 2026-07-24
-updated: 2026-07-24
+updated: 2026-07-26
+assignee: ttraenkler/opus-loop-c
 priority: high
 feasibility: hard
 model: fable
@@ -106,3 +107,69 @@ and is Fable-gated (cf. #2773 value-rep, #2984, #2744).
   (2026-07-24). Contained slices in that lane (WeakMap/WeakSet iterable ctor,
   Symbol.matchAll whitelist, Set host-leak wiring) are being harvested
   separately.
+
+---
+
+## S1 baseline re-measurement (opus-loop-c, 2026-07-26) — and a CORRECTION
+
+This issue **is #3603's slice S1**, which #3603 states must land FIRST: it
+un-vacuums the host lane's `verifyProperty` on its own, it is the prerequisite
+for S2 not producing traps, and it is *the only slice that can prove itself
+today* (the detector in `plan/probes/3603/ab.mts` is already calibrated for the
+host lane). Claimed on that basis, not as a parallel effort.
+
+Baseline re-run of the calibrated harness `plan/probes/3603/uncurry.mts` on
+`upstream/main` (it does NOT touch the shared `test262/harness` symlink — only
+`ab.mts` does — so it is safe to run alongside other lanes):
+
+| case                              | host     | standalone      |
+| --------------------------------- | -------- | --------------- |
+| `uncurried-push-works`            | **fail** | **fail** (trap) |
+| `uncurried-join-works`            | pass     | **fail** (trap) |
+| `uncurried-hasown-objlit`         | pass     | **fail**        |
+| `uncurried-hasown-desc-shape`     | pass     | **fail**        |
+| `failure-accumulation-end-to-end` | **fail** | **fail** (trap) |
+| `runtime-hasown-via-any-param`    | pass     | **fail**        |
+| `runtime-keys-via-any-param`      | pass     | **fail**        |
+| `runtime-forin-via-any-param`     | pass     | **fail**        |
+| `push-then-join-discriminator`    | **fail** | **fail** (trap) |
+| `push-then-index0-discriminator`  | **fail** | **fail** (trap) |
+| `native-push-control` (CONTROL)   | **pass** | **pass**        |
+
+Host **4/10 fail**, standalone **10/10 fail** (5 as uncatchable traps). The
+positive control passes on both lanes, so the harness is live and these are
+real failures, not probe artifacts.
+
+### CORRECTION to this issue's stated root cause
+
+The problem statement above says the bound builtin method "loses its explicit
+receiver". **That is refuted on the host lane by this table.** If the receiver
+were dropped, `__hasOwnProperty(o, "a")` would fail — it **passes** on host. So
+does `__join`. On host, *only* the `__push` family fails:
+
+- `uncurried-push-works`, `failure-accumulation-end-to-end`,
+  `push-then-join-discriminator`, `push-then-index0-discriminator` — all four
+  are the same defect, and all four **mutate** the receiver.
+- `__join` and `__hasOwnProperty` only **read** it, and both work.
+
+So the host-lane defect is **receiver mutation not being observed by the
+caller** — a value-vs-reference/identity problem — **not** receiver dropping.
+That is a different fix from the one this issue's text implies, and it must be
+confirmed before implementing. The receiver-dropping description may still hold
+for the **standalone** lane, where even the read-only cases fail; the two lanes
+must be diagnosed separately rather than assumed to share a cause.
+
+**Do not implement against the original hypothesis without re-deriving it from
+this table.** The 109-test cluster figure above was measured on the standalone
+Map/Set/Symbol lane and is not evidence for the host mechanism.
+
+### Ordering / cross-lane note
+
+- #3603 (S2+) is claimed by another lane and depends on S1 landing first.
+  Coordinate before changing anything `propertyHelper.js` runs through: S1
+  changes what the harness *can do* while #3603 changes what it *asserts*, and
+  a moving harness would make both sets of numbers unpublishable.
+- **#3642** (instance member value-read of a builtin method is `null` on BOTH
+  lanes) is a separate, newly-filed cross-lane defect in the same substrate.
+  It is plausibly upstream of the standalone half of this issue — check it
+  before designing the standalone fix.
