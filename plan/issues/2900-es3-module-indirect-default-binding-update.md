@@ -14,6 +14,11 @@ language_feature: module-code
 goal: spec-completeness
 related: [2898, 3505, 3592]
 assignee: ttraenkler/opus-es3
+trap-growth-allow:
+  count: 1
+  reason: "#3596 reclassification: deferring top-level init in the FIXTURE lane lets pending-async-dep-from-cycle.js run past the point it previously stopped, reaching a pre-existing latent illegal_cast trap. Baseline status is `fail` with `TypeError: compareArray is not a function` (reached_test: false) — the harness class this PR fixes, so the baseline DID testify and this is the #3596 baseline-did-testify branch, not the #3595 never-instantiated class. fail -> fail, flavour only; the test has never passed. Reproduced locally by A/B on the single defer flag: OFF `compareArray is not a function`, ON `illegal cast`. PR net +48 pass, host stable-path fine-gate net +67, all other trap categories flat (null_deref 159->159, oob 60->60, unreachable 3->3)."
+  tests:
+    - test/language/module-code/top-level-await/pending-async-dep-from-cycle.js
 ---
 
 > Closed 2026-07-02 with the #2932 PR — umbrella split into #2930 (RC2 alias,
@@ -317,3 +322,35 @@ null to object`, 1 `Reflect.get called on non-object`, 1 `illegal cast`.
 With the defer, the test's own assertions (`assert.sameValue(val(), 1)` and
 `assert.sameValue(val, 2)`) are actually reached — and they pass. That is the
 positive evidence that #2930 / #2931 / #2932 were correct all along.
+
+### Merge-queue outcome and the trap-growth declaration
+
+The PR was auto-parked once on the #3189 uncatchable-trap ratchet:
+`illegal_cast` 74 → 75 (+1), newly trapping
+`test/language/module-code/top-level-await/pending-async-dep-from-cycle.js`.
+Everything else was strongly positive — net **+48 pass**, host stable-path
+fine-gate net **+67** (71 improvements − 4 regressions), every other trap
+category flat.
+
+Routed against the authoritative baseline jsonl rather than a local repro: that
+file's baseline status is **`fail`** (`TypeError: compareArray is not a
+function`, `reached_test: false`) — the harness class this PR fixes. So the
+baseline **did** testify, which puts it on the **#3596** branch, not the #3595
+never-instantiated exclusion. Confirmed by A/B on the single defer flag: OFF it
+fails with `compareArray is not a function`, ON it fails with `illegal cast`.
+`fail → fail`, flavour only, on a test that has never passed — the defer simply
+lets it run past where it previously stopped, into a pre-existing latent trap.
+
+Declared as a bounded `trap-growth-allow` (`count: 1`, naming that single test)
+in this issue's frontmatter, machine-checked by `evaluateTrapReclassification`:
+named + not-previously-passing + no undeclared growth. No source change.
+
+### Scope correction — "≤ES3" is a metadata bucket, not the ES3 language
+
+This issue's title says "≤ES3 (edition bucket)" and that qualifier is
+load-bearing. `classifyEdition` assigns edition 0 only as a **fall-through**, so
+the bucket collects tests that lack version frontmatter — this ESM test among
+them. `eval` / `with` / `Function`-constructor tests sort into **later** buckets
+by frontmatter vintage and sit far lower (~37 %). Closing this issue is progress
+on the ≤ES3 _metadata bucket_, **not** a statement that the ES3 language is
+complete. #3628 and PR #3627 carry the full correction.
