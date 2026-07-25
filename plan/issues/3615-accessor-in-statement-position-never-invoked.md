@@ -17,6 +17,17 @@ completed: 2026-07-25
 # replaces the whole construct.
 loc-budget-allow:
   - src/codegen/declarations.ts
+# Same growth seen at FUNCTION granularity (#3400 / R-FUNC): collectDeclarations
+# 1324 -> 1381 (+57). Two contributions, both inside the allow-list block:
+# #3615's property/element-read arm (~34 lines) and #3623's non-silent
+# fall-through recorder (~29 lines, whose LOGIC already lives in the new
+# src/codegen/module-init-collection.ts — only the 2-line call site and its
+# rationale land here). ~46 of the 57 lines are the explanatory comments; the
+# executable growth is ~11 lines. Splitting is not the remedy: the arms only
+# mean anything ADJACENT to the five siblings they extend, and #3623 is the
+# work that replaces the whole allow-list construct.
+func-budget-allow:
+  - src/codegen/declarations.ts::collectDeclarations
 # ONE host-lane fail -> fail flavour change to a trap category, caused by a
 # statement finally running and reaching a PRE-EXISTING defect. Baseline row is
 # `fail` (never `pass`), so it is a reclassification, not a regression — and the
