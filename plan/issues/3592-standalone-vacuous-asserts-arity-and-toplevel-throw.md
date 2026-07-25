@@ -768,3 +768,89 @@ still hard-fail the #3189 ratchet — the mechanism cannot generalise to
    implement it only if the innermost-frame classifier fires on the landing run.
 3. **`verifyProperty` vacuity is unexplained** and is NOT the arity bug — it needs
    its own investigation (4,735 files call it).
+
+---
+
+## Post-landing validation: 25 %-of-corpus measured A/B (2026-07-25)
+
+The declared `standalone-devacuification-allow` was sized from an **N=4,000
+seeded sample** (18.9 % of sampled passes ⇒ point estimate ≈ 4,814, ceiling
+6,000). This section records the follow-up **measurement** that replaces that
+extrapolation. It is a post-hoc validation: the landing had already merged
+(`2033d7bc25ddd8` → PR #3601, park partition `c584b37a3df13e`, high-water
+`3b05a28beedab7`).
+
+**Method.** Local-vs-local A/B on the standalone lane, production runner
+(`pnpm run test:262`, `COMPILER_POOL_SIZE=6`), **4 complete duration-balanced
+shards = 12,019 files = 25.0 % of the 48,088-file corpus**, diffed only on the
+intersection. Never diffed against the committed baseline JSONL.
+
+**Cache aliasing** — the one thing that would have invalidated the result — was
+defeated *structurally*, not by an env var. The disk-cache key is
+`md5(wrappedSource + compilerHash + target)` and `compilerHash` hashes
+`scripts/compiler-bundle.mjs`; an env-var toggle leaves the bundle
+byte-identical, so arm ON would have been served arm OFF's artifacts. The OFF
+arm therefore hard-codes an early `return []` in
+`buildApplyClosureArityWidening` (a SOURCE change): `compilerHash` OFF
+`41de7b683373` vs ON `8c40c7d7ad66`. Cache also wiped between arms.
+Empirical proof: of 352 independently-known flip files, the 317 that were
+OFF=pass **all 317 flipped**; zero failed to flip.
+
+### Measured result
+
+| quantity | measured |
+| --- | --- |
+| OFF passes / ON passes (intersection) | 6,968 / 5,693 (net −1,275) |
+| pass → not-pass flips | 1,314 = **18.86 % ± 0.92 pp** of OFF passes |
+| official scope (standard+annexB) | 1,248 / 6,846 = **18.23 %** |
+| applied to the CI baseline's 25,453 host-free passes | **≈ 4,640–4,800 flips** |
+| trap-category flips | 17, **all 17 NAMED** in the 65-file list |
+| innermost frame `__call_fn_method_N` (widening-INTRODUCED) | **0 observed** (95 % upper bound ≈ 12 corpus-wide) |
+| un-named trap flips (each a hard gate failure) | **0 observed** (95 % upper bound ≈ 12 corpus-wide) |
+| genuine gains (OFF=fail → ON=pass) | 5 in-sample ⇒ **≈ 20–30 corpus-wide** |
+| fail → fail signature changes | 133 / 3,247 (4.1 %) |
+| routing gate `--max-unclassified-root-causes 0` | **exit 0 on BOTH arms**, 0 unclassified |
+
+**Conclusion: the 6,000 ceiling was correctly sized.** The measured ratio
+confirms the original N=4,000 extrapolation to within ~1 % and leaves ~20 %
+headroom. Three independent estimates now agree: N=4,000 sample 18.9 %, an
+in-process 1-in-4 corpus stride 18.8 %, this pool-path run 18.86 %.
+
+### Corrections to the record
+
+1. **"0 genuine gains" was wrong.** There are ~20–30, and they are
+   mechanistically coherent — every one is callback/arity-sensitive, exactly
+   what the widening fixes (`Array/prototype/lastIndexOf/15.4.4.15-5-24.js`,
+   `indexOf/15.4.4.14-3-22.js`, `reduce/15.4.4.21-3-22.js`,
+   `Number/prototype/valueOf/S15.7.4.4_A2_T02.js`,
+   `annexB/…/callexpression-as-for-of-lhs.js`).
+2. **65 named × 25 % = 16.25 expected, 17 observed, all named** — evidence the
+   declared trap list is complete. It does NOT prove zero un-named trap flips;
+   a zero-count at 25 % coverage only bounds the truth at ~12 corpus-wide.
+3. **`compile_timeout` is wall-clock noise on a loaded box, not a signal.**
+   45 timeout rows in OFF vs 20 in ON with only 3 stable (present in both) —
+   the flake runs in BOTH directions and was worse in the arm that ran under
+   load 18. A widening-caused timeout would be ON-only and reproducible. The 14
+   `pass → compile_timeout` rows are therefore noise, though they are formally
+   NOT excusable under `isDevacuificationExcusableFlip` (`r.to !== "fail"`).
+
+### Why the frontmatter allowance is left at 6,000
+
+The allowance is documented as **SELF-REMOVING**: once `promote-baseline`
+re-seeds the standalone baseline post-merge, the affected rows are no longer
+baseline `pass`, so the mechanism excuses zero flips on any later diff. The
+high-water file on `main` already carries `sha: 31139d0a…` (the widening merge)
+with `host_free_pass: 22626` / `official_pass: 22394`, so the re-seed has
+happened and the count is inert. Tightening 6,000 → ~4,800 now would be a
+cosmetic edit to a spent gate on a `done` issue, not a real narrowing — and
+widening it to absorb an unknown was explicitly ruled out. Recorded here rather
+than acted on.
+
+### Sampling caveat, for anyone repeating this
+
+Shard assignment is a **duration-stratified LPT partition** reading
+`tests/test262-slow-tests-standalone.json` (NOT the gc map — using the gc map
+produces a completely different partition), and `runTest262Chunk` then sorts
+**within** each shard slowest-first. So a *complete* shard is duration-balanced
+and representative, while a *partial* shard is that shard's slow head and is
+strongly biased. Always cut on shard boundaries.
