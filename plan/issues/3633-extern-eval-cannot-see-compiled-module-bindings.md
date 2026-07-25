@@ -67,13 +67,20 @@ ES5-classified (post-#3626 classifier), `eval`-dependent, host lane: 775 tests,
 | `assert` **inside** the eval string (masked)        | 0 / 144 | **0 %**    |
 | `assert` **outside** the eval string (unmasked)     | 89 /325 | **27.4 %** |
 
-The unmasked shape is the honest predictor for what the masked shape does once
-the masking is removed: both shapes test the same B.3.3 rules. So fixing scope
-visibility **unmasks** ~184 tests and would be expected to **flip ≈ 27 %** of
-them (≈ 50), with the remainder then failing on AnnexB B.3.3 semantics — which
-is #2200 / #2552's work, not this issue's.
+So fixing scope visibility **unmasks** ~184 tests; the remainder then fail on
+AnnexB B.3.3 semantics, which is #2200 / #2552's work, not this issue's.
 
-**Do not quote 184 as a flip count.** It is a gate count.
+**27.4 % is an UPPER BOUND on the post-unmasking flip rate, not a point
+estimate.** The two shapes are not equivalent populations: the masked variants
+put the `assert` call _inside_ the eval body, so after unmasking they exercise
+strictly more machinery inside the splice (harness property access, call
+dispatch, and the B.3.3 binding under test, all within the eval Script) than the
+unmasked variants do, where the assert runs in ordinary compiled code. The true
+rate is lower than 27.4 %; how much lower is only knowable from a post-fix
+re-run.
+
+**Do not quote 184 as a flip count** — it is a gate count. Do not quote 27.4 %
+as a flip count either; quote it as a ceiling.
 
 ## Why this is `hard`
 
