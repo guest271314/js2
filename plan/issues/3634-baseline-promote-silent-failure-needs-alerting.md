@@ -52,13 +52,78 @@ That misdirection is the expensive part, not the outage itself.
 
 1. **ALERT on a failed baseline-promote.** This is the big one; the failure is currently
    invisible and its blast radius is every open PR.
-2. **RETRY the promote step.** Six sequential merges each pushing to the baselines repo
-   smells like a push race — a retry-with-rebase would likely have absorbed all six.
-   Confirm against the six job logs before assuming.
+2. **RETRY the promote step — but NEVER blindly.** Six sequential merges each pushing to the
+   baselines repo smells like a push race — a retry-with-rebase would likely have absorbed
+   all six. Confirm against the six job logs before assuming. **Retry MUST be conditional on
+   the failure being a push race** (see "Cause 3" below): a *gate* failure is deterministic,
+   so an unconditional retry loops forever, burns CI, and — worse — makes the outage
+   *quieter* by hiding the real verdict behind N identical attempts.
 3. **Consider making the regression gate REFUSE TO VERDICT when `SRC_BEHIND` exceeds a
    threshold**, rather than confidently diffing against a known-stale baseline and emitting
    false regressions. A gate that says *"baseline too stale to judge"* is far cheaper than a
    spurious park plus the investigation it triggers.
+
+## Cause 3 — `trap-growth-allow` evaporates in the promote job (measured 2026-07-25/26)
+
+**A THIRD distinct cause with the same silent symptom.** Do not pattern-match this issue onto
+"push race" — the symptom (promote fails, baseline freezes, dashboard goes stale) is identical
+across all three causes, and the remedy is different for each.
+
+The baseline froze again for **~9 hours** (last good promote 15:29Z; noticed 00:26Z next day).
+`baseline-summary-sync.yml` was **healthy the whole time** — active, hourly, every run SUCCESS —
+it simply had nothing new to commit. The failure was upstream, in promote:
+
+```
+[trap-growth] previous:  null_deref=159 illegal_cast=74 oob=60 unreachable=3
+[trap-growth] candidate: null_deref=159 illegal_cast=75 oob=60 unreachable=3 (tolerance 0)
+##[error] trap category "illegal_cast" grew 74 → 75 (+1) — uncatchable-trap ratchet (#3189).
+          Newly trapping: test/language/module-code/top-level-await/pending-async-dep-from-cycle.js
+```
+
+This was **not a spurious gate**. PR #3629 (#2900 module-binding fix) legitimately lets that
+test run further than before, where it hits an illegal cast — and the author *anticipated it*
+and declared a bounded `trap-growth-allow` with a `reason:` naming that exact test.
+
+**The declared allowance never reached the promote job: `tolerance 0`.** The #3370 allowance is
+resolved from the **change-set**, which works at PR level and does not in the post-merge promote
+job.
+
+### Why this deadlocks rather than self-heals
+
+The promoted baseline stays at 74 while main sits at 75, so **every subsequent push fails
+identically, forever** — confirmed on two consecutive merges (#3629 19:52Z, #3630 20:06Z), and
+it would have continued for every merge after. Each failure compounds the staleness for every
+open PR's regression gate. This is the cause that argues hardest against fix #2 being
+unconditional.
+
+### Unstick recipe (used 2026-07-26)
+
+Prefer this over the `force_baseline_refresh=true` emergency dispatch in
+`refresh-baseline.yml`, whose own description says it *ignores regressions* — plural. That
+disarms the regression diff, catastrophic guard, and floor gates on the same promotion, to
+clear a single measured +1.
+
+1. **Read the census first** and confirm the only delta is the one you intend to waive.
+   `--allow N` is **not per-category** — on a fresh push it would silently absorb a `null_deref`
+   or `oob` delta too.
+2. Re-run **the already-failed run** (`gh run rerun <id> --failed`), not a new push: its census
+   is already measured, which turns the valve from "blanket tolerance" into "waive one measured
+   delta".
+3. Set repo var `BASELINE_TRAP_GROWTH_ALLOW=1` **before** firing the re-run — the job reads
+   `vars.*` at start, so a re-run fired first picks up the old value and fails identically
+   (cost us one wasted cycle).
+4. **Unset it in the same session.** One successful promote re-anchors the baseline at 75, after
+   which later runs compare 75 vs 75 and pass with no allowance at all.
+
+`gh` 2.23 in this container has **no `gh variable` subcommand** — use
+`gh api -X PATCH repos/{owner}/{repo}/actions/variables/{name} -f name=… -f value=…`.
+
+### The real fix
+
+Make a declared `trap-growth-allow` survive into the promote job (resolve it from the merge
+commit's change-set, or persist the granted ceiling alongside the baseline). Until then, every
+intentional trap reclassification freezes the baseline until someone notices and hand-waives it
+— which is exactly the invisible-outage problem this issue exists to kill.
 
 ## Discarded hypothesis — do not chase it
 
