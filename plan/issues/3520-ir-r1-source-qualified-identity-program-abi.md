@@ -123,6 +123,7 @@ loc-budget-allow:
   - src/ir/integration.ts
   - src/ir/from-ast.ts
   - src/ir/nodes.ts
+  - src/ir/verify.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
