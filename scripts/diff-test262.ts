@@ -572,6 +572,15 @@ export interface TrapCategoryGrowthOptions {
    * test. The pure helper defaults to strict candidate-only/new-test semantics.
    */
   missingBaselineRowsAreUnknown?: boolean;
+  /**
+   * #3592 — candidate files whose trap rows are excluded from category growth
+   * entirely: VERIFIED unmasked pre-existing traps under a declared
+   * de-vacuification allowance (see `evaluateDevacuificationAllowance` — each
+   * excluded file's trap has a non-dispatcher innermost frame, i.e. the trap
+   * pre-existed and only became reachable because the callee finally ran).
+   * Empty/absent ⇒ behaviour is byte-identical to pre-#3592.
+   */
+  excludeFiles?: Set<string>;
 }
 
 /**
@@ -638,6 +647,11 @@ export function evaluateTrapCategoryGrowth(
 
   for (const [file, row] of newer) {
     if (row.status === "compile_timeout" || !isTrap(row.error_category)) continue;
+    // #3592 — a verified unmasked pre-existing trap under a declared
+    // de-vacuification allowance neither grows the category nor lists as
+    // newly trapping (the baseline "pass" was vacuous: the trapping code was
+    // never reached, so the baseline never testified it was trap-free).
+    if (options.excludeFiles?.has(file)) continue;
     const base = baseline.get(file);
     // A missing shard/artifact row says nothing about the baseline runtime
     // outcome. Treat it as unknown rather than manufacturing trap growth.
@@ -955,6 +969,133 @@ export function isVacuousReclassification(base: TestResult | undefined, cur: Tes
   return isVacuousResult(cur);
 }
 
+/**
+ * #3592 — ONE-TIME standalone DE-VACUIFICATION allowance (change-scoped,
+ * standalone lane only).
+ *
+ * Background: #3592 RC2 measured that `__apply_closure` dispatched on the
+ * dynamic argument count alone, so an under-applied call through the
+ * closure-dispatch bridge (e.g. `assert.sameValue(a, b)` — 2 args into 3
+ * formals) silently NEVER invoked the callee: 18.9 % of sampled standalone
+ * passes (453 of 2,395; N = 4,000 seeded A/B) were vacuous through this one
+ * mechanism. Fixing the dispatch to `max(argc, declaredArity)` converts those
+ * fake passes into HONEST fails — an integrity correction, not a conformance
+ * regression — but the #1897 guard diffs against the pre-fix baseline (which
+ * records them `pass`) and would read the correction as a mass regression.
+ *
+ * Unlike #2940 there is no per-row marker (the new rows are ordinary honest
+ * assertion failures), so the excusal is a DECLARED, per-PR ceiling in the
+ * PR's own issue-file frontmatter (same change-set scoping as
+ * `regressions-allow`/`trap-growth-allow` — an allowance that landed on main
+ * grants nothing to later PRs):
+ *
+ *   standalone-devacuification-allow:
+ *     count: <ceiling>
+ *     reason: "<measured basis for the expected honest-fail conversion>"
+ *
+ * Containment (all load-bearing):
+ *   - STANDALONE LANE ONLY: consulted exclusively under
+ *     `--exclude-leaky-baseline-regressions` (main's YAML already passes it in
+ *     the #1897 guard step), so the js-host catastrophic/regression gates are
+ *     byte-unchanged.
+ *   - CEILING, NOT BLANK CHECK: more matching flips than the declared count
+ *     hard-fails the gate — reality exceeding the declaration is itself
+ *     signal and needs a fresh, honest re-declaration.
+ *   - FAIL-ONLY: only `pass → fail` flips qualify; `pass → compile_error` /
+ *     `absent` still count at full strength.
+ *   - TRAP-VERIFIED: a flip whose new row is an uncatchable-trap category is
+ *     excusable ONLY when the trap is verifiably PRE-EXISTING (unmasked by the
+ *     callee finally running): its innermost wasm frame must NOT be the
+ *     dispatcher (`__call_fn_method_N`). A dispatcher-innermost trap is by
+ *     construction INTRODUCED by the arity widening's own argument conversion
+ *     (#3592 §2) and remains a hard #3189 ratchet failure. A frameless trap
+ *     message cannot be verified and is NOT excused.
+ *   - SELF-REMOVING: once `promote-baseline` re-seeds the standalone baseline
+ *     post-merge, the affected rows are no longer baseline `pass`, so even the
+ *     declaring PR's mechanism excuses zero flips on any later diff; and the
+ *     change-set scoping means later PRs never see the declaration at all.
+ */
+export const DEVACUIFICATION_ALLOW_KEY = "standalone-devacuification-allow";
+
+/**
+ * #3592 — the innermost wasm frame of an enriched trap message. The runner's
+ * `enrichErrorMessage` (tests/test262-runner.ts) renders traps as
+ * `<msg> in <leaf>() at source L<n> (via <caller>@L<n> ← …)`, so the FIRST
+ * `in <name>()` occurrence names the trap site (innermost frame). Returns
+ * null when the message carries no recognizable frame.
+ */
+export function trapInnermostFrame(error: string | undefined): string | null {
+  if (!error) return null;
+  const m = / in ([A-Za-z0-9_$.]+)\(\)/.exec(error);
+  return m ? m[1]! : null;
+}
+
+/**
+ * #3592 §2 — a widening-INTRODUCED trap can only arise inside the dispatcher's
+ * own argument conversion, so its innermost frame is `__call_fn_method_N`
+ * itself. A user closure / runtime helper innermost frame means the trap
+ * pre-existed and was merely unmasked by the call finally happening.
+ */
+export function isDispatcherIntroducedTrap(error: string | undefined): boolean {
+  const frame = trapInnermostFrame(error);
+  return frame !== null && /^__call_fn_method_\d+$/.test(frame);
+}
+
+/**
+ * #3592 — is this pass→X regression row excusable under a declared
+ * de-vacuification allowance? See DEVACUIFICATION_ALLOW_KEY for the contract.
+ */
+export function isDevacuificationExcusableFlip(r: { to: string; error?: string; error_category?: string }): boolean {
+  if (r.to !== "fail") return false;
+  const isTrap = !!r.error_category && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(r.error_category);
+  if (!isTrap) return true;
+  return trapInnermostFrame(r.error) !== null && !isDispatcherIntroducedTrap(r.error);
+}
+
+/**
+ * #3592 — evaluate a declared de-vacuification allowance against the
+ * candidate regression rows (already filtered for CT flake / wasm-identical
+ * noise / the other excusals). Pure (no I/O) so the unit test drives it with
+ * fixtures, mirroring `evaluateTrapReclassification` (#3596).
+ *
+ * Returns the files to excuse from the gated regression count, the subset to
+ * exclude from the #3189 trap-category growth (verified unmasked pre-existing
+ * traps), GATE-FAIL reasons (ceiling exceeded ⇒ excuse NOTHING), and loud
+ * informational notes.
+ */
+export function evaluateDevacuificationAllowance(opts: {
+  allowance: RegressionsAllowance;
+  candidates: { file: string; to: string; error?: string; error_category?: string }[];
+}): { excusedFiles: Set<string>; trapExcludedFiles: Set<string>; failures: string[]; notes: string[] } {
+  const { allowance, candidates } = opts;
+  const failures: string[] = [];
+  const notes: string[] = [];
+  const excusable = candidates.filter(isDevacuificationExcusableFlip);
+  const where = allowance.sources.join(", ");
+  if (excusable.length > allowance.count) {
+    failures.push(
+      `standalone-devacuification-allow ceiling exceeded (#3592): ${excusable.length} qualifying pass→fail flips > declared count ${allowance.count} ` +
+        `(declared in ${where}; reason: ${allowance.reason}). The declared count is a ceiling the PR commits to, not a blank check — ` +
+        `re-measure and re-declare honestly if the de-vacuification really grew. NO flips were excused`,
+    );
+    return { excusedFiles: new Set(), trapExcludedFiles: new Set(), failures, notes };
+  }
+  const excusedFiles = new Set(excusable.map((r) => r.file));
+  const trapExcludedFiles = new Set(
+    excusable
+      .filter((r) => !!r.error_category && (TRAP_ERROR_CATEGORIES as readonly string[]).includes(r.error_category))
+      .map((r) => r.file),
+  );
+  if (excusedFiles.size > 0) {
+    notes.push(
+      `=== standalone-devacuification-allow (#3592): excused ${excusedFiles.size} of ceiling ${allowance.count} declared pass→fail de-vacuification flips ` +
+        `(${trapExcludedFiles.size} verified unmasked pre-existing trap(s) also excluded from the #3189 ratchet) — ` +
+        `reason: ${allowance.reason} (declared in ${where}). Dispatcher-innermost traps and pass→compile_error flips are NOT excused. ===`,
+    );
+  }
+  return { excusedFiles, trapExcludedFiles, failures, notes };
+}
+
 type StatusMap = Map<string, TestResult>;
 
 type OracleLane = "honest" | "fast-nativeharness";
@@ -1076,6 +1217,20 @@ Environment:
                                 Used by #1954 scoped PR-time runs: the candidate JSONL only covers
                                 the scoped subset, so the baseline must be restricted the same way
                                 or every out-of-scope baseline pass counts as a pass→absent regression.
+  STANDALONE_DEVACUIFICATION_ALLOW_FILE=<path>
+                                (#3592) Read the standalone-lane 'standalone-devacuification-allow:'
+                                ceiling from ONE explicit file instead of the change-set's own
+                                plan/issues diff. Test/emergency hook. Only consulted together with
+                                --exclude-leaky-baseline-regressions. A PR performing a deliberate
+                                honest-floor de-inflation may declare in its own issue file:
+                                  standalone-devacuification-allow:
+                                    count: <N>
+                                    reason: "<measured basis>"
+                                which excuses up to N baseline-pass → fail flips from the gated
+                                standalone regression count (hard-fails above N; pass→compile_error
+                                is never excused; a trap flip is excused only when its innermost
+                                frame proves the trap pre-existing, and dispatcher-innermost traps
+                                still hard-fail the #3189 ratchet).
   --exclude-leaky-baseline-regressions
                                 (#2879 §4, standalone lane) Excuse pass→fail flips where the baseline
                                 was a LEAKY pass (leaned on a host env:: import) and the new row is
@@ -1808,6 +1963,45 @@ async function run(
       !isExcusedLeakyToHostFree(r) &&
       isExcusedVacuous(r),
   ).length;
+  // #3592 — ONE-TIME standalone de-vacuification allowance. Consulted ONLY on
+  // the standalone lane (`--exclude-leaky-baseline-regressions` — already on
+  // main's YAML in the #1897 guard step, so this is merge_group-self-landing
+  // exactly like the #2879 §4 leaky excusal), and ONLY when the PR's own
+  // change-set declares a `standalone-devacuification-allow:` ceiling in its
+  // issue-file frontmatter (change-set scoping proven in merge_group by the
+  // #3596 trap-growth-allow). See DEVACUIFICATION_ALLOW_KEY for the full
+  // contract; the js-host gates never set the flag and are byte-unchanged.
+  let devacExcusedFiles = new Set<string>();
+  let devacTrapExcludedFiles = new Set<string>();
+  let devacFailures: string[] = [];
+  let devacAllowance: RegressionsAllowance | null = null;
+  if (excludeLeakyBaseline) {
+    const loadedDevac = await readChangeScopedNumericAllowance({
+      key: DEVACUIFICATION_ALLOW_KEY,
+      label: "standalone-devacuification-allow (#3592)",
+      overrideEnv: "STANDALONE_DEVACUIFICATION_ALLOW_FILE",
+    });
+    for (const note of loadedDevac.notes) console.log(note);
+    devacAllowance = loadedDevac.allowance;
+    if (devacAllowance) {
+      const devacResult = evaluateDevacuificationAllowance({
+        allowance: devacAllowance,
+        candidates: regressions.filter(
+          (r) =>
+            !r.hostQuarantined &&
+            r.to !== "compile_timeout" &&
+            !r.wasmUnchanged &&
+            !isStaleAsyncArgsFlake(r) &&
+            !isExcusedLeakyToHostFree(r) &&
+            !isExcusedVacuous(r),
+        ),
+      });
+      devacExcusedFiles = devacResult.excusedFiles;
+      devacTrapExcludedFiles = devacResult.trapExcludedFiles;
+      devacFailures = devacResult.failures;
+      for (const note of devacResult.notes) console.log(note);
+    }
+  }
   const noiseFiltered = regressions.filter(
     (r) =>
       !r.hostQuarantined &&
@@ -1815,7 +2009,8 @@ async function run(
       r.to !== "compile_timeout" &&
       !isStaleAsyncArgsFlake(r) &&
       !isExcusedLeakyToHostFree(r) &&
-      !isExcusedVacuous(r),
+      !isExcusedVacuous(r) &&
+      !devacExcusedFiles.has(r.file),
   );
   const regressionsWasmChange = noiseFiltered.length;
   const wasmIdenticalNoise = regressions.filter((r) => r.wasmUnchanged && r.to !== "compile_timeout").length;
@@ -1835,6 +2030,11 @@ async function run(
   console.log(
     `=== Excused vacuous reclassifications (#2940 TEMPORARY default-on — remove after standalone baseline promotes to new-policy; see #3001): ${excusedVacuous} ===`,
   );
+  if (devacAllowance) {
+    console.log(
+      `=== Excused de-vacuification reclassifications (#3592 standalone-devacuification-allow, ceiling ${devacAllowance.count}): ${devacExcusedFiles.size} ===`,
+    );
+  }
   console.log(`=== Regressions with wasm-hash change: ${regressionsWasmChange} ===`);
   console.log();
 
@@ -1964,6 +2164,13 @@ async function run(
   const netPerTest = stableImprovements.length - regressionsWasmChange;
   let gateFailed = false;
 
+  // #3592 — a de-vacuification ceiling breach is a hard gate failure (the
+  // declaration is a ceiling, not a blank check); nothing was excused above.
+  for (const reason of devacFailures) {
+    console.log(`=== GATE FAIL: ${reason} ===`);
+    gateFailed = true;
+  }
+
   // #3189 — uncatchable-trap GROWTH ratchet. A regressions-allow declaration
   // never affects this ratchet. #3370 adds a separate, change-scoped
   // trap-growth-allow ceiling for an oracle bump whose literal harness changes
@@ -1992,7 +2199,16 @@ async function run(
     // baseline row is therefore an incomplete predecessor observation, not a
     // newly-added test whose first observed result should ratchet.
     missingBaselineRowsAreUnknown: true,
+    // #3592 — verified unmasked pre-existing traps under a declared
+    // de-vacuification allowance (empty set unless the standalone lane's
+    // change-set declared one; dispatcher-innermost traps are never in here).
+    excludeFiles: devacTrapExcludedFiles,
   });
+  if (devacTrapExcludedFiles.size > 0) {
+    console.log(
+      `=== Trap rows excluded from the #3189 ratchet as #3592 unmasked pre-existing traps (baseline-pass, non-dispatcher innermost frame): ${devacTrapExcludedFiles.size} ===`,
+    );
+  }
   console.log(
     `=== Trap categories (baseline → candidate): ` +
       TRAP_ERROR_CATEGORIES.map((c) => `${c} ${trapGrowth.baseCounts[c]}→${trapGrowth.newCounts[c]}`).join(", ") +

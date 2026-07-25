@@ -1,14 +1,15 @@
 ---
 id: 3592
 title: "Silent wrong answers: top-level `throw` dropped in every non-WASI lane; under-applied calls through `__apply_closure` never happen (standalone)"
-status: in-progress
+status: done
 sprint: current
 priority: high
 horizon: m
 feasibility: hard
 goal: standalone-gap
-assignee: ttraenkler/senior-dev-vacuity
+assignee: ttraenkler/senior-dev-land-3592
 created: 2026-07-25
+completed: 2026-07-25
 # RC2 only: the widening builder lives in the (non-god-file) closure-exports.ts,
 # but its call site + import still add 8 LOC to the object-runtime.ts god-file.
 loc-budget-allow:
@@ -19,6 +20,19 @@ trap-growth-allow:
   reason: "#3596 reclassification: fixing the dropped top-level `throw` lets await-dynamic-import-rejection.js run past the point it previously stopped, reaching a pre-existing latent unreachable trap. Baseline status is `fail` (negative_test_fail) — the module DID instantiate and return a verdict, so this is the #3596 baseline-did-testify branch, not the #3595 never-instantiated class. fail -> fail, flavour only; the test has never passed. PR net +16 pass, all other trap categories flat."
   tests:
     - test/language/module-code/top-level-await/await-dynamic-import-rejection.js
+# #3592 RC2 landing (2026-07-25, lead-sanctioned honest-floor de-inflation).
+# Ceiling for the ONE-TIME conversion of vacuous standalone passes into honest
+# fails, consumed by scripts/diff-test262.ts on the standalone lane only.
+# Basis: 453 of 2,395 sampled standalone passes (18.9 %) flipped pass→fail in
+# the N=4,000 seeded A/B (seed 20260725); corpus host-free pass = 25,453 ⇒
+# point estimate ≈ 4,814 flips (95 % CI ± ~400), of which ~85 are unmasked
+# pre-existing traps (8/4,000 sampled, all with non-dispatcher innermost
+# frames). Ceiling 6,000 adds margin for lane-composition/skip-set skew between
+# the local A/B lane and the CI standalone lane. Exceeding it hard-fails the
+# gate (re-measure and re-declare).
+standalone-devacuification-allow:
+  count: 6000
+  reason: "#3592 RC2: __apply_closure now dispatches at max(argc, declaredArity), so under-applied harness assertions actually run. One-time honest-floor de-inflation; measured basis in this issue's 'RC2 re-measure' section (N=4,000 A/B, 18.9% of sampled standalone passes vacuous, 0 widening-introduced invalid Wasm)."
 ---
 
 ## Problem
@@ -465,9 +479,12 @@ ever reserved under standalone/WASI.
       for the concrete-ref (string) lowering; pinned by a test
 - [x] RC2: signature routing settled — **0 unclassified in both arms**, no new
       `STANDALONE_ROOT_CAUSE_BUCKETS` entry required
-- [ ] RC2: honest-floor landing per the F1 recipe (needs a FRESH corpus A/B
-      against the `main` of the landing day — the numbers above are a sample and
-      will be stale)
+- [x] RC2: honest-floor landing (2026-07-25) — via the change-scoped
+      `standalone-devacuification-allow` gate valve, NOT a park-and-measure.
+      Lead-directed deviation from the original "fresh full-corpus A/B" plan:
+      the ceiling was set from the N=4,000 scoped estimate + margin (see
+      `## Landing (RC2)` below), because a full corpus re-measure is ~26.7
+      CPU-hours and the merge queue was empty (the ideal landing window).
 
 ## Landing checklist (for whoever schedules RC2)
 
@@ -487,6 +504,51 @@ ever reserved under standalone/WASI.
 6. Park = measurement; expect a bot park-hold on the merge-group floor gate and
    treat it as the measurement, per
    `reference_f1_honest_floor_deinflation_landing_recipe`.
+
+## Landing (RC2) — 2026-07-25, lead-sanctioned honest-floor de-inflation
+
+Landed by `senior-dev-land-3592` from branch `issue-3585-apply-closure-arity`.
+The reported standalone number goes DOWN on purpose: the fix converts fake
+(vacuous) passes into honest fails. WHY each gate decision was made:
+
+1. **#1897 standalone guard — in-PR pass via a declared, change-scoped
+   allowance, not admin-bypass.** The workflow treats `diff-test262.ts` exit 0
+   as authoritative (#3303 contract), so the fix is a new
+   `standalone-devacuification-allow:` frontmatter key (this file), read via
+   the same `readChangeScopedNumericAllowance` machinery `trap-growth-allow`
+   (#3596) already proved works inside a `merge_group` (RC1 landed through it).
+   Honored ONLY under the standalone lane flag
+   (`--exclude-leaky-baseline-regressions`, already on main's YAML → the
+   excusal fires in this PR's own merge_group; js-host gates byte-unchanged).
+   Ceiling semantics: more qualifying flips than declared ⇒ hard fail, nothing
+   excused. Change-set scoping makes it inherently one-time: once merged, no
+   later PR's diff carries the declaration.
+2. **#3189 trap ratchet — the §2 innermost-frame discriminator is now enforced
+   MECHANICALLY.** A pass→trap flip is excused only when the trap message's
+   innermost frame is NOT `__call_fn_method_N` (i.e. verifiably pre-existing,
+   unmasked by the callee finally running — the vacuous baseline "pass" never
+   testified the file was trap-free). A dispatcher-innermost trap (the §5
+   `minSafeN` hazard) is NOT excusable and still parks the PR — landing
+   checklist item 3 is thereby enforced by the gate itself on the full corpus,
+   not just sampled. Frameless trap messages are also refused (unverifiable).
+3. **#2097 high-water floor — committed mark lowered 25,453 → 19,400**
+   (= 25,453 − 6,000 ceiling − margin; floor 19,350 with tolerance 50).
+   Expected honest pass ≈ 20,639 (CI ± ~400) clears it; the post-merge
+   `promote-baseline --update` re-raises the mark to the measured honest
+   number. `official_pass` lowered to a proportional estimate (18,400,
+   informational only — not gated; promote rewrites it).
+4. **NO `oracle_version` bump** — this is codegen, not verdict logic (touches
+   none of `check-verdict-oracle-bump.mjs`'s verdict files); bumping would
+   self-wedge (merged v(N+1) vs baseline vN ⇒ diff exit 2).
+5. **Ceiling N = 6,000.** Basis: 453/2,395 = 18.9 % of sampled standalone
+   passes vacuous (N = 4,000 seeded A/B, seed 20260725, run at `501374bf`);
+   corpus host-free pass 25,453 ⇒ point estimate ≈ 4,814 flips (binomial 95 %
+   CI ± ~400) + margin for local-lane vs CI-lane composition/skip-set skew.
+   Trap subset expected ≈ 85 (8/4,000 sampled, all non-dispatcher-innermost).
+6. **Routing gate (#3439)**: 0 unclassified in both arms at N = 4,000; all 16
+   new ON-arm signatures route into pre-existing path-based
+   `STANDALONE_ROOT_CAUSE_BUCKETS`. Residual full-corpus risk accepted (a new
+   signature on an uncovered path would park; fix-forward on the branch).
 
 ## Follow-up
 
