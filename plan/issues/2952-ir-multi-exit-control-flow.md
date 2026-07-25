@@ -456,6 +456,18 @@ fold it onto nodes.ts `directUses` or add the never-check.
   control-flow suites): see final validation record below.
 - `pnpm run check:ir-fallbacks` — OK (no unintended/post-claim growth).
 - `npx tsc --noEmit` clean.
+- **Byte-inertness**: all 13 `website/playground/examples` files sha256-
+  identical main↔branch (no switches/labels in the corpus).
+- **Scoped test262 sweep** (labeled/break/continue/do-while/while +
+  `statements/switch`, **253 files** via `runTest262File`, main↔branch
+  outcome diff): **ZERO lines** — 202 pass / 51 fail identical on both
+  sides (the 51 are pre-existing on main), so the newly-IR-claimed switch
+  shapes are behavior-equivalent to legacy across the whole switch dir.
+- **Linear capability flip #2**: switch fallthrough (non-empty body) used
+  to FAIL LOUD on linear (#1937); the ladder is core Wasm, so linear now
+  compiles + runs it — probes 6/6, fail-loud tests flipped to positive
+  runs in both linear suites. Final combined re-run of all six suites
+  (slices 1–4 + linear break-continue + linear controlflow): **130/130**.
 
 ## Test Results (slice 3)
 
