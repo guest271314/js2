@@ -21,7 +21,7 @@ describe("editionStringToYear", () => {
     expect(editionStringToYear("npm libraries")).toBeUndefined();
   });
 
-  // (#3630) The two absence-of-evidence buckets are NOT editions. They must
+  // (#3639) The two absence-of-evidence buckets are NOT editions. They must
   // resolve to negative sentinels, which the feature-row scorer treats as
   // headline-only (`yr <= 0`), so they can never present as a conformance
   // figure for an edition they were never measured against.

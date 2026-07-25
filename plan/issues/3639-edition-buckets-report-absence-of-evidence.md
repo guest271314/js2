@@ -1,5 +1,5 @@
 ---
-id: 3630
+id: 3639
 title: "Edition buckets report absence-of-evidence as conformance — 5,436 tests sorted into ES2015 by fall-through, 273 into ≤ES3"
 status: ready
 sprint: current
@@ -18,7 +18,7 @@ related: [3626, 3628, 1880, 1777]
 origin: "2026-07-25 — the lead asked 'does ES3 not require dynamic eval?' It does, and the ≤ES3 bucket does not contain it. Measuring which RULE assigns each edition showed the distortion is 20× larger in ES2015."
 ---
 
-# #3630 — edition buckets report absence-of-evidence as conformance
+# #3639 — edition buckets report absence-of-evidence as conformance
 
 ## Problem
 
