@@ -2,7 +2,7 @@
 id: 3619
 title: "Unbounded runtime scan: `Array.prototype.lastIndexOf` on an array-like never matches at indices > 2^32, so it walks ~9×10^15 slots (in-process harnesses hang forever)"
 status: ready
-sprint: Backlog
+sprint: current
 priority: medium
 horizon: m
 feasibility: hard
@@ -10,6 +10,15 @@ goal: core-semantics
 created: 2026-07-25
 related: [1589, 3592]
 ---
+
+## ⚠ Read this first: a skip list that guards nothing
+
+`tests/test262-runner.ts` `HANGING_TESTS` **appears** to cover this whole family. It
+does not. The three #1589A entries are **dead keys** that can never match — see
+"Secondary finding" below. Nothing but the compiler-pool `SIGKILL` stands between the
+corpus run and an unbounded loop, and any harness that does not fork per test has no
+protection at all. A skip list that looks like it covers something it doesn't is the
+more dangerous half of this issue.
 
 ## Summary
 
