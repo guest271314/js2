@@ -270,16 +270,125 @@ inhabitant" line #3548 established, so a pad cannot fix it — the fix would be 
 **widen only when sound** (probe returns `declArity` plus a `minSafeN` = one past
 the last formal with no undefined inhabitant; widen only when `argc >= minSafeN`).
 
-**No such trap has been observed.** Per MEASURE-NEVER-EXTRAPOLATE, no guard code
-was written. The landing agent must re-run the innermost-frame classifier on the
-fresh full-corpus A/B and implement the `minSafeN` widening **only if it fires**.
+**No such trap has been observed** — 0 occurrences in the N = 4,000 A/B below.
+Per MEASURE-NEVER-EXTRAPOLATE, no guard code was written. The landing agent must
+re-run the innermost-frame classifier on the fresh full-corpus A/B and implement
+the `minSafeN` widening **only if it fires**.
+
+#### 6. A/B on a seeded uniform sample, N = 4,000 (2026-07-25)
+
+**Sample counts against the sample denominator. Deliberately NOT scaled to a
+corpus number** — the landing needs its own fresh run against the `main` of the
+day (see "Decision"), so a corpus figure produced now would be stale on arrival.
+
+Selection (reproducible): all 48,088 non-`_FIXTURE`, non-`.imports.js` `.js`
+files under `TEST_CATEGORIES`, sorted, Fisher-Yates shuffled with mulberry32
+`seed = 20260725`, first 4,000 taken; 4 strided shards. Both arms run in ONE
+process, ONE runner (`runTest262File(..., "standalone")`), ONE file at a time,
+with only `JS2WASM_DISABLE_APPLY_ARITY_WIDENING` (an **uncommitted** codegen-time
+switch) toggled between them. Never diffed against the committed baseline JSONL.
+
+| OFF → ON                      |   count |
+| ----------------------------- | ------: |
+| pass → pass                   |   1,939 |
+| fail → fail                   |   1,068 |
+| **pass → fail**               | **453** |
+| skip → skip                   |     401 |
+| compile_error → compile_error |     131 |
+| pass → compile_error          |       3 |
+| fail → compile_error          |       2 |
+| compile_error → pass          |       2 |
+| compile_error → fail          |       1 |
+
+Per-arm: **pass 2,395 → 1,941**, fail 1,070 → 1,522, compile_error 134 → 136,
+skip 401 → 401.
+
+**Honest flips: 453 of the 2,395 sampled standalone passes = 18.9 % of the
+sampled pass set was vacuous through this one mechanism.** Every one of the 8
+status changes that involves a `compilation timeout` in either arm is a
+**contention artifact** (the box sat at load ~18 during the run, not the change);
+the 453 figure already excludes the 3 that are `pass → compile_error`. Genuine
+gains are **0** — both `compile_error → pass` rows are the same timeout artifact.
+
+**Invalid Wasm introduced by the widening: 0.** Classifier = the innermost frame
+(the function named right after `illegal cast in `); a widening-introduced trap
+must be `__call_fn_method_N` itself. Of the 453 flips, **445 carry no wasm frame
+at all** (plain harness assertion failures) and **8 carry one — every one a user
+closure or a runtime helper, never a dispatcher**:
+
+```
+__closure_36  built-ins/SharedArrayBuffer/negative-length-throws.js
+__closure_57  built-ins/TypedArrayConstructors/ctors-bigint/buffer-arg/excessive-offset-throws-sab.js
+__closure_39  built-ins/Array/prototype/copyWithin/return-abrupt-from-this-length.js
+__closure_37  built-ins/Array/prototype/findLast/return-abrupt-from-this-length-as-symbol.js
+__closure_34  built-ins/TypedArrayConstructors/BigInt64Array/prototype/not-typedarray-object.js
+__closure_40  built-ins/WeakSet/iterator-next-failure.js
+__anon_0_f    language/eval-code/direct/gen-meth-fn-body-cntns-arguments-lex-bind-declare-arguments.js
+__get_member_done  built-ins/Iterator/concat/throws-typeerror-when-generator-is-running-next.js
+```
+
+`findLast/return-abrupt-from-this-length-as-symbol.js` was additionally put
+through the same two controls as the original repro (exact-arity with the
+widening ON; exact-arity with it OFF) — **identical trap in both**, independently
+confirming the classifier.
+
+What the failing line of each flip cites — all harness assertions, i.e. honest:
+
+| cited at the failing line       | count |
+| ------------------------------- | ----: |
+| `assert.sameValue`              |   151 |
+| `assert.throws`                 |   139 |
+| `throw new Test262Error`        |   110 |
+| (no cited line — async channel) |    38 |
+| `assert.compareArray`           |    12 |
+| `assert.notSameValue`           |     2 |
+| `assert(`                       |     1 |
+
+The 38 with no cited line are `Test262:AsyncTestFailure:Test262Error: …` rows
+(the async completion channel reports no source line) plus two
+`assert.compareIterator` sites.
+
+**fail → fail error-signature delta: 6 of 1,202** non-pass→non-pass rows change
+signature. Three are the timeout artifacts; the other three are a
+`dereferencing a null pointer` → `uncaught Wasm-GC exception`, an
+`Expected resolve() to throw` → `Expected SameValue(…)`, and an
+`uncaught Wasm-GC exception` → `object is not iterable`. This is the population
+#3439's hard-0 unclassified gate could park on, and it does not:
+
+#### 7. Signature routing — **no new `STANDALONE_ROOT_CAUSE_BUCKETS` entry is needed**
+
+Both arms' rows were run through the real router
+(`node scripts/build-test262-report.mjs --target standalone
+--max-unclassified-root-causes 0`):
+
+| arm | non-pass non-skip | classified | **unclassified** | gate |
+| --- | ----------------: | ---------: | ---------------: | ---- |
+| OFF |             1,204 |      1,204 |            **0** | PASS |
+| ON  |             1,658 |      1,658 |            **0** | PASS |
+
+16 ON-arm error signatures have no OFF-arm counterpart, but **all 16 route into
+buckets that already exist**. 32 existing buckets absorb the growth; the largest
+are `class-prototype-private-descriptor` +172, `standalone-iterator-protocol`
++44, `eval-new-function` +44, `generator-async-iteration` +36,
+`object-property-semantics` +22, `array-typedarray-buffer` +18. Exactly one
+bucket (`super-spread-receiver`) was empty in the OFF arm and populated in the
+ON arm — it is a **pre-existing bucket definition**, not a new one.
+
+**This refutes the earlier expectation that 3/15 flips would need a new
+`Test262:AsyncTestFailure:Test262Error: …SameValue…` bucket.** All 23 (at N=3,020)
+/ 30-odd `AsyncTestFailure` rows classify. The reason is structural: the
+standalone bucket matchers are predominantly **path**-based
+(`class-prototype-private-descriptor` matches `language/statements/class`,
+`/class/`, `private`, …), so a _new error signature on an already-covered path_
+routes automatically. Only a signature on an uncovered path can reach
+`unclassified`.
 
 ## Decision (scoping)
 
 **RC1 lands now** (this PR): exhaustively measured, purely positive, zero park
 risk, ~10 lines.
 
-**RC2 does NOT land in this budget window.** A 15 %-of-passing de-inflation is a
+**RC2 does NOT land in this budget window.** A ~19 %-of-passing de-inflation is a
 deliberate honest-floor landing (park = measurement; separate honest-flips from
 invalid-Wasm; cluster-route every new signature into
 `STANDALONE_ROOT_CAUSE_BUCKETS`; bump `ORACLE_VERSION` if verdict logic changes)
@@ -328,7 +437,35 @@ ever reserved under standalone/WASI.
 - [x] RC2: root cause isolated to arity under-application, with host/plain-fn/object-method/explicit-`undefined` controls
 - [x] RC2: `verifyProperty` measured as a SEPARATE root cause (identical A/B arms)
 - [x] RC2: honest pass/fail split reported with denominators, not extrapolated
-- [ ] RC2: honest-floor landing (cluster-route the 3 async signatures + the illegal-cast trap, then land per the F1 recipe)
+- [x] RC2: the reported illegal-cast "blocker" measured — **pre-existing, not
+      widening-introduced** (exact-arity control + widening-off control, ×2 files)
+- [x] RC2: widening-introduced invalid Wasm **= 0** at N = 4,000 (innermost-frame classifier)
+- [x] RC2: missing formal verified BY VALUE to read as `undefined`, host-free,
+      for the concrete-ref (string) lowering; pinned by a test
+- [x] RC2: signature routing settled — **0 unclassified in both arms**, no new
+      `STANDALONE_ROOT_CAUSE_BUCKETS` entry required
+- [ ] RC2: honest-floor landing per the F1 recipe (needs a FRESH corpus A/B
+      against the `main` of the landing day — the numbers above are a sample and
+      will be stale)
+
+## Landing checklist (for whoever schedules RC2)
+
+1. **Wait for a quiet queue.** Do not land alongside an in-flight
+   `ORACLE_VERSION` bump — the two together can wedge the merge queue.
+2. **Re-measure fresh, full corpus, local-vs-local** with the uncommitted
+   `JS2WASM_DISABLE_APPLY_ARITY_WIDENING` switch. Budget: **~2.0 s per file-pair**
+   single-process (measured), 48,088 files ⇒ ~26.7 CPU-hours. Never diff against
+   the committed baseline JSONL.
+3. **Run the innermost-frame classifier** over the pass→fail flips. If any flip's
+   innermost frame is `__call_fn_method_N`, that IS a real blocker → implement the
+   `minSafeN` widening from §5 before landing. It did not fire at N = 4,000.
+4. **Re-run the routing gate** (`--max-unclassified-root-causes 0`) on the ON arm.
+   It passed at N = 4,000 with no new bucket.
+5. **Exclude `compilation timeout` rows** from the flip accounting — they are
+   machine-contention artifacts, not flips (8 of them at N = 4,000).
+6. Park = measurement; expect a bot park-hold on the merge-group floor gate and
+   treat it as the measurement, per
+   `reference_f1_honest_floor_deinflation_landing_recipe`.
 
 ## Follow-up
 
