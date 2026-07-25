@@ -1,26 +1,26 @@
-#3596 — verifyProperty vacuity: probe + measurement harness
+#3603 — verifyProperty vacuity: probe + measurement harness
 ===========================================================
 
 These are the exact scripts that produced every number in
-plan/issues/3596-verifyproperty-vacuous-both-lanes.md. They live under plan/
+plan/issues/3603-verifyproperty-vacuous-both-lanes.md. They live under plan/
 deliberately: `format:check` and `lint` are scoped to src/ tests/ scripts/, so
 nothing here is linted, formatted or executed by CI. Run them by hand with
 `npx tsx <file>` (or `node` for the .mjs) from a worktree root.
 
 Run order
 ---------
-  node   plan/probes/3596/census.mjs            # exact static census; writes vp-files.txt
-  npx tsx plan/probes/3596/probe.mts            # A/B wrong-expectation control, both lanes
-  npx tsx plan/probes/3596/inner.mts            # fine-grained observation channel (standalone)
-  npx tsx plan/probes/3596/inner2.mts           # uncurryThis mechanism probe (standalone)
-  npx tsx plan/probes/3596/inner3.mts           # FIX BOUNDARY: object-construction shapes
-  npx tsx plan/probes/3596/uncurry.mts          # two-lane uncurryThis check via runTest262File
-  npx tsx plan/probes/3596/ab.mts calibrate A   # detector calibration, one arm PER PROCESS
-  npx tsx plan/probes/3596/ab.mts calibrate B
-  npx tsx plan/probes/3596/ab.mts armA 600 20260725   # stock, harvests the pass list
-  npx tsx plan/probes/3596/ab.mts armA2               # ATTRIBUTION CONTROL (structure, no throws)
-  npx tsx plan/probes/3596/ab.mts armB                # detector
-  VP_LANE=host npx tsx plan/probes/3596/ab.mts armA 600 20260725   # host lane
+  node   plan/probes/3603/census.mjs            # exact static census; writes vp-files.txt
+  npx tsx plan/probes/3603/probe.mts            # A/B wrong-expectation control, both lanes
+  npx tsx plan/probes/3603/inner.mts            # fine-grained observation channel (standalone)
+  npx tsx plan/probes/3603/inner2.mts           # uncurryThis mechanism probe (standalone)
+  npx tsx plan/probes/3603/inner3.mts           # FIX BOUNDARY: object-construction shapes
+  npx tsx plan/probes/3603/uncurry.mts          # two-lane uncurryThis check via runTest262File
+  npx tsx plan/probes/3603/ab.mts calibrate A   # detector calibration, one arm PER PROCESS
+  npx tsx plan/probes/3603/ab.mts calibrate B
+  npx tsx plan/probes/3603/ab.mts armA 600 20260725   # stock, harvests the pass list
+  npx tsx plan/probes/3603/ab.mts armA2               # ATTRIBUTION CONTROL (structure, no throws)
+  npx tsx plan/probes/3603/ab.mts armB                # detector
+  VP_LANE=host npx tsx plan/probes/3603/ab.mts armA 600 20260725   # host lane
 
 census.mjs needs vp-files.txt to be written next to it before ab.mts can sample;
 ab.mts reads/writes its artefacts in its own directory.

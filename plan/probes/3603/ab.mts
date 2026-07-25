@@ -19,7 +19,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlink
 import { join } from "node:path";
 
 const HERE = import.meta.dirname!;
-const WT = join(HERE, "..", "..", ".."); // repo/worktree root (plan/probes/3596/..)
+const WT = join(HERE, "..", "..", ".."); // repo/worktree root (plan/probes/3603/..)
 // The worktree's test262/ is a symlink FARM into the shared /workspace/test262.
 // Swap only THIS worktree's `harness` link for a private real copy so the
 // instrumented harness is invisible to every other agent's runs. Restored by

@@ -1,5 +1,5 @@
 ---
-id: 3596
+id: 3603
 title: "verifyProperty is vacuous on BOTH lanes — two distinct root causes (standalone: object literals have no runtime own-property table; host: uncurried __push is a silent no-op)"
 status: ready
 sprint: current
@@ -17,7 +17,7 @@ related: [2984, 2896, 2860, 3592, 1472, 2177]
 origin: "senior-dev root-cause investigation, TaskList task #11 (2026-07-25)"
 ---
 
-# #3596 — `verifyProperty` is vacuous on BOTH lanes (two distinct root causes)
+# #3603 — `verifyProperty` is vacuous on BOTH lanes (two distinct root causes)
 
 > **This issue is a ROOT CAUSE + MEASUREMENT deliverable.** No compiler change
 > is proposed here. Everything below is measured on `origin/main` @
@@ -352,9 +352,9 @@ measured; it is never estimated.** The detector is already calibrated for the
 host lane (the `posthost` control above), so completing it is three commands:
 
 ```bash
-VP_LANE=host npx tsx plan/probes/3596/ab.mts armA 600 20260725
-VP_LANE=host npx tsx plan/probes/3596/ab.mts armA2   # attribution control
-VP_LANE=host npx tsx plan/probes/3596/ab.mts armB
+VP_LANE=host npx tsx plan/probes/3603/ab.mts armA 600 20260725
+VP_LANE=host npx tsx plan/probes/3603/ab.mts armA2   # attribution control
+VP_LANE=host npx tsx plan/probes/3603/ab.mts armB
 ```
 
 **There is deliberately NO host magnitude number anywhere in this issue — do not
@@ -405,7 +405,7 @@ that no step makes the tree worse:
    table are the acceptance criteria.
 
    **S1 is also the only slice that can prove itself today.** The host lane's
-   vacuity is entirely S1's fault, and the detector in `plan/probes/3596/ab.mts`
+   vacuity is entirely S1's fault, and the detector in `plan/probes/3603/ab.mts`
    is *already calibrated for the host lane* (the `posthost` control) — so S1
    lands with a real before/after vacuity count from the same harness, measured
    in one clean window. S2 has no such measurement available until S1 is in,
@@ -441,9 +441,9 @@ companion slice and is cheap now that the detector is calibrated.
 ## Reproduction
 
 Every script that produced a number above is committed at
-**`plan/probes/3596/`** (with `plan/probes/3596/NOTES.txt` giving the run order
+**`plan/probes/3603/`** (with `plan/probes/3603/NOTES.txt` giving the run order
 and the safety notes) and the raw per-file verdicts at
-**`plan/probes/3596/results/`**. `plan/` is outside the `format:check` / `lint`
+**`plan/probes/3603/results/`**. `plan/` is outside the `format:check` / `lint`
 globs (`src/ tests/ scripts/`) so nothing there is executed or checked by CI.
 
 - `census.mjs` — the exact static census (no compiler involved).
