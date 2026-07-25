@@ -1,6 +1,6 @@
 ---
 id: 3644
-title: "P0: `trap-growth-allow` is honored on the PR but unreadable in the baseline writers — one landed allowance wedges promotion permanently and stops the queue"
+title: "`trap-growth-allow` is honored on the PR but unreadable in the baseline writers — one landed allowance wedges promotion permanently, forcing the blanket emergency valve"
 status: done
 sprint: current
 created: 2026-07-26
@@ -19,6 +19,43 @@ origin: "Live outage 2026-07-25 19:52 → 2026-07-26. Diagnosed by the tech lead
 ---
 
 # #3644 — an allowance must be readable everywhere it is enforced
+
+## Status update — the outage was cleared OPERATIONALLY while this was in flight
+
+**Do not read this issue as the thing that unblocked the queue. It is not.**
+Measured 2026-07-26 shortly after the fix was written:
+
+| when (UTC) | what |
+| --- | --- |
+| 19:54 | `write-run-cache-bot` fails: `previous illegal_cast=74`, `candidate=75`, `(tolerance 0)` |
+| 22:43:12 | the same job, re-run, succeeds: `previous=74`, `candidate=75`, **`(tolerance 1)`** |
+| 22:44:21 | repo variable `BASELINE_TRAP_GROWTH_ALLOW` reset `1 → 0` |
+| 22:46:52 | next promote: `previous=75`, `candidate=75`, `(tolerance 0)` — clean |
+
+So the wedge was cleared by **option (c)** — the repo Actions variable
+`BASELINE_TRAP_GROWTH_ALLOW=1` for one cycle, correctly reset one minute later.
+Verified: the baseline now reports `illegal_cast` = **75**
+(`grep -ac '"error_category":"illegal_cast"'` on the force-fetched JSONL), the
+declared test's row is `status: fail`, `error_category: illegal_cast`, and the
+variable currently reads `0`. **No manual `workflow_dispatch` is needed, and the
+emergency valve is not left open.**
+
+Note the 22:43 log has **no** `using change-scoped per-category ceiling` line —
+the tolerance came from `--allow`, not from the declaration. That distinction is
+the whole point of this issue:
+
+**What (c) cost, and why this fix still matters.** `BASELINE_TRAP_GROWTH_ALLOW=1`
+is a **blanket +1 for every trap category**, unscoped and unverified, for the
+duration of the cycle. It banked the growth into the floor rather than attributing
+it. Had this fix been in place, #3629's declaration would have been consumed
+instead: **scoped to one named test, machine-verified as non-passing on the
+baseline, and self-expiring** (later refreshes see no granting issue in their
+change-set). Same promotion, but the ratchet stays sharp for every other category
+and every other file, and the reason is recorded in the issue file rather than in
+a repo variable someone must remember to reset.
+
+So this is a **durability fix, not the unblock**: it stops the *next* correctly
+declared allowance from wedging the pipeline and forcing the blunt lever again.
 
 ## The rule this violates
 
@@ -142,7 +179,11 @@ exits **1** at `tolerance 0` with no ceiling line (allowance never read); the fi
 exits **0** at `tolerance 1` with the VERIFIED note. `tsc --noEmit` clean;
 `tests/issue-3303.test.ts` 44/44 pass unchanged.
 
-## ⚠️ This fix does NOT self-trigger — a manual dispatch is required
+## ⚠️ This fix does NOT self-trigger (kept for the record — no longer needed)
+
+*Superseded by the status update above: the baseline is already at 75, so no
+dispatch is required now. The mechanics below remain true and will matter the
+next time a promote needs triggering.*
 
 `test262-sharded.yml`'s `push` trigger carries the `&test262-paths` filter
 (`:33-35`). This PR deliberately touches only
@@ -168,9 +209,20 @@ which suppress a gate:
 - **#3645** — the regression test. Deliberately **not** in this PR: a file under
   `tests/` pulls the change-set into the shard matrix and would block the very
   fix that unblocks it. Not an oversight.
-- Whether `scripts/check-baseline-trap-growth.ts` *should* be on `&test262-paths`
-  (it gates the baseline, so arguably yes) is a real question — but adding it is
-  self-blocking today and must wait until the queue moves.
+- **Should `scripts/check-baseline-trap-growth.ts` go on `&test262-paths`?
+  RULED: no — on principle, not on expedience.** (Raised during this PR and
+  settled, so nobody reopens it as an oversight.) That path list answers exactly
+  one question: *could this change alter test **results**, such that the 106-shard
+  matrix must re-run?* A gate script cannot alter results — it alters the
+  **verdict**. Adding it would (i) charge a full matrix run for every
+  gate-logic change, and (ii) **make the gate's own repair path depend on the
+  gate passing** — which is precisely the deadlock this issue exists to unwind.
+  A gate whose fix is gated by itself has no repair path; that property is the
+  bug, and it must not be deliberately re-created in a second place. The correct
+  validation for a gate script is **unit tests on its verdicts** (#3645), not the
+  shard matrix — the four-row exit-code table above already proves more about
+  this gate than a matrix run would. If belt-and-braces is ever wanted, the right
+  form is a required check that runs the gate's unit tests, not a paths entry.
 - Same family as the open task on `regressions-allow` being rebase-mode only.
   The durable framing for both: **an allowance must be readable everywhere it is
   enforced.**
