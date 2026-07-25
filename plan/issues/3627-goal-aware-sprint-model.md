@@ -402,16 +402,32 @@ lane is a false victory _with a machine's authority behind it_ — strictly wors
 than an un-flipped umbrella issue. `dod.lane` is **required** for
 `kind: measured`.
 
-**(d) Keep `all-issues-done`, but guard it — it is vacuously satisfiable.** It
-is distinct from `measured` (it reads the issue corpus, not conformance data)
-and is the right DoD for goals like `ci-hardening` whose completion genuinely is
-"the work items are done." But it has a failure mode `measured` does not: **a
-goal with no members is trivially Done.** This is not hypothetical — measured,
-**`full-conformance` currently has zero member issues**, so under an unguarded
-`all-issues-done` it would report Done while the project is at 70.5 %. Guards:
-`kind: all-issues-done` requires ≥ 1 member issue to have ever existed, and
-`check:goal-refs` rejects it on a goal that also declares a `measured`-capable
-population. When in doubt, `measured` beats `all-issues-done`.
+**(d) Keep `all-issues-done`, but guard TWO vacuity paths.** It is distinct from
+`measured` (it reads the issue corpus, not conformance data) and is the right
+DoD for goals like `ci-hardening` whose completion genuinely is "the work items
+are done." But it has failure modes `measured` does not:
+
+- **Zero members ⇒ trivially Done.** Not hypothetical: measured,
+  **`full-conformance` currently has zero member issues**, so unguarded it would
+  report Done while the project sits at 70.5 %. Guard: require ≥ 1 member issue
+  to have ever existed.
+- **All members non-actionable ⇒ Done with the work untouched.** A goal with 20
+  `backlog` members has members (passes the first guard) and zero
+  _actionable_ ones. This collides head-on with **D5**, which permits
+  bulk-created members to land as `backlog` — a freshly-created `es5-static`
+  with 30 backlog members would be **Done on creation**. Guard: for this DoD,
+  `backlog` and `blocked` members count as **outstanding**. Only the terminal
+  states `done` and `wont-fix` stop counting.
+
+> **This filter is deliberately DIFFERENT from D4's expansion filter, and the
+> two must never be unified.** D4 asks "what may I dispatch _now_?" ⇒
+> `ready`/`in-progress` only. D7d asks "is any work left _at all_?" ⇒ everything
+> non-terminal. Same vocabulary, opposite purpose. A well-meaning refactor that
+> shares one predicate between them silently makes goals complete early.
+
+`check:goal-refs` also rejects `all-issues-done` on a goal that has a
+`measured`-capable population. When in doubt, `measured` beats
+`all-issues-done`.
 
 ### D8 — Two decomposition axes: dependency is an EDGE, partition is a SUBSET
 
@@ -454,7 +470,7 @@ the narrower bucket.
 
 - `partition_of` forms a **tree** (one parent per goal) and is **acyclic** —
   cycle-guard the transitive walk, or expansion hangs.
-- A partition's `metric.bucket` predicate must be a **subset** of its parent's,
+- A partition's `dod.bucket` predicate must be a **subset** of its parent's,
   and sibling partitions of the same parent must be **disjoint**. Overlapping
   siblings double-count and make the parent's roll-up wrong.
 - A goal may carry both `partition_of` and `depends_on` — they are orthogonal
@@ -594,22 +610,23 @@ Verified from `website/public/benchmarks/results/test262-editions.json`
 in `scripts/generate-editions.ts:315` assigns each test exactly one edition, so
 the ES5 bucket does **not** contain the 273 ≤ES3 tests. "100 % ES5" is therefore
 ambiguous between the ES5 bucket alone (13,075) and everything through ES5
-(13,348). **Every goal file MUST state which it means in `metric.bucket`** —
+(13,348). **Every goal file MUST state which it means in `dod.bucket`** —
 this ambiguity silently changes the target by 273 tests.
 
 The stakeholder's instinct (ES3 as a separate goal ES5 depends on) resolves it
 correctly, and decomposes into:
 
 ```
-es3-complete          completion: derived, metric{lane: host, bucket: "≤ ES3", target: 100}
+es3-complete          dod{kind: measured, lane: host, bucket: "≤ ES3", target: 100}
                       47 failures. Genuinely completable near-term.
 
 es5-static            partition_of: es5-complete
                       depends_on: [es3-complete]
+                      dod{kind: measured, lane: host, bucket: "ES5 minus <census predicate>", target: 100}
                       ES5 bucket MINUS interpreter-dependent tests. Reachable now.
 
 es5-complete          depends_on: [es3-complete, runtime-eval]
-                      metric{lane: host, bucket: "ES5", target: 100}
+                      dod{kind: measured, lane: host, bucket: "ES5", target: 100}
                       The remainder needs eval / new Function ⇒ the interpreter.
 ```
 
@@ -803,7 +820,7 @@ Single shared reader so the two consumers cannot disagree about membership.
   counterpart in `goal-graph.md`'s hand-drawn DAG (warn — D11b).
 - **D8 checks:** `partition_of` cycles or multiple parents (must be a tree);
   a `partition_of` target that does not exist; sibling partitions whose
-  `metric.bucket` predicates overlap (double-counts the parent roll-up); a
+  `dod.bucket` predicates overlap (double-counts the parent roll-up); a
   partition whose bucket is not a subset of its parent's.
 - Baseline-ratchets dangling `goal:` refs against
   `scripts/goal-ref-baseline.json` (seeded at 512): fail on growth,
@@ -838,7 +855,9 @@ Single shared reader so the two consumers cannot disagree about membership.
     non-terminality). A hand-edited `state:` on a `measured` goal is a lint
     failure; on an `asserted` goal it is the intended write path.
 13. **D7d:** a `kind: all-issues-done` goal with zero members is **rejected**,
-    not reported Done (the `full-conformance` trap).
+    not reported Done (the `full-conformance` trap); and one whose members are
+    all `backlog` is **NOT** Done (the D5 collision — outstanding counts
+    everything non-terminal, unlike D4's dispatch filter).
 14. **D10:** `reconcile-tasklist.mjs` reports **nothing** for a `sprint: current`
     goal that has been open across several windows — no stale, no drift, no
     merged-but-open. _This is the test that pins the #2860-class false signal out
@@ -917,8 +936,9 @@ children reachable when `standalone-mode` is scheduled.
   baseline; the triage is a follow-up.
 - **`--prune` for orphaned tasks.** Follow-up.
 - **Scheduling any goal.** Landing the mechanism must change no behaviour.
-- **Converting the existing 29 goals to `completion: derived`.** All land as
-  `manual`; per-goal conversion is a follow-up requiring a real metric (D7a).
+- **Promoting the existing 29 goals to `dod.kind: measured`.** All land as
+  `asserted`; per-goal promotion is a follow-up requiring a real, resolvable
+  `source`/`bucket` (D7a).
 - **The `es5-static` exclusion predicate.** Comes from `dev-es5-census`; this
   spec defines the container, not its contents.
 
