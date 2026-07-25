@@ -21,13 +21,22 @@ Everything below is MEASURED, not inferred.
 | RC2 fix (arity widening) + test — **READY BRANCH, not merged** | branch `issue-3585-apply-closure-arity` (pushed to `fork`) |
 | Full measurement write-up                                      | the `3592-*` issue file on both branches                   |
 
+> **Landed since (status as of 2026-07-26).** This is a dated snapshot; the
+> handoff it describes is complete. RC2 landed as PR **#3601**
+> (`feat(#3592): apply-closure arity de-vacuification`), followed by **#3603**
+> (re-raise the standalone high-water mark) and **#3616** (25 %-corpus A/B
+> record). The "READY BRANCH, not merged" row above is historical — do not
+> re-land it. The method and measurements below still stand.
+
 > **The issue is #3592, not #3585 — the branch NAMES still say 3585.**
 > `claim-issue.mjs --allocate` reserved 3585, but another lane landed
 > `plan/issues/3585-standalone-mapget-call-result-eq-false.md` on `main` while
 > this work was in flight, so `quality` → "Issue-ID fresh-claim gate (#2531)"
 > rejected PR #3583. Per
 > `reference_cross_session_issue_id_collision_renumber_loser` the loser
-> renumbers: both branches now carry `plan/issues/3592-*.md`, `id: 3592`, and
+> renumbers: both branches now carry
+> `plan/issues/3592-standalone-vacuous-asserts-arity-and-toplevel-throw.md`,
+> `id: 3592`, and
 > `#3592` in the source comments and test filenames. The branch names were left
 > alone (renaming would have meant re-opening the PR). No behavioural change —
 > the collision is only reachable because `--allocate` cannot see an id that

@@ -6,11 +6,17 @@ yield.** Branch `issue-2864-d4-catch-across-yield` on the **fork**, tip
 GitHub-side HTTP 500 (repo-wide, confirmed independently by the tech lead, who
 owns landing it).
 
+> **Landed since (status as of 2026-07-26).** The 500 cleared and this work
+> merged as PR **#3575** (`fix(#2864 D4): doneState must be the real fallthrough
+> state, not states.length-1`). The handoff line above is historical — nothing is
+> owed. The stale-premise finding and probe results below still stand.
+
 ---
 
 ## 1. The headline: the D4 premise was stale
 
-The dispatch (and the `## D4` note in `plan/issues/2864-*.md`) said try/catch
+The dispatch (and the `## D4` note in
+`plan/issues/2864-standalone-generator-carrier.md`) said try/catch
 across a yield "still bails to the host path —
 `generators-native.ts`: `if (stmt.catchClause) fail()`" and that D4 was the
 trigger to converge sync generators onto the **#2906 CFG planner**.

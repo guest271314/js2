@@ -4,9 +4,15 @@
 **Delivered:** branch `issue-2984-ctor-carrier-own-props` on the **fork** (`ttraenkler/js2`), SHA `4176d4b`.
 PR could not be opened — GitHub `POST /pulls` was 500-ing repo-wide; the tech lead owns the retry.
 
+> **Landed since (status as of 2026-07-26).** The 500 cleared and this work
+> merged as PR **#3574** (`feat(#2984): seed builtin-ctor $Object carrier with
+> length/name/prototype own props`). The handoff line above is historical — no
+> retry is owed. The axis correction and measurements below still stand.
+
 ## 1. The axis correction — the load-bearing insight
 
-`plan/issues/2984-*.md` describes a **gOPD** problem. That framing is right for the seven
+`plan/issues/2984-standalone-gopd-on-builtin-descriptor-mop.md` describes a **gOPD**
+problem. That framing is right for the seven
 slices already landed, all of which fix the **SYNTACTIC** axis: a call site whose receiver
 expression the compiler can resolve at compile time (`gOPD(Math, "abs")`,
 `gOPD(Date.prototype, "getTime")`).
