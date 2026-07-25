@@ -2019,11 +2019,26 @@ async function run(
       0,
       ...TRAP_ERROR_CATEGORIES.map((c) => trapGrowth.newCounts[c] - trapGrowth.baseCounts[c]),
     );
-    // #3596 — on a non-rebase PR the declared ceiling alone is not enough: the
-    // reclassification claim must machine-check. Only run the check when the
-    // allowance actually did some work (growth > 0); a declaration that excused
-    // nothing needs no proof and should not fail the PR.
-    if (!rebaseMode && maxGrowth > 0) {
+    // #3596 — the DECLARATION'S OWN SHAPE selects the contract, not the run mode.
+    // This matters because mode is incidental: whether a given PR happens to run
+    // during an oracle re-baseline is not something the declaration's author can
+    // predict, and it would be a trap for the same frontmatter to receive weaker
+    // enforcement purely because of when it ran.
+    //
+    //   • `tests:` PRESENT → verify it, in BOTH modes. The author opted into the
+    //     stronger contract, so it is enforced regardless of mode. Strictly a
+    //     tightening: verification can only ever refuse a declaration, never
+    //     admit one the ceiling alone would have rejected.
+    //   • `tests:` ABSENT → #3370 semantics, unchanged. A bare bounded count
+    //     remains valid in rebase mode (existing declarations keep working and
+    //     cannot start hard-failing mid-re-baseline) and is still refused
+    //     outside one, as uncheckable.
+    //
+    // Either way the check only runs when the allowance actually did some work
+    // (growth > 0) — a declaration that excused nothing needs no proof.
+    const declaredTests = trapAllowance.tests ?? [];
+    const checkedContract = declaredTests.length > 0 || !rebaseMode;
+    if (checkedContract && maxGrowth > 0) {
       const recheck = evaluateTrapReclassification({
         allowance: trapAllowance,
         baseline,
@@ -2036,7 +2051,7 @@ async function run(
       }
     }
     console.log(
-      `=== ${rebaseMode ? "trap-growth-allow (#3370)" : "trap-growth-allow (#3596)"}: maximum category growth ${maxGrowth} within declared per-category ceiling ${trapAllowance.count} — ` +
+      `=== ${checkedContract ? "trap-growth-allow (#3596)" : "trap-growth-allow (#3370)"}: maximum category growth ${maxGrowth} within declared per-category ceiling ${trapAllowance.count} — ` +
         `reason: ${trapAllowance.reason} (declared in ${trapAllowance.sources.join(", ")}). ===`,
     );
   }

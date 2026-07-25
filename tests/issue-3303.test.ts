@@ -446,6 +446,67 @@ describe("#3303 — CLI gate behaviour (rebase-mode, REGRESSIONS_ALLOW_FILE hook
     expect(r.status).toBe(0);
   });
 
+  // #3596 MODE-INDEPENDENCE. The declaration's own SHAPE selects the contract,
+  // not the run mode. Motivation is concrete: #3583 declared a `tests:` list and
+  // merged, but an oracle v10→v11 bump happened to be in flight, so the run took
+  // the rebase path and the named list was never verified. Whether a PR lands
+  // during a re-baseline is not something the author can predict, so identical
+  // frontmatter must not receive weaker enforcement purely because of timing.
+  describe("#3596 — a `tests:` list is enforced in BOTH modes", () => {
+    const namedButPassingAllowance = (dir: string, name: string) => {
+      const f = join(dir, name);
+      writeFileSync(
+        f,
+        fm(
+          `regressions-allow:\n  count: 100\n  reason: "fixture reclassification"\n` +
+            `trap-growth-allow:\n  count: 100\n  reason: "fixture claim"\n  tests:\n    - test/trap0/a/b/c/t.js`,
+        ),
+      );
+      return f;
+    };
+
+    // `rebaseRows`' trap rows are `pass` on the baseline, so naming one is a
+    // REGRESSION claim. Before this change, rebase mode accepted it unchecked.
+    it("REBASE mode: refuses a named test that was passing on the baseline", () => {
+      const allowFile = namedButPassingAllowance(tmp, "9999-named-passing-rebase.md");
+      const r = runDiffCli(rebaseRows(1, { traps: 1 }), {
+        REGRESSIONS_ALLOW_FILE: allowFile,
+        TRAP_GROWTH_ALLOW_FILE: allowFile,
+        TRAP_RATCHET_TOLERANCE: "0",
+      });
+      expect(r.out).toMatch(/was "pass" on the baseline/);
+      expect(r.status).toBe(1);
+    });
+
+    it("NON-REBASE mode: refuses the same declaration identically", () => {
+      const allowFile = namedButPassingAllowance(tmp, "9999-named-passing-same-oracle.md");
+      const r = runDiffCli(rebaseRows(1, { sameOracle: true, traps: 1 }), {
+        REGRESSIONS_ALLOW_FILE: allowFile,
+        TRAP_GROWTH_ALLOW_FILE: allowFile,
+        TRAP_RATCHET_TOLERANCE: "0",
+      });
+      expect(r.out).toMatch(/was "pass" on the baseline/);
+      expect(r.status).toBe(1);
+    });
+
+    // Backward compatibility, the reason this is shape-driven rather than
+    // "always check": a BARE count with no `tests:` list is a valid #3370
+    // declaration and must keep working in rebase mode. Making the check
+    // unconditional would hard-fail these mid-re-baseline.
+    it("REBASE mode: a bare count (no tests:) keeps #3370 semantics and is NOT checked", () => {
+      const allowFile = join(tmp, "9999-bare-rebase.md");
+      writeFileSync(allowFile, combinedAllowanceFileText(100, 1));
+      const r = runDiffCli(rebaseRows(5, { traps: 1 }), {
+        REGRESSIONS_ALLOW_FILE: allowFile,
+        TRAP_GROWTH_ALLOW_FILE: allowFile,
+        TRAP_RATCHET_TOLERANCE: "0",
+      });
+      expect(r.out).toContain("trap-growth-allow (#3370): maximum category growth 1 within declared");
+      expect(r.out).not.toMatch(/must NAME the reclassified tests/);
+      expect(r.status).toBe(0);
+    });
+  });
+
   it("resets compile-time gate signals when an oracle bump changes the harness workload (#3370)", () => {
     const allowFile = writeAllowanceFile(tmp, 100);
     const rows = {
