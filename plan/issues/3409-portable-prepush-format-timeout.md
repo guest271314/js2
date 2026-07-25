@@ -14,7 +14,7 @@ task_type: infrastructure
 area: tooling
 language_feature: n/a
 goal: developer-experience
-sprint: current
+sprint: 75
 related: [914, 1525, 1771, 3102]
 origin: "2026-07-18 codebase engineering audit publication preflight (plan/log/2026-07-18-codebase-engineering-audit.md, F8)"
 ---

@@ -21,10 +21,45 @@ export type IrUnsupportedCode =
   | "nullish-value-unsupported"
   | "operand-coercion-unsupported"
   | "property-write-unsupported"
+  // (#680) A method call whose receiver/method the IR method-call lowering does
+  // not yet handle (`.m(...) on <type> not in slice 4`) — the sibling of
+  // `property-write-unsupported`. A not-yet-adopted construct, NOT a bug, so it
+  // demotes to the legacy path as a warning; it must NOT fall into the untyped
+  // `unexpected-internal-throw` invariant (which #3341/#3519 hard-error).
+  | "method-call-unsupported"
+  // (#3565) Three DESIGNED demote-to-legacy sites that #3341/#3519 silently
+  // promoted to hard `invariant` compile errors, contradicting their own
+  // documented "clean throw → legacy" / "demotes the function to legacy"
+  // contracts. Typed distinctly so they demote (warning → legacy body) while a
+  // GENERIC `invariant` (a real builder↔finalize desync / invalid-Wasm emission,
+  // the class #3341 rightly hard-fails) stays a hard error:
+  //   - `element-store-unsupported`  — `lowerElementStore` TypedArray-view / packed
+  //     receiver (from-ast.ts): the per-view value conversions are legacy-only.
+  //   - `element-access-unsupported` — `lowerElementAccess` slice-12 residual
+  //     (from-ast.ts): element read on a receiver/index shape not yet in IR scope.
+  //   - `return-type-legacy-coupling` — the verify.ts #1798 return-value gate:
+  //     a return/early.return whose value type or arity would emit invalid Wasm;
+  //     the gate exists PRECISELY to demote to the legacy body (see verify.ts).
+  //   - `compound-assign-unsupported` — `x += v` on an f64 slot whose RHS lowers
+  //     to a non-f64 (e.g. an externref generator value): the numeric coercion
+  //     is legacy-only. Measured casualty: tests/issue-2079 (a for-of over a
+  //     generator, `s += v`) hard-erroring where legacy compiles+runs (=3).
+  | "element-store-unsupported"
+  | "element-access-unsupported"
+  | "return-type-legacy-coupling"
+  | "compound-assign-unsupported"
   | "string-evidence-unsupported"
   | "type-resolution-unsupported"
   | "imported-call-planning-unsupported"
   | "late-preparation-unsupported"
+  // (#3536) The IR-lowered function's interned typeIdx differs from the
+  // collect-time registered signature that legacy-compiled callers already
+  // baked their call-argument coercions against (e.g. an implicit-`any`
+  // param call-site-narrowed to a shape struct that the IR re-types as
+  // externref). Patching would strand those callers on a stale ABI —
+  // invalid Wasm or silent null/undefined params — so the claim is
+  // withdrawn and the legacy body kept.
+  | "abi-signature-parity"
   | "new-target-threading"
   | "static-class-member"
   | "module-init-legacy-coupling";
@@ -52,7 +87,10 @@ export type IrPreparationFailure =
   | {
       readonly kind: "unsupported";
       readonly code: IrUnsupportedCode;
-      readonly stage: "select" | "resolve" | "build";
+      // (#3565) "verify" added: the #1798 return-value gate is a DESIGNED
+      // demote-to-legacy that legitimately produces an `unsupported` outcome at
+      // the verify stage (see verify.ts / integration-report.ts).
+      readonly stage: "select" | "resolve" | "build" | "verify";
       readonly detail: string;
       readonly cause?: unknown;
     }

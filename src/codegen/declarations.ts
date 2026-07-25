@@ -33,6 +33,7 @@ import { addFunctionOwnLocals } from "./binding-info.js"; // (#2103) memoized ow
 import { reportError } from "./context/errors.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { compileFunctionBody, registerInlinableFunction } from "./function-body.js";
+import { _hasRuntimeComputedKey } from "./literals.js"; // (#3024) module-global externref routing for runtime-computed-key literals
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import {
   addArrayIteratorImports,
@@ -115,6 +116,31 @@ import {
  * No-op when every slot classifies as `"other"` so non-TypedArray modules
  * accumulate no metadata.
  */
+/**
+ * (#3468 F1) Builtin/special function-value member names that must KEEP their
+ * existing (dropped, no-op) standalone lowering when written at top level on a
+ * function declaration — never re-route them into the closure-own-property side
+ * table (which would shadow the builtin). `.prototype` IS excluded here:
+ * `.prototype` is owned end-to-end by the #2660 S2/S3 fnctor machinery — for a
+ * RECONSTRUCT-classified fnctor the S2 keep-arm `continue`s before this one, and
+ * for a non-reconstruct fnctor S2 deliberately declines (the scoped gate that
+ * fixed the species-`Ctor.prototype`-identity ejection). Routing that declined
+ * write into the side-table bag instead would give `F.prototype` a SECOND,
+ * S3-invisible storage with divergent identity — so it keeps its existing
+ * dropped lowering (guarded by issue-2660-s2's "S2 off" test).
+ */
+const STANDALONE_FN_STATIC_KEEP_EXCLUDED = new Set([
+  "name",
+  "length",
+  "call",
+  "apply",
+  "bind",
+  "constructor",
+  "prototype",
+  "caller",
+  "arguments",
+]);
+
 function recordExportSignature(
   ctx: CodegenContext,
   exportName: string,
@@ -1274,6 +1300,17 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const widened = ctx.widenedTypeProperties.get(name);
       if ((!widened || widened.length === 0) && !ctx.shapeMap.has(name)) return true;
     }
+    // (#3024) A literal with a RUNTIME computed key (`[expr]` that neither folds
+    // to a compile-time string nor names a well-known Symbol — e.g.
+    // `{ a: 'A', [foo()]: 'B' }`) is built as a host `$Object` (externref) by the
+    // literals.ts routing (`_hasRuntimeComputedKey`, compileObjectLiteral). The
+    // receiving module GLOBAL must be externref to match; otherwise the externref
+    // is stored into a struct-typed global (`global.set expected (ref null N),
+    // found externref` — invalid Wasm) and the read side's `extern.convert_any`
+    // is likewise invalid on the struct slot. Mirrors the function-local sites
+    // (statements/variables.ts `resolveSpillLocalValType`), keeping the module
+    // global in lockstep with the same routing predicate.
+    if (_hasRuntimeComputedKey(ctx, decl.initializer)) return true;
     for (const p of decl.initializer.properties) {
       if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) return true;
       if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
@@ -1474,16 +1511,16 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       ctx.moduleInitStatements.push(stmt);
       continue;
     }
-    // (#2968) A top-level `throw` under `--target wasi`: collect it into
-    // `__module_init` so the statement actually executes at module load and its
-    // exception propagates out to `_start`, where the uncaught-exception printer
-    // (addWasiStartExport) renders it to stderr + `proc_exit(1)`. Without this
-    // there is no `ThrowStatement` case, so a bare top-level `throw` was silently
-    // dropped — it emitted no code at all and the program exited 0. Gated on
-    // `ctx.wasi` so JS-host / plain-standalone output stays byte-identical (their
-    // pre-existing top-level-throw drop is out of scope for this issue).
+    // (#2968) A top-level `throw`: collect it into `__module_init` so it really
+    // executes at module load — WASI surfaces it via `_start`'s uncaught printer,
+    // host/standalone via the `start` section (or the exported `__module_init`
+    // under `deferTopLevelInit`). Without this arm it emitted NO code at all.
+    // (#3592) The `ctx.wasi` gate is REMOVED: #2968 scoped the arm to WASI for
+    // byte-identity, but the drop is a SILENT WRONG ANSWER — a module whose only
+    // statement is `throw` scores PASS in the JS-HOST lane too. Exhaustive A/B
+    // over the whole exposed population (40 files) is +5/−0 in each lane.
     if (ts.isThrowStatement(stmt)) {
-      if (ctx.wasi) ctx.moduleInitStatements.push(stmt);
+      ctx.moduleInitStatements.push(stmt);
       continue;
     }
     // Module-level expression statements with side effects:
@@ -1579,6 +1616,48 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         if (ctx.standalone && isFnctorPrototypeAssignTarget(ctx, expr.left)) {
           ctx.moduleInitStatements.push(stmt);
           continue;
+        }
+        // (#3468 F1) STANDALONE counterpart of the #2671 keep below (which is
+        // gated `!ctx.standalone`): a top-level `F.<name> = …` static property
+        // write on a top-level FUNCTION DECLARATION — the test262 assert-harness
+        // shape (`assert.sameValue = function(){…}`, `assert._isSameValue = …`).
+        // `F` is a function, not a module global, so the generic root-identifier
+        // check below dropped the statement from `__module_init` under
+        // standalone: the own property silently never existed, so
+        // `assert.sameValue(1,2)` invoked `undefined` and every assertion was a
+        // VACUOUS PASS (#3468 root cause). The SAME write already worked from
+        // inside a function body — only the top-level collection dropped it —
+        // and the #3468 closure-own-property side table makes the ordinary
+        // `__extern_set` write-arm store it on the function value. Keep it in
+        // `__module_init` so that arm runs. Scoped exactly like the #2671 host
+        // arm: DIRECT bare-identifier receiver only (`F.prototype.m = …` chains
+        // stay excluded — non-identifier receiver); `.prototype` is already kept
+        // by the #2660 S2 arm above. Host/GC is untouched (that lane uses the
+        // `!ctx.standalone` arm below), so it stays byte-identical.
+        if (
+          ctx.standalone &&
+          ts.isPropertyAccessExpression(expr.left) &&
+          !ts.isPrivateIdentifier(expr.left.name) &&
+          // Non-builtin, non-special property names only. `.prototype` is
+          // already kept by the #2660 S2 arm above (it `continue`d), so it never
+          // reaches here; the rest are builtin function metadata/methods whose
+          // top-level write keeps its existing (dropped, no-op) lowering to
+          // avoid shadowing the builtin.
+          !STANDALONE_FN_STATIC_KEEP_EXCLUDED.has(expr.left.name.text)
+        ) {
+          let sReceiver: ts.Expression = expr.left.expression;
+          while (
+            ts.isParenthesizedExpression(sReceiver) ||
+            ts.isAsExpression(sReceiver) ||
+            ts.isNonNullExpression(sReceiver) ||
+            ts.isTypeAssertionExpression(sReceiver)
+          ) {
+            sReceiver = sReceiver.expression;
+          }
+          if (ts.isIdentifier(sReceiver) && ctx.topLevelFunctionNames.has(sReceiver.text)) {
+            ctx.moduleInitStatements.push(stmt);
+            continue;
+          }
         }
         // (#2671) `F.<prop> = …` — a STATIC property write on a top-level
         // FUNCTION DECLARATION (`Test262Error.thrower = function () {…}`, the

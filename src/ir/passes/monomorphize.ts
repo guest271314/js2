@@ -871,6 +871,24 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       walk(instr.else);
       return out;
     }
+    // #2952 slice 4 — labeled block / switch: same deep pattern as if.stmt
+    // (no own operands / the disc, plus clause-buffer uses).
+    case "labeled.block": {
+      const out: IrValueId[] = [];
+      for (const sub of instr.body) {
+        for (const u of collectUses(sub)) out.push(u);
+      }
+      return out;
+    }
+    case "switch": {
+      const out: IrValueId[] = [instr.disc];
+      for (const body of instr.bodies) {
+        for (const sub of body) {
+          for (const u of collectUses(sub)) out.push(u);
+        }
+      }
+      return out;
+    }
     // (#1373 Phase B) Async / await IR nodes — single operand.
     case "await":
       return [instr.operand];

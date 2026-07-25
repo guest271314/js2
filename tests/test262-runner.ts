@@ -16,6 +16,14 @@ import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 import { ts } from "../src/ts-api.js";
 import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
+// (#3613) ONE renderer for a thrown Wasm payload, shared with the CI worker.
+// Two copies "kept in sync" by a comment is exactly how the local lane came to
+// report the opaque #2870 label where CI reported the real assertion text.
+import {
+  renderHarnessThrownText,
+  safeStringifyThrown as sharedSafeStringifyThrown,
+  tryNativeExnRender as sharedTryNativeExnRender,
+} from "../scripts/lib/wasm-exn-render.mjs";
 import { isModuleGoal } from "../scripts/test262-module-goal.mjs";
 import { restoreHostBuiltins } from "./test262-restore-builtins.js";
 import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-original-harness.js";
@@ -3891,16 +3899,9 @@ function decodeVLQSegment(segment: string): number[] {
  * it: on failure fall back to a stable label so the recorded signature reflects
  * that the module threw a non-JS-stringifiable Wasm-GC payload.
  */
-function safeStringifyThrown(v: any): string {
-  try {
-    return String(v);
-  } catch {
-    const t = typeof v;
-    return t === "object" || t === "function"
-      ? "uncaught Wasm-GC exception (non-stringifiable payload)"
-      : `uncaught Wasm exception (${t})`;
-  }
-}
+// (#3613) Re-exported from the SHARED renderer so this lane and the CI worker
+// cannot drift again. The doc comment above is retained for the #2870 history.
+const safeStringifyThrown = sharedSafeStringifyThrown;
 
 /**
  * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
@@ -3914,20 +3915,8 @@ function safeStringifyThrown(v: any): string {
  * or anything throws — the caller then falls back to the #2870 opaque label.
  * The 64k cap is defensive (a corrupt length must not build a giant string).
  */
-function tryNativeExnRender(instance: any, payload: any): string | null {
-  try {
-    const prep = instance?.exports?.__exn_render_prepare;
-    const chr = instance?.exports?.__exn_render_char;
-    if (typeof prep !== "function" || typeof chr !== "function") return null;
-    const len = prep(payload);
-    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
-    let out = "";
-    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
-    return out;
-  } catch {
-    return null;
-  }
-}
+// (#3613) See safeStringifyThrown above — one implementation, both lanes.
+const tryNativeExnRender = sharedTryNativeExnRender;
 
 export function extractWasmExceptionMessage(err: any, instance: any): string {
   if (typeof WebAssembly !== "undefined" && err instanceof (WebAssembly as any).Exception) {
@@ -4067,25 +4056,29 @@ interface OriginalVariantResult {
   wasm_sha?: string;
 }
 
-function originalHarnessThrownText(error: unknown, instance?: WebAssembly.Instance): string {
-  if (typeof WebAssembly !== "undefined" && error instanceof WebAssembly.Exception && instance) {
-    try {
-      const exports = instance.exports as Record<string, any>;
-      const tag = exports.__exn_tag ?? exports.__tag;
-      const payload = tag ? error.getArg(tag, 0) : undefined;
-      if (payload != null && (typeof payload === "object" || typeof payload === "function")) {
-        const name = (payload as { name?: unknown }).name;
-        const message = (payload as { message?: unknown }).message;
-        if (typeof name === "string") return `${name}${message ? `: ${String(message)}` : ""}`;
-      }
-      if (payload !== undefined && payload !== null) return safeStringifyThrown(payload);
-    } catch {
-      // Fall through to the guarded generic renderer.
-    }
-  }
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return safeStringifyThrown(error);
-}
+/**
+ * (#3613) Now a thin alias over the SHARED renderer
+ * (`scripts/lib/wasm-exn-render.mjs`).
+ *
+ * The local copy this replaces was missing the `tryNativeExnRender` step the
+ * CI worker has always taken, so on the standalone lane every `Test262Error`
+ * surfaced here as the opaque #2870 label ("uncaught Wasm-GC exception
+ * (non-stringifiable payload)") while CI reported the real assertion text.
+ * Consequences: message-derived triage against the local runner saw one giant
+ * undifferentiated bucket, and a standalone runtime-negative test could not
+ * match its expected error TYPE (`originalNegativeMatches` searches the
+ * detail for `meta.negative.type`, which the opaque label does not contain).
+ *
+ * `oracle-version-exempt:` this is the LOCAL in-process runner only. The
+ * committed baseline rows are produced exclusively by
+ * `scripts/test262-worker.mjs`, whose behaviour is byte-unchanged — the shared
+ * policy IS the worker's existing policy. No baseline row can reclassify; the
+ * change only makes the local lane stop disagreeing with CI.
+ */
+const originalHarnessThrownText = renderHarnessThrownText as (
+  error: unknown,
+  instance?: WebAssembly.Instance,
+) => string;
 
 function originalNegativeMatches(meta: Test262Meta, detail: string): boolean {
   const expected = meta.negative?.type;
@@ -4159,7 +4152,16 @@ async function runOriginalHarnessVariant(
         emitWat: false,
         skipSemanticDiagnostics: true,
         inferModuleStrictArguments: meta.flags?.includes("module") === true,
-        ...(target ? { target } : { deferTopLevelInit: true }),
+        // (#2860 F3) Standalone joins the host lane's deferTopLevelInit rule
+        // (mirrors scripts/test262-worker.mjs doCompile): under the `(start)`
+        // model every top-level throw — i.e. every runtime failure in
+        // original-harness mode — surfaced from WebAssembly.instantiate with
+        // instance === null, making the #2962 native exception render
+        // unreachable and collapsing ~8,600 standalone failures onto the
+        // opaque "wasm exception during module init" label. The exec path
+        // below already calls the exported __module_init after setExports.
+        ...(target ? { target } : {}),
+        ...(target === undefined || target === "standalone" ? { deferTopLevelInit: true } : {}),
       });
     } catch (error) {
       compileMs = performance.now() - compileStarted;
@@ -4539,14 +4541,21 @@ export async function runSyntheticTest262File(
       // `__module_init`, no wasm `(start)` section) so top-level code runs
       // AFTER `setExports` has wired the runtime — aligned with
       // `scripts/compiler-fork-worker.mjs` (#1251 both-paths rule). The
-      // standalone/wasi lane keeps its own `_start` model and is untouched.
+      // wasi/linear lanes keep their own `_start` model and are untouched.
+      // (#2860 F3) The STANDALONE lane joins the defer rule (mirrors the
+      // worker's doCompile): under `(start)` a top-level throw surfaced from
+      // instantiate with instance === null, so the #2962 native exception
+      // render was unreachable and standalone failures collapsed onto the
+      // opaque "wasm exception during module init" label. The exec path
+      // below already calls the exported __module_init after setExports.
       // MODULE-GOAL tests are EXCLUDED: the multi-module (FIXTURE) link
       // already synthesizes per-module init plumbing, and adding the
       // deferred-export flag there emitted a SECOND `__module_init` export in
       // one binary — V8 rejects it ("Duplicate export name '__module_init'"),
       // which is exactly the 6-file `language/module-code/*` regression that
       // parked the stack PR #2835/#2839 in the merge queue.
-      ...(target ? { target } : moduleGoal ? {} : { deferTopLevelInit: true }),
+      ...(target ? { target } : {}),
+      ...(moduleGoal || (target !== undefined && target !== "standalone") ? {} : { deferTopLevelInit: true }),
       // #1251: align with the sharded runner — both `scripts/compiler-fork-worker.mjs`
       // (the production path that records the committed JSONL) and `tests/test262-vitest.test.ts`
       // FIXTURE multi-compile pass `skipSemanticDiagnostics: true`. Without this flag,
@@ -5048,6 +5057,23 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
   if (/^returned -1\b/.test(errorMsg)) return "exception_in_test";
   if (/^returned \d+/.test(errorMsg)) return "assertion_fail";
 
+  // (#3468 F1) A message beginning with "Test262Error" is by construction a
+  // rendered ASSERTION THROW (the #2962 standalone exception renderer prefixes
+  // the constructor name), never a genuine Wasm trap: a real trap aborts the
+  // module with a host RuntimeError message ("out of bounds memory access",
+  // "unreachable" …) that carries no Test262Error prefix. This rule must sit
+  // BEFORE the trap regexes for exactly the #3285 reason above — assertion
+  // TEXT quoting the test's own words ("following shrink (out of bounds)
+  // Expected SameValue(«8», «0»)…") was matching /out of bounds/ etc. and
+  // mis-binning honest assertion fails as uncatchable traps, false-positive-
+  // tripping the #3189 trap ratchet (seen live on the F1 merge_group run
+  // 30043224652: 6 Test262Error rows counted as NEW oob — including
+  // Temporal/Duration/…/result-out-of-range-1.js, the SAME file the v4 fix
+  // caught for the "returned N" shape; measured baseline also carries 3 such
+  // false "unreachable" rows). Label-only relabel (no pass/fail flips) —
+  // covered by the same ORACLE_VERSION 10 bump as the #3468 F1 de-inflation.
+  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
+
   // Wasm traps
   if (/dereferencing a null/i.test(errorMsg)) return "null_deref";
   if (/illegal cast/i.test(errorMsg)) return "illegal_cast";
@@ -5064,13 +5090,9 @@ export function classifyError(errorMsg: string | undefined): string | undefined 
 
   // (Assertion "returned N" patterns are classified at the TOP of this
   // function — before the trap regexes — see the #3285 comment there.)
-  // (#2962) A thrown Test262Error IS an assertion failure by definition. The
-  // standalone exception renderer (#2962) surfaces these as
-  // "Test262Error: <assert text>" — before it, such failures were the opaque
-  // #2870 label and fell to "other". Host-lane records are unaffected: there
-  // the payload is a real JS Error and the recorded message is `.message`
-  // WITHOUT the constructor-name prefix.
-  if (/^Test262Error\b/.test(errorMsg)) return "assertion_fail";
+  // (#2962/#3468 F1) The `^Test262Error` → assertion_fail rule moved to the
+  // TOP of this function, before the trap regexes — see the #3468 comment
+  // there (assertion text quoting trap words was stealing the row).
 
   // Wasm compile/validation errors (from instantiation). (#3187) Order matters:
   // classify GENUINE invalid-Wasm FIRST so an instantiation error that quotes

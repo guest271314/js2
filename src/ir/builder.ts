@@ -1720,6 +1720,46 @@ export class IrFunctionBuilder {
       resultType: null,
     });
   }
+
+  /**
+   * #2952 slice 4 — emit a break-only labeled frame (`lbl: { ... }` over a
+   * non-loop statement). Body pre-collected via `collectBodyInstrs`;
+   * `br.label{label, "break"}` inside it exits the frame.
+   */
+  emitLabeledBlock(args: { label: IrLabelId; body: readonly IrInstr[] }): void {
+    this.pushInstr({
+      kind: "labeled.block",
+      label: args.label,
+      body: args.body,
+      result: null,
+      resultType: null,
+    });
+  }
+
+  /**
+   * #2952 slice 4 — emit a `switch` over literal tests. `tests[k]` is the
+   * clause-k literal (null = default); `bodies[k]` its statement buffer
+   * (falls through into k+1 unless it breaks). `breakLabel` is the exit
+   * frame `break` targets (allocate via `freshLoopLabel`).
+   */
+  emitSwitch(args: {
+    disc: IrValueId;
+    discSlot: number;
+    tests: readonly (number | null)[];
+    bodies: readonly (readonly IrInstr[])[];
+    breakLabel: IrLabelId;
+  }): void {
+    this.pushInstr({
+      kind: "switch",
+      disc: args.disc,
+      discSlot: args.discSlot,
+      tests: args.tests,
+      bodies: args.bodies,
+      breakLabel: args.breakLabel,
+      result: null,
+      resultType: null,
+    });
+  }
 }
 
 // Convenience: value-id brand with no underlying type map — useful for tests

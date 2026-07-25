@@ -3,7 +3,7 @@ id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: blocked
 assignee: ttraenkler/fable-2161
-sprint: current
+sprint: Backlog
 created: 2026-06-15
 updated: 2026-07-04
 blocked_on: [2175]

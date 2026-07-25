@@ -23,6 +23,28 @@ import { ReOp } from "./bytecode.js";
 /** Matches the Wasm VM's step cap. Tunable; documented in the issue. */
 export const REGEX_STEP_CAP = 1_000_000;
 
+/**
+ * (#3549) Per-input-unit budget on top of the base cap. The cap exists to
+ * stop RUNAWAY BACKTRACKING (super-linear in the subject), but a flat cap
+ * also killed legitimate LINEAR matches over long subjects: `^\p{L}+$`(u)
+ * costs a measured ~5 steps/unit (CLASS+SPLIT over the surrogate-alternation
+ * program), so the flat 1M cap tripped at ~200k units — and the
+ * `RegExp/property-escapes` conformance tests match complement strings of
+ * ~1.1M units (304/311 failed exactly here). A length-LINEAR budget keeps
+ * the guard: catastrophic patterns are Ω(n²)/Ω(2ⁿ), so on any subject long
+ * enough to earn a raised budget they still exceed it (10k-unit subject:
+ * n² = 100M ≫ 1M + 50·10k = 1.5M). 50/unit is ~10× the measured legitimate
+ * cost. The length term saturates at 20M units so the i32 budget in the Wasm
+ * VM cannot overflow (1M + 50·20M ≈ 1.0G < 2³¹−1).
+ */
+export const REGEX_STEP_CAP_PER_UNIT = 50;
+export const REGEX_STEP_CAP_LEN_SATURATION = 20_000_000;
+
+/** The shared budget formula — used by BOTH this mirror VM and the Wasm VM. */
+export function regexStepBudget(len: number): number {
+  return REGEX_STEP_CAP + REGEX_STEP_CAP_PER_UNIT * Math.min(len, REGEX_STEP_CAP_LEN_SATURATION);
+}
+
 interface Frame {
   pc: number;
   sp: number;
@@ -102,12 +124,15 @@ export function runAt(
   const inBounds = (): boolean => (dir > 0 ? sp < len : sp > 0);
   const unit = (): number => input.charCodeAt(dir > 0 ? sp : sp - 1);
 
+  // (#3549) Length-scaled budget — see regexStepBudget: linear matches over
+  // long subjects stay under it; runaway backtracking still exceeds it.
+  const stepBudget = regexStepBudget(len);
   for (;;) {
     // (#2091) Cap exhaustion is a hard error, NOT a no-match: a silent `return
     // null` is indistinguishable from a genuine non-match. Throw a catchable
     // RangeError so callers (and the Wasm `__regex_run` this VM mirrors) report
     // it loudly. (A legitimate backtrack failure still returns `null` below.)
-    if (++steps > REGEX_STEP_CAP) {
+    if (++steps > stepBudget) {
       throw new RangeError("regular expression step limit exceeded");
     }
     const op = prog[pc * 3]!;

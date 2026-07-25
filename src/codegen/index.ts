@@ -170,6 +170,7 @@ import {
   fillProxyDispatch,
 } from "./object-runtime.js";
 import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
+import { fillVecPropHelpers } from "./vec-props.js"; // (#3537) array ($Vec) expando side table
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
 import { fillReflectIsConstructor } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
@@ -1514,12 +1515,60 @@ function explicitlyDisabledEnv(v: string | undefined): boolean {
   return v === "0" || v === "false";
 }
 
-export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
+// (#680 / #3341) The host-only generator/async-generator buffer imports that
+// `addGeneratorImports` (registry/imports.ts) intentionally does NOT register
+// under `--target standalone`/`wasi` (it early-returns there). In those targets
+// the native #680 `__GenState` state machine lowers generators host-free, so an
+// IR generator path that still emits a ref to one of these names (src/ir/
+// from-ast.ts) is referencing a TARGET-UNAVAILABLE host import — NOT a
+// builder↔finalize desync. Keep this list in lockstep with `addGeneratorImports`.
+function isHostOnlyGeneratorImportName(name: string): boolean {
+  return (
+    name.startsWith("__gen_") ||
+    name === "__create_generator" ||
+    name === "__create_async_generator" ||
+    name === "__get_caught_exception"
+  );
+}
+
+/**
+ * (#680) True when a hard IR-build INVARIANT is actually a reference to a host
+ * import that the CURRENT TARGET intentionally omits, not a builder↔finalize
+ * desync. #3341 promoted the `unknown-function-ref` name-repoint invariant to a
+ * hard compile error on the premise that "no valid TS source can produce an
+ * unresolvable ref on a correctly-claimed function" — validated on the gc-target
+ * playground corpus, which MISSED the standalone-target dimension: a basic
+ * `function* g(){ yield 1 }` under `--target standalone` makes the IR generator
+ * path emit a ref to the host-only `__gen_create_buffer`, which standalone never
+ * registers, so it hard-errored instead of demoting to the working native path
+ * (regressed #680, bisected to #3341 / PR #3249).
+ *
+ * Scoped PRECISELY (per the fix decision): fires ONLY when the target lacks JS
+ * host imports AND the unresolved FUNCTION-ref name is in the host-only
+ * generator-import family. A genuine desync — an unknown ref to an IR-builder-
+ * created `$…` entity, ANY unknown global/type ref, or ANY unknown ref in a
+ * host/gc build where these imports DO register — is not matched and still
+ * hard-errors.
+ */
+function isTargetOmittedHostImportInvariant(
+  err: IrIntegrationError,
+  ctx?: Pick<CodegenContext, "standalone" | "wasi">,
+): boolean {
+  if (!ctx || !(ctx.standalone || ctx.wasi)) return false;
+  if (err.outcome.kind !== "invariant" || err.outcome.code !== "unknown-function-ref") return false;
+  const name = /unknown function ref "([^"]+)"/.exec(err.message)?.[1];
+  return name !== undefined && isHostOnlyGeneratorImportName(name);
+}
+
+export function formatIrPathFallbackDiagnostic(
+  err: IrIntegrationError,
+  ctx?: Pick<CodegenContext, "standalone" | "wasi">,
+): {
   readonly message: string;
   readonly severity: "error" | "warning";
 } {
   const body = `IR path failed for ${err.func}: ${err.message} [IR-FALLBACK]`;
-  const hard = err.outcome.kind === "invariant";
+  const hard = err.outcome.kind === "invariant" && !isTargetOmittedHostImportInvariant(err, ctx);
   return {
     message: hard ? `Codegen error: ${body}` : body,
     severity: hard ? "error" : "warning",
@@ -2360,7 +2409,7 @@ function consumeIrOverlayReport(
       func: err.func,
       message: err.message,
     });
-    const diag = formatIrPathFallbackDiagnostic(err);
+    const diag = formatIrPathFallbackDiagnostic(err, ctx);
     ctx.errors.push({
       message: diag.message,
       line: 0,
@@ -3691,6 +3740,10 @@ export function generateModule(
     // (#3468) Fill after all closure types and object-runtime deps are known.
     fillClosurePropHelpers(ctx);
 
+    // (#3537) Fill the array-expando side-table helpers (same deps: the
+    // object-runtime funcIdxs are all in funcMap by finalize).
+    fillVecPropHelpers(ctx);
+
     // (#3140) Fill the reserved `__bind_dyn` dynamic-bind helper now that every
     // closure root is registered (the callable gate needs the COMPLETE
     // classifier list). No-op when no standalone `.bind`-on-any site reserved it.
@@ -4336,7 +4389,13 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
   // Helper to emit a method dispatch export
   const emitMethodDispatch = (methodSuffix: string, exportName: string) => {
-    const entries: { structName: string; typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
+    const entries: {
+      structName: string;
+      typeIdx: number;
+      funcIdx: number;
+      resultType: ValType;
+      extraParams: ValType[];
+    }[] = [];
 
     for (const [structName] of ctx.structFields) {
       const typeIdx = ctx.structMap.get(structName);
@@ -4353,8 +4412,15 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
         funcType && funcType.kind === "func" && funcType.results.length > 0
           ? funcType.results[0]!
           : { kind: "externref" };
+      // (#3024) params[0] is the receiver; a user iterator method with a formal
+      // parameter (`next(value)` / `return(value)`) has extra params the
+      // dispatcher must pad — it always represents a protocol call with NO value
+      // argument (its own signature is `(externref) -> externref`), so the pad is
+      // the "missing trailing arg" default per param type. Without it the call is
+      // `not enough arguments on the stack for call (need 2, got 1)` (invalid Wasm).
+      const extraParams: ValType[] = funcType && funcType.kind === "func" ? funcType.params.slice(1) : [];
 
-      entries.push({ structName, typeIdx, funcIdx, resultType });
+      entries.push({ structName, typeIdx, funcIdx, resultType, extraParams });
     }
 
     if (entries.length === 0) return;
@@ -4367,10 +4433,40 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
     let current: Instr[] = [{ op: "ref.null.extern" }];
 
+    // (#3024) Pad a missing trailing method argument. The dispatcher calls
+    // `<struct>_next`/`<struct>_return` with only the receiver, so any declared
+    // formal (`next(value)`) needs a default. Iterator `.next()`/`.return()`
+    // invoked with no value → the value is `undefined`; for an externref (untyped
+    // JS) param emit the real host `undefined` when already imported (else
+    // `ref.null.extern`, byte-identical standalone). Numeric/ref params get the
+    // type's zero/f64-sentinel — matching the normal missing-arg convention.
+    const undefinedIdx = ctx.funcMap.get("__get_undefined");
+    const padMissingArg = (pt: ValType): Instr[] => {
+      switch (pt.kind) {
+        case "f64":
+          return [{ op: "i64.const", value: 0x7ff00000deadc0den }, { op: "f64.reinterpret_i64" }];
+        case "f32":
+          return [{ op: "f32.const", value: 0 }];
+        case "i32":
+        case "i8":
+        case "i16":
+          return [{ op: "i32.const", value: 0 }];
+        case "i64":
+          return [{ op: "i64.const", value: 0n }];
+        case "ref":
+          return [{ op: "ref.null", typeIdx: (pt as { typeIdx: number }).typeIdx }, { op: "ref.as_non_null" }];
+        case "ref_null":
+          return [{ op: "ref.null", typeIdx: (pt as { typeIdx: number }).typeIdx }];
+        default:
+          return undefinedIdx !== undefined ? [{ op: "call", funcIdx: undefinedIdx }] : [{ op: "ref.null.extern" }];
+      }
+    };
+
     for (const entry of entries) {
       const testAndCall: Instr[] = [
         { op: "local.get", index: 1 },
         { op: "ref.cast", typeIdx: entry.typeIdx },
+        ...entry.extraParams.flatMap(padMissingArg),
         { op: "call", funcIdx: entry.funcIdx },
       ];
 
@@ -5661,6 +5757,9 @@ export function generateMultiModule(
     // side-table helpers too. Fill their placeholders only after every source
     // has registered its closure types, matching the single-source pipeline.
     fillClosurePropHelpers(ctx);
+
+    // (#3537) Same for the array-expando side table.
+    fillVecPropHelpers(ctx);
 
     // (#3371/#3496) Constructible function-expression wrappers are nominal
     // subtypes of the ordinary closure wrapper. Multi-source harness methods

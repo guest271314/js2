@@ -42,6 +42,7 @@ import { compileArraySliceFromVecLocal } from "./array-methods.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
+import { undefinedSingletonActive } from "./any-helpers.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import {
   ensureAnyToStringHelper,
@@ -766,6 +767,51 @@ function emitArrayProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
 }
 
 /**
+ * (#2875) Register the native `__extern_is_undefined` predicate early — BEFORE a
+ * reflective String proto body's other late-import-adding ops — so the
+ * RequireObjectCoercible guard can fetch its post-shift funcIdx by name. Gated on
+ * the #2106 undefinedSingleton regime (standalone/native-strings): only there is
+ * `undefined` a DISTINCT non-null sentinel externref that a bare `ref.is_null`
+ * misses. Idempotent; `flushLateImportShifts` keeps `fctx.body` consistent if the
+ * ensure added an import batch (matters for the trim body, which has no other
+ * late-import op of its own).
+ */
+function ensureStringRocUndefinedNative(ctx: CodegenContext, fctx: FunctionContext): void {
+  if (!undefinedSingletonActive(ctx)) return;
+  ensureObjectRuntime(ctx);
+  flushLateImportShifts(ctx, fctx);
+}
+
+/**
+ * (#2875) Emit RequireObjectCoercible(this) (§22.1.3.1 step 1) for a reflective
+ * `String.prototype.<member>` closure body: throw a catchable TypeError when
+ * `this` (closure param 1, externref) is null OR undefined.
+ *
+ * In standalone under the #2106 undefinedSingleton regime, `undefined` is a
+ * DISTINCT non-null sentinel externref, so a bare `ref.is_null` catches `null`
+ * but MISSES `undefined` — `String.prototype.<m>.call(undefined)` wrongly
+ * ToString'd it to "undefined" and returned a value instead of throwing. OR-in
+ * the canonical native `__extern_is_undefined` (host-free; registered up front by
+ * `ensureStringRocUndefinedNative` so its funcIdx is post-shift-correct here).
+ * When the regime is inactive, `undefined` ≡ `ref.null.extern` and the bare
+ * `ref.is_null` already covers both.
+ */
+function emitStringRequireObjectCoercible(ctx: CodegenContext, fctx: FunctionContext, member: string): void {
+  const rocThrow: Instr[] = [];
+  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
+  fctx.body.push({ op: "local.get", index: 1 });
+  fctx.body.push({ op: "ref.is_null" });
+  const isUndefIdx = undefinedSingletonActive(ctx) ? ctx.funcMap.get("__extern_is_undefined") : undefined;
+  if (isUndefIdx !== undefined) {
+    // `undefined` is a non-null sentinel externref here → also test it explicitly.
+    fctx.body.push({ op: "local.get", index: 1 });
+    fctx.body.push({ op: "call", funcIdx: isUndefIdx });
+    fctx.body.push({ op: "i32.or" });
+  }
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow });
+}
+
+/**
  * (#2875 slice 1) Native body for a reflective `String.prototype.<member>`
  * closure. `this` is closure-param 1 (externref); user args at 2.. (externref-
  * boxed). Implements §22.1.3.x steps: `? RequireObjectCoercible(this)` →
@@ -808,6 +854,7 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   if (!IN_SCOPE.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
 
   ensureNativeStringHelpers(ctx);
+  ensureStringRocUndefinedNative(ctx, fctx); // (#2875) register the undefined-sentinel predicate first
   const needsNumBox = member === "charCodeAt" || member === "codePointAt";
   // Do ALL late-import-adding ops FIRST (mirrors emitArrayProtoMemberBody), so
   // every helper funcIdx fetched by NAME afterwards is post-shift-correct.
@@ -826,14 +873,11 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
     return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
   }
 
-  // (1) RequireObjectCoercible(this): param 1 externref. In standalone,
-  // undefined is conflated with null as `ref.null.extern`, so a bare
-  // `ref.is_null` catches both → throw a catchable TypeError.
-  const rocThrow: Instr[] = [];
-  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
-  fctx.body.push({ op: "local.get", index: 1 });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow });
+  // (1) RequireObjectCoercible(this) [param 1]: throw a catchable TypeError when
+  // `this` is null OR undefined. Under the #2106 undefinedSingleton regime
+  // `undefined` is a DISTINCT non-null sentinel, so a bare `ref.is_null` would
+  // miss it — see emitStringRequireObjectCoercible.
+  emitStringRequireObjectCoercible(ctx, fctx, member);
 
   // (2) S = ToString(this): externref → anyref → $__any_to_string → $AnyString →
   // flatten. Store the flat string in a local.
@@ -1047,6 +1091,7 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
  */
 function emitStringSearchNumericMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
   ensureNativeStringHelpers(ctx);
+  ensureStringRocUndefinedNative(ctx, fctx); // (#2875) register the undefined-sentinel predicate first
   const isLast = member === "lastIndexOf";
   const helperName = isLast ? "__str_lastIndexOf" : "__str_indexOf";
 
@@ -1066,13 +1111,11 @@ function emitStringSearchNumericMemberBody(ctx: CodegenContext, fctx: FunctionCo
     return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
   }
 
-  // (3) RequireObjectCoercible(this) [param 1]: undefined≡null≡ref.null.extern in
-  // standalone, so a bare ref.is_null throw covers both → catchable TypeError.
-  const rocThrow: Instr[] = [];
-  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
-  fctx.body.push({ op: "local.get", index: 1 });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow });
+  // (3) RequireObjectCoercible(this) [param 1]: throw a catchable TypeError when
+  // `this` is null OR undefined. Under the #2106 undefinedSingleton regime
+  // `undefined` is a DISTINCT non-null sentinel, so a bare `ref.is_null` would
+  // miss it — see emitStringRequireObjectCoercible.
+  emitStringRequireObjectCoercible(ctx, fctx, member);
 
   // (4) lastIndexOf default position: §22.1.3.9 — an absent / `undefined` position
   // is ToIntegerOrInfinity → +∞ ⇒ search from the end. In standalone both map to a
@@ -1137,6 +1180,7 @@ function emitStringSearchNumericMemberBody(ctx: CodegenContext, fctx: FunctionCo
  */
 function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
   ensureNativeStringHelpers(ctx);
+  ensureStringRocUndefinedNative(ctx, fctx); // (#2875) register the undefined-sentinel predicate first
   const helperName =
     member === "includes" ? "__str_includes" : member === "startsWith" ? "__str_startsWith" : "__str_endsWith";
 
@@ -1156,13 +1200,11 @@ function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionCo
     return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
   }
 
-  // (3) RequireObjectCoercible(this) [param 1]: undefined≡null≡ref.null.extern in
-  // standalone, so a bare ref.is_null throw covers both → catchable TypeError.
-  const rocThrow: Instr[] = [];
-  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
-  fctx.body.push({ op: "local.get", index: 1 });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow });
+  // (3) RequireObjectCoercible(this) [param 1]: throw a catchable TypeError when
+  // `this` is null OR undefined. Under the #2106 undefinedSingleton regime
+  // `undefined` is a DISTINCT non-null sentinel, so a bare `ref.is_null` would
+  // miss it — see emitStringRequireObjectCoercible.
+  emitStringRequireObjectCoercible(ctx, fctx, member);
 
   // (4) endsWith default endPosition: §22.1.3.6 step 6 — absent/`undefined`
   // endPosition ⇒ end = len. Mirror the DIRECT path's 0x7fffffff sentinel
@@ -1221,6 +1263,7 @@ function emitStringSearchBooleanMemberBody(ctx: CodegenContext, fctx: FunctionCo
  */
 function emitStringTrimMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
   ensureNativeStringHelpers(ctx);
+  ensureStringRocUndefinedNative(ctx, fctx); // (#2875) register the undefined-sentinel predicate first
   const helperName = member === "trim" ? "__str_trim" : member === "trimStart" ? "__str_trimStart" : "__str_trimEnd";
 
   // Fetch helper funcIdxs. `ensureAnyToStringHelper` is the last ensure that
@@ -1239,13 +1282,11 @@ function emitStringTrimMemberBody(ctx: CodegenContext, fctx: FunctionContext, me
     return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
   }
 
-  // (1) RequireObjectCoercible(this) [param 1]: in standalone undefined≡null≡
-  // ref.null.extern, so a bare ref.is_null throw covers both → catchable TypeError.
-  const rocThrow: Instr[] = [];
-  emitBrandCheckTypeError(ctx, rocThrow, `String.prototype.${member} called on null or undefined`);
-  fctx.body.push({ op: "local.get", index: 1 });
-  fctx.body.push({ op: "ref.is_null" });
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rocThrow });
+  // (1) RequireObjectCoercible(this) [param 1]: throw a catchable TypeError when
+  // `this` is null OR undefined. Under the #2106 undefinedSingleton regime
+  // `undefined` is a DISTINCT non-null sentinel, so a bare `ref.is_null` would
+  // miss it — see emitStringRequireObjectCoercible.
+  emitStringRequireObjectCoercible(ctx, fctx, member);
 
   // (2) S = ToString(this); FLATTEN; __str_trim*(S) → native string; → externref.
   fctx.body.push({ op: "local.get", index: 1 });

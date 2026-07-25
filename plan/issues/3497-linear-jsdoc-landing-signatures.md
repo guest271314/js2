@@ -1,8 +1,9 @@
 ---
 id: 3497
 title: "Resolve exact-source JSDoc signatures for the linear IR landing benchmarks"
-status: in-review
-sprint: current
+status: done
+completed: 2026-07-23
+sprint: 75
 created: 2026-07-20
 updated: 2026-07-20
 pr: 3446

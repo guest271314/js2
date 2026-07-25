@@ -10,6 +10,8 @@ import {
   emitFuncRefAsClosure,
   isOwnParamName,
 } from "../closures.js";
+import { emitCachedFuncClosureAccess } from "../closures/method-trampolines.js"; // (#3486) fnctor ctor-closure singleton
+import { popBody, pushBody } from "../context/bodies.js"; // (#3486) detached operand buffer
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -626,18 +628,28 @@ function compileSuperMethodCallCore(
   }
 
   // Push this as first argument.
+  // (#3024) A STATIC method has no `this` local, so nothing is pushed here and
+  // the parent's compiled function has NO receiver param either. The self offset
+  // below must therefore track what we ACTUALLY pushed — hardcoding 1 made every
+  // `super.m(arg)` in a static method emit a call one argument short
+  // (`not enough arguments on the stack for call (need N, got N-1)` = invalid
+  // Wasm): the first real arg was mis-binned as an "extra" and dropped, and the
+  // pad loop started past the end so it padded nothing.
   const selfIdx = fctx.localMap.get("this");
-  if (selfIdx !== undefined) {
+  const pushedSelf = selfIdx !== undefined;
+  if (pushedSelf) {
     fctx.body.push({ op: "local.get", index: selfIdx });
   }
+  // 1 when a receiver occupies param 0, 0 in a static context (none pushed).
+  const selfOffset = pushedSelf ? 1 : 0;
 
   // Push remaining arguments with type hints.
   const paramTypes = getFuncParamTypes(ctx, funcIdx);
-  // User-visible param count excludes self (param 0).
-  const superParamCount = paramTypes ? paramTypes.length - 1 : expr.arguments.length;
+  // User-visible param count excludes the receiver, when there is one.
+  const superParamCount = paramTypes ? paramTypes.length - selfOffset : expr.arguments.length;
   for (let i = 0; i < expr.arguments.length; i++) {
     if (i < superParamCount) {
-      compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + 1]); // +1 to skip self
+      compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + selfOffset]); // skip self when present
     } else {
       // Extra argument beyond method's parameter count — evaluate for
       // side effects (JS semantics) and discard the result.
@@ -647,9 +659,11 @@ function compileSuperMethodCallCore(
       }
     }
   }
-  // Pad missing arguments with defaults (skip self param at index 0).
+  // Pad missing arguments with defaults. We have filled param slots
+  // [0, selfOffset + args.length), so resume there (#3024: was hardcoded +1,
+  // which over-skipped one slot in a static context).
   if (paramTypes) {
-    for (let i = expr.arguments.length + 1; i < paramTypes.length; i++) {
+    for (let i = expr.arguments.length + selfOffset; i < paramTypes.length; i++) {
       pushDefaultValue(fctx, paramTypes[i]!, ctx);
     }
   }
@@ -741,7 +755,19 @@ export function compileSuperPropertyAccess(
       const getterName = `${ancestor}_get_${propName}`;
       const funcIdx = ctx.funcMap.get(getterName);
       if (funcIdx !== undefined) {
-        // Push this as argument to the getter
+        // Push this as argument to the getter.
+        // (#3024) NOTE — in a STATIC method there is no `this` local, so nothing
+        // is pushed here while the call is emitted regardless, leaving the stack
+        // short (`not enough arguments on the stack for call (need 1, got 0)` =
+        // invalid Wasm). That is DELIBERATELY not padded here: a static getter
+        // is currently compiled instance-shaped (`Base_get_x (param (ref null
+        // <Base>))`), so padding the receiver with the type default emits
+        // `ref.null; ref.as_non_null`, which TRAPS at runtime — trading invalid
+        // Wasm for a guaranteed trap. The sibling `super.<plain static field>`
+        // read has the same underlying gap and silently yields `f64.const 0`
+        // today. Both need static-super property reads to model the CLASS as the
+        // receiver, which is a distinct root cause from the call-arity fix in
+        // compileSuperMethodCallCore above. Tracked separately.
         const selfIdx = fctx.localMap.get("this");
         if (selfIdx !== undefined) {
           fctx.body.push({ op: "local.get", index: selfIdx });
@@ -1236,6 +1262,102 @@ function emitCallSiteFnctorRegistration(
   fctx.body.push({ op: "local.get", index: tmp });
 }
 
+/**
+ * (#1712 / #3486) Ctor-PROLOGUE instance→ctor-closure registration for a
+ * MODULE-scope fnctor. Sibling of `emitCallSiteFnctorRegistration` above, which
+ * covers the function-LOCAL case (#3138).
+ *
+ * Emitted in the prologue — before the user body compiles — because
+ * acorn-style ctors call prototype methods on `this` inside the ctor itself
+ * (`this.context = this.initialContext()`); an end-of-ctor registration left
+ * those in-ctor dispatches unresolvable. JS-host mode only: standalone/WASI
+ * construction stays pure Wasm (the native equivalent rides on the #1888
+ * open-object runtime in a later dogfood lap).
+ *
+ * **(#3486) Why the operand is the identifier's own cached-closure ACCESS, not
+ * a pre-existing global.** The original #1712 form required
+ * `moduleGlobals`/`funcClosureGlobals` to already hold an entry, and BOTH are
+ * populated lazily by an earlier identifier-as-VALUE read of `funcName`. So
+ * whether the link got emitted at all depended on COMPILE ORDER — and in the
+ * shape test262 actually uses,
+ *
+ *     function DummyError() {}
+ *     var prop = function () { throw new DummyError(); };
+ *     assert.throws(DummyError, function () { base[prop()] *= expr(); });
+ *
+ * the `new DummyError()` compiles BEFORE the `DummyError` argument does, so no
+ * global existed, the gate missed, and — because the synthesized ctor is built
+ * exactly once and cached in `funcConstructorMap` — the link was PERMANENTLY
+ * absent. Instances then had no `.constructor` back-pointer at all.
+ *
+ * `emitCachedFuncClosureAccess` is the same helper identifiers.ts uses for a
+ * bare `DummyError` mention, with the same `constructible` flag (unconditionally
+ * false in the host lane — see `isOrdinaryFunctionDecl`'s `noJsHost` gate), so
+ * the registered value is reference-identical to the one every later mention
+ * yields. It fixes both failure modes at once: the singleton is created on
+ * demand (no compile-order dependency) AND the lazy cache is evaluated here, so
+ * the registered value is never the `null` the global holds before its own
+ * first value read.
+ *
+ * Buffer-reach note: the flush below walks `ctx.currentFunc` (still the OUTER
+ * call-site fctx at this point) plus `ctorFctx.body` explicitly; once the body
+ * compile switches `ctx.currentFunc` to `ctorFctx`, later shifts reach these
+ * prologue instrs through `currentFunc.body`, and after attachment through
+ * `ctx.mod.functions`.
+ */
+function emitCtorPrologueFnctorRegistration(
+  ctx: CodegenContext,
+  ctorFctx: FunctionContext,
+  funcName: string,
+  selfLocal: number,
+): void {
+  if (ctx.standalone || ctx.wasi) return;
+  // Build the closure operand in a DETACHED buffer (pushBody/popBody records it
+  // in `savedBodies`, so late-import shift walkers still reach it) and splice it
+  // back only on success — a helper that declines midway must not leave a
+  // partial operand on the ctor's stack.
+  const modGlobalIdx = ctx.moduleGlobals.get(funcName);
+  const declFuncIdx = ctx.funcMap.get(funcName);
+  const saved = pushBody(ctorFctx);
+  let operand: Instr[] | undefined;
+  if (modGlobalIdx !== undefined) {
+    // `var Parser = function(){}` — the module global already HOLDS the closure
+    // (it is not a lazy cache), so read it directly, as #1712 did.
+    ctorFctx.body.push({ op: "global.get", index: modGlobalIdx });
+    const gdef = ctx.mod.globals[localGlobalIdx(ctx, modGlobalIdx)];
+    if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
+      ctorFctx.body.push({ op: "extern.convert_any" });
+    }
+    operand = ctorFctx.body;
+  } else if (declFuncIdx !== undefined && declFuncIdx >= ctx.numImportFuncs) {
+    const closureType = emitCachedFuncClosureAccess(ctx, ctorFctx, funcName, declFuncIdx);
+    if (closureType) {
+      if (closureType.kind !== "externref" && closureType.kind !== "ref_extern") {
+        ctorFctx.body.push({ op: "extern.convert_any" });
+      }
+      operand = ctorFctx.body;
+    }
+  }
+  popBody(ctorFctx, saved);
+  if (operand === undefined) return;
+  // Park the closure in a scratch local BEFORE the register import is added:
+  // `emitCachedFuncClosureAccess` bakes a trampoline funcIdx, and the single
+  // terminal `flushLateImportShifts` below must repair it in the SAME buffer
+  // sweep that fixes the `call` target (#2608 "one terminal flush, never
+  // mid-emission").
+  const ctorTmp = allocLocal(ctorFctx, `__fnctor_ctor_${ctorFctx.locals.length}`, { kind: "externref" });
+  ctorFctx.body.push(...operand);
+  ctorFctx.body.push({ op: "local.set", index: ctorTmp });
+  ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+  flushLateImportShifts(ctx, ctorFctx);
+  const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+  if (regIdx === undefined) return;
+  ctorFctx.body.push({ op: "local.get", index: selfLocal });
+  ctorFctx.body.push({ op: "extern.convert_any" });
+  ctorFctx.body.push({ op: "local.get", index: ctorTmp });
+  ctorFctx.body.push({ op: "call", funcIdx: regIdx });
+}
+
 function compileNewFunctionDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1443,27 +1565,7 @@ function compileNewFunctionDeclaration(
   // compile switches ctx.currentFunc to ctorFctx, later shifts reach these
   // prologue instrs through currentFunc.body, and after attachment through
   // ctx.mod.functions.
-  if (!ctx.standalone && !ctx.wasi) {
-    const ctorGlobalIdx = ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName);
-    if (ctorGlobalIdx !== undefined) {
-      ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
-      // Apply the deferred index shift NOW (same discipline as every other
-      // ensureLateImport caller in this file) so the `call` below targets the
-      // import's final index instead of being re-shifted onto a neighbour.
-      flushLateImportShifts(ctx, ctorFctx);
-      const regIdx = ctx.funcMap.get("__register_fnctor_instance");
-      if (regIdx !== undefined) {
-        ctorFctx.body.push({ op: "local.get", index: selfLocal });
-        ctorFctx.body.push({ op: "extern.convert_any" });
-        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx });
-        const gdef = ctx.mod.globals[localGlobalIdx(ctx, ctorGlobalIdx)];
-        if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
-          ctorFctx.body.push({ op: "extern.convert_any" });
-        }
-        ctorFctx.body.push({ op: "call", funcIdx: regIdx });
-      }
-    }
-  }
+  emitCtorPrologueFnctorRegistration(ctx, ctorFctx, funcName, selfLocal);
 
   // Compile the function body
   const savedFunc = ctx.currentFunc;
@@ -2721,6 +2823,113 @@ function seedNativeSetFromArrayArg(
 }
 
 /**
+ * (#2162 / #3572) `new WeakMap()` / `new WeakSet()` and their iterable
+ * constructor forms in standalone / nativeStrings mode → the native
+ * weak-collection runtime, which reuses the Map backing store (`__map_new`
+ * yields the same `$Map`; the brand tag distinguishes them). Handled forms:
+ *   - no-arg / `null` / `undefined` (all spec-empty);
+ *   - an array LITERAL argument — WeakSet elements via `__weakset_add`, WeakMap
+ *     `[key, value]` pairs via `__map_set` (mirrors the `new Set([…])` /
+ *     `new Map([[k,v],…])` native seeding);
+ *   - (WeakSet only) a non-literal array-typed argument → runtime vec walk.
+ * Other forms (a general iterator with observable protocol steps — the
+ * `iterator-*-failure` tests) return `undefined` so the caller falls through to
+ * the generic ctor path, rather than leak a `WeakMap_new`/`WeakSet_new` host
+ * import. Returns the constructed collection's ValType when handled.
+ */
+function tryCompileNativeWeakCollectionNew(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.NewExpression,
+): ValType | undefined {
+  if (
+    !ctx.nativeStrings ||
+    !ts.isIdentifier(expr.expression) ||
+    (expr.expression.text !== "WeakMap" && expr.expression.text !== "WeakSet")
+  ) {
+    return undefined;
+  }
+  const isWeakMap = expr.expression.text === "WeakMap";
+  const wcArgs = expr.arguments ?? ([] as readonly ts.Expression[]);
+  // A single `null` / `undefined` argument is spec-equivalent to no-arg (empty).
+  const nullishArg =
+    wcArgs.length === 1 &&
+    (wcArgs[0]!.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(wcArgs[0]!) && wcArgs[0]!.text === "undefined"));
+  const wcArrArg = wcArgs.length === 1 && ts.isArrayLiteralExpression(wcArgs[0]!) ? wcArgs[0]! : undefined;
+  // WeakMap array-literal seeding requires every element to be a 2-element
+  // array literal (a `[key, value]` pair), mirroring `new Map([[k,v],…])`.
+  const seedableMapPairs =
+    isWeakMap &&
+    wcArrArg !== undefined &&
+    wcArrArg.elements.every(
+      (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
+    );
+  const seedableSetElems =
+    !isWeakMap && wcArrArg !== undefined && !wcArrArg.elements.some((e) => ts.isSpreadElement(e));
+  // WeakSet only: a non-literal array-typed argument → runtime vec walk (mirror Set).
+  const wcNonLiteralArrArg =
+    !isWeakMap && wcArgs.length === 1 && wcArrArg === undefined && !nullishArg && isArrayTypedArg(ctx, wcArgs[0]!)
+      ? wcArgs[0]!
+      : undefined;
+  const wcHandled =
+    wcArgs.length === 0 || nullishArg || seedableMapPairs || seedableSetElems || wcNonLiteralArrArg !== undefined;
+  if (!wcHandled) return undefined;
+
+  addUnionImports(ctx);
+  ensureWeakCollectionHelpers(ctx);
+  const mapNewIdx = ctx.mapHelpers.get("__map_new");
+  const mapSetIdx = ctx.mapHelpers.get("__map_set");
+  const weaksetAddIdx = ctx.mapHelpers.get("__weakset_add");
+  if (mapNewIdx === undefined || ctx.mapTypeIdx < 0) return undefined;
+
+  fctx.body.push({
+    op: "i32.const",
+    value: isWeakMap ? COLLECTION_KIND.WEAKMAP : COLLECTION_KIND.WEAKSET,
+  }); // (#3171) brand tag
+  fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+  if (seedableMapPairs && wcArrArg !== undefined && wcArrArg.elements.length > 0 && mapSetIdx !== undefined) {
+    const mTmp = allocLocal(fctx, `__wmctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
+    fctx.body.push({ op: "local.set", index: mTmp });
+    for (const el of wcArrArg.elements) {
+      // every() above narrowed each element to a 2-element array literal.
+      const pair = el as ts.ArrayLiteralExpression;
+      fctx.body.push({ op: "local.get", index: mTmp });
+      const kt = compileExpression(ctx, fctx, pair.elements[0]!);
+      coerceMapKeyToAnyref(ctx, fctx, kt);
+      const vt = compileExpression(ctx, fctx, pair.elements[1]!);
+      coerceMapKeyToAnyref(ctx, fctx, vt);
+      fctx.body.push({ op: "call", funcIdx: mapSetIdx }); // returns ref $Map
+      fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "local.get", index: mTmp });
+  } else if (
+    seedableSetElems &&
+    wcArrArg !== undefined &&
+    wcArrArg.elements.length > 0 &&
+    weaksetAddIdx !== undefined
+  ) {
+    const mTmp = allocLocal(fctx, `__wsctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
+    fctx.body.push({ op: "local.set", index: mTmp });
+    for (const el of wcArrArg.elements) {
+      if (ts.isOmittedExpression(el)) continue; // hole → undefined element
+      fctx.body.push({ op: "local.get", index: mTmp });
+      const et = compileExpression(ctx, fctx, el);
+      coerceMapKeyToAnyref(ctx, fctx, et);
+      fctx.body.push({ op: "call", funcIdx: weaksetAddIdx }); // returns ref $Map
+      fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "local.get", index: mTmp });
+  } else if (wcNonLiteralArrArg !== undefined && weaksetAddIdx !== undefined) {
+    const mTmp = allocLocal(fctx, `__wsctor_m_${fctx.locals.length}`, { kind: "ref", typeIdx: ctx.mapTypeIdx });
+    fctx.body.push({ op: "local.set", index: mTmp });
+    // On a non-vec / unsupported-element arg the helper leaves the empty
+    // collection on the stack (graceful: empty WeakSet, never a host leak).
+    seedNativeSetFromArrayArg(ctx, fctx, wcNonLiteralArrArg, mTmp, weaksetAddIdx);
+  }
+  return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+}
+
+/**
  * (#2162) Is `arg`'s static type an array (`T[]` / `Array<T>` / readonly array /
  * a tuple)? Used to recognise the non-literal iterable form of `new Set(arr)` /
  * `new Map(pairs)`. Conservative: only a checker-confirmed array/tuple type
@@ -2943,27 +3152,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
-  // (#2162) `new WeakMap()` / `new WeakSet()` in standalone / nativeStrings mode
-  // → the native weak-collection runtime, which reuses the Map backing store
-  // (`__map_new` yields the same empty `$Map`). No-arg form only; the iterable
-  // form falls through.
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    (expr.expression.text === "WeakMap" || expr.expression.text === "WeakSet") &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureWeakCollectionHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({
-        op: "i32.const",
-        value: expr.expression.text === "WeakMap" ? COLLECTION_KIND.WEAKMAP : COLLECTION_KIND.WEAKSET,
-      }); // (#3171) brand tag
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
-    }
+  // (#2162 / #3572) `new WeakMap()` / `new WeakSet()` + iterable ctor forms →
+  // native weak-collection runtime (see tryCompileNativeWeakCollectionNew).
+  {
+    const weakCollResult = tryCompileNativeWeakCollectionNew(ctx, fctx, expr);
+    if (weakCollResult !== undefined) return weakCollResult;
   }
 
   // (#3242) `new WeakRef(target)` in standalone / nativeStrings mode → the

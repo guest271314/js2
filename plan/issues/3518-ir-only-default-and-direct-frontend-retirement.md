@@ -121,10 +121,12 @@ their order and acceptance boundaries.
 | **R9**                       | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8                                 | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
 | **R10**                      | Reachability-proven direct-front-end deletion                                                         | R9                                    | Re-run #3090 audit; delete the ~59,676 frontend-only fn-lines and dispatch roots; zero direct AST→Wasm reachability remains                                     |
 
-R0a and R0b completed on 2026-07-21. **#3520 is active; its R1a identity and
-shadow-ABI foundation has merged, and R1b is migrating source planning to
-structural IDs.** R2–R8 remain blocked on the concrete dependency spine. R4 follows R3 because its
-ordered plan consumes the class/static-intent census owned by #3522.
+R0a and R0b completed on 2026-07-21. **#3520 is active on draft PR #3496. Its
+R1a identity/shadow-ABI foundation is on main, and Stage 9 / Commit 3.2 is the
+current continuation checkpoint. Structural pass/integration maps (Commit 3.3)
+and the `ProgramAbiMap` slot adapter (Commit 4) remain before R1 can close.**
+R2–R8 remain blocked on the concrete dependency spine. R4 follows R3 because
+its ordered plan consumes the class/static-intent census owned by #3522.
 Runtime-family sub-slices in #3526 may proceed in parallel after R2 once C0
 fixes their semantic contract. #3525, #3527, #3528, and R9 are integration
 barriers, not parallel deletion opportunities.
@@ -186,3 +188,33 @@ barriers, not parallel deletion opportunities.
 - Deleting runtime/builtin behavior merely because it is currently reachable
   through legacy dispatch. R6 must first provide IR-owned semantic entry points.
 - Adding new language behavior to the direct front-end during migration.
+
+## Review (Fable, 2026-07-24)
+
+Verify-first re-audit on main @ `7652f0337` (full document:
+`plan/agent-context/fable-ir-review-2026-07-24.md`).
+
+- **The "Current truth" table still holds.** Re-ran `check:ir-fallbacks`
+  (all unintended buckets 0; module-level 0) and `check:ir-only` (5/5
+  entries, 37 units, 31 IR-emitted, 6 typed Unsupported, 0 Invariants,
+  37/37 legacy bodies, NOT READY) — identical to the 2026-07-21 audit.
+  Adoption matrix: 18 ir-owned confirmed; denominator is now 58 kind rows
+  (prose says 56). Compile-once ceiling and fn-line reachability were not
+  re-measured; no allowlist-widening landed since 2026-07-21, so ≈28.1%
+  plausibly holds.
+- **Ladder gap — R9 needs an explicit coverage-closure dependency.** R9
+  depends on R3–R8 only, but a fail-closed flip with `SwitchStatement` /
+  `LabeledStatement` / `ForInStatement` still direct-only (#2952 `ready`,
+  unstarted) and `%`/`**`/`in`/`instanceof` unlowered would hard-fail
+  ordinary core-JS programs. The acceptance gate only catches this if the
+  authoritative matrices contain such syntax — the playground corpus barely
+  does. Recommend: (a) add "#2952 + #2949 + #1373b + #3583 coverage closure"
+  to R9's Depends-on cell, and (b) grow the `check:ir-only` corpus beyond
+  the playground before R9 readiness is claimed.
+- **#2952 can and should start now** — its structural work (br_table +
+  labeled nested-buffer exits) depends on neither R1 nor R2 and is the
+  longest-lead item on the R9 critical path.
+- **28 adoption-matrix rows had no live owner** (13 tracked by wont-fix
+  #1131, 12 by done issues, 3 untracked) — now tracked by new issue #3583.
+- R1 groundwork is confirmed landing on main (`4922ed58b`, `1a17b4458`);
+  the R2–R8 `depends_on` frontmatter matches this epic's spine exactly.

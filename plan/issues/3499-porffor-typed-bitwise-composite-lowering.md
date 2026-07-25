@@ -1,8 +1,9 @@
 ---
 id: 3499
 title: "Lower typed JavaScript bitwise composites through the Porffor backend"
-status: in-review
-sprint: current
+status: done
+completed: 2026-07-23
+sprint: 75
 created: 2026-07-20
 updated: 2026-07-20
 pr: 3447
@@ -17,7 +18,6 @@ language_feature: javascript-bitwise-operators
 goal: backend-agnostic-ir
 depends_on: [3497]
 related: [1584, 1850, 2953, 3288, 3497, 3498]
-assignee: ttraenkler/codex-senior-3499
 origin: "2026-07-20 explicit user request to unblock exact landing-page fib.js through JS2 typed SSA and Porffor-C"
 files:
   - src/ir/lower.ts

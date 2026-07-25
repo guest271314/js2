@@ -49,7 +49,12 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { findAlternateStructsForField } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
-import { addUnionImportsViaRegistry, ensureLateImport, flushLateImportShifts } from "./shared.js";
+import {
+  addUnionImportsViaRegistry,
+  ensureLateImport,
+  flushLateImportShifts,
+  registerReserveMemberGetDispatch,
+} from "./shared.js";
 import { coercionInstrs } from "./type-coercion.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 
@@ -640,3 +645,8 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
     dispFn.body = dispatchBody;
   }
 }
+
+// (#3178) Late-bound delegate registration — destructuring-params.ts reads
+// `done`/`value` through the dispatcher but cannot import this module
+// statically (eval-time cycle; see shared.ts delegate note).
+registerReserveMemberGetDispatch(reserveMemberGetDispatch);

@@ -35,6 +35,9 @@ import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImport
 import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
+import { ensureDateStruct } from "./builtins.js"; // (#1325) native $__Date struct for host-free `instanceof Date`
+import { ensureStandaloneRegExpStruct } from "../regexp-standalone.js"; // (#1325) native RegExp struct for host-free `instanceof RegExp`
+import { getOrRegisterPromiseType } from "../async-scheduler.js"; // (#1325) native $Promise struct for host-free `instanceof Promise`
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
 import { popBody, pushBody } from "../context/bodies.js";
@@ -1670,6 +1673,26 @@ function nativeBuiltinInstanceOfTypeIdxs(ctx: CodegenContext, ctorName: string):
       return keep(ctx.wrapperStringTypeIdx);
     case "Boolean":
       return keep(ctx.wrapperBooleanTypeIdx);
+    case "Date":
+      // (#1325) `new Date()` lowers to a distinct `$__Date` WasmGC struct
+      // (one i64 timestamp field). Register-or-fetch its type idx so
+      // `ref.test $__Date` answers `d instanceof Date` host-free even when the
+      // LHS is `any` (the static `tryStaticInstanceOf` path already covers a
+      // statically-typed `Date` LHS). `ensureDateStruct` is idempotent and
+      // type-only (no funcidx shift), so calling it here is compile-order-safe.
+      return keep(ensureDateStruct(ctx));
+    case "RegExp":
+      // (#1325) A RegExp literal / `new RegExp(...)` lowers to the distinct
+      // `$__StandaloneRegExp` struct; `ref.test` against it answers
+      // `r instanceof RegExp` host-free. Idempotent, type-only registration.
+      return keep(ensureStandaloneRegExpStruct(ctx));
+    case "Promise":
+      // (#1325) A Promise lowers to the distinct `$Promise` struct
+      // (state/value/callbacks). `ref.test` against it answers
+      // `p instanceof Promise` host-free. `getOrRegisterPromiseType` is
+      // idempotent and type-only (registers the struct type + scheduler state
+      // bookkeeping; no funcidx shift), so calling it here is compile-order-safe.
+      return keep(getOrRegisterPromiseType(ctx));
     default:
       return undefined;
   }
@@ -1910,9 +1933,11 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   // answer can only CONVERT a failing test — never regress a passing one; and
   // gc/host stays byte-identical (this branch is skipped when a JS host is
   // present). Error-family RHS was already handled natively above. A builtin we
-  // do not yet model natively (Object, Date, RegExp, Promise, ArrayBuffer, ...)
-  // or an unresolvable non-builtin ctor falls to a conservative `0` (a missed
-  // conversion, never a wrong `true` — #2916). NEVER emit the host import here.
+  // do not yet model natively (Object, Promise, ArrayBuffer, DataView, typed
+  // arrays, ...) or an unresolvable non-builtin ctor falls to a conservative `0`
+  // (a missed conversion, never a wrong `true` — #2916). Date and RegExp ARE now
+  // modeled (#1325, distinct $__Date / $__StandaloneRegExp structs). NEVER emit
+  // the host import here.
   if (noJsHost(ctx)) {
     const typeIdxs = nativeBuiltinInstanceOfTypeIdxs(ctx, ctorName);
     if (typeIdxs !== undefined) {

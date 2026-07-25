@@ -193,6 +193,35 @@ jobs:
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
           pnpm run check:loc-budget
 
+      - name: Per-function LOC-ceiling ratchet (#3400 / R-FUNC)
+        # Function-granularity twin of check:loc-budget (#3102 slice 2): the same
+        # change-scoped, shrink-only ratchet, but keyed on FUNCTIONS over 300 LOC
+        # (measured via the TS AST). FAILS when this change-set grows a function
+        # already over 300 at its base, newly pushes one over 300, or adds a
+        # brand-new over-300 function. Grandfathers the 185-entry baseline —
+        # demands zero refactoring to land; #3108/#3111 shrink entries and the
+        # post-merge --update-on-decrease banks each drop. Intentional growth is
+        # granted per change-set via a `func-budget-allow:` frontmatter key in
+        # this PR's own plan/issues/*.md. The committed baseline
+        # (scripts/func-budget-baseline.json) is NOT read on this path and PRs
+        # must NOT commit changes to it.
+        run: |
+          git fetch --no-tags --depth=200 origin main 2>/dev/null || true
+          pnpm run check:func-budget
+
+      - name: test262 harness compile-time budget gate (#3437)
+        # DETERMINISTIC, load-independent pre-merge budget for source-scan compile
+        # WORK: compiles a FIXED representative harness-shaped assembly and counts
+        # shared-forEachChild traversals (src/ts-api.ts). The oracle-v8 harness
+        # switch tanked CI via an O(call-sites × file-size) per-file scan (#3433,
+        # fixed by #3374) that was INVISIBLE until the merge queue crawled. Unlike
+        # the wall-clock #1942 guard (flaky, post-merge), this count is a pure
+        # function of the AST + scans, so it gates that regression class HERE,
+        # before the queue. Rebank an intentional slowdown with
+        # `pnpm run check:harness-compile-budget -- --update`. Budget:
+        # scripts/harness-compile-budget.json (set from post-#3433 main).
+        run: pnpm run check:harness-compile-budget
+
       - name: IR adoption table freshness (#2145)
         # Fails when plan/log/ir-adoption.md drifts from its generator data or
         # from the IrFallbackReason union in src/ir/select.ts. Regenerate with
@@ -258,6 +287,29 @@ jobs:
         run: |
           git fetch --no-tags --depth=50 origin main 2>/dev/null || true
           GATE_BASE=origin/main pnpm run check:issue-ids:against-main
+      - name: Issue-ID open-PR collision gate (#3598)
+        # PR-vs-PR half of the id defence: two open PRs adding the same
+        # plan/issues/<id>-*.md are BOTH green against main (neither file is on
+        # main yet); the collision then surfaces only when the first merges —
+        # at best a late red re-check, at worst a merge_group auto-park (#2547)
+        # that strands the loser behind a `hold`. This step compares the
+        # branch's introduced issue files against every OTHER open PR's added
+        # issue files, via the SAME batched scan `claim-issue.mjs --allocate`
+        # uses (scripts/lib/open-pr-issue-files.mjs). Same filename in both PRs
+        # = a modification, NOT flagged; only same id under a different
+        # filename fails. FAIL-OPEN (warn, exit 0) when the scan can't run — a
+        # network-dependent gate must not be able to freeze every PR on a
+        # GitHub blip; the merge_group duplicate-id gate stays the hard
+        # backstop. pull_request only: in the merge_group the head already
+        # contains main and the dup gate above re-validates the merged tree.
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLAIM_PR_REPO: ${{ github.repository }}
+          GATE_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch --no-tags --depth=50 origin main 2>/dev/null || true
+          GATE_BASE=origin/main pnpm run check:issue-ids:against-open-prs
       - name: Issue integrity vs. merged main (#2530)
         # Stale-base dup-ID gate. The check above runs on the PR's OWN tip, which
         # was cut from an older main; an id that a sibling PR has since merged is
@@ -290,6 +342,20 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main 2>/dev/null || true
           ISSUE_COVERAGE_BASE=origin/main pnpm run check:issue-spec-coverage
+
+      - name: Done-status integrity gate (#3474)
+        # Sibling to #2093. CHANGE-SCOPED: for each plan/issues/*.md this PR
+        # touches that is `status: done` and not `done_cited_ok: true`, counts
+        # the LIVE test262 failures citing its #NNNN across both baseline lanes
+        # (keyed on code state, not a commit-message grep, so it catches
+        # status-drift even when the fix didn't cite the issue). HARD FAILS when
+        # a done issue still has > DONE_CITE_THRESHOLD live citations — reopen it
+        # or mark it exempt. A PR touching no `done` issue does ZERO network
+        # work; a baseline-fetch failure WARNS and PASSES (safety net, never
+        # wedges the queue on a 3rd-party network blip).
+        run: |
+          git fetch --no-tags --depth=1 origin main 2>/dev/null || true
+          pnpm run check:done-status-integrity
 
       - name: Verdict-logic must bump oracle_version (#3003)
         # A test262 VERDICT-LOGIC change (how a per-test result is SCORED:
@@ -399,6 +465,20 @@ jobs:
           for test_file in $CHANGED; do
             pnpm exec vitest run "$test_file" --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
           done
+
+      - name: Required guard suite (#3552)
+        # Untouched root test files do NOT run at PR time — the #3008
+        # two-layer design runs only PR-touched tests/*.test.ts per PR and
+        # defers the full ~2,100-file suite (~9 CPU-hours) to the post-merge
+        # issue-tests.yml detector, which detects but does not enforce. #3503
+        # proved the gap on 2026-07-23: it regressed tests/issue-3471.test.ts
+        # WITHOUT touching it — green PR, red main, fixed forward in #3551.
+        # This step runs the SMALL curated manifest of invariant-guard tests
+        # (tests/guard-suite.json — entry criteria in its $comment: <60s per
+        # file, no test262 harness inputs, green on main, guards a prior
+        # silent main regression) on every PR, merge group, and push. Total
+        # budget ~2 minutes; it is NOT the full-suite gate #3008 rejected.
+        run: node scripts/run-guard-suite.mjs
 
       - name: Conformance numbers in sync (#1522)
         run: pnpm run sync:conformance:check

@@ -1,6 +1,6 @@
 {
   "name": "@loopdive/js2",
-  "version": "0.65.0",
+  "version": "0.66.0",
   "description": "Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC",
   "license": "Apache-2.0",
   "exports": {

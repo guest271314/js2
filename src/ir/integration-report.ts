@@ -44,6 +44,11 @@ export interface IrIntegrationError {
   readonly outcome: IrPreparationFailure;
 }
 
+interface IrVerifierDetail {
+  readonly message: string;
+  readonly demote?: boolean;
+}
+
 function legacyIntegrationKind(stage: IrPreparationStage): IrIntegrationError["kind"] {
   if (stage === "verify") return "verify";
   if (stage === "backend-legality") return "backend-legality";
@@ -69,6 +74,27 @@ export function invariantIntegrationFailure(
   return integrationFailure(func, { kind: "invariant", code, stage, detail });
 }
 
+/**
+ * Preserve the verifier's designed return-shape demotion while treating every
+ * other malformed IR artifact as an invariant.
+ */
+export function verifyIntegrationFailure(
+  func: string,
+  detail: IrVerifierDetail,
+  detailPrefix = "",
+): IrIntegrationError {
+  const message = `${detailPrefix}${detail.message}`;
+  if (detail.demote) {
+    return integrationFailure(func, {
+      kind: "unsupported",
+      code: "return-type-legacy-coupling",
+      stage: "verify",
+      detail: message,
+    });
+  }
+  return invariantIntegrationFailure(func, "verifier-failure", "verify", message);
+}
+
 export function caughtIntegrationFailure(
   func: string,
   error: unknown,
@@ -88,7 +114,7 @@ export class IrIntegrationFailureLog {
   }
 
   /** Preserve every verifier detail while emitting one logical failure event. */
-  recordVerifierDetails(func: string, details: readonly { readonly message: string }[], detailPrefix = ""): void {
+  recordVerifierDetails(func: string, details: readonly IrVerifierDetail[], detailPrefix = ""): void {
     this.recordVerifierGroups(func, [{ details, detailPrefix }]);
   }
 
@@ -96,25 +122,29 @@ export class IrIntegrationFailureLog {
   recordVerifierGroups(
     func: string,
     groups: Iterable<{
-      readonly details: readonly { readonly message: string }[];
+      readonly details: readonly IrVerifierDetail[];
       readonly detailPrefix: string;
     }>,
   ): boolean {
     const eventErrors: IrIntegrationError[] = [];
     for (const group of groups) {
       for (const detail of group.details) {
-        const error = invariantIntegrationFailure(
-          func,
-          "verifier-failure",
-          "verify",
-          `${group.detailPrefix}${detail.message}`,
-        );
+        const error = verifyIntegrationFailure(func, detail, group.detailPrefix);
         this.errors.push(error);
         eventErrors.push(error);
       }
     }
-    const error = eventErrors[0];
-    if (error) this.terminalFailureEvents.push({ error, errors: eventErrors });
+    const representativeIndex = eventErrors.findIndex((candidate) => candidate.outcome.kind === "invariant");
+    const terminalErrors =
+      representativeIndex <= 0
+        ? eventErrors
+        : [
+            eventErrors[representativeIndex]!,
+            ...eventErrors.slice(0, representativeIndex),
+            ...eventErrors.slice(representativeIndex + 1),
+          ];
+    const error = terminalErrors[0];
+    if (error) this.terminalFailureEvents.push({ error, errors: terminalErrors });
     return error !== undefined;
   }
 }

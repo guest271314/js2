@@ -15,7 +15,7 @@ import { compileAndEmitToString, emitToString } from "./coercion-engine.js";
 import { registerStringHelperEmitters } from "./string-emitter-registry.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
-import { allocLocal } from "./context/locals.js";
+import { allocLocal, getLocalType } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, HoistedCharRead } from "./context/types.js";
 import { emitThrowTypeError, getFuncParamTypes, noJsHost } from "./expressions/helpers.js";
 import { addStringImports, flatStringType, nativeStringType, resolveIdentifierType, resolveWasmType } from "./index.js";
@@ -39,7 +39,12 @@ import {
   tryCompileStandaloneStringSplit,
 } from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
+import {
+  getArrTypeIdxFromVec,
+  getOrRegisterRefCellType,
+  getOrRegisterTemplateVecType,
+  getOrRegisterVecType,
+} from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
 import {
   coerceType,
@@ -1160,35 +1165,77 @@ export function compileTaggedTemplateExpression(
     // Case 2: tag is a known function
     const funcIdx = ctx.funcMap.get(tagName);
     if (funcIdx !== undefined) {
-      // Prepend captured values for nested functions with captures.
+      // Prepend captured values for nested functions with captures. The lifted
+      // signature is [valueCap_0..N-1, tdzFlagBox_0..K-1, strings, ...userParams]
+      // (mirrors nested-declarations.ts + call-identifier.ts). BOTH the value
+      // captures AND the TDZ-flag boxes are real leading params, so the capture
+      // count that offsets `strings`/substitutions below is value + tdz-flag
+      // count — not just the value count (#3576).
       const nestedCaptures = ctx.nestedFuncCaptures.get(tagName);
+      const tdzFlaggedNested = nestedCaptures ? nestedCaptures.filter((c) => c.hasTdzFlag) : [];
       if (nestedCaptures) {
         for (const cap of nestedCaptures) {
           fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
         }
+        // #1205 Stage 3: after all value captures, push the boxed TDZ-flag refs.
+        // Minimal replication of call-identifier.ts's cap-prepend (kept gated so
+        // the common no-TDZ tag stays byte-inert): share an existing box, else
+        // box the live i32 flag, else treat as initialized (`i32.const 1`).
+        if (tdzFlaggedNested.length > 0) {
+          const i32RefCellTypeIdx = getOrRegisterRefCellType(ctx, { kind: "i32" });
+          for (const cap of tdzFlaggedNested) {
+            const existing = fctx.boxedTdzFlags?.get(cap.name);
+            if (existing) {
+              fctx.body.push({ op: "local.get", index: existing.localIdx });
+              continue;
+            }
+            const liveFlagIdx = fctx.tdzFlagLocals?.get(cap.name);
+            const liveType = liveFlagIdx !== undefined ? getLocalType(fctx, liveFlagIdx) : undefined;
+            const liveOk = liveType?.kind === "i32";
+            if (liveOk && liveFlagIdx !== undefined) {
+              fctx.body.push({ op: "local.get", index: liveFlagIdx });
+            } else {
+              fctx.body.push({ op: "i32.const", value: 1 });
+            }
+            fctx.body.push({ op: "struct.new", typeIdx: i32RefCellTypeIdx });
+            const flagBoxLocal = allocLocal(fctx, `__tdz_box_${cap.name}`, {
+              kind: "ref",
+              typeIdx: i32RefCellTypeIdx,
+            });
+            fctx.body.push({ op: "local.tee", index: flagBoxLocal });
+            if (liveOk) {
+              if (!fctx.boxedTdzFlags) fctx.boxedTdzFlags = new Map();
+              fctx.boxedTdzFlags.set(cap.name, { refCellTypeIdx: i32RefCellTypeIdx, localIdx: flagBoxLocal });
+              if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+              fctx.tdzFlagLocals.set(cap.name, flagBoxLocal);
+            }
+          }
+        }
       }
+      // Total leading capture params (value captures + TDZ-flag boxes).
+      const captureCount = nestedCaptures ? nestedCaptures.length + tdzFlaggedNested.length : 0;
 
       const restInfo = ctx.funcRestParams.get(tagName);
       const paramTypes = getFuncParamTypes(ctx, funcIdx);
 
-      // Push the strings array as argument 0
+      // Push the strings array as the first USER param (wasm index captureCount).
       fctx.body.push({ op: "local.get", index: stringsLocal });
-      // Coerce if needed (e.g. ref_null vec → externref)
-      if (paramTypes?.[0] && paramTypes[0].kind === "externref") {
+      // Coerce if the callee expects externref for the strings param.
+      if (paramTypes?.[captureCount] && paramTypes[captureCount]!.kind === "externref") {
         fctx.body.push({ op: "extern.convert_any" });
       }
 
       if (restInfo) {
-        // Tag function has rest param: push positional args before rest, then pack rest
-        const captureCount = nestedCaptures ? nestedCaptures.length : 0;
-        const restIdx = restInfo.restIndex - captureCount; // restIndex in user params (0-based after captures)
-        // Push positional substitutions before the rest param
-        for (let i = 0; i < Math.min(substitutions.length, restIdx - 1); i++) {
-          compileExpression(ctx, fctx, substitutions[i]!, paramTypes?.[i + 1 + captureCount]);
+        // Tag function has rest param: push positional user substitutions before
+        // the rest param, then pack the remainder into the rest vec. `restIndex`
+        // is in USER-param space (strings is user param 0), so the number of
+        // positional subs between strings and the rest is `restIndex - 1`.
+        const positionalSubs = Math.max(0, restInfo.restIndex - 1);
+        for (let i = 0; i < Math.min(substitutions.length, positionalSubs); i++) {
+          compileExpression(ctx, fctx, substitutions[i]!, paramTypes?.[captureCount + 1 + i]);
         }
         // Pack remaining substitutions into a vec for the rest param
-        const restStart = Math.max(0, restIdx - 1);
-        const restSubs = substitutions.slice(restStart);
+        const restSubs = substitutions.slice(positionalSubs);
         const restArgCount = restSubs.length;
         fctx.body.push({ op: "i32.const", value: restArgCount });
         for (const sub of restSubs) {
@@ -1203,12 +1250,11 @@ export function compileTaggedTemplateExpression(
       } else {
         // No rest param — push substitutions as positional args
         // Only push up to the number of declared params (excluding captures and strings array)
-        const captureCount = nestedCaptures ? nestedCaptures.length : 0;
         const maxSubs = paramTypes
           ? Math.min(substitutions.length, paramTypes.length - 1 - captureCount)
           : substitutions.length;
         for (let i = 0; i < maxSubs; i++) {
-          compileExpression(ctx, fctx, substitutions[i]!, paramTypes?.[i + 1 + captureCount]);
+          compileExpression(ctx, fctx, substitutions[i]!, paramTypes?.[captureCount + 1 + i]);
         }
 
         // Supply defaults for missing optional params

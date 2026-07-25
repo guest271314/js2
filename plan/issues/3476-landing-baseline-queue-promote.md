@@ -1,9 +1,9 @@
 ---
 id: 3476
 title: Landing-page baseline frozen — promote-baseline env-gate skips on queue merges
-status: in-progress
-assignee: ttraenkler/senior-dev-3468
-sprint: current
+status: done
+completed: 2026-07-23
+sprint: 75
 priority: high
 horizon: m
 goal: ci-infra

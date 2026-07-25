@@ -93,6 +93,35 @@ describe("#3520 integration report sidecar completeness", () => {
     expect(audited.sourceInvariant).toBeUndefined();
   });
 
+  it("keeps a mixed verifier event fail-closed without changing public diagnostic order", () => {
+    const current = fixture();
+    const failures = new IrIntegrationFailureLog();
+    failures.recordVerifierGroups("run", [
+      {
+        detailPrefix: "",
+        details: [{ message: "designed return-shape demotion", demote: true }, { message: "dominance violation" }],
+      },
+    ]);
+
+    expect(failures.errors.map((error) => error.outcome.kind)).toEqual(["unsupported", "invariant"]);
+    expect(failures.terminalFailureEvents[0]?.error.outcome.kind).toBe("invariant");
+    expect(failures.terminalFailureEvents[0]?.errors.map((error) => error.message)).toEqual([
+      "dominance violation",
+      "designed return-shape demotion",
+    ]);
+
+    const report = buildIrIntegrationReport(
+      [],
+      failures.errors,
+      current.ownerProjection,
+      [],
+      failures.terminalFailureEvents,
+    );
+    const audited = audit(current, report);
+    expect(audited.invariantByUnitId).toEqual(new Map());
+    expect(audited.sourceInvariant).toBeUndefined();
+  });
+
   it("rejects omitted, foreign, and owner-mismatched public error coverage", () => {
     const current = fixture();
     const first = invariantIntegrationFailure("run", "verifier-failure", "verify", "first");

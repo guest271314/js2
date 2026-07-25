@@ -3,7 +3,7 @@ id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
 status: done
 pr: 1292
-sprint: current
+sprint: 75
 created: 2026-06-07
 updated: 2026-07-21
 completed: 2026-07-21
