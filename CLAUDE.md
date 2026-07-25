@@ -109,7 +109,11 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 ## Test262
 
 - test262.test.ts has no assertions — all vitest tests pass; conformance is tracked via report
-- Skip filters: eval, with, Proxy, SharedArrayBuffer, Temporal, WeakRef, FinalizationRegistry, dynamic import(), top-level-await
+- Skip filters (#3626 — VERIFY BEFORE TRUSTING THIS LINE): `eval` and `with` are **NOT** skipped —
+  those tests run and are counted against conformance (measured 2026-07-25: 826 eval-dependent /
+  512 failures, 171 `with` / 148 failures in the ES5 bucket alone). `top-level-await` IS feature-skipped
+  in `tests/test262-runner.ts`. The remaining historical entries (Proxy, SharedArrayBuffer, Temporal,
+  WeakRef, FinalizationRegistry, dynamic `import()`) were NOT re-verified and must not be assumed skipped.
 - Many previously-skipped features now supported: TypedArray, DataView, ArrayBuffer, delete, async, generators, for-of
 - Issues #618-#634 cover current failure patterns (from 2026-03-19 error analysis)
 - parseInt import: `(externref, f64) -> f64` with NaN sentinel for missing radix
