@@ -1,7 +1,8 @@
 ---
 id: 3610
 title: "Standalone builtins are missing receiver brand checks — 65-test trap cluster (illegal_cast/null_deref/oob) unmasked by the #3592 de-vacuification"
-status: ready
+status: in-progress
+assignee: ttraenkler/opus-3610
 sprint: current
 priority: high
 horizon: l
@@ -9,6 +10,20 @@ feasibility: hard
 goal: standalone-gap
 related: [3592, 3596, 3601]
 created: 2026-07-25
+# The gate's BODY lives in the new subsystem module
+# src/codegen/builtin-prototype-brand.ts. What lands in these two files is the
+# dispatch WIRING only (+13 / +20 lines, the majority of it the comment
+# explaining why the new arm must run BEFORE tryBufferViewAttributeReads /
+# before any receiver-name arm can claim the call). Both files ARE the dispatch
+# chains — there is nowhere else a new dispatch step can be registered.
+loc-budget-allow:
+  - src/codegen/property-access.ts
+  - src/codegen/expressions/call-receiver-method.ts
+# Same +20: the gate must be the FIRST arm of compileReceiverMethodCall (any
+# later position lets a receiver-name-keyed arm claim the call first), so the
+# registration is necessarily inside this function.
+func-budget-allow:
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
 ---
 
 ## Problem
@@ -98,3 +113,137 @@ illegal_cast baseline rows).
 - [ ] The 65 cluster tests flip trap → honest fail or pass; the #3189 trap
       categories shrink accordingly.
 - [ ] No `oracle_version` bump needed (codegen change, not verdict logic).
+
+---
+
+## Slice 1 — the STATIC `<Builtin>.prototype.<member>` brand gate (landed)
+
+`src/codegen/builtin-prototype-brand.ts`.
+
+### Root cause (measured, not assumed)
+
+The clusters were assumed to need a *runtime* brand check. Measurement says the
+first and largest slice needs **no runtime check at all** — the receiver is
+statically decidable.
+
+Nearly every native builtin arm keys its receiver off the **TypeScript type
+name** (`objType.getSymbol()?.name` / `ctx.oracle.builtinReceiverOf`). lib.d.ts
+declares `interface DateConstructor { prototype: Date }` and
+`interface Uint8ClampedArrayConstructor { prototype: Uint8ClampedArray }` — so
+`Uint8ClampedArray.prototype` has TS type `Uint8ClampedArray` and
+`Date.prototype` has TS type `Date`. Every such arm therefore treats the
+**prototype object** as an **instance** and emits the instance lowering:
+
+- `src/codegen/property-access-dispatch.ts:1003-1013` (`.buffer`) — an
+  unconditional `ref.cast` of the receiver to the backing view vec →
+  `illegal cast`.
+- same file `:688-723` (`.maxByteLength` / `.resizable`) — `ref.cast` to
+  `$__vec_i32_byte` → `illegal cast`.
+- `src/codegen/expressions/builtins.ts` `compileDateMethodCall` — compiles the
+  receiver at `(ref $Date)`, gets a null, then `struct.get` → `null reference`.
+- `%TypedArray%.prototype.set([])` did not even produce a **valid module**
+  (`array.set[2] expected type …`) — strictly worse than a trap.
+
+`#3062` had already patched exactly two members (`byteLength`/`byteOffset`) by
+nulling out `recvName` for a `.prototype` receiver inline; that one-off is what
+this slice generalises.
+
+### Why STATIC, not a runtime `ref.test`
+
+Every gated member's spec step 1 is `RequireInternalSlot` /
+`ValidateTypedArray` / `thisTimeValue`, and a builtin's `.prototype` is an
+ordinary object that **provably never** carries that slot (§23.2.7, §21.4.4,
+§25.1.5, …). So `<Ctor>.prototype.<member>` is a compile-time-decidable
+unconditional TypeError. Compiling the check away costs nothing on the instance
+hot path, which a blanket `ref.test` in `compileDateMethodCall` would not — and
+that arm is shared with the JS-host lane, so widening it there was the riskier
+design.
+
+The runtime sibling already exists: `receiver-brand.ts`'s
+`emitReceiverBrandCheck` (non-trapping `ref.test` → catchable TypeError),
+used by the reflective closure bodies. The two are complementary — this gate
+covers the syntactic prototype receiver that never reaches a reflective closure.
+
+### Shadow safety
+
+Fires only when the base identifier's own type symbol is the lib
+`<Name>Constructor` interface (`ctx.oracle.declaredNameOf(id) === name + "Constructor"`,
+i.e. `declare var Date: DateConstructor`). A user `class Date {}` types its
+identifier as `typeof Date` (symbol name `Date`) and is never gated — strictly
+tighter than the `getSymbol()?.name` test the surrounding arms use, and
+answered entirely through `ctx.oracle` (no raw-checker growth).
+
+### Lane scope
+
+`noJsHost || strictNoHostImports` only. In JS-host mode these reads/calls
+already route to the host getter and throw a genuine host TypeError; the
+JS-host lane is a separate required gate at 30,405 and is not broken here.
+
+### Measured result
+
+Re-ran all 65 `standalone-devacuification-allow` tests before/after on this
+branch (`runTest262File(..., "standalone")`):
+
+| | before | after |
+| --- | ---: | ---: |
+| trap-category failures (illegal_cast/null_deref/oob) | **65** | **49** |
+| pass | 0 | **14** |
+
+- **14 trap → pass**: 11 `TypedArrayConstructors/*/prototype/not-typedarray-object.js`,
+  `ArrayBuffer/prototype/maxByteLength/invoked-as-accessor.js`,
+  `Date/prototype/no-date-value.js`, `Date/prototype/setFullYear/15.9.5.40_1.js`.
+- **1 trap → honest non-trap fail**: `Date/prototype/toString/non-date-receiver.js`
+  — its first assertion now throws correctly; the remaining
+  `Date.prototype.toString.call(<primitive>)` sub-cases are the reflective path
+  (Slice 2), so the file still fails, but no longer fatally.
+- Direct compile+instantiate probes (independent of the runner's payload
+  renderer) confirm each gated form returns `2` = `e instanceof TypeError` was
+  observably true **inside** the compiled module.
+
+Additional uncatchable traps fixed that the corpus does not currently exercise
+(same defect, verified by probe: all were `illegal cast` before, all are
+catchable TypeErrors now):
+`%TypedArray%.prototype.{fill,slice,subarray,join,set}`,
+`ArrayBuffer.prototype.slice`, `Map.prototype.{get,set}`,
+`Set.prototype.{add,has}`, `WeakMap.prototype.get`.
+
+Negative controls: the full positive-control battery (TypedArray/Date/Map/Set
+instance accessors + methods, reflective `X.prototype.m.call(realInstance)`,
+user-class shadowing) produces **byte-identical output before and after** on
+both `standalone` and `gc` targets.
+
+### Honest scope note — this is NOT most of the 753
+
+Census of the standalone baseline JSONL (461 trap rows at the pre-#3592
+baseline; 753 post-landing) by innermost frame shows the trap population is
+**heterogeneous** and mostly NOT missing receiver brand checks:
+
+| bucket | count | in this lane? |
+| --- | ---: | --- |
+| `illegal cast [in __module_init()]` | 79 | no |
+| `illegal cast [in C_method() ← __module_init]` (class-dstr gen-methods) | 69+19 | no |
+| async continuation `illegal cast` (Promise combinators / for-await dstr) | 111 | no |
+| `illegal cast [in __closure ← __closure ← __call_fn_method_3 ← __apply_closure]` (abrupt-completion payload) | 40 | partly (Slice 3) |
+| `illegal cast [… ← __call_accessor_get ← __extern_get]` (compound-assign poisoned accessor) | 30 | no |
+| `<Ctor>.prototype.<member>` static receiver | 12 baseline + 4 unmasked | **yes — fixed** |
+
+Do not expect a brand-check mechanism to move the other buckets; they need
+their own root-cause work (the class-dstr and async-continuation buckets are
+the two big rocks).
+
+## Remaining work (Slice 2+)
+
+1. **Reflective receivers** — `X.prototype.m.call(<non-instance>)` and
+   `gOPD(X.prototype, p).get.call(<non-instance>)`. Some families already have
+   the runtime check (`receiver-brand.ts`); `Date.prototype.toString.call(0)`
+   does not. ~1 test in the 65.
+2. **`Function.prototype[Symbol.hasInstance]`** (3 tests, null_deref) —
+   OrdinaryHasInstance error paths; not a prototype-receiver shape.
+3. **`Proxy` gOPD / deleteProperty invariant checks** (5 tests, null_deref).
+4. **`Array.prototype.{fill,copyWithin,find,findLast,findLastIndex}`
+   return-abrupt** (11 tests) — the trap is on the *thrown value*, not the
+   receiver; despite the issue's original grouping this is an
+   abrupt-completion-payload defect, not a brand check.
+5. **Non-trap correctness gaps found while measuring** (wrong value, no trap):
+   `RegExp.prototype.exec()`, `Symbol.prototype.{toString,valueOf,description}`
+   on the prototype return a value instead of throwing.
