@@ -274,7 +274,7 @@ function checkAgainstOpenPrs() {
   if (collisions.length === 0) {
     if (!args.includes("--quiet")) {
       console.log(
-        `✓ --against-open-prs OK: ${introduced.length} introduced issue file${introduced.length > 1 ? "s" : ""} collide with none of ${scan.byPr.size} open PR${scan.byPr.size === 1 ? "" : "s"} touching issue files`,
+        `✓ --against-open-prs OK: ${introduced.length} introduced issue file${introduced.length > 1 ? "s collide" : " collides"} with none of ${scan.byPr.size} open PR${scan.byPr.size === 1 ? "" : "s"} touching issue files`,
       );
     }
     process.exit(0);

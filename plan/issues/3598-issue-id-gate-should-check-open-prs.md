@@ -1,10 +1,11 @@
 ---
 id: 3598
 title: "check:issue-ids should detect collisions against OPEN PRs, not only main — the gap that silently parks PRs"
-status: ready
+status: done
+completed: 2026-07-25
 sprint: current
 created: 2026-07-24
-updated: 2026-07-24
+updated: 2026-07-25
 priority: high
 horizon: s
 feasibility: medium
@@ -272,3 +273,83 @@ comment state the SHA it judged so a reader can see it is stale. Recommend
 keeping it out of #3598's scope and filing it separately against the auto-park
 bot (#2547/#3597 territory) — folding it in would blur a clean PR-level gate
 with queue-lifecycle logic.
+
+## Implementation notes (senior-dev, 2026-07-25)
+
+Landed on branch `issue-3598-gate-open-prs`, building on the handover module.
+Probe/test coverage: `tests/issue-3598-open-pr-id-gate.test.ts` (hermetic — the
+scan result is injected, no network).
+
+### What landed, and WHY it is shaped this way
+
+- **`check-issue-ids.mjs --against-open-prs`** — new mode, wired into the
+  `quality` job (ci.yml, `pull_request` only) as
+  `check:issue-ids:against-open-prs`, with `GATE_PR_NUMBER` from the event for
+  self-exclusion. It shares `introducedIssueFiles(base)` with `--against-main`
+  (extracted, behaviour-preserving) so both modes agree on what "this branch
+  added" means, and calls the API **only when the branch actually introduces
+  issue files** — the common no-issue-file PR pays zero network cost, which is
+  what keeps the per-PR rate-limit budget trivial (one batched GraphQL query
+  even in the paying case, inherited from #2943).
+- **One scan, one code path**: the gate and `claim-issue.mjs --allocate` both
+  consume `scripts/lib/open-pr-issue-files.mjs` (the shepherd's extraction,
+  preserved verbatim in its hardened parts). `claim-issue.mjs` now delegates —
+  its local `PR_FILES_QUERY`/`idsFromOpenPRs` body and `ISSUE_ID_RE` copy are
+  gone, so the allocator and the enforcement point cannot drift.
+- **Fail-OPEN on scan failure (deliberate, stated in the PR):** the scan needs
+  network on every gated PR; fail-closed would convert a GitHub blip or
+  rate-limit into a red check on EVERY open PR at once — a total merge freeze
+  caused by the very gate meant to prevent stalls. It degrades LOUDLY
+  (`⚠ … DEGRADED … passing WITHOUT PR-vs-PR coverage`) and the `merge_group`
+  duplicate-id `--check` remains the hard backstop. `--against-main` (pure git,
+  no network) stays hard-fail.
+- **Rename hazard closed at the scan layer**: the GraphQL query now requests
+  `changeType` and `liveIssuePaths()` drops `DELETED` entries (REST fallback:
+  `select(.status != "removed")`). A _detected_ rename lists only the new path,
+  but an UNdetected one (similarity too low) appears as ADDED-new +
+  DELETED-old — without the filter, a PR that renumbered AWAY from a contested
+  id would still read as claiming it: the top false-positive source, now unit-
+  tested. This also stops a genuinely-deleted issue file from claiming its id.
+- **Same-filename ⇒ PASS** (two PRs modifying one issue file) and
+  **self-exclusion** are implemented in a pure `findOpenPrCollisions()` in the
+  lib, hermetically tested. All four behaviours were ALSO re-verified live
+  against the real repo with a throwaway probe commit (collision vs PR #3590
+  correctly named; self-exclusion via `GATE_PR_NUMBER=3590`; same-filename
+  pass; degraded-scan fail-open) — the probe commit was dropped before push,
+  per the handover ("scaffolding, not a test").
+
+### Collision C root-caused — the allocator's scan was NOT unreliable
+
+The evidence section above says PR #3585 "was already open when `--allocate`
+handed out 3597, yet the open-PR scan did not see its added file." That framing
+is subtly WRONG, and the correction matters. PR #3585's commit timeline:
+
+- at allocation time (23:27:46Z) its head was `068b33490` (pushed 23:20:41Z),
+  whose issue file was **`plan/issues/3590-auto-park-step-aware.md`** — the PR
+  was still numbered #3590;
+- the commit `fix(#3597): renumber 3590 -> 3597` was authored **23:45:28Z — 18
+  minutes AFTER the allocation**, itself resolving a _different_ collision
+  (3590), and it hand-picked 3597 without consulting `--allocate` or the
+  reservation ref (which already held `3597.json`, reserved 23:27:46Z).
+
+So the scan returned exactly what existed; the colliding id materialised on the
+branch later. A live cross-check of the batched scan against per-PR REST file
+lists (all open PRs) found **zero mismatches**. Conclusion: there is no
+allocation-time fix — ids appear on branches at arbitrary times, which is
+precisely why enforcement had to move to verdict time (this gate). Had the gate
+existed, the moment the 3597 renumber was pushed while both PRs were open, the
+loser would have gone red at PR level instead of auto-parking in the queue.
+
+Residual forensic gap closed: the reservation entry on
+`origin/issue-assignments` now records `pr_scan: ok|degraded|off`, so any
+future collision can be root-caused post-hoc instead of guessing whether the
+scan was degraded (the stderr-only warning was the reason Collision C initially
+resisted diagnosis).
+
+### Stale-head (Collision D): DEFERRED — filed as #3609
+
+Confirmed out of scope, per the handover's reasoning: a PR-level gate
+structurally cannot fix the queue validating an older commit than the branch
+has. Filed **#3609** against the auto-park bot (re-evaluate the park against
+the PR's current head before applying `hold`, or at minimum record the judged
+SHA in the park comment).
