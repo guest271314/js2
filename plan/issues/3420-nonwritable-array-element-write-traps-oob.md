@@ -7,7 +7,7 @@ priority: high
 feasibility: medium
 task_type: bugfix
 area: codegen
-goal: es5-complete
+goal: es5
 model: fable
 sprint: current
 horizon: m
