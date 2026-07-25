@@ -1,5 +1,5 @@
 ---
-id: 3622
+id: 3625
 title: "CI: merge the compilation of the two test262 lanes so the corpus is compiled once, not twice"
 status: wont-fix
 assignee: ttraenkler/opus-3622
@@ -17,6 +17,10 @@ completed: 2026-07-25
 ---
 
 # Merge the two test262 lanes' compilation — MEASURED, recommend closing
+
+> Renumbered **3622 → 3625**: a concurrent `--allocate` in the other lane
+> reserved 3622 and landed first (`plan/issues/3622-lastindexof-...`). The
+> `assignee` slug keeps the original agent name. Branch/PR names still say 3622.
 
 ## Problem as posed
 
@@ -205,7 +209,7 @@ prefix executed natively + binding shim), and `#3462` built the two-baseline lan
 stamping so `diff-test262` refuses to compare a fast candidate against an honest
 baseline. **`TEST262_ORACLE_MODE` is set by no workflow** — the fast oracle is
 built and switched off, parked behind the `#3450` stakeholder decision
-(ORACLE_VERSION 8 → 9; a native-JS harness changes what a verdict _measures_:
+(ORACLE*VERSION 8 → 9; a native-JS harness changes what a verdict \_measures*:
 cross-boundary `Test262Error` identity, `verifyProperty` MOP on wasm-created
 objects, script-global sharing).
 
