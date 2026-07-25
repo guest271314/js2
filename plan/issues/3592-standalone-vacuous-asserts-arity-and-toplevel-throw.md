@@ -294,6 +294,17 @@ process, ONE runner (`runTest262File(..., "standalone")`), ONE file at a time,
 with only `JS2WASM_DISABLE_APPLY_ARITY_WIDENING` (an **uncommitted** codegen-time
 switch) toggled between them. Never diffed against the committed baseline JSONL.
 
+Ran on branch commit `501374bf` — i.e. **RC2 alone, before RC1 was merged in from
+`main`**. Both arms therefore share the same RC1-less base; the delta isolates the
+widening. The `main` merge that follows brings RC1 in, which is one more reason
+the landing needs its own fresh run rather than reusing these numbers.
+
+Two caveats on the LANE, both inherent to measuring locally and neither affecting
+the OFF-vs-ON delta (both arms share them): the local runner supplies host
+imports via `buildImports`, where the sharded CI worker rejects a non-empty
+manifest; and local error text lacks CI's `L:N ` prefix. The value-correctness
+probe in §4 was run separately in the true host-free configuration.
+
 | OFF → ON                      |   count |
 | ----------------------------- | ------: |
 | pass → pass                   |   1,939 |
