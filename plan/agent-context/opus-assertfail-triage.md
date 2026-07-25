@@ -251,7 +251,35 @@ small enough for an **exhaustive** A/B rather than a sample.
    `quality` as of 2026-07-25 ~14:00Z), so whoever finishes #3615 must
    coordinate landing order with its owner or the second PR to land breaks.
 
-## 7.6 Local rebuild note
+## 7.6 The LOC ratchet WILL block your push — plan for it
+
+`src/codegen/declarations.ts` is a god-file under the #3102/#3131 LOC ratchet.
+The arm (34 lines, ~90 % of it the explanatory comment) pushes it 2535 → 2569
+and the `pre-git-push-loc.sh` hook hard-blocks the push:
+
+```
+src/codegen/declarations.ts: 2569 > 2535 (+34)
+```
+
+Two legitimate resolutions — pick deliberately, do NOT reflex to the escape:
+
+- **Grant the allowance** (probably right): add to the frontmatter of
+  `plan/issues/3615-*.md` —
+  ```yaml
+  loc-budget-allow:
+    - src/codegen/declarations.ts
+  ```
+  The allowance must live in **this PR's own issue file**, which currently
+  exists only on `origin/issue-3613-harness-vacuity-tests`, so you must carry
+  that file onto your branch (or land #3609 first).
+- **Or shrink the footprint**: trim the comment, or move the arm into a
+  subsystem module per `plan/log/compiler-consolidation-plan.md`.
+
+My WIP branch was pushed with the sanctioned `LOC_BUDGET_SKIP=1` escape ONLY
+because it is a recovery push with no PR behind it. **Do not carry that escape
+into the real PR** — CI runs the gate regardless.
+
+## 7.7 Local rebuild note
 
 `scripts/test262-worker.mjs` imports two generated bundles that are NOT in the
 tree; regenerate after ANY `src/` change or the pool silently runs stale code:
@@ -264,6 +292,6 @@ npx esbuild src/runtime.ts --bundle --platform=node --format=esm \
   --outfile=scripts/runtime-bundle.mjs --external:typescript --external:binaryen
 ```
 
-## 7.7 Claim
+## 7.8 Claim
 
 Released: `node scripts/claim-issue.mjs --release 3615 ttraenkler/opus-3615`.
