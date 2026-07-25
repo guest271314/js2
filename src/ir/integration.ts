@@ -88,8 +88,12 @@ import {
   type IrIntegrationLoweringPlans,
 } from "./ast-lowering-plans.js";
 import { irIntrinsicFuncRef, irSupportFuncRef, irUnitFuncRef, sameIrCallableBinding } from "./callable-bindings.js";
-import type { IrClassId, IrUnitId } from "./identity.js";
-import type { IrPlanningIdentityContext } from "./planning-identity.js";
+import { buildIrUnitInventory, indexIrTerminalDeclarations, type IrClassId, type IrUnitId } from "./identity.js";
+import {
+  buildIrLegacyUnitProjection,
+  type IrLegacyUnitProjectionEntry,
+  type IrPlanningIdentityContext,
+} from "./planning-identity.js";
 import { validateIrIntegrationPopulation } from "./integration-identity.js";
 import {
   makeIrArrayExpressionPredicate,
@@ -114,6 +118,7 @@ import {
 } from "./lower.js";
 import {
   forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
+  irTypeEquals,
   type IrClassShape,
   type IrClosureSignature,
   type IrFuncRef,
@@ -160,6 +165,7 @@ import {
   caughtIntegrationFailure,
   integrationFailure,
   IrIntegrationFailureLog,
+  type IrIntegrationCompiledArtifactEvidence,
   type IrIntegrationError,
   type IrIntegrationReport,
   type IrIntegrationTerminalFailureEvent,
@@ -170,6 +176,7 @@ export {
   integrationFailure,
   invariantIntegrationFailure,
   IrIntegrationFailureLog,
+  type IrIntegrationCompiledArtifactEvidence,
   type IrIntegrationError,
   type IrIntegrationReport,
   type IrIntegrationTerminalFailureEvent,
@@ -282,6 +289,24 @@ export function compileIrPathFunctions(
   const integrationPopulation = loweringPlans
     ? validateIrIntegrationPopulation(sourceFile, selected, loweringPlans)
     : undefined;
+  // Compatibility-only direct callers (principally focused integration
+  // tests) do not supply the production planning context. Build the same
+  // structural source inventory locally so internal bookkeeping remains
+  // ID-addressed; the public no-projection report shape stays unchanged.
+  const compatibilityInventory = loweringPlans
+    ? undefined
+    : buildIrUnitInventory([sourceFile], { entrySource: sourceFile, checker: ctx.checker });
+  const compatibilityUnitIdByDeclaration = compatibilityInventory
+    ? indexIrTerminalDeclarations(sourceFile, compatibilityInventory)
+    : undefined;
+  const activeOwnerProjection =
+    loweringPlans?.ownerProjection ??
+    buildIrLegacyUnitProjection(
+      compatibilityInventory?.terminalUnits.map((unit) => ({
+        unitId: unit.id,
+        legacyName: unit.legacyMatchName,
+      })) ?? [],
+    );
   const classIdByShape = new Map<IrClassShape, IrClassId>();
   if (loweringPlans && classShapes) {
     for (const [classId, declaration] of loweringPlans.identityContext.declarationByClassId) {
@@ -305,11 +330,28 @@ export function compileIrPathFunctions(
     selected.moduleInit && selected.moduleInit.reason === null && selected.moduleInit.stmtCount > 0
       ? selected.moduleInit
       : undefined;
-  const unsupportedHostDateOwners = supportsHostDateSnapshots
+  const requireTerminalOwner = (legacyName: string): IrLegacyUnitProjectionEntry => {
+    const owner = activeOwnerProjection.getByLegacyName(legacyName);
+    if (!owner) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `ir/integration: ${legacyName} has no exact terminal-owner projection`,
+      );
+    }
+    return owner;
+  };
+  const unsupportedHostDateOwnerNames = supportsHostDateSnapshots
     ? new Set<string>()
     : collectSelectedHostDateSnapshotOwners(sourceFile, selected, makeIrHostDateSnapshotResolver(ctx.checker));
+  const unsupportedHostDateOwners = new Map<IrUnitId, IrLegacyUnitProjectionEntry>();
+  for (const legacyName of unsupportedHostDateOwnerNames) {
+    const owner = requireTerminalOwner(legacyName);
+    unsupportedHostDateOwners.set(owner.unitId, owner);
+  }
   const compiled: string[] = [];
   const compiledOwners: string[] = [];
+  const compiledArtifactEvidence: IrIntegrationCompiledArtifactEvidence[] = [];
   const failures = new IrIntegrationFailureLog();
   const { errors } = failures;
   const finishReport = (
@@ -317,6 +359,7 @@ export function compileIrPathFunctions(
     reportErrors: readonly IrIntegrationError[] = errors,
     reportCompiledOwners: readonly string[] = compiledOwners,
     reportTerminalFailures: readonly IrIntegrationTerminalFailureEvent[] = failures.terminalFailureEvents,
+    reportCompiledArtifactEvidence: readonly IrIntegrationCompiledArtifactEvidence[] = compiledArtifactEvidence,
   ): IrIntegrationReport =>
     buildIrIntegrationReport(
       reportCompiled,
@@ -324,6 +367,7 @@ export function compileIrPathFunctions(
       loweringPlans?.ownerProjection,
       reportCompiledOwners,
       reportTerminalFailures,
+      reportCompiledArtifactEvidence,
     );
   // #1370 Phase B: don't short-circuit when only class members are claimed —
   // a source file may declare a class with IR-eligible methods but no
@@ -379,9 +423,10 @@ export function compileIrPathFunctions(
     return preparedDirectCalls;
   };
 
-  for (const ownerName of unsupportedHostDateOwners) {
+  for (const owner of unsupportedHostDateOwners.values()) {
     failures.record(
-      integrationFailure(ownerName, {
+      owner,
+      integrationFailure(owner.legacyName, {
         kind: "unsupported",
         code: "late-preparation-unsupported",
         stage: "resolve",
@@ -433,8 +478,12 @@ export function compileIrPathFunctions(
   // Phase 1 — Build: lower every selected AST function to an IrFunction.
   // -------------------------------------------------------------------------
   interface BuiltFn {
+    /** Exact pass-created/source artifact identity. */
+    readonly artifactUnitId: IrUnitId;
+    /** Exact R0 terminal owner; labels below are compatibility metadata only. */
+    readonly terminalOwnerUnitId: IrUnitId;
     readonly name: string;
-    /** Stable source-unit identity; synthesized artifacts never become rows. */
+    /** Public/legacy terminal-owner label; synthesized artifacts never become rows. */
     readonly ownerName: string;
     readonly fn: IrFunction;
     /**
@@ -467,7 +516,9 @@ export function compileIrPathFunctions(
   }
   const built: BuiltFn[] = [];
   const requireArtifactUnitId = (declaration: ts.Node, displayName: string) => {
-    const unitId = integrationPopulation?.ownerUnitIdByDeclaration.get(declaration);
+    const unitId =
+      integrationPopulation?.ownerUnitIdByDeclaration.get(declaration) ??
+      compatibilityUnitIdByDeclaration?.get(declaration);
     if (!unitId) {
       throw new IrInvariantError(
         "selection-preparation-mismatch",
@@ -498,7 +549,8 @@ export function compileIrPathFunctions(
     if (!stmt.name) continue;
     const name = stmt.name.text;
     if (!selected.funcs.has(name)) continue;
-    if (unsupportedHostDateOwners.has(name)) continue;
+    const owner = requireTerminalOwner(name);
+    if (unsupportedHostDateOwners.has(owner.unitId)) continue;
 
     try {
       // #1923 — test-only seam: simulate a build-time demotion on a CLAIMED
@@ -508,6 +560,13 @@ export function compileIrPathFunctions(
         throw new Error(`ir/from-ast: injected test build failure (${name})`);
       }
       const ownerUnitId = requireArtifactUnitId(stmt, name);
+      if (ownerUnitId !== owner.unitId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: ${name} artifact ${ownerUnitId} does not match terminal owner ${owner.unitId}`,
+        );
+      }
       const o = overrides?.get(name);
       const result = lowerFunctionAstToIr(stmt, {
         exported: hasExportModifier(stmt),
@@ -530,14 +589,21 @@ export function compileIrPathFunctions(
         // can discharge the widening-escape proof via `getContextualType`.
         checker: ctx.checker,
       });
+      if (result.main.unitId !== ownerUnitId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: ${name} lowered as artifact ${result.main.unitId}, expected ${ownerUnitId}`,
+        );
+      }
       const mainErrors = verifyBuiltArtifact(result.main, name, false);
       if (mainErrors.length > 0) {
-        failures.recordVerifierDetails(name, mainErrors);
+        failures.recordVerifierDetails(owner, mainErrors);
         continue;
       }
       // Slice 3 (#1169c): verify each lifted function before pushing.
       const anyLiftedFailed = failures.recordVerifierGroups(
-        name,
+        owner,
         result.lifted.map((lifted) => ({
           details: verifyBuiltArtifact(lifted, name, true),
           detailPrefix: `synthetic artifact ${lifted.name}: `,
@@ -545,12 +611,25 @@ export function compileIrPathFunctions(
       );
       if (anyLiftedFailed) continue;
 
-      built.push({ name, ownerName: name, fn: result.main });
+      built.push({
+        artifactUnitId: result.main.unitId,
+        terminalOwnerUnitId: owner.unitId,
+        name,
+        ownerName: owner.legacyName,
+        fn: result.main,
+      });
       for (const lifted of result.lifted) {
-        built.push({ name: lifted.name, ownerName: name, fn: lifted, synthesized: true });
+        built.push({
+          artifactUnitId: lifted.unitId,
+          terminalOwnerUnitId: owner.unitId,
+          name: lifted.name,
+          ownerName: owner.legacyName,
+          fn: lifted,
+          synthesized: true,
+        });
       }
     } catch (e) {
-      failures.record(caughtIntegrationFailure(name, e, "build"));
+      failures.record(owner, caughtIntegrationFailure(owner.legacyName, e, "build"));
     }
   }
 
@@ -645,6 +724,7 @@ export function compileIrPathFunctions(
           }
         }
         if (!selected.classMembers.has(memberName)) continue;
+        const owner = requireTerminalOwner(memberName);
 
         try {
           const descriptor = isCtorMember
@@ -663,6 +743,13 @@ export function compileIrPathFunctions(
           const paramTypeOverrides = isCtorMember ? classShape.constructorParams : descriptor!.params;
           const returnTypeOverride = isCtorMember ? undefined : descriptor!.returnType;
           const ownerUnitId = requireArtifactUnitId(member, memberName);
+          if (ownerUnitId !== owner.unitId) {
+            throw new IrInvariantError(
+              "selection-preparation-mismatch",
+              "build",
+              `ir/integration: ${memberName} artifact ${ownerUnitId} does not match terminal owner ${owner.unitId}`,
+            );
+          }
           // #3000-C: a constructor is NOT passed `__self` — it allocates the
           // instance itself (`constructorClassShape` drives the `class.alloc` +
           // `return this` synthesis in from-ast). Methods/accessors get the
@@ -690,16 +777,23 @@ export function compileIrPathFunctions(
             // ArrayLiteral widening-escape proof in method bodies too.
             checker: ctx.checker,
           });
+          if (result.main.unitId !== ownerUnitId) {
+            throw new IrInvariantError(
+              "selection-preparation-mismatch",
+              "build",
+              `ir/integration: ${memberName} lowered as artifact ${result.main.unitId}, expected ${ownerUnitId}`,
+            );
+          }
           const mainErrors = verifyBuiltArtifact(result.main, memberName, false);
           if (mainErrors.length > 0) {
-            failures.recordVerifierDetails(memberName, mainErrors);
+            failures.recordVerifierDetails(owner, mainErrors);
             continue;
           }
           // Class method bodies should not produce lifted closures in Phase B
           // (Phase 1 shape doesn't allow nested function decls inside method
           // bodies that capture `this`). Defensive re-verify if any appear.
           const anyLiftedFailed = failures.recordVerifierGroups(
-            memberName,
+            owner,
             result.lifted.map((lifted) => ({
               details: verifyBuiltArtifact(lifted, memberName, true),
               detailPrefix: `synthetic artifact ${lifted.name}: `,
@@ -707,12 +801,26 @@ export function compileIrPathFunctions(
           );
           if (anyLiftedFailed) continue;
 
-          built.push({ name: memberName, ownerName: memberName, fn: result.main, classMember: true });
+          built.push({
+            artifactUnitId: result.main.unitId,
+            terminalOwnerUnitId: owner.unitId,
+            name: memberName,
+            ownerName: owner.legacyName,
+            fn: result.main,
+            classMember: true,
+          });
           for (const lifted of result.lifted) {
-            built.push({ name: lifted.name, ownerName: memberName, fn: lifted, synthesized: true });
+            built.push({
+              artifactUnitId: lifted.unitId,
+              terminalOwnerUnitId: owner.unitId,
+              name: lifted.name,
+              ownerName: owner.legacyName,
+              fn: lifted,
+              synthesized: true,
+            });
           }
         } catch (e) {
-          failures.record(caughtIntegrationFailure(memberName, e, "build"));
+          failures.record(owner, caughtIntegrationFailure(owner.legacyName, e, "build"));
         }
       }
     }
@@ -742,7 +850,8 @@ export function compileIrPathFunctions(
   //     the #1789-adjacent collection note in declarations.ts; executing
   //     them would diverge from the legacy baseline).
   // -------------------------------------------------------------------------
-  if (moduleInitClaim && !unsupportedHostDateOwners.has(MODULE_INIT_UNIT_NAME)) {
+  const moduleInitOwner = moduleInitClaim ? requireTerminalOwner(MODULE_INIT_UNIT_NAME) : undefined;
+  if (moduleInitClaim && moduleInitOwner && !unsupportedHostDateOwners.has(moduleInitOwner.unitId)) {
     try {
       if (!ctx.mod.functions.some((f) => f.name === "__module_init")) {
         throw new IrUnsupportedError(
@@ -779,12 +888,20 @@ export function compileIrPathFunctions(
       }
       const moduleBindings = buildModuleBindingsMap(ctx, population, moduleBindingResolver);
       const synthetic = makeModuleInitSynthetic(population);
-      const moduleInitUnitId = integrationPopulation?.moduleInitUnitId;
+      const moduleInitUnitId =
+        integrationPopulation?.moduleInitUnitId ?? compatibilityUnitIdByDeclaration?.get(sourceFile);
       if (!moduleInitUnitId) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "build",
           "ir/integration: selected module init has no exact artifact identity",
+        );
+      }
+      if (moduleInitUnitId !== moduleInitOwner.unitId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: module init artifact ${moduleInitUnitId} does not match terminal owner ${moduleInitOwner.unitId}`,
         );
       }
       const result = lowerFunctionAstToIr(synthetic, {
@@ -804,12 +921,19 @@ export function compileIrPathFunctions(
         allocRegistry,
         checker: ctx.checker,
       });
+      if (result.main.unitId !== moduleInitUnitId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: module init lowered as artifact ${result.main.unitId}, expected ${moduleInitUnitId}`,
+        );
+      }
       const mainErrors = verifyBuiltArtifact(result.main, MODULE_INIT_UNIT_NAME, false);
       if (mainErrors.length > 0) {
-        failures.recordVerifierDetails(MODULE_INIT_UNIT_NAME, mainErrors);
+        failures.recordVerifierDetails(moduleInitOwner, mainErrors);
       } else {
         const anyLiftedFailed = failures.recordVerifierGroups(
-          MODULE_INIT_UNIT_NAME,
+          moduleInitOwner,
           result.lifted.map((lifted) => ({
             details: verifyBuiltArtifact(lifted, MODULE_INIT_UNIT_NAME, true),
             detailPrefix: `synthetic artifact ${lifted.name}: `,
@@ -817,18 +941,27 @@ export function compileIrPathFunctions(
         );
         if (!anyLiftedFailed) {
           built.push({
+            artifactUnitId: result.main.unitId,
+            terminalOwnerUnitId: moduleInitOwner.unitId,
             name: MODULE_INIT_UNIT_NAME,
-            ownerName: MODULE_INIT_UNIT_NAME,
+            ownerName: moduleInitOwner.legacyName,
             fn: result.main,
             moduleInit: true,
           });
           for (const lifted of result.lifted) {
-            built.push({ name: lifted.name, ownerName: MODULE_INIT_UNIT_NAME, fn: lifted, synthesized: true });
+            built.push({
+              artifactUnitId: lifted.unitId,
+              terminalOwnerUnitId: moduleInitOwner.unitId,
+              name: lifted.name,
+              ownerName: moduleInitOwner.legacyName,
+              fn: lifted,
+              synthesized: true,
+            });
           }
         }
       }
     } catch (e) {
-      failures.record(caughtIntegrationFailure(MODULE_INIT_UNIT_NAME, e, "build"));
+      failures.record(moduleInitOwner, caughtIntegrationFailure(moduleInitOwner.legacyName, e, "build"));
     }
   }
 
@@ -840,40 +973,58 @@ export function compileIrPathFunctions(
   // -------------------------------------------------------------------------
 
   // 2a. Per-function hygiene (CF → DCE → simplifyCFG to fixpoint).
-  const failedOwners = new Set<string>();
+  const failedOwners = new Set<IrUnitId>();
+  const terminalOwnerOf = (entry: BuiltFn): IrLegacyUnitProjectionEntry => ({
+    unitId: entry.terminalOwnerUnitId,
+    legacyName: entry.ownerName,
+  });
   const markOwnerFailure = (
-    ownerName: string,
+    owner: IrLegacyUnitProjectionEntry,
+    artifactUnitId: IrUnitId,
     artifactName: string,
     error: unknown,
     stage: Exclude<IrPreparationStage, "select">,
   ): void => {
-    if (failedOwners.has(ownerName)) return;
+    if (failedOwners.has(owner.unitId)) return;
     const classified = classifyIrFailure(error, stage);
     const outcome: IrPreparationFailure =
-      artifactName === ownerName
+      artifactUnitId === owner.unitId
         ? classified
         : { ...classified, detail: `synthetic artifact ${artifactName}: ${classified.detail}` };
-    failures.record(integrationFailure(ownerName, outcome));
-    failedOwners.add(ownerName);
+    failures.record(owner, integrationFailure(owner.legacyName, outcome));
+    failedOwners.add(owner.unitId);
   };
   const markOwnerInvariant = (
-    ownerName: string,
+    owner: IrLegacyUnitProjectionEntry,
+    artifactUnitId: IrUnitId,
     artifactName: string,
     code: IrInvariantCode,
     stage: Exclude<IrPreparationStage, "select">,
     detail: string,
-  ): void => markOwnerFailure(ownerName, artifactName, new IrInvariantError(code, stage, detail), stage);
+  ): void => markOwnerFailure(owner, artifactUnitId, artifactName, new IrInvariantError(code, stage, detail), stage);
   const failEveryOwner = (
     entries: readonly BuiltFn[],
     error: unknown,
     stage: Exclude<IrPreparationStage, "select">,
   ): void => {
-    for (const ownerName of new Set(entries.map((entry) => entry.ownerName))) {
-      markOwnerFailure(ownerName, ownerName, error, stage);
+    const owners = new Map<IrUnitId, IrLegacyUnitProjectionEntry>();
+    for (const entry of entries) {
+      const existing = owners.get(entry.terminalOwnerUnitId);
+      if (existing && existing.legacyName !== entry.ownerName) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "verify",
+          `terminal owner ${entry.terminalOwnerUnitId} has conflicting labels ${existing.legacyName} and ${entry.ownerName}`,
+        );
+      }
+      owners.set(entry.terminalOwnerUnitId, terminalOwnerOf(entry));
+    }
+    for (const owner of owners.values()) {
+      markOwnerFailure(owner, owner.unitId, owner.legacyName, error, stage);
     }
   };
   const retainHealthyOwners = (entries: readonly BuiltFn[]): BuiltFn[] =>
-    entries.filter((entry) => !failedOwners.has(entry.ownerName));
+    entries.filter((entry) => !failedOwners.has(entry.terminalOwnerUnitId));
 
   const hygieneCandidates: BuiltFn[] = [];
   for (const entry of built) {
@@ -894,7 +1045,7 @@ export function compileIrPathFunctions(
       assertAllocProvenance(optimized, allocRegistry);
       hygieneCandidates.push({ ...entry, fn: optimized });
     } catch (error) {
-      markOwnerFailure(entry.ownerName, entry.name, error, "verify");
+      markOwnerFailure(terminalOwnerOf(entry), entry.artifactUnitId, entry.name, error, "verify");
     }
   }
   let afterHygiene = retainHealthyOwners(hygieneCandidates);
@@ -911,7 +1062,7 @@ export function compileIrPathFunctions(
     try {
       analyzeEncoding(entry.fn, allocRegistry);
     } catch (error) {
-      markOwnerFailure(entry.ownerName, entry.name, error, "verify");
+      markOwnerFailure(terminalOwnerOf(entry), entry.artifactUnitId, entry.name, error, "verify");
     }
   }
   afterHygiene = retainHealthyOwners(afterHygiene);
@@ -927,12 +1078,14 @@ export function compileIrPathFunctions(
     modOut = inlineSmall(modIn, allocRegistry);
     if (
       modOut.functions.length !== afterHygiene.length ||
-      modOut.functions.some((fn, index) => fn.name !== afterHygiene[index]!.name)
+      modOut.functions.some(
+        (fn, index) => fn.unitId !== afterHygiene[index]!.artifactUnitId || fn.name !== afterHygiene[index]!.name,
+      )
     ) {
       throw new IrInvariantError(
         "pass-output-mismatch",
         "verify",
-        "inline pass changed function cardinality or identity",
+        "inline pass changed function cardinality, unit identity, or compatibility label",
       );
     }
   } catch (error) {
@@ -946,6 +1099,13 @@ export function compileIrPathFunctions(
     const before = afterHygiene[i]!;
     try {
       const after = modOut.functions[i]!;
+      if (after.unitId !== before.artifactUnitId || after.name !== before.name) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `inline output ${after.unitId} / ${after.name} does not match input ${before.artifactUnitId} / ${before.name}`,
+        );
+      }
       const changed = after !== before.fn;
       const final = changed ? runHygienePasses(after, allocRegistry) : after;
       const verifyErrors = verifyIrFunction(final);
@@ -967,7 +1127,7 @@ export function compileIrPathFunctions(
       assertAllocProvenance(final, allocRegistry);
       afterInline.push({ ...before, fn: final });
     } catch (error) {
-      markOwnerFailure(before.ownerName, before.name, error, "verify");
+      markOwnerFailure(terminalOwnerOf(before), before.artifactUnitId, before.name, error, "verify");
     }
   }
 
@@ -994,42 +1154,125 @@ export function compileIrPathFunctions(
     failEveryOwner(healthyAfterInline, error, "verify");
     return finishReport();
   }
-  const originalNames = new Set<string>(healthyAfterInline.map((e) => e.name));
-  const afterInlineByName = new Map<string, BuiltFn>();
-  const ownerByArtifact = new Map<string, string>();
-  for (const entry of healthyAfterInline) {
-    afterInlineByName.set(entry.name, entry);
-    ownerByArtifact.set(entry.name, entry.ownerName);
-  }
-  for (const [cloneName, originName] of monoResult.cloneOrigins) {
-    const originOwner = ownerByArtifact.get(originName);
-    if (!originOwner) {
-      failEveryOwner(
-        healthyAfterInline,
-        new IrInvariantError(
+  const originalArtifactUnitIds = new Set<IrUnitId>();
+  const afterInlineByUnitId = new Map<IrUnitId, BuiltFn>();
+  const ownerByArtifactUnitId = new Map<IrUnitId, IrLegacyUnitProjectionEntry>();
+  const monoByUnitId = new Map<IrUnitId, IrFunction>();
+  try {
+    for (const entry of healthyAfterInline) {
+      if (afterInlineByUnitId.has(entry.artifactUnitId)) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `duplicate pre-monomorphize artifact identity ${entry.artifactUnitId}`,
+        );
+      }
+      originalArtifactUnitIds.add(entry.artifactUnitId);
+      afterInlineByUnitId.set(entry.artifactUnitId, entry);
+      ownerByArtifactUnitId.set(entry.artifactUnitId, terminalOwnerOf(entry));
+    }
+    if (monoResult.cloneOrigins.size !== monoResult.cloneSignatures.size) {
+      throw new IrInvariantError(
+        "pass-output-mismatch",
+        "verify",
+        `monomorphize returned ${monoResult.cloneOrigins.size} clone origins but ${monoResult.cloneSignatures.size} clone signatures`,
+      );
+    }
+    for (const [cloneUnitId, originUnitId] of monoResult.cloneOrigins) {
+      const originOwner = ownerByArtifactUnitId.get(originUnitId);
+      if (!originOwner) {
+        throw new IrInvariantError(
           "synthetic-owner-missing",
           "verify",
-          `monomorphize clone ${cloneName} references unknown origin ${originName}`,
-        ),
-        "verify",
-      );
-      return finishReport();
+          `monomorphize clone ${cloneUnitId} references unknown origin identity ${originUnitId}`,
+        );
+      }
+      if (ownerByArtifactUnitId.has(cloneUnitId)) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize clone identity ${cloneUnitId} collides with an existing artifact`,
+        );
+      }
+      if (!monoResult.cloneSignatures.has(cloneUnitId)) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize clone ${cloneUnitId} has no structural signature`,
+        );
+      }
+      ownerByArtifactUnitId.set(cloneUnitId, originOwner);
     }
-    ownerByArtifact.set(cloneName, originOwner);
-  }
-  for (const fn of monoResult.module.functions) {
-    if (!ownerByArtifact.has(fn.name)) {
-      failEveryOwner(
-        healthyAfterInline,
-        new IrInvariantError(
+    for (const cloneUnitId of monoResult.cloneSignatures.keys()) {
+      if (!monoResult.cloneOrigins.has(cloneUnitId)) {
+        throw new IrInvariantError(
           "synthetic-owner-missing",
           "verify",
-          `pass output ${fn.name} has no explicit source owner`,
-        ),
-        "verify",
-      );
-      return finishReport();
+          `monomorphize signature ${cloneUnitId} has no structural origin`,
+        );
+      }
     }
+    for (const fn of monoResult.module.functions) {
+      if (monoByUnitId.has(fn.unitId)) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize output contains duplicate artifact identity ${fn.unitId}`,
+        );
+      }
+      monoByUnitId.set(fn.unitId, fn);
+      const owner = ownerByArtifactUnitId.get(fn.unitId);
+      if (!owner) {
+        throw new IrInvariantError(
+          "synthetic-owner-missing",
+          "verify",
+          `monomorphize output ${fn.unitId} / ${fn.name} has no exact source owner`,
+        );
+      }
+      const original = afterInlineByUnitId.get(fn.unitId);
+      if (original && fn.name !== original.name) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize changed compatibility label for ${fn.unitId}: ${original.name} -> ${fn.name}`,
+        );
+      }
+    }
+    for (const [unitId, original] of afterInlineByUnitId) {
+      if (!monoByUnitId.has(unitId)) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize dropped original artifact ${unitId} / ${original.name}`,
+        );
+      }
+    }
+    for (const [cloneUnitId, signature] of monoResult.cloneSignatures) {
+      const clone = monoByUnitId.get(cloneUnitId);
+      if (!clone) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize signature ${cloneUnitId} has no output function`,
+        );
+      }
+      if (
+        clone.name !== signature.name ||
+        clone.params.length !== signature.params.length ||
+        clone.params.some((param, index) => !irTypeEquals(param.type, signature.params[index]!)) ||
+        clone.resultTypes.length !== 1 ||
+        !irTypeEquals(clone.resultTypes[0]!, signature.returnType)
+      ) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize output ${cloneUnitId} does not match its structural clone signature`,
+        );
+      }
+    }
+  } catch (error) {
+    failEveryOwner(healthyAfterInline, error, "verify");
+    return finishReport();
   }
 
   // -------------------------------------------------------------------------
@@ -1043,26 +1286,42 @@ export function compileIrPathFunctions(
       throw new Error("injected tagged-union pass failure");
     }
     taggedResult = runTaggedUnions(monoResult.module);
+    if (
+      taggedResult.module.functions.length !== monoResult.module.functions.length ||
+      taggedResult.module.functions.some(
+        (fn, index) =>
+          fn.unitId !== monoResult.module.functions[index]!.unitId ||
+          fn.name !== monoResult.module.functions[index]!.name,
+      )
+    ) {
+      throw new IrInvariantError(
+        "pass-output-mismatch",
+        "verify",
+        "tagged-union pass changed function cardinality, unit identity, or compatibility label",
+      );
+    }
   } catch (error) {
     failEveryOwner(healthyAfterInline, error, "verify");
     return finishReport();
   }
   for (const error of taggedResult.errors) {
-    const ownerName = ownerByArtifact.get(error.func);
-    if (!ownerName) {
+    const owner = ownerByArtifactUnitId.get(error.unitId);
+    const artifact = monoByUnitId.get(error.unitId);
+    if (!owner || !artifact || artifact.name !== error.func) {
       failEveryOwner(
         healthyAfterInline,
         new IrInvariantError(
           "synthetic-owner-missing",
           "verify",
-          `tagged-union failure for unknown artifact ${error.func}`,
+          `tagged-union failure for unknown or mislabeled artifact ${error.unitId} / ${error.func}`,
         ),
         "verify",
       );
       return finishReport();
     }
     markOwnerInvariant(
-      ownerName,
+      owner,
+      error.unitId,
       error.func,
       "tagged-union-validation-failure",
       "verify",
@@ -1071,8 +1330,8 @@ export function compileIrPathFunctions(
   }
   const modAfterTU: IrModule = {
     functions: taggedResult.module.functions.filter((fn) => {
-      const owner = ownerByArtifact.get(fn.name);
-      return owner !== undefined && !failedOwners.has(owner);
+      const owner = ownerByArtifactUnitId.get(fn.unitId);
+      return owner !== undefined && !failedOwners.has(owner.unitId);
     }),
   };
 
@@ -1085,9 +1344,9 @@ export function compileIrPathFunctions(
   const readyForLower: BuiltFn[] = [];
 
   for (const fn of modAfterTU.functions) {
-    const before = afterInlineByName.get(fn.name);
-    const wasCloned = before === undefined;
-    const ownerName = ownerByArtifact.get(fn.name)!;
+    const before = afterInlineByUnitId.get(fn.unitId);
+    const wasCloned = monoResult.cloneOrigins.has(fn.unitId);
+    const owner = ownerByArtifactUnitId.get(fn.unitId)!;
     try {
       const changed = wasCloned || fn !== before.fn;
       const final = changed ? runHygienePasses(fn, allocRegistry) : fn;
@@ -1102,15 +1361,17 @@ export function compileIrPathFunctions(
       }
       assertAllocProvenance(final, allocRegistry);
       readyForLower.push({
+        artifactUnitId: fn.unitId,
+        terminalOwnerUnitId: owner.unitId,
         name: fn.name,
-        ownerName,
+        ownerName: owner.legacyName,
         fn: final,
-        synthesized: before?.synthesized || wasCloned,
+        synthesized: before?.synthesized === true || wasCloned,
         classMember: before?.classMember,
         moduleInit: before?.moduleInit,
       });
     } catch (error) {
-      markOwnerFailure(ownerName, fn.name, error, "verify");
+      markOwnerFailure(owner, fn.unitId, fn.name, error, "verify");
     }
   }
 
@@ -1145,7 +1406,7 @@ export function compileIrPathFunctions(
         const ownershipResult = analyzeOwnership(entry.fn, allocRegistry);
         if (wantEscape) analyzeEscape(entry.fn, allocRegistry, ownershipResult);
       } catch (error) {
-        markOwnerFailure(entry.ownerName, entry.name, error, "verify");
+        markOwnerFailure(terminalOwnerOf(entry), entry.artifactUnitId, entry.name, error, "verify");
       }
     }
   }
@@ -1169,10 +1430,10 @@ export function compileIrPathFunctions(
     return finishReport();
   }
   const iteratorFailures = preregisterIteratorSupport(ctx, healthyForLower);
-  for (const [ownerName, outcome] of iteratorFailures) {
-    if (failedOwners.has(ownerName)) continue;
-    failures.record(integrationFailure(ownerName, outcome));
-    failedOwners.add(ownerName);
+  for (const { owner, outcome } of iteratorFailures.values()) {
+    if (failedOwners.has(owner.unitId)) continue;
+    failures.record(owner, integrationFailure(owner.legacyName, outcome));
+    failedOwners.add(owner.unitId);
   }
   healthyForLower = retainHealthyOwners(healthyForLower);
   if (healthyForLower.length === 0) return finishReport();
@@ -1199,11 +1460,11 @@ export function compileIrPathFunctions(
   // allocation (e.g. the ABI-parity withdrawal cascade in Phase 3) can stub
   // the orphaned slot instead of leaving an EMPTY body in the module (see
   // the stub pass after the patch loop below).
-  const freshSlots: Array<{ readonly funcIdx: number; readonly ownerName: string }> = [];
+  const freshSlots: Array<{ readonly funcIdx: number; readonly terminalOwnerUnitId: IrUnitId }> = [];
   for (const entry of healthyForLower) {
     // Top-level (non-synthesized) functions already have a funcIdx
     // allocated by `compileDeclarations`. Skip them.
-    if (originalNames.has(entry.name) && !entry.synthesized) continue;
+    if (originalArtifactUnitIds.has(entry.artifactUnitId) && !entry.synthesized) continue;
     // #1370 Phase B: class members have funcIdx pre-allocated by the
     // legacy `class-bodies.ts` pass (`ctorFuncIdx` / `methodFuncIdx`).
     // Don't allocate a new slot — Phase 3 will patch the existing one.
@@ -1221,7 +1482,7 @@ export function compileIrPathFunctions(
       exported: false,
     });
     ctx.funcMap.set(entry.name, funcIdx);
-    freshSlots.push({ funcIdx, ownerName: entry.ownerName });
+    freshSlots.push({ funcIdx, terminalOwnerUnitId: entry.terminalOwnerUnitId });
   }
 
   // -------------------------------------------------------------------------
@@ -1465,16 +1726,18 @@ export function compileIrPathFunctions(
     readonly finalBody: Instr[];
   };
   const pendingPatches: PendingPatch[] = [];
-  // (#3551) Function names withdrawn by the typeIdx-parity guard below. Every
+  // (#3551) Exact artifact identities withdrawn by the typeIdx-parity guard
+  // below. Every
   // IR body was compiled against `calleeTypes` — the IR's shared view of each
   // claimed function's signature — so when a callee's claim is withdrawn on a
   // parity mismatch (its slot keeps the LEGACY ABI, which the mismatch just
   // proved differs from the IR view), any committed IR caller of it would call
   // through the wrong ABI. The cascade after this loop withdraws those callers
-  // too; collecting the names here is its input.
-  const abiDivergentNames = new Set<string>();
+  // too; collecting the unit identities here is its input.
+  const abiDivergentUnitIds = new Set<IrUnitId>();
   for (const entry of healthyForLower) {
     const name = entry.name;
+    const owner = terminalOwnerOf(entry);
     try {
       if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "lower-synthetic" && entry.synthesized) {
         throw new Error("injected synthetic lower failure");
@@ -1484,7 +1747,14 @@ export function compileIrPathFunctions(
       // `ctx.funcMap`; the slot was pushed directly by compileDeclarations).
       const funcIdx = artifactFuncIdx(entry);
       if (funcIdx === undefined) {
-        markOwnerInvariant(entry.ownerName, name, "missing-function-slot", "patch", `no funcIdx allocated for ${name}`);
+        markOwnerInvariant(
+          owner,
+          entry.artifactUnitId,
+          name,
+          "missing-function-slot",
+          "patch",
+          `no funcIdx allocated for ${name}`,
+        );
         continue;
       }
       // #1916 S2 — definedFuncAt/replaceDefinedFuncAt are the positional
@@ -1492,7 +1762,8 @@ export function compileIrPathFunctions(
       const existing = definedFuncAt(ctx, funcIdx);
       if (!existing) {
         markOwnerInvariant(
-          entry.ownerName,
+          owner,
+          entry.artifactUnitId,
           name,
           "missing-function-slot",
           "patch",
@@ -1542,9 +1813,10 @@ export function compileIrPathFunctions(
         if (entry.classMember || entry.moduleInit) {
           // Pre-#3536 semantics unchanged: for these units a mismatch means
           // the lowering itself went wrong — a hard invariant.
-          abiDivergentNames.add(name);
+          abiDivergentUnitIds.add(entry.artifactUnitId);
           markOwnerInvariant(
-            entry.ownerName,
+            owner,
+            entry.artifactUnitId,
             name,
             "abi-type-index-mismatch",
             "patch",
@@ -1558,9 +1830,10 @@ export function compileIrPathFunctions(
           // shape-struct param) — a soft withdraw-the-claim fallback, NOT a
           // compile error. The legacy body stays; callers keep the ABI they
           // compiled against.
-          abiDivergentNames.add(name);
+          abiDivergentUnitIds.add(entry.artifactUnitId);
           markOwnerFailure(
-            entry.ownerName,
+            owner,
+            entry.artifactUnitId,
             name,
             new IrUnsupportedError(
               "abi-signature-parity",
@@ -1605,7 +1878,8 @@ export function compileIrPathFunctions(
         }
         if (bodyContainsReturnClassOp(finalBody)) {
           markOwnerInvariant(
-            entry.ownerName,
+            owner,
+            entry.artifactUnitId,
             name,
             "abi-type-index-mismatch",
             "lower",
@@ -1618,7 +1892,7 @@ export function compileIrPathFunctions(
       }
       pendingPatches.push({ entry, funcIdx, existing, wasmFunc, finalBody });
     } catch (e) {
-      markOwnerFailure(entry.ownerName, name, e, "lower");
+      markOwnerFailure(owner, entry.artifactUnitId, name, e, "lower");
     }
   }
 
@@ -1626,7 +1900,7 @@ export function compileIrPathFunctions(
   // callee's LEGACY body and typeIdx — but every IR body was compiled against
   // `calleeTypes`, the IR's shared view of each claimed function's signature,
   // which the parity mismatch just proved DIFFERS from that legacy ABI for the
-  // withdrawn name. Committing a caller while withdrawing its callee therefore
+  // withdrawn unit. Committing a caller while withdrawing its callee therefore
   // strands the caller on the wrong ABI: the #3503 partial-commit regression
   // (tests/issue-3471.test.ts) committed `check`'s IR body — which passed raw
   // f64 args per the IR view of `isSameValue` — while `isSameValue` withdrew
@@ -1637,18 +1911,19 @@ export function compileIrPathFunctions(
   // is a fixpoint — a cascade-withdrawn caller PASSED the guard itself (its
   // IR typeIdx equals its legacy typeIdx), so keeping its legacy body changes
   // nothing about the ABI its own callers compiled against.
-  if (abiDivergentNames.size > 0) {
+  if (abiDivergentUnitIds.size > 0) {
     for (const patch of pendingPatches) {
-      if (failedOwners.has(patch.entry.ownerName)) continue;
-      const referenced = findReferencedFuncName(patch.entry.fn, abiDivergentNames);
+      if (failedOwners.has(patch.entry.terminalOwnerUnitId)) continue;
+      const referenced = findReferencedWithdrawnIrUnit(patch.entry.fn, abiDivergentUnitIds);
       if (referenced === undefined) continue;
       markOwnerFailure(
-        patch.entry.ownerName,
+        terminalOwnerOf(patch.entry),
+        patch.entry.artifactUnitId,
         patch.entry.name,
         new IrUnsupportedError(
           "abi-signature-parity",
           "resolve",
-          `body references ${referenced}, whose claim was withdrawn on a typeIdx parity mismatch — the call ABI baked from calleeTypes no longer matches; keeping legacy body`,
+          `body references ${referenced.name}, whose claim was withdrawn on a typeIdx parity mismatch — the call ABI baked from calleeTypes no longer matches; keeping legacy body`,
         ),
         "patch",
       );
@@ -1659,7 +1934,7 @@ export function compileIrPathFunctions(
   // failure invalidates its whole source owner, including an already-lowered
   // main artifact, so the ledger can never report emitted+fatal for one row.
   for (const patch of pendingPatches) {
-    if (failedOwners.has(patch.entry.ownerName)) continue;
+    if (failedOwners.has(patch.entry.terminalOwnerUnitId)) continue;
     replaceDefinedFuncAt(ctx, patch.funcIdx, {
       name: patch.existing.name,
       typeIdx: patch.wasmFunc.typeIdx,
@@ -1668,7 +1943,12 @@ export function compileIrPathFunctions(
       exported: patch.existing.exported,
     });
     compiled.push(patch.entry.name);
-    if (!patch.entry.synthesized && patch.entry.name === patch.entry.ownerName) {
+    compiledArtifactEvidence.push({
+      artifactUnitId: patch.entry.artifactUnitId,
+      terminalOwnerUnitId: patch.entry.terminalOwnerUnitId,
+      name: patch.entry.name,
+    });
+    if (patch.entry.artifactUnitId === patch.entry.terminalOwnerUnitId) {
       compiledOwners.push(patch.entry.ownerName);
     }
   }
@@ -1693,21 +1973,37 @@ export function compileIrPathFunctions(
     replaceDefinedFuncAt(ctx, funcIdx, { ...orphan, body: [{ op: "unreachable" }] });
   };
   for (const slot of freshSlots) {
-    if (failedOwners.has(slot.ownerName)) stubIfOrphanedEmpty(slot.funcIdx);
+    if (failedOwners.has(slot.terminalOwnerUnitId)) stubIfOrphanedEmpty(slot.funcIdx);
   }
   for (const patch of pendingPatches) {
-    if (failedOwners.has(patch.entry.ownerName)) stubIfOrphanedEmpty(patch.funcIdx);
+    if (failedOwners.has(patch.entry.terminalOwnerUnitId)) stubIfOrphanedEmpty(patch.funcIdx);
   }
 
   const dropTerminal = process.env.JS2WASM_TEST_DROP_IR_TERMINAL;
   if (dropTerminal) {
-    const owner = dropTerminal === "1" ? healthyForLower[0]?.ownerName : dropTerminal;
+    const owner =
+      dropTerminal === "1"
+        ? healthyForLower[0] && terminalOwnerOf(healthyForLower[0])
+        : loweringPlans?.ownerProjection.getByLegacyName(dropTerminal);
     if (owner) {
+      const retainedCompiled: string[] = [];
+      const retainedCompiledArtifacts: IrIntegrationCompiledArtifactEvidence[] = [];
+      const retainedCompiledOwners: string[] = [];
+      for (let index = 0; index < compiledArtifactEvidence.length; index++) {
+        const artifact = compiledArtifactEvidence[index]!;
+        if (artifact.terminalOwnerUnitId === owner.unitId) continue;
+        retainedCompiled.push(compiled[index]!);
+        retainedCompiledArtifacts.push(artifact);
+        if (artifact.artifactUnitId === artifact.terminalOwnerUnitId) {
+          retainedCompiledOwners.push(activeOwnerProjection.requireUnit(artifact.terminalOwnerUnitId).legacyName);
+        }
+      }
       return finishReport(
-        compiled.filter((name) => name !== owner),
-        errors.filter((error) => error.func !== owner),
-        compiledOwners.filter((name) => name !== owner),
-        failures.terminalFailureEvents.filter((event) => event.error.func !== owner),
+        retainedCompiled,
+        errors.filter((error) => error.func !== owner.legacyName),
+        retainedCompiledOwners,
+        failures.terminalFailureEvents.filter((event) => event.unitId !== owner.unitId),
+        retainedCompiledArtifacts,
       );
     }
   }
@@ -1720,21 +2016,34 @@ function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
 }
 
 /**
- * (#3551) Scan an IR function for any symbolic reference to one of `names`.
+ * (#3551) Scan an IR function for any exact unit-bound symbolic reference to
+ * one of `unitIds`.
  * `IrFuncRef` has exactly two carriers in the instruction set — direct `call`
- * targets and `closure.new` lifted-func refs — and terminators carry none, so
- * a flat walk over every block's instrs is complete. Returns the first
- * referenced name (for the withdrawal detail), or undefined when the body
- * references none of them.
+ * targets and `closure.new` lifted-func refs — and terminators carry none.
+ * Returns the first referenced unit and its compatibility label (for the
+ * withdrawal detail), or undefined when the body references none of them.
+ * Runtime/import/intrinsic/support bindings with a lookalike name are
+ * intentionally ignored.
  */
-function findReferencedFuncName(fn: IrFunction, names: ReadonlySet<string>): string | undefined {
+export function findReferencedWithdrawnIrUnit(
+  fn: IrFunction,
+  unitIds: ReadonlySet<IrUnitId>,
+): { readonly unitId: IrUnitId; readonly name: string } | undefined {
+  let found: { readonly unitId: IrUnitId; readonly name: string } | undefined;
   for (const block of fn.blocks) {
     for (const instr of block.instrs) {
-      if (instr.kind === "call" && names.has(instr.target.name)) return instr.target.name;
-      if (instr.kind === "closure.new" && names.has(instr.liftedFunc.name)) return instr.liftedFunc.name;
+      forEachInstrDeep(instr, (nested) => {
+        if (found) return;
+        const ref =
+          nested.kind === "call" ? nested.target : nested.kind === "closure.new" ? nested.liftedFunc : undefined;
+        if (ref?.binding.kind === "unit" && unitIds.has(ref.binding.unitId)) {
+          found = { unitId: ref.binding.unitId, name: ref.name };
+        }
+      });
+      if (found) return found;
     }
   }
-  return undefined;
+  return found;
 }
 
 /**
@@ -2778,9 +3087,16 @@ function makeResolver(
 // ---------------------------------------------------------------------------
 
 interface BuiltFnRef {
+  readonly artifactUnitId: IrUnitId;
+  readonly terminalOwnerUnitId: IrUnitId;
   readonly fn: IrFunction;
-  readonly ownerName?: string;
-  readonly name?: string;
+  readonly ownerName: string;
+  readonly name: string;
+}
+
+interface IrOwnerPreparationFailure {
+  readonly owner: IrLegacyUnitProjectionEntry;
+  readonly outcome: IrPreparationFailure;
 }
 
 interface HostDateImportSpec {
@@ -2984,7 +3300,7 @@ function instrUsesStrings(instr: IrInstr): boolean {
 function preregisterIteratorSupport(
   ctx: CodegenContext,
   fns: readonly BuiltFnRef[],
-): ReadonlyMap<string, IrPreparationFailure> {
+): ReadonlyMap<IrUnitId, IrOwnerPreparationFailure> {
   const usesIter = (instr: IrInstr): boolean => {
     switch (instr.kind) {
       case "iter.new":
@@ -3024,16 +3340,33 @@ function preregisterIteratorSupport(
     }
   }
   if (users.length === 0) return new Map();
-  const failures = new Map<string, IrPreparationFailure>();
-  const owners = new Set(users.map((entry) => entry.ownerName ?? entry.name ?? entry.fn.name));
+  const failures = new Map<IrUnitId, IrOwnerPreparationFailure>();
+  const owners = new Map<IrUnitId, IrLegacyUnitProjectionEntry>();
+  for (const entry of users) {
+    const existing = owners.get(entry.terminalOwnerUnitId);
+    if (existing && existing.legacyName !== entry.ownerName) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `terminal owner ${entry.terminalOwnerUnitId} has conflicting labels ${existing.legacyName} and ${entry.ownerName}`,
+      );
+    }
+    owners.set(entry.terminalOwnerUnitId, {
+      unitId: entry.terminalOwnerUnitId,
+      legacyName: entry.ownerName,
+    });
+  }
   if (ctx.standalone || ctx.wasi) {
-    for (const owner of owners) {
-      failures.set(owner, {
-        kind: "unsupported",
-        code: "late-preparation-unsupported",
-        stage: "resolve",
-        detail:
-          "standalone/WASI generic iteration requires the JS-host iterator protocol; a pure-Wasm Iterator Record path is not available",
+    for (const owner of owners.values()) {
+      failures.set(owner.unitId, {
+        owner,
+        outcome: {
+          kind: "unsupported",
+          code: "late-preparation-unsupported",
+          stage: "resolve",
+          detail:
+            "standalone/WASI generic iteration requires the JS-host iterator protocol; a pure-Wasm Iterator Record path is not available",
+        },
       });
     }
     return failures;
@@ -3045,7 +3378,9 @@ function preregisterIteratorSupport(
     addIteratorImports(ctx);
   } catch (error) {
     const failure = classifyIrFailure(error, "resolve");
-    for (const owner of owners) failures.set(owner, failure);
+    for (const owner of owners.values()) {
+      failures.set(owner.unitId, { owner, outcome: failure });
+    }
   }
   return failures;
 }

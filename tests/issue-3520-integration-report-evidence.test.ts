@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { auditIrIntegrationTerminalEvidence } from "../src/codegen/ir-overlay-outcomes.js";
-import { buildIrUnitInventory, type IrUnitId } from "../src/ir/identity.js";
+import { buildIrUnitInventory, createDerivedIrUnitId, type IrUnitId } from "../src/ir/identity.js";
 import {
   buildIrIntegrationReport,
   invariantIntegrationFailure,
@@ -57,6 +57,10 @@ function audit(current: Fixture, report: IrIntegrationReport) {
   });
 }
 
+function owner(current: Fixture) {
+  return current.ownerProjection.requireUnit(current.ownerUnitId);
+}
+
 function failedEvidence(current: Fixture, errorFunc = "run"): IrIntegrationTerminalEvidence {
   const error = invariantIntegrationFailure(errorFunc, "verifier-failure", "verify", `${errorFunc} failed`);
   return {
@@ -69,10 +73,19 @@ function failedEvidence(current: Fixture, errorFunc = "run"): IrIntegrationTermi
 }
 
 describe("#3520 integration report sidecar completeness", () => {
+  it("preserves the legacy constructor shape when no owner projection is available", () => {
+    const error = invariantIntegrationFailure("legacy", "verifier-failure", "verify", "legacy failure");
+
+    expect(buildIrIntegrationReport(["legacy"], [error])).toEqual({
+      compiled: ["legacy"],
+      errors: [error],
+    });
+  });
+
   it("covers every verifier detail object with one grouped terminal event", () => {
     const current = fixture();
     const failures = new IrIntegrationFailureLog();
-    failures.recordVerifierGroups("run", [
+    failures.recordVerifierGroups(owner(current), [
       { detailPrefix: "artifact one: ", details: [{ message: "first" }] },
       { detailPrefix: "artifact two: ", details: [{ message: "second" }, { message: "third" }] },
     ]);
@@ -82,6 +95,7 @@ describe("#3520 integration report sidecar completeness", () => {
       current.ownerProjection,
       [],
       failures.terminalFailureEvents,
+      [],
     );
     const evidence = report.terminalEvidence?.[0];
 
@@ -96,7 +110,7 @@ describe("#3520 integration report sidecar completeness", () => {
   it("keeps a mixed verifier event fail-closed without changing public diagnostic order", () => {
     const current = fixture();
     const failures = new IrIntegrationFailureLog();
-    failures.recordVerifierGroups("run", [
+    failures.recordVerifierGroups(owner(current), [
       {
         detailPrefix: "",
         details: [{ message: "designed return-shape demotion", demote: true }, { message: "dominance violation" }],
@@ -116,6 +130,7 @@ describe("#3520 integration report sidecar completeness", () => {
       current.ownerProjection,
       [],
       failures.terminalFailureEvents,
+      [],
     );
     const audited = audit(current, report);
     expect(audited.invariantByUnitId).toEqual(new Map());
@@ -166,10 +181,34 @@ describe("#3520 integration report sidecar completeness", () => {
 
   it("classifies synthetic compiled artifacts while requiring exact patched-owner coverage", () => {
     const current = fixture();
-    const report = buildIrIntegrationReport(["run", "__lifted_run_0"], [], current.ownerProjection, ["run"], []);
+    const syntheticUnitId = createDerivedIrUnitId({
+      parentId: current.ownerUnitId,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    const report = buildIrIntegrationReport(
+      ["run", "__lifted_run_0"],
+      [],
+      current.ownerProjection,
+      ["run"],
+      [],
+      [
+        {
+          artifactUnitId: current.ownerUnitId,
+          terminalOwnerUnitId: current.ownerUnitId,
+          name: "run",
+        },
+        {
+          artifactUnitId: syntheticUnitId,
+          terminalOwnerUnitId: current.ownerUnitId,
+          name: "__lifted_run_0",
+        },
+      ],
+    );
 
     expect(report.terminalCompiledOwners).toEqual(["run"]);
     expect(report.syntheticCompiledArtifacts).toEqual(["__lifted_run_0"]);
+    expect(report.terminalEvidence).toEqual([{ kind: "patched", unitId: current.ownerUnitId, legacyName: "run" }]);
     expect(audit(current, report).invariantByUnitId).toEqual(new Map());
 
     const missingPatch: IrIntegrationReport = { ...report, terminalEvidence: [] };
@@ -195,22 +234,81 @@ describe("#3520 integration report sidecar completeness", () => {
     });
   });
 
+  it("classifies duplicate public labels by artifact and terminal-owner identity", () => {
+    const current = fixture();
+    const syntheticUnitId = createDerivedIrUnitId({
+      parentId: current.ownerUnitId,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+
+    const report = buildIrIntegrationReport(
+      ["run", "run"],
+      [],
+      current.ownerProjection,
+      ["run"],
+      [],
+      [
+        {
+          artifactUnitId: syntheticUnitId,
+          terminalOwnerUnitId: current.ownerUnitId,
+          name: "run",
+        },
+        {
+          artifactUnitId: current.ownerUnitId,
+          terminalOwnerUnitId: current.ownerUnitId,
+          name: "run",
+        },
+      ],
+    );
+
+    expect(report.syntheticCompiledArtifacts).toEqual(["run"]);
+    expect(report.terminalCompiledOwners).toEqual(["run"]);
+    expect(report.terminalEvidence).toEqual([{ kind: "patched", unitId: current.ownerUnitId, legacyName: "run" }]);
+  });
+
   it("keeps separately recorded failures as duplicate terminal events", () => {
     const current = fixture();
     const failures = new IrIntegrationFailureLog();
-    failures.record(invariantIntegrationFailure("run", "verifier-failure", "verify", "first call"));
-    failures.record(invariantIntegrationFailure("run", "verifier-failure", "verify", "second call"));
+    failures.record(owner(current), invariantIntegrationFailure("run", "verifier-failure", "verify", "first call"));
+    failures.record(owner(current), invariantIntegrationFailure("run", "verifier-failure", "verify", "second call"));
     const report = buildIrIntegrationReport(
       [],
       failures.errors,
       current.ownerProjection,
       [],
       failures.terminalFailureEvents,
+      [],
     );
 
     expect(audit(current, report).invariantByUnitId.get(current.ownerUnitId)).toMatchObject({
       kind: "invariant",
       code: "duplicate-unit-outcome",
     });
+  });
+
+  it("rejects exact evidence whose structural owner and public label disagree", () => {
+    const current = fixture();
+    const failures = new IrIntegrationFailureLog();
+
+    expect(() =>
+      failures.record(owner(current), invariantIntegrationFailure("other", "verifier-failure", "verify", "wrong")),
+    ).toThrow(/does not match diagnostic label/);
+    expect(() =>
+      buildIrIntegrationReport(
+        ["run"],
+        [],
+        current.ownerProjection,
+        ["run"],
+        [],
+        [
+          {
+            artifactUnitId: current.ownerUnitId,
+            terminalOwnerUnitId: current.ownerUnitId,
+            name: "other",
+          },
+        ],
+      ),
+    ).toThrow();
   });
 });

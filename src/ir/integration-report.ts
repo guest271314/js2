@@ -7,7 +7,7 @@ import {
   type IrPreparationFailure,
   type IrPreparationStage,
 } from "./outcomes.js";
-import type { IrLegacyUnitProjection } from "./planning-identity.js";
+import type { IrLegacyUnitProjection, IrLegacyUnitProjectionEntry } from "./planning-identity.js";
 
 export interface IrIntegrationReport {
   readonly compiled: readonly string[];
@@ -33,8 +33,20 @@ export type IrIntegrationTerminalEvidence =
     };
 
 export interface IrIntegrationTerminalFailureEvent {
+  /** Exact terminal owner. The legacy label is diagnostic metadata only. */
+  readonly unitId: IrUnitId;
+  readonly legacyName: string;
   readonly error: IrIntegrationError;
   readonly errors: readonly IrIntegrationError[];
+}
+
+export interface IrIntegrationCompiledArtifactEvidence {
+  /** Exact emitted artifact identity, including lifted functions and clones. */
+  readonly artifactUnitId: IrUnitId;
+  /** Exact R0 terminal owner for this emitted artifact. */
+  readonly terminalOwnerUnitId: IrUnitId;
+  /** Public compiled-artifact label retained for compatibility telemetry. */
+  readonly name: string;
 }
 
 export interface IrIntegrationError {
@@ -108,19 +120,34 @@ export class IrIntegrationFailureLog {
   readonly errors: IrIntegrationError[] = [];
   readonly terminalFailureEvents: IrIntegrationTerminalFailureEvent[] = [];
 
-  record(error: IrIntegrationError): void {
+  record(owner: IrLegacyUnitProjectionEntry, error: IrIntegrationError): void {
+    if (error.func !== owner.legacyName) {
+      throw new TypeError(
+        `integration failure owner ${owner.unitId} / ${JSON.stringify(owner.legacyName)} ` +
+          `does not match diagnostic label ${JSON.stringify(error.func)}`,
+      );
+    }
     this.errors.push(error);
-    this.terminalFailureEvents.push({ error, errors: [error] });
+    this.terminalFailureEvents.push({
+      unitId: owner.unitId,
+      legacyName: owner.legacyName,
+      error,
+      errors: [error],
+    });
   }
 
   /** Preserve every verifier detail while emitting one logical failure event. */
-  recordVerifierDetails(func: string, details: readonly IrVerifierDetail[], detailPrefix = ""): void {
-    this.recordVerifierGroups(func, [{ details, detailPrefix }]);
+  recordVerifierDetails(
+    owner: IrLegacyUnitProjectionEntry,
+    details: readonly IrVerifierDetail[],
+    detailPrefix = "",
+  ): void {
+    this.recordVerifierGroups(owner, [{ details, detailPrefix }]);
   }
 
   /** Aggregate verifier details from every artifact in one owner build. */
   recordVerifierGroups(
-    func: string,
+    owner: IrLegacyUnitProjectionEntry,
     groups: Iterable<{
       readonly details: readonly IrVerifierDetail[];
       readonly detailPrefix: string;
@@ -129,7 +156,7 @@ export class IrIntegrationFailureLog {
     const eventErrors: IrIntegrationError[] = [];
     for (const group of groups) {
       for (const detail of group.details) {
-        const error = verifyIntegrationFailure(func, detail, group.detailPrefix);
+        const error = verifyIntegrationFailure(owner.legacyName, detail, group.detailPrefix);
         this.errors.push(error);
         eventErrors.push(error);
       }
@@ -144,20 +171,16 @@ export class IrIntegrationFailureLog {
             ...eventErrors.slice(representativeIndex + 1),
           ];
     const error = terminalErrors[0];
-    if (error) this.terminalFailureEvents.push({ error, errors: terminalErrors });
+    if (error) {
+      this.terminalFailureEvents.push({
+        unitId: owner.unitId,
+        legacyName: owner.legacyName,
+        error,
+        errors: terminalErrors,
+      });
+    }
     return error !== undefined;
   }
-}
-
-function syntheticCompiledArtifacts(compiled: readonly string[], terminalOwners: readonly string[]): string[] {
-  const remainingOwners = new Map<string, number>();
-  for (const name of terminalOwners) remainingOwners.set(name, (remainingOwners.get(name) ?? 0) + 1);
-  return compiled.filter((name) => {
-    const remaining = remainingOwners.get(name) ?? 0;
-    if (remaining === 0) return true;
-    remainingOwners.set(name, remaining - 1);
-    return false;
-  });
 }
 
 /**
@@ -173,20 +196,76 @@ export function buildIrIntegrationReport(
   compiled: readonly string[],
   errors: readonly IrIntegrationError[],
   ownerProjection?: IrLegacyUnitProjection,
-  compiledOwners: readonly string[] = compiled,
+  compiledOwners?: readonly string[],
   terminalFailureEvents: readonly (IrIntegrationTerminalFailureEvent | IrIntegrationError)[] = errors,
+  compiledArtifactEvidence?: readonly IrIntegrationCompiledArtifactEvidence[],
 ): IrIntegrationReport {
   if (!ownerProjection) return { compiled, errors };
+  if (!compiledArtifactEvidence) {
+    throw new TypeError("exact compiled-artifact evidence is required when an owner projection is supplied");
+  }
+  if (compiledArtifactEvidence.length !== compiled.length) {
+    throw new RangeError(
+      `compiled-artifact evidence count ${compiledArtifactEvidence.length} does not match public compiled count ${compiled.length}`,
+    );
+  }
 
   const terminalEvidence: IrIntegrationTerminalEvidence[] = [];
-  for (const legacyName of compiledOwners) {
-    const owner = ownerProjection.requireLegacyName(legacyName);
-    terminalEvidence.push({ kind: "patched", unitId: owner.unitId, legacyName: owner.legacyName });
+  const structuralCompiledOwners: string[] = [];
+  const structuralSyntheticArtifacts: string[] = [];
+  const observedArtifactUnitIds = new Set<IrUnitId>();
+  for (let index = 0; index < compiledArtifactEvidence.length; index++) {
+    const artifact = compiledArtifactEvidence[index]!;
+    const publicName = compiled[index]!;
+    if (artifact.name !== publicName) {
+      throw new TypeError(
+        `compiled artifact ${artifact.artifactUnitId} label ${JSON.stringify(artifact.name)} ` +
+          `does not match public label ${JSON.stringify(publicName)}`,
+      );
+    }
+    if (observedArtifactUnitIds.has(artifact.artifactUnitId)) {
+      throw new TypeError(`compiled artifact ${artifact.artifactUnitId} was reported more than once`);
+    }
+    observedArtifactUnitIds.add(artifact.artifactUnitId);
+    const owner = ownerProjection.requireUnit(artifact.terminalOwnerUnitId);
+    const projectedArtifact = ownerProjection.getByUnitId(artifact.artifactUnitId);
+    if (projectedArtifact && projectedArtifact.unitId !== owner.unitId) {
+      throw new TypeError(
+        `compiled terminal artifact ${artifact.artifactUnitId} is assigned to foreign owner ${owner.unitId}`,
+      );
+    }
+    if (artifact.artifactUnitId === artifact.terminalOwnerUnitId) {
+      structuralCompiledOwners.push(owner.legacyName);
+      terminalEvidence.push({ kind: "patched", unitId: owner.unitId, legacyName: owner.legacyName });
+    } else {
+      structuralSyntheticArtifacts.push(artifact.name);
+    }
+  }
+  if (
+    compiledOwners &&
+    (compiledOwners.length !== structuralCompiledOwners.length ||
+      compiledOwners.some((legacyName, index) => legacyName !== structuralCompiledOwners[index]))
+  ) {
+    throw new TypeError("public compiled-owner labels do not match exact compiled-artifact evidence");
   }
 
   for (const failureEvent of terminalFailureEvents) {
-    const event = "errors" in failureEvent ? failureEvent : { error: failureEvent, errors: [failureEvent] };
-    const owner = ownerProjection.requireLegacyName(event.error.func);
+    const event =
+      "errors" in failureEvent
+        ? failureEvent
+        : {
+            ...ownerProjection.requireLegacyName(failureEvent.func),
+            error: failureEvent,
+            errors: [failureEvent],
+          };
+    const owner = ownerProjection.requirePair({
+      unitId: event.unitId,
+      legacyName: event.legacyName,
+    });
+    ownerProjection.requirePair({ unitId: event.unitId, legacyName: event.error.func });
+    for (const error of event.errors) {
+      ownerProjection.requirePair({ unitId: event.unitId, legacyName: error.func });
+    }
     terminalEvidence.push({
       kind: "failed",
       unitId: owner.unitId,
@@ -199,7 +278,7 @@ export function buildIrIntegrationReport(
     compiled,
     errors,
     terminalEvidence,
-    terminalCompiledOwners: compiledOwners,
-    syntheticCompiledArtifacts: syntheticCompiledArtifacts(compiled, compiledOwners),
+    terminalCompiledOwners: structuralCompiledOwners,
+    syntheticCompiledArtifacts: structuralSyntheticArtifacts,
   };
 }
