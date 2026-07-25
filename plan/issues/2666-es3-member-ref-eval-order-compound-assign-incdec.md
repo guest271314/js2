@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 es_edition: multi
 language_feature: compound-assignment, increment-decrement, evaluation-order
-goal: spec-completeness
+goal: es5-complete
 sprint: 67
 ---
 # #2666 — ≤ES3 member-reference `base[prop]` evaluation order (compound-assign + ++/--)

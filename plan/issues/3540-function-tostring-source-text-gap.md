@@ -11,7 +11,7 @@ reasoning_effort: high
 task_type: feature
 area: codegen, runtime
 language_feature: function
-goal: spec-completeness
+goal: es5-complete
 related: [3024, 3534, 1337, 1632]
 ---
 
