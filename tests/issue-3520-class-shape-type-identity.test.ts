@@ -18,6 +18,7 @@ import {
   type IrType,
   type IrValueId,
 } from "../src/ir/index.js";
+import { irTypeKey } from "../src/ir/integration.js";
 import { monomorphize } from "../src/ir/passes/monomorphize.js";
 import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
@@ -98,7 +99,11 @@ describe("#3520 source-qualified class-shape type identity", () => {
     expect(first.classId).not.toBe(second.classId);
     expect(classShapeEquals(first, second)).toBe(false);
     expect(irTypeEquals({ kind: "class", shape: first }, { kind: "class", shape: second })).toBe(false);
+    expect(irTypeKey({ kind: "class", shape: first })).not.toBe(irTypeKey({ kind: "class", shape: second }));
     expect(classShapeEquals(first, { ...first, className: "DiagnosticAlias" })).toBe(true);
+    expect(irTypeKey({ kind: "class", shape: first })).toBe(
+      irTypeKey({ kind: "class", shape: { ...first, className: "DiagnosticAlias" } }),
+    );
   });
 
   it("forms separate monomorphization tuples for same-labelled source classes", () => {

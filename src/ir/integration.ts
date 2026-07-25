@@ -309,19 +309,16 @@ export function compileIrPathFunctions(
     );
   const classIdByShape = new Map<IrClassShape, IrClassId>();
   if (loweringPlans && classShapes) {
-    for (const [classId, declaration] of loweringPlans.identityContext.declarationByClassId) {
-      const className = declaration.name?.text;
-      const shape = className === undefined ? undefined : classShapes.get(className);
-      if (!shape) continue;
-      const existing = classIdByShape.get(shape);
-      if (existing !== undefined && existing !== classId) {
+    for (const shape of classShapes.values()) {
+      const declaration = loweringPlans.identityContext.declarationByClassId.get(shape.classId);
+      if (!declaration || declaration.name?.text !== shape.className) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: projected class shape ${className} aliases ${existing} and ${classId}`,
+          `ir/integration: projected class shape ${shape.className} has stale identity ${shape.classId}`,
         );
       }
-      classIdByShape.set(shape, classId);
+      classIdByShape.set(shape, shape.classId);
     }
   }
   // (#3142 Slice 2) A claimable, non-empty module-init unit keeps the
@@ -4142,7 +4139,7 @@ class ObjectStructRegistry {
  * legacy/IR convergence is enforced via `legacyFieldsHashKey` on the
  * lowered ValTypes — this key is the IR-side memo).
  */
-function irTypeKey(t: IrType): string {
+export function irTypeKey(t: IrType): string {
   if (t.kind === "val") {
     if (t.val.kind === "ref" || t.val.kind === "ref_null") {
       return `${t.val.kind}:${(t.val as { typeIdx: number }).typeIdx}`;
@@ -4161,9 +4158,7 @@ function irTypeKey(t: IrType): string {
     const ps = t.signature.params.map(irTypeKey).join(",");
     return `callable(${ps})->${t.signature.returnType === null ? "void" : irTypeKey(t.signature.returnType)}`;
   }
-  // Slice 4 (#1169d): class is keyed by name — uniqueness across the
-  // compilation unit makes this safe.
-  if (t.kind === "class") return `class:${t.shape.className}`;
+  if (t.kind === "class") return `class:${t.shape.classId}`;
   // Slice 10 (#1169i): extern is keyed solely on className.
   if (t.kind === "extern") return `extern:${t.className}`;
   // #1926 — union members / boxed inner are IrTypes; recurse.
@@ -4394,15 +4389,14 @@ function defaultFieldAllocInstr(field: FieldDef, tagValue: number): Instr {
  *   - one method function `<className>_<methodName>` per instance
  *     method in `ctx.funcMap`
  *
- * `ClassRegistry.resolve` maps an `IrClassShape` to that legacy state
- * via the `className`, with one defensive lookup per resolution call so
- * a class that wasn't registered (e.g. shape was synthesized incorrectly)
- * surfaces as `null` and the caller falls back to legacy.
+ * `ClassRegistry.resolve` validates the shape's exact `IrClassId`, then maps
+ * it to the remaining name-keyed legacy state at this backend seam. A class
+ * that wasn't registered surfaces as `null` and the caller falls back.
  *
- * Cached per className for cheap re-resolution.
+ * Cached per `IrClassId`; display labels never establish class identity.
  */
 class ClassRegistry {
-  private readonly cache = new Map<string, IrClassLowering>();
+  private readonly cache = new Map<IrClassId, IrClassLowering>();
 
   constructor(
     private readonly ctx: CodegenContext,
@@ -4412,15 +4406,26 @@ class ClassRegistry {
   ) {}
 
   private exactClassId(shape: IrClassShape): IrClassId {
-    const classId = this.classIdByShape.get(shape);
-    if (classId === undefined) {
+    const projectedClassId = this.classIdByShape.get(shape);
+    if (projectedClassId !== undefined && projectedClassId !== shape.classId) {
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "resolve",
-        `ir/integration: class shape ${shape.className} has no exact structural identity`,
+        `ir/integration: class shape ${shape.className} aliases ${projectedClassId} and ${shape.classId}`,
       );
     }
-    return classId;
+    if (
+      this.identityContext &&
+      (projectedClassId === undefined ||
+        this.identityContext.declarationByClassId.get(shape.classId)?.name?.text !== shape.className)
+    ) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `ir/integration: class shape ${shape.className} has no exact structural identity ${shape.classId}`,
+      );
+    }
+    return shape.classId;
   }
 
   private memberRef(classId: IrClassId, legacyName: string, physicalName: string): IrFuncRef | null {
@@ -4453,7 +4458,8 @@ class ClassRegistry {
   }
 
   resolve(shape: IrClassShape): IrClassLowering | null {
-    const cached = this.cache.get(shape.className);
+    const classId = this.exactClassId(shape);
+    const cached = this.cache.get(classId);
     if (cached) return cached;
 
     const structTypeIdx = this.ctx.structMap.get(shape.className);
@@ -4486,7 +4492,6 @@ class ClassRegistry {
     // registers `<className>_init` for every non-externref-backed class (the
     // only kind that can be an IR subclass parent), keyed the same way.
     const initFuncName = classMemberFuncKey(ctx, `${shape.className}_init`);
-    const classId = this.exactClassId(shape);
     const constructorFunc =
       this.memberRef(classId, `${shape.className}_new`, constructorFuncName) ??
       irSupportFuncRef(classId, "class-constructor", constructorFuncName);
@@ -4546,7 +4551,7 @@ class ClassRegistry {
       },
       allocInstrs,
     };
-    this.cache.set(shape.className, lowering);
+    this.cache.set(classId, lowering);
     return lowering;
   }
 }
