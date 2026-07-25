@@ -183,7 +183,7 @@ function deleteSentinelInstr(fieldType: ValType): Instr {
  * the receiver's STATIC type does not prove it is that struct.
  *
  * The delete lowering resolves `structTypeIdx` from
- * `resolveStructName(checker.getTypeAtLocation(receiver))` — the receiver's
+ * `resolveStructName` over the checker's type at the receiver — the receiver's
  * *declared* shape. For `delete this.x` inside an object-literal accessor that
  * is later invoked REFLECTIVELY (`__call_accessor_get` ← `__extern_get`, e.g.
  * through a `with` scope), `this` is bound to whatever the accessor was called
