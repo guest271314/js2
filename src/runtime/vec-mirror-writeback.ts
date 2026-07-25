@@ -178,16 +178,30 @@ export function reconcileVecMirrors(
       keep++;
     }
     if (scanFailed) continue;
+    // Apply as pop-back-to-prefix + push-tail, but keep the popped suffix so a
+    // failed push can UNDO the whole thing. `__vec_mut_supported` already said
+    // this vec's element kind is covered, so a `-1` push should be
+    // unreachable — but a partially-applied reconcile would silently TRUNCATE
+    // live data, which is strictly worse than the no-op we are replacing.
+    // All-or-nothing is the only safe contract here.
+    const popped: unknown[] = [];
     try {
-      for (let i = vecLen; i > keep; i--) popFn(vec);
+      for (let i = vecLen; i > keep; i--) popped.push(popFn(vec));
       for (let i = keep; i < mirror.length; i++) {
         const m = mirror[i];
         const raw = vecForMirror(m) ?? unwrap(m);
-        if (pushFn(vec, raw) < 0) break;
+        if (pushFn(vec, raw) < 0) throw new Error("vec push rejected");
       }
     } catch {
-      // A partially-applied reconcile is still closer to the host's view than
-      // dropping the mutation entirely; never let it escape as a host throw.
+      // Roll back to the pre-reconcile contents: drop whatever we managed to
+      // push, then restore the popped suffix in its original order. Never let
+      // any of this escape as a host throw.
+      try {
+        for (let n = lenFn(vec); n > keep; n--) popFn(vec);
+        for (let i = popped.length - 1; i >= 0; i--) pushFn(vec, popped[i]);
+      } catch {
+        /* nothing further we can do without making it worse */
+      }
     }
   }
 }

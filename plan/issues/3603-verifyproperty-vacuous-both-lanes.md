@@ -8,6 +8,9 @@ updated: 2026-07-25
 assignee: ttraenkler/opus-loop-a
 loc-budget-allow:
   - src/runtime.ts
+func-budget-allow:
+  - src/runtime.ts::resolveImport
+  - src/runtime.ts::<anonymous>#76
 priority: high
 horizon: xl
 feasibility: hard
