@@ -20,6 +20,9 @@ origin: "2026-07-25 Fable substrate/async review (plan/agent-context/fable-subst
 loc-budget-allow:
   - src/codegen/async-frame.ts
   - src/codegen/closures.ts
+func-budget-allow:
+  - src/codegen/async-frame.ts::ensureAsyncResumeFunction
+  - src/codegen/closures.ts::compileArrowAsClosure
 ---
 
 # Declined async shapes swallow rejections on the default (gc host) lane
@@ -177,6 +180,11 @@ dynamic-import for-await agen). Zero pass→CE flips.
   route through the closure activation path and get claimed (probe c: 17 ✓);
   a host-API callback position that routes via `compileArrowAsCallback`
   specifically was not exhaustively audited.
+- **Refactor follow-up (not this PR)**: `ensureAsyncResumeFunction` is now
+  ~1,119 lines; splitting the state-arm builder / dispatcher assembly into
+  helpers is worth doing, but it is a real refactor with its own regression
+  risk (detached-array shift discipline, br-depth accounting) and must be a
+  dedicated byte-diff-checked PR.
 - **Claimed linear host shapes** keep the pre-3c non-routed dispatcher, which
   has no `catch_all` arm — a sync host JS exception in a lead escapes the
   machine and strands the result promise pending (pre-existing, unchanged; the
