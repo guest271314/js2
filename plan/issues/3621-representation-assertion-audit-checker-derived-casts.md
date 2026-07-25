@@ -76,8 +76,31 @@ risk.)
    issue's own fix routes the guard through a helper (`guardClearField`), so
    the `ref.test` is no longer lexically in scope and `typeof-delete.ts:490`
    and `:590` still report RAW-ASSERT. They are guarded.
-3. The triage is therefore a **prioritised reading list**, not a classification.
+3. **`RAW-ASSERT` also over-reports on STATIC guards.** A site that checks
+   `recvType.typeIdx === expectedTypeIdx` before its `struct.get` is exactly as
+   sound as a `ref.test`, but carries no `ref.test` for the regex to find.
+4. The triage is therefore a **prioritised reading list**, not a classification.
    The classification below is hand-verified only where marked.
+
+### Hand-verified so far — all four `getSymbol()?.name` RAW-ASSERTs are SAFE
+
+The assignment's own scope turned out to contain **no** live defect. Verified
+by reading each site:
+
+| site                                                               | verdict  | why                                                                                                                                                                                                 |
+| ------------------------------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `property-access-dispatch.ts:1090` (`TextEncoderEncodeIntoResult`) | **safe** | `struct.get` runs only under a STATIC `recvType.typeIdx === resultTypeIdx` check; otherwise it drops and returns `f64 0`. Limitation 3.                                                             |
+| `property-access-dispatch.ts:759` (buffer byte attrs)              | **safe** | the downstream cast IS `ref.test`-guarded (~line 915, with a `0` fallback) — outside the 60-line window. Also carries #3062's `.prototype` null-out and now sits behind #3610's gate. Limitation 1. |
+| `expressions/call-builtin-static.ts:1783` (`Generator`)            | **safe** | compiles + **drops** the argument and returns a cached singleton; no assertion on the value at all. The `struct` match came from the _next_ arm (line 1793), counted separately.                    |
+| `regexp-standalone.ts:2853`                                        | **safe** | (see file) receiver is materialised by the same lowering that types it.                                                                                                                             |
+
+This is a meaningful negative result: **the family's real risk does not live at
+the `getSymbol()?.name` sites.** Both proven defects (#3620, #3621) came from
+`resolveWasmType(` / `resolveStructName(`, and #3620's cast was emitted a
+module away from its decision. Future effort should go to the
+`resolveWasmType(` / `resolveStructName(` RAW-ASSERTs and, more importantly, to
+sites where the decision and the cast are **separated by a function boundary**
+— which no lexical triage can find.
 
 ## Slice 1 (this PR) — `delete obj.prop` on a reflectively-bound receiver
 
