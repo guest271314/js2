@@ -7,6 +7,8 @@ sprint: current
 priority: medium
 horizon: s
 goal: ci-infrastructure
+# workflow-YAML-only fix, no runtime repro — exempt from #2093 by design.
+task_type: infrastructure
 feasibility: easy
 created: 2026-07-25
 assignee: ttraenkler/dev-guard-tests
