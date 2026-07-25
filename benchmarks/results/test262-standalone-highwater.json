@@ -1,9 +1,9 @@
 {
-  "pass": 19400,
-  "host_free_pass": 19400,
-  "official_pass": 18400,
+  "pass": 22626,
+  "host_free_pass": 22626,
+  "official_pass": 22394,
   "official_total": 43106,
-  "sha": "3592-devacuification-estimate",
-  "generated_at": "2026-07-25T00:00:00Z",
+  "sha": "31139d0a902cf2944fc4f2a412b83901f43f019f",
+  "generated_at": "2026-07-25T09:00:48Z",
   "tolerance": 50
 }
