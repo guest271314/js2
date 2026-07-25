@@ -10,6 +10,8 @@ import {
   emitFuncRefAsClosure,
   isOwnParamName,
 } from "../closures.js";
+import { emitCachedFuncClosureAccess } from "../closures/method-trampolines.js"; // (#3486) fnctor ctor-closure singleton
+import { popBody, pushBody } from "../context/bodies.js"; // (#3486) detached operand buffer
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -1260,6 +1262,102 @@ function emitCallSiteFnctorRegistration(
   fctx.body.push({ op: "local.get", index: tmp });
 }
 
+/**
+ * (#1712 / #3486) Ctor-PROLOGUE instance→ctor-closure registration for a
+ * MODULE-scope fnctor. Sibling of `emitCallSiteFnctorRegistration` above, which
+ * covers the function-LOCAL case (#3138).
+ *
+ * Emitted in the prologue — before the user body compiles — because
+ * acorn-style ctors call prototype methods on `this` inside the ctor itself
+ * (`this.context = this.initialContext()`); an end-of-ctor registration left
+ * those in-ctor dispatches unresolvable. JS-host mode only: standalone/WASI
+ * construction stays pure Wasm (the native equivalent rides on the #1888
+ * open-object runtime in a later dogfood lap).
+ *
+ * **(#3486) Why the operand is the identifier's own cached-closure ACCESS, not
+ * a pre-existing global.** The original #1712 form required
+ * `moduleGlobals`/`funcClosureGlobals` to already hold an entry, and BOTH are
+ * populated lazily by an earlier identifier-as-VALUE read of `funcName`. So
+ * whether the link got emitted at all depended on COMPILE ORDER — and in the
+ * shape test262 actually uses,
+ *
+ *     function DummyError() {}
+ *     var prop = function () { throw new DummyError(); };
+ *     assert.throws(DummyError, function () { base[prop()] *= expr(); });
+ *
+ * the `new DummyError()` compiles BEFORE the `DummyError` argument does, so no
+ * global existed, the gate missed, and — because the synthesized ctor is built
+ * exactly once and cached in `funcConstructorMap` — the link was PERMANENTLY
+ * absent. Instances then had no `.constructor` back-pointer at all.
+ *
+ * `emitCachedFuncClosureAccess` is the same helper identifiers.ts uses for a
+ * bare `DummyError` mention, with the same `constructible` flag (unconditionally
+ * false in the host lane — see `isOrdinaryFunctionDecl`'s `noJsHost` gate), so
+ * the registered value is reference-identical to the one every later mention
+ * yields. It fixes both failure modes at once: the singleton is created on
+ * demand (no compile-order dependency) AND the lazy cache is evaluated here, so
+ * the registered value is never the `null` the global holds before its own
+ * first value read.
+ *
+ * Buffer-reach note: the flush below walks `ctx.currentFunc` (still the OUTER
+ * call-site fctx at this point) plus `ctorFctx.body` explicitly; once the body
+ * compile switches `ctx.currentFunc` to `ctorFctx`, later shifts reach these
+ * prologue instrs through `currentFunc.body`, and after attachment through
+ * `ctx.mod.functions`.
+ */
+function emitCtorPrologueFnctorRegistration(
+  ctx: CodegenContext,
+  ctorFctx: FunctionContext,
+  funcName: string,
+  selfLocal: number,
+): void {
+  if (ctx.standalone || ctx.wasi) return;
+  // Build the closure operand in a DETACHED buffer (pushBody/popBody records it
+  // in `savedBodies`, so late-import shift walkers still reach it) and splice it
+  // back only on success — a helper that declines midway must not leave a
+  // partial operand on the ctor's stack.
+  const modGlobalIdx = ctx.moduleGlobals.get(funcName);
+  const declFuncIdx = ctx.funcMap.get(funcName);
+  const saved = pushBody(ctorFctx);
+  let operand: Instr[] | undefined;
+  if (modGlobalIdx !== undefined) {
+    // `var Parser = function(){}` — the module global already HOLDS the closure
+    // (it is not a lazy cache), so read it directly, as #1712 did.
+    ctorFctx.body.push({ op: "global.get", index: modGlobalIdx });
+    const gdef = ctx.mod.globals[localGlobalIdx(ctx, modGlobalIdx)];
+    if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
+      ctorFctx.body.push({ op: "extern.convert_any" });
+    }
+    operand = ctorFctx.body;
+  } else if (declFuncIdx !== undefined && declFuncIdx >= ctx.numImportFuncs) {
+    const closureType = emitCachedFuncClosureAccess(ctx, ctorFctx, funcName, declFuncIdx);
+    if (closureType) {
+      if (closureType.kind !== "externref" && closureType.kind !== "ref_extern") {
+        ctorFctx.body.push({ op: "extern.convert_any" });
+      }
+      operand = ctorFctx.body;
+    }
+  }
+  popBody(ctorFctx, saved);
+  if (operand === undefined) return;
+  // Park the closure in a scratch local BEFORE the register import is added:
+  // `emitCachedFuncClosureAccess` bakes a trampoline funcIdx, and the single
+  // terminal `flushLateImportShifts` below must repair it in the SAME buffer
+  // sweep that fixes the `call` target (#2608 "one terminal flush, never
+  // mid-emission").
+  const ctorTmp = allocLocal(ctorFctx, `__fnctor_ctor_${ctorFctx.locals.length}`, { kind: "externref" });
+  ctorFctx.body.push(...operand);
+  ctorFctx.body.push({ op: "local.set", index: ctorTmp });
+  ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+  flushLateImportShifts(ctx, ctorFctx);
+  const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+  if (regIdx === undefined) return;
+  ctorFctx.body.push({ op: "local.get", index: selfLocal });
+  ctorFctx.body.push({ op: "extern.convert_any" });
+  ctorFctx.body.push({ op: "local.get", index: ctorTmp });
+  ctorFctx.body.push({ op: "call", funcIdx: regIdx });
+}
+
 function compileNewFunctionDeclaration(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1467,27 +1565,7 @@ function compileNewFunctionDeclaration(
   // compile switches ctx.currentFunc to ctorFctx, later shifts reach these
   // prologue instrs through currentFunc.body, and after attachment through
   // ctx.mod.functions.
-  if (!ctx.standalone && !ctx.wasi) {
-    const ctorGlobalIdx = ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName);
-    if (ctorGlobalIdx !== undefined) {
-      ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
-      // Apply the deferred index shift NOW (same discipline as every other
-      // ensureLateImport caller in this file) so the `call` below targets the
-      // import's final index instead of being re-shifted onto a neighbour.
-      flushLateImportShifts(ctx, ctorFctx);
-      const regIdx = ctx.funcMap.get("__register_fnctor_instance");
-      if (regIdx !== undefined) {
-        ctorFctx.body.push({ op: "local.get", index: selfLocal });
-        ctorFctx.body.push({ op: "extern.convert_any" });
-        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx });
-        const gdef = ctx.mod.globals[localGlobalIdx(ctx, ctorGlobalIdx)];
-        if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
-          ctorFctx.body.push({ op: "extern.convert_any" });
-        }
-        ctorFctx.body.push({ op: "call", funcIdx: regIdx });
-      }
-    }
-  }
+  emitCtorPrologueFnctorRegistration(ctx, ctorFctx, funcName, selfLocal);
 
   // Compile the function body
   const savedFunc = ctx.currentFunc;
