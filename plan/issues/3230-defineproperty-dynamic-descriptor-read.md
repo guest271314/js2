@@ -13,7 +13,7 @@ created: 2026-07-13
 task_type: bugfix
 area: runtime
 language_feature: object-defineproperty, property-descriptors
-goal: spec-completeness
+goal: es5-complete
 parent: 3022
 related: [3022, 3042, 3043, 3116, 1629, 1712, 2106]
 test262_category: built-ins/Object/defineProperty
