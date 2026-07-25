@@ -316,9 +316,9 @@ SCRIPT-vs-TEST gap that would leave the anti-vacuity guard itself unguarded.
 
    | rejection reason on a parse/early/resolution negative that scores `pass` | n      |
    | ------------------------------------------------------------------------ | ------ |
-   | static/syntax rejection (genuine early-error detection)                  | **18** |
+   | static/syntax rejection, severity `error` (genuine)                      | **18** |
+   | genuine, but detected only as a **warning** (the #2912 lenient arm)      | **1**  |
    | coincidental (rejected for something other than the target construct)    | **1**  |
-   | no diagnostic at all                                                     | **1**  |
 
    1/20 = 5 % sits inside the audit's independently-derived 3–7 % band, so the
    ~150–300 corpus estimate holds.
@@ -342,10 +342,31 @@ Did you mean 'meta'?`. That is a **TS parse diagnostic** — a genuine static
    > capability-refusal rule above remains correct as far as it goes; it is just
    > not the whole discriminator.
 
-   The `no diagnostic at all` row
-   (`language/expressions/logical-assignment/lgcl-and-eval-strict.js`) is a
-   separate question worth a look: #2920's strict compile-succeeded arm should
-   score that `fail`, so it is presumably reaching the lenient warning arm.
+   **Correction — my first reading of the third row was wrong, and verifying it
+   changed the conclusion.** I initially recorded
+   `language/expressions/logical-assignment/lgcl-and-eval-strict.js` as "no
+   diagnostic at all" and flagged it as a probable defect in #2920's strict
+   compile-succeeded arm. That was an artifact of my probe counting only
+   `severity === "error"`. Measured (`.tmp/probe-evalstrict.mts`):
+
+   | compiled as                      | errors | warnings                                                             |
+   | -------------------------------- | ------ | -------------------------------------------------------------------- |
+   | module goal (as the runner does) | 0      | `Invalid use of 'eval' in strict mode.` + `Cannot assign to 'eval'…` |
+   | explicit `"use strict"` prefix   | 1      | same                                                                 |
+
+   So the compiler **does** detect it, and the diagnostic names **exactly the
+   early error the test targets** ("Invalid use of 'eval' in strict mode",
+   against a test whose description is "SyntaxError is thrown if the identifier
+   eval appear as the LeftHandSideExpression of a Logical Assignment
+   operator"). The `pass` comes through #2912's **documented-lenient warning
+   arm**, which is working as designed and reaching the RIGHT verdict for the
+   RIGHT reason. **There is no defect here and no issue to file.** Controls:
+   `eval = 20` and `arguments &&= 20` under an explicit `"use strict"` both
+   raise a severity-`error` diagnostic naming the same construct.
+
+   The one thing this DOES show is that any future tightening must treat the
+   warning channel as first-class evidence — a discriminator that looked only at
+   severity-`error` diagnostics would flip this genuine pass to a fail.
 
 3. **Host `(0, eval)` fallback passes (audit class P4, ~75 estimated).** Bounded
    and low-severity; the honest fix is to mark a result whose validation went
@@ -369,6 +390,14 @@ Did you mean 'meta'?`. That is a **TS parse diagnostic** — a genuine static
    environment) the standalone job would have died with "no baseline JSONL" —
    which on a scheduled run reads as infrastructure noise rather than as the
    missing measurement it is. Fixed to fetch the lane's own baseline.
+
+   **This is the strongest single argument for the guard existing: the
+   silent-zero shape appeared in the tool built to detect silent zeros, written
+   by someone actively looking for it.** A missing standalone measurement would
+   have presented as a red scheduled job that everyone learns to ignore, and the
+   lane where the entire ~5,000-test #3592 class lived would have gone unsampled
+   indefinitely. The failure mode does not require carelessness — it only
+   requires that "nothing to report" and "could not report" look alike.
 
 5. **#3619 — mechanise "the test must go red without the fix".** FILED. The
    syntax gate in (5) above catches ONE shape; the general class is "this
