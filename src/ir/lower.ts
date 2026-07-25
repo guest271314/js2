@@ -988,10 +988,19 @@ export function lowerIrFunctionBody<S, Slot>(
   //                  for normal completion). The field is masked (undefined)
   //                  while the finally itself / the catch path is emitted so
   //                  a break inside a finally never re-runs its own finally.
+  //
+  // #2952 slice 3 — `iterCloseSlot`: set on a `forof.iter` loop's OUTER
+  // (break-target) frame. A `br.label` that CROSSES the frame (labeled
+  // break/continue targeting an outer loop) must run that iterator's
+  // `__iterator_return` before branching — IteratorClose on abrupt exit
+  // (§14.7.5.7); the close call that physically follows the loop's block
+  // is skipped by a crossing br. A br that TARGETS the frame (unlabeled /
+  // labeled break of this very loop) lands AT that close call, so the
+  // resolver emits nothing extra on a match — only on a cross.
   type CtrlFrame =
-    | { kind: "break"; label: IrLabelId }
+    | { kind: "break"; label: IrLabelId; iterCloseSlot?: number }
     | { kind: "continue"; label: IrLabelId }
-    | { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined };
+    | { kind: "plain"; finallyBody?: readonly IrInstr[] | undefined; iterCloseSlot?: number };
   const ctrlStack: CtrlFrame[] = [];
 
   /**
@@ -1046,6 +1055,22 @@ export function lowerIrFunctionBody<S, Slot>(
         frame.finallyBody = undefined; // mask: a finally never re-runs itself
         emitBufferAsStatements(saved, out);
         frame.finallyBody = saved;
+      }
+      // #2952 slice 3 — crossing OUT of a forof.iter loop: close its
+      // iterator before the br (IteratorClose §14.7.5.7 — the loop's own
+      // close call sits past the frame this br skips over). Scan order
+      // gives inner-before-outer, matching finally interleaving: a
+      // finally INSIDE the for-of body was inlined above (its frame is
+      // above this one); one OUTSIDE is inlined after (frame below).
+      if (frame.kind !== "continue" && frame.iterCloseSlot !== undefined) {
+        emitter.emitLocalGet(frame.iterCloseSlot, out);
+        // Frames with iterCloseSlot exist only under backends whose
+        // legality admits forof.iter (same raw-call emission iter.return uses).
+        // pushraw-ok(#2952): plain call op, mirrors the iter.return arm
+        emitter.pushRaw(out, {
+          op: "call",
+          funcIdx: resolver.resolveFunc({ kind: "func", name: "__iterator_return" }),
+        });
       }
     }
     throw new Error(`ir/lower: br.label(${label as number}, ${mode}) has no enclosing frame in ${func.name}`);
@@ -2409,7 +2434,13 @@ export function lowerIrFunctionBody<S, Slot>(
         // __iterator_next — the advance happens at the loop top, so no
         // body-wrapping block is needed).
         const label = instr.loopLabel;
-        ctrlStack.push(label !== undefined ? { kind: "break", label } : { kind: "plain" });
+        // (slice 3) The break frame carries the iter slot so a br.label
+        // CROSSING this loop (labeled break/continue of an outer loop)
+        // closes the iterator on its way out.
+        const iterCloseSlot = slotWasmIdx(instr.iterSlot);
+        ctrlStack.push(
+          label !== undefined ? { kind: "break", label, iterCloseSlot } : { kind: "plain", iterCloseSlot },
+        );
         ctrlStack.push(label !== undefined ? { kind: "continue", label } : { kind: "plain" });
 
         // Build loop body Wasm ops.

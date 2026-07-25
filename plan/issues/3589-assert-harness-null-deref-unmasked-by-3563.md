@@ -1,7 +1,7 @@
 ---
 id: 3589
 title: "latent null-deref in the compiled test262 `assert` harness, unmasked (not caused) by #3563"
-status: ready
+status: wont-fix
 sprint: current
 created: 2026-07-24
 updated: 2026-07-24
@@ -11,11 +11,22 @@ feasibility: medium
 task_type: bug
 area: codegen, test262
 goal: core-semantics
-related: [3024, 3563, 3189, 3590]
+related: [3024, 3563, 3189, 3590, 3593]
 origin: "PR-queue shepherd diagnosis of the #3563 auto-park, 2026-07-24. Reproduced both sides locally by swapping only src/codegen/index.ts."
 ---
 
 # #3589 — latent null-deref in the compiled test262 `assert` harness
+
+> **SUPERSEDED — duplicate of #3593, kept there for the stronger minimized repro.**
+>
+> #3593 documents the same defect (the `Iterator.zip` uncatchable trap) and
+> proves pre-existence more directly: its minimized file traps **identically with
+> and without** #3563's dispatcher change. The both-sides table below reaches the
+> same conclusion by a weaker route — on `main` the full test262 file dies earlier
+> with a different error (invalid Wasm), so it never reaches the trap at all.
+> Work the issue in **#3593**; this file is retained only for the analysis it
+> carries (the `assert` L76 localisation, the ruled-out padding evidence, and the
+> `grep -a` tooling warning).
 
 ## Problem
 
