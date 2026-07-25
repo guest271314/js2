@@ -19,6 +19,11 @@ created: 2026-07-25
 loc-budget-allow:
   - src/codegen/property-access.ts
   - src/codegen/expressions/call-receiver-method.ts
+# Same +20: the gate must be the FIRST arm of compileReceiverMethodCall (any
+# later position lets a receiver-name-keyed arm claim the call first), so the
+# registration is necessarily inside this function.
+func-budget-allow:
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
 ---
 
 ## Problem
