@@ -48,6 +48,7 @@
       "import": "./dist/optimize.js"
     },
     "./cli": "./dist/cli.js",
+    "./test262-fyi": "./dist/test262-fyi-cli.js",
     "./package.json": "./package.json"
   },
   "files": [

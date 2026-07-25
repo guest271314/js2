@@ -19,7 +19,26 @@ export { loadOriginalHarnessTests } from "./test262-fyi-reader.mjs";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FYI_ROOT = join(ROOT, "test262-fyi", "data");
 const TEST262_ROOT = join(ROOT, "test262");
-const WORKER_PATH = join(ROOT, "scripts", "test262-worker.mjs");
+
+// (#3598) Resolved lazily, relative to THIS module's own location, not to a
+// path baked in at repo-checkout time. esbuild flattens `import.meta.url` to
+// wherever the bundle actually lives when this file is bundled into
+// dist/test262-fyi-cli.js for npm publishing — so a plain `join(ROOT,
+// "scripts", "test262-worker.mjs")` constant resolves correctly when run
+// unbundled from the monorepo (import.meta.url is scripts/run-test262-fyi.mjs
+// itself, and test262-worker.mjs is its sibling) but resolves to a
+// `scripts/` path inside node_modules that was never published when run from
+// the published package (dist/test262-worker.js is the sibling there
+// instead). Checking both extensions next to *this* module's own resolved
+// location covers both cases with the same code path.
+function resolveWorkerPath() {
+  const directory = dirname(fileURLToPath(import.meta.url));
+  for (const name of ["test262-worker.mjs", "test262-worker.js"]) {
+    const candidate = resolve(directory, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`js2 Test262 worker is missing beside ${fileURLToPath(import.meta.url)}`);
+}
 const DEFAULT_SOURCE_TIMEOUT_MS = 30_000;
 const DEFAULT_WORKERS = 2;
 const MAX_WORKERS = 4;
@@ -165,7 +184,7 @@ function normalizeWorkerResult(result) {
  * are shared so the two lanes cannot silently disagree about the same source.
  */
 export class FyiSourceExecutor {
-  constructor(timeoutMs = sourceTimeoutMs(), { execPath = process.execPath, workerPath = WORKER_PATH } = {}) {
+  constructor(timeoutMs = sourceTimeoutMs(), { execPath = process.execPath, workerPath = resolveWorkerPath() } = {}) {
     this.timeoutMs = timeoutMs;
     this.execPath = execPath;
     this.workerPath = workerPath;
