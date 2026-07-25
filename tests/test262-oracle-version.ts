@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 10;
+export const ORACLE_VERSION = 11;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -230,6 +230,29 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "Temporal/Duration/…/result-out-of-range-1.js file the v4 fix caught " +
       "for the 'returned N' shape). No pass/fail flips from the relabel; " +
       "promote-baseline re-seeds host+standalone baselines at v10 on merge.",
+  },
+  {
+    version: 11,
+    note:
+      "#3595 — the #3189 uncatchable-trap ratchet now treats a `compile_error` " +
+      "baseline as BASELINE-UNKNOWN, alongside the `compile_timeout`, " +
+      "missing-row and identical-`wasm_sha` exclusions it already had. " +
+      "Rationale is the one already written in diff-test262.ts for " +
+      "compile_timeout: an invalid-Wasm module never instantiated, so " +
+      "`__module_init` never ran and never had the opportunity to trap — a " +
+      "later trap on that file is *unknown*, not *introduced*. Measured " +
+      "evidence (#3593): the minimized repro for " +
+      "Iterator/zip/iterables-iteration.js traps IDENTICALLY with and without " +
+      "the PR (#3563) that made the file compile, proving the trap pre-existed " +
+      "the change that merely let the module reach it. Without this, any PR " +
+      "that fixes a compile error is charged for whatever latent trap the " +
+      "now-reachable code already contained — the ratchet punishes exactly the " +
+      "CE-elimination work it should reward. This is a VERDICT-LOGIC change " +
+      "(which transitions count as trap growth), hence the bump; no " +
+      "pass/fail/classification flips, so promote-baseline simply re-seeds at " +
+      "v11 on merge. A genuine pass→trap (or fail→trap) transition still FAILS " +
+      "the ratchet — only baselines that never produced a running module are " +
+      "excluded.",
   },
 ];
 

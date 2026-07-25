@@ -64,22 +64,27 @@ const SECTIONS = [
       [
         "`BreakStatement`",
         "mixed",
-        "Unlabeled `break` claimed in all IR loop kinds via `br.label` + lowering-time depth resolver (#2952 slice 2); labeled break is slice 3.",
+        "Unlabeled `break` claimed in all IR loop kinds via `br.label` + lowering-time depth resolver (#2952 slice 2); labeled break claimed when the label binds a claimed labeled LOOP (slice 3). `break` of a labeled non-loop block / switch stays legacy.",
         "#2952",
       ],
       [
         "`ContinueStatement`",
         "mixed",
-        "Unlabeled `continue` claimed (dedicated continue-target frame per loop shape); labeled continue is slice 3.",
+        "Unlabeled `continue` claimed (dedicated continue-target frame per loop shape); labeled continue claimed via the same label→loopLabel resolution (#2952 slice 3).",
         "#2952",
       ],
       [
         "`DoStatement`",
         "mixed",
-        "Post-test loop claimed (reuses `while.loop` + `postCond`); unlabeled break/continue bodies claimed since slice 2.",
+        "Post-test loop claimed (reuses `while.loop` + `postCond`); unlabeled break/continue bodies claimed since slice 2; labeled since slice 3.",
         "#2952",
       ],
-      ["`LabeledStatement`", "direct-only", "Needs labeled break/continue CFG support.", "#2952"],
+      [
+        "`LabeledStatement`",
+        "mixed",
+        "Labeled LOOPS claimed (`lbl: while/do/for/for-of` — label name resolves to the loop's own `loopLabel`; branches crossing an inner `forof.iter` inline its IteratorClose, #2952 slice 3). Labeled non-loop statements need `labeled.block` — banked for the switch slice.",
+        "#2952",
+      ],
       ["`ForInStatement`", "direct-only", "Object iteration host-import based today.", "#2952"],
       [
         "`ClassDeclaration`",

@@ -67,6 +67,21 @@
       "path": "tests/issue-3565.test.ts",
       "guards": "four DESIGNED demote-to-legacy sites compile (fall back to legacy) instead of hard-erroring — TypedArray element STORE (lowerElementStore), slice-12 element ACCESS on an extern receiver (lowerElementAccess), the verify.ts #1798 return-value gate, and compound-assign with a non-f64 RHS (the issue-2079 generator for-of `s += v` shape, runs =3) — AND a GENERIC invariant (block-id/type desync, injected build throw) STILL hard-fails (no masking of real invalid-Wasm)",
       "broken_by": "#3341/#3519 (PR #3249, 2026-07-17) made outcome.kind==='invariant' a hard compile error, silently promoting these 4 documented 'clean throw → legacy' demotes; #680 exempted only the generator+method-call cases, leaving these 4 hard for ~7 days (invisible outside required checks, #3008); found+fixed by #3565"
+    },
+    {
+      "path": "tests/issue-3164.test.ts",
+      "guards": "standalone generator FUNCTION EXPRESSIONS go native and stay host-free (zero env imports): dstr-harness IIFE laziness, .next() body-runs-once, for-of / destructuring over an any-held native generator, §27.5 first-next() suspension, and the #1344 host-mix arm (a real HOST generator does NOT take the TypeError arm)",
+      "broken_by": "#3032 W6 (PR #3356, 1fbb1810, 2026-07-19) silently broke 3 of these — a module-scope generator fn-expr is lifted once per compileModuleInitBody pass with a DIFFERENT state-struct type, while .next()'s inline ref.test dispatch is frozen between the passes on pass 1's dead type. Green at the parent 8bc6e1c3, red on main for 5 days, invisible because #3356 touched neither suite and the #3008 per-PR gate only runs PR-TOUCHED root tests. Root-caused + skipped-with-pointer as #3591; the remaining 10 cases guard the rest"
+    },
+    {
+      "path": "tests/issue-3386.test.ts",
+      "guards": "standalone sync-generator PATTERN PARAMS are host-free and spec-correct: array/object patterns incl. renamed+defaulted elements, elisions, nested sub-patterns, whole-param defaults, two pattern params, and the §27.5 call-time-vs-first-next() split (destructure + throwing defaults fire at CALL, body at first .next())",
+      "broken_by": "#3032 W6 (PR #3356, 1fbb1810, 2026-07-19) silently broke the fn-expr case via the same stale pass-1 state-struct type as tests/issue-3164.test.ts (#3591); green at parent 8bc6e1c3. The other 16 cases pin the call-time/lazy split that #3386 established"
+    },
+    {
+      "path": "tests/issue-3597-auto-park-step-aware.test.ts",
+      "guards": "the auto-park bot's infra-vs-verdict step classification: an infra-only merge_group failure (artifact download) must NOT park, a verdict-step failure MUST park, and anything unclassifiable parks conservatively — plus the unchanged #2547 cancellation invariant (0 failed jobs never parks) and the REAL workflow step names (a rename surfaces here). 48 cases, 5ms",
+      "broken_by": "criterion 1 applies via the SCRIPT-vs-TEST gap: editing scripts/auto-park-merge-group-failure.mjs alone does NOT trigger the #3008 per-PR gate (that gate runs changed tests/*.test.ts files, not tests RELATED to changed scripts), so without this entry the classification is unguarded against exactly the silent drift this manifest exists for. The incident it encodes: on 2026-07-24 the bot emitted THREE parks, two with textually identical comments for opposite causes — #3566 (artifact download 403'd, verdict never ran, merged cleanly once unparked), #3563 (verdict ran, real uncatchable-trap regression), #3581 (duplicate issue id). Held PRs are SKIPPED by auto-enqueue, so a wrong park STRANDS the PR. The classification is only safe in one direction: widening INFRA_STEP_PATTERNS makes the bot park LESS, which is how a real regression reaches main (#3597)"
     }
   ]
 }
