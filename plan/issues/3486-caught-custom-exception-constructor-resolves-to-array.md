@@ -17,6 +17,19 @@ es_edition: multi
 goal: test262-conformance
 related: [3429, 3430, 3628, 3614, 3617, 3618, 2666, 2836, 1712, 1057]
 origin: "Found while implementing #3429 (assert.throws expected-constructor name-mangling fix) — isolated repro traced to a separate, deeper bug unrelated to the #3429 fix."
+# Both defects are IN-PLACE corrections to arms that already live in these two
+# files, and neither is separable: (1) the vacuous vec test is one condition
+# inside `extern_get`'s existing `constructor` arm in runtime.ts, sitting between
+# the sidecar/`__sget_` fallbacks and the `prototype` vivify arm — moving it out
+# would split one key's resolution across two modules; (2) the registration
+# operand is emitted in the synthesized ctor's PROLOGUE in new-super.ts, which is
+# where the #1712 registration already lives and the only point where `selfLocal`
+# and the ctor's own FunctionContext are in scope. Net +103 lines across both, of
+# which ~75 are the comments recording the disproven hypothesis, the vacuity
+# proof, and the raw-struct-vs-wrapper measurement.
+loc-budget-allow:
+  - src/runtime.ts
+  - src/codegen/expressions/new-super.ts
 ---
 
 # #3486 — caught custom-exception `.constructor` resolves to `Array`, not the real constructor
