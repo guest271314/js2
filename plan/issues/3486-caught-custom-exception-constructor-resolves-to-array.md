@@ -4,8 +4,8 @@ title: "Host: caught custom-exception instance's .constructor resolves to Array,
 status: ready
 sprint: current
 created: 2026-07-20
-updated: 2026-07-20
-priority: medium
+updated: 2026-07-25
+priority: high
 horizon: l
 feasibility: hard
 task_type: bug
@@ -13,7 +13,7 @@ area: codegen
 language_feature: error-constructors, exceptions
 es_edition: multi
 goal: test262-conformance
-related: [3429, 3430]
+related: [3429, 3430, 3628, 3614]
 origin: "Found while implementing #3429 (assert.throws expected-constructor name-mangling fix) — isolated repro traced to a separate, deeper bug unrelated to the #3429 fix."
 ---
 
@@ -26,8 +26,8 @@ this.message = msg; }`), when instantiated with `new`, thrown, and caught on
 the JS-host side, presents `.constructor` as a function whose `.name` is
 `"Array"` — not the real declaring function. This is unrelated to the
 `wasmClosureDynamicBridge` argument-identity bug fixed in #3429 (which is
-about the *expected*-constructor argument passed *into* a host-delegated
-call); this bug is about the *actual thrown value's* constructor identity
+about the _expected_-constructor argument passed _into_ a host-delegated
+call); this bug is about the _actual thrown value's_ constructor identity
 once it round-trips through a `try`/`catch` on the host side.
 
 ## Isolated repro (zero interaction with #3429's fix — pure try/catch)
@@ -53,6 +53,7 @@ Confirmed via `runTest262File` (host lane): `typeof caught.constructor ===
 ## Impact
 
 Potentially high — any test262 test that:
+
 - catches a custom/local error constructor instance and reads
   `.constructor`/`.constructor.name`, or
 - uses the extremely common test262 idiom `assert.throws(MyError, fn)` /
@@ -115,3 +116,73 @@ driven tracing here rather than static reasoning alone).
 - #3430 (integrity-level TypeError-not-thrown triage umbrella) — same
   "oracle v8 newly honest" origin wave, same host-conformance area, may share
   a similar host-mirror-defaulting root cause worth checking together.
+
+## ES3 edition impact — measured 2026-07-25 (priority raised medium → high)
+
+**This single defect is 95 % of the remaining ≤ES3 gap.** It contributes to
+**#3628 (close the ≤ES3 edition)**, which is the edition closest to complete.
+
+Host (`gc`) lane, fresh baseline, classified with the exact `classifyEdition`
+rules from `scripts/generate-editions.ts` (reproduces the published editions
+figure exactly — 273 scored / 43 failing, so the attribution is validated):
+
+| ≤ES3                          |        count |
+| ----------------------------- | -----------: |
+| scored                        |          273 |
+| passing                       | 230 (84.2 %) |
+| failing                       |           43 |
+| compile errors                |        **0** |
+| **failing due to THIS issue** |       **41** |
+
+The 41 are 33 × `language/expressions/compound-assignment/S11.13.2_A7.*` and
+8 × prefix/postfix `++`/`--` (`S11.4.4_A6`, `S11.4.5_A6`, `S11.3.1_A6`,
+`S11.3.2_A6`). All fail with the identical message:
+
+```
+Expected a DummyError but got a Array
+```
+
+Representative source — a left-to-right evaluation-order test whose property key
+throws a user-defined error:
+
+```js
+function DummyError() {}
+assert.throws(DummyError, function () {
+  var base = null;
+  var prop = function () {
+    throw new DummyError();
+  };
+  base[prop()] *= expr();
+});
+```
+
+**The correct exception is thrown; the harness cannot identify it.** So the
+evaluation-order semantics these tests actually target are very likely already
+correct, and are being masked. Expect the fix to flip all 41 at once — but
+**measure rather than assume**, since a cluster sharing one root cause is a
+population, not a forecast (proven repeatedly on 2026-07-25).
+
+### Cross-lane note — a fix for the sibling defect already landed
+
+**#3614** is the standalone-lane twin: `Test262Error`'s `.constructor` read
+`undefined` there, for the same structural reason, and the harness's
+`thrown.constructor !== expectedErrorConstructor` check therefore rejected
+correct throws (up to 854 tests; fixed 2026-07-25, PR #3607).
+
+Its remedy is worth reading before starting here: answer `.constructor` with the
+same `__fn_closure_<Name>` global the bare identifier resolves to, so `===`
+holds by `ref.eq` — and **only read** that global, never materialise it, which
+avoids minting a `ref.func` trampoline at finalize (the late-funcidx-shift
+hazard). Whether the host lane can use the same mechanism is the first question
+to answer.
+
+**#3617** tracks the standalone residual (non-`Test262Error` fnctor instances)
+and is described there as the counterpart of this issue — the two are the same
+defect on opposite lanes and should be kept in sync.
+
+### Scope beyond ES3
+
+Any test using a **custom error constructor** with `assert.throws` hits this,
+so the true blast radius is larger than the ES3 number. Quantify it across all
+editions when fixing, and report the ES3 subset separately so #3628 can be
+closed against a measured figure.
