@@ -31,6 +31,7 @@ import {
 import { buildStringConstants, buildStringConstants16 } from "./runtime/string-constants.js";
 export { buildStringConstants, buildStringConstants16 };
 import { _arrayProtoSparseFastPaths } from "./runtime/array-proto-sparse.js"; // (#3103, #1234) sparse-aware Array.prototype fast paths
+import { registerVecMirror, snapshotVecMirrors, reconcileVecMirrors } from "./runtime/vec-mirror-writeback.js"; // (#3603 S1) vec-mirror write-back
 import {
   _rerouteStringSymbolMethodPrimitive,
   _makeLegacyRegExpState,
@@ -4098,22 +4099,6 @@ function _safeSet(
 const _hostProxyCache = new WeakMap<object, any>();
 const _hostProxyReverse = new WeakMap<object, any>();
 
-// (#3603 root cause B) MIRROR → source vec. `__make_iterable`'s `convertToJS`
-// materialises a WasmGC vec struct into a real JS array so native host APIs see
-// an array. That mirror is READ-ONLY in practice: `convertToJS` refreshes it
-// FROM the vec on every crossing, so a host-side mutation of the mirror is
-// silently discarded (and overwritten on the next crossing). That is what makes
-// test262's `propertyHelper.js` vacuous on the JS-host lane — its
-// `__push = Function.prototype.call.bind(Array.prototype.push)` appends to the
-// mirror of `failures`, the Wasm side still reads `failures.length === 0`, and
-// the terminal `assert(false, __join(failures, '; '))` never fires, so
-// `verifyProperty` returns true for ANY expectation.
-//
-// Recording mirror → vec here lets the host-call bridges
-// (`__call_function` / `__extern_method_call`) RECONCILE a mutated mirror back
-// into the vec after the callee returns. See `_reconcileVecMirror`.
-const _vecMirrorSource = new WeakMap<object, any>();
-
 // (#2671) RegExp.lastIndex value-preserving slot. §22.2.7.2 RegExpBuiltinExec
 // reads lastIndex as `ToLength(? Get(R, "lastIndex"))`; the setter stores the
 // value verbatim. When a WasmGC struct is assigned (`r.lastIndex =
@@ -5322,139 +5307,6 @@ function _copyVecSidecarOntoArray(vec: any, arr: any[], exports: Record<string, 
   for (const key of Object.getOwnPropertySymbols(sc)) {
     arrProps[key] = wrapVal(scProps[key]);
   }
-}
-
-/**
- * (#3603 S1, root cause B) Write-back for `__make_iterable` vec mirrors.
- *
- * `convertToJS` hands the host a REAL JS array mirroring a WasmGC vec, and
- * refreshes it FROM the vec on every crossing (#3368, for identity stability).
- * Reads are therefore correct, but any host-side MUTATION of the mirror is
- * silently dropped — the vec never learns about it and the next crossing
- * overwrites the mirror. `Array.prototype.push` applied to a vec through
- * `.call` / `.apply` / the `Function.prototype.call.bind(F)` uncurryThis idiom
- * is thus a SILENT NO-OP, which is what makes test262's `propertyHelper.js`
- * (and hence `verifyProperty`) vacuous on the JS-host lane.
- *
- * These two helpers bracket a host call: snapshot the lengths of every
- * mirror reachable from the marshalled values, then, if the callee changed a
- * mirror's length, replay that change onto the vec using only the
- * unconditionally-emitted `__vec_pop` / `__vec_push` exports (pop back to the
- * longest common prefix, then push the mirror's tail). That is exact for
- * `push`/`pop`/`shift`/`unshift`/`splice` — every mutator that changes length.
- *
- * DELIBERATE LIMITATIONS (not oversights):
- *  - A LENGTH-PRESERVING in-place mutation (`sort`/`reverse`/`fill`/
- *    `copyWithin`, or a bare `arr[0] = x`) is NOT reconciled: detecting it
- *    needs an element-by-element compare on every host crossing (O(n) even
- *    when nothing changed) and replaying it needs an element-setter export
- *    (`__vec_set_elem`) that is only emitted when a module imports
- *    `Object.defineProperty`. Those stay silent no-ops exactly as before —
- *    tracked as a follow-up, not fixed here.
- *  - If the vec's OWN length also changed during the call (the callee
- *    re-entered Wasm and mutated the same vec), the two edits cannot be
- *    ordered, so reconciliation is skipped rather than guessed at. Wasm-side
- *    state wins, which is the pre-#3603 behaviour.
- */
-type VecMirrorSnapshot = { mirror: any[]; vec: any; mirrorLen: number; vecLen: number };
-
-function _snapshotVecMirrors(
-  values: readonly any[],
-  exports: Record<string, Function> | undefined,
-): VecMirrorSnapshot[] {
-  if (!exports) return [];
-  const lenFn = exports.__vec_len as ((v: any) => number) | undefined;
-  if (typeof lenFn !== "function") return [];
-  let snaps: VecMirrorSnapshot[] | undefined;
-  for (const v of values) {
-    if (v == null || typeof v !== "object") continue;
-    const vec = _vecMirrorSource.get(v);
-    if (vec === undefined) continue;
-    let vecLen: number;
-    try {
-      vecLen = lenFn(vec);
-    } catch {
-      continue;
-    }
-    if (typeof vecLen !== "number" || vecLen < 0) continue;
-    (snaps ??= []).push({ mirror: v as any[], vec, mirrorLen: (v as any[]).length, vecLen });
-  }
-  return snaps ?? [];
-}
-
-function _reconcileVecMirrors(
-  snaps: readonly VecMirrorSnapshot[],
-  exports: Record<string, Function> | undefined,
-): void {
-  if (snaps.length === 0 || !exports) return;
-  const lenFn = exports.__vec_len as ((v: any) => number) | undefined;
-  const getFn = exports.__vec_get as ((v: any, i: number) => any) | undefined;
-  const pushFn = exports.__vec_push as ((v: any, x: any) => number) | undefined;
-  const popFn = exports.__vec_pop as ((v: any) => any) | undefined;
-  const mutSupFn = exports.__vec_mut_supported as ((v: any) => number) | undefined;
-  if (
-    typeof lenFn !== "function" ||
-    typeof getFn !== "function" ||
-    typeof pushFn !== "function" ||
-    typeof popFn !== "function"
-  ) {
-    return;
-  }
-  for (const snap of snaps) {
-    const { mirror, vec, mirrorLen, vecLen } = snap;
-    // Untouched by the callee, or a length-preserving edit (out of scope).
-    if (mirror.length === mirrorLen) continue;
-    let liveVecLen: number;
-    try {
-      liveVecLen = lenFn(vec);
-    } catch {
-      continue;
-    }
-    // The vec moved on its own (callee re-entered Wasm) — ambiguous, skip.
-    if (liveVecLen !== vecLen) continue;
-    try {
-      if (typeof mutSupFn !== "function" || mutSupFn(vec) !== 1) continue;
-    } catch {
-      continue;
-    }
-    // Longest common prefix between the vec and the mutated mirror. Elements
-    // compare either by identity (primitives, raw structs) or through the
-    // mirror registry (a nested vec element crosses as its own mirror).
-    let keep = 0;
-    const min = Math.min(vecLen, mirror.length);
-    let scanFailed = false;
-    while (keep < min) {
-      let raw: any;
-      try {
-        raw = getFn(vec, keep);
-      } catch {
-        scanFailed = true;
-        break;
-      }
-      const m = mirror[keep];
-      if (m !== raw && _vecMirrorSource.get(m) !== raw) break;
-      keep++;
-    }
-    if (scanFailed) continue;
-    try {
-      for (let i = vecLen; i > keep; i--) popFn(vec);
-      for (let i = keep; i < mirror.length; i++) {
-        if (pushFn(vec, _unwrapVecMirror(mirror[i])) < 0) break;
-      }
-    } catch {
-      // A partially-applied reconcile is still closer to the host's view than
-      // dropping the mutation entirely; never let it escape as a host throw.
-    }
-  }
-}
-
-/** Reverse a value through the vec-mirror / host-proxy registries before it is pushed back into a vec. */
-function _unwrapVecMirror(v: any): any {
-  if (v != null && typeof v === "object") {
-    const src = _vecMirrorSource.get(v);
-    if (src !== undefined) return src;
-  }
-  return _unwrapForHost(v);
 }
 
 // (#2841) Present a REAL host JS array (not a wasm vec) that may hold RAW
@@ -10744,16 +10596,12 @@ assert._isSameValue = isSameValue;
           // record (see _iteratorRecordForHost) so the native/polyfill helper
           // can drive a compiled iterator.
           const dispatchRecv = _isIteratorHelperFn(fn) ? _iteratorRecordForHost(obj, callbackState) : wrappedObj;
-          // (#3603 S1) `Array.prototype.push.call(vec, x)` arrives here as
-          // obj=push, method="call", args[0]=the vec's `__make_iterable` mirror.
-          // Bracket the dispatch so the mutation is replayed onto the vec (see
-          // `_reconcileVecMirrors`); without it the push is a silent no-op.
-          const mirrorSnaps = _snapshotVecMirrors(
-            dispatchRecv != null && typeof dispatchRecv === "object" ? [dispatchRecv, ...wrappedArgs] : wrappedArgs,
-            exports,
-          );
+          // (#3603 S1) `Array.prototype.push.call(vec, x)` arrives as obj=push,
+          // method="call", args[0]=the vec's `__make_iterable` mirror — bracket
+          // the dispatch so the mutation reaches the vec (silent no-op before).
+          const mirrorSnaps = snapshotVecMirrors([dispatchRecv, ...wrappedArgs], exports);
           const ret = fn.apply(dispatchRecv, wrappedArgs);
-          _reconcileVecMirrors(mirrorSnaps, exports);
+          reconcileVecMirrors(mirrorSnaps, exports, _unwrapForHost);
           // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
           if (
             (method === "exec" || method === "test") &&
@@ -11374,17 +11222,12 @@ assert._isSameValue = isSameValue;
           };
           const wrappedThis = wrapHostValue(thisArg);
           const wrappedArgs = args.map(wrapHostValue);
-          // (#3603 S1) The uncurryThis idiom
-          // `Function.prototype.call.bind(Array.prototype.push)` lands here as
-          // `__call_function(boundCall, null, [vecMirror, item])`. Bracket the
-          // dispatch so a mutation the callee makes to a vec mirror is replayed
-          // onto the underlying WasmGC vec instead of being silently dropped.
-          const mirrorSnaps = _snapshotVecMirrors(
-            wrappedThis != null && typeof wrappedThis === "object" ? [wrappedThis, ...wrappedArgs] : wrappedArgs,
-            exports,
-          );
+          // (#3603 S1) `Function.prototype.call.bind(Array.prototype.push)` lands
+          // here as `__call_function(boundCall, null, [vecMirror, item])` — same
+          // bracket, so the uncurried push reaches the vec.
+          const mirrorSnaps = snapshotVecMirrors([wrappedThis, ...wrappedArgs], exports);
           const ret = Reflect.apply(fn, wrappedThis, wrappedArgs);
-          _reconcileVecMirrors(mirrorSnaps, exports);
+          reconcileVecMirrors(mirrorSnaps, exports, _unwrapForHost);
           return _unwrapForHost(ret);
         };
       if (name === "__reflect_construct")
@@ -13204,11 +13047,9 @@ assert._isSameValue = isSameValue;
             if (typeof len === "number" && len >= 0) {
               const arr = convertedArrays.get(obj) ?? [];
               convertedArrays.set(obj, arr);
-              // (#3603 S1) Record mirror → vec so a host-side mutation of this
-              // array can be replayed onto the vec by `_reconcileVecMirrors`.
-              // Without it, `Array.prototype.push.call(vec, x)` (the
-              // `propertyHelper.js` uncurried `__push`) is a silent no-op.
-              _vecMirrorSource.set(arr, obj);
+              // (#3603 S1) Record mirror → vec so a host mutation of this array
+              // is replayed onto the vec instead of being silently dropped.
+              registerVecMirror(arr, obj);
               arr.length = len;
               for (let i = 0; i < len; i++) {
                 arr[i] = convertToJS(vecGet(obj, i));

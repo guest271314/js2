@@ -1,0 +1,182 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+//
+// (#3603 S1, root cause B) Write-back for `__make_iterable` vec mirrors.
+// Host-side only; emits zero Wasm and changes no compiled bytes.
+//
+// ── The defect this closes ─────────────────────────────────────────────────
+//
+// `__make_iterable`'s `convertToJS` materialises a WasmGC vec struct into a
+// REAL JS array so native host APIs (`Array.prototype.*`, spread, JSON, Map/Set)
+// see an array, and it REFRESHES that array FROM the vec on every crossing
+// (#3368, so ECMAScript array identity survives assignment through `any` slots).
+// Reads are therefore correct — but any host-side MUTATION of the mirror is
+// silently dropped: the vec never learns about it and the next crossing
+// overwrites the mirror.
+//
+// So `Array.prototype.push` applied to a compiled array THROUGH the host is a
+// SILENT NO-OP. Both dispatch shapes are affected, and they share this one
+// cause (traced through the import bridge, not inferred):
+//
+//   Array.prototype.push.call(a, x)   → __extern_method_call(push, "call", [mirror, x])
+//   __push(a, x)  (uncurryThis)       → __call_function(boundCall, null, [mirror, x])
+//
+// That is precisely why test262's `propertyHelper.js` is vacuous on the JS-host
+// lane: it accumulates through
+// `var __push = Function.prototype.call.bind(Array.prototype.push)`, so
+// `failures.length` stays 0, the terminal
+// `assert(false, __join(failures, '; '))` never fires, and `verifyProperty`
+// returns `true` for ANY expectation.
+//
+// ── The mechanism ──────────────────────────────────────────────────────────
+//
+// `registerVecMirror` records mirror → vec when `__make_iterable` builds one.
+// The host-call bridges then BRACKET their dispatch with
+// `snapshotVecMirrors` / `reconcileVecMirrors`: if the callee changed a
+// mirror's LENGTH, the change is replayed onto the vec using only the
+// unconditionally-emitted `__vec_pop` / `__vec_push` exports — pop back to the
+// longest common prefix, then push the mirror's tail. That is exact for
+// `push` / `pop` / `shift` / `unshift` / `splice`, i.e. every mutator that
+// changes length.
+//
+// ── Deliberate limitations (not oversights) ────────────────────────────────
+//
+//  * A LENGTH-PRESERVING in-place mutation (`sort` / `reverse` / `fill` /
+//    `copyWithin`, or a bare `arr[i] = x`) is NOT reconciled. Detecting one
+//    requires an element-by-element compare on EVERY host crossing (O(n) even
+//    when nothing changed), and replaying it requires an element-setter export
+//    (`__vec_set_elem`) that is only emitted when a module imports
+//    `Object.defineProperty`. Those stay silent no-ops exactly as before.
+//  * If the vec's OWN length also moved during the call (the callee re-entered
+//    Wasm and mutated the same vec), the two edits cannot be ordered, so
+//    reconciliation is SKIPPED rather than guessed at — Wasm-side state wins,
+//    which is the pre-#3603 behaviour.
+
+/** mirror JS array → the WasmGC vec struct it was materialised from. */
+const _vecMirrorSource = new WeakMap<object, unknown>();
+
+export type VecMirrorSnapshot = {
+  mirror: unknown[];
+  vec: unknown;
+  mirrorLen: number;
+  vecLen: number;
+};
+
+type Exports = Record<string, Function> | undefined;
+
+/** Record a `__make_iterable` mirror so its mutations can be replayed onto the vec. */
+export function registerVecMirror(mirror: unknown[], vec: unknown): void {
+  _vecMirrorSource.set(mirror, vec);
+}
+
+/**
+ * The vec a mirror was materialised from, or `undefined` when `v` is not a
+ * mirror. Used to reverse a nested vec element back to its struct before it is
+ * pushed into a vec.
+ */
+export function vecForMirror(v: unknown): unknown {
+  if (v == null || typeof v !== "object") return undefined;
+  return _vecMirrorSource.get(v as object);
+}
+
+/**
+ * Snapshot the lengths of every vec mirror reachable from `values`, BEFORE a
+ * host call. Returns an empty array (no allocation beyond the constant) when
+ * none of the values is a mirror — the overwhelmingly common case.
+ */
+export function snapshotVecMirrors(values: readonly unknown[], exports: Exports): VecMirrorSnapshot[] {
+  if (!exports) return [];
+  const lenFn = exports.__vec_len as ((v: unknown) => number) | undefined;
+  if (typeof lenFn !== "function") return [];
+  let snaps: VecMirrorSnapshot[] | undefined;
+  for (const v of values) {
+    if (v == null || typeof v !== "object") continue;
+    const vec = _vecMirrorSource.get(v as object);
+    if (vec === undefined) continue;
+    let vecLen: number;
+    try {
+      vecLen = lenFn(vec);
+    } catch {
+      continue;
+    }
+    if (typeof vecLen !== "number" || vecLen < 0) continue;
+    const mirror = v as unknown[];
+    (snaps ??= []).push({ mirror, vec, mirrorLen: mirror.length, vecLen });
+  }
+  return snaps ?? [];
+}
+
+/**
+ * Replay length-changing host mutations of the snapshotted mirrors back onto
+ * their vecs, AFTER the host call returns.
+ *
+ * `unwrap` reverses a host value to the raw wasm handle the vec should store
+ * (runtime.ts passes `_unwrapForHost`); nested mirrors are reversed here first.
+ */
+export function reconcileVecMirrors(
+  snaps: readonly VecMirrorSnapshot[],
+  exports: Exports,
+  unwrap: (v: unknown) => unknown,
+): void {
+  if (snaps.length === 0 || !exports) return;
+  const lenFn = exports.__vec_len as ((v: unknown) => number) | undefined;
+  const getFn = exports.__vec_get as ((v: unknown, i: number) => unknown) | undefined;
+  const pushFn = exports.__vec_push as ((v: unknown, x: unknown) => number) | undefined;
+  const popFn = exports.__vec_pop as ((v: unknown) => unknown) | undefined;
+  const mutSupFn = exports.__vec_mut_supported as ((v: unknown) => number) | undefined;
+  if (
+    typeof lenFn !== "function" ||
+    typeof getFn !== "function" ||
+    typeof pushFn !== "function" ||
+    typeof popFn !== "function"
+  ) {
+    return;
+  }
+  for (const snap of snaps) {
+    const { mirror, vec, mirrorLen, vecLen } = snap;
+    // Untouched by the callee, or a length-preserving edit (out of scope).
+    if (mirror.length === mirrorLen) continue;
+    let liveVecLen: number;
+    try {
+      liveVecLen = lenFn(vec);
+    } catch {
+      continue;
+    }
+    // The vec moved on its own (callee re-entered Wasm) — ambiguous, skip.
+    if (liveVecLen !== vecLen) continue;
+    try {
+      if (typeof mutSupFn !== "function" || mutSupFn(vec) !== 1) continue;
+    } catch {
+      continue;
+    }
+    // Longest common prefix between the vec and the mutated mirror. Elements
+    // compare by identity (primitives, raw structs) or through the mirror
+    // registry (a nested vec element crosses as its own mirror).
+    let keep = 0;
+    const min = Math.min(vecLen, mirror.length);
+    let scanFailed = false;
+    while (keep < min) {
+      let raw: unknown;
+      try {
+        raw = getFn(vec, keep);
+      } catch {
+        scanFailed = true;
+        break;
+      }
+      const m = mirror[keep];
+      if (m !== raw && vecForMirror(m) !== raw) break;
+      keep++;
+    }
+    if (scanFailed) continue;
+    try {
+      for (let i = vecLen; i > keep; i--) popFn(vec);
+      for (let i = keep; i < mirror.length; i++) {
+        const m = mirror[i];
+        const raw = vecForMirror(m) ?? unwrap(m);
+        if (pushFn(vec, raw) < 0) break;
+      }
+    } catch {
+      // A partially-applied reconcile is still closer to the host's view than
+      // dropping the mutation entirely; never let it escape as a host throw.
+    }
+  }
+}

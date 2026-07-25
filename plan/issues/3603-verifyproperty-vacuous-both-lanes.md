@@ -1,11 +1,13 @@
 ---
 id: 3603
 title: "verifyProperty is vacuous on BOTH lanes — two distinct root causes (standalone: object literals have no runtime own-property table; host: uncurried __push is a silent no-op)"
-status: ready
+status: in-progress
 sprint: current
 created: 2026-07-25
 updated: 2026-07-25
-assignee: ttraenkler/senior-dev-vp
+assignee: ttraenkler/opus-loop-a
+loc-budget-allow:
+  - src/runtime.ts
 priority: high
 horizon: xl
 feasibility: hard
@@ -30,15 +32,15 @@ origin: "senior-dev root-cause investigation, TaskList task #11 (2026-07-25)"
 verify anything on **both** the standalone lane **and** the JS-host lane — for
 **two completely different reasons**:
 
-| lane           | do the four descriptor-field checks RUN? | is a detected mismatch REPORTED? | net effect                     |
-| -------------- | ---------------------------------------- | -------------------------------- | ------------------------------ |
-| **standalone** | **NO** — all four guards are false       | (never reached)                  | silent pass                    |
-| **host**       | yes                                      | **NO** — `__push` is a no-op     | silent pass                    |
+| lane           | do the four descriptor-field checks RUN? | is a detected mismatch REPORTED? | net effect  |
+| -------------- | ---------------------------------------- | -------------------------------- | ----------- |
+| **standalone** | **NO** — all four guards are false       | (never reached)                  | silent pass |
+| **host**       | yes                                      | **NO** — `__push` is a no-op     | silent pass |
 
 The handed-down lead ("`__push`/`__join` swallow the terminal assert") is
 **CORRECT — for the host lane** and **REFUTED for standalone**, where `__push`
 is never reached at all. The two must not be conflated: fixing either one alone
-leaves the other lane vacuous, and fixing the standalone one *first* turns the
+leaves the other lane vacuous, and fixing the standalone one _first_ turns the
 host-lane defect into a live Wasm **trap** rather than a silent pass.
 
 ## Symptom (A/B wrong-expectation control, `tests/test262-runner.ts` verdicts)
@@ -46,29 +48,29 @@ host-lane defect into a live Wasm **trap** rather than a silent pass.
 Each row feeds `verifyProperty` a deliberately WRONG expectation. A correct
 implementation must FAIL every one of them.
 
-| probe (`.tmp/vp/probe.mts`)                                       | expect | host          | standalone    |
-| ----------------------------------------------------------------- | ------ | ------------- | ------------- |
-| `verifyProperty(Math.abs,"name",{value:"abs",…})` — **correct**   | pass   | pass          | pass          |
-| `…{value:"SHOULD_NOT_MATCH",…}`                                   | fail   | (see note)    | **pass** ✗    |
-| `…{value:"abs", writable:TRUE,…}`                                 | fail   | (see note)    | **pass** ✗    |
-| `…{value:"abs", enumerable:TRUE,…}`                               | fail   | (see note)    | **pass** ✗    |
-| `…{value:"abs", …, configurable:FALSE}`                           | fail   | (see note)    | **pass** ✗    |
-| `verifyProperty(Math.abs,"no_such_prop_zz",{value:1})`            | fail   | fail          | fail ✓ (a1)   |
-| `var o={a:1}; verifyProperty(o,"a",{value:1,…})` — **correct**    | pass   | pass          | **fail** ✗    |
-| `var o={a:1}; verifyProperty(o,"a",{value:42,…})`                 | fail   | **pass** ✗    | fail          |
-| `var o={a:1}; verifyProperty(o,"a",{value:1,writable:FALSE,…})`   | fail   | **pass** ✗    | fail          |
-| `var o={a:1}; verifyProperty(o,"a",{value:1,…,enumerable:FALSE})` | fail   | **pass** ✗    | fail          |
-| `var o={a:1}; verifyProperty(o,"a",{value:1,…,configurable:F})`   | fail   | **pass** ✗    | fail          |
-| `var o={a:1}; verifyProperty(o,"a",{value:42})` (value-only)      | fail   | **pass** ✗    | fail          |
-| `assert(false,"sanity")`                                          | fail   | fail ✓        | fail ✓        |
-| `assert.sameValue(1,2,"sanity")`                                  | fail   | fail ✓        | fail ✓        |
+| probe (`.tmp/vp/probe.mts`)                                       | expect | host       | standalone  |
+| ----------------------------------------------------------------- | ------ | ---------- | ----------- |
+| `verifyProperty(Math.abs,"name",{value:"abs",…})` — **correct**   | pass   | pass       | pass        |
+| `…{value:"SHOULD_NOT_MATCH",…}`                                   | fail   | (see note) | **pass** ✗  |
+| `…{value:"abs", writable:TRUE,…}`                                 | fail   | (see note) | **pass** ✗  |
+| `…{value:"abs", enumerable:TRUE,…}`                               | fail   | (see note) | **pass** ✗  |
+| `…{value:"abs", …, configurable:FALSE}`                           | fail   | (see note) | **pass** ✗  |
+| `verifyProperty(Math.abs,"no_such_prop_zz",{value:1})`            | fail   | fail       | fail ✓ (a1) |
+| `var o={a:1}; verifyProperty(o,"a",{value:1,…})` — **correct**    | pass   | pass       | **fail** ✗  |
+| `var o={a:1}; verifyProperty(o,"a",{value:42,…})`                 | fail   | **pass** ✗ | fail        |
+| `var o={a:1}; verifyProperty(o,"a",{value:1,writable:FALSE,…})`   | fail   | **pass** ✗ | fail        |
+| `var o={a:1}; verifyProperty(o,"a",{value:1,…,enumerable:FALSE})` | fail   | **pass** ✗ | fail        |
+| `var o={a:1}; verifyProperty(o,"a",{value:1,…,configurable:F})`   | fail   | **pass** ✗ | fail        |
+| `var o={a:1}; verifyProperty(o,"a",{value:42})` (value-only)      | fail   | **pass** ✗ | fail        |
+| `assert(false,"sanity")`                                          | fail   | fail ✓     | fail ✓      |
+| `assert.sameValue(1,2,"sanity")`                                  | fail   | fail ✓     | fail ✓      |
 
 > **note** — the four `Math.abs`/`"name"` host rows report `fail` in that run,
 > but the failure is `"obj should have an own property name"`, i.e. the **a1
-> gate**, not the descriptor check. That is a *probe artifact*: on the host lane
+> gate**, not the descriptor check. That is a _probe artifact_: on the host lane
 > `Math` is the real host object, `verifyProperty` without `{restore:true}` is
 > destructive (`isConfigurable` does `delete obj[name]`), and the earlier
-> *correct* case in the same process permanently deleted `Math.abs.name`. The
+> _correct_ case in the same process permanently deleted `Math.abs.name`. The
 > five `{a:1}` rows use a fresh literal per case and are the clean host
 > evidence. Do not read the `Math.abs` host column as a working host lane.
 
@@ -92,11 +94,11 @@ return e != null
 
 A receiver that is not an `$Object` answers **false** — it does not throw, it
 does not fall back. A plain object literal lowers to a **typed WasmGC struct**,
-not an `$Object`, so every runtime own-property query on it reports *zero own
-properties*. This is the "plain object literal → false → lowers to a typed
+not an `$Object`, so every runtime own-property query on it reports _zero own
+properties_. This is the "plain object literal → false → lowers to a typed
 struct" row already documented in the header of
 `src/codegen/builtin-ctor-own-props.ts` (#2984); that issue closed the
-*builtin-ctor carrier* row and left this one open.
+_builtin-ctor carrier_ row and left this one open.
 
 ### Why that makes `verifyProperty` vacuous
 
@@ -117,7 +119,7 @@ All four guards are false ⇒ `failures` stays empty ⇒ **`verifyProperty` retu
 `true` for any expectation whatsoever.**
 
 The a1 gate (`assert(__hasOwnProperty(obj, name), …)`) survives only because in
-the *passing* population `obj` is typically a builtin function value, which the
+the _passing_ population `obj` is typically a builtin function value, which the
 `__builtinfn_get_meta` arm answers correctly. When `obj` is itself a plain
 object literal the a1 gate is false and a **correct** descriptor FAILS — the
 "opposite symptom" noted in `plan/agent-context/dev-floor-truth.md`. Same root
@@ -159,7 +161,7 @@ Three things fall out of this table:
    queryable object by defining a property on it.
 
 > **Trap for the next agent — do not use `Object.keys(desc)` as a yardstick.**
-> Measured on a *directly named module global* `Object.keys(DESC).length === 4`
+> Measured on a _directly named module global_ `Object.keys(DESC).length === 4`
 > (compile-time fold, correct); measured on the **same object** through an
 > `any` parameter it is **0**. A detector that compares "checks performed"
 > against `Object.keys(desc).length` therefore computes `0 < 0 === false` and
@@ -173,18 +175,18 @@ Three things fall out of this table:
 through `runTest262File` (so the host lane gets its real import object) —
 `.tmp/vp/uncurry.mts`:
 
-| probe                                                        | host                          | standalone                    |
-| ------------------------------------------------------------ | ----------------------------- | ----------------------------- |
-| `var a=[]; __push(a,"x"); a.length === 1`                    | **fail** (`«0»` vs `«1»`)     | **fail** (null-deref trap)    |
-| `var a=[]; __push(a,"x"); a[0] === "boom"`                   | **fail** (`«undefined»`)      | **fail** (null-deref trap)    |
-| `var a=[]; __push(a,"x"); __join(a,";") === "boom"`          | **fail** (`«""»`)             | **fail** (null-deref trap)    |
-| `var a=[]; a.push("x"); a.length === 1` (native control)     | pass ✓                        | pass ✓                        |
-| `__join(["a","b"],";") === "a;b"`                            | pass ✓                        | **fail** (null-deref trap)    |
-| `__hasOwnProperty({a:1},"a") === true`                       | pass ✓                        | **fail**                      |
-| `__hasOwnProperty({value:1,…},"value") === true`             | pass ✓                        | **fail**                      |
-| `Object.prototype.hasOwnProperty.call(o,"a")` via any-param  | pass ✓                        | **fail**                      |
-| `Object.keys(o).length` via any-param                        | pass ✓                        | **fail**                      |
-| `for (k in o)` count via any-param                           | pass ✓                        | **fail**                      |
+| probe                                                       | host                      | standalone                 |
+| ----------------------------------------------------------- | ------------------------- | -------------------------- |
+| `var a=[]; __push(a,"x"); a.length === 1`                   | **fail** (`«0»` vs `«1»`) | **fail** (null-deref trap) |
+| `var a=[]; __push(a,"x"); a[0] === "boom"`                  | **fail** (`«undefined»`)  | **fail** (null-deref trap) |
+| `var a=[]; __push(a,"x"); __join(a,";") === "boom"`         | **fail** (`«""»`)         | **fail** (null-deref trap) |
+| `var a=[]; a.push("x"); a.length === 1` (native control)    | pass ✓                    | pass ✓                     |
+| `__join(["a","b"],";") === "a;b"`                           | pass ✓                    | **fail** (null-deref trap) |
+| `__hasOwnProperty({a:1},"a") === true`                      | pass ✓                    | **fail**                   |
+| `__hasOwnProperty({value:1,…},"value") === true`            | pass ✓                    | **fail**                   |
+| `Object.prototype.hasOwnProperty.call(o,"a")` via any-param | pass ✓                    | **fail**                   |
+| `Object.keys(o).length` via any-param                       | pass ✓                    | **fail**                   |
+| `for (k in o)` count via any-param                          | pass ✓                    | **fail**                   |
 
 Three independent observations (`.length`, `[0]`, `__join`) agree that the
 uncurried push **genuinely does not append** on the host lane — it is not a
@@ -203,21 +205,21 @@ widening.
 
 `.tmp/vp/census.mjs` over all 53,273 `.js` files under `test262/test`:
 
-| quantity                                                                   | count      |
-| -------------------------------------------------------------------------- | ---------- |
-| non-`_FIXTURE` files with `includes: [propertyHelper.js]`                  | **5,206**  |
-| files calling `verifyProperty(`                                            | **5,067**  |
-| files calling `verifyPrimordial(Callable)?Property(` (aliases)             | 8          |
-| files calling `verifyCallableProperty(`                                    | 0          |
-| files using ONLY the deprecated `verifyWritable`/… helpers                 | 166        |
-| **`verifyProperty` call sites**                                            | **6,470**  |
-| …whose `desc` argument is an object literal                                | 6,310      |
-| …object literal WITH ≥1 checkable field (`value`/`writable`/`enum`/`conf`) | **6,308**  |
-| …object literal that is `{}` (detector's only static false-positive)       | 2          |
-| …object literal with only `get`/`set`                                      | 0          |
-| …`desc` is literally `undefined` (early-returns before any check)          | 25         |
-| …`desc` is an identifier / other expression                                | 135        |
-| files with ≥1 checkable-field object-literal call site                     | **4,984**  |
+| quantity                                                                   | count     |
+| -------------------------------------------------------------------------- | --------- |
+| non-`_FIXTURE` files with `includes: [propertyHelper.js]`                  | **5,206** |
+| files calling `verifyProperty(`                                            | **5,067** |
+| files calling `verifyPrimordial(Callable)?Property(` (aliases)             | 8         |
+| files calling `verifyCallableProperty(`                                    | 0         |
+| files using ONLY the deprecated `verifyWritable`/… helpers                 | 166       |
+| **`verifyProperty` call sites**                                            | **6,470** |
+| …whose `desc` argument is an object literal                                | 6,310     |
+| …object literal WITH ≥1 checkable field (`value`/`writable`/`enum`/`conf`) | **6,308** |
+| …object literal that is `{}` (detector's only static false-positive)       | 2         |
+| …object literal with only `get`/`set`                                      | 0         |
+| …`desc` is literally `undefined` (early-returns before any check)          | 25        |
+| …`desc` is an identifier / other expression                                | 135       |
+| files with ≥1 checkable-field object-literal call site                     | **4,984** |
 
 **97.5 % of `verifyProperty` call sites (6,308 / 6,470) pass a plain object
 literal carrying at least one checkable field** — i.e. the exposed population is
@@ -231,8 +233,8 @@ surface is **2 call sites out of 6,470**.
 > (2 of the 3 survivors); and (b) **calls that never execute** — e.g.
 > `built-ins/WeakRef/prototype/constructor.js` guards its call behind
 > `if (WeakRef.prototype.hasOwnProperty('constructor'))`, which is itself false
-> on standalone *for root cause A*. The effective-rate figure below (158 / 158 of
-> *executed* calls) is unaffected by this, because it is derived from actual
+> on standalone _for root cause A_. The effective-rate figure below (158 / 158 of
+> _executed_ calls) is unaffected by this, because it is derived from actual
 > execution, not from the census. Scaling 5,067 as if it were exact is precisely
 > the over-count failure mode the project's MEASURE-NEVER-EXTRAPOLATE rule exists
 > to prevent.
@@ -258,11 +260,11 @@ agent's run is perturbed, and the symlink is restored on every exit path.
 
 ### Calibration (mandatory before any number is reported)
 
-| control                                                             | lane       | arm A | arm B    | verdict                       |
-| ------------------------------------------------------------------- | ---------- | ----- | -------- | ----------------------------- |
-| `verifyProperty(Math.abs,"name",{CORRECT})`                         | standalone | pass  | **fail** | positive control FIRES ✓      |
-| `verifyProperty(Math.abs,"name",{CORRECT})`                         | host       | pass  | pass     | negative control silent ✓     |
-| `var o={a:1}; verifyProperty(o,"a",{value:42,…})` (WRONG)           | host       | pass  | **fail** | host positive control FIRES ✓ |
+| control                                                   | lane       | arm A | arm B    | verdict                       |
+| --------------------------------------------------------- | ---------- | ----- | -------- | ----------------------------- |
+| `verifyProperty(Math.abs,"name",{CORRECT})`               | standalone | pass  | **fail** | positive control FIRES ✓      |
+| `verifyProperty(Math.abs,"name",{CORRECT})`               | host       | pass  | pass     | negative control silent ✓     |
+| `var o={a:1}; verifyProperty(o,"a",{value:42,…})` (WRONG) | host       | pass  | **fail** | host positive control FIRES ✓ |
 
 The detector is proven to fire on a known-vacuous pass and proven not to fire on
 a genuinely-checking pass. A third control (`{}` + `Object.defineProperty`,
@@ -276,21 +278,21 @@ calibration; it is recorded here as a separate observation.
 Sample: **600** files drawn uniformly (mulberry32, seed `20260725`) from the
 5,067-file `verifyProperty` population.
 
-| arm A status    | n       |
-| --------------- | ------- |
-| pass            | **161** |
-| fail            | 381     |
-| skip            | 53      |
-| compile_error   | 5       |
+| arm A status  | n       |
+| ------------- | ------- |
+| pass          | **161** |
+| fail          | 381     |
+| skip          | 53      |
+| compile_error | 5       |
 
 Arm B was then run over exactly those **161 passing** files (same runner, same
 order, only the harness differs):
 
-| arm B status | n       |
-| ------------ | ------- |
-| **fail**     | **158** |
-| pass         | 3       |
-| compile_error | 0      |
+| arm B status  | n       |
+| ------------- | ------- |
+| **fail**      | **158** |
+| pass          | 3       |
+| compile_error | 0       |
 
 **158 of 161 previously-passing files (98.1 %) flip to fail under the vacuity
 detector.** Zero compile errors, so the instrumentation did not break the build.
@@ -298,11 +300,11 @@ detector.** Zero compile errors, so the instrumentation did not break the build.
 The three survivors execute **no `verifyProperty` call at all** — verified by
 reading them:
 
-| file                                                          | why it survives                                                |
-| ------------------------------------------------------------- | -------------------------------------------------------------- |
-| `built-ins/Object/prototype/propertyIsEnumerable/S15.2.4.7_A2_T2.js` | `verifyProperty()` appears only in a `// TODO:` comment (census regex false positive) |
-| `built-ins/Object/prototype/toLocaleString/S15.2.4.3_A8.js`   | same — comment-only mention                                     |
-| `built-ins/WeakRef/prototype/constructor.js`                  | the call is inside `if (WeakRef.prototype.hasOwnProperty('constructor'))`, which is itself false on standalone for the same root cause |
+| file                                                                 | why it survives                                                                                                                        |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `built-ins/Object/prototype/propertyIsEnumerable/S15.2.4.7_A2_T2.js` | `verifyProperty()` appears only in a `// TODO:` comment (census regex false positive)                                                  |
+| `built-ins/Object/prototype/toLocaleString/S15.2.4.3_A8.js`          | same — comment-only mention                                                                                                            |
+| `built-ins/WeakRef/prototype/constructor.js`                         | the call is inside `if (WeakRef.prototype.hasOwnProperty('constructor'))`, which is itself false on standalone for the same root cause |
 
 So **every sampled standalone `verifyProperty` pass that actually executes a
 `verifyProperty` call is vacuous: 158 / 158.**
@@ -323,11 +325,11 @@ arm B (the `__vpChecks` counter, `__vpPush` replacing all five
 `__push(failures, …)` sites, the module-level `__vpFailMsg`) with the two
 detector `throw`s REMOVED.**
 
-| arm                                        | pass    | fail    |
-| ------------------------------------------ | ------- | ------- |
-| A — stock harness                          | **161** | 0       |
-| A2 — instrumented structure, no throws     | **161** | 0       |
-| B — instrumented structure + detectors     | 3       | **158** |
+| arm                                    | pass    | fail    |
+| -------------------------------------- | ------- | ------- |
+| A — stock harness                      | **161** | 0       |
+| A2 — instrumented structure, no throws | **161** | 0       |
+| B — instrumented structure + detectors | 3       | **158** |
 
 Arm A2 reproduces arm A exactly (161 / 161). The 158 flips are therefore
 attributable **solely to the detector firing**, not to the instrumentation
@@ -380,7 +382,7 @@ equivalent fix at #2623 P-7) but is **not** true of `verifyProperty`.
 
 - **`transformVerifyPropertyCalls` in `tests/test262-runner.ts:1410` is NOT the
   cause.** That legacy source-rewrite (which converts `verifyProperty(…{value:X}…)`
-  into `assert_sameValue` and *strips* descriptor-only calls) belongs to the
+  into `assert_sameValue` and _strips_ descriptor-only calls) belongs to the
   retired rewritten-harness path. `runTest262File` and `scripts/test262-worker.mjs`
   both go through `assembleOriginalHarness` / `originalHarness: true` and compile
   the **untouched upstream `propertyHelper.js`**. The vacuity is a compiler
@@ -399,19 +401,20 @@ that no step makes the tree worse:
    FIRST). Make `Function.prototype.call.bind(F)` produce a callable that
    actually forwards `(thisArg, …args)` to `F`: host lane currently no-ops for
    `Array.prototype.push`, standalone lane traps for both `push` and `join`.
-   This is independently valuable (it un-vacuums the *host* lane's
+   This is independently valuable (it un-vacuums the _host_ lane's
    `verifyProperty` on its own), it is a prerequisite for S2 not producing
    traps, and it has a clean unit test surface — the ten rows of the root-cause-B
    table are the acceptance criteria.
 
    **S1 is also the only slice that can prove itself today.** The host lane's
    vacuity is entirely S1's fault, and the detector in `plan/probes/3603/ab.mts`
-   is *already calibrated for the host lane* (the `posthost` control) — so S1
+   is _already calibrated for the host lane_ (the `posthost` control) — so S1
    lands with a real before/after vacuity count from the same harness, measured
    in one clean window. S2 has no such measurement available until S1 is in,
    because until then every standalone flip is a trap rather than a verdict. So
    the ordering is not merely "S2 is risky first"; it is "S1 is the slice that
    can be measured first."
+
 2. **S2 — promote object literals to a runtime-queryable representation on
    standalone** (`horizon: l`/`xl`). The promotion machinery already exists —
    a computed-key write produces a real `$Object`. The slice is to trigger it
@@ -437,6 +440,115 @@ one.** The host lane's `verifyProperty` population is 5,067 files; its vacuity
 inflates the headline conformance number by an amount nobody has measured yet.
 Quantifying that (arm A + arm B on the host lane, same method) is the natural
 companion slice and is cheap now that the detector is calibrated.
+
+## S1 LANDED — implementation notes (2026-07-25, `opus-loop-a`)
+
+> Slice 1 of the recommended split (host lane / root cause B) is implemented.
+> **Root cause A (standalone) is deliberately untouched** — see the re-measure
+> note below before starting it.
+
+### The mechanism was NOT `bind`, and not `uncurryThis`
+
+The handed-down lead named `Function.prototype.call.bind(F)` as the suspect.
+Traced through the import bridge (`.tmp` probe wrapping every entry in
+`buildImports(...).env`), the `bind` is innocent and the defect is **one layer
+lower**. Two independent dispatch shapes fail identically:
+
+| source                            | bridge call                                       | before |
+| --------------------------------- | ------------------------------------------------- | ------ |
+| `Array.prototype.push.call(a, x)` | `__extern_method_call(push, "call", [mirror, x])` | no-op  |
+| `__push(a, x)` (uncurryThis)      | `__call_function(boundCall, null, [mirror, x])`   | no-op  |
+| `a.push(x)` (native)              | (compiled `__vec_push`)                           | works  |
+
+In **both** failing rows the vec argument arrives as `mirror` — the JS array
+`__make_iterable`'s `convertToJS` materialises from the vec. That mirror is a
+**read mirror**: `convertToJS` _refreshes it FROM the vec_ on every crossing
+(#3368, so array identity survives `any` slots). The host push therefore
+appends to an array the Wasm side never consults, and the next crossing
+overwrites it. `__vec_push` returned `1` (the correct new length) in the trace
+while `a.length` still read `0` — the two sides were looking at different
+objects.
+
+So the fix does **not** belong in `bind`, in `.call`, or in `propertyHelper.js`.
+It belongs at the **host-call boundary**, and it fixes the whole family
+(`push`/`pop`/`shift`/`unshift`/`splice` through `.call`/`.apply`/uncurried) at
+once, not just `__push`.
+
+### What landed
+
+`src/runtime/vec-mirror-writeback.ts` (new subsystem module) +
+14 lines of wiring in `src/runtime.ts`:
+
+1. `registerVecMirror(arr, vec)` in `__make_iterable`'s vec arm — records
+   mirror → vec.
+2. `snapshotVecMirrors` / `reconcileVecMirrors` **bracket** the two host-call
+   bridges (`__extern_method_call`'s primary `fn.apply`, and
+   `__call_function`'s `Reflect.apply`). If the callee changed a mirror's
+   **length**, the change is replayed onto the vec: pop back to the longest
+   common prefix, then push the mirror's tail — using only `__vec_pop` /
+   `__vec_push`, which are already emitted unconditionally alongside
+   `__vec_mut_supported`.
+
+**Runtime-only. Zero codegen bytes change** — so no late-import funcIdx
+shifting, no stack-balance risk, no `addUnionImports` interaction. That was a
+deliberate design constraint given this issue's `feasibility: hard` /
+regression-prone framing.
+
+### Deliberate non-goals (documented at the helper, not oversights)
+
+- **Length-PRESERVING in-place edits stay silent no-ops**: `sort`, `reverse`,
+  `fill`, `copyWithin`, and a bare `arr[i] = x` through the host. Detecting one
+  needs an element-by-element compare on _every_ host crossing (O(n) even when
+  nothing changed); replaying one needs `__vec_set_elem`, which is only emitted
+  when a module imports `Object.defineProperty`. Unchanged from before.
+- **Re-entrant Wasm mutation wins**: if the vec's own length also moved during
+  the call, the two edits cannot be ordered, so reconciliation is skipped
+  rather than guessed at.
+- `_wrapVecForHost`'s `set()` trap (`src/runtime.ts`) is still a documented
+  no-op. That is a _third_ silent-no-op site in the same family; it was not in
+  S1's path and is not touched.
+
+### Evidence
+
+`tests/issue-3603-vec-mirror-writeback.test.ts` — 15 tests, all host lane by
+construction (`buildImports` + real import object). **Verified by reverting the
+diff**: 9 rows fail without the change —
+
+- the issue's three independent `__push` observations (`.length` → `0`,
+  `[0]` → `undefined`, `__join` → `""`),
+- the literal `propertyHelper` accumulate-and-report epilogue (returned `""`,
+  i.e. the `if (failures.length)` branch was never taken — _this is the
+  vacuity itself_),
+- `pop`/`shift`/`unshift`/`splice`/multi-push/numeric-vec via `.call`.
+
+Four control rows pass **before and after** and are there to isolate the
+defect, not to pad coverage: native `a.push(x)`, `__join` on a literal, the
+uncurried `hasOwnProperty` (a _read_, hence never broken), and a non-mutating
+`slice.call`.
+
+### Reach — NOT measured, and deliberately not estimated
+
+**No corpus number is claimed for S1.** The issue's own host-lane section says
+the host magnitude was never measured, and nothing here changes that. What is
+established is qualitative and mechanical: the host lane's `verifyProperty`
+epilogue can now fire, so wrong expectations in the `propertyHelper`
+population can be reported instead of swallowed. Quantifying it needs the
+three-arm A/B (`VP_LANE=host` armA / armA2 / armB in `plan/probes/3603/ab.mts`)
+in one clean window on one SHA — see the provenance rules in the host-lane
+section above. **Expect the host number to go DOWN**; that is the point.
+
+### ⚠ Before starting S2 (standalone / root cause A): RE-MEASURE
+
+The standalone numbers in this issue were taken on `ab69ad9d2`
+(2026-07-24 23:00). **#3592's arity de-vacuification landed at `bbe94d090`
+(2026-07-25 16:56) — ~18 h later** — and #3468 (standalone function-object own
+properties) closed the same day as the measured base, so its inclusion is
+unverified. Both are _standalone vacuity fixes_. The **mechanism** described in
+root cause A (object literals lower to a typed WasmGC struct with no `$Object`
+own-property table) is probably still real, but **the numbers attached to it
+are stale and its reach is unknown**. Re-run `plan/probes/3603/ab.mts` on
+current `main` before writing any code for S2; if the arm re-measures as
+resolved, say so and close that half — that is a complete result.
 
 ## Reproduction
 
@@ -474,12 +586,12 @@ is touched, and there is no committed force-disable switch.**
    Without this every observation reports "branch not taken" and the whole probe
    reads as a total failure.
 4. **A Wasm trap is not catchable by the compiled `try/catch`.** It surfaces at
-   the JS boundary as `RuntimeError`, so it must be caught around the *accessor
-   call*, not only inside the probe body.
+   the JS boundary as `RuntimeError`, so it must be caught around the _accessor
+   call_, not only inside the probe body.
 5. **The host lane needs a real import object** (`buildImports` + sandbox);
    `WebAssembly.instantiate(binary, {})` only works for standalone, where
    `result.imports` is `[]`. Use `runTest262File` for host-lane probes.
 6. **`verifyProperty` is destructive** (`isConfigurable` does `delete
-   obj[name]`, `isWritable` writes) and the host lane shares real host builtins
+obj[name]`, `isWritable` writes) and the host lane shares real host builtins
    across in-process runs. Probing `Math.abs` twice in one process without
    `{restore:true}` contaminates the second probe. Use a fresh subject per case.
