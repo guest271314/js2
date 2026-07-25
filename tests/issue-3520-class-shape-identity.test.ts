@@ -85,8 +85,9 @@ function classId(context: IrPlanningIdentityContext, declaration: ts.ClassDeclar
   return id;
 }
 
-function shape(className: string, fieldName: string): IrClassShape {
+function shape(classId: IrClassId, className: string, fieldName: string): IrClassShape {
   return {
+    classId,
     className,
     fields: [{ name: fieldName, type: { kind: "val", val: { kind: "f64" } } }],
     methods: [],
@@ -124,8 +125,14 @@ describe("#3520 exact class-shape identity", () => {
     const localId = classId(graph.context, local);
     const remoteId = classId(graph.context, remote);
     const entries = new Map<IrClassId, IrClassShapeEntry>([
-      [localId, { classId: localId, legacyName: "Shared", declaration: local, shape: shape("Shared", "local") }],
-      [remoteId, { classId: remoteId, legacyName: "Shared", declaration: remote, shape: shape("Shared", "foreign") }],
+      [
+        localId,
+        { classId: localId, legacyName: "Shared", declaration: local, shape: shape(localId, "Shared", "local") },
+      ],
+      [
+        remoteId,
+        { classId: remoteId, legacyName: "Shared", declaration: remote, shape: shape(remoteId, "Shared", "foreign") },
+      ],
     ]);
     const sidecar = createIrClassShapeSidecar(entries, graph.context);
 
@@ -144,6 +151,25 @@ describe("#3520 exact class-shape identity", () => {
     const method = child.members.find(ts.isMethodDeclaration)!;
     const parameterType = graph.checker.getTypeAtLocation(method.parameters[0]!);
     expect(resolveIrClassShapeFromType(graph.checker, parameterType, sidecar)).toBe(entries.get(remoteId));
+
+    expectPlanningError(
+      () =>
+        createIrClassShapeSidecar(
+          new Map([
+            [
+              localId,
+              {
+                classId: localId,
+                legacyName: "Shared",
+                declaration: local,
+                shape: shape(remoteId, "Shared", "local"),
+              },
+            ],
+          ]),
+          graph.context,
+        ),
+      "class-record-mismatch",
+    );
   });
 
   it("omits repeated legacy labels across sources before consulting name-keyed registries", () => {

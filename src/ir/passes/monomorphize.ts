@@ -475,9 +475,7 @@ function irTypeKey(t: IrType): string {
     const ps = t.signature.params.map(irTypeKey).join(",");
     return `cb:(${ps})->${t.signature.returnType === null ? "void" : irTypeKey(t.signature.returnType)}`;
   }
-  // Slice 4 (#1169d): class is keyed by name — one declaration per
-  // unit, so the name uniquely identifies the shape.
-  if (t.kind === "class") return `cls:${t.shape.className}`;
+  if (t.kind === "class") return `cls:${t.shape.classId}`;
   // Slice 10 (#1169i): extern is keyed solely on className.
   if (t.kind === "extern") return `ext:${t.className}`;
   // #1926 — union members / boxed inner are IrTypes; recurse via irTypeKey.
@@ -500,7 +498,9 @@ function valTypeKey(v: ValType): string {
 
 /** Human-friendly suffix for a specialization: `identity$f64`, `identity$externref`, etc. */
 function nameSuffixFor(types: readonly IrType[]): string {
-  return types.map(irTypeKey).map(simplifyForName).join("_");
+  return types
+    .map((type) => (type.kind === "class" ? `class_${type.shape.className}` : simplifyForName(irTypeKey(type))))
+    .join("_");
 }
 
 function simplifyForName(s: string): string {

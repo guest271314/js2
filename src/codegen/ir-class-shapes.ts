@@ -243,7 +243,12 @@ export function createIrClassShapeSidecar(
   const occurrences = new Map<string, number>();
   for (const [classId, entry] of entries) {
     const exactId = requireIrClassShapeClassId(entry.declaration, context);
-    if (classId !== entry.classId || classId !== exactId || entry.shape.className !== entry.legacyName) {
+    if (
+      classId !== entry.classId ||
+      classId !== exactId ||
+      entry.shape.classId !== classId ||
+      entry.shape.className !== entry.legacyName
+    ) {
       invariant("class-record-mismatch", `class-shape entry ${classId} has a stale identity projection`);
     }
     byClassId.set(classId, entry);

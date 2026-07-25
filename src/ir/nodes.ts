@@ -14,7 +14,7 @@
 // Phase 2 & 3 widen the Instr and Terminator sets.
 
 import type { ValType } from "./types.js";
-import type { IrBindingId, IrFunctionIdentity, IrUnitId } from "./identity.js";
+import type { IrBindingId, IrClassId, IrFunctionIdentity, IrUnitId } from "./identity.js";
 // #2949 slice 1 — the canonical JS-type tag enum, from the dependency-free
 // leaf `ir/js-tag.ts` (#3113 moved it below the IR layer so IR core files
 // consume it without the IR→codegen import inversion). Type-only:
@@ -195,7 +195,8 @@ export interface IrClassMethodDescriptor {
  * type-check `new`/field-access/method-call expressions on instances of
  * this class without consulting the lowering resolver.
  *
- *   - `className`        unique discriminator (one class per name per unit)
+ *   - `classId`          source-qualified semantic identity
+ *   - `className`        compatibility/debug label
  *   - `fields`           user fields in canonical order (alphabetical)
  *                        — the lowerer maps each field `name` to a Wasm
  *                        struct field index via `resolveClass`, which knows
@@ -211,6 +212,8 @@ export interface IrClassMethodDescriptor {
  * legacy-allocated slot.
  */
 export interface IrClassShape {
+  readonly classId: IrClassId;
+  /** Compatibility/debug label; never the semantic identity. */
   readonly className: string;
   readonly fields: readonly IrClassFieldDescriptor[];
   readonly methods: readonly IrClassMethodDescriptor[];
@@ -223,7 +226,7 @@ export interface IrClassShape {
    * parent's method slot). Absent (undefined) for flat / root classes and for
    * subclasses of a builtin/externref-backed parent (which stay on legacy).
    * `classShapeEquals` deliberately does NOT compare `parent` — a shape is
-   * identified by `className` alone (see the doc there).
+   * identified by its required `classId` (see the doc there).
    */
   readonly parent?: IrClassShape;
 }
@@ -429,16 +432,12 @@ export function irTypeEquals(a: IrType, b: IrType): boolean {
 }
 
 /**
- * Slice 4 (#1169d): structural equality for class shapes. `className` is
- * the discriminator — every class is unique within a compilation unit, so
- * two `IrClassShape` values with the same `className` represent the same
- * class. We don't recurse into `fields` / `methods` / `constructorParams`
- * because they're a deterministic projection of `className` (one
- * declaration per class per unit). Cross-unit class types are out of
- * slice 4 scope.
+ * Nominal equality for source class shapes. `classId` is source-qualified,
+ * so same-labelled declarations remain distinct across source and lexical
+ * owners. Shape payload and `className` are projections/diagnostics only.
  */
 export function classShapeEquals(a: IrClassShape, b: IrClassShape): boolean {
-  return a.className === b.className;
+  return a.classId === b.classId;
 }
 
 /**

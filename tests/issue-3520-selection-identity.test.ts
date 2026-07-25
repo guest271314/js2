@@ -313,7 +313,9 @@ describe("#3520 structural selector identity", () => {
 
     const repeatedDescriptor = source("/repo/repeated-descriptor.ts", `class C { m(): number { return 1; } }`);
     const repeatedContext = context([repeatedDescriptor]);
+    const repeatedClassId = repeatedContext.classIdByDeclaration.get(classDeclaration(repeatedDescriptor, "C"))!;
     const shape: IrClassShape = {
+      classId: repeatedClassId,
       className: "C",
       fields: [],
       methods: [

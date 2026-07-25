@@ -196,6 +196,12 @@ export function makeIrIdentityLocalClassExpressionResolver(
         `projected local class ${legacyName} has no exact structural class identity`,
       );
     }
+    if (shape.classId !== classId) {
+      return planningInvariant(
+        "class-record-mismatch",
+        `projected local class ${legacyName} carries ${shape.classId} instead of ${classId}`,
+      );
+    }
     const symbol = checker.getSymbolAtLocation(statement.name);
     if (!symbol) continue;
     const candidate = { classId, legacyName, declaration: statement, symbol };

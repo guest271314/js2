@@ -11,7 +11,7 @@ import { lowerFunctionAstToIr, type IrFromAstResolver } from "../src/ir/from-ast
 import type { IrClassShape, IrType } from "../src/ir/nodes.js";
 import { classifyIrFailure, evaluateIrOutcomePolicy, type IrUnsupportedCode } from "../src/ir/outcomes.js";
 import { instantiateWithRuntime } from "./equivalence/helpers.js";
-import { createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
+import { createTestIrClassId, createTestIrFunctionIdentityFactory } from "./helpers/ir-identities.js";
 
 const F64: IrType = { kind: "val", val: { kind: "f64" } };
 const EXTERNREF: IrType = { kind: "val", val: { kind: "externref" } };
@@ -278,6 +278,7 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
 
   it("constructs an exact local class named Date before consulting the ambient extern registry", () => {
     const dateShape: IrClassShape = {
+      classId: createTestIrClassId("issue-3529-dataflow-outcomes/date"),
       className: "Date",
       fields: [],
       methods: [],
@@ -313,7 +314,11 @@ describe("#3529 P2 — typed dataflow outcomes", () => {
     expect(instructionKinds).toContain("class.new");
     expect(instructionKinds).not.toContain("extern.new");
 
-    const localShape: IrClassShape = { ...dateShape, className: "Local" };
+    const localShape: IrClassShape = {
+      ...dateShape,
+      classId: createTestIrClassId("issue-3529-dataflow-outcomes/local"),
+      className: "Local",
+    };
     expect(() =>
       lowerFunctionAstToIr(
         directDeclaration(`

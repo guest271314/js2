@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
 // ---------------------------------------------------------------------------
-// The IR interchange contract — v3.0 surface (#3030-T1/#3520).
+// The IR interchange contract — v4.0 surface (#3030-T1/#3520).
 //
 // NORMATIVE artifacts (this module is their code-side anchor):
 //   - docs/ir/ir-contract.md          the contract: D1–D5, guarantees,
@@ -32,7 +32,7 @@ import type { IrUnitId } from "./identity.js";
  * - The (T5) CI schema snapshot fails any PR that changes the serialized
  *   shape without bumping this constant.
  */
-export const IR_FORMAT_VERSION = "3.0";
+export const IR_FORMAT_VERSION = "4.0";
 
 /**
  * Which pipeline compiled a function's body (#3030 D3.7 — the complete

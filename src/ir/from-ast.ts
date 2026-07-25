@@ -4191,7 +4191,7 @@ function irTypeArgAssignable(actual: IrType, expected: IrType): boolean {
   // single-level local subclasses whose parent projected — the sound set.
   if (actual.kind === "class" && expected.kind === "class") {
     for (let s = actual.shape.parent; s; s = s.parent) {
-      if (s.className === expected.shape.className) return true;
+      if (s.classId === expected.shape.classId) return true;
     }
   }
   return false;

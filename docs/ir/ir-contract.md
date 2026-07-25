@@ -1,4 +1,4 @@
-# The IR interchange contract — v3.0
+# The IR interchange contract — v4.0
 
 > **Normative.** The #3030 contract is the union of this document,
 > [`ir-module.schema.json`](ir-module.schema.json), and the exported
@@ -37,11 +37,10 @@ One JSON document per compiled module.
 
 ## D2 — Versioning
 
-`IR_FORMAT_VERSION = "3.0"` (exported from `src/ir/contract.ts`). Version 3
-makes every `IrFuncRef` carry a required structural `IrCallableBinding`.
-Function and coverage `unitId` fields introduced in version 2 remain required.
-Display `name` is a compatibility/debug label and never establishes callable
-identity or provider classification.
+`IR_FORMAT_VERSION = "4.0"` (exported from `src/ir/contract.ts`). Version 4
+makes every class shape carry a required source-qualified `classId`; display
+`className` is compatibility/debug metadata. Structural callable bindings from
+version 3 and function/coverage `unitId` fields from version 2 remain required.
 
 - **Additive** (minor bump): new instruction kinds, new optional fields, new
   enum members appended at the END of their table.
@@ -87,7 +86,7 @@ identity or provider classification.
    classification") is part of this contract; instruction order within a
    block is program order, and any reordering the compiler performed
    respected the classification (#2134). Effects are _derived_ (published
-   table), not serialized per instruction in v3.0.
+   table), not serialized per instruction in v4.0.
 6. **Source positions.** Instructions and terminators may carry
    `site: {line, column}` (1-based line, 0-based column, in the `source`
    file named by the header). Alloc-site provenance rides on `alloc`
@@ -122,17 +121,17 @@ symbolizes them.
 The serialized `IrType` carries **no module-relative index**. Grammar
 (discriminated on `kind`):
 
-| kind      | payload                                                  | meaning                                                                             |
-| --------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `val`     | `val: ScalarVal`, `signed?: boolean`                     | one concrete Wasm-level scalar/opaque-ref slot                                      |
-| `string`  | —                                                        | backend-agnostic string                                                             |
-| `object`  | `shape: {fields: [{name, type}]}` (name-sorted)          | structural object shape                                                             |
-| `closure` | `signature: {params: IrType[], returnType: IrType}`      | callable value; captures are NOT a type property                                    |
-| `class`   | `shape: {className, fields, methods, constructorParams}` | nominal class instance (`className` is the identity)                                |
-| `extern`  | `className: string`                                      | opaque host-class reference (RegExp, Map, Date, …)                                  |
-| `union`   | `members: IrType[]`                                      | tagged scalar union (v1: homogeneous-width scalar members)                          |
-| `boxed`   | `inner: IrType`                                          | single-field heap cell (mutable-capture ref cell)                                   |
-| `dynamic` | `tag?: JsTag`                                            | statically-unknown JS value; optional proven partition refinement (erased at joins) |
+| kind      | payload                                                           | meaning                                                                                |
+| --------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `val`     | `val: ScalarVal`, `signed?: boolean`                              | one concrete Wasm-level scalar/opaque-ref slot                                         |
+| `string`  | —                                                                 | backend-agnostic string                                                                |
+| `object`  | `shape: {fields: [{name, type}]}` (name-sorted)                   | structural object shape                                                                |
+| `closure` | `signature: {params: IrType[], returnType: IrType}`               | callable value; captures are NOT a type property                                       |
+| `class`   | `shape: {classId, className, fields, methods, constructorParams}` | nominal class instance (`classId` is the identity; `className` is diagnostic metadata) |
+| `extern`  | `className: string`                                               | opaque host-class reference (RegExp, Map, Date, …)                                     |
+| `union`   | `members: IrType[]`                                               | tagged scalar union (v1: homogeneous-width scalar members)                             |
+| `boxed`   | `inner: IrType`                                                   | single-field heap cell (mutable-capture ref cell)                                      |
+| `dynamic` | `tag?: JsTag`                                                     | statically-unknown JS value; optional proven partition refinement (erased at joins)    |
 
 `ScalarVal` is the **closed** set of non-indexed leaves (append-only table):
 
@@ -177,7 +176,7 @@ leaves). Those remaining named namespaces are owned by the module assembler
 
 ```
 IrModuleDocument
-├─ irVersion: "3.0"
+├─ irVersion: "4.0"
 ├─ source?: string
 ├─ coverage: [{unitId, name, carrier: "ir"|"legacy", exported, reason?}]   (D3.7)
 └─ functions: [IrFunctionDoc]           (exactly the carrier:"ir" entries)
@@ -372,9 +371,9 @@ boxed, dynamic`.
 
 ## Slice status
 
-| Slice | What                                                        | Status at v3.0                                               |
+| Slice | What                                                        | Status at v4.0                                               |
 | ----- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v3 callable-binding revision** (#3520)                     |
+| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v4 source-qualified class-shape identity** (#3520)         |
 | T2    | purge module-relative indices from in-memory `IrType` (D5)  | open — until then, affected functions are `carrier:"legacy"` |
 | T3    | `serializeIrModule`/`deserializeIrModule` + `--emit-ir`     | open                                                         |
 | T4    | verifier re-derivation of the §Node-inventory rules (#1924) | open — D3.3 effective from here                              |

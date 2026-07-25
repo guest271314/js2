@@ -108,7 +108,7 @@ describe("five-part contract surface (#3029-S1)", () => {
 
 describe("IR interchange contract surface (#3030-T1)", () => {
   it("exports the frozen format version", () => {
-    expect(IR_FORMAT_VERSION).toBe("3.0");
+    expect(IR_FORMAT_VERSION).toBe("4.0");
     expect(IR_FORMAT_VERSION).toMatch(/^\d+\.\d+$/);
   });
 
@@ -131,6 +131,7 @@ describe("IR interchange contract surface (#3030-T1)", () => {
     expect(scalars).not.toContain("ref_null");
     expect(schema.$defs.function.required).toContain("unitId");
     expect(schema.$defs.coverageEntry.required).toContain("unitId");
+    expect(schema.$defs.classShape.required).toContain("classId");
     expect(schema.$defs.funcRef.required).toContain("binding");
     expect(
       schema.$defs.callableBinding.oneOf.map(

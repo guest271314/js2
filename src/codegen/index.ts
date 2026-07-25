@@ -1362,6 +1362,7 @@ function buildIrClassShapes(
     }
 
     const shape: import("../ir/nodes.js").IrClassShape = {
+      classId,
       className,
       fields,
       methods,

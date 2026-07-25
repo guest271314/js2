@@ -149,8 +149,8 @@ function identifierUse(root: ts.Node, name: string): ts.Identifier {
   return identifier;
 }
 
-function projected(name: string): IrClassShape {
-  return { className: name, fields: [], methods: [], constructorParams: [] };
+function projected(classId: IrClassId, name: string): IrClassShape {
+  return { classId, className: name, fields: [], methods: [], constructorParams: [] };
 }
 
 function expectPlanningError(run: () => unknown, code: IrPlanningIdentityInvariantCode): void {
@@ -253,25 +253,29 @@ describe("#3520 module-binding and local-class identity", () => {
       const b = graph.byName.get("/repo/b.ts")!;
       const aDeclaration = classDeclaration(a, "Value");
       const bDeclaration = classDeclaration(b, "Value");
-      const shapes = new Map([["Value", projected("Value")]]);
-      const resolveA = makeIrIdentityLocalClassExpressionResolver(graph.checker, a, shapes, graph.context);
-      const resolveB = makeIrLocalClassExpressionResolver(graph.checker, b, shapes, graph.context);
+      const expectedA = classId(graph.context, aDeclaration);
+      const expectedB = classId(graph.context, bDeclaration);
+      const shapesA = new Map([["Value", projected(expectedA, "Value")]]);
+      const shapesB = new Map([["Value", projected(expectedB, "Value")]]);
+      const resolveA = makeIrIdentityLocalClassExpressionResolver(graph.checker, a, shapesA, graph.context);
+      const resolveB = makeIrLocalClassExpressionResolver(graph.checker, b, shapesB, graph.context);
+      expectPlanningError(
+        () => makeIrIdentityLocalClassExpressionResolver(graph.checker, a, shapesB, graph.context),
+        "class-record-mismatch",
+      );
       const readA = functionDeclaration(a, "read");
       const readB = functionDeclaration(b, "read");
       const conditional = collectNodes(readA, ts.isConditionalExpression)[0]!;
       const alias = propertyReceiver(readA, "alias");
       const parameterA = propertyReceiver(readA, "parameter");
       const parameterB = propertyReceiver(readB, "parameter");
-      const expectedA = classId(graph.context, aDeclaration);
-      const expectedB = classId(graph.context, bDeclaration);
-
       for (const expression of [conditional, alias, parameterA]) {
         expect(resolveA(expression)).toEqual({ classId: expectedA, legacyName: "Value" });
       }
       expect(resolveB(parameterB)).toEqual({ classId: expectedB, legacyName: "Value" });
       expect(expectedA).not.toBe(expectedB);
       expect(projectIrLocalClassExpressionResolverToLegacy(resolveA)(alias)).toBe("Value");
-      expect(makeIrLocalClassExpressionResolver(graph.checker, a, shapes)(alias)).toBe("Value");
+      expect(makeIrLocalClassExpressionResolver(graph.checker, a, shapesA)(alias)).toBe("Value");
       expect(LEGACY_CLASS_RESOLVER_IS_EXACT).toBe(false);
 
       const shadowParameter = propertyReceiver(functionDeclaration(a, "shadow"), "value");
@@ -291,12 +295,13 @@ describe("#3520 module-binding and local-class identity", () => {
       `,
     });
     const original = graph.byName.get("/repo/a.ts")!;
+    const valueClassId = classId(graph.context, classDeclaration(original, "Value"));
     const clone = ts.createSourceFile(original.fileName, original.text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
     const moduleResolver = makeIrIdentityModuleBindingResolver(graph.checker, MODULE_OPTIONS, graph.context);
     const classResolver = makeIrIdentityLocalClassExpressionResolver(
       graph.checker,
       original,
-      new Map([["Value", projected("Value")]]),
+      new Map([["Value", projected(valueClassId, "Value")]]),
       graph.context,
     );
     const clonedRead = functionDeclaration(clone, "read");
