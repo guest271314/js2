@@ -1,5 +1,5 @@
 ---
-id: 3619
+id: 3622
 title: "Unbounded runtime scan: `Array.prototype.lastIndexOf` on an array-like never matches at indices > 2^32, so it walks ~9×10^15 slots (in-process harnesses hang forever)"
 status: ready
 sprint: current
