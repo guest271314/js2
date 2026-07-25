@@ -9,6 +9,15 @@ feasibility: hard
 goal: core-semantics
 assignee: ttraenkler/senior-dev-harness
 created: 2026-07-25
+# +10 lines on the CodegenContext interface (2986 -> 2996): ONE optional field,
+# `droppedModuleInitShapes`, plus its doc comment. A field on the context type
+# cannot live in a subsystem module — the interface IS the shared surface — and
+# the new LOGIC deliberately went to its own file
+# (src/codegen/module-init-collection.ts, 178 lines) rather than into either
+# god-file. 8 of the 10 lines are the comment recording the six historical
+# silent drops, which is the point of the change.
+loc-budget-allow:
+  - src/codegen/context/types.ts
 ---
 
 ## Problem
