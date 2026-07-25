@@ -173,3 +173,81 @@ Map/Set/Symbol lane and is not evidence for the host mechanism.
   lanes) is a separate, newly-filed cross-lane defect in the same substrate.
   It is plausibly upstream of the standalone half of this issue — check it
   before designing the standalone fix.
+
+---
+
+## RESULT — the HOST arm of this issue is DONE, closed by #3635
+
+Same calibrated harness (`plan/probes/3603/uncurry.mts`), **unchanged**, re-run
+against `upstream/main` **merged with `issue-3603-s1-uncurry-this`** (PR #3635,
+`src/runtime/vec-mirror-writeback.ts` + 14 wiring lines, zero codegen bytes):
+
+| case                              | host BEFORE | host AFTER | standalone (both) |
+| --------------------------------- | ----------- | ---------- | ----------------- |
+| `uncurried-push-works`            | fail        | **pass**   | fail (trap)       |
+| `uncurried-join-works`            | pass        | pass       | fail (trap)       |
+| `uncurried-hasown-objlit`         | pass        | pass       | fail              |
+| `uncurried-hasown-desc-shape`     | pass        | pass       | fail              |
+| `failure-accumulation-end-to-end` | fail        | **pass**   | fail (trap)       |
+| `runtime-hasown-via-any-param`    | pass        | pass       | fail              |
+| `runtime-keys-via-any-param`      | pass        | pass       | fail              |
+| `runtime-forin-via-any-param`     | pass        | pass       | fail              |
+| `push-then-join-discriminator`    | fail        | **pass**   | fail (trap)       |
+| `push-then-index0-discriminator`  | fail        | **pass**   | fail (trap)       |
+| `native-push-control` (CONTROL)   | pass        | pass       | pass              |
+
+**Host 4/10 → 0/10. Control still green on both lanes. Standalone unchanged at
+10/10 fail, 5 of them uncatchable traps.**
+
+So #3635 covers the host arm **including the uncurried spelling** — the
+falsifiable alternative (that it fixed only the direct `.call` spelling and left
+`__push` broken) is refuted. This is a **second, independent harness** agreeing
+with #3635's own tests, reached from the opposite direction:
+
+- I derived the mechanism from a **behavioural split** — the 4 failing host
+  cases all MUTATE the receiver (`__push`), the 2 passing ones
+  (`__hasOwnProperty`, `__join`) only READ it, and native `a.push(x)` passes.
+- #3635 derived it from **mirror identity** — the vec argument arrives as the
+  `__make_iterable` mirror, a real JS array that `convertToJS` refreshes FROM
+  the vec on every crossing (#3368), so the host appends to an array the Wasm
+  side never consults.
+
+Those are the same defect. Read-only crossings never needed the write-back,
+which is exactly why they were never broken. Convergence from two harnesses is
+much stronger evidence than either alone.
+
+### What remains: the STANDALONE arm only
+
+**Do not re-implement the host arm.** The remaining work is standalone, where
+all 10 rows still fail and the mechanism may genuinely differ (5 rows trap
+rather than returning a wrong value).
+
+### Success metric — corrected, and this matters
+
+The original plan assumed uncurryThis vacuity was what gates `verifyProperty` on
+standalone. **It is not** — that is the HOST mechanism. #3603's detector
+separates `NO_CHECKS` (no descriptor check ran) from `SWALLOWED` (a check ran,
+the report was lost), and on standalone **every legible message said
+`NO_CHECKS`; none said `SWALLOWED`**. The four descriptor guards are already
+false before `__push` is ever reached, because they are `__hasOwnProperty(desc, …)`
+queries against a plain object literal — #3603's root cause A.
+
+⇒ **Fixing this issue's standalone arm will NOT un-vacuum `verifyProperty` on
+standalone.** Measure **trap / dispatch-failure reduction** instead. If you
+measure verifyProperty flips you will get ≈0 and wrongly conclude a correct fix
+did nothing. It also means this issue and #3603 S2 cannot double-attribute rows
+— different gates entirely.
+
+The 109-test cluster figure earlier in this issue was measured on the standalone
+Map/Set/Symbol lane and is **not** evidence for the host mechanism.
+
+### Method note worth keeping
+
+A cluster sharing a failure signature is a **population to be enumerated, never
+a forecast to be multiplied**. In every instance seen on 2026-07-25/26 the
+signature was a property of **where** the failure surfaced — a frame
+(`__module_init`, an `assert.throws` callback) or a message string — never of
+**what** was wrong. Ask what VARIES inside the cluster before counting it; for
+#3638's 43-row bucket that was ten different builtins, visible in about two
+minutes of reading the file list, and it turned a "43-row defect" into a 16-row
+one plus nine unrelated causes.

@@ -1,6 +1,6 @@
 ---
 id: 3642
-title: "An instance member value-read of a builtin prototype method reads as null — on BOTH lanes (`var a=[1]; a.fill` → null)"
+title: "Standalone: an instance member value-read of a builtin prototype method reads as null (`var a=[1]; a.fill`) — host half CONTESTED, see Reconciliation"
 status: ready
 sprint: current
 created: 2026-07-26
@@ -15,14 +15,24 @@ related: [3638, 3571, 3603, 2984, 2773]
 origin: "measured while fixing #3638 (opus-loop-c, 2026-07-25)"
 ---
 
-# Instance member value-read of a builtin method is `null` — both lanes
+# Instance member value-read of a builtin method is `null`
 
-> **This is a CROSS-LANE compiler correctness gap, not a standalone-lane gap.**
-> It is filed separately from #3571 and #3638 precisely so it is not read as a
-> footnote on a standalone trap bucket. Both numbers below were measured, on
-> both lanes, in the same process shape.
+> **SCOPE CORRECTION (2026-07-26).** This issue was filed claiming the defect on
+> **BOTH** lanes. **The standalone half is confirmed. The host half is contested
+> and should NOT be relied on** — opus-loop-a measured the opposite with its own
+> positive controls, and on inspection **my host harness failed its own first
+> positive control**. See "Reconciliation" below. The title and this banner were
+> corrected rather than left standing: a cross-lane claim that turns out to be
+> single-lane is exactly the overstatement that gets a real defect dismissed.
+>
+> The **standalone** defect is real, reproduced in four independent compile
+> modes, and is what this issue tracks.
 
 ## Measured (2026-07-25, `upstream/main`)
+
+> **The `host` column below is the CONTESTED one** — it comes from the harness
+> whose own first positive control failed on host. Read the standalone column as
+> the finding; read the host column only alongside "Reconciliation".
 
 Same source, same harness, only the compile target differs:
 
@@ -34,8 +44,9 @@ Same source, same harness, only the compile target differs:
 | `var a=[1]; a.fill === Array.prototype.fill` | 0    | 0     |
 | `var a=[1,2]; a.fill(9); a[0]` (direct call) | 9    | 9     |
 
-So: the **direct call** `a.fill(9)` works, and the `.prototype` **value read**
-works — but the **instance value read** `a.fill` is null on both lanes, and
+So, **on standalone**: the **direct call** `a.fill(9)` works, and the
+`.prototype` **value read** works — but the **instance value read** `a.fill` is
+null, and
 `a.fill !== Array.prototype.fill` where §23.1.3 requires identity (an instance
 has no own `fill`; the read must reach `Array.prototype.fill` through the
 prototype chain and yield the same function object).
@@ -68,13 +79,14 @@ if (inner.name.text !== "prototype") return undefined;
 
 There is no instance-receiver counterpart, so the read falls through to the
 dynamic member path (`__extern_get(vec, "fill")`), which has no entry for a
-prototype method on a vec receiver and yields null. The host lane reaches the
-same null by its own route (it is NOT the same code path — that needs
-confirming before a shared fix is designed).
+prototype method on a vec receiver and yields null. **This locates the
+STANDALONE defect only.** Whether the host lane has any counterpart is exactly
+what is contested — do not design a shared fix off this paragraph.
 
 ## Acceptance criteria
 
-- `var a=[1]; a.fill` is a callable function value on both lanes.
+- `var a=[1]; a.fill` is a callable function value on **standalone** (add a
+  host arm only if the host claim survives the shared repro).
 - `a.fill === Array.prototype.fill` (§23.1.3 identity — the singleton, not a
   fresh wrapper per read; `pushBuiltinFnSingletonValueInstrs` is the existing
   mechanism, cf. #2175 V2-S2).
@@ -90,3 +102,64 @@ confirming before a shared fix is designed).
   standalone** — dynamic-string `===` false-positives there (measured; see the
   #2984 handoff). Use a numeric discriminant.
 - The host lane must be measured separately, not assumed to share the cause.
+
+---
+
+## Reconciliation — the host half is contested, and my harness is the suspect
+
+Two agents measured the same fact with positive controls and disagreed, so one
+harness is lying. Recording the state honestly rather than defending the
+original claim.
+
+### What I re-measured (4-mode matrix, stock `upstream/main`)
+
+Built specifically to test the hypothesis that the disagreement was a
+JS-mode-vs-TS-mode artifact. **That hypothesis is dead** — all four modes agree:
+
+| probe                                   | host TS | host JS | sa TS | sa JS |
+| --------------------------------------- | ------- | ------- | ----- | ----- |
+| `a.fill === null \|\| === undefined`    | 1       | 1       | 1     | 1     |
+| `a.fill ? 1 : 0` (truthiness, not `===`) | 0       | 0       | 0     | 0     |
+| `a.fill.call(a,9)` on `[1,1]`           | THROW `Cannot read properties of null (reading 'call')` | same | illegal cast | illegal cast |
+| `Array.prototype.fill.call(a,9)`        | **18**  | **18**  | **18** | **18** |
+
+### Why I do not trust my own host rows
+
+**My first positive control FAILED on host.** `export function test(){return 7;}`
+threw `WebAssembly.instantiate(): Import #0 "string…"` on the host lane while
+passing on standalone. Two later controls passed on host (`a[0]+a[1]` → 9,
+direct `a.fill(9)` → 18) and I routed around the failure. That was wrong: a
+failing control says the **host instantiation path used here**
+(`compile()` + `WebAssembly.instantiate(binary, r.importObject)` + `__setExports`)
+does **not** supply a complete host import object. Host-lane probes need the real
+import object via `runTest262File`.
+
+**The distinction that matters, and that this issue exists to record:** a
+positive control proves the detector **FIRES**. It does not prove the **CHANNEL
+carries the value faithfully**. Those are different guarantees. "Reads as null on
+host" is precisely the artifact a thin host import object manufactures. Two
+sibling traps found the same day on these exact channels: the standalone
+string-return channel reads back `undefined` in a naive harness, and
+`typeof X === "function"` evaluates false on host even when `typeof X` renders as
+`"function"`.
+
+### Contested in the other direction too
+
+opus-loop-a reports `Array.prototype.fill.call(a, 9)` **throws on standalone**.
+I measure **18** there, in all four modes, and separately `27` for the
+three-element version in an earlier run. So that row may be its artifact the way
+the host rows may be mine. Both halves need the same reconciliation: run one
+agreed repro verbatim, in one process, with controls on both sides.
+
+### Status of each claim
+
+| claim                                                     | status                          |
+| --------------------------------------------------------- | ------------------------------- |
+| standalone: `a.fill` reads null                            | **CONFIRMED** (4 modes)         |
+| standalone: instance `.call` traps `illegal cast`          | **CONFIRMED** (and fixed at the call site by #3638) |
+| host: `a.fill` reads null                                  | **CONTESTED — do not rely on**  |
+| standalone: `Array.prototype.fill.call(a,9)` works         | measured 18 here; loop-a reports a throw — **CONTESTED** |
+
+Until reconciled, treat this issue as **standalone-scoped**. The acceptance
+criteria below still stand for standalone; re-add a host arm only if the host
+claim survives a shared repro.
