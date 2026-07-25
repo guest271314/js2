@@ -1,7 +1,7 @@
 ---
 id: 3620
 title: "Standalone: a class generator method with an ARRAY binding-pattern parameter that has a DEFAULT traps `illegal cast` (~91-test uncatchable-trap bucket)"
-status: in-progress
+status: done
 assignee: ttraenkler/opus-3620
 sprint: current
 priority: high
@@ -10,6 +10,7 @@ feasibility: hard
 goal: standalone-gap
 related: [3610, 3592]
 created: 2026-07-25
+completed: 2026-07-25
 # +32 lines in registerNativeGenerator, of which ~24 are the comment recording
 # WHY the state field must be typed at the runtime rep (the checker-tuple vs
 # widened-externref divergence that produced the trap) — the exact knowledge a
