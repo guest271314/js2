@@ -310,6 +310,43 @@ SCRIPT-vs-TEST gap that would leave the anti-vacuity guard itself unguarded.
    change-scoped allowance for the intentional de-inflation — i.e. its own
    landing, on the #3592 RC2 recipe.
 
+   **Scoped measurement (N = 20, seed 20260725, compile-only,
+   `.tmp/probe-parsenegative.mts`)** — cheap corroboration for whoever sizes it,
+   NOT a corpus number:
+
+   | rejection reason on a parse/early/resolution negative that scores `pass` | n      |
+   | ------------------------------------------------------------------------ | ------ |
+   | static/syntax rejection (genuine early-error detection)                  | **18** |
+   | coincidental (rejected for something other than the target construct)    | **1**  |
+   | no diagnostic at all                                                     | **1**  |
+
+   1/20 = 5 % sits inside the audit's independently-derived 3–7 % band, so the
+   ~150–300 corpus estimate holds.
+
+   > **IMPORTANT — this measurement REFUTES the simple form of the fix sketched
+   > above, including my own.** The one coincidental hit is
+   > `dynamic-import/syntax/invalid/nested-async-arrow-function-await-typeof-import-source.js`,
+   > rejected with `'source' is not a valid meta-property for keyword 'import'.
+Did you mean 'meta'?`. That is a **TS parse diagnostic** — a genuine static
+   > rejection by any vocabulary test — and it is STILL coincidental, because it
+   > rejects an unsupported _proposal_ rather than the construct the test
+   > targets. So a keyword regex over the diagnostic text
+   > (`/unsupported|not supported|…/`) is **not a sufficient discriminator**:
+   > it would miss this case entirely while risking false hits elsewhere.
+   >
+   > The real discriminator has to relate the rejection to the test's **target
+   > construct** (e.g. does the diagnostic's source position fall inside the
+   > syntax the test is about; does the test's `features:` list name a proposal
+   > we do not implement). That is a design problem, not a regex — which is a
+   > further reason this needs its own landing rather than a rider. The
+   > capability-refusal rule above remains correct as far as it goes; it is just
+   > not the whole discriminator.
+
+   The `no diagnostic at all` row
+   (`language/expressions/logical-assignment/lgcl-and-eval-strict.js`) is a
+   separate question worth a look: #2920's strict compile-succeeded arm should
+   score that `fail`, so it is presumably reaching the lenient warning arm.
+
 3. **Host `(0, eval)` fallback passes (audit class P4, ~75 estimated).** Bounded
    and low-severity; the honest fix is to mark a result whose validation went
    through the host `eval` fallback rather than compiled code, so the class is
