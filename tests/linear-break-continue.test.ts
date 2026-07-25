@@ -337,10 +337,6 @@ describe("linear fail-loud on unsupported constructs (#1937)", () => {
       `export async function f(): Promise<number> { return await g(); }
        async function g(): Promise<number> { return 1; }`,
     ],
-    [
-      "switch case fall-through (non-empty body)",
-      `export function f(x: number): number { let r=0; switch(x){ case 1: r=1; case 2: r=2; break; } return r; }`,
-    ],
   ];
 
   for (const [name, src] of unsupported) {
@@ -370,6 +366,18 @@ describe("linear fail-loud on unsupported constructs (#1937)", () => {
       `export function f(): number { L: for (let i=0;i<2;i+=1) { continue L; } return 1; }`,
     );
     expect(e.f()).toBe(1);
+  });
+
+  // #2952 slice 4 — switch (incl. non-empty-body fallthrough) moved OUT of
+  // the fail-loud list: the IR path claims numeric-literal switches and the
+  // block-per-case ladder is core Wasm, so linear compiles AND runs them.
+  it("switch fallthrough now compiles and runs on linear (#2952 slice 4)", async () => {
+    const e = await compileLinear(
+      `export function f(x: number): number { let r=0; switch(x){ case 1: r=1; case 2: r=2; break; } return r; }`,
+    );
+    expect(e.f(1)).toBe(2); // case 1 falls into case 2
+    expect(e.f(2)).toBe(2);
+    expect(e.f(3)).toBe(0);
   });
 
   it("empty statements compile without a diagnostic", async () => {

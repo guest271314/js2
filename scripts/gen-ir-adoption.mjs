@@ -57,20 +57,20 @@ const SECTIONS = [
       ["`Block`", "ir-owned", "Plain statement lists; scope handling via LowerCtx.", "—"],
       [
         "`SwitchStatement`",
-        "direct-only",
-        "No IR handler. Needs `br_table` + block-per-case (Design A, #2952 spec).",
+        "mixed",
+        "Numeric-literal case tests claimed via the `switch` IR instr (block-per-case ladder; eq-chain dispatch, `br_table` for dense-int i32 discs; fallthrough + mid-position `default` + break/continue interplay — #2952 slice 4). Non-literal / string tests stay legacy.",
         "#2952",
       ],
       [
         "`BreakStatement`",
         "mixed",
-        "Unlabeled `break` claimed in all IR loop kinds via `br.label` + lowering-time depth resolver (#2952 slice 2); labeled break claimed when the label binds a claimed labeled LOOP (slice 3). `break` of a labeled non-loop block / switch stays legacy.",
+        "Unlabeled `break` binds the nearest loop OR switch (`breakTargetLabel`, #2952 slice 4); labeled break targets labeled loops (slice 3), labeled switches and labeled non-loop blocks (`labeled.block`, slice 4) — all via `br.label` + the lowering-time depth resolver. Breaks in still-direct-only contexts (for-in) stay legacy.",
         "#2952",
       ],
       [
         "`ContinueStatement`",
         "mixed",
-        "Unlabeled `continue` claimed (dedicated continue-target frame per loop shape); labeled continue claimed via the same label→loopLabel resolution (#2952 slice 3).",
+        "Unlabeled `continue` claimed (dedicated continue-target frame per loop shape) and keeps binding the nearest LOOP even through switch frames (§14.8 vs §14.9 split, #2952 slice 4); labeled continue via the label→loopLabel resolution (slice 3).",
         "#2952",
       ],
       [
@@ -82,7 +82,7 @@ const SECTIONS = [
       [
         "`LabeledStatement`",
         "mixed",
-        "Labeled LOOPS claimed (`lbl: while/do/for/for-of` — label name resolves to the loop's own `loopLabel`; branches crossing an inner `forof.iter` inline its IteratorClose, #2952 slice 3). Labeled non-loop statements need `labeled.block` — banked for the switch slice.",
+        "Labeled LOOPS claimed via the loop's own `loopLabel` (+ IteratorClose on crossing branches, #2952 slice 3); labeled switches alias the switch's `breakLabel`; other labeled statements claim via the break-only `labeled.block` frame (slice 4). A label on a still-direct-only statement (for-in) stays legacy.",
         "#2952",
       ],
       ["`ForInStatement`", "direct-only", "Object iteration host-import based today.", "#2952"],
