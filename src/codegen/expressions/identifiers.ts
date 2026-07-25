@@ -53,6 +53,7 @@ import {
   isSupportedBuiltinNamespace,
 } from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
+import { emitImplicitGlobalRead } from "../global-environment.js";
 
 /**
  * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
@@ -809,7 +810,7 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     }
     return mType;
   }
-
+  if (ctx.sloppyImplicitGlobals?.has(name)) return emitImplicitGlobalRead(ctx, fctx, name);
   // Standalone built-in namespace values (Array/Object) materialize as lazy
   // open-object singletons before ambient lib declarations can route them to
   // host globals.
