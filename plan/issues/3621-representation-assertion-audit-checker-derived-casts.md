@@ -82,25 +82,38 @@ risk.)
 4. The triage is therefore a **prioritised reading list**, not a classification.
    The classification below is hand-verified only where marked.
 
-### Hand-verified so far — all four `getSymbol()?.name` RAW-ASSERTs are SAFE
+### Hand-verified: three of four `getSymbol()?.name` RAW-ASSERTs are safe, ONE IS LIVE
 
-The assignment's own scope turned out to contain **no** live defect. Verified
-by reading each site:
+> **Correction to this document's own first draft.** It originally listed all
+> four as safe, with `regexp-standalone.ts:2853` marked "safe — receiver is
+> materialised by the same lowering that types it". **That verdict was written
+> without reading the site, and it is wrong.** An unverified entry in a table
+> headed "hand-verified" is worse than no entry, because it stops the next
+> person from looking. The corrected row is below. The same failure mode this
+> issue exists to catch — asserting something on the strength of a plausible
+> story rather than evidence.
 
-| site                                                               | verdict  | why                                                                                                                                                                                                 |
-| ------------------------------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `property-access-dispatch.ts:1090` (`TextEncoderEncodeIntoResult`) | **safe** | `struct.get` runs only under a STATIC `recvType.typeIdx === resultTypeIdx` check; otherwise it drops and returns `f64 0`. Limitation 3.                                                             |
-| `property-access-dispatch.ts:759` (buffer byte attrs)              | **safe** | the downstream cast IS `ref.test`-guarded (~line 915, with a `0` fallback) — outside the 60-line window. Also carries #3062's `.prototype` null-out and now sits behind #3610's gate. Limitation 1. |
-| `expressions/call-builtin-static.ts:1783` (`Generator`)            | **safe** | compiles + **drops** the argument and returns a cached singleton; no assertion on the value at all. The `struct` match came from the _next_ arm (line 1793), counted separately.                    |
-| `regexp-standalone.ts:2853`                                        | **safe** | (see file) receiver is materialised by the same lowering that types it.                                                                                                                             |
+| site                                                                                                          | verdict              | why                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `property-access-dispatch.ts:1090` (`TextEncoderEncodeIntoResult`)                                            | **safe**             | `struct.get` runs only under a STATIC `recvType.typeIdx === resultTypeIdx` check; otherwise it drops and returns `f64 0`. Limitation 3.                                                                                                                                                                                                                             |
+| `property-access-dispatch.ts:759` (buffer byte attrs)                                                         | **safe**             | the downstream cast IS `ref.test`-guarded (~line 915, with a `0` fallback) — outside the 60-line window. Also carries #3062's `.prototype` null-out and now sits behind #3610's gate. Limitation 1.                                                                                                                                                                 |
+| `expressions/call-builtin-static.ts:1783` (`Generator`)                                                       | **safe**             | compiles + **drops** the argument and returns a cached singleton; no assertion on the value at all. The `struct` match came from the _next_ arm (line 1793), counted separately.                                                                                                                                                                                    |
+| `regexp-standalone.ts:2853` (`RegExpExecArray` / `RegExpMatchArray` → `.index`/`.input`/`.groups`/`.indices`) | **LIVE — unguarded** | keys on `nonNull.getSymbol()?.name`, then at lines 2869-2877 does `any.convert_extern` + **unconditional `ref.cast` to `matchVecIdx`** for an `externref` receiver (and a bare `ref.cast` for a mismatched `ref`). No `ref.test`, no fallback. A value the checker types `RegExpMatchArray` but which this standalone backend did not produce traps `illegal cast`. |
 
-This is a meaningful negative result: **the family's real risk does not live at
-the `getSymbol()?.name` sites.** Both proven defects (#3620, #3621) came from
-`resolveWasmType(` / `resolveStructName(`, and #3620's cast was emitted a
-module away from its decision. Future effort should go to the
-`resolveWasmType(` / `resolveStructName(` RAW-ASSERTs and, more importantly, to
-sites where the decision and the cast are **separated by a function boundary**
-— which no lexical triage can find.
+**Suspected connection to an already-measured symptom:** 2 of the 3 rows that
+still trapped after slice 1 are `built-ins/RegExp/match-indices/*`, and
+`.indices` is handled by exactly this site. Not yet confirmed — the census
+category for those rows is `null_deref`, not `illegal_cast`, so it may be a
+different assertion in the same lowering. **Confirm before fixing** (the whole
+point of this issue is not to assert without evidence).
+
+Net: **the `getSymbol()?.name` scope is not empty after all — it holds one live
+RAW-ASSERT.** But it remains a poor proxy: both _proven_ defects (#3620, #3621)
+came from `resolveWasmType(` / `resolveStructName(`, and #3620's cast was
+emitted a module away from its decision. Future effort should go to the
+`resolveWasmType(` / `resolveStructName(` RAW-ASSERTs and, above all, to sites
+where the decision and the cast are **separated by a function boundary** —
+which no lexical triage can find.
 
 ## Slice 1 (this PR) — `delete obj.prop` on a reflectively-bound receiver
 
