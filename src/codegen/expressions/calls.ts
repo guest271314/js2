@@ -1220,6 +1220,47 @@ function tryEmitNativeProtoReflectiveCall(
 }
 
 /**
+ * (#3638) True when `receiver` is an **instance** member read of a builtin
+ * prototype method — `[].fill`, `a.slice`, `this.join` — as opposed to the
+ * `<Ident>.prototype.<member>` value read (or a variable holding one).
+ *
+ * Both shapes have the SAME TypeScript type (the `MethodSignature` on the lib
+ * interface), which is why the caller's symbol-based gate cannot tell them
+ * apart — but only the `.prototype` shape lowers to the wrapper struct the
+ * caller's `ref.cast` expects. Anything that is not a property access (an
+ * identifier holding the value-read closure, a call result, …) keeps the
+ * pre-existing receiver-compiling path.
+ */
+function isInstanceMemberProtoRead(receiver: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(receiver)) return false;
+  const base = unwrapTransparent(receiver.expression);
+  return !(ts.isPropertyAccessExpression(base) && base.name.text === "prototype");
+}
+
+/**
+ * (#3638) Conservative purity test for the BASE of an instance member read.
+ * When true the base is not compiled at all (its value is discarded anyway, and
+ * compiling e.g. a bare `[]` can itself fail — an empty array literal has no
+ * vec-typed hint in expression position). When false the base IS compiled and
+ * dropped, so observable side effects still happen in source order. Returns
+ * false for anything it cannot prove, so an unknown shape is always evaluated.
+ */
+function isSideEffectFreeReceiverBase(expr: ts.Expression): boolean {
+  const e = unwrapTransparent(expr);
+  if (ts.isIdentifier(e) || e.kind === ts.SyntaxKind.ThisKeyword) return true;
+  if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) || ts.isNumericLiteral(e)) return true;
+  if (
+    e.kind === ts.SyntaxKind.TrueKeyword ||
+    e.kind === ts.SyntaxKind.FalseKeyword ||
+    e.kind === ts.SyntaxKind.NullKeyword
+  ) {
+    return true;
+  }
+  if (ts.isArrayLiteralExpression(e)) return e.elements.every((el) => isSideEffectFreeReceiverBase(el));
+  return false;
+}
+
+/**
  * (#2876) Shared tail for a reflective `<closure>.call/apply(thisArg, …args)` on a
  * value-erased native-proto member closure. Ensures the `(brand, member, kind)`
  * closure to obtain the wrapper struct type + lifted func type, reshapes the args
@@ -1300,11 +1341,38 @@ function emitReflectiveNativeProtoClosureCall(
   const selfTypeIdx = getClosureFuncSelfTypeIdx(ctx, closureInfo.funcTypeIdx) ?? closureInfo.structTypeIdx;
   const structRefT: ValType = { kind: "ref", typeIdx: selfTypeIdx };
   const closureLocal = allocLocal(fctx, `__protocall_${fctx.locals.length}`, structRefT);
-  const recvType = compileExpression(ctx, fctx, receiver);
-  // The receiver is externref (type-erased) or already a (ref $wrap). Normalize
-  // to the function's self carrier via any.convert_extern + ref.cast.
-  if (recvType && recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" });
+  // (#3638) The `ref.cast` below is UNCONDITIONAL, so it is only sound when the
+  // receiver's RUNTIME VALUE is provably the native-method wrapper. The gate
+  // above only proves the receiver's STATIC TYPE is a builtin-prototype method
+  // signature — and two DIFFERENT receiver syntaxes share that static type:
+  //
+  //   Array.prototype.fill.call(o, 1)   value read → the identity-stable
+  //                                     `__builtinfn_singleton_*` wrapper ✔
+  //   [].fill.call(o, 1) / a.fill.call  INSTANCE member read → the dynamic
+  //                                     `__extern_get(vec, "fill")` path, which
+  //                                     yields NULL today ✘ → the non-null
+  //                                     `ref.cast` traps `illegal cast`.
+  //
+  // A trap is uncatchable: it aborts the module, so the enclosing `try`/`catch`
+  // (and test262's `assert.throws`) can never observe it. Since `a.fill` IS
+  // `Array.prototype.fill` per §23.1.3 (same function object), the instance
+  // shape resolves to the SAME singleton — evaluating the base only for its side
+  // effects. That keeps the two syntaxes observationally identical instead of
+  // trapping on one of them, and leaves the provable shapes byte-identical.
+  if (isInstanceMemberProtoRead(receiver)) {
+    const base = (receiver as ts.PropertyAccessExpression).expression;
+    if (!isSideEffectFreeReceiverBase(base)) {
+      const baseType = compileExpression(ctx, fctx, base);
+      if (baseType !== null) fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
+  } else {
+    const recvType = compileExpression(ctx, fctx, receiver);
+    // The receiver is externref (type-erased) or already a (ref $wrap). Normalize
+    // to the function's self carrier via any.convert_extern + ref.cast.
+    if (recvType && recvType.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" });
+    }
   }
   fctx.body.push({ op: "ref.cast", typeIdx: selfTypeIdx });
   fctx.body.push({ op: "local.set", index: closureLocal });
