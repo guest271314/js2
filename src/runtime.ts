@@ -2188,7 +2188,9 @@ function _convertIterableForHost(obj: any, exports: Record<string, Function> | u
         return arr;
       }
     } catch {
-      // not a vec — fall through
+      // (#3637) NOT "not a vec" — `__vec_len` never throws for a non-vec, it
+      // returns 0 (`__is_vec` on the guard above is what answers that). Only a
+      // genuine element-read trap lands here.
     }
   }
   return obj;
@@ -3040,10 +3042,12 @@ function _wasmToPlain(val: any, exports: Record<string, Function> | undefined, s
             return arr;
           }
         } catch (e) {
-          // Propagate a circular-structure TypeError raised by a deeper element;
-          // only a genuine "not a vec" probe failure should fall through.
+          // Propagate a circular-structure TypeError raised by a deeper element.
           if (e instanceof TypeError) throw e;
-          // Not a vec — fall through
+          // (#3637) The rest is NOT "not a vec" — `_isWasmVec` on the guard
+          // above decided that and `__vec_len` never throws for a non-vec. Only
+          // a genuine element-read trap lands here; fall through to the object
+          // rendering below.
         }
       }
       // A genuine vec we cannot read (no `__vec_get`) — hand the raw ref back
@@ -3110,17 +3114,20 @@ function _normaliseJsonReplacer(
     if (wrapped) return { kind: "fn", fn: wrapped };
     // (#2671) §25.5.2.1 step 4.b — only an *array* replacer becomes a
     // PropertyList; any other object (`JSON.stringify(obj, {})`,
-    // `new String('s')`, …) is silently ignored. `_wasmToPlain` cannot tell an
-    // empty object struct from an empty vec (both report `__vec_len` 0 — the
-    // not-a-vec default), so it mis-materialises `{}` as `[]`, producing an
-    // empty PropertyList that wrongly filters out every key (`{}` → `"{}"`).
-    // Gate the PropertyList path on the *positive* `__is_vec` discriminator
-    // (`ref.test` over all registered vec types); a plain object struct answers
-    // 0 and correctly falls through to `{ kind: "none" }` (no replacer). Genuine
-    // array replacers cross the host boundary as real JS arrays and are handled
-    // by the `Array.isArray(replacer)` branch above, so this branch is reached
-    // only by object structs (and, defensively, any true wasm vec struct, which
+    // `new String('s')`, …) is silently ignored. Gate the PropertyList path on
+    // the *positive* `__is_vec` discriminator (`ref.test` over all registered
+    // vec types); a plain object struct answers 0 and correctly falls through to
+    // `{ kind: "none" }` (no replacer). Genuine array replacers cross the host
+    // boundary as real JS arrays and are handled by the
+    // `Array.isArray(replacer)` branch above, so this branch is reached only by
+    // object structs (and, defensively, any true wasm vec struct, which
     // `__is_vec` still routes to the PropertyList path).
+    //
+    // (#3637) This comment used to justify the gate by noting that
+    // `_wasmToPlain` "mis-materialises `{}` as `[]`" — true when written, and
+    // the clearest surviving statement of the vacuity, but no longer accurate:
+    // `_wasmToPlain` is itself `__is_vec`-gated now, so the gate here is
+    // defence-in-depth rather than a workaround for a broken callee.
     const isVecFn = exports?.__is_vec;
     if (typeof isVecFn === "function" && isVecFn(replacer) === 1) {
       const asPlain = _wasmToPlain(replacer, exports);
@@ -6551,7 +6558,9 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
           return result;
         }
       } catch {
-        // Not a vec — fall through
+        // (#3637) NOT "not a vec" — `_isWasmVec` on the guard above owns that
+        // question; `__vec_len` returns 0 for a non-vec instead of throwing.
+        // Only a genuine element-read trap lands here.
       }
     }
   }
@@ -8971,7 +8980,10 @@ assert._isSameValue = isSameValue;
                   return out;
                 }
               } catch {
-                /* not a vec — fall through to ToPrimitive */
+                /* (#3637) NOT "not a vec" — `__vec_len` returns 0 rather than
+                   throwing for a non-vec; `_isWasmVec` on the guard above is
+                   what decides that. Only a genuine element-read trap lands
+                   here, and falling through to ToPrimitive is still right. */
               }
             }
             const prim = _toPrimitive(v, "string", callbackState);
@@ -9466,7 +9478,9 @@ assert._isSameValue = isSameValue;
                   return out;
                 }
               } catch {
-                /* not a vec — fall through to the existing handling */
+                /* (#3637) NOT "not a vec" — that is `_isWasmVec`'s job on the
+                   guard above; `__vec_len` returns 0 instead of throwing. Only
+                   a genuine element-read trap reaches here. */
               }
             }
           }
@@ -13284,7 +13298,9 @@ assert._isSameValue = isSameValue;
               const n = vecLen(x);
               return typeof n === "number" && n >= 0 ? n : -1;
             } catch {
-              return -1; // not a vec struct variant
+              // (#3637) NOT "not a vec" — `_isWasmVec` above already settled
+              // that; `__vec_len` returns 0 for a non-vec rather than throwing.
+              return -1; // genuine read trap — treat as non-spreadable
             }
           };
           const applyConcat = (out: any[], xs: any[]): any[] => {
