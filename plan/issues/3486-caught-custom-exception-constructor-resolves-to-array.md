@@ -30,9 +30,37 @@ origin: "Found while implementing #3429 (assert.throws expected-constructor name
 loc-budget-allow:
   - src/runtime.ts
   - src/codegen/expressions/new-super.ts
+# The codegen half WAS extracted rather than allowed: the prologue block now
+# lives in `emitCtorPrologueFnctorRegistration`, sibling of the existing
+# `emitCallSiteFnctorRegistration`, which took `compileNewFunctionDeclaration`
+# back under the 300-LOC threshold. Only `resolveImport` needs an allowance —
+# it is a 7,142-line import-name dispatch switch whose `constructor` arm is the
+# defect site; splitting it is #3399's job, not this bug fix's, and the +44 is
+# almost entirely the comment recording the vacuity proof.
+func-budget-allow:
+  - src/runtime.ts::resolveImport
 ---
 
 # #3486 — caught custom-exception `.constructor` resolves to `Array`, not the real constructor
+
+> ## HEADLINE — 28 fixed / 0 regressed; ES3 slice is 11 of 41, NOT 41
+>
+> The pre-fix attribution in this file (and in #3628) said "expect the fix to
+> flip all 41 at once." **That was wrong, and it is corrected rather than
+> quietly dropped.** Measured: **11**. The other 30 carry a second, independent
+> blocker in the same files → routed to **#2666**.
+>
+> This is the **fourth** independent confirmation on 2026-07-25 that **a cluster
+> sharing one root cause is a population, not a forecast** — alongside a
+> 627-test cluster that yielded 14 %, a "pervasive" bug that was 34 files, and a
+> trap census off by 280. The common failure mode is identical every time:
+> tests were grouped by a shared _symptom_ (here, one error message), and a
+> shared symptom does not imply a single blocker. A test file can hold two
+> independent failures; fixing one just reveals the next.
+>
+> The gross result is nonetheless real and larger than the ES3 slice:
+> **28 tests fixed, 0 regressed**, spanning eight top-level areas well beyond
+> ≤ES3. Report the two numbers separately; neither buries the other.
 
 ## Problem
 
@@ -114,9 +142,39 @@ struct that reached the arm**, and `.constructor` unconditionally answered
 `Array`: for fnctor instances, for plain object structs, for everything.
 
 This exact vacuity is documented elsewhere in the tree — `#2836` replaced it
-with the **positive `__is_vec` discriminator** at every other `__vec_len` call
-site (`_convertIterableForHost`, `__make_iterable`'s `convertToJS`, and five
+with the **positive `__is_vec` discriminator** at seven other `__vec_len` call
+sites (`_convertIterableForHost`, `__make_iterable`'s `convertToJS`, and five
 more). The `.constructor` arm was simply missed by that sweep.
+
+### A fix applied everywhere-but-one is its own hazard class — TWO further sites found
+
+A migration with no exhaustiveness check leaves survivors, and "seven of eight"
+is invisible precisely because the eighth still _looks_ guarded. Auditing every
+`__vec_len` mention in `runtime.ts` for the defective **discriminator** shape
+(`typeof len === "number"` / `len >= 0` used to DECIDE vec-ness, as opposed to a
+length read after vec-ness is already established) found the `.constructor` arm
+fixed here **plus two more survivors**:
+
+| site                                         | shape                                 | status            |
+| -------------------------------------------- | ------------------------------------- | ----------------- |
+| `extern_get`'s `constructor` arm (~14015)    | `typeof len === "number"`             | **fixed here**    |
+| `_liveIsArray` (~3080)                       | `typeof len === "number" && len >= 0` | **still vacuous** |
+| `looksMarshalable` in `wrapExports` (~14915) | `typeof n === "number" && n >= 0`     | **still vacuous** |
+
+Both survivors are _partially_ masked by a preceding filter — `_liveIsArray`
+first rejects anything with named struct fields, and `looksMarshalable` first
+rejects closures and accepts named structs — which is why neither has produced
+an obvious bug. But the guard itself still never guards: any WasmGC struct that
+slips past the preceding filter is reported as an array/marshalable.
+
+**Deliberately NOT fixed here**: different surface (live-array probing and
+export marshaling, not `.constructor`), and — the discipline this issue's own
+measurement exists to enforce — **unmeasured**. Neither is asserted to be a live
+bug; they are asserted to be the same _shape_, which is what warrants a
+measured follow-up rather than a speculative fix bundled into this PR. One more
+`__vec_len` site (~12228) uses the identical raw call but is genuinely correct:
+it explicitly documents the `0` default and discriminates with `len > 0` plus a
+`Symbol.iterator` probe.
 
 Instrumentation that proved it: wrapping every host import showed exactly
 `__extern_get(<struct>, "constructor") -> fn(Array)`, and `13986` is the only
@@ -261,9 +319,17 @@ fnctor instance without routing through `assert.throws` produces no
   observable values; **5 of 6 verified RED against unmodified main** (the 6th is
   the vec-preservation control, which must stay green both ways by design).
 - 0 pass→fail across the 83-test candidate run.
-- A 536-test regression sample drawn from currently-PASSING tests that exercise
-  the widened surface (a user `function F(){}` + `new F()`, or `.constructor` +
-  `.prototype`), run before/after.
+- **No large local sweep — deliberately, and this is NOT an evidence gap.** A
+  536-test sample of currently-passing tests on the widened surface was
+  attempted and returned **all `compile_timeout (30s)`** at box load average
+  14–20 (other agents active). That measures the container, not the change, so
+  it was discarded rather than reported, and NOT re-run: repeating it costs an
+  hour and reproduces the same garbage. **The `merge_group` re-validation is the
+  regression measurement** — it runs the full test262 matrix on the merged state,
+  which is exactly the gate PR-level checks cannot provide (PR-level
+  `check for test262 regressions` and `merge shard reports` are designed green
+  no-ops). The 83-test CI-equivalent run plus the adjacent suites is the
+  appropriate PR-level evidence.
 - `tests/equivalence/**`, plus the fnctor/host-import gate suites
   (`host-import-allowlist-{budget,gate}`, `issue-2608`, `issue-2660-*`,
   `issue-2674`, `issue-3123`). The two failures observed there
