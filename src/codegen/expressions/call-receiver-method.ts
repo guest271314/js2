@@ -77,6 +77,7 @@ import {
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
+import { tryBuiltinPrototypeMethodBrandThrow } from "../builtin-prototype-brand.js";
 import { emitSetExtrasArgv, maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import {
   compileGuardedNativeStringMethodCall,
@@ -286,6 +287,25 @@ export function compileReceiverMethodCall(
   propAccess: ts.PropertyAccessExpression,
   expectedType?: ValType,
 ): InnerResult | undefined {
+  // (#3610) `<Builtin>.prototype.<brandedMethod>(...)` — e.g.
+  // `Date.prototype.getTime()`. The prototype object carries no [[DateValue]],
+  // so `thisTimeValue` throws TypeError (§21.4.4). Without this gate the
+  // receiver compiles to a null `$Date` ref (TS types `Date.prototype` as
+  // `Date`, so `compileDateMethodCall` engages) and the following `struct.get`
+  // traps UNCATCHABLY on a null reference. Runs first so no downstream arm can
+  // claim the call.
+  {
+    const __r = tryBuiltinPrototypeMethodBrandThrow(
+      ctx,
+      fctx,
+      expr,
+      propAccess,
+      (arg) => compileExpression(ctx, fctx, arg),
+      expectedType,
+    );
+    if (__r !== undefined) return __r;
+  }
+
   // Check if receiver is an externref object
   let receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
   // (#2767) When the static type resolves NO nominal symbol and the receiver
