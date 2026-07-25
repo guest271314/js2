@@ -15,7 +15,7 @@ reasoning_effort: medium
 task_type: bugfix
 area: codegen, scoping
 language_feature: block-scoped-functions
-goal: es5-complete
+goal: es5
 related: [1642]
 test262_bucket: annexb-block-fn-hoisting
 test262_count: 186

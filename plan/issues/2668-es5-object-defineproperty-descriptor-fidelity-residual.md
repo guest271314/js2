@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 es_edition: 5
 language_feature: property-descriptors
-goal: es5-complete
+goal: es5
 related: [1460, 1462, 929]
 sprint: 67
 ---
