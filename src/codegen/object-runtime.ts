@@ -76,6 +76,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
+import { buildApplyClosureArityWidening } from "./closure-exports.js"; // (#3592) under-application widening
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { reserveClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
@@ -4669,12 +4670,20 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     ];
   }
 
-  // n = i32(__extern_length(args)); dispatch.
+  const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
+
+  // (#3592) An UNDER-APPLIED call (`assert.sameValue(a, b)` into a 3-formal
+  // `sameValue`) matched no `__call_fn_method_N` arm and silently returned the
+  // undefined sentinel — it never happened. Rationale: see the builder.
+  const widen = buildApplyClosureArityWidening(ctx, locals, 0, 3, 3);
+
+  // n = i32(__extern_length(args)); widen to the callee's declared arity; dispatch.
   const body: Instr[] = [
     { op: "local.get", index: 2 },
     { op: "call", funcIdx: externLengthIdx },
     { op: "i32.trunc_f64_s" },
     { op: "local.set", index: 3 },
+    ...widen,
     ...dispatch,
   ];
 
@@ -4708,8 +4717,6 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     );
   }
 
-  const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
-
   // (#3140) $__bound_fn front-guard — the same ladder-step pattern as the $Proxy
   // guard above, for the native bound-function carrier `{target, thisArg,
   // boundArgs}` minted by a standalone `Function.prototype.bind` site. Unwrap
@@ -4722,9 +4729,10 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   const objVecPushIdx2 = ctx.funcMap.get("__objvec_push");
   if (ctx.boundFnTypeIdx >= 0 && objVecNewIdx2 !== undefined && objVecPushIdx2 !== undefined) {
     const bfIdx = ctx.boundFnTypeIdx;
-    // Locals appended after `n` (params fn/recv/args = 0..2, n = 3): bf=4,
-    // merged=5, bsrc=6, bk=7, blen=8.
-    const bfLocal = 3 + locals.length; // params(3) + existing locals ([n]) → 4
+    // Locals appended after `n` (+ the #3592 arity-probe trio when emitted);
+    // params fn/recv/args = 0..2, n = 3. Indices are derived from
+    // `locals.length`, so they follow the probe automatically.
+    const bfLocal = 3 + locals.length;
     const mergedLocal = bfLocal + 1;
     const srcLocal = bfLocal + 2;
     const kLocal = bfLocal + 3;
