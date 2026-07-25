@@ -403,6 +403,13 @@ for (const lane of ["gc", "standalone"] as const) {
         ).toBe(c.truth);
       };
       if (c.knownWrong) {
+        // ┌──────────────────────────────────────────────────────────────────┐
+        // │ SEEING "expected test to fail" HERE? That is GOOD NEWS, not a    │
+        // │ broken test: the defect named in the title has been FIXED. The   │
+        // │ action is to DELETE this entry's `knownWrong:` field, which      │
+        // │ turns it into an ordinary `it` asserting the same ground truth.  │
+        // │ Nothing else changes — the assertion was always the TRUTH.       │
+        // └──────────────────────────────────────────────────────────────────┘
         // Asserts the TRUTH; expected to fail today. When the defect is fixed
         // this entry starts passing and vitest reports "expected test to fail"
         // — the debt cannot rot silently.
