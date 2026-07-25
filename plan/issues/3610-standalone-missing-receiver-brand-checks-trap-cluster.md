@@ -10,6 +10,15 @@ feasibility: hard
 goal: standalone-gap
 related: [3592, 3596, 3601]
 created: 2026-07-25
+# The gate's BODY lives in the new subsystem module
+# src/codegen/builtin-prototype-brand.ts. What lands in these two files is the
+# dispatch WIRING only (+13 / +20 lines, the majority of it the comment
+# explaining why the new arm must run BEFORE tryBufferViewAttributeReads /
+# before any receiver-name arm can claim the call). Both files ARE the dispatch
+# chains — there is nowhere else a new dispatch step can be registered.
+loc-budget-allow:
+  - src/codegen/property-access.ts
+  - src/codegen/expressions/call-receiver-method.ts
 ---
 
 ## Problem
