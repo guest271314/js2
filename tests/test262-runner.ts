@@ -16,6 +16,14 @@ import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
 import { ts } from "../src/ts-api.js";
 import { negativeCompileErrorMatches } from "../scripts/negative-verdict.mjs";
+// (#3613) ONE renderer for a thrown Wasm payload, shared with the CI worker.
+// Two copies "kept in sync" by a comment is exactly how the local lane came to
+// report the opaque #2870 label where CI reported the real assertion text.
+import {
+  renderHarnessThrownText,
+  safeStringifyThrown as sharedSafeStringifyThrown,
+  tryNativeExnRender as sharedTryNativeExnRender,
+} from "../scripts/lib/wasm-exn-render.mjs";
 import { isModuleGoal } from "../scripts/test262-module-goal.mjs";
 import { restoreHostBuiltins } from "./test262-restore-builtins.js";
 import { assembleOriginalHarness, type OriginalHarnessVariant } from "./test262-original-harness.js";
@@ -3891,16 +3899,9 @@ function decodeVLQSegment(segment: string): number[] {
  * it: on failure fall back to a stable label so the recorded signature reflects
  * that the module threw a non-JS-stringifiable Wasm-GC payload.
  */
-function safeStringifyThrown(v: any): string {
-  try {
-    return String(v);
-  } catch {
-    const t = typeof v;
-    return t === "object" || t === "function"
-      ? "uncaught Wasm-GC exception (non-stringifiable payload)"
-      : `uncaught Wasm exception (${t})`;
-  }
-}
+// (#3613) Re-exported from the SHARED renderer so this lane and the CI worker
+// cannot drift again. The doc comment above is retained for the #2870 history.
+const safeStringifyThrown = sharedSafeStringifyThrown;
 
 /**
  * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
@@ -3914,20 +3915,8 @@ function safeStringifyThrown(v: any): string {
  * or anything throws — the caller then falls back to the #2870 opaque label.
  * The 64k cap is defensive (a corrupt length must not build a giant string).
  */
-function tryNativeExnRender(instance: any, payload: any): string | null {
-  try {
-    const prep = instance?.exports?.__exn_render_prepare;
-    const chr = instance?.exports?.__exn_render_char;
-    if (typeof prep !== "function" || typeof chr !== "function") return null;
-    const len = prep(payload);
-    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
-    let out = "";
-    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
-    return out;
-  } catch {
-    return null;
-  }
-}
+// (#3613) See safeStringifyThrown above — one implementation, both lanes.
+const tryNativeExnRender = sharedTryNativeExnRender;
 
 export function extractWasmExceptionMessage(err: any, instance: any): string {
   if (typeof WebAssembly !== "undefined" && err instanceof (WebAssembly as any).Exception) {
@@ -4067,25 +4056,29 @@ interface OriginalVariantResult {
   wasm_sha?: string;
 }
 
-function originalHarnessThrownText(error: unknown, instance?: WebAssembly.Instance): string {
-  if (typeof WebAssembly !== "undefined" && error instanceof WebAssembly.Exception && instance) {
-    try {
-      const exports = instance.exports as Record<string, any>;
-      const tag = exports.__exn_tag ?? exports.__tag;
-      const payload = tag ? error.getArg(tag, 0) : undefined;
-      if (payload != null && (typeof payload === "object" || typeof payload === "function")) {
-        const name = (payload as { name?: unknown }).name;
-        const message = (payload as { message?: unknown }).message;
-        if (typeof name === "string") return `${name}${message ? `: ${String(message)}` : ""}`;
-      }
-      if (payload !== undefined && payload !== null) return safeStringifyThrown(payload);
-    } catch {
-      // Fall through to the guarded generic renderer.
-    }
-  }
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return safeStringifyThrown(error);
-}
+/**
+ * (#3613) Now a thin alias over the SHARED renderer
+ * (`scripts/lib/wasm-exn-render.mjs`).
+ *
+ * The local copy this replaces was missing the `tryNativeExnRender` step the
+ * CI worker has always taken, so on the standalone lane every `Test262Error`
+ * surfaced here as the opaque #2870 label ("uncaught Wasm-GC exception
+ * (non-stringifiable payload)") while CI reported the real assertion text.
+ * Consequences: message-derived triage against the local runner saw one giant
+ * undifferentiated bucket, and a standalone runtime-negative test could not
+ * match its expected error TYPE (`originalNegativeMatches` searches the
+ * detail for `meta.negative.type`, which the opaque label does not contain).
+ *
+ * `oracle-version-exempt:` this is the LOCAL in-process runner only. The
+ * committed baseline rows are produced exclusively by
+ * `scripts/test262-worker.mjs`, whose behaviour is byte-unchanged — the shared
+ * policy IS the worker's existing policy. No baseline row can reclassify; the
+ * change only makes the local lane stop disagreeing with CI.
+ */
+const originalHarnessThrownText = renderHarnessThrownText as (
+  error: unknown,
+  instance?: WebAssembly.Instance,
+) => string;
 
 function originalNegativeMatches(meta: Test262Meta, detail: string): boolean {
   const expected = meta.negative?.type;

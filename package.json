@@ -99,6 +99,8 @@
     "test:262:fyi:smoke": "pnpm run build:compiler-bundle && node scripts/run-test262-fyi.mjs --non-authoritative-smoke",
     "test:262:validate-baseline": "npx tsx scripts/validate-test262-baseline.ts",
     "baseline:fetch": "node scripts/fetch-baseline-jsonl.mjs",
+    "detect:vacuity": "npx tsx scripts/detect-vacuity.ts",
+    "check:test-vacuity-shapes": "npx tsx scripts/check-test-vacuity-shapes.ts",
     "check:ir-fallbacks": "npx tsx scripts/check-ir-fallbacks.ts",
     "check:ir-only": "npx tsx scripts/check-ir-only.ts",
     "check:linear-ir": "npx tsx scripts/check-linear-ir.ts",
@@ -172,6 +174,7 @@
     "check:issue-ids": "node scripts/check-issue-ids.mjs",
     "check:issue-ids:staged": "node scripts/check-issue-ids.mjs --staged",
     "check:issue-ids:against-main": "node scripts/check-issue-ids.mjs --against-main",
+    "check:issue-ids:against-open-prs": "node scripts/check-issue-ids.mjs --against-open-prs",
     "new:issue-id:allocate": "node scripts/claim-issue.mjs --allocate"
   },
   "dependencies": {
