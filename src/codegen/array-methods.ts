@@ -7,7 +7,7 @@
  * shared.ts (NOT expressions.ts) to avoid circular dependencies.
  */
 import { ts } from "../ts-api.js";
-import { isBooleanType, isStringType } from "../checker/type-mapper.js";
+import { isBooleanType, isStringType, isVoidType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
@@ -19,8 +19,10 @@ import {
   addStringImports,
   addUnionImports,
   resolveWasmType,
+  resolveWasmTypeForClosureReturn,
   typedArrayPackedSignedness,
 } from "./index.js";
+import { getClosureFuncSelfTypeIdx, getOrCreateFuncRefWrapperTypes } from "./closures/funcref-wrapper-types.js";
 import { addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./js-errors.js";
 import { emitTypedArraySetBoundsCheck } from "./typed-array-set-bounds.js";
@@ -59,7 +61,7 @@ import { emitNativeNumberFormat } from "./number-format-native.js";
 import { ensureNativeArrayHof } from "./hof-native.js";
 import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
-import { coerceType, coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
+import { coerceType, coercionInstrs, defaultValueInstrs, emitGuardedRefCast } from "./type-coercion.js";
 
 // (#3264) Array.prototype-borrow subsystem extracted to array-prototype-borrow.ts;
 // re-export the two public entries so existing importers keep resolving.
@@ -186,7 +188,10 @@ function isKnownNonCallable(ctx: CodegenContext, arg: ts.Expression): boolean {
     ts.TypeFlags.BooleanLike |
     ts.TypeFlags.NumberLike |
     ts.TypeFlags.StringLike |
-    ts.TypeFlags.BigIntLike;
+    ts.TypeFlags.BigIntLike |
+    // A symbol is never callable → spec-correct §23.1.3.* step-3 TypeError for
+    // every array HOF (e.g. `[].flatMap(Symbol())`, `[].map(Symbol())`). (#3200)
+    ts.TypeFlags.ESSymbolLike;
   if (tsType.flags & NON_CALLABLE_FLAGS) return true;
   // (#2934 host-bridge A) A plain OBJECT type with NO call and NO construct
   // signatures is statically non-callable — `arr.map(new Object())`
@@ -1549,7 +1554,7 @@ export function compileArrayMethodCall(
       result = compileArrayFlat(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "flatMap":
-      result = compileArrayFlatMap(ctx, fctx, methodAccess, callExpr);
+      result = compileArrayFlatMap(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "set": {
       const setResult = compileTypedArraySet(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -3450,10 +3455,22 @@ function compileArraySlice(
   fctx.body.push({ op: "local.set", index: startTmp });
 
   // end arg into a local (only when explicit); null = "use length".
-  const hasEnd = callExpr.arguments.length >= 2;
+  // (#3201) §23.1.3.25 step 6: an explicit `undefined` end is spec-equivalent to
+  // an OMITTED end (relativeEnd = len), NOT `ToIntegerOrInfinity(undefined)` = 0.
+  // Compiling `undefined` in f64 context yields `f64.const NaN` → `trunc_sat` = 0,
+  // which turned `x.slice(3, undefined)` into an empty slice instead of `x.slice(3)`.
+  // Treat a statically-`undefined` end (the literal, or the `undefined` global) as
+  // "no end". A literal/identifier `undefined` has no side effects, so skipping its
+  // compilation preserves observable evaluation order. (undefined START already
+  // coerces correctly: ToIntegerOrInfinity(undefined) = 0 = the default.)
+  const endArg = callExpr.arguments.length >= 2 ? callExpr.arguments[1]! : undefined;
+  const endIsExplicitUndefined =
+    !!endArg &&
+    (endArg.kind === ts.SyntaxKind.UndefinedKeyword || (ts.isIdentifier(endArg) && endArg.text === "undefined"));
+  const hasEnd = endArg !== undefined && !endIsExplicitUndefined;
   const endTmp = allocLocal(fctx, `__arr_slc_e_${fctx.locals.length}`, { kind: "i32" });
   if (hasEnd) {
-    compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "f64" });
+    compileExpression(ctx, fctx, endArg!, { kind: "f64" });
     fctx.body.push({ op: "i32.trunc_sat_f64_s" });
     fctx.body.push({ op: "local.set", index: endTmp });
   }
@@ -4709,6 +4726,54 @@ function compileThisArg(
 }
 
 /**
+ * (#3015) Resolve the canonical funcref-wrapper closure for a DYNAMIC
+ * function-typed callback value that compiled to an opaque `externref` — i.e. a
+ * function PARAMETER (`function run(cb){ return arr.some(cb); }`), the one
+ * callback shape that still routed through the `__call_1_*` / `__call_2_*` host
+ * bridge. In standalone (host-free) mode that import makes the module
+ * non-instantiable, so those tests never ran.
+ *
+ * The value IS a wasm closure struct at runtime (the caller passed an arrow /
+ * function value), so we recover a native `call_ref` by resolving the
+ * callback SIGNATURE's canonical wrapper via `getOrCreateFuncRefWrapperTypes` —
+ * the SAME cache-keyed wrapper the arrow value-site registers, so the runtime
+ * closure struct (a subtype of the wrapper root) casts and calls cleanly. We
+ * return the `ClosureInfo` plus the lifted self carrier (the wrapper root) that
+ * the externref is cast to.
+ *
+ * Returns `undefined` (→ host-bridge fallback, unchanged) when the callback has
+ * no single resolvable call signature.
+ */
+function resolveDynamicCallbackClosure(
+  ctx: CodegenContext,
+  cbArg: ts.Expression,
+): { closureInfo: ClosureInfo; selfStructTypeIdx: number } | undefined {
+  // oracle-ratchet-allow (#3015): the wrapper cache key is a wasm-lowering
+  // ValType question (`resolveWasmType`), deliberately ABOVE `ctx.oracle`. This
+  // mirrors `compileArrowAsClosure`'s `computeClosureWrapperSig` lowering so the
+  // key MATCHES the arrow value-site's — they share the wrapper struct + func
+  // type, which is exactly what makes the runtime `ref.cast` + `call_ref` valid.
+  const cbType = ctx.checker.getTypeAtLocation(cbArg);
+  const sigs = cbType.getCallSignatures();
+  if (sigs.length !== 1) return undefined;
+  const sig = sigs[0]!;
+  const paramValTypes: ValType[] = [];
+  for (const p of sig.parameters) {
+    const loc = p.valueDeclaration ?? p.declarations?.[0] ?? cbArg;
+    paramValTypes.push(resolveWasmType(ctx, ctx.checker.getTypeOfSymbolAtLocation(p, loc)));
+  }
+  const retTsType = ctx.checker.getReturnTypeOfSignature(sig);
+  const results: ValType[] =
+    isVoidType(retTsType) || (retTsType.flags & ts.TypeFlags.Never) !== 0
+      ? []
+      : [resolveWasmTypeForClosureReturn(ctx, retTsType)];
+  const wrapper = getOrCreateFuncRefWrapperTypes(ctx, paramValTypes, results);
+  if (!wrapper) return undefined;
+  const selfStructTypeIdx = getClosureFuncSelfTypeIdx(ctx, wrapper.liftedFuncTypeIdx) ?? wrapper.structTypeIdx;
+  return { closureInfo: wrapper.closureInfo, selfStructTypeIdx };
+}
+
+/**
  * Compile the callback argument and set up either a closure (call_ref) path
  * or a host bridge fallback. Returns null if setup fails (error pushed).
  *
@@ -4742,6 +4807,32 @@ function setupArrayCallback(
     closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
     if (closureInfo) {
       closureTmp = allocLocal(fctx, `__arr_${tag}_clcb_${fctx.locals.length}`, cbResult);
+      fctx.body.push({ op: "local.set", index: closureTmp });
+    }
+  } else if (ctx.standalone && cbResult && cbResult.kind === "externref") {
+    // (#3015) Standalone: a dynamic function-typed callback value (a function
+    // PARAMETER, e.g. `arr.some(cb)`) arrives as an opaque externref and would
+    // otherwise route through the `__call_1_*`/`__call_2_*` host bridge — a
+    // host import that is not instantiable host-free. Recover a native
+    // `call_ref` via the callback signature's canonical funcref wrapper. Host
+    // mode is untouched (this branch is standalone-gated) and keeps the bridge
+    // as its fast path per the dual-mode principle.
+    const dyn = resolveDynamicCallbackClosure(ctx, cbArg);
+    if (dyn) {
+      closureInfo = dyn.closureInfo;
+      closureTypeIdx = dyn.selfStructTypeIdx;
+      // The externref callback value is on the stack: convert it to the wrapper
+      // self carrier and store a NON-NULL closure ref. The native invocation
+      // path (`buildClosureCallInstrs` / reduce) pushes `closureTmp` as the
+      // `call_ref` self argument, whose param type is `(ref root)` — non-null,
+      // matching the arrow branch's `(ref …)` `closureTmp`.
+      fctx.body.push({ op: "any.convert_extern" });
+      emitGuardedRefCast(fctx, dyn.selfStructTypeIdx);
+      fctx.body.push({ op: "ref.as_non_null" });
+      closureTmp = allocLocal(fctx, `__arr_${tag}_dyncb_${fctx.locals.length}`, {
+        kind: "ref",
+        typeIdx: dyn.selfStructTypeIdx,
+      });
       fctx.body.push({ op: "local.set", index: closureTmp });
     }
   }
@@ -6728,6 +6819,14 @@ function compileArrayDefaultToStringSort(
 ): ValType | null {
   const isNumeric = elemType.kind === "f64" || elemType.kind === "i32";
   const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0;
+  // (#3579) HOST default sort only supports numeric or externref (boxed-any /
+  // js-string) elements. A ref/ref_null (struct) element cannot flow into the
+  // `string_compare(externref, externref)` host import, so bail to the caller's
+  // no-op rather than emit an invalid `string_compare(ref struct, …)`. (Native
+  // mode already bailed above for the externref case.)
+  if (!native && !isNumeric && elemType.kind !== "externref") {
+    return null;
+  }
 
   // #2379 — in NATIVE-string mode this ToString sort's non-numeric branch
   // `ref.cast`s each `array.get` element to `$AnyString` (see `stringifyTail`),
@@ -6751,6 +6850,18 @@ function compileArrayDefaultToStringSort(
   let compareIdx: number | undefined;
   let numToStrIdx: number | undefined;
   let anyStrTypeIdx = -1;
+  // (#3579) HOST mode, non-numeric (boxed-`any`/externref element) branch: the
+  // element must be ToString'd via the runtime `__extern_toString` before the
+  // string comparison. Previously `stringifyTail` assumed the element was ALREADY
+  // a string (`ref.as_non_null` only) — true for `string[]` but NOT for an
+  // `any[]` whose elements are boxed numbers/undefined, so `string_compare` on
+  // raw boxed values could not order them and the default sort silently no-op'd
+  // (`[10,9,1].sort()` on an untyped array stayed unordered). `__extern_toString`
+  // is the SAME runtime primitive `emitToString`'s dynamic branch wraps and is
+  // already used directly in this file (compileArrayJoinExtern); reusing it needs
+  // no `ts.Type`/checker query. Ensured BEFORE the `string_compare` funcMap lookup
+  // so the captured `compareIdx` reflects any import-insertion index shift.
+  let externToStrIdx: number | undefined;
   if (native) {
     ensureNativeStringHelpers(ctx);
     anyStrTypeIdx = ctx.anyStrTypeIdx;
@@ -6761,8 +6872,13 @@ function compileArrayDefaultToStringSort(
       numToStrIdx = ctx.funcMap.get("number_toString");
     }
   } else {
-    compareIdx = ctx.funcMap.get("string_compare");
     cmpStrType = { kind: "externref" };
+    if (!isNumeric) {
+      externToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (externToStrIdx === undefined) return null;
+    }
+    compareIdx = ctx.funcMap.get("string_compare");
     if (isNumeric) numToStrIdx = ctx.funcMap.get("number_toString");
   }
   if (compareIdx === undefined || (isNumeric && numToStrIdx === undefined)) {
@@ -6800,6 +6916,19 @@ function compileArrayDefaultToStringSort(
   // Stringify an element value (already on the stack as elemType) to cmpStrType.
   const stringifyTail = (): Instr[] => {
     if (!isNumeric) {
+      if (!native && externToStrIdx !== undefined && elemType.kind === "externref") {
+        // (#3579) HOST boxed-`any`/string element → runtime ToString before the
+        // string comparison. A real string passes through (`ToString(str)===str`);
+        // a boxed number/undefined is stringified ("10"/"undefined"), so an
+        // untyped-array default sort orders by ToString per §23.1.3.30 instead of
+        // no-op'ing. Pass the RAW (nullable) externref straight to
+        // `__extern_toString` — it handles null (`String(null)`→"null"), so a
+        // `new Array(N)` all-holes array must NOT be `ref.as_non_null`'d first
+        // (that traps on the null holes; #2502 regression). Only the externref
+        // (boxed-any) element kind is retargeted — every other kind keeps its
+        // exact prior lowering (no regression surface).
+        return [{ op: "call", funcIdx: externToStrIdx }];
+      }
       // String element: ensure non-null, and (native) cast NativeString → AnyString.
       const out: Instr[] = [{ op: "ref.as_non_null" }];
       if (native) out.push({ op: "ref.cast", typeIdx: anyStrTypeIdx });
@@ -7912,18 +8041,17 @@ function compileArrayLastIndexOf(
  * deeper recursion, and heterogeneous array/scalar unions stay deferred to the
  * larger #2717 follow-up.
  */
-function tryCompileArrayFlatNativeDepth1(
+/**
+ * (#2717) Precondition for the native depth-1 flatten: the outer vec's element
+ * must be a `ref`/`ref_null` to an INNER vec struct (an array-of-arrays), and
+ * that inner vec must resolve to a concrete backing array type. Returns the
+ * inner vec + array type indices, or null when the shape is not a homogeneous
+ * nested array (scalar / externref / mixed elements → the caller falls back).
+ */
+function canFlattenVecElem(
   ctx: CodegenContext,
-  fctx: FunctionContext,
-  propAccess: ts.PropertyAccessExpression,
-  callExpr: ts.CallExpression,
-  vecTypeIdx: number,
-  arrTypeIdx: number,
   elemType: ValType,
-): ValType | null {
-  // Default depth only — an explicit `depth` argument falls through to refusal.
-  if (callExpr.arguments.length > 0) return null;
-  // Outer element must be a ref to an inner vec struct.
+): { innerVecTypeIdx: number; innerArrTypeIdx: number } | null {
   if (elemType.kind !== "ref" && elemType.kind !== "ref_null") return null;
   const innerVecTypeIdx = (elemType as { typeIdx?: number }).typeIdx;
   if (innerVecTypeIdx === undefined) return null;
@@ -7931,8 +8059,28 @@ function tryCompileArrayFlatNativeDepth1(
   if (innerArrTypeIdx < 0) return null;
   const innerArrDef = ctx.mod.types[innerArrTypeIdx];
   if (!innerArrDef || innerArrDef.kind !== "array") return null;
+  return { innerVecTypeIdx, innerArrTypeIdx };
+}
 
-  const outerVec = allocLocal(fctx, `__arr_flat_ov_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+/**
+ * (#2717) Emit a native depth-1 flatten of an outer vec-of-vecs. The outer vec
+ * value must be BOTH on the Wasm stack AND stored in the `outerVec` local (the
+ * caller tees it and, for a user receiver, null-guards it first). Consumes the
+ * stack value; returns a fresh inner-element vec holding every non-null inner
+ * vec's elements concatenated in order.
+ *
+ * Shared by `Array.prototype.flat()` (outer vec = the receiver) and the
+ * `Array.prototype.flatMap()` native arm (outer vec = the native `map` result).
+ */
+function emitFlattenDepth1FromVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  outerVec: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  innerVecTypeIdx: number,
+  innerArrTypeIdx: number,
+): ValType {
   const outerData = allocLocal(fctx, `__arr_flat_od_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const outerLen = allocLocal(fctx, `__arr_flat_ol_${fctx.locals.length}`, { kind: "i32" });
   const total = allocLocal(fctx, `__arr_flat_tot_${fctx.locals.length}`, { kind: "i32" });
@@ -7949,10 +8097,7 @@ function tryCompileArrayFlatNativeDepth1(
   });
   const pos = allocLocal(fctx, `__arr_flat_pos_${fctx.locals.length}`, { kind: "i32" });
 
-  // receiver -> outerVec (null-guarded), then unpack len/data.
-  compileExpression(ctx, fctx, propAccess.expression);
-  fctx.body.push({ op: "local.tee", index: outerVec });
-  emitReceiverNullGuard(ctx, fctx, outerVec);
+  // outer vec is on the stack (also in `outerVec`): unpack len/data.
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: outerLen });
   fctx.body.push({ op: "local.get", index: outerVec });
@@ -8075,6 +8220,121 @@ function tryCompileArrayFlatNativeDepth1(
 }
 
 /**
+ * (#3363) Native depth-1 homogeneous nested-array flatten for `arr.flat()` on
+ * the host-free lanes. Default depth only (an explicit `depth` argument falls
+ * through to the loud refusal); the outer element must be a nested vec.
+ */
+function tryCompileArrayFlatNativeDepth1(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  // Default depth only — an explicit `depth` argument falls through to refusal.
+  if (callExpr.arguments.length > 0) return null;
+  const pre = canFlattenVecElem(ctx, elemType);
+  if (!pre) return null;
+
+  const outerVec = allocLocal(fctx, `__arr_flat_ov_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  // receiver -> outerVec (null-guarded), leaving the vec on the stack for the flatten.
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.tee", index: outerVec });
+  emitReceiverNullGuard(ctx, fctx, outerVec);
+  return emitFlattenDepth1FromVec(
+    ctx,
+    fctx,
+    outerVec,
+    vecTypeIdx,
+    arrTypeIdx,
+    pre.innerVecTypeIdx,
+    pre.innerArrTypeIdx,
+  );
+}
+
+/**
+ * (#2717) Native `arr.flatMap(cb, thisArg?)` for the host-free lanes.
+ *
+ * `flatMap(cb)` is spec-equivalent to `map(cb).flat(1)`, so we compile the native
+ * `map` directly (its arg layout — arg0 = cb, arg1 = thisArg — matches flatMap's)
+ * and dispatch on the RESULT vec's element type — the ground truth for what the
+ * callback returned:
+ *   - element is a nested vec (callback returned arrays) → depth-1 flatten;
+ *   - element is a concrete scalar / non-array ref (callback returned a scalar or
+ *     a plain object) → `flatMap` ≡ `map` (a depth-1 flatten of non-arrays is the
+ *     identity), so the map result IS the answer;
+ *   - element is `externref`/`anyref` (dynamic — could be an array at runtime) →
+ *     drop + refuse loudly (a runtime-heterogeneous flatten is out of scope; never
+ *     a silent-wrong result), per the #2711 policy.
+ *
+ * Compiling `map` unconditionally (rather than into a throwaway buffer) mirrors
+ * the working `map(cb).flat()` codegen exactly; only the rare dynamic-return case
+ * leaves dead map code before the caller's `unreachable`, which is well-typed.
+ */
+function tryCompileFlatMapNative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
+
+  // (#3532) The former a-priori guard here — refusing any inline callback whose
+  // body contained a bare `[]` — is no longer needed. The underlying bug (an
+  // empty `[]` under flatMap's `U | readonly U[]` union contextual type resolving
+  // to a DIFFERENT vec type than a sibling non-empty array in the same
+  // conditional, yielding an invalid closure) is fixed at its source in
+  // `compileArrayLiteral` (`resolveEmptyArrayElemWasm`): `[]` now adopts the
+  // union's array-member element type, so `cond ? [] : [x]` unifies correctly.
+
+  const mapType = compileArrayMap(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  if (!mapType || (mapType.kind !== "ref" && mapType.kind !== "ref_null")) {
+    // map couldn't type its result; the caller's unreachable keeps the body valid.
+    return null;
+  }
+  const mapVecTypeIdx = (mapType as { typeIdx?: number }).typeIdx;
+  if (mapVecTypeIdx === undefined) return null;
+  const mapArrTypeIdx = getArrTypeIdxFromVec(ctx, mapVecTypeIdx);
+  const mapArrDef = mapArrTypeIdx >= 0 ? ctx.mod.types[mapArrTypeIdx] : undefined;
+  const mapElemType = mapArrDef && mapArrDef.kind === "array" ? mapArrDef.element : undefined;
+
+  // Callback returned arrays → flatten the map result depth-1.
+  const pre = mapElemType ? canFlattenVecElem(ctx, mapElemType) : null;
+  if (pre) {
+    const mapVec = allocLocal(fctx, `__arr_flatmap_mv_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: mapVecTypeIdx,
+    });
+    fctx.body.push({ op: "local.tee", index: mapVec });
+    return emitFlattenDepth1FromVec(
+      ctx,
+      fctx,
+      mapVec,
+      mapVecTypeIdx,
+      mapArrTypeIdx,
+      pre.innerVecTypeIdx,
+      pre.innerArrTypeIdx,
+    );
+  }
+
+  // Dynamic element (externref/anyref) — could be an array at runtime; a native
+  // depth-1 flatten would need per-element runtime IsArray. Out of scope → drop
+  // the map result and refuse loudly.
+  if (mapElemType && (mapElemType.kind === "externref" || mapElemType.kind === "anyref")) {
+    fctx.body.push({ op: "drop" });
+    return null;
+  }
+
+  // Concrete non-array element (scalar or plain-object ref): flatMap ≡ map.
+  return mapType;
+}
+
+/**
  * Compile arr.flat(depth?) — delegates to __array_flat host import (#1136).
  * Converts WasmGC vec receiver to externref, passes depth arg, returns externref.
  */
@@ -8157,23 +8417,38 @@ function compileArrayFlatMap(
   fctx: FunctionContext,
   propAccess: ts.PropertyAccessExpression,
   callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
 ): ValType | null {
+  // §23.1.3.11 step 3: IsCallable(mapperFunction) is false → throw TypeError,
+  // BEFORE any flatten work. Mirrors map/filter/forEach; covers the missing
+  // callback (`[].flatMap()`) and known-non-callable args (`{}`, `0`, `null`,
+  // `Symbol()`, …). Placed above the standalone arm so both lanes get it.
+  if (emitCallbackTypeCheck(ctx, fctx, callExpr, "Array.prototype.flatMap")) {
+    fctx.body.push({ op: "unreachable" });
+    return { kind: "externref" };
+  }
   if (callExpr.arguments.length < 1) return null; // flatMap requires a callback
 
-  // (#2717) `flatMap` has no Wasm-native arm — it delegates to the host
-  // `__array_flatMap` import, which is unsatisfiable under `--target
-  // standalone`/`wasi` (no JS host) and traps at instantiation. Per the #2711
-  // fail-loud policy, refuse loudly instead of emitting the unsatisfiable import.
-  // A native arm (callback invocation + depth-1 flatten of scalar-or-array
-  // returns) is a separate follow-up. Host/gc mode is unchanged.
+  // (#2717) On the host-free lanes `flatMap` has no host `__array_flatMap` to
+  // satisfy. `flatMap(cb)` ≡ `map(cb).flat(1)`, so try the native arm first
+  // (reuses the native `map` + the #3363 depth-1 flatten); it applies when the
+  // callback provably returns arrays. Otherwise fall through to the loud refusal
+  // below (scalar / union / externref returns), per the #2711 fail-loud policy.
+  // Host/gc mode is unchanged — it keeps the fast `__array_flatMap` import path.
   if (ctx.standalone || ctx.wasi) {
+    const native = tryCompileFlatMapNative(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+    if (native) return native;
     reportError(
       ctx,
       callExpr,
-      `Codegen error: Array.prototype.flatMap() is not yet supported in --target standalone/wasi ` +
-        `(#2717) — there is no Wasm-native arm and emitting the host import __array_flatMap ` +
-        `would produce a module that traps at instantiation. Recompile without --target ` +
-        `standalone, or avoid flatMap() in standalone/WASI code.`,
+      `Codegen error: Array.prototype.flatMap() with a non-array-returning callback is not yet ` +
+        `supported in --target standalone/wasi (#2717) — the native arm handles callbacks that ` +
+        `return arrays (flatMap ≡ map+flat(1)); scalar/union/dynamic returns would need a ` +
+        `runtime-heterogeneous flatten. Emitting the host import __array_flatMap would produce a ` +
+        `module that traps at instantiation. Recompile without --target standalone, or have the ` +
+        `flatMap callback return an array.`,
     );
     // Non-null type + `unreachable` so the #1919 speculative wrapper commits and
     // the diagnostic is not rolled back into a silent default (see compileArrayFlat).

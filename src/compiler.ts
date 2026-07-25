@@ -26,7 +26,7 @@ import { applyCabiTransform, generateDts, generateImportsHelper, widenNonDefault
 import {
   detectEarlyErrors,
   pushSourceAnchoredDiagnostic,
-  rewriteEvalSuperCall,
+  rewriteEvalSuperCallWithMap,
   validateHardenedMode,
   validateSafeMode,
 } from "./compiler/validation.js";
@@ -40,7 +40,7 @@ import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
-import { elideDeadTopLevelBindings } from "./deadcode-elide.js";
+import { elideWithIrIds, makeIrInventoryOptions, type IrInventoryOptions } from "./compiler/ir-outcome-inventory.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -820,6 +820,7 @@ interface PipelineInput {
   errors: CompileError[];
   /** Resolved codegen option bundle (see buildCodegenOptions). */
   codegenOptions: CodegenOptions;
+  irInventoryOptions?: IrInventoryOptions;
   /** For source-map sourcesContent: original-name → original text. */
   sourcesContent: Map<string, string>;
   /** Anchor file for pushSourceAnchoredDiagnostic on codegen/emit throws. */
@@ -1010,7 +1011,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     } else {
       const result = multiAst
         ? generateMultiModule(multiAst, input.codegenOptions)
-        : generateModule(entryAst, input.codegenOptions);
+        : generateModule(entryAst, input.codegenOptions, input.irInventoryOptions);
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
       capturedIrPostClaimErrors = result.irPostClaimErrors;
@@ -1308,10 +1309,9 @@ export function compileSourceSync(
   // #1491 — detect named fs imports for both WASI (#1035 syscall path) and the
   // new JS-host imports (non-WASI). Detection is identical; the codegen branch
   // is selected based on `ctx.wasi` + `ctx.allowFs`.
-  // #1928 — `rewriteEvalSuperCall` only rewrites `eval("…super()…")` to a
-  // same-line throwing IIFE (a rare early-error edge); it never shifts lines, so
-  // it contributes an identity map and is omitted from the composition.
-  const cjsRewritten2 = rewriteEvalSuperCall(cjsRewritten);
+  // #1928/#1054 — same-line eval/super rewrites still contribute structural provenance.
+  const evalResult = rewriteEvalSuperCallWithMap(cjsRewritten);
+  const cjsRewritten2 = evalResult.source;
   const wasiNodeFsFuncs = detectNodeFsImports(cjsRewritten);
   // #2657 — raw `wasi_snapshot_preview1` fd_read/fd_write imports + the
   // `wasm:memory` inline linear-memory accessors (detected pre-preprocessing,
@@ -1320,10 +1320,9 @@ export function compileSourceSync(
   const { rawWasi: wasiRawImports, memAccessors: wasiMemAccessors } = detectRawWasiImports(cjsRewritten);
   const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
   let processedSource = preprocessed.source;
-  // Composed map: processedSource → original source. Pipeline output order is
-  // define → stdin-prelude → cjs → (eval/super, identity) → imports, so compose
-  // outermost-first.
+  // Compose imports → eval/super → CJS → Iterator → stdin → define back to the original source.
   const positionMap = preprocessed.positionMap
+    .compose(evalResult.positionMap)
     .compose(cjsResult.positionMap)
     .compose(iterStaticsResult.positionMap)
     .compose(stdinResult.positionMap)
@@ -1333,6 +1332,7 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
+  let irInventory = options.trackIrOutcomes ? makeIrInventoryOptions(positionMap) : undefined;
   // #2645/#2736 — `--target node`/`deno` (formerly `--platform node`) implies
   // node-style emulation so the ambient surface and the importable `node:<mod>`
   // capability gate share one target model. This EFFECTIVE flag drives the
@@ -1348,19 +1348,14 @@ export function compileSourceSync(
   // stay intact. Byte-neutral when no prelude was injected.
   const forceTsGrammar = stdinResult.injected || iterStaticsResult.injected;
 
-  // Step 1a: #3418 — host-free targets only: elide provably-dead top-level
-  // pure bindings BEFORE the parse, so never-invoked function bodies (e.g. the
-  // test262 harness shim's `var print = function () { console.log(...) }` /
-  // `var $262 = { detachArrayBuffer: ... structuredClone ... }` when the
-  // program never mentions them) don't register host imports in the unified
-  // collector. Strictly same-length whitespace blanking → identity map, no
-  // positionMap composition needed; bails (source untouched) on any syntax
-  // error. Host `gc`/`linear` targets are excluded and stay byte-identical.
+  // Step 1a: #3418 — host-free targets elide dead pure top-level bindings before
+  // parsing so unreachable bodies do not register host imports. Same-length
+  // whitespace blanking needs no PositionMap; syntax errors leave source intact.
   if (options.target === "standalone" || options.target === "wasi") {
-    processedSource = elideDeadTopLevelBindings(
-      processedSource,
-      isJsMode && !forceTsGrammar ? ts.ScriptKind.JS : ts.ScriptKind.TS,
-    ).source;
+    const scriptKind = isJsMode && !forceTsGrammar ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+    const elision = elideWithIrIds(processedSource, effectiveFileName, scriptKind, irInventory);
+    processedSource = elision.source;
+    irInventory = elision.inventoryOptions;
   }
 
   let ast: TypedAST;
@@ -1522,6 +1517,7 @@ export function compileSourceSync(
       wasiMemAccessors,
       jsxRuntime: preprocessed.jsxRuntime,
     }),
+    ...(irInventory ? { irInventoryOptions: irInventory } : {}),
     sourcesContent,
     diagnosticAnchor: ast.sourceFile,
     // #1958 — single-source: the lone source is the entry, so always run ES

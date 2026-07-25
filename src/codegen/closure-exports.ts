@@ -809,9 +809,10 @@ export function emitIsClosureExport(ctx: CodegenContext): void {
  * closure FUNC types — the func type determines the formal count). No-op when
  * the module has no closures, exactly like `__is_closure`.
  */
-export function emitClosureArityExport(ctx: CodegenContext): void {
+function collectClosureArityEntries(
+  ctx: CodegenContext,
+): { funcTypeIdx: number; selfTypeIdx: number; closureArity: number }[] {
   const mod = ctx.mod;
-
   const seenFuncTypeIdx = new Set<number>();
   const entries: { funcTypeIdx: number; selfTypeIdx: number; closureArity: number }[] = [];
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
@@ -827,6 +828,126 @@ export function emitClosureArityExport(ctx: CodegenContext): void {
         : typeIdx;
     entries.push({ funcTypeIdx: info.funcTypeIdx, selfTypeIdx, closureArity: info.paramTypes.length });
   }
+  return entries;
+}
+
+/**
+ * (#3592) INLINE twin of {@link emitClosureArityExport} for the IN-WASM dynamic
+ * call bridge `__apply_closure`. Leaves an `i32` on the stack: the DECLARED
+ * formal count of the closure in `valueLocal`, or `-1` when it is not a
+ * registered closure. Returns `undefined` when the module has no closures (the
+ * caller then keeps its arg-count-only dispatch, byte-identical).
+ *
+ * Emitted inline rather than as a `call` to the `__closure_arity` EXPORT because
+ * that export is minted at index.ts:3975 — AFTER `fillApplyClosure` runs at
+ * :3817 — and minting a function inside that finalize window is the
+ * #1839/#117/#1886 late-registration index-shift hazard the whole "S1 pulls no
+ * new machinery" carve-out in `fillApplyClosure` exists to avoid. Inlining
+ * costs a duplicated `ref.test` chain and shifts nothing.
+ *
+ * `anyLocal` must be an `anyref` slot and `funcLocal` a `funcref` slot; both are
+ * clobbered.
+ */
+function buildClosureArityProbe(
+  ctx: CodegenContext,
+  valueLocal: number,
+  anyLocal: number,
+  funcLocal: number,
+): Instr[] | undefined {
+  const entries = collectClosureArityEntries(ctx);
+  if (entries.length === 0) return undefined;
+  // Nested if/else so exactly ONE arm wins (the export twin uses early `return`,
+  // which is unavailable mid-body).
+  let chain: Instr[] = [{ op: "i32.const", value: -1 }];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    chain = [
+      { op: "local.get", index: funcLocal },
+      { op: "ref.test", typeIdx: entries[i]!.funcTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: entries[i]!.closureArity }],
+        else: chain,
+      },
+    ];
+  }
+  return [
+    { op: "local.get", index: valueLocal },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: anyLocal },
+    { op: "ref.null.func" },
+    { op: "local.set", index: funcLocal },
+    ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
+    ...chain,
+  ];
+}
+
+/**
+ * (#3592) Build `__apply_closure`'s UNDER-APPLICATION widening: replace the
+ * bridge's dispatch index `n` (the raw argument count) with
+ * `max(n, declaredArity(fn))`, appending the three probe locals to `locals`.
+ * Returns `[]` — and appends nothing — when the module has no closures, so such
+ * modules stay byte-identical.
+ *
+ * WHY: `__call_fn_method_N` carries only closures with `formals <= N`, so an
+ * arity-3 closure dispatched at `n = 2` matched no arm and fell through to the
+ * bridge's undefined sentinel — the call SILENTLY DID NOT HAPPEN. That is the
+ * shape of the entire test262 assert harness (`assert.sameValue(found, expected,
+ * message)` invoked with two args), so every under-applied `assert.*` scored a
+ * VACUOUS PASS in the standalone/WASI lanes. The JS-host lane fixed the same bug
+ * in JS at #2623 P-7 (`max(args.length, __closure_arity(fn))`); the in-Wasm
+ * bridge never did.
+ *
+ * WHY `max` AND NOT PADDING: widening only to the callee's OWN declared count
+ * keeps `N === closureArity`, where the #820l plumbing sets `__argc =
+ * closureArity` with a null `__extras_argv` — byte-for-byte what an arity-matched
+ * call sets, so `arguments.length` reflection is untouched. Padding the arg
+ * vector to the highest emitted dispatcher instead fills `__extras_argv` with
+ * synthetic `undefined`s, which is precisely the regression #2623 P-7 removed.
+ *
+ * Non-closures probe as `-1`, so over-application, exact-arity and
+ * not-a-function all keep their existing dispatch index.
+ *
+ * Lives here rather than in `fillApplyClosure` so the widening sits next to the
+ * `__call_fn_method_N` emitter whose arity filter it compensates for (and so the
+ * `object-runtime.ts` god-file does not grow).
+ */
+export function buildApplyClosureArityWidening(
+  ctx: CodegenContext,
+  locals: { name: string; type: ValType }[],
+  fnLocal: number,
+  nLocal: number,
+  paramCount: number,
+): Instr[] {
+  const declLocal = paramCount + locals.length;
+  const probe = buildClosureArityProbe(ctx, fnLocal, declLocal + 1, declLocal + 2);
+  if (!probe) return [];
+  locals.push(
+    { name: "__decl_arity", type: { kind: "i32" } },
+    { name: "__arity_any", type: { kind: "anyref" } },
+    { name: "__arity_func", type: { kind: "funcref" } },
+  );
+  return [
+    ...probe,
+    { op: "local.set", index: declLocal },
+    { op: "local.get", index: declLocal },
+    { op: "local.get", index: nLocal },
+    { op: "i32.gt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: declLocal },
+        { op: "local.set", index: nLocal },
+      ],
+    },
+  ];
+}
+
+export function emitClosureArityExport(ctx: CodegenContext): void {
+  const mod = ctx.mod;
+
+  const entries = collectClosureArityEntries(ctx);
   if (entries.length === 0) return;
 
   const arityTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$closure_arity_type");

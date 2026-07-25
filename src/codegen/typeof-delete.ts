@@ -179,6 +179,48 @@ function deleteSentinelInstr(fieldType: ValType): Instr {
 }
 
 /**
+ * (#3621) Guard the field-clearing `struct.set` with a runtime `ref.test` when
+ * the receiver's STATIC type does not prove it is that struct.
+ *
+ * The delete lowering resolves `structTypeIdx` from
+ * `resolveStructName` over the checker's type at the receiver — the receiver's
+ * *declared* shape. For `delete this.x` inside an object-literal accessor that
+ * is later invoked REFLECTIVELY (`__call_accessor_get` ← `__extern_get`, e.g.
+ * through a `with` scope), `this` is bound to whatever the accessor was called
+ * on, which is frequently a different representation than the literal's
+ * shape-inferred struct. `clearField` then pushes an externref where
+ * `struct.set` wants `(ref null $Shape)`, the coercion emits
+ * `any.convert_extern ; ref.cast null (ref null $Shape)`, and the cast traps
+ * `illegal cast` — uncatchably, aborting the module.
+ *
+ * Same invariant as #3610 / #3620: **a `ref.cast` is a claim that the value's
+ * runtime representation is known, and a static type is not that evidence.**
+ * Unlike #3610 this one is NOT compile-time decidable (whether `this` is the
+ * struct depends on the call), so the remedy is the runtime arm: `ref.test`,
+ * and skip the field poke on a miss. Nothing is lost on the miss path — the
+ * `__delete_property` sidecar call has already performed the semantically
+ * meaningful part of the delete; `clearField` only resets a shape-struct field
+ * that this receiver does not have.
+ */
+function guardClearField(
+  fctx: FunctionContext,
+  recvLocal: number,
+  recvType: ValType,
+  structTypeIdx: number,
+  clearField: Instr[],
+): Instr[] {
+  // Statically the exact struct (or its nullable form) ⇒ the cast cannot fail;
+  // emit byte-identical code to pre-#3621.
+  if ((recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx === structTypeIdx) {
+    return clearField;
+  }
+  const probe: Instr[] = [{ op: "local.get", index: recvLocal }];
+  if (recvType.kind === "externref") probe.push({ op: "any.convert_extern" });
+  probe.push({ op: "ref.test", typeIdx: structTypeIdx });
+  return [...probe, { op: "if", blockType: { kind: "empty" }, then: clearField, else: [] }];
+}
+
+/**
  * (#2703) Emit the tail of a struct-field `delete` once `__delete_property`'s
  * i32 result is stored in `resLocal`: clear the struct field to its undefined
  * sentinel **only when the delete succeeded** (so a refused non-configurable
@@ -482,11 +524,13 @@ export function compileDeleteExpression(
           fctx.body.push({ op: "local.set", index: recvLocal });
 
           // Instrs that reset the field to undefined (run only on success).
-          const clearField: Instr[] = [
+          // (#3621) `ref.test`-guarded when the static type does not prove the
+          // receiver IS this struct — see `guardClearField`.
+          const clearField: Instr[] = guardClearField(fctx, recvLocal, recvType, structTypeIdx, [
             { op: "local.get", index: recvLocal },
             deleteSentinelInstr(fieldType),
             { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
-          ];
+          ]);
 
           if (recvType.kind !== "ref" && recvType.kind !== "ref_null" && recvType.kind !== "externref") {
             // Non-struct numeric/bool receiver (defensive) — no sidecar applies;
@@ -573,11 +617,12 @@ export function compileDeleteExpression(
           const recvLocal = allocLocal(fctx, `__del_recv_${fctx.locals.length}`, recvType);
           fctx.body.push({ op: "local.set", index: recvLocal });
 
-          const clearField: Instr[] = [
+          // (#3621) `ref.test`-guarded — see `guardClearField`.
+          const clearField: Instr[] = guardClearField(fctx, recvLocal, recvType, structTypeIdx, [
             { op: "local.get", index: recvLocal },
             deleteSentinelInstr(fieldType),
             { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
-          ];
+          ]);
 
           if (recvType.kind !== "ref" && recvType.kind !== "ref_null" && recvType.kind !== "externref") {
             for (const instr of clearField) fctx.body.push(instr);

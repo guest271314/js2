@@ -1,7 +1,12 @@
 ---
 id: 3520
 title: "IR-only R1: source-qualified unit identity and whole-program ABI map"
-status: ready
+status: in-progress
+assignee: ttraenkler/codex-r1
+claimed_by: codex-r1
+claimed_at: 2026-07-21T20:23:19Z
+branch: symphony/3520-r1-identity-abi
+pr: 3490
 sprint: current
 created: 2026-07-21
 updated: 2026-07-21
@@ -61,6 +66,14 @@ files:
   - src/ir/passes/simplify-cfg.ts
   - src/ir/passes/tagged-union-types.ts
   - src/ir/passes/tagged-unions.ts
+  - src/index.ts
+  - src/compiler.ts
+  - src/compiler/ir-outcome-inventory.ts
+  - src/compiler/validation.ts
+  - src/import-resolver.ts
+  - src/iterator-statics-prelude.ts
+  - src/position-map.ts
+  - src/process-stdin-prelude.ts
   - src/codegen/class-member-keys.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
@@ -69,6 +82,7 @@ files:
   - src/codegen/index.ts
   - src/codegen/stdlib-selfhost.ts
   - tests/issue-3520-ir-unit-identity.test.ts
+  - tests/issue-3520-program-abi.test.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
@@ -151,11 +165,14 @@ The inventory exposes two explicit populations rather than conflating nested
 support artifacts with terminal source outcomes:
 
 - `allUnits` is exhaustive over source, nested, lifted, and synthetic support
-  units. Every record has a `terminalOwnerId` and, where applicable, a
-  `lexicalOwnerId`.
+  units. Records rooted in an existing R0 attempt carry `terminalOwnerId` and,
+  where applicable, `lexicalOwnerId`. A genuinely exhaustive unit for which R0
+  has no attempt root carries `terminalOwnerId: null` plus
+  `unownedReason: "no-r0-attempt-root"`; R1 must not fabricate a terminal
+  outcome merely to make ownership total.
 - `terminalUnits` is the exact one-to-one population consumed by the R0 outcome
   ledger. Its count must equal terminal outcomes, while every additional
-  `allUnits` record must resolve to one terminal owner.
+  owned `allUnits` record must resolve to one terminal owner.
 
 An equality check between `allUnits.length` and the R0 outcome count is invalid:
 R0 deliberately attributes lifted/support preparation failures to their source
@@ -171,9 +188,12 @@ Build one whole-program inventory in deterministic source order. The map owns:
    Wasm type intents, exports, class layouts, and support-unit relationships.
 3. Stable source order and dependency order, including explicit parent/child
    links for lifted closures and constructor support units.
-4. The eventual concrete Wasm handle for each identity. Allocation happens
-   once; a second allocation, an unplanned binding, or two identities sharing a
-   non-alias slot is an R0 `Invariant`.
+4. The intention and eventual final-layout Wasm index for each identity.
+   `ProgramAbiMap` is an identity/intention ledger, not an allocator:
+   `ModuleAssembler` remains the sole allocator, and only binds finalized
+   indices after planning. A second binding, an unplanned binding, or two
+   identities sharing a non-alias slot is an R0 `Invariant`. In particular,
+   global/type raw indices are never preallocated or cached by the ABI plan.
 5. Explicit aliases. An import alias, inherited member, or export alias points
    to a canonical binding ID; it is not implemented by copying a display-name
    map entry.
@@ -188,6 +208,11 @@ adapter is the only string-keyed compatibility boundary. It must:
 - reject an ambiguous reverse lookup instead of choosing first/last wins;
 - record intentional aliases separately from accidental collisions; and
 - expose the old display labels for telemetry without making them keys.
+
+Repairing the current runtime/legacy collision behavior through this adapter is
+later R1 work. The first shadow landing proves identity and alias semantics
+without rewiring `funcMap`, `moduleGlobals`, `structMap`, exports, or module
+arrays, so it cannot claim that existing runtime collisions are fixed.
 
 ## Bounded landing sequence
 
@@ -242,6 +267,121 @@ adapter is the only string-keyed compatibility boundary. It must:
   only for a real collision and require runtime evidence.
 - Emit diagnostic tables sorted by canonical source/unit order, never JS `Map`
   accident or filesystem walk order.
+
+## R1a implementation status — PR #3490
+
+This PR is a continuation slice and deliberately leaves the issue
+`in-progress`.
+
+Implemented in the bounded landing:
+
+- opaque, serializable `IrSourceId`, `IrUnitId`, `IrClassId`, and
+  `IrBindingId` encodings whose uniqueness does not use display names;
+- dependency-first source ordering from compiler-resolved edges when available,
+  with authoritative empty/external resolutions, unique relative/bare-specifier
+  fallback only when resolution is unavailable, checkout-independent
+  `@library/` keys, collision rejection, and raw canonical source-key SCC
+  ordering as the disconnected-root/cycle tie-breaker;
+- fixed-width numeric identity components, so the canonical text comparator
+  orders source orders and regular/derived ordinals numerically past 9;
+- producer-tagged provenance for timer, node:path, typed Node import wrappers,
+  generated ambient import classes, eval/super early-error IIFEs,
+  process.stdin, and Iterator source rewrites. Synthetic IDs use semantic
+  producer roles; repeated units with the same parent and role use an explicit
+  sibling ordinal rather than a display spelling;
+- an exhaustive final-target source-AST/compiler-prelude `allUnits` inventory
+  plus the exact R0-compatible `terminalUnits` population, including nullable
+  ownership for compiler support units that have no R0 attempt root. The
+  host-free dead-binding pass snapshots pre-elision ordinals so every retained
+  support node keeps its ID; deliberately removed support nodes remain absent
+  and never manufacture terminal rows;
+- additive `sourceId` / `unitId` fields on compiler-produced terminal outcomes,
+  while legacy outcome key, label, count, and order remain unchanged;
+- a validated `indexIrTerminalDeclarations` AST-node-to-ID join so subsequent
+  declaration planning does not need to rejoin by display name; and
+- a semantic/shadow `ProgramAbiMap` and read-only `LegacyAbiAdapter` data-
+  structure seam with
+  separate plan/final-bind phases, explicit `required | alias | none` policy,
+  deterministic numeric plan order, namespace-aware lookup, and typed
+  alias/export/final-index invariants. Production codegen does not build this
+  map yet, so this landing does not claim whole-program ABI completeness.
+
+Intentionally deferred from this PR:
+
+- changing source planning, call graphs, IR references, passes, or backends to
+  use the new IDs (the remainder of commits 2 and 3);
+- assigning derived identities to pass-created lifted closures,
+  monomorphization clones, and other post-AST support units (Commit 3);
+- giving every nested node inside one compiler helper its own named semantic
+  role. Iterator helper children currently derive from the semantic top-helper
+  parent/role plus structural sibling ordinal; this is deterministic for the
+  current helper AST but internal sibling edits intentionally revise those
+  child IDs;
+- binding current codegen slots into `ProgramAbiMap`, or changing
+  `ModuleAssembler` allocation/finalization order; and
+- routing the legacy runtime maps through `LegacyAbiAdapter` or repairing their
+  current collision cases. Those binding points require the broader locked R1
+  file set and runtime evidence; the shadow seam is interface/invariant
+  groundwork, not runtime-collision completion.
+
+Remaining numbered work:
+
+- **Commit 2:** thread `IrUnitId` from the validated declaration index through
+  selection, propagation, source planning, recursion/SCC, ownership/escape,
+  imported/module binding, promise-delay, class-key, and self-host plans.
+- **Commit 3:** put identities on IR functions/references, key inline and
+  monomorphization edits structurally, derive IDs for pass-created units, and
+  carry the same binding identities through verification/lowering/backends.
+- **Commit 4:** populate the whole-program ABI intentions, bind only
+  ModuleAssembler-final indices, then route legacy maps/exports through the
+  adapter and prove runtime collision behavior plus non-collision byte parity.
+
+### R1a validation evidence
+
+- Representative inventory denominator: **1 source / 2 classes / 12 allUnits /
+  6 terminalUnits**, with **6/6** outcome-ID parity and byte-identical tracked
+  versus untracked output. The definition-expression fixture separately proves
+  **1 / 3 / 10 / 2**, including three unowned implicit constructors.
+- Collision matrix: same-named functions across sources, same-named nested
+  functions/classes across lexical owners, static versus instance methods,
+  get versus set accessors, and two legacy `<computed>` labels all receive
+  distinct structural IDs. Two required ABI bindings sharing display label
+  `same` receive distinct internal names and reject ambiguous reverse lookup;
+  one explicit import alias resolves to its canonical final slot.
+- Determinism: `/checkout-one` and `/different/checkout-two` produce identical
+  IDs; reversing the caller input array preserves IDs/order; `a.ts` importing
+  lexically later `z.ts` orders `z.ts` first, with disconnected sources tied by
+  canonical key. Relocating both a project and an external declaration-library
+  root preserves source IDs; exact resolved-dependency entries override syntax,
+  checker-resolved external modules do not bind unrelated same-basename sources,
+  duplicate final source keys fail, and numeric order/ordinal 10 sorts after 2.
+- The #3520 identity, #3520 ABI, and R0 outcome suites passed **66/66**
+  (**27** identity/provenance, **10** ABI invariants, and **29** R0 outcomes). The
+  identity matrix snapshots exact timer/node:path/typed-Node-wrapper/
+  process.stdin/Iterator R0 rows; proves raw/gc/standalone/WASI user
+  class/member/function IDs and retained host-free-DCE support IDs; and keeps
+  tracked/untracked host-free binaries stable. Removed DCE support units are
+  target-absent and are not claimed as cross-target identities. The green
+  focused matrix passed **93/93**. The separate known-base matrix passed
+  **9/15**: its three existing #1983 type-index failures and three inline-small
+  harness/expectation failures reproduce identically on the exact pre-branch
+  base `d3d2454b`, so the combined nine-file result is **102/108** with no new
+  failure attributable to this slice. #2138, #3529, and phase3c are green.
+- `pnpm run typecheck`, `pnpm run lint`, `pnpm run format:check`, and
+  `pnpm run check:loc-budget` pass; compiler-driver identity anchoring lives in
+  `src/compiler/ir-outcome-inventory.ts` rather than growing `src/compiler.ts`.
+- `pnpm run check:ir-only -- --policy=hybrid`: **READY**, 37 terminal units,
+  31 emitted, 6 typed Unsupported, 0 Invariants; existing labels/counts remain
+  unchanged.
+- `pnpm run check:ir-fallbacks -- --verbose`: pass, zero unintended,
+  post-claim, or module-level increases.
+- Full equivalence gate: **1,608 passing**, **35 known failures**, zero new
+  regressions, and one existing baseline failure now passing; the baseline is
+  intentionally unchanged in this identity-only slice.
+- Cross-backend differential validation passed **29/29**.
+- No local Test262 run was performed; neither
+  `benchmarks/results/test262-run.log` nor
+  `scripts/equivalence-baseline.json` is changed.
 
 ## File ownership and locks
 
@@ -323,7 +463,7 @@ multi-file equivalence suite.
   legacy slot. Require a unique structural owner and raise a stable Invariant
   on zero or multiple matches.
 - **Late index shifts:** lazy imports/globals can invalidate numeric slots.
-  Keep symbolic ABI handles until the one planned finalization boundary and
+  Keep symbolic binding identities until the one planned finalization boundary and
   test late-import pressure.
 - **Wide pass blast radius:** identity touches builders, passes, and codegen.
   Land the bounded commits with old/new telemetry parity after each step and
@@ -343,7 +483,7 @@ multi-file equivalence suite.
 ## Required completion evidence
 
 ```bash
-pnpm exec vitest run tests/issue-3520-ir-unit-identity.test.ts tests/issue-1983-funcmap-collision.test.ts tests/issue-2138-multi-module-ir-overlay.test.ts tests/ir/inline-small.test.ts tests/ir/phase3c.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+pnpm exec vitest run tests/issue-3520-ir-unit-identity.test.ts tests/issue-3520-program-abi.test.ts tests/issue-1983-funcmap-collision.test.ts tests/issue-2138-multi-module-ir-overlay.test.ts tests/ir/inline-small.test.ts tests/ir/phase3c.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
 pnpm run check:ir-only -- --policy=hybrid
 pnpm run check:ir-fallbacks -- --verbose
 pnpm run typecheck

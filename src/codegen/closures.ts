@@ -86,7 +86,11 @@ import { addFunctionOwnLocals, registerOwnLocalsCollector } from "./binding-info
 // pulls the `async-cps`/`async-frame` chain which imports back into `closures`
 // (a cycle), so it must evaluate after this module's other deps are loaded to
 // avoid perturbing the init order of the coercion-engine/string-ops chain.
-import { planAsyncClosureActivation, emitAsyncClosureBody } from "./async-activation.js";
+import {
+  planAsyncClosureActivation,
+  emitAsyncClosureBody,
+  reportDeclinedAsyncRejectionHazard,
+} from "./async-activation.js";
 import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js"; // (#2865) async-gen fn-expr producer
 // (#3164) Native generator FUNCTION EXPRESSIONS (standalone/wasi): the lifted
 // closure body emits the state-struct factory instead of the eager-buffer host
@@ -325,6 +329,35 @@ export function collectReferencedIdentifiers(node: ts.Node, names: Set<string>, 
   // enclosing scope's `this` through the normal closure mechanism.
   if (node.kind === ts.SyntaxKind.ThisKeyword || node.kind === ts.SyntaxKind.SuperKeyword) {
     if (!shadowed || !shadowed.has("this")) names.add("this");
+    return;
+  }
+  // (#3378) A non-computed MEMBER/PROPERTY NAME is never a free-variable
+  // reference — `a.join`, the key of `{ join: x }`, or `ns.Type` name a
+  // property, not a binding. The generic `forEachChild` walk below would
+  // otherwise collect the `.name` Identifier and, if it collides with an
+  // outer local (e.g. `parts.join('')` vs. a module-scope `let join`), record
+  // a SPURIOUS capture. That capture's `outerLocalIdx` is valid only in the
+  // declaring frame, so baking it into a differently-framed nested closure
+  // emits a `local.get` past the closure's local count ("local index out of
+  // range" — the deepEqual.js `__closure_NN` crash). Recurse only into the
+  // reference-bearing children (the object/expression, the initializer, and
+  // any computed key), skipping the member NAME. Optional chaining
+  // (`a?.b`, `a?.[k]`) shares the same node kinds.
+  if (ts.isPropertyAccessExpression(node)) {
+    collectReferencedIdentifiers(node.expression, names, shadowed);
+    return;
+  }
+  if (ts.isQualifiedName(node)) {
+    collectReferencedIdentifiers(node.left, names, shadowed);
+    return;
+  }
+  if (ts.isPropertyAssignment(node)) {
+    // A computed key (`{ [k]: v }`) IS a reference; a plain identifier / string
+    // / numeric key is a property name. Always recurse the initializer.
+    if (ts.isComputedPropertyName(node.name)) {
+      collectReferencedIdentifiers(node.name, names, shadowed);
+    }
+    collectReferencedIdentifiers(node.initializer, names, shadowed);
     return;
   }
   if (isFunctionScopeBoundary(node)) {
@@ -1905,6 +1938,11 @@ export function compileArrowAsClosure(
   const asyncDecision = isAsync && !isGenerator ? planAsyncClosureActivation(ctx, arrow, /*isAsync*/ true) : null;
   if (asyncDecision) {
     closureReturnType = { kind: "externref" };
+  } else if (isAsync && !isGenerator) {
+    // (#3587) Declined async arrow/fn-expr with a genuinely-suspending await
+    // inside a `try`: refuse loudly instead of silently compiling the legacy
+    // pass-through that cannot deliver awaited rejections.
+    reportDeclinedAsyncRejectionHazard(ctx, arrow);
   }
 
   // 2. Analyze captured variables (referenced/written free vars, outer-write +

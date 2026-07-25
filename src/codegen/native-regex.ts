@@ -24,7 +24,7 @@ import { addFuncType, getOrRegisterArrayType, getOrRegisterVecType } from "./reg
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3) stable-regime minting
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { ReOp } from "./regex/bytecode.js";
-import { REGEX_STEP_CAP } from "./regex/vm.js";
+import { REGEX_STEP_CAP, REGEX_STEP_CAP_LEN_SATURATION, REGEX_STEP_CAP_PER_UNIT } from "./regex/vm.js";
 
 /** REGEX_STEP_CAP message (§22.2.6.x — cap exhaustion → catchable RangeError). */
 const REGEX_CAP_MESSAGE = "RangeError: regular expression step limit exceeded";
@@ -318,6 +318,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
   const JJ = 28; // i32 backref compare cursor (#1912)
   const C1 = 29; // i32 backref left-hand unit (#1912)
   const INB = 30; // i32 direction-aware in-bounds flag (#1911)
+  const BUDGET = 31; // i32 length-scaled step budget (#3549)
 
   // Helper: read prog[pc*3 + k]
   const readProg = (k: number): Instr[] => [
@@ -1229,6 +1230,22 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     { op: "local.set", index: SP },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: STEPS },
+    // (#3549) budget = CAP + PER_UNIT * min(slen, SATURATION) — length-scaled
+    // so legitimate LINEAR matches over long subjects (measured ~5 steps/unit
+    // for `^\p{L}+$`(u); the property-escapes complement subjects are ~1.1M
+    // units) fit, while runaway backtracking (Ω(n²)/Ω(2ⁿ)) still exceeds it.
+    // Mirrors regexStepBudget in regex/vm.ts — keep the two in lockstep.
+    { op: "local.get", index: SLEN },
+    { op: "i32.const", value: REGEX_STEP_CAP_LEN_SATURATION },
+    { op: "local.get", index: SLEN },
+    { op: "i32.const", value: REGEX_STEP_CAP_LEN_SATURATION },
+    { op: "i32.lt_s" },
+    { op: "select" },
+    { op: "i32.const", value: REGEX_STEP_CAP_PER_UNIT },
+    { op: "i32.mul" },
+    { op: "i32.const", value: REGEX_STEP_CAP },
+    { op: "i32.add" },
+    { op: "local.set", index: BUDGET },
     // stack = array.new_default(INITIAL_STACK_CAP); top=0; capUsed=INITIAL
     { op: "i32.const", value: INITIAL_STACK_CAP },
     { op: "array.new_default", typeIdx: frameArrIdx },
@@ -1241,13 +1258,14 @@ export function ensureRegexRun(ctx: CodegenContext): number {
       op: "loop",
       blockType: { kind: "empty" },
       body: [
-        // steps++; if steps > CAP throw RangeError (#2091 — was a silent
-        // `return 0`, indistinguishable from a genuine no-match).
+        // steps++; if steps > budget throw RangeError (#2091 — was a silent
+        // `return 0`, indistinguishable from a genuine no-match; #3549 — the
+        // flat cap became the length-scaled BUDGET local computed at entry).
         { op: "local.get", index: STEPS },
         { op: "i32.const", value: 1 },
         { op: "i32.add" },
         { op: "local.tee", index: STEPS },
-        { op: "i32.const", value: REGEX_STEP_CAP },
+        { op: "local.get", index: BUDGET },
         { op: "i32.gt_s" },
         { op: "if", blockType: { kind: "empty" }, then: capThrow },
         // failed = 0
@@ -1329,6 +1347,7 @@ export function ensureRegexRun(ctx: CodegenContext): number {
       { name: "jj", type: { kind: "i32" } },
       { name: "c1", type: { kind: "i32" } },
       { name: "inb", type: { kind: "i32" } },
+      { name: "budget", type: { kind: "i32" } },
     ],
     body,
     exported: false,

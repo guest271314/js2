@@ -259,7 +259,8 @@ export function compileNestedFunctionDeclaration(
     return false;
   };
   const paramTypes: ValType[] = [];
-  for (const p of stmt.parameters) {
+  for (let pi = 0; pi < stmt.parameters.length; pi++) {
+    const p = stmt.parameters[pi]!;
     const paramType = ctx.checker.getTypeAtLocation(p);
     let wasmType: ValType = restBindingOverridesToExternref(p)
       ? { kind: "externref" }
@@ -270,6 +271,30 @@ export function compileNestedFunctionDeclaration(
       wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
     }
     paramTypes.push(wasmType);
+    // (#3576) Rest parameter `...args: T[]` lowers (via resolveWasmType above)
+    // to a single `(ref null $__vec_elem)` param. Register it in
+    // `ctx.funcRestParams` so call sites — notably the tagged-template
+    // known-function dispatch in string-ops.ts — pack the trailing arguments
+    // into that vec instead of pushing them as positional slots. Top-level
+    // `declarations.ts` already registers rest params; the nested-function path
+    // silently did not, so a nested rest tag function (e.g. deepEqual.js
+    // `lazyResult(strings, ...subs)`) got a fixed-arity funcType with NO rest
+    // info and under-arity tag calls under-pushed the stack (`call ... need N,
+    // got N-1`, a hard Wasm-validation failure). The vec/array/element types are
+    // read back off the lowered param via `getVecInfo` — no extra checker query
+    // (oracle-ratchet-neutral) and guaranteed consistent with the param type.
+    if (p.dotDotDotToken && (wasmType.kind === "ref" || wasmType.kind === "ref_null")) {
+      const vecTypeIdx = (wasmType as { typeIdx: number }).typeIdx;
+      const vecInfo = getVecInfo(ctx, vecTypeIdx);
+      if (vecInfo) {
+        ctx.funcRestParams.set(funcName, {
+          restIndex: pi,
+          elemType: vecInfo.elemType,
+          arrayTypeIdx: vecInfo.arrTypeIdx,
+          vecTypeIdx,
+        });
+      }
+    }
   }
 
   // Check if this is a generator function declaration (function* name() { ... })

@@ -1958,16 +1958,13 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
       enc.byte(OP.end);
       break;
     case "br_table":
-      // #1939 — `br_table` is declared in the Instr union as `{ op: "br_table" }`
-      // with NO payload (target label vector + default), so there is no correct
-      // encoding for it: emitting opcode 0x0e without its operands would corrupt
-      // every following instruction. No codegen path produces it today. Fail
-      // loud rather than emit a malformed branch; wiring it needs the union to
-      // carry `targets: number[]` + `default: number` first.
-      throw new Error(
-        "encodeInstr: 'br_table' has no payload in the Instr union (needs targets[] + default) — " +
-          "cannot be encoded; no codegen path should emit it yet (#1939)",
-      );
+      // #2952 slice 4 — 0x0e, vec(labelidx) targets + default labelidx.
+      // (Was a payload-less stub that failed loud, #1939.)
+      enc.byte(OP.br_table);
+      enc.u32(instr.targets.length);
+      for (const t of instr.targets) enc.u32(t);
+      enc.u32(instr.defaultDepth);
+      break;
     // #1939 — fail loud on an op with no encoding case. The `never` binding is
     // a compile-time exhaustiveness check over the real Instr union, so a new
     // union variant without a matching encoding case is a type error here rather

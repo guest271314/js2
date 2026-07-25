@@ -2,7 +2,7 @@
 id: 3527
 title: "IR-only R7: AST-free async suspension plans and canonical Promise ABI"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-21
 updated: 2026-07-21
 priority: critical

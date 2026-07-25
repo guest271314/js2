@@ -148,6 +148,16 @@ function arrayLiteralIsUndefinedOrHoleOnly(arr: ts.ArrayLiteralExpression): bool
 }
 
 /**
+ * Is an array literal produced directly into an unconstrained `any` element
+ * position? Accept bare `any` (an inner literal of `any[]`) and
+ * `Array<any>`/`ReadonlyArray<any>` (the outer literal), but not typed unions.
+ */
+function arrayLiteralHasAnyElementContext(ctx: CodegenContext, arr: ts.ArrayLiteralExpression): boolean {
+  const contextual = ctx.oracle.contextualFactOf(arr);
+  return contextual?.kind === "any" || (contextual?.kind === "array" && contextual.element.kind === "any");
+}
+
+/**
  * Ensure that a struct registered for an object literal includes fields for
  * computed property names that TypeScript cannot statically resolve.
  * When TS returns 0 properties (e.g. { [1+1]: 2 }), we resolve the computed
@@ -1072,7 +1082,7 @@ function _hasDisposalMethod(expr: ts.ObjectLiteralExpression): boolean {
  * fields from compile-time names only, so these literals must take the host
  * plain-object path, which evaluates the key expression at runtime.
  */
-function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+export function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
   for (const p of expr.properties) {
     if (!ts.isPropertyAssignment(p) && !ts.isMethodDeclaration(p)) continue;
     if (!ts.isComputedPropertyName(p.name)) continue;
@@ -1270,6 +1280,7 @@ export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ObjectLiteralExpression,
+  expectedType?: ValType,
 ): ValType | null {
   // (#1239) If the literal carries any get/set accessor declarations,
   // route to the JS-host plain-object path so the runtime sees real
@@ -1431,6 +1442,53 @@ export function compileObjectLiteral(
   // failure mode the gc/host R2 fast path avoids. Gating to `ctx.standalone`
   // keeps wasi byte-identical to main (the wasi extension is a tracked
   // follow-on; see plan/issues/1901). gc/host mode is untouched (not standalone).
+  //
+  // (#3536) EXCEPT when the Wasm-level EXPECTED type is this literal's OWN
+  // shape struct. A literal in call-ARGUMENT position to a declared function
+  // whose implicit-`any` param was call-site-narrowed (inferParamTypeFromCallSites
+  // derived the param's struct FROM this literal's type) has TS-contextual type
+  // `any` — so the #1901 diversion below would build a dynamic `$Object`, and
+  // the call-boundary coercion's guarded cast (externref → shape struct) can
+  // never match → the callee's param silently arrives NULL. That is the
+  // `built-ins/RegExp/property-escapes` 311-row cluster (`buildString({...})`
+  // in regExpUtils.js) and the wider "Cannot access property on null or
+  // undefined [in <fn>]" masked family. When the literal's own struct
+  // resolution lands EXACTLY on the expected typeIdx, construct the closed
+  // struct — the same representation the var-init position already picks
+  // (`var obj = {...}; f(obj)` passes today) — so the argument matches the
+  // narrowed param by construction. Precise by design: the routing fires ONLY
+  // on typeIdx equality, so an expected `$Object` / class / vec / AnyValue
+  // type can never divert a literal that would not have lowered to that exact
+  // struct anyway.
+  if (
+    ctx.standalone &&
+    expectedType !== undefined &&
+    (expectedType.kind === "ref" || expectedType.kind === "ref_null") &&
+    expr.properties.length > 0
+  ) {
+    // oracle-ratchet-allow (#3536, granted in the issue frontmatter): this
+    // query needs the raw type IDENTITY for resolveStructName's anonTypeMap /
+    // structMap lookup — a wasm-lowering ValType question deliberately above
+    // what the oracle expresses (its header assigns struct registration to
+    // the caller).
+    let litType: ts.Type | undefined;
+    try {
+      litType = ctx.checker.getTypeAtLocation(expr);
+    } catch {
+      litType = undefined;
+    }
+    if (litType) {
+      let litStructName = resolveStructName(ctx, litType);
+      if (!litStructName) {
+        ensureStructForType(ctx, litType);
+        litStructName = resolveStructName(ctx, litType);
+      }
+      if (litStructName !== undefined && ctx.structMap.get(litStructName) === expectedType.typeIdx) {
+        ensureComputedPropertyFields(ctx, fctx, expr, litType);
+        return compileObjectLiteralForStruct(ctx, fctx, expr, litStructName);
+      }
+    }
+  }
   if (objectLiteralTakesStandaloneAnyObjectPath(ctx, expr)) {
     const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
     if (objResult) return objResult;
@@ -3438,6 +3496,40 @@ function isExprFreeOfReference(expr: ts.Node, name: string): boolean {
   return ok;
 }
 
+/**
+ * (#3532) Element wasm type for a bare empty `[]` from its contextual type.
+ * Handles a direct `Array<T>`/`ReadonlyArray<T>` context AND a UNION context
+ * (e.g. flatMap's `U | readonly U[]`) with array member(s), so `[]` adopts the
+ * array member's element type and registers the SAME vec type as a sibling
+ * `[x]` in the same conditional (`cond ? [] : [x]`) — otherwise the union falls
+ * through to `externref` while `[x]` is a numeric vec → invalid closure. Only
+ * adopts a union's element type when EVERY array member resolves to the same
+ * wasm type (ambiguous otherwise, e.g. `number[] | string[]` → keep externref).
+ */
+function resolveEmptyArrayElemWasm(ctx: CodegenContext, ctxType: ts.Type): ValType | undefined {
+  const fromArrayType = (t: ts.Type): ValType | undefined => {
+    const sym = (t as ts.TypeReference).symbol ?? t.symbol;
+    if (sym?.name === "Array" || sym?.name === "ReadonlyArray") {
+      const typeArgs = ctx.checker.getTypeArguments(t as ts.TypeReference);
+      if (typeArgs[0]) return resolveWasmType(ctx, typeArgs[0]);
+    }
+    return undefined;
+  };
+  const direct = fromArrayType(ctxType);
+  if (direct) return direct;
+  if (ctxType.isUnion()) {
+    const elems: ValType[] = [];
+    for (const part of ctxType.types) {
+      const e = fromArrayType(part);
+      if (e) elems.push(e);
+    }
+    if (elems.length > 0 && elems.every((e) => valTypesMatch(e, elems[0]!))) {
+      return elems[0];
+    }
+  }
+  return undefined;
+}
+
 export function compileArrayLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3523,20 +3615,19 @@ export function compileArrayLiteral(
     // the per-write grow-on-demand path otherwise pays.
     const fillBoundExpr = prealloc > 0 ? null : detectCountedFillLoopBound(expr);
 
-    // Empty array — try to determine element type from contextual type (e.g. number[])
+    // Empty array — try to determine element type from contextual type (e.g. number[]).
+    // Handles a direct `Array<T>`/`ReadonlyArray<T>` context AND a union context
+    // (e.g. flatMap's `U | readonly U[]`) so `[]` in `cond ? [] : [x]` adopts the
+    // sibling's concrete vec type instead of mis-defaulting to externref (#3532).
     let emptyElemKind = "externref";
     const ctxType = ctx.checker.getContextualType(expr) ?? ctx.checker.getTypeAtLocation(expr);
     if (ctxType) {
-      const sym = (ctxType as ts.TypeReference).symbol ?? ctxType.symbol;
-      if (sym?.name === "Array") {
-        const typeArgs = ctx.checker.getTypeArguments(ctxType as ts.TypeReference);
-        if (typeArgs[0]) {
-          const elemWasmType = resolveWasmType(ctx, typeArgs[0]);
-          emptyElemKind =
-            elemWasmType.kind === "ref" || elemWasmType.kind === "ref_null"
-              ? `ref_${(elemWasmType as { typeIdx: number }).typeIdx}`
-              : elemWasmType.kind;
-        }
+      const elemWasmType = resolveEmptyArrayElemWasm(ctx, ctxType);
+      if (elemWasmType) {
+        emptyElemKind =
+          elemWasmType.kind === "ref" || elemWasmType.kind === "ref_null"
+            ? `ref_${(elemWasmType as { typeIdx: number }).typeIdx}`
+            : elemWasmType.kind;
       }
     }
     const vecTypeIdx = getOrRegisterVecType(ctx, emptyElemKind);
@@ -3901,6 +3992,38 @@ export function compileArrayLiteral(
         }
       }
     }
+  }
+  // (#3543) Preserve the carrier that a nested heterogeneous literal ACTUALLY
+  // builds in an `any` context. With `unionAnyRep` enabled, the outer literal's
+  // first-element TS type `(string | number)[]` resolves to
+  // `__vec_ref_<AnyValue>`. The inner literal's existing #2190b/#2106 writer,
+  // however, correctly widens its mixed elements to canonical
+  // `__vec_externref`. Compiling that inner value against the inferred outer
+  // carrier immediately copies every externref element into `$AnyValue`; the
+  // dynamic vec reader then externalizes the wrapper rather than its payload,
+  // so numbers become NaN and native-string casts null-deref. The RTT arm order
+  // is not involved: the correct AnyValue vec arm matches.
+  //
+  // Re-key only this proven writer/inference mismatch. Both literals must be in
+  // a genuine any context, the inferred element must specifically be a vec of
+  // AnyValue, and neither construction may contain a spread. Typed union
+  // matrices, homogeneous matrices, flat arrays, and the flag-off lane remain
+  // byte-identical.
+  const inferredInnerVec =
+    elemWasm.kind === "ref" || elemWasm.kind === "ref_null" ? getVecInfo(ctx, elemWasm.typeIdx) : null;
+  if (
+    ctx.unionAnyRep &&
+    !hasSpread &&
+    ts.isArrayLiteralExpression(firstElem) &&
+    !firstElem.elements.some(ts.isSpreadElement) &&
+    arrayLiteralHasAnyElementContext(ctx, expr) &&
+    arrayLiteralHasAnyElementContext(ctx, firstElem) &&
+    inferredInnerVec &&
+    (inferredInnerVec.elemType.kind === "ref" || inferredInnerVec.elemType.kind === "ref_null") &&
+    inferredInnerVec.elemType.typeIdx === ctx.anyValueTypeIdx
+  ) {
+    const innerVecIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
+    elemWasm = { kind: "ref_null", typeIdx: innerVecIdx };
   }
   // (#2769) for-of over a direct array LITERAL whose binding pattern has an
   // element default / nested sub-pattern: the OUTER literal must not coerce an

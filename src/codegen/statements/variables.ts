@@ -844,28 +844,117 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
       // so other functions can access the closure via global.get.
       // #1690b: skip the module-global path when a function-local shadow
       // exists — the inner declaration must bind to the local, not the global.
-      const modGlobalIdx = hasLocalShadow ? undefined : ctx.moduleGlobals.get(name);
+      // (#3546) Additionally: only a genuinely TOP-LEVEL declaration binds the
+      // module global. A `let`/`const` inside a top-level BLOCK is a
+      // block-scoped SHADOW — `saveBlockScopedShadows` removed the outer
+      // binding's localMap entry on block entry, so `hasLocalShadow` is false
+      // here and the pre-fix code stored the block's closure into the OUTER
+      // module binding (`{ let f = () => 7; }` clobbered module `f`). `var`
+      // keeps the module store from any top-level block (§10.2.10 var
+      // scoping); function bodies are unaffected (their hoister pre-allocates
+      // the local, so `hasLocalShadow` gates them already).
+      const declIsLexical = (stmt.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
+      const bindsModuleGlobal = !declIsLexical || ts.isSourceFile(stmt.parent);
+      const modGlobalIdx = hasLocalShadow || !bindsModuleGlobal ? undefined : ctx.moduleGlobals.get(name);
       if (modGlobalIdx !== undefined) {
-        // Update the global's type to match the actual closure ref type
+        // (#3534 step 2, option a) NEVER retro-narrow the pre-declared
+        // `$__mod_<name>` global. It is declared `externref` before the closure
+        // type is known; narrowing it here to the precise `(ref null N)`
+        // retroactively invalidated every ALREADY-EMITTED `global.get` whose
+        // consumer took the externref at face value (the #3533 class-field
+        // `struct.set expected externref, found (ref null N)` invalid-Wasm
+        // family). Keep the binding `externref` for its whole lifetime and BOX
+        // ON STORE instead (`extern.convert_any`); readers get a stable
+        // externref (identifiers.ts C1) and calls take `compileClosureCall`'s
+        // existing externref arm (guarded cast to the lifted self carrier).
+        // The LOCAL keeps the precise closure type — its reads use the
+        // precise-ref call arm (no unbox round-trip inside this function).
         const globalDef = ctx.mod.globals[localGlobalIdx(ctx, modGlobalIdx)];
-        if (globalDef) {
+        const globalIsExternref = globalDef?.type.kind === "externref";
+        if (globalDef && !globalIsExternref) {
+          // Pre-declared as something other than externref (not the closure
+          // pre-decl convention) — keep the legacy retype so init and type
+          // agree. Closure globals never take this arm.
           const nullableType: ValType =
             closureType.kind === "ref"
               ? { kind: "ref_null", typeIdx: (closureType as { typeIdx: number }).typeIdx }
               : closureType;
           globalDef.type = nullableType;
-          // Also fix the init expression to match the new type
           if (nullableType.kind === "ref_null") {
             globalDef.init = [{ op: "ref.null", typeIdx: (nullableType as { typeIdx: number }).typeIdx }];
           }
         }
-        // Duplicate value on stack: one for the global, one for the local
-        const localIdx = allocLocal(fctx, name, closureType);
-        fctx.body.push({ op: "local.tee", index: localIdx });
-        fctx.body.push({ op: "global.set", index: modGlobalIdx });
+        if (globalIsExternref) {
+          // (#3546) The `__module_init` shadow local is EXTERNREF — the same
+          // uniform representation as the global (#3534 option a): convert
+          // ONCE, tee the boxed value into the local, store the same value to
+          // the global. Top-level reads return externref (consumers coerce);
+          // top-level calls take `compileClosureCall`'s guarded externref arm
+          // (cold — module init runs once). Keeping the local PRECISE while
+          // the binding is reassignable forced assignment.ts to RETYPE the
+          // local on reassignment — the exact #3534 retro-invalidation
+          // mechanism, one slot over. Record the shadow so a later top-level
+          // reassignment (which resolves to this local via localMap) re-syncs
+          // the module global (#3546 — pre-fix it updated only the shadow and
+          // every cross-function call kept the FIRST closure).
+          const localIdx = allocLocal(fctx, name, { kind: "externref" });
+          if (closureType.kind === "ref" || closureType.kind === "ref_null") {
+            // Box on store: precise closure struct → externref (A2).
+            fctx.body.push({ op: "extern.convert_any" });
+          }
+          fctx.body.push({ op: "local.tee", index: localIdx });
+          fctx.body.push({ op: "global.set", index: modGlobalIdx });
+          (fctx.moduleBindingShadowLocals ??= new Map()).set(name, localIdx);
+        } else {
+          // Legacy non-externref pre-decl arm (closure globals never take
+          // this): duplicate value on stack — one for the global, one for the
+          // (precise) local.
+          const localIdx = allocLocal(fctx, name, closureType);
+          fctx.body.push({ op: "local.tee", index: localIdx });
+          fctx.body.push({ op: "global.set", index: modGlobalIdx });
+        }
         // Set TDZ flag to 1 (initialized)
         emitTdzInit(ctx, fctx, name);
       } else {
+        // (#3534 construct site) Boxed-before-declared: an EARLIER
+        // (forward-referencing) closure construction boxed this binding into a
+        // ref cell and re-aimed `localMap[name]` at the `__boxed_<name>` CELL
+        // local. Reusing that slot as the value slot below would (a) RETYPE
+        // the cell local to the closure struct — retroactively invalidating
+        // the already-emitted `struct.new <cell>; local.tee` (stack-balance
+        // then "repairs" the tee with a statically-impossible `ref.cast_null`
+        // → guaranteed `illegal cast` at runtime: the nativeFunctionMatcher
+        // mutually-recursive `eat`/`test` trap) and (b) alias the raw value
+        // over the cell, so captures never observe the initialization. Write
+        // the closure value THROUGH the cell instead (the #3396/#1177
+        // `boxedForInitStore` convention) and leave the slot's ref-cell type
+        // untouched.
+        const boxedClosureCell = fctx.boxedCaptures?.get(name);
+        const boxedCellLocalIdx = boxedClosureCell !== undefined ? fctx.localMap.get(name) : undefined;
+        if (boxedClosureCell !== undefined && boxedCellLocalIdx !== undefined) {
+          if (!valTypesMatch(closureType, boxedClosureCell.valType)) {
+            // Precise closure struct → externref cell field: extern.convert_any.
+            coerceType(ctx, fctx, closureType, boxedClosureCell.valType);
+          }
+          const tmpVal = allocLocal(fctx, `__box_init_tmp_${fctx.locals.length}`, boxedClosureCell.valType);
+          fctx.body.push({ op: "local.set", index: tmpVal });
+          fctx.body.push({ op: "local.get", index: boxedCellLocalIdx });
+          fctx.body.push({ op: "ref.is_null" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [],
+            else: [
+              { op: "local.get", index: boxedCellLocalIdx },
+              { op: "local.get", index: tmpVal },
+              { op: "struct.set", typeIdx: boxedClosureCell.refCellTypeIdx, fieldIdx: 0 },
+            ],
+          });
+          // The binding is initialized now — flip the (possibly boxed) local
+          // TDZ flag so captured forward references pass their checks.
+          emitLocalTdzInit(fctx, name);
+          continue;
+        }
         // Reuse pre-hoisted slot if it exists.
         // Do NOT narrow externref → ref: the hoisting pass already emitted
         // __get_undefined() targeting externref; mutating the type causes
@@ -878,6 +967,7 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
           if (slot && slot.type.kind !== "externref") slot.type = closureType;
         }
         emitCoercedLocalSet(ctx, fctx, localIdx, closureType);
+        emitLocalTdzInit(fctx, name);
       }
       continue;
     }
@@ -1483,7 +1573,15 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
             localIdx < fctx.params.length
               ? fctx.params[localIdx]?.type
               : fctx.locals[localIdx - fctx.params.length]?.type;
-          if (matchedClosureInfo && slotTypeForCast?.kind === "externref") {
+          if (slotTypeForCast?.kind === "externref") {
+            // Slot stays a raw externref here whether a signature MATCHED but
+            // the #962 guard kept it externref (#3432) OR nothing matched
+            // (#3460, the else-arm below) — either way the value can be a
+            // foreign/bridge/null callable (`var f = obj.missingFn`). Record the
+            // decl so `calleeMayBeHostCallable` emits the #1712 __call_function
+            // arm; without it the closure-struct dispatch nulls the guarded cast
+            // and `struct.get`-traps (uncatchable) where spec wants a catchable
+            // TypeError. Arm emission is !standalone&&!wasi-gated → #1941 holds.
             (ctx.skippedClosureRecastDecls ??= new Set()).add(decl);
           }
           if (matchedClosureInfo && slotTypeForCast?.kind !== "externref") {

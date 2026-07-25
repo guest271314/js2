@@ -7,11 +7,18 @@
 // isolated compile+execute attempt and communicates success through the normal
 // process exit/stdout/stderr contract used by every test262.fyi engine.
 import fs from "node:fs";
-import { dirname, relative, resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { discoverFixtureGraph } from "./test262-fixture-graph.mjs";
 import { FyiSourceExecutor, runTest } from "./run-test262-fyi.mjs";
 import { enforceTest262FyiRuntime } from "./test262-fyi-runtime.mjs";
+
+// (#3599) Re-exported so external integrations that run many files in one
+// long-lived process (see `executeTestFile`'s `executor` param below) can
+// construct and reuse a `FyiSourceExecutor` themselves, instead of paying a
+// fresh Node start + full compiler-module load on every single-file
+// invocation of this CLI. Both are otherwise internal to this module.
+export { FyiSourceExecutor, runTest };
 
 const SUPPORTED_TARGETS = new Set(["gc", "standalone"]);
 
@@ -113,26 +120,24 @@ export function parseTest262Negative(source, flags = parseTest262Flags(source)) 
   return flags.has("negative") ? true : undefined;
 }
 
-function workerPathForCli() {
-  const directory = dirname(fileURLToPath(import.meta.url));
-  for (const name of ["test262-worker.mjs", "test262-worker.js"]) {
-    const candidate = resolve(directory, name);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  throw new Error(`js2 Test262 worker is missing beside ${fileURLToPath(import.meta.url)}`);
-}
-
-export async function executeTestFile({ target, test262Root, inputPath, engineSuffix, module = false }) {
+// (#3599) `executor` lets a caller that runs many files in the same process —
+// e.g. a persistent server wrapping this one-shot function — supply an
+// already-running `FyiSourceExecutor` and reuse its warm compiler/worker
+// across calls instead of paying a fresh Node start + full module load per
+// file. Omitting it preserves the original one-shot behavior exactly: a
+// fresh executor is created and torn down before returning, matching every
+// existing caller (the `main()` CLI entry point below, and any external
+// integration written against the prior signature).
+export async function executeTestFile({ target, test262Root, inputPath, engineSuffix, module = false, executor }) {
   const source = fs.readFileSync(resolve(inputPath), "utf8");
   const flags = parseTest262Flags(source);
   const testPath = testPathForInput(inputPath, test262Root, engineSuffix);
   const graph = discoverFixtureGraph(testPath, source, { test262Root });
   const asyncTest = flags.has("async");
   const negative = parseTest262Negative(source, flags);
-  const executor = new FyiSourceExecutor(undefined, {
-    execPath: process.execPath,
-    workerPath: workerPathForCli(),
-  });
+  // FyiSourceExecutor resolves its own worker path (bundled dist/ layout or
+  // unbundled scripts/ layout) — see run-test262-fyi.mjs's resolveWorkerPath.
+  const ownExecutor = executor ?? new FyiSourceExecutor();
 
   try {
     const result = await runTest(
@@ -147,11 +152,11 @@ export async function executeTestFile({ target, test262Root, inputPath, engineSu
         ...graph,
       },
       target,
-      executor,
+      ownExecutor,
     );
     return { ...result, asyncTest, negative };
   } finally {
-    executor.shutdown();
+    if (!executor) ownExecutor.shutdown();
   }
 }
 

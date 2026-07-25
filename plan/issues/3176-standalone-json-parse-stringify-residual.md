@@ -1,8 +1,7 @@
 ---
 id: 3176
 title: "standalone: JSON.parse/stringify spec residual — reviver array walk illegal-cast, SyntaxError strictness, replacer/space edges (67 gap tests)"
-status: in-progress
-assignee: ttraenkler/dev-json
+status: ready
 created: 2026-07-12
 updated: 2026-07-12
 priority: high
@@ -140,3 +139,15 @@ fragility out of scope for a JSON-only PR.
 - **`value-string-escape-ascii`**: blocked on `Object.values` / computed keys,
   not JSON.
 - **deferred**: the 2 `*-proxy-revoked` rows (Proxy).
+
+## Stale-verify (2026-07-24, dev-std-4) — headline PASSES, keep ready
+
+MEASURED on current `main` (`--target standalone`, host-free): the JSON headline
+now works — `JSON.stringify({a:1})`→`{"a":1}`, `JSON.stringify({a:[1,2]})`→
+`{"a":[1,2]}`, `JSON.parse('{"a":7}').a`→7, and (the SyntaxError-strictness
+bucket) `JSON.parse("+1")` throws SyntaxError. The native codec + object/array
+stringify + parse are solid; #1353 (the open-ended shape-walking spec request)
+is now superseded by this issue. Keep `ready` but RE-MEASURE the full
+`built-ins/JSON/**` dirs (parse 77 + stringify 66) to size the true residual
+against the stale "67 gap tests" figure — the reviver-array-walk illegal-cast
+and replacer/space edges likely remain, but the count needs refreshing.

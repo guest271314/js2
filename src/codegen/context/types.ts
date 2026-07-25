@@ -593,6 +593,22 @@ export interface FunctionContext {
     promiseTypeIdx: number;
     /** `__promise_fulfill(promise, value) -> value` funcIdx. */
     fulfillFuncIdx: number;
+    /**
+     * (#2906 3c-ii) The ACTIVE handler region's await-free finalizer at the
+     * lead statement currently being compiled — set/cleared per-lead by
+     * `buildStateBody`. A `return v` compiled while this is non-empty replays
+     * it between evaluating `v` and settling (return-through-finally). Cleared
+     * during the replay itself so a `return` INSIDE the finally settles
+     * directly (the finally's completion overrides, §14.15.3).
+     */
+    pendingFinalizer?: readonly ts.Statement[];
+    /**
+     * (#2906 3c-ii) The `__async_in_try` region-id local. The replay resets it
+     * to 0 first so a throw INSIDE the replayed finally does not re-enter the
+     * same region's catch/finalizer (mirrors the inline finally leads, which
+     * are flagged not-in-try).
+     */
+    handlerLocal?: number;
   };
   /** Set of variable names that are read-only bindings (e.g. named function expression name) */
   readOnlyBindings?: Set<string>;
@@ -795,6 +811,19 @@ export interface FunctionContext {
    * preserve the old map so call-site checks (calls.ts) keep firing.
    */
   boxedTdzFlags?: Map<string, { refCellTypeIdx: number; localIdx: number }>;
+  /**
+   * (#3546) Locals in `__module_init` that SHADOW a module-global binding for a
+   * top-level closure declaration (`const/let/var f = () => …` at module
+   * level): name → the shadow local's index. The declaration dual-stores
+   * (local + `$__mod_<name>` global); a later TOP-LEVEL reassignment resolves
+   * to the local via `localMap` and would otherwise update only the shadow —
+   * every OTHER function's read/call of the binding goes through the global,
+   * which silently kept the FIRST closure. Assignment's local arm consults
+   * this map (exact name→index match, so genuine function-locals and
+   * block-scoped shadows never match) and re-syncs the global after the local
+   * write.
+   */
+  moduleBindingShadowLocals?: Map<string, number>;
   /**
    * Stack of catch rethrow info. Each entry tracks a catch variable name and the
    * current depth (number of block-like structures) from the catch boundary.
@@ -1450,6 +1479,26 @@ export interface CodegenContext {
    * closure-own-property side table's linked list.
    */
   closurePropHeadGlobalIdx?: number;
+  /**
+   * (#3537) Set when `ensureObjectRuntime` reserved the array ($Vec) expando
+   * side-table helpers (`__is_vec_prop_carrier`, `__vec_bag_lookup`,
+   * `__vec_bag_ensure`, `__vec_prop_get`, `__vec_prop_set`) — the ARRAY arm of
+   * the #3468 own-property family. Bodies self-call `__extern_get`/`__extern_set`
+   * so they are filled by `fillVecPropHelpers` at FINALIZE. Standalone/wasi only.
+   */
+  vecPropHelpersReserved?: boolean;
+  /**
+   * (#3537) Type index of the `$VecPropEntry` linked-list node
+   * `{ next: (ref null $VecPropEntry); key: eqref; bag: externref }`.
+   */
+  vecPropEntryTypeIdx?: number;
+  /** (#3537) Global index of `$__vec_prop_head` (`(mut ref null $VecPropEntry)`). */
+  vecPropHeadGlobalIdx?: number;
+  /**
+   * (#3537) `$__vec_base` type index resolved at RESERVE time (never registers
+   * a type at finalize) — the `ref.test` target for `__is_vec_prop_carrier`.
+   */
+  vecPropBaseTypeIdx?: number;
   /**
    * (#1100) Set when the standalone Proxy trap-dispatch runtime reserved its
    * `__proxy_call_{get,set,has}` driver placeholders (in `ensureProxyRuntime`).

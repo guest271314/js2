@@ -130,7 +130,7 @@ import {
   planIrCompilation,
   type IrSelection,
 } from "./select.js";
-import { verifyIrFunction } from "./verify.js";
+import { verifyIrFunction, type IrVerifyError } from "./verify.js";
 import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
@@ -180,6 +180,29 @@ function invariantIntegrationFailure(
   detail: string,
 ): IrIntegrationError {
   return integrationFailure(func, { kind: "invariant", code, stage, detail });
+}
+
+/**
+ * (#3565) Classify a verify-stage error into an integration failure. The #1798
+ * return-value gate marks its errors `demote: true` — a DESIGNED demote-to-legacy
+ * signal (a return/early.return whose type or arity would emit invalid Wasm), NOT
+ * a compiler invariant. Those flow to an `unsupported` outcome (warning → keep the
+ * legacy body), restoring the pre-#3341 behavior the gate's own doc documents.
+ * EVERY other verify error (SSA scope, dominance, branch/instr type rules, block-id
+ * shape) is a genuine invalid-IR invariant and stays a hard `verifier-failure` —
+ * so #3341's invalid-Wasm-catching purpose is preserved.
+ */
+function verifyIntegrationFailure(func: string, e: IrVerifyError, detailPrefix = ""): IrIntegrationError {
+  const detail = `${detailPrefix}${e.message}`;
+  if (e.demote) {
+    return integrationFailure(func, {
+      kind: "unsupported",
+      code: "return-type-legacy-coupling",
+      stage: "verify",
+      detail,
+    });
+  }
+  return invariantIntegrationFailure(func, "verifier-failure", "verify", detail);
 }
 
 function caughtIntegrationFailure(
@@ -465,7 +488,7 @@ export function compileIrPathFunctions(
       const mainErrors = verifyBuiltArtifact(result.main, name, false);
       if (mainErrors.length > 0) {
         for (const e of mainErrors) {
-          errors.push(invariantIntegrationFailure(name, "verifier-failure", "verify", e.message));
+          errors.push(verifyIntegrationFailure(name, e));
         }
         continue;
       }
@@ -475,14 +498,7 @@ export function compileIrPathFunctions(
         const liftedErrors = verifyBuiltArtifact(lifted, name, true);
         if (liftedErrors.length > 0) {
           for (const e of liftedErrors) {
-            errors.push(
-              invariantIntegrationFailure(
-                name,
-                "verifier-failure",
-                "verify",
-                `synthetic artifact ${lifted.name}: ${e.message}`,
-              ),
-            );
+            errors.push(verifyIntegrationFailure(name, e, `synthetic artifact ${lifted.name}: `));
           }
           anyLiftedFailed = true;
         }
@@ -634,7 +650,7 @@ export function compileIrPathFunctions(
           const mainErrors = verifyBuiltArtifact(result.main, memberName, false);
           if (mainErrors.length > 0) {
             for (const e of mainErrors) {
-              errors.push(invariantIntegrationFailure(memberName, "verifier-failure", "verify", e.message));
+              errors.push(verifyIntegrationFailure(memberName, e));
             }
             continue;
           }
@@ -646,14 +662,7 @@ export function compileIrPathFunctions(
             const liftedErrors = verifyBuiltArtifact(lifted, memberName, true);
             if (liftedErrors.length > 0) {
               for (const e of liftedErrors) {
-                errors.push(
-                  invariantIntegrationFailure(
-                    memberName,
-                    "verifier-failure",
-                    "verify",
-                    `synthetic artifact ${lifted.name}: ${e.message}`,
-                  ),
-                );
+                errors.push(verifyIntegrationFailure(memberName, e, `synthetic artifact ${lifted.name}: `));
               }
               anyLiftedFailed = true;
             }
@@ -750,7 +759,7 @@ export function compileIrPathFunctions(
       const mainErrors = verifyBuiltArtifact(result.main, MODULE_INIT_UNIT_NAME, false);
       if (mainErrors.length > 0) {
         for (const e of mainErrors) {
-          errors.push(invariantIntegrationFailure(MODULE_INIT_UNIT_NAME, "verifier-failure", "verify", e.message));
+          errors.push(verifyIntegrationFailure(MODULE_INIT_UNIT_NAME, e));
         }
       } else {
         let anyLiftedFailed = false;
@@ -758,14 +767,7 @@ export function compileIrPathFunctions(
           const liftedErrors = verifyBuiltArtifact(lifted, MODULE_INIT_UNIT_NAME, true);
           if (liftedErrors.length > 0) {
             for (const e of liftedErrors) {
-              errors.push(
-                invariantIntegrationFailure(
-                  MODULE_INIT_UNIT_NAME,
-                  "verifier-failure",
-                  "verify",
-                  `synthetic artifact ${lifted.name}: ${e.message}`,
-                ),
-              );
+              errors.push(verifyIntegrationFailure(MODULE_INIT_UNIT_NAME, e, `synthetic artifact ${lifted.name}: `));
             }
             anyLiftedFailed = true;
           }
@@ -1150,6 +1152,11 @@ export function compileIrPathFunctions(
   // The placeholder body is overwritten with the real lowered body in the
   // Phase-3 loop below.
   // -------------------------------------------------------------------------
+  // (#3551) Track freshly-allocated slots so an owner failure AFTER
+  // allocation (e.g. the ABI-parity withdrawal cascade in Phase 3) can stub
+  // the orphaned slot instead of leaving an EMPTY body in the module (see
+  // the stub pass after the patch loop below).
+  const freshSlots: Array<{ readonly funcIdx: number; readonly ownerName: string }> = [];
   for (const entry of healthyForLower) {
     // Top-level (non-synthesized) functions already have a funcIdx
     // allocated by `compileDeclarations`. Skip them.
@@ -1171,6 +1178,7 @@ export function compileIrPathFunctions(
       exported: false,
     });
     ctx.funcMap.set(entry.name, funcIdx);
+    freshSlots.push({ funcIdx, ownerName: entry.ownerName });
   }
 
   // -------------------------------------------------------------------------
@@ -1323,6 +1331,14 @@ export function compileIrPathFunctions(
     readonly finalBody: Instr[];
   };
   const pendingPatches: PendingPatch[] = [];
+  // (#3551) Function names withdrawn by the typeIdx-parity guard below. Every
+  // IR body was compiled against `calleeTypes` — the IR's shared view of each
+  // claimed function's signature — so when a callee's claim is withdrawn on a
+  // parity mismatch (its slot keeps the LEGACY ABI, which the mismatch just
+  // proved differs from the IR view), any committed IR caller of it would call
+  // through the wrong ABI. The cascade after this loop withdraws those callers
+  // too; collecting the names here is its input.
+  const abiDivergentNames = new Set<string>();
   for (const entry of healthyForLower) {
     const name = entry.name;
     try {
@@ -1372,23 +1388,67 @@ export function compileIrPathFunctions(
       // body stays in place; the IR's effort goes uncommitted but no
       // regression occurs.
       //
-      // Top-level FunctionDeclarations don't need this check — their
-      // pre-allocated body was empty and no legacy callers depend on
-      // the slot's prior typeIdx.
+      // (#3536) Top-level FunctionDeclarations now share the guard too. The
+      // old exemption assumed "no legacy callers depend on the slot's prior
+      // typeIdx" — false: `__module_init` (and any legacy-compiled body) that
+      // calls the function has ALREADY emitted its call-argument coercions
+      // against the collect-time signature (`getFuncParamTypes` at that
+      // moment), and those bodies are not re-visited after this patch. A
+      // call-site-narrowed implicit-`any` param (a shape-struct ValType from
+      // inferParamTypeFromCallSites) that the IR re-types as externref left
+      // the module INVALID (V8: "call[0] expected type externref, found …")
+      // or, one fixup later, silently passed a closed struct into a
+      // dynamic-reading body → every member read `undefined`. `addFuncType`
+      // dedups on shape, so an identical signature lands on the identical
+      // typeIdx and the guard is a no-op for the common case; a mismatch
+      // means the IR resolved a DIFFERENT ABI than the one already-compiled
+      // callers bake — keep the legacy body (the IR's effort goes
+      // uncommitted, recorded on the ledger; no regression occurs).
       // (#3142 Slice 2) `__module_init` shares the guard: its slot's
       // `()->()` typeIdx was interned by compileDeclarations and the wasm
       // `start` section / `_start` wrapper depend on it. `addFuncType`
       // dedups on shape, so the IR-lowered void unit lands on the same
       // index; a mismatch means the lowering went wrong — keep legacy.
-      if ((entry.classMember || entry.moduleInit) && wasmFunc.typeIdx !== existing.typeIdx) {
-        markOwnerInvariant(
-          entry.ownerName,
-          name,
-          "abi-type-index-mismatch",
-          "patch",
-          `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
-        );
-        continue;
+      if (wasmFunc.typeIdx !== existing.typeIdx) {
+        if (entry.classMember || entry.moduleInit) {
+          // Pre-#3536 semantics unchanged: for these units a mismatch means
+          // the lowering itself went wrong — a hard invariant.
+          abiDivergentNames.add(name);
+          markOwnerInvariant(
+            entry.ownerName,
+            name,
+            "abi-type-index-mismatch",
+            "patch",
+            `${entry.moduleInit ? "module-init" : "class-method"} typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
+          );
+          continue;
+        }
+        if (existing.body.length > 0) {
+          // Top-level function WITH a real legacy body: an EXPECTED,
+          // recoverable divergence (the IR legitimately cannot express e.g. a
+          // shape-struct param) — a soft withdraw-the-claim fallback, NOT a
+          // compile error. The legacy body stays; callers keep the ABI they
+          // compiled against.
+          abiDivergentNames.add(name);
+          markOwnerFailure(
+            entry.ownerName,
+            name,
+            new IrUnsupportedError(
+              "abi-signature-parity",
+              "resolve",
+              `function typeIdx parity mismatch: IR=${wasmFunc.typeIdx}, legacy=${existing.typeIdx} — keeping legacy body`,
+            ),
+            "patch",
+          );
+          continue;
+        }
+        // EMPTY pre-allocated slot (e.g. a lifted branch-hoisted nested
+        // declaration whose slot carries a placeholder typeIdx and no body):
+        // this is the original exemption's TRUE case — the IR body is the
+        // ONLY body, so withdrawing would leave an empty function and an
+        // invalid module (the 2026-07-23 #3536 CI regressions:
+        // var-hoisting-scope / scope-and-error-handling). Fall through and
+        // patch as before.
       }
       // Tail-call optimization parity with the legacy AST path (#602): the IR
       // `return` lowering never rewrites a trailing `call`/`call_ref` into
@@ -1433,6 +1493,39 @@ export function compileIrPathFunctions(
     }
   }
 
+  // (#3551) ABI-parity withdrawal CASCADE. A withdrawal above keeps the
+  // callee's LEGACY body and typeIdx — but every IR body was compiled against
+  // `calleeTypes`, the IR's shared view of each claimed function's signature,
+  // which the parity mismatch just proved DIFFERS from that legacy ABI for the
+  // withdrawn name. Committing a caller while withdrawing its callee therefore
+  // strands the caller on the wrong ABI: the #3503 partial-commit regression
+  // (tests/issue-3471.test.ts) committed `check`'s IR body — which passed raw
+  // f64 args per the IR view of `isSameValue` — while `isSameValue` withdrew
+  // to its legacy `(externref, externref)` signature, producing invalid Wasm
+  // ("call[0] expected type f64, found call of type externref") after the
+  // stack-balance repair mangled the arg coercions. So: withdraw every still-
+  // pending patch whose IR body references a parity-withdrawn name. One level
+  // is a fixpoint — a cascade-withdrawn caller PASSED the guard itself (its
+  // IR typeIdx equals its legacy typeIdx), so keeping its legacy body changes
+  // nothing about the ABI its own callers compiled against.
+  if (abiDivergentNames.size > 0) {
+    for (const patch of pendingPatches) {
+      if (failedOwners.has(patch.entry.ownerName)) continue;
+      const referenced = findReferencedFuncName(patch.entry.fn, abiDivergentNames);
+      if (referenced === undefined) continue;
+      markOwnerFailure(
+        patch.entry.ownerName,
+        patch.entry.name,
+        new IrUnsupportedError(
+          "abi-signature-parity",
+          "resolve",
+          `body references ${referenced}, whose claim was withdrawn on a typeIdx parity mismatch — the call ABI baked from calleeTypes no longer matches; keeping legacy body`,
+        ),
+        "patch",
+      );
+    }
+  }
+
   // Patch only after every artifact lowered successfully. A lifted/clone
   // failure invalidates its whole source owner, including an already-lowered
   // main artifact, so the ledger can never report emitted+fatal for one row.
@@ -1446,6 +1539,32 @@ export function compileIrPathFunctions(
       exported: patch.existing.exported,
     });
     compiled.push(patch.entry.name);
+  }
+
+  // (#3551) Stub orphaned empty slots. Two slot families can be stranded
+  // BODYLESS when their owner fails after allocation (at lower time or via
+  // the cascade above): fresh slots (mono clones / lifted fns), and
+  // pre-allocated slots whose legacy body was empty (a branch-hoisted nested
+  // declaration — the guard's empty-slot fall-through case, where the IR body
+  // was the only body on offer). An empty body is invalid Wasm for any
+  // signature WITH results, and the slot can be reachable (a HEALTHY owner
+  // may have committed a body that calls it). A lone `unreachable` validates
+  // against every signature, keeps the rest of the module working, and traps
+  // only on a path that actually enters the orphaned artifact. Empty VOID
+  // bodies are already valid Wasm (fall-through) — leave those as-is rather
+  // than converting today's silent no-op into a trap.
+  const stubIfOrphanedEmpty = (funcIdx: number): void => {
+    const orphan = definedFuncAt(ctx, funcIdx);
+    if (!orphan || orphan.body.length > 0) return;
+    const typeDef = ctx.mod.types[orphan.typeIdx];
+    if (!typeDef || typeDef.kind !== "func" || typeDef.results.length === 0) return;
+    replaceDefinedFuncAt(ctx, funcIdx, { ...orphan, body: [{ op: "unreachable" }] });
+  };
+  for (const slot of freshSlots) {
+    if (failedOwners.has(slot.ownerName)) stubIfOrphanedEmpty(slot.funcIdx);
+  }
+  for (const patch of pendingPatches) {
+    if (failedOwners.has(patch.entry.ownerName)) stubIfOrphanedEmpty(patch.funcIdx);
   }
 
   const dropTerminal = process.env.JS2WASM_TEST_DROP_IR_TERMINAL;
@@ -1464,6 +1583,24 @@ export function compileIrPathFunctions(
 
 function hasExportModifier(fn: ts.FunctionDeclaration): boolean {
   return !!fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+}
+
+/**
+ * (#3551) Scan an IR function for any symbolic reference to one of `names`.
+ * `IrFuncRef` has exactly two carriers in the instruction set — direct `call`
+ * targets and `closure.new` lifted-func refs — and terminators carry none, so
+ * a flat walk over every block's instrs is complete. Returns the first
+ * referenced name (for the withdrawal detail), or undefined when the body
+ * references none of them.
+ */
+function findReferencedFuncName(fn: IrFunction, names: ReadonlySet<string>): string | undefined {
+  for (const block of fn.blocks) {
+    for (const instr of block.instrs) {
+      if (instr.kind === "call" && names.has(instr.target.name)) return instr.target.name;
+      if (instr.kind === "closure.new" && names.has(instr.liftedFunc.name)) return instr.liftedFunc.name;
+    }
+  }
+  return undefined;
 }
 
 /**

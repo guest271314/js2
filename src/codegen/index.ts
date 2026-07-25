@@ -55,6 +55,14 @@ import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../ir/
 import { makeIrHostDateSnapshotResolver } from "../ir/host-date.js";
 import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "../ir/backend/legality.js";
 import { collectModuleInitPopulation, MODULE_INIT_UNIT_NAME } from "../ir/module-init.js";
+import {
+  buildIrUnitInventory,
+  terminalIrUnitsForSource,
+  type BuildIrUnitInventoryOptions,
+  type IrSourceId,
+  type IrUnitId,
+  type IrUnitInventory,
+} from "../ir/identity.js";
 import { makeIrPromiseDelayResolver } from "../ir/promise-delay.js";
 import {
   buildIrPromiseDelayLoweringPlans,
@@ -140,6 +148,7 @@ import {
   fillProxyDispatch,
 } from "./object-runtime.js";
 import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
+import { fillVecPropHelpers } from "./vec-props.js"; // (#3537) array ($Vec) expando side table
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
 import { fillReflectIsConstructor } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
@@ -1514,12 +1523,60 @@ function explicitlyDisabledEnv(v: string | undefined): boolean {
   return v === "0" || v === "false";
 }
 
-export function formatIrPathFallbackDiagnostic(err: IrIntegrationError): {
+// (#680 / #3341) The host-only generator/async-generator buffer imports that
+// `addGeneratorImports` (registry/imports.ts) intentionally does NOT register
+// under `--target standalone`/`wasi` (it early-returns there). In those targets
+// the native #680 `__GenState` state machine lowers generators host-free, so an
+// IR generator path that still emits a ref to one of these names (src/ir/
+// from-ast.ts) is referencing a TARGET-UNAVAILABLE host import — NOT a
+// builder↔finalize desync. Keep this list in lockstep with `addGeneratorImports`.
+function isHostOnlyGeneratorImportName(name: string): boolean {
+  return (
+    name.startsWith("__gen_") ||
+    name === "__create_generator" ||
+    name === "__create_async_generator" ||
+    name === "__get_caught_exception"
+  );
+}
+
+/**
+ * (#680) True when a hard IR-build INVARIANT is actually a reference to a host
+ * import that the CURRENT TARGET intentionally omits, not a builder↔finalize
+ * desync. #3341 promoted the `unknown-function-ref` name-repoint invariant to a
+ * hard compile error on the premise that "no valid TS source can produce an
+ * unresolvable ref on a correctly-claimed function" — validated on the gc-target
+ * playground corpus, which MISSED the standalone-target dimension: a basic
+ * `function* g(){ yield 1 }` under `--target standalone` makes the IR generator
+ * path emit a ref to the host-only `__gen_create_buffer`, which standalone never
+ * registers, so it hard-errored instead of demoting to the working native path
+ * (regressed #680, bisected to #3341 / PR #3249).
+ *
+ * Scoped PRECISELY (per the fix decision): fires ONLY when the target lacks JS
+ * host imports AND the unresolved FUNCTION-ref name is in the host-only
+ * generator-import family. A genuine desync — an unknown ref to an IR-builder-
+ * created `$…` entity, ANY unknown global/type ref, or ANY unknown ref in a
+ * host/gc build where these imports DO register — is not matched and still
+ * hard-errors.
+ */
+function isTargetOmittedHostImportInvariant(
+  err: IrIntegrationError,
+  ctx?: Pick<CodegenContext, "standalone" | "wasi">,
+): boolean {
+  if (!ctx || !(ctx.standalone || ctx.wasi)) return false;
+  if (err.outcome.kind !== "invariant" || err.outcome.code !== "unknown-function-ref") return false;
+  const name = /unknown function ref "([^"]+)"/.exec(err.message)?.[1];
+  return name !== undefined && isHostOnlyGeneratorImportName(name);
+}
+
+export function formatIrPathFallbackDiagnostic(
+  err: IrIntegrationError,
+  ctx?: Pick<CodegenContext, "standalone" | "wasi">,
+): {
   readonly message: string;
   readonly severity: "error" | "warning";
 } {
   const body = `IR path failed for ${err.func}: ${err.message} [IR-FALLBACK]`;
-  const hard = err.outcome.kind === "invariant";
+  const hard = err.outcome.kind === "invariant" && !isTargetOmittedHostImportInvariant(err, ctx);
   return {
     message: hard ? `Codegen error: ${body}` : body,
     severity: hard ? "error" : "warning",
@@ -1645,6 +1702,8 @@ function prepareHostDateSnapshotPreflight(
 
 interface ObservedIrUnit {
   readonly key: string;
+  readonly sourceId: IrSourceId;
+  readonly unitId: IrUnitId;
   readonly matchName: string;
   readonly unitKind: IrObservedOutcome["unitKind"];
   readonly displayName: string;
@@ -1658,163 +1717,43 @@ interface ObservedIrUnit {
   readonly directFailure?: IrPreparationFailure;
 }
 
-const AUTO_TIMER_SHIM_MARKER = "// #1501 timer host-import shim (auto-injected)";
-const AUTO_TIMER_SHIM_LINE =
-  /^(?:declare function __timer_(?:set|clear)_(?:timeout|interval)\(|function (?:setTimeout|setInterval|clearTimeout|clearInterval)\()/;
-
-/**
- * Return the exclusive end of the compiler-injected timer prelude.
- *
- * The outcome ledger inventories user source units. The timer wrappers remain
- * part of the real production compile (and any diagnostics still fail the
- * gate), but they must not silently inflate the source-unit denominator.
- */
-function autoTimerShimEnd(sourceFile: ts.SourceFile): number | null {
-  const markerStart = sourceFile.text.indexOf(AUTO_TIMER_SHIM_MARKER);
-  if (markerStart < 0) return null;
-  let cursor = sourceFile.text.indexOf("\n", markerStart);
-  if (cursor < 0) return null;
-  cursor += 1;
-  while (cursor < sourceFile.text.length) {
-    const newline = sourceFile.text.indexOf("\n", cursor);
-    const end = newline < 0 ? sourceFile.text.length : newline;
-    if (!AUTO_TIMER_SHIM_LINE.test(sourceFile.text.slice(cursor, end))) break;
-    cursor = newline < 0 ? end : newline + 1;
-  }
-  return cursor;
+/** Build the exact legacy R0 terminal view from the structural R1 inventory. */
+function collectObservedIrUnits(
+  sourceFile: ts.SourceFile,
+  _selection?: IrSelection,
+  inventory = buildIrUnitInventory([sourceFile], { entrySource: sourceFile }),
+): ObservedIrUnit[] {
+  return terminalIrUnitsForSource(inventory, sourceFile).map((unit) => ({
+    key: unit.legacyKey,
+    sourceId: unit.sourceId,
+    unitId: unit.id,
+    matchName: unit.legacyMatchName,
+    unitKind: unit.observedKind,
+    displayName: unit.displayName,
+    ordinal: unit.legacyOrdinal,
+    line: unit.line,
+    column: unit.column,
+    staticClassMember: unit.staticClassMember,
+    legacyBodyAvailable: unit.legacyBodyAvailable,
+    ...(unit.directFailure ? { directFailure: unit.directFailure } : {}),
+  }));
 }
 
-function observedClassMemberName(className: string, member: ts.ClassElement): string | null {
-  if (ts.isConstructorDeclaration(member)) return `${className}_new`;
-  if (!ts.isMethodDeclaration(member) && !ts.isGetAccessorDeclaration(member) && !ts.isSetAccessorDeclaration(member)) {
-    return null;
-  }
-  const raw = member.name;
-  const base =
-    raw && (ts.isIdentifier(raw) || ts.isStringLiteral(raw) || ts.isNumericLiteral(raw)) ? raw.text : "<computed>";
-  if (ts.isGetAccessorDeclaration(member)) return `${className}_get_${base}`;
-  if (ts.isSetAccessorDeclaration(member)) return `${className}_set_${base}`;
-  return `${className}_${base}`;
-}
-
-/** Build observational labels only; compiler identity remains legacy-owned until R1. */
-function collectObservedIrUnits(sourceFile: ts.SourceFile, selection?: IrSelection): ObservedIrUnit[] {
-  const units: ObservedIrUnit[] = [];
-  const ordinals = new Map<string, number>();
-  const timerShimEnd = autoTimerShimEnd(sourceFile);
-  let unnamed = 0;
-  let anonymousClass = 0;
-  let firstStaticInitialization: ts.Node | undefined;
-  const push = (
-    matchName: string,
-    unitKind: ObservedIrUnit["unitKind"],
-    node: ts.Node,
-    staticClassMember = false,
-    directFailure?: IrPreparationFailure,
-    legacyBodyAvailable = true,
-  ): void => {
-    const ordinalKey = `${unitKind}\u0000${matchName}`;
-    const ordinal = ordinals.get(ordinalKey) ?? 0;
-    ordinals.set(ordinalKey, ordinal + 1);
-    const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
-    units.push({
-      key: `${sourceFile.fileName}::${unitKind}::${matchName}#${ordinal}`,
-      matchName,
-      unitKind,
-      displayName: matchName,
-      ordinal,
-      line: pos.line + 1,
-      column: pos.character + 1,
-      staticClassMember,
-      legacyBodyAvailable,
-      ...(directFailure ? { directFailure } : {}),
-    });
-  };
-
-  for (const statement of sourceFile.statements) {
-    if (ts.isFunctionDeclaration(statement)) {
-      // Overload signatures and ambient declarations allocate no executable
-      // legacy slot, so they are not source-unit denominator entries.
-      if (!statement.body) continue;
-      if (timerShimEnd !== null && statement.getStart(sourceFile) < timerShimEnd) continue;
-      push(statement.name?.text ?? `<unnamed:${unnamed++}>`, "function", statement);
-      continue;
-    }
-    if (!ts.isClassDeclaration(statement)) continue;
-    const isAnonymous = !statement.name;
-    const className = statement.name?.text ?? `<anonymous-default-class:${anonymousClass++}>`;
-    const anonymousFailure: IrPreparationFailure | undefined = isAnonymous
-      ? {
-          kind: "unsupported",
-          code: "anonymous-class",
-          stage: "select",
-          detail: `${className} has no stable direct-codegen class identity for IR patching`,
-        }
-      : undefined;
-    let hasExecutableConstructor = false;
-    let firstInstanceInitializer: ts.PropertyDeclaration | undefined;
-    for (const member of statement.members) {
-      const isStatic = hasStaticModifier(member);
-      if (
-        (ts.isClassStaticBlockDeclaration(member) ||
-          (ts.isPropertyDeclaration(member) && isStatic && member.initializer)) &&
-        firstStaticInitialization === undefined
-      ) {
-        firstStaticInitialization = member;
-      }
-      if (ts.isPropertyDeclaration(member) && !isStatic && member.initializer && !firstInstanceInitializer) {
-        firstInstanceInitializer = member;
-      }
-      const name = observedClassMemberName(className, member);
-      if (name === null) continue;
-      const functionalMember = member as
-        | ts.ConstructorDeclaration
-        | ts.MethodDeclaration
-        | ts.GetAccessorDeclaration
-        | ts.SetAccessorDeclaration;
-      if (!functionalMember.body) continue;
-      if (ts.isConstructorDeclaration(functionalMember)) hasExecutableConstructor = true;
-      push(name, "class-member", member, isStatic, anonymousFailure);
-    }
-    if (!hasExecutableConstructor && firstInstanceInitializer) {
-      push(`${className}_new`, "class-member", firstInstanceInitializer, false, {
-        kind: "unsupported",
-        code: "implicit-class-initializer",
-        stage: "select",
-        detail: `${className} has instance field initialization owned by an implicit direct constructor`,
-      });
-    }
-  }
-
-  const modulePopulation = collectModuleInitPopulation(sourceFile);
-  if ((selection?.moduleInit?.stmtCount ?? modulePopulation.length) > 0 || firstStaticInitialization) {
-    const first = modulePopulation[0] ?? firstStaticInitialization ?? sourceFile;
-    push(
-      MODULE_INIT_UNIT_NAME,
-      "module-init",
-      first,
-      false,
-      firstStaticInitialization
-        ? {
-            kind: "unsupported",
-            code: "static-class-initialization",
-            stage: "select",
-            detail: "class static initialization is still emitted by the direct module-init path",
-          }
-        : undefined,
-    );
-  }
-  return units;
-}
-
-function recordWholeSourceFailure(ctx: CodegenContext, sourceFile: ts.SourceFile, failure: IrPreparationFailure): void {
+function recordWholeSourceFailure(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  failure: IrPreparationFailure,
+  inventory?: IrUnitInventory,
+): void {
   if (ctx.irOutcomes === undefined || ctx.irOutcomes.some((outcome) => outcome.file === sourceFile.fileName)) return;
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
-  for (const unit of collectObservedIrUnits(sourceFile)) {
+  for (const unit of collectObservedIrUnits(sourceFile, undefined, inventory)) {
     ctx.irOutcomes.push(
       observedFailure(
         {
           key: unit.key,
+          sourceId: unit.sourceId,
+          unitId: unit.unitId,
           file: sourceFile.fileName,
           unitKind: unit.unitKind,
           displayName: unit.displayName,
@@ -1873,6 +1812,7 @@ function recordObservedIrOutcomes(
   preparedSelection: Pick<IrSelection, "funcs" | "classMembers" | "moduleInit">,
   report: IrIntegrationReport,
   irSkipBodies?: ReadonlySet<string>,
+  inventory?: IrUnitInventory,
 ): void {
   if (ctx.irOutcomes === undefined) return;
 
@@ -1888,11 +1828,13 @@ function recordObservedIrOutcomes(
 
   const target: IrObservedOutcome["target"] = ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc";
   const keys = new Set(ctx.irOutcomes.map((outcome) => outcome.key));
-  for (const unit of collectObservedIrUnits(sourceFile, plan.selection)) {
+  for (const unit of collectObservedIrUnits(sourceFile, plan.selection, inventory)) {
     const legacyBodyEmitted =
       unit.legacyBodyAvailable && !(unit.unitKind === "function" && irSkipBodies?.has(unit.matchName));
     const base = {
       key: unit.key,
+      sourceId: unit.sourceId,
+      unitId: unit.unitId,
       file: sourceFile.fileName,
       unitKind: unit.unitKind,
       displayName: unit.displayName,
@@ -2675,6 +2617,7 @@ function consumeIrOverlayReport(
   preparedSelection: Pick<IrSelection, "funcs" | "classMembers" | "moduleInit">,
   sourceFile: ts.SourceFile,
   irSkipBodies?: ReadonlySet<string>,
+  inventory?: IrUnitInventory,
 ): void {
   const { selection, logFallbacks } = plan;
   // #3000 — aggregate genuine emission across every source-file overlay. A
@@ -2690,7 +2633,7 @@ function consumeIrOverlayReport(
       func: err.func,
       message: err.message,
     });
-    const diag = formatIrPathFallbackDiagnostic(err);
+    const diag = formatIrPathFallbackDiagnostic(err, ctx);
     // #2138 — only the single-source IR-first path can omit a legacy body. The
     // multi-module overlay never passes a skip set and therefore always keeps
     // the ordinary warning demotion available.
@@ -2720,7 +2663,7 @@ function consumeIrOverlayReport(
     }
   }
 
-  recordObservedIrOutcomes(ctx, sourceFile, plan, preparedSelection, report, irSkipBodies);
+  recordObservedIrOutcomes(ctx, sourceFile, plan, preparedSelection, report, irSkipBodies, inventory);
 
   // #1169q — retain the existing selector-fallback log format, now once per
   // source file for a multi-module compilation.
@@ -3131,6 +3074,7 @@ function prepareMultiIrImportedLowering(
 export function generateModule(
   ast: TypedAST,
   options?: CodegenOptions,
+  inventoryOptions: BuildIrUnitInventoryOptions = {},
 ): {
   module: WasmModule;
   errors: CodegenError[];
@@ -3147,6 +3091,9 @@ export function generateModule(
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  const irUnitInventory = options?.trackIrOutcomes
+    ? buildIrUnitInventory([ast.sourceFile], { ...inventoryOptions, entrySource: ast.sourceFile })
+    : undefined;
   const sourceFileInternal = ast.sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node };
   ctx.sourceIsModule = sourceFileInternal.externalModuleIndicator !== undefined;
   // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
@@ -3598,7 +3545,7 @@ export function generateModule(
         hostVoidCallbacks: plan.hostVoidCallbacks,
         promiseDelays: plan.promiseDelays,
       });
-      consumeIrOverlayReport(ctx, report, plan, safeSelection, ast.sourceFile, irSkipBodies);
+      consumeIrOverlayReport(ctx, report, plan, safeSelection, ast.sourceFile, irSkipBodies, irUnitInventory);
     }
 
     // Fixup pass: reconcile struct.new argument counts with actual struct field counts.
@@ -3872,6 +3819,10 @@ export function generateModule(
     // (#3468) Fill after all closure types and object-runtime deps are known.
     fillClosurePropHelpers(ctx);
 
+    // (#3537) Fill the array-expando side-table helpers (same deps: the
+    // object-runtime funcIdxs are all in funcMap by finalize).
+    fillVecPropHelpers(ctx);
+
     // (#3140) Fill the reserved `__bind_dyn` dynamic-bind helper now that every
     // closure root is registered (the callable gate needs the COMPLETE
     // classifier list). No-op when no standalone `.bind`-on-any site reserved it.
@@ -4125,7 +4076,7 @@ export function generateModule(
     // Must run after all other passes since they can introduce invalid coercions.
     fixupExternConvertAny(ctx);
   } catch (e) {
-    recordWholeSourceFailure(ctx, ast.sourceFile, classifyIrFailure(e, "build"));
+    recordWholeSourceFailure(ctx, ast.sourceFile, classifyIrFailure(e, "build"), irUnitInventory);
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
@@ -4517,7 +4468,13 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
   // Helper to emit a method dispatch export
   const emitMethodDispatch = (methodSuffix: string, exportName: string) => {
-    const entries: { structName: string; typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
+    const entries: {
+      structName: string;
+      typeIdx: number;
+      funcIdx: number;
+      resultType: ValType;
+      extraParams: ValType[];
+    }[] = [];
 
     for (const [structName] of ctx.structFields) {
       const typeIdx = ctx.structMap.get(structName);
@@ -4534,8 +4491,15 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
         funcType && funcType.kind === "func" && funcType.results.length > 0
           ? funcType.results[0]!
           : { kind: "externref" };
+      // (#3024) params[0] is the receiver; a user iterator method with a formal
+      // parameter (`next(value)` / `return(value)`) has extra params the
+      // dispatcher must pad — it always represents a protocol call with NO value
+      // argument (its own signature is `(externref) -> externref`), so the pad is
+      // the "missing trailing arg" default per param type. Without it the call is
+      // `not enough arguments on the stack for call (need 2, got 1)` (invalid Wasm).
+      const extraParams: ValType[] = funcType && funcType.kind === "func" ? funcType.params.slice(1) : [];
 
-      entries.push({ structName, typeIdx, funcIdx, resultType });
+      entries.push({ structName, typeIdx, funcIdx, resultType, extraParams });
     }
 
     if (entries.length === 0) return;
@@ -4548,10 +4512,40 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
 
     let current: Instr[] = [{ op: "ref.null.extern" }];
 
+    // (#3024) Pad a missing trailing method argument. The dispatcher calls
+    // `<struct>_next`/`<struct>_return` with only the receiver, so any declared
+    // formal (`next(value)`) needs a default. Iterator `.next()`/`.return()`
+    // invoked with no value → the value is `undefined`; for an externref (untyped
+    // JS) param emit the real host `undefined` when already imported (else
+    // `ref.null.extern`, byte-identical standalone). Numeric/ref params get the
+    // type's zero/f64-sentinel — matching the normal missing-arg convention.
+    const undefinedIdx = ctx.funcMap.get("__get_undefined");
+    const padMissingArg = (pt: ValType): Instr[] => {
+      switch (pt.kind) {
+        case "f64":
+          return [{ op: "i64.const", value: 0x7ff00000deadc0den }, { op: "f64.reinterpret_i64" }];
+        case "f32":
+          return [{ op: "f32.const", value: 0 }];
+        case "i32":
+        case "i8":
+        case "i16":
+          return [{ op: "i32.const", value: 0 }];
+        case "i64":
+          return [{ op: "i64.const", value: 0n }];
+        case "ref":
+          return [{ op: "ref.null", typeIdx: (pt as { typeIdx: number }).typeIdx }, { op: "ref.as_non_null" }];
+        case "ref_null":
+          return [{ op: "ref.null", typeIdx: (pt as { typeIdx: number }).typeIdx }];
+        default:
+          return undefinedIdx !== undefined ? [{ op: "call", funcIdx: undefinedIdx }] : [{ op: "ref.null.extern" }];
+      }
+    };
+
     for (const entry of entries) {
       const testAndCall: Instr[] = [
         { op: "local.get", index: 1 },
         { op: "ref.cast", typeIdx: entry.typeIdx },
+        ...entry.extraParams.flatMap(padMissingArg),
         { op: "call", funcIdx: entry.funcIdx },
       ];
 
@@ -5545,6 +5539,12 @@ export function generateMultiModule(
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
+  const irUnitInventory = options?.trackIrOutcomes
+    ? buildIrUnitInventory(multiAst.sourceFiles, {
+        entrySource: multiAst.entryFile,
+        checker: multiAst.checker,
+      })
+    : undefined;
   // Multi-file compilation is linked through import/export module records.
   ctx.sourceIsModule = true;
   try {
@@ -5772,7 +5772,7 @@ export function generateMultiModule(
           hostVoidCallbacks: plan.hostVoidCallbacks,
           promiseDelays: plan.promiseDelays,
         });
-        consumeIrOverlayReport(ctx, report, plan, safeSelection, sourceFile);
+        consumeIrOverlayReport(ctx, report, plan, safeSelection, sourceFile, undefined, irUnitInventory);
       }
       // A+B1 may create callback singleton trampolines after the legacy
       // finalization pass. Rebuild those late declarations against the target's
@@ -5854,6 +5854,9 @@ export function generateMultiModule(
     // side-table helpers too. Fill their placeholders only after every source
     // has registered its closure types, matching the single-source pipeline.
     fillClosurePropHelpers(ctx);
+
+    // (#3537) Same for the array-expando side table.
+    fillVecPropHelpers(ctx);
 
     // (#3371/#3496) Constructible function-expression wrappers are nominal
     // subtypes of the ordinary closure wrapper. Multi-source harness methods
@@ -6031,7 +6034,9 @@ export function generateMultiModule(
     fixupExternConvertAny(ctx);
   } catch (e) {
     const failure = classifyIrFailure(e, "build");
-    for (const sourceFile of multiAst.sourceFiles) recordWholeSourceFailure(ctx, sourceFile, failure);
+    for (const sourceFile of multiAst.sourceFiles) {
+      recordWholeSourceFailure(ctx, sourceFile, failure, irUnitInventory);
+    }
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
