@@ -66,6 +66,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { openPrIssueIds, ISSUE_ID_RE } from "./lib/open-pr-issue-files.mjs";
 
 const ASSIGN_REF = "issue-assignments";
 // The issue-assignments orphan ref lives on the FORK (origin) — keep REMOTE =
@@ -91,14 +92,12 @@ const MAIN_REF = `${MAIN_REMOTE}/main`;
 // `--allocate` must NEVER hang indefinitely. `execFileSync` has no default
 // timeout, so a single stuck `gh`/`git` call under API contention (many
 // concurrent agents) previously blocked the WHOLE team's issue filing. Every
-// network call in the allocate path is now capped; the open-PR scan
-// additionally carries an overall wall-clock budget, after which it degrades to
-// the pre-existing fail-open fallback (allocate against main ∪ reservations
-// only — the PR-time `check:issue-ids:against-main` gate is the hard backstop).
-// All three are env-overridable for tuning under different load.
+// network call in the allocate path is now capped; the open-PR scan (now in
+// scripts/lib/open-pr-issue-files.mjs, with its own CLAIM_PR_SCAN_*_TIMEOUT_MS
+// budget) degrades to the pre-existing fail-open fallback (allocate against
+// main ∪ reservations only — the PR-time `check:issue-ids` gates are the hard
+// backstop). Env-overridable for tuning under different load.
 const MAIN_FETCH_TIMEOUT_MS = Number(process.env.CLAIM_MAIN_FETCH_TIMEOUT_MS) || 15000;
-const PR_SCAN_CALL_TIMEOUT_MS = Number(process.env.CLAIM_PR_SCAN_CALL_TIMEOUT_MS) || 12000;
-const PR_SCAN_TOTAL_TIMEOUT_MS = Number(process.env.CLAIM_PR_SCAN_TOTAL_TIMEOUT_MS) || 25000;
 
 // Best-effort refresh of the main tip — only when allocating (frequent
 // --check/--list calls shouldn't pay a network round-trip). Bounded so a hung
@@ -237,7 +236,9 @@ function mainIssueStatus(id) {
 // `allUsedIds()` unions all three; the next id is max(union)+1 (monotonic — we
 // never reuse a gap that might be reserved on a branch this scan can't see).
 
-const ISSUE_ID_RE = /(?:^|\/)plan\/issues\/(\d+)[a-z]?-[^/]*\.md$/;
+// ISSUE_ID_RE is imported from scripts/lib/open-pr-issue-files.mjs (#3598) so
+// the main-tree scan here and the open-PR scans (allocator + CI gate) agree on
+// what an issue file IS — one regex, no drift.
 
 // Stray ids separated from the contiguous body by a large gap (a mis-typed
 // 6406 when the real range is ~2500) must not poison max+1 and hand out a 2194
@@ -334,28 +335,6 @@ function idsFromAssignRef(sha) {
   return out;
 }
 
-// Ids added by currently-open PRs. Uses `gh` when available (the only way to
-// see a fork-headed PR whose branch is NOT a refs/remotes/origin/* ref here).
-//
-// #2943 hardening — the original implementation fanned out 1 + N gh calls
-// (`gh pr list` then `gh pr view --json files` per PR), which made EVERY open
-// PR an independent, silently-swallowed failure point. Under gh rate-limit /
-// API contention (many concurrent agents), a dropped call narrowed the id
-// universe with NO signal: on 2026-07-02 an --allocate returned 2920 while
-// open PR #2424 already added plan/issues/2920-*.md (same pattern hit 2921 /
-// PR #2425; downstream, one analysis file burned the 2921→2931→2937→2940
-// re-id chain on parallel-session collisions). Now:
-//   - ONE batched GraphQL query (100 PRs × 100 files per page, paginated)
-//     replaces the fan-out — two orders of magnitude fewer API calls, one
-//     failure point instead of N;
-//   - a per-PR REST `--paginate` fallback covers the rare >100-file PR
-//     (`gh pr view --json files` also silently truncates at 100 — a second
-//     latent miss source in the old code);
-//   - the whole scan retries 3× with backoff, and on total failure returns
-//     `complete: false` so the caller can WARN LOUDLY instead of proceeding
-//     silently. Still fail-open by design (offline/unauthenticated use keeps
-//     working; the PR-time CI gate check-issue-ids --against-main is the hard
-//     backstop) — but no longer fail-SILENT.
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -374,91 +353,26 @@ function raceBackoffMs(attempt) {
   return Math.floor(Math.random() * ceil);
 }
 
-const PR_FILES_QUERY = `query($owner:String!,$name:String!,$cursor:String){
-  repository(owner:$owner,name:$name){
-    pullRequests(states:OPEN,first:100,after:$cursor){
-      pageInfo{hasNextPage endCursor}
-      nodes{number files(first:100){pageInfo{hasNextPage} nodes{path}}}
-    }
-  }
-}`;
-
+// Ids added by currently-open PRs. Uses `gh` when available (the only way to
+// see a fork-headed PR whose branch is NOT a refs/remotes/origin/* ref here).
+//
+// The scan itself lives in scripts/lib/open-pr-issue-files.mjs (#3598) — ONE
+// implementation shared with the CI gate `check-issue-ids.mjs
+// --against-open-prs`, so the allocator and the enforcement point can never
+// drift apart. The lib preserves the full #2943 hardening (one batched GraphQL
+// query instead of 1+N calls, REST --paginate fallback for >100-file PRs, 3×
+// retry with backoff, `complete: false` on total failure). This wrapper keeps
+// the allocator's loud fail-open warning at the call site.
 function idsFromOpenPRs() {
-  const repo = process.env.CLAIM_PR_REPO || "loopdive/js2";
-  const [owner, name] = repo.split("/");
-  // Overall wall-clock budget for the whole scan (all attempts + pagination).
-  // Past this the scan bails to the fail-open fallback rather than hanging.
-  const deadline = Date.now() + PR_SCAN_TOTAL_TIMEOUT_MS;
-  // A single gh invocation, capped at min(per-call limit, remaining budget).
-  // On budget exhaustion it throws a tagged error so the loop bails cleanly;
-  // on a per-call timeout `execFileSync` throws ETIMEDOUT (process SIGKILLed),
-  // which the retry/backoff path below handles like any transient gh failure.
-  const ghBounded = (args) => {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) {
-      const e = new Error("open-PR scan budget exhausted");
-      e.scanBudgetExhausted = true;
-      throw e;
-    }
-    return execFileSync("gh", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: Math.min(PR_SCAN_CALL_TIMEOUT_MS, remaining),
-      killSignal: "SIGKILL",
-    });
-  };
-  let budgetExhausted = false;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    if (Date.now() >= deadline) {
-      budgetExhausted = true;
-      break;
-    }
-    try {
-      const ids = new Set();
-      const bigPRs = [];
-      let cursor = null;
-      for (;;) {
-        const args = ["api", "graphql", "-f", `query=${PR_FILES_QUERY}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
-        if (cursor) args.push("-F", `cursor=${cursor}`);
-        const raw = ghBounded(args);
-        const prs = JSON.parse(raw)?.data?.repository?.pullRequests;
-        if (!prs) throw new Error("unexpected GraphQL shape");
-        for (const pr of prs.nodes || []) {
-          for (const f of pr.files?.nodes || []) {
-            const m = (f.path || "").match(ISSUE_ID_RE);
-            if (m) ids.add(Number(m[1]));
-          }
-          if (pr.files?.pageInfo?.hasNextPage) bigPRs.push(pr.number);
-        }
-        if (!prs.pageInfo?.hasNextPage) break;
-        cursor = prs.pageInfo.endCursor;
-      }
-      // >100-file PRs: fetch the full file list via REST pagination.
-      for (const n of bigPRs) {
-        const raw = ghBounded(["api", `repos/${repo}/pulls/${n}/files`, "--paginate", "--jq", ".[].filename"]);
-        for (const p of raw.split("\n")) {
-          const m = p.match(ISSUE_ID_RE);
-          if (m) ids.add(Number(m[1]));
-        }
-      }
-      return { ids, complete: true };
-    } catch (e) {
-      if (e && e.scanBudgetExhausted) {
-        budgetExhausted = true;
-        break;
-      }
-      // Per-call timeout (ETIMEDOUT/SIGKILL) or transient API error: back off
-      // and retry, but never sleep past the overall deadline.
-      const backoff = Math.min(attempt * 1000, Math.max(0, deadline - Date.now()));
-      if (attempt < 3 && backoff > 0) sleepMs(backoff);
-    }
+  const r = openPrIssueIds();
+  if (!r.complete) {
+    console.error(
+      `warning: open-PR id scan ${r.budgetExhausted ? `timed out (>${r.scanTotalTimeoutMs}ms)` : "FAILED after 3 attempts"} ` +
+        "(gh offline/unauthenticated/rate-limited/slow). Allocating against main ∪ reservations ONLY — the id may " +
+        "collide with an in-flight PR's issue file (#2943). The CI gates check-issue-ids --against-main/--against-open-prs remain the backstop.",
+    );
   }
-  console.error(
-    `warning: open-PR id scan ${budgetExhausted ? `timed out (>${PR_SCAN_TOTAL_TIMEOUT_MS}ms)` : "FAILED after 3 attempts"} ` +
-      "(gh offline/unauthenticated/rate-limited/slow). Allocating against main ∪ reservations ONLY — the id may " +
-      "collide with an in-flight PR's issue file (#2943). The CI gate check-issue-ids --against-main remains the hard backstop.",
-  );
-  return { ids: new Set(), complete: false };
+  return r;
 }
 
 function allUsedIds(sha, { scanPRs }) {
@@ -597,6 +511,12 @@ function doAllocate(assignee) {
       reserved_at: nowIso(),
       ...(assignee ? { claimed_at: nowIso() } : {}),
       updated_at: nowIso(),
+      // (#3598 forensics) durable record of the open-PR scan's health AT
+      // allocation time. Collision C could not be root-caused post-hoc because
+      // the degraded-scan signal lived only on stderr; now the reservation
+      // itself says whether the id universe included open PRs ("ok"),
+      // was degraded (scan failed → fail-open), or was skipped (--no-pr-scan).
+      pr_scan: scanPRs ? (degraded ? "degraded" : "ok") : "off",
     };
     const verb = assignee ? `reserve+claim #${id} -> ${assignee}` : `reserve #${id}`;
     const msg = `chore(assign): ${verb} [skip ci]`;
