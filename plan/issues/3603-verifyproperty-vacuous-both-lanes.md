@@ -11,6 +11,9 @@ loc-budget-allow:
 func-budget-allow:
   - src/runtime.ts::resolveImport
   - src/runtime.ts::<anonymous>#76
+regressions-allow:
+  count: 2500
+  reason: "#3603 S1 host verifyProperty de-inflation. Stakeholder-directed UNMEASURED ceiling (2026-07-26): the v11->v12 bump is itself the verdict-logic change, so no pre-v12 figure converts into a v12 count. Prior v11 context: 1031-1033 honest regressions, 96-97 gross fixed. Sized ~2.4x that to absorb v12 reclassification on both sides plus baseline drift. TO BE RATCHETED DOWN to measured+margin once the first v12 merge_group run reports."
 priority: high
 horizon: xl
 feasibility: hard
