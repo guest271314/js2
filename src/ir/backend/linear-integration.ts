@@ -83,12 +83,9 @@ import {
 } from "../nodes.js";
 import { buildIrUnitInventory, type IrUnitId } from "../identity.js";
 import {
-  buildIrLegacyUnitProjection,
   buildIrPlanningIdentityContext,
-  IrLegacyUnitProjectionInvariantError,
   IrPlanningIdentityInvariantError,
   requireIrPlanningSourceId,
-  type IrLegacyUnitProjection,
   type IrPlanningIdentityContext,
   type IrPlanningIdentityInvariantCode,
 } from "../planning-identity.js";
@@ -137,14 +134,28 @@ export type LinearIrOwnerEvidence =
       readonly rejection: LinearIrRejection;
     };
 
+export interface LinearIrCompiledArtifact {
+  readonly ownerUnitId: IrUnitId;
+  readonly func: WasmFunction;
+  readonly legacySlot: LinearIrLegacySlotAdapter;
+}
+
 export interface LinearIrResult {
-  /** name → IR-lowered function, ready to insert at the pre-assigned slot. */
-  readonly funcs: Map<string, WasmFunction>;
+  /** Structural owner → IR-lowered function, ready for its exact legacy slot. */
+  readonly funcs: ReadonlyMap<IrUnitId, WasmFunction>;
   readonly compiled: readonly string[];
   /** Selector rejections plus post-claim IR demotions, in direct-path order. */
   readonly rejected: readonly LinearIrRejection[];
   /** Exact owners for every public compiled/rejected legacy-name outcome. */
   readonly ownerEvidence: readonly LinearIrOwnerEvidence[];
+  /**
+   * Temporary direct-backend slot adapters. ProgramAbiSession removes this
+   * compatibility boundary; until then every entry retains and validates the
+   * structural owner, legacy label, physical slot label, and concrete index.
+   */
+  readonly legacySlots: readonly LinearIrLegacySlotAdapter[];
+  /** Resolve an exact source declaration and its paired compatibility slot. */
+  compiledArtifactFor(declaration: ts.FunctionDeclaration): LinearIrCompiledArtifact | undefined;
   /** Deferred helpers appended only after every pre-assigned user slot. */
   readonly helpers: readonly LinearIrHelper[];
   /** Exact verified source-derived module consumed by the memory planner. */
@@ -161,24 +172,21 @@ export interface LinearIrSourceOwner {
 
 export interface LinearIrSourceOwnerIndex {
   readonly owners: readonly LinearIrSourceOwner[];
-  readonly projection: IrLegacyUnitProjection;
 }
 
-/** Resolve an inventoried source artifact onto the linear backend's physical slot label. */
-function linearOwnerSlotName(ctx: LinearContext, owner: LinearIrSourceOwner): string | null {
-  let enclosingClass: ts.ClassDeclaration | undefined;
-  for (let node: ts.Node | undefined = owner.declaration; node; node = node.parent) {
-    if (ts.isClassDeclaration(node)) {
-      enclosingClass = node;
-      break;
-    }
-  }
-  const className = enclosingClass?.name?.text;
-  if (className && owner.legacyName === `${className}_new`) {
-    const constructorName = ctx.classLayouts.get(className)?.ctorFuncName;
-    if (constructorName && ctx.funcMap.has(constructorName)) return constructorName;
-  }
-  return ctx.funcMap.has(owner.legacyName) ? owner.legacyName : null;
+/** Direct-backend registration before the ProgramAbiSession cutover. */
+export interface LinearIrLegacySlotInput {
+  readonly declaration: ts.Node;
+  readonly legacyName: string;
+  readonly funcIdx: number;
+}
+
+/** Exact structural/name pair at the one remaining concrete legacy-slot seam. */
+export interface LinearIrLegacySlotAdapter {
+  readonly ownerUnitId: IrUnitId;
+  readonly legacyName: string;
+  readonly slotName: string;
+  readonly funcIdx: number;
 }
 
 function linearOwnerInvariant(code: IrPlanningIdentityInvariantCode, message: string): never {
@@ -186,16 +194,40 @@ function linearOwnerInvariant(code: IrPlanningIdentityInvariantCode, message: st
 }
 
 function rethrowLinearOwnerInvariant(error: unknown): void {
-  if (error instanceof IrPlanningIdentityInvariantError || error instanceof IrLegacyUnitProjectionInvariantError) {
+  if (error instanceof IrPlanningIdentityInvariantError) {
     throw error;
   }
 }
 
+function requireLinearOwnerPair(owner: LinearIrSourceOwner, legacyName: string): void {
+  if (owner.legacyName !== legacyName) {
+    linearOwnerInvariant(
+      "unit-record-mismatch",
+      `linear IR owner ${owner.ownerUnitId} expected label ${JSON.stringify(owner.legacyName)}, received ${JSON.stringify(legacyName)}`,
+    );
+  }
+}
+
+function requireUniqueLinearOwner(
+  ownersByLegacyName: ReadonlyMap<string, readonly LinearIrSourceOwner[]>,
+  legacyName: string,
+  role: string,
+): LinearIrSourceOwner {
+  const owners = ownersByLegacyName.get(legacyName) ?? [];
+  if (owners.length !== 1) {
+    return linearOwnerInvariant(
+      "unit-record-mismatch",
+      `linear IR ${role} ${JSON.stringify(legacyName)} resolves to ${owners.length} structural source owners`,
+    );
+  }
+  return owners[0]!;
+}
+
 /**
  * Validate the complete structural population received by the linear source
- * seam, then expose the temporary one-to-one legacy-name projection. Every
- * direction is checked against the same authoritative planning context;
- * colliding legacy labels fail through the typed projection invariant.
+ * seam. Every direction is checked against the same authoritative planning
+ * context. Display-label collisions remain distinct here; only the explicit
+ * legacy-slot adapter below is permitted to cross into concrete slot names.
  */
 export function indexLinearIrSourceOwners(
   sourceFile: ts.SourceFile,
@@ -243,10 +275,83 @@ export function indexLinearIrSourceOwners(
       declaration,
     });
   });
-  const projection = buildIrLegacyUnitProjection(
-    owners.map(({ ownerUnitId, legacyName }) => ({ unitId: ownerUnitId, legacyName })),
-  );
-  return Object.freeze({ owners: Object.freeze(owners), projection });
+  return Object.freeze({ owners: Object.freeze(owners) });
+}
+
+/**
+ * Pair structural source owners with exact direct-backend registrations.
+ *
+ * This is the sole temporary source-unit → concrete-label adapter in the
+ * linear IR path. It rejects duplicate declarations, unit IDs, and concrete
+ * function indices instead of accepting a last-write-wins `funcMap` result.
+ */
+export function buildLinearIrLegacySlotAdapters(
+  ownerIndex: LinearIrSourceOwnerIndex,
+  inputs: readonly LinearIrLegacySlotInput[],
+): readonly LinearIrLegacySlotAdapter[] {
+  const inputByDeclaration = new Map<ts.Node, LinearIrLegacySlotInput>();
+  for (const input of inputs) {
+    if (
+      typeof input.legacyName !== "string" ||
+      input.legacyName.length === 0 ||
+      !Number.isSafeInteger(input.funcIdx) ||
+      input.funcIdx < 0
+    ) {
+      return linearOwnerInvariant(
+        "unit-record-mismatch",
+        `linear IR legacy slot registration has an invalid label or function index`,
+      );
+    }
+    if (inputByDeclaration.has(input.declaration)) {
+      return linearOwnerInvariant(
+        "duplicate-unit-declaration",
+        `linear IR declaration was registered for more than one concrete function slot`,
+      );
+    }
+    inputByDeclaration.set(input.declaration, input);
+  }
+
+  const unitIds = new Set<IrUnitId>();
+  const ownersByFuncIdx = new Map<number, IrUnitId>();
+  const consumedInputs = new Set<LinearIrLegacySlotInput>();
+  const adapters: LinearIrLegacySlotAdapter[] = [];
+  for (const owner of ownerIndex.owners) {
+    const input = inputByDeclaration.get(owner.declaration);
+    if (!input) continue;
+    consumedInputs.add(input);
+    if (unitIds.has(owner.ownerUnitId)) {
+      return linearOwnerInvariant(
+        "duplicate-unit-id",
+        `linear IR source unit ${owner.ownerUnitId} was registered more than once`,
+      );
+    }
+    const previousOwner = ownersByFuncIdx.get(input.funcIdx);
+    if (previousOwner !== undefined && previousOwner !== owner.ownerUnitId) {
+      return linearOwnerInvariant(
+        "unit-record-mismatch",
+        `linear IR units ${previousOwner} and ${owner.ownerUnitId} share concrete function slot ${input.funcIdx}`,
+      );
+    }
+    unitIds.add(owner.ownerUnitId);
+    ownersByFuncIdx.set(input.funcIdx, owner.ownerUnitId);
+    adapters.push(
+      Object.freeze({
+        ownerUnitId: owner.ownerUnitId,
+        legacyName: owner.legacyName,
+        slotName: input.legacyName,
+        funcIdx: input.funcIdx,
+      }),
+    );
+  }
+  for (const input of inputs) {
+    if (!consumedInputs.has(input)) {
+      return linearOwnerInvariant(
+        "unit-record-mismatch",
+        `linear IR legacy slot ${JSON.stringify(input.legacyName)} has no exact structural source owner`,
+      );
+    }
+  }
+  return Object.freeze(adapters);
 }
 
 export interface LinearIrHelper {
@@ -283,22 +388,42 @@ export function compileLinearIrFunctions(
   ctx: LinearContext,
   sourceFile: ts.SourceFile,
   allocationPolicy: LinearAllocatorPolicy = DEFAULT_ARENA_POLICY,
+  legacySlotInputs: readonly LinearIrLegacySlotInput[] = [],
 ): LinearIrResult {
-  const funcs = new Map<string, WasmFunction>();
+  const funcs = new Map<IrUnitId, WasmFunction>();
   const compiled: string[] = [];
   const rejected: LinearIrRejection[] = [];
   const ownerEvidence: LinearIrOwnerEvidence[] = [];
+  const legacySlots: LinearIrLegacySlotAdapter[] = [];
+  const unitIdByDeclaration = new Map<ts.Node, IrUnitId>();
+  const slotByDeclaration = new Map<ts.Node, LinearIrLegacySlotAdapter>();
   const allocRegistry = new AllocSiteRegistry();
   let irModule: IrModule = { functions: [] };
   let memoryPlan = planLinearMemory(irModule, allocRegistry, allocationPolicy);
   let helperStartFuncIdx = 0;
   for (const funcIdx of ctx.funcMap.values()) helperStartFuncIdx = Math.max(helperStartFuncIdx, funcIdx + 1);
+  for (const slot of legacySlotInputs) helperStartFuncIdx = Math.max(helperStartFuncIdx, slot.funcIdx + 1);
   const { resolver, helpers, bindMemoryPlan, bindUnitFunc } = makeLinearIrResolver(ctx, helperStartFuncIdx);
   const result: LinearIrResult = {
     funcs,
     compiled,
     rejected,
     ownerEvidence,
+    legacySlots,
+    compiledArtifactFor(declaration) {
+      const unitId = unitIdByDeclaration.get(declaration);
+      if (unitId === undefined) return undefined;
+      const func = funcs.get(unitId);
+      if (!func) return undefined;
+      const legacySlot = slotByDeclaration.get(declaration);
+      if (!legacySlot || legacySlot.ownerUnitId !== unitId) {
+        return linearOwnerInvariant(
+          "unit-record-mismatch",
+          `linear IR compiled artifact ${unitId} has no exact legacy slot adapter`,
+        );
+      }
+      return { ownerUnitId: unitId, func, legacySlot };
+    },
     helpers,
     get irModule() {
       return irModule;
@@ -343,13 +468,28 @@ export function compileLinearIrFunctions(
     recursiveTypeEvidence.typeMap,
   );
   const ownerIndex = indexLinearIrSourceOwners(sourceFile, identityContext);
-  for (const owner of ownerIndex.owners) {
-    const slotName = linearOwnerSlotName(ctx, owner);
-    if (slotName) bindUnitFunc(owner.ownerUnitId, slotName);
+  for (const owner of ownerIndex.owners) unitIdByDeclaration.set(owner.declaration, owner.ownerUnitId);
+  for (const slot of buildLinearIrLegacySlotAdapters(ownerIndex, legacySlotInputs)) {
+    const owner = identityContext.declarationByUnitId.get(slot.ownerUnitId);
+    if (!owner) {
+      return linearOwnerInvariant(
+        "missing-unit-declaration",
+        `linear IR legacy slot ${slot.ownerUnitId} has no exact source declaration`,
+      );
+    }
+    legacySlots.push(slot);
+    slotByDeclaration.set(owner, slot);
+    bindUnitFunc(slot);
   }
   const ownerByUnitId = new Map(ownerIndex.owners.map((owner) => [owner.ownerUnitId, owner] as const));
+  const ownersByLegacyName = new Map<string, LinearIrSourceOwner[]>();
+  for (const owner of ownerIndex.owners) {
+    const sameName = ownersByLegacyName.get(owner.legacyName);
+    if (sameName) sameName.push(owner);
+    else ownersByLegacyName.set(owner.legacyName, [owner]);
+  }
   const recordRejection = (owner: LinearIrSourceOwner, rejection: LinearIrRejection): void => {
-    ownerIndex.projection.requirePair({ unitId: owner.ownerUnitId, legacyName: rejection.func });
+    requireLinearOwnerPair(owner, rejection.func);
     rejected.push(rejection);
     ownerEvidence.push({
       outcome: "rejected",
@@ -359,15 +499,7 @@ export function compileLinearIrFunctions(
     });
   };
   for (const fallback of selection.fallbacks ?? []) {
-    const pair = ownerIndex.projection.requireLegacyName(fallback.name);
-    const owner = ownerByUnitId.get(pair.unitId);
-    if (!owner) {
-      return linearOwnerInvariant(
-        "terminal-record-mismatch",
-        `linear IR fallback ${pair.unitId} is absent from the validated source population`,
-      );
-    }
-    ownerIndex.projection.requirePair(pair);
+    const owner = requireUniqueLinearOwner(ownersByLegacyName, fallback.name, "fallback");
     recordRejection(owner, {
       func: fallback.name,
       reason: `select:${fallback.reason}`,
@@ -383,9 +515,8 @@ export function compileLinearIrFunctions(
     exported: boolean;
   }[] = [];
   for (const name of selection.funcs) {
-    const pair = ownerIndex.projection.requireLegacyName(name);
-    const ownerUnitId = pair.unitId;
-    const owner = ownerByUnitId.get(ownerUnitId);
+    const owner = requireUniqueLinearOwner(ownersByLegacyName, name, "function claim");
+    const ownerUnitId = owner.ownerUnitId;
     const declaration = owner?.declaration;
     if (
       !owner ||
@@ -400,7 +531,7 @@ export function compileLinearIrFunctions(
         `linear IR function claim ${ownerUnitId} does not resolve to its exact named declaration`,
       );
     }
-    ownerIndex.projection.requirePair(pair);
+    requireLinearOwnerPair(owner, name);
     const exported = declaration.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
     claimedDecls.push({ ownerUnitId, legacyName: name, declaration, exported });
   }
@@ -413,8 +544,9 @@ export function compileLinearIrFunctions(
   // functions that failed ONLY on a not-yet-known callee are retried with
   // the enriched map. Bounded by the claim count (each round must compile
   // at least one new function to continue).
-  const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
-  const ownTypes = new Map<IrUnitId, { params: readonly IrType[]; returnType: IrType | null }>();
+  type LinearIrSignature = { params: readonly IrType[]; returnType: IrType | null };
+  const declaredSignaturesByUnitId = new Map<IrUnitId, LinearIrSignature>();
+  const signaturesByUnitId = new Map<IrUnitId, LinearIrSignature>();
   const built = new Map<IrUnitId, IrFunction>();
   const lastFailure = new Map<IrUnitId, LinearIrRejection>();
   let pending = claimedDecls;
@@ -439,8 +571,8 @@ export function compileLinearIrFunctions(
             ? typeNodeToIr(returnNode, `pre-seed return of ${name}`)
             : latticeEvidenceToIr(evidence?.returnType, `pre-seed return of ${name}`);
       const signature = { params, returnType };
-      ownTypes.set(ownerUnitId, signature);
-      calleeTypes.set(name, signature);
+      declaredSignaturesByUnitId.set(ownerUnitId, signature);
+      signaturesByUnitId.set(ownerUnitId, signature);
     } catch {
       // Non-primitive or unresolved signatures stay on the existing
       // build-fixpoint/demotion path.
@@ -454,14 +586,10 @@ export function compileLinearIrFunctions(
     for (const owner of pending) {
       const { ownerUnitId, legacyName: name, declaration: decl, exported } = owner;
       try {
-        const directCallTargets = new Map<string, IrDirectCallTarget>();
-        for (const [calleeName, signature] of calleeTypes) {
-          const callee = ownerIndex.projection.requireLegacyName(calleeName);
-          directCallTargets.set(calleeName, {
-            target: irUnitFuncRef({ unitId: callee.unitId, name: calleeName }),
-            signature,
-          });
-        }
+        const { calleeTypes, directCallTargets } = projectLinearCalleeSignaturesToLegacy(
+          signaturesByUnitId,
+          ownerByUnitId,
+        );
         // Build through the SAME shared from-ast as WasmGC. The narrowed
         // linear resolver exposes the landed L2 vec/aggregate and L3 string
         // shapes; every other representation-dependent family still throws
@@ -473,12 +601,12 @@ export function compileLinearIrFunctions(
           ownerUnitId,
           calleeTypes,
           directCalls: collectIrDirectCallLoweringPlans(decl, ownerUnitId, directCallTargets),
-          paramTypeOverrides: ownTypes.get(ownerUnitId)?.params,
-          returnTypeOverride: ownTypes.get(ownerUnitId)?.returnType,
+          paramTypeOverrides: declaredSignaturesByUnitId.get(ownerUnitId)?.params,
+          returnTypeOverride: declaredSignaturesByUnitId.get(ownerUnitId)?.returnType,
           resolver,
           allocRegistry,
         });
-        ownerIndex.projection.requirePair({ unitId: ownerUnitId, legacyName: main.name });
+        requireLinearOwnerPair(owner, main.name);
 
         // Slice 1 lowers into PRE-ASSIGNED slots only; a build that
         // synthesizes lifted closures needs fresh slots (the WasmGC
@@ -512,7 +640,7 @@ export function compileLinearIrFunctions(
         }
 
         built.set(ownerUnitId, main);
-        calleeTypes.set(name, {
+        signaturesByUnitId.set(ownerUnitId, {
           params: main.params.map((p) => p.type),
           returnType: main.resultTypes.length > 0 ? main.resultTypes[0]! : null,
         });
@@ -523,7 +651,7 @@ export function compileLinearIrFunctions(
         // Fail-safe demote: the linear DIRECT path compiles this function
         // exactly as it does today (the overlay only ever ADDS capability).
         // A "call to unknown function" may resolve in a later round once
-        // the callee's signature lands in `calleeTypes` — keep it pending.
+        // the callee's signature lands in `signaturesByUnitId` — keep it pending.
         lastFailure.set(ownerUnitId, {
           func: name,
           reason: "build",
@@ -561,7 +689,7 @@ export function compileLinearIrFunctions(
         stringRuntime: resolver,
       });
       const body = lowerIrFunctionBody(main, resolver, emitter, linearValueTypeConverter(resolver, main.name));
-      ownerIndex.projection.requirePair({ unitId: ownerUnitId, legacyName: body.name });
+      requireLinearOwnerPair(owner, body.name);
       const vecScratchLocals = new Set(emitter.getVecScratchLocalIndices());
       const wasmLocals = body.locals.flatMap((local) =>
         local.slots.map((type, slot) => ({
@@ -585,7 +713,7 @@ export function compileLinearIrFunctions(
           resolveLinearRuntimeOperation(ctx, stackOperations.restore),
         );
       }
-      funcs.set(name, {
+      funcs.set(ownerUnitId, {
         name: body.name,
         typeIdx: resolver.internFuncType({
           kind: "func",
@@ -609,6 +737,50 @@ export function compileLinearIrFunctions(
   }
 
   return result;
+}
+
+/**
+ * Narrow compatibility projection for the still-name-keyed `from-ast`
+ * signature option. Canonical signature/fixpoint state remains keyed by unit
+ * ID; colliding labels are omitted rather than selecting either source unit.
+ */
+function projectLinearCalleeSignaturesToLegacy(
+  signaturesByUnitId: ReadonlyMap<IrUnitId, { params: readonly IrType[]; returnType: IrType | null }>,
+  ownerByUnitId: ReadonlyMap<IrUnitId, LinearIrSourceOwner>,
+): {
+  calleeTypes: ReadonlyMap<string, { params: readonly IrType[]; returnType: IrType | null }>;
+  directCallTargets: ReadonlyMap<string, IrDirectCallTarget>;
+} {
+  const candidates = new Map<
+    string,
+    { owner: LinearIrSourceOwner; signature: { params: readonly IrType[]; returnType: IrType | null } }[]
+  >();
+  for (const [unitId, signature] of signaturesByUnitId) {
+    const owner = ownerByUnitId.get(unitId);
+    if (!owner) {
+      return linearOwnerInvariant(
+        "missing-planning-owner",
+        `linear IR signature ${unitId} has no validated source owner`,
+      );
+    }
+    const existing = candidates.get(owner.legacyName);
+    const candidate = { owner, signature };
+    if (existing) existing.push(candidate);
+    else candidates.set(owner.legacyName, [candidate]);
+  }
+
+  const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
+  const directCallTargets = new Map<string, IrDirectCallTarget>();
+  for (const [legacyName, matches] of candidates) {
+    if (matches.length !== 1) continue;
+    const { owner, signature } = matches[0]!;
+    calleeTypes.set(legacyName, signature);
+    directCallTargets.set(legacyName, {
+      target: irUnitFuncRef({ unitId: owner.ownerUnitId, name: legacyName }),
+      signature,
+    });
+  }
+  return { calleeTypes, directCallTargets };
 }
 
 function latticeEvidenceToIr(type: LatticeType | undefined, context: string): IrType {
@@ -663,7 +835,7 @@ function makeLinearIrResolver(
   resolver: IrLowerResolver & IrFromAstResolver;
   helpers: LinearIrHelper[];
   bindMemoryPlan(plan: LinearMemoryPlan): void;
-  bindUnitFunc(unitId: IrUnitId, legacyName: string): void;
+  bindUnitFunc(slot: LinearIrLegacySlotAdapter): void;
 } {
   const helpers: LinearIrHelper[] = [];
   const helperByShape = new Map<string, number>();
@@ -671,7 +843,7 @@ function makeLinearIrResolver(
   const refCells = new Map<string, LinearRefCellLowering>();
   const f64IrType = irVal({ kind: "f64" });
   const provisionalF64VectorLayout = planLinearVectorLayout(f64IrType);
-  const unitFuncIdxById = new Map<IrUnitId, number>();
+  const unitFuncSlotById = new Map<IrUnitId, LinearIrLegacySlotAdapter>();
   let memoryPlan: LinearMemoryPlan | undefined;
 
   const resolveRuntimeFunc = (name: string): number => {
@@ -693,16 +865,17 @@ function makeLinearIrResolver(
     throw new Error(`linear-ir: imported function '${module}.${field}' missing`);
   };
 
-  const bindUnitFunc = (unitId: IrUnitId, legacyName: string): void => {
-    const funcIdx = ctx.funcMap.get(legacyName);
-    if (funcIdx === undefined) {
-      throw new Error(`linear-ir: no pre-assigned function slot for source unit '${unitId}' (${legacyName})`);
+  const bindUnitFunc = (slot: LinearIrLegacySlotAdapter): void => {
+    const previous = unitFuncSlotById.get(slot.ownerUnitId);
+    if (
+      previous !== undefined &&
+      (previous.funcIdx !== slot.funcIdx ||
+        previous.legacyName !== slot.legacyName ||
+        previous.slotName !== slot.slotName)
+    ) {
+      throw new Error(`linear-ir: source unit '${slot.ownerUnitId}' was bound to multiple function slots`);
     }
-    const previous = unitFuncIdxById.get(unitId);
-    if (previous !== undefined && previous !== funcIdx) {
-      throw new Error(`linear-ir: source unit '${unitId}' was bound to multiple function slots`);
-    }
-    unitFuncIdxById.set(unitId, funcIdx);
+    unitFuncSlotById.set(slot.ownerUnitId, slot);
   };
 
   const ensureAggregateHelper = (
@@ -789,11 +962,11 @@ function makeLinearIrResolver(
     resolveFunc(ref: IrFuncRef): number {
       switch (ref.binding.kind) {
         case "unit": {
-          const idx = unitFuncIdxById.get(ref.binding.unitId);
-          if (idx === undefined) {
+          const slot = unitFuncSlotById.get(ref.binding.unitId);
+          if (slot === undefined) {
             throw new Error(`linear-ir: no function slot for source unit '${ref.binding.unitId}' (${ref.name})`);
           }
-          return idx;
+          return slot.funcIdx;
         }
         case "import":
           return resolveImportFunc(ref.binding.module, ref.binding.field);

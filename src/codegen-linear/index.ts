@@ -170,8 +170,8 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     const className = classDecl.name!.text;
     const layout = ctx.classLayouts.get(className)!;
 
-    // Constructor
-    allFuncEntries.push({ kind: "ctor", node: classDecl, name: layout.ctorFuncName, className });
+    const ctorDecl = classDecl.members.find(ts.isConstructorDeclaration);
+    allFuncEntries.push({ kind: "ctor", node: ctorDecl ?? classDecl, name: layout.ctorFuncName, className });
 
     // Methods
     for (const member of classDecl.members) {
@@ -200,12 +200,13 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     }
   }
 
-  // Assign function indices for all entries
   const runtimeFuncCount = ctx.mod.functions.length;
+  const linearIrLegacySlots = [];
   for (let i = 0; i < allFuncEntries.length; i++) {
     const entry = allFuncEntries[i];
     const funcIdx = ctx.numImportFuncs + runtimeFuncCount + i;
     ctx.funcMap.set(entry.name, funcIdx);
+    linearIrLegacySlots.push({ declaration: entry.node, legacyName: entry.name, funcIdx });
   }
 
   // ── Collect module-level variable declarations as wasm globals ──
@@ -217,19 +218,18 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   }
 
   // ── #2956: IR overlay for selector-claimed top-level functions ──
-  // Default-on since L4; JS2WASM_LINEAR_IR=0 restores the byte-identical
-  // direct path. Runs
-  // AFTER slot pre-assignment + module-global collection so the linear IR
-  // resolver's name-based lookups (funcMap / moduleGlobals) are complete,
-  // and BEFORE the funcDecls loop so an IR-lowered body lands at exactly
-  // its pre-assigned slot position. Anything the gate demotes compiles via
-  // the direct path below, unchanged.
-  const linearIr = linearIrEnabled() ? compileLinearIrFunctions(ctx, ast.sourceFile, allocationPolicy) : undefined;
+  // Default-on since L4. Run after exact slot registration and module-global
+  // collection, but before top-level body insertion. Demotions retain the
+  // direct path and JS2WASM_LINEAR_IR=0 remains the escape hatch.
+  const linearIr = linearIrEnabled()
+    ? compileLinearIrFunctions(ctx, ast.sourceFile, allocationPolicy, linearIrLegacySlots)
+    : undefined;
 
   // ── Compile top-level function declarations ──
   for (const decl of funcDecls) {
-    const irFunc = linearIr?.funcs.get(decl.name!.text);
-    if (irFunc) {
+    const irArtifact = linearIr?.compiledArtifactFor(decl);
+    if (irArtifact) {
+      const { func: irFunc, legacySlot } = irArtifact;
       // Insert the IR-lowered body at this decl's slot position (push order
       // must match the forward-registered funcMap indices). Mirror
       // compileFunction's export record.
@@ -237,7 +237,7 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
       if (irFunc.exported) {
         ctx.mod.exports.push({
           name: irFunc.name,
-          desc: { kind: "func", index: ctx.funcMap.get(irFunc.name)! },
+          desc: { kind: "func", index: legacySlot.funcIdx },
         });
       }
       continue;

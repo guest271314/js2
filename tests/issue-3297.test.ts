@@ -14,6 +14,7 @@ import { compile } from "../src/index.js";
 import {
   IrFunctionBuilder,
   irVal,
+  irUnitFuncRef,
   lowerFunctionAstToIr,
   verifyIrBackendLegality,
   type IrFunction,
@@ -66,14 +67,16 @@ const DIFF_SOURCE = `
 function effectFunctions(): IrFunction[] {
   const global = { kind: "global" as const, name: "trace" };
 
-  const left = new IrFunctionBuilder(identities.next("left"), [F64]);
+  const leftIdentity = identities.next("left");
+  const left = new IrFunctionBuilder(leftIdentity, [F64]);
   left.openBlock();
   const one = left.emitConst({ kind: "f64", value: 1 }, F64);
   left.emitGlobalSet(global, one);
   const ten = left.emitConst({ kind: "f64", value: 10 }, F64);
   left.terminate({ kind: "return", values: [ten] });
 
-  const right = new IrFunctionBuilder(identities.next("right"), [F64]);
+  const rightIdentity = identities.next("right");
+  const right = new IrFunctionBuilder(rightIdentity, [F64]);
   right.openBlock();
   const oldTrace = right.emitGlobalGet(global, F64);
   const scale = right.emitConst({ kind: "f64", value: 10 }, F64);
@@ -88,8 +91,8 @@ function effectFunctions(): IrFunction[] {
   ordered.openBlock();
   const zero = ordered.emitConst({ kind: "f64", value: 0 }, F64);
   ordered.emitGlobalSet(global, zero);
-  const leftResult = ordered.emitCall({ kind: "func", name: "left" }, [], F64)!;
-  const rightResult = ordered.emitCall({ kind: "func", name: "right" }, [], F64)!;
+  const leftResult = ordered.emitCall(irUnitFuncRef(leftIdentity), [], F64)!;
+  const rightResult = ordered.emitCall(irUnitFuncRef(rightIdentity), [], F64)!;
   const sum = ordered.emitBinary("f64.add", leftResult, rightResult, F64);
   const hundred = ordered.emitConst({ kind: "f64", value: 100 }, F64);
   const weighted = ordered.emitBinary("f64.mul", sum, hundred, F64);
@@ -97,7 +100,8 @@ function effectFunctions(): IrFunction[] {
   const result = ordered.emitBinary("f64.add", weighted, finalTrace, F64);
   ordered.terminate({ kind: "return", values: [result] });
 
-  const twice = new IrFunctionBuilder(identities.next("twice"), [F64]);
+  const twiceIdentity = identities.next("twice");
+  const twice = new IrFunctionBuilder(twiceIdentity, [F64]);
   const input = twice.addParam("x", F64);
   twice.openBlock();
   const multiplier = twice.emitConst({ kind: "f64", value: 2 }, F64);
@@ -108,8 +112,8 @@ function effectFunctions(): IrFunction[] {
   directArgs.openBlock();
   const six = directArgs.emitConst({ kind: "f64", value: 6 }, F64);
   const seven = directArgs.emitConst({ kind: "f64", value: 7 }, F64);
-  const twelve = directArgs.emitCall({ kind: "func", name: "twice" }, [six], F64)!;
-  const fourteen = directArgs.emitCall({ kind: "func", name: "twice" }, [seven], F64)!;
+  const twelve = directArgs.emitCall(irUnitFuncRef(twiceIdentity), [six], F64)!;
+  const fourteen = directArgs.emitCall(irUnitFuncRef(twiceIdentity), [seven], F64)!;
   const twentySix = directArgs.emitBinary("f64.add", twelve, fourteen, F64);
   directArgs.terminate({ kind: "return", values: [twentySix] });
 
@@ -228,7 +232,7 @@ describe("#3297 Porffor scalar/control-flow sink", () => {
     expect(calls.every((call) => (call[2] & 4) !== 0)).toBe(true);
   });
 
-  it("assigns final function positions by stable name, independent of registration order", () => {
+  it("preserves stable label order and uses identity only to break label collisions", () => {
     expect(lowerProof("shuffled")).toStrictEqual(lowerProof("normal"));
     expect(lowerProof().funcs.map((func) => func?.name)).toEqual([
       "classify",

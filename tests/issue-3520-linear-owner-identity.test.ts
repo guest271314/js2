@@ -3,10 +3,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { buildIrUnitInventory } from "../src/ir/identity.js";
-import { getLastLinearIrReport, indexLinearIrSourceOwners } from "../src/ir/backend/linear-integration.js";
+import {
+  buildLinearIrLegacySlotAdapters,
+  getLastLinearIrReport,
+  indexLinearIrSourceOwners,
+} from "../src/ir/backend/linear-integration.js";
 import {
   buildIrPlanningIdentityContext,
-  IrLegacyUnitProjectionInvariantError,
   IrPlanningIdentityInvariantError,
   type IrPlanningIdentityContext,
 } from "../src/ir/planning-identity.js";
@@ -49,7 +52,7 @@ describe("#3520 linear integration owner identity", () => {
     );
   });
 
-  it("fails with the typed projection invariant when one source has an ambiguous legacy label", () => {
+  it("keeps duplicate labels distinct and rejects a shared concrete slot", () => {
     const file = source(
       "/repo/ambiguous.ts",
       `
@@ -58,10 +61,45 @@ describe("#3520 linear integration owner identity", () => {
       `,
     );
     const identityContext = context([file]);
+    const ownerIndex = indexLinearIrSourceOwners(file, identityContext);
 
-    expect(() => indexLinearIrSourceOwners(file, identityContext)).toThrowError(
-      expect.objectContaining<IrLegacyUnitProjectionInvariantError>({ code: "duplicate-legacy-name" }),
+    expect(ownerIndex.owners).toHaveLength(2);
+    expect(ownerIndex.owners.map((owner) => owner.legacyName)).toEqual(["same", "same"]);
+    expect(new Set(ownerIndex.owners.map((owner) => owner.ownerUnitId)).size).toBe(2);
+
+    const distinct = buildLinearIrLegacySlotAdapters(
+      ownerIndex,
+      ownerIndex.owners.map((owner, index) => ({
+        declaration: owner.declaration,
+        legacyName: "same",
+        funcIdx: 40 + index,
+      })),
     );
+    expect(
+      distinct.map(({ ownerUnitId, legacyName, slotName, funcIdx }) => ({
+        ownerUnitId,
+        legacyName,
+        slotName,
+        funcIdx,
+      })),
+    ).toEqual([
+      { ownerUnitId: ownerIndex.owners[0]!.ownerUnitId, legacyName: "same", slotName: "same", funcIdx: 40 },
+      { ownerUnitId: ownerIndex.owners[1]!.ownerUnitId, legacyName: "same", slotName: "same", funcIdx: 41 },
+    ]);
+
+    expect(() =>
+      buildLinearIrLegacySlotAdapters(
+        ownerIndex,
+        ownerIndex.owners.map((owner) => ({
+          declaration: owner.declaration,
+          legacyName: "same",
+          funcIdx: 40,
+        })),
+      ),
+    ).toThrowError(expect.objectContaining<IrPlanningIdentityInvariantError>({ code: "unit-record-mismatch" }));
+    expect(() =>
+      buildLinearIrLegacySlotAdapters(ownerIndex, [{ declaration: file, legacyName: "unowned", funcIdx: 42 }]),
+    ).toThrowError(expect.objectContaining<IrPlanningIdentityInvariantError>({ code: "unit-record-mismatch" }));
   });
 
   it("retains exact owners for compiled and rejected public name telemetry", async () => {
@@ -91,5 +129,10 @@ describe("#3520 linear integration owner identity", () => {
     expect(compiledOwner?.ownerUnitId).toBeTruthy();
     expect(rejectedOwner?.ownerUnitId).toBeTruthy();
     expect(compiledOwner?.ownerUnitId).not.toBe(rejectedOwner?.ownerUnitId);
+    expect([...report!.funcs.keys()]).toEqual([compiledOwner!.ownerUnitId]);
+    expect(report!.legacySlots.find((slot) => slot.ownerUnitId === compiledOwner!.ownerUnitId)).toMatchObject({
+      legacyName: "accepted",
+      slotName: "accepted",
+    });
   });
 });
