@@ -1,19 +1,19 @@
 ---
 id: 2900
 title: "≤ES3 (edition bucket): module indirect default-export binding update returns wrong value"
-status: ready
+status: done
 priority: high
 sprint: current
 created: 2026-06-30
-completed: 2026-07-02
+completed: 2026-07-25
 feasibility: hard
 task_type: bug
-area: codegen
+area: testing
 es_edition: 3
 language_feature: module-code
 goal: spec-completeness
-related: [2898]
-assignee: ttraenkler/dev-2900
+related: [2898, 3505, 3592]
+assignee: ttraenkler/opus-es3
 ---
 
 > Closed 2026-07-02 with the #2932 PR — umbrella split into #2930 (RC2 alias,
@@ -218,3 +218,102 @@ vacuous standalone passes fixed on 2026-07-25 via #3592.
 issue should be re-pointed (or closed as blocked on that defect) rather than
 re-implementing module-binding logic that may already be correct. Verify on the
 CI path — `runTest262File`'s category and location are unreliable.
+
+---
+
+## Resolution 2026-07-25 — case (3): a **different, later defect** was masking a correct fix
+
+The reopen note's hypothesis was right, and the module-binding work
+(#2930 / #2931 / #2932) needed no change at all. The cause was in the **test
+runner**, not the compiler: one execution lane was still running the harness
+before the runtime was wired.
+
+### Diagnosis
+
+Reproduced through the exact CI recipe for this test — the in-process FIXTURE
+branch of `tests/test262-shared.ts` (`assembleOriginalHarness` →
+`discoverFixtureGraph` → `compileMulti` → instantiate → `setExports` →
+`__module_init`), not `runTest262File`.
+
+A minimal control isolated the variable immediately: the trivial body
+`assert.sameValue(1, 1)` — no fixtures, no modules, no imports — **also** threw
+`sameValue is not a function` under that recipe. So the failure had nothing to
+do with module bindings, `.js` fixtures, or `allowJs`. Flipping one flag:
+
+| compile                      | `deferTopLevelInit` | result                              |
+| ---------------------------- | ------------------- | ----------------------------------- |
+| `compile()` single file      | off                 | THREW `sameValue is not a function` |
+| `compile()` single file      | **on**              | OK                                  |
+| `compileMulti()` `.js` entry | off                 | THREW `sameValue is not a function` |
+| `compileMulti()` `.js` entry | **on**              | OK                                  |
+
+### Root cause
+
+Without `deferTopLevelInit`, the whole original-harness assembly runs in the
+wasm `(start)` section — i.e. **before** `importObj.setExports(instance.exports)`
+wires the runtime. `assert` is a **function object** and `assert.sameValue` is an
+own property assigned onto it (`assert.sameValue = function …` in
+`harness/assert.js`); those reads need the wired runtime. So every `assert.*`
+call in an affected test threw "… is not a function" and the test body was never
+reached — which is exactly what the baseline row records
+(`reached_test: false`).
+
+The FIXTURE branch was the **only** lane still running undeferred.
+`scripts/test262-worker.mjs` defers on both its single-file path and its own
+fixture-graph path (`...deferOpt`), and the FYI runner defers too (#3505). Every
+one of the corpus's other ~42,900 tests already ran deferred; the ~204
+fixture-graph tests did not. That is why this looked like a module-semantics gap
+confined to `language/module-code`.
+
+The branch's comment gave the historical reason for the omission: deferring made
+compileMulti emit a **second** `__module_init` export (V8 "Duplicate export name
+'**module_init'" — the #2835/#2839 merge-queue park). **#3505 fixed that**: the
+progressively accumulated dependency-order initializers now retain only the
+FINAL `**module_init` export. The omission outlived its cause.
+
+### Fix
+
+`tests/test262-shared.ts`: the FIXTURE compile now passes
+`deferTopLevelInit: true`, aligning this lane with every other one. No compiler
+source change. The stale comment is replaced with the #3505 rationale.
+
+### Measured effect
+
+Swept all **204** fixture-graph tests through the branch's own verdict logic,
+`deferTopLevelInit` off vs on, everything else identical:
+
+|               | off (stock) | on (fixed) |
+| ------------- | ----------: | ---------: |
+| pass          |           3 |     **34** |
+| fail          |          64 |         33 |
+| compile_error |          45 |         45 |
+| skip          |          92 |         92 |
+
+**31 fail→pass, 0 pass→fail, byte-identical compile_error set** (verified as
+sets, not just counts). All 31 are `fail` in the force-fetched baseline, so the
+gain is real rather than a re-labelling. No duplicate-export CompileError
+appeared anywhere in the 204 — #3505's fix holds for this whole bucket.
+
+Of the 31, 22 were failing on `sameValue is not a function` and 1 on
+`throws is not a function` — i.e. the harness class this issue was suspected of.
+
+The residual fixture failures are unrelated and out of scope here: 18 opaque
+`WebAssembly.Exception`, 5 `null is not a function` (the renamed/aliased-import
+class), 3 dynamic-import module-resolution, 3 async-marker, 2 `Cannot convert
+null to object`, 1 `Reflect.get called on non-object`, 1 `illegal cast`.
+
+### Verification
+
+`tests/issue-2900.test.ts`:
+
+- source guard that the FIXTURE compile passes `deferTopLevelInit: true` (and
+  still passes `allowJs: !isNegative`, #2932);
+- the target test, run through the branch's recipe **both ways** — asserting it
+  fails with `sameValue is not a function` when the defer is removed and passes
+  with it, so the test cannot pass for the wrong reason;
+- an explicit assertion that the deferred fixture binary exports exactly **one**
+  `__module_init`, locking the #2835/#2839 park shut.
+
+With the defer, the test's own assertions (`assert.sameValue(val(), 1)` and
+`assert.sameValue(val, 2)`) are actually reached — and they pass. That is the
+positive evidence that #2930 / #2931 / #2932 were correct all along.
