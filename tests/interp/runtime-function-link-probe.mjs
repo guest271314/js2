@@ -104,21 +104,40 @@ function providerSource() {
         throw new SyntaxError("unexpected runtime source");
       }
 
+      function runtimeEvalResult(ok: boolean, value: any): any {
+        const result: any[] = [ok, value];
+        return result;
+      }
+
       export function __runtime_new_function(
         paramString: any,
         bodyString: any,
         globalObject: any
       ): any {
-        return createDynamicFunction(
-          parse,
-          String(paramString),
-          String(bodyString),
-          globalObject
-        );
+        try {
+          return runtimeEvalResult(
+            true,
+            createDynamicFunction(
+              parse,
+              String(paramString),
+              String(bodyString),
+              globalObject
+            )
+          );
+        } catch (error) {
+          return runtimeEvalResult(false, error);
+        }
       }
 
       export function __runtime_indirect_eval(source: any, globalObject: any): any {
-        return executeIndirectEval(parse, source, globalObject);
+        try {
+          return runtimeEvalResult(
+            true,
+            executeIndirectEval(parse, source, globalObject)
+          );
+        } catch (error) {
+          return runtimeEvalResult(false, error);
+        }
       }
 
       export function providerCanary(): number {

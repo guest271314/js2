@@ -48,6 +48,6 @@ describe("#2928 — real Acorn runtime-eval provider", () => {
     ]);
     expect(report.functionCanaryEnabled).toBe(false);
     expect(report.executionErrors).toEqual({});
-    expect(report.values).toEqual({ eval: 3, linkedEval: 42 });
+    expect(report.values).toEqual({ eval: 3, linkedEval: 42, linkedThrow: 1 });
   });
 });

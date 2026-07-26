@@ -37,24 +37,43 @@ function providerSource() {
     acorn,
     ...interpreter,
     `
+      function runtimeEvalResult(ok: boolean, value: any): any {
+        const result: any[] = [ok, value];
+        return result;
+      }
+
       export function __runtime_new_function(
         paramString: any,
         bodyString: any,
         globalObject: any
       ): any {
-        return createDynamicFunction(
-          parse,
-          String(paramString),
-          String(bodyString),
-          globalObject
-        );
+        try {
+          return runtimeEvalResult(
+            true,
+            createDynamicFunction(
+              parse,
+              String(paramString),
+              String(bodyString),
+              globalObject
+            )
+          );
+        } catch (error) {
+          return runtimeEvalResult(false, error);
+        }
       }
 
       export function __runtime_indirect_eval(
         source: any,
         globalObject: any
       ): any {
-        return executeIndirectEval(parse, source, globalObject);
+        try {
+          return runtimeEvalResult(
+            true,
+            executeIndirectEval(parse, source, globalObject)
+          );
+        } catch (error) {
+          return runtimeEvalResult(false, error);
+        }
       }
 
       export function __runtime_eval_canary(): number {
@@ -95,6 +114,16 @@ async function main() {
         globalThis.answer = 40;
         return (0, eval)(dynamic("answer + 2")) as number;
       }
+
+      export function linkedThrow(): number {
+        try {
+          (0, eval)(dynamic("throw 7"));
+          return 0;
+        } catch (error) {
+          return error === 7 ? 1 : 2;
+        }
+      }
+
     `,
     {
       fileName: "runtime-eval-acorn-user.ts",
@@ -133,6 +162,7 @@ async function main() {
         const canaries = [
           ["eval", instance.exports.__runtime_eval_canary],
           ["linkedEval", userInstance.exports.linkedEval],
+          ["linkedThrow", userInstance.exports.linkedThrow],
         ];
         if (report.functionCanaryEnabled) {
           canaries.push(["function", instance.exports.__runtime_function_canary]);
