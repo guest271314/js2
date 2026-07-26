@@ -18,6 +18,11 @@ import { runTest262File } from "./test262-runner.js";
 
 const FIXTURES = resolve(__dirname, "..", "scripts", "fixtures", "issue-3669-monomorphism");
 const TIMEOUT = 120_000;
+const ARRAY_GENERIC_NONTRAP_CASES = [
+  "built-ins/Array/prototype/join/S15.4.4.5_A2_T1.js",
+  "built-ins/Array/prototype/pop/S15.4.4.6_A2_T1.js",
+  "built-ins/Array/prototype/shift/S15.4.4.9_A2_T1.js",
+];
 
 /**
  * Each fixture always throws a Test262Error carrying a report of `<arm>:ok` /
@@ -44,6 +49,22 @@ function expectArm(v: Map<string, string>, arm: string, want: "ok" | "BROKEN"): 
 }
 
 describe("#3669 property slot monomorphism", () => {
+  it.each(ARRAY_GENERIC_NONTRAP_CASES)(
+    "does not turn an anticipated undefined/null slot into a null receiver: %s",
+    async (relativePath) => {
+      const result = await runTest262File(
+        resolve(__dirname, "..", "test262", "test", relativePath),
+        "built-ins/Array",
+        TIMEOUT,
+      );
+      expect(["pass", "fail"], "the exact case must execute rather than skip or fail compilation").toContain(
+        result.status,
+      );
+      expect(String(result.error ?? "")).not.toContain("dereferencing a null pointer");
+    },
+    TIMEOUT,
+  );
+
   it(
     "reports every arm and its own positive control",
     async () => {

@@ -14,6 +14,21 @@ import { widenedVarKeyFromDecl } from "../widened-var-key.js";
 import type { FieldDef, ValType } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
 
+function isUnboxedPrimitiveCarrier(type: ValType): boolean {
+  return ["f64", "f32", "i64", "i32", "i16", "i8"].includes(type.kind);
+}
+
+type WidenedPropCandidate = {
+  name: string;
+  type: ValType;
+  primitiveSeed: boolean;
+};
+
+function isRuntimePrimitiveSeed(type: ValType, tsType: ts.Type): boolean {
+  const sentinelFlags = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null;
+  return isUnboxedPrimitiveCarrier(type) && (tsType.flags & sentinelFlags) === 0;
+}
+
 /**
  * Early, type-table-neutral carrier scan for functions that return an empty
  * object populated through computed keys. Fnctor structs are reserved before
@@ -119,7 +134,7 @@ export function collectEmptyObjectWidening(
           // (#3403) per-declaration key for `widenedDefinePropertyKeys`; matches
           // what `integrityVarKey` yields at the USE sites in object-ops.ts.
           const varKey = widenedVarKeyFromDecl(decl.name);
-          const extraProps: { name: string; type: ValType }[] = [];
+          const extraProps: WidenedPropCandidate[] = [];
           const seenProps = new Set<string>();
 
           // Scan all following statements in the same block for property assignments
@@ -1165,23 +1180,25 @@ function recordDefinePropertyWiden(
   varKey: string,
   propName: string,
   descArg: ts.Expression,
-  extraProps: { name: string; type: ValType }[],
+  extraProps: WidenedPropCandidate[],
   seenProps: Set<string>,
 ): void {
   if (!seenProps.has(propName)) {
     seenProps.add(propName);
     // Try to get value type from descriptor.value
     let wasmType: ValType = { kind: "externref" };
+    let primitiveSeed = false;
     if (ts.isObjectLiteralExpression(descArg)) {
       for (const prop of descArg.properties) {
         if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "value") {
           const rhsType = checker.getTypeAtLocation(prop.initializer);
           wasmType = resolveWasmType(ctx, rhsType);
+          primitiveSeed = isRuntimePrimitiveSeed(wasmType, rhsType);
           break;
         }
       }
     }
-    extraProps.push({ name: propName, type: wasmType });
+    extraProps.push({ name: propName, type: wasmType, primitiveSeed });
     ctx.widenedDefinePropertyKeys.add(`${varKey}:${propName}`);
   }
 }
@@ -1195,7 +1212,7 @@ export function collectPropsFromStatements(
   // `recordDefinePropertyWiden`); `varName` stays bare for the `objArg.text ===
   // varName` receiver match below.
   varKey: string,
-  extraProps: { name: string; type: ValType }[],
+  extraProps: WidenedPropCandidate[],
   seenProps: Set<string>,
 ): void {
   for (const s of stmts) {
@@ -1214,7 +1231,11 @@ export function collectPropsFromStatements(
         const wasmType = resolveWasmType(ctx, rhsType);
         if (!seenProps.has(propName)) {
           seenProps.add(propName);
-          extraProps.push({ name: propName, type: wasmType });
+          extraProps.push({
+            name: propName,
+            type: wasmType,
+            primitiveSeed: isRuntimePrimitiveSeed(wasmType, rhsType),
+          });
         } else {
           // (#3669) A LATER write of a different kind must not be force-coerced
           // into the first write's slot. This pre-pass used to be
@@ -1222,10 +1243,13 @@ export function collectPropsFromStatements(
           // and every subsequent `struct.set` ran a numeric coercion — a string
           // landed as NaN while `typeof o.p` (folded from the checker's
           // narrowed static type, independent of the slot) still said "string".
-          // Widen to the universal carrier instead, so the slot can hold either
-          // kind losslessly.
+          // Widen to the universal carrier only when the slot was seeded by a
+          // real unboxed primitive. `resolveWasmType(undefined)` is also i32,
+          // but that is a missing-value sentinel rather than a runtime boolean;
+          // widening an anticipated `undefined -> null` property changes its
+          // empty-object default and can null-deref reads before the first write.
           const existing = extraProps.find((p) => p.name === propName);
-          if (existing && !valTypesMatch(existing.type, wasmType)) {
+          if (existing?.primitiveSeed && !valTypesMatch(existing.type, wasmType)) {
             existing.type = { kind: "externref" };
           }
         }
