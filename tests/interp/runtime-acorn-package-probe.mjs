@@ -133,6 +133,14 @@ async function main() {
         }
       }
 
+      export function linkedNumberBuiltin(): number {
+        return (0, eval)(dynamic("Number('4')")) as number;
+      }
+
+      export function linkedMathBuiltin(): number {
+        return (0, eval)(dynamic("Math.max(3, 7, 2)")) as number;
+      }
+
       function aotAdd(a: number, b: number): number {
         return a + b;
       }
@@ -183,6 +191,8 @@ async function main() {
           ["linkedEval", userInstance.exports.linkedEval],
           ["linkedThrow", userInstance.exports.linkedThrow],
           ["linkedErrorThrow", userInstance.exports.linkedErrorThrow],
+          ["linkedNumberBuiltin", userInstance.exports.linkedNumberBuiltin],
+          ["linkedMathBuiltin", userInstance.exports.linkedMathBuiltin],
           ["linkedAotCall", userInstance.exports.linkedAotCall],
         ];
         if (report.functionCanaryEnabled) {

@@ -588,9 +588,42 @@ function callBuiltin(builtinId: number, regs: Regs, base: number, argc: number, 
       return argc === 0 ? new SyntaxError() : new SyntaxError(String(regs[base]));
     case Builtin.ReferenceError:
       return argc === 0 ? new ReferenceError() : new ReferenceError(String(regs[base]));
+    case Builtin.Number:
+      return argc === 0 ? 0 : Number(regs[base]);
+    case Builtin.MathMax:
+      return builtinMathExtremum(regs, base, argc, true);
+    case Builtin.MathMin:
+      return builtinMathExtremum(regs, base, argc, false);
+    case Builtin.MathAbs:
+      return Math.abs(Number(regs[base]));
+    case Builtin.MathFloor:
+      return Math.floor(Number(regs[base]));
+    case Builtin.MathCeil:
+      return Math.ceil(Number(regs[base]));
+    case Builtin.MathRound:
+      return Math.round(Number(regs[base]));
     default:
       throw new InterpInternalError(`unknown builtin id ${builtinId}`);
   }
+}
+
+/** Host-free Math.max/min over the bytecode argument window. The signed-zero
+ * tie-breaks match ECMA-262: max prefers +0 and min prefers -0. */
+function builtinMathExtremum(regs: Regs, base: number, argc: number, wantMax: boolean): JSValue {
+  let result = wantMax ? -Infinity : Infinity;
+  let i = 0;
+  for (;;) {
+    if (i >= argc) break;
+    const value = Number(regs[base + i]);
+    if (value !== value) return NaN;
+    if (wantMax) {
+      if (value > result || (value === 0 && result === 0 && 1 / value === Infinity)) result = value;
+    } else if (value < result || (value === 0 && result === 0 && 1 / value === -Infinity)) {
+      result = value;
+    }
+    i += 1;
+  }
+  return result;
 }
 
 /** A short description of a non-callable value for TypeError messages. */

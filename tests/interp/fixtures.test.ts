@@ -104,6 +104,17 @@ describe("#3101 arithmetic + coercion (delegated to generic runtime ops)", () =>
   it("mixes number/string coercion like JS +", () => expectValue("1 + '2'", "12"));
   it("computes modulo", () => expectValue("17 % 5", 2));
   it("negates and ToNumber-coerces unary +", () => expectValue("-(3) + +'4'", 1));
+  it("calls unshadowed Number through CallBuiltin", () => expectValue("Number('4') + Number()", 4));
+  it("preserves a shadowed global-coercion binding", () =>
+    expectValue("function Number(x){ return x + 1; } Number(4)", 5));
+  it("calls the host-free Math CallBuiltin surface", () =>
+    expectValue("Math.max(3,7,2) + Math.min(3,7,2) + Math.abs(-5) + Math.floor(2.9) + Math.ceil(2.1)", 19));
+  it("preserves Math max/min NaN and signed-zero behavior", () => {
+    expectValue("Math.max()", -Infinity);
+    expectValue("Math.min()", Infinity);
+    expectValue("1 / Math.max(-0, +0)", Infinity);
+    expectValue("1 / Math.min(+0, -0)", -Infinity);
+  });
 });
 
 describe("#3101 comparison desugarings (>, >=, !=, !== via the minimal ISA)", () => {

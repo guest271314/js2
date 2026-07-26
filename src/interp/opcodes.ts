@@ -219,6 +219,13 @@ export const Builtin = {
   RangeError: 7, //     %RangeError%
   SyntaxError: 8, //    %SyntaxError%
   ReferenceError: 9, // %ReferenceError%
+  Number: 10, //        %Number%         — global numeric coercion
+  MathMax: 11, //       %Math.max%       — common host-free Math surface
+  MathMin: 12, //       %Math.min%
+  MathAbs: 13, //       %Math.abs%
+  MathFloor: 14, //     %Math.floor%
+  MathCeil: 15, //      %Math.ceil%
+  MathRound: 16, //     %Math.round%
 } as const;
 
 /** Names for the disassembler's builtin-id rendering, indexed by builtin id. */
@@ -233,4 +240,11 @@ export const BUILTIN_NAMES: string[] = [
   "RangeError",
   "SyntaxError",
   "ReferenceError",
+  "Number",
+  "Math.max",
+  "Math.min",
+  "Math.abs",
+  "Math.floor",
+  "Math.ceil",
+  "Math.round",
 ];

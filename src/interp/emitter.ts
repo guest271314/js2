@@ -67,6 +67,13 @@ class FunctionEmitter {
   private readonly enc = new Encoder();
   /** name → fixed register (params + hoisted locals). */
   private readonly names = new Map<string, number>();
+  /** Self-compile-stable membership mirror for `names`.
+   *
+   * A missing numeric Map value is not a reliable `undefined` discriminator in
+   * every standalone generic-Map lowering. Register lookup still uses `names`;
+   * global-builtin shadow classification uses this explicit string list.
+   */
+  private readonly boundNames: string[] = [];
   /** bump pointer: next free register (temporaries live at/above this). */
   private regTop = 1; // regs[0] reserved for `this`
   private maxReg = 1;
@@ -107,6 +114,7 @@ class FunctionEmitter {
     if (existing !== undefined) return existing;
     const r = this.allocReg();
     this.names.set(name, r);
+    this.boundNames.push(name);
     return r;
   }
 
@@ -565,7 +573,9 @@ class FunctionEmitter {
    * self-compile subset.
    */
   private isBoundName(name: string): boolean {
-    if (this.names.get(name) !== undefined) return true;
+    for (const bound of this.boundNames) {
+      if (bound === name) return true;
+    }
     for (const local of this.hoistedVars) {
       if (local === name) return true;
     }
@@ -646,6 +656,41 @@ class FunctionEmitter {
 
   private emitCall(node: Node): void {
     if (node.optional) throw new UnsupportedNodeError("optional call", "CallExpression");
+    // Resolve the small Phase-1 generic-builtin surface that has no property on
+    // the sparse standalone global object. Keep this classification inline:
+    // the current self-compiler can lose a newly-added late class-method call
+    // on this dynamic ESTree receiver (#3651's adjacent method seam).
+    const directCallee = node.callee;
+    let directBuiltin = -1;
+    if (directCallee.type === "Identifier" && !this.isBoundName(directCallee.name)) {
+      if (directCallee.name === "Number") directBuiltin = Builtin.Number;
+    } else if (
+      directCallee.type === "MemberExpression" &&
+      !directCallee.optional &&
+      !directCallee.computed &&
+      directCallee.object.type === "Identifier" &&
+      directCallee.object.name === "Math" &&
+      !this.isBoundName("Math") &&
+      directCallee.property.type === "Identifier"
+    ) {
+      const mathName = directCallee.property.name;
+      if (mathName === "max") directBuiltin = Builtin.MathMax;
+      else if (mathName === "min") directBuiltin = Builtin.MathMin;
+      else if (mathName === "abs") directBuiltin = Builtin.MathAbs;
+      else if (mathName === "floor") directBuiltin = Builtin.MathFloor;
+      else if (mathName === "ceil") directBuiltin = Builtin.MathCeil;
+      else if (mathName === "round") directBuiltin = Builtin.MathRound;
+    }
+    if (directBuiltin >= 0) {
+      const builtinCallMark = this.mark();
+      const builtinCallBase = this.regTop;
+      for (let i = 0; i < node.arguments.length; i += 1) this.allocReg();
+      this.emitArgWindow(node.arguments, builtinCallBase);
+      this.enc.emitCallBuiltin(directBuiltin, builtinCallBase, node.arguments.length);
+      this.release(builtinCallMark);
+      return;
+    }
+
     const argc = node.arguments.length;
     const m = this.mark();
     const base = this.regTop;
