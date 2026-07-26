@@ -12,6 +12,13 @@ function requireNonEmpty(value: string, label: string): string {
   return value;
 }
 
+function requireString(value: string, label: string): string {
+  if (typeof value !== "string") {
+    throw new TypeError(`${label} must be a string`);
+  }
+  return value;
+}
+
 function requireBindingId(value: IrBindingId, label: string, domain: "global" | "type" | "class"): IrBindingId {
   const checked = requireNonEmpty(value, label);
   if (!checked.startsWith(`ir-binding:v1:${domain}:`)) {
@@ -99,7 +106,9 @@ export function irImportGlobalRef(
   ordinal?: number,
 ): IrGlobalRef {
   const checkedModule = requireNonEmpty(module, "global import module");
-  const checkedField = requireNonEmpty(field, "global import field");
+  // WebAssembly import field names may be empty. Host string constants use
+  // that valid spelling for the empty-string literal, so retain it exactly.
+  const checkedField = requireString(field, "global import field");
   return globalRef(compatibilityName(adapterName, checkedField, "global import compatibility name"), {
     kind: "import",
     bindingId: createIrBindingId({
@@ -248,7 +257,7 @@ export function irGlobalBindingKey(binding: IrGlobalBinding): string {
     case "import":
       return (
         `import|${bindingId}|${keyPart(requireNonEmpty(binding.module, "global import module"))}|` +
-        keyPart(requireNonEmpty(binding.field, "global import field"))
+        keyPart(requireString(binding.field, "global import field"))
       );
     case "runtime":
       return `runtime|${bindingId}|${keyPart(requireNonEmpty(binding.symbol, "runtime global symbol"))}`;
