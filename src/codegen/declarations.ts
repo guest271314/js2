@@ -19,6 +19,10 @@ import {
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import { collectShapes } from "../shape-inference.js";
+// (#3623) Total classification of top-level ExpressionStatements, so the
+// allow-list's fall-through leaves evidence instead of silently dropping an
+// observable statement (the #1268/#2671/#2992/#3366/#3468/#3592/#3615 class).
+import { classifyTopLevelExpressionStatement } from "./module-init-collection.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { asyncFnNeedsHostDrive, asyncGenDrivableUnderCarrier, asyncGenStem } from "./async-frame.js";
@@ -1559,6 +1563,40 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         ctx.moduleInitStatements.push(stmt);
         continue;
       }
+      // (#3615) Top-level bare property/element READ — `o.p;`, `o["p"];`,
+      // `void o.p;`. Matched no case in this allow-list, so the statement was
+      // silently dropped from `__module_init` and the read NEVER HAPPENED.
+      //
+      // The read is observable. §13.3.2.1 evaluates the MemberExpression to a
+      // Reference and §6.2.5.5 GetValue calls `[[Get]]` on it, which (a) invokes
+      // the getter for an accessor property and (b) throws a TypeError when the
+      // base is null/undefined. Dropping it is a SILENT WRONG ANSWER of exactly
+      // the shape #2992 (top-level `delete`) and #3592 (top-level `throw`) fixed:
+      // the same read INSIDE a function body has always worked — only the
+      // top-level collection dropped it — so this is a collection gap, not a
+      // property-read lowering gap. The decisive control uses a side effect
+      // rather than a throw, removing all exception machinery from the picture:
+      //
+      //   let hit = 0;
+      //   const o = { get p() { hit = 1; return 1; } };
+      //   o.p;               // hit stayed 0 — the getter never ran
+      //   const v = o.p;     // hit became 1
+      //
+      // In the conformance number this is a VACUOUS PASS: a test whose entire
+      // point is "reading this property must throw/observe", written as a bare
+      // `obj.prop;` statement, ran to completion and scored `pass`.
+      //
+      // Kept UNCONDITIONALLY, matching the #2992 / #3592 arms rather than trying
+      // to predict which reads are side-effecting: whether the base is nullish
+      // and whether the property is an accessor are both runtime facts (the
+      // receiver is routinely `any`), so any static narrowing here would
+      // reintroduce the same silent drop for the cases it mispredicts. Reads
+      // that genuinely have no effect lower to a value that is immediately
+      // dropped, exactly as they already do inside a function body.
+      if (ts.isPropertyAccessExpression(expr) || ts.isElementAccessExpression(expr)) {
+        ctx.moduleInitStatements.push(stmt);
+        continue;
+      }
       if (ts.isBinaryExpression(expr)) {
         const opKind = expr.operatorToken.kind;
         const isAssignOp =
@@ -1761,6 +1799,29 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // one representation across all source files in the shared realm.
         if (targetName && (targetName === "globalThis" || ctx.moduleGlobals.has(targetName))) {
           ctx.moduleInitStatements.push(stmt);
+        }
+      }
+      // (#3623) THE FALL-THROUGH IS NO LONGER SILENT.
+      //
+      // Everything above is an ALLOW-LIST. Historically anything it did not
+      // name simply fell off the end of this block and was dropped with no
+      // diagnostic — the statement never happened, the program produced a
+      // silent wrong answer, and any test covering it became a VACUOUS PASS.
+      // That has happened at least SIX times (#1268, #2671, #2992, #3366,
+      // #3468, #3592 RC1, #3615), each fixed by adding one more arm; a seventh
+      // arm does not stop the eighth. Its sharpest instance: the dropped
+      // top-level `throw` (#3592 RC1) broke the throw-probe technique used to
+      // DETECT vacuous passes — the mechanism disabled its own detector.
+      //
+      // Classify TOTALLY instead. `inert` is an explicit deny-list of shapes
+      // that provably run no user code; anything else that was not collected
+      // is recorded as `unhandled` so it is visible instead of vanishing.
+      // Behaviour is unchanged — nothing new is collected here — but the drop
+      // now leaves evidence.
+      if (!ctx.moduleInitStatements.includes(stmt)) {
+        const c = classifyTopLevelExpressionStatement(stmt.expression);
+        if (c.disposition === "unhandled") {
+          (ctx.droppedModuleInitShapes ??= new Map()).set(c.shape, (ctx.droppedModuleInitShapes.get(c.shape) ?? 0) + 1);
         }
       }
     }
