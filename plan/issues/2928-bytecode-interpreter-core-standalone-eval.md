@@ -322,9 +322,10 @@ interpreted→AOT calls, boxed object identity in both directions, native error
 construction, numeric built-ins, and sloppy/strict dynamic-function `this`.
 
 The real pinned Acorn source and the import-clean interpreter sources compile
-as one ordered-initializer provider. The provider is 2,395,255 bytes in the
-current measured gate, has zero imports, and links to a separately compiled
-user module whose only dynamic-code dependencies are
+as one ordered-initializer provider. At the published Acorn consumption head
+(`1ea2f888fb7b12a9904c8f46734027dd6fe3b19b`), the provider is 2,389,936
+bytes, has zero imports, and links to a separately compiled user module whose
+only dynamic-code dependencies are
 `__runtime_new_function` and `__runtime_indirect_eval`. The mandatory acceptance
 executes stored and immediate `new Function` values, the `Function(...)` call
 form, indirect eval, exception propagation, built-ins, and the reverse AOT call

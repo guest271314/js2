@@ -257,6 +257,8 @@ export interface ClosureInfo {
   paramTypes: ValType[];
   /** True only for source closures with one or more captured lexical bindings. */
   hasCaptures?: boolean;
+  /** True when the source closure has a `...rest` parameter. */
+  hasRestParam?: boolean;
 }
 
 /** Metadata for a generator lowered to an in-module WasmGC state machine (#680). */
@@ -1002,9 +1004,9 @@ export interface FunctionContext {
   thisStructName?: string;
 }
 
-/** Context shared across all codegen. */
 export interface CodegenContext {
   mod: WasmModule;
+  programAbiSession?: import("../program-abi-session.js").ProgramAbiSession;
   checker: ts.TypeChecker;
   /** True when the single-file input is an ECMAScript Module goal. Script-goal
    * module init uses the host global object for top-level `this`; module goal

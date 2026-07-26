@@ -3408,7 +3408,7 @@ export function compileNativeStringMethodCall(
   // against a backend-created static RegExp with a literal replacement routes
   // to the pure-WasmGC matcher (returns the rebuilt NativeString). `$`-pattern /
   // function replacers and the string-coercion form fall through to the refusal.
-  if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
+  if ((ctx.standalone || ctx.wasi) && (method === "replace" || method === "replaceAll")) {
     const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess, receiverOverride);
     if (replaceResult !== undefined) return replaceResult;
   }

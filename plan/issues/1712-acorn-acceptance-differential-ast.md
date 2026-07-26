@@ -1,17 +1,50 @@
 ---
 id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
-status: in-progress
+status: done
 assignee: ttraenkler/codex-acorn
 created: 2026-05-29
 updated: 2026-07-26
+completed: 2026-07-26
 loc-budget-allow:
   - src/codegen/property-access-dispatch.ts
-  - src/codegen/expressions/call-receiver-method.ts
+  - src/codegen/regexp-standalone.ts
   - src/codegen/object-runtime.ts
+  - src/codegen/property-access.ts
+  - src/codegen/declarations.ts
+  - src/codegen/index.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/expressions/assignment.ts
+  - src/ir/select.ts
+  - src/runtime.ts
+  - src/codegen/expressions/calls-closures.ts
+  - src/codegen/context/types.ts
+  - src/ir/integration.ts
+  - src/codegen/expressions/call-receiver-method.ts
 func-budget-allow:
-  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/type-coercion.ts::coerceType
   - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/codegen/property-access.ts::compileElementAccessBody
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/index.ts::generateModule
+  - src/ir/select.ts::isPhase1Expr
+  - src/codegen/builtin-value-read.ts::ensureStandaloneBuiltinStaticMethodClosure
+  - src/codegen/index.ts::generateMultiModule
+  - src/codegen/expressions/calls-closures.ts::compileCallablePropertyCall
+  - src/codegen/index.ts::resolveWasmType
+  - src/codegen/declarations.ts::collectDeclarations
+  - src/codegen/context/create-context.ts::createCodegenContext
+  - src/codegen/index.ts::planIrOverlay
+  - src/ir/integration.ts::compileIrPathFunctions
+  - src/codegen/regexp-standalone.ts::ensureDynamicStandaloneRegExpCompiler
+  - src/runtime.ts::<anonymous>#77
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+oracle-ratchet-allow:
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/fnctor-escape-gate.ts
+  - src/codegen/regexp-standalone.ts
+coercion-sites-allow:
+  - src/codegen/regexp-standalone.ts
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -24,7 +57,7 @@ model: fable
 depends_on: [1710, 1711]
 es_edition: multi
 related: [1690, 1690b, 1584, 1058, 2928, 3098, 3308, 3651]
-pr: 1293
+pr: 3646
 ---
 
 # #1712 — Acceptance milestone: compiled acorn parses a representative .js with a structurally-equal AST
@@ -668,8 +701,21 @@ Follow-up **#3651** identifies the root cause: fnctor-shape analysis treated
 Acorn Parser fields assigned in both arms of a complete `if/else` as optional.
 The implemented definite-assignment reconciliation restores **20/20**
 single-construct parity and keeps the scale gate **13/13**. The #1712 branch
-remains `in-progress` until the refreshed full corpus, standalone artifact,
-typecheck, and regression gates are rerun after the final upstream sync.
+is complete after the refreshed full corpus, standalone artifact, typecheck,
+and regression gates passed on the final upstream merge.
+
+## PR #3646 test results (2026-07-26)
+
+- Exact Acorn differential AST and zero-import standalone acceptance: **pass**.
+- Focused dynamic-dispatch/boolean-brand, RegExp/String, and object-runtime
+  reconciliation suites: **46 tests pass**.
+- Native Messaging real-Wasmtime scale matrix: **4 variants × 4 sizes pass**
+  at 1/64/128/256 MiB.
+- Typecheck, lint, format, IR fallback/IR-only, oracle, coercion, LOC/function,
+  adoption, dead-export, pushRaw, and guard-suite gates: **pass**.
+- Deterministic harness compile work: **121,637 → 111,490** calls after
+  consolidating the three new boolean-brand source scans; ceiling **112,803**
+  (current-main control **105,924**). No budget baseline was changed.
 
 ## Standalone Function-body regression fixed 2026-07-26
 
@@ -700,7 +746,8 @@ currentVarScope` path. Two independent standalone defects caused the trap:
 The focused standalone regressions separate the late-method case from the
 11-accessor table-growth case. The real pinned Acorn 8.16.0 artifact now:
 
-- compiles in **23,790 ms** to **1,711,551 bytes**;
+- compiles on the synced upstream base in **25,970 ms** to **1,711,629
+  bytes**;
 - validates and instantiates with **zero imports**;
 - passes `parse`, `parseExpressionAt`, and `tokenizer` scalar canaries; and
 - returns the expected `Program → FunctionDeclaration → ReturnStatement →

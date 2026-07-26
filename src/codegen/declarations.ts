@@ -202,22 +202,34 @@ function restBindingOverridesToExternref(p: ts.ParameterDeclaration): boolean {
   return false;
 }
 
+const dynamicObjectParamsByFunction = new WeakMap<ts.FunctionDeclaration, ReadonlySet<string>>();
+
 /**
  * An implicit-any parameter used as the receiver of a computed property access
- * is intentionally polymorphic. Specialising it from one call-site shape would
- * insert a nominal struct cast at the function boundary, while the body uses a
- * runtime key and must accept every object carrier. Acorn's `getOptions(opts)`
- * is the canonical case (`opts[opt]`).
+ * may be intentionally polymorphic. Specialising it from one call-site object
+ * shape would insert a nominal struct cast at the function boundary, while the
+ * body uses a runtime key and must accept every object carrier. Acorn's
+ * `getOptions(opts)` is the canonical case (`opts[opt]`).
+ *
+ * Call-site inference may still prove an indexed vec/array carrier. Those
+ * carriers must stay concrete: Native Messaging's untyped `buf[start + i]`
+ * parameters are Uint8Arrays, and widening them to externref routes numeric
+ * byte writes through the open-object string-key hash path.
  */
 function implicitAnyParamNeedsDynamicObjectCarrier(
   param: ts.ParameterDeclaration,
   stmt: ts.FunctionDeclaration,
 ): boolean {
   if (param.type || !ts.isIdentifier(param.name) || !stmt.body) return false;
-  const paramName = param.name.text;
-  let found = false;
+  const cached = dynamicObjectParamsByFunction.get(stmt);
+  if (cached) return cached.has(param.name.text);
+
+  const parameterNames = new Set<string>();
+  for (const candidate of stmt.parameters) {
+    if (ts.isIdentifier(candidate.name)) parameterNames.add(candidate.name.text);
+  }
+  const dynamicParams = new Set<string>();
   const visit = (node: ts.Node): void => {
-    if (found) return;
     if (
       node !== stmt &&
       (ts.isFunctionDeclaration(node) ||
@@ -229,15 +241,21 @@ function implicitAnyParamNeedsDynamicObjectCarrier(
     ) {
       return;
     }
-    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === paramName) {
-      found = true;
-      return;
+    if (
+      ts.isElementAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      parameterNames.has(node.expression.text)
+    ) {
+      dynamicParams.add(node.expression.text);
     }
     forEachChild(node, visit);
   };
   forEachChild(stmt.body, visit);
-  return found;
+  dynamicObjectParamsByFunction.set(stmt, dynamicParams);
+  return dynamicParams.has(param.name.text);
 }
+
+const dynamicObjectReturnByFunction = new WeakMap<ts.FunctionDeclaration, boolean>();
 
 /**
  * Detect a function that returns an empty object populated/read through computed
@@ -246,6 +264,8 @@ function implicitAnyParamNeedsDynamicObjectCarrier(
  */
 function functionReturnsDynamicObjectCarrier(stmt: ts.FunctionDeclaration): boolean {
   if (!stmt.body) return false;
+  const cached = dynamicObjectReturnByFunction.get(stmt);
+  if (cached !== undefined) return cached;
   const emptyObjectVars = new Set<string>();
   const dynamicVars = new Set<string>();
   const returnedVars = new Set<string>();
@@ -280,8 +300,12 @@ function functionReturnsDynamicObjectCarrier(stmt: ts.FunctionDeclaration): bool
   };
   forEachChild(stmt.body, visit);
   for (const name of returnedVars) {
-    if (emptyObjectVars.has(name) && dynamicVars.has(name)) return true;
+    if (emptyObjectVars.has(name) && dynamicVars.has(name)) {
+      dynamicObjectReturnByFunction.set(stmt, true);
+      return true;
+    }
   }
+  dynamicObjectReturnByFunction.set(stmt, false);
   return false;
 }
 
@@ -317,10 +341,10 @@ function lowerParamType(
   if (
     !param.type &&
     paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
-    !implicitAnyParamNeedsDynamicObjectCarrier(param, stmt) &&
     (wasmType.kind === "externref" ||
       (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
   ) {
+    const needsDynamicObjectCarrier = implicitAnyParamNeedsDynamicObjectCarrier(param, stmt);
     // (#3471) Call-site inference first; body-usage fallback ONLY for a
     // genuinely-uncalled function (see inferImplicitAnyParamType).
     const inferred = inferImplicitAnyParamType(ctx, funcName, index, sourceFile, stmt);
@@ -328,13 +352,22 @@ function lowerParamType(
       const inferredTypeIdx = inferred.kind === "ref" || inferred.kind === "ref_null" ? inferred.typeIdx : undefined;
       const inferredStructName =
         inferredTypeIdx === undefined ? undefined : ctx.typeIdxToStructName.get(inferredTypeIdx);
+      const inferredIndexedCarrier =
+        inferredStructName?.startsWith("__vec_") || inferredStructName?.startsWith("__arr_");
       // A call-site object literal is only one observed shape of an untyped JS
       // parameter. In standalone, specialising that parameter to the literal's
       // nominal `__anon_*` struct breaks forwarding chains (`parse(input,
       // options) -> Parser.parse -> new Parser`) as soon as another boundary
       // expects the dynamic carrier. Keep anonymous object arguments externref;
       // numeric, string, vec, and declared nominal inference remain unchanged.
-      if (!(ctx.standalone && inferredStructName?.startsWith("__anon_"))) wasmType = inferred;
+      // A computed-access parameter likewise stays dynamic unless inference
+      // proved the indexed vec/array family rather than one incidental object.
+      if (
+        !(needsDynamicObjectCarrier && !inferredIndexedCarrier) &&
+        !(ctx.standalone && inferredStructName?.startsWith("__anon_"))
+      ) {
+        wasmType = inferred;
+      }
     }
   }
   return wasmType;
