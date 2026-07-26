@@ -1,8 +1,9 @@
 ---
 id: 739
 title: "Object.defineProperty correctness — host-lane store-unification (representation pinning) + defineProperties two-phase apply"
-status: ready
-assignee: fable-739
+status: done
+completed: 2026-07-26
+assignee: ttraenkler/opus-loop-e
 created: 2026-03-22
 updated: 2026-07-18
 priority: high
@@ -364,6 +365,77 @@ Targets (gate each slice on its own diff):
 - **Do NOT repeat the #3230 traps**: no read-only or write-only rerouting; no
   `__extern_get` fallback layering. Pinning removes the second store instead
   of bridging it.
+
+## S2 outcome (2026-07-26, opus-loop-e) — descriptor-object pinning
+
+**S2 as landed is NOT the "defineProperties two-phase apply" originally planned
+above.** Re-measurement redirected it; both changes are in
+`src/codegen/declarations/object-shape-widening.ts` (host-gated).
+
+### What was actually broken
+
+S1 pinned runtime-store-define **receivers**, but its pre-pass
+(`collectEmptyObjectWidening`) only reaches vars initialized with an **empty
+`{}`** literal. A **non-empty** literal that later receives a
+runtime-store-routed define stayed a widened closed struct, so an accessor
+landed in the `_wasmPropDescs` sidecar while the struct-field reader read the
+struct — and the getter never fired, though §6.2.5.5 requires a full `[[Get]]`
+per descriptor field. **Same two-store defect as #739, on the DESCRIPTOR object
+instead of the receiver.**
+
+### The two changes
+
+1. **`collectGrowableObjectLiterals`** — mark a non-empty literal `grows` when it
+   receives a runtime-store-routed define (reusing
+   `definePropertyRoutesToRuntimeStore`). Marking `grows`, rather than adding a
+   separate pre-arm like the standalone `markStandaloneAccessorDefineTargets`
+   block, is deliberate: it keeps **every** existing #1897/#2837 consumer-safety
+   poison in force (arithmetic field reads, concrete-struct-typed positions,
+   `delete V.k`, `V[expr]`, `for…in V`).
+2. **`Object.<mop>(…)` carve-out** from the concrete-struct-consumer poison, via
+   the existing #2992 S6 `isObjectMopCallArg` helper, so both arms agree. TS
+   types `defineProperty`'s 3rd argument as `PropertyDescriptor`, which has named
+   own props, so `typeRequiresStruct` was poisoning **every** descriptor object —
+   precisely the vars this pass must route to `$Object`. The **map** form
+   (`PropertyDescriptorMap`) was already safe (pure string-index dictionary),
+   which is why acorn's `prototypeAccessors` stayed marked.
+
+### Measured (varied-axis A/B, on merge base `58991cc19`)
+
+16-case matrix varying descriptor **construction** (empty / non-empty / nested /
+`Object.create` / fn-returned), which descriptor **field** carries the accessor
+(configurable / enumerable / writable / value), the receiver **key kind**, and
+`defineProperties`; plus 4 struct-path guards and a negative control:
+
+| arm | result |
+| --- | --- |
+| merge base | **6 / 16** |
+| with fix | **13 / 16** |
+
+**7 real flips**; all 4 guards pass in **both** arms (no struct-path regression);
+the negative control reports failure in both, proving the harness can fail.
+`tests/issue-739-s2-descriptor-pin.test.ts` (15 cases) is **15/15 with the fix
+and 7-failed/8-passed on the merge base** — the 8 that pass there are exactly the
+2 controls + 4 guards + 2 documented residuals, by construction.
+
+### Documented residuals (asserted in the test file, not fixed here)
+
+- **Descriptor returned from a function** (`const d = mk()`) — the name-based
+  pre-pass cannot see it. Same class as the aliased/parameter-receiver limitation
+  already documented for S1.
+- **`defineProperties` map MEMBER descriptor** — the nested member is not the
+  marked var. This is the remaining piece of the ORIGINAL S2 plan (two-phase
+  apply) and is the natural next slice.
+
+### Method note
+
+⚠️ This is the `propertyHelper`/`verifyProperty` vacuity area (#3468/#3592/#3434).
+Every assertion checks an **observable getter invocation** via a mutated flag,
+never merely "no throw". While investigating this issue the swallowed-exception /
+no-op failure mode fired **three times** — including once where a candidate fix
+produced byte-identical results to the merge base. **Always run the with-fix and
+reverted arms and diff them.** See #3626 §2.2.1 for the full account and for the
+refutation of that section's original "confirmed floor of 73".
 
 ## Superseded plan
 
