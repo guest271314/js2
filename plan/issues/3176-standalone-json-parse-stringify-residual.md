@@ -3,7 +3,7 @@ id: 3176
 title: "standalone: JSON.parse/stringify spec residual — reviver array walk illegal-cast, SyntaxError strictness, replacer/space edges (67 gap tests)"
 status: ready
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-26
 priority: high
 feasibility: hard
 task_type: bug
@@ -19,6 +19,9 @@ origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; slices the J
 loc-budget-allow:
   - src/codegen/json-codec-native.ts
   - src/codegen/expressions/calls.ts
+  - src/codegen/expressions/call-builtin-static.ts
+  - src/codegen/builtin-static-globals.ts
+  - src/codegen/native-proto.ts
   - src/codegen/object-runtime.ts
 coercion-sites-allow:
   - src/codegen/json-codec-native.ts
@@ -151,3 +154,60 @@ is now superseded by this issue. Keep `ready` but RE-MEASURE the full
 `built-ins/JSON/**` dirs (parse 77 + stringify 66) to size the true residual
 against the stale "67 gap tests" figure — the reviver-array-walk illegal-cast
 and replacer/space edges likely remain, but the count needs refreshing.
+
+## 2026-07-26 — runtime JSON reflection completion (codex)
+
+Authoritative local-v-local measurement used the literal test262.fyi harness,
+the real standalone worker, Node 25.9.0 / Unicode 17, and all 165
+`built-ins/JSON/**` rows:
+
+- pre-change standalone: **73/165**
+- pre-change gc/host: **116/165**
+- post-change standalone: **82/165** (**+9**, zero regressions)
+- post-change gc/host: **116/165** (zero flips, zero regressions)
+
+The stale descriptor note above was accurate about the symptom but not the
+shared root cause. Direct `<Builtin>.<method>` accesses already had closure and
+metadata lowering. Test262's `propertyHelper.js` erases the receiver/key types,
+so reflection instead observes the runtime namespace carrier. The standalone
+JSON carrier was an empty `$Object`; dynamic gOPD/hasOwn therefore reported the
+four methods absent, while dynamic `JSON[Symbol.toStringTag]` returned
+undefined.
+
+The fix seeds the JSON carrier at lazy materialization time with the same
+identity-stable builtin-function singletons used by direct VALUE reads:
+
+- `parse`, `stringify`, `rawJSON`, and `isRawJSON` are genuine own data
+  properties with `{writable:true, enumerable:false, configurable:true}`;
+- `@@toStringTag` uses the real well-known-symbol carrier and the descriptor
+  `{writable:false, enumerable:false, configurable:true}`.
+
+This seed is intentionally separate from `SUPPORTED_STATIC_PROPS`. Adding the
+JSON methods there would reroute direct property/call lowering through the old
+Array/Object-only static-function path and regress working codec calls.
+
+The four `*/builtin.js` rows exposed the next shared layer: metadata-bearing
+builtin closure wrappers were treated as primitives by object-integrity and
+prototype runtime helpers. Their type set is source-order dependent, so eager
+runtime construction would be incomplete. `fillBuiltinFnMeta` now splices the
+complete finalized subtype set into `isExtensible`/`isFrozen`/`isSealed` and
+`getPrototypeOf`; matches are extensible function objects whose prototype is
+the existing identity-stable `%Function.prototype%` singleton. This is why the
+change lives in the shared builtin-function metadata finalizer rather than four
+JSON-specific call-site exceptions.
+
+Exact standalone flips:
+
+- `JSON/{parse,stringify,rawJSON,isRawJSON}/prop-desc.js`
+- `JSON/{parse,stringify,rawJSON,isRawJSON}/builtin.js`
+- `JSON/Symbol.toStringTag.js`
+
+The independently completed rawJSON-stringify branch
+(`codex/3176-json-residual`, implementation commit
+`f147f6c9d3858b04f6641ff2756958ed439258f9`) was inspected and deliberately
+excluded here; this slice does not modify `json-codec-native.ts` or its
+raw-carrier serialization.
+
+The current measured host-pass/standalone-fail residual is **35 rows**:
+stringify 25, parse 7, rawJSON 2, isRawJSON 1. These are codec/coercion,
+Proxy/RegExp, or global-environment semantics, not more namespace reflection.
