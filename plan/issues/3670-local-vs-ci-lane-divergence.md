@@ -31,6 +31,29 @@ passing in the baseline that CI gates on.
 Not investigated further — filed so it isn't lost. Sample was small and
 opportunistic, so the true count is unknown.
 
+## Third sighting — the equivalence suite (2026-07-26)
+
+`tests/equivalence/new-non-constructor.test.ts` fails **2 tests locally** on
+current main:
+
+- `not-a-constructor test262 pattern compiles without stack underflow`
+- `guard preamble with many exported functions does not double-remap`
+  → `AssertionError: expected 'Empty binary' to be null`
+
+Found in a 45-file local pre-check (44 files / 277 tests otherwise pass). **CI
+is green on main**, so this is the same local-vs-CI shape as the three test262
+sightings above, now on a second suite.
+
+**Confirmed pre-existing, not caused by #3669**: it reproduces with the #3669
+fix genuinely reverted (`git checkout HEAD~1 -- <file>`, verified by grepping
+that the widening code was gone before trusting the run — a `git stash push`
+control on an already-committed change is a no-op and silently keeps the fix in
+place).
+
+This matters more than a single flaky file: the local equivalence suite is what
+agents run as their pre-CI check. If it disagrees with CI, agents are triaging
+against a lane that does not match the gate.
+
 ## Ruled out
 
 **Not PR #3653.** That PR is docs-only (adds three issue files, no `src/`, no
