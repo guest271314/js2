@@ -12,8 +12,8 @@ func-budget-allow:
   - src/runtime.ts::resolveImport
   - src/runtime.ts::<anonymous>#76
 regressions-allow:
-  count: 2500
-  reason: "#3603 S1 host verifyProperty de-inflation. Stakeholder-directed UNMEASURED ceiling (2026-07-26): the v11->v12 bump is itself the verdict-logic change, so no pre-v12 figure converts into a v12 count. Prior v11 context: 1031-1033 honest regressions, 96-97 gross fixed. Sized ~2.4x that to absorb v12 reclassification on both sides plus baseline drift. TO BE RATCHETED DOWN to measured+margin once the first v12 merge_group run reports."
+  count: 1065
+  reason: "#3603 S1 host verifyProperty de-inflation. Authoritative merge_group run 30179758665 measured 1023 stable non-timeout wasm-change regressions. Ceiling = 1023 measured + 17 observed ct_flake conversion bound + 25 ORACLE_REBASE_DRIFT_TOLERANCE; traps were flat. Gross fixes are reported separately below and are not netted into this ceiling."
 priority: high
 horizon: xl
 feasibility: hard
@@ -46,8 +46,45 @@ origin: "senior-dev root-cause investigation, TaskList task #11 (2026-07-25)"
 | ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | (a) broader fires-once sweep                               | **DONE** — see below                                                         |
 | (b) every exposed failure cohort-routed                    | **DONE** — #3646, #3647 (table below); corpus completeness re-checked at (c) |
-| (c) allowance = measured delta + documented margin         | **PENDING** the `merge_group` measurement                                    |
-| (d) gross-fixed / honest-regressions separate, never a net | **PENDING** — reported with (c)                                              |
+| (c) allowance = measured delta + documented margin         | **DONE** — 1,065 = 1,023 measured + 17 timeout bound + 25 drift              |
+| (d) gross-fixed / honest-regressions separate, never a net | **DONE** — 23 stable improvements / 1,023 honest regressions                 |
+
+### Authoritative merge-group measurement (conditions c/d)
+
+The first full merge-group run is the landing measurement:
+[run 30179758665](https://github.com/loopdive/js2/actions/runs/30179758665),
+group SHA `07e140b398ec5191b11bc91361d6bf01d1ce5b7c`. It measured the
+runtime fix at oracle v11; the later v12 commit changes only the result stamp
+and activates rebase mode, so it does not change these per-test verdicts.
+
+Report the two directions separately:
+
+- **Honest regressions / de-inflations: 1,023** stable, non-timeout,
+  wasm-changing pass→other transitions. Before the host-canary quarantine the
+  raw count was 1,049; 26 known-noise paths were excluded.
+- **Gross fixed: 23** stable other→pass improvements. Before quarantine the raw
+  count was 28; 5 known-noise paths were excluded.
+
+The stable fine-gate net was −1,000, but that subtraction is context only and
+is deliberately not the allowance basis. The two dominant regression buckets
+were the expected property-helper descriptor cohorts:
+`test/language/statements/class/elements` (374) and
+`test/language/expressions/class/elements` (356), routed through #3646/#3647.
+The exact error distribution is likewise descriptor-check shaped (682 raw
+non-timeout transitions alone reported
+`obj['m'] descriptor should not be enumerable`). There was no uncatchable-trap
+growth: `null_deref 159→159`, `illegal_cast 75→75`, `oob 60→60`,
+`unreachable 3→3`.
+
+The allowance is therefore the measured 1,023 plus two named bounds:
+
+```
+1,023 measured non-timeout wasm-change regressions
+   17 observed ct_flake pass→compile_timeout conversions
+   25 ORACLE_REBASE_DRIFT_TOLERANCE
+──────
+1,065 declared ceiling
+```
 
 ### ORACLE_VERSION 11 → 12 — sanctioned, and load-bearing
 
@@ -191,9 +228,9 @@ reverted, measured without the test262 harness:
 | `propertyIsEnumerable(C.prototype,'m')` returns **true** while `gOPD().enumerable` is false — 5 reflective routes agree, it dissents | **#3647** | `.tmp/3603/enum-check.mts` — identical S1-applied vs S1-reverted  |
 
 Either defect alone makes `verifyProperty`'s enumerable check fire **correctly**.
-Corpus-level cohort completeness is pending the merge_group measurement — if the
-bucketed delta shows cohorts outside these two, they get their own trackers
-before landing.
+The authoritative merge-group measurement above confirmed that the two dominant
+clusters are the class-element descriptor/enumerability cohorts routed through
+#3646/#3647; no new trap cohort appeared.
 
 > **This issue is a ROOT CAUSE + MEASUREMENT deliverable.** No compiler change
 > is proposed here. Everything below is measured on `origin/main` @
@@ -719,16 +756,12 @@ defect, not to pad coverage: native `a.push(x)`, `__join` on a literal, the
 uncurried `hasOwnProperty` (a _read_, hence never broken), and a non-mutating
 `slice.call`.
 
-### Reach — NOT measured, and deliberately not estimated
+### Reach — measured by the authoritative merge-group
 
-**No corpus number is claimed for S1.** The issue's own host-lane section says
-the host magnitude was never measured, and nothing here changes that. What is
-established is qualitative and mechanical: the host lane's `verifyProperty`
-epilogue can now fire, so wrong expectations in the `propertyHelper`
-population can be reported instead of swallowed. Quantifying it needs the
-three-arm A/B (`VP_LANE=host` armA / armA2 / armB in `plan/probes/3603/ab.mts`)
-in one clean window on one SHA — see the provenance rules in the host-lane
-section above. **Expect the host number to go DOWN**; that is the point.
+The merge-group run recorded above measured **1,023 stable, non-timeout
+wasm-change regressions** and **23 stable improvements**. Those are reported
+separately rather than extrapolated or collapsed into a net. This supersedes
+the earlier pre-merge statement that S1's corpus reach was unmeasured.
 
 ### S2 (standalone / root cause A) re-measure — MECHANISM half done, REACH half still stale
 
