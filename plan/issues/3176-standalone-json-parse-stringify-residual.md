@@ -19,6 +19,7 @@ origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; slices the J
 loc-budget-allow:
   - src/codegen/json-codec-native.ts
   - src/codegen/expressions/calls.ts
+  - src/codegen/expressions/call-namespace-static.ts
   - src/codegen/expressions/call-builtin-static.ts
   - src/codegen/builtin-static-globals.ts
   - src/codegen/native-proto.ts
@@ -155,6 +156,71 @@ is now superseded by this issue. Keep `ready` but RE-MEASURE the full
 against the stale "67 gap tests" figure — the reviver-array-walk illegal-cast
 and replacer/space edges likely remain, but the count needs refreshing.
 
+## 2026-07-26 — rawJSON stringify integration (pre-reflection A/B)
+
+Re-measured all 165 `built-ins/JSON/**` records on pristine
+`origin/main@afe92ffd291651bd43c599fc027435a1a5bbe482` through the literal
+test262.fyi original-harness assembler under the authoritative Node 25 /
+Unicode 17 runtime:
+
+- standalone: **73/165**
+- gc/host control: **116/165**
+- host-pass / standalone-fail gap: **44 files**
+
+This replaces the stale 130/165 standalone headline: that number came from an
+older, inflated lane rather than the current de-inflated original-harness
+contract. The current gap is dominated by stringify (27 files), followed by
+parse (9), rawJSON (4), isRawJSON (3), and `Symbol.toStringTag` (1).
+
+### Shipped slice
+
+The highest-impact bounded JSON-only slice was rawJSON composition through the
+existing native stringify codec:
+
+1. `__json_stringify_value` now recognizes the existing
+   `OBJ_FLAG_RAWJSON` internal-slot brand after `toJSON` / replacer processing
+   and emits the carrier's validated source text verbatim.
+2. Direct non-spread JSON array literals are normalized into the existing
+   `$ObjVec` carrier. Nested arrays and plain object elements reuse the existing
+   object runtime, which also lets the empty replacer-array path serialize
+   `[1, {a: 2}]` correctly.
+3. `JSON.rawJSON` now applies its self-contained primitive ToString conversion
+   to `$AnyValue` carriers as well as native number/boolean boxes. This covers
+   generic array/union lanes without depending on shared helper-emission order.
+
+No parser, serializer, object walk, or array ABI was forked.
+
+The emitted instruction sequences are assembled in small top-level builders
+rather than inline in `compileNamespaceStaticCall`, `emitJsonStringifyValue`,
+and `emitJsonRawJson`. This is a structural quality-gate fix: it keeps those
+already-large dispatcher/generator functions within the R-FUNC ceilings while
+preserving the exact stack order and reusing the same runtime helpers.
+
+### Exact local A/B
+
+- standalone: **73/165 → 76/165**
+- FAIL → PASS:
+  - `built-ins/JSON/isRawJSON/basic.js`
+  - `built-ins/JSON/rawJSON/basic.js`
+  - `built-ins/JSON/stringify/replacer-array-empty.js`
+- standalone PASS → FAIL: **0**
+- gc/host: **116/165 → 116/165**, with **0** file-level verdict changes
+
+On that pre-reflection base, the residual was 41 host-pass /
+standalone-fail files.
+
+### Test results
+
+- `pnpm exec vitest run tests/issue-3176.test.ts` — **6/6 passed**
+  (standalone and WASI; empty WebAssembly import table asserted)
+- authoritative full `built-ins/JSON/**` standalone and gc/host A/B — results
+  above
+- `pnpm run typecheck`
+- `pnpm exec prettier --check ...`
+- `pnpm run check:coercion-sites`
+- `pnpm run check:test262-hard-errors`
+- `pnpm run check:ir-fallbacks`
+
 ## 2026-07-26 — runtime JSON reflection completion (codex)
 
 Authoritative local-v-local measurement used the literal test262.fyi harness,
@@ -211,3 +277,30 @@ raw-carrier serialization.
 The current measured host-pass/standalone-fail residual is **35 rows**:
 stringify 25, parse 7, rawJSON 2, isRawJSON 1. These are codec/coercion,
 Proxy/RegExp, or global-environment semantics, not more namespace reflection.
+
+## 2026-07-26 — combined post-reflection rawJSON A/B
+
+After the reflection slice merged as PR #3654 and the RegExp range slice merged
+as PR #3647, the rawJSON codec slice was composed with pristine
+`origin/main@fa10458427350db9b9b7912d6577f9b72bbb4a6c` and all 165
+`built-ins/JSON/**` records were rerun through the same literal test262.fyi
+original-harness assembler under Node 25 / Unicode 17:
+
+- standalone: **82/165 → 85/165**
+- FAIL → PASS:
+  - `built-ins/JSON/isRawJSON/basic.js`
+  - `built-ins/JSON/rawJSON/basic.js`
+  - `built-ins/JSON/stringify/replacer-array-empty.js`
+- standalone PASS → FAIL: **0**
+- gc/host: **116/165 → 116/165**
+- gc/host file-level verdict changes: **0**
+
+The current host-pass / standalone-fail residual is therefore **32 rows**:
+stringify 24, parse 7, rawJSON 1. `isRawJSON` has no remaining host-pass gap.
+Keep #3176 `ready`: the remaining rows are separate codec/coercion,
+Proxy/RegExp, or object-model semantics.
+
+Combined validation also passed 25/25 focused tests across rawJSON composition,
+JSON namespace reflection, shared builtin-function metadata, and the
+GeneratorPrototype call/apply safeguards, plus typecheck and the function/LOC
+quality gates.

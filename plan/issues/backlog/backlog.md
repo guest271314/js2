@@ -12,6 +12,16 @@ Lightweight pointer index for unscheduled issues that need sprint candidacy. Aut
   sequential isolation, and Test262 fixture-graph reuse covered by focused
   tests.
 
+## 2026-07-26 — Test262 linked-harness implementation
+
+- [#3451](../3451-linked-harness-wasm-separate-compilation.md) — **in progress,
+  high priority, hard, XL.** Slice 1 now provides the deterministic
+  strict-neutral harness/body split, target-specific content keys, and a
+  maintained-corpus inventory: 64 harness sources / 128 target objects versus
+  82,628 potential harness-bearing variants per lane, with 82,660 authoritative
+  split-parity checks. Next is the two-target `assert.sameValue` linked smoke,
+  gated on WasmGC/shared-realm linker substrate.
+
 ## 2026-07-17 - /harvest-errors (baselines run 20260717-151504, 32,139 pass)
 
 Harvested both lanes (default JS-host + standalone) from
