@@ -11,7 +11,12 @@ const TEST262_ROOT = resolve(ROOT, "test262");
 const HOST_REGEXP_IMPORT_RE = /(^|::)RegExp_/;
 
 async function compileAndRun(source: string): Promise<number> {
-  const result = await compile(source, { fileName: "issue-3507.ts", target: "standalone" });
+  const result = await compile(source, {
+    fileName: "issue-3507.ts",
+    target: "standalone",
+    skipSemanticDiagnostics: true,
+    experimentalIR: false,
+  });
   expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
   expect(
     result.imports.map((entry) => `${entry.module}::${entry.name}`).filter((name) => HOST_REGEXP_IMPORT_RE.test(name)),
@@ -79,19 +84,13 @@ describe("#3507 standalone native RegExp carrier dispatch", () => {
     ).toBe(1);
   });
 
-  it("keeps genuinely dynamic constructor patterns loudly unsupported", async () => {
-    const result = await compile(
-      `export function test(pattern: string): boolean { return new RegExp(pattern).test("x"); }`,
-      {
-        fileName: "issue-3507.ts",
-        target: "standalone",
-      },
-    );
-    expect(result.success, JSON.stringify({ errors: result.errors, imports: result.imports }, null, 2)).toBe(false);
+  it("keeps genuinely dynamic literal constructor patterns on the native carrier", async () => {
     expect(
-      result.errors.some((error) => /dynamic constructor patterns/.test(error.message) && /#1539/.test(error.message)),
-    ).toBe(true);
-    expect(result.imports.some((entry) => HOST_REGEXP_IMPORT_RE.test(`${entry.module}::${entry.name}`))).toBe(false);
+      await compileAndRun(`
+        function matches(pattern: string): boolean { return new RegExp(pattern).test("x"); }
+        export function test(): number { return matches("x") && !matches("y") ? 1 : 0; }
+      `),
+    ).toBe(1);
   });
 
   const representatives = [

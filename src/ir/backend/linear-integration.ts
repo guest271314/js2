@@ -84,6 +84,7 @@ import {
   makeIrAmbientBindingPredicate,
   makeIrDeclaredPrimitiveExpressionClassifier,
   makeIrPrimitiveExpressionClassifier,
+  makeIrRegExpExpressionPredicate,
 } from "../module-bindings.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, planIrCompilation } from "../select.js";
 import { buildRecursiveTypeEvidence } from "../type-evidence.js";
@@ -202,6 +203,7 @@ export function compileLinearIrFunctions(
       classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
       classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
       isArrayExpression: makeIrArrayExpressionPredicate(ctx.checker),
+      isRegExpExpression: makeIrRegExpExpressionPredicate(ctx.checker),
       isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
       supportsSymbolicMathHelpers: false,
       supportsLiteralStringReplace: false,

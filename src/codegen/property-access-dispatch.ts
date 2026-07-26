@@ -569,7 +569,7 @@ export function tryPinnedAndDeleteAwareDynamicGet(
         : undefined;
     const pinned = pinnedThis ?? resolveReceiverStruct(ctx, fctx, expr.expression);
     if (pinned !== undefined) {
-      const routed = tryEmitPinnedStructMemberGet(ctx, fctx, expr, propName);
+      const routed = tryEmitPinnedStructMemberGet(ctx, fctx, expr, propName, pinned);
       if (routed !== undefined) return routed;
     }
   }

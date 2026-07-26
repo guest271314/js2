@@ -14,6 +14,83 @@ import type { FieldDef, ValType } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
 
 /**
+ * Early, type-table-neutral carrier scan for functions that return an empty
+ * object populated through computed keys. Fnctor structs are reserved before
+ * the full widening pass, so their RHS field inference must already know that
+ * calls such as `getOptions(options)` return the open externref `$Object`.
+ */
+export function collectDynamicObjectReturnCarrierTypes(
+  ctx: CodegenContext,
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+): void {
+  const dynamicFunctionNames = new Set<string>();
+  const inspect = (fn: ts.FunctionDeclaration): void => {
+    if (!fn.body) return;
+    const emptyVars = new Set<string>();
+    const dynamicVars = new Set<string>();
+    const returnedVars = new Set<string>();
+    const visitBody = (node: ts.Node): void => {
+      if (
+        node !== fn &&
+        (ts.isFunctionDeclaration(node) ||
+          ts.isFunctionExpression(node) ||
+          ts.isArrowFunction(node) ||
+          ts.isMethodDeclaration(node) ||
+          ts.isAccessor(node) ||
+          ts.isConstructorDeclaration(node))
+      ) {
+        return;
+      }
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer &&
+        ts.isObjectLiteralExpression(node.initializer) &&
+        node.initializer.properties.length === 0
+      ) {
+        emptyVars.add(node.name.text);
+      }
+      if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression)) {
+        dynamicVars.add(node.expression.text);
+      }
+      if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
+        returnedVars.add(node.expression.text);
+      }
+      forEachChild(node, visitBody);
+    };
+    forEachChild(fn.body, visitBody);
+    const returnsDynamic = [...returnedVars].some((name) => emptyVars.has(name) && dynamicVars.has(name));
+    if (!returnsDynamic) return;
+    const sig = checker.getSignatureFromDeclaration(fn);
+    if (sig) ctx.objectHashConsumerTypes.add(checker.getReturnTypeOfSignature(sig));
+    if (fn.name) {
+      dynamicFunctionNames.add(fn.name.text);
+      ctx.dynamicObjectReturnFunctions.add(fn.name.text);
+    }
+  };
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node)) inspect(node);
+    forEachChild(node, visit);
+  };
+  forEachChild(sourceFile, visit);
+  if (dynamicFunctionNames.size > 0) {
+    const collectCalls = (node: ts.Node): void => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        dynamicFunctionNames.has(node.expression.text)
+      ) {
+        ctx.objectHashConsumerTypes.add(checker.getTypeAtLocation(node));
+      }
+      forEachChild(node, collectCalls);
+    };
+    forEachChild(sourceFile, collectCalls);
+  }
+}
+
+/**
  * Pre-pass: detect empty object literals (`var obj = {}`) that later receive
  * property assignments (`obj.prop = val`) and record the extra properties so
  * that ensureStructForType creates a struct with the correct fields.
@@ -180,9 +257,6 @@ export function collectEmptyObjectWidening(
             // refuses it and the var stays externref / host-MOP end to end.
             //
             // Scope guards keep everything else byte-identical:
-            //   - `!ctx.standalone`: standalone keeps its pre-existing codegen
-            //     byte-identical (its matching read-back gap for this shape is
-            //     tracked separately; see #2849's follow-up note).
             //   - skip `any` (singleton type object shared by all any-typed
             //     vars — same hazard as the anonTypeMap guard below).
             //   - a 0-props (TS-mode, non-evolved `{}`) type is added ONLY when
@@ -204,13 +278,62 @@ export function collectEmptyObjectWidening(
             // host `$Object` fails the decl-init cast, and the var is null from
             // the first instruction — the acorn `Parser`/`getOptions` escape
             // shape in TS-mode typing (tests/issue-2944.test.ts).
-            if (!ctx.standalone) {
-              const vt = checker.getTypeAtLocation(decl.name);
-              if (
-                !(vt.flags & ts.TypeFlags.Any) &&
-                (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
-              ) {
-                ctx.objectHashConsumerTypes.add(vt);
+            // (#1712/#2849 standalone completion) The same representation
+            // invariant is required without a host: the `{}` initializer is a
+            // native `$Object`, so leaving the evolved checker type mapped to a
+            // closed anon struct makes the declaration's guarded cast store
+            // null. Acorn's `getOptions` then successfully performs its dynamic
+            // for-in writes against that null receiver but traps at the first
+            // static `options.ecmaVersion` read. Poison the fresh per-variable
+            // type in every target; the provenance guards below keep annotated
+            // or shared types out.
+            const vt = checker.getTypeAtLocation(decl.name);
+            if (
+              !(vt.flags & ts.TypeFlags.Any) &&
+              (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
+            ) {
+              ctx.objectHashConsumerTypes.add(vt);
+            }
+            const it = checker.getTypeAtLocation(decl.initializer);
+            if (
+              !(it.flags & ts.TypeFlags.Any) &&
+              (it.getProperties().length > 0 || it.symbol?.declarations?.[0] === decl.initializer)
+            ) {
+              ctx.objectHashConsumerTypes.add(it);
+            }
+            if (ctx.standalone) ctx.growableObjectLiteralVars.add(varName);
+            // Record the enclosing function's inferred return type during this
+            // early shape pass as well. Fnctor field derivation can run before
+            // collectDeclarations reaches the function declaration (Acorn's
+            // Parser constructor stores `getOptions(options)`), and must already
+            // see that return as the open-object externref carrier.
+            let owner: ts.Node | undefined = decl.parent;
+            while (owner && !ts.isFunctionDeclaration(owner) && !ts.isSourceFile(owner)) owner = owner.parent;
+            if (owner && ts.isFunctionDeclaration(owner) && owner.body) {
+              let returnsVar = false;
+              const findReturn = (node: ts.Node): void => {
+                if (returnsVar) return;
+                if (
+                  node !== owner &&
+                  (ts.isFunctionDeclaration(node) ||
+                    ts.isFunctionExpression(node) ||
+                    ts.isArrowFunction(node) ||
+                    ts.isMethodDeclaration(node) ||
+                    ts.isAccessor(node) ||
+                    ts.isConstructorDeclaration(node))
+                ) {
+                  return;
+                }
+                if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
+                  if (node.expression.text === varName) returnsVar = true;
+                  return;
+                }
+                forEachChild(node, findReturn);
+              };
+              forEachChild(owner.body, findReturn);
+              if (returnsVar) {
+                const sig = checker.getSignatureFromDeclaration(owner);
+                if (sig) ctx.objectHashConsumerTypes.add(checker.getReturnTypeOfSignature(sig));
               }
             }
             continue;

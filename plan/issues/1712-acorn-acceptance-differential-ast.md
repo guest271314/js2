@@ -2,9 +2,9 @@
 id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
 status: in-progress
-assignee: ttraenkler/sendev-acorn
+assignee: ttraenkler/codex-acorn
 created: 2026-05-29
-updated: 2026-07-23
+updated: 2026-07-26
 loc-budget-allow:
   - src/codegen/property-access-dispatch.ts
 priority: high
@@ -18,7 +18,7 @@ sprint: current
 model: fable
 depends_on: [1710, 1711]
 es_edition: multi
-related: [1690, 1690b, 1584, 1058]
+related: [1690, 1690b, 1584, 1058, 2928, 3098, 3308, 3651]
 pr: 1293
 ---
 
@@ -608,3 +608,57 @@ equal±quirks, 0 throws, 0 real gaps.
 
 `loc-budget-allow` note: +35 lines on property-access-dispatch.ts are the
 narrowed guard + the mechanism documentation comment.
+
+## Acceptance refresh 2026-07-26 — host ASTs correct; standalone artifact and bare-arrow follow-up
+
+The Acorn-owned branch now establishes two distinct parser contracts:
+
+1. **JS-host differential AST:** `tests/dogfood/acorn-corpus.mjs` reports
+   **23/23 exact structurally equal results**, including Acorn self-parse, with
+   **0 normalization quirks, 0 compiled throws, and 0 real divergences**.
+   `tests/issue-1712.test.ts` is active and asserts exact equality on
+   its 22-input CI corpus.
+2. **Host-free in-module parser:** `tests/dogfood/acorn-standalone-compile.mjs`
+   compiles Acorn plus a scalar AST consumer as one `target: "standalone"`
+   module, validates a **zero-import** artifact, calls
+   `parse(nativeString, { ecmaVersion: 2025, sourceType: "script" })`, and reads
+   `Program → ExpressionStatement → BinaryExpression` inside Wasm. This keeps
+   the parser/AST carrier native for #2928; it does not claim host marshalling
+   of the standalone AST.
+
+The refreshed host-free artifact is **1,704,853 bytes**, has **zero function
+imports**, and also executes scalar canaries for the other public parser
+entries:
+
+- `parseExpressionAt("xx 1 + 2 yy", 3, options)` returns the expected
+  `BinaryExpression` at `[3, 8]`;
+- `tokenizer("42", options)` returns the expected numeric token followed by
+  EOF.
+
+The preserved parser seam is:
+
+```text
+parse(nativeString, optionsObject) -> ESTree AST object
+```
+
+No new callable, rec-group, or export ABI was introduced. The implementation
+reuses the existing fnctor constructor and closure-call machinery, including
+the #3098 `new this(options, input)` argument-preserving path. This is compatible
+with the interpreter seam `emitProgram(ast) -> FuncMeta` followed by
+`interpEnter(...)`; E6 packaging and ordered-initializer ABI remain explicitly
+unfrozen.
+
+### Bare-arrow regression found during refresh
+
+Expanding the in-Wasm single-construct probe exposed a branch-only regression:
+all six bare-arrow forms threw at `=>`, reducing parity to **14/20**, while the
+13 larger scale fixtures remained green. Exact A/B showed the failure already
+present at Acorn publication commit `f80654c4455664ce1bd7b95bbe871f8e5fd5026c`,
+not introduced by the latest upstream merge.
+
+Follow-up **#3651** identifies the root cause: fnctor-shape analysis treated
+Acorn Parser fields assigned in both arms of a complete `if/else` as optional.
+The implemented definite-assignment reconciliation restores **20/20**
+single-construct parity and keeps the scale gate **13/13**. The #1712 branch
+remains `in-progress` until the refreshed full corpus, standalone artifact,
+typecheck, and regression gates are rerun after the final upstream sync.

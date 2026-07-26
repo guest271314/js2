@@ -2828,7 +2828,10 @@ function _getStructFieldNames(obj: any, exports: Record<string, Function> | unde
   if (typeof fn !== "function") return null;
   const csv = fn(obj);
   if (csv == null || typeof csv !== "string" || csv === "") return null;
-  return csv.split(",");
+  return csv.split(",").filter((field) => {
+    const presence = exports[`__shas_${field}`];
+    return typeof presence !== "function" || presence(obj) !== 0;
+  });
 }
 
 /**
@@ -2895,6 +2898,9 @@ function _structToPlainObject(
       // field — `o.prop = o` — raises a TypeError instead of recursing here
       // until a host stack overflow; #2671).
       val = _wasmToPlain(val, exports, seen);
+      if (typeof exports?.[`__sbool_${key}`] === "function" && (val === 0 || val === 1)) {
+        val = val !== 0;
+      }
       result[key] = val;
     }
   }
@@ -2910,7 +2916,13 @@ function _structToPlainObject(
   const sc = _wasmStructProps.get(obj);
   if (sc) {
     for (const key of Object.keys(sc)) {
-      if (!(key in result)) result[key] = _wasmToPlain(sc[key], exports, seen);
+      if (!(key in result)) {
+        let value = _wasmToPlain(sc[key], exports, seen);
+        if (typeof exports?.[`__sbool_${key}`] === "function" && (value === 0 || value === 1)) {
+          value = value !== 0;
+        }
+        result[key] = value;
+      }
     }
   }
   return result;
@@ -3905,6 +3917,16 @@ function _safeSet(
   strict?: boolean,
 ): void {
   if (obj == null) return;
+  // #2847: dynamic writes can cross a generic bridge after the Wasm boolean
+  // carrier was widened to an unbranded numeric externref. The compiler emits
+  // a marker only for property names whose complete visible write set is
+  // boolean; restore the JS brand before either a host-object write or a
+  // Wasm-struct writeback observes the value. Numeric properties with the same
+  // spelling suppress the marker during whole-program analysis.
+  if (typeof key === "string" && (val === 0 || val === 1)) {
+    const booleanExports = exports ?? callbackState?.getExports();
+    if (typeof booleanExports?.[`__sbool_${key}`] === "function") val = val !== 0;
+  }
   // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090, #1716).
   // Prefer the explicit callbackState; fall back to wrapping `exports` so a
   // WasmGC-closure key method can still be dispatched when only exports is in

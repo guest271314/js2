@@ -101,11 +101,13 @@ import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3
 import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js"; // (#3274 wave-B) descriptor/integrity helper builders
 import { buildObjectEnumerationHelpers } from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
 import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // (#3274 wave-B) prototype-chain helper builders
+import { isSyntheticStructName } from "./emit-helpers.js";
 // (#3265) Proxy dispatch subsystem extracted to a sibling module (subtask of
 // #3182 god-file split). `ensureProxyRuntime` is still called by
 // `ensureObjectRuntime` (imported back here); `fillProxyDispatch` is re-exported
 // so `index.ts`s `from "./object-runtime.js"` importer keeps resolving.
 import { ensureProxyRuntime } from "./object-runtime-proxy.js";
+import { ensureArgcGlobal } from "./statements/nested-declarations.js";
 export { fillProxyDispatch } from "./object-runtime-proxy.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1).
@@ -1430,6 +1432,22 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   }
   const objFindIdx = ctx.funcMap.get("__obj_find")!;
 
+  // Approved standalone function constructors use native `__fnctor_<F>`
+  // instance structs while their prototype properties live on a per-fnctor
+  // `$Object`. Reserve a tiny classifier before `__extern_get` bakes its call
+  // index; finalize fills the complete ref.test/global.get ladder after all
+  // fnctor structs and prototype globals are known.
+  const fnctorProtoStartIdx =
+    ctx.standalone && (ctx.fnctorEscapeGate?.approvedNames.size ?? 0) > 0
+      ? registerNative(
+          "__fnctor_proto_start",
+          [{ kind: "externref" }],
+          [{ kind: "externref" }],
+          [{ name: "any", type: { kind: "anyref" } }],
+          [{ op: "ref.null.extern" }],
+        )
+      : undefined;
+
   // ── __extern_get(externref obj, externref key) -> externref ──────────────
   //
   // Unwrap obj to $Object (return null on non-object), walk the own-property
@@ -1479,20 +1497,39 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: 4 },
-      // if !ref.test $Object → not one of our objects → miss (undefined), OR
-      // (#3468 C-core) a closure receiver whose own property lives in the side
-      // table — `__closure_prop_get` resolves it, or returns `getMiss` too.
+      // Plain `$Object` starts its walk at itself. An approved native fnctor
+      // instance starts at its per-fnctor prototype `$Object`, but param 0 stays
+      // the ORIGINAL instance so an accessor found on that prototype receives
+      // the correct `this`. Every other non-object keeps the closure-side-table
+      // miss path.
       { op: "ref.test", typeIdx: objectTypeIdx },
-      { op: "i32.eqz" },
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: buildVecOrClosurePropGetMissArm(ctx, getMiss),
+        then: [
+          { op: "local.get", index: 4 },
+          { op: "ref.cast", typeIdx: objectTypeIdx },
+          { op: "local.set", index: 2 },
+        ],
+        else:
+          fnctorProtoStartIdx === undefined
+            ? buildVecOrClosurePropGetMissArm(ctx, getMiss)
+            : [
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: fnctorProtoStartIdx },
+                { op: "local.tee", index: 7 },
+                { op: "ref.is_null" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: buildVecOrClosurePropGetMissArm(ctx, getMiss),
+                },
+                { op: "local.get", index: 7 },
+                { op: "any.convert_extern" },
+                { op: "ref.cast", typeIdx: objectTypeIdx },
+                { op: "local.set", index: 2 },
+              ],
       },
-      // o = cast<$Object>(any)
-      { op: "local.get", index: 4 },
-      { op: "ref.cast", typeIdx: objectTypeIdx },
-      { op: "local.set", index: 2 },
       // proto-walk loop
       {
         op: "block",
@@ -1582,6 +1619,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "any", type: { kind: "anyref" } },
         { name: "getter", type: { kind: "externref" } }, // (#1888 S5b) accessor $get
         { name: "bfmeta", type: { kind: "externref" } }, // (#2896) builtin-fn meta
+        { name: "fnctorProto", type: { kind: "externref" } },
       ],
       body,
     );
@@ -4568,7 +4606,7 @@ export function reserveApplyClosure(ctx: CodegenContext): number {
  * from `__extern_length(args)` and dispatches to the matching this-threaded
  * closure dispatcher:
  *
- *   n = i32(__extern_length(args))
+ *   n = max(i32(__extern_length(args)), __closure_arity(fn))
  *   if n==0: __call_fn_method_0(recv, fn)
  *   if n==1: __call_fn_method_1(recv, fn, idx0)
  *   ... up to 8 (#3310 G2 — matches the `emitClosureMethodCallExportN` cap) ...
@@ -4608,12 +4646,13 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     return;
   }
 
-  // S1 undefined sentinel: every non-dispatchable case (arity > 4, or a missing
+  // S1 undefined sentinel: every non-dispatchable case (arity > 8, or a missing
   // arity-N dispatcher) returns undefined rather than throwing. S2 replaces
   // these with spec-correct TypeError throws once the late-shift is fixed.
   const undefinedSentinel = (): Instr[] => [{ op: "ref.null.extern" }];
 
-  // Locals: 0=fn 1=recv 2=args (params); 3=n(i32)
+  // Locals: 0=fn 1=recv 2=args (params); 3=n(i32), 4=declared(i32),
+  // 5=actual(i32), 6=result(externref).
   const ARG_OF = (k: number): Instr[] => [
     { op: "local.get", index: 2 },
     { op: "f64.const", value: k },
@@ -4670,21 +4709,33 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     ];
   }
 
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+
   const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
 
   // (#3592) An UNDER-APPLIED call (`assert.sameValue(a, b)` into a 3-formal
   // `sameValue`) matched no `__call_fn_method_N` arm and silently returned the
   // undefined sentinel — it never happened. Rationale: see the builder.
   const widen = buildApplyClosureArityWidening(ctx, locals, 0, 3, 3);
+  const resultLocal = 3 + locals.length;
+  locals.push({ name: "result", type: { kind: "externref" } });
 
-  // n = i32(__extern_length(args)); widen to the callee's declared arity; dispatch.
+  // Preserve the raw call-site count in `__argc` before widening only the
+  // dispatcher selector. This keeps omitted formals undefined without turning
+  // them into synthetic arguments, while over-arity calls still populate the
+  // canonical extras vector in `__call_fn_method_N`.
   const body: Instr[] = [
     { op: "local.get", index: 2 },
     { op: "call", funcIdx: externLengthIdx },
     { op: "i32.trunc_f64_s" },
-    { op: "local.set", index: 3 },
+    { op: "local.tee", index: 3 },
+    { op: "global.set", index: argcGlobalIdx },
     ...widen,
     ...dispatch,
+    { op: "local.set", index: resultLocal },
+    { op: "i32.const", value: -1 },
+    { op: "global.set", index: argcGlobalIdx },
+    { op: "local.get", index: resultLocal },
   ];
 
   // (#3031 apply slice) $Proxy front-guard — the §0.1 ladder-step-1 pattern for
@@ -5522,6 +5573,333 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
  * existing ones). Standalone-only — gated on `ctx.standalone`; host mode's JS
  * `__extern_*` imports own these paths.
  */
+/**
+ * Teach the standalone own-property predicates about closed compiler structs.
+ *
+ * The object runtime is emitted while user shapes are still being discovered,
+ * so its eager `__object_hasOwn` / `__hasOwnProperty` bodies can initially see
+ * only the open `$Object` hash table. At finalize, build one string-key arm per
+ * visible field over the complete nominal struct set. Conditionally-created
+ * fields use #2847's hidden `$has_<name>` bit; ordinary physical fields are
+ * always own properties, including when their value is null/undefined.
+ *
+ * This is deliberately an in-place fill: no imports or functions are added and
+ * all previously-baked call indices remain stable.
+ */
+export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
+  if (!ctx.standalone || ctx.anyStrTypeIdx < 0) return;
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const equalsIdx = ctx.nativeStrHelpers.get("__str_equals");
+  if (flattenIdx === undefined || equalsIdx === undefined) return;
+
+  type Entry = { typeIdx: number; presenceFieldIdx?: number };
+  const byField = new Map<string, Entry[]>();
+  for (const [structName, fields] of ctx.structFields) {
+    if (isSyntheticStructName(structName)) continue;
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+    for (const field of fields) {
+      if (!field?.name || field.name.startsWith("$")) continue;
+      const presenceFieldIdx = field.presenceTracked
+        ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
+        : -1;
+      if (presenceFieldIdx >= 0) {
+        const typeDef = ctx.mod.types[typeIdx];
+        const physicalFields =
+          typeDef?.kind === "struct"
+            ? typeDef.fields
+            : typeDef?.kind === "sub" && typeDef.type.kind === "struct"
+              ? typeDef.type.fields
+              : [];
+        if (presenceFieldIdx >= physicalFields.length) {
+          throw new Error(
+            `closed-struct-has-own presence mismatch: ${structName}.${field.name} index ${presenceFieldIdx}, physical ${physicalFields.length}`,
+          );
+        }
+      }
+      let entries = byField.get(field.name);
+      if (!entries) {
+        entries = [];
+        byField.set(field.name, entries);
+      }
+      entries.push({ typeIdx, ...(presenceFieldIdx >= 0 ? { presenceFieldIdx } : {}) });
+    }
+  }
+  if (byField.size === 0) return;
+
+  // Factory, not a shared Instr tree: finalize remaps every function body in
+  // place, so sharing these objects between the two predicates would remap all
+  // embedded type indices twice (#1719 reserve/fill discipline).
+  const buildPrologue = (): Instr[] => {
+    const keyArms: Instr[] = [];
+    for (const [fieldName, entries] of byField) {
+      const receiverArms: Instr[] = [];
+      for (const entry of entries) {
+        receiverArms.push(
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: entry.typeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then:
+              entry.presenceFieldIdx === undefined
+                ? [{ op: "i32.const", value: 1 }, { op: "return" }]
+                : [
+                    { op: "local.get", index: 0 },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: entry.typeIdx },
+                    { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.presenceFieldIdx },
+                    { op: "return" },
+                  ],
+          },
+        );
+      }
+      keyArms.push(
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+        { op: "call", funcIdx: flattenIdx },
+        ...nativeStringLiteralInstrs(ctx, fieldName),
+        { op: "call", funcIdx: equalsIdx },
+        { op: "if", blockType: { kind: "empty" }, then: receiverArms },
+      );
+    }
+    return [
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+      { op: "if", blockType: { kind: "empty" }, then: keyArms },
+    ];
+  };
+  for (const name of ["__object_hasOwn", "__hasOwnProperty"]) {
+    const fn = ctx.mod.functions.find((candidate) => candidate.name === name);
+    if (fn) fn.body.unshift(...buildPrologue());
+  }
+}
+
+/**
+ * Finalize the standalone dynamic getter with closed-struct field arms.
+ * Computed reads such as Acorn's `opts[opt]` otherwise fall through the eager
+ * `$Object`-only body and return undefined even though Object.hasOwn correctly
+ * reports the physical field.
+ */
+export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
+  if (!ctx.standalone || ctx.anyStrTypeIdx < 0) return;
+  const fn = ctx.mod.functions.find((candidate) => candidate.name === "__extern_get");
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const equalsIdx = ctx.nativeStrHelpers.get("__str_equals");
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  const boxedNumberTypeIdx = ctx.nativeBoxNumberTypeIdx;
+  if (!fn || flattenIdx === undefined || equalsIdx === undefined) return;
+
+  type Entry = {
+    typeIdx: number;
+    fieldIdx: number;
+    fieldType: ValType;
+    jsBoolean: boolean;
+    presenceFieldIdx?: number;
+  };
+  const byField = new Map<string, Entry[]>();
+  for (const [structName, fields] of ctx.structFields) {
+    if (isSyntheticStructName(structName)) continue;
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+    for (let fieldIdx = 0; fieldIdx < fields.length; fieldIdx++) {
+      const field = fields[fieldIdx];
+      if (!field?.name || field.name.startsWith("$")) continue;
+      const boxable =
+        field.type.kind === "externref" ||
+        field.type.kind === "ref_extern" ||
+        field.type.kind === "anyref" ||
+        field.type.kind === "eqref" ||
+        field.type.kind === "ref" ||
+        field.type.kind === "ref_null" ||
+        (field.type.kind === "f64" && boxNumberIdx !== undefined) ||
+        (field.type.kind === "i32" &&
+          (field.jsBoolean || field.type.boolean ? boxBooleanIdx !== undefined : boxNumberIdx !== undefined));
+      if (!boxable) continue;
+      const presenceFieldIdx = field.presenceTracked
+        ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
+        : -1;
+      let entries = byField.get(field.name);
+      if (!entries) {
+        entries = [];
+        byField.set(field.name, entries);
+      }
+      entries.push({
+        typeIdx,
+        fieldIdx,
+        fieldType: field.type,
+        jsBoolean: field.jsBoolean === true || (field.type.kind === "i32" && field.type.boolean === true),
+        ...(presenceFieldIdx >= 0 ? { presenceFieldIdx } : {}),
+      });
+    }
+  }
+  if (byField.size === 0) return;
+
+  const readAndBox = (entry: Entry): Instr[] => {
+    const read: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: entry.typeIdx },
+      { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx },
+    ];
+    if (entry.fieldType.kind === "f64") {
+      read.push({ op: "call", funcIdx: boxNumberIdx! });
+    } else if (entry.fieldType.kind === "i32") {
+      if (entry.jsBoolean) read.push({ op: "call", funcIdx: boxBooleanIdx! });
+      else read.push({ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumberIdx! });
+    } else if (entry.fieldType.kind !== "externref" && entry.fieldType.kind !== "ref_extern") {
+      read.push({ op: "extern.convert_any" });
+    }
+    read.push({ op: "return" });
+    return read;
+  };
+
+  const buildReceiverArms = (entries: Entry[]): Instr[] => {
+    const receiverArms: Instr[] = [];
+    for (const entry of entries) {
+      const then: Instr[] = [];
+      if (entry.presenceFieldIdx !== undefined) {
+        then.push(
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: entry.typeIdx },
+          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.presenceFieldIdx },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }]), { op: "return" }],
+          },
+        );
+      }
+      then.push(...readAndBox(entry));
+      receiverArms.push(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: entry.typeIdx },
+        { op: "if", blockType: { kind: "empty" }, then },
+      );
+    }
+    return receiverArms;
+  };
+
+  const stringKeyArms: Instr[] = [];
+  for (const [fieldName, entries] of byField) {
+    const receiverArms = buildReceiverArms(entries);
+    stringKeyArms.push(
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+      { op: "call", funcIdx: flattenIdx },
+      ...nativeStringLiteralInstrs(ctx, fieldName),
+      { op: "call", funcIdx: equalsIdx },
+      { op: "if", blockType: { kind: "empty" }, then: receiverArms },
+    );
+  }
+  const numericKeyArms: Instr[] = [];
+  if (boxedNumberTypeIdx >= 0) {
+    for (const [fieldName, entries] of byField) {
+      if (!/^(?:0|[1-9]\d*)$/.test(fieldName)) continue;
+      numericKeyArms.push(
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: boxedNumberTypeIdx },
+        { op: "struct.get", typeIdx: boxedNumberTypeIdx, fieldIdx: 0 },
+        { op: "f64.const", value: Number(fieldName) },
+        { op: "f64.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: buildReceiverArms(entries) },
+      );
+    }
+  }
+  fn.body.unshift(
+    ...(numericKeyArms.length > 0
+      ? ([
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: boxedNumberTypeIdx },
+          { op: "if", blockType: { kind: "empty" }, then: numericKeyArms },
+        ] satisfies Instr[])
+      : []),
+    { op: "local.get", index: 1 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+    { op: "if", blockType: { kind: "empty" }, then: stringKeyArms },
+  );
+}
+
+/**
+ * Finalize native method-call arms for approved function-constructor instances.
+ * The method value is resolved by `__extern_get` (own fields first, then the
+ * per-fnctor prototype above) and invoked through the shared #3098 callable
+ * classifier, preserving the original receiver as `this` and the full args
+ * vector. No new callable or constructor ABI is introduced.
+ */
+export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
+  if (!ctx.standalone) return;
+  const protoStartIdx = ctx.funcMap.get("__fnctor_proto_start");
+  const protoStartFn = protoStartIdx === undefined ? undefined : definedFuncAt(ctx, protoStartIdx);
+  if (protoStartFn) {
+    const protoArms: Instr[] = [];
+    for (const [fnctorName, protoGlobalIdx] of ctx.fnctorPrototypeObject) {
+      const typeIdx = ctx.structMap.get(`__fnctor_${fnctorName}`);
+      if (typeIdx === undefined) continue;
+      protoArms.push(
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "global.get", index: protoGlobalIdx }, { op: "return" }],
+        },
+      );
+    }
+    protoStartFn.body = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 1 },
+      ...protoArms,
+      { op: "ref.null.extern" },
+    ];
+  }
+
+  const fn = ctx.mod.functions.find((candidate) => candidate.name === "__extern_method_call");
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  const applyClosureIdx = ctx.funcMap.get("__apply_closure");
+  if (!fn || externGetIdx === undefined || applyClosureIdx === undefined) return;
+
+  const arms: Instr[] = [];
+  for (const [fnctorName] of ctx.fnctorPrototypeObject) {
+    const typeIdx = ctx.structMap.get(`__fnctor_${fnctorName}`);
+    if (typeIdx === undefined) continue;
+    arms.push(
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: externGetIdx },
+          ...(ctx.funcMap.has("__nullish_to_null")
+            ? ([{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] satisfies Instr[])
+            : []),
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: applyClosureIdx },
+          { op: "return" },
+        ],
+      },
+    );
+  }
+  fn.body.unshift(...arms);
+}
+
 export function fillDynamicForinVecArms(ctx: CodegenContext): void {
   if (!ctx.standalone) return; // host imports own the dynamic path
   const anyStrTypeIdx = ctx.anyStrTypeIdx;

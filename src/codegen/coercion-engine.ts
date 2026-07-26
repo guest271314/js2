@@ -399,7 +399,11 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
     addUnionImports(ctx);
     const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
     if (isTruthyIdx !== undefined) {
-      sink.push({ op: "call", funcIdx: isTruthyIdx });
+      // Registering a late helper can shift every subsequent function index.
+      // Always re-read the canonical map entry before emitting the call; using
+      // the provisional index is observably wrong in large standalone graphs
+      // such as Acorn, where TokenType.keyword is an externref union.
+      sink.push({ op: "call", funcIdx: ctx.funcMap.get("__is_truthy") ?? isTruthyIdx });
       return sink;
     }
     // Fallback: non-null → true.

@@ -99,6 +99,7 @@ export {
 } from "./declarations/import-collector.js";
 export {
   applyShapeInference,
+  collectDynamicObjectReturnCarrierTypes,
   collectEmptyObjectWidening,
   collectGrowableObjectLiterals,
 } from "./declarations/object-shape-widening.js";
@@ -202,6 +203,89 @@ function restBindingOverridesToExternref(p: ts.ParameterDeclaration): boolean {
 }
 
 /**
+ * An implicit-any parameter used as the receiver of a computed property access
+ * is intentionally polymorphic. Specialising it from one call-site shape would
+ * insert a nominal struct cast at the function boundary, while the body uses a
+ * runtime key and must accept every object carrier. Acorn's `getOptions(opts)`
+ * is the canonical case (`opts[opt]`).
+ */
+function implicitAnyParamNeedsDynamicObjectCarrier(
+  param: ts.ParameterDeclaration,
+  stmt: ts.FunctionDeclaration,
+): boolean {
+  if (param.type || !ts.isIdentifier(param.name) || !stmt.body) return false;
+  const paramName = param.name.text;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      node !== stmt &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isAccessor(node) ||
+        ts.isConstructorDeclaration(node))
+    ) {
+      return;
+    }
+    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === paramName) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(stmt.body, visit);
+  return found;
+}
+
+/**
+ * Detect a function that returns an empty object populated/read through computed
+ * keys. Its representation is the native open `$Object`, so an inferred closed
+ * anonymous return type would cast the value to null at the return boundary.
+ */
+function functionReturnsDynamicObjectCarrier(stmt: ts.FunctionDeclaration): boolean {
+  if (!stmt.body) return false;
+  const emptyObjectVars = new Set<string>();
+  const dynamicVars = new Set<string>();
+  const returnedVars = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (
+      node !== stmt &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isAccessor(node) ||
+        ts.isConstructorDeclaration(node))
+    ) {
+      return;
+    }
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      ts.isObjectLiteralExpression(node.initializer) &&
+      node.initializer.properties.length === 0
+    ) {
+      emptyObjectVars.add(node.name.text);
+    }
+    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression)) {
+      dynamicVars.add(node.expression.text);
+    }
+    if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
+      returnedVars.add(node.expression.text);
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(stmt.body, visit);
+  for (const name of returnedVars) {
+    if (emptyObjectVars.has(name) && dynamicVars.has(name)) return true;
+  }
+  return false;
+}
+
+/**
  * (#3268) Lower a single non-rest function parameter to its Wasm ValType.
  * Consolidates the four byte-identical per-parameter lowering blocks
  * (registerBodyless + collectDeclarations, generator and normal arms):
@@ -233,13 +317,25 @@ function lowerParamType(
   if (
     !param.type &&
     paramType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) &&
+    !implicitAnyParamNeedsDynamicObjectCarrier(param, stmt) &&
     (wasmType.kind === "externref" ||
       (wasmType.kind === "ref_null" && ctx.anyValueTypeIdx >= 0 && wasmType.typeIdx === ctx.anyValueTypeIdx))
   ) {
     // (#3471) Call-site inference first; body-usage fallback ONLY for a
     // genuinely-uncalled function (see inferImplicitAnyParamType).
     const inferred = inferImplicitAnyParamType(ctx, funcName, index, sourceFile, stmt);
-    if (inferred) wasmType = inferred;
+    if (inferred) {
+      const inferredTypeIdx = inferred.kind === "ref" || inferred.kind === "ref_null" ? inferred.typeIdx : undefined;
+      const inferredStructName =
+        inferredTypeIdx === undefined ? undefined : ctx.typeIdxToStructName.get(inferredTypeIdx);
+      // A call-site object literal is only one observed shape of an untyped JS
+      // parameter. In standalone, specialising that parameter to the literal's
+      // nominal `__anon_*` struct breaks forwarding chains (`parse(input,
+      // options) -> Parser.parse -> new Parser`) as soon as another boundary
+      // expects the dynamic carrier. Keep anonymous object arguments externref;
+      // numeric, string, vec, and declared nominal inference remain unchanged.
+      if (!(ctx.standalone && inferredStructName?.startsWith("__anon_"))) wasmType = inferred;
+    }
   }
   return wasmType;
 }
@@ -349,6 +445,7 @@ function registerBodylessFunctionDeclaration(
 
   const retType = ctx.checker.getReturnTypeOfSignature(sig);
   const unwrappedRetType = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+  if (functionReturnsDynamicObjectCarrier(stmt)) ctx.objectHashConsumerTypes.add(unwrappedRetType);
   if (!isGenerator && !isVoidType(unwrappedRetType)) ensureStructForType(ctx, unwrappedRetType);
   for (const p of stmt.parameters) {
     ensureStructForType(ctx, ctx.checker.getTypeAtLocation(p));
@@ -398,7 +495,9 @@ function registerBodylessFunctionDeclaration(
     if (inferredNumericRet && isImplicitAnyReturn && allParamsNumeric) {
       results = [inferredNumericRet];
     } else {
-      results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
+      results = isVoidType(rUnwrapped)
+        ? []
+        : [functionReturnsDynamicObjectCarrier(stmt) ? { kind: "externref" } : resolveWasmType(ctx, rUnwrapped)];
     }
   }
 
@@ -777,6 +876,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const retType = ctx.checker.getReturnTypeOfSignature(sig);
       // For async functions, unwrap Promise<T> to get T for struct registration
       const unwrappedRetType = isAsync ? unwrapPromiseType(retType, ctx.checker) : retType;
+      if (functionReturnsDynamicObjectCarrier(stmt)) ctx.objectHashConsumerTypes.add(unwrappedRetType);
       if (!isGenerator && !isVoidType(unwrappedRetType)) ensureStructForType(ctx, unwrappedRetType);
       for (const p of stmt.parameters) {
         const pt = ctx.checker.getTypeAtLocation(p);
@@ -837,7 +937,9 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         if (inferredNumericRet && isImplicitAnyReturn && allParamsNumeric) {
           results = [inferredNumericRet];
         } else {
-          results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
+          results = isVoidType(rUnwrapped)
+            ? []
+            : [functionReturnsDynamicObjectCarrier(stmt) ? { kind: "externref" } : resolveWasmType(ctx, rUnwrapped)];
         }
       }
 
