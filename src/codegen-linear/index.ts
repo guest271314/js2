@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
+import { buildIrUnitInventory, indexIrTerminalDeclarations, type BuildIrUnitInventoryOptions } from "../ir/identity.js";
 import type { FuncTypeDef, Instr, ValType, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { linearAllocatorPolicy, type LinearAllocatorPolicyId } from "../ir/analysis/linear-memory-plan.js";
@@ -10,6 +11,11 @@ import type { CollectionKind, FinallyEntry, LinearContext, LinearFuncContext } f
 import { addLocal } from "./context.js";
 import type { ClassLayout } from "./layout.js";
 import { computeClassLayout } from "./layout.js";
+import {
+  addLinearNumberToStringRuntime,
+  LINEAR_NUMBER_FORMAT_DATA_BASE,
+  LINEAR_NUMBER_FORMAT_HEAP_START,
+} from "./number-format.js";
 import { addLinearStackArenaRuntime } from "./runtime-stack-arena.js";
 import {
   addArrayRuntime,
@@ -60,6 +66,32 @@ function sourceMayUseLinearIrStringRuntime(sourceFile: ts.SourceFile): boolean {
   return found;
 }
 
+function sourceMayUseLinearNumberToString(ast: TypedAST): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isCallExpression(node) &&
+      node.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "toString"
+    ) {
+      try {
+        const type = ast.checker.getNonNullableType(ast.checker.getTypeAtLocation(node.expression.expression));
+        if ((type.flags & ts.TypeFlags.NumberLike) !== 0) {
+          found = true;
+          return;
+        }
+      } catch {
+        // Unresolved receiver: the direct/IR lowering keeps its normal fallback.
+      }
+    }
+    forEachChild(node, visit);
+  };
+  visit(ast.sourceFile);
+  return found;
+}
+
 /**
  * Extract a 1-based {line, column} from an AST node for diagnostics (#1937).
  * Mirrors the GC backend's extractLocation (src/codegen/context/errors.ts);
@@ -92,6 +124,8 @@ export interface LinearOptions {
   exposeArenaReset?: boolean;
   /** Shared IR allocation policy. Direct-backend fallbacks remain arena-backed. */
   allocationPolicy?: LinearAllocatorPolicyId;
+  /** Structural source identity/provenance consumed by the IR overlay. */
+  irInventoryOptions?: BuildIrUnitInventoryOptions;
 }
 
 /**
@@ -101,13 +135,19 @@ export interface LinearOptions {
 export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): WasmModule {
   const mod = createEmptyModule();
   const allocationPolicy = linearAllocatorPolicy(opts.allocationPolicy ?? "arena-v1");
+  const needsNumberToString = sourceMayUseLinearNumberToString(ast);
+  const dataSegmentBase = needsNumberToString ? LINEAR_NUMBER_FORMAT_DATA_BASE : DATA_SEGMENT_BASE;
 
   // Add memory and runtime functions first
-  addRuntime(mod, { exposeArenaReset: opts.exposeArenaReset });
+  addRuntime(mod, {
+    exposeArenaReset: opts.exposeArenaReset,
+    ...(needsNumberToString ? { heapStart: LINEAR_NUMBER_FORMAT_HEAP_START } : {}),
+  });
   if (allocationPolicy.id === "analysis-stack-arena-v1") addLinearStackArenaRuntime(mod);
   addUint8ArrayRuntime(mod);
   addArrayRuntime(mod);
   addStringRuntime(mod);
+  if (needsNumberToString) addLinearNumberToStringRuntime(mod);
   addMapRuntime(mod);
   addSetRuntime(mod);
   addNumericMapRuntime(mod);
@@ -141,7 +181,7 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
     errors: [],
     classLayouts: new Map(),
     stringLiterals: new Map(),
-    dataSegmentOffset: DATA_SEGMENT_BASE,
+    dataSegmentOffset: dataSegmentBase,
     lambdaCounter: 0,
     tableEntries: [],
     closureEnvGlobalIdx,
@@ -202,11 +242,23 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
 
   const runtimeFuncCount = ctx.mod.functions.length;
   const linearIrLegacySlots = [];
+  const linearIrTerminalDeclarations = linearIrEnabled()
+    ? indexIrTerminalDeclarations(
+        ast.sourceFile,
+        buildIrUnitInventory([ast.sourceFile], {
+          ...opts.irInventoryOptions,
+          entrySource: ast.sourceFile,
+          checker: ast.checker,
+        }),
+      )
+    : new Map<ts.Node, never>();
   for (let i = 0; i < allFuncEntries.length; i++) {
     const entry = allFuncEntries[i];
     const funcIdx = ctx.numImportFuncs + runtimeFuncCount + i;
     ctx.funcMap.set(entry.name, funcIdx);
-    linearIrLegacySlots.push({ declaration: entry.node, legacyName: entry.name, funcIdx });
+    if (linearIrTerminalDeclarations.has(entry.node)) {
+      linearIrLegacySlots.push({ declaration: entry.node, legacyName: entry.name, funcIdx });
+    }
   }
 
   // ── Collect module-level variable declarations as wasm globals ──
@@ -222,7 +274,7 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   // collection, but before top-level body insertion. Demotions retain the
   // direct path and JS2WASM_LINEAR_IR=0 remains the escape hatch.
   const linearIr = linearIrEnabled()
-    ? compileLinearIrFunctions(ctx, ast.sourceFile, allocationPolicy, linearIrLegacySlots)
+    ? compileLinearIrFunctions(ctx, ast.sourceFile, allocationPolicy, linearIrLegacySlots, opts.irInventoryOptions)
     : undefined;
 
   // ── Compile top-level function declarations ──
@@ -259,12 +311,12 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
 
   // ── Emit data segments for string literals ──
   if (ctx.stringLiterals.size > 0) {
-    const totalSize = ctx.dataSegmentOffset - DATA_SEGMENT_BASE;
+    const totalSize = ctx.dataSegmentOffset - dataSegmentBase;
     const bytes = new Uint8Array(totalSize);
     for (const literal of ctx.stringLiterals.values()) {
-      bytes.set(literal.bytes, literal.offset - DATA_SEGMENT_BASE);
+      bytes.set(literal.bytes, literal.offset - dataSegmentBase);
     }
-    mod.dataSegments.push({ offset: DATA_SEGMENT_BASE, bytes });
+    mod.dataSegments.push({ offset: dataSegmentBase, bytes });
   }
 
   emitClosureTable(ctx);
@@ -3519,8 +3571,13 @@ function compileMethodCall(ctx: LinearContext, fctx: LinearFuncContext, expr: ts
     fctx.body.push({ op: "f64.convert_i32_s" });
     return;
   } else if (methodName === "toString") {
-    // x.toString(...) — for numbers, just compile x (it's already a value)
+    // Exact no-radix Number::toString is the shared host-free Ryū runtime.
+    // Non-number receivers retain the representation-preserving legacy arm.
     compileExpression(ctx, fctx, propAccess.expression);
+    if (expr.arguments.length === 0 && inferExprType(ctx, fctx, propAccess.expression).kind === "f64") {
+      const numberToStringIdx = ctx.funcMap.get("number_toString");
+      if (numberToStringIdx !== undefined) fctx.body.push({ op: "call", funcIdx: numberToStringIdx });
+    }
     return;
   } else {
     // Check if it's a class method call
@@ -5008,12 +5065,11 @@ function compileTemplateExpression(ctx: LinearContext, fctx: LinearFuncContext, 
       // Already a string pointer (i32), just compile
       compileExpression(ctx, fctx, span.expression);
     } else {
-      // It's an f64 number — need to convert to string
-      // For now, use __str_from_i32 if available, otherwise just truncate and convert
-      const strFromI32Idx = ctx.funcMap.get("__str_from_i32");
-      if (strFromI32Idx !== undefined) {
-        compileExprToI32(ctx, fctx, span.expression);
-        fctx.body.push({ op: "call", funcIdx: strFromI32Idx });
+      // It's an f64 number — use the exact host-free Ryū formatter.
+      const numberToStringIdx = ctx.funcMap.get("number_toString");
+      if (numberToStringIdx !== undefined) {
+        compileExpression(ctx, fctx, span.expression);
+        fctx.body.push({ op: "call", funcIdx: numberToStringIdx });
       } else {
         // Fallback: compile as empty string (shouldn't normally happen)
         compileStringLiteral(ctx, fctx, "");

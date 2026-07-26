@@ -1003,6 +1003,7 @@ function runPipeline(input: PipelineInput): CompileResult {
         : generateLinearModule(entryAst, {
             exposeArenaReset: options.allocator === "arena-reset",
             allocationPolicy: options.allocator === "analysis-stack" ? "analysis-stack-arena-v1" : "arena-v1",
+            irInventoryOptions: input.irInventoryOptions,
           });
       // Fail the compile on unsupported linear-backend constructs instead of
       // emitting a structurally invalid binary (#1868).
@@ -1333,7 +1334,12 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
-  let irInventory = options.trackIrOutcomes ? makeIrInventoryOptions(positionMap) : undefined;
+  // Linear's IR overlay also consumes the structural inventory. Preserve
+  // compiler-prelude provenance there even when the public WasmGC outcome
+  // ledger is disabled, so injected support functions never manufacture
+  // user attempt roots.
+  let irInventory =
+    options.trackIrOutcomes || options.target === "linear" ? makeIrInventoryOptions(positionMap) : undefined;
   // #2645/#2736 — `--target node`/`deno` (formerly `--platform node`) implies
   // node-style emulation so the ambient surface and the importable `node:<mod>`
   // capability gate share one target model. This EFFECTIVE flag drives the

@@ -40,6 +40,8 @@ export interface ArenaOptions {
    * exports are dead weight and are omitted to keep the binary minimal.
    */
   exposeArenaReset?: boolean;
+  /** First allocatable byte after compiler-owned immutable data. */
+  heapStart?: number;
 }
 
 /**
@@ -57,6 +59,7 @@ export interface ArenaOptions {
  * ADR-0017.
  */
 export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
+  const heapStart = opts.heapStart ?? HEAP_START;
   // Add memory (1 page = 64 KiB, growable to 256 pages = 16 MiB)
   if (mod.memories.length === 0) {
     mod.memories.push({ min: 1, max: 256 });
@@ -73,7 +76,7 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
     name: "__heap_ptr",
     type: { kind: "i32" },
     mutable: true,
-    init: [{ op: "i32.const", value: HEAP_START }],
+    init: [{ op: "i32.const", value: heapStart }],
   };
   mod.globals.push(heapPtrGlobal);
 
@@ -166,7 +169,7 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
   void mallocFuncIdx;
 
   if (opts.exposeArenaReset) {
-    addArenaManagementExports(mod, heapPtrGlobalIdx);
+    addArenaManagementExports(mod, heapPtrGlobalIdx, heapStart);
   }
 }
 
@@ -181,7 +184,7 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
  * These are off by default (see {@link ArenaOptions.exposeArenaReset}) so the
  * "allocate-and-exit" common case pays nothing for them.
  */
-function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number): void {
+function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number, heapStart: number): void {
   // __arena_reset() -> void
   const resetTypeIdx = mod.types.length;
   mod.types.push({
@@ -196,7 +199,7 @@ function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number): v
     typeIdx: resetTypeIdx,
     locals: [],
     body: [
-      { op: "i32.const", value: HEAP_START },
+      { op: "i32.const", value: heapStart },
       { op: "global.set", index: heapPtrGlobalIdx },
     ],
     exported: false,
@@ -215,7 +218,7 @@ function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number): v
     name: "__arena_used",
     typeIdx: usedTypeIdx,
     locals: [],
-    body: [{ op: "global.get", index: heapPtrGlobalIdx }, { op: "i32.const", value: HEAP_START }, { op: "i32.sub" }],
+    body: [{ op: "global.get", index: heapPtrGlobalIdx }, { op: "i32.const", value: heapStart }, { op: "i32.sub" }],
     exported: false,
   });
 

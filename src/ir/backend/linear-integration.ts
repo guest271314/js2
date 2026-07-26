@@ -81,7 +81,7 @@ import {
   type IrType,
   type IrTypeRef,
 } from "../nodes.js";
-import { buildIrUnitInventory, type IrUnitId } from "../identity.js";
+import { buildIrUnitInventory, type BuildIrUnitInventoryOptions, type IrUnitId } from "../identity.js";
 import {
   buildIrPlanningIdentityContext,
   IrPlanningIdentityInvariantError,
@@ -89,7 +89,7 @@ import {
   type IrPlanningIdentityContext,
   type IrPlanningIdentityInvariantCode,
 } from "../planning-identity.js";
-import { buildLegacyProjectedTypeMap, type LatticeType } from "../propagate.js";
+import { buildIrUnitTypeMap, projectIrUnitTypeMapToLegacy, type LatticeType } from "../propagate.js";
 import {
   makeIrArrayExpressionPredicate,
   makeIrAmbientBindingPredicate,
@@ -97,8 +97,13 @@ import {
   makeIrPrimitiveExpressionClassifier,
   makeIrRegExpExpressionPredicate,
 } from "../module-bindings.js";
-import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, planIrCompilation } from "../select.js";
-import { buildLegacyProjectedRecursiveTypeEvidence } from "../type-evidence.js";
+import {
+  effectiveIrParamTypeNode,
+  effectiveIrReturnTypeNode,
+  irClosureSignatureFromFunctionTypeNode,
+} from "../select.js";
+import { planIrCompilationByIdentity, projectIrSelectionToLegacy } from "../select-identity.js";
+import { buildIrRecursiveTypeEvidence } from "../type-evidence.js";
 import type { FuncTypeDef, Instr, ValType, WasmFunction } from "../types.js";
 import { verifyIrFunction } from "../verify.js";
 import type { TypeConverter } from "./contract.js";
@@ -390,6 +395,7 @@ export function compileLinearIrFunctions(
   sourceFile: ts.SourceFile,
   allocationPolicy: LinearAllocatorPolicy = DEFAULT_ARENA_POLICY,
   legacySlotInputs: readonly LinearIrLegacySlotInput[] = [],
+  inventoryOptions: BuildIrUnitInventoryOptions = {},
 ): LinearIrResult {
   const funcs = new Map<IrUnitId, WasmFunction>();
   const compiled: string[] = [];
@@ -443,32 +449,37 @@ export function compileLinearIrFunctions(
   // SCC entries that the checker-backed certifier has independently proved;
   // this avoids widening unrelated unannotated selection while giving the
   // selector and from-ast one shared, concrete recursive ABI.
-  const inventory = buildIrUnitInventory([sourceFile], { entrySource: sourceFile, checker: ctx.checker });
+  const inventory = buildIrUnitInventory([sourceFile], {
+    ...inventoryOptions,
+    entrySource: sourceFile,
+    checker: ctx.checker,
+  });
   const identityContext = buildIrPlanningIdentityContext(inventory);
-  const propagated = buildLegacyProjectedTypeMap(sourceFile, ctx.checker, identityContext);
-  const recursiveTypeEvidence = buildLegacyProjectedRecursiveTypeEvidence(
-    sourceFile,
-    ctx.checker,
-    propagated,
-    identityContext,
-  );
+  const sourceFiles = [sourceFile];
+  const propagated = buildIrUnitTypeMap(sourceFiles, ctx.checker, identityContext);
+  const recursiveTypeEvidence = buildIrRecursiveTypeEvidence(sourceFiles, ctx.checker, propagated, identityContext);
   const evidenceChecker = overlayCertifiedCheckerTypes(ctx.checker, recursiveTypeEvidence.checkerTypeOverrides);
-  const selection = planIrCompilation(
-    sourceFile,
-    {
-      experimentalIR: true,
-      trackFallbacks: true,
-      recursiveTypeEvidence,
-      classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
-      classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
-      isArrayExpression: makeIrArrayExpressionPredicate(ctx.checker),
-      isRegExpExpression: makeIrRegExpExpressionPredicate(ctx.checker),
-      isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
-      supportsSymbolicMathHelpers: false,
-      supportsLiteralStringReplace: false,
-    },
-    recursiveTypeEvidence.typeMap,
+  const { selection } = projectIrSelectionToLegacy(
+    planIrCompilationByIdentity(
+      sourceFile,
+      identityContext,
+      {
+        experimentalIR: true,
+        trackFallbacks: true,
+        recursiveTypeEvidence,
+        classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
+        classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
+        isArrayExpression: makeIrArrayExpressionPredicate(ctx.checker),
+        isRegExpExpression: makeIrRegExpExpressionPredicate(ctx.checker),
+        isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
+        supportsSymbolicMathHelpers: false,
+        supportsNumberToString: ctx.mod.functions.some((func) => func.name === "number_toString"),
+        supportsLiteralStringReplace: false,
+      },
+      propagated,
+    ),
   );
+  const recursiveTypeMap = projectIrUnitTypeMapToLegacy(sourceFiles, recursiveTypeEvidence.typeMap, identityContext);
   const ownerIndex = indexLinearIrSourceOwners(sourceFile, identityContext);
   for (const owner of ownerIndex.owners) unitIdByDeclaration.set(owner.declaration, owner.ownerUnitId);
   for (const slot of buildLinearIrLegacySlotAdapters(ownerIndex, legacySlotInputs)) {
@@ -558,10 +569,17 @@ export function compileLinearIrFunctions(
   // call lowering cannot derive different signatures.
   for (const { ownerUnitId, legacyName: name, declaration: decl } of claimedDecls) {
     try {
-      const evidence = recursiveTypeEvidence.typeMap.get(name);
+      const evidence = recursiveTypeMap.get(name);
       const params = decl.parameters.map((param, index) => {
         const annotated = effectiveIrParamTypeNode(param);
-        if (annotated) return typeNodeToIr(annotated, `pre-seed param of ${name}`);
+        if (annotated) {
+          if (ts.isFunctionTypeNode(annotated)) {
+            const signature = irClosureSignatureFromFunctionTypeNode(annotated);
+            if (!signature) throw new Error(`linear-ir: unsupported callable parameter of ${name}`);
+            return { kind: "callable", signature } as IrType;
+          }
+          return typeNodeToIr(annotated, `pre-seed param of ${name}`);
+        }
         return latticeEvidenceToIr(evidence?.params[index], `pre-seed param of ${name}`);
       });
       const returnNode = effectiveIrReturnTypeNode(decl);
@@ -857,6 +875,10 @@ function makeLinearIrResolver(
   };
 
   const resolveImportFunc = (module: string, field: string): number => {
+    // from-ast's symbolic number formatter call is representation-abstract:
+    // host mode resolves env.number_toString, while linear owns the same
+    // semantic operation as a zero-import runtime helper returning i32.
+    if (module === "env" && field === "number_toString") return resolveRuntimeFunc("number_toString");
     let funcIdx = 0;
     for (const imported of ctx.mod.imports) {
       if (imported.desc.kind !== "func") continue;
@@ -1029,7 +1051,7 @@ function makeLinearIrResolver(
       return false;
     },
     hasHostNumberToString(): boolean {
-      return false;
+      return ctx.mod.functions.some((func) => func.name === "number_toString");
     },
     stringMethodPlan(method: string) {
       if (method === "charCodeAt") {
