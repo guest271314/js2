@@ -1619,6 +1619,37 @@ function _wrapExecReturnForHost(
 }
 
 /**
+ * (#2742) Wrap an accessor GETTER so a compiled-closure RETURN value is bridged
+ * into a callable JS function before the host sees it.
+ *
+ * `get valueOf() { return function () { … }; }` compiles the inner function to a
+ * WasmGC closure struct. The getter itself is already bridged (so V8 can invoke
+ * it), but its return value crossed back raw — so V8 observed
+ * `typeof o.valueOf === "object"`, i.e. NOT callable. In `OrdinaryToPrimitive`
+ * (§7.1.1.1 step 5b `IsCallable(method)`) that silently skips the method, and
+ * with `toString` also non-callable the algorithm falls through to step 6 and
+ * throws "Cannot convert object to primitive value" — the observed failure for
+ * the `String.prototype.trim{Start,End}` `this`-value method-priority tests.
+ *
+ * Deliberately narrow: only the ACCESSOR path is marshalled, and only for values
+ * that `__is_closure` positively identifies as closures (`_maybeWrapCallableUnknownArity`
+ * returns everything else untouched). Marshalling *generic* call exits was tried
+ * and reverted — it regressed ~85 dstr files (#3123/#2835), and the `new`-path
+ * carve-out in `wasmClosureDynamicBridge` exists for the same reason. A getter
+ * returning a function is unambiguously meant to be callable, so bridging it is
+ * strictly more spec-correct and does not touch plain-call returns.
+ */
+function _wrapAccessorGetterReturn(
+  getterFn: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (typeof getterFn !== "function") return getterFn;
+  return function accessorGetterReturnBridge(this: any, ...args: any[]): any {
+    return _maybeWrapCallableUnknownArity(getterFn.apply(this, args), callbackState);
+  };
+}
+
+/**
  * (#2702) Tri-state result of `V instanceof target` per ECMA-262 §13.10.2
  * (InstanceofOperator) + §7.3.20 (OrdinaryHasInstance). The wasm caller turns
  * this into a value or a *wasm-thrown* `TypeError` (a host-thrown JS error
@@ -9866,7 +9897,10 @@ assert._isSameValue = isSameValue;
           // dropped (the bridge ignores `this`). Tracked as Phase 2 / a
           // follow-up; accessors that close over their `this` keep the
           // existing accessor-shim path (__make_getter_callback).
-          const wrappedGetter = _maybeWrapCallable(getter, 0, callbackState);
+          // (#2742) Also marshal the getter's RETURN value: a compiled closure
+          // returned by `get valueOf() { return function(){…}; }` must reach the
+          // host as a callable, or §7.1.1.1 IsCallable skips it.
+          const wrappedGetter = _wrapAccessorGetterReturn(_maybeWrapCallable(getter, 0, callbackState), callbackState);
           const wrappedSetter = _maybeWrapCallable(setter, 1, callbackState);
           const desc: PropertyDescriptor = {};
           if (wrappedGetter != null) desc.get = wrappedGetter;
