@@ -33,10 +33,10 @@
  *
  * Spec: ECMA-262 §6.1.6.1.13 (Number::toString).
  */
-import { createEmptyModule, type Instr, type LocalDef, type ValType } from "../ir/types.js";
+import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
-import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
+import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
 
 // ---------------------------------------------------------------------------
 // Compile-time table generation (BigInt). Produces byte-identical tables to
@@ -1629,57 +1629,4 @@ export function emitRyuToBuf(ctx: CodegenContext, strDataTypeIdx: number): numbe
     exported: false,
   });
   return funcIdx;
-}
-
-/**
- * Backend-neutral scalar template for the Ryū core.
- *
- * The native-string emitter above is the canonical implementation and its
- * arithmetic is heavily property-tested. Linear memory reuses those exact
- * function bodies at compile time, replacing only the two representation
- * seams: immutable table reads and scratch-buffer element access. Keeping the
- * template here prevents a second, silently drifting Ryū port.
- */
-export interface PortableRyuTemplate {
-  readonly functions: ReadonlyMap<
-    "__ryu_mul_shift" | "__num_ryu_digits" | "__num_ryu_to_buf",
-    { readonly handle: number; readonly locals: readonly LocalDef[]; readonly body: readonly Instr[] }
-  >;
-  readonly tables: readonly (readonly bigint[])[];
-}
-
-export function buildPortableRyuTemplate(): PortableRyuTemplate {
-  const mod = createEmptyModule();
-  // Dummy native scratch-buffer array. Linear replaces its array.get/set
-  // instructions with pointer-based byte helpers before emission.
-  mod.types.push({ kind: "array", name: "__portable_ryu_buf", element: I32, mutable: true });
-  const funcMap = new Map<string, number>();
-  const ctx = {
-    mod,
-    funcMap,
-    funcTypeCache: new Map(),
-    arrayTypeMap: new Map(),
-    numImportFuncs: 0,
-    numImportGlobals: 0,
-  } as unknown as CodegenContext;
-  emitRyuToBuf(ctx, 0);
-
-  const names = ["__ryu_mul_shift", "__num_ryu_digits", "__num_ryu_to_buf"] as const;
-  const functions = new Map<
-    (typeof names)[number],
-    { handle: number; locals: readonly LocalDef[]; body: readonly Instr[] }
-  >();
-  for (const name of names) {
-    const handle = funcMap.get(name);
-    const func = handle === undefined ? undefined : definedFuncAt(ctx, handle);
-    if (handle === undefined || !func) throw new Error(`portable Ryū template is missing ${name}`);
-    functions.set(name, { handle, locals: func.locals, body: func.body });
-  }
-  const tables = mod.globals.map((global) =>
-    global.init.flatMap((instr) => (instr.op === "i64.const" ? [instr.value] : [])),
-  );
-  if (tables.length !== 2 || tables.some((table) => table.length === 0)) {
-    throw new Error("portable Ryū template has an invalid power-of-five table population");
-  }
-  return { functions, tables };
 }

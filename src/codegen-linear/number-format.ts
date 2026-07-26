@@ -12,8 +12,12 @@ import {
   LINEAR_STRING_PAYLOAD_PREFIX_BYTES,
   LINEAR_STRING_PAYLOAD_SIZE_OFFSET,
 } from "../ir/analysis/linear-memory-plan.js";
+import type { TypedAST } from "../checker/index.js";
+import { buildPortableRyuTemplate } from "../codegen/number-ryu-portable.js";
 import type { Instr, LocalDef, ValType, WasmModule } from "../ir/types.js";
-import { buildPortableRyuTemplate } from "../codegen/number-ryu.js";
+import { forEachChild, ts } from "../ts-api.js";
+import type { LinearContext, LinearFuncContext } from "./context.js";
+import { addRuntime as addBaseRuntime } from "./runtime.js";
 
 const TABLE_BASE = 1024;
 /** Keep literals above the immutable Ryū tables in modules that need formatting. */
@@ -24,6 +28,61 @@ export const LINEAR_NUMBER_FORMAT_HEAP_START = 65536;
 const I32: ValType = { kind: "i32" };
 const I64: ValType = { kind: "i64" };
 const F64: ValType = { kind: "f64" };
+
+export function sourceMayUseLinearNumberToString(ast: TypedAST): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      ts.isCallExpression(node) &&
+      node.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "toString"
+    ) {
+      try {
+        const type = ast.checker.getNonNullableType(ast.checker.getTypeAtLocation(node.expression.expression));
+        if ((type.flags & ts.TypeFlags.NumberLike) !== 0) {
+          found = true;
+          return;
+        }
+      } catch {
+        // Unresolved receiver: the direct/IR lowering keeps its normal fallback.
+      }
+    }
+    forEachChild(node, visit);
+  };
+  visit(ast.sourceFile);
+  return found;
+}
+
+export function emitLinearStringData(ctx: LinearContext, dataSegmentBase: number): void {
+  if (ctx.stringLiterals.size === 0) return;
+  const bytes = new Uint8Array(ctx.dataSegmentOffset - dataSegmentBase);
+  for (const literal of ctx.stringLiterals.values()) {
+    bytes.set(literal.bytes, literal.offset - dataSegmentBase);
+  }
+  ctx.mod.dataSegments.push({ offset: dataSegmentBase, bytes });
+}
+
+export function addRuntime(
+  mod: WasmModule,
+  ast: TypedAST,
+  exposeArenaReset: boolean | undefined,
+  defaultDataSegmentBase: number,
+): number {
+  const enabled = sourceMayUseLinearNumberToString(ast);
+  addBaseRuntime(mod, {
+    exposeArenaReset,
+    ...(enabled ? { heapStart: LINEAR_NUMBER_FORMAT_HEAP_START } : {}),
+  });
+  if (enabled) addLinearNumberToStringRuntime(mod);
+  return enabled ? LINEAR_NUMBER_FORMAT_DATA_BASE : defaultDataSegmentBase;
+}
+
+export function emitNumberToStringCall(ctx: LinearContext, fctx: LinearFuncContext): void {
+  const funcIdx = ctx.funcMap.get("number_toString");
+  if (funcIdx !== undefined) fctx.body.push({ op: "call", funcIdx });
+}
 
 function addFunc(
   mod: WasmModule,

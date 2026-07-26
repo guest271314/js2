@@ -81,7 +81,12 @@ import {
   type IrType,
   type IrTypeRef,
 } from "../nodes.js";
-import { buildIrUnitInventory, type BuildIrUnitInventoryOptions, type IrUnitId } from "../identity.js";
+import {
+  buildIrUnitInventory,
+  indexIrTerminalDeclarations,
+  type BuildIrUnitInventoryOptions,
+  type IrUnitId,
+} from "../identity.js";
 import {
   buildIrPlanningIdentityContext,
   IrPlanningIdentityInvariantError,
@@ -375,6 +380,66 @@ export function linearIrEnabled(): boolean {
   return typeof process === "undefined" || process.env?.JS2WASM_LINEAR_IR !== "0";
 }
 
+export function terminalPredicate(
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  inventoryOptions: BuildIrUnitInventoryOptions = {},
+): (node: ts.Node) => boolean {
+  if (!linearIrEnabled()) return () => false;
+  const inventory = buildIrUnitInventory([sourceFile], {
+    ...inventoryOptions,
+    entrySource: sourceFile,
+    checker,
+  });
+  const terminals = indexIrTerminalDeclarations(sourceFile, inventory);
+  return (node) => terminals.has(node);
+}
+
+function planLinearIrOverlay(
+  ctx: LinearContext,
+  sourceFile: ts.SourceFile,
+  inventoryOptions: BuildIrUnitInventoryOptions,
+) {
+  const sourceFiles = [sourceFile];
+  const inventory = buildIrUnitInventory(sourceFiles, {
+    ...inventoryOptions,
+    entrySource: sourceFile,
+    checker: ctx.checker,
+  });
+  const identityContext = buildIrPlanningIdentityContext(inventory);
+  const propagated = buildIrUnitTypeMap(sourceFiles, ctx.checker, identityContext);
+  const recursiveTypeEvidence = buildIrRecursiveTypeEvidence(sourceFiles, ctx.checker, propagated, identityContext);
+  const evidenceChecker = overlayCertifiedCheckerTypes(ctx.checker, recursiveTypeEvidence.checkerTypeOverrides);
+  const { selection } = projectIrSelectionToLegacy(
+    planIrCompilationByIdentity(
+      sourceFile,
+      identityContext,
+      {
+        experimentalIR: true,
+        trackFallbacks: true,
+        recursiveTypeEvidence,
+        classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
+        classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
+        isArrayExpression: makeIrArrayExpressionPredicate(ctx.checker),
+        isRegExpExpression: makeIrRegExpExpressionPredicate(ctx.checker),
+        isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
+        supportsSymbolicMathHelpers: false,
+        supportsNumberToString: ctx.mod.functions.some((func) => func.name === "number_toString"),
+        supportsLiteralStringReplace: false,
+      },
+      propagated,
+    ),
+  );
+  return {
+    identityContext,
+    recursiveTypeEvidence,
+    evidenceChecker,
+    selection,
+    recursiveTypeMap: projectIrUnitTypeMapToLegacy(sourceFiles, recursiveTypeEvidence.typeMap, identityContext),
+    ownerIndex: indexLinearIrSourceOwners(sourceFile, identityContext),
+  };
+}
+
 // Report side-channel for the ratchet harness (scripts/check-linear-ir.mjs):
 // compiles are single-threaded within one process, so the harness reads the
 // last module's report right after `compile()` returns. Deliberately NOT on
@@ -449,38 +514,8 @@ export function compileLinearIrFunctions(
   // SCC entries that the checker-backed certifier has independently proved;
   // this avoids widening unrelated unannotated selection while giving the
   // selector and from-ast one shared, concrete recursive ABI.
-  const inventory = buildIrUnitInventory([sourceFile], {
-    ...inventoryOptions,
-    entrySource: sourceFile,
-    checker: ctx.checker,
-  });
-  const identityContext = buildIrPlanningIdentityContext(inventory);
-  const sourceFiles = [sourceFile];
-  const propagated = buildIrUnitTypeMap(sourceFiles, ctx.checker, identityContext);
-  const recursiveTypeEvidence = buildIrRecursiveTypeEvidence(sourceFiles, ctx.checker, propagated, identityContext);
-  const evidenceChecker = overlayCertifiedCheckerTypes(ctx.checker, recursiveTypeEvidence.checkerTypeOverrides);
-  const { selection } = projectIrSelectionToLegacy(
-    planIrCompilationByIdentity(
-      sourceFile,
-      identityContext,
-      {
-        experimentalIR: true,
-        trackFallbacks: true,
-        recursiveTypeEvidence,
-        classifyPrimitiveExpression: makeIrPrimitiveExpressionClassifier(ctx.checker),
-        classifyDeclaredPrimitiveExpression: makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker),
-        isArrayExpression: makeIrArrayExpressionPredicate(ctx.checker),
-        isRegExpExpression: makeIrRegExpExpressionPredicate(ctx.checker),
-        isAmbientBinding: makeIrAmbientBindingPredicate(ctx.checker),
-        supportsSymbolicMathHelpers: false,
-        supportsNumberToString: ctx.mod.functions.some((func) => func.name === "number_toString"),
-        supportsLiteralStringReplace: false,
-      },
-      propagated,
-    ),
-  );
-  const recursiveTypeMap = projectIrUnitTypeMapToLegacy(sourceFiles, recursiveTypeEvidence.typeMap, identityContext);
-  const ownerIndex = indexLinearIrSourceOwners(sourceFile, identityContext);
+  const { identityContext, recursiveTypeEvidence, evidenceChecker, selection, recursiveTypeMap, ownerIndex } =
+    planLinearIrOverlay(ctx, sourceFile, inventoryOptions);
   for (const owner of ownerIndex.owners) unitIdByDeclaration.set(owner.declaration, owner.ownerUnitId);
   for (const slot of buildLinearIrLegacySlotAdapters(ownerIndex, legacySlotInputs)) {
     const owner = identityContext.declarationByUnitId.get(slot.ownerUnitId);
@@ -758,6 +793,8 @@ export function compileLinearIrFunctions(
   return result;
 }
 
+export const compileLinearIr = compileLinearIrFunctions;
+
 /**
  * Narrow compatibility projection for the still-name-keyed `from-ast`
  * signature option. Canonical signature/fixpoint state remains keyed by unit
@@ -842,6 +879,22 @@ function bucketFromLegalityMessage(message: string): string {
   return "other";
 }
 
+function resolveLinearImportFunc(
+  ctx: LinearContext,
+  module: string,
+  field: string,
+  resolveRuntimeFunc: (name: string) => number,
+): number {
+  if (module === "env" && field === "number_toString") return resolveRuntimeFunc("number_toString");
+  let funcIdx = 0;
+  for (const imported of ctx.mod.imports) {
+    if (imported.desc.kind !== "func") continue;
+    if (imported.module === module && imported.name === field) return funcIdx;
+    funcIdx++;
+  }
+  throw new Error(`linear-ir: imported function '${module}.${field}' missing`);
+}
+
 /**
  * The linear resolver: required name/table methods plus the L2 fixed-f64-vec,
  * aggregate/refcell subsets and the L3 i32-pointer string representation.
@@ -874,19 +927,8 @@ function makeLinearIrResolver(
     return ctx.numImportFuncs + localIdx;
   };
 
-  const resolveImportFunc = (module: string, field: string): number => {
-    // from-ast's symbolic number formatter call is representation-abstract:
-    // host mode resolves env.number_toString, while linear owns the same
-    // semantic operation as a zero-import runtime helper returning i32.
-    if (module === "env" && field === "number_toString") return resolveRuntimeFunc("number_toString");
-    let funcIdx = 0;
-    for (const imported of ctx.mod.imports) {
-      if (imported.desc.kind !== "func") continue;
-      if (imported.module === module && imported.name === field) return funcIdx;
-      funcIdx++;
-    }
-    throw new Error(`linear-ir: imported function '${module}.${field}' missing`);
-  };
+  const resolveImportFunc = (module: string, field: string): number =>
+    resolveLinearImportFunc(ctx, module, field, resolveRuntimeFunc);
 
   const bindUnitFunc = (slot: LinearIrLegacySlotAdapter): void => {
     const previous = unitFuncSlotById.get(slot.ownerUnitId);

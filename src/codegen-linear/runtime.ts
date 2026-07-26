@@ -40,7 +40,6 @@ export interface ArenaOptions {
    * exports are dead weight and are omitted to keep the binary minimal.
    */
   exposeArenaReset?: boolean;
-  /** First allocatable byte after compiler-owned immutable data. */
   heapStart?: number;
 }
 
@@ -151,7 +150,6 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
     { op: "local.get", index: local_ret },
   ];
 
-  const mallocFuncIdx = mod.functions.length;
   mod.functions.push({
     name: "__malloc",
     typeIdx: mallocTypeIdx,
@@ -163,10 +161,7 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
     exported: false,
   });
 
-  // Note: __malloc is NOT exported; it's internal. Register in a way
-  // that codegen can find it. The function index will be:
-  // numImportFuncs + mallocFuncIdx (but since we add early, it's just mallocFuncIdx for now)
-  void mallocFuncIdx;
+  // __malloc is internal; codegen finds it in the defined-function table.
 
   if (opts.exposeArenaReset) {
     addArenaManagementExports(mod, heapPtrGlobalIdx, heapStart);
