@@ -1,7 +1,7 @@
 ---
 id: 3669
 title: Property slot monomorphism — a slot seeded with a number/boolean corrupts on some later writes
-status: ready
+status: done
 sprint: current
 priority: high
 horizon: l
@@ -9,9 +9,10 @@ feasibility: hard
 area: codegen
 language_feature: value-representation
 goal: value-rep-substrate
-related: [2773, 2760, 2949, 3667, 3668]
+related: [2773, 2760, 2949, 3667, 3668, 3671]
 assignee: ttraenkler/opus-loop-g
 created: 2026-07-26
+completed: 2026-07-26
 ---
 
 # #3669 — property slot monomorphism
@@ -86,9 +87,12 @@ transition lowerings in the value-rep substrate, not a one-line fix.
 - **Per-SLOT, not per-shape.** A sibling object built identically but only ever
   holding a string is unaffected (`shape-sibling:ok`). So this is the individual
   property slot's state, not a hidden class / shape transition.
-- **Object-literal initialiser behaves exactly like assignment** —
-  `{p: 1}` then `.p = "s"` breaks identically, while `{p: "a"}` then `.p = "b"`
-  is fine. So the seeding happens at first _value_, wherever it comes from.
+- **Object-literal initialiser behaved exactly like assignment** —
+  `{p: 1}` then `.p = "s"` broke identically, while `{p: "a"}` then `.p = "b"`
+  was fine. So the seeding happens at first _value_, wherever it comes from.
+  **This case is the residual left by the fix below** and is now tracked as
+  **#3671**: a non-empty literal takes a different code path from the
+  `var o = {}` widening pre-pass.
 - **The slot does not recover.** A third, same-kind-as-the-second write
   (`o.p = 1; o.p = "s"; o.p = "t"`) still reads back wrong.
 - The corrupted value is **self-unequal**, matching the "type-default sentinel
@@ -126,6 +130,55 @@ tech lead's direction; the _implementation_ should be routed per the partition.
 - Not explained by descriptor-sidecar enrichment. The prediction that failing
   `propertyHelper` tests would be enriched for `defineProperty`-defined
   properties was **measured and falsified** (#3668): 671 of 893 such tests pass.
+
+## Fix (landed) and its measured effect
+
+**Root cause, localised:** `src/codegen/declarations/object-shape-widening.ts`,
+`collectPropsFromStatements`. The pre-pass that types the widened struct's
+fields was **first-write-wins**, guarded by a `seenProps` set — a second
+assignment to the same key with a different RHS type was silently ignored for
+typing. The field stayed frozen at the first write's `ValType` (`f64` for
+`o.p = 1`), and every later `struct.set`
+(`src/codegen/expressions/assignment.ts`, `emitAssignToTarget`) force-coerced
+through `coerceType`, whose `f64`↔`i32` paths are raw Wasm numeric conversions.
+A string therefore landed as a genuine NaN payload.
+
+**The tag/payload divergence has a separate cause:** `typeof o.p`
+(`src/codegen/typeof-delete.ts`, `compileTypeofExpression`) folds at compile
+time from the checker's flow-narrowed static type, which tracks the _last_
+textual write — independent of the frozen slot. So `typeof` said `"string"`
+while the payload was NaN. There is **no runtime tag field** on this slot; the
+`JsTag`/`$AnyValue` boxed-any carrier is a different substrate that this
+widened-struct fast path bypasses entirely.
+
+**Fix:** on a repeat assignment whose resolved `ValType` differs from the
+recorded one, widen the field to `externref` instead of keeping the first
+write's type.
+
+**Verified by reverting**, not merely by controls: with the fix removed, the
+`num→{str,null,obj}`, `bool→{num,str,null,obj}` and `third-write` arms return to
+`BROKEN`; with it applied they report `ok`. The with/without diff is non-trivial
+— this is not a no-op.
+
+**Measured corpus effect: ZERO flips.** Local-vs-local A/B via
+`scripts/harness-flip-probe.ts` over a **40-file** sample of
+`built-ins/Object` propertyHelper/`verifyProperty` tests:
+`0 gained, 0 lost, 0 other change, 40 unchanged`, partition verified 40 == 40,
+`{"fail":14,"pass":26}` on both arms.
+
+**Reported as a result, not massaged.** The sample was drawn _before_ the root
+cause was known, and it is small and not representative; the 14 failures in it
+are evidently dominated by other defects (descriptor sidecar, accessors) rather
+than by this path. A larger or differently-targeted measurement may well show
+flips — but re-picking the filter after seeing a zero would be exactly the
+post-hoc fishing this project has been burned by, so the number stands as
+measured. **No conformance improvement is claimed.** The fix is justified as a
+correctness repair with a demonstrated with/without diff, not as a conformance
+win.
+
+**Residual scoped out:** non-empty object literals (`var o = {p: 1}`) take a
+different path and are still monomorphic — filed as **#3671**, guarded by an
+`it.fails` block that errors when it starts passing.
 
 ## Suggested next step
 

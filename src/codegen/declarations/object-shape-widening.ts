@@ -9,6 +9,7 @@ import { forEachChild, ts } from "../../ts-api.js";
 import { resolveWasmType } from "../index.js";
 import { localGlobalIdx } from "../registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType, registerStructType } from "../registry/types.js";
+import { valTypesMatch } from "../shared.js";
 import { widenedVarKeyFromDecl } from "../widened-var-key.js";
 import type { FieldDef, ValType } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
@@ -1010,12 +1011,25 @@ export function collectPropsFromStatements(
         bin.left.expression.text === varName
       ) {
         const propName = bin.left.name.text;
+        // Infer wasm type from the RHS
+        const rhsType = checker.getTypeAtLocation(bin.right);
+        const wasmType = resolveWasmType(ctx, rhsType);
         if (!seenProps.has(propName)) {
           seenProps.add(propName);
-          // Infer wasm type from the RHS
-          const rhsType = checker.getTypeAtLocation(bin.right);
-          const wasmType = resolveWasmType(ctx, rhsType);
           extraProps.push({ name: propName, type: wasmType });
+        } else {
+          // (#3669) A LATER write of a different kind must not be force-coerced
+          // into the first write's slot. This pre-pass used to be
+          // first-write-wins, so `o.p = 1; o.p = "s"` froze the field to `f64`
+          // and every subsequent `struct.set` ran a numeric coercion — a string
+          // landed as NaN while `typeof o.p` (folded from the checker's
+          // narrowed static type, independent of the slot) still said "string".
+          // Widen to the universal carrier instead, so the slot can hold either
+          // kind losslessly.
+          const existing = extraProps.find((p) => p.name === propName);
+          if (existing && !valTypesMatch(existing.type, wasmType)) {
+            existing.type = { kind: "externref" };
+          }
         }
       }
     }
