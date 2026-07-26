@@ -91,6 +91,10 @@ bridge's per-call implementation was:
   per exports object (immutable after instantiation).
 - `snapshotVecMirrors` inlined to a plain loop; `_resolveHostField`'s
   getter-invoke closure hoisted to a top-level helper.
+- `_isWasmStruct` verdict caches merged into ONE WeakMap (one probe per
+  call; measured ~19.9k predicate calls per 330B parse, 95% cache hits,
+  only ~147 slow-path classifications — the volume made the second WeakSet
+  probe of the miss path measurable).
 
 ## Measured after (same protocol)
 
@@ -101,13 +105,39 @@ bridge's per-call implementation was:
 | control-flow.js (330B)       | 155.7ms  | 13.7ms  | 226x         |
 | 17-file corpus concat (4.3KB)| 2,050ms  | 192ms   | 302x         |
 
-**10.7x faster end-to-end; slowdown vs node-acorn reduced from ~3,000x to
+**~11x faster end-to-end; slowdown vs node-acorn reduced from ~3,000x to
 ~150-300x.** Gates: `dogfood:acorn-corpus` 23/23 exact (0 quirks, 0 real
-gaps, incl. acorn self-parse), `tests/issue-1712.test.ts` acceptance green,
-dynamic-dispatch/ifelse-global-shift/capture-closure/exactfield-lane pins
-green. (`issue-1712-reflection-identity.test.ts` has 12 failures that
-reproduce identically on the unmodified base — pre-existing container/env
-issue, not from this branch.)
+gaps, incl. acorn self-parse) — re-verified after every batch;
+`tests/issue-1712.test.ts` acceptance green; dynamic-dispatch /
+ifelse-global-shift / capture-closure / exactfield-lane / tokenizer-identity
+pins green (36 tests); sidecar/presence/tombstone lanes green
+(issue-1630/2130/2668/2731/2739/2853 — 47/48, the one 2668 for-in failure
+reproduces identically on the pre-branch base 5805049, pre-existing).
+`issue-1712-reflection-identity.test.ts`'s 12 failures also reproduce
+identically on the unmodified base (pre-existing container/env issue).
+tsc clean, biome clean.
+
+## wasm-opt data point (measured, not landed)
+
+`optimize: true` (Binaryen) shrinks the host-mode acorn binary **682KB →
+393KB (−42%)** but does NOT improve parse time (medium input 208ms vs
+183ms — within noise, slightly worse). Confirms the residual cost is
+host-bridge crossings, not Wasm execution quality. Worth wiring into the
+dogfood/artifact path for SIZE, irrelevant for speed.
+
+## .wat evidence — what one hot line compiles to
+
+Compiled a minimal acorn-shaped repro (fnctor + prototype methods + a
+`while (this.pos < this.input.length) this.pos = this.pos + 1` loop) via
+`compileToWat`. The single comparison `this.pos < this.input.length`
+lowers to: current-`this` global read with `__get_undefined` fallback →
+`__extern_get(this, "pos")` host crossing → `__extern_is_undefined` probe
+→ a 4-deep `ref.test` ladder over boxed-number shapes whose EVERY arm ends
+in a `__box_number` host call (re-boxing to externref) → two more
+`__extern_get` crossings for `input`/`length` → `__host_compare` on two
+externrefs. The increment adds `__host_add` + `__extern_set_strict`. So
+one source line ≈ 7-9 host crossings; nothing numeric ever stays in Wasm.
+This is the mechanical explanation for 45k crossings / 330 bytes.
 
 ## Remaining follow-up (out of scope here, needs codegen)
 

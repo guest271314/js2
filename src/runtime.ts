@@ -973,29 +973,30 @@ function _rethrowIfProxyOrRevoked(e: any, obj: any): void {
 // implementation forced a V8 exception throw/catch plus a fresh Symbol PER CALL
 // for every WasmGC struct receiver — measured at 57% of total CPU during a
 // compiled-acorn parse. Classification is stable for a given object identity
-// (a struct never becomes a plain object and vice versa), so cache both
-// verdicts in WeakSets. Note `_userProxies` membership also answers false, and
-// a proxy can only be cached here as non-struct — consistent either way.
-const _wasmStructVerdictYes = new WeakSet<object>();
-const _wasmStructVerdictNo = new WeakSet<object>();
+// (a struct never becomes a plain object and vice versa), so cache the verdict
+// in a single WeakMap (one probe per call — ~20k calls per small acorn parse
+// makes the second probe of a two-WeakSet scheme measurable). Note
+// `_userProxies` membership also answers false, and a proxy can only be cached
+// here as non-struct — consistent either way.
+const _wasmStructVerdict = new WeakMap<object, boolean>();
 
 function _isWasmStruct(obj: any): boolean {
   if (obj == null || typeof obj !== "object") return false;
-  if (_wasmStructVerdictYes.has(obj)) return true;
-  if (_wasmStructVerdictNo.has(obj)) return false;
+  const verdict = _wasmStructVerdict.get(obj);
+  if (verdict !== undefined) return verdict;
   if (_userProxies.has(obj)) return false;
   try {
     // WasmGC structs have a null prototype — quick check that exits early for
     // normal objects. (Kept inside the try so an unregistered revoked proxy —
     // whose traps throw — classifies exactly as before the #3673 rework.)
     if (Object.getPrototypeOf(obj) !== null) {
-      _wasmStructVerdictNo.add(obj);
+      _wasmStructVerdict.set(obj, false);
       return false;
     }
     // (#3673) WasmGC objects report non-extensible; a plain Object.create(null)
     // is extensible. This resolves the common case without the probe throw below.
     if (Object.isExtensible(obj)) {
-      _wasmStructVerdictNo.add(obj);
+      _wasmStructVerdict.set(obj, false);
       return false;
     }
     // Final check (rare: non-extensible null-proto value — a sealed/frozen JS
@@ -1005,17 +1006,17 @@ function _isWasmStruct(obj: any): boolean {
     const probe = Symbol();
     (obj as any)[probe] = 1;
     delete (obj as any)[probe];
-    _wasmStructVerdictNo.add(obj);
+    _wasmStructVerdict.set(obj, false);
     return false; // set succeeded → regular object
   } catch (e: any) {
     // Sealed/frozen plain JS objects (null-proto) throw on new-symbol set too.
     // WasmGC structs throw "WebAssembly objects are opaque" — NOT an extensibility error.
     // Filter out the JS extensibility error so sealed JS objects aren't misidentified.
     if (e instanceof TypeError && (e.message ?? "").includes("extensible")) {
-      _wasmStructVerdictNo.add(obj);
+      _wasmStructVerdict.set(obj, false);
       return false;
     }
-    _wasmStructVerdictYes.add(obj);
+    _wasmStructVerdict.set(obj, true);
     return true; // "WebAssembly objects are opaque" or similar
   }
 }
