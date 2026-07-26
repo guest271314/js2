@@ -23,7 +23,7 @@ import {
 
 const F64_TO_F64 = Object.freeze({
   params: Object.freeze(["f64"]),
-  result: "f64",
+  results: Object.freeze(["f64"]),
 }) satisfies ProgramAbiCallableSignature;
 
 function source(fileName: string, text: string): ts.SourceFile {
@@ -478,10 +478,37 @@ describe("#3520 ProgramAbiMap invariants", () => {
     wrongSignature.plan(
       callableAlias(fixture, binding(fixture, "callable", "bad-signature"), callableId, "badSignature", 1, {
         params: [],
-        result: null,
+        results: [],
       }),
     );
     expectInvariant(() => wrongSignature.sealPlan(), "alias-signature-mismatch");
+
+    const multiResultSignature = { params: ["i32"], results: ["i32", "f64"] };
+    const exactMultiResult = new ProgramAbiMap(fixture.inventory);
+    exactMultiResult.plan(requiredCallable(fixture, callableId, "first", 0, fixture.firstUnitId, multiResultSignature));
+    exactMultiResult.plan(
+      callableAlias(
+        fixture,
+        binding(fixture, "callable", "multi-result"),
+        callableId,
+        "multiResult",
+        1,
+        multiResultSignature,
+      ),
+    );
+    exactMultiResult.sealPlan();
+
+    const reorderedMultiResult = new ProgramAbiMap(fixture.inventory);
+    reorderedMultiResult.plan(
+      requiredCallable(fixture, callableId, "first", 0, fixture.firstUnitId, multiResultSignature),
+    );
+    reorderedMultiResult.plan(
+      callableAlias(fixture, binding(fixture, "callable", "reordered-result"), callableId, "reorderedResult", 1, {
+        params: ["i32"],
+        results: ["f64", "i32"],
+      }),
+    );
+    expectInvariant(() => reorderedMultiResult.sealPlan(), "alias-signature-mismatch");
 
     const wrongGlobal = new ProgramAbiMap(fixture.inventory);
     wrongGlobal.plan(requiredGlobal(fixture, globalId, "state", 0));
