@@ -122,10 +122,10 @@ describe.skipIf(ESLINT_LINTER === null)(
     /**
      * Tier 1a — run the real package-entry graph in the Node-host JS lane.
      * #3654 restores the resolver layer, but the expanded graph does not yet
-     * complete inside this test's compile budget (#3658). The independent
+     * complete inside this test's compile budget (#3672). The independent
      * dynamic object-destructuring invariant was removed by #3656.
      */
-    it.skip('Tier 1a — package entry reaches the #3658 frontier for `import { Linter } from "eslint"`', async () => {
+    it.skip('Tier 1a — package entry reaches the #3672 frontier for `import { Linter } from "eslint"`', async () => {
       const r = await compileTier1Entry();
       const diagnostics = r.errors.map((error) => error.message).join("\n");
       expect(r.success).toBe(false);
@@ -144,7 +144,7 @@ describe.skipIf(ESLINT_LINTER === null)(
      * references after dead-elim compaction. Fixed by skipping
      * `collectInterface` for `.d.ts` source files. (#1287)
      */
-    it.skip("Tier 1b — package-entry binary is structurally valid Wasm (blocked before emission by #3655/#3658)", () => {
+    it.skip("Tier 1b — package-entry binary is structurally valid Wasm (blocked before emission by #3655/#3672)", () => {
       // Advance this rung once Tier 1a emits a binary.
     });
 
@@ -157,7 +157,7 @@ describe.skipIf(ESLINT_LINTER === null)(
      * What this rung asserts: compile-time success against a real
      * 32-file CJS module graph. Validation is the next rung.
      */
-    it.skip("Tier 1c — `eslint/lib/linter/linter.js` direct compile succeeds (blocked by #3655/#3658)", async () => {
+    it.skip("Tier 1c — `eslint/lib/linter/linter.js` direct compile succeeds (blocked by #3655/#3672)", async () => {
       const entry = requireEslintFile(ESLINT_LINTER, "lib/linter/linter.js");
       const r = await compileProject(entry, { allowJs: true });
       expect(r.success, r.errors.map((error) => error.message).join("\n")).toBe(true);
@@ -175,7 +175,7 @@ describe.skipIf(ESLINT_LINTER === null)(
      *
      * BLOCKED on #1289.
      */
-    it.skip("Tier 1d — `linter.js` binary instantiates (blocked before validation by #3655/#3658)", async () => {
+    it.skip("Tier 1d — `linter.js` binary instantiates (blocked before validation by #3655/#3672)", async () => {
       const entry = requireEslintFile(ESLINT_LINTER, "lib/linter/linter.js");
       const r = await compileProject(entry, { allowJs: true });
       expect(r.success, r.errors.map((error) => error.message).join("\n")).toBe(true);
@@ -192,7 +192,7 @@ describe.skipIf(ESLINT_LINTER === null)(
      * BLOCKED on #1287, #1289, #1273 (instanceof), #1271 (for-in),
      * #1275 (typeof dispatch).
      */
-    it.skip('Tier 1e — Node-host `Linter.verify("const x = 1;", {})` returns `[]` (blocked by #3655/#3657/#3658)', async () => {
+    it.skip('Tier 1e — Node-host `Linter.verify("const x = 1;", {})` returns `[]` (blocked by #3655/#3657/#3672)', async () => {
       const entry = writeEntry(
         "tier1e-entry.ts",
         `

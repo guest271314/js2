@@ -1,5 +1,5 @@
 ---
-id: 3658
+id: 3672
 title: "ESLint linter.js: resolved 149-file graph exhausts a 2 GB compiler heap"
 status: ready
 created: 2026-07-26
@@ -17,7 +17,7 @@ es_edition: n/a
 related: [824, 1282, 1400, 1573, 1942, 3654, 3655, 3656, 3657]
 ---
 
-# #3658 — Bound full codegen for the resolved ESLint Linter graph
+# #3672 — Bound full codegen for the resolved ESLint Linter graph
 
 ## Problem
 
