@@ -29,7 +29,7 @@
 // and reports coverage (they are named follow-ups in the issue).
 
 import { Builtin, Encoder, type JumpSlot } from "./encoder.js";
-import { FLAG_SCRIPT, type FuncMeta, type JSValue } from "./types.js";
+import { FLAG_SCRIPT, FLAG_STRICT, type FuncMeta, type JSValue } from "./types.js";
 import { Op } from "./opcodes.js";
 
 /** Thrown when the emitter meets a Phase-1-out-of-scope ESTree node/operator. */
@@ -84,6 +84,8 @@ class FunctionEmitter {
   private readonly hoistedVars: string[] = [];
   /** Hoisted function declarations (collected before emission). */
   private readonly hoistedFuncs: Node[] = [];
+  /** Function directive-prologue strictness (scripts keep their global-this entry semantics). */
+  private strictMode = false;
 
   constructor(params: Node[], body: Node, name: JSValue, isScript: boolean, isExpressionBody: boolean) {
     // Use explicit fields instead of TypeScript parameter properties: the E2
@@ -160,6 +162,18 @@ class FunctionEmitter {
       this.enc.emit0(Op.Return);
     } else {
       const stmts: Node[] = this.body.body;
+      if (!this.isScript) {
+        // Detect the directive prologue inline. A newly-added late class helper
+        // is not a stable self-compile call seam until #3651 lands.
+        for (const statement of stmts) {
+          if (statement.type !== "ExpressionStatement" || statement.expression.type !== "Literal") break;
+          if (statement.expression.value === "use strict") {
+            this.strictMode = true;
+            break;
+          }
+          if (typeof statement.expression.value !== "string") break;
+        }
+      }
       // Collect all var/function/let/const declarations (function-scoped).
       this.collectHoist(stmts);
       if (this.isScript) {
@@ -189,7 +203,7 @@ class FunctionEmitter {
       }
     }
 
-    const flags = this.isScript ? FLAG_SCRIPT : 0;
+    const flags = (this.isScript ? FLAG_SCRIPT : 0) | (this.strictMode ? FLAG_STRICT : 0);
     return this.enc.finish(this.maxReg, paramCount, this.name, flags);
   }
 

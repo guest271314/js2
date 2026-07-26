@@ -56,7 +56,16 @@ import {
   anyTypeof,
   isTruthy,
 } from "./runtime-ops.js";
-import { ENV_DECLARATIVE, type EnvRec, EXN_ROW, Frame, type FuncMeta, type JSValue, type Regs } from "./types.js";
+import {
+  ENV_DECLARATIVE,
+  type EnvRec,
+  EXN_ROW,
+  FLAG_STRICT,
+  Frame,
+  type FuncMeta,
+  type JSValue,
+  type Regs,
+} from "./types.js";
 
 /** A genuine interpreter-invariant violation (bad opcode, stalled decode). Never
  *  routed through the exception table — rethrown so it cannot be masked by a
@@ -121,7 +130,8 @@ export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): Interp
     a6?: JSValue,
     a7?: JSValue,
   ): JSValue {
-    return interpEnter(meta, envRec, normalizeSloppyThis(envRec, this), [a0, a1, a2, a3, a4, a5, a6, a7]);
+    const receiver = (meta.flags & FLAG_STRICT) !== 0 ? this : normalizeSloppyThis(envRec, this);
+    return interpEnter(meta, envRec, receiver, [a0, a1, a2, a3, a4, a5, a6, a7]);
   };
   const nm = typeof meta.name === "string" ? meta.name : "";
   try {
@@ -394,7 +404,10 @@ function run(bottom: Frame): JSValue {
               const cm = binding.meta;
               const cregs: Regs = new Array(cm.regCount);
               for (let i = 0; i < cm.regCount; i += 1) cregs[i] = undefined;
-              cregs[0] = normalizeSloppyThis(binding.envRec, regs[base]); // receiver → sloppy this
+              cregs[0] =
+                (cm.flags & FLAG_STRICT) !== 0
+                  ? regs[base]
+                  : normalizeSloppyThis(binding.envRec, regs[base]); // receiver → this
               const np = argc < cm.paramCount ? argc : cm.paramCount;
               for (let i = 0; i < np; i += 1) cregs[1 + i] = regs[base + 1 + i];
               // Suspend the caller, install the callee frame (no host recursion).
