@@ -5,8 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c10-class-method-aliases
-pr: 3677
+branch: codex/3520-c11-import-callables
 last_merged_pr: 3496
 sprint: current
 created: 2026-07-21
@@ -86,6 +85,7 @@ files:
   - src/codegen/context/create-context.ts
   - src/codegen/dead-elimination.ts
   - src/codegen/func-space.ts
+  - src/codegen/program-abi-import-planning.ts
   - src/codegen/program-abi-planning.ts
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
@@ -134,6 +134,8 @@ files:
   - tests/issue-3520-support-callable-abi.test.ts
   - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
+  - tests/issue-3520-program-abi-import-callable-planning.test.ts
+  - tests/issue-3520-imported-callable-abi.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
@@ -1529,6 +1531,59 @@ production `LegacyAbiAdapter` cutover still remain. R2 must then prepare the
 whole IR program before body emission; R3-R8 move function, class,
 module-initializer, multisource, runtime/async, and linear ownership to that
 program; R9 removes fallback policy; and R10 deletes the direct codegen path.
+
+### 2026-07-26 retained imported-callable continuation
+
+The next stacked continuation on `codex/3520-c11-import-callables` moves the
+module's retained function-import population into the production Program ABI:
+
+- before IR body lowering, every registered function import is validated and
+  cataloged by its exact module/field structural key and allocator `Import`
+  object. Import refs now resolve through that exact object and current import
+  position; a compatibility label cannot redirect the call through
+  `funcMap`;
+- pre-DCE cataloging deliberately creates no required ABI slots. After
+  dead-import and type elimination settles the final module, every retained
+  function import receives a deterministic entry-source-owned callable ID,
+  complete final signature contract, structural reference, and exact
+  `import-function` locator;
+- repeated module/field imports are real production allocator entries rather
+  than a theoretical error case. The most recently inserted retained object
+  owns the base structural ref used by current symbolic IR; every earlier
+  retained duplicate receives a separate allocator-occurrence key, ID,
+  signature, and final slot. This preserves existing module-index semantics
+  without consulting the compatibility map; and
+- single- and multi-module finalization invoke the same retained-import
+  planner immediately after DCE and before Program ABI publication.
+
+The production regression lowers a real `console.log(number)` import call,
+passes a deliberately false adapter label through the resolver probe, verifies
+the exact published `env.console_log_number` import object and post-DCE
+signature, and executes the emitted program. Planner regressions cover reverse
+registration order, equal fields from different modules, late import shifts,
+reference-bearing type remapping, runtime-immutable catalogs, dead
+preparation-only imports, allocator duplicates, malformed signatures, and
+missing entry provenance.
+
+The complete #3520 matrix plus #2138 passes **255/255 across 44 files**. The
+focused catalog/production/structural matrix passes **40/40**; the full #3214
+imported-HOF and host-callback matrix passes **60/60**; and the linear,
+cross-backend, and adjacent constructor matrix passes **43/43**. Strict
+TypeScript, lint, scoped Prettier, diff, LOC/function budget, dead-export,
+checker-oracle, issue-spec, and fallback gates pass.
+
+The hybrid readiness lane remains **31 IR-emitted / 6 typed Unsupported / 0
+Invariant across 37 terminal units**, with all 37 legacy bodies still emitted.
+The full equivalence gate reports **1,608 passing / 35 known failing / 0 new
+regressions** and one prior baseline failure now passing; the shared baseline
+was deliberately left unchanged. This continuation did not run a local
+Test262 shard.
+
+C11 closes retained raw function-import IDs and exact import-object locators,
+not semantic provider ownership or R1. Dual-mode runtime/intrinsic providers,
+inherited accessors, static and externref/Promise-host support helpers, Program
+ABI type/class-layout entries, exports and remaining alias families, and the
+production `LegacyAbiAdapter` cutover still remain before R2 can start.
 
 ### R1a validation evidence
 

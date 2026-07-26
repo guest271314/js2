@@ -60,6 +60,7 @@ import {
   PROGRAM_ABI_CALLABLE_ROLE,
   PROGRAM_ABI_GLOBAL_ROLE,
 } from "../codegen/program-abi-planning.js";
+import { catalogProgramAbiCallableImports } from "../codegen/program-abi-import-planning.js";
 // (#2856) Console-variant parity with the legacy collectConsoleImports scan.
 import { isBooleanType, isNumberType, isStringType } from "../checker/type-mapper.js";
 import {
@@ -105,6 +106,7 @@ import {
 } from "./abi-bindings.js";
 import {
   irCallableBindingKey,
+  irImportFuncRef,
   irIntrinsicFuncRef,
   irSupportFuncRef,
   irUnitCallableBindingId,
@@ -181,7 +183,7 @@ import { verifyIrFunction } from "./verify.js";
 import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
-import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
+import type { FieldDef, FuncTypeDef, Import, Instr, StructTypeDef, ValType } from "./types.js";
 import { definedFuncAt, definedFuncHandleOf, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
 import {
   classifyIrFailure,
@@ -1639,6 +1641,7 @@ export function compileIrPathFunctions(
   ) {
     return finishReport();
   }
+  const importedCallableCatalog = catalogProgramAbiCallableImports(ctx);
 
   // -------------------------------------------------------------------------
   // Register monomorphized clones in `ctx` — append a placeholder
@@ -1939,6 +1942,7 @@ export function compileIrPathFunctions(
       deferredCell,
       deferredClass,
       unitCallableSlots,
+      importedCallableCatalog,
     );
     const resolverInjection = process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE;
     if (resolverInjection === "function") resolver.resolveFunc(irIntrinsicFuncRef("__injected_missing_func"));
@@ -1969,6 +1973,34 @@ export function compileIrPathFunctions(
             "planned support resolver probe did not preserve the exact allocator slot",
           );
         }
+      }
+    }
+    if (resolverInjection === "planned-import") {
+      const imported = ctx.mod.imports.find((candidate) => candidate.desc.kind === "func");
+      const session = ctx.programAbiSession;
+      if (!imported || imported.desc.kind !== "func" || !session) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          "planned import resolver probe requires one exact function import",
+        );
+      }
+      const misleadingRef = irImportFuncRef(imported.module, imported.name, "__nonexistent_import_compatibility_label");
+      const key = irCallableBindingKey(misleadingRef.binding);
+      const exactImport = importedCallableCatalog.get(key);
+      let expected = -1;
+      let functionIndex = 0;
+      for (const candidate of ctx.mod.imports) {
+        if (candidate.desc.kind !== "func") continue;
+        if (candidate === exactImport) expected = functionIndex;
+        functionIndex++;
+      }
+      if (!exactImport || expected < 0 || resolver.resolveFunc(misleadingRef) !== expected) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          "planned import resolver probe did not preserve the exact import-object slot",
+        );
       }
     }
     const injectionOwner = moduleBindingIdentityContext.inventory.sources[0]?.id;
@@ -3081,6 +3113,7 @@ function makeResolver(
   refCellResolver: DeferredRefCellResolver,
   classResolver: DeferredClassResolver,
   unitCallableSlots: ReadonlyMap<IrUnitId, IrUnitCallableSlot>,
+  importedCallableCatalog: ReadonlyMap<string, Import>,
 ): IrLowerResolver {
   // (#2949 slice 3) One dynamic-lowering handle per resolver (undefined =
   // not yet built; null = mode has no dynamic op lowering).
@@ -3117,6 +3150,39 @@ function makeResolver(
           ref.binding.bindingId,
           "function",
           irCallableBindingKey(ref.binding),
+        );
+      }
+      if (ref.binding.kind === "import" && ctx.programAbiSession) {
+        const structuralReferenceKey = irCallableBindingKey(ref.binding);
+        const exactImport = importedCallableCatalog.get(structuralReferenceKey);
+        if (!exactImport || exactImport.desc.kind !== "func") {
+          throw new IrInvariantError(
+            "unknown-function-ref",
+            "lower",
+            `ir/integration: unknown exact function import ${ref.binding.module}.${ref.binding.field}`,
+          );
+        }
+        let functionIndex = 0;
+        let resolved = -1;
+        for (const imported of ctx.mod.imports) {
+          if (imported.desc.kind !== "func") continue;
+          if (imported === exactImport) {
+            if (resolved >= 0) {
+              throw new IrInvariantError(
+                "selection-preparation-mismatch",
+                "lower",
+                `ir/integration: exact function import ${ref.binding.module}.${ref.binding.field} has duplicate allocator ownership`,
+              );
+            }
+            resolved = functionIndex;
+          }
+          functionIndex++;
+        }
+        if (resolved >= 0) return resolved;
+        throw new IrInvariantError(
+          "unknown-function-ref",
+          "lower",
+          `ir/integration: exact function import ${ref.binding.module}.${ref.binding.field} lost its allocator object`,
         );
       }
       // #2945 — `%` lowers to a call of the Wasm-native exact-fmod helper.
