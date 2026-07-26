@@ -552,7 +552,6 @@ export function compileLinearIrFunctions(
   const built = new Map<IrUnitId, IrFunction>();
   const lastFailure = new Map<IrUnitId, LinearIrRejection>();
   let pending = claimedDecls;
-
   // Pre-seed `calleeTypes` from effective TS/JSDoc annotations and, only for
   // certified recursive SCC members, the evidence TypeMap. The same entries
   // are passed as from-ast overrides so declaration lowering and recursive
