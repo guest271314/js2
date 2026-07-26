@@ -231,6 +231,36 @@ issue-3031-proxy-apply — 71 tests); the 94 standalone/native-string suites
 show the SAME 9 pre-existing failures and zero new; host corpus 23/23
 exact; 1712 acceptance + pins green; tsc + biome clean.
 
+## Round 4 — funcref-extraction root-collapse + the measured wall
+
+`buildFuncrefExtraction` (shared by `__call_fn_<N>`/`__call_fn_method_<N>`
+/`__closure_arity`/`__apply_closure`'s arity probe) emitted one
+`ref.test`+cast+get arm PER closure struct shape. Since
+`mintClosureStructTypes` makes every shared-signature wrapper AND every
+capture-carrying closure subtype the canonical ROOT wrapper, the ladder now
+collapses to ONE root arm (+ per-shape arms only for named function
+expressions / wrapper-less fallbacks). Measured: ~3% (3.52 → 3.41ms) — the
+extraction was not the hot part of these dispatchers.
+
+**The measured wall (next session's target): closure-arity + funcref-type
+chains.** The emitted `__apply_closure` carries a 149-arm `ref.test` chain
+over distinct closure FUNC types to answer "declared arity of this
+closure" (the #3592 widening probe), and `__call_fn_method_1` a 69-arm
+chain to select the `call_ref` target type. Together `__apply_closure`
+(12.5%) + `__call_fn_method_{0,1,2,3}` (~13.5%) are the dominant remaining
+cost, and both are O(#closure-func-types) per dynamic call. The real fix
+is REPRESENTATIONAL: carry the declared arity (and ideally a small
+signature id) as a field in the root closure wrapper so the probe is one
+`struct.get`. That shifts every capture field index by one — capture
+indices are computed at multiple sites (`closures.ts` `i + 1` sites, TDZ
+at `1 + captures.length + ti`, `__constructible` append, every allocation
+`struct.new` operand list) — a contained but genuinely risky refactor
+that needs its own slice with the full closure/dispatch suite as the
+gate (the #1712 history shows this class of change causing invalid-wasm
+regressions when done piecemeal). Remaining profile after round 4:
+`__apply_closure` 12.5%, `__extern_get` 11.3%, `__obj_find` 6.5%,
+`__call_fn_method_1` 5.4%, `__str_equals` 5.2%.
+
 **Answer to the hybrid question**: yes, and it is now the winning
 direction. The standalone object runtime, after this round, outperforms
 the host bridge — so a "standalone-core + thin host imports" artifact

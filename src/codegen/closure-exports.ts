@@ -13,6 +13,7 @@ import type { CodegenContext } from "./context/types.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
 import { addUnionImports } from "./registry/imports.js";
 import { buildClosureRefTestArms, collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
+import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -408,7 +409,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   // (collectClosureBaseWrapperTypeIdxs): chain a `ref.test` per distinct self
   // shape, extracting field 0 from whichever matches. `funcLocal` stays null
   // when nothing matches and the dispatch falls through as before.
-  body.push(...buildFuncrefExtraction(entries, anyLocal, funcLocal));
+  body.push(...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal));
   body.push(...funcrefDispatch);
 
   mod.functions.push({
@@ -440,21 +441,66 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
  * `funcLocal` as null funcref (the dispatch chain's `ref.test`s all fail on
  * null and yield the `ref.null.extern` fallthrough).
  */
-function buildFuncrefExtraction(entries: { selfTypeIdx: number }[], anyLocal: number, funcLocal: number): Instr[] {
+function buildFuncrefExtraction(
+  ctx: CodegenContext,
+  entries: { selfTypeIdx: number }[],
+  anyLocal: number,
+  funcLocal: number,
+): Instr[] {
+  // (#3673) Root-collapse: every shared-signature wrapper AND every
+  // capture-carrying closure struct subtypes the canonical root wrapper
+  // (mintClosureStructTypes / getOrCreateFuncRefWrapperTypes), and field 0 is
+  // funcref on the root itself — so ONE `ref.test <root>` arm extracts the
+  // funcref for all of them. Only shapes with no path to the root (named
+  // function expressions, wrapper-less fallbacks) keep per-shape arms. The
+  // old one-arm-per-shape ladder ran per dynamic call/arity-probe and scaled
+  // with the number of closures in the program (hundreds for acorn).
+  const rootIdx = getFuncRefWrapperRootTypeIdx(ctx);
+  const isRootDescendant = (typeIdx: number): boolean => {
+    if (rootIdx === undefined) return false;
+    let cur: number | undefined = typeIdx;
+    let guard = 0;
+    while (cur !== undefined && cur >= 0 && guard++ < 64) {
+      if (cur === rootIdx) return true;
+      const t: { kind: string; superTypeIdx?: number } | undefined = ctx.mod.types[cur];
+      cur = t && t.kind === "struct" ? t.superTypeIdx : undefined;
+    }
+    return false;
+  };
   const out: Instr[] = [];
   const seenShape = new Set<number>();
+  let needRootArm = false;
+  const ladderShapes: number[] = [];
   for (const entry of entries) {
     if (seenShape.has(entry.selfTypeIdx)) continue;
     seenShape.add(entry.selfTypeIdx);
+    if (isRootDescendant(entry.selfTypeIdx)) needRootArm = true;
+    else ladderShapes.push(entry.selfTypeIdx);
+  }
+  if (needRootArm) {
     out.push({ op: "local.get", index: anyLocal });
-    out.push({ op: "ref.test", typeIdx: entry.selfTypeIdx });
+    out.push({ op: "ref.test", typeIdx: rootIdx! });
     out.push({
       op: "if",
       blockType: { kind: "empty" },
       then: [
         { op: "local.get", index: anyLocal },
-        { op: "ref.cast", typeIdx: entry.selfTypeIdx },
-        { op: "struct.get", typeIdx: entry.selfTypeIdx, fieldIdx: 0 },
+        { op: "ref.cast", typeIdx: rootIdx! },
+        { op: "struct.get", typeIdx: rootIdx!, fieldIdx: 0 },
+        { op: "local.set", index: funcLocal },
+      ],
+    });
+  }
+  for (const selfTypeIdx of ladderShapes) {
+    out.push({ op: "local.get", index: anyLocal });
+    out.push({ op: "ref.test", typeIdx: selfTypeIdx });
+    out.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: selfTypeIdx },
+        { op: "struct.get", typeIdx: selfTypeIdx, fieldIdx: 0 },
         { op: "local.set", index: funcLocal },
       ],
     });
@@ -728,7 +774,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // require their own shape arms. The funcref dispatch below leaves its
   // externref result on the stack (null fallthrough when `funcLocal` stayed
   // null because no shape matched).
-  body.push(...buildFuncrefExtraction(entries, anyLocal, funcLocal));
+  body.push(...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal));
   body.push(...funcrefDispatch);
 
   // Restore __current_this. The result value remains on the stack as the
@@ -908,7 +954,7 @@ function buildClosureArityProbe(
     { op: "local.set", index: anyLocal },
     { op: "ref.null.func" },
     { op: "local.set", index: funcLocal },
-    ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
+    ...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal),
     ...chain,
   ];
 }
@@ -991,7 +1037,7 @@ export function emitClosureArityExport(ctx: CodegenContext): void {
     { op: "local.get", index: 0 },
     { op: "any.convert_extern" },
     { op: "local.set", index: anyLocal },
-    ...buildFuncrefExtraction(entries, anyLocal, funcLocal),
+    ...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal),
   ];
   for (const entry of entries) {
     body.push({ op: "local.get", index: funcLocal });
