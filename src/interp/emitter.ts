@@ -532,8 +532,7 @@ class FunctionEmitter {
       } else {
         this.emitLoadName(node.name);
       }
-    }
-    else if (node.type === "ThisExpression") this.enc.emitReg(Op.Ldar, 0);
+    } else if (node.type === "ThisExpression") this.enc.emitReg(Op.Ldar, 0);
     else if (node.type === "ArrayExpression") this.emitArray(node);
     else if (node.type === "ObjectExpression") this.emitObject(node);
     else if (node.type === "MemberExpression") this.emitMemberGet(node);

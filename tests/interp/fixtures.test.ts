@@ -42,7 +42,12 @@ describe("#2928 dynamic Function factory", () => {
 
   it("preserves undefined bare-call this for a strict dynamic function", () => {
     const globalObject: Record<string, unknown> = {};
-    const fn = createDynamicFunction((source) => parse(source), "", '"use strict"; return this', globalObject) as () => unknown;
+    const fn = createDynamicFunction(
+      (source) => parse(source),
+      "",
+      '"use strict"; return this',
+      globalObject,
+    ) as () => unknown;
     expect(fn()).toBeUndefined();
   });
 });

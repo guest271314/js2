@@ -3982,11 +3982,7 @@ function isStaticallyCallableExpression(ctx: CodegenContext, value: ts.Expressio
   ) {
     return true;
   }
-  try {
-    return ctx.checker.getTypeAtLocation(expr).getCallSignatures().length > 0;
-  } catch {
-    return false;
-  }
+  return ctx.oracle.signatureOf(expr) !== undefined;
 }
 
 /**

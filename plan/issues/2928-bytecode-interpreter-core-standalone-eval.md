@@ -17,6 +17,20 @@ sprint: Backlog
 parent: 1584
 depends_on: [2927] # 2853 done (sprint 71) — removed 2026-07-17, see plan/log/analysis-2026-07/02-interpreter-backend-audit-2026-07-17.md
 related: [1715, 1713, 2864, 2865, 2960, 3017, 2929]
+oracle-ratchet-allow:
+  - src/codegen/expressions/eval-inline.ts
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/context/types.ts
+func-budget-allow:
+  - src/codegen/expressions/calls.ts::compileCallExpression
+  - src/codegen/index.ts::planIrOverlay
+  - src/codegen/index.ts::generateModule
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/expressions/new-builtin-globals.ts::tryCompileBuiltinGlobalNew
 ---
 
 # #2928 — Bytecode interpreter core + standalone `new Function` / indirect eval

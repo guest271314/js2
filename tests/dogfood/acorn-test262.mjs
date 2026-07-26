@@ -24,6 +24,7 @@
 //   pnpm run dogfood:acorn-test262 -- --limit=100
 //   pnpm run dogfood:acorn-test262 -- --path=language/expressions
 //   pnpm run dogfood:acorn-test262 -- --shard=1/4
+//   pnpm run dogfood:acorn-test262 -- --mismatch-report=/tmp/prior-report.json
 //   pnpm run dogfood:acorn-test262 -- --json
 
 import { execFileSync } from "node:child_process";
@@ -102,6 +103,7 @@ function parseArgs(argv) {
   const options = {
     json: false,
     limit: null,
+    mismatchReports: [],
     pathFilters: [],
     reportPath: DEFAULT_REPORT_PATH,
     shardIndex: 0,
@@ -114,6 +116,8 @@ function parseArgs(argv) {
     if (arg === "--json") options.json = true;
     else if (arg === "--single-variant") options.strictReruns = false;
     else if (arg.startsWith("--limit=")) options.limit = Number.parseInt(arg.slice("--limit=".length), 10);
+    else if (arg.startsWith("--mismatch-report="))
+      options.mismatchReports.push(resolve(arg.slice("--mismatch-report=".length)));
     else if (arg.startsWith("--path=")) options.pathFilters.push(arg.slice("--path=".length));
     else if (arg.startsWith("--report=")) options.reportPath = resolve(arg.slice("--report=".length));
     else if (arg.startsWith("--shard=")) {
@@ -166,6 +170,16 @@ function trackedTestFiles(test262Root, testDir) {
 
 function selectFiles(files, options) {
   let selected = files;
+  if (options.mismatchReports.length > 0) {
+    const mismatchFiles = new Set();
+    for (const reportPath of options.mismatchReports) {
+      const report = JSON.parse(readFileSync(reportPath, "utf8"));
+      for (const mismatch of report.recordedMismatches ?? []) {
+        if (typeof mismatch?.file === "string") mismatchFiles.add(mismatch.file);
+      }
+    }
+    selected = selected.filter((file) => mismatchFiles.has(file.path));
+  }
   if (options.pathFilters.length > 0) {
     selected = selected.filter((file) => options.pathFilters.some((filter) => file.path.includes(filter)));
   }
@@ -267,6 +281,7 @@ export async function runTest262Differential(rawOptions = {}) {
   const options = {
     json: false,
     limit: null,
+    mismatchReports: [],
     pathFilters: [],
     reportPath: DEFAULT_REPORT_PATH,
     shardIndex: 0,
@@ -281,6 +296,13 @@ export async function runTest262Differential(rawOptions = {}) {
   const test262Revision = execFileSync("git", ["-C", test262Root, "rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim();
+  const compilerRevision = execFileSync("git", ["-C", ROOT, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+  }).trim();
+  const compilerDirty =
+    execFileSync("git", ["-C", ROOT, "status", "--porcelain=v1", "--untracked-files=normal"], {
+      encoding: "utf8",
+    }).trim().length > 0;
   const corpusDigest = createHash("sha256")
     .update(selectedFiles.map((file) => file.path).join("\n"))
     .digest("hex");
@@ -406,12 +428,15 @@ export async function runTest262Differential(rawOptions = {}) {
     generatedAt: new Date().toISOString(),
     acornVersion: compiled.version,
     acornTarballShasum: compiled.pin.shasum,
+    compilerRevision,
+    compilerDirty,
     test262Revision,
     corpusDigest,
     options: {
       ecmaVersion: ECMA_VERSION,
       exactPositions: true,
       strictReruns: options.strictReruns,
+      mismatchReports: options.mismatchReports,
       pathFilters: options.pathFilters,
       limit: options.limit,
       shard: `${options.shardIndex + 1}/${options.shardCount}`,

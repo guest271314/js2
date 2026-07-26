@@ -11,12 +11,7 @@ const TEST262_ROOT = resolve(ROOT, "test262");
 const HOST_REGEXP_IMPORT_RE = /(^|::)RegExp_/;
 
 async function compileAndRun(source: string): Promise<number> {
-  const result = await compile(source, {
-    fileName: "issue-3507.ts",
-    target: "standalone",
-    skipSemanticDiagnostics: true,
-    experimentalIR: false,
-  });
+  const result = await compile(source, { fileName: "issue-3507.ts", target: "standalone" });
   expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
   expect(
     result.imports.map((entry) => `${entry.module}::${entry.name}`).filter((name) => HOST_REGEXP_IMPORT_RE.test(name)),

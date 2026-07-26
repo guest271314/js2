@@ -9,9 +9,25 @@ import { forEachChild, ts } from "../../ts-api.js";
 import { resolveWasmType } from "../index.js";
 import { localGlobalIdx } from "../registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterVecType, registerStructType } from "../registry/types.js";
+import { valTypesMatch } from "../shared.js";
 import { widenedVarKeyFromDecl } from "../widened-var-key.js";
 import type { FieldDef, ValType } from "../../ir/types.js";
 import type { CodegenContext } from "../context/types.js";
+
+function isUnboxedPrimitiveCarrier(type: ValType): boolean {
+  return ["f64", "f32", "i64", "i32", "i16", "i8"].includes(type.kind);
+}
+
+type WidenedPropCandidate = {
+  name: string;
+  type: ValType;
+  primitiveSeed: boolean;
+};
+
+function isRuntimePrimitiveSeed(type: ValType, tsType: ts.Type): boolean {
+  const sentinelFlags = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Null;
+  return isUnboxedPrimitiveCarrier(type) && (tsType.flags & sentinelFlags) === 0;
+}
 
 /**
  * Early, type-table-neutral carrier scan for functions that return an empty
@@ -118,7 +134,7 @@ export function collectEmptyObjectWidening(
           // (#3403) per-declaration key for `widenedDefinePropertyKeys`; matches
           // what `integrityVarKey` yields at the USE sites in object-ops.ts.
           const varKey = widenedVarKeyFromDecl(decl.name);
-          const extraProps: { name: string; type: ValType }[] = [];
+          const extraProps: WidenedPropCandidate[] = [];
           const seenProps = new Set<string>();
 
           // Scan all following statements in the same block for property assignments
@@ -186,6 +202,21 @@ export function collectEmptyObjectWidening(
           if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
             for (const s of stmts) {
               markStandaloneAccessorDefineTargets(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
+          // (#1712) Descriptor/integrity mutation is per OBJECT IDENTITY, not
+          // per structural Wasm type. Keep every receiver of Object's mutating
+          // MOPs on the canonical open `$Object` store so define/freeze/seal
+          // update the exact `$PropEntry` metadata later read by direct OR
+          // stored gOPD. This includes a builtin captured into a local
+          // (`const define = Object.defineProperty; define(o, ...)`): the
+          // stored closure has the same mutation effect as its direct spelling.
+          // Baking these flags into a widened closed shape would incorrectly
+          // share one instance's integrity state with every same-shape object.
+          if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markStandaloneObjectMutationTargets(ctx, s, varName, ctx.objectHashConsumerVars);
             }
           }
 
@@ -278,63 +309,22 @@ export function collectEmptyObjectWidening(
             // host `$Object` fails the decl-init cast, and the var is null from
             // the first instruction — the acorn `Parser`/`getOptions` escape
             // shape in TS-mode typing (tests/issue-2944.test.ts).
-            // (#1712/#2849 standalone completion) The same representation
-            // invariant is required without a host: the `{}` initializer is a
-            // native `$Object`, so leaving the evolved checker type mapped to a
-            // closed anon struct makes the declaration's guarded cast store
-            // null. Acorn's `getOptions` then successfully performs its dynamic
-            // for-in writes against that null receiver but traps at the first
-            // static `options.ecmaVersion` read. Poison the fresh per-variable
-            // type in every target; the provenance guards below keep annotated
-            // or shared types out.
-            const vt = checker.getTypeAtLocation(decl.name);
-            if (
-              !(vt.flags & ts.TypeFlags.Any) &&
-              (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
-            ) {
-              ctx.objectHashConsumerTypes.add(vt);
-            }
-            const it = checker.getTypeAtLocation(decl.initializer);
-            if (
-              !(it.flags & ts.TypeFlags.Any) &&
-              (it.getProperties().length > 0 || it.symbol?.declarations?.[0] === decl.initializer)
-            ) {
-              ctx.objectHashConsumerTypes.add(it);
-            }
-            if (ctx.standalone) ctx.growableObjectLiteralVars.add(varName);
-            // Record the enclosing function's inferred return type during this
-            // early shape pass as well. Fnctor field derivation can run before
-            // collectDeclarations reaches the function declaration (Acorn's
-            // Parser constructor stores `getOptions(options)`), and must already
-            // see that return as the open-object externref carrier.
-            let owner: ts.Node | undefined = decl.parent;
-            while (owner && !ts.isFunctionDeclaration(owner) && !ts.isSourceFile(owner)) owner = owner.parent;
-            if (owner && ts.isFunctionDeclaration(owner) && owner.body) {
-              let returnsVar = false;
-              const findReturn = (node: ts.Node): void => {
-                if (returnsVar) return;
-                if (
-                  node !== owner &&
-                  (ts.isFunctionDeclaration(node) ||
-                    ts.isFunctionExpression(node) ||
-                    ts.isArrowFunction(node) ||
-                    ts.isMethodDeclaration(node) ||
-                    ts.isAccessor(node) ||
-                    ts.isConstructorDeclaration(node))
-                ) {
-                  return;
-                }
-                if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
-                  if (node.expression.text === varName) returnsVar = true;
-                  return;
-                }
-                forEachChild(node, findReturn);
-              };
-              forEachChild(owner.body, findReturn);
-              if (returnsVar) {
-                const sig = checker.getSignatureFromDeclaration(owner);
-                if (sig) ctx.objectHashConsumerTypes.add(checker.getReturnTypeOfSignature(sig));
+            if (!ctx.standalone) {
+              // Preserve the host lane's evolved-variable-only poison. Its
+              // live-mirror/sidecar provider still relies on the initializer
+              // retaining main's closed-struct representation.
+              const vt = checker.getTypeAtLocation(decl.name);
+              if (
+                !(vt.flags & ts.TypeFlags.Any) &&
+                (vt.getProperties().length > 0 ||
+                  vt.symbol?.declarations?.[0] === (decl.initializer as unknown as ts.Declaration))
+              ) {
+                ctx.objectHashConsumerTypes.add(vt);
               }
+            } else {
+              // Standalone's native `$Object` provider needs the initializer,
+              // variable, and enclosing return carrier pinned together.
+              recordOpenObjectConsumerTypes(ctx, checker, decl, varName);
             }
             continue;
           }
@@ -391,6 +381,61 @@ export function collectEmptyObjectWidening(
   }
 
   scanStatements(sourceFile.statements);
+}
+
+function recordOpenObjectConsumerTypes(
+  ctx: CodegenContext,
+  checker: ts.TypeChecker,
+  decl: ts.VariableDeclaration,
+  varName: string,
+): void {
+  if (!decl.initializer) return;
+  const initializerDeclaration = decl.initializer as unknown as ts.Declaration;
+  const vt = checker.getTypeAtLocation(decl.name);
+  if (
+    !(vt.flags & ts.TypeFlags.Any) &&
+    (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === initializerDeclaration)
+  ) {
+    ctx.objectHashConsumerTypes.add(vt);
+  }
+  const it = checker.getTypeAtLocation(decl.initializer);
+  if (
+    !(it.flags & ts.TypeFlags.Any) &&
+    (it.getProperties().length > 0 || it.symbol?.declarations?.[0] === initializerDeclaration)
+  ) {
+    ctx.objectHashConsumerTypes.add(it);
+  }
+  if (ctx.standalone) ctx.growableObjectLiteralVars.add(varName);
+
+  // Fnctor field derivation can run before collectDeclarations reaches the
+  // function declaration, so record the inferred return carrier here too.
+  let owner: ts.Node | undefined = decl.parent;
+  while (owner && !ts.isFunctionDeclaration(owner) && !ts.isSourceFile(owner)) owner = owner.parent;
+  if (!owner || !ts.isFunctionDeclaration(owner) || !owner.body) return;
+  let returnsVar = false;
+  const findReturn = (node: ts.Node): void => {
+    if (returnsVar) return;
+    if (
+      node !== owner &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isAccessor(node) ||
+        ts.isConstructorDeclaration(node))
+    ) {
+      return;
+    }
+    if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
+      if (node.expression.text === varName) returnsVar = true;
+      return;
+    }
+    forEachChild(node, findReturn);
+  };
+  forEachChild(owner.body, findReturn);
+  if (!returnsVar) return;
+  const sig = checker.getSignatureFromDeclaration(owner);
+  if (sig) ctx.objectHashConsumerTypes.add(checker.getReturnTypeOfSignature(sig));
 }
 
 /**
@@ -850,6 +895,52 @@ function markStandaloneAccessorDefineTargets(node: ts.Node, varName: string, poi
   visit(node);
 }
 
+/** Mutating Object static methods whose receiver must use the identity-bearing
+ * open-object store in standalone. Resolve both direct member calls and the
+ * exact single-assignment stored-builtin shape used by test262's harnesses. */
+function markStandaloneObjectMutationTargets(
+  ctx: CodegenContext,
+  node: ts.Node,
+  varName: string,
+  poisonSet: Set<string>,
+): void {
+  const mutators = new Set(["defineProperty", "defineProperties", "freeze", "seal", "preventExtensions"]);
+  const resolveMethod = (callee: ts.Expression): string | undefined => {
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "Object"
+    ) {
+      return callee.name.text;
+    }
+    if (!ts.isIdentifier(callee)) return undefined;
+    const sym = ctx.checker.getSymbolAtLocation(callee);
+    const decl = sym?.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
+    let init: ts.Expression = decl.initializer;
+    while (
+      ts.isParenthesizedExpression(init) ||
+      ts.isAsExpression(init) ||
+      ts.isTypeAssertionExpression(init) ||
+      ts.isNonNullExpression(init) ||
+      ts.isSatisfiesExpression(init)
+    ) {
+      init = init.expression;
+    }
+    return ts.isPropertyAccessExpression(init) && ts.isIdentifier(init.expression) && init.expression.text === "Object"
+      ? init.name.text
+      : undefined;
+  };
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && mutators.has(resolveMethod(n.expression) ?? "")) {
+      const recv = n.arguments[0];
+      if (recv && ts.isIdentifier(recv) && recv.text === varName) poisonSet.add(varName);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
 /** (#2992 S5) Does a descriptor object literal carry a `get` or `set` key (any
  * form: property assignment — including `get: undefined` —, method shorthand,
  * or string-named)? Presence of the key is what makes the define an accessor
@@ -1089,23 +1180,25 @@ function recordDefinePropertyWiden(
   varKey: string,
   propName: string,
   descArg: ts.Expression,
-  extraProps: { name: string; type: ValType }[],
+  extraProps: WidenedPropCandidate[],
   seenProps: Set<string>,
 ): void {
   if (!seenProps.has(propName)) {
     seenProps.add(propName);
     // Try to get value type from descriptor.value
     let wasmType: ValType = { kind: "externref" };
+    let primitiveSeed = false;
     if (ts.isObjectLiteralExpression(descArg)) {
       for (const prop of descArg.properties) {
         if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === "value") {
           const rhsType = checker.getTypeAtLocation(prop.initializer);
           wasmType = resolveWasmType(ctx, rhsType);
+          primitiveSeed = isRuntimePrimitiveSeed(wasmType, rhsType);
           break;
         }
       }
     }
-    extraProps.push({ name: propName, type: wasmType });
+    extraProps.push({ name: propName, type: wasmType, primitiveSeed });
     ctx.widenedDefinePropertyKeys.add(`${varKey}:${propName}`);
   }
 }
@@ -1119,7 +1212,7 @@ export function collectPropsFromStatements(
   // `recordDefinePropertyWiden`); `varName` stays bare for the `objArg.text ===
   // varName` receiver match below.
   varKey: string,
-  extraProps: { name: string; type: ValType }[],
+  extraProps: WidenedPropCandidate[],
   seenProps: Set<string>,
 ): void {
   for (const s of stmts) {
@@ -1133,12 +1226,32 @@ export function collectPropsFromStatements(
         bin.left.expression.text === varName
       ) {
         const propName = bin.left.name.text;
+        // Infer wasm type from the RHS
+        const rhsType = checker.getTypeAtLocation(bin.right);
+        const wasmType = resolveWasmType(ctx, rhsType);
         if (!seenProps.has(propName)) {
           seenProps.add(propName);
-          // Infer wasm type from the RHS
-          const rhsType = checker.getTypeAtLocation(bin.right);
-          const wasmType = resolveWasmType(ctx, rhsType);
-          extraProps.push({ name: propName, type: wasmType });
+          extraProps.push({
+            name: propName,
+            type: wasmType,
+            primitiveSeed: isRuntimePrimitiveSeed(wasmType, rhsType),
+          });
+        } else {
+          // (#3669) A LATER write of a different kind must not be force-coerced
+          // into the first write's slot. This pre-pass used to be
+          // first-write-wins, so `o.p = 1; o.p = "s"` froze the field to `f64`
+          // and every subsequent `struct.set` ran a numeric coercion — a string
+          // landed as NaN while `typeof o.p` (folded from the checker's
+          // narrowed static type, independent of the slot) still said "string".
+          // Widen to the universal carrier only when the slot was seeded by a
+          // real unboxed primitive. `resolveWasmType(undefined)` is also i32,
+          // but that is a missing-value sentinel rather than a runtime boolean;
+          // widening an anticipated `undefined -> null` property changes its
+          // empty-object default and can null-deref reads before the first write.
+          const existing = extraProps.find((p) => p.name === propName);
+          if (existing?.primitiveSeed && !valTypesMatch(existing.type, wasmType)) {
+            existing.type = { kind: "externref" };
+          }
         }
       }
     }

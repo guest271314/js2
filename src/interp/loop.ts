@@ -404,10 +404,7 @@ function run(bottom: Frame): JSValue {
               const cm = binding.meta;
               const cregs: Regs = new Array(cm.regCount);
               for (let i = 0; i < cm.regCount; i += 1) cregs[i] = undefined;
-              cregs[0] =
-                (cm.flags & FLAG_STRICT) !== 0
-                  ? regs[base]
-                  : normalizeSloppyThis(binding.envRec, regs[base]); // receiver → this
+              cregs[0] = (cm.flags & FLAG_STRICT) !== 0 ? regs[base] : normalizeSloppyThis(binding.envRec, regs[base]); // receiver → this
               const np = argc < cm.paramCount ? argc : cm.paramCount;
               for (let i = 0; i < np; i += 1) cregs[1 + i] = regs[base + 1 + i];
               // Suspend the caller, install the callee frame (no host recursion).
@@ -643,7 +640,7 @@ function builtinMathExtremum(regs: Regs, base: number, argc: number, wantMax: bo
   for (;;) {
     if (i >= argc) break;
     const value = Number(regs[base + i]);
-    if (value !== value) return NaN;
+    if (Number.isNaN(value)) return NaN;
     if (wantMax) {
       if (value > result || (value === 0 && result === 0 && 1 / value === Infinity)) result = value;
     } else if (value < result || (value === 0 && result === 0 && 1 / value === -Infinity)) {
