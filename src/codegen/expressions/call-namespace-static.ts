@@ -360,17 +360,32 @@ export function compileNamespaceStaticCall(
         fctx.body.push({ op: "call", funcIdx: forIdx });
         return { kind: "i32" };
       }
+      // (#3676) JS-host mode: return the module's CANONICAL i32 symbol id, not a
+      // raw host Symbol. A symbol VALUE is an i32 id everywhere else in the
+      // compiler — `mapTsTypeToWasm` maps `symbol` → i32 and the sibling
+      // producer `compileSymbolCall` (`Symbol()`) returns an unbranded
+      // `{ kind: "i32" }`. `Symbol.for` was the outlier returning `externref`,
+      // so a `symbol`-typed slot (module global, local, param) received an
+      // externref and `coerceType` bridged it with `__unbox_number` — literally
+      // `Number(Symbol())`, a guaranteed TypeError (§7.1.4) at `__module_init`.
+      // That is why React 19, whose very first statement is twelve chained
+      // `Symbol.for(...)` initializers, emitted a valid module that could not be
+      // instantiated. Returning i32 here puts `Symbol.for` on exactly the same,
+      // already-exercised footing as `Symbol()`: no new representation is
+      // introduced, an inconsistent one is removed. `__symbol_for_id` registers
+      // the id in the same per-instance cache `__box_symbol` reads, so identity
+      // survives a round trip through the host in both directions.
       const keyType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
       if (keyType && keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
-      const funcIdx = ensureLateImport(ctx, "__symbol_for", [{ kind: "externref" }], [{ kind: "externref" }]);
+      const funcIdx = ensureLateImport(ctx, "__symbol_for_id", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
-        return { kind: "externref" };
+        return { kind: "i32" };
       }
       fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "ref.null.extern" });
-      return { kind: "externref" };
+      fctx.body.push({ op: "i32.const", value: 0 });
+      return { kind: "i32" };
     }
     if (symMethod === "keyFor" && expr.arguments.length >= 1) {
       // (#2163) No-JS-host mode: the symbol is an i32 id; the native registry
@@ -382,6 +397,27 @@ export function compileNamespaceStaticCall(
         if (symType && symType.kind !== "i32") coerceType(ctx, fctx, symType, { kind: "i32" });
         fctx.body.push({ op: "call", funcIdx: keyForIdx });
         return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+      }
+      // (#3676) JS-host mode: when the argument is STATICALLY a symbol it is an
+      // i32 id (see the `Symbol.for` note above and `compileSymbolCall`), so
+      // resolve it through the id-keyed host helper. Coercing an i32 to
+      // `externref` here would box it with `__box_number` — the unbranded-i32
+      // hazard #2792 describes — and hand `Symbol.keyFor` a Number. Mirrors the
+      // identical static-type gate #3085 added for `String(sym)`.
+      // A non-symbol / `any` argument keeps the original externref path, where
+      // the host `Symbol.keyFor` produces the spec TypeError itself.
+      if (ctx.oracle.staticJsTypeOf(expr.arguments[0]!) === "symbol") {
+        const symIdType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "i32" });
+        if (symIdType && symIdType.kind !== "i32") coerceType(ctx, fctx, symIdType, { kind: "i32" });
+        const keyForIdIdx = ensureLateImport(ctx, "__symbol_keyFor_id", [{ kind: "i32" }], [{ kind: "externref" }]);
+        flushLateImportShifts(ctx, fctx);
+        if (keyForIdIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: keyForIdIdx });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
       }
       const symType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
       if (symType && symType.kind !== "externref") coerceType(ctx, fctx, symType, { kind: "externref" });
