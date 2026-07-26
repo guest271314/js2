@@ -22,6 +22,7 @@ files:
   - tests/issue-incremental.test.ts
   - tests/typescript-diagnostic-failures.test.ts
 ---
+
 # #700 — Reuse TypeScript Program and checker state across incremental builds
 
 ## Status: in review
@@ -91,12 +92,13 @@ be reused.
 
 The Test262 integration was measured separately rather than extrapolating the
 microbenchmarks. One-worker, non-authoritative original-harness smoke runs
-produced byte-for-byte identical verdict sets against `origin/main`:
+produced byte-for-byte identical verdict sets against the pre-integration
+`origin/main` control (`52c498db4`):
 
-| Lane       | Records | `origin/main` | Language Service | Result split      |
-| ---------- | ------: | ------------: | ---------------: | ----------------- |
-| Host / GC  |     100 |       43.03 s |          44.45 s | 68 pass / 32 fail |
-| Standalone |      20 |        9.03 s |           8.45 s | 12 pass / 8 fail  |
+| Lane       | Records | Control | Language Service | Result split      |
+| ---------- | ------: | ------: | ---------------: | ----------------- |
+| Host / GC  |     100 | 43.03 s |          44.45 s | 68 pass / 32 fail |
+| Standalone |      20 |  9.03 s |           8.45 s | 12 pass / 8 fail  |
 
 These single-run wall timings are mixed compile-and-execute measurements and do
 not demonstrate a reliable Test262 throughput improvement. The integration
@@ -143,7 +145,7 @@ several had previously asserted properties on unresolved Promises.
 - Test262 integration suite: 4 tests passed
 - existing unified-worker oracle sample: 50/50 records passed
 - Test262 original-harness A/B: 100/100 host and 20/20 standalone verdicts
-  identical to `origin/main`
+  identical to the `52c498db4` control
 - repository pre-push typecheck, lint, formatting, and committed-issue integrity
   gates
 
