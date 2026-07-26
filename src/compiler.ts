@@ -8,6 +8,7 @@ import {
   IncrementalProjectLanguageService,
   type TypedAST,
   type MultiTypedAST,
+  type ProjectModuleResolutions,
 } from "./checker/index.js";
 import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
@@ -37,7 +38,7 @@ import { generateSourceMap } from "./emit/sourcemap.js";
 import { emitWat } from "./emit/wat.js";
 import { applyDefineSubstitutions, applyDefineSubstitutionsWithMap } from "./compiler/define-substitution.js";
 import { rewriteCjsRequire, rewriteCjsRequireWithMap } from "./cjs-rewrite.js";
-import { preprocessImports } from "./import-resolver.js";
+import { collectNodeBuiltinImports, preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
@@ -721,11 +722,9 @@ async function applyOptimize(
  * `wasiNodeFsFuncs` / `allowFs` / `jsxRuntime`, silently giving multi-file
  * users a weaker, different compiler with the IR overlay off.
  *
- * `prep` carries the single-source-only import-preprocessing results
- * (`nodeBuiltins`, `wasiNodeFsFuncs`, `jsxRuntime`). They are `undefined` for
- * the multi paths because `analyzeMultiSource` / `analyzeFiles` resolve imports
- * through the TS program rather than `preprocessImports`; collecting them for
- * multi mode is a separate, larger change (tracked alongside #2138).
+ * `prep` carries import preprocessing/collection results. Single-source uses
+ * `preprocessImports`; multi-source separately collects graph-wide Node/WASI
+ * metadata while retaining real module declarations.
  */
 function buildCodegenOptions(
   options: CompileOptions,
@@ -796,10 +795,8 @@ function buildCodegenOptions(
     // set this so a post-claim IR-first hard error in a sub-compile is not
     // swallowed by the shim's fallback catch into a silent wrong answer.
     disableIrFirst: options.disableIrFirst === true,
-    // Single-source-only import-preprocessing results (undefined in multi mode).
-    // #1927: multi paths do not yet collect node-builtin / fs / jsx imports —
-    // they resolve imports through the TS program; closing that gap is a
-    // separate change (tracked alongside #2138).
+    // Import preprocessing/collection results. JSX remains single-source-only;
+    // Node/WASI metadata is also collected graph-wide in compileMultiSource.
     nodeBuiltins: prep?.nodeBuiltins,
     wasiNodeFsFuncs: prep?.wasiNodeFsFuncs,
     wasiRawImports: prep?.wasiRawImports,
@@ -1542,6 +1539,7 @@ export async function compileMultiSource(
   entryFile: string,
   options: CompileOptions = {},
   projectService?: IncrementalProjectLanguageService,
+  projectResolutions?: ProjectModuleResolutions,
 ): Promise<CompileResult> {
   const errors: CompileError[] = [];
 
@@ -1562,11 +1560,11 @@ export async function compileMultiSource(
     ...(options.platform ? { platform: options.platform } : {}),
   };
   let multiAst: MultiTypedAST;
-  if (projectService) {
+  if (projectService && projectResolutions === undefined) {
     projectService.updateProject(processedFiles, entryFile);
     multiAst = projectService.analyze(analyzeOptions);
   } else {
-    multiAst = analyzeMultiSource(processedFiles, entryFile, undefined, analyzeOptions);
+    multiAst = analyzeMultiSource(processedFiles, entryFile, undefined, analyzeOptions, projectResolutions);
   }
 
   // When allowJs is set (e.g. compiling npm packages like lodash-es), only report
@@ -1646,17 +1644,24 @@ export async function compileMultiSource(
   // single-source path uses (`detectNodeFsImports` / `detectRawWasiImports`) over
   // the CJS-rewritten file map so codegen lowers those calls module-wide. The
   // unions are empty for any program that imports none of these modules, so
-  // existing multi-file compiles stay byte-identical. (`nodeBuiltins`/`jsxRuntime`
-  // are a separate, larger preprocessImports-parity change — tracked alongside
-  // #2138.)
+  // existing multi-file compiles stay byte-identical. JSX runtime collection
+  // remains a separate preprocessImports-parity change.
   const wasiNodeFsFuncs = new Set<string>();
   const wasiRawImports = new Set<string>();
   const wasiMemAccessors = new Set<string>();
+  const nodeBuiltins = [];
+  const seenNodeBuiltins = new Set<string>();
   for (const content of Object.values(processedFiles)) {
     for (const name of detectNodeFsImports(content)) wasiNodeFsFuncs.add(name);
     const { rawWasi, memAccessors } = detectRawWasiImports(content);
     for (const name of rawWasi) wasiRawImports.add(name);
     for (const name of memAccessors) wasiMemAccessors.add(name);
+    for (const builtin of collectNodeBuiltinImports(content)) {
+      const key = `${builtin.localName}\0${builtin.moduleName}\0${builtin.namedBindings?.join("\0") ?? ""}`;
+      if (seenNodeBuiltins.has(key)) continue;
+      seenNodeBuiltins.add(key);
+      nodeBuiltins.push(builtin);
+    }
   }
   return applyOptimize(
     runPipeline({
@@ -1665,6 +1670,7 @@ export async function compileMultiSource(
       multiAst,
       errors,
       codegenOptions: buildCodegenOptions(options, emitSourceMap, {
+        nodeBuiltins,
         wasiNodeFsFuncs,
         wasiRawImports,
         wasiMemAccessors,
