@@ -120,20 +120,18 @@ describe.skipIf(ESLINT_LINTER === null)(
   `#1282 ESLint Tier 1 — minimal Linter.verify() ${ESLINT_DEV_DEPENDENCY_SKIP}`,
   () => {
     /**
-     * Tier 1a — run the real package-entry graph and pin the first two
-     * independent failures: the package export/resolver frontier (#3654) and
-     * dynamic object-destructuring IR frontier (#3656). An unexpected process
-     * failure is not accepted as an expected test failure.
+     * Tier 1a — run the real package-entry graph and pin the package
+     * export/resolver frontier (#3654). The independent dynamic
+     * object-destructuring invariant was removed by #3656. An unexpected
+     * process failure is not accepted as an expected test failure.
      */
-    it('Tier 1a — package entry reports the #3654/#3656 compile frontier for `import { Linter } from "eslint"`', async () => {
+    it('Tier 1a — package entry reports the #3654 compile frontier for `import { Linter } from "eslint"`', async () => {
       const r = await compileTier1Entry();
       const diagnostics = r.errors.map((error) => error.message).join("\n");
       expect(r.success).toBe(false);
       expect(r.binaryByteLength).toBe(0);
       expect(diagnostics).toContain(`Module '"eslint"' has no exported member 'Linter'.`);
-      expect(diagnostics).toMatch(
-        /getInactivityReasonMessage:.*object destructuring source must be IrType\.object or IrType\.class \(got dynamic\)/,
-      );
+      expect(diagnostics).not.toContain("object destructuring source must be IrType.object or IrType.class");
     }, 180_000);
 
     /**
@@ -146,7 +144,7 @@ describe.skipIf(ESLINT_LINTER === null)(
      * references after dead-elim compaction. Fixed by skipping
      * `collectInterface` for `.d.ts` source files. (#1287)
      */
-    it.skip("Tier 1b — package-entry binary is structurally valid Wasm (blocked before emission by #3654/#3656)", () => {
+    it.skip("Tier 1b — package-entry binary is structurally valid Wasm (blocked before emission by #3654)", () => {
       // Advance this rung once Tier 1a emits a binary.
     });
 
