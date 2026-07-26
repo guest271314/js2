@@ -449,9 +449,41 @@ never varied **`new`**, which is the shape the real population actually uses.
 
 **So the honest standing of this change is: a correct, regression-free spec fix
 with 7 proven behavioural flips and 0 test262 flips.** It closes a real §6.2.5.5
-violation and guards it, but it is not the B1 lever. **The B1 lever is
-constructed-instance descriptors**, which needs the pin to reach `new`-initialized
-vars — a distinct and larger slice, and the right next one on this surface.
+violation and guards it, but it is not the B1 lever.
+
+#### The B1 population is NOT one descriptor shape — measured, so do not extend blindly
+
+Before attempting a `new`-constructed extension, the 36 files were classified **by
+reading the corpus** rather than by enumerating axes anyone could think of. The
+descriptor object is constructed **at least seven different ways**:
+
+| descriptor construction | n |
+| --- | ---: |
+| `new ConstructFun()` — constructed instance | 16 |
+| the **global object** (`descObj` is the global) | ~9 |
+| inline inside the `defineProperties` map | 4 |
+| array literal | 2 |
+| object literal | 2 |
+| function object | 2 |
+| `arguments` object | 1 |
+
+**A perfect `new`-constructed pin would therefore cap at 16 / 36 (44 %)**, with the
+remaining 20 spread over six further shapes — several of which (global object,
+`arguments` object, function object) are not var-initializer shapes at all and can
+never be reached by a declaration-site pre-pass.
+
+**Conclusion: the declaration-site pinning strategy is the wrong lever for B1.**
+Each new shape needs its own pre-pass arm, and the population is long-tailed. The
+correct fix is at the **`ToPropertyDescriptor` reader** — make the descriptor
+field read a genuine `[[Get]]` regardless of how the descriptor object is
+represented — not another initializer-shape arm. That is a substantially larger,
+reader-side slice and should be scoped as its own issue.
+
+**Method note (the reason this table exists):** the axis that mattered was
+invisible from the fix side and obvious from the corpus side. **Derive the matrix
+from the failing population, not from the axes you can think of.** Reading ten
+real failing files first would have shown `new ConstructFun()` immediately — and
+would also have shown that `new` is only 44 % of it.
 
 ### Documented residuals (asserted in the test file, not fixed here)
 
