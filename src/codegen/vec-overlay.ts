@@ -233,6 +233,15 @@ function allowedCarriers(ctx: CodegenContext): OverlayCarrier[] {
 interface OverlayCore {
   stateTypeIdx: number;
   stateGlobalIdx: number;
+  /**
+   * (#3673) i32 flag global: 1 once ANY companion define used a NUMERIC
+   * (array-index) key. The `__extern_get_idx` prologue gates on THIS instead
+   * of the state global: string-key-only companions (the standalone RegExp
+   * result arrays define `index`/`input`/`groups`/`indices` per exec, growing
+   * the scan table unboundedly) then cost indexed reads nothing. The
+   * `__extern_get` string lane keeps gating on the state global.
+   */
+  numericFlagGlobalIdx: number;
   lookupIdx: number;
   ensureIdx: number;
 }
@@ -249,6 +258,7 @@ function ensureOverlayCore(ctx: CodegenContext, objectTypeIdx: number, newPlainO
     return {
       stateTypeIdx: ctx.vecOverlayStateTypeIdx!,
       stateGlobalIdx: ctx.vecOverlayStateGlobalIdx,
+      numericFlagGlobalIdx: ctx.vecOverlayNumericGlobalIdx!,
       lookupIdx: existingLookup,
       ensureIdx: ctx.funcMap.get(ENSURE_NAME)!,
     };
@@ -292,6 +302,16 @@ function ensureOverlayCore(ctx: CodegenContext, objectTypeIdx: number, newPlainO
   });
   ctx.vecOverlayStateGlobalIdx = stateGlobalIdx;
   ctx.vecOverlayStateTypeIdx = stateTypeIdx;
+
+  // (#3673) numeric-key-companion flag — see OverlayCore.numericFlagGlobalIdx.
+  const numericFlagGlobalIdx = nextModuleGlobalIdx(ctx);
+  ctx.mod.globals.push({
+    name: "__vec_overlay_numeric",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }],
+  });
+  ctx.vecOverlayNumericGlobalIdx = numericFlagGlobalIdx;
 
   const objRefNull: ValType = { kind: "ref_null", typeIdx: objectTypeIdx };
 
@@ -505,7 +525,7 @@ function ensureOverlayCore(ctx: CodegenContext, objectTypeIdx: number, newPlainO
     ctx.funcMap.set(ENSURE_NAME, funcIdx);
   }
 
-  return { stateTypeIdx, stateGlobalIdx, lookupIdx, ensureIdx: ctx.funcMap.get(ENSURE_NAME)! };
+  return { stateTypeIdx, stateGlobalIdx, numericFlagGlobalIdx, lookupIdx, ensureIdx: ctx.funcMap.get(ENSURE_NAME)! };
 }
 
 function fillVecHasOwnHelpers(ctx: CodegenContext, vecBaseIdx: number): void {
@@ -889,14 +909,18 @@ export function fillVecOverlayHelpers(ctx: CodegenContext): void {
         { op: "local.set", index: 6 },
         ...parseIndex(1, 7),
         ...vecLen(4, 8),
-        // if (i >= 0) seed-if-real-element
+        // if (i >= 0) mark numeric-companion presence (#3673) + seed-if-real-element
         { op: "local.get", index: 7 },
         { op: "i32.const", value: 0 },
         { op: "i32.ge_s" },
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: seedIfRealElement({ comp: 5, compExt: 6, key: 1, vec: 0, i: 7, len: 8 }),
+          then: [
+            { op: "i32.const", value: 1 },
+            { op: "global.set", index: core.numericFlagGlobalIdx },
+            ...seedIfRealElement({ comp: 5, compExt: 6, key: 1, vec: 0, i: 7, len: 8 }),
+          ],
         },
         // Delegate the define to the $Object native (validation throws propagate).
         { op: "local.get", index: 6 },
@@ -1022,7 +1046,12 @@ export function fillVecOverlayHelpers(ctx: CodegenContext): void {
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: seedIfRealElement({ comp: 6, compExt: 7, key: 1, vec: 0, i: 8, len: 9 }),
+          then: [
+            // (#3673) numeric-companion presence — see OverlayCore.numericFlagGlobalIdx.
+            { op: "i32.const", value: 1 },
+            { op: "global.set", index: core.numericFlagGlobalIdx },
+            ...seedIfRealElement({ comp: 6, compExt: 7, key: 1, vec: 0, i: 8, len: 9 }),
+          ],
         },
         // Delegate the accessor define (validation + merge live in the native).
         { op: "local.get", index: 7 },
@@ -1174,9 +1203,12 @@ export function fillVecOverlayHelpers(ctx: CodegenContext): void {
         { name: "__ov_getter", type: { kind: "externref" } },
       );
       const prologue: Instr[] = [
-        { op: "global.get", index: core.stateGlobalIdx },
-        { op: "ref.is_null" },
-        { op: "i32.eqz" },
+        // (#3673) Gate on the numeric-companion flag, NOT the state global: a
+        // table holding only string-key companions (standalone RegExp result
+        // arrays — one per exec) is irrelevant to an INDEXED read, and the
+        // per-read linear table scan was 29% of a standalone compiled-acorn
+        // parse. Flag set ⇒ state global is non-null.
+        { op: "global.get", index: core.numericFlagGlobalIdx },
         {
           op: "if",
           blockType: { kind: "empty" },

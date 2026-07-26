@@ -1652,6 +1652,9 @@ export interface CodegenContext {
    * late import-global insertion can shift it in `fixupModuleGlobalIndices`.
    */
   vecOverlayStateGlobalIdx?: number;
+  /** (#3673) i32 flag global — 1 once any overlay companion carries a numeric
+   *  (array-index) key; gates the `__extern_get_idx` overlay prologue. */
+  vecOverlayNumericGlobalIdx?: number;
   /** (#3251 S1) Type index of `$__overlay_state` (see above). */
   vecOverlayStateTypeIdx?: number;
   /**

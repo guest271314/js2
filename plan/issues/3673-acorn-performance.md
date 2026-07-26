@@ -183,8 +183,53 @@ all fixed on this branch:
 **Result: standalone 52.4ms → 8.9ms/parse (5.9x) — now 1.7x FASTER than
 the host lane (14.9ms) on the same input.** Post-fix profile: 
 `__extern_get_idx` 29%, `__apply_closure` 21%, `__extern_get` 14%,
-`__str_equals` 8% — the next round is dispatch-ladder work (indexed-read
-and closure-apply ladders), plus hash-based member routing.
+`__str_equals` 8% — attacked in round 3 below.
+
+## Standalone lane (round 3) — indexed reads, member-ladder buckets, apply args
+
+Three more measured fixes:
+
+1. **`__extern_get_idx` overlay tax (29% → gone).** The #3251 vec-descriptor
+   overlay design assumed "defineProperty-on-array is rare", but the
+   standalone RegExp exec path defines `index`/`input`/`groups`/`indices` on
+   every match-result array via `__defineProperty_value` — each exec appends
+   a companion to the GLOBAL overlay table, and `__vec_overlay_lookup` is a
+   linear `ref.eq` scan of that table on EVERY indexed read (acorn: regex per
+   token → unbounded growth; also a leak — entries pin their arrays forever,
+   noted as follow-up). Fix: a `__vec_overlay_numeric` i32 flag global, set
+   by `__vec_dp_value`/`__vec_dp_accessor` only when the defined key parses
+   as an ARRAY INDEX; the `__extern_get_idx` prologue gates on the flag
+   instead of the state global (string-key-only companions — the regexp case
+   — are irrelevant to an indexed read). The `__extern_get` string lane keeps
+   the state-global gate, so descriptor introspection of match arrays is
+   unchanged. Routing the regexp defines through the #3537 bag instead was
+   REJECTED: bag reflection (gopd/keys) is not implemented, which would
+   regress `verifyProperty`-style tests.
+2. **Member ladder → length + first-char buckets.** The interned-literal
+   ladder still paid one inline length check per arm (hundreds). Arms are now
+   grouped by name length, sub-grouped by first character (key length and
+   `data[off]` hoisted into locals once per lookup) — a miss costs ~15 length
+   checks + a handful of char checks instead of ~300 arm guards; a hit runs
+   `__str_equals` ~1-2 times.
+3. **`__apply_closure` $ObjVec fast path.** Args built by in-module call
+   sites are always the runtime's own `$ObjVec`; length + per-arg reads now
+   use direct `struct.get`/bounds-checked `array.get` instead of
+   `__extern_length` + fully-dynamic `__extern_get_idx` per argument
+   (OOB reads keep the undefined sentinel for #3592 widened calls).
+
+**Measured: 8.9 → 3.4ms/parse.** Standalone cumulative: **52.4 → 3.4ms
+(15.3x); now ~4.3x faster than the host lane** on the same input (host
+14.9ms; node-acorn 0.06ms — the residual gap is ~55x). Post-round profile:
+`__apply_closure` 12.5% (the remaining cost is the closure-ARITY resolution:
+`buildClosureArityProbe`'s linear funcref/`ref.test` ladders inlined per
+apply — the real fix is carrying the arity in the closure representation,
+follow-up), `__extern_get` 10.5%, `__obj_find` 7.2%, `__str_equals` 5.4%.
+
+Verification (round 3): standalone acorn canaries 4/4 green; overlay +
+apply suites green (issue-3251, issue-3537, issue-3592 ×3,
+issue-3031-proxy-apply — 71 tests); the 94 standalone/native-string suites
+show the SAME 9 pre-existing failures and zero new; host corpus 23/23
+exact; 1712 acceptance + pins green; tsc + biome clean.
 
 **Answer to the hybrid question**: yes, and it is now the winning
 direction. The standalone object runtime, after this round, outperforms

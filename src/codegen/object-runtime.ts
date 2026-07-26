@@ -4716,14 +4716,6 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   // these with spec-correct TypeError throws once the late-shift is fixed.
   const undefinedSentinel = (): Instr[] => [{ op: "ref.null.extern" }];
 
-  // Locals: 0=fn 1=recv 2=args (params); 3=n(i32), 4=declared(i32),
-  // 5=actual(i32), 6=result(externref).
-  const ARG_OF = (k: number): Instr[] => [
-    { op: "local.get", index: 2 },
-    { op: "f64.const", value: k },
-    { op: "call", funcIdx: externGetIdxArr },
-  ];
-
   // Build the arity dispatch from the bottom up (n>MAX → undefined), each arm
   // guarded on the matching __call_fn_method_N being registered.
   const callMethod = (n: number): number | undefined => ctx.funcMap.get(`__call_fn_method_${n}`);
@@ -4739,6 +4731,76 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   // dead arms at +33 B). Host/gc modules are unaffected: the bridge is only
   // ever reserved under standalone/wasi (all reserveApplyClosure call sites).
   const APPLY_CLOSURE_MAX_ARITY = 8;
+
+  const argcGlobalIdx = ensureArgcGlobal(ctx);
+
+  const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
+
+  // (#3592) An UNDER-APPLIED call (`assert.sameValue(a, b)` into a 3-formal
+  // `sameValue`) matched no `__call_fn_method_N` arm and silently returned the
+  // undefined sentinel — it never happened. Rationale: see the builder.
+  const widen = buildApplyClosureArityWidening(ctx, locals, 0, 3, 3);
+  const resultLocal = 3 + locals.length;
+  locals.push({ name: "result", type: { kind: "externref" } });
+
+  // (#3673) $ObjVec fast path: the args carrier built by every in-module call
+  // site (`__extern_method_call`, field-stored-closure arms, accessor/HOF
+  // drivers) is the runtime's own $ObjVec. Read its length + elements with
+  // direct struct.get/array.get instead of paying `__extern_length` + a full
+  // dynamic `__extern_get_idx` (overlay prologue + carrier ladder) PER
+  // ARGUMENT — measured as the top remaining cost of a standalone
+  // compiled-acorn parse. Non-$ObjVec args keep the generic path.
+  const objVecTypeIdx = ctx.objectRuntimeTypes?.objVecTypeIdx;
+  const objVecArrTypeIdx = ctx.objectRuntimeTypes?.objVecArrTypeIdx;
+  const fastArgs = objVecTypeIdx !== undefined && objVecArrTypeIdx !== undefined;
+  let argDataLocal = -1;
+  let argLenLocal = -1;
+  if (fastArgs) {
+    argDataLocal = 3 + locals.length;
+    locals.push({ name: "__argdata", type: { kind: "ref_null", typeIdx: objVecArrTypeIdx } });
+    argLenLocal = 3 + locals.length;
+    locals.push({ name: "__arglen", type: { kind: "i32" } });
+  }
+
+  // Locals: 0=fn 1=recv 2=args (params); 3=n(i32), then widen locals, result,
+  // and (fast path) __argdata.
+  const ARG_OF = (k: number): Instr[] => {
+    const generic: Instr[] = [
+      { op: "local.get", index: 2 },
+      { op: "f64.const", value: k },
+      { op: "call", funcIdx: externGetIdxArr },
+    ];
+    if (!fastArgs) return generic;
+    // OOB (an under-applied call widened up by the #3592 selector widening
+    // reads k >= len) answers the undefined sentinel — exactly what the
+    // generic `__extern_get_idx` returns for an out-of-bounds index.
+    const oob: Instr[] = undefinedExternInstrs(ctx)?.map((i) => ({ ...i })) ?? [{ op: "ref.null.extern" }];
+    return [
+      { op: "local.get", index: argDataLocal },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: generic,
+        else: [
+          { op: "i32.const", value: k },
+          { op: "local.get", index: argLenLocal },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [
+              { op: "local.get", index: argDataLocal },
+              { op: "ref.as_non_null" },
+              { op: "i32.const", value: k },
+              { op: "array.get", typeIdx: objVecArrTypeIdx },
+            ],
+            else: oob,
+          },
+        ],
+      },
+    ];
+  };
 
   const buildArm = (n: number): Instr[] => {
     const idx = callMethod(n);
@@ -4774,25 +4836,39 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     ];
   }
 
-  const argcGlobalIdx = ensureArgcGlobal(ctx);
-
-  const locals: { name: string; type: ValType }[] = [{ name: "n", type: { kind: "i32" } }];
-
-  // (#3592) An UNDER-APPLIED call (`assert.sameValue(a, b)` into a 3-formal
-  // `sameValue`) matched no `__call_fn_method_N` arm and silently returned the
-  // undefined sentinel — it never happened. Rationale: see the builder.
-  const widen = buildApplyClosureArityWidening(ctx, locals, 0, 3, 3);
-  const resultLocal = 3 + locals.length;
-  locals.push({ name: "result", type: { kind: "externref" } });
+  // n = args.len via the $ObjVec fast path when it applies, else the generic
+  // `__extern_length` (also fills __argdata for ARG_OF).
+  const computeN: Instr[] = fastArgs
+    ? [
+        { op: "local.get", index: 2 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: objVecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: 2 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: objVecTypeIdx },
+            { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+            { op: "local.set", index: argDataLocal },
+            { op: "local.get", index: 2 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: objVecTypeIdx },
+            { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+            { op: "local.tee", index: argLenLocal },
+          ],
+          else: [{ op: "local.get", index: 2 }, { op: "call", funcIdx: externLengthIdx }, { op: "i32.trunc_f64_s" }],
+        },
+      ]
+    : [{ op: "local.get", index: 2 }, { op: "call", funcIdx: externLengthIdx }, { op: "i32.trunc_f64_s" }];
 
   // Preserve the raw call-site count in `__argc` before widening only the
   // dispatcher selector. This keeps omitted formals undefined without turning
   // them into synthetic arguments, while over-arity calls still populate the
   // canonical extras vector in `__call_fn_method_N`.
   const body: Instr[] = [
-    { op: "local.get", index: 2 },
-    { op: "call", funcIdx: externLengthIdx },
-    { op: "i32.trunc_f64_s" },
+    ...computeN,
     { op: "local.tee", index: 3 },
     { op: "global.set", index: argcGlobalIdx },
     ...widen,
@@ -6016,38 +6092,88 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     return receiverArms;
   };
 
-  // (#3673) The key is flattened ONCE into a scratch local, and every arm is
-  // guarded by an inline length compare before the `__str_equals` call. The
-  // old per-arm `flatten(key)` + unconditional equals call made this linear
-  // ladder (one arm per distinct field name in the program — hundreds for
-  // acorn) the dominant cost of a standalone dynamic property read.
+  // (#3673) The key is flattened ONCE into a scratch local (its length into a
+  // second), and the arms are grouped into LENGTH BUCKETS: one inline length
+  // compare per distinct name length (~15 for acorn), each guarding the
+  // `__str_equals` probes of just that bucket. The old shape — a linear ladder
+  // with per-arm `flatten(key)` + equals call over one arm per distinct field
+  // name in the program (hundreds for acorn) — was the dominant cost of a
+  // standalone dynamic property read.
   const fkeyLocal = 2 + fn.locals.length;
-  fn.locals.push({ name: "__fkey_ladder", type: { kind: "ref_null", typeIdx: ctx.nativeStrTypeIdx } });
+  const fkeyLenLocal = fkeyLocal + 1;
+  const fkeyC0Local = fkeyLocal + 2;
+  fn.locals.push(
+    { name: "__fkey_ladder", type: { kind: "ref_null", typeIdx: ctx.nativeStrTypeIdx } },
+    { name: "__fkey_len", type: { kind: "i32" } },
+    { name: "__fkey_c0", type: { kind: "i32" } },
+  );
+  const byLen = new Map<number, Map<number, Array<[string, Entry[]]>>>();
+  for (const [fieldName, entries] of byField) {
+    let lenGroup = byLen.get(fieldName.length);
+    if (!lenGroup) {
+      lenGroup = new Map();
+      byLen.set(fieldName.length, lenGroup);
+    }
+    const c0 = fieldName.length > 0 ? fieldName.charCodeAt(0) : -1;
+    let c0Group = lenGroup.get(c0);
+    if (!c0Group) {
+      c0Group = [];
+      lenGroup.set(c0, c0Group);
+    }
+    c0Group.push([fieldName, entries]);
+  }
   const stringKeyArms: Instr[] = [
     { op: "local.get", index: 1 },
     { op: "any.convert_extern" },
     { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
     { op: "call", funcIdx: flattenIdx },
-    { op: "local.set", index: fkeyLocal },
+    { op: "local.tee", index: fkeyLocal },
+    { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 },
+    { op: "local.tee", index: fkeyLenLocal },
+    // c0 = len > 0 ? data[off] : -1 — one array read per lookup, shared by
+    // every first-char sub-bucket guard below.
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [
+        { op: "local.get", index: fkeyLocal },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 2 },
+        { op: "local.get", index: fkeyLocal },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 1 },
+        { op: "array.get_u", typeIdx: ctx.nativeStrDataTypeIdx },
+      ],
+      else: [{ op: "i32.const", value: -1 }],
+    },
+    { op: "local.set", index: fkeyC0Local },
   ];
-  for (const [fieldName, entries] of byField) {
-    const receiverArms = buildReceiverArms(entries);
-    stringKeyArms.push(
-      { op: "local.get", index: fkeyLocal },
-      { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 },
-      { op: "i32.const", value: fieldName.length },
-      { op: "i32.eq" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
+  for (const [len, lenGroup] of byLen) {
+    const lenBucket: Instr[] = [];
+    for (const [c0, c0Group] of lenGroup) {
+      const c0Bucket: Instr[] = [];
+      for (const [fieldName, entries] of c0Group) {
+        const receiverArms = buildReceiverArms(entries);
+        c0Bucket.push(
           { op: "local.get", index: fkeyLocal },
           { op: "ref.as_non_null" },
           ...nativeStringLiteralInstrs(ctx, fieldName),
           { op: "call", funcIdx: equalsIdx },
           { op: "if", blockType: { kind: "empty" }, then: receiverArms },
-        ],
-      },
+        );
+      }
+      lenBucket.push(
+        { op: "local.get", index: fkeyC0Local },
+        { op: "i32.const", value: c0 },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: c0Bucket },
+      );
+    }
+    stringKeyArms.push(
+      { op: "local.get", index: fkeyLenLocal },
+      { op: "i32.const", value: len },
+      { op: "i32.eq" },
+      { op: "if", blockType: { kind: "empty" }, then: lenBucket },
     );
   }
   const numericKeyArms: Instr[] = [];
