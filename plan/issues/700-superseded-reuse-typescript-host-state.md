@@ -89,6 +89,12 @@ versioned TypeScript Language Service:
     harness lane, synthetic TypeScript lane, and JavaScript fixture graphs
     through the persistent compiler. The worker keeps a compatibility fallback
     to `compileMulti()` for older bundles without the new method.
+11. The worker no longer recreates the compiler on a fixed 100-compilation
+    interval. TypeScript releases removed documents as the Language Service
+    Program changes, and the wrapper retains only the current source/project
+    graph, so the reset merely introduced periodic cold frontend builds.
+    Thrown compiler failures still replace the service immediately; explicit
+    GC and whole-worker contamination/recycle safeguards remain active.
 
 ## Performance evidence
 
@@ -121,6 +127,21 @@ says "approximately unchanged, if anything slightly slower" rather than
 available; a larger repeated CI measurement is still required before claiming
 an end-to-end Test262 speedup.
 
+The fixed 100-compilation reset was also measured with the maintained Test262
+runner on CI shard 1/57 (836 Vitest cases, four unified workers), alternating
+the exact pre-removal commit and the reset-free workspace:
+
+| Run order | Fixed reset | Reset-free |
+| --------- | ----------: | ---------: |
+| First     |    226.39 s |   245.74 s |
+| Repeat    |    207.19 s |   183.16 s |
+| Mean      |    216.79 s |   214.45 s |
+
+The reset-free mean is 2.34 s (1.1%) faster, but the pair-to-pair reversal and
+large run variance make the honest conclusion "approximately unchanged." The
+mean sum of per-case compile timings was also effectively identical:
+682,101 ms with the reset versus 681,904 ms without it (0.03% lower).
+
 ## Correctness and isolation
 
 The implementation adds or strengthens coverage for:
@@ -141,6 +162,9 @@ The implementation adds or strengthens coverage for:
 - add/remove/re-add and entry-file invalidation
 - simultaneous project-service isolation on identical virtual paths
 - consecutive changing JavaScript fixture graphs in one unified worker
+- absence of the obsolete fixed-interval cold-recreation path
+- exact Test262 pass-set and terminal-status parity across the fixed-reset
+  boundary on a complete CI shard
 - hard TypeScript diagnostics on the asynchronous incremental API
 
 Existing incremental tests were also corrected to await `compiler.compile()`;
@@ -163,13 +187,19 @@ several had previously asserted properties on unresolved Promises.
 
 - `pnpm exec tsc --noEmit --pretty false`
 - focused Biome lint over all seven changed files
-- focused incremental and multi-file Vitest suites: 9 files, 51 tests passed
-- Test262 integration suite: 9 tests passed
+- focused incremental and multi-file Vitest suites: 9 files, 52 tests passed
+- Test262 integration suite: 10 tests passed
 - 14 exact Test262 fixture-negative paths passed in both host and standalone
   FYI lanes
 - existing unified-worker oracle sample: 50/50 records passed
 - Test262 original-harness A/B: 100/100 host and 20/20 standalone verdicts
   identical to the `52c498db4` control
+- maintained Test262 CI shard 1/57 A/B, repeated with four workers: all 836
+  file/strict-mode/status tuples identical; 526/836 raw cases and 523/761
+  canonical tests passed in every run
+- shard wall-time A/B: fixed reset 226.39 s and 207.19 s (216.79 s mean);
+  reset-free 245.74 s and 183.16 s (214.45 s mean, 1.1% faster but within
+  observed variance)
 - repository pre-push typecheck, lint, formatting, and committed-issue integrity
   gates
 

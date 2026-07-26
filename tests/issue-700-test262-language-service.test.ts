@@ -51,6 +51,16 @@ describe("#700 Test262 Language Service integration", () => {
     expect(fixtureBranch).not.toContain("return compileMulti(");
   });
 
+  it("does not cold-recreate the Language Service on a fixed compilation interval", () => {
+    const worker = readFileSync("scripts/test262-worker.mjs", "utf8");
+
+    expect(worker).not.toContain("RECREATE_INTERVAL");
+    expect(worker).not.toContain("RECREATE at compile");
+    expect(worker).toContain("compileCount % GC_INTERVAL === 0");
+    expect(worker).toContain("incrementalCompiler?.dispose?.()");
+    expect(worker).toContain("createFreshCompiler();");
+  });
+
   it("retains unchanged dependency ASTs while editing a project graph", () => {
     const service = new IncrementalProjectLanguageService();
     const firstFiles = {

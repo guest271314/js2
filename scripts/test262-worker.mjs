@@ -89,7 +89,6 @@ function buildOriginalHarnessSandbox(consoleProxy) {
 
 let compileCount = 0;
 const GC_INTERVAL = 25;
-const RECREATE_INTERVAL = 100;
 const WORKER_RECYCLE_INTERVAL = Math.max(0, parseInt(process.env.TEST262_WORKER_RECYCLE_INTERVAL || "0", 10) || 0);
 let runtimeIntrinsicCanarySnapshot = null;
 
@@ -2134,18 +2133,14 @@ function postCompileCleanup() {
     return cleanup;
   }
 
-  if (compileCount % RECREATE_INTERVAL === 0) {
-    try {
-      incrementalCompiler?.dispose?.();
-    } catch (_e) {
-      // dispose() may fail if the service is already in a bad state
-    }
-    incrementalCompiler = null;
-    const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.error(`[unified-worker] RECREATE at compile ${compileCount}, heap=${heapMB}MB`);
-    if (typeof globalThis.gc === "function") globalThis.gc();
-    createFreshCompiler();
-  } else if (compileCount % GC_INTERVAL === 0 && typeof globalThis.gc === "function") {
+  // #700 — no fixed compiler recreation interval. The versioned Language
+  // Services retain only the current single-file snapshot/project graph, and
+  // TypeScript releases removed documents from the shared registry as the
+  // Program changes. Recreating every 100 tests forced a cold frontend build
+  // without repairing process-wide prototype/codegen state. Thrown compiler
+  // failures still replace the service immediately in the doCompile catch
+  // above; contamination and optional memory policies recycle the whole worker.
+  if (compileCount % GC_INTERVAL === 0 && typeof globalThis.gc === "function") {
     globalThis.gc();
   }
 
