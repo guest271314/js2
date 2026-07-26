@@ -14,6 +14,8 @@ export interface IrImportedOptionalParamPlan {
 }
 
 export interface IrImportedCallLoweringPlan {
+  /** Module-body source-unit import or same-file ambient host import (#3657). */
+  readonly source: "module-import" | "ambient-host";
   readonly ownerUnitId: IrUnitId;
   readonly ownerName: string;
   /** Exact source-unit target. `name` is diagnostic/adapter metadata only. */
@@ -24,6 +26,16 @@ export interface IrImportedCallLoweringPlan {
   readonly needsArgc: boolean;
   /** Exact runtime argc state; present iff {@link needsArgc} is true. */
   readonly argcGlobal?: IrGlobalRef;
+}
+
+export function requireValidImportedCallTarget(plan: IrImportedCallLoweringPlan): void {
+  if (plan.source === "ambient-host") {
+    if (plan.target.binding.kind === "import" && plan.target.binding.module === "env") return;
+    throw new Error(`ir/from-ast: ambient host call target ${plan.target.name} is not backed by an env import`);
+  }
+  if (plan.target.binding.kind !== "unit") {
+    throw new Error(`ir/from-ast: imported source call target ${plan.target.name} is not backed by an exact unit`);
+  }
 }
 
 export interface IrTopLevelFunctionValueLoweringPlan {
