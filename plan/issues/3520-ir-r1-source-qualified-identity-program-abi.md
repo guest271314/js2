@@ -129,7 +129,9 @@ files:
   - tests/issue-3520-promise-plan-identity.test.ts
   - tests/issue-3520-selfhost-cache-identity.test.ts
   - tests/issue-3520-monomorphize-identity.test.ts
+  - tests/issue-3520-program-abi-callable-planning.test.ts
   - tests/issue-3520-program-abi-type-remap.test.ts
+  - tests/issue-3520-support-callable-abi.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
@@ -1372,6 +1374,52 @@ of R1. Provider/import/runtime/support callables, remaining imported globals,
 Program ABI type and class-shape intentions, exports and aliases, and production
 `LegacyAbiAdapter` replacement of the remaining `funcMap`, `structMap`,
 module-array, and display-name scans still remain before R1 can close.
+
+### 2026-07-26 function-value support-callable continuation
+
+The next stacked continuation on `codex/3520-c8-support-callable` moves the
+cached top-level function-value trampoline into the production Program ABI:
+
+- function-value preparation now validates and publishes the exact trampoline
+  and closure-cache allocator objects as one pair. The trampoline is a
+  unit-anchored `callable/support` entry; its existing companion cache remains
+  an exact `global/support` entry;
+- support-callable planning recomputes the opaque binding ID from the
+  authoritative unit anchor and semantic role, owns one exact required
+  `WasmFunction` locator, and registers the complete callable type contract.
+  The API deliberately supports only ordinal zero until structural ordering
+  has an explicit artifact-ordinal dimension;
+- the resolver consults a planned support binding by structural key before any
+  intrinsic, runtime, or compatibility-name fallback. Once planned, a support
+  reference cannot silently redirect through `funcMap`; and
+- the paired planning helper lives in `program-abi-planning.ts`, leaving the
+  already-large codegen driver seven lines smaller than the C7 branch.
+
+The production regression passes a deliberately nonexistent compatibility
+label through the real integration resolver and proves that it still reaches
+the exact trampoline slot. It then verifies that the published signature
+contains a reference type and exactly matches the final post-DCE function
+type. A source-name collision separately proves that a demoted owner publishes
+no nonexistent support entry. Planner regressions cover relabelling, a late
+function import, mismatched reference role and final signature, and duplicate
+allocator ownership.
+
+The complete #3520 matrix plus #2138 passes **232/232** across **39 files**.
+The related #3214 callable and imported-HOF matrix passes **60/60** across
+**3 files**.
+Strict TypeScript, Prettier, Biome lint, diff, LOC, function-budget,
+dead-export, and oracle-ratchet checks pass. Hybrid readiness remains **READY**
+at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy bodies**,
+and the fallback ratchet reports no unintended, post-claim, or module-level
+increase. The eight-shard equivalence gate passes with **1,608 passing / 35
+known failures / 0 new regressions**; one baseline failure now passes, and the
+baseline remains unchanged.
+
+This is the first non-unit defined support callable with an authoritative
+production locator, not the end of R1. Class support callables, exact imported
+callable IDs and import locators, dual-mode runtime/intrinsic providers,
+remaining imported globals, Program ABI type/class-layout entries, exports and
+aliases, and the production `LegacyAbiAdapter` cutover still remain.
 
 ### R1a validation evidence
 

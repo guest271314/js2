@@ -5,10 +5,20 @@ import { describe, expect, it } from "vitest";
 import { analyzeSource } from "../src/checker/index.js";
 import { createCodegenContext } from "../src/codegen/context/create-context.js";
 import { generateModule } from "../src/codegen/index.js";
-import { planProgramAbiUnitCallable } from "../src/codegen/program-abi-planning.js";
+import {
+  PROGRAM_ABI_CALLABLE_ROLE,
+  planProgramAbiSupportCallable,
+  planProgramAbiUnitCallable,
+} from "../src/codegen/program-abi-planning.js";
 import { ProgramAbiSession } from "../src/codegen/program-abi-session.js";
-import { irCallableBindingKey, irUnitCallableBindingId, irUnitFuncRef } from "../src/ir/callable-bindings.js";
+import {
+  irCallableBindingKey,
+  irSupportFuncRef,
+  irUnitCallableBindingId,
+  irUnitFuncRef,
+} from "../src/ir/callable-bindings.js";
 import { buildIrUnitInventory, createDerivedIrUnitId } from "../src/ir/identity.js";
+import { ProgramAbiInvariantError } from "../src/ir/program-abi.js";
 import { createEmptyModule, type FuncTypeDef, type Import, type WasmFunction } from "../src/ir/types.js";
 import { ts } from "../src/ts-api.js";
 
@@ -229,5 +239,160 @@ describe("#3520 production unit-callable Program ABI planning", () => {
       space: "function",
       index: importCount + localIndex,
     });
+  });
+});
+
+describe("#3520 production support-callable Program ABI planning", () => {
+  it("resolves an exact unit-anchored trampoline after relabelling and a late import", () => {
+    const file = source("/repo/support.ts", "export function target() {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const targetUnit = inventory.allUnits.find((unit) => unit.kind === "top-level-function")!;
+    const module = createEmptyModule();
+    module.types.push({ kind: "struct", name: "$Payload", fields: [] });
+    const signature: FuncTypeDef = {
+      kind: "func",
+      name: "$trampoline",
+      params: [
+        { kind: "ref_null", typeIdx: 0 },
+        { kind: "i32", boolean: true },
+      ],
+      results: [{ kind: "ref", typeIdx: 0 }],
+    };
+    module.types.push(signature);
+    const target = wasmFunction("target", 1);
+    const trampoline = wasmFunction("__fn_tramp_target_cached", 1);
+    module.functions.push(target, trampoline);
+
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+    const ref = irSupportFuncRef(targetUnit.id, "function-value-trampoline", "misleading-compatibility-label");
+    const id = planProgramAbiSupportCallable(ctx, {
+      ref,
+      anchor: { kind: "unit", unitId: targetUnit.id },
+      role: "function-value-trampoline",
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.functionValueTrampoline,
+      signature,
+      func: trampoline,
+    });
+    expect(ref.binding.kind).toBe("support");
+    expect(id).toBe(ref.binding.kind === "support" ? ref.binding.bindingId : undefined);
+    expect(session.getDraft(id!)).toMatchObject({
+      structuralOrder: {
+        sourceId: targetUnit.sourceId,
+        domainOrdinal: 0,
+        roleOrdinal: 1,
+      },
+      structuralReferenceKey: irCallableBindingKey(ref.binding),
+      displayName: trampoline.name,
+      slotPolicy: "required",
+      slotSpace: "function",
+      intent: {
+        kind: "callable",
+        origin: "support",
+        unitId: targetUnit.id,
+        signature: {
+          params: ['{"kind":"ref_null","typeIdx":0}', '{"kind":"i32","boolean":true}'],
+          results: ['{"kind":"ref","typeIdx":0}'],
+        },
+      },
+    });
+    expect(session.hasLocator(id!, trampoline)).toBe(true);
+
+    const relabelled = irSupportFuncRef(targetUnit.id, "function-value-trampoline", "another-label");
+    expect(irCallableBindingKey(relabelled.binding)).toBe(irCallableBindingKey(ref.binding));
+    expect(session.resolveCurrentIndex(id!, "function", irCallableBindingKey(relabelled.binding))).toBe(1);
+
+    const lateImport: Import = {
+      module: "env",
+      name: "late",
+      desc: { kind: "func", typeIdx: 1 },
+    };
+    module.imports.push(lateImport);
+    expect(session.resolveCurrentIndex(id!, "function", irCallableBindingKey(relabelled.binding))).toBe(2);
+
+    const { abi } = session.publish(module);
+    expect(abi.resolveFinalIndex(id!)).toEqual({ space: "function", index: 2 });
+  });
+
+  it("rejects non-support references and final locator signature mismatches", () => {
+    const file = source("/repo/support-mismatch.ts", "export function target() {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const targetUnit = inventory.allUnits.find((unit) => unit.kind === "top-level-function")!;
+    const module = createEmptyModule();
+    const plannedSignature: FuncTypeDef = {
+      kind: "func",
+      params: [{ kind: "i32", boolean: true }],
+      results: [],
+    };
+    const locatorSignature: FuncTypeDef = {
+      kind: "func",
+      params: [{ kind: "f64" }],
+      results: [],
+    };
+    module.types.push(plannedSignature, locatorSignature);
+    const trampoline = wasmFunction("__fn_tramp_target_cached", 1);
+    module.functions.push(trampoline);
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+    const plan = {
+      anchor: { kind: "unit" as const, unitId: targetUnit.id },
+      role: "function-value-trampoline",
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.functionValueTrampoline,
+      signature: plannedSignature,
+      func: trampoline,
+    };
+
+    expect(() =>
+      planProgramAbiSupportCallable(ctx, {
+        ...plan,
+        ref: irUnitFuncRef({ unitId: targetUnit.id, name: trampoline.name }),
+      }),
+    ).toThrowError(TypeError);
+
+    expect(() =>
+      planProgramAbiSupportCallable(ctx, {
+        ...plan,
+        ref: irSupportFuncRef(targetUnit.id, "wrong-support-role", trampoline.name),
+      }),
+    ).toThrowError(TypeError);
+
+    const ref = irSupportFuncRef(targetUnit.id, "function-value-trampoline", trampoline.name);
+    planProgramAbiSupportCallable(ctx, { ...plan, ref });
+    expect(() => session.publish(module)).toThrowError(
+      expect.objectContaining<ProgramAbiInvariantError>({ code: "type-remap-mismatch" }),
+    );
+  });
+
+  it("keeps one exact allocator function under a single support binding owner", () => {
+    const file = source("/repo/support-owner.ts", "export function target() {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const targetUnit = inventory.allUnits.find((unit) => unit.kind === "top-level-function")!;
+    const module = createEmptyModule();
+    const signature: FuncTypeDef = { kind: "func", params: [], results: [] };
+    module.types.push(signature);
+    const trampoline = wasmFunction("__shared_trampoline", 0);
+    module.functions.push(trampoline);
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+    const plan = {
+      anchor: { kind: "unit" as const, unitId: targetUnit.id },
+      signature,
+      func: trampoline,
+    };
+
+    planProgramAbiSupportCallable(ctx, {
+      ...plan,
+      ref: irSupportFuncRef(targetUnit.id, "function-value-trampoline", "first-label"),
+      role: "function-value-trampoline",
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.functionValueTrampoline,
+    });
+    expect(() =>
+      planProgramAbiSupportCallable(ctx, {
+        ...plan,
+        ref: irSupportFuncRef(targetUnit.id, "other-support-callable", "second-label"),
+        role: "other-support-callable",
+        roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.functionValueTrampoline + 1,
+      }),
+    ).toThrowError(expect.objectContaining<ProgramAbiInvariantError>({ code: "duplicate-slot-locator" }));
   });
 });

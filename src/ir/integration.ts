@@ -1938,6 +1938,35 @@ export function compileIrPathFunctions(
     );
     const resolverInjection = process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE;
     if (resolverInjection === "function") resolver.resolveFunc(irIntrinsicFuncRef("__injected_missing_func"));
+    if (resolverInjection === "planned-support") {
+      const valuePlan = loweringPlans?.topLevelFunctionValues.values().next().value;
+      if (valuePlan) {
+        const session = ctx.programAbiSession;
+        if (valuePlan.trampoline.binding.kind !== "support" || !session) {
+          throw new IrInvariantError(
+            "selection-preparation-mismatch",
+            "resolve",
+            "planned support resolver probe requires one exact function-value trampoline",
+          );
+        }
+        const misleadingRef: IrFuncRef = Object.freeze({
+          ...valuePlan.trampoline,
+          name: "__nonexistent_support_compatibility_label",
+        });
+        const expected = session.resolveCurrentIndex(
+          valuePlan.trampoline.binding.bindingId,
+          "function",
+          irCallableBindingKey(valuePlan.trampoline.binding),
+        );
+        if (resolver.resolveFunc(misleadingRef) !== expected) {
+          throw new IrInvariantError(
+            "selection-preparation-mismatch",
+            "resolve",
+            "planned support resolver probe did not preserve the exact allocator slot",
+          );
+        }
+      }
+    }
     const injectionOwner = moduleBindingIdentityContext.inventory.sources[0]?.id;
     if (!injectionOwner && (resolverInjection === "global" || resolverInjection === "type")) {
       throw new IrInvariantError(
@@ -3078,6 +3107,13 @@ function makeResolver(
           );
         }
         return slot.funcIdx;
+      }
+      if (ref.binding.kind === "support" && ctx.programAbiSession?.hasPlan(ref.binding.bindingId)) {
+        return ctx.programAbiSession.resolveCurrentIndex(
+          ref.binding.bindingId,
+          "function",
+          irCallableBindingKey(ref.binding),
+        );
       }
       // #2945 — `%` lowers to a call of the Wasm-native exact-fmod helper.
       // Materialize it on demand: `ensureFmod` is idempotent (funcMap-cached)

@@ -2,7 +2,7 @@
 
 import { irGlobalBindingKey } from "../ir/abi-bindings.js";
 import { irCallableBindingKey, irUnitCallableBindingId } from "../ir/callable-bindings.js";
-import type { IrBindingId, IrSourceId, IrUnitId } from "../ir/identity.js";
+import { createIrBindingId, type IrBindingId, type IrSourceId, type IrUnitId } from "../ir/identity.js";
 import type { IrFuncRef, IrGlobalRef } from "../ir/nodes.js";
 import type { FuncTypeDef, GlobalDef, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
@@ -14,6 +14,7 @@ import {
 
 export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   body: 0,
+  functionValueTrampoline: 1,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({
@@ -39,6 +40,21 @@ export interface ProgramAbiUnitCallablePlan {
   readonly ref: IrFuncRef;
   readonly signature: FuncTypeDef;
   readonly func: WasmFunction;
+}
+
+export interface ProgramAbiSupportCallablePlan {
+  readonly ref: IrFuncRef;
+  readonly anchor: { readonly kind: "unit"; readonly unitId: IrUnitId };
+  readonly role: string;
+  readonly roleOrdinal: number;
+  readonly signature: FuncTypeDef;
+  readonly func: WasmFunction;
+}
+
+export interface ProgramAbiFunctionValuePlan {
+  readonly trampoline: IrFuncRef;
+  readonly cacheGlobal: IrGlobalRef;
+  readonly target: IrFuncRef;
 }
 
 /**
@@ -89,6 +105,95 @@ export function planProgramAbiUnitCallable(
     session.attachLocator(bindingId, { kind: "defined-function", value: plan.func });
   }
   return bindingId;
+}
+
+/**
+ * Plan and locate one compiler-owned support callable beneath an exact unit.
+ *
+ * The explicit unit anchor supplies deterministic whole-program order and
+ * provenance without parsing the opaque support binding ID. The support
+ * reference supplies identity; its compatibility label cannot redirect the
+ * exact allocator-owned function locator.
+ */
+export function planProgramAbiSupportCallable(
+  ctx: CodegenContext,
+  plan: ProgramAbiSupportCallablePlan,
+): IrBindingId | undefined {
+  const session = ctx.programAbiSession;
+  if (!session) return undefined;
+  if (plan.ref.binding.kind !== "support") {
+    throw new TypeError("program ABI support callable planning requires an exact support reference");
+  }
+  const expectedBindingId = createIrBindingId({
+    ownerId: plan.anchor.unitId,
+    domain: "support",
+    role: plan.role,
+  });
+  if (plan.ref.binding.bindingId !== expectedBindingId) {
+    throw new TypeError(
+      `program ABI support callable reference does not match unit anchor ${plan.anchor.unitId} and role ${plan.role}`,
+    );
+  }
+  const bindingId = plan.ref.binding.bindingId;
+  const structuralReferenceKey = irCallableBindingKey(plan.ref.binding);
+  const typeContract = cloneProgramAbiCallableTypeContract(plan.signature);
+  session.ensurePlan({
+    id: bindingId,
+    structuralOrder: session.structuralOrder.forUnit(plan.anchor.unitId, {
+      domain: "callable",
+      roleOrdinal: plan.roleOrdinal,
+    }),
+    structuralReferenceKey,
+    displayName: plan.func.name,
+    slotPolicy: "required",
+    slotSpace: "function",
+    intent: {
+      kind: "callable",
+      origin: "support",
+      unitId: plan.anchor.unitId,
+      signature: canonicalProgramAbiCallableTypeContract(typeContract),
+    },
+  });
+  session.registerCallableTypeContract(bindingId, typeContract);
+  session.registerStructuralReference(bindingId, structuralReferenceKey);
+  if (!session.hasLocator(bindingId, plan.func)) {
+    session.attachLocator(bindingId, { kind: "defined-function", value: plan.func });
+  }
+  return bindingId;
+}
+
+/** Publish the exact cached function-value singleton as one ABI-owned pair. */
+export function planProgramAbiFunctionValue(
+  ctx: CodegenContext,
+  plan: ProgramAbiFunctionValuePlan,
+  func: WasmFunction,
+  global: GlobalDef,
+): boolean {
+  const signature = ctx.mod.types[func.typeIdx];
+  if (
+    plan.target.binding.kind !== "unit" ||
+    func.name !== plan.trampoline.name ||
+    global.name !== plan.cacheGlobal.name ||
+    !signature ||
+    signature.kind !== "func"
+  ) {
+    return false;
+  }
+  planProgramAbiSupportCallable(ctx, {
+    ref: plan.trampoline,
+    anchor: { kind: "unit", unitId: plan.target.binding.unitId },
+    role: "function-value-trampoline",
+    roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.functionValueTrampoline,
+    signature,
+    func,
+  });
+  planProgramAbiGlobal(ctx, {
+    ref: plan.cacheGlobal,
+    anchor: { kind: "unit", unitId: plan.target.binding.unitId },
+    roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.functionValueCache,
+    global,
+  });
+  return true;
 }
 
 /**
