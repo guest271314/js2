@@ -1,0 +1,98 @@
+---
+id: 3647
+title: "Object.prototype.propertyIsEnumerable returns true for a non-enumerable class prototype method, contradicting getOwnPropertyDescriptor().enumerable === false"
+status: ready
+sprint: current
+created: 2026-07-26
+updated: 2026-07-26
+priority: high
+horizon: m
+feasibility: medium
+task_type: bug
+area: codegen, runtime
+language_feature: property-reflection
+goal: core-semantics
+related: [3603, 3646, 2984, 3479]
+origin: "cohort tracker for failures exposed by #3603 S1 host de-inflation (PR #3635)"
+---
+
+# #3647 — `propertyIsEnumerable` contradicts `getOwnPropertyDescriptor().enumerable`
+
+> **Cohort tracker.** One of the two failure cohorts EXPOSED (not caused) by
+> #3603 S1's host-lane de-inflation. Per the #3468 F1 landing recipe, every
+> exposed cohort is routed to a tracker — that is what makes a de-inflation
+> honest rather than banked. **This defect predates #3603 S1 and reproduces on
+> stock `upstream/main`.**
+
+## Problem
+
+`Object.prototype.propertyIsEnumerable.call(C.prototype, "m")` returns **true**
+for a class prototype method, while every other reflective route on the _same
+object and key_ correctly reports it as non-enumerable.
+
+Class methods are non-enumerable per ES2015+ (§14.6, MethodDefinition →
+`DefineMethod` with `enumerable: false`), so `true` is spec-wrong. More
+importantly it is **self-inconsistent**: our own `getOwnPropertyDescriptor`
+disagrees with our own `propertyIsEnumerable`.
+
+## Measured (stock `upstream/main`, host lane, no test262 harness involved)
+
+```js
+var C = class {
+  m() {
+    return 42;
+  }
+};
+```
+
+| query                                                             | observed |      spec |
+| ----------------------------------------------------------------- | -------: | --------: |
+| `Object.getOwnPropertyDescriptor(C.prototype,'m').enumerable`     |    false |     false |
+| `Object.getOwnPropertyDescriptor(C.prototype,'m').writable`       |     true |      true |
+| `Object.getOwnPropertyDescriptor(C.prototype,'m').configurable`   |     true |      true |
+| for-in over `C.prototype` — key count                             |        0 |         0 |
+| `Object.keys(C.prototype).length`                                 |        0 |         0 |
+| **`Object.prototype.propertyIsEnumerable.call(C.prototype,'m')`** | **true** | **false** |
+
+Five routes agree; `propertyIsEnumerable` is the lone dissenter. Verified
+**identical with #3603 S1 applied and reverted**, so S1 does not influence it.
+
+All observations use a **numeric** return channel — a string channel is
+unreliable across lanes, and `typeof X === "..."` comparisons are unreliable on
+host (see #3603's probe notes).
+
+## Why it matters
+
+`propertyHelper.js`'s `isEnumerable` is
+
+```js
+return stringCheck && __hasOwnProperty(obj, name) && __propertyIsEnumerable(obj, name);
+```
+
+and `verifyProperty` fails when `desc.enumerable !== isEnumerable(obj, name)`.
+So a wrong `propertyIsEnumerable` produces a genuine
+`obj['m'] descriptor should not be enumerable` failure for any test that
+verifies a class method's descriptor — a large share of the `class/elements`
+cohort surfaced by #3603 S1.
+
+It also silently corrupts any user program using `propertyIsEnumerable` for
+filtering, independently of test262.
+
+## Acceptance criteria
+
+- `Object.prototype.propertyIsEnumerable.call(C.prototype, 'm')` is `false` for
+  a class prototype method.
+- `propertyIsEnumerable` agrees with `getOwnPropertyDescriptor().enumerable`,
+  `Object.keys`, and `for-in` for the same key — assert the **agreement**, not
+  each in isolation, so a future divergence is caught.
+- Covered for both the direct call and the uncurried
+  `Function.prototype.call.bind(Object.prototype.propertyIsEnumerable)` form
+  (the shape `propertyHelper.js` actually uses).
+- Assert across **shapes** (simple class, computed-name fields, generator/async
+  methods, object literal, plain assignment) — #3642's lesson: an unvaried axis
+  is an assumption, not a measurement.
+
+## Reproduction
+
+`.tmp/3603/enum-check.mts` and `.tmp/3603/attribution.mts` in the #3603 S1
+worktree; self-contained `compile()` + `buildImports()` probes, no harness.

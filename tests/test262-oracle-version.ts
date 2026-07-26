@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 11;
+export const ORACLE_VERSION = 12;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -253,6 +253,58 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "v11 on merge. A genuine pass→trap (or fail→trap) transition still FAILS " +
       "the ratchet — only baselines that never produced a running module are " +
       "excluded.",
+  },
+  {
+    version: 12,
+    note:
+      "#3603 S1 HOST-lane verifyProperty de-inflation (stakeholder-ruled " +
+      "2026-07-26; same ruling shape as v10/#3468 F1 for standalone). " +
+      "test262's propertyHelper.js accumulates descriptor mismatches through " +
+      "the uncurryThis idiom `__push = Function.prototype.call.bind(" +
+      "Array.prototype.push)`. On the JS-host lane that push was a SILENT " +
+      "NO-OP, so `failures.length` stayed 0 and the terminal " +
+      "`assert(false, __join(failures, '; '))` never fired — `verifyProperty` " +
+      "returned true for ANY expectation. MECHANISM (traced through the import " +
+      "bridge, not inferred): a WasmGC vec argument crosses into a host call " +
+      "as the `__make_iterable` MIRROR, a JS array that `convertToJS` " +
+      "REFRESHES FROM the vec on every crossing (#3368, for array-identity " +
+      "stability), so the host appended to an array the Wasm side never " +
+      "consults. Plain `Array.prototype.push.call(a,x)` failed identically to " +
+      "the uncurried form, so `bind` was never implicated. The fix is " +
+      "RUNTIME-ONLY (src/runtime/vec-mirror-writeback.ts + ~14 wiring lines): " +
+      "the two host-call bridges bracket their dispatch and replay a " +
+      "length-changing mirror mutation onto the vec via __vec_pop/__vec_push. " +
+      "WHAT A HOST 'pass' MEANS CHANGES: assertions that could not be " +
+      "reported now fire, so previously-vacuous passes become honest fails. " +
+      "The flips are NOT caused by this change — they are EXPOSED by it. " +
+      "Attribution control: verifyProperty's enumerable predicate was " +
+      "evaluated directly (no harness, no __push) with the change applied and " +
+      "reverted, and is BIT-IDENTICAL — S1 alters only whether a detected " +
+      "mismatch is REPORTED, never whether it is DETECTED. The exposed " +
+      "defects are cohort-routed to #3646 (getOwnPropertyDescriptor returns " +
+      "null for a class method when the class has computed-name fields, while " +
+      "hasOwnProperty says true) and #3647 (propertyIsEnumerable returns true " +
+      "while gOPD().enumerable is false — five reflective routes agree, it " +
+      "dissents); both reproduce on stock main with S1 reverted. " +
+      "Over-application was refuted by an instrumented sweep (51 tests across " +
+      "6 areas, 3 in-run positive controls): every reconcile fires on a fresh " +
+      "`var failures = []` growing 0→1, ZERO on any other array. " +
+      "Like v4/#3285 and v10/#3468 these flips register as wasm-CHANGE " +
+      "regressions, so the re-baseline lands via this bump plus a #3303 " +
+      "regressions-allow ceiling declared in the #3603 issue file — the bump " +
+      "is what makes `rebaseMode` true and therefore the ONLY thing that " +
+      "makes that ceiling readable at all (diff-test262.ts reads it lazily " +
+      "inside `if (rebaseMode)`). NOTE the gate blind spot found here: " +
+      "check-verdict-oracle-bump.mjs watches only negative-verdict.mjs, " +
+      "test262-worker.mjs, test262-shared.ts, test262-vitest.test.ts and " +
+      "test262-runner.ts — NOT src/runtime/**, so a runtime-layer change can " +
+      "flip verdicts corpus-wide without the gate demanding a bump; this " +
+      "entry exists because that was caught by hand. NO classifyError change " +
+      "in v12 and NO trap growth: the v10 `^Test262Error` → assertion_fail " +
+      "rule already binds the newly-created assertion text before the trap " +
+      "regexes (verified against the real classifier, including adversarial " +
+      "messages embedding trap vocabulary), so the #3189 trap ratchet is NOT " +
+      "superseded by this bump and still applies in full.",
   },
 ];
 
