@@ -237,7 +237,13 @@ import {
   tryExternClassMethodOnAny,
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
-import { isFunctionCtorImmediateCall, tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
+import {
+  ensureRuntimeEvalCallableCarrier,
+  isFunctionCtorImmediateCall,
+  tryStandaloneDynamicFunctionCtorValue,
+  tryStaticEvalInline,
+  tryStaticFunctionCtorCall,
+} from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -5606,6 +5612,22 @@ function compileCallExpression(
   {
     const r = tryStaticFunctionCtorCall(ctx, fctx, expr);
     if (r !== undefined) return r;
+  }
+
+  // #2928 — dynamic standalone Function(...) value form, plus the immediate
+  // `new Function(...)(args)` / `Function(...)(args)` form. Seed the canonical
+  // runtime callable before the dynamic-dispatch candidate scan.
+  {
+    const r = tryStandaloneDynamicFunctionCtorValue(ctx, fctx, expr);
+    if (r !== undefined) return r;
+    if (
+      ctx.standalone &&
+      isFunctionCtorImmediateCall(expr, ctx.checker) &&
+      ensureRuntimeEvalCallableCarrier(ctx, fctx)
+    ) {
+      const dyn = tryEmitInlineDynamicCall(ctx, fctx, expr, true);
+      if (dyn !== null) return dyn;
+    }
   }
 
   // (#2960) DYNAMIC immediate-call `new Function(<non-const>)(args)` /

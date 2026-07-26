@@ -1704,6 +1704,11 @@ export interface CodegenContext {
   /** Counter for generated closure types/functions */
   closureCounter: number;
   /**
+   * #2928 — true once the module has materialized the canonical eight-slot
+   * callable carrier used by the separately linked interpreter runtime.
+   */
+  runtimeEvalCallableSeeded?: boolean;
+  /**
    * (#2640) When set, `compileArrowAsClosure` widens any callback parameter
    * whose resolved type is a typed WasmGC vec/array (`__vec_*`/`__arr_*`/
    * `$__vec_base`) to `externref`. Set transiently by
