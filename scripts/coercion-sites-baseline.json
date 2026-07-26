@@ -49,6 +49,7 @@
   "codegen/promise-combinators.ts": 1,
   "codegen/property-access-dispatch.ts": 10,
   "codegen/property-access.ts": 7,
+  "codegen/regexp-standalone.ts": 2,
   "codegen/registry/imports.ts": 17,
   "codegen/stack-balance.ts": 1,
   "codegen/statements/control-flow.ts": 4,
