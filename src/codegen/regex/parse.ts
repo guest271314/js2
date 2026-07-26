@@ -44,11 +44,19 @@
  *     code-point classes inside lookbehind
  *
  * Added by #2591:
- *   - v-mode `\q{…}` finite string disjunctions. Unicode properties of
- *     strings and set algebra involving string-valued operands remain a
- *     separate narrowed residual.
+ *   - v-mode `\q{…}` finite string disjunctions
+ *
+ * Added by #3665:
+ *   - Unicode 17 properties of strings and finite v-set union, intersection,
+ *     and subtraction, lowered through existing CPCLASS/string alternations
  */
 import { RE_FLAG_I, RE_FLAG_M, RE_FLAG_S, RE_FLAG_U, RE_FLAG_V, RegexUnsupportedError } from "./bytecode.js";
+import {
+  evaluateUnicodeStringClass,
+  hasUnicodeStringSetSyntax,
+  unicodeStringPropertyEscape,
+  type UnicodeStringSet,
+} from "./unicode-string-properties.js";
 import { codePointSource, enumerateClassRanges, parseStringDisjunction, type CpRanges } from "./unicode.js";
 
 export type ReNode =
@@ -79,6 +87,46 @@ export interface ParsedRegex {
   numCaptures: number;
   /** Capture name → 1-based group index for named groups. */
   groupNames: Map<string, number>;
+}
+
+interface UnicodeStringTrieNode {
+  terminal: boolean;
+  children: Map<number, UnicodeStringTrieNode>;
+}
+
+function newUnicodeStringTrieNode(): UnicodeStringTrieNode {
+  return { terminal: false, children: new Map() };
+}
+
+function insertUnicodeString(root: UnicodeStringTrieNode, sequence: readonly number[]): void {
+  let node = root;
+  for (const cp of sequence) {
+    let child = node.children.get(cp);
+    if (child === undefined) {
+      child = newUnicodeStringTrieNode();
+      node.children.set(cp, child);
+    }
+    node = child;
+  }
+  node.terminal = true;
+}
+
+function unicodeStringTrieSignature(node: UnicodeStringTrieNode): string {
+  const children = [...node.children]
+    .map(([cp, child]) => `${cp.toString(36)}:${unicodeStringTrieSignature(child)}`)
+    .sort();
+  return `${node.terminal ? "1" : "0"}[${children.join(",")}]`;
+}
+
+function codePointRanges(codePoints: readonly number[]): CpRanges {
+  const sorted = [...codePoints].sort((left, right) => left - right);
+  const ranges: CpRanges = [];
+  for (const cp of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last !== undefined && cp <= last[1] + 1) last[1] = Math.max(last[1], cp);
+    else ranges.push([cp, cp]);
+  }
+  return ranges;
 }
 
 const DIGIT: Array<[number, number]> = [[0x30, 0x39]];
@@ -124,15 +172,6 @@ export function complementRanges(ranges: Array<[number, number]>): Array<[number
 const NOT_DIGIT = complementRanges(DIGIT);
 const NOT_WORD = complementRanges(WORD);
 const NOT_SPACE = complementRanges(SPACE);
-
-/**
- * The fixed set of binary Unicode **properties of strings** (§22.2.1.9, Table
- * 64) — `\p{…}` escapes whose members are multi-code-point STRINGS, not single
- * code points. A v-mode class that unions one of these with a `\q{…}`
- * disjunction can't be lowered by the single-code-point enumerator; #2591
- * refuses that combination loudly. (A `\p{…}` over code points — `\p{ASCII}`,
- * `\p{L}` — is unaffected and keeps working.)
- */
 const PROPERTY_OF_STRINGS_RE =
   /\\[pP]\{(?:Basic_Emoji|Emoji_Keycap_Sequence|RGI_Emoji(?:_Flag_Sequence|_Modifier_Sequence|_Tag_Sequence|_ZWJ_Sequence)?)\}/;
 
@@ -244,6 +283,69 @@ class Parser {
 
   private cpClass(ranges: CpRanges): ReNode {
     return { kind: "cpclass", ranges, negated: false };
+  }
+
+  /** A group of trie edges with the same continuation can share one CPCLASS
+   * head. This is essential for aggregate properties: Test262 concatenates all
+   * 3,953 RGI_Emoji members, so scanning hundreds of equivalent root branches
+   * for every member would exhaust the unchanged VM step budget. */
+  private uStringTrieHead(codePoints: readonly number[]): ReNode {
+    if (codePoints.length === 1) return this.uChar(codePoints[0]!);
+    if (this.iState) {
+      const source = `[${codePoints.map((cp) => codePointSource(cp)).join("")}]`;
+      return this.cpClass(enumerateClassRanges(source, this.enumFlags()));
+    }
+    return this.cpClass(codePointRanges(codePoints));
+  }
+
+  private uStringTrieBranches(node: UnicodeStringTrieNode): ReNode[] {
+    const groups = new Map<string, { codePoints: number[]; child: UnicodeStringTrieNode }>();
+    for (const [cp, child] of node.children) {
+      const signature = unicodeStringTrieSignature(child);
+      const group = groups.get(signature);
+      if (group === undefined) groups.set(signature, { codePoints: [cp], child });
+      else group.codePoints.push(cp);
+    }
+
+    const branches: ReNode[] = [];
+    for (const { codePoints, child } of groups.values()) {
+      const head = this.uStringTrieHead(codePoints);
+      const tail = this.uStringTrieNode(child);
+      branches.push(
+        tail.kind === "concat" && tail.parts.length === 0
+          ? head
+          : tail.kind === "concat"
+            ? { kind: "concat", parts: [head, ...tail.parts] }
+            : { kind: "concat", parts: [head, tail] },
+      );
+    }
+    return branches;
+  }
+
+  /** Lower one non-root prefix-trie node. Descendants precede the terminal
+   * empty arm, preserving the v-set rule that a longer member wins over its
+   * prefix without emitting one top-level branch per complete string. */
+  private uStringTrieNode(node: UnicodeStringTrieNode): ReNode {
+    const options = this.uStringTrieBranches(node);
+    if (node.terminal) options.push({ kind: "concat", parts: [] });
+    if (options.length === 0) return this.cpClass([]);
+    return options.length === 1 ? options[0]! : { kind: "alt", options };
+  }
+
+  /** Lower a completed finite v-set through the existing regex AST. Multi-code-
+   * point members share prefixes in a trie; the one-code-point domain stays
+   * compact in one CPCLASS arm, and an empty member remains the final arm. */
+  private uStringSet(set: UnicodeStringSet): ReNode {
+    const root = newUnicodeStringTrieNode();
+    for (const sequence of set.strings.values()) {
+      insertUnicodeString(root, sequence);
+    }
+
+    const options = this.uStringTrieBranches(root);
+    if (set.ranges.length > 0) options.push(this.cpClass(set.ranges));
+    if (root.terminal) options.push({ kind: "concat", parts: [] });
+    if (options.length === 0) return this.cpClass([]);
+    return options.length === 1 ? options[0]! : { kind: "alt", options };
   }
 
   /**
@@ -553,12 +655,18 @@ class Parser {
       // exactly; the result desugars to unit-level nodes. #1911 Slice B.
       if (this.unicode) {
         const classSrc = this.extractClassSource();
-        // v-mode `\q{…}` string disjunctions match multi-code-point strings,
-        // which the single-code-point class enumerator cannot represent. Desugar
-        // them to an alternation of literal strings unioned with the residual
-        // code-point class (§22.2.1 ClassStringDisjunction). #2591.
-        if (this.vMode && classSrc.includes("\\q{")) {
-          return this.uEnumClassWithStrings(classSrc);
+        if (this.vMode && hasUnicodeStringSetSyntax(classSrc)) {
+          // Keep #2591's proven direct-q union path. String properties and
+          // top-level algebra use #3665's first-class finite set evaluator.
+          if (
+            classSrc.includes("\\q{") &&
+            !classSrc.includes("\\p{") &&
+            !classSrc.includes("&&") &&
+            !classSrc.includes("--")
+          ) {
+            return this.uEnumClassWithStrings(classSrc);
+          }
+          return this.uStringSet(evaluateUnicodeStringClass(classSrc, this.enumFlags()));
         }
         return this.uEnum(classSrc);
       }
@@ -770,7 +878,9 @@ class Parser {
       // u/v: property escapes resolve through the host enumerator. Non-u
       // `\p` stays a narrowed refusal (Annex B treats it as identity — rare).
       if (this.unicode) {
-        return this.uEnum(this.extractPropertyEscapeSource());
+        const source = this.extractPropertyEscapeSource();
+        const stringSet = this.vMode ? unicodeStringPropertyEscape(source) : null;
+        return stringSet === null ? this.uEnum(source) : this.uStringSet(stringSet);
       }
       throw new RegexUnsupportedError(`Unicode property escape \\${e}{…} — #1539 Phase 2d`);
     }

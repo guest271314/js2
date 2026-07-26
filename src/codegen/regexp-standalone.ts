@@ -66,6 +66,7 @@ import {
   RE_FLAG_Y,
 } from "./regex/bytecode.js";
 import { compilePattern, RepeatTooLargeError } from "./regex/compile.js";
+import { pushRegexI32Array } from "./regex/wasm-array-literal.js";
 import {
   emitNativeProtoIdentityReturnUndefined,
   getBuiltinBrand,
@@ -1504,10 +1505,9 @@ function emitStandaloneRegExpStruct(
   fctx.body.push({ op: "i32.const", value: compiled.flags });
   // field 1: nGroups
   fctx.body.push({ op: "i32.const", value: compiled.nGroups });
-  // field 2: prog (ref array<i32>)
-  for (const instr of i32ArrayLiteralInstrs(ctx, compiled.prog)) fctx.body.push(instr);
+  pushRegexI32Array(ctx, fctx, compiled.prog, "prog");
   // field 3: classTable (ref array<i32>)
-  for (const instr of i32ArrayLiteralInstrs(ctx, compiled.classTable)) fctx.body.push(instr);
+  pushRegexI32Array(ctx, fctx, compiled.classTable, "class_table");
   // field 4: source string — stored in spec form (§22.2.6.13.1
   // EscapeRegExpPattern) so the `.source` getter is a plain field read.
   const srcType = compileStringLiteral(ctx, fctx, escapeRegExpPattern(pattern), node);
