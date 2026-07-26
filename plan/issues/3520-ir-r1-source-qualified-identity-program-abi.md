@@ -6,7 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c5-derived-provenance
-pr: 3656
+pr: 3669
 last_merged_pr: 3490
 sprint: current
 created: 2026-07-21
