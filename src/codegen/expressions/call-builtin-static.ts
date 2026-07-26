@@ -111,6 +111,55 @@ import {
 } from "./calls.js";
 
 /**
+ * Reified builtin method closures are ordinary function objects whose
+ * [[Prototype]] is %Function.prototype%. Preserve their exact metadata subtype
+ * long enough to route around the generic `$Object`-only prototype helper.
+ */
+function tryEmitBuiltinFunctionPrototype(ctx: CodegenContext, fctx: FunctionContext, argType: ValType): boolean {
+  if (
+    (!ctx.standalone && !ctx.wasi) ||
+    (argType.kind !== "ref" && argType.kind !== "ref_null") ||
+    !ctx.builtinFnMetaByTypeIdx?.has(argType.typeIdx)
+  ) {
+    return false;
+  }
+
+  fctx.body.push({ op: "drop" });
+  const functionBrand = tryEnsureNativeProtoBrand(ctx, "Function");
+  if (functionBrand !== undefined && emitLazyNativeProtoGet(ctx, fctx, functionBrand)) {
+    return true;
+  }
+  fctx.body.push({ op: "ref.null.extern" });
+  return true;
+}
+
+function emitBuiltinGetPrototypeOfFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg: ts.Expression,
+): InnerResult {
+  const argType = compileExpression(ctx, fctx, arg);
+  if (!argType) {
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+  if (tryEmitBuiltinFunctionPrototype(ctx, fctx, argType)) {
+    return { kind: "externref" };
+  }
+  if (argType.kind !== "externref") {
+    coerceType(ctx, fctx, argType, { kind: "externref" });
+  }
+  const getPrototypeIdx = ensureLateImport(ctx, "__getPrototypeOf", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (getPrototypeIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: getPrototypeIdx });
+  } else {
+    fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+  }
+  return { kind: "externref" };
+}
+
+/**
  * (#742 slice 2) Built-in static-method call dispatch — extracted verbatim from
  * the property-access arm of compileCallExpression. Handles static method calls
  * on the built-in value-type namespaces whose callee is `Namespace.method(...)`:
@@ -1865,46 +1914,8 @@ export function compileBuiltinStaticCall(
       }
     }
 
-    // Fallback: use host import for externref/dynamic objects (e.g. Object.create results)
-    const argTypeF = compileExpression(ctx, fctx, arg0);
-    if (!argTypeF) {
-      fctx.body.push({ op: "ref.null.extern" });
-      return { kind: "externref" };
-    }
-    // (#3176 residual) Reified builtin method closures are ordinary function
-    // objects whose [[Prototype]] is %Function.prototype%. The generic native
-    // `__getPrototypeOf` only recognises open `$Object` carriers, so feeding it
-    // a metadata-bearing closure wrapper returned null. Preserve the exact
-    // closure subtype long enough to identify it, then route to the SAME
-    // `%Function.prototype%` singleton a direct `Function.prototype` read uses.
-    // This also covers local aliases (`const f = JSON.parse`) because locals
-    // retain the metadata subtype. Dynamic `any` receivers continue through the
-    // runtime fallback below.
-    if (
-      (ctx.standalone || ctx.wasi) &&
-      (argTypeF.kind === "ref" || argTypeF.kind === "ref_null") &&
-      ctx.builtinFnMetaByTypeIdx?.has(argTypeF.typeIdx)
-    ) {
-      fctx.body.push({ op: "drop" });
-      const functionBrand = tryEnsureNativeProtoBrand(ctx, "Function");
-      if (functionBrand !== undefined && emitLazyNativeProtoGet(ctx, fctx, functionBrand)) {
-        return { kind: "externref" };
-      }
-      fctx.body.push({ op: "ref.null.extern" });
-      return { kind: "externref" };
-    }
-    if (argTypeF.kind !== "externref") {
-      coerceType(ctx, fctx, argTypeF, { kind: "externref" });
-    }
-    const gptFuncIdx = ensureLateImport(ctx, "__getPrototypeOf", [{ kind: "externref" }], [{ kind: "externref" }]);
-    flushLateImportShifts(ctx, fctx);
-    if (gptFuncIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: gptFuncIdx });
-    } else {
-      fctx.body.push({ op: "drop" });
-      fctx.body.push({ op: "ref.null.extern" });
-    }
-    return { kind: "externref" };
+    // Fallback: use host import for externref/dynamic objects (e.g. Object.create results).
+    return emitBuiltinGetPrototypeOfFallback(ctx, fctx, arg0);
   }
 
   // Handle Object.create(proto) — create instances for known prototypes

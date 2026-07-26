@@ -6273,46 +6273,8 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
   }
 }
 
-/**
- * (#2896) Finalize-time fill for the reserved builtin-fn metadata natives
- * (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
- * `__builtinfn_push_ownnames` — registered by `ensureObjectRuntime` under
- * `--target standalone` with constant default bodies). Runs from index.ts
- * finalize, right after `fillExternGetIdxVecArms`, once EVERY builtin closure
- * meta type (`ctx.builtinFnMetaByTypeIdx`, see builtin-fn-meta.ts) is known —
- * a meta type registered after an eagerly-baked ref.test chain would otherwise
- * be invisible (the same compile-order snapshot bug `fillExternIsArray` fixes
- * for Array.isArray).
- *
- * Shift-safety: the arms are SPLICED into the existing default bodies (never
- * rebuilt — see `reference_no_rebuild_helper_body_at_finalize`); the `call`
- * funcIdxs baked here read `funcMap` at fill time, and any later import shift
- * walks + adjusts spliced instrs like all others. `ref.test`/`ref.cast`/
- * `struct.get`/`struct.set` use TYPE indices (rec-group stable, no funcidx
- * hazard).
- */
-export function fillBuiltinFnMeta(ctx: CodegenContext): void {
-  const metaMap = ctx.builtinFnMetaByTypeIdx;
-  if (!metaMap || metaMap.size === 0) return;
-  const getMetaFuncIdx = ctx.funcMap.get("__builtinfn_get_meta");
-  if (getMetaFuncIdx === undefined) return; // object runtime never ensured
-  const boxNumIdx = ctx.funcMap.get("__box_number");
-  const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-  const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals");
-  const anyStrTypeIdx = ctx.anyStrTypeIdx;
-  if (boxNumIdx === undefined || strFlattenIdx === undefined || strEqualsIdx === undefined || anyStrTypeIdx < 0) {
-    return;
-  }
-  // Resolve fill targets BY NAME (funcIdx math across phases is shift-sensitive).
+function prependBuiltinFnObjectSemantics(ctx: CodegenContext, typeIdxs: readonly number[]): void {
   const findFn = (name: string) => ctx.mod.functions.find((f) => f.name === name);
-  const getMetaFn = findFn("__builtinfn_get_meta");
-  const gopdFn = findFn("__builtinfn_gopd");
-  const deleteFn = findFn("__builtinfn_delete");
-  const pushOwnFn = findFn("__builtinfn_push_ownnames");
-
-  // Deterministic arm order.
-  const entries = Array.from(metaMap.entries()).sort((a, b) => a[0] - b[0]);
-
   // Builtin function closure wrappers are objects, but the ordinary integrity
   // predicates only recognise the open-object `$Object` carrier. Consequently
   // every reified builtin method answered the primitive fallback
@@ -6323,7 +6285,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
   // miss builtin closures registered later in source order.
   const builtinFnTypePredicate = (): Instr[] => {
     const predicate: Instr[] = [{ op: "i32.const", value: 0 }];
-    for (const [typeIdx] of entries) {
+    for (const typeIdx of typeIdxs) {
       predicate.push(
         { op: "local.get", index: 0 },
         { op: "any.convert_extern" },
@@ -6363,6 +6325,51 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
       then: [...functionProtoInstrs, { op: "return" }],
     });
   }
+}
+
+/**
+ * (#2896) Finalize-time fill for the reserved builtin-fn metadata natives
+ * (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
+ * `__builtinfn_push_ownnames` — registered by `ensureObjectRuntime` under
+ * `--target standalone` with constant default bodies). Runs from index.ts
+ * finalize, right after `fillExternGetIdxVecArms`, once EVERY builtin closure
+ * meta type (`ctx.builtinFnMetaByTypeIdx`, see builtin-fn-meta.ts) is known —
+ * a meta type registered after an eagerly-baked ref.test chain would otherwise
+ * be invisible (the same compile-order snapshot bug `fillExternIsArray` fixes
+ * for Array.isArray).
+ *
+ * Shift-safety: the arms are SPLICED into the existing default bodies (never
+ * rebuilt — see `reference_no_rebuild_helper_body_at_finalize`); the `call`
+ * funcIdxs baked here read `funcMap` at fill time, and any later import shift
+ * walks + adjusts spliced instrs like all others. `ref.test`/`ref.cast`/
+ * `struct.get`/`struct.set` use TYPE indices (rec-group stable, no funcidx
+ * hazard).
+ */
+export function fillBuiltinFnMeta(ctx: CodegenContext): void {
+  const metaMap = ctx.builtinFnMetaByTypeIdx;
+  if (!metaMap || metaMap.size === 0) return;
+  const getMetaFuncIdx = ctx.funcMap.get("__builtinfn_get_meta");
+  if (getMetaFuncIdx === undefined) return; // object runtime never ensured
+  const boxNumIdx = ctx.funcMap.get("__box_number");
+  const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals");
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  if (boxNumIdx === undefined || strFlattenIdx === undefined || strEqualsIdx === undefined || anyStrTypeIdx < 0) {
+    return;
+  }
+  // Resolve fill targets BY NAME (funcIdx math across phases is shift-sensitive).
+  const findFn = (name: string) => ctx.mod.functions.find((f) => f.name === name);
+  const getMetaFn = findFn("__builtinfn_get_meta");
+  const gopdFn = findFn("__builtinfn_gopd");
+  const deleteFn = findFn("__builtinfn_delete");
+  const pushOwnFn = findFn("__builtinfn_push_ownnames");
+
+  // Deterministic arm order.
+  const entries = Array.from(metaMap.entries()).sort((a, b) => a[0] - b[0]);
+  prependBuiltinFnObjectSemantics(
+    ctx,
+    entries.map(([typeIdx]) => typeIdx),
+  );
 
   // Shared preamble for get_meta / delete (locals: 2=any 3=fkey 4=isName 5=isLen):
   // convert the receiver, classify the key ONCE (string → flattened; isName /
