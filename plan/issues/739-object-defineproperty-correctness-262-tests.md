@@ -418,6 +418,41 @@ the negative control reports failure in both, proving the harness can fail.
 and 7-failed/8-passed on the merge base** — the 8 that pass there are exactly the
 2 controls + 4 guards + 2 documented residuals, by construction.
 
+### test262 flip count: **0 of 36** — measured, not projected
+
+**This fix flips ZERO test262 tests on the B1 surface. Do not credit it with the
+census's B1 figure (38 ES5-scoped / 61 corpus-wide).** That number was always a
+floor; measured, the recovery here is 0.
+
+Population: every baseline-failing test with signature `accessed !== true` under
+`built-ins/Object/{defineProperty,defineProperties,create}` — **n = 36**. Run with
+the fix: `pass=0 fail=36 other=0`.
+
+**Why** — and it is the unvaried-axis trap one level out. The B1 descriptors are
+**constructed instances**, not object literals:
+
+```js
+var proto = { enumerable: false };
+var ConstructFun = function () {};
+ConstructFun.prototype = proto;
+var child = new ConstructFun();               // <-- NOT an object literal
+Object.defineProperty(child, "enumerable", { get: function () { return true; } });
+Object.defineProperty(obj, "property", child);
+```
+
+`collectGrowableObjectLiterals` requires
+`ts.isObjectLiteralExpression(decl.initializer)`, so a `new`-constructed
+descriptor is outside this pass entirely — as it is outside S1's
+`collectEmptyObjectWidening`. My 16-case matrix varied descriptor *literal*
+construction (empty / non-empty / nested / `Object.create` / fn-returned) but
+never varied **`new`**, which is the shape the real population actually uses.
+
+**So the honest standing of this change is: a correct, regression-free spec fix
+with 7 proven behavioural flips and 0 test262 flips.** It closes a real §6.2.5.5
+violation and guards it, but it is not the B1 lever. **The B1 lever is
+constructed-instance descriptors**, which needs the pin to reach `new`-initialized
+vars — a distinct and larger slice, and the right next one on this surface.
+
 ### Documented residuals (asserted in the test file, not fixed here)
 
 - **Descriptor returned from a function** (`const d = mk()`) — the name-based
