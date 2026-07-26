@@ -18,6 +18,8 @@ origin: "2026-07-24 bounded standalone-test audit (dev-opus / #3565 lane): tests
 loc-budget-allow:
   - src/codegen/regexp-standalone.ts
   - src/codegen/expressions/call-tail-dispatch.ts
+func-budget-allow:
+  - src/codegen/expressions/call-tail-dispatch.ts::compileTailDispatch
 files:
   - src/codegen/regexp-standalone.ts
   - src/codegen/string-ops.ts
@@ -101,7 +103,11 @@ red. Fold once the refusal is restored (green).
   standalone lowering and 14-line WASI dispatch growth. Both additions are
   required to preserve the fatal diagnostic across the distinct transaction
   and direct-symbol call paths described above; no project-wide baseline was
-  relaxed.
+  relaxed. The corresponding `compileTailDispatch` function allowance is
+  limited to the same 14-line WASI preflight. It must run inside the existing
+  tail dispatcher before the unsupported direct-symbol call can enter fallback
+  lowering, so extracting it would obscure rather than isolate that ordering
+  invariant.
 - **What did not work:** committing the diagnostic only inside the shared
   RegExp replacement core did not cover WASI's direct `Symbol.replace` form,
   because that dispatcher did not enter the standalone helper. A narrow WASI
