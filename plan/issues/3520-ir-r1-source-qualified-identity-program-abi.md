@@ -1121,6 +1121,45 @@ remain later R2-R10 work and are explicitly outside R1.
   `benchmarks/results/test262-run.log` and
   `scripts/equivalence-baseline.json` remain unchanged.
 
+### PR #3496 merge-group regression repair
+
+- Exact merge-group run `30183268819` at head
+  `83b55f7790096a93aa60c97c25cd14e22d30b1e3` failed the Test262 regression
+  and standalone guards against immutable baseline commit
+  `de3acdd66f5e9835108502b92e4648747e541a3d`. The host gate reported 63
+  stable non-timeout regressions and 31 improvements; 56 of those regressions
+  shared the structural-identity diagnostic repaired here. All 52 standalone
+  non-CT regressions shared the same diagnostic.
+- The field-evaluation support record and a function or arrow used as its
+  initializer both used the initializer expression as their declaration
+  anchor. This violated the planning context's intentional declaration/unit
+  bijection. Field evaluation is a property operation, while the nested
+  callable is a separate executable unit, so static and instance field units
+  now anchor to their `PropertyDeclaration`. An implicit constructor likewise
+  anchors to its class declaration rather than borrowing the first instance
+  initializer.
+- Moving the inventory anchor exposed a second stale assumption in IR-first
+  call-edge collection: property initializers still resolved their terminal
+  owner through the initializer expression. They now resolve the field unit
+  through the property declaration, then retain the initializer expression as
+  the body boundary. This preserves module-init ownership for static fields and
+  constructor ownership for instance fields without aliasing nested callable
+  units.
+- Both defects have red-before-fix invariant tests. The focused identity matrix
+  passes 39/39. Replaying the exact affected baseline-pass/candidate-regression
+  paths locally restores 56/56 host rows and 52/52 standalone rows to runtime
+  pass. A fresh-process standalone replay also passes 52/52 on both this branch
+  and current-main control `dde8800c95694231e76ca3a56512a4060dbf81ad`.
+  The baseline and allowlists are unchanged; rows outside this diagnosed
+  signature are not attributed to this repair.
+- After merging current main `c941712943f45994149480b60165b5e18afb9505`,
+  the complete #3520/#2138 matrix passes 212/212. Strict TypeScript, lint,
+  formatting, LOC, fallback, and hybrid IR-readiness gates pass, with 31
+  emitted / 6 typed Unsupported / 0 Invariants. The linear/cross-backend matrix
+  passes 43/43. Full equivalence reports 1,608 passing / 35 known failures,
+  zero new regressions, and one known baseline failure now passing; the
+  equivalence baseline remains unchanged.
+
 Minimum resume validation:
 
 ```bash
