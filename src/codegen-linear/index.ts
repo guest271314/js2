@@ -10,6 +10,7 @@ import type { CollectionKind, FinallyEntry, LinearContext, LinearFuncContext } f
 import { addLocal } from "./context.js";
 import type { ClassLayout } from "./layout.js";
 import { computeClassLayout } from "./layout.js";
+import * as linearCoercion from "./coercion-engine.js";
 import * as numberFormat from "./number-format.js";
 import { addLinearStackArenaRuntime } from "./runtime-stack-arena.js";
 import {
@@ -3519,7 +3520,7 @@ function compileMethodCall(ctx: LinearContext, fctx: LinearFuncContext, expr: ts
     // Exact no-radix Number::toString uses the host-free Ryū runtime.
     compileExpression(ctx, fctx, propAccess.expression);
     if (expr.arguments.length === 0 && inferExprType(ctx, fctx, propAccess.expression).kind === "f64") {
-      numberFormat.emitNumberToStringCall(ctx, fctx);
+      linearCoercion.emitNumberToStringCall(ctx, fctx);
     }
     return;
   } else {
@@ -5009,10 +5010,9 @@ function compileTemplateExpression(ctx: LinearContext, fctx: LinearFuncContext, 
       compileExpression(ctx, fctx, span.expression);
     } else {
       // It's an f64 number — use the exact host-free Ryū formatter.
-      const numberToStringIdx = ctx.funcMap.get("number_toString");
-      if (numberToStringIdx !== undefined) {
+      if (linearCoercion.hasNumberToString(ctx)) {
         compileExpression(ctx, fctx, span.expression);
-        fctx.body.push({ op: "call", funcIdx: numberToStringIdx });
+        linearCoercion.emitNumberToStringCall(ctx, fctx);
       } else {
         // Fallback: compile as empty string (shouldn't normally happen)
         compileStringLiteral(ctx, fctx, "");

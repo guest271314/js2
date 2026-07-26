@@ -16,7 +16,8 @@ import type { TypedAST } from "../checker/index.js";
 import { buildPortableRyuTemplate } from "../codegen/number-ryu-portable.js";
 import type { Instr, LocalDef, ValType, WasmModule } from "../ir/types.js";
 import { forEachChild, ts } from "../ts-api.js";
-import type { LinearContext, LinearFuncContext } from "./context.js";
+import { NUMBER_TO_STRING_RUNTIME } from "./coercion-engine.js";
+import type { LinearContext } from "./context.js";
 import { addRuntime as addBaseRuntime } from "./runtime.js";
 
 const TABLE_BASE = 1024;
@@ -77,11 +78,6 @@ export function addRuntime(
   });
   if (enabled) addLinearNumberToStringRuntime(mod);
   return enabled ? LINEAR_NUMBER_FORMAT_DATA_BASE : defaultDataSegmentBase;
-}
-
-export function emitNumberToStringCall(ctx: LinearContext, fctx: LinearFuncContext): void {
-  const funcIdx = ctx.funcMap.get("number_toString");
-  if (funcIdx !== undefined) fctx.body.push({ op: "call", funcIdx });
 }
 
 function addFunc(
@@ -228,9 +224,9 @@ function finalizeString(ptr: number, pos: number): Instr[] {
   ];
 }
 
-/** Register `number_toString(f64) -> i32` and its exact Ryū dependencies. */
+/** Register the f64 → linear-string coercion and its exact Ryū dependencies. */
 export function addLinearNumberToStringRuntime(mod: WasmModule): void {
-  if (mod.functions.some((func) => func.name === "number_toString")) return;
+  if (mod.functions.some((func) => func.name === NUMBER_TO_STRING_RUNTIME)) return;
   const template = buildPortableRyuTemplate();
   const encoded = tableBytes(template.tables);
   mod.dataSegments.push({ offset: TABLE_BASE, bytes: encoded.bytes });
@@ -352,7 +348,7 @@ export function addLinearNumberToStringRuntime(mod: WasmModule): void {
   ];
   addFunc(
     mod,
-    "number_toString",
+    NUMBER_TO_STRING_RUNTIME,
     [F64],
     [I32],
     [
