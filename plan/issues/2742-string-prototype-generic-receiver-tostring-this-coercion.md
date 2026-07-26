@@ -16,6 +16,16 @@ language_feature: string-methods
 goal: es5
 related: [2670]
 depends_on: []
+# (#3102 ratchet) The fix adds `_wrapAccessorGetterReturn` — a host-marshalling
+# bridge that must sit beside its siblings `_wrapExecReturnForHost` /
+# `_maybeWrapCallableUnknownArity` in runtime.ts, since it composes directly with
+# the accessor wiring at the single `Object.defineProperty` accessor site. There
+# is no subsystem module for host-value marshalling to move it to, and splitting
+# one bridge away from the cache/discriminator helpers it calls would be worse
+# than the +34 lines (~2/3 of which are the rationale comment recording why the
+# generic call-exit marshal was reverted — #3123/#2835).
+loc-budget-allow:
+  - src/runtime.ts
 ---
 # #2742 — String.prototype generic-receiver `ToString(this)` coercion
 
