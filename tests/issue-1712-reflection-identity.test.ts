@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
+import { assertEquivalent } from "./equivalence/helpers.js";
 import { runTest262File } from "./test262-runner.js";
 
 const PROPERTY_HELPER_CASES = [
@@ -384,6 +385,41 @@ describe("#1712 standalone reflection identity", () => {
 });
 
 describe("#1712 host null-receiver boundary", () => {
+  it("preserves host Object.freeze identity and closed-struct field reads", async () => {
+    await assertEquivalent(
+      `
+        export function run(): number {
+          const obj = { value: 42 };
+          const frozen = Object.freeze(obj);
+          return frozen === obj && frozen.value === 42 ? 1 : 0;
+        }
+      `,
+      [{ fn: "run", args: [] }],
+    );
+  });
+
+  it("preserves host defineProperty return, value, and redefine semantics", async () => {
+    await assertEquivalent(
+      `
+        export function run(): number {
+          const obj: any = {};
+          const first = Object.defineProperty(obj, "value", {
+            value: 10,
+            writable: true,
+            configurable: true,
+          });
+          const second = Object.defineProperty(obj, "value", {
+            value: 42,
+            writable: false,
+            configurable: false,
+          });
+          return first === obj && second === obj && obj.value === 42 ? 1 : 0;
+        }
+      `,
+      [{ fn: "run", args: [] }],
+    );
+  });
+
   it.each(HOST_REALM_NULL_RECEIVER_CASES)(
     "keeps backup-cast recovery out of the host lane for %s",
     { timeout: 60_000 },

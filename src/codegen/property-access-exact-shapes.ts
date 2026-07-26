@@ -137,6 +137,7 @@ export function tryEmitExactStructFieldGet(
   const objResult = compileExpression(ctx, fctx, expr.expression);
   const fieldType = fields[fieldIdx]!.type;
   if (
+    ctx.standalone &&
     objResult &&
     ctx.classSet.has(typeName) &&
     (objResult.kind === "externref" || objResult.kind === "ref" || objResult.kind === "ref_null")
@@ -149,7 +150,7 @@ export function tryEmitExactStructFieldGet(
     return fieldType.kind === "ref" ? { kind: "ref_null", typeIdx: fieldType.typeIdx } : fieldType;
   }
   if (objResult?.kind === "externref") {
-    if (isStructuralObjectContract(ctx, objType, typeName)) {
+    if (ctx.standalone && isStructuralObjectContract(ctx, objType, typeName)) {
       const structuralResult = emitStructuralExternrefFieldGet(ctx, fctx, expr, propName);
       if (structuralResult !== undefined) return structuralResult;
     }
@@ -174,7 +175,7 @@ export function tryEmitStructuralContractReadFromLocal(
   typeName: string | undefined,
   receiverLocal: number,
 ): ValType | undefined {
-  if (!isStructuralObjectContract(ctx, objType, typeName)) return undefined;
+  if (!ctx.standalone || !isStructuralObjectContract(ctx, objType, typeName)) return undefined;
   fctx.body.push({ op: "local.get", index: receiverLocal });
   const result = emitStructuralExternrefFieldGet(ctx, fctx, expr, propName, true);
   if (result === undefined) fctx.body.push({ op: "drop" });

@@ -293,16 +293,23 @@ export function collectEmptyObjectWidening(
             // host `$Object` fails the decl-init cast, and the var is null from
             // the first instruction — the acorn `Parser`/`getOptions` escape
             // shape in TS-mode typing (tests/issue-2944.test.ts).
-            // (#1712/#2849 standalone completion) The same representation
-            // invariant is required without a host: the `{}` initializer is a
-            // native `$Object`, so leaving the evolved checker type mapped to a
-            // closed anon struct makes the declaration's guarded cast store
-            // null. Acorn's `getOptions` then successfully performs its dynamic
-            // for-in writes against that null receiver but traps at the first
-            // static `options.ecmaVersion` read. Poison the fresh per-variable
-            // type in every target; the provenance guards below keep annotated
-            // or shared types out.
-            recordOpenObjectConsumerTypes(ctx, checker, decl, varName);
+            if (!ctx.standalone) {
+              // Preserve the host lane's evolved-variable-only poison. Its
+              // live-mirror/sidecar provider still relies on the initializer
+              // retaining main's closed-struct representation.
+              const vt = checker.getTypeAtLocation(decl.name);
+              if (
+                !(vt.flags & ts.TypeFlags.Any) &&
+                (vt.getProperties().length > 0 ||
+                  vt.symbol?.declarations?.[0] === (decl.initializer as unknown as ts.Declaration))
+              ) {
+                ctx.objectHashConsumerTypes.add(vt);
+              }
+            } else {
+              // Standalone's native `$Object` provider needs the initializer,
+              // variable, and enclosing return carrier pinned together.
+              recordOpenObjectConsumerTypes(ctx, checker, decl, varName);
+            }
             continue;
           }
 
