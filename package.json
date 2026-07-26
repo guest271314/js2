@@ -109,6 +109,7 @@
     "check:loc-budget": "node scripts/check-loc-budget.mjs",
     "check:func-budget": "node scripts/check-func-budget.mjs",
     "check:harness-compile-budget": "npx tsx scripts/check-harness-compile-budget.ts",
+    "inventory:test262-linked-harness": "npx tsx scripts/test262-linked-harness-inventory.ts",
     "check:dead-exports": "node scripts/audit-legacy-reachability.mjs --check",
     "check:godfiles": "node scripts/profile-godfiles.mjs --check",
     "profile:godfiles": "node scripts/profile-godfiles.mjs",
