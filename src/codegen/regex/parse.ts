@@ -37,17 +37,25 @@
  *     rewrite to their zero-width-idempotent equivalent
  *   - inline modifier groups `(?ims-ims:…)` (regexp-modifiers proposal)
  *
- * Still refused (each cites the phase/slice that adds it):
- *   - Unicode property escapes `\p{…}` / `\P{…}`   → 2d Slice B
- *   - the `u`/`v` flags' code-point semantics      → 2d Slice B (parse stays UTF-16)
+ * Added in 2d Slice B (#1911, compacted by #3652):
+ *   - `u`/`v` code-point classes, Unicode property escapes, dot, and Unicode
+ *     ignore-case atoms as compile-time-enumerated CPCLASS range sets
+ *   - astral literals as explicit lead/trail sequences, with direction-aware
+ *     code-point classes inside lookbehind
+ *
+ * Added by #2591:
+ *   - v-mode `\q{…}` finite string disjunctions. Unicode properties of
+ *     strings and set algebra involving string-valued operands remain a
+ *     separate narrowed residual.
  */
 import { RE_FLAG_I, RE_FLAG_M, RE_FLAG_S, RE_FLAG_U, RE_FLAG_V, RegexUnsupportedError } from "./bytecode.js";
-import { codePointSource, cpRangesToNode, enumerateClassRanges, parseStringDisjunction } from "./unicode.js";
+import { codePointSource, enumerateClassRanges, parseStringDisjunction, type CpRanges } from "./unicode.js";
 
 export type ReNode =
   | { kind: "char"; code: number }
   | { kind: "any" }
   | { kind: "class"; ranges: Array<[number, number]>; negated: boolean }
+  | { kind: "cpclass"; ranges: CpRanges; negated: boolean }
   | { kind: "bol" }
   | { kind: "eol" }
   | { kind: "wordBoundary"; negated: boolean }
@@ -212,7 +220,7 @@ class Parser {
    *  otherwise BMP → CHAR, astral → lead+trail concat. */
   private uChar(cp: number): ReNode {
     if (this.iState) {
-      return cpRangesToNode(enumerateClassRanges(codePointSource(cp), this.enumFlags()));
+      return this.cpClass(enumerateClassRanges(codePointSource(cp), this.enumFlags()));
     }
     if (cp > 0xffff) {
       const lead = 0xd800 + ((cp - 0x10000) >> 10);
@@ -228,10 +236,14 @@ class Parser {
     return { kind: "char", code: cp };
   }
 
-  /** Enumerate a class-like source fragment under the current flags and lower
-   *  it to the unit-level AST. */
+  /** Enumerate a class-like source fragment under the current flags and keep
+   *  the resulting code-point ranges compact for the VM. */
   private uEnum(source: string): ReNode {
-    return cpRangesToNode(enumerateClassRanges(source, this.enumFlags()));
+    return this.cpClass(enumerateClassRanges(source, this.enumFlags()));
+  }
+
+  private cpClass(ranges: CpRanges): ReNode {
+    return { kind: "cpclass", ranges, negated: false };
   }
 
   /**
@@ -340,7 +352,7 @@ class Parser {
           // Under `i`, fold each literal code point through the host so the
           // operand matches case-insensitively (reuses the Slice B oracle).
           if (caseFold) {
-            parts.push(cpRangesToNode(enumerateClassRanges(codePointSource(cp), flagStr)));
+            parts.push(this.cpClass(enumerateClassRanges(codePointSource(cp), flagStr)));
           } else {
             parts.push(this.uChar(cp));
           }
@@ -365,7 +377,7 @@ class Parser {
       // (e.g. `\q{ab}` alone leaves ``), in which case no arm is added.
       const residualRanges = enumerateClassRanges(`[${residual}]`, flagStr);
       if (residualRanges.length > 0) {
-        arms.push({ len: 1, node: cpRangesToNode(residualRanges) });
+        arms.push({ len: 1, node: this.cpClass(residualRanges) });
       } else if (PROPERTY_OF_STRINGS_RE.test(residual)) {
         // A residual that enumerates to NO code points but names a
         // **property of strings** (`\p{Basic_Emoji}`, `\p{RGI_Emoji}`, …; the
@@ -384,7 +396,7 @@ class Parser {
     // stable order among equal lengths.
     arms.sort((a, b) => b.len - a.len);
     const options = arms.map((a) => a.node);
-    if (options.length === 0) return cpRangesToNode([]); // never matches
+    if (options.length === 0) return this.cpClass([]); // never matches
     return options.length === 1 ? options[0]! : { kind: "alt", options };
   }
 
