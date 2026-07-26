@@ -83,12 +83,7 @@ import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
-import {
-  planProgramAbiGlobal,
-  programAbiSourceIdForUnit,
-  programAbiUnitDeclarationOrdinal,
-  PROGRAM_ABI_GLOBAL_ROLE,
-} from "./program-abi-planning.js";
+import { planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
 import {
   applyIrFinalContextFunctionRetention,
@@ -2900,8 +2895,7 @@ function prepareMultiIrImportedLowering(
       }
       planProgramAbiGlobal(ctx, {
         ref: callPlan.argcGlobal,
-        sourceId: entrySource.id,
-        declarationOrdinal: 0,
+        anchor: { kind: "source", sourceId: entrySource.id },
         roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.argc,
         global: argcGlobal,
       });
@@ -2944,11 +2938,9 @@ function prepareMultiIrImportedLowering(
       continue;
     }
     const targetUnitId = valuePlan.target.binding.unitId;
-    const inventory = plan.identityPlan.identityContext.inventory;
     planProgramAbiGlobal(ctx, {
       ref: valuePlan.cacheGlobal,
-      sourceId: programAbiSourceIdForUnit(inventory, targetUnitId),
-      declarationOrdinal: programAbiUnitDeclarationOrdinal(inventory, targetUnitId),
+      anchor: { kind: "unit", unitId: targetUnitId },
       roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.functionValueCache,
       global: cache,
     });

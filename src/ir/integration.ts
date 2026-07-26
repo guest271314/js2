@@ -2199,17 +2199,17 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
   const tdzGlobalRef = tdzGlobal ? irSourceGlobalRef(identity.tdzBindingId, expectedTdzGlobalName) : null;
   planProgramAbiGlobal(ctx, {
     ref: globalRef,
-    sourceId: identity.sourceId,
-    declarationOrdinal: identity.declarationOrdinal,
+    anchor: { kind: "source", sourceId: identity.sourceId },
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
+    derivedOrdinal: identity.declarationOrdinal,
     global,
   });
   if (tdzGlobal && tdzGlobalRef) {
     planProgramAbiGlobal(ctx, {
       ref: tdzGlobalRef,
-      sourceId: identity.sourceId,
-      declarationOrdinal: identity.declarationOrdinal,
+      anchor: { kind: "source", sourceId: identity.sourceId },
       roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleTdz,
+      derivedOrdinal: identity.declarationOrdinal,
       global: tdzGlobal,
     });
   }
