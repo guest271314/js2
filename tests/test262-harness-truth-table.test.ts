@@ -285,47 +285,60 @@ const CASES: TruthCase[] = [
     why: "The failing assertion runs in a microtask; the runner must drain the queue and observe the rejection instead of scoring the synchronous return.",
   },
 
-  // ── Group F: KNOWN-VACUOUS — asserted as TRUTH, expected to fail today.
+  // ── Group F: the #3615 accessor-drop class — RETIRED from known-wrong.
   //
-  // Discovered by this file on 2026-07-25 (#3615). A property read in
-  // EXPRESSION-STATEMENT position does not invoke the accessor at all, so an
-  // accessor's observable effects — including its throw — are dropped.
-  // Controlled comparison: F3 (statement read, side effect NOT observed →
-  // scored `fail` because the following assertion catches it) vs F4 (consumed
-  // read, side effect observed → `pass`). Same file shape, only the read form
-  // differs.
+  // Discovered by this file on its first run (2026-07-25): a bare property read
+  // in EXPRESSION-STATEMENT position never invoked the accessor, so its
+  // observable effects — including its throw — were dropped, and the test
+  // scored a VACUOUS PASS. F1–F3 were `it.fails` entries asserting the truth.
+  //
+  // FIXED by #3615 in the same PR series, so they are now ordinary `it`s. The
+  // root cause was NOT the property-read lowering (this file's original note
+  // guessed wrong): `collectDeclarations` builds `ctx.moduleInitStatements`
+  // from an ALLOW-LIST of expression-statement shapes, and a bare
+  // PropertyAccess/ElementAccess matched no arm, so the whole statement never
+  // reached `__module_init`. Identical mechanism to #2992 (`delete`) and #3592
+  // RC1 (`throw`) — see #3623 for the generalisation that stops the next one.
+  //
+  // F4/F5 stay as the controlled pair that proved NOT-INVOKED rather than
+  // invoked-but-swallowed: same file shape, only the read form differs.
   {
     id: "F1-objlit-getter-in-statement-position",
     body: `var o = { get p() { throw new Test262Error("accessor must run"); } };\no.p;`,
     truth: "fail",
-    knownWrong:
-      "#3615 — a property read in expression-statement position never invokes the accessor; the throw is dropped and the test scores a vacuous pass.",
+    why: "#3615: a bare `o.p;` statement must invoke the accessor, so the throw must be observed. Was a vacuous pass until the collector's allow-list gained a property/element-read arm.",
     lanes: ["gc", "standalone"],
   },
   {
     id: "F2-defineProperty-getter-in-statement-position",
     body: `var o = {};\nObject.defineProperty(o, "p", { get: function () { throw new Test262Error("accessor must run"); } });\no.p;`,
     truth: "fail",
-    knownWrong:
-      "#3615 — same class via Object.defineProperty. This is the exact shape of the corpus's 'reading this property must throw' tests.",
+    why: "#3615: same class via Object.defineProperty — the accessor kind is irrelevant, the statement SHAPE was the defect.",
   },
   {
     id: "F3-class-getter-in-statement-position",
     body: `class C { get p() { throw new Test262Error("accessor must run"); } }\nvar c = new C();\nc.p;`,
     truth: "fail",
-    knownWrong: "#3615 — same class on a class accessor, so the defect is in the read form, not the accessor kind.",
+    why: "#3615: same class on a class accessor — confirms the defect was the read form, not the accessor kind.",
   },
+  // F4/F5 are a matched pair that observes the accessor through a SIDE EFFECT
+  // rather than a throw, so no exception machinery is in the picture. Before
+  // #3615 they disagreed (F4 fail / F5 pass) and that disagreement is what
+  // proved the accessor was NOT INVOKED rather than invoked-but-swallowed.
+  // After #3615 they must AGREE — and they still localize a regression: if the
+  // collector arm is ever lost again, F4 flips to fail while F5 stays pass,
+  // pinning it to the statement-read form specifically.
   {
-    id: "F4-control-statement-read-side-effect-not-observed",
+    id: "F4-statement-read-side-effect-observed",
     body: `var hit = 0;\nvar o = { get p() { hit = 1; return 1; } };\no.p;\nassert.sameValue(hit, 1, "the accessor must have run");`,
-    truth: "fail",
-    why: "CONTROL for F1-F3, and the direct evidence that the accessor is NOT INVOKED (rather than invoked-but-throw-swallowed): `hit` is still 0 after a statement-position read. Passes today because the follow-up assertion catches the miss.",
+    truth: "pass",
+    why: "#3615: a STATEMENT-position read must invoke the accessor, so `hit` must be 1. This entry's ground truth INVERTED when #3615 landed — pre-fix it was the direct evidence of the drop (`hit` stayed 0); post-fix it is the direct evidence the fix holds. If it ever fails again while F5 passes, the collector arm has been lost.",
   },
   {
-    id: "F5-control-consumed-read-side-effect-observed",
+    id: "F5-consumed-read-side-effect-observed",
     body: `var hit = 0;\nvar o = { get p() { hit = 1; return 1; } };\nvar v = o.p;\nassert.sameValue(hit, 1, "the accessor must have run");`,
     truth: "pass",
-    why: "CONTROL for F4: the SAME accessor, read in value position, IS invoked. F4/F5 isolate the defect to the expression-statement read form.",
+    why: "The SAME accessor read in VALUE position — a path that always worked, so it never depended on #3615. Paired with F4 it discriminates 'the collector dropped the statement' from 'the accessor itself broke'.",
   },
 ];
 
