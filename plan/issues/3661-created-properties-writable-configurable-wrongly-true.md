@@ -1,5 +1,5 @@
 ---
-id: 3653
+id: 3661
 title: "Created properties report writable/configurable TRUE when the spec requires FALSE (202 + 134 tests)"
 status: ready
 sprint: current
@@ -14,11 +14,11 @@ area: codegen, runtime
 language_feature: property-descriptors
 es_edition: es5
 goal: es5
-related: [3647, 3654, 3655, 739, 3603]
+related: [3647, 3662, 3663, 739, 3603]
 origin: "2026-07-26 lead measurement of the #3603 host de-inflation regression set (merge_group run 30179758665), decomposed per failed assertion."
 ---
 
-# #3653 — created properties report `writable`/`configurable` TRUE when the spec requires FALSE
+# #3661 — created properties report `writable`/`configurable` TRUE when the spec requires FALSE
 
 ## Measured population
 
@@ -33,10 +33,10 @@ Decomposing each failure message into its individual failed assertions:
 | ------------------------------- | -------------: |
 | `enumerable` wrongly TRUE       |        838 → **#3647** |
 | **`writable` wrongly TRUE**     |        **202** |
-| descriptor **value** wrong      |        153 → **#3654** |
+| descriptor **value** wrong      |        153 → **#3662** |
 | **`configurable` wrongly TRUE** |        **134** |
-| `configurable` wrongly FALSE    |         72 → **#3655** |
-| `writable` wrongly FALSE        |         16 → **#3655** |
+| `configurable` wrongly FALSE    |         72 → **#3663** |
+| `writable` wrongly FALSE        |         16 → **#3663** |
 
 A test can fail several assertions, so these overlap. **This issue owns the two
 "wrongly TRUE" rows: 202 + 134.**

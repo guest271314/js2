@@ -1,5 +1,5 @@
 ---
-id: 3655
+id: 3663
 title: "Properties are OVER-restricted — configurable/writable read FALSE when the spec requires TRUE (72 + 16 tests)"
 status: ready
 sprint: current
@@ -14,11 +14,11 @@ area: codegen, runtime
 language_feature: property-descriptors
 es_edition: es5
 goal: es5
-related: [3647, 3653, 3654, 739, 3626, 3603]
+related: [3647, 3661, 3662, 739, 3626, 3603]
 origin: "2026-07-26 lead measurement of the #3603 host de-inflation regression set (merge_group run 30179758665); independently corroborates opus-loop-e's refutation of the ES5 census's A1 direction."
 ---
 
-# #3655 — properties are OVER-restricted
+# #3663 — properties are OVER-restricted
 
 ## Measured population
 
@@ -33,7 +33,7 @@ gate.
 
 The failing clauses read *"obj[X] descriptor should be configurable"* /
 *"should be writable"* — i.e. we mark properties **more restricted than the spec
-requires**, the opposite direction from #3647/#3653.
+requires**, the opposite direction from #3647/#3661.
 
 ## Why this matters more than its size
 
@@ -63,13 +63,13 @@ neither earlier account captured:
 So `writable` skews strongly toward over-permissiveness while `configurable`
 has substantial traffic in **both** directions. **A single "descriptor defaults"
 fix that assumes one direction will regress the other.** That is the concrete
-reason this is filed separately rather than folded into #3653.
+reason this is filed separately rather than folded into #3661.
 
 ## Acceptance
 
 - [ ] Identify the mechanism by direct probe on HEAD — specifically, what makes a
       property `configurable: false` that should be configurable.
-- [ ] Verify a fix here does **not** regress #3653's 202/134 — run both
+- [ ] Verify a fix here does **not** regress #3661's 202/134 — run both
       directions as a matrix, not one arm.
 - [ ] Regression test **red on the merge base**, covering both directions.
 - [ ] Report the **measured flip count** from a re-run, with its denominator.

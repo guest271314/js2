@@ -1,5 +1,5 @@
 ---
-id: 3654
+id: 3662
 title: "Descriptor `value` reads back wrong from getOwnPropertyDescriptor (153 tests)"
 status: ready
 sprint: current
@@ -14,11 +14,11 @@ area: codegen, runtime
 language_feature: property-descriptors
 es_edition: es5
 goal: es5
-related: [3647, 3653, 3655, 739, 3603]
+related: [3647, 3661, 3663, 739, 3603]
 origin: "2026-07-26 lead measurement of the #3603 host de-inflation regression set (merge_group run 30179758665), decomposed per failed assertion."
 ---
 
-# #3654 — descriptor `value` reads back wrong
+# #3662 — descriptor `value` reads back wrong
 
 ## Measured population
 
@@ -40,16 +40,16 @@ Observed concrete expectations in the corpus include `gen`, `fn`, `arrow`, and
 `undefined` — i.e. **class members and function-valued properties**, plus a
 distinct sub-family asserting `value should be undefined`.
 
-## Why this is filed separately from #3647 / #3653
+## Why this is filed separately from #3647 / #3661
 
-`enumerable` (#3647) and `writable`/`configurable` (#3653) are **attribute**
+`enumerable` (#3647) and `writable`/`configurable` (#3661) are **attribute**
 defects — booleans that read back wrong. This is a **value** defect: the property
 holds, or reports, the wrong thing entirely. That is plausibly a different
 mechanism (wrong slot read, accessor-vs-data confusion, or a sidecar/struct
 two-store mismatch) and should not be assumed to fall out of the attribute
 fixes.
 
-**Check first whether it does.** If fixing #3647 or #3653 also clears these, close
+**Check first whether it does.** If fixing #3647 or #3661 also clears these, close
 this as subsumed and say so — that is a perfectly good outcome and cheaper than
 a parallel investigation. What must not happen is assuming either way.
 
@@ -71,7 +71,7 @@ starting** — this may be the same bug seen from the receiver side.
 
 ## Acceptance
 
-- [ ] Determine whether this is subsumed by #3647 / #3653 / #739-S2; record the
+- [ ] Determine whether this is subsumed by #3647 / #3661 / #739-S2; record the
       answer either way.
 - [ ] If distinct: identify the mechanism by direct probe on HEAD.
 - [ ] Regression test **red on the merge base**.
