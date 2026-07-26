@@ -112,6 +112,12 @@ function compileSingleSource(source, options) {
   return incrementalCompiler ? incrementalCompiler.compile(source, options) : compile(source, options);
 }
 
+function compileMultipleSources(files, entryFile, options) {
+  return incrementalCompiler?.compileMulti
+    ? incrementalCompiler.compileMulti(files, entryFile, options)
+    : compileMulti(files, entryFile, options);
+}
+
 // Suppress unhandled Promise rejections from async tests
 process.on("unhandledRejection", () => {});
 
@@ -1125,7 +1131,7 @@ async function doCompile(
     // fixture sources beside it. Like the project runner's #2932 path, the
     // graph deliberately omits deferTopLevelInit: compileMulti synthesizes
     // one init schedule for the entire graph, including circular exports.
-    return compileMulti({ ...fixtureFiles, [entryFile]: source }, entryFile, {
+    return compileMultipleSources({ ...fixtureFiles, [entryFile]: source }, entryFile, {
       // #3506 — every virtual root is a real pinned `.js` file. With
       // `allowJs:false`, TypeScript excludes the graph before syntax checking
       // and codegen crashes at `undefined.kind`. Retain the literal JavaScript

@@ -4,12 +4,13 @@ Lightweight pointer index for unscheduled issues that need sprint candidacy. Aut
 
 ## 2026-07-26 — TypeScript frontend incremental reuse
 
-- [#700](../700-reuse-typescript-program-across-builds.md) — **in review,
-  PR #3645**: replace per-build TypeScript Program/checker construction with a
-  persistent versioned Language Service. Measured edited rebuilds improve
-  2.2–2.6× and unchanged rebuilds 4.1–6.2×, with Program invalidation,
-  cross-service isolation, JS byte parity, and 100-source sequential isolation
-  covered by focused tests.
+- [#700](../700-superseded-reuse-typescript-host-state.md) — **in review,
+  PRs #3645 / #3650**: replace per-build TypeScript Program/checker construction
+  with persistent single- and multi-file Language Services. Measured edited
+  single-file rebuilds improve 2.2–2.6× and unchanged rebuilds 4.1–6.2×, with
+  Program invalidation, cross-service isolation, JS byte parity, 100-source
+  sequential isolation, and Test262 fixture-graph reuse covered by focused
+  tests.
 
 ## 2026-07-17 - /harvest-errors (baselines run 20260717-151504, 32,139 pass)
 

@@ -13,7 +13,9 @@ goal: performance
 sprint: current
 files:
   - scripts/test262-worker.mjs
+  - src/checker/multi-file-paths.ts
   - src/checker/language-service.ts
+  - src/compiler.ts
   - src/index.ts
   - tests/issue-700-test262-language-service.test.ts
   - tests/issue-1119.test.ts
@@ -75,10 +77,18 @@ versioned TypeScript Language Service:
    different source text.
 7. JavaScript, JSX, TypeScript, and TSX inputs retain their correct ScriptKind
    and `allowJs`/JSX compiler settings.
-8. The authoritative Test262 unified worker routes both its literal JavaScript
-   harness lane and its synthetic TypeScript lane through the persistent
-   service. Multi-file fixture graphs remain on `compileMulti()`, since the
-   service deliberately owns one mutable source document.
+8. `createIncrementalCompiler()` exposes both `compile()` and `compileMulti()`.
+   The multi-file service owns a versioned snapshot per normalized virtual path,
+   preserving unchanged dependency ASTs while invalidating edits, additions,
+   removals, renames, root ordering, and entry-file changes.
+9. The one-shot and incremental project hosts share path normalization,
+   extension probing, bare-specifier mapping, ScriptKind selection, and module
+   resolution. Both retain the compiler's dependency-first, entry-last module
+   initialization order.
+10. The authoritative Test262 unified worker routes its literal JavaScript
+    harness lane, synthetic TypeScript lane, and JavaScript fixture graphs
+    through the persistent compiler. The worker keeps a compatibility fallback
+    to `compileMulti()` for older bundles without the new method.
 
 ## Performance evidence
 
@@ -104,9 +114,12 @@ produced byte-for-byte identical verdict sets against the pre-integration
 | Standalone |      20 |  9.03 s |           8.45 s | 12 pass / 8 fail  |
 
 These single-run wall timings are mixed compile-and-execute measurements and do
-not demonstrate a reliable Test262 throughput improvement. The integration
-removes the bypass and makes frontend reuse available; a larger repeated CI
-measurement is still required before claiming an end-to-end Test262 speedup.
+not demonstrate a reliable Test262 throughput improvement. The combined point
+estimate is 52.06 s → 52.90 s (about 1.6% slower), so the evidence currently
+says "approximately unchanged, if anything slightly slower" rather than
+"faster." The integration removes the bypass and makes frontend reuse
+available; a larger repeated CI measurement is still required before claiming
+an end-to-end Test262 speedup.
 
 ## Correctness and isolation
 
@@ -122,6 +135,12 @@ The implementation adds or strengthens coverage for:
 - literal-harness JavaScript parity across source replacements
 - recovery from a syntax-error harness to a subsequent clean harness
 - consecutive host and standalone original-harness jobs in one unified worker
+- unchanged dependency AST identity across multi-file entry edits
+- unchanged whole-project Program identity
+- edited dependency byte parity with one-shot `compileMulti()`
+- add/remove/re-add and entry-file invalidation
+- simultaneous project-service isolation on identical virtual paths
+- consecutive changing JavaScript fixture graphs in one unified worker
 - hard TypeScript diagnostics on the asynchronous incremental API
 
 Existing incremental tests were also corrected to await `compiler.compile()`;
@@ -144,8 +163,10 @@ several had previously asserted properties on unresolved Promises.
 
 - `pnpm exec tsc --noEmit --pretty false`
 - focused Biome lint over all seven changed files
-- focused Vitest suite: 5 files, 23 tests passed
-- Test262 integration suite: 4 tests passed
+- focused incremental and multi-file Vitest suites: 9 files, 51 tests passed
+- Test262 integration suite: 9 tests passed
+- 14 exact Test262 fixture-negative paths passed in both host and standalone
+  FYI lanes
 - existing unified-worker oracle sample: 50/50 records passed
 - Test262 original-harness A/B: 100/100 host and 20/20 standalone verdicts
   identical to the `52c498db4` control
@@ -155,7 +176,9 @@ several had previously asserted properties on unresolved Promises.
 ## Files changed
 
 - `scripts/test262-worker.mjs`
+- `src/checker/multi-file-paths.ts`
 - `src/checker/language-service.ts`
+- `src/compiler.ts`
 - `src/index.ts`
 - `tests/issue-700-test262-language-service.test.ts`
 - `tests/issue-1119.test.ts`
