@@ -24,6 +24,7 @@ import {
 import {
   buildIrPlanningIdentityContext,
   IrPlanningIdentityInvariantError,
+  requireIrPlanningOwnerUnitId,
   requireIrPlanningSourceId,
   type IrPlanningIdentityInvariantCode,
 } from "../src/ir/index.js";
@@ -613,6 +614,40 @@ describe("#3520 structural IR identity", () => {
     });
     expect(context.moduleInitUnitIdBySourceFile.has(dependency)).toBe(false);
     expect(indexIrTerminalDeclarations(entry, inventory).get(entry)).toBe(moduleInitId);
+  });
+
+  it("gives field evaluation, nested callable, and implicit-constructor units distinct AST anchors", () => {
+    const fixture = source(
+      "field-callables.ts",
+      `
+        class Fields {
+          static fromArrow = () => 1;
+          fromFunction = function () { return 2; };
+        }
+      `,
+    );
+    const inventory = buildIrUnitInventory([fixture], { entrySource: fixture });
+    const context = buildIrPlanningIdentityContext(inventory);
+    const declaration = collectNodes(fixture, ts.isClassDeclaration)[0]!;
+    const staticField = collectNodes(fixture, ts.isPropertyDeclaration).find(
+      (field) => ts.isIdentifier(field.name) && field.name.text === "fromArrow",
+    )!;
+    const instanceField = collectNodes(fixture, ts.isPropertyDeclaration).find(
+      (field) => ts.isIdentifier(field.name) && field.name.text === "fromFunction",
+    )!;
+    const arrow = collectNodes(fixture, ts.isArrowFunction)[0]!;
+    const expression = collectNodes(fixture, ts.isFunctionExpression)[0]!;
+    const unitKindAt = (node: ts.Node) => context.unitByUnitId.get(context.unitIdByDeclaration.get(node)!)?.kind;
+
+    expect(unitKindAt(declaration)).toBe("class-implicit-constructor");
+    expect(unitKindAt(staticField)).toBe("class-static-field-initializer");
+    expect(unitKindAt(instanceField)).toBe("class-instance-field-initializer");
+    expect(unitKindAt(arrow)).toBe("arrow-function");
+    expect(unitKindAt(expression)).toBe("function-expression");
+    expect(requireIrPlanningOwnerUnitId(context, arrow.body)).toBe(context.moduleInitUnitIdBySourceFile.get(fixture));
+    expect(requireIrPlanningOwnerUnitId(context, expression.body)).toBe(context.unitIdByDeclaration.get(declaration));
+    expect(context.unitIdByDeclaration.size).toBe(context.declarationByUnitId.size);
+    expect(context.declarationByUnitId.size).toBe(inventory.allUnits.length - 1);
   });
 
   it("keeps planning declaration identities stable when source input order reverses", () => {
