@@ -34,7 +34,7 @@ import {
 } from "../linear-uint8-signatures.js";
 import { compileArrayConstructorCall, compileSymbolCall } from "../literals.js";
 import { tryCompileNodeFsCall } from "../node-fs-api.js";
-import { compileObjectDefineProperties, compileObjectDefineProperty } from "../object-ops.js";
+import { calleeIsBoundFunctionVar } from "../object-builtin-effects.js";
 import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import { emitStandaloneRegExpToStringFromExpr } from "../regexp-standalone.js";
 import type { InnerResult } from "../shared.js";
@@ -56,6 +56,7 @@ import {
 import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { wasiAllocStringData } from "./builtins.js";
 import { compileClosureCall } from "./calls-closures.js";
+import { tryCompileStoredObjectBuiltinCall } from "./call-object-builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
   emitThrowTypeError,
@@ -71,7 +72,6 @@ import {
   buildArgcExtrasReset,
   buildArgcExtrasSetupFromLocals,
   buildArgcResetNoLazyExtras,
-  calleeIsBoundFunctionVar,
   calleeIsCapabilityCtorParam,
   calleeIsPromiseExecutorParam,
   calleeMayBeHostCallable,
@@ -81,8 +81,6 @@ import {
   emitBoundFunctionCall,
   PATH_BASED_FS_FNS,
   resolveClosureInfoFromLocal,
-  resolveStoredObjectStaticMethod,
-  resolveUncurriedObjectPrototypeMethod,
   tryEmitArrayToStringNative,
   tryEmitInlineDynamicCall,
 } from "./calls.js";
@@ -957,144 +955,23 @@ export function compileIdentifierCall(
         const nonNull = ctx.checker.getNonNullableType(calleeTsType);
         callSigs = nonNull.getCallSignatures?.();
       }
-      // (#1337) If the callee is a variable holding a `Function.prototype.bind`
-      // result, its runtime value is a host bound-function externref, NOT a
-      // wasm closure struct — the struct-cast + call_ref path below would null
-      // it and trap. Route the call through the `__call_function` host helper
-      // (Reflect.apply on the bound function, which already carries
-      // [[BoundThis]]/[[BoundArguments]]). JS-host mode only; standalone
-      // degrades bind to identity so the normal path applies.
-      if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsBoundFunctionVar(ctx, expr.expression)) {
+      // (#1337) Host bound functions route through Reflect.apply; standalone
+      // degrades bind to identity and continues through its native call path.
+      if (
+        isKnownVariable &&
+        !ctx.standalone &&
+        !noJsHost(ctx) &&
+        calleeIsBoundFunctionVar(ctx.oracle, expr.expression)
+      ) {
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;
       }
       if (isKnownVariable && (ctx.standalone || noJsHost(ctx))) {
-        const storedObjectStatic = resolveStoredObjectStaticMethod(ctx, expr.expression);
-        if (storedObjectStatic === "defineProperty" && expr.arguments.length >= 3) {
-          return compileObjectDefineProperty(ctx, fctx, expr);
-        }
-        if (storedObjectStatic === "defineProperties" && expr.arguments.length >= 2) {
-          return compileObjectDefineProperties(ctx, fctx, expr);
-        }
-        if (
-          (storedObjectStatic === "freeze" ||
-            storedObjectStatic === "seal" ||
-            storedObjectStatic === "preventExtensions") &&
-          expr.arguments.length >= 1
-        ) {
-          const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
-          if (!argType) return null;
-          if (
-            argType.kind === "ref" ||
-            argType.kind === "ref_null" ||
-            argType.kind === "anyref" ||
-            argType.kind === "eqref"
-          ) {
-            fctx.body.push({ op: "extern.convert_any" });
-          } else if (argType.kind !== "externref") {
-            // Integrity methods return primitive arguments unchanged.
-            return argType;
-          }
-          const helperName =
-            storedObjectStatic === "freeze"
-              ? "__object_freeze"
-              : storedObjectStatic === "seal"
-                ? "__object_seal"
-                : "__object_preventExtensions";
-          const externRef: ValType = { kind: "externref" };
-          const helperIdx = ensureLateImport(ctx, helperName, [externRef], [externRef]);
-          flushLateImportShifts(ctx, fctx);
-          const finalHelperIdx = ctx.funcMap.get(helperName) ?? helperIdx;
-          if (finalHelperIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: finalHelperIdx });
-          }
-          return externRef;
-        }
-        if (storedObjectStatic === "getOwnPropertyDescriptor") {
-          const externRef: ValType = { kind: "externref" };
-          for (let index = 0; index < 2; index++) {
-            const arg = expr.arguments[index];
-            if (!arg) {
-              fctx.body.push({ op: "ref.null.extern" });
-              continue;
-            }
-            const actual = compileExpression(ctx, fctx, arg, externRef);
-            if (actual === null) fctx.body.push({ op: "ref.null.extern" });
-            else if (actual.kind !== "externref") coerceType(ctx, fctx, actual, externRef);
-          }
-          const helperIdx = ensureLateImport(ctx, "__getOwnPropertyDescriptor", [externRef, externRef], [externRef]);
-          flushLateImportShifts(ctx, fctx);
-          const finalHelperIdx = ctx.funcMap.get("__getOwnPropertyDescriptor") ?? helperIdx;
-          if (finalHelperIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: finalHelperIdx });
-          } else {
-            fctx.body.push({ op: "drop" }, { op: "drop" }, { op: "ref.null.extern" });
-          }
-          return externRef;
-        }
-        if (storedObjectStatic === "getOwnPropertyNames") {
-          const externRef: ValType = { kind: "externref" };
-          const arg = expr.arguments[0];
-          if (!arg) {
-            fctx.body.push({ op: "ref.null.extern" });
-          } else {
-            const actual = compileExpression(ctx, fctx, arg, externRef);
-            if (actual === null) fctx.body.push({ op: "ref.null.extern" });
-            else if (actual.kind !== "externref") coerceType(ctx, fctx, actual, externRef);
-          }
-          const helperIdx = ensureLateImport(ctx, "__getOwnPropertyNames", [externRef], [externRef]);
-          flushLateImportShifts(ctx, fctx);
-          const finalHelperIdx = ctx.funcMap.get("__getOwnPropertyNames") ?? helperIdx;
-          if (finalHelperIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: finalHelperIdx });
-          } else {
-            fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
-          }
-          return externRef;
-        }
-        const uncurriedObjectMethod = resolveUncurriedObjectPrototypeMethod(ctx, expr.expression);
-        if (uncurriedObjectMethod !== undefined) {
-          const externRef: ValType = { kind: "externref" };
-          const emitArg = (index: number): void => {
-            const arg = expr.arguments[index];
-            if (!arg) {
-              fctx.body.push({ op: "ref.null.extern" });
-              return;
-            }
-            const actual = compileExpression(ctx, fctx, arg, externRef);
-            if (actual === null) {
-              fctx.body.push({ op: "ref.null.extern" });
-            } else if (actual.kind !== "externref") {
-              coerceType(ctx, fctx, actual, externRef);
-            }
-          };
-          emitArg(0);
-          if (uncurriedObjectMethod === "valueOf") return externRef;
-          emitArg(1);
-          const helperName = uncurriedObjectMethod === "hasOwnProperty" ? "__hasOwnProperty" : "__propertyIsEnumerable";
-          const helperIdx = ensureLateImport(ctx, helperName, [externRef, externRef], [{ kind: "i32", boolean: true }]);
-          flushLateImportShifts(ctx, fctx);
-          const finalHelperIdx = ctx.funcMap.get(helperName) ?? helperIdx;
-          if (finalHelperIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: finalHelperIdx });
-            return { kind: "i32", boolean: true };
-          }
-          fctx.body.push({ op: "drop" }, { op: "drop" }, { op: "i32.const", value: 0 });
-          return { kind: "i32", boolean: true };
-        }
+        const storedObjectCall = tryCompileStoredObjectBuiltinCall(ctx, fctx, expr);
+        if (storedObjectCall !== undefined) return storedObjectCall;
       }
-      // (#1528 / #56 follow-up — class-ctor arm) `executor(...)` inside a function
-      // used as a Promise-combinator capability constructor
-      // (`Promise.X.call(Constructor, …)` → V8 `Construct(Constructor, «executor»)`
-      // via the #1632b-2 bridge). The `executor` PARAM is an UNTYPED (`any`) value
-      // — no call signatures — so it never reaches the callable-param closure
-      // dispatch below; the no-sig fallback would `ref.cast` it to a closure
-      // struct and trap (`illegal cast in Constructor()`), because V8 supplies a
-      // HOST function there, not a wasm closure. Route it through the same
-      // `__call_function` host helper the bound-function path uses (it packs args
-      // into a JS array and calls `Reflect.apply`). JS-host only; narrow syntactic
-      // gate (the fn flows to a combinator capability-ctor site), so the #1941
-      // dual-mode guarantee for ordinary callable params is preserved.
+      // (#1528/#56) Promise-combinator executor params are host functions, so
+      // their narrow capability-constructor lane also routes via Reflect.apply.
       if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsCapabilityCtorParam(ctx, expr.expression)) {
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;

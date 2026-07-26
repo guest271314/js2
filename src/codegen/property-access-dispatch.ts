@@ -142,7 +142,6 @@ import {
   emitExternrefToStructGet,
   emitGetterCallWithDummy,
   emitGuardedNativeStringLength,
-  emitNullCheckThrow,
   emitNullGuardedStructGet,
   emitRuntimeDescriptorGet,
   emitThisReceiverGuardConvert,
@@ -167,6 +166,7 @@ import {
   tryEmitPinnedStructMemberGet,
   typeErrorThrowInstrs,
 } from "./property-access.js";
+import { tryEmitExactStructFieldGet, tryEmitStructuralContractReadFromLocal } from "./property-access-exact-shapes.js";
 
 /**
  * Sentinel returned by every dispatch helper to mean "this guard band did not
@@ -176,132 +176,6 @@ import {
  */
 export const PA_FALLTHROUGH: unique symbol = Symbol("property-access:fallthrough");
 export type PADispatchResult = ValType | null | typeof PA_FALLTHROUGH;
-
-/**
- * True when a named struct is only the compile-time structural contract for a
- * receiver, rather than its nominal runtime representation.
- *
- * An externref crossing an interface / object-type boundary can hold any exact
- * closed object-literal shape satisfying that contract.  A plain `ref.test`
- * against the interface struct is not a valid discriminator: WasmGC may
- * canonicalise a different same-layout shape to the same runtime type.  Class
- * instances remain nominal and deliberately keep their exact cast path.
- */
-function isStructuralObjectContract(ctx: CodegenContext, objType: ts.Type, typeName?: string): boolean {
-  if (typeName !== undefined && ctx.classSet.has(typeName)) return false;
-  if (typeName?.startsWith("__anon_") && !typeName.startsWith("__anonClass_")) return true;
-  if (objType.isUnion()) {
-    const nonNullish = objType.types.filter(
-      (member) =>
-        (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Never)) === 0,
-    );
-    return (
-      nonNullish.length > 0 &&
-      nonNullish.every((member) => isStructuralObjectContract(ctx, member, member.getSymbol()?.name))
-    );
-  }
-
-  const symbols = [objType.aliasSymbol, objType.getSymbol()].filter(
-    (symbol): symbol is ts.Symbol => symbol !== undefined,
-  );
-  return symbols.some((symbol) =>
-    symbol.declarations?.some(
-      (decl) =>
-        ts.isInterfaceDeclaration(decl) ||
-        ts.isTypeAliasDeclaration(decl) ||
-        ts.isTypeLiteralNode(decl) ||
-        ts.isObjectLiteralExpression(decl),
-    ),
-  );
-}
-
-/**
- * Read a field from an already-emitted externref structural receiver through
- * the canonical dynamic provider.  In standalone mode `__extern_get` is
- * finalize-filled with exact `$shape` stamp arms, so two structurally
- * canonicalised closed structs cannot be mistaken for one another.
- *
- * Optional fields keep the externref result so an absent field remains the
- * runtime `undefined` value.  Required primitive fields retain their unboxed
- * representation for existing numeric / boolean consumers.
- */
-function emitStructuralExternrefFieldGet(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  expr: ts.PropertyAccessExpression,
-  propName: string,
-  receiverAlreadyNullChecked = false,
-): ValType | undefined {
-  const accessType = ctx.checker.getTypeAtLocation(expr);
-  const accessWasm = resolveWasmType(ctx, accessType);
-  const mayBeUndefined =
-    accessType.isUnion() &&
-    accessType.types.some((member) => (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0);
-  const resultType: ValType =
-    !mayBeUndefined && (accessWasm.kind === "f64" || accessWasm.kind === "i32") ? accessWasm : { kind: "externref" };
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  let unboxIdx: number | undefined;
-  if (resultType.kind === "f64" || resultType.kind === "i32") {
-    unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
-  }
-  flushLateImportShifts(ctx, fctx);
-  if (getIdx === undefined) return undefined;
-
-  // The receiver expression has already left one externref on the stack.
-  // Preserve ordinary property-access null semantics before dynamic dispatch.
-  if (!receiverAlreadyNullChecked) {
-    emitNullCheckThrow(ctx, fctx, { kind: "externref" }, expr);
-  }
-  addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-  fctx.body.push({ op: "call", funcIdx: getIdx });
-  if (resultType.kind === "f64" && unboxIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: unboxIdx });
-  } else if (resultType.kind === "i32" && unboxIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: unboxIdx });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-  }
-  return resultType;
-}
-
-/**
- * Read a public class field from an externref boundary without admitting an
- * unrelated same-layout class.  WasmGC structural canonicalisation makes a
- * bare `ref.test $Expected` insufficient; reuse the class tag + descendant
- * predicate that protects private fields, then perform the exact struct read.
- */
-function emitNominalExternrefClassFieldGet(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  expr: ts.PropertyAccessExpression,
-  className: string,
-  structTypeIdx: number,
-  fieldIdx: number,
-  fieldType: ValType,
-): ValType {
-  emitNullCheckThrow(ctx, fctx, { kind: "externref" }, expr);
-  fctx.body.push({ op: "any.convert_extern" });
-  const receiverLocal = allocLocal(fctx, `__nominal_recv_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.set", index: receiverLocal });
-
-  emitPrivateBrandPredicate(ctx, fctx, receiverLocal, className, structTypeIdx);
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "val", type: fieldType },
-    then: [
-      { op: "local.get", index: receiverLocal },
-      { op: "ref.cast", typeIdx: structTypeIdx },
-      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
-    ],
-    else: typeErrorThrowInstrs(ctx, expr),
-  });
-  return fieldType;
-}
 
 export function tryDynamicReceiverRuntimeDispatchReads(
   ctx: CodegenContext,
@@ -3333,61 +3207,17 @@ export function finalizeStructAndDynamicMemberGet(
     const structTypeIdx = ctx.structMap.get(typeName);
     const fields = ctx.structFields.get(typeName);
     if (structTypeIdx !== undefined && fields) {
-      const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx !== -1) {
-        const objResult = compileExpression(ctx, fctx, expr.expression);
-        const fieldType = fields[fieldIdx]!.type;
-        if (
-          objResult &&
-          ctx.classSet.has(typeName) &&
-          (objResult.kind === "externref" || objResult.kind === "ref" || objResult.kind === "ref_null")
-        ) {
-          if (objResult.kind !== "externref") {
-            fctx.body.push({ op: "extern.convert_any" });
-          }
-          return emitNominalExternrefClassFieldGet(ctx, fctx, expr, typeName, structTypeIdx, fieldIdx, fieldType);
-        }
-        // Null-guard: if the object ref could be null (ref_null), prevent trap
-        // Skip null guard when expression is provably non-null (#800)
-        const exprNonNull = isProvablyNonNull(expr.expression, ctx.checker);
-        if (objResult && objResult.kind === "ref_null") {
-          // Always use multi-struct dispatch (even when provably non-null) to avoid
-          // illegal cast traps when runtime struct type differs from compile-time type (#778).
-          emitNullGuardedStructGet(ctx, fctx, objResult, fieldType, structTypeIdx, fieldIdx, propName);
-          if (fieldType.kind === "ref") {
-            return { kind: "ref_null", typeIdx: (fieldType as any).typeIdx };
-          }
-          return fieldType;
-        } else if (objResult && objResult.kind === "externref") {
-          if (isStructuralObjectContract(ctx, objType, typeName)) {
-            const structuralResult = emitStructuralExternrefFieldGet(ctx, fctx, expr, propName);
-            if (structuralResult !== undefined) return structuralResult;
-          }
-          // The expression returned externref but we need a struct ref for struct.get.
-          // Cast externref → anyref → (ref null $StructType), with __extern_get fallback.
-          emitExternrefToStructGet(ctx, fctx, fieldType, structTypeIdx, fieldIdx, propName, true /* throwOnNull */);
-          if (fieldType.kind === "ref") {
-            return { kind: "ref_null", typeIdx: (fieldType as any).typeIdx };
-          }
-          return fieldType;
-        } else if (objResult && objResult.kind === "ref") {
-          // Always use multi-struct dispatch to avoid illegal cast traps (#778).
-          // Even for provably-non-null, runtime struct type may differ from compile-time type.
-          const nullableObj: ValType = { kind: "ref_null", typeIdx: (objResult as any).typeIdx ?? structTypeIdx };
-          emitNullGuardedStructGet(ctx, fctx, nullableObj, fieldType, structTypeIdx, fieldIdx, propName);
-          if (fieldType.kind === "ref") {
-            return { kind: "ref_null", typeIdx: (fieldType as any).typeIdx };
-          }
-          return fieldType;
-        } else {
-          fctx.body.push({
-            op: "struct.get",
-            typeIdx: structTypeIdx,
-            fieldIdx,
-          });
-        }
-        return fieldType;
-      }
+      const exactField = tryEmitExactStructFieldGet(
+        ctx,
+        fctx,
+        expr,
+        propName,
+        objType,
+        typeName,
+        structTypeIdx,
+        fields,
+      );
+      if (exactField !== undefined) return exactField;
 
       // ── Prototype chain walk (#799b) ──────────────────────────────
       // Field not found on this struct at compile time. Walk the __proto__
@@ -3686,18 +3516,16 @@ export function finalizeStructAndDynamicMemberGet(
         // The generic inline candidate chain below uses brand-blind `ref.test`
         // and can read the same slot from a different, structurally
         // canonicalised descriptor literal.
-        if (isStructuralObjectContract(ctx, objType, typeName)) {
-          fctx.body.push({ op: "local.get", index: objTmp });
-          const structuralResult = emitStructuralExternrefFieldGet(
-            ctx,
-            fctx,
-            expr,
-            propName,
-            true /* receiverAlreadyNullChecked */,
-          );
-          if (structuralResult !== undefined) return structuralResult;
-          fctx.body.push({ op: "drop" });
-        }
+        const structuralResult = tryEmitStructuralContractReadFromLocal(
+          ctx,
+          fctx,
+          expr,
+          propName,
+          objType,
+          typeName,
+          objTmp,
+        );
+        if (structuralResult !== undefined) return structuralResult;
         // Multi-struct dispatch: the externref may actually be a WasmGC struct
         // (converted via extern.convert_any).  JS __extern_get cannot read GC
         // struct fields, so try struct.get first for all struct types that

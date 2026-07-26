@@ -302,55 +302,7 @@ export function collectEmptyObjectWidening(
             // static `options.ecmaVersion` read. Poison the fresh per-variable
             // type in every target; the provenance guards below keep annotated
             // or shared types out.
-            const vt = checker.getTypeAtLocation(decl.name);
-            if (
-              !(vt.flags & ts.TypeFlags.Any) &&
-              (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === decl.initializer)
-            ) {
-              ctx.objectHashConsumerTypes.add(vt);
-            }
-            const it = checker.getTypeAtLocation(decl.initializer);
-            if (
-              !(it.flags & ts.TypeFlags.Any) &&
-              (it.getProperties().length > 0 || it.symbol?.declarations?.[0] === decl.initializer)
-            ) {
-              ctx.objectHashConsumerTypes.add(it);
-            }
-            if (ctx.standalone) ctx.growableObjectLiteralVars.add(varName);
-            // Record the enclosing function's inferred return type during this
-            // early shape pass as well. Fnctor field derivation can run before
-            // collectDeclarations reaches the function declaration (Acorn's
-            // Parser constructor stores `getOptions(options)`), and must already
-            // see that return as the open-object externref carrier.
-            let owner: ts.Node | undefined = decl.parent;
-            while (owner && !ts.isFunctionDeclaration(owner) && !ts.isSourceFile(owner)) owner = owner.parent;
-            if (owner && ts.isFunctionDeclaration(owner) && owner.body) {
-              let returnsVar = false;
-              const findReturn = (node: ts.Node): void => {
-                if (returnsVar) return;
-                if (
-                  node !== owner &&
-                  (ts.isFunctionDeclaration(node) ||
-                    ts.isFunctionExpression(node) ||
-                    ts.isArrowFunction(node) ||
-                    ts.isMethodDeclaration(node) ||
-                    ts.isAccessor(node) ||
-                    ts.isConstructorDeclaration(node))
-                ) {
-                  return;
-                }
-                if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
-                  if (node.expression.text === varName) returnsVar = true;
-                  return;
-                }
-                forEachChild(node, findReturn);
-              };
-              forEachChild(owner.body, findReturn);
-              if (returnsVar) {
-                const sig = checker.getSignatureFromDeclaration(owner);
-                if (sig) ctx.objectHashConsumerTypes.add(checker.getReturnTypeOfSignature(sig));
-              }
-            }
+            recordOpenObjectConsumerTypes(ctx, checker, decl, varName);
             continue;
           }
 
@@ -406,6 +358,61 @@ export function collectEmptyObjectWidening(
   }
 
   scanStatements(sourceFile.statements);
+}
+
+function recordOpenObjectConsumerTypes(
+  ctx: CodegenContext,
+  checker: ts.TypeChecker,
+  decl: ts.VariableDeclaration,
+  varName: string,
+): void {
+  if (!decl.initializer) return;
+  const initializerDeclaration = decl.initializer as unknown as ts.Declaration;
+  const vt = checker.getTypeAtLocation(decl.name);
+  if (
+    !(vt.flags & ts.TypeFlags.Any) &&
+    (vt.getProperties().length > 0 || vt.symbol?.declarations?.[0] === initializerDeclaration)
+  ) {
+    ctx.objectHashConsumerTypes.add(vt);
+  }
+  const it = checker.getTypeAtLocation(decl.initializer);
+  if (
+    !(it.flags & ts.TypeFlags.Any) &&
+    (it.getProperties().length > 0 || it.symbol?.declarations?.[0] === initializerDeclaration)
+  ) {
+    ctx.objectHashConsumerTypes.add(it);
+  }
+  if (ctx.standalone) ctx.growableObjectLiteralVars.add(varName);
+
+  // Fnctor field derivation can run before collectDeclarations reaches the
+  // function declaration, so record the inferred return carrier here too.
+  let owner: ts.Node | undefined = decl.parent;
+  while (owner && !ts.isFunctionDeclaration(owner) && !ts.isSourceFile(owner)) owner = owner.parent;
+  if (!owner || !ts.isFunctionDeclaration(owner) || !owner.body) return;
+  let returnsVar = false;
+  const findReturn = (node: ts.Node): void => {
+    if (returnsVar) return;
+    if (
+      node !== owner &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isArrowFunction(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isAccessor(node) ||
+        ts.isConstructorDeclaration(node))
+    ) {
+      return;
+    }
+    if (ts.isReturnStatement(node) && node.expression && ts.isIdentifier(node.expression)) {
+      if (node.expression.text === varName) returnsVar = true;
+      return;
+    }
+    forEachChild(node, findReturn);
+  };
+  forEachChild(owner.body, findReturn);
+  if (!returnsVar) return;
+  const sig = checker.getSignatureFromDeclaration(owner);
+  if (sig) ctx.objectHashConsumerTypes.add(checker.getReturnTypeOfSignature(sig));
 }
 
 /**

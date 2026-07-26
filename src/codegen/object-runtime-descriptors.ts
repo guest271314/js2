@@ -37,6 +37,7 @@ import { emitSelfHostedFunc } from "./stdlib-selfhost.js";
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js";
 import { getOrRegisterVecBaseType } from "./registry/types.js";
 import { reserveVecOverlayHelpers } from "./vec-overlay.js";
+import { buildObjectIntegrityMutationHelpers } from "./object-runtime-integrity.js";
 
 /**
  * Everything the descriptor/integrity block reads from the enclosing
@@ -2794,127 +2795,20 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
   emitIntegrityPredicate("__object_isSealed", OBJ_FLAG_SEALED, false, 1);
   emitIntegrityPredicate("__object_isExtensible", OBJ_FLAG_NONEXTENSIBLE, true, 0);
 
-  // ── Object integrity SET path (#1472 Phase B Blocker A Half 2) ────────────
-  //
-  // __object_preventExtensions / __object_seal / __object_freeze set the
-  // object-level `$Object.flags` (field 4) integrity bits and return the
-  // ORIGINAL externref (identity preserved — these return their argument per
-  // ES §20.5.2.{5,18,6}). freeze ⊃ seal ⊃ preventExtensions, so each sets a
-  // cumulative bit-mask:
-  //   preventExtensions → NONEXTENSIBLE
-  //   seal              → NONEXTENSIBLE | SEALED
-  //   freeze            → NONEXTENSIBLE | SEALED | FROZEN
-  // The write gates in __extern_set (FROZEN → refuse all) and __obj_insert
-  // empty-slot (NONEXTENSIBLE → refuse new key) read these bits to enforce
-  // immutability. Non-$Object receiver: returned unchanged (primitives are
-  // already non-extensible; the predicate readers handle their query side).
-  //
-  // params: 0=obj(externref)
-  // locals: 1=any(anyref) 2=o(ref null $Object) 3=props(ref $PropMap)
-  //         4=cap(i32) 5=i(i32) 6=e(ref null $PropEntry)
-  const emitSetFlags = (name: string, bits: number, entryClearMask: number): void => {
-    const clearEntryFlags: Instr[] =
-      entryClearMask === 0
-        ? []
-        : [
-            // Seal/freeze update the canonical dynamic-property entries too.
-            // __getOwnPropertyDescriptor reads these exact bits, so mutating
-            // only $Object.flags would leave stale descriptor attributes.
-            { op: "local.get", index: 2 },
-            { op: "ref.as_non_null" },
-            { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
-            { op: "local.tee", index: 3 },
-            { op: "array.len" },
-            { op: "local.set", index: 4 },
-            { op: "i32.const", value: 0 },
-            { op: "local.set", index: 5 },
-            {
-              op: "block",
-              blockType: { kind: "empty" },
-              body: [
-                {
-                  op: "loop",
-                  blockType: { kind: "empty" },
-                  body: [
-                    { op: "local.get", index: 5 },
-                    { op: "local.get", index: 4 },
-                    { op: "i32.ge_s" },
-                    { op: "br_if", depth: 1 },
-                    { op: "local.get", index: 3 },
-                    { op: "local.get", index: 5 },
-                    { op: "array.get", typeIdx: propMapTypeIdx },
-                    { op: "local.tee", index: 6 },
-                    { op: "ref.is_null" },
-                    {
-                      op: "if",
-                      blockType: { kind: "empty" },
-                      then: [],
-                      else: [
-                        { op: "local.get", index: 6 },
-                        { op: "ref.as_non_null" },
-                        { op: "local.get", index: 6 },
-                        { op: "ref.as_non_null" },
-                        { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                        { op: "i32.const", value: ~entryClearMask },
-                        { op: "i32.and" },
-                        { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                      ],
-                    },
-                    { op: "local.get", index: 5 },
-                    { op: "i32.const", value: 1 },
-                    { op: "i32.add" },
-                    { op: "local.set", index: 5 },
-                    { op: "br", depth: 0 },
-                  ],
-                },
-              ],
-            },
-          ];
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.tee", index: 1 },
-      { op: "ref.test", typeIdx: objectTypeIdx },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          // o = cast<$Object>(any) ; o.flags |= bits
-          { op: "local.get", index: 1 },
-          { op: "ref.cast", typeIdx: objectTypeIdx },
-          { op: "local.tee", index: 2 },
-          { op: "local.get", index: 2 },
-          { op: "ref.as_non_null" },
-          { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
-          { op: "i32.const", value: bits },
-          { op: "i32.or" },
-          { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 4 },
-          ...clearEntryFlags,
-        ],
-      },
-      // return the original externref unchanged (identity preserved)
-      { op: "local.get", index: 0 },
-    ];
-    registerNative(
-      name,
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-      [
-        { name: "any", type: { kind: "anyref" } },
-        { name: "o", type: objRefNull },
-        { name: "props", type: propMapRef },
-        { name: "cap", type: { kind: "i32" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "e", type: entryRefNull },
-      ],
-      body,
-    );
-  };
-  emitSetFlags("__object_preventExtensions", OBJ_FLAG_NONEXTENSIBLE, 0);
-  emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED, FLAG_CONFIGURABLE);
-  emitSetFlags(
-    "__object_freeze",
-    OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN,
-    FLAG_WRITABLE | FLAG_CONFIGURABLE,
-  );
+  // Register at the original minting point so every subsequent function index
+  // remains byte-for-byte stable.
+  buildObjectIntegrityMutationHelpers({
+    registerNative,
+    objectTypeIdx,
+    propMapTypeIdx,
+    propEntryTypeIdx,
+    objRefNull,
+    propMapRef,
+    entryRefNull,
+    FLAG_WRITABLE,
+    FLAG_CONFIGURABLE,
+    OBJ_FLAG_NONEXTENSIBLE,
+    OBJ_FLAG_SEALED,
+    OBJ_FLAG_FROZEN,
+  });
 }

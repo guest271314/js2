@@ -151,7 +151,6 @@ import {
   coerceType,
   compileExpression,
   resolveThisStructName,
-  skipTransparentExpressions,
   valTypesMatch,
   VOID_RESULT,
 } from "../shared.js";
@@ -2305,115 +2304,6 @@ export function compileFunctionBind(
  * single-assignment `const`/`let`/`var = fn.bind(...)` form is recognised; this
  * matches the bulk of the test262 bound-function-invocation corpus.
  */
-export function resolveBoundFunctionInitializer(
-  ctx: CodegenContext,
-  expr: ts.Expression,
-): ts.CallExpression | undefined {
-  if (!ts.isIdentifier(expr)) return undefined;
-  const sym = ctx.checker.getSymbolAtLocation(expr);
-  const decl = sym?.valueDeclaration;
-  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
-  const init = decl.initializer;
-  if (!ts.isCallExpression(init)) return undefined;
-  const callee = init.expression;
-  if (!ts.isPropertyAccessExpression(callee)) return undefined;
-  // Direct `<receiver>.bind(...)`.
-  if (callee.name.text === "bind") return init;
-  // Indirect `Function.prototype.bind.call(fn, ...)`.
-  if (
-    callee.name.text === "call" &&
-    ts.isPropertyAccessExpression(callee.expression) &&
-    callee.expression.name.text === "bind" &&
-    ts.isPropertyAccessExpression(callee.expression.expression) &&
-    callee.expression.expression.name.text === "prototype" &&
-    ts.isIdentifier(callee.expression.expression.expression) &&
-    callee.expression.expression.expression.text === "Function"
-  ) {
-    return init;
-  }
-  return undefined;
-}
-
-export function calleeIsBoundFunctionVar(ctx: CodegenContext, expr: ts.Expression): boolean {
-  return resolveBoundFunctionInitializer(ctx, expr) !== undefined;
-}
-
-export function resolveUncurriedObjectPrototypeMethod(
-  ctx: CodegenContext,
-  expr: ts.Expression,
-): "hasOwnProperty" | "propertyIsEnumerable" | "valueOf" | undefined {
-  const init = resolveBoundFunctionInitializer(ctx, expr);
-  if (!init || !ts.isPropertyAccessExpression(init.expression) || init.expression.name.text !== "bind") {
-    return undefined;
-  }
-  const callValue = init.expression.expression;
-  if (
-    !ts.isPropertyAccessExpression(callValue) ||
-    callValue.name.text !== "call" ||
-    !ts.isPropertyAccessExpression(callValue.expression) ||
-    callValue.expression.name.text !== "prototype" ||
-    !ts.isIdentifier(callValue.expression.expression) ||
-    callValue.expression.expression.text !== "Function"
-  ) {
-    return undefined;
-  }
-  const target = init.arguments[0];
-  if (
-    !target ||
-    !ts.isPropertyAccessExpression(target) ||
-    !ts.isPropertyAccessExpression(target.expression) ||
-    target.expression.name.text !== "prototype" ||
-    !ts.isIdentifier(target.expression.expression) ||
-    target.expression.expression.text !== "Object"
-  ) {
-    return undefined;
-  }
-  const method = target.name.text;
-  return method === "hasOwnProperty" || method === "propertyIsEnumerable" || method === "valueOf" ? method : undefined;
-}
-
-/**
- * Resolve the exact single-assignment stored builtin-static shape whose generic
- * typed-call adapter cannot preserve a closed-struct argument carrier.
- *
- * The stored value remains a real identity-stable builtin closure for metadata
- * reads; only the terminal invocation routes to the same semantic provider as
- * the direct static call.
- */
-export function resolveStoredObjectStaticMethod(
-  ctx: CodegenContext,
-  expr: ts.Expression,
-):
-  | "defineProperty"
-  | "defineProperties"
-  | "freeze"
-  | "seal"
-  | "preventExtensions"
-  | "getOwnPropertyDescriptor"
-  | "getOwnPropertyNames"
-  | undefined {
-  if (!ts.isIdentifier(expr)) return undefined;
-  const sym = ctx.checker.getSymbolAtLocation(expr);
-  const decl = sym?.valueDeclaration;
-  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
-  const init = skipTransparentExpressions(decl.initializer);
-  if (!ts.isPropertyAccessExpression(init) || !ts.isIdentifier(init.expression) || init.expression.text !== "Object") {
-    return undefined;
-  }
-  switch (init.name.text) {
-    case "defineProperty":
-    case "defineProperties":
-    case "freeze":
-    case "seal":
-    case "preventExtensions":
-    case "getOwnPropertyDescriptor":
-    case "getOwnPropertyNames":
-      return init.name.text;
-    default:
-      return undefined;
-  }
-}
-
 /**
  * (#1712 / #1941) Static gate for the host-callable dispatch fallback.
  *
