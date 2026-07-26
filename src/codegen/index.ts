@@ -156,7 +156,6 @@ import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillVecOverlayHelpers } from "./vec-overlay.js"; // (#3251 S1)
 import { fillDisposableStackDisposeDriver } from "./disposable-runtime.js";
 import {
   recordSloppyImplicitGlobalNames,
@@ -187,6 +186,7 @@ import {
 import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
 import { fillVecPropHelpers } from "./vec-props.js"; // (#3537) array ($Vec) expando side table
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
+import { fillObjVecReflectionHelpers } from "./objvec-array-proto.js"; // (#3666) RegExp indices Array reflection
 import { fillReflectIsConstructor } from "./reflect-construct-native.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
 import { fillClassToPrimitive } from "./class-to-primitive.js";
@@ -3744,9 +3744,8 @@ export function generateModule(
     // read prologues into `__extern_get_idx` / `__extern_get`. Runs AFTER the
     // vec fills above (needs every carrier + `__obj_index_of_key`) and BEFORE
     // `fillTaDynViewMopArms` below so the TypedArray dyn-view arm keeps the
-    // front slot (TA receivers must exit before the overlay consult).
-    // Standalone only (no-op otherwise).
-    fillVecOverlayHelpers(ctx);
+    // front slot (TA receivers must exit before the overlay consult). Standalone only.
+    fillObjVecReflectionHelpers(ctx);
 
     // (#3177) `$__ta_dyn_view` §10.4.5 MOP arms — AFTER every vec fill above
     // (each fill prepends at body[0]; last fill wins the front slot, and the
@@ -5721,14 +5720,6 @@ export function generateMultiModule(
     fillClosedStructExternGetArms(ctx);
     fillFnctorPrototypeDispatchArms(ctx);
 
-    // (#3371) Reflect.construct reserves the same host-free constructor
-    // classifier and native-view prototype overrides in project compilation as
-    // in the single-source pipeline. Fill only after every source has
-    // registered its closure and carrier types.
-    fillTaDynViewMopArms(ctx);
-    fillDataViewConstructProtoArm(ctx);
-    fillReflectIsConstructor(ctx);
-
     // (#3495) `__extern_get_idx` is reserved while compiling standalone
     // numeric reads through an externref (for example `globalThis.logs[i]`).
     // Its eager body only knows `$Object`/`$ObjVec`; splice the per-element-kind
@@ -5737,7 +5728,15 @@ export function generateMultiModule(
     // fill, the backing vec contains the right values but every indexed read
     // silently returns the undefined sentinel.
     fillExternGetIdxVecArms(ctx);
-
+    // (#3666/#3251) Multi-source parity after every carrier/dynamic reader is complete.
+    fillObjVecReflectionHelpers(ctx);
+    // (#3371) Reflect.construct reserves the same host-free constructor
+    // classifier and native-view prototype overrides in project compilation as
+    // in the single-source pipeline. Keep native views after generic vec fills
+    // so they retain front precedence.
+    fillTaDynViewMopArms(ctx);
+    fillDataViewConstructProtoArm(ctx);
+    fillReflectIsConstructor(ctx);
     // Emit __vec_get / __vec_len exports for runtime iterator fallback.
     emitVecAccessExports(ctx);
 
