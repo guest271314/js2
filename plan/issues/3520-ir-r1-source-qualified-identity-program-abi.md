@@ -131,6 +131,26 @@ loc-budget-allow:
   - src/ir/nodes.ts
   - src/ir/verify.ts
   - src/ir/backend/porffor/assembler.ts
+# R1 must resolve exact checker declarations to the one authoritative identity
+# inventory. TypeOracle deliberately does not expose ts.Symbol/ts.Type objects,
+# so these two structural joins remain reviewed raw-checker boundaries until
+# the oracle grows a declaration-identity API.
+oracle-ratchet-allow:
+  - src/codegen/index.ts
+  - src/codegen/ir-class-shapes.ts
+# This long-lived identity migration adds validation and sidecars at the exact
+# legacy/IR seams below without changing body ownership. Splitting those seams
+# inside the same already-wide change would obscure parity review; #3399 owns
+# their mechanical decomposition after this checkpoint lands.
+func-budget-allow:
+  - src/ir/integration.ts::compileIrPathFunctions
+  - src/codegen/index.ts::generateModule
+  - src/ir/backend/linear-integration.ts::makeLinearIrResolver
+  - src/ir/integration.ts::makeResolver
+  - src/codegen/context/create-context.ts::createCodegenContext
+  - src/ir/from-ast.ts::lowerFunctionAstToIr
+  - src/ir/backend/linear-integration.ts::compileLinearIrFunctions
+  - src/ir/type-evidence.ts::buildIrRecursiveTypeEvidence
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map
