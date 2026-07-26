@@ -322,6 +322,7 @@ import {
   emitClosureMethodCallExportN,
   emitIsClosureExport,
   emitClosureArityExport,
+  emitClosureHasRestExport,
   emitIsDataStructExport,
   fillStandaloneTypeofClosureArms,
 } from "./closure-exports.js"; // (#3272) extracted verbatim
@@ -4000,6 +4001,10 @@ export function generateModule(
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
 
+    // #2742: classify accessor-returned rest closures before the JS runtime
+    // exposes them through a dispatcher that cannot materialize their rest vec.
+    emitClosureHasRestExport(ctx);
+
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
     // masks a data struct (AST Node / class instance / object literal) as callable.
@@ -5956,6 +5961,9 @@ export function generateMultiModule(
 
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
+
+    // #2742: accessor-returned rest-closure discriminator (see primary path).
+    emitClosureHasRestExport(ctx);
 
     // #2794: POSITIVE data-vs-closure discriminator (see generateModule path).
     emitIsDataStructExport(ctx);
