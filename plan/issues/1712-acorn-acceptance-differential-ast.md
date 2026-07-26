@@ -794,9 +794,9 @@ The final two residuals were:
   Wasm→host→Wasm prototype-method bridge.
 
 Both residual files now replay exact (**2/2 files, 4/4 variants**). The required
-22-input corpus is again **22/22 exact**, and the standalone parser remains a
-zero-import artifact with all four scalar canaries green. The clean published
-compiler revision `c4a1ea55628d8f5df88008539b6fb94ec91b2039` completes the
+23-input corpus is **23/23 exact**, and the standalone parser remains a
+zero-import artifact with all four scalar canaries green. The clean integrated
+compiler revision `9768f821f79999845750bc80a929de607d728441` completes the
 full four-shard differential at **53,259/53,259 exact files** and
 **102,312/102,312 exact variants**: 92,649 variants produced structurally
 identical ESTree ASTs, 9,663 were rejected by both parsers, and zero files or
