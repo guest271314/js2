@@ -1023,3 +1023,26 @@ export function emitProgram(ast: Node): FuncMeta {
   const emitter = new FunctionEmitter([], ast, "", /*isScript*/ true, /*isExpressionBody*/ false);
   return emitter.emit();
 }
+
+/** Emit one parsed function node to callable metadata.
+ *
+ * `new Function` is parsed through a synthetic `FunctionDeclaration`, then
+ * handed here instead of compiling the enclosing `Program` as an eval script.
+ * The resulting metadata binds the parsed parameters in `regs[1..]`, returns
+ * from the function body normally, and carries the synthetic `anonymous` name
+ * without installing it as a global declaration.
+ */
+export function emitFunction(node: Node): FuncMeta {
+  if (
+    node.type !== "FunctionDeclaration" &&
+    node.type !== "FunctionExpression" &&
+    node.type !== "ArrowFunctionExpression"
+  ) {
+    throw new UnsupportedNodeError(`function entry ${node.type}`, node.type);
+  }
+  const isArrow = node.type === "ArrowFunctionExpression";
+  const isExpressionBody = isArrow && node.body.type !== "BlockStatement";
+  const name = node.id && node.id.name ? node.id.name : "";
+  const emitter = new FunctionEmitter(node.params, node.body, name, /*isScript*/ false, isExpressionBody);
+  return emitter.emit();
+}
