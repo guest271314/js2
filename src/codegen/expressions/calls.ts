@@ -5563,6 +5563,38 @@ function canDeferStandaloneDynamicImport(fctx: FunctionContext): boolean {
   return fctx.deferredDynamicImportTrap === true;
 }
 
+/**
+ * #2928 — interpreter-owned external-call intrinsic. The source helper keeps
+ * ordinary Node execution on Function#apply; the self-compiled provider lowers
+ * it directly to the native closure bridge so a foreign callable carrier does
+ * not need to expose `.apply` through the provider's object-property runtime.
+ */
+function tryRuntimeEvalApplyCallableIntrinsic(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (
+    (!ctx.standalone && !ctx.wasi) ||
+    ctx.runtimeEvalCallableBoundaryEnabled !== true ||
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "__runtime_eval_apply_callable" ||
+    expr.arguments.length !== 3
+  ) {
+    return undefined;
+  }
+
+  const externref: ValType = { kind: "externref" };
+  for (const arg of expr.arguments) {
+    const type = compileExpression(ctx, fctx, arg, externref);
+    if (type && type.kind !== "externref") coerceType(ctx, fctx, type, externref);
+  }
+  ensureObjectRuntime(ctx);
+  const applyIdx = reserveApplyClosure(ctx);
+  fctx.body.push({ op: "call", funcIdx: applyIdx });
+  return externref;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -5580,6 +5612,11 @@ function compileCallExpression(
   // route to the short-circuiting path.
   if (ts.isOptionalChain(expr) && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
+  }
+
+  {
+    const r = tryRuntimeEvalApplyCallableIntrinsic(ctx, fctx, expr);
+    if (r !== undefined) return r;
   }
 
   // (#1732/#2180) Calling a built-in non-constructor namespace (Math, JSON,

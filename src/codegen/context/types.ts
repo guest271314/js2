@@ -1709,6 +1709,20 @@ export interface CodegenContext {
    */
   runtimeEvalCallableSeeded?: boolean;
   /**
+   * #2928 — this unit consumes or provides the linked runtime-eval ABI.
+   * Callable writes to its native global object use the cross-module carrier.
+   */
+  runtimeEvalCallableBoundaryEnabled?: boolean;
+  /**
+   * #2928 — structurally canonical `(code,target)` carrier shared by caller
+   * and provider without changing the ordinary closure hierarchy.
+   */
+  runtimeEvalAotCallableCarrier?: {
+    structTypeIdx: number;
+    funcTypeIdx: number;
+    trampolineFuncIdx?: number;
+  };
+  /**
    * (#2640) When set, `compileArrowAsClosure` widens any callback parameter
    * whose resolved type is a typed WasmGC vec/array (`__vec_*`/`__arr_*`/
    * `$__vec_base`) to `externref`. Set transiently by

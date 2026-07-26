@@ -135,6 +135,22 @@ export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): Interp
 }
 
 /**
+ * Invoke a non-interpreted callable at the runtime boundary.
+ *
+ * In ordinary TypeScript/Node execution this is exactly Function#apply. The
+ * standalone compiler recognizes this deliberately private intrinsic name and
+ * lowers it straight to `__apply_closure(callee, receiver, args)`, avoiding a
+ * second dynamic lookup of the foreign carrier's `.apply` property.
+ */
+export function __runtime_eval_apply_callable(
+  callee: (...a: JSValue[]) => JSValue,
+  receiver: JSValue,
+  args: JSValue[],
+): JSValue {
+  return callee.apply(receiver, args);
+}
+
+/**
  * `__interp_enter` — the single exported AOT↔interp trampoline (doc §"Call
  * protocol"). Allocates the bottom `$Frame` (regs from `regCount`), seeds
  * regs[0]=thisArg and regs[1..1+paramCount)=args, runs the loop, returns `acc`.
@@ -385,7 +401,7 @@ function run(bottom: Frame): JSValue {
               const recv = regs[base];
               const args: JSValue[] = new Array(argc);
               for (let i = 0; i < argc; i += 1) args[i] = regs[base + 1 + i];
-              acc = (callee as (...a: JSValue[]) => JSValue).apply(recv, args);
+              acc = __runtime_eval_apply_callable(callee as (...a: JSValue[]) => JSValue, recv, args);
             }
             break;
           }

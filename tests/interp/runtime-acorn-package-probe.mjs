@@ -124,6 +124,16 @@ async function main() {
         }
       }
 
+      function aotAdd(a: number, b: number): number {
+        return a + b;
+      }
+
+      export function linkedAotCall(): number {
+        const assigned: any = (globalThis.aotAdd = aotAdd);
+        if (assigned !== aotAdd) return -1;
+        return (0, eval)(dynamic("aotAdd(2, 3)")) as number;
+      }
+
     `,
     {
       fileName: "runtime-eval-acorn-user.ts",
@@ -163,6 +173,7 @@ async function main() {
           ["eval", instance.exports.__runtime_eval_canary],
           ["linkedEval", userInstance.exports.linkedEval],
           ["linkedThrow", userInstance.exports.linkedThrow],
+          ["linkedAotCall", userInstance.exports.linkedAotCall],
         ];
         if (report.functionCanaryEnabled) {
           canaries.push(["function", instance.exports.__runtime_function_canary]);

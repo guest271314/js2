@@ -4768,6 +4768,38 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     );
   }
 
+  // (#2928) Cross-module AOT-callable carrier. The provider cannot enumerate
+  // the caller module's private closure signatures, so the carrier holds a
+  // caller-owned trampoline that accepts the receiver and ORIGINAL args vector
+  // explicitly. That trampoline re-enters the caller's own __apply_closure,
+  // where the target's concrete shape is known.
+  const runtimeEvalCarrier = ctx.runtimeEvalAotCallableCarrier;
+  if (runtimeEvalCarrier !== undefined) {
+    body.unshift(
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: runtimeEvalCarrier.structTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // code(self, recv, args)
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: runtimeEvalCarrier.structTypeIdx },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: runtimeEvalCarrier.structTypeIdx },
+          { op: "struct.get", typeIdx: runtimeEvalCarrier.structTypeIdx, fieldIdx: 0 },
+          { op: "call_ref", typeIdx: runtimeEvalCarrier.funcTypeIdx },
+          { op: "return" },
+        ],
+      },
+    );
+  }
+
   // (#3140) $__bound_fn front-guard — the same ladder-step pattern as the $Proxy
   // guard above, for the native bound-function carrier `{target, thisArg,
   // boundArgs}` minted by a standalone `Function.prototype.bind` site. Unwrap
