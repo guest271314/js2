@@ -277,3 +277,29 @@ raw-carrier serialization.
 The current measured host-pass/standalone-fail residual is **35 rows**:
 stringify 25, parse 7, rawJSON 2, isRawJSON 1. These are codec/coercion,
 Proxy/RegExp, or global-environment semantics, not more namespace reflection.
+
+## 2026-07-26 — combined post-reflection rawJSON A/B
+
+After the reflection slice merged as PR #3654, the rawJSON codec slice was
+composed with pristine `origin/main@c941712943f45994149480b60165b5e18afb9505`
+and all 165 `built-ins/JSON/**` records were rerun through the same literal
+test262.fyi original-harness assembler under Node 25 / Unicode 17:
+
+- standalone: **82/165 → 85/165**
+- FAIL → PASS:
+  - `built-ins/JSON/isRawJSON/basic.js`
+  - `built-ins/JSON/rawJSON/basic.js`
+  - `built-ins/JSON/stringify/replacer-array-empty.js`
+- standalone PASS → FAIL: **0**
+- gc/host: **116/165 → 116/165**
+- gc/host file-level verdict changes: **0**
+
+The current host-pass / standalone-fail residual is therefore **32 rows**:
+stringify 24, parse 7, rawJSON 1. `isRawJSON` has no remaining host-pass gap.
+Keep #3176 `ready`: the remaining rows are separate codec/coercion,
+Proxy/RegExp, or object-model semantics.
+
+Combined validation also passed 25/25 focused tests across rawJSON composition,
+JSON namespace reflection, shared builtin-function metadata, and the
+GeneratorPrototype call/apply safeguards, plus typecheck and the function/LOC
+quality gates.
