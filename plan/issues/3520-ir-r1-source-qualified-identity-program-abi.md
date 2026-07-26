@@ -1086,6 +1086,30 @@ direct codegen path. Preparation ownership, compile-once migration, remaining
 runtime/async/linear adoption, fallback removal, and direct-handler deletion
 remain later R2-R10 work and are explicitly outside R1.
 
+### Final PR #3496 validation
+
+- The branch was merged forward through current-main runtime, call, literal,
+  interpreter, module-init, and baseline-contract changes. The intended PR
+  path set stayed identical across each merge, and main-owned files remained
+  byte-identical to `origin/main`.
+- Strict TypeScript, full Biome lint, Prettier, diff, LOC, function-budget,
+  oracle, dead-export, issue, and change-scoped quality gates pass. The
+  dead-export audit reports **15 known / 0 new** after deleting the obsolete
+  name-keyed overlay cluster.
+- The post-main regression matrix passes **397 tests in 43 files**, with 46
+  intentional Test262-harness skips. It covers every #3520 suite, #2138,
+  backend contract, linear integration, cross-backend differential coverage,
+  and the current-main #2928/#3615/#3623/#3637/#3638/edition fixtures.
+- `check:ir-fallbacks -- --verbose` reports no unintended, post-claim, or
+  module-level increase. Hybrid IR-only readiness remains **READY** across 37
+  terminal units: **31 emitted / 6 typed Unsupported / 0 Invariants**.
+- Full equivalence reports **1,608 passing / 35 known failures**, with no new
+  regression and one known baseline failure now passing. The equivalence
+  baseline remains unchanged.
+- No local Test262 corpus run was performed.
+  `benchmarks/results/test262-run.log` and
+  `scripts/equivalence-baseline.json` remain unchanged.
+
 Minimum resume validation:
 
 ```bash
