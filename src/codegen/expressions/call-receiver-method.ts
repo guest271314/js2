@@ -38,6 +38,7 @@ import { pushBody } from "../context/bodies.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js";
+import { hostFnctorCallableFallbackImportName, reserveHostFnctorMethodDriver } from "../host-fnctor-method-driver.js";
 import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
@@ -289,9 +290,10 @@ function tryEmitTaStaticOfFrom(
  *   });
  *   Parser.prototype.currentVarScope = function () { ... };
  *
- * The getter compiles before a direct method target exists. Defer that call to
- * the closed-method dispatcher, which is filled after all prototype writes and
- * resolves the method from the reconstructed fnctor's live prototype.
+ * The getter compiles before a direct method target exists. Standalone defers
+ * that call to the closed-method dispatcher. JS-host mode performs a live raw
+ * callable lookup and invokes the compiled closure through a private in-Wasm
+ * driver, avoiding a recursive host callback frame (#3668).
  */
 function tryCompileLateFnctorPrototypeMethodCall(
   ctx: CodegenContext,
@@ -299,24 +301,78 @@ function tryCompileLateFnctorPrototypeMethodCall(
   expr: ts.CallExpression,
   propAccess: ts.PropertyAccessExpression,
 ): InnerResult | undefined {
-  if (!ctx.standalone) return undefined;
-
   const pinnedReceiver = resolveReceiverStruct(ctx, fctx, propAccess.expression);
   const isThisReceiver = propAccess.expression.kind === ts.SyntaxKind.ThisKeyword;
-  if (!isThisReceiver && !pinnedReceiver?.startsWith("__fnctor_")) return undefined;
+  const pinnedFnctor = pinnedReceiver?.startsWith("__fnctor_") === true;
+  if (ctx.standalone) {
+    if (!isThisReceiver && !pinnedFnctor) return undefined;
+  } else {
+    // (#3668) JS-host parser recursion used to bounce every `this.m(...)`
+    // between Wasm and `__extern_method_call`, consuming one native JS frame
+    // per recursive-descent edge. Only take the in-module dispatcher when the
+    // escape analysis proves the receiver's concrete fnctor struct. Dynamic /
+    // unpinned receivers retain the host MOP path.
+    if (ctx.wasi || !pinnedFnctor) return undefined;
+  }
 
   const dispatchArgs = expr.arguments.some((arg) => ts.isSpreadElement(arg))
     ? flattenCallArgs(expr.arguments)
     : [...expr.arguments];
   if (dispatchArgs === null) return undefined;
+  // The canonical closure-method surface is intentionally capped at arity 8.
+  // Preserve the generic host path above that cap instead of reserving an
+  // unfillable private driver.
+  if (!ctx.standalone && !ctx.wasi && dispatchArgs.length > 8) return undefined;
 
-  const dispatchIdx = reserveClosedMethodDispatch(ctx, propAccess.name.text, dispatchArgs.length);
+  const methodName = propAccess.name.text;
+  const dispatchIdx = ctx.standalone
+    ? reserveClosedMethodDispatch(ctx, methodName, dispatchArgs.length)
+    : reserveHostFnctorMethodDriver(ctx, dispatchArgs.length);
+  const rawGetIdx =
+    ctx.standalone || ctx.wasi
+      ? undefined
+      : ensureLateImport(
+          ctx,
+          "__extern_get_raw_callable",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+  if (!ctx.standalone && !ctx.wasi) {
+    ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
+    ensureLateImport(
+      ctx,
+      hostFnctorCallableFallbackImportName(dispatchArgs.length),
+      Array.from({ length: dispatchArgs.length + 2 }, () => ({ kind: "externref" }) as ValType),
+      [{ kind: "externref" }],
+    );
+  }
+  if (!ctx.standalone && !ctx.wasi) addStringConstantGlobal(ctx, methodName);
   flushLateImportShifts(ctx, fctx);
   const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
   if (recvType && recvType.kind !== "externref") {
     coerceType(ctx, fctx, recvType, { kind: "externref" });
   } else if (recvType === null) {
     fctx.body.push({ op: "ref.null.extern" });
+  }
+  if (!ctx.standalone && !ctx.wasi) {
+    // Keep one receiver copy for `this`, then resolve the current method value
+    // without wrapping the Wasm closure as a JavaScript Function. The lookup
+    // import returns before the closure is invoked, so recursive descent does
+    // not retain a host frame.
+    const recvLocal = allocLocal(fctx, `__host_fnctor_recv_${fctx.locals.length}`, {
+      kind: "externref",
+    });
+    fctx.body.push({ op: "local.set", index: recvLocal });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
+    if (rawGetIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: rawGetIdx });
+    } else {
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "ref.null.extern" });
+    }
   }
   for (const arg of dispatchArgs) {
     const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });

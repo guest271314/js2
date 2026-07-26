@@ -2,6 +2,20 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## 2026-07-26 — compiled Acorn full-Test262 differential follow-ups
+
+The #1712 acceptance branch compares pinned compiled Acorn 8.16.0 against
+node-acorn on every Git-tracked Test262 JavaScript parser input, including exact
+positions and Test262 strict/module variants. The clean published-head
+four-shard result is **53,259/53,259 exact files** and
+**102,312/102,312 exact variants**, with zero mismatches. Recursive
+Wasm→host→Wasm prototype-method dispatch is stack-flat, dynamic indexed and
+nested-vec mutations update the live compiled backing, lexical early errors
+preserve null sentinels, and arbitrary-width BigInt literals remain exact.
+[#2802](../2802-nested-any-vec-multipush-join-first-element-drop.md) and
+[#2846](../2846-acorn-bigint-literal-corrupted-to-f64.md) are completed under
+the #1712 umbrella; no parser-fidelity residual remains in this census.
+
 ## 2026-07-26 — TypeScript frontend incremental reuse
 
 - [#700](../700-superseded-reuse-typescript-host-state.md) — **in review,

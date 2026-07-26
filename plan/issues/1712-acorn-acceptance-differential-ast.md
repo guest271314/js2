@@ -7,9 +7,7 @@ created: 2026-05-29
 updated: 2026-07-26
 completed: 2026-07-26
 loc-budget-allow:
-  - src/codegen/property-access-dispatch.ts
   - src/codegen/regexp-standalone.ts
-  - src/codegen/object-runtime.ts
   - src/codegen/property-access.ts
   - src/codegen/declarations.ts
   - src/codegen/index.ts
@@ -20,10 +18,13 @@ loc-budget-allow:
   - src/codegen/expressions/calls-closures.ts
   - src/codegen/context/types.ts
   - src/ir/integration.ts
+  - src/codegen/property-access-dispatch.ts
+  - src/codegen/object-runtime.ts
   - src/codegen/expressions/call-receiver-method.ts
 func-budget-allow:
+  - src/codegen/regexp-standalone.ts::ensureDynamicStandaloneRegExpCompiler
+  - src/runtime.ts::<anonymous>#77
   - src/codegen/type-coercion.ts::coerceType
-  - src/codegen/object-runtime.ts::ensureObjectRuntime
   - src/codegen/property-access.ts::compileElementAccessBody
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
   - src/codegen/index.ts::generateModule
@@ -36,9 +37,9 @@ func-budget-allow:
   - src/codegen/context/create-context.ts::createCodegenContext
   - src/codegen/index.ts::planIrOverlay
   - src/ir/integration.ts::compileIrPathFunctions
-  - src/codegen/regexp-standalone.ts::ensureDynamicStandaloneRegExpCompiler
-  - src/runtime.ts::<anonymous>#77
   - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/runtime.ts::resolveImport
 oracle-ratchet-allow:
   - src/codegen/declarations/object-shape-widening.ts
   - src/codegen/fnctor-escape-gate.ts
@@ -756,3 +757,62 @@ BinaryExpression` shape for the exact production input above.
 The exported parser seam remains
 `parse(nativeString, optionsObject) → ESTree AST object`. No callable carrier,
 rec-group, runtime-eval envelope, or interpreter export changed.
+
+### Change-set budget accounting
+
+PR #3646 carries the complete Acorn acceptance stack rather than only this
+last regression fix. Its merge-base therefore includes the earlier native
+RegExp, fnctor reconstruction, field-presence, AST marshalling, and dynamic
+dispatch slices listed in this issue's history. The `loc-budget-allow` and
+`func-budget-allow` entries above enumerate that already-reviewed integration
+surface so the change-scoped quality gates assess the PR intentionally. This
+does not raise the repository baselines; post-merge ratchets still bank the
+new sizes.
+
+## Full Test262 parser differential 2026-07-26
+
+The acceptance surface now includes every Git-tracked Test262 JavaScript parser
+input, using pinned acorn 8.16.0 on both sides and comparing exact ESTree,
+including positions and Test262 script/module/strict variants. The completed
+pre-fix four-shard census covered **53,259 files / 102,312 variants** and reduced
+the remaining mismatches to two files / four variants after first closing the
+lexical early-error and arbitrary-width BigInt families.
+
+The lexical family covered **36 files / 72 variants** across invalid
+template/string escapes, truncated radix numerics, and dangling named RegExp
+backreferences. Two substrate defects explained it: nullable primitive function
+results erased Acorn's `readInt`/`readHexChar` null sentinel, while nested vec
+`push` mutated a materialized host Array mirror rather than Acorn's live
+`backReferenceNames` vector. The complete recorded 223-file replay eliminated
+every `compiled-accepted-oracle-rejected` residual from that family.
+
+The final two residuals were:
+
+- A generator-context vec mutation left `yield/regexp/` in the division lexical
+  goal because the host proxy write did not update the live Wasm vector.
+- One depth-32 nested-function program overflowed the alternating
+  Wasm→host→Wasm prototype-method bridge.
+
+Both residual files now replay exact (**2/2 files, 4/4 variants**). The required
+23-input corpus is **23/23 exact**, and the standalone parser remains a
+zero-import artifact with all four scalar canaries green. The clean integrated
+compiler revision `9768f821f79999845750bc80a929de607d728441` completes the
+full four-shard differential at **53,259/53,259 exact files** and
+**102,312/102,312 exact variants**: 92,649 variants produced structurally
+identical ESTree ASTs, 9,663 were rejected by both parsers, and zero files or
+variants mismatched. The run used pinned Acorn 8.16.0 and Test262 revision
+`63829c6d925e24a3f5f307b08754aaa1c412c6a6`. After the final upstream
+slot-widening merge, code revision
+`2cccb33288957f` emits the byte-identical 681,946-byte host artifact
+(`sha256:765c5cc3570ab3b5fb62942701e0969dbaeafdd49fe5a6e863c2410a9c523ee6`);
+the exhaustive result therefore transfers exactly, and the zero-import
+standalone canaries remain green.
+
+The vec mutation is now routed through the module's canonical mutation export.
+The recursive method path first resolves the live prototype property, returns
+from the host lookup, and only then invokes the compiled closure through a
+private Wasm driver. Under-applied calls receive the host's real `undefined`
+carrier while retaining the original `arguments.length`; genuine host
+overrides and calls wider than the supported fixed arities retain the generic
+host fallback. These are internal lowering/runtime repairs and do not change
+the public Acorn or interpreter ABI.
