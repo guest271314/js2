@@ -242,8 +242,41 @@ collapses to ONE root arm (+ per-shape arms only for named function
 expressions / wrapper-less fallbacks). Measured: ~3% (3.52 → 3.41ms) — the
 extraction was not the hot part of these dispatchers.
 
-**The measured wall (next session's target): closure-arity + funcref-type
-chains.** The emitted `__apply_closure` carries a 149-arm `ref.test` chain
+## Round 5 — named-func-expr func-type unification (the arity-chain fix
+that needed NO layout change)
+
+Instrumenting the arity probe showed the 149-arm chain resolved to **90
+distinct closure func types over 57 self shapes for only 9 distinct
+arities** — and the explosion came from NAMED FUNCTION EXPRESSIONS: each
+minted a private `(ref_null $ownStruct, …)` lifted func type, so acorn's
+hundreds of `pp$X.method = function …` closures each added a chain arm
+even when their USER signatures were identical.
+
+Fix (`mintClosureStructTypes`): named func exprs keep their private
+capture struct but now SUBTYPE the shared wrapper, and their lifted func
+type takes the nullable canonical ROOT as `__self` (deduped by
+`addFuncType` across identical user signatures). Bodies downcast root →
+private struct via the existing `usesWrapperFuncType` machinery; var
+hoisting keeps the nullable self slot; recursion dispatches unchanged
+(the #2118 comment's "struct.get runs against __self's actual param
+type" contract now holds root-wide). No allocation-site or capture-index
+changes — the layout-risk variant (arity FIELD in the wrapper) was
+deliberately deferred.
+
+**Measured: funcTypes 90 → 48, extraction selfShapes 57 → 1, standalone
+parse 3.38 → 2.66ms.** Cumulative standalone: **52.4 → 2.7ms (19.7x),
+~5x faster than the host lane**; gap to node-acorn now ~45x.
+
+Verification (round 5): all 10 closure suites — the 10 failures
+(illegal-cast-closures ×6, closure-construct ×1, 2637 ×1, 3036 ×2)
+reproduce IDENTICALLY on the committed base (pre-existing); var-hoisting
++ annexB-hoist + nested-hoist suites green; async/generator suites
+100/100; standalone batch — same pre-existing 4; host corpus 23/23
+exact; standalone canaries 4/4; 1712 acceptance green; host bench
+unchanged; tsc + biome clean.
+
+**The remaining wall (next slice): closure-arity + funcref-type
+chains, now at 48 arms.** The emitted `__apply_closure` carries a 149-arm `ref.test` chain
 over distinct closure FUNC types to answer "declared arity of this
 closure" (the #3592 widening probe), and `__call_fn_method_1` a 69-arm
 chain to select the `call_ref` target type. Together `__apply_closure`
