@@ -1089,9 +1089,17 @@ remain later R2-R10 work and are explicitly outside R1.
 ### Final PR #3496 validation
 
 - The branch was merged forward through current-main runtime, call, literal,
-  interpreter, module-init, and baseline-contract changes. The intended PR
-  path set stayed identical across each merge, and main-owned files remained
-  byte-identical to `origin/main`.
+  interpreter, module-init, global-environment, and baseline-contract changes.
+  Main-owned semantics remain present, including the current #2726
+  global-environment delete guard.
+- The required CI guard suite exposed a missing structural-order anchor for
+  ambient and transformed-import classes that have no executable `IrUnit`.
+  `ProgramAbiStructuralOrder` now assigns those classes deterministic,
+  source-local tail anchors while preserving the existing source, unit, and
+  member-backed class anchors. Dedicated coverage includes multiple zero-unit
+  classes, mixed live/ambient populations, reversed source input, transformed
+  import wrappers, and the exact #2961/#3565 regressions; the final focused
+  post-merge matrix passes **44/44**.
 - Strict TypeScript, full Biome lint, Prettier, diff, LOC, function-budget,
   oracle, dead-export, issue, and change-scoped quality gates pass. The
   dead-export audit reports **15 known / 0 new** after deleting the obsolete
