@@ -5,6 +5,7 @@ import {
   analyzeMultiSource,
   analyzeSource,
   IncrementalLanguageService,
+  IncrementalProjectLanguageService,
   type TypedAST,
   type MultiTypedAST,
 } from "./checker/index.js";
@@ -1540,6 +1541,7 @@ export async function compileMultiSource(
   files: Record<string, string>,
   entryFile: string,
   options: CompileOptions = {},
+  projectService?: IncrementalProjectLanguageService,
 ): Promise<CompileResult> {
   const errors: CompileError[] = [];
 
@@ -1553,12 +1555,19 @@ export async function compileMultiSource(
   // are seen as proper module imports during cross-file resolution.
   const processedFiles = Object.fromEntries(Object.entries(definedFiles).map(([k, v]) => [k, rewriteCjsRequire(v)]));
 
-  const multiAst = analyzeMultiSource(processedFiles, entryFile, undefined, {
+  const analyzeOptions = {
     allowJs: options.allowJs,
     skipSemanticDiagnostics: options.skipSemanticDiagnostics,
     // #2528 — propagate the ambient-platform selection into multi-file analysis.
     ...(options.platform ? { platform: options.platform } : {}),
-  });
+  };
+  let multiAst: MultiTypedAST;
+  if (projectService) {
+    projectService.updateProject(processedFiles, entryFile);
+    multiAst = projectService.analyze(analyzeOptions);
+  } else {
+    multiAst = analyzeMultiSource(processedFiles, entryFile, undefined, analyzeOptions);
+  }
 
   // When allowJs is set (e.g. compiling npm packages like lodash-es), only report
   // diagnostics from the entry file — dependency files may have TS errors we can't
