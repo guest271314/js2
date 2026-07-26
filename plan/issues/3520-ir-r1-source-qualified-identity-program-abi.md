@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: symphony/3520-r1-planning-identity
+branch: codex/3520-c4-production-abi
 pr: 3496
 last_merged_pr: 3490
 sprint: current
@@ -1129,6 +1129,50 @@ pnpm run check:ir-only -- --policy=hybrid
 pnpm run check:ir-fallbacks -- --verbose
 node scripts/equivalence-gate.mjs
 ```
+
+### 2026-07-26 production callable/imported-global continuation
+
+The first production ABI populations after PR #3496 are implemented on
+`codex/3520-c4-production-abi`:
+
+- every inventory-backed source/unit callable observed by WasmGC IR integration
+  now receives the canonical `callable/body` binding ID, a structural callable
+  reference key, a canonical signature intention, and an exact
+  `WasmFunction` locator;
+- migrated unit calls resolve through
+  `ProgramAbiSession.resolveCurrentIndex(...)`, so late function-import shifts
+  are resolved from the current allocator layout instead of a captured
+  `funcMap` index;
+- overlay replacement and orphan stubbing update the exact function locator in
+  the same mutation seam, so ABI publication follows the final function object;
+- host string-constant globals now plan exact imported-global intentions
+  anchored to the unique entry source, including deterministic literal order,
+  deduplication, late/interleaved imports, lone-surrogate field encoding, and
+  the valid empty import field; and
+- native-string builds retain the no-import sentinel path and publish no
+  string-constant ABI entries.
+
+The complete #3520 matrix plus #2138 multi-source coverage passes **216/216**
+across **35 files**. Strict TypeScript, LOC budget, Prettier, and diff checks
+pass. Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed
+Unsupported / 0 Invariants / 37 legacy bodies**, and the fallback ratchet
+reports no unintended, post-claim, or module-level increase. Full equivalence
+reports **1,608 passing / 35 known failures / 0 new regressions**, with one
+known baseline failure now passing; the baseline remains unchanged.
+The existing `ir-scaffold` host fixture still fails **1/7** because it does not
+provide the already-requested `env.__unbox_number` import; the identical
+failure reproduces on untouched PR #3496 head `c96312ba`.
+
+This remains a bounded R1 continuation, not the final ABI cutover. Derived
+lifted and monomorphized units remain explicitly unplanned because
+`LoweredFunctionResult` and the monomorphization sidecar do not yet preserve
+the complete `{ parentId, sourceId, terminalOwnerId, role, ordinal }`
+`ProgramAbiDerivedUnitRecord`. No display-label or encoded-ID inference is
+used. Imported/runtime/intrinsic/support callables, remaining imported globals,
+Wasm types and class layouts plus DCE remaps, exports and aliases, and
+production `LegacyAbiAdapter` replacement of the remaining `funcMap`,
+`structMap`, module-array, and display-name scans still remain before R1 can
+close.
 
 ### R1a validation evidence
 
