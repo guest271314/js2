@@ -160,7 +160,7 @@ const NODE_BUILTIN_CLASS_TYPED_STUBS: Record<string, Record<string, string>> = {
 };
 
 /** (#1794) Lookup: is `name` a known node-builtin class export of `moduleName`? */
-function nodeBuiltinClassStub(moduleName: string, name: string): string | null {
+export function nodeBuiltinClassStub(moduleName: string, name: string): string | null {
   const members = NODE_BUILTIN_CLASS_TYPED_STUBS[moduleName]?.[name];
   if (!members) return null;
   return (
