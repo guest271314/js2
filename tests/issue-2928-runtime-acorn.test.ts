@@ -21,7 +21,6 @@ describe("#2928 — real Acorn runtime-eval provider", () => {
       {
         cwd: join(HERE, ".."),
         encoding: "utf8",
-        env: { ...process.env, JS2WASM_RUNTIME_FUNCTION_CANARY: "0" },
         maxBuffer: 64 * 1024 * 1024,
       },
     );
@@ -36,20 +35,32 @@ describe("#2928 — real Acorn runtime-eval provider", () => {
       { name: "__runtime_indirect_eval", kind: "function" },
       { name: "__runtime_eval_canary", kind: "function" },
       { name: "__runtime_function_canary", kind: "function" },
+      { name: "__runtime_positive_corpus_canary", kind: "function" },
     ]);
     expect(report.userSuccess).toBe(true);
     expect(report.userErrors).toEqual([]);
     expect(report.userImports).toEqual([
       {
         module: "js2wasm:runtime-eval",
+        name: "__runtime_new_function",
+        kind: "function",
+      },
+      {
+        module: "js2wasm:runtime-eval",
         name: "__runtime_indirect_eval",
         kind: "function",
       },
     ]);
-    expect(report.functionCanaryEnabled).toBe(false);
     expect(report.executionErrors).toEqual({});
     expect(report.values).toEqual({
+      function: 3,
+      linkedFunction: 3,
+      linkedFunctionImmediate: 3,
+      linkedFunctionCall: 5,
+      linkedSloppyThis: 1,
+      linkedStrictThis: 1,
       eval: 3,
+      positiveCorpus: 30,
       linkedEval: 42,
       linkedThrow: 1,
       linkedErrorThrow: 1,

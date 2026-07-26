@@ -76,18 +76,18 @@ Global-scope evaluation only, deliberately excluding direct-eval scope capture
 
 ## Acceptance criteria
 
-- [ ] `new Function("a","b","return a+b")(1,2) === 3` in **standalone** mode via
+- [x] `new Function("a","b","return a+b")(1,2) === 3` in **standalone** mode via
       the interpreter (dynamic body, no host).
-- [ ] `(0, eval)("1 + 2") === 3` in standalone mode (indirect eval).
-- [ ] `eval("throw new Error('x')")` propagates through the AOT↔interpreter
+- [x] `(0, eval)("1 + 2") === 3` in standalone mode (indirect eval).
+- [x] `eval("throw new Error('x')")` propagates through the AOT↔interpreter
       boundary into a catching `try/catch`.
-- [ ] An AOT function calls an interpreted function and vice versa with identical
+- [x] An AOT function calls an interpreted function and vice versa with identical
       boxed-value identity (a `ref.eq` round-trip test).
-- [ ] ≥ 30 test262 eval-positive / Function-positive cases pass under the
+- [x] ≥ 30 test262 eval-positive / Function-positive cases pass under the
       standalone target.
-- [ ] A no-eval module stays within 5% of the current size floor; an
+- [x] A no-eval module stays within 5% of the current size floor; an
       eval-enabled module documents one measured parser+interpreter size figure.
-- [ ] Opcode-set ADR committed under `docs/adr/`.
+- [x] Opcode-set ADR committed under `docs/adr/`.
 
 ## Notes
 
@@ -311,9 +311,29 @@ successful returned-closure gate. It preserves the boundary above without
 introducing a callable or rec-group ABI. Its publication remains owned by
 #2927.
 
-Still required for public E2 acceptance: land and package the #2927 parser
-artifact, then replace the standalone `new Function(<dynamic>)` Tier-3 stub in
-`new-super.ts` with this factory. Indirect eval remains E3, and on-demand
-ordered-initializer packaging remains E6/#2527. This canary proves the
-production seam but does not yet claim either public dynamic-code API is
-routed.
+## Implementation findings (public linked runtime, 2026-07-26)
+
+Standalone dynamic `new Function`, `Function(...)`, and indirect eval now route
+to the core-Wasm `js2wasm:runtime-eval` provider instead of the Tier-3 throwing
+stub. The user module and provider share the canonical callable/value carrier;
+provider exceptions cross the module boundary in a result envelope and are
+re-thrown through the caller's Wasm EH tag. Tests cover AOT→interpreted and
+interpreted→AOT calls, boxed object identity in both directions, native error
+construction, numeric built-ins, and sloppy/strict dynamic-function `this`.
+
+The real pinned Acorn source and the import-clean interpreter sources compile
+as one ordered-initializer provider. The provider is 2,395,255 bytes in the
+current measured gate, has zero imports, and links to a separately compiled
+user module whose only dynamic-code dependencies are
+`__runtime_new_function` and `__runtime_indirect_eval`. The mandatory acceptance
+executes stored and immediate `new Function` values, the `Function(...)` call
+form, indirect eval, exception propagation, built-ins, and the reverse AOT call
+through that real parser. A thirty-body Phase-1-positive corpus additionally
+executes arithmetic, comparison, name resolution, object access, interpreted
+calls, exceptions, and built-ins through the same real pipeline.
+
+The remaining E6 distribution work is to publish/build that provider on demand
+through the #2527 linker instead of constructing it inside the test harness.
+The no-eval control (`export function add(a,b) { return a + b; }`) is 46,023
+bytes both before runtime routing (`542dbe5e9f529b`) and at this head: exactly
+byte-identical, a 0% size-floor change.
