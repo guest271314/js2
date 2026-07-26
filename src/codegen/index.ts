@@ -78,12 +78,13 @@ import {
   makeIrLocalClassExpressionResolver,
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
+  makeIrRegExpExpressionPredicate,
 } from "../ir/module-bindings.js"; // (#2856 Capability C)
 import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
-import { planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
+import { planProgramAbiFunctionValue, planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
 import {
   applyIrFinalContextFunctionRetention,
@@ -167,10 +168,14 @@ import {
   fillApplyClosure,
   fillBindDynHelper,
   fillBuiltinFnMeta,
+  fillClosedStructExternGetArms,
+  fillClosedStructHasOwnArms,
+  fillClosedStructOwnPropertyNamesArms,
   fillDynamicForinVecArms,
   fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
   fillExternSetVecArms,
+  fillFnctorPrototypeDispatchArms,
   fillExternIsArray,
   fillProxyDispatch,
 } from "./object-runtime.js";
@@ -258,6 +263,7 @@ import { classMemberFuncKey, fnctorAncestorOfClass, moduleHasFnctorSubclass } fr
 import {
   applyShapeInference,
   collectDeclarations,
+  collectDynamicObjectReturnCarrierTypes,
   inferNumericReturnTypes,
   collectEmptyObjectWidening,
   collectGrowableObjectLiterals,
@@ -318,14 +324,18 @@ import {
   emitClosureMethodCallExportN,
   emitIsClosureExport,
   emitClosureArityExport,
+  emitClosureHasRestExport,
   emitIsDataStructExport,
   fillStandaloneTypeofClosureArms,
 } from "./closure-exports.js"; // (#3272) extracted verbatim
 import {
   emitStructFieldGetters,
+  emitStructFieldBooleanMarkers,
+  emitStructFieldPresenceGetters,
   emitStructFieldSetters,
   resolveSameShapeFieldNameCollisions,
 } from "./struct-field-exports.js"; // (#3272) extracted verbatim
+import { analyzeBooleanPropertyNames, recoverBooleanStructFieldBrands } from "./struct-field-boolean-brand.js";
 import {
   registerWasiImports,
   emitDeferredWasiHelpers,
@@ -2039,6 +2049,7 @@ function planIrOverlay(
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ast.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ast.checker);
   const isArrayExpression = makeIrArrayExpressionPredicate(ast.checker);
+  const isRegExpExpression = makeIrRegExpExpressionPredicate(ast.checker);
   const resolveHostVoidCallback = jsHostExterns ? makeIrHostVoidCallbackResolver(ast.checker) : undefined;
   const resolveHostDateSnapshot = supportsHostDateSnapshots ? makeIrHostDateSnapshotResolver(ast.checker) : undefined;
   const resolvePromiseDelay =
@@ -2081,6 +2092,7 @@ function planIrOverlay(
       classifyPrimitiveExpression,
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
+      isRegExpExpression,
       projectedClassShapes: classShapes,
       resolveLocalClassExpression,
       supportsSymbolicMathHelpers: true,
@@ -2936,17 +2948,9 @@ function prepareMultiIrImportedLowering(
     const singleton = ensureFuncClosureSingleton(ctx, valuePlan.target.name, funcIdx, false);
     const trampoline = singleton ? definedFuncAt(ctx, singleton.trampolineFuncIdx) : undefined;
     const cache = singleton ? ctx.mod.globals[localGlobalIdx(ctx, singleton.cacheGlobalIdx)] : undefined;
-    if (!singleton || trampoline?.name !== valuePlan.trampoline.name || cache?.name !== valuePlan.cacheGlobalName) {
+    if (!trampoline || !cache || !planProgramAbiFunctionValue(ctx, valuePlan, trampoline, cache)) {
       blocked.add(valuePlan.ownerUnitId);
-      continue;
     }
-    const targetUnitId = valuePlan.target.binding.unitId;
-    planProgramAbiGlobal(ctx, {
-      ref: valuePlan.cacheGlobal,
-      anchor: { kind: "unit", unitId: targetUnitId },
-      roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.functionValueCache,
-      global: cache,
-    });
   }
 
   if (blocked.size === 0) return selection;
@@ -3174,6 +3178,7 @@ export function generateModule(
     // target-independent). MUST run after the gate is built (above, line ~1081)
     // and after the subview / ObjVecArr reservations so the type-table prefix is
     // already stable.
+    collectDynamicObjectReturnCarrierTypes(ctx, ast.checker, ast.sourceFile);
     reserveFnctorStructTypes(ctx);
 
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
@@ -3363,6 +3368,7 @@ export function generateModule(
     // collectDeclarations so the inferred f64 return shows up directly in
     // the function's signature instead of being patched after the fact.
     ctx.numericReturnTypes = inferNumericReturnTypes(ctx, ast.sourceFile);
+    ctx.booleanPropertyNames = analyzeBooleanPropertyNames(ctx, [ast.sourceFile]);
 
     // #1677 — final reconcile of native-string helper indices before any USER
     // function is registered. Any imports added by the deferred-helper
@@ -3401,6 +3407,11 @@ export function generateModule(
     scanForArrayHoles(ctx, ast.sourceFile);
 
     collectDeclarations(ctx, ast.sourceFile);
+    // #2847: declaration collection has now materialized the initial struct
+    // field table. Brand proven boolean i32 slots before compiling bodies so
+    // direct/dynamic reads preserve JS boolean identity at their use sites.
+    // The finalize-time pass below remains necessary for late-grown fields.
+    recoverBooleanStructFieldBrands(ctx);
 
     // Shape inference: detect array-like variables and override their types
     applyShapeInference(ctx, ast.checker, ast.sourceFile);
@@ -3607,6 +3618,10 @@ export function generateModule(
       mod.exportSignatures = obj;
     }
 
+    // (#2847) Recover boolean brands after every late field has been discovered,
+    // but before the host getter signatures/boxing paths are finalized.
+    recoverBooleanStructFieldBrands(ctx);
+
     // (#2009) Resolve same-structural-shape field-name collisions BEFORE the
     // getter/setter/name-export emitters read the struct layout. Runs after ALL
     // function bodies are final (legacy + IR), so its struct.new patch covers
@@ -3625,6 +3640,8 @@ export function generateModule(
     // These allow JS host imports to read WasmGC struct fields that are
     // otherwise opaque to JS (V8 returns undefined for direct property access).
     emitStructFieldGetters(ctx);
+    emitStructFieldBooleanMarkers(ctx);
+    emitStructFieldPresenceGetters(ctx);
     emitStructFieldSetters(ctx);
 
     // Emit __vec_get / __vec_len exports for runtime iterator fallback on WasmGC arrays
@@ -3788,6 +3805,12 @@ export function generateModule(
       for (let n = 6; n <= cap; n++) emitClosureMethodCallExportN(ctx, n);
     }
 
+    // Emit the declared-arity classifier before filling `__apply_closure`.
+    // The native bridge uses it to select a dispatcher wide enough for calls
+    // that omit optional trailing arguments, padding those missing formals with
+    // the canonical undefined carrier just like the host wrapper does.
+    emitClosureArityExport(ctx);
+
     // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive
     // site reserved a driver (brand clear / no Array.prototype @@iterator override).
@@ -3872,6 +3895,13 @@ export function generateModule(
     // compile-order freeze that left parser field reads (`base.end`,
     // `this.lastTokEnd`) resolving to `__extern_get` → `undefined` (acorn 9th wall).
     fillMemberGetDispatch(ctx);
+
+    // Closed compiler structs are not `$Object` hash maps. Fill the native
+    // Object.hasOwn / hasOwnProperty predicates from the complete shape table.
+    fillClosedStructHasOwnArms(ctx);
+    fillClosedStructOwnPropertyNamesArms(ctx);
+    fillClosedStructExternGetArms(ctx);
+    fillFnctorPrototypeDispatchArms(ctx);
 
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
@@ -3966,11 +3996,9 @@ export function generateModule(
     // non-vec structs — JS cannot tell them apart without this probe).
     emitIsClosureExport(ctx);
 
-    // #2623 P-7 (B-1): emit __closure_arity(externref) -> i32 so the JS-side
-    // dynamic bridge can dispatch host→wasm method callbacks at the closure's
-    // REAL declared arity (exact `arguments.length` reflection) instead of the
-    // highest emitted __call_fn_method_N.
-    emitClosureArityExport(ctx);
+    // #2742: classify accessor-returned rest closures before the JS runtime
+    // exposes them through a dispatcher that cannot materialize their rest vec.
+    emitClosureHasRestExport(ctx);
 
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
@@ -5654,6 +5682,7 @@ export function generateMultiModule(
       }
       ctx.numericReturnTypes = merged;
     }
+    ctx.booleanPropertyNames = analyzeBooleanPropertyNames(ctx, multiAst.sourceFiles);
 
     // #1677 — final reconcile before any user function is registered.
     reconcileNativeStrFinalizeShift(ctx);
@@ -5690,6 +5719,9 @@ export function generateMultiModule(
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);
     }
+    // #2847: make initial boolean brands visible while bodies are emitted;
+    // recover again at finalize for fields discovered during body compilation.
+    recoverBooleanStructFieldBrands(ctx);
 
     // Shape inference: detect array-like variables and override their types
     for (const sf of multiAst.sourceFiles) {
@@ -5826,6 +5858,13 @@ export function generateMultiModule(
       mod.exportSignatures = obj;
     }
 
+    // (#2847) Whole-program conservative branding for multi-source modules.
+    recoverBooleanStructFieldBrands(ctx);
+
+    // Mirror single-source exact shape provenance before any closed-struct
+    // runtime finalizer consumes the complete multi-source type table.
+    resolveSameShapeFieldNameCollisions(ctx);
+
     // (#2831) Reserve the host-externref → wasm-vec materializers before the
     // `__sset_*` setters and deferred member dispatchers bake their value
     // coercions (mirrors the generateModule path).
@@ -5835,6 +5874,8 @@ export function generateMultiModule(
     // generateModule path — #1308 surfaced that multi-source projects
     // were missing these export emits).
     emitStructFieldGetters(ctx);
+    emitStructFieldBooleanMarkers(ctx);
+    emitStructFieldPresenceGetters(ctx);
     emitStructFieldSetters(ctx);
 
     // (#3468) Multi-source compilation can reserve the closure own-property
@@ -5873,6 +5914,12 @@ export function generateMultiModule(
     fillMemberSetDispatch(ctx);
     fillMemberGetDispatch(ctx);
 
+    // Mirror the single-source closed-struct own-property finalizer.
+    fillClosedStructHasOwnArms(ctx);
+    fillClosedStructOwnPropertyNamesArms(ctx);
+    fillClosedStructExternGetArms(ctx);
+    fillFnctorPrototypeDispatchArms(ctx);
+
     // (#3495) `__extern_get_idx` is reserved while compiling standalone
     // numeric reads through an externref (for example `globalThis.logs[i]`).
     // Its eager body only knows `$Object`/`$ObjVec`; splice the per-element-kind
@@ -5885,7 +5932,10 @@ export function generateMultiModule(
     // carrier and dynamic index reader are complete.
     fillVecOverlayHelpers(ctx);
     fillObjVecArrayPrototypeArm(ctx);
-    // Keep native views after generic vec fills so they retain front precedence.
+    // (#3371) Reflect.construct reserves the same host-free constructor
+    // classifier and native-view prototype overrides in project compilation as
+    // in the single-source pipeline. Keep native views after generic vec fills
+    // so they retain front precedence.
     fillTaDynViewMopArms(ctx);
     fillDataViewConstructProtoArm(ctx);
     fillReflectIsConstructor(ctx);
@@ -5913,6 +5963,9 @@ export function generateMultiModule(
 
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
+
+    // #2742: accessor-returned rest-closure discriminator (see primary path).
+    emitClosureHasRestExport(ctx);
 
     // #2794: POSITIVE data-vs-closure discriminator (see generateModule path).
     emitIsDataStructExport(ctx);
@@ -6702,8 +6755,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // __extern_get/_safeGet. NOTE: resolving to the CTOR struct here instead
     // was tried and regressed (.tmp/dbg15.mts G4/G5) — the member-call
     // static/dynamic split keys off this type, so only the always-dynamic
-    // externref resolution is safe. JS-host mode only.
-    if (!ctx.standalone && !ctx.wasi) {
+    // externref resolution is safe. Standalone admits only fnctors approved by
+    // the escape gate: those have a reserved native `__fnctor_<name>` receiver
+    // arm plus a per-fnctor `$Object` prototype used by the native dynamic
+    // getter/method dispatcher. Other standalone fnctors keep their existing
+    // closed representation.
+    const approvedStandaloneFnctor =
+      ctx.standalone && sym?.name !== undefined && ctx.fnctorEscapeGate?.approvedNames.has(sym.name) === true;
+    if ((!ctx.standalone && !ctx.wasi) || approvedStandaloneFnctor) {
       const fnDecl = sym?.valueDeclaration;
       const isFnCtorType =
         (sym?.name !== undefined && ctx.funcConstructorMap.has(sym.name)) ||

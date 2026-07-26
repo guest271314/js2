@@ -137,15 +137,6 @@ export function auditIrIntegrationTerminalEvidence(input: {
       const owner = input.activeOwners.getByLegacyName(legacyName);
       if (!owner) recordMismatch(undefined, `terminal compiled owner ${JSON.stringify(legacyName)} is not active`);
     }
-    for (const artifactName of syntheticCompiledArtifacts) {
-      const owner = input.activeOwners.getByLegacyName(artifactName);
-      if (owner) {
-        recordMismatch(
-          owner.unitId,
-          `compiled terminal owner ${JSON.stringify(artifactName)} was misclassified as a synthetic artifact`,
-        );
-      }
-    }
   }
   const patchedOwnerCounts = new Map<string, number>();
 

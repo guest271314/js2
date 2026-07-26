@@ -847,10 +847,10 @@ function buildTimerShim(used: Set<string>, definedNames: Set<string>): string {
     const hostName = hostFor[name]!;
     if (name === "clearTimeout" || name === "clearInterval") {
       lines.push(`declare function ${hostName}(h: any): void;`);
-      lines.push(`function ${name}(h: any): void { ${hostName}(h); }`);
+      lines.push(`function ${name}(h: number): void { ${hostName}(h); }`);
     } else {
       lines.push(`declare function ${hostName}(cb: any, ms: any): any;`);
-      lines.push(`function ${name}(cb: any, ms: any): any { return ${hostName}(cb, ms); }`);
+      lines.push(`function ${name}(cb: () => void, ms: number): number { return ${hostName}(cb, ms); }`);
     }
   }
   if (lines.length === 0) return "";

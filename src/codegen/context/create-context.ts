@@ -60,9 +60,11 @@ export function createCodegenContext(
     usageInference: new UsageInference(checker),
     useUsageInfer: options?.useUsageInfer ?? process.env.JS2WASM_USAGE_INFER !== "0",
     funcMap: new Map(),
+    irUnitFuncMap: new Map(),
     structMap: new Map(),
     typeIdxToStructName: new Map(),
     structFields: new Map(),
+    booleanPropertyNames: new Set(),
     noBrandShapeTypes: new Set(),
     fnctorReservedTypeIdx: new Map(), // #2773 S1 — up-front fnctor struct-type slots
 
@@ -239,6 +241,7 @@ export function createCodegenContext(
     dynamicDescriptorWidenVars: new Set(),
     objectHashConsumerVars: new Set(),
     objectHashConsumerTypes: new Set(),
+    dynamicObjectReturnFunctions: new Set(),
     growableObjectLiteralVars: new Set(),
     externrefAccessorVars: new Set(),
     pendingMathMethods: new Set(),

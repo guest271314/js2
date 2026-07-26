@@ -118,6 +118,7 @@ export type IrFallbackReason =
   | "error-constructor-unsupported"
   | "typed-array-constructor-unsupported"
   | "date-constructor-unsupported"
+  | "regexp-constructor-unsupported"
   | "call-resolution-unsupported"
   | "call-arity-unsupported"
   | "constructor-resolution-unsupported"
@@ -390,6 +391,12 @@ export interface IrSelectionOptions {
    */
   readonly isArrayExpression?: (expr: ts.Expression) => boolean;
   /**
+   * Checker-backed proof that an expression has the ambient lib `RegExp`
+   * type. Host-free targets use it to defer `.test`/`.exec` to native
+   * standalone codegen instead of selecting the host-extern IR ABI.
+   */
+  readonly isRegExpExpression?: (expr: ts.Expression) => boolean;
+  /**
    * Checker-only ambient identity proof used by Math call selection when a
    * backend deliberately does not install the module-binding capability.
    * Absent means unproven: bare selector callers stay shadow-safe.
@@ -397,6 +404,8 @@ export interface IrSelectionOptions {
   readonly isAmbientBinding?: (node: ts.Identifier) => boolean;
   /** True only when the active backend can resolve `Math_<method>` helpers. */
   readonly supportsSymbolicMathHelpers?: boolean;
+  /** Backend owns a no-radix f64 → abstract-string formatter. */
+  readonly supportsNumberToString?: boolean;
   /**
    * True when the active backend explicitly supports the selector's exact
    * literal-string `String.replace(search, replacement)` slice. Backends
@@ -465,7 +474,7 @@ export interface IrSelectionOptions {
    * An explicit false prevents an ambient Date snapshot from being claimed
    * even if its checker shape is otherwise exact.
    */
-  readonly supportsBackendCapability?: (capability: "host-date-snapshot") => boolean;
+  readonly supportsBackendCapability?: (capability: "host-date-snapshot" | "host-regexp-constructor") => boolean;
   /**
    * (#2856 async-delay slice) Exact checker-certified
    * `new Promise<number>((resolve) => { setTimeout(...); })` construction.
@@ -1563,8 +1572,8 @@ export function effectiveIrReturnTypeNode(
  *
  * Out-of-surface shapes (→ null, so the selector keeps the honest
  * `param-type-not-resolvable` rejection): non-primitive param/return types,
- * void returns (`emitClosureCall` is value-producing), rest/optional/default
- * params, type parameters.
+ * rest/optional/default params, and type parameters. Void returns are a
+ * canonical zero-result closure signature; value-position calls still reject.
  */
 export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode): IrClosureSignature | null {
   if (node.typeParameters && node.typeParameters.length > 0) return null;
@@ -1582,8 +1591,8 @@ export function irClosureSignatureFromFunctionTypeNode(node: ts.FunctionTypeNode
     if (!ir) return null;
     params.push(ir);
   }
-  const returnType = prim(node.type);
-  if (!returnType) return null;
+  const returnType = node.type.kind === ts.SyntaxKind.VoidKeyword ? null : prim(node.type);
+  if (returnType === null && node.type.kind !== ts.SyntaxKind.VoidKeyword) return null;
   return { params, returnType };
 }
 
@@ -4217,7 +4226,7 @@ function isExactModuleMapGenericInitializer(expr: ts.NewExpression): boolean {
  * f64 even though provenance scanning still sees the module arguments.
  */
 function isExactF64ScalarToStringCall(expr: ts.CallExpression): boolean {
-  if (currentModuleBindingResolver?.supportsHostNumberToString !== true) return false;
+  if (!selectorSupportsNumberToString()) return false;
   if (expr.questionDotToken || expr.arguments.length !== 0) return false;
   const callee = unwrapPhase1Parens(expr.expression);
   if (!ts.isPropertyAccessExpression(callee) || callee.questionDotToken || callee.name.text !== "toString") {
@@ -4380,6 +4389,13 @@ function selectorSeesAmbientBinding(node: ts.Identifier): boolean {
 
 function selectorSupportsMathPlan(plan: IrMathMethodPlan): boolean {
   return "op" in plan || currentSelectionOptions?.supportsSymbolicMathHelpers === true;
+}
+
+function selectorSupportsNumberToString(): boolean {
+  return (
+    currentSelectionOptions?.supportsNumberToString === true ||
+    currentModuleBindingResolver?.supportsHostNumberToString === true
+  );
 }
 
 function isBoundedToFixedCall(expr: ts.CallExpression): boolean {
@@ -5547,6 +5563,13 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     // `methodName`. If not, the function falls back to legacy.
     if (ts.isPropertyAccessExpression(expr.expression)) {
       if (!ts.isIdentifier(expr.expression.name)) return false;
+      if (
+        (expr.expression.name.text === "test" || expr.expression.name.text === "exec") &&
+        currentSelectionOptions?.isRegExpExpression?.(expr.expression.expression) === true &&
+        currentSelectionOptions.supportsBackendCapability?.("host-regexp-constructor") === false
+      ) {
+        return capabilityNo("regexp-constructor-unsupported", "expr-regexp-method-target", expr);
+      }
       // (#1371) Whitelist `Math.<unary>(arg)` for a small set of f64-mapped
       // ops. The receiver `Math` is a host global, never in scope, so the
       // generic receiver check below would reject these. Recognise the shape
@@ -5623,7 +5646,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         expr.expression.name.text === "toString" &&
         expr.arguments.length === 0 &&
         isNumberReceiver &&
-        currentModuleBindingResolver?.supportsHostNumberToString === true
+        selectorSupportsNumberToString()
       ) {
         if (!isPhase1Expr(builtinReceiver, scope, localClasses)) return false;
         return true;
@@ -5838,6 +5861,17 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     const ctorName = expr.expression.text;
     const isLocalClass = localClassValueIsUnshadowed(ctorName, scope) && localClasses.has(ctorName);
     const isAmbientConstructor = !isLocalClass && selectorSeesAmbientBinding(expr.expression);
+    // The IR slice lowers RegExp construction through the host `RegExp_new`
+    // extern-class ABI. Host-free targets own RegExp in legacy native codegen,
+    // including its runtime pattern compiler, so defer the whole function
+    // before from-ast can type-check native strings against externref params.
+    if (
+      ctorName === "RegExp" &&
+      isAmbientConstructor &&
+      currentSelectionOptions?.supportsBackendCapability?.("host-regexp-constructor") === false
+    ) {
+      return capabilityNo("regexp-constructor-unsupported", "expr-new-regexp-target", expr);
+    }
     if (!isLocalClass && isKnownExternClass(ctorName) && !isAmbientConstructor) {
       return capabilityNo("constructor-resolution-unsupported", "expr-new-extern-identity", expr.expression);
     }

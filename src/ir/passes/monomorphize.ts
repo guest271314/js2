@@ -67,7 +67,7 @@ import {
 } from "../nodes.js";
 import type { ValType } from "../types.js";
 import type { AllocSiteRegistry } from "../alloc-registry.js";
-import { createDerivedIrUnitId, type IrUnitId } from "../identity.js";
+import { createDerivedIrUnitId, type IrDerivedUnitProvenance, type IrUnitId } from "../identity.js";
 import { irUnitFuncRef } from "../callable-bindings.js";
 import { forkAllocInInstr } from "./alloc-discipline.js";
 
@@ -95,6 +95,8 @@ export interface MonomorphizeResult {
   readonly cloneSignatures: ReadonlyMap<IrUnitId, MonomorphizeCloneSignature>;
   /** Explicit clone identity → source callee identity for source-owner rollup. */
   readonly cloneOrigins: ReadonlyMap<IrUnitId, IrUnitId>;
+  /** Exact pass-allocation provenance for each clone, keyed by clone identity. */
+  readonly cloneUnitProvenance: ReadonlyMap<IrUnitId, IrDerivedUnitProvenance>;
 }
 
 /**
@@ -155,7 +157,12 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   }
 
   if (callSites.length === 0) {
-    return { module: mod, cloneSignatures: new Map(), cloneOrigins: new Map() };
+    return {
+      module: mod,
+      cloneSignatures: new Map(),
+      cloneOrigins: new Map(),
+      cloneUnitProvenance: new Map(),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -197,7 +204,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   // the callee's param count is a bug upstream — skip the callee entirely.
   // -------------------------------------------------------------------------
   interface ClonePlan {
-    readonly cloneUnitId: IrUnitId;
+    readonly provenance: IrDerivedUnitProvenance;
     readonly cloneName: string;
     readonly argTypes: readonly IrType[];
     readonly calls: readonly CallSite[];
@@ -224,13 +231,20 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
       const [, group] = entries[i]!;
       const baseName = `${callee.name}$${nameSuffixFor(group.argTypes)}`;
       const cloneName = uniquifyName(baseName, usedNames);
-      usedNames.add(cloneName);
-      plans.push({
-        cloneUnitId: createDerivedIrUnitId({
+      const ordinal = i - 1;
+      const provenance: IrDerivedUnitProvenance = Object.freeze({
+        id: createDerivedIrUnitId({
           parentId: callee.unitId,
           role: "monomorphization-clone",
-          ordinal: i - 1,
+          ordinal,
         }),
+        parentId: callee.unitId,
+        role: "monomorphization-clone",
+        ordinal,
+      });
+      usedNames.add(cloneName);
+      plans.push({
+        provenance,
         cloneName,
         argTypes: group.argTypes,
         calls: group.calls,
@@ -240,7 +254,12 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   }
 
   if (planByCallee.size === 0) {
-    return { module: mod, cloneSignatures: new Map(), cloneOrigins: new Map() };
+    return {
+      module: mod,
+      cloneSignatures: new Map(),
+      cloneOrigins: new Map(),
+      cloneUnitProvenance: new Map(),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -257,7 +276,12 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     newInstrs += plans.length * calleeSize;
   }
   if (newInstrs > originalSize * GROWTH_BUDGET) {
-    return { module: mod, cloneSignatures: new Map(), cloneOrigins: new Map() };
+    return {
+      module: mod,
+      cloneSignatures: new Map(),
+      cloneOrigins: new Map(),
+      cloneUnitProvenance: new Map(),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -266,23 +290,26 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
   const clonedFuncs: IrFunction[] = [];
   const cloneSignatures = new Map<IrUnitId, MonomorphizeCloneSignature>();
   const cloneOrigins = new Map<IrUnitId, IrUnitId>();
+  const cloneUnitProvenance = new Map<IrUnitId, IrDerivedUnitProvenance>();
   for (const [calleeUnitId, plans] of planByCallee) {
     const callee = byUnitId.get(calleeUnitId)!;
     for (const plan of plans) {
+      const cloneUnitId = plan.provenance.id;
       const { fn: clone, returnType } = cloneWithParamTypes(
         callee,
-        plan.cloneUnitId,
+        cloneUnitId,
         plan.cloneName,
         plan.argTypes,
         registry,
       );
       clonedFuncs.push(clone);
-      cloneSignatures.set(plan.cloneUnitId, {
+      cloneSignatures.set(cloneUnitId, {
         name: plan.cloneName,
         params: plan.argTypes,
         returnType,
       });
-      cloneOrigins.set(plan.cloneUnitId, calleeUnitId);
+      cloneOrigins.set(cloneUnitId, plan.provenance.parentId);
+      cloneUnitProvenance.set(cloneUnitId, plan.provenance);
     }
   }
 
@@ -310,7 +337,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
           blockIdx: call.blockIdx,
           instrIdx: call.instrIdx,
           newTarget: {
-            unitId: plan.cloneUnitId,
+            unitId: plan.provenance.id,
             name: plan.cloneName,
           },
         });
@@ -332,6 +359,7 @@ export function monomorphize(mod: IrModule, registry?: AllocSiteRegistry): Monom
     module: { functions: [...rewrittenFuncs, ...clonedFuncs] },
     cloneSignatures,
     cloneOrigins,
+    cloneUnitProvenance,
   };
 }
 
