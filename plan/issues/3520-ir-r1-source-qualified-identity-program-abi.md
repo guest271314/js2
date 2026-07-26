@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c7-type-remap
-pr: 3673
+branch: codex/3520-c8-support-callable
+pr: 3675
 last_merged_pr: 3490
 sprint: current
 created: 2026-07-21
