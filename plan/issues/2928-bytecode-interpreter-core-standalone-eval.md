@@ -19,6 +19,12 @@ depends_on: [2927] # 2853 done (sprint 71) — removed 2026-07-17, see plan/log/
 related: [1715, 1713, 2864, 2865, 2960, 3017, 2929]
 oracle-ratchet-allow:
   - src/codegen/expressions/eval-inline.ts
+# See "Coercion-sites allowance" below for the justification. In short: the two
+# `__is_truthy` sites read field 0 of the provider's `[ok, value]` ABI envelope
+# — a protocol discriminator the runtime-eval provider writes itself — not a
+# §7.1.2 ToBoolean on a JS value flowing from user code.
+coercion-sites-allow:
+  - src/codegen/expressions/eval-inline.ts
 loc-budget-allow:
   - src/codegen/index.ts
   - src/codegen/expressions/calls.ts
@@ -352,3 +358,47 @@ through the #2527 linker instead of constructing it inside the test harness.
 The no-eval control (`export function add(a,b) { return a + b; }`) is 46,023
 bytes both before runtime routing (`542dbe5e9f529b`) and at this head: exactly
 byte-identical, a 0% size-floor change.
+
+## Coercion-sites allowance (`src/codegen/expressions/eval-inline.ts`)
+
+`pnpm run check:coercion-sites` fired on this change-set:
+
+```
+coercion-sites gate FAILED — this change-set ADDS hand-rolled coercion vocabulary on net (__is_truthy +2).
+  codegen/expressions/eval-inline.ts: 0 → 2 (__is_truthy 0→2)
+```
+
+The gate fired **correctly** — `eval-inline.ts` is genuinely absent from
+`scripts/coercion-sites-baseline.json`, so `0 → 2` is real net growth. The
+allowance is granted deliberately, with this reasoning recorded so it can be
+audited or reversed later.
+
+**Why this is not what #2108 protects against.** The gate is a *net-growth
+ratchet on a normal vocabulary token*, not a prohibition: the baseline carries
+376 sites across 65 files, `__is_truthy` appears in a dozen-plus codegen files
+**including `coercion-engine.ts` itself**, and `array-methods.ts` alone holds
+19. What #1917/#2108 exist to stop is **JS-semantic coercion leaking outside
+the engine** — a hand-rolled ToString/ToNumber/ToPrimitive/equality matrix
+applied to user operands.
+
+Both new sites are in `emitRuntimeEvalResultUnwrap`, which reads **field 0 of
+the provider's `[ok, value]` ABI envelope**. That field is a *protocol
+discriminator written by the runtime-eval provider itself*, never a JS value
+flowing from user code. Reading it is a **representation** conversion
+(externref-carrying-a-bool → i32), not a §7.1.2 ToBoolean on a JS operand.
+
+Routing it through the coercion engine would therefore be **actively wrong**,
+not merely heavier: it would assert JS ToBoolean semantics on a value that is
+not a JS operand. So of the gate's two suggested remedies, "route through the
+coercion engine" is the worse one here.
+
+**Follow-up (not done here, deliberately).** That the envelope needs *any*
+coercion to read `ok` is an ABI smell. If field 0 were carried as an `i32` — or
+discriminated the way `__vec_len` does — the site would **disappear** rather
+than be excepted, and the allowance could be dropped. That is a change to the
+runtime-eval provider ABI, owned by this issue's author, and out of scope for
+unblocking the gate.
+
+Granted by the tech lead on 2026-07-26 (ruling recorded rather than parked on
+the absent author, to stop #3678 stalling indefinitely; a one-line frontmatter
+grant is cheap to reverse if the author disagrees).
