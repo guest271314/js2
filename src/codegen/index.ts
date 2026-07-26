@@ -85,6 +85,7 @@ import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
+import { eliminateDeadImportsAndPlanAbiCallables } from "./program-abi-import-planning.js";
 import { planProgramAbiFunctionValue, planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
 import {
@@ -137,7 +138,6 @@ import type {
   OptionalParamInfo,
 } from "./context/types.js";
 import type { NodeBuiltinImport } from "../import-resolver.js";
-import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForDynamicProto, fillDynamicProtoHelpers } from "./dynamic-proto.js"; // (#802)
@@ -2854,6 +2854,15 @@ function recordSourceGlobalEnvironment(ctx: CodegenContext, sourceFile: ts.Sourc
 
 /** Pre-scan the small syntax surface that enables the linked runtime-eval ABI. */
 function sourceUsesRuntimeEvalBoundary(sourceFile: ts.SourceFile): boolean {
+  // (#3437) `callUsesRuntimeEvalBoundary` can only answer true for a call whose
+  // callee is the identifier `Function` or `eval` — so if neither name occurs
+  // anywhere in the source text, no call can match and the full-file AST walk
+  // below is guaranteed to return false. Skipping it on that cheap substring
+  // test keeps this predicate off the harness compile-work budget for the
+  // overwhelming majority of files (a sound over-approximation: the text test
+  // is only allowed to skip when the identifiers are definitely absent).
+  const text = sourceFile.text;
+  if (!text.includes("Function") && !text.includes("eval")) return false;
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
@@ -3974,7 +3983,7 @@ export function generateModule(
     markLeafStructsFinal(mod, ctx.wasi, callableRootTypeIdx === undefined ? undefined : new Set([callableRootTypeIdx]));
 
     // Dead import and type elimination pass
-    eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
+    eliminateDeadImportsAndPlanAbiCallables(ctx); // #1899 authoritative remap, then #3520 retained ABI
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
@@ -5938,7 +5947,7 @@ export function generateMultiModule(
     markLeafStructsFinal(mod, ctx.wasi, callableRootTypeIdx === undefined ? undefined : new Set([callableRootTypeIdx]));
 
     // Dead import and type elimination pass
-    eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
+    eliminateDeadImportsAndPlanAbiCallables(ctx); // #1899 authoritative remap, then #3520 retained ABI
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
