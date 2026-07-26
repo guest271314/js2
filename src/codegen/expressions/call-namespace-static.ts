@@ -164,6 +164,31 @@ function isPlainJsonCodecObjectLiteral(literal: ts.ObjectLiteralExpression): boo
   });
 }
 
+/**
+ * Normalize the bounded JSON.stringify value shapes into the existing codec's
+ * `anyref` ABI. This keeps literal-carrier selection out of the namespace
+ * dispatcher and gives compact/replacer routes one identical conversion path.
+ */
+function emitJsonCodecValueAsAnyref(ctx: CodegenContext, fctx: FunctionContext, value: ts.Expression): boolean {
+  const unwrapped = unwrapReflectConstructExpr(value);
+  let valueType: ValType | null = { kind: "externref" };
+  if (ts.isArrayLiteralExpression(unwrapped) && !unwrapped.elements.some(ts.isSpreadElement)) {
+    emitJsonArrayLiteralAsObjVec(ctx, fctx, unwrapped);
+  } else if (ts.isObjectLiteralExpression(unwrapped) && isPlainJsonCodecObjectLiteral(unwrapped)) {
+    ensureObjectRuntime(ctx);
+    valueType = compileObjectLiteralAsExternref(ctx, fctx, unwrapped);
+  } else {
+    valueType = compileExpression(ctx, fctx, value, { kind: "anyref" });
+  }
+  if (valueType === null) return false;
+  if (valueType.kind === "externref" || valueType.kind === "ref_extern") {
+    fctx.body.push({ op: "any.convert_extern" });
+  } else if (valueType.kind !== "anyref") {
+    coerceType(ctx, fctx, valueType, { kind: "anyref" });
+  }
+  return true;
+}
+
 function isOrdinaryFunctionLike(node: ts.Node | undefined): boolean {
   if (!node || (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node))) return false;
   return (
@@ -1768,27 +1793,7 @@ export function compileNamespaceStaticCall(
             gap = staticSpace === undefined ? undefined : jsonGapFromStaticSpace(staticSpace);
           }
           if (replacerNullish && gap !== undefined && (!isArrayLike || arrayLiteralForCodec !== undefined)) {
-            let argResult: ValType | null = { kind: "externref" };
-            if (arrayLiteralForCodec !== undefined) {
-              emitJsonArrayLiteralAsObjVec(ctx, fctx, arrayLiteralForCodec);
-            } else if (
-              ts.isObjectLiteralExpression(valueExpression) &&
-              isPlainJsonCodecObjectLiteral(valueExpression)
-            ) {
-              ensureObjectRuntime(ctx);
-              argResult = compileObjectLiteralAsExternref(ctx, fctx, valueExpression);
-              if (argResult === null) return null;
-            } else {
-              argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
-              if (argResult === null) return null;
-            }
-            // Bring the value to anyref so the codec can ref.test-discriminate
-            // it. Externref-typed object/array values widen via any.convert_extern.
-            if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
-              fctx.body.push({ op: "any.convert_extern" });
-            } else if (argResult.kind !== "anyref") {
-              coerceType(ctx, fctx, argResult, { kind: "anyref" });
-            }
+            if (!emitJsonCodecValueAsAnyref(ctx, fctx, expr.arguments[0]!)) return null;
             emitJsonStringifyValue(ctx);
             flushLateImportShifts(ctx, fctx);
             if (gap === "") {
@@ -1822,25 +1827,7 @@ export function compileNamespaceStaticCall(
             const isArrayLiteral = ts.isArrayLiteralExpression(replacerArg);
             if (replacerCallable || isArrayLiteral) {
               // value → anyref
-              let argResult: ValType | null = { kind: "externref" };
-              if (arrayLiteralForCodec !== undefined) {
-                emitJsonArrayLiteralAsObjVec(ctx, fctx, arrayLiteralForCodec);
-              } else if (
-                ts.isObjectLiteralExpression(valueExpression) &&
-                isPlainJsonCodecObjectLiteral(valueExpression)
-              ) {
-                ensureObjectRuntime(ctx);
-                argResult = compileObjectLiteralAsExternref(ctx, fctx, valueExpression);
-                if (argResult === null) return null;
-              } else {
-                argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
-                if (argResult === null) return null;
-              }
-              if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
-                fctx.body.push({ op: "any.convert_extern" });
-              } else if (argResult.kind !== "anyref") {
-                coerceType(ctx, fctx, argResult, { kind: "anyref" });
-              }
+              if (!emitJsonCodecValueAsAnyref(ctx, fctx, expr.arguments[0]!)) return null;
               // gap (or null for compact)
               if (gap === "") {
                 fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx });

@@ -188,6 +188,12 @@ existing native stringify codec:
 
 No parser, serializer, object walk, or array ABI was forked.
 
+The emitted instruction sequences are assembled in small top-level builders
+rather than inline in `compileNamespaceStaticCall`, `emitJsonStringifyValue`,
+and `emitJsonRawJson`. This is a structural quality-gate fix: it keeps those
+already-large dispatcher/generator functions within the R-FUNC ceilings while
+preserving the exact stack order and reusing the same runtime helpers.
+
 ### Exact local A/B
 
 - standalone: **73/165 → 76/165**
