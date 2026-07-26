@@ -12,15 +12,16 @@ area: checker, compiler
 goal: performance
 sprint: current
 files:
+  - scripts/test262-worker.mjs
   - src/checker/language-service.ts
   - src/index.ts
+  - tests/issue-700-test262-language-service.test.ts
   - tests/issue-1119.test.ts
   - tests/issue-973-repro.test.ts
   - tests/issue-973.test.ts
   - tests/issue-incremental.test.ts
   - tests/typescript-diagnostic-failures.test.ts
 ---
-
 # #700 — Reuse TypeScript Program and checker state across incremental builds
 
 ## Status: in review
@@ -70,6 +71,10 @@ versioned TypeScript Language Service:
    different source text.
 7. JavaScript, JSX, TypeScript, and TSX inputs retain their correct ScriptKind
    and `allowJs`/JSX compiler settings.
+8. The authoritative Test262 unified worker routes both its literal JavaScript
+   harness lane and its synthetic TypeScript lane through the persistent
+   service. Multi-file fixture graphs remain on `compileMulti()`, since the
+   service deliberately owns one mutable source document.
 
 ## Performance evidence
 
@@ -84,6 +89,20 @@ Edited builds still run the existing IR and code-generation pipeline. Unchanged
 builds obtain the larger gain because the full TypeScript frontend result can
 be reused.
 
+The Test262 integration was measured separately rather than extrapolating the
+microbenchmarks. One-worker, non-authoritative original-harness smoke runs
+produced byte-for-byte identical verdict sets against `origin/main`:
+
+| Lane       | Records | `origin/main` | Language Service | Result split      |
+| ---------- | ------: | ------------: | ---------------: | ----------------- |
+| Host / GC  |     100 |       43.03 s |          44.45 s | 68 pass / 32 fail |
+| Standalone |      20 |        9.03 s |           8.45 s | 12 pass / 8 fail  |
+
+These single-run wall timings are mixed compile-and-execute measurements and do
+not demonstrate a reliable Test262 throughput improvement. The integration
+removes the bypass and makes frontend reuse available; a larger repeated CI
+measurement is still required before claiming an end-to-end Test262 speedup.
+
 ## Correctness and isolation
 
 The implementation adds or strengthens coverage for:
@@ -95,6 +114,9 @@ The implementation adds or strengthens coverage for:
 - simultaneous compiler instances with the same virtual filename
 - JavaScript-mode byte parity with standalone compilation
 - byte-for-byte isolation across 100 unrelated sequential sources
+- literal-harness JavaScript parity across source replacements
+- recovery from a syntax-error harness to a subsequent clean harness
+- consecutive host and standalone original-harness jobs in one unified worker
 - hard TypeScript diagnostics on the asynchronous incremental API
 
 Existing incremental tests were also corrected to await `compiler.compile()`;
@@ -118,13 +140,19 @@ several had previously asserted properties on unresolved Promises.
 - `pnpm exec tsc --noEmit --pretty false`
 - focused Biome lint over all seven changed files
 - focused Vitest suite: 5 files, 23 tests passed
+- Test262 integration suite: 4 tests passed
+- existing unified-worker oracle sample: 50/50 records passed
+- Test262 original-harness A/B: 100/100 host and 20/20 standalone verdicts
+  identical to `origin/main`
 - repository pre-push typecheck, lint, formatting, and committed-issue integrity
   gates
 
 ## Files changed
 
+- `scripts/test262-worker.mjs`
 - `src/checker/language-service.ts`
 - `src/index.ts`
+- `tests/issue-700-test262-language-service.test.ts`
 - `tests/issue-1119.test.ts`
 - `tests/issue-973-repro.test.ts`
 - `tests/issue-973.test.ts`

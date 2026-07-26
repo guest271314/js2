@@ -97,7 +97,6 @@ let incrementalCompiler = null;
 function createFreshCompiler() {
   try {
     incrementalCompiler = createIncrementalCompiler({
-      fileName: "test.ts",
       sourceMap: true,
       sourceMapUrl: "test.wasm.map",
       emitWat: false,
@@ -108,6 +107,10 @@ function createFreshCompiler() {
   }
 }
 createFreshCompiler();
+
+function compileSingleSource(source, options) {
+  return incrementalCompiler ? incrementalCompiler.compile(source, options) : compile(source, options);
+}
 
 // Suppress unhandled Promise rejections from async tests
 process.on("unhandledRejection", () => {});
@@ -1078,7 +1081,6 @@ async function doCompile(
   if (preCleanup.recycle) {
     throw makeWorkerRecycleError(`worker built-ins poisoned before compile: ${preCleanup.reason}`);
   }
-  const compileFn = incrementalCompiler ? incrementalCompiler.compile : compile;
   // (#3049 C1 / #3123) Host lane (no target) defers top-level init:
   // `__module_init` is exported instead of wired to the wasm `(start)`
   // section, and the exec path below calls it right after `setExports` so
@@ -1146,7 +1148,12 @@ async function doCompile(
     });
   }
   if (originalHarness) {
-    return compile(source, {
+    // The authoritative sharded-CI and test262.fyi lanes both compile literal
+    // JavaScript harness assemblies. Keep those single-file builds on the same
+    // persistent Language Service as the synthetic TypeScript lane; passing the
+    // JS filename and allowJs mode here preserves ScriptKind while successive
+    // harness/body edits can reuse TypeScript's Program and checker state.
+    return compileSingleSource(source, {
       allowJs: true,
       fileName: "test.js",
       sourceMap: true,
@@ -1158,18 +1165,16 @@ async function doCompile(
       ...deferOpt,
     });
   }
-  return incrementalCompiler
-    ? compileFn(source, { sourceMapUrl: sourceMapUrl || "test.wasm.map", target, inferModuleStrictArguments, ...deferOpt })
-    : (await compile(source, {
-              fileName: "test.ts",
-              sourceMap: true,
-              sourceMapUrl: sourceMapUrl || "test.wasm.map",
-              emitWat: false,
-              skipSemanticDiagnostics: true,
-              target,
-              inferModuleStrictArguments,
-              ...deferOpt,
-            }));
+  return compileSingleSource(source, {
+    fileName: "test.ts",
+    sourceMap: true,
+    sourceMapUrl: sourceMapUrl || "test.wasm.map",
+    emitWat: false,
+    skipSemanticDiagnostics: true,
+    target,
+    inferModuleStrictArguments,
+    ...deferOpt,
+  });
 }
 
 /**
@@ -1487,6 +1492,12 @@ process.on("message", async (msg) => {
   } catch (err) {
     // Thrown exception may have poisoned the incremental compiler's internal
     // state.  Recreate immediately so subsequent compilations don't cascade-fail.
+    try {
+      incrementalCompiler?.dispose?.();
+    } catch (_disposeError) {
+      // A poisoned service may also reject disposal; replacement still gives
+      // the next test a clean Language Service.
+    }
     incrementalCompiler = null;
     createFreshCompiler();
     if (err instanceof WebAssembly.Exception) {
