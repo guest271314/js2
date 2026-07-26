@@ -769,6 +769,13 @@ export function addUnionImports(ctx: CodegenContext): void {
   const ctorBigType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i64" }]);
   addImport(ctx, "env", "__bigint_ctor", { kind: "func", typeIdx: ctorBigType });
 
+  // __bigint_ctor_ref: (externref) → externref (#2846 follow-up). The ordinary
+  // i64 constructor above remains the arithmetic carrier; this variant keeps
+  // arbitrary-width host BigInts exact when the surrounding value is already
+  // nullable/dynamic externref (Acorn's `bigint | null` stringToBigInt result).
+  const ctorBigRefType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+  addImport(ctx, "env", "__bigint_ctor_ref", { kind: "func", typeIdx: ctorBigRefType });
+
   // __typeof: (externref) → externref (returns type string)
   const typeofStrType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__typeof", {
@@ -801,6 +808,7 @@ export function addUnionImports(ctx: CodegenContext): void {
       "__box_bigint",
       "__to_bigint",
       "__bigint_ctor",
+      "__bigint_ctor_ref",
       "__typeof",
     ]);
     // Update funcMap entries for defined functions (not imports)

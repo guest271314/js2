@@ -4,6 +4,14 @@ import { ts } from "../ts-api.js";
 /** Script-file extensions recognized by the in-memory multi-source pipeline. */
 const KNOWN_SCRIPT_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
 
+/**
+ * Exact importer-relative module edges captured by the on-disk project
+ * resolver. Keys and targets use the same file names as the virtual file map.
+ */
+export type ProjectModuleResolutions = Record<string, Record<string, string>>;
+
+export type ProjectModuleResolutionLookup = ReadonlyMap<string, ReadonlyMap<string, string>>;
+
 export function stripMultiFileExtension(name: string): string {
   for (const ext of KNOWN_SCRIPT_EXTS) {
     if (name.endsWith(ext)) return name.slice(0, -ext.length);
@@ -108,15 +116,40 @@ export function buildBareSpecifierLookup(
   return lookup;
 }
 
+export function buildProjectModuleResolutionLookup(
+  projectResolutions?: ProjectModuleResolutions,
+): ProjectModuleResolutionLookup {
+  const lookup = new Map<string, ReadonlyMap<string, string>>();
+  for (const [importer, resolutions] of Object.entries(projectResolutions ?? {})) {
+    const targets = new Map<string, string>();
+    for (const [specifier, target] of Object.entries(resolutions)) {
+      targets.set(specifier, normalizeMultiFileName(target));
+    }
+    lookup.set(normalizeMultiFileName(importer), targets);
+  }
+  return lookup;
+}
+
 export function resolveMultiFileModule(
   moduleName: string,
   containingFile: string,
   files: ReadonlyMap<string, unknown>,
   bareSpecifierLookup: ReadonlyMap<string, string>,
+  projectResolutionLookup?: ProjectModuleResolutionLookup,
 ): ts.ResolvedModuleFull | undefined {
+  const normalizedContainingFile = normalizeMultiFileName(containingFile);
+  const exactTarget = projectResolutionLookup?.get(normalizedContainingFile)?.get(moduleName);
+  if (exactTarget && files.has(exactTarget)) {
+    return {
+      resolvedFileName: exactTarget,
+      isExternalLibraryImport: false,
+      extension: multiFileExtension(exactTarget),
+    };
+  }
+
   let resolved: string;
   if (moduleName.startsWith("./") || moduleName.startsWith("../")) {
-    const containingDir = normalizeMultiFileName(containingFile).replace(/[^/]*$/, "");
+    const containingDir = normalizedContainingFile.replace(/[^/]*$/, "");
     resolved = normalizeMultiFileName(containingDir + moduleName);
   } else {
     resolved = bareSpecifierLookup.get(moduleName) ?? normalizeMultiFileName(moduleName);

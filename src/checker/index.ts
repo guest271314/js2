@@ -2,9 +2,11 @@
 import { ts } from "../ts-api.js";
 import {
   buildBareSpecifierLookup,
+  buildProjectModuleResolutionLookup,
   multiFileScriptKind,
   normalizeMultiFileName,
   resolveMultiFileModule,
+  type ProjectModuleResolutions,
 } from "./multi-file-paths.js";
 import { getDefaultEnvironment } from "../env.js";
 import { buildModuleDecls } from "./node-capability-map.js";
@@ -979,15 +981,31 @@ export function analyzeMultiSource(
   specifierMap?: Record<string, string>,
   /** Compiler options (allowJs, skipSemanticDiagnostics, ...) */
   analyzeOptions?: AnalyzeOptions,
+  /** Exact per-importer edges captured by compileProject's filesystem resolver. */
+  projectResolutions?: ProjectModuleResolutions,
 ): MultiTypedAST {
   const normalizedFiles = new Map<string, string>();
   for (const [name, content] of Object.entries(files)) {
     normalizedFiles.set(normalizeMultiFileName(name), content);
   }
+
+  // Multi-file package graphs retain their real Node import declarations.
+  // Give the checker the same import-scoped ambient module surface as the
+  // single-file path while codegen passes those modules through to the Node
+  // host. Building once from the joined graph avoids duplicate ambient
+  // declarations when many dependencies import the same builtin (#3654).
+  if (resolveEmulateNode(analyzeOptions)) {
+    const nodeEnvDts = buildNodeEnvDtsForSource(Array.from(normalizedFiles.values()).join("\n"), ts.ScriptKind.JS);
+    if (nodeEnvDts !== undefined) {
+      normalizedFiles.set(NODE_ENV_DTS_NAME, nodeEnvDts);
+    }
+  }
+
   const normalizedEntry = normalizeMultiFileName(entryFile);
   const rootNames = Array.from(normalizedFiles.keys());
 
   const bareSpecifierLookup = buildBareSpecifierLookup(normalizedFiles, specifierMap);
+  const projectResolutionLookup = buildProjectModuleResolutionLookup(projectResolutions);
 
   const compilerHost: ts.CompilerHost = {
     getSourceFile(name, languageVersion) {
@@ -1011,12 +1029,15 @@ export function analyzeMultiSource(
     getDirectories: () => [],
     directoryExists: () => true,
     resolveModuleNameLiterals(moduleLiterals, containingFile) {
-      return moduleLiterals.map((literal) => {
-        const moduleName = literal.text;
-        return {
-          resolvedModule: resolveMultiFileModule(moduleName, containingFile, normalizedFiles, bareSpecifierLookup),
-        };
-      });
+      return moduleLiterals.map((literal) => ({
+        resolvedModule: resolveMultiFileModule(
+          literal.text,
+          containingFile,
+          normalizedFiles,
+          bareSpecifierLookup,
+          projectResolutionLookup,
+        ),
+      }));
     },
   };
 
@@ -1071,13 +1092,18 @@ export function analyzeMultiSource(
             : undefined;
         if (!spec) continue;
         // Re-use the same resolver the program used so cycles are treated identically.
-        const resolved = ts.resolveModuleName(spec, name, compilerOptions, compilerHost).resolvedModule
-          ?.resolvedFileName;
+        const resolved = resolveMultiFileModule(
+          spec,
+          name,
+          normalizedFiles,
+          bareSpecifierLookup,
+          projectResolutionLookup,
+        )?.resolvedFileName;
         if (resolved && resolved !== name) visit(resolved);
       }
       visited.add(name);
       onStack.delete(name);
-      if (sf !== entrySourceFile) userSourceFiles.push(sf);
+      if (sf !== entrySourceFile && name !== NODE_ENV_DTS_NAME) userSourceFiles.push(sf);
     };
     // Entry-anchored DFS; only files reachable from entry are emitted.
     visit(normalizedEntry);
@@ -1086,6 +1112,7 @@ export function analyzeMultiSource(
     // (the previous behaviour was to emit every rootName, so we keep that for safety).
     for (const name of rootNames) {
       if (visited.has(name) || name === normalizedEntry) continue;
+      if (name === NODE_ENV_DTS_NAME) continue;
       const sf = program.getSourceFile(name);
       if (sf && sf !== entrySourceFile && !userSourceFiles.includes(sf)) {
         userSourceFiles.splice(userSourceFiles.length - 1, 0, sf);
@@ -1170,3 +1197,4 @@ export function analyzeFiles(entryPath: string, analyzeOptions?: AnalyzeOptions)
 }
 
 export { IncrementalLanguageService, IncrementalProjectLanguageService } from "./language-service.js";
+export type { ProjectModuleResolutions } from "./multi-file-paths.js";

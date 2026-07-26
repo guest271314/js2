@@ -1848,6 +1848,12 @@ export interface CodegenContext {
    * recursive numeric kernel pattern is detected.
    */
   numericReturnTypes?: Map<string, ValType>;
+  /**
+   * #2847: property names whose complete source definition/write set is
+   * boolean-producing. Used to preserve JS boolean identity through untyped
+   * numeric carriers and sidecar writes; computed conservatively per module.
+   */
+  booleanPropertyNames: Set<string>;
   /** Set of function names that are async (for .d.ts generation) */
   asyncFunctions: Set<string>;
   /** Set of function names that are generators (function*) */
@@ -2426,6 +2432,8 @@ export interface CodegenContext {
    * pre-existing codegen byte-identical; its matching gap is filed separately).
    */
   objectHashConsumerTypes: Set<ts.Type>;
+  /** Functions proven to return an open `$Object` populated via computed keys. */
+  dynamicObjectReturnFunctions: Set<string>;
   /**
    * (#2837) Variable names initialized by a NON-EMPTY object literal that later
    * receives an OUT-OF-SHAPE property write (a direct `V.k=` with `k` not in the
@@ -2726,7 +2734,8 @@ export interface CodegenContext {
   /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
    *  function-closure values under `--target standalone`. Each (builtin, member)
    *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
-   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  (mut i32) bfnstate, i32 bfnid]`, supertype = its signature wrapper
+   *  struct), so the
    *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
    *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
    *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own

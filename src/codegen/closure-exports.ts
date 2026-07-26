@@ -121,6 +121,22 @@ function externToClosureParamRef(paramType: ValType): Instr[] {
   return ops;
 }
 
+/** Preserve the structural boolean brand when an i32 crosses the externref ABI. */
+function boxI32ClosureResult(
+  ctx: CodegenContext,
+  returnType: { kind: "i32"; boolean?: true },
+  boxNumberIdx: number | undefined,
+): Instr[] {
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  if (returnType.boolean === true && boxBooleanIdx !== undefined) {
+    return [{ op: "call", funcIdx: boxBooleanIdx }];
+  }
+  if (boxNumberIdx !== undefined) {
+    return [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumberIdx }];
+  }
+  return [{ op: "drop" }, { op: "ref.null.extern" }];
+}
+
 /**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
@@ -359,13 +375,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" });
-          callBody.push({ op: "call", funcIdx: boxNumberIdx });
-        } else {
-          callBody.push({ op: "drop" });
-          callBody.push({ op: "ref.null.extern" });
-        }
+        callBody.push(...boxI32ClosureResult(ctx, entry.returnType, boxNumberIdx));
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i64_s" });
@@ -613,10 +623,37 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
     // emitClosureCallExportN). User args are at locals [2..arity+1]; formal i is
     // at local i+2, extras are args[closureArity..arity) at locals
     // [closureArity+2 .. arity+2).
-    const setupInstrs: Instr[] = [
-      { op: "i32.const", value: entry.closureArity },
-      { op: "global.set", index: argcGlobalIdx },
-    ];
+    const setupInstrs: Instr[] =
+      ctx.standalone || ctx.wasi
+        ? [
+            // `__apply_closure` presets the ACTUAL count before choosing a padded
+            // dispatcher. Preserve min(actual, formals); ordinary direct/host calls
+            // enter with the -1 sentinel and retain the historical formal count.
+            { op: "global.get", index: argcGlobalIdx },
+            { op: "i32.const", value: 0 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "global.get", index: argcGlobalIdx },
+                { op: "i32.const", value: entry.closureArity },
+                { op: "i32.lt_s" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [{ op: "global.get", index: argcGlobalIdx }],
+                  else: [{ op: "i32.const", value: entry.closureArity }],
+                },
+              ],
+              else: [{ op: "i32.const", value: entry.closureArity }],
+            },
+            { op: "global.set", index: argcGlobalIdx },
+          ]
+        : [
+            { op: "i32.const", value: entry.closureArity },
+            { op: "global.set", index: argcGlobalIdx },
+          ];
     if (arity > entry.closureArity) {
       const extrasCount = arity - entry.closureArity;
       setupInstrs.push({ op: "i32.const", value: extrasCount });
@@ -659,13 +696,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" });
-          callBody.push({ op: "call", funcIdx: boxNumberIdx });
-        } else {
-          callBody.push({ op: "drop" });
-          callBody.push({ op: "ref.null.extern" });
-        }
+        callBody.push(...boxI32ClosureResult(ctx, entry.returnType, boxNumberIdx));
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i64_s" });
@@ -988,6 +1019,10 @@ export function emitClosureArityExport(ctx: CodegenContext): void {
     name: "__closure_arity",
     desc: { kind: "func", index: funcIdx },
   });
+  // Native in-module callers (notably `__apply_closure`) need the same
+  // classifier the JS wrapper uses. Register the canonical function index so
+  // reserve-then-fill runtimes can call it without introducing another ABI.
+  ctx.funcMap.set("__closure_arity", funcIdx);
 }
 
 /**
