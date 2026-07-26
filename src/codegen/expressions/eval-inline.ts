@@ -20,6 +20,7 @@ import { ts } from "../../ts-api.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitVariadicStringConcat, nativeStringRepr } from "../builtin-scaffold.js";
+import { emitGlobalEnvironmentObject } from "../global-environment.js";
 import { hoistFunctionDeclarations } from "../statements/nested-declarations.js";
 import { hoistLetConstWithTdz, hoistVarDeclarations } from "../index.js";
 import type { InnerResult } from "../shared.js";
@@ -1045,6 +1046,51 @@ const DYNAMIC_CODE_UNSUPPORTED_MSG =
 export const RUNTIME_EVAL_IMPORT_MODULE = "js2wasm:runtime-eval";
 
 /**
+ * Standalone indirect eval route. Direct eval remains on #2929 because it
+ * requires caller-scope reification; indirect eval is always global-scoped and
+ * can execute entirely inside the separately linked interpreter provider.
+ */
+export function emitStandaloneIndirectEvalRuntime(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  args: readonly ts.Expression[],
+): ValType | undefined {
+  if (!ctx.standalone) return undefined;
+  if (args.length === 0) {
+    fctx.body.push({ op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+
+  const sourceType = compileExpression(ctx, fctx, args[0]!);
+  if (sourceType && sourceType.kind !== "externref") {
+    coerceType(ctx, fctx, sourceType, { kind: "externref" });
+  }
+  for (let i = 1; i < args.length; i++) {
+    const extraType = compileExpression(ctx, fctx, args[i]!);
+    if (extraType !== null) fctx.body.push({ op: "drop" });
+  }
+  if (emitGlobalEnvironmentObject(ctx, fctx) === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+
+  const evalIdx = ensureLateImport(
+    ctx,
+    "__runtime_indirect_eval",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    RUNTIME_EVAL_IMPORT_MODULE,
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (evalIdx === undefined) {
+    fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+    return { kind: "externref" };
+  }
+  const liveIdx = ctx.funcMap.get("__runtime_indirect_eval") ?? evalIdx;
+  fctx.body.push({ op: "call", funcIdx: liveIdx });
+  return { kind: "externref" };
+}
+
+/**
  * Standalone dynamic `new Function` route. The parser/interpreter lives in a
  * separately compiled core-Wasm provider, so the user module keeps only one
  * link-time import and no JavaScript host dependency.
@@ -1100,11 +1146,14 @@ export function emitStandaloneDynamicFunctionRuntime(
   } else {
     fctx.body.push(...compilePart(args[args.length - 1]!), { op: "extern.convert_any" });
   }
+  if (emitGlobalEnvironmentObject(ctx, fctx) === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
 
   const newFnIdx = ensureLateImport(
     ctx,
     "__runtime_new_function",
-    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [{ kind: "externref" }],
     RUNTIME_EVAL_IMPORT_MODULE,
   );

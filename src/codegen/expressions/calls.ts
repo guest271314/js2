@@ -238,6 +238,7 @@ import {
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
 import {
+  emitStandaloneIndirectEvalRuntime,
   ensureRuntimeEvalCallableCarrier,
   isFunctionCtorImmediateCall,
   tryStandaloneDynamicFunctionCtorValue,
@@ -5747,13 +5748,16 @@ function compileCallExpression(
       if (rewritten !== undefined) return rewritten;
       const inlined = tryStaticEvalInline(ctx, fctx, expr, evalKind === "direct");
       if (inlined !== undefined) return inlined;
-      // (#2960) No-JS-host (standalone / wasi): the `__extern_eval` host import
-      // is unsatisfiable and previously leaked into the binary, trapping only at
-      // instantiation with zero compile-time signal. Instead emit a
-      // source-located WARNING and, for the dynamic case, a CATCHABLE throw at
-      // the eval call site (a program that never reaches this eval keeps
-      // working). The static-constant path (tryStaticEvalInline above) already
-      // splices inline and returned; only genuine dynamic eval reaches here.
+      // #2928 — indirect eval is global-scoped, so standalone can route it to
+      // the linked interpreter without caller-scope reification. Direct eval
+      // still needs #2929 and retains #2960's catchable failure.
+      if (evalKind === "indirect") {
+        const runtimeEval = emitStandaloneIndirectEvalRuntime(ctx, fctx, expr.arguments);
+        if (runtimeEval !== undefined) return runtimeEval;
+      }
+      // (#2960) No-JS-host direct eval (and WASI until its linker grows the
+      // provider): refuse the unsatisfiable `__extern_eval` import with a
+      // source-located warning and a catchable call-site throw.
       if (noJsHost(ctx)) {
         reportError(
           ctx,

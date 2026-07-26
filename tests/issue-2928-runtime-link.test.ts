@@ -37,6 +37,11 @@ describe("#2928 — linked runtime Function provider", () => {
         name: "__runtime_new_function",
         kind: "function",
       },
+      {
+        module: "js2wasm:runtime-eval",
+        name: "__runtime_indirect_eval",
+        kind: "function",
+      },
     ]);
     expect(report.executionErrors).toEqual({});
     expect(report.values).toEqual({
@@ -46,6 +51,8 @@ describe("#2928 — linked runtime Function provider", () => {
       invokeNewImmediate: 3,
       invokeCall: 5,
       invokeCallImmediate: 5,
+      indirectEval: 42,
+      indirectEvalNonString: 42,
     });
   });
 });

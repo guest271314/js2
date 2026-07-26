@@ -32,6 +32,28 @@ function providerSource() {
   return [
     ...interpreter,
     `
+      function makeEvalAst(): any {
+        const left: any = {};
+        left.type = "Identifier";
+        left.name = "answer";
+        const right: any = {};
+        right.type = "Literal";
+        right.value = 2;
+        const binary: any = {};
+        binary.type = "BinaryExpression";
+        binary.operator = "+";
+        binary.left = left;
+        binary.right = right;
+        const statement: any = {};
+        statement.type = "ExpressionStatement";
+        statement.expression = binary;
+        const ast: any = {};
+        ast.type = "Program";
+        ast.sourceType = "script";
+        ast.body = [statement];
+        return ast;
+      }
+
       function makeFunctionAst(): any {
         const left: any = {};
         left.type = "Identifier";
@@ -72,22 +94,31 @@ function providerSource() {
       }
 
       function parse(source: string, options: any): any {
-        if (source !== "function anonymous(a,b\\n) {\\nreturn a + b\\n}") {
-          throw new SyntaxError("unexpected Function-constructor source");
-        }
         if (options.ecmaVersion !== 2025 || options.sourceType !== "script") {
           throw new TypeError("unexpected parser options");
         }
-        return makeFunctionAst();
+        if (source === "function anonymous(a,b\\n) {\\nreturn a + b\\n}") {
+          return makeFunctionAst();
+        }
+        if (source === "answer + 2") return makeEvalAst();
+        throw new SyntaxError("unexpected runtime source");
       }
 
-      export function __runtime_new_function(paramString: any, bodyString: any): any {
+      export function __runtime_new_function(
+        paramString: any,
+        bodyString: any,
+        globalObject: any
+      ): any {
         return createDynamicFunction(
           parse,
           String(paramString),
           String(bodyString),
-          globalThis
+          globalObject
         );
+      }
+
+      export function __runtime_indirect_eval(source: any, globalObject: any): any {
+        return executeIndirectEval(parse, source, globalObject);
       }
 
       export function providerCanary(): number {
@@ -105,6 +136,10 @@ function providerSource() {
 
 const USER_SOURCE = `
   function dynamic(value: string): string {
+    return value;
+  }
+
+  function dynamicAny(value: any): any {
     return value;
   }
 
@@ -143,6 +178,15 @@ const USER_SOURCE = `
       dynamic("b"),
       dynamic("return a + b")
     )(2, 3) as number;
+  }
+
+  export function indirectEval(): number {
+    globalThis.answer = 40;
+    return (0, eval)(dynamic("answer + 2")) as number;
+  }
+
+  export function indirectEvalNonString(): number {
+    return (0, eval)(dynamicAny(42)) as number;
   }
 `;
 
@@ -185,6 +229,7 @@ async function main() {
       const userInstance = new WebAssembly.Instance(userModule, {
         "js2wasm:runtime-eval": {
           __runtime_new_function: runtimeInstance.exports.__runtime_new_function,
+          __runtime_indirect_eval: runtimeInstance.exports.__runtime_indirect_eval,
         },
       });
       for (const [name, fn] of [
@@ -194,6 +239,8 @@ async function main() {
         ["invokeNewImmediate", userInstance.exports.invokeNewImmediate],
         ["invokeCall", userInstance.exports.invokeCall],
         ["invokeCallImmediate", userInstance.exports.invokeCallImmediate],
+        ["indirectEval", userInstance.exports.indirectEval],
+        ["indirectEvalNonString", userInstance.exports.indirectEvalNonString],
       ]) {
         try {
           report.values[name] = fn();

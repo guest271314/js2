@@ -7,9 +7,10 @@
 //     meta-circular runtime-eval shim (`__extern_new_function`), producing a
 //     REAL callable value; the immediate-call form goes through
 //     `__call_function`.
-//  2. Standalone dynamic `eval` still throws catchably without leaking a host
-//     import. Dynamic `new Function` now imports the core-Wasm runtime-eval
-//     provider; #2928's linked acceptance test proves construction/invocation.
+//  2. Standalone dynamic direct `eval` still throws catchably without leaking a
+//     host import because caller-scope reification belongs to #2929. Indirect
+//     eval and dynamic `new Function` import the core-Wasm runtime-eval provider;
+//     #2928's linked acceptance test proves execution.
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 
@@ -62,7 +63,7 @@ describe("#2960 — host-mode dynamic new Function routes to the meta-circular s
   });
 });
 
-describe("#2960 — standalone dynamic eval: warning + host-free + catchable throw", () => {
+describe("#2960 — standalone dynamic direct eval: warning + host-free + catchable throw", () => {
   it("does NOT leak env::__extern_eval and warns", async () => {
     const r = await compile(`export function test(): number { let s = "1"; s = s + "+1"; return eval(s) as number; }`, {
       target: "standalone",
@@ -84,6 +85,18 @@ describe("#2960 — standalone dynamic eval: warning + host-free + catchable thr
     expect(r.success, JSON.stringify(r.errors)).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as { test(): number }).test()).toBe(42);
+  });
+});
+
+describe("#2928 — standalone dynamic indirect eval links the runtime provider", () => {
+  it("emits one core-Wasm provider import and no unsupported-code warning", async () => {
+    const r = await compile(
+      `export function test(): number { let s = "1"; s = s + "+1"; return (0, eval)(s) as number; }`,
+      { target: "standalone" },
+    );
+    expect(r.success, JSON.stringify(r.errors)).toBe(true);
+    expect(importNames(r.binary)).toEqual(["js2wasm:runtime-eval::__runtime_indirect_eval"]);
+    expect((r.errors ?? []).some((e) => (e as { severity?: string }).severity === "warning")).toBe(false);
   });
 });
 
