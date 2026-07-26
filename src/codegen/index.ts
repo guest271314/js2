@@ -5624,8 +5624,8 @@ export function generateMultiModule(
       }
     }
 
-    // Register built-in collection types as extern classes if not already collected from lib files
     registerBuiltinExternClasses(ctx);
+    if (options?.nodeBuiltins?.length) registerNodeBuiltinImports(ctx, options.nodeBuiltins);
 
     // Pre-pass: detect empty object literals that get properties assigned later
     // Must run before import collectors so that widened types are known
