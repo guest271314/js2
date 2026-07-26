@@ -51,6 +51,8 @@ describe("#2928 — linked runtime Function provider", () => {
       invokeNewImmediate: 3,
       invokeCall: 5,
       invokeCallImmediate: 5,
+      interpretedIdentity: 1,
+      aotIdentityRoundTrip: 1,
       indirectEval: 42,
       indirectEvalNonString: 42,
     });

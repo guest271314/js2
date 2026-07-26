@@ -54,6 +54,28 @@ function providerSource() {
         return ast;
       }
 
+      function makeReverseIdentityEvalAst(): any {
+        const callee: any = {};
+        callee.type = "Identifier";
+        callee.name = "aotIdentity";
+        const argument: any = {};
+        argument.type = "Identifier";
+        argument.name = "globalValue";
+        const call: any = {};
+        call.type = "CallExpression";
+        call.callee = callee;
+        call.arguments = [argument];
+        call.optional = false;
+        const statement: any = {};
+        statement.type = "ExpressionStatement";
+        statement.expression = call;
+        const ast: any = {};
+        ast.type = "Program";
+        ast.sourceType = "script";
+        ast.body = [statement];
+        return ast;
+      }
+
       function makeFunctionAst(): any {
         const left: any = {};
         left.type = "Identifier";
@@ -93,6 +115,34 @@ function providerSource() {
         return ast;
       }
 
+      function makeIdentityFunctionAst(): any {
+        const value: any = {};
+        value.type = "Identifier";
+        value.name = "x";
+        const ret: any = {};
+        ret.type = "ReturnStatement";
+        ret.argument = value;
+        const block: any = {};
+        block.type = "BlockStatement";
+        block.body = [ret];
+        const param: any = {};
+        param.type = "Identifier";
+        param.name = "x";
+        const id: any = {};
+        id.type = "Identifier";
+        id.name = "anonymous";
+        const declaration: any = {};
+        declaration.type = "FunctionDeclaration";
+        declaration.id = id;
+        declaration.params = [param];
+        declaration.body = block;
+        const ast: any = {};
+        ast.type = "Program";
+        ast.sourceType = "script";
+        ast.body = [declaration];
+        return ast;
+      }
+
       function parse(source: string, options: any): any {
         if (options.ecmaVersion !== 2025 || options.sourceType !== "script") {
           throw new TypeError("unexpected parser options");
@@ -100,7 +150,13 @@ function providerSource() {
         if (source === "function anonymous(a,b\\n) {\\nreturn a + b\\n}") {
           return makeFunctionAst();
         }
+        if (source === "function anonymous(x\\n) {\\nreturn x\\n}") {
+          return makeIdentityFunctionAst();
+        }
         if (source === "answer + 2") return makeEvalAst();
+        if (source === "aotIdentity(globalValue)") {
+          return makeReverseIdentityEvalAst();
+        }
         throw new SyntaxError("unexpected runtime source");
       }
 
@@ -199,6 +255,27 @@ const USER_SOURCE = `
     )(2, 3) as number;
   }
 
+  export function interpretedIdentity(): number {
+    const fn: any = new Function(
+      dynamic("x"),
+      dynamic("return x")
+    );
+    const value: any = {};
+    return fn(value) === value ? 1 : 2;
+  }
+
+  function aotIdentity(value: any): any {
+    return value;
+  }
+
+  export function aotIdentityRoundTrip(): number {
+    const value: any = {};
+    globalThis.globalValue = value;
+    globalThis.aotIdentity = aotIdentity;
+    const result: any = (0, eval)(dynamic("aotIdentity(globalValue)"));
+    return result === value ? 1 : 2;
+  }
+
   export function indirectEval(): number {
     globalThis.answer = 40;
     return (0, eval)(dynamic("answer + 2")) as number;
@@ -258,6 +335,8 @@ async function main() {
         ["invokeNewImmediate", userInstance.exports.invokeNewImmediate],
         ["invokeCall", userInstance.exports.invokeCall],
         ["invokeCallImmediate", userInstance.exports.invokeCallImmediate],
+        ["interpretedIdentity", userInstance.exports.interpretedIdentity],
+        ["aotIdentityRoundTrip", userInstance.exports.aotIdentityRoundTrip],
         ["indirectEval", userInstance.exports.indirectEval],
         ["indirectEvalNonString", userInstance.exports.indirectEvalNonString],
       ]) {
