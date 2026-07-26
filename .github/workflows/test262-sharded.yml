@@ -2453,6 +2453,18 @@ jobs:
             # conformance improved). Staged so the new floor lands atomically
             # with the refreshed summary.
             git add -f benchmarks/results/test262-standalone-highwater.json 2>/dev/null || true
+            # The standalone CURRENT summary — the host lane's
+            # `test262-standalone-current.json` twin. It was already WRITTEN by
+            # the "Promote merged artifacts to stable baseline" step above, but
+            # never staged, so it never reached main. Consumers that wanted a
+            # *current* standalone rate had only the HIGH-WATER file, which is a
+            # best-ever floor maintained for the #2097 gate — semantically a
+            # different number, and it read ~7 points low (56.1% vs ~63%). The
+            # landing page dodged this by fetching the JSONL fresh from the
+            # baselines repo (run-pages-build.mjs); anything reading the repo
+            # (e.g. the statusline) had no correct source until now. Same shape
+            # as the host file — official_summary.pass/.total + oracle_version.
+            git add -f benchmarks/results/test262-standalone-current.json 2>/dev/null || true
             # editions JSON is regenerated into website/public/ (the vite
             # publicDir, served by the landing page) by the earlier step. #1656
             # moved the public dir under website/; staging the old public/ path
