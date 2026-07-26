@@ -1,7 +1,7 @@
 ---
 id: 3677
 title: cheap gate aborts at `wait` under `bash -e` — every failure is diagnostic-free and lint hard-fails against its own declared intent
-status: in-progress
+status: done
 sprint: current
 priority: high
 horizon: s
@@ -11,6 +11,7 @@ goal: ci-reliability
 related: [3437]
 assignee: ttraenkler/pr-queue-shepherd
 created: 2026-07-26
+completed: 2026-07-26
 ---
 
 # #3677 — cheap gate swallows its own diagnostics under `errexit`
@@ -114,13 +115,78 @@ one.
 The bug is present in the old form and absent in the new one, observed in both
 directions.
 
-### CI positive control
+### CI positive control (observed, not reasoned)
 
-Two scratch draft PRs off this branch, both carrying the fixed workflow:
+Two scratch draft PRs off this branch, both carrying the fixed workflow. Both
+have been closed and their branches deleted; the run logs remain linked.
 
-- **typecheck-error control** — cheap gate must FAIL, with the typecheck dump
-  and `::error::typecheck failed` present.
-- **lint-only-error control** — cheap gate must PASS, with
-  `::warning::lint failed` and both dumps present.
+**PR #3688 — deliberate typecheck error** (`const x: number = "..."`).
+Cheap gate conclusion: **fail** — the gate is NOT neutered.
+[job 89839251412](https://github.com/loopdive/js2/actions/runs/30219450969/job/89839251412):
 
-Results recorded below.
+```
+--- typecheck (last 50 lines) ---
+##[error]src/__ci_control_3677.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.
+--- lint (last 50 lines) ---
+##[error]typecheck failed (rc=2)
+##[error]Process completed with exit code 2.
+```
+
+Both dumps present, and `::error::typecheck failed (rc=2)` — an annotation that
+was **unreachable** before this fix — is now emitted.
+
+**PR #3689 — lint-only error** (`value !== value` → `lint/suspicious/noSelfCompare`,
+typechecks cleanly, isolating the lint lane).
+Cheap gate conclusion: **pass** — declared intent restored.
+[job 89839272201](https://github.com/loopdive/js2/actions/runs/30219458491/job/89839272201):
+
+```
+--- typecheck (last 50 lines) ---
+--- lint (last 50 lines) ---
+src/__ci_control_3677.ts:2:10 lint/suspicious/noSelfCompare
+  × Comparing to itself is potentially pointless.
+Found 1 error.
+##[warning]lint failed (rc=1) — not blocking
+```
+
+Both dumps present, the offending rule and line visible, and the
+`not blocking` warning surfaced. `quality` FAILED on the same PR for the same
+lint error — confirming lint enforcement is retained repo-wide.
+
+## Second finding — a check NAME does not identify a check
+
+Found while building the controls above, and it generalises well past this PR.
+
+**Two different checks report under the identical name
+`cheap gate (main-ancestor + lint)`**: a stub workflow that always concludes
+`skipping`, and the real `test262-sharded.yml` job. On both control PRs:
+
+```
+cheap gate (main-ancestor + lint)   skipping   .../job/89839307250
+cheap gate (main-ancestor + lint)   pending    .../job/89839251412
+```
+
+So the everywhere-used idiom
+
+```bash
+gh pr checks "$PR" | grep '^cheap gate' | head -1     # ← WRONG
+```
+
+returns `skipping` — a **terminal-looking, non-failing** value — while the real
+job is still `pending`. My first control watcher did exactly this and printed
+`SETTLED: typecheck-control=skipping lint-control=skipping`. That is a clean,
+confident, entirely artifactual result: had I trusted it I would have reported
+positive controls that had **never run**.
+
+This is the silent-empty family again: the poller answered "is there a row
+named X with a terminal state?" while I was asking "did the gate that guards
+this PR conclude, and how?" Those differ whenever a name is not unique.
+
+**Rules this implies, for any check-polling code:**
+
+- **Never let a name alone identify a check.** Disambiguate by job/run id, or
+  at minimum exclude `skipping` rows.
+- **Settle only on a terminal `pass`/`fail`.** `skipping` is not a verdict about
+  this PR — it means some *other* workflow declined to run.
+- A watcher that can only ever report success is untestable; make sure the
+  polling predicate can distinguish "concluded green" from "never ran".
