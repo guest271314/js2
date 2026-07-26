@@ -368,6 +368,92 @@ export function evaluateRebaseGate(opts: {
 }
 
 /**
+ * (#3649) Machine-check a NAMED `regressions-allow` declaration so it can be
+ * honoured on an ORDINARY (non-rebase) PR without becoming a blank cheque.
+ *
+ * WHY THIS EXISTS. `regressions-allow` was read **only** inside
+ * `evaluateRebaseGate`, i.e. only when `rebaseMode` holds — which requires
+ * `ORACLE_REBASE=1` or a forward `ORACLE_VERSION` bump. On an ordinary PR the
+ * declaration was therefore **inert**: it parsed, it was well-formed, and it did
+ * nothing. A dev with a genuine, proven, intentional pass→fail had no way to
+ * declare it that any gate would read — the declaration was theatre, not a
+ * machine check. Worse, the failure is **indistinguishable from "ceiling too
+ * small"**: the gate fails either way and nothing in the log says which. (The
+ * tell is the ABSENCE of this function's own note; absence-as-diagnosis is the
+ * same silent-ambiguity class as #3644 and #3648.)
+ *
+ * This mirrors `evaluateTrapReclassification` (#3596) exactly, and the contract
+ * is selected by the DECLARATION'S SHAPE, never by the run mode:
+ *
+ *   • `tests:` PRESENT → verified and honoured in both modes (this function).
+ *   • `tests:` ABSENT  → #3303 semantics, byte-for-byte unchanged: a bare
+ *     ceiling, rebase mode only. Existing declarations cannot change behaviour.
+ *
+ * Two conditions, both required:
+ *
+ *   1. **Real** — every named test must actually be among this diff's
+ *      wasm-change regressions. A name that is not is either stale (copied from
+ *      an earlier run) or speculative (pre-naming tests to bank future
+ *      breakage); both are refused, so the declaration cannot be written ahead
+ *      of the evidence.
+ *   2. **Bounded** — the number excused may not exceed the declared `count`.
+ *      The count remains a ceiling the PR commits to, not a blank cheque.
+ *
+ * Note what is deliberately NOT required: completeness. Undeclared regressions
+ * are simply *not excused* and continue through the net/ratio/bucket gates
+ * normally. That is strictly safer than failing outright on undeclared
+ * collateral, and it means a partial declaration degrades gracefully instead of
+ * turning an honest under-declaration into a hard stop.
+ *
+ * Pure (no I/O) so the unit test drives it with fixture lists.
+ */
+export function evaluateNamedRegressionsAllowance(opts: {
+  allowance: RegressionsAllowance;
+  regressedFiles: string[];
+}): { excused: Set<string>; failures: string[]; notes: string[] } {
+  const { allowance, regressedFiles } = opts;
+  const failures: string[] = [];
+  const notes: string[] = [];
+  const declared = allowance.tests ?? [];
+  const where = allowance.sources.join(", ");
+  const regressedSet = new Set(regressedFiles);
+
+  const excused = new Set<string>();
+  const notRegressed: string[] = [];
+  for (const file of declared) {
+    if (regressedSet.has(file)) excused.add(file);
+    else notRegressed.push(file);
+  }
+
+  if (notRegressed.length > 0) {
+    const sample = notRegressed.slice().sort().slice(0, 10);
+    const more = notRegressed.length > sample.length ? ` (+${notRegressed.length - sample.length} more)` : "";
+    failures.push(
+      `regressions-allow (#3649): ${notRegressed.length} declared test(s) are NOT among this diff's wasm-change ` +
+        `regressions — ${sample.join(", ")}${more} (declared in ${where}). A declaration must describe THIS diff: ` +
+        `name only tests it actually regresses, so the claim cannot be written ahead of the evidence`,
+    );
+  }
+
+  if (excused.size > allowance.count) {
+    failures.push(
+      `regressions-allow (#3649) ceiling exceeded: ${excused.size} named regression(s) > declared count ` +
+        `${allowance.count} (declared in ${where}). The count is a ceiling the PR commits to — re-measure and ` +
+        `re-declare honestly`,
+    );
+  }
+
+  if (failures.length === 0 && excused.size > 0) {
+    notes.push(
+      `=== regressions-allow (#3649): EXCUSING ${excused.size} named wasm-change regression(s) of a declared ` +
+        `ceiling ${allowance.count}, each verified to be a regression in this diff. Undeclared regressions are ` +
+        `NOT excused and still gate. reason: ${allowance.reason} (declared in ${where}). ===`,
+    );
+  }
+  return { excused: failures.length === 0 ? excused : new Set(), failures, notes };
+}
+
+/**
  * #3303 — read the change-set-scoped `regressions-allow:` declaration (CLI
  * path only; never called when this module is imported for its pure helpers).
  * Resolution:
@@ -2055,7 +2141,7 @@ async function run(
       for (const note of devacResult.notes) console.log(note);
     }
   }
-  const noiseFiltered = regressions.filter(
+  const noiseFilteredBase = regressions.filter(
     (r) =>
       !r.hostQuarantined &&
       !r.wasmUnchanged &&
@@ -2065,6 +2151,45 @@ async function run(
       !isExcusedVacuous(r) &&
       !devacExcusedFiles.has(r.file),
   );
+
+  // (#3649) Read `regressions-allow` ONCE, here, for BOTH modes. It used to be
+  // read lazily inside the rebase branch only, which made it inert on an
+  // ordinary PR — a well-formed declaration that no gate consulted. The
+  // declaration's SHAPE now selects the contract:
+  //   • `tests:` present → verified here and honoured in either mode, by
+  //     excusing exactly the named files from the regression set the
+  //     net/ratio/bucket gates see (mirroring how `devacExcusedFiles` works).
+  //   • bare `count:`    → untouched #3303 semantics; consumed by
+  //     `evaluateRebaseGate` in rebase mode and inert elsewhere, as before.
+  // The exclusion is applied only OUTSIDE rebase mode: in rebase mode the bare
+  // ceiling already supersedes the drift/concentration checks, and excusing the
+  // files as well would apply the same leniency twice.
+  const { allowance: regressionsAllowance, notes: regressionsAllowanceNotes } = await readRegressionsAllowance();
+  for (const note of regressionsAllowanceNotes) console.log(note);
+  const namedRegressionsAllowance = (regressionsAllowance?.tests ?? []).length > 0;
+  let regressionsAllowExcused = new Set<string>();
+  const regressionsAllowFailures: string[] = [];
+  if (regressionsAllowance && namedRegressionsAllowance && !rebaseMode) {
+    const verdict = evaluateNamedRegressionsAllowance({
+      allowance: regressionsAllowance,
+      regressedFiles: noiseFilteredBase.map((r) => r.file),
+    });
+    for (const note of verdict.notes) console.log(note);
+    regressionsAllowFailures.push(...verdict.failures);
+    regressionsAllowExcused = verdict.excused;
+  } else if (regressionsAllowance && !namedRegressionsAllowance && !rebaseMode) {
+    // Say so out loud. Silence here is exactly what made the old behaviour
+    // unreadable: the gate would fail and the author could not tell whether the
+    // ceiling was too small or the declaration was never consulted at all.
+    console.log(
+      `=== regressions-allow: declaration found (count ${regressionsAllowance.count}, declared in ` +
+        `${regressionsAllowance.sources.join(", ")}) but it is INERT on this ordinary PR — a bare count is only ` +
+        `honoured across an oracle re-baseline (#3303). Add a nested \`tests:\` list naming the regressions to ` +
+        `make the claim machine-checkable and have it honoured here (#3649). ===`,
+    );
+  }
+
+  const noiseFiltered = noiseFilteredBase.filter((r) => !regressionsAllowExcused.has(r.file));
   const regressionsWasmChange = noiseFiltered.length;
   const wasmIdenticalNoise = regressions.filter((r) => r.wasmUnchanged && r.to !== "compile_timeout").length;
   console.log(`=== Wasm-identical noise (pass → other, same wasm_sha): ${wasmIdenticalNoise} ===`);
@@ -2224,6 +2349,14 @@ async function run(
     gateFailed = true;
   }
 
+  // (#3649) A named `regressions-allow` that did not verify is a hard failure —
+  // the declaration excused nothing (its `excused` set is empty on failure), so
+  // the regressions it named still count AND the dishonest claim is reported.
+  for (const reason of regressionsAllowFailures) {
+    console.log(`=== GATE FAIL: ${reason} ===`);
+    gateFailed = true;
+  }
+
   // #3189 — uncatchable-trap GROWTH ratchet. A regressions-allow declaration
   // never affects this ratchet. #3370 adds a separate, change-scoped
   // trap-growth-allow ceiling for an oracle bump whose literal harness changes
@@ -2336,17 +2469,20 @@ async function run(
     // the PR declares a #3303 `regressions-allow:` ceiling in its own issue
     // file (an honest reclassification larger than drift, e.g. #3285/#3286),
     // which supersedes both checks up to the declared count and hard-fails
-    // above it. The allowance is read lazily HERE (rebase mode only) so an
-    // ordinary same-oracle run never consults it — a declared allowance grants
-    // nothing without the oracle bump that makes this a deliberate re-baseline.
-    // Since #3303 the #1668/#1897 workflow guards treat this exit code as
-    // authoritative when it passes, so this branch IS the rebase verdict.
-    const { allowance, notes: allowanceNotes } = await readRegressionsAllowance();
-    for (const note of allowanceNotes) console.log(note);
+    // above it. Since #3303 the #1668/#1897 workflow guards treat this exit code
+    // as authoritative when it passes, so this branch IS the rebase verdict.
+    //
+    // (#3649) The allowance is now read ONCE, before the mode split, rather than
+    // lazily here. Rebase-mode behaviour is byte-for-byte unchanged — the same
+    // allowance object reaches `evaluateRebaseGate`, with the same ceiling logic
+    // — but it is no longer true that "an ordinary same-oracle run never
+    // consults it". THAT was the bug: it made a well-formed declaration silently
+    // inert on every normal PR, and indistinguishable from a ceiling that was
+    // simply too small.
     const rebaseGate = evaluateRebaseGate({
       regressionsWasmChange,
       regressedFiles: noiseFiltered.map((r) => r.file),
-      allowance,
+      allowance: regressionsAllowance,
     });
     for (const reason of rebaseGate.failures) {
       console.log(`=== GATE FAIL: ${reason} ===`);
