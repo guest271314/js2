@@ -1,7 +1,7 @@
 ---
 id: 2802
 title: "nested `any`-vec mutation hits a host Array mirror instead of the WasmGC vec"
-status: in-progress
+status: done
 assignee: ttraenkler/codex-acorn
 sprint: current
 priority: high
@@ -10,6 +10,7 @@ feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
 updated: 2026-07-26
+completed: 2026-07-26
 task_type: bugfix
 area: codegen
 language_feature: value-representation
@@ -97,6 +98,20 @@ return the same backing vec each time).
 
 - The repro above yields `"a|b|c"`; `length`/`indexOf` consistent with all
   pushed elements across mixed read/write sequences on a nested `any`-vec field.
+
+## Resolution (2026-07-26)
+
+The full Acorn differential confirmed that generic host lookup exposed a
+materialized Array facade for a WasmGC vec. Native `push`/`pop` therefore
+mutated only the temporary mirror, leaving Acorn's live nested
+`backReferenceNames` vector unchanged.
+
+`__extern_method_call` now intercepts vec `push`/`pop` before generic property
+lookup and routes supported receivers through the module's canonical
+`__vec_push`/`__vec_pop` exports. The fix preserves the existing read-only
+materialization path and wrapper reversal. The clean published-head Test262
+comparison is exact for all **53,259 files / 102,312 variants**, including the
+dangling named-backreference family that reopened this issue.
 
 ## Method
 

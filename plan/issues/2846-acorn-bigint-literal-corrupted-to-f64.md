@@ -1,7 +1,7 @@
 ---
 id: 2846
 title: "compiled Acorn corrupts arbitrary-width BigInt literal value and bigint fields beyond signed i64"
-status: in-progress
+status: done
 assignee: ttraenkler/codex-acorn
 sprint: 69
 priority: high
@@ -10,6 +10,7 @@ feasibility: hard
 created: 2026-06-29
 updated: 2026-07-26
 reopened: 2026-07-26
+completed: 2026-07-26
 loc-budget-allow:
   - src/codegen/expressions/call-identifier.ts
   - src/codegen/registry/imports.ts
@@ -138,3 +139,12 @@ match node-acorn; do not silently preserve the current signed-i64 truncation.
   precision runtime design; signed-i64 truncation is not accepted.
 - The full pinned-Acorn/Test262 differential reports zero BigInt AST
   mismatches for the recorded corpus.
+
+### Final resolution (2026-07-26)
+
+Nullable primitive return lowering now preserves the explicit-null union while
+carrying a non-null BigInt result as `externref`. Acorn's
+`stringToBigInt` path therefore keeps arbitrary-width host BigInts exact rather
+than narrowing through signed i64. The focused regression covers a 128-bit
+boundary value and the clean published-head Test262 differential reports zero
+BigInt AST mismatches across **53,259 files / 102,312 variants**.

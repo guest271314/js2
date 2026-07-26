@@ -795,9 +795,13 @@ The final two residuals were:
 
 Both residual files now replay exact (**2/2 files, 4/4 variants**). The required
 22-input corpus is again **22/22 exact**, and the standalone parser remains a
-zero-import artifact with all four scalar canaries green. The full 53,259-file
-post-fix differential is running as the final completion gate; its measured
-aggregate replaces this paragraph when complete.
+zero-import artifact with all four scalar canaries green. The clean published
+compiler revision `c4a1ea55628d8f5df88008539b6fb94ec91b2039` completes the
+full four-shard differential at **53,259/53,259 exact files** and
+**102,312/102,312 exact variants**: 92,649 variants produced structurally
+identical ESTree ASTs, 9,663 were rejected by both parsers, and zero files or
+variants mismatched. The run used pinned Acorn 8.16.0 and Test262 revision
+`63829c6d925e24a3f5f307b08754aaa1c412c6a6`.
 
 The vec mutation is now routed through the module's canonical mutation export.
 The recursive method path first resolves the live prototype property, returns
