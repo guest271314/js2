@@ -16,6 +16,10 @@ area: codegen
 language_feature: regexp
 goal: standalone
 related: [2161, 2591, 2723, 2876, 3549, 3567]
+loc-budget-allow:
+  - src/codegen/native-regex.ts
+func-budget-allow:
+  - src/codegen/native-regex.ts::ensureRegexRun
 files:
   - src/codegen/regex/bytecode.ts
   - src/codegen/regex/parse.ts
@@ -112,6 +116,17 @@ lead at `sp - 2`. A missing or mismatched partner remains a one-unit lone
 surrogate. This direction-aware width is essential: treating CPCLASS as a
 forward-only operation would silently corrupt lookbehind positions and capture
 spans.
+
+The issue's LOC contract is limited to `native-regex.ts`, whose measured
+205-line growth implements CPCLASS directly in the hand-emitted Wasm VM:
+direction-aware UTF-16 decoding, binary-search membership, and cursor update.
+That logic cannot be delegated to the TypeScript reference VM, and no
+project-wide LOC baseline is relaxed. The matching function receives the
+corresponding function-level allowance because `ensureRegexRun` constructs the
+single opcode-dispatch body and CPCLASS must share its existing locals,
+backtracking state, and program-counter continuation. Extracting the case into a
+second generated Wasm function would change the VM's control-flow and stack
+contract rather than reduce implementation complexity.
 
 The common class-table contract was tightened to sorted, disjoint ranges at
 compile time, and both the TypeScript and emitted-Wasm membership helpers now
