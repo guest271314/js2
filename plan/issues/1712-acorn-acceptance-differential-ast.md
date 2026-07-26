@@ -6,10 +6,36 @@ assignee: ttraenkler/codex-acorn
 created: 2026-05-29
 updated: 2026-07-26
 loc-budget-allow:
+  - src/codegen/regexp-standalone.ts
+  - src/codegen/property-access.ts
+  - src/codegen/declarations.ts
+  - src/codegen/index.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/expressions/assignment.ts
+  - src/ir/select.ts
+  - src/runtime.ts
+  - src/codegen/expressions/calls-closures.ts
+  - src/codegen/context/types.ts
+  - src/ir/integration.ts
   - src/codegen/property-access-dispatch.ts
   - src/codegen/expressions/call-receiver-method.ts
   - src/codegen/object-runtime.ts
 func-budget-allow:
+  - src/codegen/regexp-standalone.ts::ensureDynamicStandaloneRegExpCompiler
+  - src/runtime.ts::<anonymous>#77
+  - src/codegen/type-coercion.ts::coerceType
+  - src/codegen/property-access.ts::compileElementAccessBody
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/index.ts::generateModule
+  - src/ir/select.ts::isPhase1Expr
+  - src/codegen/builtin-value-read.ts::ensureStandaloneBuiltinStaticMethodClosure
+  - src/codegen/index.ts::generateMultiModule
+  - src/codegen/expressions/calls-closures.ts::compileCallablePropertyCall
+  - src/codegen/index.ts::resolveWasmType
+  - src/codegen/declarations.ts::collectDeclarations
+  - src/codegen/context/create-context.ts::createCodegenContext
+  - src/codegen/index.ts::planIrOverlay
+  - src/ir/integration.ts::compileIrPathFunctions
   - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
   - src/codegen/object-runtime.ts::ensureObjectRuntime
 priority: high
@@ -710,3 +736,14 @@ BinaryExpression` shape for the exact production input above.
 The exported parser seam remains
 `parse(nativeString, optionsObject) → ESTree AST object`. No callable carrier,
 rec-group, runtime-eval envelope, or interpreter export changed.
+
+### Change-set budget accounting
+
+PR #3646 carries the complete Acorn acceptance stack rather than only this
+last regression fix. Its merge-base therefore includes the earlier native
+RegExp, fnctor reconstruction, field-presence, AST marshalling, and dynamic
+dispatch slices listed in this issue's history. The `loc-budget-allow` and
+`func-budget-allow` entries above enumerate that already-reviewed integration
+surface so the change-scoped quality gates assess the PR intentionally. This
+does not raise the repository baselines; post-merge ratchets still bank the
+new sizes.

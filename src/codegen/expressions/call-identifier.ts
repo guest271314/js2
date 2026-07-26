@@ -101,6 +101,7 @@ export function compileIdentifierCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
+  expectedType?: ValType,
 ): InnerResult | undefined {
   // #1491 — non-WASI fs.readFileSync / writeFileSync as JS-host imports.
   // Gated behind `--allow-fs` (CompileOptions.allowFs) to prevent accidental
@@ -570,6 +571,13 @@ export function compileIdentifierCall(
       // RangeError / SyntaxError / TypeError semantics.
       if (argType && argType.kind !== "externref") {
         coerceType(ctx, fctx, argType, { kind: "externref" }, "default");
+      }
+      if (!ctx.standalone && expectedType?.kind === "externref") {
+        const ctorRefIdx = ctx.funcMap.get("__bigint_ctor_ref");
+        if (ctorRefIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: ctorRefIdx });
+          return { kind: "externref" };
+        }
       }
       const ctorIdx = ctx.funcMap.get("__bigint_ctor");
       if (ctorIdx !== undefined) {

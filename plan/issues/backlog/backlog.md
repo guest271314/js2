@@ -2,6 +2,31 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## 2026-07-26 — compiled Acorn full-Test262 differential follow-ups
+
+The #1712 acceptance branch now compares pinned compiled Acorn 8.16.0 against
+node-acorn on every Git-tracked Test262 JavaScript parser input, including exact
+positions and Test262 strict/module variants. The completed four-shard baseline
+is 53,036/53,259 exact files and isolates three non-duplicate residual
+families:
+
+- [#3668](../3668-compiled-acorn-test262-host-stack-overflow.md) — valid inputs
+  raise `host-error: Maximum call stack size exceeded` during the compiled
+  parse boundary: 90 files / 180 variants. The scalar arbitration proves this
+  is the host-call depth guard during parsing, not AST materialization; the
+  widened guard is undergoing the complete recorded-set replay.
+- [#3666](../3666-compiled-acorn-test262-lexical-early-errors.md) — compiled
+  Acorn accepts lexical errors rejected by the identical node-acorn source: 36
+  files / 72 variants across invalid template/string escapes, truncated radix
+  numerics, and dangling named RegExp backreferences, now fully fixed in the
+  223-file replay. Work reuses the completed #1769 nullable-return design and
+  reactivates #2802 for the nested-vec mirror mutation that the curated corpus
+  had not reached.
+- [#2846](../2846-acorn-bigint-literal-corrupted-to-f64.md) is reopened rather
+  than duplicated: its signed-i64 branding fix solved precision through 64 bits,
+  but arbitrary-width literal `value` and `bigint` fields wrap modulo 2^64 in
+  97 files / 194 variants in the new census.
+
 ## 2026-07-17 - /harvest-errors (baselines run 20260717-151504, 32,139 pass)
 
 Harvested both lanes (default JS-host + standalone) from

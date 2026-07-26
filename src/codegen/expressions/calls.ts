@@ -7275,7 +7275,7 @@ function compileCallExpression(
   // compileIdentifierCall; an `undefined` result means the callee is not one
   // of these identifier cases, so dispatch continues below (IIFE / super / …).
   {
-    const __idResult = compileIdentifierCall(ctx, fctx, expr);
+    const __idResult = compileIdentifierCall(ctx, fctx, expr, expectedType);
     if (__idResult !== undefined) return __idResult;
   }
 

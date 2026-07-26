@@ -6874,6 +6874,11 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   // this, `void | null` (e.g. binding `w` in `function f({w = counter()} = {w: null})`)
   // collapses to `void` → i32 and the destructured null is erased.
   if (tsType.isUnion()) {
+    // (#1769/#3666) Nullable primitive function results/params/fields need the
+    // same sentinel-preserving carrier already used by local preallocation.
+    // Resolving `number | null` to plain f64 erases a returned null to 0 before
+    // the caller can test it (Acorn's readInt/readHexChar error sentinel).
+    if (isNullablePrimitiveType(tsType)) return { kind: "externref" };
     const nonNullish = tsType.types.filter(
       (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined) && !(t.flags & ts.TypeFlags.Void),
     );

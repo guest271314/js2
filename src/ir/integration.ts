@@ -2984,6 +2984,7 @@ const UNION_IMPORT_FUNC_NAMES: ReadonlySet<string> = new Set([
   "__box_bigint",
   "__to_bigint",
   "__bigint_ctor",
+  "__bigint_ctor_ref",
   "__box_symbol",
   "__is_truthy",
   "__typeof",

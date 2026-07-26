@@ -1843,6 +1843,56 @@ const _PROTO_CB_SLOTS: Record<string, { argIdx: number; arity: number }> = {
  */
 const _VEC_PRIMITIVE_READ_METHODS = new Set(["indexOf", "lastIndexOf", "includes", "join"]);
 
+type WasmVecMutationResult = { handled: false } | { handled: true; value: any };
+
+/**
+ * Mutate a WasmGC vec before generic host method lookup can observe its
+ * materialized Array mirror. Calling `mirror.push(...)` appears successful but
+ * only changes the temporary JS array; Acorn's nested RegExp name vector then
+ * remains empty (#2802/#3666).
+ */
+function _tryWasmVecMutation(
+  obj: any,
+  method: string,
+  args: any[] | undefined,
+  exports: Record<string, Function> | undefined,
+): WasmVecMutationResult {
+  if ((method !== "push" && method !== "pop") || !exports) return { handled: false };
+
+  let rawVec = _unwrapForHost(obj);
+  if (typeof rawVec === "function") {
+    const wrapperTarget = _wasmClosureWrapperTargets.get(rawVec);
+    if (wrapperTarget) rawVec = wrapperTarget;
+  }
+  if (!_isWasmStruct(rawVec)) return { handled: false };
+
+  const mutSupFn = exports.__vec_mut_supported as ((value: any) => number) | undefined;
+  let supported = false;
+  try {
+    supported = typeof mutSupFn === "function" && mutSupFn(rawVec) === 1;
+  } catch {
+    supported = false;
+  }
+  if (!supported) return { handled: false };
+
+  if (method === "push" && typeof exports.__vec_push === "function") {
+    const pushFn = exports.__vec_push as (value: any, item: any) => number;
+    const lenFn = exports.__vec_len as ((value: any) => number) | undefined;
+    if (typeof lenFn !== "function") return { handled: false };
+    let newLen = lenFn(rawVec);
+    for (const arg of args ?? []) {
+      newLen = pushFn(rawVec, _unwrapForHost(arg));
+      if (newLen < 0) return { handled: false };
+    }
+    return { handled: true, value: newLen };
+  }
+
+  if (method === "pop" && typeof exports.__vec_pop === "function") {
+    return { handled: true, value: exports.__vec_pop(rawVec) };
+  }
+  return { handled: false };
+}
+
 /**
  * (#1382) Materialize a Wasm vec into a real JS array via the `__vec_len`
  * + `__vec_get` exports. Non-vec values pass through:
@@ -8018,6 +8068,30 @@ function resolveImport(
           return BigInt(prim);
         };
       }
+      // (#2846 follow-up) Same §21.2.1.1 semantics as __bigint_ctor, but
+      // returned as externref so arbitrary-width host BigInts are not narrowed
+      // through Wasm i64 before entering a nullable/dynamic value carrier.
+      if (name === "__bigint_ctor_ref") {
+        return (v: any): bigint => {
+          let prim = v;
+          if (v != null && typeof v === "object") {
+            const p = _toPrimitive(v, "number", callbackState);
+            prim = p !== undefined ? p : _hostToPrimitive(v, "number", callbackState);
+          }
+          if (typeof prim === "number") {
+            if (!Number.isInteger(prim)) {
+              throw new RangeError(
+                "The number " + prim + " cannot be converted to a BigInt because it is not an integer",
+              );
+            }
+            return BigInt(prim);
+          }
+          if (typeof prim === "symbol") {
+            throw new TypeError("Cannot convert a Symbol value to a BigInt");
+          }
+          return BigInt(prim);
+        };
+      }
       // Batched string concat: __concat_3, __concat_4, ... (#958)
       if (name.startsWith("__concat_")) {
         return (...args: any[]) => {
@@ -10451,6 +10525,13 @@ assert._isSameValue = isSameValue;
               if (drained !== null) wrappedArgs[1] = [drained, ...wrappedArgs[1].slice(1)];
             }
           }
+          // (#2802/#3666) Intercept vec push/pop BEFORE `wrappedObj[method]`.
+          // `_wrapForHost` exposes a real Array facade, so generic lookup finds
+          // Array.prototype.push/pop and mutates only that materialized mirror;
+          // the existing not-a-function fallback below is then unreachable.
+          const vecMutation = _tryWasmVecMutation(obj, method, args, exports);
+          if (vecMutation.handled) return vecMutation.value;
+
           const fn = wrappedObj[method];
           // (#1320) Some chained `Array.from.call(C, items)` shapes lower as a
           // generic `method="from"` dispatch on `Array`. Drain Wasm-closure
@@ -10504,15 +10585,9 @@ assert._isSameValue = isSameValue;
                 }
               }
             }
-            // (#1712) Array mutators on WasmGC vec structs. acorn mutates
-            // instance array fields through dynamic `this` dispatch
-            // (`this.scopeStack.push(new Scope(flags))`); the receiver is an
-            // opaque vec struct the host cannot grow. Route push/pop through
-            // the Wasm-side __vec_push/__vec_pop exports (per-vec-type
-            // dispatch, grow on the Wasm side). __vec_mut_supported is the
-            // discriminator — __vec_len's not-a-vec default is 0 and can't
-            // tell an empty vec from a non-vec. Push the RAW args (not host
-            // proxies) so Wasm-side reads of the elements see the structs.
+            // (#1712) Read-only Array methods on WasmGC vec structs. Mutators
+            // are intercepted before generic host lookup above; otherwise the
+            // Array facade's native push/pop would mutate only a JS mirror.
             {
               // The receiver may be a _wrapForHost proxy (the field read that
               // produced it wrapped the struct for host visibility) — unwrap
@@ -10527,31 +10602,6 @@ assert._isSameValue = isSameValue;
                 if (wrapperTarget) rawVec = wrapperTarget;
               }
               if (_isWasmStruct(rawVec) && exports) {
-                const mutSupFn = exports.__vec_mut_supported as ((v: any) => number) | undefined;
-                let vecSupported = false;
-                try {
-                  vecSupported = typeof mutSupFn === "function" && mutSupFn(rawVec) === 1;
-                } catch {
-                  vecSupported = false;
-                }
-                if (vecSupported) {
-                  if (method === "push" && typeof exports.__vec_push === "function") {
-                    const pushFn = exports.__vec_push as (v: any, x: any) => number;
-                    const rawArgs = args ?? [];
-                    let newLen = (exports.__vec_len as (v: any) => number)(rawVec);
-                    let ok = true;
-                    for (const a of rawArgs) {
-                      newLen = pushFn(rawVec, _unwrapForHost(a));
-                      if (newLen < 0) {
-                        ok = false;
-                        break;
-                      }
-                    }
-                    if (ok) return newLen;
-                  } else if (method === "pop" && typeof exports.__vec_pop === "function") {
-                    return (exports.__vec_pop as (v: any) => any)(rawVec);
-                  }
-                }
                 // (#2794) Read-only, primitive-returning Array methods on an
                 // opaque vec receiver (e.g. acorn `declareName`'s
                 // `scope.lexical.indexOf(name)`). `__vec_mut_supported` gates only
@@ -14835,7 +14885,11 @@ export function buildImports(
   // (e.g. callback_maker, valueOf/toString coercion, iterator protocol),
   // which can call back into host imports, creating infinite recursion.
   // Track depth across ALL host imports sharing a single counter.
-  const MAX_HOST_RECURSION_DEPTH = 100;
+  // Legitimate parser recursion can cross the generic host bridge once per
+  // nested expression/parser method. Acorn's valid async-generator Test262
+  // cases exceed 100 crossings before returning, so keep the cycle guard well
+  // below V8's native stack limit without rejecting ordinary source depth.
+  const MAX_HOST_RECURSION_DEPTH = 512;
   let hostCallDepth = 0;
 
   for (const imp of manifest) {
