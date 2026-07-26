@@ -174,7 +174,7 @@ function reportStandaloneRegExpUnsupported(ctx: CodegenContext, node: ts.Node, d
     ctx,
     node,
     `Codegen error: standalone RegExp engine does not support ${detail} (#1539 Phase 2a). ` +
-      "Use a supported pattern/flag set, or recompile without --target standalone.",
+      "Use a supported pattern/flag set, or recompile with a JS host target.",
   );
 }
 
@@ -1858,7 +1858,7 @@ export function tryCompileStandaloneStringReplace(
   expr: ts.CallExpression,
   propAccess: ts.PropertyAccessExpression,
 ): ValType | null | undefined {
-  if (!ctx.standalone) return undefined;
+  if (!ctx.standalone && !ctx.wasi) return undefined;
   const method = propAccess.name.text;
   if (method !== "replace" && method !== "replaceAll") return undefined;
 
@@ -1872,6 +1872,19 @@ export function tryCompileStandaloneStringReplace(
   if (!isGlobalRegExpType(reType) && !isKnownBackendCreatedRegExpReceiver(ctx, reExpr)) {
     return undefined; // not a RegExp arg → generic string path
   }
+
+  // Function replacers require closure dispatch plus capture-argument
+  // marshalling, which the host-free RegExp carrier does not implement yet.
+  // Refuse before the standalone/WASI paths can diverge: standalone otherwise
+  // reaches emitStandaloneRegExpReplaceCore, while WASI falls through to
+  // unsatisfiable host-string imports and reports the wrong failure.
+  const replacerRefusal = tryRefuseHostFreeRegExpReplacer(ctx, fctx, replExpr, method);
+  if (replacerRefusal !== undefined) return replacerRefusal;
+
+  // WASI only joins the shared refusal above. Its supported RegExp replacement
+  // behavior is otherwise unchanged; the native RegExp engine remains the
+  // standalone target's lowering.
+  if (!ctx.standalone) return undefined;
 
   const flags = staticRegExpFlags(ctx, reExpr);
   if (flags === null) return undefined;
@@ -1894,6 +1907,32 @@ export function tryCompileStandaloneStringReplace(
     globalReplace,
     method,
   );
+}
+
+/**
+ * Commit the narrowed host-free refusal for a RegExp replacement value that
+ * cannot use the native string-replacement path. Function replacers need
+ * closure dispatch plus capture-argument marshalling; other non-string values
+ * need ToString support. Neither is available on this carrier yet.
+ *
+ * The typed `unreachable` is intentional: a null result is a speculative miss
+ * to compileExpression (#1919), which rolls back diagnostics. Returning a real
+ * ValType commits the fatal error and prevents silent broken-binary emission.
+ */
+function tryRefuseHostFreeRegExpReplacer(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  replExpr: ts.Expression,
+  diag: string,
+): ValType | undefined {
+  if (isStringLikeArg(ctx, replExpr)) return undefined;
+  reportStandaloneRegExpUnsupported(
+    ctx,
+    replExpr,
+    `${diag} with a function (or non-string) replacer (#1913 follow-up)`,
+  );
+  fctx.body.push({ op: "unreachable" });
+  return nativeStringType(ctx);
 }
 
 /**
@@ -1921,14 +1960,8 @@ function emitStandaloneRegExpReplaceCore(
   // patterns are expanded at runtime by __regex_get_substitution per
   // §22.2.6.11, #1913). Function replacers need closure dispatch with
   // capture-arg marshalling and stay a narrowed refusal.
-  if (!isStringLikeArg(ctx, replExpr)) {
-    reportStandaloneRegExpUnsupported(
-      ctx,
-      replExpr,
-      `${diag} with a function (or non-string) replacer (#1913 follow-up)`,
-    );
-    return null;
-  }
+  const replacerRefusal = tryRefuseHostFreeRegExpReplacer(ctx, fctx, replExpr, diag);
+  if (replacerRefusal !== undefined) return replacerRefusal;
 
   if (!hasStandaloneRegExpEngine(ctx)) {
     reportStandaloneRegExpUnsupported(ctx, expr, `${diag} without an enabled standalone engine`);
@@ -2178,7 +2211,7 @@ export function tryCompileStandaloneRegExpSymbolCall(
   regexExpr: ts.Expression,
   methodName: string,
 ): ValType | null | undefined {
-  if (!ctx.standalone) return undefined;
+  if (!ctx.standalone && !ctx.wasi) return undefined;
 
   const symbolMethod =
     methodName === "@@match"
@@ -2207,6 +2240,15 @@ export function tryCompileStandaloneRegExpSymbolCall(
   if (expr.arguments.length < 1) return undefined;
   const strExpr = expr.arguments[0]!;
   if (!isStringLikeArg(ctx, strExpr)) return undefined;
+
+  // WASI shares only the fail-loud function-replacer contract. Supported
+  // RegExp symbol-method behavior otherwise stays on its existing path.
+  if (!ctx.standalone) {
+    if (symbolMethod === "replace" && expr.arguments.length === 2) {
+      return tryRefuseHostFreeRegExpReplacer(ctx, fctx, expr.arguments[1]!, "@@replace");
+    }
+    return undefined;
+  }
 
   // Operand order: subject = the string ARGUMENT (arg[0]), regex = the RECEIVER.
   switch (symbolMethod) {
