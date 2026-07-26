@@ -92,6 +92,15 @@ interface ProgramAbiPlanBase<TIntent extends ProgramAbiIntent> {
   readonly order: ProgramAbiOrderKey;
   /** Diagnostic/legacy label only. Structural IDs remain the semantic key. */
   readonly displayName: string;
+  /**
+   * Canonical structural payload paired with this binding ID by IR references.
+   *
+   * The session treats this as an opaque, producer-owned key. It deliberately
+   * excludes compatibility labels and must include any payload that could
+   * otherwise lie beside a valid ID (for example an import module/field,
+   * runtime symbol, or class identity).
+   */
+  readonly structuralReferenceKey?: string;
   readonly intent: TIntent;
 }
 
@@ -164,17 +173,28 @@ export type ProgramAbiInvariantCode =
   | "ambiguous-legacy-name"
   | "no-internal-wasm-name"
   | "duplicate-session-draft"
+  | "session-draft-mismatch"
   | "invalid-draft-order"
   | "duplicate-draft-order"
   | "unknown-draft-source"
+  | "unknown-order-anchor"
+  | "ambiguous-order-anchor"
   | "session-closed"
   | "session-publish-once"
   | "context-session-mismatch"
   | "unknown-locator-binding"
+  | "missing-binding-reference"
+  | "invalid-binding-reference"
+  | "binding-reference-mismatch"
   | "locator-not-required"
   | "duplicate-slot-locator"
   | "slot-locator-space-mismatch"
+  | "locator-remap-mismatch"
   | "foreign-type-cell"
+  | "duplicate-type-cell"
+  | "foreign-type-object"
+  | "ambiguous-type-remap"
+  | "type-remap-mismatch"
   | "missing-required-locator"
   | "eliminated-required-locator";
 
@@ -299,6 +319,15 @@ export class ProgramAbiMap {
       throw new ProgramAbiInvariantError(
         "invalid-plan-order",
         `binding ${entry.id} has invalid structural order ${JSON.stringify(entry.order)}`,
+      );
+    }
+    if (
+      entry.structuralReferenceKey !== undefined &&
+      (typeof entry.structuralReferenceKey !== "string" || entry.structuralReferenceKey.length === 0)
+    ) {
+      throw new ProgramAbiInvariantError(
+        "invalid-binding-reference",
+        `binding ${entry.id} has an invalid structural reference key`,
       );
     }
     const structuralOrder = orderKey(entry.order);

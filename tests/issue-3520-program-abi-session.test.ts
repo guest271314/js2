@@ -12,6 +12,7 @@ import {
   createDerivedIrUnitId,
   createIrBindingId,
   type IrBindingId,
+  type IrClassId,
   type IrSourceId,
   type IrUnitId,
   type IrUnitInventory,
@@ -572,6 +573,289 @@ describe("#3520 ProgramAbiSession", () => {
     eliminatedType.attachLocator(typeId, { kind: "type-cell", cell });
     eliminatedType.remapTypeCell(cell, null);
     expectInvariant(() => eliminatedType.publish(typeModule), "eliminated-required-locator");
+  });
+
+  it("resolves provisional exact slots and re-resolves final indices after a late import shift", () => {
+    const fixture = sessionFixture();
+    const module = createEmptyModule();
+    module.types.push(functionType("$void"));
+    const defined = wasmFunction("legacy-label");
+    module.functions.push(defined);
+    const canonicalId = binding(fixture, "callable", "current", fixture.firstUnitId);
+    const aliasId = binding(fixture, "callable", "current-alias");
+    const canonicalKey = `unit|${canonicalId}|${fixture.firstUnitId}`;
+    const aliasKey = `import|${aliasId}|3:env|3:run`;
+    const session = new ProgramAbiSession(fixture.inventory, module);
+    session.ensurePlan({
+      ...callableDraft(fixture, canonicalId, fixture.firstUnitId, "legacy-label", 0),
+      structuralReferenceKey: canonicalKey,
+    });
+    session.ensurePlan({
+      ...callableAliasDraft(fixture, aliasId, canonicalId, "renamed", 1),
+      structuralReferenceKey: aliasKey,
+    });
+    session.attachLocator(canonicalId, { kind: "defined-function", value: defined });
+
+    expect(session.resolveCurrentIndex(canonicalId, "function", canonicalKey)).toBe(0);
+    expect(session.resolveCurrentIndex(aliasId, "function", aliasKey)).toBe(0);
+
+    module.imports.push({
+      module: "env",
+      name: "late",
+      desc: { kind: "func", typeIdx: 0 },
+    });
+    expect(session.resolveCurrentIndex(canonicalId, "function", canonicalKey)).toBe(1);
+    expect(session.resolveCurrentIndex(aliasId, "function", aliasKey)).toBe(1);
+
+    const publication = session.publish(module);
+    expect(publication.abi.resolveFinalIndex(canonicalId)).toEqual({ space: "function", index: 1 });
+    expect(session.resolveCurrentIndex(aliasId, "function", aliasKey)).toBe(1);
+    expectInvariant(
+      () => session.resolveCurrentIndex(aliasId, "function", aliasKey, createEmptyModule()),
+      "context-session-mismatch",
+    );
+  });
+
+  it("replaces exact defined allocators while preserving one binding owner", () => {
+    const fixture = sessionFixture();
+    const module = createEmptyModule();
+    module.types.push(functionType("$void"));
+    const oldFirst = wasmFunction("same");
+    const oldSecond = wasmFunction("same");
+    const oldGlobal = wasmGlobal("same");
+    module.functions.push(oldFirst, oldSecond);
+    module.globals.push(oldGlobal);
+    const firstId = binding(fixture, "callable", "replace", fixture.firstUnitId);
+    const secondId = binding(fixture, "callable", "other", fixture.secondUnitId);
+    const globalId = binding(fixture, "global", "replace");
+    const firstKey = `unit|${firstId}|${fixture.firstUnitId}`;
+    const globalKey = `runtime|${globalId}|7:counter`;
+    const session = new ProgramAbiSession(fixture.inventory, module);
+    session.plan({
+      ...callableDraft(fixture, firstId, fixture.firstUnitId, "same", 0),
+      structuralReferenceKey: firstKey,
+    });
+    session.plan(callableDraft(fixture, secondId, fixture.secondUnitId, "same", 1));
+    session.plan({
+      ...globalDraft(fixture, globalId, "same", 2),
+      structuralReferenceKey: globalKey,
+    });
+    session.attachLocator(firstId, { kind: "defined-function", value: oldFirst });
+    session.attachLocator(secondId, { kind: "defined-function", value: oldSecond });
+    session.attachLocator(globalId, { kind: "defined-global", value: oldGlobal });
+
+    expectInvariant(
+      () => session.replaceDefinedFunctionLocator(firstId, oldFirst, oldSecond),
+      "duplicate-slot-locator",
+    );
+    expectInvariant(
+      () => session.replaceDefinedFunctionLocator(firstId, wasmFunction("foreign"), wasmFunction("new")),
+      "locator-remap-mismatch",
+    );
+
+    const newFirst = wasmFunction("same");
+    const newGlobal = wasmGlobal("same");
+    module.functions[0] = newFirst;
+    module.globals[0] = newGlobal;
+    session.replaceDefinedFunctionLocator(firstId, oldFirst, newFirst);
+    session.replaceDefinedGlobalLocator(globalId, oldGlobal, newGlobal);
+    expect(session.hasLocator(firstId, newFirst)).toBe(true);
+    expect(session.hasLocator(firstId, oldFirst)).toBe(false);
+    expect(session.resolveCurrentIndex(firstId, "function", firstKey)).toBe(0);
+    expect(session.resolveCurrentIndex(globalId, "global", globalKey)).toBe(0);
+
+    const { abi } = session.publish(module);
+    expect(abi.resolveFinalIndex(firstId)).toEqual({ space: "function", index: 0 });
+    expect(abi.resolveFinalIndex(globalId)).toEqual({ space: "global", index: 0 });
+  });
+
+  it("tracks old TypeDef objects through survivor and elimination remaps", () => {
+    const fixture = sessionFixture();
+    const module = createEmptyModule();
+    const oldFirst: TypeDef = { kind: "struct", name: "$First", fields: [] };
+    const oldSecond: TypeDef = { kind: "struct", name: "$Second", fields: [] };
+    const replacement: TypeDef = { kind: "struct", name: "$First", fields: [] };
+    module.types.push(oldFirst, oldSecond);
+    const session = new ProgramAbiSession(fixture.inventory, module);
+    const firstCell = session.createTypeCell(oldFirst);
+    const secondCell = session.createTypeCell(oldSecond);
+    expect(session.typeCellFor(oldFirst)).toBe(firstCell);
+    expectInvariant(() => session.createTypeCell(oldFirst), "duplicate-type-cell");
+    expectInvariant(
+      () => session.remapTypeObject({ kind: "struct", name: "$Foreign", fields: [] }, null),
+      "foreign-type-object",
+    );
+
+    session.remapTypeObject(oldFirst, replacement);
+    expect(firstCell.current).toBe(replacement);
+    expect(session.typeCellFor(oldFirst)).toBe(firstCell);
+    expect(session.typeCellFor(replacement)).toBe(firstCell);
+    expectInvariant(() => session.remapTypeObject(oldFirst, null), "type-remap-mismatch");
+    expectInvariant(() => session.remapTypeObject(oldSecond, replacement), "ambiguous-type-remap");
+
+    session.remapTypeObjects([[oldSecond, null]]);
+    expect(secondCell.current).toBeNull();
+    expectInvariant(() => session.remapTypeObject(oldSecond, null), "type-remap-mismatch");
+  });
+
+  it("derives whole-source unit/class/source order from exact inventory anchors", () => {
+    const file = source(
+      "/repo/nested-order.ts",
+      `
+        function first() { function nested() {} }
+        function second() { function nested() {} }
+        class Box { method() { function nested() {} } }
+      `,
+    );
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const module = createEmptyModule();
+    const session = new ProgramAbiSession(inventory, module);
+    const sourceId = inventory.sources[0]!.id;
+    const sourceUnits = inventory.allUnits.filter((unit) => unit.sourceId === sourceId);
+    const unitOrders = sourceUnits.map((unit) =>
+      session.structuralOrder.forUnit(unit.id, { domain: "callable", roleOrdinal: 0 }),
+    );
+    expect(unitOrders.map((order) => order.declarationOrdinal)).toEqual(sourceUnits.map((_, index) => (index + 1) * 2));
+    expect(new Set(unitOrders.map((order) => order.declarationOrdinal)).size).toBe(sourceUnits.length);
+    const repeatedLocalOrdinals = sourceUnits.filter((unit) => unit.ordinal === 0);
+    expect(repeatedLocalOrdinals.length).toBeGreaterThan(2);
+    expect(
+      new Set(
+        repeatedLocalOrdinals.map(
+          (unit) => session.structuralOrder.forUnit(unit.id, { domain: "callable", roleOrdinal: 0 }).declarationOrdinal,
+        ),
+      ).size,
+    ).toBe(repeatedLocalOrdinals.length);
+
+    const classRecord = inventory.classes[0]!;
+    const classOrder = session.structuralOrder.forClass(classRecord.id, {
+      domain: "class",
+      roleOrdinal: 0,
+    });
+    const firstClassMemberOrder = Math.min(
+      ...inventory.allUnits
+        .filter((unit) => unit.lexicalOwnerId === classRecord.id)
+        .map(
+          (unit) => session.structuralOrder.forUnit(unit.id, { domain: "callable", roleOrdinal: 0 }).declarationOrdinal,
+        ),
+    );
+    expect(classOrder.declarationOrdinal).toBe(firstClassMemberOrder - 1);
+    expect(session.structuralOrder.forSource(sourceId, { domain: "support", roleOrdinal: 0 }).declarationOrdinal).toBe(
+      0,
+    );
+    expectInvariant(
+      () =>
+        session.structuralOrder.forUnit("ir-unit:v1:missing" as IrUnitId, {
+          domain: "callable",
+          roleOrdinal: 0,
+        }),
+      "unknown-order-anchor",
+    );
+  });
+
+  it("validates the full canonical reference payload beside an existing binding ID", () => {
+    const file = source("/repo/reference.ts", "class Local {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const sourceId = inventory.sources[0]!.id;
+    const classId = inventory.classes[0]!.id;
+    const runtimeId = createIrBindingId({ ownerId: sourceId, domain: "global", role: "runtime-state" });
+    const importId = createIrBindingId({ ownerId: sourceId, domain: "callable", role: "imported" });
+    const classBindingId = createIrBindingId({ ownerId: classId, domain: "class", role: "layout" });
+    const runtimeKey = `runtime|${runtimeId}|5:clock`;
+    const importKey = `import|${importId}|3:env|4:read`;
+    const classKey = `class|${classBindingId}|${classId}`;
+    const session = new ProgramAbiSession(inventory, createEmptyModule());
+    session.plan({
+      id: runtimeId,
+      structuralOrder: session.structuralOrder.forSource(sourceId, { domain: "global", roleOrdinal: 0 }),
+      displayName: "clock",
+      structuralReferenceKey: runtimeKey,
+      slotPolicy: "required",
+      slotSpace: "global",
+      intent: { kind: "global", origin: "runtime", valueType: "i32", mutable: true },
+    });
+    session.plan({
+      id: importId,
+      structuralOrder: session.structuralOrder.forSource(sourceId, { domain: "callable", roleOrdinal: 0 }),
+      displayName: "read",
+      structuralReferenceKey: importKey,
+      slotPolicy: "required",
+      slotSpace: "function",
+      intent: { kind: "callable", origin: "import", signature: VOID_SIGNATURE },
+    });
+    session.plan({
+      id: classBindingId,
+      structuralOrder: session.structuralOrder.forClass(classId, { domain: "class", roleOrdinal: 0 }),
+      displayName: "Local",
+      structuralReferenceKey: classKey,
+      slotPolicy: "required",
+      slotSpace: "type",
+      intent: { kind: "class", classId, layoutKey: "class:Local" },
+    });
+    session.registerStructuralReference(runtimeId, runtimeKey);
+    session.registerStructuralReference(importId, importKey);
+    session.registerStructuralReference(classBindingId, classKey);
+    expectInvariant(
+      () => session.registerStructuralReference(runtimeId, `runtime|${runtimeId}|5:timer`),
+      "binding-reference-mismatch",
+    );
+    expectInvariant(
+      () => session.registerStructuralReference(importId, `import|${importId}|5:other|5:field`),
+      "binding-reference-mismatch",
+    );
+    expectInvariant(
+      () =>
+        session.registerStructuralReference(
+          classBindingId,
+          `class|${classBindingId}|${"ir-class:v1:foreign" as IrClassId}`,
+        ),
+      "binding-reference-mismatch",
+    );
+
+    const missingMetadataId = createIrBindingId({ ownerId: sourceId, domain: "support", role: "missing-metadata" });
+    session.plan({
+      id: missingMetadataId,
+      structuralOrder: session.structuralOrder.forSource(sourceId, { domain: "support", roleOrdinal: 1 }),
+      displayName: "missing",
+      slotPolicy: "none",
+      intent: { kind: "support", role: "missing-metadata" },
+    });
+    expectInvariant(
+      () => session.registerStructuralReference(missingMetadataId, "support|missing"),
+      "missing-binding-reference",
+    );
+  });
+
+  it("ensures repeated plans match the full frozen draft contract", () => {
+    const fixture = sessionFixture();
+    const session = new ProgramAbiSession(fixture.inventory, createEmptyModule());
+    const id = binding(fixture, "global", "ensure");
+    const draft = {
+      ...globalDraft(fixture, id, "state", 0),
+      structuralReferenceKey: `runtime|${id}|5:state`,
+      intent: {
+        kind: "global",
+        origin: "runtime",
+        valueType: "i32",
+        mutable: true,
+      },
+    } satisfies ProgramAbiDraft;
+    session.ensurePlan(draft);
+    session.ensurePlan({ ...draft, structuralOrder: { ...draft.structuralOrder }, intent: { ...draft.intent } });
+    expect(session.hasPlan(id)).toBe(true);
+    expect(session.getDraft(id)).not.toBe(draft);
+
+    const foreign = sessionFixture("/other/ensure.ts");
+    const mismatches: ProgramAbiDraft[] = [
+      { ...draft, displayName: "other" },
+      { ...draft, structuralReferenceKey: `runtime|${id}|5:other` },
+      { ...draft, structuralOrder: { ...draft.structuralOrder, sourceId: foreign.sourceId } },
+      { ...draft, intent: { ...draft.intent, valueType: "f64" } },
+      { ...draft, intent: { ...draft.intent, mutable: false } },
+    ];
+    for (const mismatch of mismatches) {
+      expectInvariant(() => session.ensurePlan(mismatch), "session-draft-mismatch");
+    }
   });
 
   it("closes planning after publish, rejects publish twice, and validates context ownership", () => {

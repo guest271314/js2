@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import type { GlobalDef, Import, TypeDef, WasmFunction, WasmModule } from "../ir/types.js";
-import type { IrBindingId, IrSourceId, IrUnitId, IrUnitInventory } from "../ir/identity.js";
+import type { IrBindingId, IrClassId, IrSourceId, IrUnitId, IrUnitInventory } from "../ir/identity.js";
 import {
   LegacyAbiAdapter,
   ProgramAbiInvariantError,
@@ -20,7 +20,7 @@ const ABI_DOMAIN_ORDINAL = Object.freeze({
   support: 5,
 } as const);
 
-type ProgramAbiDomain = keyof typeof ABI_DOMAIN_ORDINAL;
+export type ProgramAbiDomain = keyof typeof ABI_DOMAIN_ORDINAL;
 
 /**
  * Closed domain order used by ABI planning. Producers record this value
@@ -41,6 +41,164 @@ export interface ProgramAbiDraftOrder {
   readonly domainOrdinal: number;
   readonly roleOrdinal: number;
   readonly derivedOrdinal: number;
+}
+
+export interface ProgramAbiDraftSuborder {
+  readonly domain: ProgramAbiDomain;
+  readonly roleOrdinal: number;
+  readonly derivedOrdinal?: number;
+}
+
+interface ProgramAbiDeclarationAnchor {
+  readonly sourceId: IrSourceId;
+  readonly declarationOrdinal: number;
+}
+
+/**
+ * Canonical source-local draft ordering derived from the inventory population.
+ *
+ * `IrUnitRecord.ordinal` is only local to a structural owner/kind, so it is
+ * never used here as a whole-source ordinal. Exact unit anchors instead use
+ * their position in `inventory.allUnits`; source and class anchors occupy
+ * disjoint slots around that authoritative sequence.
+ */
+export class ProgramAbiStructuralOrder {
+  private readonly sourceAnchors = new Map<IrSourceId, ProgramAbiDeclarationAnchor>();
+  private readonly unitAnchors = new Map<IrUnitId, ProgramAbiDeclarationAnchor>();
+  private readonly classAnchors = new Map<IrClassId, ProgramAbiDeclarationAnchor>();
+  private readonly derivedParents = new Map<IrUnitId, IrUnitId>();
+
+  constructor(readonly inventory: IrUnitInventory) {
+    const sourceLocalCounts = new Map<IrSourceId, number>();
+    for (const source of inventory.sources) {
+      if (this.sourceAnchors.has(source.id)) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `source ${source.id} occurs more than once in the ABI ordering inventory`,
+        );
+      }
+      this.sourceAnchors.set(source.id, Object.freeze({ sourceId: source.id, declarationOrdinal: 0 }));
+      sourceLocalCounts.set(source.id, 0);
+    }
+
+    for (const unit of inventory.allUnits) {
+      if (this.unitAnchors.has(unit.id)) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `unit ${unit.id} occurs more than once in the ABI ordering inventory`,
+        );
+      }
+      const sourceCount = sourceLocalCounts.get(unit.sourceId);
+      if (sourceCount === undefined) {
+        throw new ProgramAbiInvariantError(
+          "unknown-order-anchor",
+          `unit ${unit.id} references source ${unit.sourceId} outside the ABI ordering inventory`,
+        );
+      }
+      this.unitAnchors.set(
+        unit.id,
+        Object.freeze({
+          sourceId: unit.sourceId,
+          declarationOrdinal: (sourceCount + 1) * 2,
+        }),
+      );
+      sourceLocalCounts.set(unit.sourceId, sourceCount + 1);
+    }
+
+    const classOrderOwners = new Map<string, IrClassId>();
+    for (const classRecord of inventory.classes) {
+      if (this.classAnchors.has(classRecord.id)) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `class ${classRecord.id} occurs more than once in the ABI ordering inventory`,
+        );
+      }
+      const member = inventory.allUnits.find(
+        (unit) => unit.sourceId === classRecord.sourceId && unit.lexicalOwnerId === classRecord.id,
+      );
+      const memberAnchor = member === undefined ? undefined : this.unitAnchors.get(member.id);
+      if (!memberAnchor) {
+        throw new ProgramAbiInvariantError(
+          "unknown-order-anchor",
+          `class ${classRecord.id} has no exact unit anchor in inventory.allUnits`,
+        );
+      }
+      const anchor = Object.freeze({
+        sourceId: classRecord.sourceId,
+        declarationOrdinal: memberAnchor.declarationOrdinal - 1,
+      });
+      const key = `${anchor.sourceId}\u0000${anchor.declarationOrdinal}`;
+      const previous = classOrderOwners.get(key);
+      if (previous !== undefined) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `classes ${previous} and ${classRecord.id} share ABI order anchor ${anchor.declarationOrdinal}`,
+        );
+      }
+      classOrderOwners.set(key, classRecord.id);
+      this.classAnchors.set(classRecord.id, anchor);
+    }
+  }
+
+  registerDerivedUnit(id: IrUnitId, parentId: IrUnitId): void {
+    if (this.unitAnchors.has(id) || this.derivedParents.has(id)) {
+      throw new ProgramAbiInvariantError(
+        "ambiguous-order-anchor",
+        `derived unit ${id} was registered more than once with the ABI ordering sidecar`,
+      );
+    }
+    this.derivedParents.set(id, parentId);
+  }
+
+  forSource(sourceId: IrSourceId, suborder: ProgramAbiDraftSuborder): ProgramAbiDraftOrder {
+    return this.orderFor(this.sourceAnchors.get(sourceId), `source ${sourceId}`, suborder);
+  }
+
+  forUnit(unitId: IrUnitId, suborder: ProgramAbiDraftSuborder): ProgramAbiDraftOrder {
+    return this.orderFor(this.resolveUnitAnchor(unitId, new Set()), `unit ${unitId}`, suborder);
+  }
+
+  forClass(classId: IrClassId, suborder: ProgramAbiDraftSuborder): ProgramAbiDraftOrder {
+    return this.orderFor(this.classAnchors.get(classId), `class ${classId}`, suborder);
+  }
+
+  private orderFor(
+    anchor: ProgramAbiDeclarationAnchor | undefined,
+    description: string,
+    suborder: ProgramAbiDraftSuborder,
+  ): ProgramAbiDraftOrder {
+    if (!anchor) {
+      throw new ProgramAbiInvariantError(
+        "unknown-order-anchor",
+        `${description} is outside the ABI ordering inventory`,
+      );
+    }
+    const derivedOrdinal = suborder.derivedOrdinal ?? 0;
+    if (!validOrdinal(suborder.roleOrdinal) || !validOrdinal(derivedOrdinal)) {
+      throw new ProgramAbiInvariantError("invalid-draft-order", `${description} has an invalid ABI suborder`);
+    }
+    return Object.freeze({
+      sourceId: anchor.sourceId,
+      declarationOrdinal: anchor.declarationOrdinal,
+      domainOrdinal: programAbiDomainOrdinal(suborder.domain),
+      roleOrdinal: suborder.roleOrdinal,
+      derivedOrdinal,
+    });
+  }
+
+  private resolveUnitAnchor(unitId: IrUnitId, visiting: Set<IrUnitId>): ProgramAbiDeclarationAnchor | undefined {
+    const inventoryAnchor = this.unitAnchors.get(unitId);
+    if (inventoryAnchor) return inventoryAnchor;
+    const parentId = this.derivedParents.get(unitId);
+    if (parentId === undefined) return undefined;
+    if (visiting.has(unitId)) {
+      throw new ProgramAbiInvariantError("ambiguous-order-anchor", `derived ABI order cycle includes ${unitId}`);
+    }
+    visiting.add(unitId);
+    const parent = this.resolveUnitAnchor(parentId, visiting);
+    visiting.delete(unitId);
+    return parent;
+  }
 }
 
 type ProgramAbiDraftFromPlan<T> = T extends ProgramAbiPlanEntry
@@ -120,6 +278,56 @@ function cloneDraft(draft: ProgramAbiDraft): ProgramAbiDraft {
   }) as ProgramAbiDraft;
 }
 
+function intentsEqual(a: ProgramAbiDraft["intent"], b: ProgramAbiDraft["intent"]): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "callable" && b.kind === "callable") {
+    return (
+      a.origin === b.origin &&
+      a.unitId === b.unitId &&
+      a.signature.params.length === b.signature.params.length &&
+      a.signature.params.every((value, index) => value === b.signature.params[index]) &&
+      a.signature.results.length === b.signature.results.length &&
+      a.signature.results.every((value, index) => value === b.signature.results[index])
+    );
+  }
+  if (a.kind === "global" && b.kind === "global") {
+    return a.origin === b.origin && a.valueType === b.valueType && a.mutable === b.mutable;
+  }
+  if (a.kind === "type" && b.kind === "type") return a.shapeKey === b.shapeKey;
+  if (a.kind === "export" && b.kind === "export") {
+    return a.externalName === b.externalName && a.targetId === b.targetId;
+  }
+  if (a.kind === "class" && b.kind === "class") {
+    return a.classId === b.classId && a.layoutKey === b.layoutKey;
+  }
+  return a.kind === "support" && b.kind === "support" && a.role === b.role;
+}
+
+function draftsEqual(a: ProgramAbiDraft, b: ProgramAbiDraft): boolean {
+  const ar = a as ProgramAbiDraft & {
+    readonly aliasOf?: IrBindingId;
+    readonly slotSpace?: ProgramAbiSlotSpace;
+  };
+  const br = b as ProgramAbiDraft & {
+    readonly aliasOf?: IrBindingId;
+    readonly slotSpace?: ProgramAbiSlotSpace;
+  };
+  return (
+    a.id === b.id &&
+    a.displayName === b.displayName &&
+    a.structuralReferenceKey === b.structuralReferenceKey &&
+    a.slotPolicy === b.slotPolicy &&
+    ar.slotSpace === br.slotSpace &&
+    ar.aliasOf === br.aliasOf &&
+    a.structuralOrder.sourceId === b.structuralOrder.sourceId &&
+    a.structuralOrder.declarationOrdinal === b.structuralOrder.declarationOrdinal &&
+    a.structuralOrder.domainOrdinal === b.structuralOrder.domainOrdinal &&
+    a.structuralOrder.roleOrdinal === b.structuralOrder.roleOrdinal &&
+    a.structuralOrder.derivedOrdinal === b.structuralOrder.derivedOrdinal &&
+    intentsEqual(a.intent, b.intent)
+  );
+}
+
 function structuralOrderKey(sourceOrder: number, order: ProgramAbiDraftOrder): string {
   return [sourceOrder, order.declarationOrdinal, order.domainOrdinal, order.roleOrdinal, order.derivedOrdinal].join(
     ":",
@@ -157,15 +365,19 @@ export class ProgramAbiSession {
   private readonly derivedUnits = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
   private readonly locators = new Map<IrBindingId, ProgramAbiSlotLocator>();
   private readonly locatorOwners = new Map<object, IrBindingId>();
+  private readonly structuralReferenceKeys = new Map<IrBindingId, string>();
   private readonly typeCells = new Set<ProgramAbiTypeCell>();
+  private readonly typeCellsByObject = new Map<TypeDef, MutableProgramAbiTypeCell>();
   private state: SessionState = "open";
   private publishedValue: PublishedProgramAbi | undefined;
+  readonly structuralOrder: ProgramAbiStructuralOrder;
 
   constructor(
     readonly inventory: IrUnitInventory,
     readonly module: WasmModule,
   ) {
     for (const source of inventory.sources) this.sourceOrderById.set(source.id, source.order);
+    this.structuralOrder = new ProgramAbiStructuralOrder(inventory);
   }
 
   /** Fail early if a context/module attempts to adopt another compilation's session. */
@@ -180,6 +392,43 @@ export class ProgramAbiSession {
 
   get publication(): PublishedProgramAbi | undefined {
     return this.publishedValue;
+  }
+
+  hasPlan(id: IrBindingId): boolean {
+    return this.drafts.has(id);
+  }
+
+  getDraft(id: IrBindingId): ProgramAbiDraft | undefined {
+    return this.drafts.get(id);
+  }
+
+  /**
+   * Plan once or prove that a repeated producer observation is byte-for-byte
+   * equivalent at the structural contract level.
+   */
+  ensurePlan(draft: ProgramAbiDraft): void {
+    this.assertOpen(`ensure plan ${draft.id}`);
+    const existing = this.drafts.get(draft.id);
+    if (!existing) {
+      this.plan(draft);
+      return;
+    }
+    if (!draftsEqual(existing, cloneDraft(draft))) {
+      throw new ProgramAbiInvariantError(
+        "session-draft-mismatch",
+        `ABI draft ${draft.id} was observed with a different plan contract`,
+      );
+    }
+  }
+
+  hasLocator(id: IrBindingId, allocatorObject?: object): boolean {
+    const locator = this.locators.get(id);
+    return locator !== undefined && (allocatorObject === undefined || locatorObject(locator) === allocatorObject);
+  }
+
+  registerStructuralReference(id: IrBindingId, key: string): void {
+    this.assertOpen(`register structural reference for ${id}`);
+    this.assertStructuralReference(id, key, true);
   }
 
   plan(draft: ProgramAbiDraft): void {
@@ -206,6 +455,15 @@ export class ProgramAbiSession {
     ) {
       throw new ProgramAbiInvariantError("invalid-draft-order", `ABI draft ${draft.id} has invalid structural order`);
     }
+    if (
+      draft.structuralReferenceKey !== undefined &&
+      (typeof draft.structuralReferenceKey !== "string" || draft.structuralReferenceKey.length === 0)
+    ) {
+      throw new ProgramAbiInvariantError(
+        "invalid-binding-reference",
+        `ABI draft ${draft.id} has an invalid structural reference key`,
+      );
+    }
     const key = structuralOrderKey(sourceOrder, draft.structuralOrder);
     const previous = this.draftOrderOwners.get(key);
     if (previous) {
@@ -227,13 +485,25 @@ export class ProgramAbiSession {
       );
     }
     this.derivedUnits.set(record.id, Object.freeze({ ...record }));
+    this.structuralOrder.registerDerivedUnit(record.id, record.parentId);
   }
 
   createTypeCell(type: TypeDef): ProgramAbiTypeCell {
     this.assertOpen("create a type cell");
+    if (this.typeCellsByObject.has(type)) {
+      throw new ProgramAbiInvariantError(
+        "duplicate-type-cell",
+        "allocator type object already belongs to an ABI type cell",
+      );
+    }
     const cell: MutableProgramAbiTypeCell = { current: type };
     this.typeCells.add(cell);
+    this.typeCellsByObject.set(type, cell);
     return cell;
+  }
+
+  typeCellFor(type: TypeDef): ProgramAbiTypeCell | undefined {
+    return this.typeCellsByObject.get(type);
   }
 
   /**
@@ -245,7 +515,70 @@ export class ProgramAbiSession {
     if (!this.typeCells.has(cell)) {
       throw new ProgramAbiInvariantError("foreign-type-cell", "type cell belongs to another ABI session");
     }
-    (cell as MutableProgramAbiTypeCell).current = replacement;
+    const current = cell.current;
+    if (current === null) {
+      throw new ProgramAbiInvariantError("type-remap-mismatch", "eliminated ABI type cell cannot be remapped again");
+    }
+    this.remapTypeObject(current, replacement);
+  }
+
+  /** Follow one exact old TypeDef object through an allocator/DCE remap. */
+  remapTypeObject(previous: TypeDef, replacement: TypeDef | null): void {
+    this.remapTypeObjects([[previous, replacement]]);
+  }
+
+  /**
+   * Apply an allocator/DCE remap in linear time from the old type population.
+   *
+   * Historical old-object keys remain session-owned so stale or duplicate
+   * remap reports reject instead of silently attaching to another cell.
+   */
+  remapTypeObjects(remaps: Iterable<readonly [TypeDef, TypeDef | null]>): void {
+    this.assertOpen("remap type objects");
+    const pending = [...remaps];
+    const previousObjects = new Set<TypeDef>();
+    const replacementOwners = new Map<TypeDef, MutableProgramAbiTypeCell>();
+    const validated: Array<readonly [MutableProgramAbiTypeCell, TypeDef, TypeDef | null]> = [];
+
+    for (const [previous, replacement] of pending) {
+      if (previousObjects.has(previous)) {
+        throw new ProgramAbiInvariantError("type-remap-mismatch", "allocator type object was remapped more than once");
+      }
+      previousObjects.add(previous);
+      const cell = this.typeCellsByObject.get(previous);
+      if (!cell) {
+        throw new ProgramAbiInvariantError(
+          "foreign-type-object",
+          "allocator type object does not belong to this ABI session",
+        );
+      }
+      if (cell.current !== previous) {
+        throw new ProgramAbiInvariantError(
+          "type-remap-mismatch",
+          "allocator type remap does not start at the cell's current object",
+        );
+      }
+      if (replacement !== null) {
+        const historicalOwner = this.typeCellsByObject.get(replacement);
+        const pendingOwner = replacementOwners.get(replacement);
+        if (
+          (historicalOwner !== undefined && historicalOwner !== cell) ||
+          (pendingOwner !== undefined && pendingOwner !== cell)
+        ) {
+          throw new ProgramAbiInvariantError(
+            "ambiguous-type-remap",
+            "allocator replacement type object would belong to multiple ABI cells",
+          );
+        }
+        replacementOwners.set(replacement, cell);
+      }
+      validated.push([cell, previous, replacement]);
+    }
+
+    for (const [cell, , replacement] of validated) {
+      cell.current = replacement;
+      if (replacement !== null) this.typeCellsByObject.set(replacement, cell);
+    }
   }
 
   attachLocator(id: IrBindingId, locator: ProgramAbiSlotLocator): void {
@@ -284,6 +617,61 @@ export class ProgramAbiSession {
     }
     this.locators.set(id, Object.freeze({ ...locator }) as ProgramAbiSlotLocator);
     this.locatorOwners.set(object, id);
+  }
+
+  replaceDefinedFunctionLocator(id: IrBindingId, previous: WasmFunction, replacement: WasmFunction): void {
+    this.replaceDefinedLocator(id, "defined-function", previous, replacement);
+  }
+
+  replaceDefinedGlobalLocator(id: IrBindingId, previous: GlobalDef, replacement: GlobalDef): void {
+    this.replaceDefinedLocator(id, "defined-global", previous, replacement);
+  }
+
+  /**
+   * Resolve one planned binding against the module's current, provisional
+   * layout. Publication deliberately repeats exact-object resolution after
+   * index-space freeze and records that later result as authoritative.
+   */
+  resolveCurrentIndex(
+    id: IrBindingId,
+    expectedSpace: ProgramAbiSlotSpace,
+    structuralReferenceKey: string,
+    module: WasmModule = this.module,
+  ): number {
+    this.assertModule(module);
+    this.assertStructuralReference(id, structuralReferenceKey, this.state === "open");
+    if (this.state === "published") {
+      const finalIndex = this.publishedValue!.abi.resolveFinalIndex(id);
+      if (!finalIndex || finalIndex.space !== expectedSpace) {
+        throw new ProgramAbiInvariantError(
+          "final-index-space-mismatch",
+          `published ABI binding ${id} does not resolve in ${expectedSpace} space`,
+        );
+      }
+      return finalIndex.index;
+    }
+    this.assertOpen(`resolve current slot for ${id}`);
+    const canonical = this.canonicalDraft(id);
+    if (canonical.slotPolicy !== "required" || canonical.slotSpace !== expectedSpace) {
+      throw new ProgramAbiInvariantError(
+        "slot-locator-space-mismatch",
+        `ABI binding ${id} does not resolve to a required ${expectedSpace} slot`,
+      );
+    }
+    const locator = this.locators.get(canonical.id);
+    if (!locator) {
+      throw new ProgramAbiInvariantError(
+        "missing-required-locator",
+        `ABI binding ${canonical.id} has no allocator locator`,
+      );
+    }
+    if (locatorSpace(locator) !== expectedSpace) {
+      throw new ProgramAbiInvariantError(
+        "slot-locator-space-mismatch",
+        `ABI binding ${canonical.id} owns ${locator.kind}, not ${expectedSpace}`,
+      );
+    }
+    return this.resolveLocator(module, canonical.id, locator);
   }
 
   /**
@@ -354,6 +742,99 @@ export class ProgramAbiSession {
         `cannot ${action} after ProgramAbiSession left planning state (${this.state})`,
       );
     }
+  }
+
+  private assertStructuralReference(id: IrBindingId, key: string, record: boolean): void {
+    const draft = this.drafts.get(id);
+    if (!draft) {
+      throw new ProgramAbiInvariantError("unknown-binding", `structural reference targets unplanned ABI draft ${id}`);
+    }
+    if (typeof key !== "string" || key.length === 0) {
+      throw new ProgramAbiInvariantError(
+        "invalid-binding-reference",
+        `ABI binding ${id} received an invalid structural reference key`,
+      );
+    }
+    const canonicalKey = draft.structuralReferenceKey;
+    if (canonicalKey === undefined) {
+      throw new ProgramAbiInvariantError(
+        "missing-binding-reference",
+        `ABI binding ${id} did not plan canonical structural reference metadata`,
+      );
+    }
+    const previous = this.structuralReferenceKeys.get(id);
+    if (canonicalKey !== key || (previous !== undefined && previous !== key)) {
+      throw new ProgramAbiInvariantError(
+        "binding-reference-mismatch",
+        `ABI binding ${id} does not match the supplied structural reference payload`,
+      );
+    }
+    if (record) this.structuralReferenceKeys.set(id, key);
+  }
+
+  private canonicalDraft(id: IrBindingId): ProgramAbiDraft {
+    let current = this.drafts.get(id);
+    if (!current) throw new ProgramAbiInvariantError("unknown-binding", `ABI binding ${id} was not planned`);
+    const visited = new Set<IrBindingId>();
+    while (current.slotPolicy === "alias") {
+      if (visited.has(current.id)) {
+        throw new ProgramAbiInvariantError("alias-cycle", `ABI draft alias cycle includes ${current.id}`);
+      }
+      visited.add(current.id);
+      const target = this.drafts.get(current.aliasOf);
+      if (!target) {
+        throw new ProgramAbiInvariantError(
+          "missing-alias-target",
+          `ABI draft alias ${current.id} targets unplanned binding ${current.aliasOf}`,
+        );
+      }
+      current = target;
+    }
+    return current;
+  }
+
+  private replaceDefinedLocator<T extends WasmFunction | GlobalDef>(
+    id: IrBindingId,
+    kind: "defined-function" | "defined-global",
+    previous: T,
+    replacement: T,
+  ): void {
+    this.assertOpen(`replace slot locator for ${id}`);
+    const draft = this.drafts.get(id);
+    if (!draft) {
+      throw new ProgramAbiInvariantError("unknown-locator-binding", `slot locator targets unplanned ABI draft ${id}`);
+    }
+    const expectedSpace: ProgramAbiSlotSpace = kind === "defined-function" ? "function" : "global";
+    if (draft.slotPolicy !== "required" || draft.slotSpace !== expectedSpace) {
+      throw new ProgramAbiInvariantError(
+        "slot-locator-space-mismatch",
+        `ABI draft ${id} does not own a required ${expectedSpace} locator`,
+      );
+    }
+    const current = this.locators.get(id);
+    if (!current) {
+      throw new ProgramAbiInvariantError("missing-required-locator", `ABI binding ${id} has no allocator locator`);
+    }
+    if (current.kind !== kind || current.value !== previous || this.locatorOwners.get(previous) !== id) {
+      throw new ProgramAbiInvariantError(
+        "locator-remap-mismatch",
+        `ABI binding ${id} does not own the supplied previous ${kind} object`,
+      );
+    }
+    if (replacement === previous) return;
+    const replacementOwner = this.locatorOwners.get(replacement);
+    if (replacementOwner !== undefined) {
+      throw new ProgramAbiInvariantError(
+        "duplicate-slot-locator",
+        `replacement allocator object for ${id} is already owned by ${replacementOwner}`,
+      );
+    }
+    this.locatorOwners.delete(previous);
+    this.locatorOwners.set(replacement, id);
+    this.locators.set(
+      id,
+      Object.freeze({ kind, value: replacement }) as Extract<ProgramAbiSlotLocator, { readonly kind: typeof kind }>,
+    );
   }
 
   private resolveLocator(module: WasmModule, id: IrBindingId, locator: ProgramAbiSlotLocator): number {
