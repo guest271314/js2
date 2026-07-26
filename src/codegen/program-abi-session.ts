@@ -428,6 +428,14 @@ export class ProgramAbiSession {
     return this.drafts.get(id);
   }
 
+  hasKnownUnit(id: IrUnitId): boolean {
+    return this.derivedUnits.has(id) || this.inventory.allUnits.some((unit) => unit.id === id);
+  }
+
+  registeredDerivedUnit(id: IrUnitId): ProgramAbiDerivedUnitRecord | undefined {
+    return this.derivedUnits.get(id);
+  }
+
   /**
    * Plan once or prove that a repeated producer observation is byte-for-byte
    * equivalent at the structural contract level.

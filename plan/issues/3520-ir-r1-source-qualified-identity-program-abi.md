@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c4-production-abi
+branch: codex/3520-c5-derived-provenance
 pr: 3656
 last_merged_pr: 3490
 sprint: current
@@ -84,6 +84,7 @@ files:
   - src/codegen/class-member-keys.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
+  - src/codegen/func-space.ts
   - src/codegen/program-abi-planning.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/ir-first-gate.ts
@@ -100,6 +101,7 @@ files:
   - tests/helpers/ir-identities.ts
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
+  - tests/issue-3520-lifted-program-abi.test.ts
   - tests/issue-3520-callable-binding.test.ts
   - tests/issue-3520-global-type-binding.test.ts
   - tests/issue-3520-callable-preregistration.test.ts
@@ -126,6 +128,7 @@ files:
   - tests/issue-3520-monomorphize-identity.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
 loc-budget-allow:
+  - src/codegen/context/types.ts
   - src/ir/integration.ts
   - src/ir/from-ast.ts
   - src/ir/nodes.ts
@@ -1173,6 +1176,53 @@ Wasm types and class layouts plus DCE remaps, exports and aliases, and
 production `LegacyAbiAdapter` replacement of the remaining `funcMap`,
 `structMap`, module-array, and display-name scans still remain before R1 can
 close.
+
+### 2026-07-26 lifted-callable provenance continuation
+
+The next stacked continuation on `codex/3520-c5-derived-provenance` moves
+successfully emitted lifted closures into the production Program ABI:
+
+- lifted allocation now preserves exact `{ id, parentId, role, ordinal }`
+  provenance beside `LoweredFunctionResult`; integration joins it to the
+  authoritative inventory's `sourceId` and terminal owner by ID, never by
+  output order, encoded ID, or display label;
+- accepted lifted functions register complete `ProgramAbiDerivedUnitRecord`
+  values only after lowering has produced the settled Wasm function and
+  signature. The owner body retains derived suborder zero and its owner-wide
+  lifted ordinals occupy one-based suborders;
+- the backend keeps an exact `IrUnitId -> WasmFunction` table and resolves the
+  current live or stable function handle from the allocator object. Synthetic
+  compatibility labels may therefore collide with source functions without
+  aliasing their slots or locators;
+- derived callable planning occurs after the placeholder is replaced, so the
+  ABI records the real lowered signature rather than placeholder type zero;
+  and
+- integration telemetry continues to classify terminal versus synthetic
+  artifacts from exact artifact/owner IDs. Equal public labels no longer
+  manufacture a false invariant.
+
+The production collision regression compiles one source owner, two lifted
+closures, and a top-level function deliberately named like the first lift. All
+four callables publish distinct final function slots while the legacy
+name-only adapter correctly rejects the ambiguous label. The complete #3520
+matrix plus #2138 passes **219/219** across **36 files**. Strict TypeScript,
+Prettier, scoped Biome lint, diff, and LOC checks pass. Hybrid readiness remains
+**READY** at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy
+bodies**, and the fallback ratchet reports no unintended, post-claim, or
+module-level increase. The eight-shard equivalence gate passes with **1,608
+passing / 35 known failures / 0 new regressions**; one baseline failure now
+passes.
+
+This is still a bounded lifted-only slice. Monomorphization already creates
+exact clone IDs but its result sidecar drops the clone role and parent-local
+ordinal. More importantly, clone-local ordinals are not injective across
+different lifted parents after structural ordering collapses to the inventory
+ancestor. The next derived-unit slice must preserve full clone provenance and
+assign an explicit provenance-path (or equivalent owner-wide) ABI rank before
+monomorphized clones can leave the compatibility adapter. Provider/import/
+runtime/support callables, remaining imported globals, Wasm types and class
+layouts plus DCE remaps, exports and aliases, and the production
+`LegacyAbiAdapter` cutover remain after that.
 
 ### R1a validation evidence
 

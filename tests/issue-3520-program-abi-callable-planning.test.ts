@@ -145,6 +145,72 @@ describe("#3520 production unit-callable Program ABI planning", () => {
     ).toBeUndefined();
   });
 
+  it("plans explicitly registered lifted units with distinct deterministic suborders", () => {
+    const file = source("/repo/lifted.ts", "export function owner() {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const owner = inventory.allUnits.find((unit) => unit.kind === "top-level-function")!;
+    const liftedUnitIds = [0, 1].map((ordinal) =>
+      createDerivedIrUnitId({
+        parentId: owner.id,
+        role: "lifted-closure",
+        ordinal,
+      }),
+    );
+    const module = createEmptyModule();
+    const signature: FuncTypeDef = { kind: "func", params: [], results: [] };
+    const functions = [
+      wasmFunction("owner", 0),
+      wasmFunction("owner__closure_0", 0),
+      wasmFunction("owner__closure_1", 0),
+    ];
+    module.types.push(signature);
+    module.functions.push(...functions);
+
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+    const records = liftedUnitIds.map((id, ordinal) => ({
+      id,
+      parentId: owner.id,
+      sourceId: owner.sourceId,
+      terminalOwnerId: owner.terminalOwnerId,
+      role: "lifted-closure" as const,
+      ordinal,
+    }));
+    // Queue and plan in reverse producer order. Publication order must still
+    // follow the explicit lifted ordinals beneath the owner's body.
+    session.registerDerivedUnit(records[1]!);
+    session.registerDerivedUnit(records[0]!);
+
+    const refs = [
+      irUnitFuncRef({ unitId: owner.id, name: functions[0]!.name }),
+      ...liftedUnitIds.map((unitId, index) => irUnitFuncRef({ unitId, name: functions[index + 1]!.name })),
+    ];
+    const ids = [irUnitCallableBindingId(owner.id), ...liftedUnitIds.map(irUnitCallableBindingId)];
+    for (const index of [2, 1, 0]) {
+      expect(
+        planProgramAbiUnitCallable(ctx, {
+          ref: refs[index]!,
+          signature,
+          func: functions[index]!,
+        }),
+      ).toBe(ids[index]);
+    }
+
+    expect(ids.map((id) => session.getDraft(id)!.structuralOrder.derivedOrdinal)).toEqual([0, 1, 2]);
+    const { abi } = session.publish(module);
+    expect(
+      abi
+        .entries()
+        .filter((entry) => entry.intent.kind === "callable")
+        .map((entry) => entry.id),
+    ).toEqual(ids);
+    expect(ids.map((id) => abi.resolveFinalIndex(id))).toEqual([
+      { space: "function", index: 0 },
+      { space: "function", index: 1 },
+      { space: "function", index: 2 },
+    ]);
+  });
+
   it("publishes the replacement object installed by production IR lowering", () => {
     const ast = analyzeSource("export function selected(value: number): number { return value + 1; }");
     const result = generateModule(ast, { experimentalIR: true, trackIrOutcomes: true });

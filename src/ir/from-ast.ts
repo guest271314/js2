@@ -90,7 +90,13 @@ import {
   stringIndexProvenBelow,
 } from "./capability.js";
 import type { IrLowerResolver, IrVecLowering } from "./lower.js";
-import { allocateLiftedFunctionArtifact, type IrFunctionIdentity, type IrUnitId } from "./identity.js";
+import {
+  allocateLiftedFunctionArtifact,
+  type IrDerivedUnitProvenance,
+  type IrFunctionIdentity,
+  type IrLiftedFunctionArtifactIdentity,
+  type IrUnitId,
+} from "./identity.js";
 import { IrUnsupportedError } from "./outcomes.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
@@ -557,6 +563,8 @@ export interface AstToIrOptions {
 export interface LoweredFunctionResult {
   readonly main: IrFunction;
   readonly lifted: readonly IrFunction[];
+  /** Exact allocation-side provenance for `lifted`, joined by ID rather than array position. */
+  readonly liftedUnitProvenance: readonly IrDerivedUnitProvenance[];
 }
 
 export function lowerFunctionAstToIr(
@@ -786,6 +794,7 @@ export function lowerFunctionAstToIr(
   }
 
   const lifted: IrFunction[] = [];
+  const liftedUnitProvenance: IrDerivedUnitProvenance[] = [];
   const liftedCounter = { value: 0 };
   const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
   const emptyArrayInference = inferEmptyArrayElementTypes(
@@ -807,6 +816,7 @@ export function lowerFunctionAstToIr(
     classShapes: options.classShapes,
     resolver: options.resolver,
     lifted,
+    liftedUnitProvenance,
     liftedCounter,
     mutatedLets,
     ownedStringAppendSymbols,
@@ -871,7 +881,7 @@ export function lowerFunctionAstToIr(
       // selector rejects it), so no dead-code guard is needed.
     }
     builder.terminate({ kind: "return", values: [] });
-    return { main: builder.finish(), lifted };
+    return { main: builder.finish(), lifted, liftedUnitProvenance };
   }
 
   if (isCtor) {
@@ -893,12 +903,12 @@ export function lowerFunctionAstToIr(
       // loop) — the selector rejects it — so no dead-code guard is needed.
     }
     builder.terminate({ kind: "return", values: [thisV] });
-    return { main: builder.finish(), lifted };
+    return { main: builder.finish(), lifted, liftedUnitProvenance };
   }
 
   lowerStatementList(stmts, cx);
 
-  return { main: builder.finish(), lifted };
+  return { main: builder.finish(), lifted, liftedUnitProvenance };
 }
 
 /**
@@ -1505,6 +1515,8 @@ interface LowerCtx {
   readonly resolver?: IrFromAstResolver;
   /** Slice 3 — output bin for lifted closures / nested funcs. */
   readonly lifted: IrFunction[];
+  /** Structural provenance emitted alongside each lifted function. */
+  readonly liftedUnitProvenance: IrDerivedUnitProvenance[];
   /** Slice 3 — mutable counter for synthesizing lifted-func names. */
   readonly liftedCounter: { value: number };
   /**
@@ -8446,6 +8458,15 @@ function tryLowerDynamicArithmetic(
 // Closure / nested-function lowering (#1169c — IR Phase 4 Slice 3)
 // ---------------------------------------------------------------------------
 
+function recordLiftedUnitProvenance(identity: IrLiftedFunctionArtifactIdentity, cx: LowerCtx): void {
+  cx.liftedUnitProvenance.push({
+    id: identity.unitId,
+    parentId: identity.parentId,
+    role: identity.role,
+    ordinal: identity.ordinal,
+  });
+}
+
 /**
  * Lower an arrow function or function expression as an IR closure
  * value. Lifts the body to a top-level IR function (with __self as
@@ -8530,6 +8551,7 @@ function lowerClosureExpressionWithSignature(
   const liftedIdentity = allocateLiftedFunctionArtifact(cx, (ordinal) =>
     exactClosureLiftedName(cx.funcName, ordinal, exact?.expectedLiftedName),
   );
+  recordLiftedUnitProvenance(liftedIdentity, cx);
   const liftedTarget = irUnitFuncRef(liftedIdentity);
   if (
     exact?.expectedLiftedTarget &&
@@ -8628,6 +8650,7 @@ function lowerNestedFunctionDeclaration(fn: ts.FunctionDeclaration, cx: LowerCtx
     cx,
     (ordinal) => `${cx.funcName}__nested_${innerName}_${ordinal}`,
   );
+  recordLiftedUnitProvenance(liftedIdentity, cx);
 
   const lifted = liftNestedFunction(liftedIdentity, fn, signature, captures, cx);
   cx.lifted.push(lifted);
@@ -8689,6 +8712,7 @@ function liftNestedFunction(
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
+    liftedUnitProvenance: cx.liftedUnitProvenance,
     liftedCounter: cx.liftedCounter,
     // Slice 6 part 2 (#1181) — nested-function bodies have their own
     // mutated-let scope (collected per-body when slice 6 extends to
@@ -8780,6 +8804,7 @@ function liftClosureBody(
     classShapes: cx.classShapes,
     resolver: cx.resolver,
     lifted: cx.lifted,
+    liftedUnitProvenance: cx.liftedUnitProvenance,
     liftedCounter: cx.liftedCounter,
     // Slice 6 part 2 (#1181) — closure-body mutated lets are scanned
     // per closure (block bodies) or empty (concise expression bodies,

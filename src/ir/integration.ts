@@ -84,6 +84,7 @@ import {
   lowerFunctionAstToIr,
   STRING_METHOD_TABLE,
   type IrFromAstResolver,
+  type LoweredFunctionResult,
   type ModuleBindingGlobal,
 } from "./from-ast.js";
 import {
@@ -113,6 +114,7 @@ import {
   type IrClassId,
   type IrUnitId,
 } from "./identity.js";
+import type { ProgramAbiDerivedUnitRecord } from "./program-abi.js";
 import {
   buildIrPlanningIdentityContext,
   buildIrLegacyUnitProjection,
@@ -176,7 +178,7 @@ import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
 import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./types.js";
-import { definedFuncAt, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
+import { definedFuncAt, definedFuncHandleOf, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
 import {
   classifyIrFailure,
   IrInvariantError,
@@ -312,6 +314,62 @@ export function compileIrPathFunctions(
       "ir/integration: ProgramAbiSession and lowering plans use different identity inventories",
     );
   }
+  const inventoryUnitById = new Map(
+    moduleBindingIdentityContext.inventory.allUnits.map((unit) => [unit.id, unit] as const),
+  );
+  const liftedProgramAbiRecords = (
+    result: LoweredFunctionResult,
+    parentUnitId: IrUnitId,
+    terminalOwnerId: IrUnitId,
+  ): ReadonlyMap<IrUnitId, ProgramAbiDerivedUnitRecord> => {
+    if (result.lifted.length !== result.liftedUnitProvenance.length) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "build",
+        `ir/integration: ${parentUnitId} produced ${result.lifted.length} lifted functions but ${result.liftedUnitProvenance.length} provenance records`,
+      );
+    }
+    const records = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
+    for (const provenance of result.liftedUnitProvenance) {
+      if (provenance.parentId !== parentUnitId || provenance.role !== "lifted-closure") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: lifted unit ${provenance.id} has invalid parent or role provenance`,
+        );
+      }
+      const parent = inventoryUnitById.get(provenance.parentId);
+      if (!parent || parent.terminalOwnerId !== terminalOwnerId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: lifted unit ${provenance.id} has no exact inventory parent and terminal owner`,
+        );
+      }
+      if (records.has(provenance.id)) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: lifted unit ${provenance.id} was produced more than once`,
+        );
+      }
+      records.set(provenance.id, {
+        ...provenance,
+        sourceId: parent.sourceId,
+        terminalOwnerId,
+      });
+    }
+    for (const lifted of result.lifted) {
+      if (!records.has(lifted.unitId)) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "build",
+          `ir/integration: lifted function ${lifted.unitId} / ${lifted.name} has no exact provenance record`,
+        );
+      }
+    }
+    return records;
+  };
   const moduleBindingResolver = makeIrModuleBindingResolver(
     ctx.checker,
     moduleBindingOptions,
@@ -529,6 +587,8 @@ export function compileIrPathFunctions(
     /** Public/legacy terminal-owner label; synthesized artifacts never become rows. */
     readonly ownerName: string;
     readonly fn: IrFunction;
+    /** Complete Program ABI provenance when this artifact was lifted from a source unit. */
+    readonly derivedUnit?: ProgramAbiDerivedUnitRecord;
     /**
      * Slice 3 (#1169c): set when `fn` is a lifted closure or nested
      * function rather than a top-level FunctionDeclaration. Synthesized
@@ -639,6 +699,7 @@ export function compileIrPathFunctions(
           `ir/integration: ${name} lowered as artifact ${result.main.unitId}, expected ${ownerUnitId}`,
         );
       }
+      const liftedAbiRecords = liftedProgramAbiRecords(result, ownerUnitId, owner.unitId);
       const mainErrors = verifyBuiltArtifact(result.main, name, false);
       if (mainErrors.length > 0) {
         failures.recordVerifierDetails(owner, mainErrors);
@@ -668,6 +729,7 @@ export function compileIrPathFunctions(
           name: lifted.name,
           ownerName: owner.legacyName,
           fn: lifted,
+          derivedUnit: liftedAbiRecords.get(lifted.unitId)!,
           synthesized: true,
         });
       }
@@ -827,6 +889,7 @@ export function compileIrPathFunctions(
               `ir/integration: ${memberName} lowered as artifact ${result.main.unitId}, expected ${ownerUnitId}`,
             );
           }
+          const liftedAbiRecords = liftedProgramAbiRecords(result, ownerUnitId, owner.unitId);
           const mainErrors = verifyBuiltArtifact(result.main, memberName, false);
           if (mainErrors.length > 0) {
             failures.recordVerifierDetails(owner, mainErrors);
@@ -859,6 +922,7 @@ export function compileIrPathFunctions(
               name: lifted.name,
               ownerName: owner.legacyName,
               fn: lifted,
+              derivedUnit: liftedAbiRecords.get(lifted.unitId)!,
               synthesized: true,
             });
           }
@@ -971,6 +1035,7 @@ export function compileIrPathFunctions(
           `ir/integration: module init lowered as artifact ${result.main.unitId}, expected ${moduleInitUnitId}`,
         );
       }
+      const liftedAbiRecords = liftedProgramAbiRecords(result, moduleInitUnitId, moduleInitOwner.unitId);
       const mainErrors = verifyBuiltArtifact(result.main, MODULE_INIT_UNIT_NAME, false);
       if (mainErrors.length > 0) {
         failures.recordVerifierDetails(moduleInitOwner, mainErrors);
@@ -998,6 +1063,7 @@ export function compileIrPathFunctions(
               name: lifted.name,
               ownerName: moduleInitOwner.legacyName,
               fn: lifted,
+              derivedUnit: liftedAbiRecords.get(lifted.unitId)!,
               synthesized: true,
             });
           }
@@ -1416,6 +1482,7 @@ export function compileIrPathFunctions(
         name: fn.name,
         ownerName: owner.legacyName,
         fn: final,
+        derivedUnit: before?.derivedUnit,
         synthesized: before?.synthesized === true || wasCloned,
         classMember: before?.classMember,
         moduleInit: before?.moduleInit,
@@ -1510,11 +1577,33 @@ export function compileIrPathFunctions(
   // allocation (e.g. the ABI-parity withdrawal cascade in Phase 3) can stub
   // the orphaned slot instead of leaving an EMPTY body in the module (see
   // the stub pass after the patch loop below).
+  const exactArtifactFuncIdx = (unitId: IrUnitId): number | undefined => {
+    const func = ctx.irUnitFuncMap.get(unitId);
+    return func ? definedFuncHandleOf(ctx, func) : undefined;
+  };
+  const legacyArtifactFuncIdx = (entry: BuiltFn): number | undefined =>
+    entry.moduleInit
+      ? (() => {
+          const local = ctx.mod.functions.findIndex((candidate) => candidate.name === "__module_init");
+          return local >= 0 ? ctx.numImportFuncs + local : undefined;
+        })()
+      : ctx.funcMap.get(entry.name);
+  const hasPreallocatedArtifactSlot = (entry: BuiltFn): boolean =>
+    (originalArtifactUnitIds.has(entry.artifactUnitId) && !entry.synthesized) ||
+    entry.classMember === true ||
+    entry.moduleInit === true;
+  for (const entry of healthyForLower) {
+    if (!hasPreallocatedArtifactSlot(entry) || ctx.irUnitFuncMap.has(entry.artifactUnitId)) continue;
+    const funcIdx = legacyArtifactFuncIdx(entry);
+    const func = funcIdx === undefined ? undefined : definedFuncAt(ctx, funcIdx);
+    if (func) ctx.irUnitFuncMap.set(entry.artifactUnitId, func);
+  }
   const freshSlots: Array<{
     readonly artifactUnitId: IrUnitId;
     readonly funcIdx: number;
     readonly terminalOwnerUnitId: IrUnitId;
   }> = [];
+  const claimedIrFunctions = new Set(ctx.irUnitFuncMap.values());
   for (const entry of healthyForLower) {
     // Top-level (non-synthesized) functions already have a funcIdx
     // allocated by `compileDeclarations`. Skip them.
@@ -1526,15 +1615,30 @@ export function compileIrPathFunctions(
     // (#3142 Slice 2) The module-init unit patches the legacy
     // `__module_init` slot (located by name at Phase 3) — never a fresh one.
     if (entry.moduleInit) continue;
-    if (ctx.funcMap.has(entry.name)) continue; // already registered (defensive)
-    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
-      name: entry.name,
-      typeIdx: 0,
-      locals: [],
-      body: [],
-      exported: false,
-    });
+    if (ctx.irUnitFuncMap.has(entry.artifactUnitId)) continue;
+    const namedIdx = ctx.funcMap.get(entry.name);
+    const named = namedIdx === undefined ? undefined : definedFuncAt(ctx, namedIdx);
+    const func =
+      named && named.body.length === 0 && !claimedIrFunctions.has(named)
+        ? named
+        : {
+            name: entry.name,
+            typeIdx: 0,
+            locals: [],
+            body: [],
+            exported: false,
+          };
+    if (func !== named) ctx.mod.functions.push(func);
+    const funcIdx = definedFuncHandleOf(ctx, func);
+    if (funcIdx === undefined) {
+      throw new IrInvariantError(
+        "missing-function-slot",
+        "resolve",
+        `ir/integration: exact artifact ${entry.artifactUnitId} / ${entry.name} has no allocator slot`,
+      );
+    }
+    ctx.irUnitFuncMap.set(entry.artifactUnitId, func);
+    claimedIrFunctions.add(func);
     ctx.funcMap.set(entry.name, funcIdx);
     freshSlots.push({
       artifactUnitId: entry.artifactUnitId,
@@ -1638,13 +1742,6 @@ export function compileIrPathFunctions(
   // not the helpers map), so we resolve names against `ctx.mod.functions`
   // directly to pick up the current absolute index.
   const unitCallableSlots = new Map<IrUnitId, IrUnitCallableSlot>();
-  // Pass-created lifted/monomorphized units are deliberately absent until
-  // lowering carries explicit parent/role/allocation-ordinal provenance.
-  // Inventory membership is the exact boundary; labels and encoded IDs never
-  // classify a unit as source-owned or derived.
-  const programAbiInventoryUnitIds = ctx.programAbiSession
-    ? new Set(ctx.programAbiSession.inventory.allUnits.map((unit) => unit.id))
-    : undefined;
   const bindUnitCallableSlot = (ref: IrFuncRef, funcIdx: number, physicalName: string): void => {
     if (ref.binding.kind !== "unit") {
       throw new IrInvariantError(
@@ -1667,14 +1764,24 @@ export function compileIrPathFunctions(
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: unit ${ref.binding.unitId} maps to both ${existing.physicalName} and ${physicalName}`,
+          `ir/integration: unit ${ref.binding.unitId} maps to both ${existing.physicalName}@${existing.funcIdx} and ${physicalName}@${funcIdx}`,
         );
       }
       existing.compatibilityNames.add(ref.name);
       return;
     }
+    const mapped = ctx.irUnitFuncMap.get(ref.binding.unitId);
+    if (mapped && mapped !== defined) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `ir/integration: exact unit ${ref.binding.unitId} maps to more than one allocator function`,
+      );
+    }
+    ctx.irUnitFuncMap.set(ref.binding.unitId, defined);
     let programAbiBindingId: IrBindingId | undefined;
-    if (programAbiInventoryUnitIds?.has(ref.binding.unitId)) {
+    const derived = ctx.programAbiSession?.registeredDerivedUnit(ref.binding.unitId);
+    if (ctx.programAbiSession?.hasKnownUnit(ref.binding.unitId) && !derived) {
       const signature = ctx.mod.types[defined.typeIdx];
       if (!signature || signature.kind !== "func") {
         throw new IrInvariantError(
@@ -1693,24 +1800,11 @@ export function compileIrPathFunctions(
     });
   };
   const artifactFuncIdx = (entry: BuiltFn): number | undefined =>
-    entry.moduleInit
-      ? (() => {
-          const local = ctx.mod.functions.findIndex((candidate) => candidate.name === "__module_init");
-          return local >= 0 ? ctx.numImportFuncs + local : undefined;
-        })()
-      : ctx.funcMap.get(entry.name);
+    exactArtifactFuncIdx(entry.artifactUnitId) ?? legacyArtifactFuncIdx(entry);
   const bindPlannedUnitTarget = (ref: IrFuncRef): void => {
     if (ref.binding.kind !== "unit") return;
     const existing = unitCallableSlots.get(ref.binding.unitId);
     if (existing) {
-      const namedIdx = ctx.funcMap.get(ref.name);
-      if (namedIdx !== existing.funcIdx) {
-        throw new IrInvariantError(
-          "selection-preparation-mismatch",
-          "resolve",
-          `ir/integration: adapter ${ref.name} does not resolve to exact unit ${ref.binding.unitId}`,
-        );
-      }
       existing.compatibilityNames.add(ref.name);
       return;
     }
@@ -1821,11 +1915,56 @@ export function compileIrPathFunctions(
     previous: NonNullable<ReturnType<typeof definedFuncAt>>,
     replacement: NonNullable<ReturnType<typeof definedFuncAt>>,
   ): void => {
+    const mapped = ctx.irUnitFuncMap.get(unitId);
+    if (mapped && mapped !== previous) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "patch",
+        `ir/integration: exact unit ${unitId} replacement does not match its allocator function`,
+      );
+    }
     replaceDefinedFuncAt(ctx, funcIdx, replacement);
+    ctx.irUnitFuncMap.set(unitId, replacement);
     const bindingId = unitCallableSlots.get(unitId)?.programAbiBindingId;
     if (bindingId) {
       ctx.programAbiSession!.replaceDefinedFunctionLocator(bindingId, previous, replacement);
     }
+  };
+  const planSettledDerivedCallable = (
+    entry: BuiltFn,
+    replacement: NonNullable<ReturnType<typeof definedFuncAt>>,
+  ): void => {
+    if (!entry.derivedUnit || !ctx.programAbiSession) return;
+    const slot = unitCallableSlots.get(entry.artifactUnitId);
+    if (!slot || slot.programAbiBindingId) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "patch",
+        `ir/integration: lifted unit ${entry.artifactUnitId} has no unique unsettled callable slot`,
+      );
+    }
+    const signature = ctx.mod.types[replacement.typeIdx];
+    if (!signature || signature.kind !== "func") {
+      throw new IrInvariantError(
+        "abi-type-index-mismatch",
+        "patch",
+        `ir/integration: lifted unit ${entry.artifactUnitId} has non-function type ${replacement.typeIdx}`,
+      );
+    }
+    ctx.programAbiSession.registerDerivedUnit(entry.derivedUnit);
+    const bindingId = planProgramAbiUnitCallable(ctx, {
+      ref: irUnitFuncRef(entry.fn),
+      signature,
+      func: replacement,
+    });
+    if (!bindingId) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "patch",
+        `ir/integration: lifted unit ${entry.artifactUnitId} was not accepted by Program ABI planning`,
+      );
+    }
+    slot.programAbiBindingId = bindingId;
   };
   const pendingPatches: PendingPatch[] = [];
   // (#3551) Exact artifact identities withdrawn by the typeIdx-parity guard
@@ -2045,6 +2184,7 @@ export function compileIrPathFunctions(
       exported: patch.existing.exported,
     };
     replaceUnitCallableAt(patch.entry.artifactUnitId, patch.funcIdx, patch.existing, replacement);
+    planSettledDerivedCallable(patch.entry, replacement);
     compiled.push(patch.entry.name);
     compiledArtifactEvidence.push({
       artifactUnitId: patch.entry.artifactUnitId,
@@ -2440,8 +2580,8 @@ interface IrUnitCallableSlot {
   readonly physicalName: string;
   /** Temporary adapter labels admitted for this exact unit and slot only. */
   readonly compatibilityNames: Set<string>;
-  /** Present only for inventory-backed units planned through ProgramAbiSession. */
-  readonly programAbiBindingId?: IrBindingId;
+  /** Set once the unit has a settled signature and Program ABI plan. */
+  programAbiBindingId?: IrBindingId;
 }
 
 /**

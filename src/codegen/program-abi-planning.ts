@@ -74,10 +74,12 @@ export function planProgramAbiUnitCallable(
     throw new TypeError("program ABI unit callable planning requires an exact unit reference");
   }
   const unitId = plan.ref.binding.unitId;
-  // Derived lifted/monomorphized functions stay on the compatibility adapter
-  // until their producers carry explicit ProgramAbiDerivedUnitRecord
-  // provenance. Exact inventory membership is the only accepted classifier.
-  if (!session.inventory.allUnits.some((unit) => unit.id === unitId)) return undefined;
+  if (!session.hasKnownUnit(unitId)) return undefined;
+  const derived = session.registeredDerivedUnit(unitId);
+  // Lifted functions use one owner-wide allocation counter, so ordinal + 1
+  // is injective beneath the owner's body slot (which occupies zero).
+  // Other derived roles wait for the provenance-path ordering follow-up.
+  if (derived && derived.role !== "lifted-closure") return undefined;
   const bindingId = irUnitCallableBindingId(unitId);
   const structuralReferenceKey = irCallableBindingKey(plan.ref.binding);
   session.ensurePlan({
@@ -85,6 +87,7 @@ export function planProgramAbiUnitCallable(
     structuralOrder: session.structuralOrder.forUnit(unitId, {
       domain: "callable",
       roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.body,
+      ...(derived ? { derivedOrdinal: derived.ordinal + 1 } : {}),
     }),
     structuralReferenceKey,
     displayName: plan.func.name,
