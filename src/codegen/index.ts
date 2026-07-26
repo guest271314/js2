@@ -2183,7 +2183,7 @@ function planIrOverlay(
       const params: IrType[] = [];
       for (let i = 0; i < declaration.parameters.length; i++) {
         const p = declaration.parameters[i]!;
-        params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapeSidecar));
+        params.push(resolvePositionType(effectiveIrParamTypeNode(p), entry?.params[i], ctx, classShapeSidecar));
       }
       const override = { params, returnType };
       overrideMapByUnitId.set(unitId, override);
