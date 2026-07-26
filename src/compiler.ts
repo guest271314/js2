@@ -37,8 +37,9 @@ import { WasmEncoder } from "./emit/encoder.js";
 import { generateSourceMap } from "./emit/sourcemap.js";
 import { emitWat } from "./emit/wat.js";
 import { applyDefineSubstitutions, applyDefineSubstitutionsWithMap } from "./compiler/define-substitution.js";
+import { collectGraphNodeBuiltinImports } from "./compiler/node-builtin-import-collector.js";
 import { rewriteCjsRequire, rewriteCjsRequireWithMap } from "./cjs-rewrite.js";
-import { collectNodeBuiltinImports, preprocessImports } from "./import-resolver.js";
+import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
@@ -1647,19 +1648,12 @@ export async function compileMultiSource(
   const wasiNodeFsFuncs = new Set<string>();
   const wasiRawImports = new Set<string>();
   const wasiMemAccessors = new Set<string>();
-  const nodeBuiltins = [];
-  const seenNodeBuiltins = new Set<string>();
+  const nodeBuiltins = collectGraphNodeBuiltinImports(Object.values(processedFiles));
   for (const content of Object.values(processedFiles)) {
     for (const name of detectNodeFsImports(content)) wasiNodeFsFuncs.add(name);
     const { rawWasi, memAccessors } = detectRawWasiImports(content);
     for (const name of rawWasi) wasiRawImports.add(name);
     for (const name of memAccessors) wasiMemAccessors.add(name);
-    for (const builtin of collectNodeBuiltinImports(content)) {
-      const key = `${builtin.localName}\0${builtin.moduleName}\0${builtin.namedBindings?.join("\0") ?? ""}`;
-      if (seenNodeBuiltins.has(key)) continue;
-      seenNodeBuiltins.add(key);
-      nodeBuiltins.push(builtin);
-    }
   }
   return applyOptimize(
     runPipeline({

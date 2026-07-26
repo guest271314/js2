@@ -160,7 +160,7 @@ const NODE_BUILTIN_CLASS_TYPED_STUBS: Record<string, Record<string, string>> = {
 };
 
 /** (#1794) Lookup: is `name` a known node-builtin class export of `moduleName`? */
-function nodeBuiltinClassStub(moduleName: string, name: string): string | null {
+export function nodeBuiltinClassStub(moduleName: string, name: string): string | null {
   const members = NODE_BUILTIN_CLASS_TYPED_STUBS[moduleName]?.[name];
   if (!members) return null;
   return (
@@ -642,55 +642,6 @@ export interface NodeBuiltinImport {
   moduleName: string;
   /** Named bindings imported (e.g., `['createServer', 'get']` from `import { createServer, get } from 'http'`). */
   namedBindings?: string[];
-}
-
-/**
- * Collect Node builtin bindings without rewriting the source.
- *
- * The multi-file pipeline keeps real import declarations so TypeScript can
- * link user/package modules. It still needs the same host-import registration
- * metadata as the single-file preprocessor, especially for package CommonJS
- * rewritten to ESM imports (#3654).
- */
-export function collectNodeBuiltinImports(source: string): NodeBuiltinImport[] {
-  const sf = ts.createSourceFile("__node_builtin_collect__.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-  const builtins: NodeBuiltinImport[] = [];
-
-  for (const stmt of sf.statements) {
-    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
-    const moduleSpec = stmt.moduleSpecifier.text;
-    if (!isNodeBuiltin(moduleSpec)) continue;
-    const moduleName = normalizeNodeBuiltin(moduleSpec);
-    const clause = stmt.importClause;
-
-    if (!clause) {
-      builtins.push({ localName: moduleName, moduleName });
-      continue;
-    }
-    if (clause.isTypeOnly) continue;
-    if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
-      builtins.push({ localName: clause.namedBindings.name.text, moduleName });
-      continue;
-    }
-
-    const namedBindings =
-      clause.namedBindings && ts.isNamedImports(clause.namedBindings)
-        ? clause.namedBindings.elements
-            .filter((element) => !element.isTypeOnly)
-            .map((element) => element.name.text)
-            .filter((name) => nodeBuiltinClassStub(moduleName, name) === null)
-        : [];
-    const localName = clause.name?.text ?? namedBindings[0] ?? moduleName;
-    if (clause.name || namedBindings.length > 0 || !clause.namedBindings) {
-      builtins.push({
-        localName,
-        moduleName,
-        ...(namedBindings.length > 0 ? { namedBindings } : {}),
-      });
-    }
-  }
-
-  return builtins;
 }
 
 /** Result of `preprocessImports`. */
