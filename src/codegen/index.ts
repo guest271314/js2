@@ -26,8 +26,6 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
-import { irArgcGlobalRef, irSupportGlobalRef } from "../ir/abi-bindings.js";
-import { irSupportFuncRef } from "../ir/callable-bindings.js";
 import { asVal, irDynamic, isDynamic, irVal, type IrFuncRef, type IrType } from "../ir/nodes.js";
 import type { LatticeType } from "../ir/propagate.js";
 import {
@@ -38,7 +36,6 @@ import {
   type IrPreparationFailure,
 } from "../ir/outcomes.js";
 import {
-  certifyImportedIrCall,
   effectiveIrParamTypeNode,
   effectiveIrReturnTypeNode,
   irClosureSignatureFromFunctionTypeNode,
@@ -48,10 +45,13 @@ import {
 import type {
   IrHostVoidCallbackLoweringPlan,
   IrImportedCallLoweringPlan,
-  IrImportedOptionalParamPlan,
   IrTopLevelFunctionValueLoweringPlan,
 } from "../ir/ast-lowering-plans.js";
-import { makeIrHostGlobalResolver, makeIrHostVoidCallbackResolver } from "../ir/host-extern.js"; // (#2856/#3214)
+import {
+  makeIrAmbientClassCallResolver,
+  makeIrHostGlobalResolver,
+  makeIrHostVoidCallbackResolver,
+} from "../ir/host-extern.js"; // (#2856/#3214/#3657)
 import { makeIrHostDateSnapshotResolver } from "../ir/host-date.js";
 import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "../ir/backend/legality.js";
 import { collectModuleInitPopulation, MODULE_INIT_UNIT_NAME } from "../ir/module-init.js";
@@ -86,6 +86,11 @@ import { createCodegenContext } from "./context/create-context.js";
 import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
 import { planProgramAbiFunctionValue, planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
+import {
+  planIrImportedCalls,
+  prepareIrAmbientClassCallLowering,
+  recordIrOverlayPreparationFailure,
+} from "./ir-imported-call-planning.js";
 import {
   applyIrFinalContextFunctionRetention,
   closeIrBlockedComponentByIdentity,
@@ -1625,7 +1630,7 @@ interface IrOverlayPlan {
   /** Pre-integration terminal failures retained through exact reconciliation. */
   readonly preparationFailuresByUnitId: Map<IrUnitId, IrPreparationFailure>;
   readonly declByName: ReadonlyMap<string, ts.FunctionDeclaration>;
-  /** Checker-certified A+B1 imported-call and function-value sites. */
+  /** Checker-certified source-unit and ambient-host call sites, keyed by exact AST node. */
   readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
   readonly topLevelFunctionValues: Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
   /** Exact ambient addEventListener void arrows admitted by B2/Calendar. */
@@ -1635,23 +1640,6 @@ interface IrOverlayPlan {
   /** Exact Promise-delay plans, keyed separately by each owned AST call. */
   readonly promiseDelays: IrPromiseDelayLoweringPlans;
   readonly importedFunctionResolver?: irOverlayIdentity.IrIdentityImportedFunctionResolver;
-}
-
-function recordIrOverlayPreparationFailure(
-  plan: Pick<IrOverlayPlan, "identityPlan" | "preparationFailuresByUnitId">,
-  legacyName: string,
-  failure: IrPreparationFailure,
-): void {
-  const unitId = irOverlayIdentity.requireIrOverlayUnitId(plan.identityPlan, legacyName);
-  const previous = plan.preparationFailuresByUnitId.get(unitId);
-  if (previous && previous !== failure) {
-    throw new IrInvariantError(
-      "selection-preparation-mismatch",
-      "resolve",
-      `IR unit ${unitId} / ${legacyName} received more than one preparation result`,
-    );
-  }
-  plan.preparationFailuresByUnitId.set(unitId, failure);
 }
 
 function synchronizeIrSafeFunctionSelection(plan: IrOverlayPlan, selection: IrSelection): IrSelection {
@@ -1788,191 +1776,6 @@ function recordObservedIrOutcomes(
   for (const diagnostic of reconciled.diagnostics) reportErrorNoNode(ctx, diagnostic);
 }
 
-/**
- * A zero-result imported call is lowerable only where JavaScript discards its
- * value. Keep this check in the pre-claim planner: ordinary expression
- * lowering requires an SSA result and must never discover the missing value
- * after the legacy body has already been skipped.
- */
-function importedVoidCallIsDiscarded(call: ts.CallExpression, owner: ts.FunctionDeclaration): boolean {
-  let current: ts.Expression = call;
-  for (;;) {
-    const parent = current.parent;
-    if (ts.isParenthesizedExpression(parent) && parent.expression === current) {
-      current = parent;
-      continue;
-    }
-    // `void` always discards its operand, even when the resulting undefined
-    // value is itself consumed by an outer expression.
-    if (ts.isVoidExpression(parent) && parent.expression === current) return true;
-    // A conditional arm is discarded only when the conditional as a whole is
-    // discarded. Its condition is a value position and deliberately stops.
-    if (ts.isConditionalExpression(parent) && (parent.whenTrue === current || parent.whenFalse === current)) {
-      current = parent;
-      continue;
-    }
-    // Discard lowering evaluates comma operands in source order. Ascend to
-    // require the whole comma expression to reach a discarded context.
-    if (ts.isCommaListExpression(parent) && parent.elements.some((element) => element === current)) {
-      current = parent;
-      continue;
-    }
-    if (
-      ts.isBinaryExpression(parent) &&
-      parent.operatorToken.kind === ts.SyntaxKind.CommaToken &&
-      (parent.left === current || parent.right === current)
-    ) {
-      current = parent;
-      continue;
-    }
-    break;
-  }
-
-  const parent = current.parent;
-  if (ts.isExpressionStatement(parent) && parent.expression === current) return true;
-  return (
-    ts.isReturnStatement(parent) &&
-    parent.expression === current &&
-    effectiveIrReturnTypeNode(owner)?.kind === ts.SyntaxKind.VoidKeyword
-  );
-}
-
-interface IrImportedOverlayPlans {
-  readonly importedCalls: Map<ts.CallExpression, IrImportedCallLoweringPlan>;
-  readonly topLevelFunctionValues: Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>;
-}
-
-function planIrImportedLowering(
-  ctx: CodegenContext,
-  identityPlan: irOverlayIdentity.IrOverlayIdentityPlan,
-  identityImportedFunctions: irOverlayIdentity.IrIdentityImportedFunctionResolver,
-  legacyImportedFunctions: ReturnType<typeof irOverlayIdentity.projectIrOverlayImportedResolver>,
-  classShapeSidecar: IrClassShapeSidecar,
-  declByName: ReadonlyMap<string, ts.FunctionDeclaration>,
-  safeSelection: IrOverlayPlan["safeSelection"],
-  recordPreparationFailure: (legacyName: string, failure: IrPreparationFailure) => void,
-): IrImportedOverlayPlans {
-  const importedCalls = new Map<ts.CallExpression, IrImportedCallLoweringPlan>();
-  const topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
-  const planIdentity = irOverlayIdentity.makeIrFeaturePlanIdentity(identityPlan, identityImportedFunctions);
-  const entrySourceId = identityPlan.identityContext.inventory.sources.find((source) => source.kind === "entry")?.id;
-  if (!entrySourceId) {
-    throw new IrInvariantError(
-      "selection-preparation-mismatch",
-      "resolve",
-      "imported lowering requires one exact entry-source identity",
-    );
-  }
-  for (const [ownerName, declaration] of declByName) {
-    if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
-    let planningFailure: IrPreparationFailure | undefined;
-    const visit = (node: ts.Node): void => {
-      if (planningFailure) return;
-      if (node !== declaration && ts.isFunctionLike(node)) return;
-      if (ts.isCallExpression(node)) {
-        const certified = certifyImportedIrCall(node, legacyImportedFunctions);
-        if (certified) {
-          try {
-            if (
-              process.env.JS2WASM_TEST_INJECT_IR_IMPORTED_PLAN_THROW === "1" ||
-              process.env.JS2WASM_TEST_INJECT_IR_IMPORTED_PLAN_THROW === ownerName
-            ) {
-              throw new Error(`injected imported-call planning failure for ${ownerName}`);
-            }
-            const params = certified.target.declaration.parameters.map((parameter) =>
-              resolvePositionType(effectiveIrParamTypeNode(parameter), undefined, ctx, classShapeSidecar),
-            );
-            const returnNode = effectiveIrReturnTypeNode(certified.target.declaration);
-            const returnType =
-              returnNode?.kind === ts.SyntaxKind.VoidKeyword
-                ? null
-                : resolvePositionType(returnNode, undefined, ctx, classShapeSidecar);
-            if (returnType === null && !importedVoidCallIsDiscarded(node, declaration)) {
-              throw new IrUnsupportedError(
-                "imported-call-planning-unsupported",
-                "resolve",
-                "void imported result is used in a value context",
-              );
-            }
-            if (returnType?.kind === "callable") {
-              throw new IrUnsupportedError(
-                "imported-call-planning-unsupported",
-                "resolve",
-                "callable imported results are outside A+B1",
-              );
-            }
-            const optionalParams = new Map<number, IrImportedOptionalParamPlan>();
-            for (const optional of ctx.funcOptionalParams.get(certified.target.targetName) ?? []) {
-              optionalParams.set(optional.index, {
-                ...(optional.constantDefault ? { constantDefault: optional.constantDefault } : {}),
-                ...(optional.hasExpressionDefault ? { hasExpressionDefault: true } : {}),
-              });
-            }
-            const importedIdentity = planIdentity.imported(ownerName, node.expression, certified.target);
-            const needsArgc =
-              ctx.funcUsesArguments.has(certified.target.targetName) ||
-              ctx.funcOptionalParams.has(certified.target.targetName);
-            importedCalls.set(node, {
-              ...importedIdentity,
-              ownerName,
-              params,
-              returnType,
-              optionalParams,
-              needsArgc,
-              ...(needsArgc ? { argcGlobal: irArgcGlobalRef(entrySourceId) } : {}),
-            });
-            for (const functionArgument of certified.functionArguments) {
-              const valueIdentity = planIdentity.value(ownerName, functionArgument.argument, functionArgument.target);
-              if (valueIdentity.target.binding.kind !== "unit") {
-                throw new IrInvariantError(
-                  "selection-preparation-mismatch",
-                  "resolve",
-                  `function-value target ${valueIdentity.target.name} has no exact source-unit binding`,
-                );
-              }
-              const trampolineName = `__fn_tramp_${functionArgument.target.targetName}_cached`;
-              const cacheGlobalName = `__fn_closure_${functionArgument.target.targetName}`;
-              topLevelFunctionValues.set(functionArgument.argument, {
-                ...valueIdentity,
-                ownerName,
-                signature: functionArgument.signature,
-                trampoline: irSupportFuncRef(
-                  valueIdentity.target.binding.unitId,
-                  "function-value-trampoline",
-                  trampolineName,
-                ),
-                cacheGlobal: irSupportGlobalRef(
-                  valueIdentity.target.binding.unitId,
-                  "function-value-cache",
-                  cacheGlobalName,
-                ),
-                cacheGlobalName,
-              });
-            }
-          } catch (error) {
-            planningFailure = classifyIrFailure(error, "resolve");
-            return;
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(declaration.body);
-    if (planningFailure) {
-      recordPreparationFailure(ownerName, planningFailure);
-      safeSelection.funcs.delete(ownerName);
-      irOverlayIdentity.dropIrSafeFunctionByLegacyName(identityPlan, ownerName);
-      for (const [call, plan] of importedCalls) {
-        if (plan.ownerName === ownerName) importedCalls.delete(call);
-      }
-      for (const [identifier, plan] of topLevelFunctionValues) {
-        if (plan.ownerName === ownerName) topLevelFunctionValues.delete(identifier);
-      }
-    }
-  }
-  return { importedCalls, topLevelFunctionValues };
-}
-
 function planIrOverlay(
   ctx: CodegenContext,
   ast: TypedAST,
@@ -2050,6 +1853,8 @@ function planIrOverlay(
   const isArrayExpression = makeIrArrayExpressionPredicate(ast.checker);
   const isRegExpExpression = makeIrRegExpExpressionPredicate(ast.checker);
   const resolveHostVoidCallback = jsHostExterns ? makeIrHostVoidCallbackResolver(ast.checker) : undefined;
+  const resolveAmbientClassCall =
+    jsHostExterns && options.resolveModuleBindings !== false ? makeIrAmbientClassCallResolver(ast.checker) : undefined;
   const resolveHostDateSnapshot = supportsHostDateSnapshots ? makeIrHostDateSnapshotResolver(ast.checker) : undefined;
   const resolvePromiseDelay =
     jsHostExterns && !ctx.fast && !ctx.nativeStrings && options.resolveModuleBindings !== false
@@ -2085,6 +1890,7 @@ function planIrOverlay(
       dynMemberReadBuildable,
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
       ...(resolveHostVoidCallback ? { hostVoidCallbacks: resolveHostVoidCallback } : {}),
+      ...(resolveAmbientClassCall ? { ambientClassCalls: resolveAmbientClassCall } : {}),
       ...(resolveHostDateSnapshot ? { hostDateSnapshots: resolveHostDateSnapshot } : {}),
       ...(resolvePromiseDelay ? { promiseDelays: resolvePromiseDelay } : {}),
       ...(resolveModuleBinding ? { resolveModuleBinding } : {}),
@@ -2305,25 +2111,21 @@ function planIrOverlay(
     identityPlan.safeFunctionUnitIds,
     identityContext,
   );
-  let importedCalls = new Map<ts.CallExpression, IrImportedCallLoweringPlan>();
-  let topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
+  const { importedCalls, topLevelFunctionValues } = planIrImportedCalls({
+    ctx,
+    identityPlan,
+    preparationFailuresByUnitId,
+    ...(jsHostExterns && identityImportedFunctions ? { identityImportedFunctions, legacyImportedFunctions } : {}),
+    ...(resolveAmbientClassCall ? { resolveAmbientClassCall } : {}),
+    classShapeSidecar,
+    safeSelection,
+    resolvePositionType: (node, mapped, classShapes) => resolvePositionType(node, mapped, ctx, classShapes),
+  });
   const hostVoidCallbacks = new Map<ts.ArrowFunction, IrHostVoidCallbackLoweringPlan>();
   const hostDateImportsByOwnerUnitId = new Map<
     IrUnitId,
     { ownerUnitId: IrUnitId; ownerName: string; importNames: Set<string> }
   >();
-  if (jsHostExterns && identityImportedFunctions) {
-    ({ importedCalls, topLevelFunctionValues } = planIrImportedLowering(
-      ctx,
-      identityPlan,
-      identityImportedFunctions,
-      legacyImportedFunctions,
-      classShapeSidecar,
-      declByName,
-      safeSelection,
-      recordPreparationFailure,
-    ));
-  }
   if (resolveHostVoidCallback) {
     for (const [ownerName, declaration] of declByName) {
       if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
@@ -3521,7 +3323,7 @@ export function generateModule(
       const { classShapes, overrideMap } = plan;
       let safeSelection = applyIrFinalContextFunctionUnitIds(
         plan,
-        plan.safeSelection,
+        prepareIrAmbientClassCallLowering(ctx, plan, plan.safeSelection),
         prepareHostVoidCallbackLoweringByIdentity(
           ctx,
           ast.sourceFile,
