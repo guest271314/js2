@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c5-derived-provenance
+branch: codex/3520-c6-monomorph-provenance
 pr: 3669
 last_merged_pr: 3490
 sprint: current
@@ -102,6 +102,7 @@ files:
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
   - tests/issue-3520-lifted-program-abi.test.ts
+  - tests/issue-3520-monomorph-program-abi.test.ts
   - tests/issue-3520-callable-binding.test.ts
   - tests/issue-3520-global-type-binding.test.ts
   - tests/issue-3520-callable-preregistration.test.ts
@@ -1262,6 +1263,67 @@ monomorphized clones can leave the compatibility adapter. Provider/import/
 runtime/support callables, remaining imported globals, Wasm types and class
 layouts plus DCE remaps, exports and aliases, and the production
 `LegacyAbiAdapter` cutover remain after that.
+
+### 2026-07-26 monomorph-clone provenance continuation
+
+The next stacked continuation on `codex/3520-c6-monomorph-provenance` moves
+monomorphization clones through the same exact derived-unit Program ABI
+contract:
+
+- `monomorphize` now returns one immutable
+  `{ id, parentId, role: "monomorphization-clone", ordinal }` provenance record
+  for every clone, including clones whose parent is itself a lifted unit. The
+  legacy clone-origin sidecar remains temporarily for compatibility, and
+  integration rejects any disagreement between origins, provenance,
+  signatures, and output functions.
+- Integration composes each clone's `sourceId` and `terminalOwnerId` through
+  its exact parent record. It registers the complete derived graph
+  topologically before callable planning, so module/pass insertion order
+  cannot make a child appear to be an inventory root or erase a lifted parent.
+- `ProgramAbiStructuralOrder` assigns dense, deterministic per-root ranks from
+  complete role/ordinal provenance paths. Source bodies retain rank zero;
+  parents precede descendants; the same clone ordinal under two different
+  lifted parents cannot collide; and reverse registration/planning order
+  produces the same ABI order.
+- Ordering is sealed per inventory root rather than globally. A source that
+  has started planning rejects later descendants beneath that root, while a
+  distinct source may still register a child before its parent. Root-local
+  descendant traversal also prevents an unrelated incomplete provenance graph
+  from poisoning another source's ordering.
+
+The production integration-contract regression runs the real monomorphizer,
+then injects two contract-valid ordinal-zero clones beneath two real lifted
+closures sharing one source owner. The clones are deliberately placed before
+their parents and in reverse order; publication still recovers
+owner/lift/clone provenance order, exact binding IDs, distinct final function
+slots, exact function objects, and the distinguishing `f64` versus branded
+boolean parameter/result types. This seam is intentionally explicit:
+production source lowering currently normalizes direct-call tuples to one
+callee signature, so no natural source fixture reaches monomorphization with
+heterogeneous tuples. Pass-level tests continue to prove real clone discovery,
+call rewriting, and ordinals.
+
+The strengthened regression also exposed the next concrete R1 boundary.
+Callable intents containing capture-reference types retain their pre-DCE
+`typeIdx`, while the final located Wasm function correctly uses the compacted
+post-DCE index. Final identity, locator, and callable dispatch are correct, and
+no current consumer treats the stale signature metadata as authoritative.
+Program ABI type intentions plus DCE remap notification must nevertheless land
+before signatures or aliases can become authoritative; the regression binds
+all stable non-capture positions and documents the deferred ref-index check.
+
+The complete #3520 matrix plus #2138 passes **224/224** across **37 files**.
+Strict TypeScript, Prettier, scoped Biome lint, diff, and LOC checks pass.
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants / 37 legacy bodies**, and the fallback ratchet reports no
+unintended, post-claim, or module-level increase. The eight-shard equivalence
+gate passes with **1,608 passing / 35 known failures / 0 new regressions**; one
+baseline failure now passes, and the baseline remains unchanged.
+
+This remains a bounded R1 slice. Provider/import/runtime/support callables,
+remaining imported globals, Program ABI type intentions and DCE remaps, class
+layouts, exports and aliases, and the production `LegacyAbiAdapter` cutover
+still remain before R1 can close.
 
 ### R1a validation evidence
 

@@ -109,8 +109,15 @@ describe("#3520 — monomorphization structural identity", () => {
 
     expect(result.cloneSignatures.size).toBe(1);
     expect(result.cloneOrigins.size).toBe(1);
+    expect(result.cloneUnitProvenance.size).toBe(1);
     const [cloneUnitId, signature] = [...result.cloneSignatures.entries()][0]!;
     expect(result.cloneOrigins.get(cloneUnitId)).toBe(first.unitId);
+    expect(result.cloneUnitProvenance.get(cloneUnitId)).toEqual({
+      id: cloneUnitId,
+      parentId: first.unitId,
+      role: "monomorphization-clone",
+      ordinal: 0,
+    });
     expect(cloneUnitId).toBe(
       createDerivedIrUnitId({
         parentId: first.unitId,
@@ -143,6 +150,56 @@ describe("#3520 — monomorphization structural identity", () => {
     const clone = result.module.functions.find((fn) => fn.unitId === cloneUnitId);
     expect(clone?.name).toBe(signature.name);
     expect(signature.name.startsWith("shared$")).toBe(true);
+  });
+
+  it("preserves exact clone ordinals when the callee is itself a derived lifted unit", () => {
+    const sourceOwner = identities.next("owner");
+    const liftedUnitId = createDerivedIrUnitId({
+      parentId: sourceOwner.unitId,
+      role: "lifted-closure",
+      ordinal: 3,
+    });
+    const lifted: IrFunction = {
+      ...makeIdentity("owner__closure_3"),
+      unitId: liftedUnitId,
+    };
+    const numberCaller = makeCaller("numberCaller", irUnitFuncRef(lifted), F64);
+    const externCaller = makeCaller("externCaller", irUnitFuncRef(lifted), EXTERNREF);
+    const integerCaller = makeCaller("integerCaller", irUnitFuncRef(lifted), I32);
+
+    const result = monomorphize({
+      functions: [lifted, numberCaller, externCaller, integerCaller],
+    });
+
+    expect(result.cloneSignatures.size).toBe(2);
+    expect(result.cloneOrigins.size).toBe(2);
+    const provenance = [...result.cloneUnitProvenance.values()];
+    expect(provenance).toEqual([
+      {
+        id: createDerivedIrUnitId({
+          parentId: liftedUnitId,
+          role: "monomorphization-clone",
+          ordinal: 0,
+        }),
+        parentId: liftedUnitId,
+        role: "monomorphization-clone",
+        ordinal: 0,
+      },
+      {
+        id: createDerivedIrUnitId({
+          parentId: liftedUnitId,
+          role: "monomorphization-clone",
+          ordinal: 1,
+        }),
+        parentId: liftedUnitId,
+        role: "monomorphization-clone",
+        ordinal: 1,
+      },
+    ]);
+    for (const record of provenance) {
+      expect(result.cloneOrigins.get(record.id)).toBe(liftedUnitId);
+      expect(result.module.functions.some((fn) => fn.unitId === record.id)).toBe(true);
+    }
   });
 
   it("excludes only the recursive identity when a same-named peer is cloneable", () => {

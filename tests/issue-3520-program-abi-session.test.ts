@@ -380,6 +380,171 @@ describe("#3520 ProgramAbiSession", () => {
     expect(abi.entries().map((entry) => entry.id)).toEqual(ids);
   });
 
+  it("orders colliding derived ordinals by their complete provenance paths", () => {
+    const fixture = sessionFixture();
+    const owner = fixture.inventory.allUnits.find((unit) => unit.id === fixture.firstUnitId)!;
+    const liftedFirst = createDerivedIrUnitId({
+      parentId: owner.id,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    const liftedSecond = createDerivedIrUnitId({
+      parentId: owner.id,
+      role: "lifted-closure",
+      ordinal: 1,
+    });
+    const cloneOfFirst = createDerivedIrUnitId({
+      parentId: liftedFirst,
+      role: "monomorphization-clone",
+      ordinal: 0,
+    });
+    const cloneOfSecond = createDerivedIrUnitId({
+      parentId: liftedSecond,
+      role: "monomorphization-clone",
+      ordinal: 0,
+    });
+    const unitIds = [owner.id, liftedFirst, cloneOfFirst, liftedSecond, cloneOfSecond];
+    const records: ProgramAbiDerivedUnitRecord[] = [
+      {
+        id: liftedFirst,
+        parentId: owner.id,
+        terminalOwnerId: owner.terminalOwnerId,
+        sourceId: owner.sourceId,
+        role: "lifted-closure",
+        ordinal: 0,
+      },
+      {
+        id: liftedSecond,
+        parentId: owner.id,
+        terminalOwnerId: owner.terminalOwnerId,
+        sourceId: owner.sourceId,
+        role: "lifted-closure",
+        ordinal: 1,
+      },
+      {
+        id: cloneOfFirst,
+        parentId: liftedFirst,
+        terminalOwnerId: owner.terminalOwnerId,
+        sourceId: owner.sourceId,
+        role: "monomorphization-clone",
+        ordinal: 0,
+      },
+      {
+        id: cloneOfSecond,
+        parentId: liftedSecond,
+        terminalOwnerId: owner.terminalOwnerId,
+        sourceId: owner.sourceId,
+        role: "monomorphization-clone",
+        ordinal: 0,
+      },
+    ];
+    const module = createEmptyModule();
+    module.types.push(functionType("$void"));
+    const functions = ["owner", "lifted-0", "clone-of-lifted-0", "lifted-1", "clone-of-lifted-1"].map((name) =>
+      wasmFunction(name),
+    );
+    module.functions.push(...functions);
+
+    const session = new ProgramAbiSession(fixture.inventory, module);
+    // Register children before parents to prove ordering comes from the
+    // complete structural records rather than queue order.
+    for (const record of [...records].reverse()) session.registerDerivedUnit(record);
+
+    const ids = unitIds.map((unitId) => binding(fixture, "callable", "body", unitId));
+    const drafts = unitIds.map(
+      (unitId, index): ProgramAbiDraft => ({
+        id: ids[index]!,
+        structuralOrder: session.structuralOrder.forUnit(unitId, {
+          domain: "callable",
+          roleOrdinal: 0,
+        }),
+        displayName: functions[index]!.name,
+        slotPolicy: "required",
+        slotSpace: "function",
+        intent: {
+          kind: "callable",
+          origin: "source",
+          signature: VOID_SIGNATURE,
+          unitId,
+        },
+      }),
+    );
+    expect(drafts.map((draft) => draft.structuralOrder.derivedOrdinal)).toEqual([0, 1, 2, 3, 4]);
+    expect(new Set(drafts.map((draft) => JSON.stringify(draft.structuralOrder))).size).toBe(drafts.length);
+    const lateLift = createDerivedIrUnitId({
+      parentId: owner.id,
+      role: "lifted-closure",
+      ordinal: 2,
+    });
+    expectInvariant(
+      () =>
+        session.registerDerivedUnit({
+          id: lateLift,
+          parentId: owner.id,
+          terminalOwnerId: owner.terminalOwnerId,
+          sourceId: owner.sourceId,
+          role: "lifted-closure",
+          ordinal: 2,
+        }),
+      "planning-sealed",
+    );
+    const independentOwner = fixture.inventory.allUnits.find((unit) => unit.id === fixture.secondUnitId)!;
+    const independentLift = createDerivedIrUnitId({
+      parentId: independentOwner.id,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    const independentClone = createDerivedIrUnitId({
+      parentId: independentLift,
+      role: "monomorphization-clone",
+      ordinal: 0,
+    });
+    // A sealed source root must not prevent a distinct root from accepting
+    // child-first provenance.
+    session.registerDerivedUnit({
+      id: independentClone,
+      parentId: independentLift,
+      terminalOwnerId: independentOwner.terminalOwnerId,
+      sourceId: independentOwner.sourceId,
+      role: "monomorphization-clone",
+      ordinal: 0,
+    });
+    session.registerDerivedUnit({
+      id: independentLift,
+      parentId: independentOwner.id,
+      terminalOwnerId: independentOwner.terminalOwnerId,
+      sourceId: independentOwner.sourceId,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    expect(
+      session.structuralOrder.forUnit(independentLift, {
+        domain: "callable",
+        roleOrdinal: 0,
+      }).derivedOrdinal,
+    ).toBe(1);
+    expect(
+      session.structuralOrder.forUnit(independentClone, {
+        domain: "callable",
+        roleOrdinal: 0,
+      }).derivedOrdinal,
+    ).toBe(2);
+
+    // Planning is reversed as well. Publication must recover owner-first,
+    // depth-first provenance order, with each parent preceding its clone.
+    for (const draft of [...drafts].reverse()) session.plan(draft);
+    ids.forEach((id, index) => session.attachLocator(id, { kind: "defined-function", value: functions[index]! }));
+
+    const { abi } = session.publish(module);
+    expect(
+      abi
+        .entries()
+        .filter((entry) => entry.intent.kind === "callable")
+        .map((entry) => entry.id),
+    ).toEqual(ids);
+    expect(ids.map((id) => abi.resolveFinalIndex(id)?.index)).toEqual([0, 1, 2, 3, 4]);
+  });
+
   it("resolves imported and defined slots after late function/global import shifts", () => {
     const fixture = sessionFixture();
     const module = createEmptyModule();

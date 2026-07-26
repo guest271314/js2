@@ -76,10 +76,9 @@ export function planProgramAbiUnitCallable(
   const unitId = plan.ref.binding.unitId;
   if (!session.hasKnownUnit(unitId)) return undefined;
   const derived = session.registeredDerivedUnit(unitId);
-  // Lifted functions use one owner-wide allocation counter, so ordinal + 1
-  // is injective beneath the owner's body slot (which occupies zero).
-  // Other derived roles wait for the provenance-path ordering follow-up.
-  if (derived && derived.role !== "lifted-closure") return undefined;
+  if (derived && derived.role !== "lifted-closure" && derived.role !== "monomorphization-clone") {
+    return undefined;
+  }
   const bindingId = irUnitCallableBindingId(unitId);
   const structuralReferenceKey = irCallableBindingKey(plan.ref.binding);
   session.ensurePlan({
@@ -87,7 +86,6 @@ export function planProgramAbiUnitCallable(
     structuralOrder: session.structuralOrder.forUnit(unitId, {
       domain: "callable",
       roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.body,
-      ...(derived ? { derivedOrdinal: derived.ordinal + 1 } : {}),
     }),
     structuralReferenceKey,
     displayName: plan.func.name,

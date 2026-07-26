@@ -1266,6 +1266,7 @@ export function compileIrPathFunctions(
   const originalArtifactUnitIds = new Set<IrUnitId>();
   const afterInlineByUnitId = new Map<IrUnitId, BuiltFn>();
   const ownerByArtifactUnitId = new Map<IrUnitId, IrLegacyUnitProjectionEntry>();
+  const derivedUnitByArtifactUnitId = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
   const monoByUnitId = new Map<IrUnitId, IrFunction>();
   try {
     for (const entry of healthyAfterInline) {
@@ -1279,21 +1280,37 @@ export function compileIrPathFunctions(
       originalArtifactUnitIds.add(entry.artifactUnitId);
       afterInlineByUnitId.set(entry.artifactUnitId, entry);
       ownerByArtifactUnitId.set(entry.artifactUnitId, terminalOwnerOf(entry));
+      if (entry.derivedUnit) derivedUnitByArtifactUnitId.set(entry.artifactUnitId, entry.derivedUnit);
     }
-    if (monoResult.cloneOrigins.size !== monoResult.cloneSignatures.size) {
+    if (
+      monoResult.cloneOrigins.size !== monoResult.cloneSignatures.size ||
+      monoResult.cloneUnitProvenance.size !== monoResult.cloneSignatures.size
+    ) {
       throw new IrInvariantError(
         "pass-output-mismatch",
         "verify",
-        `monomorphize returned ${monoResult.cloneOrigins.size} clone origins but ${monoResult.cloneSignatures.size} clone signatures`,
+        `monomorphize returned ${monoResult.cloneOrigins.size} origins, ${monoResult.cloneUnitProvenance.size} provenance records, and ${monoResult.cloneSignatures.size} signatures`,
       );
     }
-    for (const [cloneUnitId, originUnitId] of monoResult.cloneOrigins) {
-      const originOwner = ownerByArtifactUnitId.get(originUnitId);
+    for (const [cloneUnitId, provenance] of monoResult.cloneUnitProvenance) {
+      const originUnitId = monoResult.cloneOrigins.get(cloneUnitId);
+      if (
+        provenance.id !== cloneUnitId ||
+        provenance.parentId !== originUnitId ||
+        provenance.role !== "monomorphization-clone"
+      ) {
+        throw new IrInvariantError(
+          "pass-output-mismatch",
+          "verify",
+          `monomorphize clone ${cloneUnitId} has inconsistent origin/provenance`,
+        );
+      }
+      const originOwner = ownerByArtifactUnitId.get(provenance.parentId);
       if (!originOwner) {
         throw new IrInvariantError(
           "synthetic-owner-missing",
           "verify",
-          `monomorphize clone ${cloneUnitId} references unknown origin identity ${originUnitId}`,
+          `monomorphize clone ${cloneUnitId} references unknown origin identity ${provenance.parentId}`,
         );
       }
       if (ownerByArtifactUnitId.has(cloneUnitId)) {
@@ -1310,14 +1327,30 @@ export function compileIrPathFunctions(
           `monomorphize clone ${cloneUnitId} has no structural signature`,
         );
       }
-      ownerByArtifactUnitId.set(cloneUnitId, originOwner);
-    }
-    for (const cloneUnitId of monoResult.cloneSignatures.keys()) {
-      if (!monoResult.cloneOrigins.has(cloneUnitId)) {
+      const parentDerived = derivedUnitByArtifactUnitId.get(provenance.parentId);
+      const parentInventory = inventoryUnitById.get(provenance.parentId);
+      const sourceId = parentDerived?.sourceId ?? parentInventory?.sourceId;
+      const terminalOwnerId = parentDerived?.terminalOwnerId ?? parentInventory?.terminalOwnerId;
+      if (!sourceId || terminalOwnerId !== originOwner.unitId) {
         throw new IrInvariantError(
           "synthetic-owner-missing",
           "verify",
-          `monomorphize signature ${cloneUnitId} has no structural origin`,
+          `monomorphize clone ${cloneUnitId} has no exact source/terminal provenance through parent ${provenance.parentId}`,
+        );
+      }
+      derivedUnitByArtifactUnitId.set(cloneUnitId, {
+        ...provenance,
+        sourceId,
+        terminalOwnerId,
+      });
+      ownerByArtifactUnitId.set(cloneUnitId, originOwner);
+    }
+    for (const cloneUnitId of monoResult.cloneSignatures.keys()) {
+      if (!monoResult.cloneOrigins.has(cloneUnitId) || !monoResult.cloneUnitProvenance.has(cloneUnitId)) {
+        throw new IrInvariantError(
+          "synthetic-owner-missing",
+          "verify",
+          `monomorphize signature ${cloneUnitId} has no structural origin/provenance`,
         );
       }
     }
@@ -1482,7 +1515,7 @@ export function compileIrPathFunctions(
         name: fn.name,
         ownerName: owner.legacyName,
         fn: final,
-        derivedUnit: before?.derivedUnit,
+        derivedUnit: before?.derivedUnit ?? derivedUnitByArtifactUnitId.get(fn.unitId),
         synthesized: before?.synthesized === true || wasCloned,
         classMember: before?.classMember,
         moduleInit: before?.moduleInit,
@@ -1566,6 +1599,42 @@ export function compileIrPathFunctions(
   }
   if (!runGlobalPreparation(() => preregisterExceptionSupport(ctx, healthyForLower))) return finishReport();
   if (!runGlobalPreparation(() => preregisterDynamicSupport(ctx, healthyForLower))) return finishReport();
+  if (
+    !runGlobalPreparation(() => {
+      const pending = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
+      for (const entry of healthyForLower) {
+        if (!entry.derivedUnit) continue;
+        if (entry.derivedUnit.id !== entry.artifactUnitId || pending.has(entry.derivedUnit.id)) {
+          throw new IrInvariantError(
+            "selection-preparation-mismatch",
+            "resolve",
+            `ir/integration: derived unit ${entry.derivedUnit.id} is duplicated or detached from artifact ${entry.artifactUnitId}`,
+          );
+        }
+        pending.set(entry.derivedUnit.id, entry.derivedUnit);
+      }
+      const session = ctx.programAbiSession;
+      if (!session) return;
+      while (pending.size > 0) {
+        let registered = 0;
+        for (const [id, record] of pending) {
+          if (!session.hasKnownUnit(record.parentId)) continue;
+          session.registerDerivedUnit(record);
+          pending.delete(id);
+          registered++;
+        }
+        if (registered === 0) {
+          throw new IrInvariantError(
+            "selection-preparation-mismatch",
+            "resolve",
+            `ir/integration: ${pending.size} derived unit(s) have no registered inventory/provenance parent`,
+          );
+        }
+      }
+    })
+  ) {
+    return finishReport();
+  }
 
   // -------------------------------------------------------------------------
   // Register monomorphized clones in `ctx` — append a placeholder
@@ -1940,7 +2009,7 @@ export function compileIrPathFunctions(
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "patch",
-        `ir/integration: lifted unit ${entry.artifactUnitId} has no unique unsettled callable slot`,
+        `ir/integration: derived unit ${entry.artifactUnitId} has no unique unsettled callable slot`,
       );
     }
     const signature = ctx.mod.types[replacement.typeIdx];
@@ -1948,10 +2017,16 @@ export function compileIrPathFunctions(
       throw new IrInvariantError(
         "abi-type-index-mismatch",
         "patch",
-        `ir/integration: lifted unit ${entry.artifactUnitId} has non-function type ${replacement.typeIdx}`,
+        `ir/integration: derived unit ${entry.artifactUnitId} has non-function type ${replacement.typeIdx}`,
       );
     }
-    ctx.programAbiSession.registerDerivedUnit(entry.derivedUnit);
+    if (!ctx.programAbiSession.registeredDerivedUnit(entry.artifactUnitId)) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "patch",
+        `ir/integration: derived unit ${entry.artifactUnitId} was not registered before callable ordering`,
+      );
+    }
     const bindingId = planProgramAbiUnitCallable(ctx, {
       ref: irUnitFuncRef(entry.fn),
       signature,
@@ -1961,7 +2036,7 @@ export function compileIrPathFunctions(
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "patch",
-        `ir/integration: lifted unit ${entry.artifactUnitId} was not accepted by Program ABI planning`,
+        `ir/integration: derived unit ${entry.artifactUnitId} was not accepted by Program ABI planning`,
       );
     }
     slot.programAbiBindingId = bindingId;

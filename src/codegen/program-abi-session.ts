@@ -67,6 +67,9 @@ export class ProgramAbiStructuralOrder {
   private readonly unitAnchors = new Map<IrUnitId, ProgramAbiDeclarationAnchor>();
   private readonly classAnchors = new Map<IrClassId, ProgramAbiDeclarationAnchor>();
   private readonly derivedParents = new Map<IrUnitId, IrUnitId>();
+  private readonly derivedChildren = new Map<IrUnitId, Set<IrUnitId>>();
+  private readonly derivedUnits = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
+  private readonly derivedPathOrdinalsByRoot = new Map<IrUnitId, ReadonlyMap<IrUnitId, number>>();
 
   constructor(readonly inventory: IrUnitInventory) {
     const sourceLocalCounts = new Map<IrSourceId, number>();
@@ -166,14 +169,29 @@ export class ProgramAbiStructuralOrder {
     }
   }
 
-  registerDerivedUnit(id: IrUnitId, parentId: IrUnitId): void {
-    if (this.unitAnchors.has(id) || this.derivedParents.has(id)) {
+  registerDerivedUnit(record: ProgramAbiDerivedUnitRecord): void {
+    const exactRecord = Object.freeze({ ...record });
+    const parentRoot = this.resolveKnownRoot(exactRecord.parentId, new Set());
+    if (parentRoot !== undefined && this.derivedPathOrdinalsByRoot.has(parentRoot)) {
       throw new ProgramAbiInvariantError(
-        "ambiguous-order-anchor",
-        `derived unit ${id} was registered more than once with the ABI ordering sidecar`,
+        "planning-sealed",
+        `cannot register derived unit ${exactRecord.id} after ordering started for its provenance root`,
       );
     }
-    this.derivedParents.set(id, parentId);
+    if (this.unitAnchors.has(exactRecord.id) || this.derivedParents.has(exactRecord.id)) {
+      throw new ProgramAbiInvariantError(
+        "ambiguous-order-anchor",
+        `derived unit ${exactRecord.id} was registered more than once with the ABI ordering sidecar`,
+      );
+    }
+    this.derivedParents.set(exactRecord.id, exactRecord.parentId);
+    this.derivedUnits.set(exactRecord.id, exactRecord);
+    let children = this.derivedChildren.get(exactRecord.parentId);
+    if (!children) {
+      children = new Set();
+      this.derivedChildren.set(exactRecord.parentId, children);
+    }
+    children.add(exactRecord.id);
   }
 
   forSource(sourceId: IrSourceId, suborder: ProgramAbiDraftSuborder): ProgramAbiDraftOrder {
@@ -181,7 +199,11 @@ export class ProgramAbiStructuralOrder {
   }
 
   forUnit(unitId: IrUnitId, suborder: ProgramAbiDraftSuborder): ProgramAbiDraftOrder {
-    return this.orderFor(this.resolveUnitAnchor(unitId, new Set()), `unit ${unitId}`, suborder);
+    const exactSuborder =
+      this.derivedUnits.has(unitId) && suborder.derivedOrdinal === undefined
+        ? { ...suborder, derivedOrdinal: this.derivedPathOrdinal(unitId) }
+        : suborder;
+    return this.orderFor(this.resolveUnitAnchor(unitId, new Set()), `unit ${unitId}`, exactSuborder);
   }
 
   forClass(classId: IrClassId, suborder: ProgramAbiDraftSuborder): ProgramAbiDraftOrder {
@@ -224,6 +246,100 @@ export class ProgramAbiStructuralOrder {
     const parent = this.resolveUnitAnchor(parentId, visiting);
     visiting.delete(unitId);
     return parent;
+  }
+
+  private derivedPathOrdinal(id: IrUnitId): number {
+    const path = this.resolveDerivedPath(id, new Set());
+    let ordinals = this.derivedPathOrdinalsByRoot.get(path.rootUnitId);
+    if (!ordinals) {
+      ordinals = this.buildDerivedPathOrdinals(path.rootUnitId);
+      this.derivedPathOrdinalsByRoot.set(path.rootUnitId, ordinals);
+    }
+    const ordinal = ordinals.get(id);
+    if (ordinal === undefined) {
+      throw new ProgramAbiInvariantError("unknown-order-anchor", `derived unit ${id} has no ABI provenance-path rank`);
+    }
+    return ordinal;
+  }
+
+  private buildDerivedPathOrdinals(rootUnitId: IrUnitId): ReadonlyMap<IrUnitId, number> {
+    const entries: Array<{ readonly id: IrUnitId; readonly path: ProgramAbiDerivedPath }> = [];
+    const pending = [...(this.derivedChildren.get(rootUnitId) ?? [])];
+    const visited = new Set<IrUnitId>();
+    while (pending.length > 0) {
+      const id = pending.pop()!;
+      if (visited.has(id)) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `derived ABI ordering reaches ${id} more than once from root ${rootUnitId}`,
+        );
+      }
+      visited.add(id);
+      const path = this.resolveDerivedPath(id, new Set());
+      if (path.rootUnitId !== rootUnitId) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `derived unit ${id} is indexed beneath root ${rootUnitId} but resolves through ${path.rootUnitId}`,
+        );
+      }
+      entries.push({ id, path });
+      pending.push(...(this.derivedChildren.get(id) ?? []));
+    }
+
+    const ordinals = new Map<IrUnitId, number>();
+    entries.sort((left, right) => compareDerivedPaths(left.path, right.path));
+    for (let index = 0; index < entries.length; index++) {
+      if (index > 0 && compareDerivedPaths(entries[index - 1]!.path, entries[index]!.path) === 0) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `derived units ${entries[index - 1]!.id} and ${entries[index]!.id} share one provenance path`,
+        );
+      }
+      ordinals.set(entries[index]!.id, index + 1);
+    }
+    return ordinals;
+  }
+
+  private resolveDerivedPath(id: IrUnitId, visiting: Set<IrUnitId>): ProgramAbiDerivedPath {
+    if (this.unitAnchors.has(id)) {
+      return Object.freeze({ rootUnitId: id, segments: Object.freeze([]) });
+    }
+    const record = this.derivedUnits.get(id);
+    if (!record) {
+      throw new ProgramAbiInvariantError(
+        "unknown-order-anchor",
+        `derived ABI ordering references unknown parent ${id}`,
+      );
+    }
+    if (!validOrdinal(record.ordinal) || record.role.length === 0) {
+      throw new ProgramAbiInvariantError(
+        "invalid-draft-order",
+        `derived unit ${id} has invalid role/ordinal ordering provenance`,
+      );
+    }
+    if (visiting.has(id)) {
+      throw new ProgramAbiInvariantError("ambiguous-order-anchor", `derived ABI order cycle includes ${id}`);
+    }
+    visiting.add(id);
+    const parent = this.resolveDerivedPath(record.parentId, visiting);
+    visiting.delete(id);
+    return Object.freeze({
+      rootUnitId: parent.rootUnitId,
+      segments: Object.freeze([...parent.segments, Object.freeze({ role: record.role, ordinal: record.ordinal })]),
+    });
+  }
+
+  private resolveKnownRoot(id: IrUnitId, visiting: Set<IrUnitId>): IrUnitId | undefined {
+    if (this.unitAnchors.has(id)) return id;
+    const parentId = this.derivedParents.get(id);
+    if (parentId === undefined) return undefined;
+    if (visiting.has(id)) {
+      throw new ProgramAbiInvariantError("ambiguous-order-anchor", `derived ABI order cycle includes ${id}`);
+    }
+    visiting.add(id);
+    const root = this.resolveKnownRoot(parentId, visiting);
+    visiting.delete(id);
+    return root;
   }
 }
 
@@ -274,6 +390,25 @@ type SessionState = "open" | "publishing" | "published" | "failed";
 
 function validOrdinal(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+interface ProgramAbiDerivedPath {
+  readonly rootUnitId: IrUnitId;
+  readonly segments: readonly {
+    readonly role: string;
+    readonly ordinal: number;
+  }[];
+}
+
+function compareDerivedPaths(a: ProgramAbiDerivedPath, b: ProgramAbiDerivedPath): number {
+  const sharedLength = Math.min(a.segments.length, b.segments.length);
+  for (let index = 0; index < sharedLength; index++) {
+    const left = a.segments[index]!;
+    const right = b.segments[index]!;
+    if (left.role !== right.role) return left.role < right.role ? -1 : 1;
+    if (left.ordinal !== right.ordinal) return left.ordinal - right.ordinal;
+  }
+  return a.segments.length - b.segments.length;
 }
 
 function locatorObject(locator: ProgramAbiSlotLocator): object {
@@ -386,6 +521,7 @@ function compareDrafts(
  */
 export class ProgramAbiSession {
   private readonly sourceOrderById = new Map<IrSourceId, number>();
+  private readonly inventoryUnitIds = new Set<IrUnitId>();
   private readonly drafts = new Map<IrBindingId, ProgramAbiDraft>();
   private readonly draftOrderOwners = new Map<string, IrBindingId>();
   private readonly derivedUnits = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
@@ -403,6 +539,7 @@ export class ProgramAbiSession {
     readonly module: WasmModule,
   ) {
     for (const source of inventory.sources) this.sourceOrderById.set(source.id, source.order);
+    for (const unit of inventory.allUnits) this.inventoryUnitIds.add(unit.id);
     this.structuralOrder = new ProgramAbiStructuralOrder(inventory);
   }
 
@@ -429,7 +566,7 @@ export class ProgramAbiSession {
   }
 
   hasKnownUnit(id: IrUnitId): boolean {
-    return this.derivedUnits.has(id) || this.inventory.allUnits.some((unit) => unit.id === id);
+    return this.derivedUnits.has(id) || this.inventoryUnitIds.has(id);
   }
 
   registeredDerivedUnit(id: IrUnitId): ProgramAbiDerivedUnitRecord | undefined {
@@ -518,8 +655,9 @@ export class ProgramAbiSession {
         `derived unit ${record.id} was registered more than once`,
       );
     }
-    this.derivedUnits.set(record.id, Object.freeze({ ...record }));
-    this.structuralOrder.registerDerivedUnit(record.id, record.parentId);
+    const exactRecord = Object.freeze({ ...record });
+    this.structuralOrder.registerDerivedUnit(exactRecord);
+    this.derivedUnits.set(exactRecord.id, exactRecord);
   }
 
   createTypeCell(type: TypeDef): ProgramAbiTypeCell {
