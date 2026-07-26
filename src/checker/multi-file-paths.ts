@@ -1,0 +1,132 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { ts } from "../ts-api.js";
+
+/** Script-file extensions recognized by the in-memory multi-source pipeline. */
+const KNOWN_SCRIPT_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
+
+export function stripMultiFileExtension(name: string): string {
+  for (const ext of KNOWN_SCRIPT_EXTS) {
+    if (name.endsWith(ext)) return name.slice(0, -ext.length);
+  }
+  return name;
+}
+
+function hasKnownExtension(name: string): boolean {
+  return KNOWN_SCRIPT_EXTS.some((ext) => name.endsWith(ext));
+}
+
+export function multiFileScriptKind(name: string): ts.ScriptKind {
+  if (name.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (name.endsWith(".jsx")) return ts.ScriptKind.JSX;
+  if (name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")) return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
+export function multiFileExtension(name: string): ts.Extension {
+  if (name.endsWith(".tsx")) return ts.Extension.Tsx;
+  if (name.endsWith(".jsx")) return ts.Extension.Jsx;
+  if (name.endsWith(".js")) return ts.Extension.Js;
+  if (name.endsWith(".mjs")) return ts.Extension.Mjs;
+  if (name.endsWith(".cjs")) return ts.Extension.Cjs;
+  return ts.Extension.Ts;
+}
+
+/**
+ * Normalize an in-memory project path to the canonical key used by both the
+ * one-shot CompilerHost and the incremental LanguageServiceHost.
+ */
+export function normalizeMultiFileName(name: string): string {
+  let normalized = name.replaceAll("\\", "/");
+  if (normalized.startsWith("./")) normalized = normalized.slice(2);
+  if (normalized.startsWith("/")) normalized = normalized.slice(1);
+
+  const parts = normalized.split("/");
+  const resolved: string[] = [];
+  for (const part of parts) {
+    if (part === "..") {
+      resolved.pop();
+    } else if (part !== "." && part !== "") {
+      resolved.push(part);
+    }
+  }
+  normalized = resolved.join("/");
+  return hasKnownExtension(normalized) ? normalized : `${normalized}.ts`;
+}
+
+/**
+ * Locate a virtual file while accepting extension swaps and directory-index
+ * imports, matching the historical compileMulti resolver.
+ */
+export function probeMultiFileKey(resolved: string, files: ReadonlyMap<string, unknown>): string | undefined {
+  if (files.has(resolved)) return resolved;
+  if (hasKnownExtension(resolved)) {
+    const stem = stripMultiFileExtension(resolved);
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const candidate = stem + ext;
+      if (candidate !== resolved && files.has(candidate)) return candidate;
+    }
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const candidate = `${stem}/index${ext}`;
+      if (files.has(candidate)) return candidate;
+    }
+  } else {
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const candidate = resolved + ext;
+      if (files.has(candidate)) return candidate;
+    }
+    for (const ext of KNOWN_SCRIPT_EXTS) {
+      const candidate = `${resolved}/index${ext}`;
+      if (files.has(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+export function buildBareSpecifierLookup(
+  files: ReadonlyMap<string, unknown>,
+  specifierMap?: Record<string, string>,
+): Map<string, string> {
+  const lookup = new Map<string, string>();
+  for (const normalized of files.keys()) {
+    const withoutExt = stripMultiFileExtension(normalized);
+    lookup.set(withoutExt, normalized);
+    if (!lookup.has(normalized)) lookup.set(normalized, normalized);
+
+    const basename = withoutExt.split("/").pop()!;
+    if (basename && !lookup.has(basename)) lookup.set(basename, normalized);
+    if (basename === "index") {
+      const directory = withoutExt.replace(/\/index$/, "");
+      if (directory && !lookup.has(directory)) lookup.set(directory, normalized);
+    }
+  }
+
+  if (specifierMap) {
+    for (const [specifier, fileKey] of Object.entries(specifierMap)) {
+      lookup.set(specifier, normalizeMultiFileName(fileKey));
+    }
+  }
+  return lookup;
+}
+
+export function resolveMultiFileModule(
+  moduleName: string,
+  containingFile: string,
+  files: ReadonlyMap<string, unknown>,
+  bareSpecifierLookup: ReadonlyMap<string, string>,
+): ts.ResolvedModuleFull | undefined {
+  let resolved: string;
+  if (moduleName.startsWith("./") || moduleName.startsWith("../")) {
+    const containingDir = normalizeMultiFileName(containingFile).replace(/[^/]*$/, "");
+    resolved = normalizeMultiFileName(containingDir + moduleName);
+  } else {
+    resolved = bareSpecifierLookup.get(moduleName) ?? normalizeMultiFileName(moduleName);
+  }
+
+  const key = probeMultiFileKey(resolved, files) ?? resolved;
+  if (!files.has(key)) return undefined;
+  return {
+    resolvedFileName: key,
+    isExternalLibraryImport: false,
+    extension: multiFileExtension(key),
+  };
+}
