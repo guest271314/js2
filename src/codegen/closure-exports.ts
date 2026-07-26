@@ -991,6 +991,53 @@ export function emitClosureArityExport(ctx: CodegenContext): void {
 }
 
 /**
+ * Emit `__closure_has_rest(externref) -> i32` for the narrow host-accessor
+ * bridge. A returned rest closure cannot be exposed through the generic
+ * host-call dispatcher: its single Wasm formal is the materialized rest vec,
+ * while V8 supplies the call's positional host arguments. Treating the first
+ * host argument as that vec causes an uncatchable concrete-struct `ref.cast`.
+ *
+ * The source-shape bit lives on `ClosureInfo`; captured rest closures retain a
+ * concrete subtype, while no-capture closures can reuse a signature-keyed
+ * wrapper. The latter means an identical vec-signature non-rest closure is
+ * conservatively left raw too. Modules without rest closures emit nothing.
+ */
+export function emitClosureHasRestExport(ctx: CodegenContext): void {
+  const restTypes = [...ctx.closureInfoByTypeIdx]
+    .filter(([, info]) => info.hasRestParam === true)
+    .map(([typeIdx]) => typeIdx);
+  if (restTypes.length === 0) return;
+
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$closure_has_rest_type");
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
+  for (const restType of new Set(restTypes)) {
+    body.push(
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: restType },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
+    );
+  }
+  body.push({ op: "i32.const", value: 0 });
+
+  ctx.mod.functions.push({
+    name: "__closure_has_rest",
+    typeIdx,
+    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    body,
+    exported: true,
+  } as WasmFunction);
+  ctx.mod.exports.push({
+    name: "__closure_has_rest",
+    desc: { kind: "func", index: funcIdx },
+  });
+}
+
+/**
  * Emit `__is_data_struct(externref) -> i32` (#2794). Returns 1 when the value is
  * a registered **named DATA struct** (a class instance, an object literal, an AST
  * Node — anything the host can read fields off via `__sget_<field>`), 0 otherwise.

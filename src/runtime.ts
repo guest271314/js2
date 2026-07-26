@@ -1064,6 +1064,8 @@ const _wasmClosureWrapperSource = new WeakMap<Function, { closure: any; arity: n
 const _wasmClosureDynamicWrapperCache = new WeakMap<object, Function>();
 const _wasmClosureWrapperCache = new WeakMap<object, Map<number, Function>>();
 const _wasmClosureWrapperTargets = new WeakMap<Function, object>();
+const _wasmAccessorGetterReturnWrappers = new WeakSet<Function>();
+const _wasmGetterCallbackWrappers = new WeakSet<Function>();
 // #3214 B2 — `__make_callback(-1, closure)` bridges a canonical void IR
 // closure without minting a legacy `__cb_N` export. Cache the non-constructible
 // JS arrow per raw closure so repeated boundary conversion preserves identity.
@@ -1243,10 +1245,14 @@ function _wrapWasmClosure(
         const methodCallFn = exports![`__call_fn_method_${methodArity}`]!;
         const methodPadded = _denseOwnArgs(args, methodArity);
         const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
-        return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...methodPadded);
+        const ret = methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...methodPadded);
+        return _wasmAccessorGetterReturnWrappers.has(wrapped)
+          ? _maybeWrapAccessorGetterCallable(ret, callbackState)
+          : ret;
       }
     }
-    return callFn(closure, ...padded);
+    const ret = callFn(closure, ...padded);
+    return _wasmAccessorGetterReturnWrappers.has(wrapped) ? _maybeWrapAccessorGetterCallable(ret, callbackState) : ret;
   };
   _wasmClosureWrapperSource.set(wrapped, { closure, arity });
   if (_canBeWeakKey(closure)) {
@@ -1591,6 +1597,25 @@ function _maybeWrapCallableUnknownArity(
 }
 
 /**
+ * The generic host bridge cannot synthesize the Wasm vec backing a source rest
+ * parameter. Wrapping `(...args) => …` therefore makes Proxy's positional host
+ * arguments hit a concrete-vec `ref.cast`, turning the pre-existing "not a
+ * function" limitation into an uncatchable `illegal cast`. Use the emitted
+ * source-shape discriminator before exposing a callable; ordinary zero- and
+ * nonzero-arity functions remain bridgeable.
+ */
+function _maybeWrapAccessorGetterCallable(
+  val: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (val != null && typeof val === "object" && callbackState) {
+    const hasRest = callbackState.getExports()?.__closure_has_rest as ((v: any) => number) | undefined;
+    if (typeof hasRest === "function" && hasRest(val) === 1) return val;
+  }
+  return _maybeWrapCallableUnknownArity(val, callbackState);
+}
+
+/**
  * (#3051) Wrap a callable stored as `regexp.exec` so its RETURN value — the
  * match result object the RegExp protocol reads — is exposed to the native
  * engine via `_wrapForHost`. The user overrides `exec` with a compiled
@@ -1617,6 +1642,36 @@ function _wrapExecReturnForHost(
     }
     return ret;
   };
+}
+
+/**
+ * (#2742) Mark an accessor GETTER bridge so a compiled-closure RETURN value is
+ * bridged into a callable JS function before the host sees it.
+ *
+ * `get valueOf() { return function () { … }; }` compiles the inner function to a
+ * WasmGC closure struct. The getter itself is already bridged (so V8 can invoke
+ * it), but its return value crossed back raw — so V8 observed
+ * `typeof o.valueOf === "object"`, i.e. NOT callable. In `OrdinaryToPrimitive`
+ * (§7.1.1.1 step 5b `IsCallable(method)`) that silently skips the method, and
+ * with `toString` also non-callable the algorithm falls through to step 6 and
+ * throws "Cannot convert object to primitive value" — the observed failure for
+ * the `String.prototype.trim{Start,End}` `this`-value method-priority tests.
+ *
+ * Deliberately narrow: only a bridge OWNED by `_wrapWasmClosure` or the
+ * getter-callback maker can be marked, and only non-rest values that
+ * `__is_closure` positively identifies are converted.
+ * The existing cached bridge must itself remain the descriptor's `get`: adding
+ * an outer return wrapper changes observable getter identity and makes a
+ * SameValue redefinition of a non-configurable accessor throw. Marshalling
+ * generic call exits was tried and reverted for regressing ~85 dstr files
+ * (#3123/#2835), so the marker is consumed only inside the accessor bridge.
+ */
+function _markAccessorGetterReturn(getterFn: any): any {
+  if (typeof getterFn !== "function") return getterFn;
+  if (_wasmClosureWrapperSource.has(getterFn) || _wasmGetterCallbackWrappers.has(getterFn)) {
+    _wasmAccessorGetterReturnWrappers.add(getterFn);
+  }
+  return getterFn;
 }
 
 /**
@@ -9894,7 +9949,7 @@ assert._isSameValue = isSameValue;
           // dropped (the bridge ignores `this`). Tracked as Phase 2 / a
           // follow-up; accessors that close over their `this` keep the
           // existing accessor-shim path (__make_getter_callback).
-          const wrappedGetter = _maybeWrapCallable(getter, 0, callbackState);
+          const wrappedGetter = _markAccessorGetterReturn(_maybeWrapCallable(getter, 0, callbackState));
           const wrappedSetter = _maybeWrapCallable(setter, 1, callbackState);
           const desc: PropertyDescriptor = {};
           if (wrappedGetter != null) desc.get = wrappedGetter;
@@ -13929,11 +13984,11 @@ assert._isSameValue = isSameValue;
         };
       };
     case "getter_callback_maker":
-      return (id: number, cap: any) =>
+      return (id: number, cap: any) => {
         // Regular function (not arrow) so 'this' is bound to the receiver;
         // rest params forward setter arguments (value) to the Wasm callback.
         // eslint-disable-next-line func-names
-        function (this: any, ...args: any[]) {
+        const bridge = function (this: any, ...args: any[]) {
           const exports = callbackState?.getExports();
           // (#2128) Setter invoked during the module START function (top-level
           // `o.v = 9` runs before WebAssembly.instantiate returns, so
@@ -13974,8 +14029,13 @@ assert._isSameValue = isSameValue;
               /* discriminators unavailable — keep the raw return */
             }
           }
-          return ret;
+          return _wasmAccessorGetterReturnWrappers.has(bridge)
+            ? _maybeWrapAccessorGetterCallable(ret, callbackState)
+            : ret;
         };
+        _wasmGetterCallbackWrappers.add(bridge);
+        return bridge;
+      };
     case "await":
       return (v: any) => v;
     case "dynamic_import":
