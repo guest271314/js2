@@ -6,7 +6,8 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c11-import-callables
-last_merged_pr: 3496
+pr: 3679
+last_merged_pr: 3677
 sprint: current
 created: 2026-07-21
 updated: 2026-07-26
