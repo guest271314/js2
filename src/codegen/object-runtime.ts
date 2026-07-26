@@ -98,7 +98,8 @@ import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3160) TS-source builtins
-import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js"; // (#3274 wave-B) descriptor/integrity helper builders
+import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js";
+import { isOpenDescriptorShape } from "./property-descriptor-shape.js";
 import { buildObjectEnumerationHelpers } from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
 import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // (#3274 wave-B) prototype-chain helper builders
 import { isSyntheticStructName } from "./emit-helpers.js";
@@ -726,15 +727,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     });
   }
 
-  // $ObjVec struct {len: i32, data: (ref $ObjVecArr)} — a growable externref
-  // vector. Wrapped to externref via extern.convert_any so it flows through the
-  // existing externref-typed enumeration call sites (Object.keys → __extern_*).
+  // Growable externref Array carrier; vec-base exposes length to shared reflection.
+  const objVecBaseTypeIdx = getOrRegisterVecBaseType(ctx);
   const objVecTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
     name: "$ObjVec",
+    superTypeIdx: objVecBaseTypeIdx,
     fields: [
-      { name: "len", type: { kind: "i32" }, mutable: true },
+      { name: "length", type: { kind: "i32" }, mutable: true },
       { name: "data", type: { kind: "ref", typeIdx: objVecArrTypeIdx }, mutable: true },
     ],
   });
@@ -5905,7 +5906,6 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
   const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
   const boxedNumberTypeIdx = ctx.nativeBoxNumberTypeIdx;
   if (!fn || flattenIdx === undefined || equalsIdx === undefined) return;
-
   type Entry = {
     typeIdx: number;
     fieldIdx: number;
@@ -5917,7 +5917,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
   };
   const byField = new Map<string, Entry[]>();
   for (const [structName, fields] of ctx.structFields) {
-    if (isSyntheticStructName(structName)) continue;
+    if (isSyntheticStructName(structName) || isOpenDescriptorShape(structName, fields)) continue;
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
     const shapeFieldIdx = fields.findIndex((field) => field?.name === "$shape");
