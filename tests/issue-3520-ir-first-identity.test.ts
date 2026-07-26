@@ -2,11 +2,7 @@
 
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import {
-  collectLocalCallEdgesByIdentity,
-  MODULE_INIT_CALLER,
-  type IrIdentityLocalCallEdges,
-} from "../src/codegen/ir-first-gate.js";
+import { collectLocalCallEdgesByIdentity, type IrIdentityLocalCallEdges } from "../src/codegen/ir-first-gate.js";
 import { buildIrUnitInventory, type IrUnitId } from "../src/ir/identity.js";
 import {
   buildIrPlanningIdentityContext,
@@ -153,7 +149,6 @@ describe("#3520 identity-keyed IR-first local-call edges", () => {
     expect(targets(edges, getterId)).toEqual([topTarget]);
     expect(targets(edges, moduleInitId)).toEqual([topTarget]);
     expect(edges.callees.has(methodArrowId)).toBe(false);
-    expect([...edges.callees.keys()]).not.toContain(MODULE_INIT_CALLER as IrUnitId);
     expect([...edges.calleesFromUnownedCallers]).toEqual([]);
   });
 
@@ -199,7 +194,6 @@ describe("#3520 identity-keyed IR-first local-call edges", () => {
     expect(context.moduleInitUnitIdBySourceFile.has(declarations)).toBe(false);
     expect(edges.callees.size).toBe(0);
     expect(edges.calleesFromUnownedCallers.size).toBe(0);
-    expect([...edges.callees.keys()]).not.toContain(MODULE_INIT_CALLER as IrUnitId);
   });
 
   it("rejects a nonempty module population whose structural owner is missing", () => {

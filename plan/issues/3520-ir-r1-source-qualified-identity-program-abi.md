@@ -1002,6 +1002,24 @@ Commit 3.3 and Commit 4 before R1 can close.
   `symphony/3520-c4-abi-session`. The cutover must publish one program-owned
   ABI map after the index space freezes; a per-source map is not acceptable.
 
+### 2026-07-26 Commit 4 runtime/global checkpoint
+
+- Added one compilation-owned `ProgramAbiSession`, canonical inventory-backed
+  structural ordering, exact allocator-object locators/remaps, and one-shot
+  publication after index-space freeze.
+- Global and type references now carry closed structural bindings. Module
+  storage, TDZ cells, function-value caches, and the program `argc` cell plan
+  exact global drafts and reject mismatched repeated producer observations.
+- Removed the obsolete name-keyed local-call and overlay-finalization cluster
+  after every production caller moved to its `IrUnitId`-keyed counterpart.
+  `check:dead-exports` is clean without banking the deleted functions.
+- R1 remains **in progress**: production ABI planning still needs complete
+  callable/import, class/type, export/alias, support, and derived-unit
+  lifecycles before the whole-program inventory acceptance criterion can close.
+- Cleanup validation passes 249/249 tests across #3143, #3203, all #3520
+  suites, and the #2138 multi-module overlay suite, plus strict TypeScript,
+  Prettier, scoped Biome lint, diff, LOC, and dead-export gates.
+
 Minimum resume validation:
 
 ```bash
