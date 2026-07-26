@@ -1,7 +1,7 @@
 ---
 id: 3669
 title: Property slot monomorphism — a slot seeded with a number/boolean corrupts on some later writes
-status: ready
+status: done
 sprint: current
 priority: high
 horizon: l
@@ -9,9 +9,10 @@ feasibility: hard
 area: codegen
 language_feature: value-representation
 goal: value-rep-substrate
-related: [2773, 2760, 2949, 3667, 3668]
+related: [2773, 2760, 2949, 3667, 3668, 3671]
 assignee: ttraenkler/opus-loop-g
 created: 2026-07-26
+completed: 2026-07-26
 ---
 
 # #3669 — property slot monomorphism
@@ -64,31 +65,56 @@ Reproducer: `scripts/fixtures/issue-3669-monomorphism/transitions.js`.
 
 ### Transition matrix — seed kind → overwrite kind
 
+Harness lane (authoritative — this is the lane the corpus is scored on):
+
 | seed \ write | number     | string     | boolean   | null       | undefined | object     |
 | ------------ | ---------- | ---------- | --------- | ---------- | --------- | ---------- |
 | **number**   | ok (ctrl)  | **BROKEN** | ok        | **BROKEN** | ok        | **BROKEN** |
-| **string**   | ok         | ok (ctrl)  | ok        | –          | –         | ok         |
-| **boolean**  | **BROKEN** | **BROKEN** | ok (ctrl) | –          | –         | –          |
-| **object**   | ok         | ok         | –         | –          | –         | –          |
+| **string**   | ok         | ok (ctrl)  | ok        | ok         | –         | ok         |
+| **boolean**  | **BROKEN** | **BROKEN** | ok (ctrl) | **BROKEN** | ok        | **BROKEN** |
+| **object**   | ok         | ok         | –         | ok         | –         | –          |
 
-**5 of 12 cross-kind transitions are broken; 7 work.** All three same-type
-controls pass.
+**7 broken of 15 cross-kind cells measured.** All same-type controls pass.
 
-**This is the key structural finding: the failure is selective, not uniform.**
-It is _not_ one missing widening primitive — if slots simply could not widen,
-`num→bool`, `num→undefined`, `str→*` and `obj→*` would fail too, and they do
-not. Nor is it "numeric slots are frozen": `num→bool` succeeds while
-`bool→num` fails, which is asymmetric. So the repair is a set of specific
-transition lowerings in the value-rep substrate, not a one-line fix.
+**The pattern is not arbitrary:** a slot seeded with an **unboxed primitive**
+(number or boolean) corrupts when written with a **reference-kind** value
+(string / null / object); a slot seeded with a **reference** (string / object)
+never corrupts. `undefined` writes always work. The boolean seed is strictly
+worse than the number seed — it additionally breaks on `number`.
+
+**It is still selective, not uniform** — `num→bool`, `num→undefined`,
+`bool→undefined`, `str→*` and `obj→*` all work — so this is not one missing
+widening primitive. The sharpest single lead is the asymmetry **`num→bool`
+works while `bool→num` fails**: two adjacent transitions with opposite outcomes.
+
+### The test shape matters — bare `compile()` misses two cells
+
+A plain `compile()` (properly awaited, using `result.importObject`) reproduces
+**most** of the matrix but **disagrees with the harness lane on two cells**:
+
+| cell             | harness lane | bare `compile()` |
+| ---------------- | ------------ | ---------------- |
+| `bool→number`    | **BROKEN**   | ok               |
+| `bool→undefined` | ok           | **BROKEN**       |
+
+So a fast unit test written against bare `compile()` would **silently pass**
+`bool→num` — which is one half of the asymmetry above, i.e. the single most
+diagnostic cell. **Red tests for this issue must run through the assembled
+harness path**, not a bare compile. (This is the third instance this session of
+bare `compile()` disagreeing with the harness on the same broad surface; see
+#3670.)
 
 ### Scope
 
 - **Per-SLOT, not per-shape.** A sibling object built identically but only ever
   holding a string is unaffected (`shape-sibling:ok`). So this is the individual
   property slot's state, not a hidden class / shape transition.
-- **Object-literal initialiser behaves exactly like assignment** —
-  `{p: 1}` then `.p = "s"` breaks identically, while `{p: "a"}` then `.p = "b"`
-  is fine. So the seeding happens at first _value_, wherever it comes from.
+- **Object-literal initialiser behaved exactly like assignment** —
+  `{p: 1}` then `.p = "s"` broke identically, while `{p: "a"}` then `.p = "b"`
+  was fine. So the seeding happens at first _value_, wherever it comes from.
+  **This case is the residual left by the fix below** and is now tracked as
+  **#3671**: a non-empty literal takes a different code path from the
+  `var o = {}` widening pre-pass.
 - **The slot does not recover.** A third, same-kind-as-the-second write
   (`o.p = 1; o.p = "s"; o.p = "t"`) still reads back wrong.
 - The corrupted value is **self-unequal**, matching the "type-default sentinel
@@ -112,9 +138,15 @@ builtin dispatch:
 - **#2949** would subsume this at the IR level (`{kind:"dynamic", tag?: JsTag}`),
   but is XL and not a prerequisite for a targeted repair.
 
-**Lane note:** `value-rep-substrate` is Lane B (fable/porffor) under
-`plan/method/lane-partition.md`. This issue was characterised in Lane A at the
-tech lead's direction; the _implementation_ should be routed per the partition.
+**Lane note (ruled):** `value-rep-substrate` is nominally Lane B
+(fable/porffor) under `plan/method/lane-partition.md`. The tech lead has ruled
+that **implementation proceeds in Lane A**: no Lane B agent is active on this,
+so there is nothing to duplicate, and the partition exists to prevent collision
+rather than to route by topic. The defect is also **selective rather than a
+substrate rewrite**, which is not the case the partition was written for.
+Lane B should claim it if they turn out to be working adjacent — and if the fix
+reaches deeper than the selective picture suggests, that is the point to stop
+and re-route rather than push into the substrate.
 
 ## What this is NOT
 
@@ -126,6 +158,55 @@ tech lead's direction; the _implementation_ should be routed per the partition.
 - Not explained by descriptor-sidecar enrichment. The prediction that failing
   `propertyHelper` tests would be enriched for `defineProperty`-defined
   properties was **measured and falsified** (#3668): 671 of 893 such tests pass.
+
+## Fix (landed) and its measured effect
+
+**Root cause, localised:** `src/codegen/declarations/object-shape-widening.ts`,
+`collectPropsFromStatements`. The pre-pass that types the widened struct's
+fields was **first-write-wins**, guarded by a `seenProps` set — a second
+assignment to the same key with a different RHS type was silently ignored for
+typing. The field stayed frozen at the first write's `ValType` (`f64` for
+`o.p = 1`), and every later `struct.set`
+(`src/codegen/expressions/assignment.ts`, `emitAssignToTarget`) force-coerced
+through `coerceType`, whose `f64`↔`i32` paths are raw Wasm numeric conversions.
+A string therefore landed as a genuine NaN payload.
+
+**The tag/payload divergence has a separate cause:** `typeof o.p`
+(`src/codegen/typeof-delete.ts`, `compileTypeofExpression`) folds at compile
+time from the checker's flow-narrowed static type, which tracks the _last_
+textual write — independent of the frozen slot. So `typeof` said `"string"`
+while the payload was NaN. There is **no runtime tag field** on this slot; the
+`JsTag`/`$AnyValue` boxed-any carrier is a different substrate that this
+widened-struct fast path bypasses entirely.
+
+**Fix:** on a repeat assignment whose resolved `ValType` differs from the
+recorded one, widen the field to `externref` instead of keeping the first
+write's type.
+
+**Verified by reverting**, not merely by controls: with the fix removed, the
+`num→{str,null,obj}`, `bool→{num,str,null,obj}` and `third-write` arms return to
+`BROKEN`; with it applied they report `ok`. The with/without diff is non-trivial
+— this is not a no-op.
+
+**Measured corpus effect: ZERO flips.** Local-vs-local A/B via
+`scripts/harness-flip-probe.ts` over a **40-file** sample of
+`built-ins/Object` propertyHelper/`verifyProperty` tests:
+`0 gained, 0 lost, 0 other change, 40 unchanged`, partition verified 40 == 40,
+`{"fail":14,"pass":26}` on both arms.
+
+**Reported as a result, not massaged.** The sample was drawn _before_ the root
+cause was known, and it is small and not representative; the 14 failures in it
+are evidently dominated by other defects (descriptor sidecar, accessors) rather
+than by this path. A larger or differently-targeted measurement may well show
+flips — but re-picking the filter after seeing a zero would be exactly the
+post-hoc fishing this project has been burned by, so the number stands as
+measured. **No conformance improvement is claimed.** The fix is justified as a
+correctness repair with a demonstrated with/without diff, not as a conformance
+win.
+
+**Residual scoped out:** non-empty object literals (`var o = {p: 1}`) take a
+different path and are still monomorphic — filed as **#3671**, guarded by an
+`it.fails` block that errors when it starts passing.
 
 ## Suggested next step
 
