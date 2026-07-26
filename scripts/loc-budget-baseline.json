@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-26",
   "threshold": 1500,
-  "totalCeiling": 480740,
+  "totalCeiling": 481153,
   "files": {
     "src/codegen-linear/index.ts": 5575,
     "src/codegen-linear/runtime.ts": 4034,
@@ -24,9 +24,9 @@
     "src/codegen/expressions/assignment.ts": 4924,
     "src/codegen/expressions/builtins.ts": 3893,
     "src/codegen/expressions/call-builtin-static.ts": 3639,
-    "src/codegen/expressions/call-identifier.ts": 2213,
+    "src/codegen/expressions/call-identifier.ts": 2221,
     "src/codegen/expressions/call-namespace-static.ts": 2395,
-    "src/codegen/expressions/call-receiver-method.ts": 3487,
+    "src/codegen/expressions/call-receiver-method.ts": 3543,
     "src/codegen/expressions/call-tail-dispatch.ts": 1905,
     "src/codegen/expressions/calls-closures.ts": 1648,
     "src/codegen/expressions/calls.ts": 8260,
@@ -36,7 +36,7 @@
     "src/codegen/expressions/unary-updates.ts": 1912,
     "src/codegen/extern-declarations.ts": 1650,
     "src/codegen/generators-native.ts": 4121,
-    "src/codegen/index.ts": 8306,
+    "src/codegen/index.ts": 8326,
     "src/codegen/iterator-native.ts": 3056,
     "src/codegen/json-codec-native.ts": 3513,
     "src/codegen/literals.ts": 4690,
@@ -51,7 +51,7 @@
     "src/codegen/property-access-dispatch.ts": 3939,
     "src/codegen/property-access.ts": 5224,
     "src/codegen/regexp-standalone.ts": 4108,
-    "src/codegen/registry/imports.ts": 2279,
+    "src/codegen/registry/imports.ts": 2287,
     "src/codegen/stack-balance.ts": 2805,
     "src/codegen/statements/control-flow.ts": 1575,
     "src/codegen/statements/for-of-destructuring.ts": 2131,
@@ -68,11 +68,11 @@
     "src/ir/backend/porffor/assembler.ts": 1507,
     "src/ir/builder.ts": 1769,
     "src/ir/from-ast.ts": 9094,
-    "src/ir/integration.ts": 5247,
+    "src/ir/integration.ts": 5248,
     "src/ir/lower.ts": 3814,
     "src/ir/nodes.ts": 3187,
     "src/ir/select.ts": 6591,
     "src/ir/verify.ts": 1587,
-    "src/runtime.ts": 15337
+    "src/runtime.ts": 15464
   }
 }
