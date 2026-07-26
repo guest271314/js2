@@ -23,6 +23,8 @@ files:
   - tests/issue-973.test.ts
   - tests/issue-incremental.test.ts
   - tests/typescript-diagnostic-failures.test.ts
+loc-budget-allow:
+  - src/compiler.ts
 ---
 
 # #700 — Reuse TypeScript Program and checker state across incremental builds
@@ -95,6 +97,13 @@ versioned TypeScript Language Service:
     graph, so the reset merely introduced periodic cold frontend builds.
     Thrown compiler failures still replace the service immediately; explicit
     GC and whole-worker contamination/recycle safeguards remain active.
+
+The nine-line `src/compiler.ts` growth is the intentional orchestration seam
+that selects the persistent project service while preserving the existing
+one-shot analyzer path and its exact options. Moving this decision into the
+checker would couple one-shot analysis to Language Service lifecycle rather
+than reducing subsystem complexity. Issue #700 therefore grants only the
+file-level LOC allowance; the per-function budget needs no allowance.
 
 ## Performance evidence
 
