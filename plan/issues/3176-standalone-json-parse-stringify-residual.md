@@ -280,10 +280,11 @@ Proxy/RegExp, or global-environment semantics, not more namespace reflection.
 
 ## 2026-07-26 — combined post-reflection rawJSON A/B
 
-After the reflection slice merged as PR #3654, the rawJSON codec slice was
-composed with pristine `origin/main@c941712943f45994149480b60165b5e18afb9505`
-and all 165 `built-ins/JSON/**` records were rerun through the same literal
-test262.fyi original-harness assembler under Node 25 / Unicode 17:
+After the reflection slice merged as PR #3654 and the RegExp range slice merged
+as PR #3647, the rawJSON codec slice was composed with pristine
+`origin/main@fa10458427350db9b9b7912d6577f9b72bbb4a6c` and all 165
+`built-ins/JSON/**` records were rerun through the same literal test262.fyi
+original-harness assembler under Node 25 / Unicode 17:
 
 - standalone: **82/165 → 85/165**
 - FAIL → PASS:
