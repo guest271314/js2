@@ -224,9 +224,10 @@ function implicitAnyParamNeedsDynamicObjectCarrier(
   const cached = dynamicObjectParamsByFunction.get(stmt);
   if (cached) return cached.has(param.name.text);
 
-  const parameterNames = new Set(
-    stmt.parameters.filter((candidate) => ts.isIdentifier(candidate.name)).map((candidate) => candidate.name.text),
-  );
+  const parameterNames = new Set<string>();
+  for (const candidate of stmt.parameters) {
+    if (ts.isIdentifier(candidate.name)) parameterNames.add(candidate.name.text);
+  }
   const dynamicParams = new Set<string>();
   const visit = (node: ts.Node): void => {
     if (

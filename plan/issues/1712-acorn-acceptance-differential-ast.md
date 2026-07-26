@@ -696,5 +696,18 @@ Follow-up **#3651** identifies the root cause: fnctor-shape analysis treated
 Acorn Parser fields assigned in both arms of a complete `if/else` as optional.
 The implemented definite-assignment reconciliation restores **20/20**
 single-construct parity and keeps the scale gate **13/13**. The #1712 branch
-remains `in-progress` until the refreshed full corpus, standalone artifact,
-typecheck, and regression gates are rerun after the final upstream sync.
+is complete after the refreshed full corpus, standalone artifact, typecheck,
+and regression gates passed on the final upstream merge.
+
+## PR #3646 test results (2026-07-26)
+
+- Exact Acorn differential AST and zero-import standalone acceptance: **pass**.
+- Focused dynamic-dispatch/boolean-brand, RegExp/String, and object-runtime
+  reconciliation suites: **46 tests pass**.
+- Native Messaging real-Wasmtime scale matrix: **4 variants × 4 sizes pass**
+  at 1/64/128/256 MiB.
+- Typecheck, lint, format, IR fallback/IR-only, oracle, coercion, LOC/function,
+  adoption, dead-export, pushRaw, and guard-suite gates: **pass**.
+- Deterministic harness compile work: **121,637 → 111,490** calls after
+  consolidating the three new boolean-brand source scans; ceiling **112,803**
+  (current-main control **105,924**). No budget baseline was changed.
