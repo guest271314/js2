@@ -3,7 +3,7 @@ id: 1282
 title: "ESLint Tier 1 stress test — minimal Linter.verify() compilation"
 status: done
 created: 2026-05-02
-updated: 2026-05-03
+updated: 2026-07-26
 completed: 2026-05-03
 priority: medium
 feasibility: hard
@@ -14,7 +14,8 @@ language_feature: classes, Map, WeakMap, CJS, instanceof
 goal: npm-library-support
 sprint: 48
 depends_on: [1277, 1279]
-related: [1244, 1274, 1287, 1289]
+es_edition: n/a
+related: [1244, 1274, 1287, 1289, 1400, 3653, 3654]
 ---
 # #1282 — ESLint Tier 1 stress test
 
@@ -102,3 +103,23 @@ on the constructed Wasm types, not module resolution.
 Tier 1a + 1c stay green as a regression sentinel for the
 compile-time fast path. Tier 1b/1d/1e progressively unskip as their
 referenced issues land.
+
+## 2026-07-26 audit — harness retained, sentinels no longer green
+
+The historical deliverable (a five-rung stress-test ladder) remains complete,
+but its comments and paths no longer describe the current frontier:
+
+- Tier 1a (`import { Linter } from "eslint"`) now returns
+  `success: false`; the first diagnostic is
+  `Module '"eslint"' has no exported member 'Linter'`.
+- Direct `linter.js` also returns `success: false`, so the pipeline does not
+  reach Wasm validation.
+- Tier 1c/1d use `/workspace/...`; on non-container hosts they measure path
+  portability rather than compiler capability.
+- Other ESLint tests use the same absolute-path pattern, and the #2693
+  dual-delegation test can return early and appear green without executing.
+
+Path and skip semantics are tracked by #3653. The real package compilation
+frontier is reopened under #1400, with module-graph resolution in #3654.
+Do not use the old Tier 1a/1c status table as evidence that current ESLint
+compiles.
