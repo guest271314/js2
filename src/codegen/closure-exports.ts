@@ -229,6 +229,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
 
   // #820l — globals for argc + extras-argv plumbing into the callee's
   // `arguments` object. Both globals are mode-agnostic; ensureExtrasArgvGlobal
@@ -359,7 +360,13 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        if (boxNumberIdx !== undefined) {
+        // (#3666) Preserve the ValType's boolean brand across the uniform
+        // externref closure boundary. Boxing `true` as Number(1) makes strict
+        // harness checks (`result === true`) fail even though the callback
+        // returned the correct i32 bit.
+        if ((entry.returnType as { boolean?: true }).boolean === true && boxBooleanIdx !== undefined) {
+          callBody.push({ op: "call", funcIdx: boxBooleanIdx });
+        } else if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i32_s" });
           callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {
@@ -540,6 +547,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
 
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
   const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
   // (#2745) Same #820l argc/extras plumbing as `emitClosureCallExportN`, so a
   // method-dispatched closure's `arguments` object observes over-arity args
@@ -659,7 +667,12 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        if (boxNumberIdx !== undefined) {
+        // (#3666) `i32` may carry the structural boolean brand. Preserve it
+        // when returning through the method dispatcher so dynamic closure calls
+        // observe `true`/`false`, not numeric 1/0.
+        if ((entry.returnType as { boolean?: true }).boolean === true && boxBooleanIdx !== undefined) {
+          callBody.push({ op: "call", funcIdx: boxBooleanIdx });
+        } else if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i32_s" });
           callBody.push({ op: "call", funcIdx: boxNumberIdx });
         } else {

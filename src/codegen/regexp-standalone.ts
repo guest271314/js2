@@ -1290,7 +1290,7 @@ function emitRegexGroupsObjectExternref(
   i32Arr: number,
 ): void {
   if (groupNames.size === 0) {
-    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push(...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }]));
     return;
   }
   const newObjIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
@@ -1334,14 +1334,34 @@ function emitRegexIndicesArrayExternref(
   fctx: FunctionContext,
   hasD: boolean,
   nGroups: number,
+  groupNames: ReadonlyMap<string, number>,
   capsLocal: number,
   i32Arr: number,
 ): void {
   if (!hasD) {
-    fctx.body.push({ op: "ref.null.extern" });
+    fctx.body.push(...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }]));
     return;
   }
   const { newIdx, pushIdx } = ensureObjVecBuilders(ctx);
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get_idx",
+    [{ kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  const newGroupsIdx =
+    groupNames.size > 0 ? ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]) : undefined;
+  const setGroupsIdx =
+    groupNames.size > 0
+      ? ensureLateImport(ctx, "__extern_set", [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }], [])
+      : undefined;
+  const defineIdx = ensureLateImport(
+    ctx,
+    "__defineProperty_value",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
   const outerLocal = allocLocal(fctx, `__re_indices_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "call", funcIdx: newIdx });
   fctx.body.push({ op: "local.set", index: outerLocal });
@@ -1356,10 +1376,44 @@ function emitRegexIndicesArrayExternref(
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
-      then: [{ op: "ref.null.extern" }],
+      then: undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }],
       else: [...buildIndexPairExternref(ctx, fctx, g, capsLocal, i32Arr, newIdx, pushIdx)],
     });
     fctx.body.push({ op: "call", funcIdx: pushIdx });
+  }
+
+  // `indices.groups` is always an own data property. With no named captures
+  // its value is the exact undefined singleton; otherwise it is a null-proto
+  // object whose values alias (not copy) the corresponding numeric pair.
+  const indicesGroupsLocal = allocLocal(fctx, `__re_indices_groups_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+  if (groupNames.size === 0 || newGroupsIdx === undefined || setGroupsIdx === undefined || getIdx === undefined) {
+    fctx.body.push(...(undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }]));
+    fctx.body.push({ op: "local.set", index: indicesGroupsLocal });
+  } else {
+    fctx.body.push({ op: "call", funcIdx: newGroupsIdx });
+    fctx.body.push({ op: "local.set", index: indicesGroupsLocal });
+    const ordered = [...groupNames.entries()].sort((a, b) => a[1] - b[1]);
+    for (const [name, captureIdx] of ordered) {
+      fctx.body.push({ op: "local.get", index: indicesGroupsLocal });
+      addStringConstantGlobal(ctx, name);
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, name));
+      fctx.body.push({ op: "local.get", index: outerLocal });
+      fctx.body.push({ op: "f64.const", value: captureIdx });
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+      fctx.body.push({ op: "call", funcIdx: setGroupsIdx });
+    }
+  }
+  if (defineIdx !== undefined) {
+    fctx.body.push({ op: "local.get", index: outerLocal });
+    addStringConstantGlobal(ctx, "groups");
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, "groups"));
+    fctx.body.push({ op: "local.get", index: indicesGroupsLocal });
+    // value + writable/enumerable/configurable, all explicitly specified.
+    fctx.body.push({ op: "f64.const", value: 0xbf });
+    fctx.body.push({ op: "call", funcIdx: defineIdx });
+    fctx.body.push({ op: "drop" });
   }
   fctx.body.push({ op: "local.get", index: outerLocal });
 }
@@ -1426,6 +1480,14 @@ function emitRegexExecArrayCall(
   // {length, data} prefix every vec consumer reads, plus index/input fields
   // for the spec result shape.
   const nstrVecTypeIdx = ensureRegexMatchVecType(ctx);
+  const defineIdx = ensureLateImport(
+    ctx,
+    "__defineProperty_value",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "f64" }],
+    [{ kind: "externref" }],
+  );
+  const boxNumberIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
 
   // #2588/#2589 — resolve the STATIC pattern to recover the named-group map and
   // the `d` flag. Both are compile-time-known for a backend-created RegExp, so
@@ -1443,37 +1505,56 @@ function emitRegexExecArrayCall(
     hasD = (meta.flags & RE_FLAG_D) !== 0;
     nGroups = meta.nGroups;
   }
-  const needsExtras = groupNames.size > 0 || hasD;
-
   // Build the matched-branch body into a temporary buffer so the groups/indices
   // builders (which allocate locals + emit `if`s) stay scoped to the then-arm.
   const savedBody = fctx.body;
   const thenBody: Instr[] = [];
   fctx.body = thenBody;
 
-  let groupsLocal = -1;
-  let indicesLocal = -1;
-  if (needsExtras) {
-    groupsLocal = allocLocal(fctx, `__re_groups_x_${fctx.locals.length}`, { kind: "externref" });
-    indicesLocal = allocLocal(fctx, `__re_indices_x_${fctx.locals.length}`, { kind: "externref" });
-    emitRegexGroupsObjectExternref(ctx, fctx, groupNames, emitted.inputLocal, emitted.capsLocal, strTypeIdx, i32Arr);
-    fctx.body.push({ op: "local.set", index: groupsLocal });
-    emitRegexIndicesArrayExternref(ctx, fctx, hasD, nGroups, emitted.capsLocal, i32Arr);
-    fctx.body.push({ op: "local.set", index: indicesLocal });
-  }
+  const groupsLocal = allocLocal(fctx, `__re_groups_x_${fctx.locals.length}`, { kind: "externref" });
+  const indicesLocal = allocLocal(fctx, `__re_indices_x_${fctx.locals.length}`, { kind: "externref" });
+  emitRegexGroupsObjectExternref(ctx, fctx, groupNames, emitted.inputLocal, emitted.capsLocal, strTypeIdx, i32Arr);
+  fctx.body.push({ op: "local.set", index: groupsLocal });
+  emitRegexIndicesArrayExternref(ctx, fctx, hasD, nGroups, groupNames, emitted.capsLocal, i32Arr);
+  fctx.body.push({ op: "local.set", index: indicesLocal });
 
   fctx.body.push({ op: "local.get", index: emitted.regexpLocal });
   fctx.body.push({ op: "struct.get", typeIdx: emitted.structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
   fctx.body.push({ op: "local.get", index: emitted.inputLocal });
   fctx.body.push({ op: "local.get", index: emitted.capsLocal });
-  if (needsExtras) {
-    fctx.body.push({ op: "local.get", index: groupsLocal });
-    fctx.body.push({ op: "local.get", index: indicesLocal });
-  } else {
-    fctx.body.push({ op: "ref.null.extern" });
-    fctx.body.push({ op: "ref.null.extern" });
-  }
+  fctx.body.push({ op: "local.get", index: groupsLocal });
+  fctx.body.push({ op: "local.get", index: indicesLocal });
   fctx.body.push({ op: "call", funcIdx: captureArrayIdx });
+
+  const resultLocal = allocLocal(fctx, `__re_match_result_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: nstrVecTypeIdx,
+  });
+  fctx.body.push({ op: "local.set", index: resultLocal });
+  if (defineIdx !== undefined) {
+    const defineOwn = (name: string, value: Instr[]): void => {
+      fctx.body.push({ op: "local.get", index: resultLocal });
+      fctx.body.push({ op: "extern.convert_any" });
+      addStringConstantGlobal(ctx, name);
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, name));
+      fctx.body.push(...value);
+      fctx.body.push({ op: "f64.const", value: 0xbf });
+      fctx.body.push({ op: "call", funcIdx: defineIdx });
+      fctx.body.push({ op: "drop" });
+    };
+    if (boxNumberIdx !== undefined) {
+      defineOwn("index", [
+        { op: "local.get", index: resultLocal },
+        { op: "struct.get", typeIdx: nstrVecTypeIdx, fieldIdx: MATCH_VEC_FIELD_INDEX },
+        { op: "f64.convert_i32_s" },
+        { op: "call", funcIdx: boxNumberIdx },
+      ]);
+    }
+    defineOwn("input", [{ op: "local.get", index: emitted.inputLocal }, { op: "extern.convert_any" }]);
+    defineOwn("groups", [{ op: "local.get", index: groupsLocal }]);
+    if (hasD) defineOwn("indices", [{ op: "local.get", index: indicesLocal }]);
+  }
+  fctx.body.push({ op: "local.get", index: resultLocal });
 
   fctx.body = savedBody;
   fctx.body.push({

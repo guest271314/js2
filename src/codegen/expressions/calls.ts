@@ -3559,6 +3559,59 @@ export function classInstanceHasField(
   return !!fields && fields.some((f) => f.name === fieldName);
 }
 
+function buildDynamicApplyFallback(
+  fctx: FunctionContext,
+  fallback: { applyIdx: number; vecNewIdx: number; vecPushIdx: number },
+  argLocals: readonly number[],
+  anyLocal: number,
+  undefinedIdx: number | undefined,
+  undefinedSingletonPad: readonly Instr[] | undefined,
+): Instr[] {
+  const argsLocal = allocLocal(fctx, `__dyn_apply_args_${fctx.locals.length}`, { kind: "externref" });
+  const body: Instr[] = [
+    { op: "call", funcIdx: fallback.vecNewIdx },
+    { op: "local.set", index: argsLocal },
+  ];
+  for (const argLocal of argLocals) {
+    body.push({ op: "local.get", index: argsLocal });
+    body.push({ op: "local.get", index: argLocal });
+    body.push({ op: "call", funcIdx: fallback.vecPushIdx });
+  }
+  body.push({ op: "local.get", index: anyLocal });
+  body.push({ op: "extern.convert_any" });
+  pushDynamicUndefinedExternref(body, undefinedIdx, undefinedSingletonPad);
+  body.push({ op: "local.get", index: argsLocal });
+  body.push({ op: "call", funcIdx: fallback.applyIdx });
+  return body;
+}
+
+function pushDynamicUndefinedExternref(
+  body: Instr[],
+  undefinedIdx: number | undefined,
+  singleton: readonly Instr[] | undefined,
+): void {
+  if (undefinedIdx !== undefined) {
+    body.push({ op: "call", funcIdx: undefinedIdx });
+  } else if (singleton !== undefined) {
+    for (const ins of singleton) body.push({ ...ins });
+  } else {
+    body.push({ op: "ref.null.extern" });
+  }
+}
+
+function reserveDynamicApplyFallback(ctx: CodegenContext): {
+  applyIdx: number;
+  vecNewIdx: number;
+  vecPushIdx: number;
+} {
+  const vecBuilders = ensureObjVecBuilders(ctx);
+  return {
+    applyIdx: reserveApplyClosure(ctx),
+    vecNewIdx: vecBuilders.newIdx,
+    vecPushIdx: vecBuilders.pushIdx,
+  };
+}
+
 export function tryEmitInlineDynamicCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3679,7 +3732,8 @@ export function tryEmitInlineDynamicCall(
   // (byte-inert otherwise). Standalone/WASI lane; the host lane's callee is a
   // real host constructor whose [[Call]] already throws.
   const wantTaCtorArm = (ctx.standalone === true || ctx.wasi === true) && ctx.taCtorTypeIdx >= 0;
-  if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm && !wantTaCtorArm) return null;
+  const wantApplyFallback = ctx.standalone === true || ctx.wasi === true;
+  if (allCandidates.length === 0 && !wantProxyArm && !wantBoundArm && !wantTaCtorArm && !wantApplyFallback) return null;
 
   // Dedupe by funcTypeIdx — concrete subtypes share funcTypeIdx with their
   // base wrapper; one dispatch arm per unique funcref type is enough.
@@ -3736,7 +3790,7 @@ export function tryEmitInlineDynamicCall(
   // null externref alike).
   const maxFormals = candidates.reduce((m, c) => Math.max(m, c.info.paramTypes.length), 0);
   const needsUndefinedPad = maxFormals > arity;
-  const needsUndefined = needsUndefinedPad || wantProxyArm;
+  const needsUndefined = needsUndefinedPad || wantProxyArm || wantApplyFallback;
   const undefinedIdx = needsUndefined ? ensureGetUndefined(ctx) : undefined;
   const undefinedSingletonPad = needsUndefined && undefinedIdx === undefined ? undefinedExternInstrs(ctx) : undefined;
   // (#2611) Flush the deferred late-import shift NOW — every other late-import
@@ -3768,20 +3822,6 @@ export function tryEmitInlineDynamicCall(
   const unboxNumberIdx = ctx.funcMap.get(UNBOX_NUMBER);
   if (boxNumberIdx === undefined || unboxNumberIdx === undefined) return null;
 
-  const pushUndefinedExternref = (body: Instr[]): void => {
-    if (undefinedIdx !== undefined) {
-      body.push({ op: "call", funcIdx: undefinedIdx });
-    } else if (undefinedSingletonPad !== undefined) {
-      // FRESH Instr objects per use — the singleton sequence lands in multiple
-      // dispatch arms, and a shared Instr aliased into two branches gets
-      // double-remapped by finalize index walks (the
-      // `reference_shared_instr_object_dce_double_remap` class).
-      for (const ins of undefinedSingletonPad) body.push({ ...ins });
-    } else {
-      body.push({ op: "ref.null.extern" });
-    }
-  };
-
   // (#3031) Materialize the Proxy [[Call]] pieces while the gate is live. The
   // object/proxy runtime registers DEFINED functions only (no import → no index
   // shift), so this is safe after the flush + captures above.
@@ -3809,6 +3849,7 @@ export function tryEmitInlineDynamicCall(
       vecPushIdx: vecBuilders.pushIdx,
     };
   }
+  const applyFallback = wantApplyFallback ? reserveDynamicApplyFallback(ctx) : undefined;
   // (#2933) Variadic builtin value-closure arm pieces. Set at Math.max/Math.min
   // value-read time (all of its types + the closure func are then already
   // registered — DEFINED funcs only, no import, no index shift). One lifted
@@ -3832,6 +3873,7 @@ export function tryEmitInlineDynamicCall(
     candidates.length === 0 &&
     proxyArm === undefined &&
     boundArm === undefined &&
+    applyFallback === undefined &&
     variadicArm === undefined &&
     !wantTaCtorArm
   )
@@ -3864,6 +3906,11 @@ export function tryEmitInlineDynamicCall(
   // Build dispatch chain (innermost = default, outermost = first).
   // Default: ref.null.extern (matches existing fallback semantics).
   let dispatch: Instr[] = [{ op: "ref.null.extern" }];
+
+  // Finalize-time default; exact inline arms remain preferred.
+  if (applyFallback !== undefined) {
+    dispatch = buildDynamicApplyFallback(fctx, applyFallback, argLocals, anyLocal, undefinedIdx, undefinedSingletonPad);
+  }
 
   // (#3335) HOST-lane default arm: dispatch through `__call_function` instead
   // of silently producing `undefined`. A dynamic callee that is NOT a wasm
@@ -3997,7 +4044,7 @@ export function tryEmitInlineDynamicCall(
         } else if (pType.kind === "i32") {
           callBody.push({ op: "i32.const", value: 0 });
         } else if (pType.kind === "externref") {
-          pushUndefinedExternref(callBody);
+          pushDynamicUndefinedExternref(callBody, undefinedIdx, undefinedSingletonPad);
         } else if (pType.kind === "ref" || pType.kind === "ref_null") {
           callBody.push({ op: "ref.null", typeIdx: (pType as { typeIdx: number }).typeIdx });
         }
@@ -4096,7 +4143,7 @@ export function tryEmitInlineDynamicCall(
     }
     armBody.push({ op: "local.get", index: anyLocal });
     armBody.push({ op: "extern.convert_any" });
-    pushUndefinedExternref(armBody); // thisArgument = undefined
+    pushDynamicUndefinedExternref(armBody, undefinedIdx, undefinedSingletonPad); // thisArgument = undefined
     armBody.push({ op: "local.get", index: vecLocal });
     armBody.push({ op: "call", funcIdx: proxyArm.dispatchIdx });
     dispatch = [

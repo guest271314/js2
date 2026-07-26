@@ -137,6 +137,49 @@ const PROPERTY_OF_STRINGS_RE =
   /\\[pP]\{(?:Basic_Emoji|Emoji_Keycap_Sequence|RGI_Emoji(?:_Flag_Sequence|_Modifier_Sequence|_Tag_Sequence|_ZWJ_Sequence)?)\}/;
 
 /**
+ * Decode the UnicodeEscapeSequence spelling permitted inside a RegExp group
+ * name. The parser otherwise consumes pattern source text verbatim, but named
+ * captures/backreferences are keyed by the resulting String value:
+ * `(?<\u{03C0}>a)` and `(?<π>a)` both declare the property `"π"`.
+ *
+ * Pattern validity is host-prechecked for u/v literals. Keep this helper
+ * defensive for constructor/non-u entry points so malformed escapes refuse
+ * loudly instead of creating an unreachable raw backslash-keyed group.
+ */
+function decodeGroupName(raw: string): string {
+  let out = "";
+  for (let i = 0; i < raw.length; ) {
+    if (raw[i] !== "\\") {
+      out += raw[i++]!;
+      continue;
+    }
+    if (raw[i + 1] !== "u") {
+      throw new RegexUnsupportedError(`invalid escape in group name '${raw}'`);
+    }
+    if (raw[i + 2] === "{") {
+      const close = raw.indexOf("}", i + 3);
+      if (close < 0) throw new RegexUnsupportedError(`unterminated Unicode escape in group name '${raw}'`);
+      const digits = raw.slice(i + 3, close);
+      if (!/^[0-9a-fA-F]+$/.test(digits)) {
+        throw new RegexUnsupportedError(`invalid Unicode escape in group name '${raw}'`);
+      }
+      const cp = Number.parseInt(digits, 16);
+      if (cp > 0x10ffff) throw new RegexUnsupportedError(`group-name code point out of range in '${raw}'`);
+      out += String.fromCodePoint(cp);
+      i = close + 1;
+      continue;
+    }
+    const digits = raw.slice(i + 2, i + 6);
+    if (!/^[0-9a-fA-F]{4}$/.test(digits)) {
+      throw new RegexUnsupportedError(`invalid Unicode escape in group name '${raw}'`);
+    }
+    out += String.fromCharCode(Number.parseInt(digits, 16));
+    i += 6;
+  }
+  return out;
+}
+
+/**
  * Pre-scan the pattern for the total capture-group count and the named-group
  * table. Both are needed *before* the descent parse: a decimal escape is a
  * backreference only when its value does not exceed the total group count
@@ -169,8 +212,9 @@ function scanGroups(src: string): { count: number; names: Map<string, number> } 
       if (src[i + 1] === "?") {
         if (src[i + 2] === "<" && src[i + 3] !== "=" && src[i + 3] !== "!") {
           let j = i + 3;
-          let name = "";
-          while (j < src.length && src[j] !== ">") name += src[j++];
+          let rawName = "";
+          while (j < src.length && src[j] !== ">") rawName += src[j++];
+          const name = decodeGroupName(rawName);
           count++;
           if (!names.has(name)) names.set(name, count);
         }
@@ -613,10 +657,11 @@ class Parser {
           lookaround = { negated: after === "!", behind: true };
         } else {
           // named capture (?<name>…)
-          name = "";
-          while (this.peek() !== ">" && !this.eof()) name += this.next();
+          let rawName = "";
+          while (this.peek() !== ">" && !this.eof()) rawName += this.next();
           if (this.peek() !== ">") throw new RegexUnsupportedError("unterminated group name");
           this.next();
+          name = decodeGroupName(rawName);
           capIndex = ++this.numCaptures;
           // The pre-scan kept the FIRST index for each name; a different index
           // here means the pattern re-declares the name — ES2025 duplicate
@@ -756,10 +801,11 @@ class Parser {
       this.next();
       if (this.peek() !== "<") throw new RegexUnsupportedError("\\k must be followed by <name>");
       this.next();
-      let name = "";
-      while (this.peek() !== undefined && this.peek() !== ">") name += this.next();
+      let rawName = "";
+      while (this.peek() !== undefined && this.peek() !== ">") rawName += this.next();
       if (this.peek() !== ">") throw new RegexUnsupportedError("unterminated \\k<name>");
       this.next();
+      const name = decodeGroupName(rawName);
       const idx = this.groupNames.get(name);
       if (idx === undefined) {
         throw new RegexUnsupportedError(`\\k<${name}> references an undeclared group`);

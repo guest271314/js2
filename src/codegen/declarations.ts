@@ -468,9 +468,18 @@ function defaultReturnInstrs(returnType: ValType | undefined): Instr[] {
   }
 }
 
-export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFile, isEntryFile = true): void {
-  function getAssignmentRootIdentifier(expr: ts.Expression): string | undefined {
-    let current: ts.Expression = expr;
+function getAssignmentRootIdentifier(expr: ts.Expression): string | undefined {
+  let current: ts.Expression = expr;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+    current = current.expression;
     while (
       ts.isParenthesizedExpression(current) ||
       ts.isAsExpression(current) ||
@@ -479,20 +488,31 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     ) {
       current = current.expression;
     }
-    while (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
-      current = current.expression;
-      while (
-        ts.isParenthesizedExpression(current) ||
-        ts.isAsExpression(current) ||
-        ts.isNonNullExpression(current) ||
-        ts.isTypeAssertionExpression(current)
-      ) {
-        current = current.expression;
-      }
-    }
-    return ts.isIdentifier(current) ? current.text : undefined;
   }
+  return ts.isIdentifier(current) ? current.text : undefined;
+}
 
+function isTopLevelFunctionPropertyReceiver(ctx: CodegenContext, receiver: ts.Expression): boolean {
+  let current = receiver;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  if (ts.isIdentifier(current)) return ctx.topLevelFunctionNames.has(current.text);
+  if (!ts.isPropertyAccessExpression(current) && !ts.isElementAccessExpression(current)) return false;
+  const rootName = getAssignmentRootIdentifier(current);
+  return (
+    rootName !== undefined &&
+    ctx.topLevelFunctionNames.has(rootName) &&
+    ctx.checker.getTypeAtLocation(current).getCallSignatures().length > 0
+  );
+}
+
+export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFile, isEntryFile = true): void {
   // First: collect enum declarations (so enum values are available)
   collectEnumDeclarations(ctx, sourceFile);
 
@@ -1667,10 +1687,18 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // inside a function body — only the top-level collection dropped it —
         // and the #3468 closure-own-property side table makes the ordinary
         // `__extern_set` write-arm store it on the function value. Keep it in
-        // `__module_init` so that arm runs. Scoped exactly like the #2671 host
-        // arm: DIRECT bare-identifier receiver only (`F.prototype.m = …` chains
-        // stay excluded — non-identifier receiver); `.prototype` is already kept
-        // by the #2660 S2 arm above. Host/GC is untouched (that lane uses the
+        // `__module_init` so that arm runs. The original F1 gate covered a
+        // DIRECT bare-identifier receiver. (#3666) It must also retain a nested
+        // receiver that the checker proves is itself callable:
+        //
+        //   assert.deepEqual._compare = (function () { ... })();
+        //
+        // `assert` is the top-level function root and `assert.deepEqual` is a
+        // function-valued own property. Dropping that second-level write leaves
+        // `_compare` undefined, so the real Test262 deepEqual body is never
+        // invoked. The callable-type gate deliberately excludes
+        // `F.prototype.m` and ordinary object-valued chains; `.prototype` stays
+        // owned by #2660. Host/GC is untouched (that lane uses the
         // `!ctx.standalone` arm below), so it stays byte-identical.
         if (
           ctx.standalone &&
@@ -1683,16 +1711,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           // avoid shadowing the builtin.
           !STANDALONE_FN_STATIC_KEEP_EXCLUDED.has(expr.left.name.text)
         ) {
-          let sReceiver: ts.Expression = expr.left.expression;
-          while (
-            ts.isParenthesizedExpression(sReceiver) ||
-            ts.isAsExpression(sReceiver) ||
-            ts.isNonNullExpression(sReceiver) ||
-            ts.isTypeAssertionExpression(sReceiver)
-          ) {
-            sReceiver = sReceiver.expression;
-          }
-          if (ts.isIdentifier(sReceiver) && ctx.topLevelFunctionNames.has(sReceiver.text)) {
+          if (isTopLevelFunctionPropertyReceiver(ctx, expr.left.expression)) {
             ctx.moduleInitStatements.push(stmt);
             continue;
           }

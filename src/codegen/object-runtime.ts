@@ -723,15 +723,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     });
   }
 
-  // $ObjVec struct {len: i32, data: (ref $ObjVecArr)} — a growable externref
-  // vector. Wrapped to externref via extern.convert_any so it flows through the
-  // existing externref-typed enumeration call sites (Object.keys → __extern_*).
+  // Growable externref Array carrier; vec-base exposes length to shared reflection.
+  const objVecBaseTypeIdx = getOrRegisterVecBaseType(ctx);
   const objVecTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
     name: "$ObjVec",
+    superTypeIdx: objVecBaseTypeIdx,
     fields: [
-      { name: "len", type: { kind: "i32" }, mutable: true },
+      { name: "length", type: { kind: "i32" }, mutable: true },
       { name: "data", type: { kind: "ref", typeIdx: objVecArrTypeIdx }, mutable: true },
     ],
   });
