@@ -2854,6 +2854,15 @@ function recordSourceGlobalEnvironment(ctx: CodegenContext, sourceFile: ts.Sourc
 
 /** Pre-scan the small syntax surface that enables the linked runtime-eval ABI. */
 function sourceUsesRuntimeEvalBoundary(sourceFile: ts.SourceFile): boolean {
+  // (#3437) `callUsesRuntimeEvalBoundary` can only answer true for a call whose
+  // callee is the identifier `Function` or `eval` — so if neither name occurs
+  // anywhere in the source text, no call can match and the full-file AST walk
+  // below is guaranteed to return false. Skipping it on that cheap substring
+  // test keeps this predicate off the harness compile-work budget for the
+  // overwhelming majority of files (a sound over-approximation: the text test
+  // is only allowed to skip when the identifiers are definitely absent).
+  const text = sourceFile.text;
+  if (!text.includes("Function") && !text.includes("eval")) return false;
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
