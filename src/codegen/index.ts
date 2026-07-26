@@ -6869,7 +6869,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // same sentinel-preserving carrier already used by local preallocation.
     // Resolving `number | null` to plain f64 erases a returned null to 0 before
     // the caller can test it (Acorn's readInt/readHexChar error sentinel).
-    if (isNullablePrimitiveType(tsType)) return { kind: "externref" };
+    // Optional object fields (`number | undefined`, etc.) already have
+    // shape-specific absence handling. Widening those here changes their
+    // concrete struct layout and can make direct delete/read paths disagree.
+    // The Acorn boundary that needs a carrier at this general resolver is the
+    // explicit-null result family (`number | null`, `string | null`, ...).
+    if (isNullablePrimitiveType(tsType) && tsType.types.some((type) => type.flags & ts.TypeFlags.Null)) {
+      return { kind: "externref" };
+    }
     const nonNullish = tsType.types.filter(
       (t) => !(t.flags & ts.TypeFlags.Null) && !(t.flags & ts.TypeFlags.Undefined) && !(t.flags & ts.TypeFlags.Void),
     );
