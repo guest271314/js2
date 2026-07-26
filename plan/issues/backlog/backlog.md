@@ -2,6 +2,15 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## 2026-07-26 — TypeScript frontend incremental reuse
+
+- [#700](../700-reuse-typescript-program-across-builds.md) — **in review,
+  PR #3645**: replace per-build TypeScript Program/checker construction with a
+  persistent versioned Language Service. Measured edited rebuilds improve
+  2.2–2.6× and unchanged rebuilds 4.1–6.2×, with Program invalidation,
+  cross-service isolation, JS byte parity, and 100-source sequential isolation
+  covered by focused tests.
+
 ## 2026-07-17 - /harvest-errors (baselines run 20260717-151504, 32,139 pass)
 
 Harvested both lanes (default JS-host + standalone) from
