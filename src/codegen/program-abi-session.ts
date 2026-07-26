@@ -70,6 +70,18 @@ export class ProgramAbiStructuralOrder {
 
   constructor(readonly inventory: IrUnitInventory) {
     const sourceLocalCounts = new Map<IrSourceId, number>();
+    const anchorOwners = new Map<string, string>();
+    const reserveAnchor = (anchor: ProgramAbiDeclarationAnchor, owner: string): void => {
+      const key = `${anchor.sourceId}\u0000${anchor.declarationOrdinal}`;
+      const previous = anchorOwners.get(key);
+      if (previous !== undefined) {
+        throw new ProgramAbiInvariantError(
+          "ambiguous-order-anchor",
+          `${owner} and ${previous} share ABI order anchor ${anchor.declarationOrdinal}`,
+        );
+      }
+      anchorOwners.set(key, owner);
+    };
     for (const source of inventory.sources) {
       if (this.sourceAnchors.has(source.id)) {
         throw new ProgramAbiInvariantError(
@@ -77,7 +89,9 @@ export class ProgramAbiStructuralOrder {
           `source ${source.id} occurs more than once in the ABI ordering inventory`,
         );
       }
-      this.sourceAnchors.set(source.id, Object.freeze({ sourceId: source.id, declarationOrdinal: 0 }));
+      const anchor = Object.freeze({ sourceId: source.id, declarationOrdinal: 0 });
+      reserveAnchor(anchor, `source ${source.id}`);
+      this.sourceAnchors.set(source.id, anchor);
       sourceLocalCounts.set(source.id, 0);
     }
 
@@ -95,17 +109,24 @@ export class ProgramAbiStructuralOrder {
           `unit ${unit.id} references source ${unit.sourceId} outside the ABI ordering inventory`,
         );
       }
-      this.unitAnchors.set(
-        unit.id,
-        Object.freeze({
-          sourceId: unit.sourceId,
-          declarationOrdinal: (sourceCount + 1) * 2,
-        }),
-      );
+      const anchor = Object.freeze({
+        sourceId: unit.sourceId,
+        declarationOrdinal: (sourceCount + 1) * 2,
+      });
+      reserveAnchor(anchor, `unit ${unit.id}`);
+      this.unitAnchors.set(unit.id, anchor);
       sourceLocalCounts.set(unit.sourceId, sourceCount + 1);
     }
 
-    const classOrderOwners = new Map<string, IrClassId>();
+    // Unit-backed classes retain their historical slot immediately before the
+    // first exact member unit. Classes with no executable unit (for example an
+    // ambient `declare class`) occupy odd slots after the authoritative unit
+    // range, in the inventory's canonical source-local class order.
+    const nextUnitlessClassOrdinalBySource = new Map<IrSourceId, number>();
+    for (const source of inventory.sources) {
+      const sourceUnitCount = sourceLocalCounts.get(source.id)!;
+      nextUnitlessClassOrdinalBySource.set(source.id, (sourceUnitCount + 1) * 2 - 1);
+    }
     for (const classRecord of inventory.classes) {
       if (this.classAnchors.has(classRecord.id)) {
         throw new ProgramAbiInvariantError(
@@ -117,25 +138,30 @@ export class ProgramAbiStructuralOrder {
         (unit) => unit.sourceId === classRecord.sourceId && unit.lexicalOwnerId === classRecord.id,
       );
       const memberAnchor = member === undefined ? undefined : this.unitAnchors.get(member.id);
-      if (!memberAnchor) {
+      let anchor: Readonly<ProgramAbiDeclarationAnchor>;
+      if (memberAnchor) {
+        anchor = Object.freeze({
+          sourceId: classRecord.sourceId,
+          declarationOrdinal: memberAnchor.declarationOrdinal - 1,
+        });
+      } else {
+        const declarationOrdinal = nextUnitlessClassOrdinalBySource.get(classRecord.sourceId);
+        if (declarationOrdinal === undefined) {
+          throw new ProgramAbiInvariantError(
+            "unknown-order-anchor",
+            `class ${classRecord.id} references source ${classRecord.sourceId} outside the ABI ordering inventory`,
+          );
+        }
+        anchor = Object.freeze({ sourceId: classRecord.sourceId, declarationOrdinal });
+        nextUnitlessClassOrdinalBySource.set(classRecord.sourceId, declarationOrdinal + 2);
+      }
+      if (!validOrdinal(anchor.declarationOrdinal)) {
         throw new ProgramAbiInvariantError(
-          "unknown-order-anchor",
-          `class ${classRecord.id} has no exact unit anchor in inventory.allUnits`,
+          "invalid-draft-order",
+          `class ${classRecord.id} has invalid ABI order anchor ${anchor.declarationOrdinal}`,
         );
       }
-      const anchor = Object.freeze({
-        sourceId: classRecord.sourceId,
-        declarationOrdinal: memberAnchor.declarationOrdinal - 1,
-      });
-      const key = `${anchor.sourceId}\u0000${anchor.declarationOrdinal}`;
-      const previous = classOrderOwners.get(key);
-      if (previous !== undefined) {
-        throw new ProgramAbiInvariantError(
-          "ambiguous-order-anchor",
-          `classes ${previous} and ${classRecord.id} share ABI order anchor ${anchor.declarationOrdinal}`,
-        );
-      }
-      classOrderOwners.set(key, classRecord.id);
+      reserveAnchor(anchor, `class ${classRecord.id}`);
       this.classAnchors.set(classRecord.id, anchor);
     }
   }
