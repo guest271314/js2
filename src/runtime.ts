@@ -1904,7 +1904,7 @@ type WasmVecMutationResult = { handled: false } | { handled: true; value: any };
  * Mutate a WasmGC vec before generic host method lookup can observe its
  * materialized Array mirror. Calling `mirror.push(...)` appears successful but
  * only changes the temporary JS array; Acorn's nested RegExp name vector then
- * remains empty (#2802/#3666).
+ * remains empty (#2802/#1712).
  */
 function _tryWasmVecMutation(
   obj: any,
@@ -10678,7 +10678,7 @@ assert._isSameValue = isSameValue;
               if (drained !== null) wrappedArgs[1] = [drained, ...wrappedArgs[1].slice(1)];
             }
           }
-          // (#2802/#3666) Intercept vec push/pop BEFORE `wrappedObj[method]`.
+          // (#2802/#1712) Intercept vec push/pop BEFORE `wrappedObj[method]`.
           // `_wrapForHost` exposes a real Array facade, so generic lookup finds
           // Array.prototype.push/pop and mutates only that materialized mirror;
           // the existing not-a-function fallback below is then unreachable.

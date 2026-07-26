@@ -14,7 +14,7 @@ task_type: bugfix
 area: codegen
 language_feature: value-representation
 goal: acorn-dogfood
-related: [1712, 2784, 2794, 3603, 3666]
+related: [1712, 2784, 2794, 3603]
 depends_on: [2784]
 blocks: [1712]
 ---

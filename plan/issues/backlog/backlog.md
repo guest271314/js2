@@ -8,18 +8,12 @@ The #1712 acceptance branch now compares pinned compiled Acorn 8.16.0 against
 node-acorn on every Git-tracked Test262 JavaScript parser input, including exact
 positions and Test262 strict/module variants. The completed four-shard baseline
 is 53,036/53,259 exact files and isolates the remaining non-duplicate residual
-families. Two runtime residuals are resolved directly under #1712: recursive
-Wasm→host→Wasm prototype-method dispatch is now stack-flat, and dynamic indexed
-vec writes now update the live compiled element rather than an opaque sidecar.
-The tracked lexical and BigInt follow-ups are:
+families. Three runtime residuals are resolved directly under #1712: recursive
+Wasm→host→Wasm prototype-method dispatch is now stack-flat, dynamic indexed vec
+writes now update the live compiled element rather than an opaque sidecar, and
+the lexical early-error family is exact after the nullable-return and nested-vec
+repairs. The remaining tracked BigInt follow-up is:
 
-- [#3666](../3666-compiled-acorn-test262-lexical-early-errors.md) — compiled
-  Acorn accepts lexical errors rejected by the identical node-acorn source: 36
-  files / 72 variants across invalid template/string escapes, truncated radix
-  numerics, and dangling named RegExp backreferences, now fully fixed in the
-  223-file replay. Work reuses the completed #1769 nullable-return design and
-  reactivates #2802 for the nested-vec mirror mutation that the curated corpus
-  had not reached.
 - [#2846](../2846-acorn-bigint-literal-corrupted-to-f64.md) is reopened rather
   than duplicated: its signed-i64 branding fix solved precision through 64 bits,
   but arbitrary-width literal `value` and `bigint` fields wrap modulo 2^64 in

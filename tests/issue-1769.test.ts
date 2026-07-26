@@ -161,7 +161,7 @@ describe("#1769 nullable primitive union lowering and narrowing", () => {
           return value == null ? -1 : value;
         }
       `,
-      "issue-3666.js",
+      "issue-1712-nullable-return.js",
     );
 
     expect(exports.classify(false)).toBe(-1);

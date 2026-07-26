@@ -775,7 +775,18 @@ The acceptance surface now includes every Git-tracked Test262 JavaScript parser
 input, using pinned acorn 8.16.0 on both sides and comparing exact ESTree,
 including positions and Test262 script/module/strict variants. The completed
 pre-fix four-shard census covered **53,259 files / 102,312 variants** and reduced
-the remaining mismatches to two files / four variants:
+the remaining mismatches to two files / four variants after first closing the
+lexical early-error and arbitrary-width BigInt families.
+
+The lexical family covered **36 files / 72 variants** across invalid
+template/string escapes, truncated radix numerics, and dangling named RegExp
+backreferences. Two substrate defects explained it: nullable primitive function
+results erased Acorn's `readInt`/`readHexChar` null sentinel, while nested vec
+`push` mutated a materialized host Array mirror rather than Acorn's live
+`backReferenceNames` vector. The complete recorded 223-file replay eliminated
+every `compiled-accepted-oracle-rejected` residual from that family.
+
+The final two residuals were:
 
 - A generator-context vec mutation left `yield/regexp/` in the division lexical
   goal because the host proxy write did not update the live Wasm vector.
