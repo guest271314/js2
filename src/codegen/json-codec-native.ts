@@ -828,6 +828,37 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             ],
           },
         ] satisfies Instr[])),
+    // ES2025 §25.5.2.2: a branded raw-JSON carrier contributes its source text
+    // verbatim. The carrier was already minted through the object runtime by
+    // emitJsonRawJson; recognize the existing internal-slot bit here, after
+    // toJSON/replacer transformation and before ordinary object walking.
+    { op: "local.get", index: L_ANY },
+    { op: "ref.test", typeIdx: objectTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L_ANY },
+        { op: "ref.cast", typeIdx: objectTypeIdx },
+        { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+        { op: "i32.const", value: OBJ_FLAG_RAWJSON },
+        { op: "i32.and" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_ANY },
+            { op: "extern.convert_any" },
+            ...litStr("rawJSON"),
+            { op: "extern.convert_any" },
+            { op: "call", funcIdx: externGetIdxTJ },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: anyStrTypeIdx },
+            { op: "return" },
+          ],
+        },
+      ],
+    },
     // $Object?
     { op: "local.get", index: L_ANY },
     { op: "ref.test", typeIdx: objectTypeIdx },
@@ -2644,6 +2675,8 @@ export function emitJsonRawJson(ctx: CodegenContext): number {
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
   const boxNumTypeIdx = ctx.nativeBoxNumberTypeIdx;
   const boxBoolTypeIdx = ctx.nativeBoxBooleanTypeIdx;
+  const anyValueTypeIdx = ctx.anyValueTypeIdx;
+  const f64: ValType = { kind: "f64" };
   const strDataRef: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
   const strRefNative: ValType = { kind: "ref", typeIdx: strTypeIdx };
   const objRef: ValType = { kind: "ref", typeIdx: rt.objectTypeIdx };
@@ -2681,6 +2714,8 @@ export function emitJsonRawJson(ctx: CodegenContext): number {
   const R_O = 8; // ref $Object (carrier cast once for the brand-bit write)
   const R_STR = 9; // externref — ToString(v), the JSON source text
   const R_ANY = 10; // anyref — v widened for the ToString tag-dispatch
+  const R_TAG = 11; // i32 — $AnyValue tag
+  const R_PAYLOAD = 12; // externref — overloaded tag-5 payload
 
   // isWhitespace(c): space | tab | LF | CR
   const isWs = (loadC: Instr[]): Instr[] => [
@@ -2726,6 +2761,7 @@ export function emitJsonRawJson(ctx: CodegenContext): number {
     //   $AnyString           → the string itself
     //   $__box_number_struct → number_toString(value)
     //   $__box_boolean_struct→ "true" / "false"
+    //   $AnyValue             → tag-dispatch its primitive payload
     //   else (object/array/symbol/undefined) → "[object Object]", which the
     //        parser below rejects → SyntaxError (matching §25.5.3).
     { op: "local.get", index: R_V },
@@ -2772,7 +2808,164 @@ export function emitJsonRawJson(ctx: CodegenContext): number {
                       else: strConst("false"),
                     },
                   ],
-                  else: strConst("[object Object]"),
+                  else: [
+                    // Generic array/union lanes carry their values in
+                    // `$AnyValue`, not in the native box structs above. Apply
+                    // the same primitive ToString conversion to that carrier
+                    // so JSON.rawJSON(value) remains representation-neutral.
+                    { op: "local.get", index: R_ANY },
+                    { op: "ref.test", typeIdx: anyValueTypeIdx },
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: externref },
+                      then: [
+                        { op: "local.get", index: R_ANY },
+                        { op: "ref.cast", typeIdx: anyValueTypeIdx },
+                        { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 0 },
+                        { op: "local.set", index: R_TAG },
+                        // tag 2/3 = integer/f64 number
+                        { op: "local.get", index: R_TAG },
+                        { op: "i32.const", value: 2 },
+                        { op: "i32.eq" },
+                        { op: "local.get", index: R_TAG },
+                        { op: "i32.const", value: 3 },
+                        { op: "i32.eq" },
+                        { op: "i32.or" },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: externref },
+                          then: [
+                            { op: "local.get", index: R_TAG },
+                            { op: "i32.const", value: 2 },
+                            { op: "i32.eq" },
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: f64 },
+                              then: [
+                                { op: "local.get", index: R_ANY },
+                                { op: "ref.cast", typeIdx: anyValueTypeIdx },
+                                { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 1 },
+                                { op: "f64.convert_i32_s" },
+                              ],
+                              else: [
+                                { op: "local.get", index: R_ANY },
+                                { op: "ref.cast", typeIdx: anyValueTypeIdx },
+                                { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 2 },
+                              ],
+                            },
+                            { op: "call", funcIdx: numToStrIdx },
+                          ],
+                          else: [
+                            // tag 4 = boolean
+                            { op: "local.get", index: R_TAG },
+                            { op: "i32.const", value: 4 },
+                            { op: "i32.eq" },
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: externref },
+                              then: [
+                                { op: "local.get", index: R_ANY },
+                                { op: "ref.cast", typeIdx: anyValueTypeIdx },
+                                { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 1 },
+                                {
+                                  op: "if",
+                                  blockType: { kind: "val", type: externref },
+                                  then: strConst("true"),
+                                  else: strConst("false"),
+                                },
+                              ],
+                              else: [
+                                // tag 5 = string; tag 0 = null; tag 1 =
+                                // undefined (invalid JSON, rejected below).
+                                { op: "local.get", index: R_TAG },
+                                { op: "i32.const", value: 5 },
+                                { op: "i32.eq" },
+                                {
+                                  op: "if",
+                                  blockType: { kind: "val", type: externref },
+                                  then: [
+                                    // Generic externref boxing also uses tag 5
+                                    // for native number/boolean boxes. Peel
+                                    // those before treating the payload as a
+                                    // string; this mirrors the established
+                                    // AnyValue ToString ABI without depending
+                                    // on helper-emission order.
+                                    { op: "local.get", index: R_ANY },
+                                    { op: "ref.cast", typeIdx: anyValueTypeIdx },
+                                    { op: "struct.get", typeIdx: anyValueTypeIdx, fieldIdx: 4 },
+                                    { op: "local.tee", index: R_PAYLOAD },
+                                    { op: "any.convert_extern" },
+                                    { op: "local.tee", index: R_ANY },
+                                    { op: "ref.test", typeIdx: anyStrTypeIdx },
+                                    {
+                                      op: "if",
+                                      blockType: { kind: "val", type: externref },
+                                      then: [{ op: "local.get", index: R_PAYLOAD }],
+                                      else: [
+                                        { op: "local.get", index: R_ANY },
+                                        { op: "ref.test", typeIdx: boxNumTypeIdx },
+                                        {
+                                          op: "if",
+                                          blockType: { kind: "val", type: externref },
+                                          then: [
+                                            { op: "local.get", index: R_ANY },
+                                            { op: "ref.cast", typeIdx: boxNumTypeIdx },
+                                            { op: "struct.get", typeIdx: boxNumTypeIdx, fieldIdx: 0 },
+                                            { op: "call", funcIdx: numToStrIdx },
+                                          ],
+                                          else: [
+                                            { op: "local.get", index: R_ANY },
+                                            { op: "ref.test", typeIdx: boxBoolTypeIdx },
+                                            {
+                                              op: "if",
+                                              blockType: { kind: "val", type: externref },
+                                              then: [
+                                                { op: "local.get", index: R_ANY },
+                                                { op: "ref.cast", typeIdx: boxBoolTypeIdx },
+                                                { op: "struct.get", typeIdx: boxBoolTypeIdx, fieldIdx: 0 },
+                                                {
+                                                  op: "if",
+                                                  blockType: { kind: "val", type: externref },
+                                                  then: strConst("true"),
+                                                  else: strConst("false"),
+                                                },
+                                              ],
+                                              else: strConst("[object Object]"),
+                                            },
+                                          ],
+                                        },
+                                      ],
+                                    },
+                                  ],
+                                  else: [
+                                    { op: "local.get", index: R_TAG },
+                                    { op: "i32.eqz" },
+                                    {
+                                      op: "if",
+                                      blockType: { kind: "val", type: externref },
+                                      then: strConst("null"),
+                                      else: [
+                                        { op: "local.get", index: R_TAG },
+                                        { op: "i32.const", value: 1 },
+                                        { op: "i32.eq" },
+                                        {
+                                          op: "if",
+                                          blockType: { kind: "val", type: externref },
+                                          then: strConst("undefined"),
+                                          else: strConst("[object Object]"),
+                                        },
+                                      ],
+                                    },
+                                  ],
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                      else: strConst("[object Object]"),
+                    },
+                  ],
                 },
               ],
             },
@@ -2861,6 +3054,8 @@ export function emitJsonRawJson(ctx: CodegenContext): number {
       { count: 1, type: objRef }, // R_O
       { count: 1, type: externref }, // R_STR
       { count: 1, type: anyref }, // R_ANY
+      { count: 1, type: i32 }, // R_TAG
+      { count: 1, type: externref }, // R_PAYLOAD
     ],
     body,
     exported: false,

@@ -3,7 +3,7 @@ id: 3176
 title: "standalone: JSON.parse/stringify spec residual — reviver array walk illegal-cast, SyntaxError strictness, replacer/space edges (67 gap tests)"
 status: ready
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-26
 priority: high
 feasibility: hard
 task_type: bug
@@ -19,6 +19,7 @@ origin: "PO groom of #2860 umbrella, 2026-07-12 lane-baseline diff; slices the J
 loc-budget-allow:
   - src/codegen/json-codec-native.ts
   - src/codegen/expressions/calls.ts
+  - src/codegen/expressions/call-namespace-static.ts
   - src/codegen/object-runtime.ts
 coercion-sites-allow:
   - src/codegen/json-codec-native.ts
@@ -151,3 +152,63 @@ is now superseded by this issue. Keep `ready` but RE-MEASURE the full
 `built-ins/JSON/**` dirs (parse 77 + stringify 66) to size the true residual
 against the stale "67 gap tests" figure — the reviver-array-walk illegal-cast
 and replacer/space edges likely remain, but the count needs refreshing.
+
+## 2026-07-26 — authoritative residual + rawJSON stringify integration
+
+Re-measured all 165 `built-ins/JSON/**` records on pristine
+`origin/main@932e042a20d45ce517668d6a62ad03e9df53fb4` through the literal
+test262.fyi original-harness assembler under the authoritative Node 25 /
+Unicode 17 runtime:
+
+- standalone: **73/165**
+- gc/host control: **117/165**
+- host-pass / standalone-fail gap: **45 files**
+
+This replaces the stale 130/165 standalone headline: that number came from an
+older, inflated lane rather than the current de-inflated original-harness
+contract. The current gap is dominated by stringify (27 files), followed by
+parse (9), rawJSON (4), isRawJSON (3), JSON descriptors (1), and
+`Symbol.toStringTag` (1).
+
+### Shipped slice
+
+The highest-impact bounded JSON-only slice was rawJSON composition through the
+existing native stringify codec:
+
+1. `__json_stringify_value` now recognizes the existing
+   `OBJ_FLAG_RAWJSON` internal-slot brand after `toJSON` / replacer processing
+   and emits the carrier's validated source text verbatim.
+2. Direct non-spread JSON array literals are normalized into the existing
+   `$ObjVec` carrier. Nested arrays and plain object elements reuse the existing
+   object runtime, which also lets the empty replacer-array path serialize
+   `[1, {a: 2}]` correctly.
+3. `JSON.rawJSON` now applies its self-contained primitive ToString conversion
+   to `$AnyValue` carriers as well as native number/boolean boxes. This covers
+   generic array/union lanes without depending on shared helper-emission order.
+
+No parser, serializer, object walk, or array ABI was forked.
+
+### Exact local A/B
+
+- standalone: **73/165 → 76/165**
+- FAIL → PASS:
+  - `built-ins/JSON/isRawJSON/basic.js`
+  - `built-ins/JSON/rawJSON/basic.js`
+  - `built-ins/JSON/stringify/replacer-array-empty.js`
+- standalone PASS → FAIL: **0**
+- gc/host: **117/165 → 117/165**, with **0** file-level verdict changes
+
+The honest residual is therefore 42 host-pass / standalone-fail files. Keep
+#3176 `ready`: this PR completes one coherent slice, not the umbrella issue.
+
+### Test results
+
+- `pnpm exec vitest run tests/issue-3176.test.ts` — **6/6 passed**
+  (standalone and WASI; empty WebAssembly import table asserted)
+- authoritative full `built-ins/JSON/**` standalone and gc/host A/B — results
+  above
+- `pnpm run typecheck`
+- `pnpm exec prettier --check ...`
+- `pnpm run check:coercion-sites`
+- `pnpm run check:test262-hard-errors`
+- `pnpm run check:ir-fallbacks`
