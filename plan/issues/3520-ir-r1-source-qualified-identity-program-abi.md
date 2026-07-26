@@ -1149,7 +1149,7 @@ remain later R2-R10 work and are explicitly outside R1.
   and current-main control `dde8800c95694231e76ca3a56512a4060dbf81ad`.
   The baseline and allowlists are unchanged; rows outside this diagnosed
   signature are not attributed to this repair.
-- After merging current main `d64a8aa2fc6dedb8ffc905584333a4ca88d5e567`,
+- After merging current main `c941712943f45994149480b60165b5e18afb9505`,
   the complete #3520/#2138 matrix passes 212/212. Strict TypeScript, lint,
   formatting, LOC, fallback, and hybrid IR-readiness gates pass, with 31
   emitted / 6 typed Unsupported / 0 Invariants. The linear/cross-backend matrix

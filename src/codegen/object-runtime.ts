@@ -106,6 +106,7 @@ import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // 
 // `ensureObjectRuntime` (imported back here); `fillProxyDispatch` is re-exported
 // so `index.ts`s `from "./object-runtime.js"` importer keeps resolving.
 import { ensureProxyRuntime } from "./object-runtime-proxy.js";
+import { buildLazyNativeProtoGetInstrs, getBuiltinBrand } from "./native-proto.js";
 export { fillProxyDispatch } from "./object-runtime-proxy.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1).
@@ -6272,6 +6273,60 @@ export function fillExternArrayLikeStructArms(ctx: CodegenContext): void {
   }
 }
 
+function prependBuiltinFnObjectSemantics(ctx: CodegenContext, typeIdxs: readonly number[]): void {
+  const findFn = (name: string) => ctx.mod.functions.find((f) => f.name === name);
+  // Builtin function closure wrappers are objects, but the ordinary integrity
+  // predicates only recognise the open-object `$Object` carrier. Consequently
+  // every reified builtin method answered the primitive fallback
+  // (`isExtensible` false, `isFrozen`/`isSealed` true). Splice a finalized
+  // meta-type guard in front of those predicates once the complete subtype set
+  // is known. Like the metadata helpers below, this must be finalize-time:
+  // baking the `ref.test` set when the object runtime is first ensured would
+  // miss builtin closures registered later in source order.
+  const builtinFnTypePredicate = (): Instr[] => {
+    const predicate: Instr[] = [{ op: "i32.const", value: 0 }];
+    for (const typeIdx of typeIdxs) {
+      predicate.push(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx },
+        { op: "i32.or" },
+      );
+    }
+    return predicate;
+  };
+  for (const [name, result] of [
+    ["__object_isExtensible", 1],
+    ["__object_isFrozen", 0],
+    ["__object_isSealed", 0],
+  ] as const) {
+    const integrityFn = findFn(name);
+    if (!integrityFn) continue;
+    integrityFn.body.splice(0, 0, ...builtinFnTypePredicate(), {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: result }, { op: "return" }],
+    });
+  }
+
+  // The same wrappers' [[Prototype]] is %Function.prototype%. The ordinary
+  // native helper only follows `$Object.$proto`, so prepend the complete
+  // finalized meta-type predicate and return the identity-stable native
+  // Function prototype for a match. The singleton/glue is already registered
+  // by the source's `Function.prototype` value read in reflective comparisons;
+  // if it is absent, retain the prior null fallback.
+  const functionBrand = getBuiltinBrand(ctx, "Function");
+  const functionProtoInstrs = functionBrand === undefined ? null : buildLazyNativeProtoGetInstrs(ctx, functionBrand);
+  const getPrototypeFn = findFn("__getPrototypeOf");
+  if (functionProtoInstrs && getPrototypeFn) {
+    getPrototypeFn.body.splice(0, 0, ...builtinFnTypePredicate(), {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...functionProtoInstrs, { op: "return" }],
+    });
+  }
+}
+
 /**
  * (#2896) Finalize-time fill for the reserved builtin-fn metadata natives
  * (`__builtinfn_get_meta` / `__builtinfn_gopd` / `__builtinfn_delete` /
@@ -6311,6 +6366,10 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
 
   // Deterministic arm order.
   const entries = Array.from(metaMap.entries()).sort((a, b) => a[0] - b[0]);
+  prependBuiltinFnObjectSemantics(
+    ctx,
+    entries.map(([typeIdx]) => typeIdx),
+  );
 
   // Shared preamble for get_meta / delete (locals: 2=any 3=fkey 4=isName 5=isLen):
   // convert the receiver, classify the key ONCE (string → flattened; isName /
