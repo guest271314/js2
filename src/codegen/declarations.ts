@@ -508,7 +508,7 @@ function isTopLevelFunctionPropertyReceiver(ctx: CodegenContext, receiver: ts.Ex
   return (
     rootName !== undefined &&
     ctx.topLevelFunctionNames.has(rootName) &&
-    ctx.checker.getTypeAtLocation(current).getCallSignatures().length > 0
+    ctx.oracle.signatureOf(current) !== undefined
   );
 }
 
