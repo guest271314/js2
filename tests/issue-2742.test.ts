@@ -191,4 +191,77 @@ describe("#2742 group (c): accessor getter returning a compiled closure", () => 
     `;
     expect(await run(src, "test")).toBe(1);
   });
+
+  it("preserves getter identity and permits SameValue redefinition", async () => {
+    const src = `
+      const getter = function (): any {
+        return function (): number { return 7; };
+      };
+      const o: any = {};
+      Object.defineProperty(o, "value", {
+        get: getter,
+        configurable: false
+      });
+      export function test(): number {
+        const identity = Object.getOwnPropertyDescriptor(o, "value").get === getter;
+        let redefined = false;
+        try {
+          Object.defineProperty(o, "value", { get: getter });
+          redefined = true;
+        } catch (_err) {
+          redefined = false;
+        }
+        return identity && redefined && o.value() === 7 ? 1 : 0;
+      }
+    `;
+    expect(await run(src, "test")).toBe(1);
+  });
+
+  it("bridges an accessor-returned arity-1 function used as a descriptor setter", async () => {
+    const src = `
+      export function test(): number {
+        let observed = "";
+        const attributes: any = {};
+        Object.defineProperty(attributes, "set", {
+          get: function (): any {
+            return function (value: any): void {
+              observed = value;
+            };
+          }
+        });
+        const o: any = {};
+        Object.defineProperty(o, "value", attributes);
+        o.value = "ok";
+        return observed === "ok" ? 1 : 0;
+      }
+    `;
+    expect(await run(src, "test")).toBe(1);
+  });
+
+  it("does not turn unsupported accessor-returned rest closures into a Wasm trap", async () => {
+    const src = `
+      const target: any = {};
+      Object.defineProperty(target, "x", {
+        value: 1,
+        enumerable: true,
+        configurable: true
+      });
+      const handler: any = {
+        get ownKeys(): any {
+          return (..._args: any[]): any => ["x"];
+        },
+        get getOwnPropertyDescriptor(): any {
+          return (..._args: any[]): any => ({
+            value: 1,
+            enumerable: true,
+            configurable: true
+          });
+        }
+      };
+      export function test(): number {
+        return Object.keys(new Proxy(target, handler)).length;
+      }
+    `;
+    await expect(run(src, "test")).rejects.toThrow(/not a function/);
+  });
 });

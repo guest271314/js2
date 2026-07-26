@@ -16,16 +16,21 @@ language_feature: string-methods
 goal: es5
 related: [2670]
 depends_on: []
-# (#3102 ratchet) The fix adds `_wrapAccessorGetterReturn` — a host-marshalling
-# bridge that must sit beside its siblings `_wrapExecReturnForHost` /
-# `_maybeWrapCallableUnknownArity` in runtime.ts, since it composes directly with
-# the accessor wiring at the single `Object.defineProperty` accessor site. There
-# is no subsystem module for host-value marshalling to move it to, and splitting
-# one bridge away from the cache/discriminator helpers it calls would be worse
-# than the +34 lines (~2/3 of which are the rationale comment recording why the
-# generic call-exit marshal was reverted — #3123/#2835).
+# (#3102 ratchet) Accessor-return marshalling belongs beside its sibling
+# host-value bridges and closure caches in runtime.ts. The merge-group
+# regression repair also needs source rest-parameter metadata and one narrow
+# emitted classifier: the generic host dispatcher cannot materialize a rest vec,
+# so the runtime must classify that source shape before exposing the closure.
 loc-budget-allow:
   - src/runtime.ts
+  - src/codegen/closure-exports.ts
+  - src/codegen/closures/arrow-phases.ts
+  - src/codegen/context/types.ts
+  - src/codegen/index.ts
+func-budget-allow:
+  - src/runtime.ts::resolveImport
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
 ---
 # #2742 — String.prototype generic-receiver `ToString(this)` coercion
 
@@ -216,3 +221,51 @@ it does **not** claim conformance flips it cannot demonstrate.
    receiver.
 
 Stays `in-progress`: this closes the group-(c) root cause, not the issue.
+
+## Merge-group regression remediation (PR #3660, 2026-07-26)
+
+The bot-held merge-group run `30187000346` tested immutable merge commit
+`ff373100552e1d6c4f9c792a8eecf6e01fadbd23`. Recomputing the gate from its
+downloaded candidate artifact against exact selected baseline
+`100c90d3b71426b6ec2cf6a6e920878325ac1a02` found 33 stable regressions after
+flakiness/quarantine filtering, 42 fine-gate improvements, and signature
+`fc7292a8a6f761c1`. The trap ratchet also isolated one new
+`illegal_cast`: `test/built-ins/Object/keys/proxy-keys.js`.
+
+There were two causal defects:
+
+1. The first implementation wrapped the already-cached getter bridge in a
+   second JavaScript function. Accessor getter identity is observable, so
+   `Object.getOwnPropertyDescriptor(o, "x").get === getter` became false and a
+   SameValue redefinition of a non-configurable accessor incorrectly threw.
+   The repair marks bridge-owned getter functions and marshals the return inside
+   that same bridge. No new function replaces the descriptor getter.
+2. `proxy-keys.js` returns a source rest closure from an accessor. Rest lowering
+   gives that closure one concrete Wasm vec formal, but a native `Proxy` call
+   supplies positional host arguments. Sending the first host argument through
+   the generic dynamic dispatcher therefore trapped in a concrete `ref.cast`.
+   `ClosureInfo` now records the source rest shape and the module emits a narrow
+   `__closure_has_rest` discriminator. The accessor bridge leaves such closures
+   raw, preserving current-main's accepted `missing_builtin` limitation instead
+   of worsening it to an uncatchable Wasm trap. Ordinary zero- and nonzero-arity
+   returned functions are still bridged.
+
+No-capture closures reuse a signature-keyed wrapper type. A non-rest closure
+with the exact same concrete vec signature is therefore conservatively left raw
+too; captured closures retain distinct subtypes. This bounded tradeoff avoids an
+ABI change to closure structs in a regression-only repair.
+
+This deliberately does not catch and retry a trapped dynamic call, alter any
+Test262 baseline, or broaden generic call-exit marshalling (the latter already
+regressed ~85 dstr files in #3123/#2835).
+
+Validation after merging current `main` (`f7d1187fa2c79e0153731308200ebb2c6cac274b`):
+
+- `tests/issue-2742.test.ts`: 15/15 pass, including getter identity,
+  non-configurable SameValue redefinition, an arity-1 returned setter, and the
+  rest-closure trap guard.
+- Exact immutable affected set: 75/75 Vitest cases pass — all 33 stable
+  regressions and all 42 fine-gate improvements.
+- Exact controls: the three dominant identity regressions pass;
+  `proxy-keys.js` reports `missing_builtin` (“not a function”), with no
+  `illegal_cast`.
