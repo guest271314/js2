@@ -31,6 +31,7 @@ import {
 import { buildStringConstants, buildStringConstants16 } from "./runtime/string-constants.js";
 export { buildStringConstants, buildStringConstants16 };
 import { _arrayProtoSparseFastPaths } from "./runtime/array-proto-sparse.js"; // (#3103, #1234) sparse-aware Array.prototype fast paths
+import { registerVecMirror, snapshotVecMirrors, reconcileVecMirrors } from "./runtime/vec-mirror-writeback.js"; // (#3603 S1) vec-mirror write-back
 import {
   _rerouteStringSymbolMethodPrimitive,
   _makeLegacyRegExpState,
@@ -10737,7 +10738,12 @@ assert._isSameValue = isSameValue;
           // record (see _iteratorRecordForHost) so the native/polyfill helper
           // can drive a compiled iterator.
           const dispatchRecv = _isIteratorHelperFn(fn) ? _iteratorRecordForHost(obj, callbackState) : wrappedObj;
+          // (#3603 S1) `Array.prototype.push.call(vec, x)` arrives as obj=push,
+          // method="call", args[0]=the vec's `__make_iterable` mirror — bracket
+          // the dispatch so the mutation reaches the vec (silent no-op before).
+          const mirrorSnaps = snapshotVecMirrors(dispatchRecv, wrappedArgs, exports);
           const ret = fn.apply(dispatchRecv, wrappedArgs);
+          reconcileVecMirrors(mirrorSnaps, exports, _unwrapForHost);
           // (#1333) Annex B — RegExp.prototype.exec/test post-match slot update.
           if (
             (method === "exec" || method === "test") &&
@@ -11358,7 +11364,12 @@ assert._isSameValue = isSameValue;
           };
           const wrappedThis = wrapHostValue(thisArg);
           const wrappedArgs = args.map(wrapHostValue);
+          // (#3603 S1) `Function.prototype.call.bind(Array.prototype.push)` lands
+          // here as `__call_function(boundCall, null, [vecMirror, item])` — same
+          // bracket, so the uncurried push reaches the vec.
+          const mirrorSnaps = snapshotVecMirrors(wrappedThis, wrappedArgs, exports);
           const ret = Reflect.apply(fn, wrappedThis, wrappedArgs);
+          reconcileVecMirrors(mirrorSnaps, exports, _unwrapForHost);
           return _unwrapForHost(ret);
         };
       if (name === "__reflect_construct")
@@ -13181,6 +13192,9 @@ assert._isSameValue = isSameValue;
             if (typeof len === "number" && len >= 0) {
               const arr = convertedArrays.get(obj) ?? [];
               convertedArrays.set(obj, arr);
+              // (#3603 S1) Record mirror → vec so a host mutation of this array
+              // is replayed onto the vec instead of being silently dropped.
+              registerVecMirror(arr, obj);
               arr.length = len;
               for (let i = 0; i < len; i++) {
                 arr[i] = convertToJS(vecGet(obj, i));

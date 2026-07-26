@@ -1967,6 +1967,10 @@ export interface CodegenContext {
   preRegisteredBodyless?: Set<string>;
   /** Map from module-level variable name → global index in mod.globals */
   moduleGlobals: Map<string, number>;
+  /** Script `var` names whose global-object properties are non-configurable. */
+  globalObjectVarBindings?: Set<string>;
+  /** Sloppy unresolvable assignment targets discovered before body compilation. */
+  sloppyImplicitGlobals?: Set<string>;
   /**
    * (#2931) Names of function declarations that are *reassigned* somewhere in the
    * realm (`fn = …`). ES function bindings are live/mutable, so such a name is

@@ -5237,6 +5237,19 @@ function collectDirectNestedFunctionNames(body: ts.Block): Set<string> {
   return names;
 }
 
+/**
+ * The IR delete lowerer returns constant true and has no global binding
+ * attributes. Keep direct module-init `delete this.name` on legacy until the IR
+ * owns the GlobalEnvironmentRecord model (#2726).
+ */
+function isUnsupportedModuleGlobalObjectDelete(expr: ts.DeleteExpression): boolean {
+  return (
+    currentSubjectIsModuleInit &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    expr.expression.expression.kind === ts.SyntaxKind.ThisKeyword
+  );
+}
+
 function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClasses: ReadonlySet<string>): boolean {
   if (
     (expressionTouchesModuleExtern(expr) || expressionTouchesModuleMapGetAlias(expr)) &&
@@ -5245,8 +5258,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     return shapeNo("expr-module-extern-consumer", expr);
   }
   if (ts.isParenthesizedExpression(expr)) return isPhase1Expr(expr.expression, scope, localClasses);
-  // (#1373b C-1) `await <e>` inside a C-1-claimed async body. Shape-accept
-  // mirrors the legacy sync-model lowering from-ast emits:
+  // (#1373b C-1) `await <e>` inside a C-1 async body mirrors legacy sync-model lowering:
   //   - `await Promise.resolve(x)` → the settled expression `x` (#3227
   //     static substitution) — check THAT shape; the zero-arg form settles
   //     to `undefined`, which from-ast has no value lowering for → reject.
@@ -6089,9 +6101,10 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   //   - `void <expr>`         → lower expr for side effects, push
   //                              `f64 NaN` (the undefined sentinel
   //                              the IR uses in f64-typed contexts).
-  if (ts.isDeleteExpression(expr)) {
-    return isPhase1Expr(expr.expression, scope, localClasses);
-  }
+  if (ts.isDeleteExpression(expr))
+    return isUnsupportedModuleGlobalObjectDelete(expr)
+      ? shapeNo("expr-delete-module-global-object", expr)
+      : isPhase1Expr(expr.expression, scope, localClasses);
   if (ts.isVoidExpression(expr)) {
     return isPhase1Expr(expr.expression, scope, localClasses);
   }

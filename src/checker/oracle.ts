@@ -101,6 +101,8 @@ export interface TypeOracle {
   typeKeyOf(node: ts.Node): OracleTypeKey;
   /** Declared type NAME when the node's type has a named symbol. */
   declaredNameOf(node: ts.Node): string | undefined;
+  /** Whether an identifier has no value binding in the checker environment. */
+  isUnresolvableIdentifier(id: ts.Identifier): boolean;
   /**
    * (#869) Immutable-`const` binding resolution for compile-time default-param
    * folding. If `id` is an identifier that references a `const` variable
@@ -259,6 +261,14 @@ export class TsCheckerOracle implements TypeOracle {
       this.keyCache.set(t, key);
     }
     return key;
+  }
+
+  isUnresolvableIdentifier(id: ts.Identifier): boolean {
+    try {
+      return this.checker.getSymbolAtLocation(id) === undefined;
+    } catch {
+      return true;
+    }
   }
 
   declaredNameOf(node: ts.Node): string | undefined {
