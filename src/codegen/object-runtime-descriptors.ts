@@ -2809,8 +2809,67 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
   // immutability. Non-$Object receiver: returned unchanged (primitives are
   // already non-extensible; the predicate readers handle their query side).
   //
-  // params: 0=obj(externref) ; locals: 1=any(anyref) 2=o(ref null $Object)
-  const emitSetFlags = (name: string, bits: number): void => {
+  // params: 0=obj(externref)
+  // locals: 1=any(anyref) 2=o(ref null $Object) 3=props(ref $PropMap)
+  //         4=cap(i32) 5=i(i32) 6=e(ref null $PropEntry)
+  const emitSetFlags = (name: string, bits: number, entryClearMask: number): void => {
+    const clearEntryFlags: Instr[] =
+      entryClearMask === 0
+        ? []
+        : [
+            // Seal/freeze update the canonical dynamic-property entries too.
+            // __getOwnPropertyDescriptor reads these exact bits, so mutating
+            // only $Object.flags would leave stale descriptor attributes.
+            { op: "local.get", index: 2 },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
+            { op: "local.tee", index: 3 },
+            { op: "array.len" },
+            { op: "local.set", index: 4 },
+            { op: "i32.const", value: 0 },
+            { op: "local.set", index: 5 },
+            {
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [
+                {
+                  op: "loop",
+                  blockType: { kind: "empty" },
+                  body: [
+                    { op: "local.get", index: 5 },
+                    { op: "local.get", index: 4 },
+                    { op: "i32.ge_s" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: 3 },
+                    { op: "local.get", index: 5 },
+                    { op: "array.get", typeIdx: propMapTypeIdx },
+                    { op: "local.tee", index: 6 },
+                    { op: "ref.is_null" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [],
+                      else: [
+                        { op: "local.get", index: 6 },
+                        { op: "ref.as_non_null" },
+                        { op: "local.get", index: 6 },
+                        { op: "ref.as_non_null" },
+                        { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                        { op: "i32.const", value: ~entryClearMask },
+                        { op: "i32.and" },
+                        { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                      ],
+                    },
+                    { op: "local.get", index: 5 },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: 5 },
+                    { op: "br", depth: 0 },
+                  ],
+                },
+              ],
+            },
+          ];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -2830,6 +2889,7 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
           { op: "i32.const", value: bits },
           { op: "i32.or" },
           { op: "struct.set", typeIdx: objectTypeIdx, fieldIdx: 4 },
+          ...clearEntryFlags,
         ],
       },
       // return the original externref unchanged (identity preserved)
@@ -2842,11 +2902,19 @@ export function buildObjectDescriptorHelpers(ctx: CodegenContext, s: ObjectDescr
       [
         { name: "any", type: { kind: "anyref" } },
         { name: "o", type: objRefNull },
+        { name: "props", type: propMapRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
       ],
       body,
     );
   };
-  emitSetFlags("__object_preventExtensions", OBJ_FLAG_NONEXTENSIBLE);
-  emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED);
-  emitSetFlags("__object_freeze", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN);
+  emitSetFlags("__object_preventExtensions", OBJ_FLAG_NONEXTENSIBLE, 0);
+  emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED, FLAG_CONFIGURABLE);
+  emitSetFlags(
+    "__object_freeze",
+    OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN,
+    FLAG_WRITABLE | FLAG_CONFIGURABLE,
+  );
 }

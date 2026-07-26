@@ -2731,7 +2731,8 @@ export interface CodegenContext {
   /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
    *  function-closure values under `--target standalone`. Each (builtin, member)
    *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
-   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  (mut i32) bfnstate, i32 bfnid]`, supertype = its signature wrapper
+   *  struct), so the
    *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
    *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
    *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own

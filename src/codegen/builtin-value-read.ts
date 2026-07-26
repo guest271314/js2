@@ -849,6 +849,10 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       // __extern_get_idx. Preserve that contract for method values.
       returnType = { kind: "externref" };
       break;
+    case "Object.getOwnPropertyNames":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
     case "Object.getOwnPropertyDescriptor":
       paramTypes = [{ kind: "externref" }, { kind: "externref" }];
       returnType = { kind: "externref" };
@@ -1035,6 +1039,11 @@ export function ensureStandaloneBuiltinStaticMethodClosure(
       if (returnType && !valTypesMatch({ kind: "externref" }, returnType)) {
         coerceType(ctx, closureFctx, { kind: "externref" }, returnType);
       }
+    } else if (key === "Object.getOwnPropertyNames") {
+      const namesIdx = ensureLateImport(ctx, "__getOwnPropertyNames", [{ kind: "externref" }], [{ kind: "externref" }]);
+      if (namesIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "call", funcIdx: namesIdx });
     } else if (key === "Object.getOwnPropertyDescriptor") {
       const gopdIdx = ensureLateImport(
         ctx,

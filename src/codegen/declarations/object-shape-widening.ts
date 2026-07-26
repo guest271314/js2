@@ -189,6 +189,21 @@ export function collectEmptyObjectWidening(
             }
           }
 
+          // (#1712) Descriptor/integrity mutation is per OBJECT IDENTITY, not
+          // per structural Wasm type. Keep every receiver of Object's mutating
+          // MOPs on the canonical open `$Object` store so define/freeze/seal
+          // update the exact `$PropEntry` metadata later read by direct OR
+          // stored gOPD. This includes a builtin captured into a local
+          // (`const define = Object.defineProperty; define(o, ...)`): the
+          // stored closure has the same mutation effect as its direct spelling.
+          // Baking these flags into a widened closed shape would incorrectly
+          // share one instance's integrity state with every same-shape object.
+          if (ctx.standalone && !ctx.objectHashConsumerVars.has(varName)) {
+            for (const s of stmts) {
+              markStandaloneObjectMutationTargets(ctx, s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
           // (#739 S1 — HOST-lane representation pinning, the store-unification)
           // Any `Object.defineProperty` / `Object.defineProperties` on this
           // receiver whose application lands in the RUNTIME STORE — the native
@@ -844,6 +859,52 @@ function markStandaloneAccessorDefineTargets(node: ts.Node, varName: string, poi
           }
         }
       }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+}
+
+/** Mutating Object static methods whose receiver must use the identity-bearing
+ * open-object store in standalone. Resolve both direct member calls and the
+ * exact single-assignment stored-builtin shape used by test262's harnesses. */
+function markStandaloneObjectMutationTargets(
+  ctx: CodegenContext,
+  node: ts.Node,
+  varName: string,
+  poisonSet: Set<string>,
+): void {
+  const mutators = new Set(["defineProperty", "defineProperties", "freeze", "seal", "preventExtensions"]);
+  const resolveMethod = (callee: ts.Expression): string | undefined => {
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ts.isIdentifier(callee.expression) &&
+      callee.expression.text === "Object"
+    ) {
+      return callee.name.text;
+    }
+    if (!ts.isIdentifier(callee)) return undefined;
+    const sym = ctx.checker.getSymbolAtLocation(callee);
+    const decl = sym?.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return undefined;
+    let init: ts.Expression = decl.initializer;
+    while (
+      ts.isParenthesizedExpression(init) ||
+      ts.isAsExpression(init) ||
+      ts.isTypeAssertionExpression(init) ||
+      ts.isNonNullExpression(init) ||
+      ts.isSatisfiesExpression(init)
+    ) {
+      init = init.expression;
+    }
+    return ts.isPropertyAccessExpression(init) && ts.isIdentifier(init.expression) && init.expression.text === "Object"
+      ? init.name.text
+      : undefined;
+  };
+  const visit = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && mutators.has(resolveMethod(n.expression) ?? "")) {
+      const recv = n.arguments[0];
+      if (recv && ts.isIdentifier(recv) && recv.text === varName) poisonSet.add(varName);
     }
     ts.forEachChild(n, visit);
   };

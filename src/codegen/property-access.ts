@@ -1213,7 +1213,7 @@ export function emitNullGuardedStructGet(
     if (
       objType.kind === "ref_null" &&
       (objType as { typeIdx: number }).typeIdx === typeIdx &&
-      (fctx as any).__lastGuardedCastBackup === undefined
+      (!ctx.standalone || (fctx as any).__lastGuardedCastBackup === undefined)
     ) {
       const tmp = allocLocal(fctx, `__ng_${fctx.locals.length}`, objType);
       fctx.body.push({ op: "local.tee", index: tmp });

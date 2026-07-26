@@ -170,6 +170,7 @@ import {
   fillBuiltinFnMeta,
   fillClosedStructExternGetArms,
   fillClosedStructHasOwnArms,
+  fillClosedStructOwnPropertyNamesArms,
   fillDynamicForinVecArms,
   fillExternArrayLikeStructArms,
   fillExternGetIdxVecArms,
@@ -3905,6 +3906,7 @@ export function generateModule(
     // Closed compiler structs are not `$Object` hash maps. Fill the native
     // Object.hasOwn / hasOwnProperty predicates from the complete shape table.
     fillClosedStructHasOwnArms(ctx);
+    fillClosedStructOwnPropertyNamesArms(ctx);
     fillClosedStructExternGetArms(ctx);
     fillFnctorPrototypeDispatchArms(ctx);
 
@@ -5866,6 +5868,10 @@ export function generateMultiModule(
     // (#2847) Whole-program conservative branding for multi-source modules.
     recoverBooleanStructFieldBrands(ctx);
 
+    // Mirror single-source exact shape provenance before any closed-struct
+    // runtime finalizer consumes the complete multi-source type table.
+    resolveSameShapeFieldNameCollisions(ctx);
+
     // (#2831) Reserve the host-externref → wasm-vec materializers before the
     // `__sset_*` setters and deferred member dispatchers bake their value
     // coercions (mirrors the generateModule path).
@@ -5917,6 +5923,7 @@ export function generateMultiModule(
 
     // Mirror the single-source closed-struct own-property finalizer.
     fillClosedStructHasOwnArms(ctx);
+    fillClosedStructOwnPropertyNamesArms(ctx);
     fillClosedStructExternGetArms(ctx);
     fillFnctorPrototypeDispatchArms(ctx);
 
