@@ -611,7 +611,7 @@ export interface CompileOptions {
 }
 
 import * as path from "path";
-import { IncrementalLanguageService } from "./checker/index.js";
+import { IncrementalLanguageService, IncrementalProjectLanguageService } from "./checker/index.js";
 import { compileFilesSource, compileMultiSource, compileSource, compileToObjectSource } from "./compiler.js";
 import { ModuleResolver, resolveAllImports } from "./resolve.js";
 import { buildImports as buildImportsRuntime } from "./runtime.js";
@@ -791,20 +791,37 @@ export async function compileProject(entryFile: string, options?: CompileOptions
  * const compiler = createIncrementalCompiler();
  * const result1 = await compiler.compile("export function a(): number { return 1; }");
  * const result2 = await compiler.compile("export function b(): number { return 2; }"); // faster
+ * const project = await compiler.compileMulti(
+ *   { "dep.ts": "export const n = 2", "main.ts": "import { n } from './dep'; export const value = n" },
+ *   "main.ts",
+ * );
  * compiler.dispose(); // free resources when done
  * ```
  */
 export function createIncrementalCompiler(defaultOptions?: CompileOptions): {
   compile: (source: string, options?: CompileOptions) => Promise<CompileResult>;
+  compileMulti: (files: Record<string, string>, entryFile: string, options?: CompileOptions) => Promise<CompileResult>;
   dispose: () => void;
 } {
   const service = new IncrementalLanguageService();
+  let projectService: IncrementalProjectLanguageService | undefined;
   return {
     compile(source: string, options?: CompileOptions): Promise<CompileResult> {
       return compileSource(source, { ...defaultOptions, ...options }, service);
     },
+    async compileMulti(
+      files: Record<string, string>,
+      entryFile: string,
+      options?: CompileOptions,
+    ): Promise<CompileResult> {
+      projectService ??= new IncrementalProjectLanguageService();
+      return withImportObject(
+        await compileMultiSource(files, entryFile, { ...defaultOptions, ...options }, projectService),
+      );
+    },
     dispose() {
       service.dispose();
+      projectService?.dispose();
     },
   };
 }
