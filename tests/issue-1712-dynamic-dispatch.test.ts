@@ -38,6 +38,18 @@ async function run(src: string): Promise<any> {
   return wrapExports(instance.exports, { signatures: result.exportSignatures });
 }
 
+async function runStandalone(src: string): Promise<WebAssembly.Instance> {
+  const result = await compile(src, {
+    fileName: "acorn-standalone.mjs",
+    target: "standalone",
+    skipSemanticDiagnostics: true,
+  });
+  expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+  const module = await WebAssembly.compile(result.binary);
+  expect(WebAssembly.Module.imports(module).filter((entry) => entry.kind === "function")).toEqual([]);
+  return WebAssembly.instantiate(module, {});
+}
+
 describe("#1712 — static methods on function-style constructors", () => {
   it("plain static method call (was: 'parse is not a function')", async () => {
     const exp = await run(`
@@ -258,6 +270,111 @@ describe("#1712 — dynamic prototype accessors outrank inferred struct fields",
       export function probe() { return new Parser().allowReturn ? 1 : 0; }
     `);
     expect(exp.probe()).toBe(1);
+  });
+
+  it("preserves the receiver across chained accessors in standalone mode", async () => {
+    const instance = await runStandalone(`
+      var prototypeAccessors = {
+        inFunction: { configurable: true },
+        allowReturn: { configurable: true },
+      };
+      var Parser = function Parser() { this.flags = 2; };
+      prototypeAccessors.inFunction.get = function () { return (this.flags & 2) > 0; };
+      prototypeAccessors.allowReturn.get = function () { return this.inFunction; };
+      Object.defineProperties(Parser.prototype, prototypeAccessors);
+      export function probe() { return new Parser().allowReturn ? 1 : 0; }
+    `);
+    expect((instance.exports.probe as () => number)()).toBe(1);
+  });
+
+  it("reads a late-assigned prototype method through an Acorn-style accessor", async () => {
+    const instance = await runStandalone(`
+      var SCOPE_TOP = 1, SCOPE_FUNCTION = 2, SCOPE_VAR = SCOPE_TOP | SCOPE_FUNCTION;
+      var Scope = function Scope(flags) { this.flags = flags; };
+      var Parser = function Parser() { this.scopeStack = []; this.enterScope(SCOPE_TOP); };
+      Parser.prototype.enterScope = function (flags) { this.scopeStack.push(new Scope(flags)); };
+      Object.defineProperty(Parser.prototype, "inFunction", {
+        configurable: true,
+        get: function () { return (this.currentVarScope().flags & SCOPE_FUNCTION) > 0; },
+      });
+      Parser.prototype.currentVarScope = function () {
+        for (var i = this.scopeStack.length - 1;; i--) {
+          var scope = this.scopeStack[i];
+          if (scope.flags & SCOPE_VAR) return scope;
+        }
+      };
+      export function probe() {
+        var parser = new Parser();
+        parser.enterScope(SCOPE_FUNCTION);
+        return parser.inFunction ? 1 : 0;
+      }
+    `);
+    expect((instance.exports.probe as () => number)()).toBe(1);
+  });
+
+  it("preserves Acorn's prototype accessors across standalone table growth", async () => {
+    const instance = await runStandalone(`
+      var SCOPE_TOP = 1, SCOPE_FUNCTION = 2, SCOPE_VAR = SCOPE_TOP | SCOPE_FUNCTION;
+      var Scope = function Scope(flags) { this.flags = flags; };
+      var Parser = function Parser() { this.scopeStack = []; this.enterScope(SCOPE_TOP); };
+      var prototypeAccessors = {
+        inFunction: { configurable: true },
+        inGenerator: { configurable: true },
+        inAsync: { configurable: true },
+        canAwait: { configurable: true },
+        allowReturn: { configurable: true },
+        allowSuper: { configurable: true },
+        allowDirectSuper: { configurable: true },
+        treatFunctionsAsVar: { configurable: true },
+        allowNewDotTarget: { configurable: true },
+        allowUsing: { configurable: true },
+        inClassStaticBlock: { configurable: true },
+      };
+      prototypeAccessors.inFunction.get = function () {
+        return (this.currentVarScope().flags & SCOPE_FUNCTION) > 0;
+      };
+      prototypeAccessors.inGenerator.get = function () { return true; };
+      prototypeAccessors.inAsync.get = function () { return true; };
+      prototypeAccessors.canAwait.get = function () { return true; };
+      prototypeAccessors.allowReturn.get = function () { return this.inFunction; };
+      prototypeAccessors.allowSuper.get = function () { return true; };
+      prototypeAccessors.allowDirectSuper.get = function () { return true; };
+      prototypeAccessors.treatFunctionsAsVar.get = function () { return true; };
+      prototypeAccessors.allowNewDotTarget.get = function () { return true; };
+      prototypeAccessors.allowUsing.get = function () { return true; };
+      prototypeAccessors.inClassStaticBlock.get = function () { return true; };
+      Object.defineProperties(Parser.prototype, prototypeAccessors);
+      var pp = Parser.prototype;
+      pp.enterScope = function (flags) { this.scopeStack.push(new Scope(flags)); };
+      pp.currentVarScope = function () {
+        for (var i = this.scopeStack.length - 1;; i--) {
+          var scope = this.scopeStack[i];
+          if (scope.flags & SCOPE_VAR) return scope;
+        }
+      };
+      export function probe() {
+        var parser = new Parser();
+        parser.enterScope(SCOPE_FUNCTION);
+        return parser.inFunction ? 1 : 0;
+      }
+      export function accessorMask() {
+        var parser = new Parser();
+        parser.enterScope(SCOPE_FUNCTION);
+        return (parser.inFunction ? 1 : 0)
+          | (parser.inGenerator ? 2 : 0)
+          | (parser.inAsync ? 4 : 0)
+          | (parser.canAwait ? 8 : 0)
+          | (parser.allowReturn ? 16 : 0)
+          | (parser.allowSuper ? 32 : 0)
+          | (parser.allowDirectSuper ? 64 : 0)
+          | (parser.treatFunctionsAsVar ? 128 : 0)
+          | (parser.allowNewDotTarget ? 256 : 0)
+          | (parser.allowUsing ? 512 : 0)
+          | (parser.inClassStaticBlock ? 1024 : 0);
+      }
+    `);
+    expect((instance.exports.accessorMask as () => number)()).toBe(2047);
+    expect((instance.exports.probe as () => number)()).toBe(1);
   });
 
   it("keeps widened Object.defineProperty data values on their exact struct field", async () => {

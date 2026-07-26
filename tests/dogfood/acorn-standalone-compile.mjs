@@ -66,6 +66,27 @@ export function __acorn_tokenizer_canary() {
     token.end === 2 &&
     eof.type.label === "eof" ? 4 : -1;
 }
+export function __acorn_function_body_canary() {
+  const ast = parse("function f(a,b) { return a + b; }", {
+    ecmaVersion: 2025,
+    sourceType: "script"
+  });
+  const declaration = ast.body[0];
+  const returnStatement = declaration.body.body[0];
+  const expression = returnStatement.argument;
+  return ast.type === "Program" &&
+    ast.body.length === 1 &&
+    declaration.type === "FunctionDeclaration" &&
+    declaration.id.name === "f" &&
+    declaration.params.length === 2 &&
+    declaration.params[0].name === "a" &&
+    declaration.params[1].name === "b" &&
+    returnStatement.type === "ReturnStatement" &&
+    expression.type === "BinaryExpression" &&
+    expression.operator === "+" &&
+    expression.left.name === "a" &&
+    expression.right.name === "b" ? 5 : -1;
+}
 `;
 
   const started = performance.now();
@@ -87,6 +108,8 @@ export function __acorn_tokenizer_canary() {
       runtimeCanary: null,
       parseExpressionAtCanary: null,
       tokenizerCanary: null,
+      functionBodyCanary: null,
+      functionBodyCanaryError: null,
       functionImports: [],
       exports: [],
     };
@@ -97,11 +120,18 @@ export function __acorn_tokenizer_canary() {
   let runtimeCanary = null;
   let parseExpressionAtCanary = null;
   let tokenizerCanary = null;
+  let functionBodyCanary = null;
+  let functionBodyCanaryError = null;
   if (result.success && imports.length === 0) {
     const { exports } = await WebAssembly.instantiate(module, {});
     runtimeCanary = exports.__acorn_runtime_canary();
     parseExpressionAtCanary = exports.__acorn_parse_expression_at_canary();
     tokenizerCanary = exports.__acorn_tokenizer_canary();
+    try {
+      functionBodyCanary = exports.__acorn_function_body_canary();
+    } catch (error) {
+      functionBodyCanaryError = error?.stack ?? error?.message ?? String(error);
+    }
   }
 
   return {
@@ -113,6 +143,8 @@ export function __acorn_tokenizer_canary() {
     runtimeCanary,
     parseExpressionAtCanary,
     tokenizerCanary,
+    functionBodyCanary,
+    functionBodyCanaryError,
     functionImports: imports
       .filter((entry) => entry.kind === "function")
       .map((entry) => `${entry.module}::${entry.name}`),
