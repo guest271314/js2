@@ -243,6 +243,86 @@ describe("#3520 production unit-callable Program ABI planning", () => {
 });
 
 describe("#3520 production support-callable Program ABI planning", () => {
+  it("plans an exact class-owned constructor initializer with class-local order", () => {
+    const file = source("/repo/class-support.ts", "class Local {} class Other {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const localClass = inventory.classes.find((record) => record.displayName === "Local")!;
+    const otherClass = inventory.classes.find((record) => record.displayName === "Other")!;
+    const module = createEmptyModule();
+    const signature: FuncTypeDef = {
+      kind: "func",
+      params: [{ kind: "externref" }],
+      results: [{ kind: "externref" }],
+    };
+    module.types.push(signature);
+    const init = wasmFunction("Local_init", 0);
+    module.functions.push(init);
+
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+    const ref = irSupportFuncRef(localClass.id, "class-constructor-init", init.name);
+    expect(() =>
+      planProgramAbiSupportCallable(ctx, {
+        ref,
+        anchor: { kind: "class", classId: otherClass.id },
+        role: "class-constructor-init",
+        roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classConstructorInit,
+        signature,
+        func: init,
+      }),
+    ).toThrowError(TypeError);
+
+    const id = planProgramAbiSupportCallable(ctx, {
+      ref,
+      anchor: { kind: "class", classId: localClass.id },
+      role: "class-constructor-init",
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classConstructorInit,
+      signature,
+      func: init,
+    })!;
+    const draft = session.getDraft(id)!;
+    expect(draft).toMatchObject({
+      structuralOrder: {
+        sourceId: localClass.sourceId,
+        domainOrdinal: 0,
+        roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classConstructorInit,
+      },
+      structuralReferenceKey: irCallableBindingKey(ref.binding),
+      displayName: init.name,
+      slotPolicy: "required",
+      slotSpace: "function",
+      intent: {
+        kind: "callable",
+        origin: "support",
+        classId: localClass.id,
+        signature: {
+          params: ['{"kind":"externref"}'],
+          results: ['{"kind":"externref"}'],
+        },
+      },
+    });
+    expect(draft.intent).not.toHaveProperty("unitId");
+    expect(() =>
+      session.ensurePlan({
+        ...draft,
+        intent: { ...draft.intent, classId: otherClass.id },
+      }),
+    ).toThrowError(expect.objectContaining<ProgramAbiInvariantError>({ code: "session-draft-mismatch" }));
+    expect(session.resolveCurrentIndex(id, "function", irCallableBindingKey(ref.binding))).toBe(0);
+
+    const { abi } = session.publish(module);
+    expect(abi.get(id)?.intent).toEqual({
+      kind: "callable",
+      origin: "support",
+      classId: localClass.id,
+      signature: {
+        params: ['{"kind":"externref"}'],
+        results: ['{"kind":"externref"}'],
+      },
+    });
+    expect(abi.resolveFinalIndex(id)).toEqual({ space: "function", index: 0 });
+  });
+
   it("resolves an exact unit-anchored trampoline after relabelling and a late import", () => {
     const file = source("/repo/support.ts", "export function target() {}");
     const inventory = buildIrUnitInventory([file], { entrySource: file });

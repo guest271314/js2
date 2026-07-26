@@ -5,9 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c8-support-callable
-pr: 3675
-last_merged_pr: 3490
+branch: codex/3520-c9-class-support-callables
+last_merged_pr: 3496
 sprint: current
 created: 2026-07-21
 updated: 2026-07-26
@@ -132,6 +131,7 @@ files:
   - tests/issue-3520-program-abi-callable-planning.test.ts
   - tests/issue-3520-program-abi-type-remap.test.ts
   - tests/issue-3520-support-callable-abi.test.ts
+  - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
@@ -1416,10 +1416,64 @@ known failures / 0 new regressions**; one baseline failure now passes, and the
 baseline remains unchanged.
 
 This is the first non-unit defined support callable with an authoritative
-production locator, not the end of R1. Class support callables, exact imported
-callable IDs and import locators, dual-mode runtime/intrinsic providers,
-remaining imported globals, Program ABI type/class-layout entries, exports and
-aliases, and the production `LegacyAbiAdapter` cutover still remain.
+production locator, not the end of R1. Non-externref class constructor/init
+callables are covered by C9; class-method adapters and externref/Promise-host
+helpers remain. Exact imported callable IDs and import locators, dual-mode
+runtime/intrinsic providers, remaining imported globals, Program ABI
+type/class-layout entries, exports and aliases, and the production
+`LegacyAbiAdapter` cutover still remain.
+
+### 2026-07-26 class constructor/support-callable continuation
+
+The next stacked continuation on `codex/3520-c9-class-support-callables`
+makes the non-externref WasmGC class constructor pair structurally
+authoritative in the production Program ABI:
+
+- `<Class>_new` now resolves to exactly one inventoried
+  `class-constructor` or `class-implicit-constructor` unit beneath the exact
+  `IrClassId`. The integration seam binds that unit to the allocator-owned
+  constructor slot; an omitted source constructor remains a source-unit
+  callable and never receives a fabricated support identity.
+- `<Class>_init` is now a class-owned `callable/support` entry anchored by the
+  exact `IrClassId` and semantic `class-constructor-init` role. It carries
+  class-local structural order, the exact defined-function locator, and a
+  callable contract that is checked again against the final post-DCE type.
+- Support-callable intent now requires exactly one inventoried owner: a unit
+  or a class, never both. Source callables reject class provenance;
+  import/runtime callables reject source provenance; foreign owners and wrong
+  source order fail with typed Program ABI invariants. Session draft equality
+  includes the class owner.
+- Compatibility-only integration builds and reuses the same exact planning
+  identity context for class-shape resolution. Missing or duplicate
+  constructor units, absent or mismatched allocator slots, and non-function
+  `_init` types fail closed instead of falling back through a display label.
+- A collision fixture relocates a compiler-owned `A_init` beside a user
+  function named `A_init`, proves distinct ABI IDs and final function slots,
+  verifies the published post-DCE signature against the located function, and
+  executes the IR `super(...)` path to `"Rex/4|Lab|99"`.
+
+The focused C9 matrix passes **21/21**. The complete #3520 matrix plus #2138
+passes **243/243 across 41 files**; the class/collision matrix passes
+**27/27**; and the linear/cross-backend/class matrix passes **43/43**. Strict
+TypeScript, Biome lint, Prettier, diff, LOC, function-budget, dead-export,
+oracle-ratchet, and issue-spec checks pass. Hybrid readiness remains **READY**
+at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy bodies**,
+and the fallback ratchet reports no unintended, post-claim, or module-level
+increase. The eight-shard equivalence gate reports **1,608 passing / 35 known
+failures / 0 new regressions**; one baseline failure now passes and the
+baseline remains unchanged. No local Test262 corpus run or baseline refresh
+was performed.
+
+This is a bounded class-constructor ABI slice, not completion of class or R1
+ABI ownership. Externref-backed classes (including the JS-host Promise
+`*_new__onhost` path) have no WasmGC `_init` and remain excluded. Inherited or
+otherwise synthetic `class-method-adapter:*` callables, exact imported
+callables and import locators, dual-mode runtime/intrinsic providers, remaining
+imported globals, Program ABI type/class-layout entries, exports and aliases,
+and production `LegacyAbiAdapter` replacement of the remaining `funcMap`,
+`structMap`, module-array, and display-name scans still remain before R1 can
+close. Preparation/body ownership, routing policy, and R2-R10 work are
+unchanged.
 
 ### R1a validation evidence
 

@@ -53,8 +53,10 @@ import {
 } from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../codegen/registry/imports.js";
 import {
+  planProgramAbiSupportCallable,
   planProgramAbiGlobal,
   planProgramAbiUnitCallable,
+  PROGRAM_ABI_CALLABLE_ROLE,
   PROGRAM_ABI_GLOBAL_ROLE,
 } from "../codegen/program-abi-planning.js";
 // (#2856) Console-variant parity with the legacy collectConsoleImports scan.
@@ -412,9 +414,9 @@ export function compileIrPathFunctions(
       })) ?? [],
     );
   const classIdByShape = new Map<IrClassShape, IrClassId>();
-  if (loweringPlans && classShapes) {
+  if (classShapes) {
     for (const shape of classShapes.values()) {
-      const declaration = loweringPlans.identityContext.declarationByClassId.get(shape.classId);
+      const declaration = moduleBindingIdentityContext.declarationByClassId.get(shape.classId);
       if (!declaration || declaration.name?.text !== shape.className) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
@@ -1993,7 +1995,7 @@ export function compileIrPathFunctions(
     // Slice 4 (#1169d): the class registry is a thin lookup over the
     // legacy class-collection state — `ctx.structMap`, `ctx.structFields`,
     // and `ctx.funcMap` carry everything we need.
-    const classRegistry = new ClassRegistry(ctx, classIdByShape, loweringPlans?.identityContext, bindUnitCallableSlot);
+    const classRegistry = new ClassRegistry(ctx, classIdByShape, moduleBindingIdentityContext, bindUnitCallableSlot);
     deferredClass.resolve = (shape) => classRegistry.resolve(shape);
   } catch (error) {
     failEveryOwner(healthyForLower, error, "resolve");
@@ -4854,10 +4856,78 @@ class ClassRegistry {
     return ref;
   }
 
+  /**
+   * Resolve the allocator-owned `<Class>_new` to its exact inventoried source
+   * unit. An omitted constructor is still a real source artifact: the identity
+   * inventory projects one `class-implicit-constructor` unit beneath the class.
+   * Never manufacture a support binding when that unit has no AST body.
+   */
+  private constructorRef(classId: IrClassId, physicalName: string): IrFuncRef {
+    const matches = [...(this.identityContext?.unitByUnitId.values() ?? [])].filter(
+      (unit) =>
+        unit.lexicalOwnerId === classId &&
+        (unit.kind === "class-constructor" || unit.kind === "class-implicit-constructor"),
+    );
+    if (matches.length !== 1) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `ir/integration: class ${classId} projects ${matches.length} constructor units; expected exactly one`,
+      );
+    }
+    const funcIdx = this.ctx.funcMap.get(physicalName);
+    if (funcIdx === undefined) {
+      throw new IrInvariantError(
+        "missing-function-slot",
+        "resolve",
+        `ir/integration: class constructor ${matches[0]!.id} / ${physicalName} has no registered slot`,
+      );
+    }
+    const ref = irUnitFuncRef({ unitId: matches[0]!.id, name: physicalName });
+    this.bindUnitCallableSlot(ref, funcIdx, physicalName);
+    return ref;
+  }
+
+  /** Publish the exact class-owned `<Class>_init` support function. */
+  private initRef(classId: IrClassId, physicalName: string): IrFuncRef {
+    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const func = funcIdx === undefined ? undefined : definedFuncAt(this.ctx, funcIdx);
+    if (!func || func.name !== physicalName) {
+      throw new IrInvariantError(
+        "missing-function-slot",
+        "resolve",
+        `ir/integration: class ${classId} has no exact defined init slot ${physicalName}`,
+      );
+    }
+    const signature = this.ctx.mod.types[func.typeIdx];
+    if (!signature || signature.kind !== "func") {
+      throw new IrInvariantError(
+        "abi-type-index-mismatch",
+        "resolve",
+        `ir/integration: class ${classId} / ${physicalName} has non-function type ${func.typeIdx}`,
+      );
+    }
+    const ref = irSupportFuncRef(classId, "class-constructor-init", physicalName);
+    planProgramAbiSupportCallable(this.ctx, {
+      ref,
+      anchor: { kind: "class", classId },
+      role: "class-constructor-init",
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classConstructorInit,
+      signature,
+      func,
+    });
+    return ref;
+  }
+
   resolve(shape: IrClassShape): IrClassLowering | null {
     const classId = this.exactClassId(shape);
     const cached = this.cache.get(classId);
     if (cached) return cached;
+
+    // Builtin-backed subclasses (including the JS-host Promise onhost lane)
+    // have no WasmGC `<Class>_init` support function and remain outside this
+    // structural class ABI slice.
+    if (this.ctx.classExternrefBackedSet.has(shape.className)) return null;
 
     const structTypeIdx = this.ctx.structMap.get(shape.className);
     if (structTypeIdx === undefined) return null;
@@ -4889,10 +4959,8 @@ class ClassRegistry {
     // registers `<className>_init` for every non-externref-backed class (the
     // only kind that can be an IR subclass parent), keyed the same way.
     const initFuncName = classMemberFuncKey(ctx, `${shape.className}_init`);
-    const constructorFunc =
-      this.memberRef(classId, `${shape.className}_new`, constructorFuncName) ??
-      irSupportFuncRef(classId, "class-constructor", constructorFuncName);
-    const initFunc = irSupportFuncRef(classId, "class-constructor-init", initFuncName);
+    const constructorFunc = this.constructorRef(classId, constructorFuncName);
+    const initFunc = this.initRef(classId, initFuncName);
 
     // #3000-C: precompute the default-alloc instruction prefix so the
     // `class.alloc` IR instr (used by the IR constructor-body lowering to

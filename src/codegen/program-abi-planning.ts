@@ -2,7 +2,7 @@
 
 import { irGlobalBindingKey } from "../ir/abi-bindings.js";
 import { irCallableBindingKey, irUnitCallableBindingId } from "../ir/callable-bindings.js";
-import { createIrBindingId, type IrBindingId, type IrSourceId, type IrUnitId } from "../ir/identity.js";
+import { createIrBindingId, type IrBindingId, type IrClassId, type IrSourceId, type IrUnitId } from "../ir/identity.js";
 import type { IrFuncRef, IrGlobalRef } from "../ir/nodes.js";
 import type { FuncTypeDef, GlobalDef, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
@@ -15,6 +15,7 @@ import {
 export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   body: 0,
   functionValueTrampoline: 1,
+  classConstructorInit: 2,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({
@@ -44,7 +45,9 @@ export interface ProgramAbiUnitCallablePlan {
 
 export interface ProgramAbiSupportCallablePlan {
   readonly ref: IrFuncRef;
-  readonly anchor: { readonly kind: "unit"; readonly unitId: IrUnitId };
+  readonly anchor:
+    | { readonly kind: "unit"; readonly unitId: IrUnitId }
+    | { readonly kind: "class"; readonly classId: IrClassId };
   readonly role: string;
   readonly roleOrdinal: number;
   readonly signature: FuncTypeDef;
@@ -108,9 +111,10 @@ export function planProgramAbiUnitCallable(
 }
 
 /**
- * Plan and locate one compiler-owned support callable beneath an exact unit.
+ * Plan and locate one compiler-owned support callable beneath an exact
+ * inventoried unit or class.
  *
- * The explicit unit anchor supplies deterministic whole-program order and
+ * The explicit structural anchor supplies deterministic whole-program order and
  * provenance without parsing the opaque support binding ID. The support
  * reference supplies identity; its compatibility label cannot redirect the
  * exact allocator-owned function locator.
@@ -124,25 +128,34 @@ export function planProgramAbiSupportCallable(
   if (plan.ref.binding.kind !== "support") {
     throw new TypeError("program ABI support callable planning requires an exact support reference");
   }
+  const ownerId = plan.anchor.kind === "unit" ? plan.anchor.unitId : plan.anchor.classId;
   const expectedBindingId = createIrBindingId({
-    ownerId: plan.anchor.unitId,
+    ownerId,
     domain: "support",
     role: plan.role,
   });
   if (plan.ref.binding.bindingId !== expectedBindingId) {
     throw new TypeError(
-      `program ABI support callable reference does not match unit anchor ${plan.anchor.unitId} and role ${plan.role}`,
+      `program ABI support callable reference does not match ${plan.anchor.kind} anchor ${ownerId} and role ${plan.role}`,
     );
   }
   const bindingId = plan.ref.binding.bindingId;
   const structuralReferenceKey = irCallableBindingKey(plan.ref.binding);
   const typeContract = cloneProgramAbiCallableTypeContract(plan.signature);
+  const structuralOrder =
+    plan.anchor.kind === "unit"
+      ? session.structuralOrder.forUnit(plan.anchor.unitId, {
+          domain: "callable",
+          roleOrdinal: plan.roleOrdinal,
+        })
+      : session.structuralOrder.forClass(plan.anchor.classId, {
+          domain: "callable",
+          roleOrdinal: plan.roleOrdinal,
+        });
+  const provenance = plan.anchor.kind === "unit" ? { unitId: plan.anchor.unitId } : { classId: plan.anchor.classId };
   session.ensurePlan({
     id: bindingId,
-    structuralOrder: session.structuralOrder.forUnit(plan.anchor.unitId, {
-      domain: "callable",
-      roleOrdinal: plan.roleOrdinal,
-    }),
+    structuralOrder,
     structuralReferenceKey,
     displayName: plan.func.name,
     slotPolicy: "required",
@@ -150,7 +163,7 @@ export function planProgramAbiSupportCallable(
     intent: {
       kind: "callable",
       origin: "support",
-      unitId: plan.anchor.unitId,
+      ...provenance,
       signature: canonicalProgramAbiCallableTypeContract(typeContract),
     },
   });
