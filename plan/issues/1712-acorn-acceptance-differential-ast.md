@@ -767,3 +767,22 @@ dispatch slices listed in this issue's history. The `loc-budget-allow` and
 surface so the change-scoped quality gates assess the PR intentionally. This
 does not raise the repository baselines; post-merge ratchets still bank the
 new sizes.
+
+## Full Test262 parser differential 2026-07-26
+
+The acceptance surface now includes every Git-tracked Test262 JavaScript parser
+input, using pinned acorn 8.16.0 on both sides and comparing exact ESTree,
+including positions and Test262 script/module/strict variants. The completed
+pre-fix four-shard census covered **53,259 files / 102,312 variants** and reduced
+the remaining mismatches to two files / four variants:
+
+- #3667: generator-context vec mutation left `yield/regexp/` in the division
+  lexical goal.
+- #3668: one depth-32 nested-function program overflowed the alternating
+  Wasm→host→Wasm prototype-method bridge.
+
+Both residual files now replay exact (**2/2 files, 4/4 variants**). The required
+22-input corpus is again **22/22 exact**, and the standalone parser remains a
+zero-import artifact with all four scalar canaries green. The full 53,259-file
+post-fix differential is running as the final completion gate; its measured
+aggregate replaces this paragraph when complete.

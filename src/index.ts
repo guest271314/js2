@@ -56,7 +56,8 @@ export type ImportIntent =
   | { type: "box"; targetType: string }
   | { type: "unbox"; targetType: string }
   | { type: "any_to_index" }
-  | { type: "extern_get" }
+  | { type: "extern_get"; rawCallable?: boolean }
+  | { type: "extern_call_raw_callable"; arity: number }
   | { type: "extern_set" }
   | { type: "extern_set_strict" } // (#2017) strict-mode [[Set]] — throws on getter-only / non-writable
   | { type: "truthy_check" }

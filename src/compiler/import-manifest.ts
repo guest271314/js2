@@ -124,6 +124,11 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
 
   // Extern get/set
   if (name === "__extern_get") return { type: "extern_get" };
+  if (name === "__extern_get_raw_callable") return { type: "extern_get", rawCallable: true };
+  if (name.startsWith("__extern_call_raw_callable_")) {
+    const arity = Number.parseInt(name.slice("__extern_call_raw_callable_".length), 10);
+    return { type: "extern_call_raw_callable", arity };
+  }
   if (name === "__extern_set") return { type: "extern_set" };
   if (name === "__extern_set_strict") return { type: "extern_set_strict" }; // (#2017) strict [[Set]]
 

@@ -10,6 +10,12 @@ feasibility: hard
 created: 2026-06-29
 updated: 2026-07-26
 reopened: 2026-07-26
+loc-budget-allow:
+  - src/codegen/expressions/call-identifier.ts
+  - src/codegen/registry/imports.ts
+func-budget-allow:
+  - src/codegen/expressions/call-identifier.ts::compileIdentifierCall
+  - src/runtime.ts::<anonymous>#78
 task_type: bugfix
 area: codegen, runtime
 language_feature: bigint

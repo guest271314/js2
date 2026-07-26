@@ -6,6 +6,7 @@ import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { analyzeFnctorEscapeGate, deriveFnctorFields } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { fillHostFnctorMethodDrivers, maxReservedHostFnctorMethodArity } from "./host-fnctor-method-driver.js";
 import { emitVecDefineWritebackExports } from "./vec-define-writeback.js"; // (#3116)
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import type { TypeFact } from "../checker/oracle.js";
@@ -3807,6 +3808,7 @@ export function generateModule(
       for (const info of ctx.closureInfoByTypeIdx.values()) {
         if (info.paramTypes.length > maxClosureArity) maxClosureArity = info.paramTypes.length;
       }
+      maxClosureArity = Math.max(maxClosureArity, maxReservedHostFnctorMethodArity(ctx));
       const cap = Math.min(maxClosureArity, 8);
       for (let n = 6; n <= cap; n++) emitClosureMethodCallExportN(ctx, n);
     }
@@ -3816,6 +3818,12 @@ export function generateModule(
     // that omit optional trailing arguments, padding those missing formals with
     // the canonical undefined carrier just like the host wrapper does.
     emitClosureArityExport(ctx);
+
+    // (#3668) The host fnctor method call sites reserve stable private drivers
+    // before these public closure dispatchers exist. Fill them now over the
+    // complete closure-shape and declared-arity tables, keeping recursive
+    // parser descent in Wasm after the live host method lookup returns.
+    fillHostFnctorMethodDrivers(ctx);
 
     // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive

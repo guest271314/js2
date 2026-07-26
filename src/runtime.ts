@@ -3794,7 +3794,12 @@ function _resolveNamespacedClass(
 }
 
 /** Safe property get: works on both JS objects and WasmGC structs. */
-function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record<string, Function> | undefined }): any {
+function _safeGet(
+  obj: any,
+  key: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+  rawCallable = false,
+): any {
   if (obj == null) return undefined;
   // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090, #1716).
   // Passing callbackState lets a key with a WasmGC-closure valueOf / toString /
@@ -3923,7 +3928,7 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
         }
       }
       if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
-      return _maybeWrapCallableUnknownArity(protoDesc.value, callbackState);
+      return rawCallable ? protoDesc.value : _maybeWrapCallableUnknownArity(protoDesc.value, callbackState);
     }
     // Fall back to native access (e.g. Symbol.iterator set directly on the struct)
     return obj[key];
@@ -3998,6 +4003,31 @@ function _lookupDescriptorNoProxy(obj: any, key: PropertyKey): PropertyDescripto
   return undefined;
 }
 
+/** Write a canonical numeric key through to a live WasmGC vec backing array. */
+function _trySetWasmVecElement(
+  obj: any,
+  key: any,
+  val: any,
+  exports?: Record<string, Function>,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (typeof key === "symbol") return false;
+  const index = _asArrayIndex(String(key));
+  if (index === undefined) return false;
+  const vecExports = exports ?? callbackState?.getExports();
+  const isVec = vecExports?.__is_vec as ((v: any) => number) | undefined;
+  const setElem = vecExports?.__vec_set_elem as ((v: any, i: number, x: any) => number) | undefined;
+  if (typeof isVec !== "function" || typeof setElem !== "function") return false;
+  try {
+    if (isVec(obj) !== 1 || setElem(obj, index, _unwrapForHost(val)) !== 1) return false;
+    const sc = _wasmStructProps.get(obj);
+    if (sc && String(key) in sc) delete sc[String(key)];
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Safe property set: works on both JS objects and WasmGC structs.
  *
@@ -4022,6 +4052,10 @@ function _safeSet(
   strict?: boolean,
 ): void {
   if (obj == null) return;
+  // (#3667) A vec read through `_wrapForHost` may return its real-array Proxy
+  // view. Numeric writes must target the canonical raw WasmGC vec so the
+  // module's element-set dispatcher can mutate the backing array.
+  obj = _unwrapForHost(obj);
   // #2847: dynamic writes can cross a generic bridge after the Wasm boolean
   // carrier was widened to an unbranded numeric externref. The compiler emits
   // a marker only for property names whose complete visible write set is
@@ -4134,6 +4168,14 @@ function _safeSet(
         return; // silent fail: non-extensible, new property not added
       }
     }
+    // (#3667) Dynamic indexed assignment to a WasmGC vec. Fnctor fields are
+    // externref in JS-host mode, so an expression such as
+    // `this.context[index] = nextContext` reaches `_safeSet` rather than the
+    // compiler's typed `array.set` lane. A native assignment to the opaque
+    // WasmGC handle is a silent no-op, and a sidecar value is invisible to
+    // subsequent compiled vec reads. Route canonical array indices through the
+    // same live-value writer used by Array [[DefineOwnProperty]].
+    if (_trySetWasmVecElement(obj, key, val, exports, callbackState)) return;
     // Symmetric writeback through the compiled `__sset_<key>` export so the
     // real WasmGC struct field gets updated, not just the sidecar (#1630).
     // Falls back silently when the export is missing or doesn't match the
@@ -7562,6 +7604,35 @@ function _sandboxConstructorValue(value: any, key: any, globalSandbox?: Record<s
     }
   }
   return value;
+}
+
+function _wrapRawCallableHostValue(
+  value: any,
+  exports: Record<string, Function> | undefined,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (!_isWasmStruct(value)) return value;
+  const callable = _maybeWrapCallableUnknownArity(value, callbackState);
+  return callable !== value ? callable : _wrapForHost(value, exports);
+}
+
+/** Build the live-method fallback used when raw lookup returns a JS callable. */
+function _makeRawCallableInvoker(
+  arity: number,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): Function {
+  return function externCallRawCallable(callableValue: any, receiver: any, ...args: any[]): any {
+    const exports = callbackState?.getExports();
+    const callable = _maybeWrapCallableUnknownArity(callableValue, callbackState);
+    if (typeof callable !== "function") throw new TypeError("value is not callable");
+    const wrappedReceiver = _wrapRawCallableHostValue(receiver, exports, callbackState);
+    const wrappedArgs: any[] = [];
+    for (let i = 0; i < arity; i++) {
+      wrappedArgs.push(_wrapRawCallableHostValue(args[i], exports, callbackState));
+    }
+    const result = callable.apply(wrappedReceiver, wrappedArgs);
+    return result === wrappedReceiver ? receiver : _unwrapForHost(result);
+  };
 }
 
 function resolveImport(
@@ -14218,7 +14289,7 @@ assert._isSameValue = isSameValue;
             /* fall through to the generic path */
           }
         }
-        const val = _safeGet(obj, key, callbackState);
+        const val = _safeGet(obj, key, callbackState, intent.rawCallable === true);
         if (val !== undefined) {
           // (#779c) Sandbox-aware constructor identity. When a
           // `globalSandbox` is supplied (test262 per-test realm isolation),
@@ -14352,6 +14423,8 @@ assert._isSameValue = isSameValue;
         }
         return undefined;
       };
+    case "extern_call_raw_callable":
+      return _makeRawCallableInvoker(intent.arity, callbackState);
     case "extern_set":
       return (obj: any, key: any, val: any) => {
         // (#860) Wrap closure-as-value before storing — see __extern_set

@@ -5,6 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-acorn
 created: 2026-07-26
 updated: 2026-07-26
+func-budget-allow:
+  - src/runtime.ts::resolveImport
 priority: high
 horizon: m
 feasibility: hard
@@ -62,9 +64,21 @@ reaches that ceiling. Raising the guard again to 1024 is not a solution: the
 same case then exhausts V8's native stack inside the alternating
 Wasm→host→Wasm method bridges before the explicit guard fires.
 
-Keep the safer 512 ceiling. The final residual needs an in-module prototype
-method-dispatch path (or equivalent stack-flattening), not a larger host stack
-allowance.
+Keep the safer 512 ceiling. The final residual is fixed by splitting method
+lookup from method invocation for a statically pinned fnctor receiver:
+
+1. `__extern_get_raw_callable(receiver, name)` performs the live prototype
+   lookup and returns the raw Wasm closure before its host frame returns.
+2. A private stable-handle driver invokes that closure through the existing
+   `__call_fn_method_N` surface inside Wasm.
+3. Under-applied calls widen to the closure's declared arity while padding with
+   the host's real `undefined` carrier and preserving the actual `__argc`.
+4. If a live method has been replaced with a genuine JavaScript callable, the
+   driver detects the non-closure and takes a host fallback. Prototype
+   monkeypatching therefore remains observable.
+
+The route is limited to receivers proven by fnctor escape analysis. Dynamic and
+unresolved receivers keep the generic host MOP path.
 
 ## Reproduction
 
@@ -79,13 +93,20 @@ The runner compiles pinned `acorn@8.16.0` once, parses the same sloppy and stric
 source variants with node-acorn and compiled Acorn, and compares exact ESTree
 output including positions.
 
-## Work plan
+## Measured acceptance
 
-1. Re-run the representative scalar consumer at the widened depth.
-2. Replay all recorded stack-family files, not only the first representative.
-3. Add a focused guard regression that exceeds 100 legitimate host crossings
-   and a deliberate recursion case that still terminates at the new ceiling.
-4. Retain the broad Test262 census as the final manual gate.
+- The exact residual
+  `language/statements/function/S13.2.1_A1_T1.js` now parses in **325 ms** after
+  compilation with **2/2 sloppy+strict variants exact**, rather than
+  overflowing or returning a null AST.
+- A focused aliased-prototype regression performs 600 recursive method calls
+  and returns 601. The same test replaces the method with host `Math.abs` and
+  observes the live override.
+- The required Acorn corpus is **22/22 exact** with zero compiled throws after
+  the raw-driver and real-undefined padding changes.
+- The prior final two-file Test262 mismatch report replays **2/2 files, 4/4
+  variants exact**.
+- The full 53,259-file post-fix differential is the final running gate.
 
 ## Acceptance
 

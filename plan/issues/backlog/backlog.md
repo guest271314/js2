@@ -13,8 +13,14 @@ families:
 - [#3668](../3668-compiled-acorn-test262-host-stack-overflow.md) — valid inputs
   raise `host-error: Maximum call stack size exceeded` during the compiled
   parse boundary: 90 files / 180 variants. The scalar arbitration proves this
-  is the host-call depth guard during parsing, not AST materialization; the
-  widened guard is undergoing the complete recorded-set replay.
+  is recursive Wasm→host→Wasm prototype-method dispatch during parsing, not AST
+  materialization. A live raw-callable lookup plus private in-Wasm driver clears
+  the final depth-32 stress case while preserving host method overrides.
+- [#3667](../3667-compiled-acorn-yield-regexp-context.md) — generator context
+  mutation wrote to an opaque vec sidecar instead of its live backing element,
+  making `yield/regexp/` use the division lexical goal. Dynamic indexed vec
+  writes now use the compiled element writer; the exact sloppy/strict replay is
+  green.
 - [#3666](../3666-compiled-acorn-test262-lexical-early-errors.md) — compiled
   Acorn accepts lexical errors rejected by the identical node-acorn source: 36
   files / 72 variants across invalid template/string escapes, truncated radix
