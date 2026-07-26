@@ -30,6 +30,7 @@ import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
 import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./with-scope.js";
+import { emitGlobalEnvironmentDelete, tryEmitNonConfigurableGlobalObjectDelete } from "./global-environment.js";
 
 // (#2726 group (b), partial) The only value properties of the global object with
 // `[[Configurable]]: false` (ECMA-262 §19.1). `delete <bareIdentifier>` of any of
@@ -297,7 +298,6 @@ export function compileDeleteExpression(
     emitDeleteThrow(ctx, fctx, "ReferenceError", "'super' property cannot be deleted");
     return { kind: "i32" };
   }
-
   if (ts.isIdentifier(inner)) {
     // (#2663 Slice 3) `delete name` inside a dynamic `with`: if the with-object
     // has the binding ⇒ delete the object property (configurability-aware
@@ -355,7 +355,7 @@ export function compileDeleteExpression(
     const identSym = ctx.checker.getSymbolAtLocation(ident);
     const notEvalBody = ident.getSourceFile().fileName !== EVAL_SOURCE_FILENAME;
     if (identSym === undefined && notEvalBody) {
-      fctx.body.push({ op: "i32.const", value: 1 });
+      emitGlobalEnvironmentDelete(ctx, fctx, ident.text);
       return { kind: "i32" };
     }
     // (#2726 group (b), partial) §13.5.1.2 step 5: a `delete IdentifierReference`
@@ -385,7 +385,8 @@ export function compileDeleteExpression(
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
   }
-
+  const globalObjectDelete = tryEmitNonConfigurableGlobalObjectDelete(ctx, fctx, expr);
+  if (globalObjectDelete) return globalObjectDelete;
   // (#1511) `delete arguments[i]` on a mapped index severs the param↔arguments
   // mapping for that slot (ECMA-262 §10.4.4.5 step 5.b): after a successful
   // delete the property no longer mirrors the named parameter. Record the
