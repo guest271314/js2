@@ -1002,23 +1002,69 @@ Commit 3.3 and Commit 4 before R1 can close.
   `symphony/3520-c4-abi-session`. The cutover must publish one program-owned
   ABI map after the index space freezes; a per-source map is not acceptable.
 
-### 2026-07-26 Commit 4 runtime/global checkpoint
+### 2026-07-26 Commit 4 foundation checkpoint
 
-- Added one compilation-owned `ProgramAbiSession`, canonical inventory-backed
-  structural ordering, exact allocator-object locators/remaps, and one-shot
-  publication after index-space freeze.
-- Global and type references now carry closed structural bindings. Module
-  storage, TDZ cells, function-value caches, and the program `argc` cell plan
-  exact global drafts and reject mismatched repeated producer observations.
-- Removed the obsolete name-keyed local-call and overlay-finalization cluster
-  after every production caller moved to its `IrUnitId`-keyed counterpart.
-  `check:dead-exports` is clean without banking the deleted functions.
-- R1 remains **in progress**: production ABI planning still needs complete
-  callable/import, class/type, export/alias, support, and derived-unit
-  lifecycles before the whole-program inventory acceptance criterion can close.
-- Cleanup validation passes 249/249 tests across #3143, #3203, all #3520
-  suites, and the #2138 multi-module overlay suite, plus strict TypeScript,
-  Prettier, scoped Biome lint, diff, LOC, and dead-export gates.
+The Commit 4 foundation is integrated through `54f30f076f8dbb`, but R1
+acceptance remains partial and this issue stays `in-progress`. The integrated
+sequence is:
+
+- `100d13edd532d9` makes class shapes source-qualified, and
+  `e9674975ee622c` keys class integration caches and checks by exact
+  `IrClassId`;
+- `b88293dc401ebe` creates one compilation-owned `ProgramAbiSession` for each
+  single- or multi-source compilation that requests the IR identity inventory;
+- `cf88b88f6d2bc8` keys source-function backend tables by `IrUnitId`;
+- `8a574b16b2e6e4` binds the currently adapted globals through structural
+  `IrBindingId` references; and
+- `50816a88d826f5` plus `216f5ea9e1c370` harden the session lifecycle and make
+  every adapted global producer prove the same canonical payload and
+  structural order; and
+- `54f30f076f8dbb` removes the obsolete name-keyed local-call and
+  overlay-finalization cluster after every production caller moved to the
+  `IrUnitId`-keyed implementation.
+
+The foundation now validates these boundaries:
+
+- a single session owns the inventory, plan, allocator-object locators, and
+  publication for its exact `WasmModule`;
+- module, TDZ, argument-count, and function-value-cache globals are planned by
+  canonical binding payload rather than display name;
+- the runtime API supports exact defined-function/global locator replacement,
+  imported slot resolution after late index shifts, and explicit type-cell or
+  type-object remaps; and
+- publication is one-shot and occurs immediately after
+  `indexSpaceFrozen = true`, so final indices are resolved from the frozen
+  module layout.
+
+Validation at `216f5ea9e1c370` passes the strict TypeScript check; all #3520
+suites plus backend contract, linear integration, and cross-backend coverage
+(**34 files / 239 tests**); Prettier; scoped Biome lint with the two existing
+`index.ts` `any` warnings; the diff check; and the LOC-budget check. After the
+cleanup, the #3143, #3203, #2138, and complete #3520 matrix passes
+**249/249**, and `check:dead-exports` reports **15 known / 0 new**. Strict
+TypeScript, Prettier, scoped Biome, diff, and LOC checks remain green.
+
+This is not yet the whole-program ABI cutover described by Commit 4:
+
+- production `ProgramAbiSession` planning currently covers the adapted defined
+  globals only; callable signatures, callable/global imports, Wasm types,
+  classes/layouts, exports, aliases, support bindings, and derived-unit
+  provenance are not yet populated as production ABI entries;
+- source functions and classes carry structural identity through the IR and
+  pass tables, but concrete WasmGC, linear, and compatibility-slot resolution
+  still contains direct `funcMap`, `structMap`, module-array, and display-name
+  scans instead of routing exclusively through `LegacyAbiAdapter`;
+- function/global replacement and type remap APIs have focused lifecycle
+  coverage, but allocator replacement, dead-type elimination, and compaction
+  do not yet notify the production session; and
+- exports are still emitted directly by legacy codegen rather than represented
+  as explicit Program ABI aliases.
+
+Accordingly, the acceptance criteria below remain unchecked. This checkpoint
+does not enable IR-only mode by default and does not justify retiring any
+direct codegen path. Preparation ownership, compile-once migration, remaining
+runtime/async/linear adoption, fallback removal, and direct-handler deletion
+remain later R2-R10 work and are explicitly outside R1.
 
 Minimum resume validation:
 
