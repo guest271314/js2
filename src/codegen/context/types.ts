@@ -257,6 +257,8 @@ export interface ClosureInfo {
   paramTypes: ValType[];
   /** True only for source closures with one or more captured lexical bindings. */
   hasCaptures?: boolean;
+  /** True when the source closure has a `...rest` parameter. */
+  hasRestParam?: boolean;
 }
 
 /** Metadata for a generator lowered to an in-module WasmGC state machine (#680). */

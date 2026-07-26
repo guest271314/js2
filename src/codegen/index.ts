@@ -318,6 +318,7 @@ import {
   emitClosureMethodCallExportN,
   emitIsClosureExport,
   emitClosureArityExport,
+  emitClosureHasRestExport,
   emitIsDataStructExport,
   fillStandaloneTypeofClosureArms,
 } from "./closure-exports.js"; // (#3272) extracted verbatim
@@ -2184,7 +2185,7 @@ function planIrOverlay(
       const params: IrType[] = [];
       for (let i = 0; i < declaration.parameters.length; i++) {
         const p = declaration.parameters[i]!;
-        params.push(resolvePositionType(p.type, entry?.params[i], ctx, classShapeSidecar));
+        params.push(resolvePositionType(effectiveIrParamTypeNode(p), entry?.params[i], ctx, classShapeSidecar));
       }
       const override = { params, returnType };
       overrideMapByUnitId.set(unitId, override);
@@ -3971,6 +3972,10 @@ export function generateModule(
     // REAL declared arity (exact `arguments.length` reflection) instead of the
     // highest emitted __call_fn_method_N.
     emitClosureArityExport(ctx);
+
+    // #2742: classify accessor-returned rest closures before the JS runtime
+    // exposes them through a dispatcher that cannot materialize their rest vec.
+    emitClosureHasRestExport(ctx);
 
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
@@ -5913,6 +5918,9 @@ export function generateMultiModule(
 
     // #1504: emit __is_closure for wrapExports discrimination.
     emitIsClosureExport(ctx);
+
+    // #2742: accessor-returned rest-closure discriminator (see primary path).
+    emitClosureHasRestExport(ctx);
 
     // #2794: POSITIVE data-vs-closure discriminator (see generateModule path).
     emitIsDataStructExport(ctx);
