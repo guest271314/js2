@@ -9,7 +9,8 @@
 import { ts } from "../../ts-api.js";
 import type { TypeOracle } from "../../checker/oracle.js";
 import type { UsageInference } from "../../checker/usage-inference.js";
-import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
+import type { IrUnitId } from "../../ir/identity.js";
+import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmFunction, WasmModule } from "../../ir/types.js";
 import type { IrObservedOutcome } from "../../ir/outcomes.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
@@ -1032,6 +1033,8 @@ export interface CodegenContext {
   useUsageInfer: boolean;
   /** Map from function name to its absolute index (imports + locals) */
   funcMap: Map<string, number>;
+  /** Exact IR artifact identity to its allocator-owned defined-function object. */
+  irUnitFuncMap: Map<IrUnitId, WasmFunction>;
   /** Map from struct/interface name to type index */
   structMap: Map<string, number>;
   /** Reverse map from type index to struct/interface name (O(1) reverse lookup) */
@@ -2731,7 +2734,8 @@ export interface CodegenContext {
   /** (#2896) Struct-type index → static `{name, length}` metadata for builtin
    *  function-closure values under `--target standalone`. Each (builtin, member)
    *  closure gets a UNIQUE wrapper-struct SUBTYPE (fields `[funcref func,
-   *  (mut i32) bfnstate]`, supertype = its signature wrapper struct), so the
+   *  (mut i32) bfnstate, i32 bfnid]`, supertype = its signature wrapper
+   *  struct), so the
    *  reflective runtime natives (`__getOwnPropertyDescriptor` / `__extern_get` /
    *  `__hasOwnProperty` / `__getOwnPropertyNames` / `__delete_property`) can
    *  `ref.test` the value at RUNTIME and answer its spec `name`/`length` own

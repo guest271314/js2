@@ -27,6 +27,7 @@ import { reconcileNativeStrFinalizeShift } from "../expressions/late-imports.js"
 import { emitWasiErrorConstructor } from "./error-types.js";
 import { emitNativeParseNumber } from "../parse-number-native.js";
 import { isTupleType, isStandaloneRegExpMatchArrayValue } from "../index.js";
+import { planProgramAbiStringConstantImport } from "../program-abi-import-planning.js";
 
 /**
  * Register an import (`module.name`) on the current module.
@@ -49,7 +50,7 @@ import { isTupleType, isStandaloneRegExpMatchArrayValue } from "../index.js";
  * If they ARE requested under strict mode, the gate rejects them with a
  * dedicated error pointing the user at the nativeStrings option.
  */
-export function addImport(ctx: CodegenContext, module: string, name: string, desc: Import["desc"]): void {
+export function addImport(ctx: CodegenContext, module: string, name: string, desc: Import["desc"]): Import | undefined {
   // #1984 — freeze-point discipline. Once the module's index spaces are
   // declared final (set right before `stackBalance` in generateModule/
   // generateMultiModule), any further import mutation is a producer bug:
@@ -102,7 +103,7 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
       // Skip registration. The caller may record a stale funcMap index if it
       // looks the import up by name; if that index is ever emitted into the
       // binary the emit-time leak scan / link step catches it.
-      return;
+      return undefined;
     }
   }
   ctx.mod.imports.push({ module, name, desc });
@@ -113,6 +114,7 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
   if (desc.kind === "global") {
     ctx.numImportGlobals++;
   }
+  return ctx.mod.imports[ctx.mod.imports.length - 1]!;
 }
 
 /**
@@ -129,7 +131,6 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
  */
 export function addStringConstantGlobal(ctx: CodegenContext, value: string): void {
   if (ctx.stringGlobalMap.has(value)) return;
-
   if (ctx.nativeStrings) {
     // Sentinel: no host import, materialize inline at use sites.
     ctx.stringGlobalMap.set(value, -1);
@@ -139,10 +140,8 @@ export function addStringConstantGlobal(ctx: CodegenContext, value: string): voi
     ctx.mod.stringPool.push(value);
     return;
   }
-
   const hasModuleGlobals = ctx.mod.globals.length > 0 || ctx.mod.functions.length > 0;
   const oldNumImportGlobals = ctx.numImportGlobals;
-
   const globalIdx = ctx.numImportGlobals;
   // (#2880) A wasm import field name must be valid UTF-8. A literal containing a
   // lone surrogate cannot be its own field name (TextEncoder makes it lossy,
@@ -152,17 +151,18 @@ export function addStringConstantGlobal(ctx: CodegenContext, value: string): voi
   const useSurrogateNs = hasLoneSurrogate(value);
   const importModule = useSurrogateNs ? STRING_CONSTANTS16_NS : "string_constants";
   const importName = useSurrogateNs ? hexCodeUnits(value) : value;
-  addImport(ctx, importModule, importName, {
+  const stableOrdinal = ctx.stringLiteralCounter;
+  const importValue = addImport(ctx, importModule, importName, {
     kind: "global",
     type: { kind: "externref" },
     mutable: false,
   });
+  if (importValue) planProgramAbiStringConstantImport(ctx, importValue, stableOrdinal);
   ctx.stringGlobalMap.set(value, globalIdx);
   ctx.stringLiteralMap.set(value, `__str_${ctx.stringLiteralCounter}`);
   ctx.stringLiteralValues.set(`__str_${ctx.stringLiteralCounter}`, value);
   ctx.stringLiteralCounter++;
   ctx.mod.stringPool.push(value);
-
   if (hasModuleGlobals) {
     fixupModuleGlobalIndices(ctx, oldNumImportGlobals, 1);
   }

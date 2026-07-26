@@ -7,20 +7,12 @@ Lightweight pointer index for unscheduled issues that need sprint candidacy. Aut
 The #1712 acceptance branch now compares pinned compiled Acorn 8.16.0 against
 node-acorn on every Git-tracked Test262 JavaScript parser input, including exact
 positions and Test262 strict/module variants. The completed four-shard baseline
-is 53,036/53,259 exact files and isolates three non-duplicate residual
-families:
+is 53,036/53,259 exact files and isolates the remaining non-duplicate residual
+families. Two runtime residuals are resolved directly under #1712: recursive
+Wasm→host→Wasm prototype-method dispatch is now stack-flat, and dynamic indexed
+vec writes now update the live compiled element rather than an opaque sidecar.
+The tracked lexical and BigInt follow-ups are:
 
-- [#3668](../3668-compiled-acorn-test262-host-stack-overflow.md) — valid inputs
-  raise `host-error: Maximum call stack size exceeded` during the compiled
-  parse boundary: 90 files / 180 variants. The scalar arbitration proves this
-  is recursive Wasm→host→Wasm prototype-method dispatch during parsing, not AST
-  materialization. A live raw-callable lookup plus private in-Wasm driver clears
-  the final depth-32 stress case while preserving host method overrides.
-- [#3667](../3667-compiled-acorn-yield-regexp-context.md) — generator context
-  mutation wrote to an opaque vec sidecar instead of its live backing element,
-  making `yield/regexp/` use the division lexical goal. Dynamic indexed vec
-  writes now use the compiled element writer; the exact sloppy/strict replay is
-  green.
 - [#3666](../3666-compiled-acorn-test262-lexical-early-errors.md) — compiled
   Acorn accepts lexical errors rejected by the identical node-acorn source: 36
   files / 72 variants across invalid template/string escapes, truncated radix

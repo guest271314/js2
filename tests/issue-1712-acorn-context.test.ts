@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #3667 — dynamic indexed writes to a WasmGC vec were silently ignored.
+// #1712 — dynamic indexed writes to a WasmGC vec were silently ignored.
 //
 // Acorn builds its token table at module initialization and then installs
 // context callbacks with assignments such as:
@@ -28,7 +28,7 @@ async function instantiate(source: string): Promise<Record<string, (...args: unk
   return instance.exports as Record<string, (...args: unknown[]) => unknown>;
 }
 
-describe("#3667 dynamic indexed write to a WasmGC vec", () => {
+describe("#1712 dynamic indexed write to a WasmGC vec", () => {
   it("updates the live element used by later reads", async () => {
     const exports = await instantiate(`
       function Context(name, generator) {

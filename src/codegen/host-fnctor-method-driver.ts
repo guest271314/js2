@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #3668 — stack-flat JS-host calls to compiled fnctor prototype methods.
+ * #1712 — stack-flat JS-host calls to compiled fnctor prototype methods.
  *
  * A generic `this.method(...)` on a reconstructed fnctor used to lower to
  * `__extern_method_call`. The host resolved the raw prototype closure, wrapped

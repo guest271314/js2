@@ -776,9 +776,9 @@ including positions and Test262 script/module/strict variants. The completed
 pre-fix four-shard census covered **53,259 files / 102,312 variants** and reduced
 the remaining mismatches to two files / four variants:
 
-- #3667: generator-context vec mutation left `yield/regexp/` in the division
-  lexical goal.
-- #3668: one depth-32 nested-function program overflowed the alternating
+- A generator-context vec mutation left `yield/regexp/` in the division lexical
+  goal because the host proxy write did not update the live Wasm vector.
+- One depth-32 nested-function program overflowed the alternating
   Wasm→host→Wasm prototype-method bridge.
 
 Both residual files now replay exact (**2/2 files, 4/4 variants**). The required
@@ -786,3 +786,12 @@ Both residual files now replay exact (**2/2 files, 4/4 variants**). The required
 zero-import artifact with all four scalar canaries green. The full 53,259-file
 post-fix differential is running as the final completion gate; its measured
 aggregate replaces this paragraph when complete.
+
+The vec mutation is now routed through the module's canonical mutation export.
+The recursive method path first resolves the live prototype property, returns
+from the host lookup, and only then invokes the compiled closure through a
+private Wasm driver. Under-applied calls receive the host's real `undefined`
+carrier while retaining the original `arguments.length`; genuine host
+overrides and calls wider than the supported fixed arities retain the generic
+host fallback. These are internal lowering/runtime repairs and do not change
+the public Acorn or interpreter ABI.

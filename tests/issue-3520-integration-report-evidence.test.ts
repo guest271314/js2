@@ -265,6 +265,7 @@ describe("#3520 integration report sidecar completeness", () => {
     expect(report.syntheticCompiledArtifacts).toEqual(["run"]);
     expect(report.terminalCompiledOwners).toEqual(["run"]);
     expect(report.terminalEvidence).toEqual([{ kind: "patched", unitId: current.ownerUnitId, legacyName: "run" }]);
+    expect(audit(current, report).invariantByUnitId).toEqual(new Map());
   });
 
   it("keeps separately recorded failures as duplicate terminal events", () => {

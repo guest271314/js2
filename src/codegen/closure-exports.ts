@@ -613,31 +613,37 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
     // emitClosureCallExportN). User args are at locals [2..arity+1]; formal i is
     // at local i+2, extras are args[closureArity..arity) at locals
     // [closureArity+2 .. arity+2).
-    const setupInstrs: Instr[] = [
-      // `__apply_closure` presets the ACTUAL count before choosing a padded
-      // dispatcher. Preserve min(actual, formals); ordinary direct/host calls
-      // enter with the -1 sentinel and retain the historical formal count.
-      { op: "global.get", index: argcGlobalIdx },
-      { op: "i32.const", value: 0 },
-      { op: "i32.ge_s" },
-      {
-        op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [
-          { op: "global.get", index: argcGlobalIdx },
-          { op: "i32.const", value: entry.closureArity },
-          { op: "i32.lt_s" },
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
-            then: [{ op: "global.get", index: argcGlobalIdx }],
-            else: [{ op: "i32.const", value: entry.closureArity }],
-          },
-        ],
-        else: [{ op: "i32.const", value: entry.closureArity }],
-      },
-      { op: "global.set", index: argcGlobalIdx },
-    ];
+    const setupInstrs: Instr[] =
+      ctx.standalone || ctx.wasi
+        ? [
+            // `__apply_closure` presets the ACTUAL count before choosing a padded
+            // dispatcher. Preserve min(actual, formals); ordinary direct/host calls
+            // enter with the -1 sentinel and retain the historical formal count.
+            { op: "global.get", index: argcGlobalIdx },
+            { op: "i32.const", value: 0 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "global.get", index: argcGlobalIdx },
+                { op: "i32.const", value: entry.closureArity },
+                { op: "i32.lt_s" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [{ op: "global.get", index: argcGlobalIdx }],
+                  else: [{ op: "i32.const", value: entry.closureArity }],
+                },
+              ],
+              else: [{ op: "i32.const", value: entry.closureArity }],
+            },
+            { op: "global.set", index: argcGlobalIdx },
+          ]
+        : [
+            { op: "i32.const", value: entry.closureArity },
+            { op: "global.set", index: argcGlobalIdx },
+          ];
     if (arity > entry.closureArity) {
       const extrasCount = arity - entry.closureArity;
       setupInstrs.push({ op: "i32.const", value: extrasCount });

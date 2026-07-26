@@ -4052,7 +4052,7 @@ function _safeSet(
   strict?: boolean,
 ): void {
   if (obj == null) return;
-  // (#3667) A vec read through `_wrapForHost` may return its real-array Proxy
+  // (#1712) A vec read through `_wrapForHost` may return its real-array Proxy
   // view. Numeric writes must target the canonical raw WasmGC vec so the
   // module's element-set dispatcher can mutate the backing array.
   obj = _unwrapForHost(obj);
@@ -4168,7 +4168,7 @@ function _safeSet(
         return; // silent fail: non-extensible, new property not added
       }
     }
-    // (#3667) Dynamic indexed assignment to a WasmGC vec. Fnctor fields are
+    // (#1712) Dynamic indexed assignment to a WasmGC vec. Fnctor fields are
     // externref in JS-host mode, so an expression such as
     // `this.context[index] = nextContext` reaches `_safeSet` rather than the
     // compiler's typed `array.set` lane. A native assignment to the opaque

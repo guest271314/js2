@@ -22,6 +22,24 @@ function source(fileName: string): ts.SourceFile {
   );
 }
 
+function nestedSource(fileName: string): ts.SourceFile {
+  return ts.createSourceFile(
+    fileName,
+    `
+      export function nested(): number {
+        const outer = (value: number): number => {
+          const inner = (input: number): number => input + 1;
+          return inner(value);
+        };
+        return outer(2);
+      }
+    `,
+    ts.ScriptTarget.ES2022,
+    true,
+    ts.ScriptKind.TS,
+  );
+}
+
 function declaration(sourceFile: ts.SourceFile): ts.FunctionDeclaration {
   const found = sourceFile.statements.find(ts.isFunctionDeclaration);
   if (!found) throw new Error(`missing function declaration in ${sourceFile.fileName}`);
@@ -58,6 +76,22 @@ describe("#3520 IR function artifact identity", () => {
       createDerivedIrUnitId({ parentId: secondOwner, role: "lifted-closure", ordinal: 0 }),
     );
     expect(secondLifted.unitId).not.toBe(firstLifted.unitId);
+    expect(first.liftedUnitProvenance).toEqual([
+      {
+        id: firstLifted.unitId,
+        parentId: firstOwner,
+        role: "lifted-closure",
+        ordinal: 0,
+      },
+    ]);
+    expect(second.liftedUnitProvenance).toEqual([
+      {
+        id: secondLifted.unitId,
+        parentId: secondOwner,
+        role: "lifted-closure",
+        ordinal: 0,
+      },
+    ]);
 
     const firstClosureNew = first.main.blocks
       .flatMap((block) => block.instrs)
@@ -77,5 +111,46 @@ describe("#3520 IR function artifact identity", () => {
       [secondLifted.unitId, secondLifted.name],
     ]);
     expect(artifacts.size).toBe(2);
+  });
+
+  it("preserves allocation provenance when nested lifting reverses artifact output order", () => {
+    const sourceFile = nestedSource("/project/nested.ts");
+    const fn = declaration(sourceFile);
+    const context = buildIrPlanningIdentityContext(buildIrUnitInventory([sourceFile], { entrySource: sourceFile }));
+    const ownerUnitId = context.unitIdByDeclaration.get(fn);
+    if (!ownerUnitId) throw new Error("missing exact owner identity");
+
+    const lowered = lowerFunctionAstToIr(fn, { ownerUnitId, exported: true });
+    const outerUnitId = createDerivedIrUnitId({
+      parentId: ownerUnitId,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    const innerUnitId = createDerivedIrUnitId({
+      parentId: ownerUnitId,
+      role: "lifted-closure",
+      ordinal: 1,
+    });
+
+    // The outer identity is allocated first, but its body recursively emits
+    // the inner artifact before the outer artifact is appended.
+    expect(lowered.liftedUnitProvenance).toEqual([
+      {
+        id: outerUnitId,
+        parentId: ownerUnitId,
+        role: "lifted-closure",
+        ordinal: 0,
+      },
+      {
+        id: innerUnitId,
+        parentId: ownerUnitId,
+        role: "lifted-closure",
+        ordinal: 1,
+      },
+    ]);
+    expect(lowered.lifted.map((lifted) => lifted.unitId)).toEqual([innerUnitId, outerUnitId]);
+
+    const provenanceById = new Map(lowered.liftedUnitProvenance.map((record) => [record.id, record] as const));
+    expect(lowered.lifted.map((lifted) => provenanceById.get(lifted.unitId)?.ordinal)).toEqual([1, 0]);
   });
 });

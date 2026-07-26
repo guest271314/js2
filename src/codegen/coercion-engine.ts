@@ -363,6 +363,17 @@ export function emitToNumber(ctx: CodegenContext, fctx: FunctionContext, valType
 }
 
 /**
+ * Reserve the canonical externref→number provider for detached/late-built
+ * instruction sequences. Callers that cannot emit ToNumber immediately use
+ * the returned stable index after this helper flushes late-import shifts.
+ */
+export function ensureExternrefToNumberProvider(ctx: CodegenContext, fctx: FunctionContext): number | undefined {
+  const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+  flushLateImportShifts(ctx, fctx);
+  return unboxIdx;
+}
+
+/**
  * Append `ToBoolean(value)` (§7.1.2 → i32, 1 = truthy) for a value of ValType
  * `valType` already on the stack into `sink`. The consolidation of the two
  * hand-rolled truthiness sites that #2085 already aligned:

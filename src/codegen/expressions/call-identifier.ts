@@ -34,6 +34,7 @@ import {
 } from "../linear-uint8-signatures.js";
 import { compileArrayConstructorCall, compileSymbolCall } from "../literals.js";
 import { tryCompileNodeFsCall } from "../node-fs-api.js";
+import { calleeIsBoundFunctionVar } from "../object-builtin-effects.js";
 import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import { emitStandaloneRegExpToStringFromExpr } from "../regexp-standalone.js";
 import type { InnerResult } from "../shared.js";
@@ -55,6 +56,7 @@ import {
 import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { wasiAllocStringData } from "./builtins.js";
 import { compileClosureCall } from "./calls-closures.js";
+import { tryCompileStoredObjectBuiltinCall } from "./call-object-builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
 import {
   emitThrowTypeError,
@@ -70,7 +72,6 @@ import {
   buildArgcExtrasReset,
   buildArgcExtrasSetupFromLocals,
   buildArgcResetNoLazyExtras,
-  calleeIsBoundFunctionVar,
   calleeIsCapabilityCtorParam,
   calleeIsPromiseExecutorParam,
   calleeMayBeHostCallable,
@@ -962,29 +963,23 @@ export function compileIdentifierCall(
         const nonNull = ctx.checker.getNonNullableType(calleeTsType);
         callSigs = nonNull.getCallSignatures?.();
       }
-      // (#1337) If the callee is a variable holding a `Function.prototype.bind`
-      // result, its runtime value is a host bound-function externref, NOT a
-      // wasm closure struct — the struct-cast + call_ref path below would null
-      // it and trap. Route the call through the `__call_function` host helper
-      // (Reflect.apply on the bound function, which already carries
-      // [[BoundThis]]/[[BoundArguments]]). JS-host mode only; standalone
-      // degrades bind to identity so the normal path applies.
-      if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsBoundFunctionVar(ctx, expr.expression)) {
+      // (#1337) Host bound functions route through Reflect.apply; standalone
+      // degrades bind to identity and continues through its native call path.
+      if (
+        isKnownVariable &&
+        !ctx.standalone &&
+        !noJsHost(ctx) &&
+        calleeIsBoundFunctionVar(ctx.oracle, expr.expression)
+      ) {
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;
       }
-      // (#1528 / #56 follow-up — class-ctor arm) `executor(...)` inside a function
-      // used as a Promise-combinator capability constructor
-      // (`Promise.X.call(Constructor, …)` → V8 `Construct(Constructor, «executor»)`
-      // via the #1632b-2 bridge). The `executor` PARAM is an UNTYPED (`any`) value
-      // — no call signatures — so it never reaches the callable-param closure
-      // dispatch below; the no-sig fallback would `ref.cast` it to a closure
-      // struct and trap (`illegal cast in Constructor()`), because V8 supplies a
-      // HOST function there, not a wasm closure. Route it through the same
-      // `__call_function` host helper the bound-function path uses (it packs args
-      // into a JS array and calls `Reflect.apply`). JS-host only; narrow syntactic
-      // gate (the fn flows to a combinator capability-ctor site), so the #1941
-      // dual-mode guarantee for ordinary callable params is preserved.
+      if (isKnownVariable && (ctx.standalone || noJsHost(ctx))) {
+        const storedObjectCall = tryCompileStoredObjectBuiltinCall(ctx, fctx, expr);
+        if (storedObjectCall !== undefined) return storedObjectCall;
+      }
+      // (#1528/#56) Promise-combinator executor params are host functions, so
+      // their narrow capability-constructor lane also routes via Reflect.apply.
       if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsCapabilityCtorParam(ctx, expr.expression)) {
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;

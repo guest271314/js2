@@ -149,7 +149,7 @@ function collectVecMutationEntries(
   for (const [elemKey, vecTypeIdx] of vecEntries) {
     const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
     const arrDef = arrTypeIdx >= 0 ? ctx.mod.types[arrTypeIdx] : undefined;
-    // (#3667) A reference-keyed vec can still use an EXTERNREF backing array.
+    // (#1712) A reference-keyed vec can still use an EXTERNREF backing array.
     // This is how JS-mode arrays whose inferred element is a compiled struct
     // stay heterogeneous at runtime. Treat the physical carrier as the source
     // of truth for mutation, just as __vec_get already does (#2669).
@@ -838,7 +838,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   // write-back exports (values into the vec, attributes in the sidecar — see
   // src/codegen/vec-define-writeback.ts for the full rationale).
   //
-  // (#3667) Dynamic `arr[index] = value` in JS-host mode also reaches the
+  // (#1712) Dynamic `arr[index] = value` in JS-host mode also reaches the
   // runtime as `__extern_set{_strict}` over an opaque vec. Emit the same
   // element writer for that lane; otherwise the host accepts the write without
   // touching the Wasm backing array. Modules with neither property-definition

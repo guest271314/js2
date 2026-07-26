@@ -678,7 +678,7 @@ function buildSetterStore(
  * original relative position at the end. No recorded order ⇒ `slotNames`
  * unchanged (plain literals, IR-fresh structs, named classes).
  */
-function orderNamesByInsertion(ctx: CodegenContext, structName: string, slotNames: string[]): string[] {
+export function orderNamesByInsertion(ctx: CodegenContext, structName: string, slotNames: string[]): string[] {
   const order = ctx.structInsertionOrder.get(structName);
   if (!order || order.length === 0) return slotNames;
   const slotSet = new Set(slotNames);
@@ -701,12 +701,11 @@ function orderNamesByInsertion(ctx: CodegenContext, structName: string, slotName
 }
 
 export function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
-  // Host enumeration is JS-only; standalone/WASI has no host name export.
-  if (ctx.nativeStrings) return;
-
   // Structural-shape key = field TYPES only (the thing WasmGC canonicalizes on),
-  // ignoring names and any pre-existing internal `$`/`__` fields. Group anon
-  // object-literal structs by it.
+  // ignoring names and any pre-existing internal `$`/`__` fields. The hidden
+  // identity is consumed both by host field-name exports and by standalone
+  // closed-struct runtime finalizers; ref.test alone cannot distinguish
+  // structurally equivalent anonymous structs.
   const typeKindKey = (t: ValType): string => {
     if (t.kind === "ref" || t.kind === "ref_null") return `${t.kind}:${(t as { typeIdx: number }).typeIdx}`;
     if (t.kind === "i32" && (t as { boolean?: true }).boolean) return "i32:bool";
