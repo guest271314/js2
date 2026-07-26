@@ -29,11 +29,93 @@ async function expectRefused(src: string): Promise<ReturnType<typeof compile>> {
   return r;
 }
 
+async function compileAndRunAcornCarrier(source: string): Promise<number> {
+  const result = await compile(source, {
+    fileName: "issue-3507.ts",
+    target: "standalone",
+    skipSemanticDiagnostics: true,
+    experimentalIR: false,
+  });
+  expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+  expect(
+    result.imports.map((entry) => `${entry.module}::${entry.name}`).filter((name) => /(^|::)RegExp_/.test(name)),
+  ).toEqual([]);
+  const module = await WebAssembly.compile(result.binary);
+  const instance = await WebAssembly.instantiate(module, {});
+  return (instance.exports as { test(): number }).test();
+}
+
 // #1539 Phase 2a and #1712 narrowed these refusals: static patterns and the
 // bounded runtime-pattern grammar now compile to the pure-WasmGC backtracking
 // VM (see tests/issue-1539-standalone-regex.test.ts). The residual refusal
 // cases below are unsupported symbol-protocol and RegExp grammar surfaces.
 describe("#1474/#1539 --target standalone native RegExp", () => {
+  it("preserves an Acorn-mode RegExp through a typed function parameter", async () => {
+    expect(
+      await compileAndRunAcornCarrier(`
+        function accepts(re: RegExp, value: string): boolean {
+          return re.test(value);
+        }
+        export function test(): number {
+          return accepts(/\\p{ASCII}+/u, "ASCII") ? 1 : 0;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("routes Acorn-mode untyped helper and object-property carriers by runtime brand", async () => {
+    expect(
+      await compileAndRunAcornCarrier(`
+        function verify(record, value) {
+          return record.regExp.test(value);
+        }
+        export function test(): number {
+          const record = { regExp: /^(?:[\\q{ab|cd}])+$/v };
+          return verify(record, "abcd") ? 1 : 0;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("preserves Acorn-mode RegExp identity through array and for-of carriers", async () => {
+    expect(
+      await compileAndRunAcornCarrier(`
+        export function test(): number {
+          const regexps = [/^\\d+$/, /^\\d+$/u, /^\\d+$/v];
+          let matched = 0;
+          for (const regexp of regexps) {
+            if (regexp.test("123")) matched++;
+          }
+          return matched;
+        }
+      `),
+    ).toBe(3);
+  });
+
+  it("keeps Acorn-mode global carrier lastIndex semantics", async () => {
+    expect(
+      await compileAndRunAcornCarrier(`
+        function next(re, value) { return re.test(value); }
+        export function test(): number {
+          const re = /a/g;
+          const a = next(re, "aa");
+          const b = next(re, "aa");
+          const c = next(re, "aa");
+          return a && b && !c && re.lastIndex === 0 ? 1 : 0;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("keeps Acorn-mode dynamic constructor patterns on the native carrier", async () => {
+    expect(
+      await compileAndRunAcornCarrier(`
+        function matches(pattern: string): boolean { return new RegExp(pattern).test("x"); }
+        export function test(): number { return matches("x") && !matches("y") ? 1 : 0; }
+      `),
+    ).toBe(1);
+  });
+
   it("executes a dynamic literal constructor without host imports", async () => {
     const r = await compile(
       `function f(p: string): boolean { return new RegExp(p).test("x"); } export function run(): number { return f("x") ? 1 : 0; }`,
