@@ -41,6 +41,7 @@ export type ProgramAbiIntent =
       readonly origin: "source" | "import" | "runtime" | "support";
       readonly signature: ProgramAbiCallableSignature;
       readonly unitId?: IrUnitId;
+      readonly classId?: IrClassId;
     }
   | {
       readonly kind: "global";
@@ -138,6 +139,7 @@ export type ProgramAbiInvariantCode =
   | "duplicate-plan-order"
   | "invalid-slot-policy"
   | "missing-source-unit"
+  | "invalid-callable-provenance"
   | "unknown-inventory-unit"
   | "unknown-inventory-class"
   | "inventory-source-order-mismatch"
@@ -628,13 +630,36 @@ export class ProgramAbiMap {
 
   private validateInventoryMembership(entry: ProgramAbiPlanEntry): void {
     if (entry.intent.kind === "callable") {
-      if (entry.intent.origin === "source" && entry.intent.unitId === undefined) {
+      const hasUnit = entry.intent.unitId !== undefined;
+      const hasClass = entry.intent.classId !== undefined;
+      if (entry.intent.origin === "source") {
+        if (!hasUnit) {
+          throw new ProgramAbiInvariantError(
+            "missing-source-unit",
+            `source callable binding ${entry.id} must identify its inventoried unit`,
+          );
+        }
+        if (hasClass) {
+          throw new ProgramAbiInvariantError(
+            "invalid-callable-provenance",
+            `source callable binding ${entry.id} cannot identify class ${entry.intent.classId}`,
+          );
+        }
+      } else if (entry.intent.origin === "support") {
+        if (hasUnit === hasClass) {
+          throw new ProgramAbiInvariantError(
+            "invalid-callable-provenance",
+            `support callable binding ${entry.id} must identify exactly one unit or class owner`,
+          );
+        }
+      } else if (hasUnit || hasClass) {
         throw new ProgramAbiInvariantError(
-          "missing-source-unit",
-          `source callable binding ${entry.id} must identify its inventoried unit`,
+          "invalid-callable-provenance",
+          `${entry.intent.origin} callable binding ${entry.id} cannot identify a source unit or class owner`,
         );
       }
-      if (entry.intent.unitId !== undefined) {
+
+      if (hasUnit) {
         const unit = this.units.get(entry.intent.unitId);
         if (!unit) {
           throw new ProgramAbiInvariantError(
@@ -643,6 +668,16 @@ export class ProgramAbiMap {
           );
         }
         this.assertInventorySourceOrder(entry, unit.sourceId);
+      }
+      if (hasClass) {
+        const classRecord = this.classes.get(entry.intent.classId);
+        if (!classRecord) {
+          throw new ProgramAbiInvariantError(
+            "unknown-inventory-class",
+            `callable binding ${entry.id} references class ${entry.intent.classId} outside this inventory`,
+          );
+        }
+        this.assertInventorySourceOrder(entry, classRecord.sourceId);
       }
     }
 
