@@ -20,6 +20,7 @@ files:
   - src/codegen/regex/bytecode.ts
   - src/codegen/regex/parse.ts
   - src/codegen/regex/compile.ts
+  - src/codegen/regex/unicode.ts
   - src/codegen/regex/vm.ts
   - src/codegen/native-regex.ts
   - tests/issue-3652.test.ts
@@ -116,8 +117,11 @@ The common class-table contract was tightened to sorted, disjoint ranges at
 compile time, and both the TypeScript and emitted-Wasm membership helpers now
 binary-search that contract. Canonicalizing every table also protects legacy
 case-fold augmentation, whose source-order ranges are not necessarily sorted.
-All parser call sites now bypass the old surrogate-alternation lowering in
-favor of CPCLASS.
+All parser call sites now use CPCLASS. The superseded
+`cpRangesToNode` surrogate-alternation converter and its private helpers were
+removed after the dead-export gate correctly identified that no live compiler
+path could reach them. Keeping that second lowering path would invite semantic
+drift between code-point matching implementations.
 
 ## Measured continuation map
 
