@@ -993,7 +993,7 @@ class SourceInventoryBuilder {
               "class-static-field-initializer",
               classRecord.id,
               terminalOwnerId,
-              member.initializer!,
+              member,
               `${displayName}.${memberBaseName(member.name)}`,
               memberSyntheticRole,
             );
@@ -1051,7 +1051,7 @@ class SourceInventoryBuilder {
         ? this.addTerminalUnit(
             "class-implicit-constructor",
             classRecord.id,
-            firstInstanceInitializer,
+            node,
             `${displayName}_new`,
             "class-member",
             false,
@@ -1068,7 +1068,7 @@ class SourceInventoryBuilder {
             "class-implicit-constructor",
             classRecord.id,
             inheritedTerminalOwnerId,
-            firstInstanceInitializer,
+            node,
             `${displayName}_new`,
             compilerOrigin ? compilerUnitRole(compilerOrigin) : undefined,
           );
@@ -1090,7 +1090,7 @@ class SourceInventoryBuilder {
         "class-instance-field-initializer",
         classRecord.id,
         instanceTerminalOwner,
-        field.initializer!,
+        field,
         `${displayName}.${memberBaseName(field.name)}`,
         fieldCompilerOrigin ? compilerUnitRole(fieldCompilerOrigin) : undefined,
       );

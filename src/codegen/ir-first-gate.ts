@@ -426,7 +426,7 @@ export function collectLocalCallEdgesByIdentity(
       const owner = terminalOwnerFor(node, true);
       if (owner !== undefined) ownerByBoundary.set(node.body, owner);
     } else if (ts.isPropertyDeclaration(node) && node.initializer) {
-      const owner = terminalOwnerFor(node.initializer, true);
+      const owner = terminalOwnerFor(node, true);
       if (owner !== undefined) ownerByBoundary.set(node.initializer, owner);
     } else if (ts.isExportAssignment(node)) {
       const owner = terminalOwnerFor(node, true);

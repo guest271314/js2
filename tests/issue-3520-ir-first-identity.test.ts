@@ -152,6 +152,30 @@ describe("#3520 identity-keyed IR-first local-call edges", () => {
     expect([...edges.calleesFromUnownedCallers]).toEqual([]);
   });
 
+  it("attributes class field initializer calls through their property unit anchors", () => {
+    const fixture = source(
+      "/repo/field-owners.ts",
+      `
+        function target() { return 1; }
+        class Fields {
+          static definition = target();
+          instance = target();
+          nested = class { value = target(); };
+        }
+      `,
+    );
+    const context = contextFor([fixture]);
+    const declaration = fixture.statements.find(ts.isClassDeclaration)!;
+    const constructorId = unitId(context, declaration);
+    const moduleInitId = context.moduleInitUnitIdBySourceFile.get(fixture)!;
+    const targetId = unitId(context, topLevelFunction(fixture, "target"));
+    const edges = collectLocalCallEdgesByIdentity(fixture, context);
+
+    expect(targets(edges, moduleInitId)).toEqual([targetId]);
+    expect(targets(edges, constructorId)).toEqual([targetId]);
+    expect([...edges.calleesFromUnownedCallers]).toEqual([]);
+  });
+
   it("retains every duplicate same-source target instead of choosing by insertion order", () => {
     const fixture = source(
       "/repo/duplicates.ts",
