@@ -81,16 +81,47 @@ interface InterpBinding {
 }
 const INTERP_BINDINGS: WeakMap<object, InterpBinding> = new WeakMap();
 
+/** Callable carrier shared with the standalone generic closure ABI. */
+export type InterpCallable = (
+  a0?: JSValue,
+  a1?: JSValue,
+  a2?: JSValue,
+  a3?: JSValue,
+  a4?: JSValue,
+  a5?: JSValue,
+  a6?: JSValue,
+  a7?: JSValue,
+) => JSValue;
+
 /** Is `v` an interpreted-function value (a branded closure)? */
 export function isInterpClosure(v: JSValue): boolean {
   return typeof v === "function" && INTERP_BINDINGS.has(v as object);
 }
 
 /** Build an interpreted-function value from a FuncMeta + captured env record. */
-export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): JSValue {
-  // A regular (non-arrow) function so `.prototype` exists for construct/instanceof.
-  const closure = function interpTrampoline(this: JSValue, ...args: JSValue[]): JSValue {
-    return interpEnter(meta, envRec, this, args);
+export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): InterpCallable {
+  // A regular (non-arrow) function so `.prototype` exists for
+  // construct/instanceof. Keep eight explicit formal slots: the standalone
+  // generic closure dispatcher classifies a rest-only function as arity zero,
+  // which would discard the AOT call's arguments before this trampoline runs.
+  // Eight is the shared Phase-1 closure ABI ceiling (#3310). Keep the body free
+  // of `arguments`: the standalone compiler already pads under-applied closure
+  // calls to their declared arity, and its `arguments` side channel belongs to
+  // `__apply_closure`, not a statically typed returned closure.
+  // Keep this expression anonymous. A named expression currently takes the
+  // standalone fnctor-escape path and loses the returned closure carrier.
+  const closure: InterpCallable = function (
+    this: JSValue,
+    a0?: JSValue,
+    a1?: JSValue,
+    a2?: JSValue,
+    a3?: JSValue,
+    a4?: JSValue,
+    a5?: JSValue,
+    a6?: JSValue,
+    a7?: JSValue,
+  ): JSValue {
+    return interpEnter(meta, envRec, this, [a0, a1, a2, a3, a4, a5, a6, a7]);
   };
   const nm = typeof meta.name === "string" ? meta.name : "";
   try {
