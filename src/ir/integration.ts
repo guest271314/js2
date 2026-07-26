@@ -53,6 +53,7 @@ import {
 } from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../codegen/registry/imports.js";
 import {
+  planProgramAbiSupportCallableAlias,
   planProgramAbiSupportCallable,
   planProgramAbiGlobal,
   planProgramAbiUnitCallable,
@@ -106,6 +107,7 @@ import {
   irCallableBindingKey,
   irIntrinsicFuncRef,
   irSupportFuncRef,
+  irUnitCallableBindingId,
   irUnitFuncRef,
   sameIrCallableBinding,
 } from "./callable-bindings.js";
@@ -4857,6 +4859,225 @@ class ClassRegistry {
   }
 
   /**
+   * Publish one inherited ordinary instance method as an explicit alias of the
+   * exact ancestor source unit that owns its allocator slot.
+   *
+   * Accessors and statics deliberately stay on the compatibility seam: the
+   * current `IrClassLowering.methodFunc(name)` handle does not retain their
+   * member kind. An exact projected ordinary method is safe because the class
+   * shape identifies the ancestor declaration, the inventory identifies its
+   * source unit, and legacy inheritance must map the child's physical key to
+   * that same allocator-owned function.
+   */
+  private inheritedInstanceMethodRef(
+    shape: IrClassShape,
+    classId: IrClassId,
+    methodName: string,
+    childPhysicalName: string,
+  ): IrFuncRef | null {
+    const session = this.ctx.programAbiSession;
+    if (!session) return null;
+    const identity = this.identityContext;
+    if (!identity) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `ir/integration: inherited class method ${classId} / ${methodName} has no structural inventory`,
+      );
+    }
+
+    const descriptorCallName = (descriptor: IrClassShape["methods"][number]): string => {
+      if (descriptor.memberKind === "getter") return `get_${descriptor.name}`;
+      if (descriptor.memberKind === "setter") return `set_${descriptor.name}`;
+      return descriptor.name;
+    };
+    for (let cursor: IrClassShape | undefined = shape; cursor; cursor = cursor.parent) {
+      if (
+        cursor.methods.some(
+          (descriptor) =>
+            descriptorCallName(descriptor) === methodName &&
+            descriptor.memberKind !== undefined &&
+            descriptor.memberKind !== "method",
+        )
+      ) {
+        return null;
+      }
+    }
+
+    const ownOrdinary = shape.methods.filter(
+      (descriptor) => descriptor.name === methodName && (descriptor.memberKind ?? "method") === "method",
+    );
+    if (ownOrdinary.length > 0) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `ir/integration: own instance method ${classId} / ${methodName} has no exact source slot`,
+      );
+    }
+
+    const visited = new Set<IrClassId>([classId]);
+    for (let ancestor = shape.parent; ancestor; ancestor = ancestor.parent) {
+      const ancestorClassId = this.exactClassId(ancestor);
+      if (visited.has(ancestorClassId)) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class method ${classId} / ${methodName} has a cyclic class shape`,
+        );
+      }
+      visited.add(ancestorClassId);
+      const descriptors = ancestor.methods.filter(
+        (descriptor) => descriptor.name === methodName && (descriptor.memberKind ?? "method") === "method",
+      );
+      if (descriptors.length > 1) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} is not structurally unique`,
+        );
+      }
+      if (descriptors.length === 0) continue;
+
+      const ancestorDeclaration = identity.declarationByClassId.get(ancestorClassId);
+      if (!ancestorDeclaration) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: ancestor class ${ancestorClassId} / ${ancestor.className} has no exact declaration`,
+        );
+      }
+      const methodDeclarations = ancestorDeclaration.members.filter(
+        (member): member is ts.MethodDeclaration =>
+          ts.isMethodDeclaration(member) &&
+          ts.isIdentifier(member.name) &&
+          member.name.text === methodName &&
+          !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
+      );
+      if (methodDeclarations.length !== 1) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} has ${methodDeclarations.length} exact declarations`,
+        );
+      }
+      const methodDeclaration = methodDeclarations[0]!;
+      const terminalId = identity.unitIdByDeclaration.get(methodDeclaration);
+      const terminal = terminalId === undefined ? undefined : identity.terminalByUnitId.get(terminalId);
+      const ancestorLegacyName = `${ancestor.className}_${methodName}`;
+      if (
+        !terminal ||
+        identity.declarationByUnitId.get(terminal.id) !== methodDeclaration ||
+        terminal.kind !== "class-instance-method" ||
+        terminal.observedKind !== "class-member" ||
+        terminal.lexicalOwnerId !== ancestorClassId ||
+        terminal.staticClassMember ||
+        terminal.legacyMatchName !== ancestorLegacyName
+      ) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} has no consistent exact source unit`,
+        );
+      }
+      const derivedOrdinal = identity.inventory.allUnits.findIndex((unit) => unit.id === terminal.id);
+      if (derivedOrdinal < 0) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: ancestor instance method ${terminal.id} is absent from structural inventory order`,
+        );
+      }
+
+      const ancestorPhysicalName = classMemberFuncKey(this.ctx, ancestorLegacyName);
+      const ancestorFuncIdx = this.ctx.funcMap.get(ancestorPhysicalName);
+      const childFuncIdx = this.ctx.funcMap.get(childPhysicalName);
+      const ancestorFunc = ancestorFuncIdx === undefined ? undefined : definedFuncAt(this.ctx, ancestorFuncIdx);
+      const childFunc = childFuncIdx === undefined ? undefined : definedFuncAt(this.ctx, childFuncIdx);
+      if (ancestorFuncIdx === undefined || !ancestorFunc || ancestorFunc.name !== ancestorPhysicalName) {
+        throw new IrInvariantError(
+          "missing-function-slot",
+          "resolve",
+          `ir/integration: ancestor instance method ${terminal.id} has no defined slot ${ancestorPhysicalName}`,
+        );
+      }
+      if (!childFunc) {
+        throw new IrInvariantError(
+          "missing-function-slot",
+          "resolve",
+          `ir/integration: inherited class method ${classId} / ${childPhysicalName} has no defined slot`,
+        );
+      }
+      if (childFuncIdx !== ancestorFuncIdx || childFunc !== ancestorFunc) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class method ${classId} / ${childPhysicalName} does not alias exact ancestor ${terminal.id} / ${ancestorPhysicalName}`,
+        );
+      }
+      const signature = this.ctx.mod.types[ancestorFunc.typeIdx];
+      if (!signature || signature.kind !== "func") {
+        throw new IrInvariantError(
+          "abi-type-index-mismatch",
+          "resolve",
+          `ir/integration: ancestor instance method ${terminal.id} / ${ancestorPhysicalName} has non-function type ${ancestorFunc.typeIdx}`,
+        );
+      }
+
+      const ancestorRef = irUnitFuncRef({ unitId: terminal.id, name: ancestorPhysicalName });
+      this.bindUnitCallableSlot(ancestorRef, ancestorFuncIdx, ancestorPhysicalName);
+      const aliasOf = irUnitCallableBindingId(terminal.id);
+      if (!session.hasPlan(aliasOf)) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: ancestor instance method ${terminal.id} has no Program ABI callable plan`,
+        );
+      }
+      const resolvedAncestorFuncIdx = session.resolveCurrentIndex(
+        aliasOf,
+        "function",
+        irCallableBindingKey(ancestorRef.binding),
+      );
+      const resolvedAncestorFunc = definedFuncAt(this.ctx, resolvedAncestorFuncIdx);
+      if (resolvedAncestorFunc !== ancestorFunc || resolvedAncestorFunc !== childFunc) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class method ${classId} / ${childPhysicalName} resolves structurally to slot ${resolvedAncestorFuncIdx}, not exact ancestor ${terminal.id}`,
+        );
+      }
+
+      const role = `class-method-adapter:instance:${methodName}`;
+      const ref = irSupportFuncRef(classId, role, childPhysicalName, derivedOrdinal);
+      if (ref.binding.kind !== "support") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class method ${classId} / ${methodName} has a non-support adapter reference`,
+        );
+      }
+      const bindingId = planProgramAbiSupportCallableAlias(this.ctx, {
+        ref,
+        anchor: { kind: "class", classId },
+        role,
+        roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classMethodAdapter,
+        derivedOrdinal,
+        aliasOf,
+        signature,
+      });
+      if (bindingId !== ref.binding.bindingId) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class method ${classId} / ${methodName} was not accepted as a Program ABI alias`,
+        );
+      }
+      return ref;
+    }
+    return null;
+  }
+
+  /**
    * Resolve the allocator-owned `<Class>_new` to its exact inventoried source
    * unit. An omitted constructor is still a real source artifact: the identity
    * inventory projects one `class-implicit-constructor` unit beneath the class.
@@ -5011,6 +5232,7 @@ class ClassRegistry {
         const physicalName = classMemberFuncKey(ctx, legacyName);
         return (
           this.memberRef(classId, legacyName, physicalName) ??
+          this.inheritedInstanceMethodRef(shape, classId, name, physicalName) ??
           irSupportFuncRef(classId, `class-method-adapter:${name}`, physicalName)
         );
       },

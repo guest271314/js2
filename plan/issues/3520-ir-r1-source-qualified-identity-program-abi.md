@@ -5,8 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c9-class-support-callables
-pr: 3676
+branch: codex/3520-c10-class-method-aliases
 last_merged_pr: 3496
 sprint: current
 created: 2026-07-21
@@ -133,6 +132,7 @@ files:
   - tests/issue-3520-program-abi-type-remap.test.ts
   - tests/issue-3520-support-callable-abi.test.ts
   - tests/issue-3520-class-support-callable-abi.test.ts
+  - tests/issue-3520-class-method-alias-abi.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
@@ -1467,14 +1467,67 @@ was performed.
 
 This is a bounded class-constructor ABI slice, not completion of class or R1
 ABI ownership. Externref-backed classes (including the JS-host Promise
-`*_new__onhost` path) have no WasmGC `_init` and remain excluded. Inherited or
-otherwise synthetic `class-method-adapter:*` callables, exact imported
-callables and import locators, dual-mode runtime/intrinsic providers, remaining
-imported globals, Program ABI type/class-layout entries, exports and aliases,
-and production `LegacyAbiAdapter` replacement of the remaining `funcMap`,
-`structMap`, module-array, and display-name scans still remain before R1 can
-close. Preparation/body ownership, routing policy, and R2-R10 work are
-unchanged.
+`*_new__onhost` path) have no WasmGC `_init` and remain excluded. Inherited
+ordinary instance-method adapters are covered by C10; inherited accessors,
+statics, and other synthetic helpers remain. Exact imported callables and
+import locators, dual-mode runtime/intrinsic providers, Program ABI
+type/class-layout entries, exports and remaining alias families, and production
+`LegacyAbiAdapter` replacement of the remaining `funcMap`, `structMap`,
+module-array, and display-name scans still remain before R1 can close.
+Preparation/body ownership, routing policy, and R2-R10 work are unchanged.
+
+### 2026-07-26 inherited instance-method alias continuation
+
+The next stacked continuation on `codex/3520-c10-class-method-aliases` moves
+projected local instance-method adapters into the production Program ABI:
+
+- an inherited child method is now an explicit class-owned support alias of
+  the exact ancestor source-method callable. The alias has its own structural
+  reference, provenance, deterministic inventory-derived order, and callable
+  contract, but owns no locator or independent function slot;
+- ancestor class shape, AST declaration, source unit, allocator handle,
+  `WasmFunction` object, and current Program ABI slot must all agree before the
+  alias can be planned. The legacy label is only a consistency assertion and
+  cannot select the canonical method;
+- structural resolution follows `aliasOf` through the canonical source
+  callable. A relocated child compatibility key therefore remains stable
+  across import insertion, type-layout remapping, and final DCE publication;
+  and
+- accessors, statics, externref-backed classes, unresolved projections, and
+  builds without a Program ABI session deliberately remain on the
+  compatibility seam until their member/provider identities are exact.
+
+The production regression covers an `A -> B -> C` hierarchy, a method
+overridden in `B`, a second method inherited transitively from `A`, and a user
+function that collides with `C_m`. It proves that `C.m` aliases the exact `B.m`
+source unit, `C.n` aliases the exact `A.n` source unit, neither child adapter
+allocates a function, both published post-DCE reference-bearing signatures
+match their canonical functions, the colliding user function owns a distinct
+slot, and the emitted program executes to the expected value. Planner
+regressions cover reversed discovery order, multiple derived ordinals,
+relabelling, late function imports, type remapping, structural-reference
+mismatch, and wrong owner/role/ordinal identities.
+
+The complete #3520 matrix plus #2138 passes **246/246 across 42 files**; the
+focused class/planner matrix passes **41/41**; and the
+linear/cross-backend/class matrix passes **43/43**. Strict TypeScript, Biome
+lint, Prettier, diff, LOC, function-budget, dead-export, and oracle-ratchet
+checks pass. Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed
+Unsupported / 0 Invariants / 37 legacy bodies**, and the fallback ratchet
+reports no unintended, post-claim, or module-level increase. The eight-shard
+equivalence gate reports **1,608 passing / 35 known failures / 0 new
+regressions**; one baseline failure now passes and the baseline remains
+unchanged. No local Test262 corpus run was performed.
+
+C10 completes the currently identified inherited ordinary instance-method
+projection, not the remaining class/provider surface or R1. Exact imported
+callable IDs and import locators, dual-mode runtime/intrinsic providers,
+inherited accessors, externref/Promise-host helpers, Program ABI
+type/class-layout entries, exports and remaining alias families, and the
+production `LegacyAbiAdapter` cutover still remain. R2 must then prepare the
+whole IR program before body emission; R3-R8 move function, class,
+module-initializer, multisource, runtime/async, and linear ownership to that
+program; R9 removes fallback policy; and R10 deletes the direct codegen path.
 
 ### R1a validation evidence
 
