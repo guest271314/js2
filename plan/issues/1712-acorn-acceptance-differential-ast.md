@@ -700,7 +700,8 @@ currentVarScope` path. Two independent standalone defects caused the trap:
 The focused standalone regressions separate the late-method case from the
 11-accessor table-growth case. The real pinned Acorn 8.16.0 artifact now:
 
-- compiles in **23,790 ms** to **1,711,551 bytes**;
+- compiles on the synced upstream base in **25,970 ms** to **1,711,629
+  bytes**;
 - validates and instantiates with **zero imports**;
 - passes `parse`, `parseExpressionAt`, and `tokenizer` scalar canaries; and
 - returns the expected `Program → FunctionDeclaration → ReturnStatement →

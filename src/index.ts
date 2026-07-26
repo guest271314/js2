@@ -778,9 +778,10 @@ export async function compileProject(entryFile: string, options?: CompileOptions
 }
 
 /**
- * Create an incremental compiler that reuses a persistent TypeScript Language Service.
- * Lib files are parsed once on first compilation and cached for all subsequent compilations,
- * eliminating ~50ms of program creation overhead per compilation.
+ * Create an incremental compiler that reuses a persistent, versioned TypeScript Language Service.
+ * Unchanged sources retain their Program, checker, and diagnostic caches; edited sources use
+ * incremental snapshots so TypeScript reparses and rechecks only invalidated state. Lib files
+ * are parsed once and retained across compilations.
  *
  * Ideal for worker pools or batch compilation scenarios where many source files
  * are compiled sequentially in the same process.
@@ -788,8 +789,8 @@ export async function compileProject(entryFile: string, options?: CompileOptions
  * @example
  * ```ts
  * const compiler = createIncrementalCompiler();
- * const result1 = compiler.compile("export function a(): number { return 1; }");
- * const result2 = compiler.compile("export function b(): number { return 2; }"); // faster
+ * const result1 = await compiler.compile("export function a(): number { return 1; }");
+ * const result2 = await compiler.compile("export function b(): number { return 2; }"); // faster
  * compiler.dispose(); // free resources when done
  * ```
  */

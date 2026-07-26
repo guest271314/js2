@@ -147,6 +147,71 @@ signature. There is no single mega-fix in ES5.
 | A4 "Expected a SyntaxError…"                                       | 5         |                                        |
 | **uncovered / diffuse**                                            | **1,223** | 411 buckets                            |
 
+### 2.1b The "1,223 diffuse" figure is partly an artifact of the GROUPING FUNCTION (#23, 2026-07-26)
+
+**"1,223 diffuse across 411 buckets with no repeating signature" is a claim about
+`error_signature`, not about the population.** If the normalisation retains
+test-specific data (values, property names, indices), genuinely-shared mechanisms
+scatter into singletons and read as irreducible. That is measurable, so it was
+measured: the **same** failures, re-grouped at five normalisation strengths.
+
+| normalisation                  | groups | singletons | in clusters | cluster coverage |
+| ------------------------------ | -----: | ---------: | ----------: | ---------------: |
+| L0 raw                         |    850 |    **632** |       1,334 |           67.9 % |
+| L1 strip location              |    850 |        632 |       1,334 |           67.9 % |
+| L2 + strip quoted values       |    702 |        522 |       1,444 |           73.4 % |
+| L3 + strip numbers/identifiers |    646 |        474 |       1,492 |           75.9 % |
+| L4 first clause only           |    499 |    **319** |       1,647 |       **83.8 %** |
+
+**Singletons halve (632 → 319) and cluster coverage rises 67.9 % → 83.8 % purely
+from coarser grouping** — no new data, same failures. So a substantial share of
+the "irreducible residue" is shared-mechanism work that the census's
+normalisation scattered.
+
+**"No single mega-fix in ES5" may still hold, but "1,223 diffuse" overstates the
+irreducible residue.** This sharpens §2.1 rather than contradicting it: signature
+counts are a floor, **and the floor itself moves with normalisation strength.**
+
+> **CAVEAT — L4 is one END of a range, not the right answer.** Past some
+> strength, grouping stops revealing mechanisms and starts inventing them. The
+> L4 cluster `Expected SameValue(«V», «V») to be true` × 69 is
+> **over-normalised by construction**: L4 erases the very values that
+> distinguish those failures, so it is a routing label, not a mechanism. Read
+> the table as a range (L0 floor → L4 ceiling), exactly as §2.1 says to read
+> signatures-vs-paths. Do not quote L4 alone.
+
+**Cross-validation.** At L4 the top clusters land on independently-derived
+census families, which is the evidence that the method is sound:
+
+| L4 cluster                                              | n   | census family                     |
+| ------------------------------------------------------- | --- | --------------------------------- |
+| `Expected a TypeError to be thrown…`                    | 140 | **A3 = 139**                      |
+| `An initialized binding is not created… ReferenceError` | 96  | **A5 Annex B B.3.3 = 96** (exact) |
+| `accessed !== true`                                     | 38  | **B1 = 38** (exact)               |
+| `null is not a function [in __module_init()]`           | 35  | C2 (145), partial                 |
+| `obj[X] descriptor should not be enumerable`            | 82  | **none** — see below              |
+
+The 82 has no census counterpart because it is **#3603 S1's own host
+de-inflation** landing in the ES5 population (157 of that PR's 1,066 regressions
+are ES5-classified, 2.3 % of the ES5 passing set, concentrated in
+`Object/defineProperty` and `Object/defineProperties` — the two largest clusters
+below, both heavy `verifyProperty` users). Numbers here therefore post-date
+#3603; the census's own figures pre-date it.
+
+> **⚠ POPULATION TRAP — do not repeat this mistake.** A first pass classified
+> ES5 membership using only the edition classifier's rules 1 and 4 (`es5id:`
+> frontmatter, `annexB/` path) and ran on **2,631** rows. That is the WRONG
+> population: the census **partitions eval- and with-dependent tests OUT** of its
+> reachable set (§1). The correct population is **1,966** (484 eval-dependent +
+> 181 with-dependent were contaminating it). The contaminated run produced a
+> spurious top cluster — `assert is not defined` × 184, ALL of them in
+> `annexB/language/eval-code` — which looked like the largest lever in ES5 and
+> was not part of the diffuse set at all. **Apply the §1 eval/with partition
+> before grouping**, or the biggest apparent finding will be an excluded bucket.
+
+Probe: `.tmp/3603/es5-regroup.mjs` (method; re-derive counts against a
+current baseline before quoting).
+
 Path clusters, for routing only (**these are not shared-mechanism claims**):
 
 | path bucket (routing label)                 | fail | of tests in bucket  |
@@ -308,7 +373,7 @@ census issue): #671, #739, #2200, #2552, #2666, #2668, #2726, #2737, #2742,
 #2747, #3230, #3420, #3434, #3475, #3540.
 
 `goal:` is single-valued (`sync-goal-issue-tables.mjs` matches the goal file
-name exactly), so a retag *moves* an issue rather than adding a second home.
+name exactly), so a retag _moves_ an issue rather than adding a second home.
 Deliberate exclusions:
 
 - **Standalone-lane ES5 work stays under the standalone goals** — #2036, #2042,
