@@ -801,7 +801,12 @@ full four-shard differential at **53,259/53,259 exact files** and
 **102,312/102,312 exact variants**: 92,649 variants produced structurally
 identical ESTree ASTs, 9,663 were rejected by both parsers, and zero files or
 variants mismatched. The run used pinned Acorn 8.16.0 and Test262 revision
-`63829c6d925e24a3f5f307b08754aaa1c412c6a6`.
+`63829c6d925e24a3f5f307b08754aaa1c412c6a6`. After the final upstream
+slot-widening merge, code revision
+`2cccb33288957f` emits the byte-identical 681,946-byte host artifact
+(`sha256:765c5cc3570ab3b5fb62942701e0969dbaeafdd49fe5a6e863c2410a9c523ee6`);
+the exhaustive result therefore transfers exactly, and the zero-import
+standalone canaries remain green.
 
 The vec mutation is now routed through the module's canonical mutation export.
 The recursive method path first resolves the live prototype property, returns
