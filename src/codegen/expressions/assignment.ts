@@ -57,6 +57,11 @@ import { tryCompileFnctorPrototypeAssign } from "./fnctor-prototype.js";
 import { reserveAccessorSetDriver } from "../accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "../struct-accessor-closure.js";
 import {
+  emitGlobalEnvironmentKey,
+  emitGlobalEnvironmentObject,
+  ensureGlobalEnvironmentOperation,
+} from "../global-environment.js";
+import {
   arrayIteratorOverrideGlobalIdx,
   emitArrayProtoIteratorDrive,
   maybeCaptureArrayProtoOverride,
@@ -99,7 +104,7 @@ import {
   emitDynamicWithSet,
   resolveWithBinding,
 } from "../with-scope.js";
-import { isStrictFunction } from "../helpers/is-strict-function.js";
+import { isStrictContext } from "../helpers/is-strict-function.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -560,57 +565,27 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       fctx.body.push({ op: "global.get", index: moduleIdxPost });
       return globalType ?? resultType;
     }
-    // §6.2.5.6 PutValue steps 2.b–2.d: assigning to an unresolvable
-    // reference in non-strict code creates/updates a property on the current
-    // realm's global object. The old fallback allocated a function local, so
-    // the assignment itself appeared to work but reflective reads through
-    // globalThis/Object.getOwnPropertyDescriptor could not observe it
-    // (test262 11.13.1-4-1). Keep this host-only: standalone/WASI need a
-    // separate native-global-object write path and must not leak host imports.
-    if (
-      !ctx.standalone &&
-      !ctx.wasi &&
-      !isStrictContext(expr.left, ctx.inferModuleStrictArguments) &&
-      isUnresolvableIdent(ctx, fctx, expr.left)
-    ) {
-      const gtIdx = ensureLateImport(ctx, "__get_globalThis", [], [{ kind: "externref" }]);
-      const setIdx = ensureLateImport(
-        ctx,
-        "__extern_set",
-        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-        [],
-      );
-      flushLateImportShifts(ctx, fctx);
+    // §6.2.5.6 PutValue: a sloppy unresolvable assignment creates/updates a
+    // configurable property on the realm's global object. Host and host-free
+    // targets share the same target-aware carrier (#2726).
+    if (!isStrictContext(expr.left, ctx.inferModuleStrictArguments) && isUnresolvableIdent(ctx, fctx, expr.left)) {
+      (ctx.sloppyImplicitGlobals ??= new Set()).add(name);
+      const resultType = compileExpression(ctx, fctx, expr.right);
+      if (!resultType) return null;
+      const resultTmp = allocLocal(fctx, `__implicit_global_rhs_${fctx.locals.length}`, resultType);
+      fctx.body.push({ op: "local.set", index: resultTmp });
 
-      if (gtIdx !== undefined && setIdx !== undefined) {
-        // §13.15.2 evaluates the RHS once, PutValue consumes that value, and
-        // the assignment expression then returns the same RHS value. Preserve
-        // its native representation in a temp while boxing only the copy sent
-        // through the host object's [[Set]] bridge.
-        const resultType = compileExpression(ctx, fctx, expr.right);
-        if (!resultType) return null;
-        const resultTmp = allocLocal(fctx, `__implicit_global_rhs_${fctx.locals.length}`, resultType);
-        fctx.body.push({ op: "local.set", index: resultTmp });
-
-        // RHS compilation may have registered additional late imports, so use
-        // the current function indices rather than the pre-RHS snapshots.
-        const finalGtIdx = ctx.funcMap.get("__get_globalThis");
-        if (finalGtIdx === undefined) return null;
-        fctx.body.push({ op: "call", funcIdx: finalGtIdx });
-        addStringConstantGlobal(ctx, name);
-        fctx.body.push(...stringConstantExternrefInstrs(ctx, name));
-        fctx.body.push({ op: "local.get", index: resultTmp });
-        if (resultType.kind !== "externref") {
-          coerceType(ctx, fctx, resultType, { kind: "externref" });
-        }
-        // Boxing may itself register a late import and shift every later
-        // function index; resolve the setter only after that coercion.
-        const finalSetIdx = ctx.funcMap.get("__extern_set");
-        if (finalSetIdx === undefined) return null;
-        fctx.body.push({ op: "call", funcIdx: finalSetIdx });
-        fctx.body.push({ op: "local.get", index: resultTmp });
-        return resultType;
+      if (!emitGlobalEnvironmentObject(ctx, fctx)) return null;
+      emitGlobalEnvironmentKey(ctx, fctx, name);
+      fctx.body.push({ op: "local.get", index: resultTmp });
+      if (resultType.kind !== "externref") {
+        coerceType(ctx, fctx, resultType, { kind: "externref" });
       }
+      const setIdx = ensureGlobalEnvironmentOperation(ctx, fctx, "__extern_set");
+      if (setIdx === undefined) return null;
+      fctx.body.push({ op: "call", funcIdx: setIdx });
+      fctx.body.push({ op: "local.get", index: resultTmp });
+      return resultType;
     }
 
     // Graceful fallback for other unresolved identifiers: auto-allocate a
@@ -839,62 +814,7 @@ function emitIdentifierWriteFromLocal(
   fctx.body.push({ op: "local.set", index: newLocalIdx });
 }
 
-/**
- * Detect strict-mode context for a node (§10.2.1).
- * A node is in strict mode if:
- *   - Containing source file starts with `"use strict";` directive.
- *   - Inside a class body (classes are always strict).
- *   - Inside a function whose body begins with `"use strict";`.
- */
-export function isStrictContext(node: ts.Node, inferModuleStrict = true): boolean {
-  let current: ts.Node | undefined = node;
-  while (current) {
-    if (
-      ts.isFunctionDeclaration(current) ||
-      ts.isFunctionExpression(current) ||
-      ts.isArrowFunction(current) ||
-      ts.isMethodDeclaration(current) ||
-      ts.isGetAccessorDeclaration(current) ||
-      ts.isSetAccessorDeclaration(current) ||
-      ts.isConstructorDeclaration(current)
-    ) {
-      return isStrictFunction(current, inferModuleStrict);
-    }
-    if (ts.isSourceFile(current)) {
-      for (const stmt of current.statements) {
-        if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)) {
-          if (stmt.expression.text === "use strict") return true;
-        } else {
-          break;
-        }
-      }
-      const internal = current as ts.SourceFile & { externalModuleIndicator?: ts.Node };
-      return (
-        inferModuleStrict &&
-        (internal.externalModuleIndicator !== undefined || current.impliedNodeFormat === ts.ModuleKind.ESNext)
-      );
-    }
-    if (ts.isClassDeclaration(current) || ts.isClassExpression(current)) return true;
-    if (
-      ts.isFunctionDeclaration(current) ||
-      ts.isFunctionExpression(current) ||
-      ts.isArrowFunction(current) ||
-      ts.isMethodDeclaration(current)
-    ) {
-      if (current.body && ts.isBlock(current.body)) {
-        for (const stmt of current.body.statements) {
-          if (ts.isExpressionStatement(stmt) && ts.isStringLiteral(stmt.expression)) {
-            if (stmt.expression.text === "use strict") return true;
-          } else {
-            break;
-          }
-        }
-      }
-    }
-    current = current.parent;
-  }
-  return false;
-}
+export { isStrictContext } from "../helpers/is-strict-function.js";
 
 /** True when this binding is the receiver of a static Object.defineProperty call. */
 function sourceDefinesProperty(ctx: CodegenContext, receiver: ts.Identifier, propName: string): boolean {
