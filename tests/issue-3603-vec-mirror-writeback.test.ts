@@ -190,3 +190,65 @@ describe("#3603 S1 — host-side vec-mirror mutations reach the WasmGC vec", () 
     });
   });
 });
+
+// (#3603 S1 follow-up) The write-back registry must survive test262 DELETING
+// host intrinsics. `propertyHelper.js`'s `verifyProperty` is destructive by
+// design — its `isConfigurable` probe does `delete obj[name]` — so
+// `test/built-ins/WeakMap/prototype/get/get.js` deletes `WeakMap.prototype.get`
+// for the whole realm. This module's registry is itself a `WeakMap` and is
+// probed by `snapshotVecMirrors` on EVERY host-call bridge (far more often than
+// `__make_iterable` runs), so it was the first thing to break:
+// `TypeError: _vecMirrorSource.get is not a function`. Measured as a real
+// regression caused by this module on merge_group 30179758665 (1 file).
+//
+// SCOPE — this is a UNIT test of the module, deliberately not end-to-end.
+// `src/runtime.ts` has the same exposure in several PRE-EXISTING WeakMaps
+// (`_hostProxyCache`, `__make_iterable`'s `convertedArrays`, …), so a compiled
+// end-to-end program cannot survive the deletion regardless of this fix, and a
+// test written that way would fail for defects this change does not own. That
+// broader exposure is a separate finding. What IS this module's contract is
+// asserted directly below.
+describe("#3603 S1 — vec-mirror registry survives deletion of WeakMap intrinsics", () => {
+  it("registerVecMirror / vecForMirror still work after `delete WeakMap.prototype.{get,set}`", async () => {
+    const { registerVecMirror, vecForMirror } = await import("../src/runtime/vec-mirror-writeback.js");
+
+    const savedGet = Object.getOwnPropertyDescriptor(WeakMap.prototype, "get");
+    const savedSet = Object.getOwnPropertyDescriptor(WeakMap.prototype, "set");
+    const mirror: unknown[] = [];
+    const vec = { __fakeVec: true };
+
+    let roundTripped: unknown;
+    let thrown: unknown;
+    let deletionTookEffect = false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete (WeakMap.prototype as any).get;
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete (WeakMap.prototype as any).set;
+      deletionTookEffect =
+        typeof (WeakMap.prototype as any).get === "undefined" && typeof (WeakMap.prototype as any).set === "undefined";
+      registerVecMirror(mirror, vec);
+      roundTripped = vecForMirror(mirror);
+    } catch (e) {
+      thrown = e;
+    } finally {
+      // Restore BEFORE asserting — vitest's own matcher registry is a Map, so
+      // `expect()` throws `globalThis[MATCHERS_OBJECT].get is not a function`
+      // while the intrinsic is missing. The assertion library has the same
+      // exposure as the code under test.
+      if (savedGet) Object.defineProperty(WeakMap.prototype, "get", savedGet);
+      if (savedSet) Object.defineProperty(WeakMap.prototype, "set", savedSet);
+    }
+
+    expect(deletionTookEffect).toBe(true); // the deletion really happened
+    expect(thrown).toBeUndefined(); // no `_vecMirrorSource.get is not a function`
+    expect(roundTripped).toBe(vec); // and the registry still round-trips
+  });
+
+  it("vecForMirror returns undefined for a non-mirror, intrinsics intact", async () => {
+    const { vecForMirror } = await import("../src/runtime/vec-mirror-writeback.js");
+    expect(vecForMirror([])).toBeUndefined();
+    expect(vecForMirror(null)).toBeUndefined();
+    expect(vecForMirror(42)).toBeUndefined();
+  });
+});

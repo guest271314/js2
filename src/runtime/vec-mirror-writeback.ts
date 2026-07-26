@@ -51,8 +51,43 @@
 //    reconciliation is SKIPPED rather than guessed at — Wasm-side state wins,
 //    which is the pre-#3603 behaviour.
 
+// ── Intrinsic capture — REQUIRED, not defensive style ──────────────────────
+//
+// This registry is a real `WeakMap`, and test262 MUTATES HOST INTRINSICS.
+// `propertyHelper.js`'s `verifyProperty` is DESTRUCTIVE by design: its
+// `isConfigurable` probe does `delete obj[name]`. So
+// `test/built-ins/WeakMap/prototype/get/get.js` — which calls
+// `verifyProperty(WeakMap.prototype, "get", …)` — DELETES
+// `WeakMap.prototype.get` out from under the whole realm. Any later
+// `_vecMirrorSource.get(…)` then throws
+// `TypeError: _vecMirrorSource.get is not a function`, turning an unrelated
+// passing test into a failure.
+//
+// That is not hypothetical: it was measured on merge_group 30179758665 as a
+// real regression caused by this module (1 file), and it is exactly the trap
+// #3603 already documents — "verifyProperty is destructive … the host lane
+// shares real host builtins across in-process runs".
+//
+// Capturing the methods at MODULE LOAD (before any test body runs) and
+// invoking them through a captured `Reflect.apply` makes this module immune:
+// no property lookup on `WeakMap.prototype`, and no lookup of `.call` on the
+// method either, at call time.
+const _apply = Reflect.apply;
+const _wmGet = WeakMap.prototype.get;
+const _wmSet = WeakMap.prototype.set;
+
 /** mirror JS array → the WasmGC vec struct it was materialised from. */
 const _vecMirrorSource = new WeakMap<object, unknown>();
+
+/** `map.get(key)` that cannot be broken by a test deleting `WeakMap.prototype.get`. */
+function _mirrorGet(key: object): unknown {
+  return _apply(_wmGet, _vecMirrorSource, [key]);
+}
+
+/** `map.set(key, value)` that cannot be broken by a test deleting `WeakMap.prototype.set`. */
+function _mirrorSet(key: object, value: unknown): void {
+  _apply(_wmSet, _vecMirrorSource, [key, value]);
+}
 
 export type VecMirrorSnapshot = {
   mirror: unknown[];
@@ -65,7 +100,7 @@ type Exports = Record<string, Function> | undefined;
 
 /** Record a `__make_iterable` mirror so its mutations can be replayed onto the vec. */
 export function registerVecMirror(mirror: unknown[], vec: unknown): void {
-  _vecMirrorSource.set(mirror, vec);
+  _mirrorSet(mirror, vec);
 }
 
 /**
@@ -75,7 +110,7 @@ export function registerVecMirror(mirror: unknown[], vec: unknown): void {
  */
 export function vecForMirror(v: unknown): unknown {
   if (v == null || typeof v !== "object") return undefined;
-  return _vecMirrorSource.get(v as object);
+  return _mirrorGet(v as object);
 }
 
 /** Shared no-mirrors result — `__extern_method_call` / `__call_function` are HOT paths; the common case must not allocate. */
@@ -99,7 +134,7 @@ export function snapshotVecMirrors(
   let snaps: VecMirrorSnapshot[] | undefined;
   const consider = (v: unknown): void => {
     if (v == null || typeof v !== "object") return;
-    const vec = _vecMirrorSource.get(v as object);
+    const vec = _mirrorGet(v as object);
     if (vec === undefined) return;
     let vecLen: number;
     try {
@@ -109,7 +144,10 @@ export function snapshotVecMirrors(
     }
     if (typeof vecLen !== "number" || vecLen < 0) return;
     const mirror = v as unknown[];
-    (snaps ??= []).push({ mirror, vec, mirrorLen: mirror.length, vecLen });
+    // Index assignment, not `.push()` — see the intrinsic-capture note above:
+    // a test262 file may have deleted `Array.prototype.push` by now.
+    const list = (snaps ??= []);
+    list[list.length] = { mirror, vec, mirrorLen: mirror.length, vecLen };
   };
   consider(receiver);
   for (const a of args) consider(a);
@@ -163,7 +201,8 @@ export function reconcileVecMirrors(
     // compare by identity (primitives, raw structs) or through the mirror
     // registry (a nested vec element crosses as its own mirror).
     let keep = 0;
-    const min = Math.min(vecLen, mirror.length);
+    // Not `Math.min` — a deletable intrinsic (see the capture note above).
+    const min = vecLen < mirror.length ? vecLen : mirror.length;
     let scanFailed = false;
     while (keep < min) {
       let raw: unknown;
@@ -186,7 +225,7 @@ export function reconcileVecMirrors(
     // All-or-nothing is the only safe contract here.
     const popped: unknown[] = [];
     try {
-      for (let i = vecLen; i > keep; i--) popped.push(popFn(vec));
+      for (let i = vecLen; i > keep; i--) popped[popped.length] = popFn(vec);
       for (let i = keep; i < mirror.length; i++) {
         const m = mirror[i];
         const raw = vecForMirror(m) ?? unwrap(m);
