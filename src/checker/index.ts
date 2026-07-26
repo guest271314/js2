@@ -1,5 +1,11 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts } from "../ts-api.js";
+import {
+  buildBareSpecifierLookup,
+  multiFileScriptKind,
+  normalizeMultiFileName,
+  resolveMultiFileModule,
+} from "./multi-file-paths.js";
 import { getDefaultEnvironment } from "../env.js";
 import { buildModuleDecls } from "./node-capability-map.js";
 
@@ -805,7 +811,7 @@ function isRecognizedDenoStdioNotFound(diag: ts.Diagnostic): boolean {
  * inject the ambient `Deno` d.ts. Path-agnostic and precisely scoped via
  * `isRecognizedDenoStdioNotFound`; leaves every other diagnostic untouched.
  */
-function filterRecognizedDenoStdioDiagnostics(diagnostics: ts.Diagnostic[]): ts.Diagnostic[] {
+export function filterRecognizedDenoStdioDiagnostics(diagnostics: ts.Diagnostic[]): ts.Diagnostic[] {
   if (!diagnostics.some(isRecognizedDenoStdioNotFound)) return diagnostics;
   return diagnostics.filter((d) => !isRecognizedDenoStdioNotFound(d));
 }
@@ -961,95 +967,6 @@ export interface MultiTypedAST {
   syntacticDiagnostics: readonly ts.Diagnostic[];
 }
 
-/** Script-file extensions we recognize in the multi-source pipeline. */
-const KNOWN_SCRIPT_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
-
-function stripKnownExt(name: string): string {
-  for (const ext of KNOWN_SCRIPT_EXTS) {
-    if (name.endsWith(ext)) return name.slice(0, -ext.length);
-  }
-  return name;
-}
-
-function hasKnownExt(name: string): boolean {
-  return KNOWN_SCRIPT_EXTS.some((ext) => name.endsWith(ext));
-}
-
-function scriptKindFor(name: string): ts.ScriptKind {
-  if (name.endsWith(".tsx")) return ts.ScriptKind.TSX;
-  if (name.endsWith(".jsx")) return ts.ScriptKind.JSX;
-  if (name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")) return ts.ScriptKind.JS;
-  return ts.ScriptKind.TS;
-}
-
-function tsExtensionFor(name: string): ts.Extension {
-  if (name.endsWith(".tsx")) return ts.Extension.Tsx;
-  if (name.endsWith(".jsx")) return ts.Extension.Jsx;
-  if (name.endsWith(".js")) return ts.Extension.Js;
-  if (name.endsWith(".mjs")) return ts.Extension.Mjs;
-  if (name.endsWith(".cjs")) return ts.Extension.Cjs;
-  return ts.Extension.Ts;
-}
-
-/**
- * Normalize a file path to a canonical form used as key in our in-memory file map.
- * Strips leading "./", resolves ".." segments, preserves any known script extension,
- * and defaults to ".ts" when no extension is present.
- */
-function normalizeFileName(name: string): string {
-  let normalized = name.startsWith("./") ? name.slice(2) : name;
-  if (normalized.startsWith("/")) {
-    normalized = normalized.slice(1);
-  }
-  // Resolve ".." path segments (e.g., "link/../emit/foo" → "emit/foo")
-  const parts = normalized.split("/");
-  const resolved: string[] = [];
-  for (const part of parts) {
-    if (part === "..") {
-      resolved.pop();
-    } else if (part !== ".") {
-      resolved.push(part);
-    }
-  }
-  normalized = resolved.join("/");
-  // Preserve explicit script extensions (.js/.mjs/.cjs/.jsx/.tsx/.ts); otherwise default to .ts
-  if (!hasKnownExt(normalized)) {
-    normalized = `${normalized}.ts`;
-  }
-  return normalized;
-}
-
-/**
- * Locate a file in the normalizedFiles map, probing for alternate extensions.
- * Accepts e.g. "a" (user wrote `import "./a"`) and finds "a.js" / "a.ts" / "a/index.js".
- */
-function probeFileKey(resolved: string, files: Map<string, string>): string | undefined {
-  if (files.has(resolved)) return resolved;
-  // Swap the trailing extension (e.g. normalized "a.ts" but file is "a.js")
-  if (hasKnownExt(resolved)) {
-    const stem = stripKnownExt(resolved);
-    for (const ext of KNOWN_SCRIPT_EXTS) {
-      const cand = stem + ext;
-      if (cand !== resolved && files.has(cand)) return cand;
-    }
-    // Also try <stem>/index.<ext>
-    for (const ext of KNOWN_SCRIPT_EXTS) {
-      const cand = `${stem}/index${ext}`;
-      if (files.has(cand)) return cand;
-    }
-  } else {
-    for (const ext of KNOWN_SCRIPT_EXTS) {
-      const cand = resolved + ext;
-      if (files.has(cand)) return cand;
-    }
-    for (const ext of KNOWN_SCRIPT_EXTS) {
-      const cand = `${resolved}/index${ext}`;
-      if (files.has(cand)) return cand;
-    }
-  }
-  return undefined;
-}
-
 /**
  * Parse and type-check multiple TS source files.
  * In-memory CompilerHost — no filesystem needed.
@@ -1065,47 +982,18 @@ export function analyzeMultiSource(
 ): MultiTypedAST {
   const normalizedFiles = new Map<string, string>();
   for (const [name, content] of Object.entries(files)) {
-    normalizedFiles.set(normalizeFileName(name), content);
+    normalizedFiles.set(normalizeMultiFileName(name), content);
   }
-  const normalizedEntry = normalizeFileName(entryFile);
+  const normalizedEntry = normalizeMultiFileName(entryFile);
   const rootNames = Array.from(normalizedFiles.keys());
 
-  // Build a bare-specifier-to-normalized-file lookup.
-  // Explicit specifierMap entries take priority, then we auto-derive
-  // mappings from file keys (e.g. "utils.ts" -> bare specifier "utils").
-  const bareSpecifierLookup = new Map<string, string>();
-  for (const normalized of normalizedFiles.keys()) {
-    // "foo/bar.ts" -> bare specifiers "foo/bar" and "bar"
-    const withoutExt = stripKnownExt(normalized);
-    bareSpecifierLookup.set(withoutExt, normalized);
-    // Also register the exact extension form so `import "foo/bar.js"` works.
-    if (!bareSpecifierLookup.has(normalized)) {
-      bareSpecifierLookup.set(normalized, normalized);
-    }
-    const basename = withoutExt.split("/").pop()!;
-    if (basename && !bareSpecifierLookup.has(basename)) {
-      bareSpecifierLookup.set(basename, normalized);
-    }
-    // Also support "foo/index.ts" -> bare specifier "foo"
-    if (basename === "index") {
-      const dir = withoutExt.replace(/\/index$/, "");
-      if (dir && !bareSpecifierLookup.has(dir)) {
-        bareSpecifierLookup.set(dir, normalized);
-      }
-    }
-  }
-  // Explicit specifierMap overrides auto-derived entries
-  if (specifierMap) {
-    for (const [specifier, fileKey] of Object.entries(specifierMap)) {
-      bareSpecifierLookup.set(specifier, normalizeFileName(fileKey));
-    }
-  }
+  const bareSpecifierLookup = buildBareSpecifierLookup(normalizedFiles, specifierMap);
 
   const compilerHost: ts.CompilerHost = {
     getSourceFile(name, languageVersion) {
       const userContent = normalizedFiles.get(name);
       if (userContent !== undefined) {
-        return ts.createSourceFile(name, userContent, languageVersion, true, scriptKindFor(name));
+        return ts.createSourceFile(name, userContent, languageVersion, true, multiFileScriptKind(name));
       }
       const libSf = getLibSourceFile(name, languageVersion);
       if (libSf) return libSf;
@@ -1125,26 +1013,9 @@ export function analyzeMultiSource(
     resolveModuleNameLiterals(moduleLiterals, containingFile) {
       return moduleLiterals.map((literal) => {
         const moduleName = literal.text;
-        // Resolve relative paths against the containing file's directory
-        let resolved: string;
-        if (moduleName.startsWith("./") || moduleName.startsWith("../")) {
-          const containingDir = containingFile.replace(/[^/]*$/, "");
-          resolved = normalizeFileName(containingDir + moduleName);
-        } else {
-          // Bare specifier: check the lookup map first, then fall back to normalizeFileName
-          resolved = bareSpecifierLookup.get(moduleName) ?? normalizeFileName(moduleName);
-        }
-        const key = probeFileKey(resolved, normalizedFiles) ?? resolved;
-        if (normalizedFiles.has(key)) {
-          return {
-            resolvedModule: {
-              resolvedFileName: key,
-              isExternalLibraryImport: false,
-              extension: tsExtensionFor(key),
-            },
-          };
-        }
-        return { resolvedModule: undefined };
+        return {
+          resolvedModule: resolveMultiFileModule(moduleName, containingFile, normalizedFiles, bareSpecifierLookup),
+        };
       });
     },
   };
@@ -1298,4 +1169,4 @@ export function analyzeFiles(entryPath: string, analyzeOptions?: AnalyzeOptions)
   };
 }
 
-export { IncrementalLanguageService } from "./language-service.js";
+export { IncrementalLanguageService, IncrementalProjectLanguageService } from "./language-service.js";
