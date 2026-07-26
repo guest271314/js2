@@ -638,9 +638,7 @@ function isTopLevelFunctionPropertyReceiver(ctx: CodegenContext, receiver: ts.Ex
   if (!ts.isPropertyAccessExpression(current) && !ts.isElementAccessExpression(current)) return false;
   const rootName = getAssignmentRootIdentifier(current);
   return (
-    rootName !== undefined &&
-    ctx.topLevelFunctionNames.has(rootName) &&
-    ctx.oracle.signatureOf(current) !== undefined
+    rootName !== undefined && ctx.topLevelFunctionNames.has(rootName) && ctx.oracle.signatureOf(current) !== undefined
   );
 }
 
