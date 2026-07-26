@@ -2,6 +2,7 @@
 
 import {
   createIrBindingId,
+  type IrBindingId,
   type IrClassId,
   type IrFunctionIdentity,
   type IrSourceId,
@@ -24,6 +25,15 @@ function compatibilityName(explicit: string | undefined, fallback: string, label
 
 function funcRef(name: string, binding: IrCallableBinding): IrFuncRef {
   return Object.freeze({ kind: "func", name, binding: Object.freeze(binding) });
+}
+
+/** Canonical program-ABI identity for one exact unit's executable body. */
+export function irUnitCallableBindingId(unitId: IrUnitId): IrBindingId {
+  return createIrBindingId({
+    ownerId: requireNonEmpty(unitId, "callable unitId") as IrUnitId,
+    domain: "callable",
+    role: "body",
+  });
 }
 
 /** Reference one exact source or compiler-created function artifact. */

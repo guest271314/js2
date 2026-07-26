@@ -83,7 +83,7 @@ import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
-import { planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
+import { planProgramAbiFunctionValue, planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
 import {
   applyIrFinalContextFunctionRetention,
@@ -2936,17 +2936,9 @@ function prepareMultiIrImportedLowering(
     const singleton = ensureFuncClosureSingleton(ctx, valuePlan.target.name, funcIdx, false);
     const trampoline = singleton ? definedFuncAt(ctx, singleton.trampolineFuncIdx) : undefined;
     const cache = singleton ? ctx.mod.globals[localGlobalIdx(ctx, singleton.cacheGlobalIdx)] : undefined;
-    if (!singleton || trampoline?.name !== valuePlan.trampoline.name || cache?.name !== valuePlan.cacheGlobalName) {
+    if (!trampoline || !cache || !planProgramAbiFunctionValue(ctx, valuePlan, trampoline, cache)) {
       blocked.add(valuePlan.ownerUnitId);
-      continue;
     }
-    const targetUnitId = valuePlan.target.binding.unitId;
-    planProgramAbiGlobal(ctx, {
-      ref: valuePlan.cacheGlobal,
-      anchor: { kind: "unit", unitId: targetUnitId },
-      roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.functionValueCache,
-      global: cache,
-    });
   }
 
   if (blocked.size === 0) return selection;

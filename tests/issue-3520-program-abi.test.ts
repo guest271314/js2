@@ -361,6 +361,65 @@ describe("#3520 ProgramAbiMap invariants", () => {
       "missing-source-unit",
     );
 
+    const sourceWithClass = new ProgramAbiMap(fixture.inventory);
+    expectInvariant(
+      () =>
+        sourceWithClass.plan({
+          ...requiredCallable(fixture, callableId, "first", 0),
+          intent: {
+            kind: "callable",
+            origin: "source",
+            signature: F64_TO_F64,
+            unitId: fixture.firstUnitId,
+            classId: fixture.firstClassId,
+          },
+        }),
+      "invalid-callable-provenance",
+    );
+
+    const supportWithoutOwner = new ProgramAbiMap(fixture.inventory);
+    expectInvariant(
+      () =>
+        supportWithoutOwner.plan({
+          ...requiredCallable(fixture, binding(fixture, "support", "ownerless"), "ownerless", 0),
+          intent: { kind: "callable", origin: "support", signature: F64_TO_F64 },
+        }),
+      "invalid-callable-provenance",
+    );
+
+    const supportWithTwoOwners = new ProgramAbiMap(fixture.inventory);
+    expectInvariant(
+      () =>
+        supportWithTwoOwners.plan({
+          ...requiredCallable(fixture, binding(fixture, "support", "ambiguous"), "ambiguous", 0),
+          intent: {
+            kind: "callable",
+            origin: "support",
+            signature: F64_TO_F64,
+            unitId: fixture.firstUnitId,
+            classId: fixture.firstClassId,
+          },
+        }),
+      "invalid-callable-provenance",
+    );
+
+    for (const origin of ["import", "runtime"] as const) {
+      const externalWithOwner = new ProgramAbiMap(fixture.inventory);
+      expectInvariant(
+        () =>
+          externalWithOwner.plan({
+            ...requiredCallable(fixture, binding(fixture, "callable", `${origin}-with-owner`), origin, 0),
+            intent: {
+              kind: "callable",
+              origin,
+              signature: F64_TO_F64,
+              classId: fixture.firstClassId,
+            },
+          }),
+        "invalid-callable-provenance",
+      );
+    }
+
     const foreign = abiFixture("/other/foreign.ts");
     const foreignUnit = new ProgramAbiMap(fixture.inventory);
     expectInvariant(
@@ -377,12 +436,53 @@ describe("#3520 ProgramAbiMap invariants", () => {
       "unknown-inventory-class",
     );
 
+    const foreignSupportClass = new ProgramAbiMap(fixture.inventory);
+    expectInvariant(
+      () =>
+        foreignSupportClass.plan({
+          ...requiredCallable(
+            fixture,
+            binding(fixture, "support", "foreign-class", foreign.firstClassId),
+            "foreignSupport",
+            0,
+          ),
+          intent: {
+            kind: "callable",
+            origin: "support",
+            signature: F64_TO_F64,
+            classId: foreign.firstClassId,
+          },
+        }),
+      "unknown-inventory-class",
+    );
+
     const wrongSourceOrder = new ProgramAbiMap(fixture.inventory);
     expectInvariant(
       () =>
         wrongSourceOrder.plan({
           ...requiredCallable(fixture, secondId, "second", 0, fixture.secondUnitId),
           order: { sourceOrder: fixture.sourceOrder + 1, declarationOrder: 0 },
+        }),
+      "inventory-source-order-mismatch",
+    );
+
+    const wrongClassSourceOrder = new ProgramAbiMap(fixture.inventory);
+    expectInvariant(
+      () =>
+        wrongClassSourceOrder.plan({
+          ...requiredCallable(
+            fixture,
+            binding(fixture, "support", "class-init", fixture.firstClassId),
+            "First_init",
+            0,
+          ),
+          order: { sourceOrder: fixture.sourceOrder + 1, declarationOrder: 0 },
+          intent: {
+            kind: "callable",
+            origin: "support",
+            signature: F64_TO_F64,
+            classId: fixture.firstClassId,
+          },
         }),
       "inventory-source-order-mismatch",
     );
