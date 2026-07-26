@@ -1244,7 +1244,7 @@ The production collision regression compiles one source owner, two lifted
 closures, and a top-level function deliberately named like the first lift. All
 four callables publish distinct final function slots while the legacy
 name-only adapter correctly rejects the ambiguous label. The complete #3520
-matrix plus #2138 passes **219/219** across **36 files**. Strict TypeScript,
+matrix plus #2138 passes **221/221** across **36 files**. Strict TypeScript,
 Prettier, scoped Biome lint, diff, and LOC checks pass. Hybrid readiness remains
 **READY** at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy
 bodies**, and the fallback ratchet reports no unintended, post-claim, or
