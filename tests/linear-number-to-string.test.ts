@@ -7,7 +7,7 @@ import { getLastLinearIrReport } from "../src/ir/backend/linear-integration.js";
 const ORIGINAL_LINEAR_IR = process.env.JS2WASM_LINEAR_IR;
 
 afterEach(() => {
-  if (ORIGINAL_LINEAR_IR === undefined) delete process.env.JS2WASM_LINEAR_IR;
+  if (ORIGINAL_LINEAR_IR === undefined) Reflect.deleteProperty(process.env, "JS2WASM_LINEAR_IR");
   else process.env.JS2WASM_LINEAR_IR = ORIGINAL_LINEAR_IR;
 });
 
