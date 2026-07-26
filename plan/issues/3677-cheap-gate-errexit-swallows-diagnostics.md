@@ -6,6 +6,7 @@ sprint: current
 priority: high
 horizon: s
 feasibility: easy
+task_type: ci
 area: ci
 goal: ci-reliability
 related: [3437]
@@ -190,3 +191,58 @@ this PR conclude, and how?" Those differ whenever a name is not unique.
   this PR — it means some *other* workflow declined to run.
 - A watcher that can only ever report success is untestable; make sure the
   polling predicate can distinguish "concluded green" from "never ran".
+
+## Third finding — an unset `task_type` defaults to GATED
+
+This PR tripped `Issue→probe coverage gate (#2093)` on its own issue file:
+
+```
+✖ FAIL  #3677 flipped to done with NO probe/test reference (created 2026-07-26).
+```
+
+`scripts/check-issue-spec-coverage.mjs:160` is:
+
+```js
+if (taskType && !GATED_TASK_TYPES.has(taskType)) continue;
+```
+
+with `GATED_TASK_TYPES = {bug, bugfix, fix, feature, conformance, codegen, runtime}`.
+The exemption is guarded on `taskType` being **truthy**, so an issue with **no
+`task_type:` field at all** never reaches the membership test and is gated as
+behavioural by default. It then demands either a `tests/issue-<id>*.test.ts` on
+disk or a body citing a `tests/….test.ts` / `test262/….js` path.
+
+Fixed here by declaring `task_type: ci` — honest classification, not
+gate-gaming: the file already carried `area: ci` and `goal: ci-reliability`, and
+a workflow shell bug has no runnable behavioural repro by construction. Sibling
+precedent: `1170-move-test262-baselines-out-of.md` and
+`1214-ci-playground-benchmark-baseline.md` are both `task_type: infrastructure`,
+`status: done`, `area: ci`.
+
+**Why this is worth recording.** Measured on this branch: **1,197 of 3,236**
+issue files (37%) carry no `task_type` at all. Gating-by-default is a
+defensible safe choice, but it means the gate's verdict on an old, untyped
+issue depends on **whether a PR happens to touch that file** — the rule is
+change-scoped, so 1,197 latent trip-wires sit dormant until someone edits one
+for an unrelated reason and inherits a probe requirement for work that may not
+be behavioural at all. Anyone editing an untyped issue file should expect this
+and set `task_type:` honestly rather than inventing a probe.
+
+## A process note, recorded because it caused real delay
+
+This PR's `quality` failure went unobserved: the CI watcher was backgrounded
+and then the session stood down reporting "the enqueue fires when quality
+settles". It settled as a **failure**, the watcher died with the session, and
+the PR sat `BLOCKED` with nothing watching it — the tech lead had to catch it.
+
+The rule: **do not stand down while a required check is still unresolved.**
+Backgrounding a watcher is not delegation if the watcher's lifetime is bounded
+by your own. Silence is only a healthy signal while something is actually
+watching.
+
+Compounding it: `quality` runs under `bash -e` and fails fast, so step 25
+failing meant **steps 26–38 never ran**. Clearing step 25 is therefore *not*
+the same as `quality` going green — the remaining gates were unknown, not
+passing. They were run locally before re-push (done-status integrity #3474,
+required guard suite #3552, conformance sync #1522, feature badges) and all
+pass.
