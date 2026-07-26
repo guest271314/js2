@@ -102,13 +102,14 @@ function e2BundleSource(): string {
       }
 
       function parse(source: string, options: any): any {
-        if (source !== "function anonymous(a,b\\n) {\\nreturn a + b\\n}") {
-          throw new SyntaxError("unexpected Function-constructor source");
-        }
         if (options.ecmaVersion !== 2025 || options.sourceType !== "script") {
           throw new TypeError("unexpected parser options");
         }
-        return makeFunctionAst();
+        if (source === "function anonymous(a,b\\n) {\\nreturn a + b\\n}") {
+          return makeFunctionAst();
+        }
+        if (source === "1 + 2") return makeAst();
+        throw new SyntaxError("unexpected runtime source");
       }
 
       export function testProgram(): number {
@@ -139,6 +140,14 @@ function e2BundleSource(): string {
         const meta = compileDynamicFunctionMeta(parse, "a,b", "return a + b");
         return interpEnter(meta, env, globalObject, [1, 2]) as number;
       }
+
+      export function testIndirectEval(): number {
+        return executeIndirectEval(parse, "1 + 2", {}) as number;
+      }
+
+      export function testIndirectEvalNonString(): number {
+        return executeIndirectEval(parse, 42, {}) as number;
+      }
     `,
   ].join("\n");
 }
@@ -166,5 +175,7 @@ describe("#2928 E2 — self-compiled standalone interpreter canary", () => {
     expect((instance.exports.testDynamicDirect as () => number)()).toBe(3);
     expect((instance.exports.testDynamicClosureCreated as () => number)()).toBe(1);
     expect((instance.exports.testDynamicFunction as () => number)()).toBe(3);
+    expect((instance.exports.testIndirectEval as () => number)()).toBe(3);
+    expect((instance.exports.testIndirectEvalNonString as () => number)()).toBe(42);
   }, 120_000);
 });

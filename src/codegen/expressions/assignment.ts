@@ -105,6 +105,7 @@ import {
   resolveWithBinding,
 } from "../with-scope.js";
 import { isStrictContext } from "../helpers/is-strict-function.js";
+import { emitRuntimeEvalAotCallableAdapter } from "../runtime-eval-callable.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -3642,7 +3643,9 @@ function compilePropertyAssignment(
   // host/GC versus standalone/WASI.
   if (ts.isIdentifier(target.expression) && target.expression.text === "globalThis") {
     const propName = ts.isPrivateIdentifier(target.name) ? `__priv_${target.name.text.slice(1)}` : target.name.text;
-    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, propName);
+    const wrapRuntimeEvalCallable =
+      ctx.runtimeEvalCallableBoundaryEnabled === true && isStaticallyCallableExpression(ctx, value);
+    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, propName, false, wrapRuntimeEvalCallable);
   }
 
   // Handle externref property set
@@ -3969,6 +3972,19 @@ function compilePropertyAssignment(
   return valType;
 }
 
+/** Conservative proof used only for the linked runtime-eval global seam. */
+function isStaticallyCallableExpression(ctx: CodegenContext, value: ts.Expression): boolean {
+  const expr = skipTransparentExpressions(value);
+  if (
+    ts.isFunctionExpression(expr) ||
+    ts.isArrowFunction(expr) ||
+    (ts.isIdentifier(expr) && (ctx.funcMap.has(expr.text) || ctx.topLevelFunctionNames.has(expr.text)))
+  ) {
+    return true;
+  }
+  return ctx.oracle.signatureOf(expr) !== undefined;
+}
+
 /**
  * Fallback for property assignment when the struct field is not found.
  * Used when Object.defineProperty with an accessor descriptor (get/set) was detected
@@ -3982,6 +3998,7 @@ function compilePropertyAssignmentExternSet(
   value: ts.Expression,
   propName: string,
   forceRuntimeSet = false,
+  wrapRuntimeEvalCallable = false,
 ): InnerResult {
   // Compile object expression and convert to externref
   const objResult = compileExpression(ctx, fctx, target.expression);
@@ -4008,6 +4025,16 @@ function compilePropertyAssignmentExternSet(
     coerceType(ctx, fctx, { kind: "i32", boolean: true }, { kind: "externref" });
   } else if (valResult.kind !== "externref") {
     coerceType(ctx, fctx, valResult, { kind: "externref" });
+  }
+  let assignmentResultLocal: number | undefined;
+  if (wrapRuntimeEvalCallable) {
+    // PutValue returns the ORIGINAL RHS, not the internal adapter stored on the
+    // realm object. Preserve identity for `(globalThis.f = f) === f`.
+    assignmentResultLocal = allocLocal(fctx, `__runtime_eval_aot_rhs_${fctx.locals.length}`, {
+      kind: "externref",
+    });
+    fctx.body.push({ op: "local.tee", index: assignmentResultLocal });
+    emitRuntimeEvalAotCallableAdapter(ctx, fctx);
   }
   const valLocal = allocLocal(fctx, `__paset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
@@ -4054,7 +4081,7 @@ function compilePropertyAssignmentExternSet(
   }
 
   // Return the assigned value
-  fctx.body.push({ op: "local.get", index: valLocal });
+  fctx.body.push({ op: "local.get", index: assignmentResultLocal ?? valLocal });
   return { kind: "externref" };
 }
 

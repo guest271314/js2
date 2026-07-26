@@ -145,6 +145,7 @@ import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 
 import { hoistedVarRetypesToConcreteRef, usageInferredLocalType } from "./statements/variables.js"; // (#2106 S1 PR-2) hoist undefined-init retype predicate; (#684) usage-based any-local f64 override
 import { ensureDynReadHelpers, ensureDynMemberGet } from "./dyn-read.js"; // (#2580 M0) / (#3053 U0)
 import { collectClosureBaseWrapperTypeIdxs, buildClosureRefTestArms } from "./closure-classifier.js"; // (#2175 V2-S1)
+import { ensureRuntimeEvalAotCallableCarrierTypes } from "./runtime-eval-callable.js";
 import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./iterator-native.js";
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
@@ -2067,6 +2068,29 @@ function planIrOverlay(
     // throws at build time and the unit demotes to the legacy body.
     moduleInit: selection.moduleInit,
   };
+  // (#2928) The linked runtime-eval carrier is currently owned by the legacy
+  // WasmGC closure/object runtime. Its recursive cross-module types may be
+  // registered while module-init writes are compiled, after legacy function
+  // signatures but before the IR overlay is installed; mixing the two paths
+  // would violate IR/legacy type-index parity. Keep the whole runtime-eval unit
+  // on one backend until the typed IR owns this carrier explicitly.
+  if (sourceUsesRuntimeEvalBoundary(ast.sourceFile) || sourceProvidesRuntimeEvalBoundary(ast.sourceFile)) {
+    const failure: IrPreparationFailure = {
+      kind: "unsupported",
+      code: "late-preparation-unsupported",
+      stage: "resolve",
+      detail: "the linked runtime-eval callable carrier is still owned by the direct frontend",
+    };
+    for (const name of safeSelection.funcs) recordPreparationFailure(name, failure);
+    for (const name of safeSelection.classMembers ?? []) recordPreparationFailure(name, failure);
+    if (safeSelection.moduleInit?.reason === null && safeSelection.moduleInit.stmtCount > 0) {
+      recordPreparationFailure(MODULE_INIT_UNIT_NAME, failure);
+    }
+    safeSelection.funcs.clear();
+    identityPlan.safeFunctionUnitIds.clear();
+    safeSelection.classMembers = new Set();
+    safeSelection.moduleInit = undefined;
+  }
   // (#2023) The IR `new C(...)` lowering does not thread the new.target
   // class-id (that machinery lives only on the legacy path). When the
   // program uses `new.target`, route every function through legacy so the
@@ -2828,6 +2852,64 @@ function recordSourceGlobalEnvironment(ctx: CodegenContext, sourceFile: ts.Sourc
   );
 }
 
+/** Pre-scan the small syntax surface that enables the linked runtime-eval ABI. */
+function sourceUsesRuntimeEvalBoundary(sourceFile: ts.SourceFile): boolean {
+  // (#3437) `callUsesRuntimeEvalBoundary` can only answer true for a call whose
+  // callee is the identifier `Function` or `eval` — so if neither name occurs
+  // anywhere in the source text, no call can match and the full-file AST walk
+  // below is guaranteed to return false. Skipping it on that cheap substring
+  // test keeps this predicate off the harness compile-work budget for the
+  // overwhelming majority of files (a sound over-approximation: the text test
+  // is only allowed to skip when the identifiers are definitely absent).
+  const text = sourceFile.text;
+  if (!text.includes("Function") && !text.includes("eval")) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && callUsesRuntimeEvalBoundary(node)) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+function sourceProvidesRuntimeEvalBoundary(sourceFile: ts.SourceFile): boolean {
+  return sourceFile.statements.some(
+    (stmt) =>
+      ts.isFunctionDeclaration(stmt) &&
+      (stmt.name?.text === "__runtime_new_function" || stmt.name?.text === "__runtime_indirect_eval"),
+  );
+}
+
+function callUsesRuntimeEvalBoundary(node: ts.CallExpression | ts.NewExpression): boolean {
+  let expr: ts.Expression = node.expression;
+  while (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isNonNullExpression(expr) ||
+    ts.isTypeAssertionExpression(expr)
+  ) {
+    expr = expr.expression;
+  }
+  // Direct eval remains on #2929 (constant direct eval is compiled away;
+  // dynamic direct eval is refused), so it does not enable this linked ABI.
+  if (ts.isIdentifier(expr) && expr.text === "eval") return false;
+  if (ts.isIdentifier(expr) && expr.text === "Function") {
+    // Literal-only Function construction is compiled away by #2924.
+    return node.arguments?.some((arg) => !ts.isStringLiteralLike(arg)) ?? false;
+  }
+  // `(0, eval)(...)` is indirect even when its source is a literal.
+  return (
+    ts.isBinaryExpression(expr) &&
+    expr.operatorToken.kind === ts.SyntaxKind.CommaToken &&
+    ts.isIdentifier(expr.right) &&
+    expr.right.text === "eval"
+  );
+}
+
 /** Compile a typed AST into a WasmModule IR */
 export function generateModule(
   ast: TypedAST,
@@ -2876,6 +2958,14 @@ export function generateModule(
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
       ctx.topLevelFunctionNames.add(stmt.name.text);
     }
+  }
+  if (
+    (ctx.standalone || ctx.wasi) &&
+    (sourceUsesRuntimeEvalBoundary(ast.sourceFile) ||
+      ctx.topLevelFunctionNames.has("__runtime_new_function") ||
+      ctx.topLevelFunctionNames.has("__runtime_indirect_eval"))
+  ) {
+    ctx.runtimeEvalCallableBoundaryEnabled = true;
   }
   // (#2179) Pre-scan for `delete <member>` so `any`-receiver property reads can
   // be routed through the tombstone-aware `__extern_get` host helper instead of
@@ -3418,6 +3508,14 @@ export function generateModule(
       const obj: Record<string, import("../ir/types.js").ExportSignature> = {};
       for (const [k, v] of ctx.exportSignatures) obj[k] = v;
       mod.exportSignatures = obj;
+    }
+
+    // (#2928) Register the cross-module AOT-callable carrier only after legacy
+    // and IR bodies have settled their type slots. Prepending it during the
+    // syntax scan shifts the legacy type indices underneath IR-first's parity
+    // check for otherwise ordinary numeric AOT functions.
+    if (ctx.runtimeEvalCallableBoundaryEnabled) {
+      ensureRuntimeEvalAotCallableCarrierTypes(ctx);
     }
 
     // (#2847) Recover boolean brands after every late field has been discovered,
