@@ -4,8 +4,13 @@ import { irGlobalBindingKey } from "../ir/abi-bindings.js";
 import { irCallableBindingKey, irUnitCallableBindingId } from "../ir/callable-bindings.js";
 import type { IrBindingId, IrSourceId, IrUnitId } from "../ir/identity.js";
 import type { IrFuncRef, IrGlobalRef } from "../ir/nodes.js";
-import type { FuncTypeDef, GlobalDef, ValType, WasmFunction } from "../ir/types.js";
+import type { FuncTypeDef, GlobalDef, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
+import {
+  canonicalProgramAbiCallableTypeContract,
+  canonicalProgramAbiValType,
+  cloneProgramAbiCallableTypeContract,
+} from "./program-abi-signatures.js";
 
 export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   body: 0,
@@ -36,27 +41,6 @@ export interface ProgramAbiUnitCallablePlan {
   readonly func: WasmFunction;
 }
 
-function canonicalProgramAbiValType(type: ValType): string {
-  switch (type.kind) {
-    case "i32":
-      return JSON.stringify({
-        kind: type.kind,
-        ...(type.boolean === true ? { boolean: true as const } : {}),
-        ...(type.symbol === true ? { symbol: true as const } : {}),
-      });
-    case "i64":
-      return JSON.stringify({
-        kind: type.kind,
-        ...(type.bigint === true ? { bigint: true as const } : {}),
-      });
-    case "ref":
-    case "ref_null":
-      return JSON.stringify({ kind: type.kind, typeIdx: type.typeIdx });
-    default:
-      return JSON.stringify({ kind: type.kind });
-  }
-}
-
 /**
  * Plan and locate one exact unit-owned function body.
  *
@@ -81,6 +65,7 @@ export function planProgramAbiUnitCallable(
   }
   const bindingId = irUnitCallableBindingId(unitId);
   const structuralReferenceKey = irCallableBindingKey(plan.ref.binding);
+  const typeContract = cloneProgramAbiCallableTypeContract(plan.signature);
   session.ensurePlan({
     id: bindingId,
     structuralOrder: session.structuralOrder.forUnit(unitId, {
@@ -95,12 +80,10 @@ export function planProgramAbiUnitCallable(
       kind: "callable",
       origin: "source",
       unitId,
-      signature: {
-        params: plan.signature.params.map(canonicalProgramAbiValType),
-        results: plan.signature.results.map(canonicalProgramAbiValType),
-      },
+      signature: canonicalProgramAbiCallableTypeContract(typeContract),
     },
   });
+  session.registerCallableTypeContract(bindingId, typeContract);
   session.registerStructuralReference(bindingId, structuralReferenceKey);
   if (!session.hasLocator(bindingId, plan.func)) {
     session.attachLocator(bindingId, { kind: "defined-function", value: plan.func });
@@ -139,10 +122,11 @@ export function planProgramAbiGlobal(ctx: CodegenContext, plan: ProgramAbiGlobal
     intent: {
       kind: "global",
       origin,
-      valueType: JSON.stringify(plan.global.type),
+      valueType: canonicalProgramAbiValType(plan.global.type),
       mutable: plan.global.mutable,
     },
   });
+  session.registerGlobalTypeContract(binding.bindingId, plan.global.type, plan.global.mutable);
   session.registerStructuralReference(binding.bindingId, structuralReferenceKey);
   if (!session.hasLocator(binding.bindingId, plan.global)) {
     session.attachLocator(binding.bindingId, { kind: "defined-global", value: plan.global });

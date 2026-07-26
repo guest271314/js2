@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c6-monomorph-provenance
+branch: codex/3520-c7-type-remap
 pr: 3672
 last_merged_pr: 3490
 sprint: current
@@ -84,8 +84,10 @@ files:
   - src/codegen/class-member-keys.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
+  - src/codegen/dead-elimination.ts
   - src/codegen/func-space.ts
   - src/codegen/program-abi-planning.ts
+  - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/ir-first-gate.ts
   - src/codegen/ir-class-shapes.ts
@@ -127,7 +129,9 @@ files:
   - tests/issue-3520-promise-plan-identity.test.ts
   - tests/issue-3520-selfhost-cache-identity.test.ts
   - tests/issue-3520-monomorphize-identity.test.ts
+  - tests/issue-3520-program-abi-type-remap.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
+  - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
   - src/codegen/context/types.ts
   - src/ir/integration.ts
@@ -1324,6 +1328,50 @@ This remains a bounded R1 slice. Provider/import/runtime/support callables,
 remaining imported globals, Program ABI type intentions and DCE remaps, class
 layouts, exports and aliases, and the production `LegacyAbiAdapter` cutover
 still remain before R1 can close.
+
+### 2026-07-26 type-layout authority continuation
+
+The next stacked continuation on `codex/3520-c7-type-remap` makes the callable
+and global intentions already populated by production code authoritative
+through DCE type compaction:
+
+- callable and global planners retain immutable structured `ValType`
+  contracts beside the frozen public draft. The public canonical strings are
+  materialized only at publication, after all reported layout changes;
+- dead type elimination constructs the complete old-to-final type-index
+  vector, including explicit `null` entries for eliminated types, and reports
+  the exact before/after type arrays while the old layout is still installed;
+- `ProgramAbiSession` validates the complete layout before changing state,
+  remaps every callable/global reference and exact type cell together, and
+  rejects invalid, incomplete, ambiguous, or eliminated-reference layouts;
+- matching aliases inherit the remapped canonical contract. Aliases whose
+  original intent differs retain their own intent and continue through the
+  existing `ProgramAbiMap` mismatch checks; and
+- function/global locator replacements and final publication validate the
+  concrete allocator object against the tracked contract. A late replacement
+  can no longer make stale metadata look authoritative.
+
+The production regression compiles a real lifted closure and a contract-valid
+monomorph clone whose capture reference shifts during DCE. Both published
+signatures now exactly equal their final located Wasm function types, including
+the compacted capture index and their distinct `f64` versus branded-boolean
+parameters/results. Lower-level regressions cover callable, alias, global, and
+type-cell remapping plus transactional rejection of malformed layouts.
+
+The complete #3520 matrix plus #2138 passes **227/227** across **38 files**.
+Strict TypeScript, Prettier, scoped Biome lint, diff, LOC, function-budget,
+dead-export, and oracle-ratchet checks pass. Hybrid readiness remains **READY**
+at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy bodies**,
+and the fallback ratchet reports no unintended, post-claim, or module-level
+increase. The eight-shard equivalence gate passes with **1,608 passing / 35
+known failures / 0 new regressions**; one baseline failure now passes, and the
+baseline remains unchanged.
+
+This closes the concrete stale capture-reference gap exposed by C6, but not all
+of R1. Provider/import/runtime/support callables, remaining imported globals,
+Program ABI type and class-shape intentions, exports and aliases, and production
+`LegacyAbiAdapter` replacement of the remaining `funcMap`, `structMap`,
+module-array, and display-name scans still remain before R1 can close.
 
 ### R1a validation evidence
 
