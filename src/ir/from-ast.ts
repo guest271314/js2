@@ -58,6 +58,7 @@ import { collectOuterWrites } from "./closure-captures.js";
 import {
   requireMatchingModuleBindingOwner,
   requireMatchingLoweringPlanOwner,
+  requireValidImportedCallTarget,
   type IrDirectCallLoweringPlan,
   type IrHostVoidCallbackLoweringPlan,
   type IrImportedCallLoweringPlan,
@@ -3980,13 +3981,7 @@ function lowerImportedCall(
   statementPosition: boolean,
 ): IrValueId | null {
   requireMatchingLoweringPlanOwner("imported call", plan.ownerUnitId, cx.ownerUnitId, cx.funcName);
-  if (plan.source === "ambient-host") {
-    if (plan.target.binding.kind !== "import" || plan.target.binding.module !== "env") {
-      throw new Error(`ir/from-ast: ambient host call target ${plan.target.name} is not backed by an env import`);
-    }
-  } else if (plan.target.binding.kind !== "unit") {
-    throw new Error(`ir/from-ast: imported source call target ${plan.target.name} is not backed by an exact unit`);
-  }
+  requireValidImportedCallTarget(plan);
   if (expr.arguments.length > plan.params.length || expr.arguments.some(ts.isSpreadElement)) {
     throw new Error(`ir/from-ast: imported call shape diverged after certification (${cx.funcName})`);
   }

@@ -436,17 +436,9 @@ export interface IrSelectionOptions {
    * default (undefined ⇒ true) is correct for the default-host fallback path.
    */
   readonly dynMemberReadBuildable?: boolean;
-  /**
-   * (#3214 A+B1) Realm-wide, checker-backed imported-function resolution.
-   * Present only for host/component multi-file compilation.  Bare selector
-   * callers and standalone/WASI intentionally omit it, preserving the
-   * pre-slice conservative boundary.
-   */
+  /** (#3214 A+B1) Checker-backed imports; omitted by host-free and bare selector callers. */
   readonly importedFunctions?: IrImportedFunctionResolver;
-  /**
-   * (#3657) Checker-certified direct calls from class members to same-file
-   * primitive `declare function` host stubs. Omitted outside JS-host mode.
-   */
+  /** (#3657) Checker-certified class-member calls to same-file primitive host stubs. */
   readonly ambientClassCalls?: IrAmbientClassCallResolver;
   /**
    * (#3214 B2) Checker-certified direct ambient `addEventListener` callback
@@ -5775,26 +5767,13 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       return true;
     }
     if (!ts.isIdentifier(expr.expression)) return false;
-    // (#1373b C-1) A local ASYNC callee is claimable ONLY as the immediate
-    // operand of an `await` (handled inline in the await arm above, which
-    // never recurses here for that shape). Every other use — `return f();`,
-    // `const p = f();`, an argument position — is a THENABLE consumer under
-    // the legacy #1796 call-site contract (wrapped in `Promise.resolve`),
-    // which the IR does not emit. Reject to keep claimed-vs-legacy behavior
-    // identical; the fn stays on the legacy path.
+    // (#1373b C-1) Only the await arm above admits local async callees; every
+    // other use remains a legacy thenable consumer.
     if (currentAsyncDeclNames.has(expr.expression.text) && !scope.has(expr.expression.text)) {
       return shapeNo("expr-async-callee-not-awaited", expr);
     }
-    // (#3657) Same-file user `declare function` stubs are already registered
-    // as env imports by the legacy declaration pass. Admit only the exact
-    // class-member call nodes certified by the shared checker resolver.
-    const ambientClassCall = currentSelectionOptions?.ambientClassCalls?.(expr);
-    if (ambientClassCall) {
-      for (const arg of expr.arguments) {
-        if (!isPhase1Expr(arg, scope, localClasses)) return false;
-      }
-      return true;
-    }
+    if (currentSelectionOptions?.ambientClassCalls?.(expr))
+      return expr.arguments.every((arg) => isPhase1Expr(arg, scope, localClasses));
     // (#3214 A+B1) A checker-certified imported direct call is a stable
     // in-module funcMap target, not an external call.  Bare top-level function
     // identifiers are accepted ONLY at the exact FunctionTypeNode argument

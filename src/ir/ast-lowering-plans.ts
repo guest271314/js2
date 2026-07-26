@@ -28,6 +28,16 @@ export interface IrImportedCallLoweringPlan {
   readonly argcGlobal?: IrGlobalRef;
 }
 
+export function requireValidImportedCallTarget(plan: IrImportedCallLoweringPlan): void {
+  if (plan.source === "ambient-host") {
+    if (plan.target.binding.kind === "import" && plan.target.binding.module === "env") return;
+    throw new Error(`ir/from-ast: ambient host call target ${plan.target.name} is not backed by an env import`);
+  }
+  if (plan.target.binding.kind !== "unit") {
+    throw new Error(`ir/from-ast: imported source call target ${plan.target.name} is not backed by an exact unit`);
+  }
+}
+
 export interface IrTopLevelFunctionValueLoweringPlan {
   readonly ownerUnitId: IrUnitId;
   readonly ownerName: string;
