@@ -2938,7 +2938,6 @@ function prepareMultiIrImportedLowering(
     const cache = singleton ? ctx.mod.globals[localGlobalIdx(ctx, singleton.cacheGlobalIdx)] : undefined;
     if (!trampoline || !cache || !planProgramAbiFunctionValue(ctx, valuePlan, trampoline, cache)) {
       blocked.add(valuePlan.ownerUnitId);
-      continue;
     }
   }
 
