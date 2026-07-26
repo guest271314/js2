@@ -121,6 +121,22 @@ function externToClosureParamRef(paramType: ValType): Instr[] {
   return ops;
 }
 
+/** Preserve the structural boolean brand when an i32 crosses the externref ABI. */
+function boxI32ClosureResult(
+  ctx: CodegenContext,
+  returnType: { kind: "i32"; boolean?: true },
+  boxNumberIdx: number | undefined,
+): Instr[] {
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  if (returnType.boolean === true && boxBooleanIdx !== undefined) {
+    return [{ op: "call", funcIdx: boxBooleanIdx }];
+  }
+  if (boxNumberIdx !== undefined) {
+    return [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumberIdx }];
+  }
+  return [{ op: "drop" }, { op: "ref.null.extern" }];
+}
+
 /**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
@@ -359,13 +375,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" });
-          callBody.push({ op: "call", funcIdx: boxNumberIdx });
-        } else {
-          callBody.push({ op: "drop" });
-          callBody.push({ op: "ref.null.extern" });
-        }
+        callBody.push(...boxI32ClosureResult(ctx, entry.returnType, boxNumberIdx));
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i64_s" });
@@ -686,13 +696,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" });
-          callBody.push({ op: "call", funcIdx: boxNumberIdx });
-        } else {
-          callBody.push({ op: "drop" });
-          callBody.push({ op: "ref.null.extern" });
-        }
+        callBody.push(...boxI32ClosureResult(ctx, entry.returnType, boxNumberIdx));
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i64_s" });
