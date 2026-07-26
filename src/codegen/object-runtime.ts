@@ -1965,6 +1965,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=o(ref $Object)
   // locals: 1=old(ref $PropMap) 2=newCap 3=i 4=oldLen 5=e(ref null $PropEntry)
+  //         6=inserted(ref null $PropEntry)
   {
     const body: Instr[] = [
       // old = o.props ; oldLen = old.len ; newCap = oldLen * 2
@@ -2042,6 +2043,49 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       { op: "ref.as_non_null" },
                       { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 3 }, // seq
                       { op: "call", funcIdx: objInsertIdx },
+                      // __obj_insert preserves the common key/value/flags/seq
+                      // fields but initializes accessor halves to null. During
+                      // a rehash that would silently turn every existing
+                      // accessor into a getter-less/setter-less property. Find
+                      // the freshly inserted entry and copy both live halves.
+                      { op: "local.get", index: 5 },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                      { op: "i32.const", value: FLAG_ACCESSOR },
+                      { op: "i32.and" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: 0 },
+                          { op: "local.get", index: 5 },
+                          { op: "ref.as_non_null" },
+                          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+                          { op: "extern.convert_any" },
+                          { op: "call", funcIdx: objFindIdx },
+                          { op: "local.tee", index: 6 },
+                          { op: "ref.is_null" },
+                          { op: "i32.eqz" },
+                          {
+                            op: "if",
+                            blockType: { kind: "empty" },
+                            then: [
+                              { op: "local.get", index: 6 },
+                              { op: "ref.as_non_null" },
+                              { op: "local.get", index: 5 },
+                              { op: "ref.as_non_null" },
+                              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+                              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 4 },
+                              { op: "local.get", index: 6 },
+                              { op: "ref.as_non_null" },
+                              { op: "local.get", index: 5 },
+                              { op: "ref.as_non_null" },
+                              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+                              { op: "struct.set", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+                            ],
+                          },
+                        ],
+                      },
                     ],
                   },
                 ],
@@ -2067,6 +2111,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "i", type: { kind: "i32" } },
         { name: "oldLen", type: { kind: "i32" } },
         { name: "e", type: entryRefNull },
+        { name: "inserted", type: entryRefNull },
       ],
       body,
     );

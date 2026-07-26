@@ -37,6 +37,7 @@ import { compileArrowAsClosure } from "../closures.js";
 import { pushBody } from "../context/bodies.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
+import { resolveReceiverStruct } from "../fnctor-escape-gate.js";
 import {
   emitArrayBufferResize,
   emitArrayBufferSlice,
@@ -277,6 +278,55 @@ function tryEmitTaStaticOfFrom(
     then: thenArm,
     else: elseArm,
   });
+  return { kind: "externref" };
+}
+
+/**
+ * Acorn installs some prototype getters before the methods they invoke:
+ *
+ *   Object.defineProperty(Parser.prototype, "inFunction", {
+ *     get() { return this.currentVarScope().flags !== 0; }
+ *   });
+ *   Parser.prototype.currentVarScope = function () { ... };
+ *
+ * The getter compiles before a direct method target exists. Defer that call to
+ * the closed-method dispatcher, which is filled after all prototype writes and
+ * resolves the method from the reconstructed fnctor's live prototype.
+ */
+function tryCompileLateFnctorPrototypeMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): InnerResult | undefined {
+  if (!ctx.standalone) return undefined;
+
+  const pinnedReceiver = resolveReceiverStruct(ctx, fctx, propAccess.expression);
+  const isThisReceiver = propAccess.expression.kind === ts.SyntaxKind.ThisKeyword;
+  if (!isThisReceiver && !pinnedReceiver?.startsWith("__fnctor_")) return undefined;
+
+  const dispatchArgs = expr.arguments.some((arg) => ts.isSpreadElement(arg))
+    ? flattenCallArgs(expr.arguments)
+    : [...expr.arguments];
+  if (dispatchArgs === null) return undefined;
+
+  const dispatchIdx = reserveClosedMethodDispatch(ctx, propAccess.name.text, dispatchArgs.length);
+  flushLateImportShifts(ctx, fctx);
+  const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+  if (recvType && recvType.kind !== "externref") {
+    coerceType(ctx, fctx, recvType, { kind: "externref" });
+  } else if (recvType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  for (const arg of dispatchArgs) {
+    const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
+    if (argType && argType.kind !== "externref") {
+      coerceType(ctx, fctx, argType, { kind: "externref" });
+    } else if (argType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+  }
+  fctx.body.push({ op: "call", funcIdx: dispatchIdx });
   return { kind: "externref" };
 }
 
@@ -2693,6 +2743,9 @@ export function compileReceiverMethodCall(
   if (propAccess.name.text === "valueOf" && expr.arguments.length === 0) {
     return compileExpression(ctx, fctx, propAccess.expression);
   }
+
+  const lateFnctorCall = tryCompileLateFnctorPrototypeMethodCall(ctx, fctx, expr, propAccess);
+  if (lateFnctorCall !== undefined) return lateFnctorCall;
 
   // Fallback for method calls on any-typed / externref / unresolvable receivers.
   // This handles patterns like: ref(args).next(), anyObj.someMethod(), etc.
