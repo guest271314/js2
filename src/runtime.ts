@@ -4410,6 +4410,33 @@ function _getClassMethodBridge(classObj: object, name: string): Function {
  * property of `obj`. Caller is responsible for the non-struct fast path
  * (`Object.getOwnPropertyDescriptor`) and for `ToPropertyKey` on `prop`.
  */
+/**
+ * (#3661) Clamp a data descriptor to the receiver's frozen/sealed state.
+ *
+ * `Object.freeze`/`seal` record per-property flags in the sidecar descriptor
+ * table, which covers properties that HAVE a sidecar entry (dynamically added,
+ * or `defineProperty`-created). It does NOT cover the two shapes whose value
+ * lives outside the sidecar — a **bare struct field** (object-literal property)
+ * and a **vec element** (array index) — so `getOwnPropertyDescriptor` reported
+ * `writable: true, configurable: true` on a frozen object. Measured on HEAD:
+ * frozen plain field read back `w,c,e = true,true,true` where V8 gives
+ * `false,false,true`; a frozen array element likewise.
+ *
+ * Clamping on the READ side covers every shape uniformly and is exactly the
+ * spec statement — an integrity-level-frozen object's own data properties are
+ * non-writable and non-configurable (§7.3.15 SetIntegrityLevel), sealed ones
+ * non-configurable — rather than trying to keep the write side's enumeration in
+ * sync with every value-carrier. Accessor descriptors are left alone: freeze
+ * makes them non-configurable but has no `[[Writable]]` to clear.
+ */
+function _clampFrozenDescriptor(obj: any, d: PropertyDescriptor): PropertyDescriptor {
+  const frozen = _wasmFrozenObjs.has(obj);
+  if (!frozen && !_wasmSealedObjs.has(obj)) return d;
+  d.configurable = false;
+  if (frozen && !d.get && !d.set) d.writable = false;
+  return d;
+}
+
 function _readOwnDescriptor(
   obj: any,
   prop: string | symbol,
@@ -4475,12 +4502,12 @@ function _readOwnDescriptor(
               value = undefined;
             }
             const flags = f ?? _SC_ELEM_DEFAULT;
-            return {
+            return _clampFrozenDescriptor(obj, {
               value,
               writable: !!(flags & _SC_WRITABLE),
               enumerable: !!(flags & _SC_ENUMERABLE),
               configurable: !!(flags & _SC_CONFIGURABLE),
-            };
+            });
           }
         }
         // idx >= length or accessor-flagged → generic sidecar handling below.
@@ -4560,12 +4587,12 @@ function _readOwnDescriptor(
     const value = typeof getter === "function" ? getter(obj) : undefined;
     const descs = _wasmPropDescs.get(obj);
     const flags = descs?.get(propStr) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
-    return {
+    return _clampFrozenDescriptor(obj, {
       value,
       writable: !!(flags & _SC_WRITABLE),
       enumerable: !!(flags & _SC_ENUMERABLE),
       configurable: !!(flags & _SC_CONFIGURABLE),
-    };
+    });
   }
   return undefined; // not an own property
 }
