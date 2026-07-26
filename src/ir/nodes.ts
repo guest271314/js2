@@ -49,16 +49,37 @@ export interface IrFuncRef {
   readonly binding: IrCallableBinding;
 }
 
+/** Closed structural identity for every IR global target. */
+export type IrGlobalBinding =
+  | { readonly kind: "source"; readonly bindingId: IrBindingId }
+  | {
+      readonly kind: "import";
+      readonly bindingId: IrBindingId;
+      readonly module: string;
+      readonly field: string;
+    }
+  | { readonly kind: "runtime"; readonly bindingId: IrBindingId; readonly symbol: string }
+  | { readonly kind: "support"; readonly bindingId: IrBindingId };
+
 export interface IrGlobalRef {
   readonly kind: "global";
-  /** Unique global name (same namespace as `ctx.globalMap` or similar). */
+  /** Compatibility/debug label; never the semantic lookup key. */
   readonly name: string;
+  readonly binding: IrGlobalBinding;
 }
+
+/** Closed structural identity for every symbolic IR type target. */
+export type IrTypeBinding =
+  | { readonly kind: "source"; readonly bindingId: IrBindingId }
+  | { readonly kind: "class"; readonly bindingId: IrBindingId; readonly classId: IrClassId }
+  | { readonly kind: "runtime"; readonly bindingId: IrBindingId; readonly symbol: string }
+  | { readonly kind: "support"; readonly bindingId: IrBindingId };
 
 export interface IrTypeRef {
   readonly kind: "type";
-  /** Unique WasmGC type name (same namespace as `ctx.typeNames`). */
+  /** Compatibility/debug label; never the semantic lookup key. */
   readonly name: string;
+  readonly binding: IrTypeBinding;
 }
 
 // ---------------------------------------------------------------------------

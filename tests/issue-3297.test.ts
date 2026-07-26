@@ -13,6 +13,7 @@ import { analyzeSource } from "../src/checker/index.js";
 import { compile } from "../src/index.js";
 import {
   IrFunctionBuilder,
+  irSupportGlobalRef,
   irVal,
   irUnitFuncRef,
   lowerFunctionAstToIr,
@@ -65,7 +66,7 @@ const DIFF_SOURCE = `
 `;
 
 function effectFunctions(): IrFunction[] {
-  const global = { kind: "global" as const, name: "trace" };
+  const global = irSupportGlobalRef(identities.unit(100), "effect-trace", "trace");
 
   const leftIdentity = identities.next("left");
   const left = new IrFunctionBuilder(leftIdentity, [F64]);
@@ -166,16 +167,18 @@ function proofModule(order: "normal" | "shuffled" = "normal"): IrModule {
   return { functions };
 }
 function lowerProof(order: "normal" | "shuffled" = "normal") {
+  const trace = irSupportGlobalRef(identities.unit(100), "effect-trace", "trace");
+  const spare = irSupportGlobalRef(identities.unit(101), "effect-spare", "spare");
   return lowerIrModuleToPorffor(proofModule(order), {
     globals:
       order === "normal"
         ? [
-            { name: "trace", type: F64 },
-            { name: "spare", type: I32 },
+            { ref: trace, type: F64 },
+            { ref: spare, type: I32 },
           ]
         : [
-            { name: "spare", type: I32 },
-            { name: "trace", type: F64 },
+            { ref: spare, type: I32 },
+            { ref: trace, type: F64 },
           ],
     prefs: { gc: false },
   });

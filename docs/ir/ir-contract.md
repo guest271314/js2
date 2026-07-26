@@ -1,4 +1,4 @@
-# The IR interchange contract — v4.0
+# The IR interchange contract — v5.0
 
 > **Normative.** The #3030 contract is the union of this document,
 > [`ir-module.schema.json`](ir-module.schema.json), and the exported
@@ -37,10 +37,11 @@ One JSON document per compiled module.
 
 ## D2 — Versioning
 
-`IR_FORMAT_VERSION = "4.0"` (exported from `src/ir/contract.ts`). Version 4
-makes every class shape carry a required source-qualified `classId`; display
-`className` is compatibility/debug metadata. Structural callable bindings from
-version 3 and function/coverage `unitId` fields from version 2 remain required.
+`IR_FORMAT_VERSION = "5.0"` (exported from `src/ir/contract.ts`). Version 5
+makes global and symbolic type references carry required closed structural
+bindings; their `name` fields are compatibility/debug metadata. Source-qualified
+class shapes from version 4, callable bindings from version 3, and
+function/coverage `unitId` fields from version 2 remain required.
 
 - **Additive** (minor bump): new instruction kinds, new optional fields, new
   enum members appended at the END of their table.
@@ -67,10 +68,9 @@ version 3 and function/coverage `unitId` fields from version 2 remain required.
    coverage rows are joined by `unitId`. Every `IrFuncRef` identifies a source
    unit, import, runtime symbol, intrinsic, or compiler support binding through
    a closed `IrCallableBinding`; its `name` is compatibility/debug data only.
-   Globals and types remain symbolic named references (`IrGlobalRef` and
-   `IrTypeRef`). No funcIdx / globalIdx / typeIdx appears anywhere in a
-   serialized document (D5 closes the one historical leak inside `IrType`; see
-   T2).
+   Every `IrGlobalRef` and `IrTypeRef` likewise carries a closed structural
+   binding ID. No funcIdx / globalIdx / typeIdx appears anywhere in a serialized
+   document (D5 closes the one historical leak inside `IrType`; see T2).
 3. **Verified per-instruction `resultType`.** Every value-producing
    instruction carries its result type, and the verifier **re-derives** it
    from operand types per the §"Node inventory" rules (#1924).
@@ -86,7 +86,7 @@ version 3 and function/coverage `unitId` fields from version 2 remain required.
    classification") is part of this contract; instruction order within a
    block is program order, and any reordering the compiler performed
    respected the classification (#2134). Effects are _derived_ (published
-   table), not serialized per instruction in v4.0.
+   table), not serialized per instruction in v5.0.
 6. **Source positions.** Instructions and terminators may carry
    `site: {line, column}` (1-based line, 0-based column, in the `source`
    file named by the header). Alloc-site provenance rides on `alloc`
@@ -167,16 +167,26 @@ adapters may consult it only after resolving the structural binding domain, to
 join an exact unit/support binding to a pre-existing physical slot; they may
 not classify a callable or choose a provider from the label. Runtime,
 intrinsic, and import resolution uses `symbol` or `{module, field}` directly.
-In contrast, globals and types still use the flat module-scoped symbolic names
-in `IrGlobalRef` (`global.get/set.target`) and `IrTypeRef` (D5 symbolic `ref`
-leaves). Those remaining named namespaces are owned by the module assembler
-(#3029-S4 invariant A6).
+
+`IrGlobalRef.binding` is one of `source {bindingId}`,
+`import {bindingId,module,field}`, `runtime {bindingId,symbol}`, or
+`support {bindingId}`. Every ID belongs to the `global` binding domain.
+`IrTypeRef.binding` is one of `source {bindingId}`,
+`class {bindingId,classId}`, `runtime {bindingId,symbol}`, or
+`support {bindingId}`; ordinary IDs belong to the `type` domain and class
+layout IDs to the `class` domain. Reference equality and provider selection
+exclude the compatibility `name`.
+
+The current in-memory numeric `ref`/`ref_null` leaves do not yet carry an
+`IrTypeRef`; replacing those leaves is D5/T2. Version 5 closes the explicit
+type-reference vocabulary and resolver boundary without claiming that T2 has
+landed.
 
 ## Document layout
 
 ```
 IrModuleDocument
-├─ irVersion: "4.0"
+├─ irVersion: "5.0"
 ├─ source?: string
 ├─ coverage: [{unitId, name, carrier: "ir"|"legacy", exported, reason?}]   (D3.7)
 └─ functions: [IrFunctionDoc]           (exactly the carrier:"ir" entries)
@@ -371,9 +381,9 @@ boxed, dynamic`.
 
 ## Slice status
 
-| Slice | What                                                        | Status at v4.0                                               |
+| Slice | What                                                        | Status at v5.0                                               |
 | ----- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v4 source-qualified class-shape identity** (#3520)         |
+| T1    | this document + schema + `IR_FORMAT_VERSION`                | **v5 structural callable/global/type identity** (#3520)      |
 | T2    | purge module-relative indices from in-memory `IrType` (D5)  | open — until then, affected functions are `carrier:"legacy"` |
 | T3    | `serializeIrModule`/`deserializeIrModule` + `--emit-ir`     | open                                                         |
 | T4    | verifier re-derivation of the §Node-inventory rules (#1924) | open — D3.3 effective from here                              |

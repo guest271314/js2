@@ -209,6 +209,11 @@ describe("#3520 module-binding and local-class identity", () => {
     expect(memberBinding.ownerUnitId).toBe(unitId(graph.context, boxRead));
     expect(functionBinding.ownerUnitId).not.toBe(moduleBinding.ownerUnitId);
     expect(memberBinding.ownerUnitId).not.toBe(functionBinding.ownerUnitId);
+    expect(functionBinding.globalBindingId).toBe(moduleBinding.globalBindingId);
+    expect(memberBinding.globalBindingId).toBe(moduleBinding.globalBindingId);
+    expect(functionBinding.tdzBindingId).toBe(moduleBinding.tdzBindingId);
+    expect(memberBinding.tdzBindingId).toBe(moduleBinding.tdzBindingId);
+    expect(functionBinding.globalBindingId).not.toBe(functionBinding.tdzBindingId);
     expect(resolver(shadowUse)).toBeUndefined();
 
     const overloaded = makeIrModuleBindingResolver(graph.checker, MODULE_OPTIONS, graph.context);
@@ -223,6 +228,30 @@ describe("#3520 module-binding and local-class identity", () => {
       projectedResolver(functionUse),
     );
     expect(LEGACY_MODULE_RESOLVER_IS_EXACT).toBe(false);
+  });
+
+  it("keeps same-labelled module storage distinct across sources and inventory order", () => {
+    const files = {
+      "/repo/a.ts": `let shared: number = 1; export function read(): number { return shared; }`,
+      "/repo/b.ts": `let shared: number = 2; export function readB(): number { return shared; }`,
+    } as const;
+    const forward = fixture(files, ["/repo/a.ts", "/repo/b.ts"]);
+    const reversed = fixture(files, ["/repo/b.ts", "/repo/a.ts"], ["/repo/b.ts", "/repo/a.ts"]);
+
+    const bindingIds = (graph: Fixture): readonly [string, string] => {
+      const a = graph.byName.get("/repo/a.ts")!;
+      const b = graph.byName.get("/repo/b.ts")!;
+      const resolver = makeIrIdentityModuleBindingResolver(graph.checker, MODULE_OPTIONS, graph.context);
+      const aBinding = resolver(identifierUse(functionDeclaration(a, "read"), "shared"))!;
+      const bBinding = resolver(identifierUse(functionDeclaration(b, "readB"), "shared"))!;
+      expect(aBinding.declarationOrdinal).toBe(0);
+      expect(bBinding.declarationOrdinal).toBe(0);
+      expect(aBinding.globalBindingId).not.toBe(bBinding.globalBindingId);
+      expect(aBinding.tdzBindingId).not.toBe(bBinding.tdzBindingId);
+      return [aBinding.globalBindingId, bBinding.globalBindingId];
+    };
+
+    expect(bindingIds(reversed)).toEqual(bindingIds(forward));
   });
 
   it("keeps same-named classes exact across sources and inventory order", () => {

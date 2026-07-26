@@ -51,7 +51,8 @@ import {
   nativeStringLiteralInstrs,
   type StringEncoding,
 } from "../codegen/native-strings.js";
-import { addStringConstantGlobal, ensureExnTag } from "../codegen/registry/imports.js";
+import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../codegen/registry/imports.js";
+import { planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "../codegen/program-abi-planning.js";
 // (#2856) Console-variant parity with the legacy collectConsoleImports scan.
 import { isBooleanType, isNumberType, isStringType } from "../checker/type-mapper.js";
 import {
@@ -87,9 +88,17 @@ import {
   type IrDirectCallTarget,
   type IrIntegrationLoweringPlans,
 } from "./ast-lowering-plans.js";
+import {
+  irGlobalBindingKey,
+  irSourceGlobalRef,
+  irSupportGlobalRef,
+  irSupportTypeRef,
+  irTypeBindingKey,
+} from "./abi-bindings.js";
 import { irIntrinsicFuncRef, irSupportFuncRef, irUnitFuncRef, sameIrCallableBinding } from "./callable-bindings.js";
 import { buildIrUnitInventory, indexIrTerminalDeclarations, type IrClassId, type IrUnitId } from "./identity.js";
 import {
+  buildIrPlanningIdentityContext,
   buildIrLegacyUnitProjection,
   type IrLegacyUnitProjectionEntry,
   type IrPlanningIdentityContext,
@@ -265,9 +274,33 @@ export function compileIrPathFunctions(
     allowHostExterns: jsHostExterns && !ctx.nativeStrings,
     allowBuiltinMapExtern: jsHostExterns && !ctx.nativeStrings,
   };
-  const moduleBindingResolver = loweringPlans
-    ? makeIrModuleBindingResolver(ctx.checker, moduleBindingOptions, loweringPlans.identityContext)
-    : makeIrModuleBindingResolver(ctx.checker, moduleBindingOptions);
+  // Compatibility-only direct callers still receive one exact local planning
+  // context. Structural global refs must never fall back to declaration names.
+  const compatibilityInventory = loweringPlans
+    ? undefined
+    : buildIrUnitInventory([sourceFile], { entrySource: sourceFile, checker: ctx.checker });
+  const moduleBindingIdentityContext =
+    loweringPlans?.identityContext ??
+    (compatibilityInventory ? buildIrPlanningIdentityContext(compatibilityInventory) : undefined);
+  if (!moduleBindingIdentityContext) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "resolve",
+      "ir/integration: module binding planning has no structural identity context",
+    );
+  }
+  if (ctx.programAbiSession && ctx.programAbiSession.inventory !== moduleBindingIdentityContext.inventory) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "resolve",
+      "ir/integration: ProgramAbiSession and lowering plans use different identity inventories",
+    );
+  }
+  const moduleBindingResolver = makeIrModuleBindingResolver(
+    ctx.checker,
+    moduleBindingOptions,
+    moduleBindingIdentityContext,
+  );
   const classifyPrimitiveExpression = makeIrPrimitiveExpressionClassifier(ctx.checker);
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
   const isArrayExpression = makeIrArrayExpressionPredicate(ctx.checker);
@@ -293,9 +326,6 @@ export function compileIrPathFunctions(
   // tests) do not supply the production planning context. Build the same
   // structural source inventory locally so internal bookkeeping remains
   // ID-addressed; the public no-projection report shape stays unchanged.
-  const compatibilityInventory = loweringPlans
-    ? undefined
-    : buildIrUnitInventory([sourceFile], { entrySource: sourceFile, checker: ctx.checker });
   const compatibilityUnitIdByDeclaration = compatibilityInventory
     ? indexIrTerminalDeclarations(sourceFile, compatibilityInventory)
     : undefined;
@@ -1701,8 +1731,20 @@ export function compileIrPathFunctions(
     );
     const resolverInjection = process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE;
     if (resolverInjection === "function") resolver.resolveFunc(irIntrinsicFuncRef("__injected_missing_func"));
-    if (resolverInjection === "global") resolver.resolveGlobal({ kind: "global", name: "__injected_missing_global" });
-    if (resolverInjection === "type") resolver.resolveType({ kind: "type", name: "__injected_missing_type" });
+    const injectionOwner = moduleBindingIdentityContext.inventory.sources[0]?.id;
+    if (!injectionOwner && (resolverInjection === "global" || resolverInjection === "type")) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        "resolver injection requires one structural source owner",
+      );
+    }
+    if (resolverInjection === "global") {
+      resolver.resolveGlobal(irSupportGlobalRef(injectionOwner!, "resolver-injection", "__injected_missing_global"));
+    }
+    if (resolverInjection === "type") {
+      resolver.resolveType(irSupportTypeRef(injectionOwner!, "resolver-injection", "__injected_missing_type"));
+    }
     const objectRegistry = new ObjectStructRegistry(ctx, (t) => lowerIrTypeToValType(t, resolver, "<obj-registry>"));
     deferredObj.resolve = (shape) => objectRegistry.resolve(shape);
     const closureRegistry = new ClosureStructRegistry(ctx, (t) =>
@@ -2074,11 +2116,8 @@ function bodyContainsReturnClassOp(body: readonly Instr[]): boolean {
   return false;
 }
 
-/** Resolve a checker-owned module declaration to its exact legacy slot. */
-type IrAnyModuleBindingIdentity = IrModuleBindingIdentity | IrLegacyModuleBindingIdentity;
-type IrAnyModuleBindingResolver = IrModuleBindingResolver | IrLegacyModuleBindingResolver;
-
-function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrAnyModuleBindingIdentity): ModuleBindingGlobal {
+/** Resolve a checker-owned module declaration to its exact structural/legacy slot pair. */
+function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindingIdentity): ModuleBindingGlobal {
   const declaration = identity.declaration;
   if (!ts.isIdentifier(declaration.name)) {
     throw new IrInvariantError(
@@ -2088,7 +2127,8 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrAnyModuleBi
     );
   }
   const name = declaration.name.text;
-  if (!ctx.moduleGlobals.has(name)) {
+  const globalIdx = ctx.moduleGlobals.get(name);
+  if (globalIdx === undefined) {
     throw new IrInvariantError(
       "unknown-global-ref",
       "build",
@@ -2097,8 +2137,8 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrAnyModuleBi
   }
 
   const globalName = `__mod_${name}`;
-  const global = ctx.mod.globals.find((candidate) => candidate.name === globalName);
-  if (!global) {
+  const global = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  if (!global || global.name !== globalName) {
     throw new IrInvariantError(
       "unknown-global-ref",
       "build",
@@ -2144,10 +2184,41 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrAnyModuleBi
     );
   }
 
+  const tdzGlobalIdx = ctx.tdzGlobals.get(name);
+  const tdzGlobal = tdzGlobalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, tdzGlobalIdx)];
+  const expectedTdzGlobalName = `__tdz_${name}`;
+  if (tdzGlobalIdx !== undefined && (!tdzGlobal || tdzGlobal.name !== expectedTdzGlobalName)) {
+    throw new IrInvariantError(
+      "unknown-global-ref",
+      "build",
+      `module-init: TDZ registry contains '${name}' but ${expectedTdzGlobalName} is missing`,
+    );
+  }
+  const tdzGlobalName = tdzGlobal ? expectedTdzGlobalName : null;
+  const globalRef = irSourceGlobalRef(identity.globalBindingId, globalName);
+  const tdzGlobalRef = tdzGlobal ? irSourceGlobalRef(identity.tdzBindingId, expectedTdzGlobalName) : null;
+  planProgramAbiGlobal(ctx, {
+    ref: globalRef,
+    sourceId: identity.sourceId,
+    declarationOrdinal: identity.declarationOrdinal,
+    roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
+    global,
+  });
+  if (tdzGlobal && tdzGlobalRef) {
+    planProgramAbiGlobal(ctx, {
+      ref: tdzGlobalRef,
+      sourceId: identity.sourceId,
+      declarationOrdinal: identity.declarationOrdinal,
+      roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleTdz,
+      global: tdzGlobal,
+    });
+  }
   return {
-    ...("ownerUnitId" in identity ? { ownerUnitId: identity.ownerUnitId } : {}),
+    ownerUnitId: identity.ownerUnitId,
+    globalRef,
+    tdzGlobalRef,
     globalName,
-    tdzGlobalName: ctx.mod.globals.some((candidate) => candidate.name === `__tdz_${name}`) ? `__tdz_${name}` : null,
+    tdzGlobalName,
     type,
   };
 }
@@ -2161,7 +2232,7 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrAnyModuleBi
 function buildModuleBindingsMap(
   ctx: CodegenContext,
   population: readonly ts.Statement[],
-  resolveModuleBinding: IrAnyModuleBindingResolver,
+  resolveModuleBinding: IrModuleBindingResolver,
 ): Map<string, ModuleBindingGlobal> {
   const map = new Map<string, ModuleBindingGlobal>();
   for (const stmt of population) {
@@ -2382,10 +2453,7 @@ function externResultClassName(
   }
 }
 
-function makeFromAstResolver(
-  ctx: CodegenContext,
-  moduleBindingResolver?: IrAnyModuleBindingResolver,
-): IrFromAstResolver {
+function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
   return {
     // (#2955 slice 5) No raw `nativeStrings()` here anymore — from-ast's
     // interface no longer carries the mode discriminator; every mode
@@ -2832,11 +2900,18 @@ function makeResolver(
           `injected unknown global ref through resolver (${ref.name})`,
         );
       }
-      const localIdx = ctx.mod.globals.findIndex((g) => g.name === ref.name);
-      if (localIdx < 0) {
-        throw new IrInvariantError("unknown-global-ref", "lower", `ir/integration: unknown global ref "${ref.name}"`);
+      if (!ctx.programAbiSession) {
+        throw new IrInvariantError(
+          "unknown-global-ref",
+          "lower",
+          `ir/integration: global ref "${ref.name}" has no ProgramAbiSession`,
+        );
       }
-      return ctx.numImportGlobals + localIdx;
+      return ctx.programAbiSession.resolveCurrentIndex(
+        ref.binding.bindingId,
+        "global",
+        irGlobalBindingKey(ref.binding),
+      );
     },
     resolveType(ref: IrTypeRef): number {
       if (process.env.JS2WASM_TEST_INJECT_IR_RESOLVER_FAILURE === "type") {
@@ -2846,11 +2921,14 @@ function makeResolver(
           `injected unknown type ref through resolver (${ref.name})`,
         );
       }
-      const idx = ctx.mod.types.findIndex((t) => "name" in t && (t as { name?: string }).name === ref.name);
-      if (idx < 0) {
-        throw new IrInvariantError("unknown-type-ref", "lower", `ir/integration: unknown type ref "${ref.name}"`);
+      if (!ctx.programAbiSession) {
+        throw new IrInvariantError(
+          "unknown-type-ref",
+          "lower",
+          `ir/integration: type ref "${ref.name}" has no ProgramAbiSession`,
+        );
       }
-      return idx;
+      return ctx.programAbiSession.resolveCurrentIndex(ref.binding.bindingId, "type", irTypeBindingKey(ref.binding));
     },
     internFuncType(type: FuncTypeDef): number {
       return addFuncType(ctx, type.params, type.results, type.name);

@@ -26,6 +26,7 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
+import { irArgcGlobalRef, irSupportGlobalRef } from "../ir/abi-bindings.js";
 import { irSupportFuncRef } from "../ir/callable-bindings.js";
 import { asVal, irDynamic, isDynamic, irVal, type IrFuncRef, type IrType } from "../ir/nodes.js";
 import type { LatticeType } from "../ir/propagate.js";
@@ -81,6 +82,13 @@ import {
 import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
+import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
+import {
+  planProgramAbiGlobal,
+  programAbiSourceIdForUnit,
+  programAbiUnitDeclarationOrdinal,
+  PROGRAM_ABI_GLOBAL_ROLE,
+} from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
 import {
   applyIrFinalContextFunctionRetention,
@@ -1840,6 +1848,14 @@ function planIrImportedLowering(
   const importedCalls = new Map<ts.CallExpression, IrImportedCallLoweringPlan>();
   const topLevelFunctionValues = new Map<ts.Identifier, IrTopLevelFunctionValueLoweringPlan>();
   const planIdentity = irOverlayIdentity.makeIrFeaturePlanIdentity(identityPlan, identityImportedFunctions);
+  const entrySourceId = identityPlan.identityContext.inventory.sources.find((source) => source.kind === "entry")?.id;
+  if (!entrySourceId) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "resolve",
+      "imported lowering requires one exact entry-source identity",
+    );
+  }
   for (const [ownerName, declaration] of declByName) {
     if (!safeSelection.funcs.has(ownerName) || !declaration.body) continue;
     let planningFailure: IrPreparationFailure | undefined;
@@ -1886,15 +1902,17 @@ function planIrImportedLowering(
               });
             }
             const importedIdentity = planIdentity.imported(ownerName, node.expression, certified.target);
+            const needsArgc =
+              ctx.funcUsesArguments.has(certified.target.targetName) ||
+              ctx.funcOptionalParams.has(certified.target.targetName);
             importedCalls.set(node, {
               ...importedIdentity,
               ownerName,
               params,
               returnType,
               optionalParams,
-              needsArgc:
-                ctx.funcUsesArguments.has(certified.target.targetName) ||
-                ctx.funcOptionalParams.has(certified.target.targetName),
+              needsArgc,
+              ...(needsArgc ? { argcGlobal: irArgcGlobalRef(entrySourceId) } : {}),
             });
             for (const functionArgument of certified.functionArguments) {
               const valueIdentity = planIdentity.value(ownerName, functionArgument.argument, functionArgument.target);
@@ -1906,6 +1924,7 @@ function planIrImportedLowering(
                 );
               }
               const trampolineName = `__fn_tramp_${functionArgument.target.targetName}_cached`;
+              const cacheGlobalName = `__fn_closure_${functionArgument.target.targetName}`;
               topLevelFunctionValues.set(functionArgument.argument, {
                 ...valueIdentity,
                 ownerName,
@@ -1915,7 +1934,12 @@ function planIrImportedLowering(
                   "function-value-trampoline",
                   trampolineName,
                 ),
-                cacheGlobalName: `__fn_closure_${functionArgument.target.targetName}`,
+                cacheGlobal: irSupportGlobalRef(
+                  valueIdentity.target.binding.unitId,
+                  "function-value-cache",
+                  cacheGlobalName,
+                ),
+                cacheGlobalName,
               });
             }
           } catch (error) {
@@ -2856,7 +2880,32 @@ function prepareMultiIrImportedLowering(
   for (const [call, callPlan] of plan.importedCalls) {
     requireMultiIrOwnerClaim(plan, callPlan.ownerUnitId, callPlan.ownerName);
     if (!retained.has(callPlan.ownerUnitId)) continue;
-    if (callPlan.needsArgc) ensureArgcGlobal(ctx);
+    if (callPlan.needsArgc) {
+      if (!callPlan.argcGlobal || callPlan.argcGlobal.binding.kind !== "runtime") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `argc-sensitive call plan for ${callPlan.ownerName} has no exact runtime binding`,
+        );
+      }
+      const argcGlobalIdx = ensureArgcGlobal(ctx);
+      const argcGlobal = ctx.mod.globals[localGlobalIdx(ctx, argcGlobalIdx)];
+      const entrySource = plan.identityPlan.identityContext.inventory.sources.find((source) => source.kind === "entry");
+      if (!argcGlobal || !entrySource) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `argc-sensitive call plan for ${callPlan.ownerName} has no exact allocator/source owner`,
+        );
+      }
+      planProgramAbiGlobal(ctx, {
+        ref: callPlan.argcGlobal,
+        sourceId: entrySource.id,
+        declarationOrdinal: 0,
+        roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.argc,
+        global: argcGlobal,
+      });
+    }
     for (let i = call.arguments.length; i < callPlan.params.length; i++) {
       if (!importedMissingArgNeedsUndefined(callPlan.params[i]!)) continue;
       if (ensureGetUndefined(ctx) === undefined) blocked.add(callPlan.ownerUnitId);
@@ -2871,6 +2920,13 @@ function prepareMultiIrImportedLowering(
   for (const valuePlan of plan.topLevelFunctionValues.values()) {
     requireMultiIrOwnerClaim(plan, valuePlan.ownerUnitId, valuePlan.ownerName);
     if (!retained.has(valuePlan.ownerUnitId) || blocked.has(valuePlan.ownerUnitId)) continue;
+    if (valuePlan.target.binding.kind !== "unit") {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "resolve",
+        `function-value cache target ${valuePlan.target.name} has no exact source-unit binding`,
+      );
+    }
     const funcIdx = ctx.funcMap.get(valuePlan.target.name);
     if (
       funcIdx === undefined ||
@@ -2885,7 +2941,17 @@ function prepareMultiIrImportedLowering(
     const cache = singleton ? ctx.mod.globals[localGlobalIdx(ctx, singleton.cacheGlobalIdx)] : undefined;
     if (!singleton || trampoline?.name !== valuePlan.trampoline.name || cache?.name !== valuePlan.cacheGlobalName) {
       blocked.add(valuePlan.ownerUnitId);
+      continue;
     }
+    const targetUnitId = valuePlan.target.binding.unitId;
+    const inventory = plan.identityPlan.identityContext.inventory;
+    planProgramAbiGlobal(ctx, {
+      ref: valuePlan.cacheGlobal,
+      sourceId: programAbiSourceIdForUnit(inventory, targetUnitId),
+      declarationOrdinal: programAbiUnitDeclarationOrdinal(inventory, targetUnitId),
+      roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.functionValueCache,
+      global: cache,
+    });
   }
 
   if (blocked.size === 0) return selection;
@@ -2969,15 +3035,20 @@ export function generateModule(
   irFirstSkipped?: readonly string[];
   // #3519 — typed terminal unit ledger (opt-in).
   irOutcomes?: readonly IrObservedOutcome[];
+  // #3520 — finalized structural ABI when an IR identity inventory was requested.
+  programAbi?: PublishedProgramAbi;
 } {
   const mod = createEmptyModule();
-  const ctx = createCodegenContext(mod, ast.checker, options);
   const irPlanningIdentityContext =
     options?.experimentalIR || options?.trackIrOutcomes
       ? buildIrPlanningIdentityContext(
           buildIrUnitInventory([ast.sourceFile], { ...inventoryOptions, entrySource: ast.sourceFile }),
         )
       : undefined;
+  const programAbiSession = irPlanningIdentityContext
+    ? new ProgramAbiSession(irPlanningIdentityContext.inventory, mod)
+    : undefined;
+  const ctx = createCodegenContext(mod, ast.checker, options, programAbiSession);
   const sourceFileInternal = ast.sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node };
   ctx.sourceIsModule = sourceFileInternal.externalModuleIndicator !== undefined;
   // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
@@ -3988,6 +4059,7 @@ export function generateModule(
     // addImport/ensureLateImport after here is a producer bug and throws at
     // its own call site (see imports.ts / late-imports.ts).
     ctx.indexSpaceFrozen = true;
+    ctx.programAbiSession?.publish(mod);
 
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
@@ -4015,6 +4087,7 @@ export function generateModule(
     irCompiledFuncs: ctx.irCompiledFuncs,
     irFirstSkipped,
     irOutcomes: ctx.irOutcomes,
+    programAbi: ctx.programAbiSession?.publication,
   };
 }
 
@@ -5458,9 +5531,10 @@ export function generateMultiModule(
   irCompiledFuncs?: readonly string[];
   // #3519 — typed terminal unit ledger (opt-in).
   irOutcomes?: readonly IrObservedOutcome[];
+  // #3520 — finalized structural ABI when an IR identity inventory was requested.
+  programAbi?: PublishedProgramAbi;
 } {
   const mod = createEmptyModule();
-  const ctx = createCodegenContext(mod, multiAst.checker, options);
   const irPlanningIdentityContext =
     options?.experimentalIR || options?.trackIrOutcomes
       ? buildIrPlanningIdentityContext(
@@ -5470,6 +5544,10 @@ export function generateMultiModule(
           }),
         )
       : undefined;
+  const programAbiSession = irPlanningIdentityContext
+    ? new ProgramAbiSession(irPlanningIdentityContext.inventory, mod)
+    : undefined;
+  const ctx = createCodegenContext(mod, multiAst.checker, options, programAbiSession);
   // Multi-file compilation is linked through import/export module records.
   ctx.sourceIsModule = true;
   try {
@@ -5921,6 +5999,7 @@ export function generateMultiModule(
     // run; stackBalance / fixupExternConvertAny / emit add no imports. Any
     // addImport/ensureLateImport after here throws at the producer site.
     ctx.indexSpaceFrozen = true;
+    ctx.programAbiSession?.publish(mod);
 
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
@@ -5954,6 +6033,7 @@ export function generateMultiModule(
     irPostClaimErrors: ctx.irPostClaimErrors,
     irCompiledFuncs: ctx.irCompiledFuncs,
     irOutcomes: ctx.irOutcomes,
+    programAbi: ctx.programAbiSession?.publication,
   };
 }
 

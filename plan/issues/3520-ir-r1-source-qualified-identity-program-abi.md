@@ -10,7 +10,7 @@ pr: 3496
 last_merged_pr: 3490
 sprint: current
 created: 2026-07-21
-updated: 2026-07-25
+updated: 2026-07-26
 priority: critical
 horizon: l
 complexity: L
@@ -32,6 +32,7 @@ files:
   - scripts/check-ir-fallbacks.ts
   - src/ir/identity.ts
   - src/ir/planning-identity.ts
+  - src/ir/abi-bindings.ts
   - src/ir/program-abi.ts
   - src/ir/index.ts
   - src/ir/contract.ts
@@ -83,6 +84,8 @@ files:
   - src/codegen/class-member-keys.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
+  - src/codegen/program-abi-planning.ts
+  - src/codegen/program-abi-session.ts
   - src/codegen/ir-first-gate.ts
   - src/codegen/ir-class-shapes.ts
   - src/codegen/ir-overlay-identity.ts
@@ -98,6 +101,7 @@ files:
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
   - tests/issue-3520-callable-binding.test.ts
+  - tests/issue-3520-global-type-binding.test.ts
   - tests/issue-3520-callable-preregistration.test.ts
   - tests/issue-3520-ir-unit-identity.test.ts
   - tests/issue-3520-program-abi.test.ts
@@ -126,6 +130,7 @@ loc-budget-allow:
   - src/ir/from-ast.ts
   - src/ir/nodes.ts
   - src/ir/verify.ts
+  - src/ir/backend/porffor/assembler.ts
 ---
 
 # #3520 — IR-only R1: source-qualified identity and whole-program ABI map

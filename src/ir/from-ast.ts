@@ -46,6 +46,7 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 // codegen state) to port the `safeIndexedArrays` in-bounds proof into the IR.
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 import { IrFunctionBuilder } from "./builder.js";
+import { sameIrGlobalBinding } from "./abi-bindings.js";
 import {
   irImportFuncRef,
   irIntrinsicFuncRef,
@@ -114,6 +115,7 @@ import {
   type IrConst,
   type IrFunction,
   type IrFuncRef,
+  type IrGlobalRef,
   type IrInstr,
   type IrLabelId,
   type IrObjectShape,
@@ -1419,7 +1421,7 @@ type ScopeBinding =
        * share the exact same storage. Slice 2 restricts `type` to f64/i32.
        */
       kind: "moduleGlobal";
-      globalName: string;
+      globalRef: IrGlobalRef;
       type: IrType;
       stringEncoding?: Encoding;
     }
@@ -1666,7 +1668,7 @@ function sameScopeStorage(a: StringEncodingScopeBinding, b: ScopeBinding | undef
     case "local":
       return b.kind === "local" && b.value === a.value;
     case "moduleGlobal":
-      return b.kind === "moduleGlobal" && b.globalName === a.globalName;
+      return b.kind === "moduleGlobal" && sameIrGlobalBinding(b.globalRef.binding, a.globalRef.binding);
     case "slot":
       return b.kind === "slot" && b.slotIndex === a.slotIndex;
   }
@@ -1686,7 +1688,7 @@ function lowerTopLevelFunctionValue(plan: IrTopLevelFunctionValueLoweringPlan, c
   if (plan.trampoline.binding.kind !== "support") {
     throw new Error(`ir/from-ast: function-value trampoline ${plan.trampoline.name} is not compiler support`);
   }
-  const cache = { kind: "global" as const, name: plan.cacheGlobalName };
+  const cache = plan.cacheGlobal;
   const cached = cx.builder.emitGlobalGet(cache, irVal({ kind: "externref" }));
   const isNull = cx.builder.emitRefIsNull(cached);
   const thenBody = cx.builder.collectBodyInstrs(() => {
@@ -2223,14 +2225,14 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
             `${describeIrType(moduleBinding.type)} in ${cx.funcName}`,
         );
       }
-      cx.builder.emitGlobalSet({ kind: "global", name: moduleBinding.globalName }, value);
-      if (moduleBinding.tdzGlobalName) {
+      cx.builder.emitGlobalSet(moduleBinding.globalRef, value);
+      if (moduleBinding.tdzGlobalRef) {
         const one = cx.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
-        cx.builder.emitGlobalSet({ kind: "global", name: moduleBinding.tdzGlobalName }, one);
+        cx.builder.emitGlobalSet(moduleBinding.tdzGlobalRef, one);
       }
       cx.scope.set(name, {
         kind: "moduleGlobal",
-        globalName: moduleBinding.globalName,
+        globalRef: moduleBinding.globalRef,
         type: moduleBinding.type,
         ...(stringEncoding ? { stringEncoding } : {}),
       });
@@ -2539,8 +2541,8 @@ function lowerResolvedModuleBindingRead(name: string, binding: ModuleBindingGlob
       cx.funcName,
     );
   }
-  if (binding.tdzGlobalName) {
-    const tdz = cx.builder.emitGlobalGet({ kind: "global", name: binding.tdzGlobalName }, irVal({ kind: "i32" }));
+  if (binding.tdzGlobalRef) {
+    const tdz = cx.builder.emitGlobalGet(binding.tdzGlobalRef, irVal({ kind: "i32" }));
     const cond = cx.builder.emitUnary("i32.eqz", tdz, irVal({ kind: "i32" }));
     const thenBody = cx.builder.collectBodyInstrs(() => {
       const nullExt = cx.builder.emitConst(
@@ -2551,7 +2553,7 @@ function lowerResolvedModuleBindingRead(name: string, binding: ModuleBindingGlob
     });
     cx.builder.emitIfStmt({ cond, then: thenBody, else: [] });
   }
-  return cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, binding.type);
+  return cx.builder.emitGlobalGet(binding.globalRef, binding.type);
 }
 
 function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
@@ -2723,7 +2725,7 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     // (#3142 Slice 2) Module-scope binding inside the `<module-init>` unit:
     // reads come from the legacy-allocated global (symbolic ref).
     if (p.kind === "moduleGlobal") {
-      return cx.builder.emitGlobalGet({ kind: "global", name: p.globalName }, p.type);
+      return cx.builder.emitGlobalGet(p.globalRef, p.type);
     }
     if (p.kind !== "local") {
       // Slice 3 (#1169c): nestedFunc bindings are name-only — they have
@@ -4002,8 +4004,13 @@ function lowerImportedCall(
   // function, so mirror legacy ordering and publish this callee's argc only
   // after every argument value has been evaluated.
   if (plan.needsArgc) {
+    if (!plan.argcGlobal || plan.argcGlobal.binding.kind !== "runtime") {
+      throw new Error(`ir/from-ast: argc-sensitive call has no exact runtime global (${cx.funcName})`);
+    }
     const argc = cx.builder.emitConst({ kind: "i32", value: expr.arguments.length }, irVal({ kind: "i32" }));
-    cx.builder.emitGlobalSet({ kind: "global", name: "__argc" }, argc);
+    cx.builder.emitGlobalSet(plan.argcGlobal, argc);
+  } else if (plan.argcGlobal) {
+    throw new Error(`ir/from-ast: argc-insensitive call unexpectedly carries runtime global state (${cx.funcName})`);
   }
 
   const result = cx.builder.emitCall(plan.target, args, plan.returnType);
@@ -6851,7 +6858,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
           `ir/from-ast: assignment to module binding "${id.text}" (${describeIrType(writable.type)}) got ${describeIrType(newType)} in ${cx.funcName}`,
         );
       }
-      cx.builder.emitGlobalSet({ kind: "global", name: writable.globalName }, newValue);
+      cx.builder.emitGlobalSet(writable.globalRef, newValue);
       return;
     }
     throw new Error(`ir/from-ast: assignment to undeclared identifier "${id.text}" in ${cx.funcName}`);
@@ -6865,7 +6872,7 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
         `ir/from-ast: assignment to module binding "${id.text}" (${describeIrType(binding.type)}) got ${describeIrType(newType)} in ${cx.funcName}`,
       );
     }
-    cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, newValue);
+    cx.builder.emitGlobalSet(binding.globalRef, newValue);
     cx.scope.set(id.text, { ...binding, stringEncoding: inferStringEncoding(rhs, cx) });
     return;
   }
@@ -6913,7 +6920,7 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
   if (compoundOp === ts.SyntaxKind.PlusEqualsToken && logicalType.kind === "string") {
     const lhs =
       binding.kind === "moduleGlobal"
-        ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, logicalType)
+        ? cx.builder.emitGlobalGet(binding.globalRef, logicalType)
         : cx.builder.emitSlotReadAs(binding.slotIndex, logicalType);
     const rhsValue = lowerExpr(rhs, cx, logicalType);
     const rhsType = cx.builder.typeOf(rhsValue);
@@ -6937,7 +6944,7 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
     const concatMode = symbol && cx.ownedStringAppendSymbols.has(symbol) ? "owned-append" : "immutable";
     const result = cx.builder.emitStringConcat(lhs, rhsValue, proof.resultEncoding, concatMode);
     if (binding.kind === "moduleGlobal") {
-      cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+      cx.builder.emitGlobalSet(binding.globalRef, result);
     } else {
       cx.builder.emitSlotWrite(binding.slotIndex, result);
     }
@@ -6955,7 +6962,7 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
   // RHS, apply the binop, write back.
   const lhs =
     binding.kind === "moduleGlobal"
-      ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, binding.type)
+      ? cx.builder.emitGlobalGet(binding.globalRef, binding.type)
       : cx.builder.emitSlotRead(binding.slotIndex);
   const rhsValue = lowerExpr(rhs, cx, binding.type);
   const rhsType = cx.builder.typeOf(rhsValue);
@@ -6993,7 +7000,7 @@ function lowerCompoundAssignment(id: ts.Identifier, compoundOp: ts.SyntaxKind, r
   }
   const result = cx.builder.emitBinary(binop, lhs, rhsValue, irVal({ kind: "f64" }));
   if (binding.kind === "moduleGlobal") {
-    cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+    cx.builder.emitGlobalSet(binding.globalRef, result);
     return;
   }
   cx.builder.emitSlotWrite(binding.slotIndex, result);
@@ -7030,7 +7037,7 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
   }
   const lhs =
     binding.kind === "moduleGlobal"
-      ? cx.builder.emitGlobalGet({ kind: "global", name: binding.globalName }, binding.type)
+      ? cx.builder.emitGlobalGet(binding.globalRef, binding.type)
       : cx.builder.emitSlotRead(binding.slotIndex);
   const isAdd = op === ts.SyntaxKind.PlusPlusToken;
   const oneIr: IrType = irVal({ kind: "f64" });
@@ -7038,7 +7045,7 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
   const binop: IrBinop = isAdd ? "f64.add" : "f64.sub";
   const result = cx.builder.emitBinary(binop, lhs, one, oneIr);
   if (binding.kind === "moduleGlobal") {
-    cx.builder.emitGlobalSet({ kind: "global", name: binding.globalName }, result);
+    cx.builder.emitGlobalSet(binding.globalRef, result);
     return;
   }
   cx.builder.emitSlotWrite(binding.slotIndex, result);

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import type { IrUnitId } from "./identity.js";
-import type { IrClosureSignature, IrFuncRef, IrType } from "./nodes.js";
+import type { IrClosureSignature, IrFuncRef, IrGlobalRef, IrType } from "./nodes.js";
 import type { IrLegacyUnitProjection, IrPlanningIdentityContext } from "./planning-identity.js";
 import type { IrPromiseDelayLoweringPlans } from "./promise-delay-lowering.js";
 import { ts } from "../ts-api.js";
@@ -22,6 +22,8 @@ export interface IrImportedCallLoweringPlan {
   readonly returnType: IrType | null;
   readonly optionalParams: ReadonlyMap<number, IrImportedOptionalParamPlan>;
   readonly needsArgc: boolean;
+  /** Exact runtime argc state; present iff {@link needsArgc} is true. */
+  readonly argcGlobal?: IrGlobalRef;
 }
 
 export interface IrTopLevelFunctionValueLoweringPlan {
@@ -32,6 +34,9 @@ export interface IrTopLevelFunctionValueLoweringPlan {
   readonly signature: IrClosureSignature;
   /** Exact compiler-owned trampoline used by `closure.new`. */
   readonly trampoline: IrFuncRef;
+  /** Exact compiler-owned singleton storage. */
+  readonly cacheGlobal: IrGlobalRef;
+  /** Compatibility label for the legacy singleton allocator/preflight. */
   readonly cacheGlobalName: string;
 }
 
@@ -90,6 +95,11 @@ export interface IrHostVoidCallbackLoweringPlan {
 /** One module binding's legacy storage, optionally tied to an exact terminal owner. */
 export interface ModuleBindingGlobal {
   readonly ownerUnitId?: IrUnitId;
+  /** Exact source-owned value storage. */
+  readonly globalRef: IrGlobalRef;
+  /** Exact source-owned TDZ state, when legacy storage tracks it. */
+  readonly tdzGlobalRef: IrGlobalRef | null;
+  /** Compatibility labels retained only for preflight and diagnostics. */
   readonly globalName: string;
   readonly tdzGlobalName: string | null;
   readonly type: IrType;

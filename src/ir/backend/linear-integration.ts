@@ -998,16 +998,16 @@ function makeLinearIrResolver(
       }
     },
     resolveGlobal(ref: IrGlobalRef): number {
-      const idx = ctx.moduleGlobals.get(ref.name);
-      if (idx === undefined) {
-        throw new Error(`linear-ir: no global for '${ref.name}'`);
-      }
-      return idx;
+      throw new Error(
+        `linear-ir: symbolic global binding '${ref.binding.bindingId}' is outside the claimed scope (${ref.name})`,
+      );
     },
     resolveType(ref: IrTypeRef): number {
       // Landed linear shapes resolve through their dedicated handles; symbolic
       // module type refs remain outside the claimed surface.
-      throw new Error(`linear-ir: symbolic type '${ref.name}' outside the claimed scope`);
+      throw new Error(
+        `linear-ir: symbolic type binding '${ref.binding.bindingId}' is outside the claimed scope (${ref.name})`,
+      );
     },
     internFuncType(def: FuncTypeDef): number {
       return internLinearFuncType(ctx, def);

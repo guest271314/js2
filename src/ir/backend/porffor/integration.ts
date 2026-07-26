@@ -2,7 +2,7 @@
 
 import type { LinearMemoryPlan } from "../../analysis/linear-memory-plan.js";
 import type { IrUnitId } from "../../identity.js";
-import { forEachInstrDeep, type IrModule, type IrType } from "../../nodes.js";
+import { forEachInstrDeep, type IrGlobalRef, type IrModule, type IrType } from "../../nodes.js";
 import { lowerIrFunctionBody } from "../../lower.js";
 import { verifyIrBackendLegality } from "../legality.js";
 import type { PorfforRendererInput } from "./compat.js";
@@ -11,7 +11,7 @@ import { PorfforEmitter } from "./sink.js";
 import { PorfforTypeConverter } from "./type-converter.js";
 
 export interface PorfforGlobalInput {
-  readonly name: string;
+  readonly ref: IrGlobalRef;
   readonly type: IrType;
 }
 
@@ -83,8 +83,10 @@ export function lowerIrModuleToPorffor(
 
   for (const global of options.globals ?? []) {
     const slots = types.convertType(global.type);
-    if (slots.length !== 1) throw new Error(`porffor backend requires one scalar slot for global '${global.name}'`);
-    assembler.declarePorfforGlobal(global.name, slots[0]!);
+    if (slots.length !== 1) {
+      throw new Error(`porffor backend requires one scalar slot for global '${global.ref.name}'`);
+    }
+    assembler.declareIrGlobal(global.ref, slots[0]!);
   }
 
   const handles = new Map<IrUnitId, number>();

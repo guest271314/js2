@@ -215,8 +215,67 @@ function callableReferenceProblem(value: unknown): string | null {
   }
 }
 
-/** Verify direct callable refs in every nested instruction buffer. */
-function verifyCallableReferences(func: IrFunction, errors: IrVerifyError[]): void {
+function structuralBindingId(value: unknown, domain: "global" | "type" | "class"): value is string {
+  return nonEmptyString(value) && value.startsWith(`ir-binding:v1:${domain}:`);
+}
+
+/** Validate a serialized/in-memory global ref without trusting its TypeScript type. */
+export function irGlobalReferenceProblem(value: unknown): string | null {
+  if (!isRecord(value)) return "must be an IrGlobalRef object";
+  if (value.kind !== "global") return 'must have kind "global"';
+  if (!nonEmptyString(value.name)) return "must carry a non-empty compatibility name";
+  if (!("binding" in value)) {
+    return "is missing required global binding; legacy name-only refs are not valid IR";
+  }
+  if (!isRecord(value.binding)) return "has a malformed global binding object";
+  const binding = value.binding;
+  if (!structuralBindingId(binding.bindingId, "global")) return "has a malformed global-domain bindingId";
+  switch (binding.kind) {
+    case "source":
+    case "support":
+      return null;
+    case "import":
+      return nonEmptyString(binding.module) && nonEmptyString(binding.field)
+        ? null
+        : "has a malformed import global binding";
+    case "runtime":
+      return nonEmptyString(binding.symbol) ? null : "has a malformed runtime global binding";
+    default:
+      return "has an unknown global binding kind";
+  }
+}
+
+/** Validate a symbolic type ref before a backend adapter resolves it. */
+export function irTypeReferenceProblem(value: unknown): string | null {
+  if (!isRecord(value)) return "must be an IrTypeRef object";
+  if (value.kind !== "type") return 'must have kind "type"';
+  if (!nonEmptyString(value.name)) return "must carry a non-empty compatibility name";
+  if (!("binding" in value)) {
+    return "is missing required type binding; legacy name-only refs are not valid IR";
+  }
+  if (!isRecord(value.binding)) return "has a malformed type binding object";
+  const binding = value.binding;
+  const expectedDomain = binding.kind === "class" ? "class" : "type";
+  if (!structuralBindingId(binding.bindingId, expectedDomain)) {
+    return `has a malformed ${expectedDomain}-domain bindingId`;
+  }
+  switch (binding.kind) {
+    case "source":
+    case "support":
+      return null;
+    case "class":
+      return nonEmptyString(binding.classId) && binding.classId.startsWith("ir-class:v1:")
+        ? null
+        : "has a malformed class type binding";
+    case "runtime":
+      return nonEmptyString(binding.symbol) ? null : "has a malformed runtime type binding";
+    default:
+      return "has an unknown type binding kind";
+  }
+}
+
+/** Verify direct symbolic refs in every nested instruction buffer. */
+function verifySymbolicReferences(func: IrFunction, errors: IrVerifyError[]): void {
   for (const block of func.blocks) {
     for (const instr of block.instrs) {
       forEachInstrDeep(instr, (nested) => {
@@ -228,6 +287,16 @@ function verifyCallableReferences(func: IrFunction, errors: IrVerifyError[]): vo
         } else if (nested.kind === "closure.new") {
           site = "closure.new liftedFunc";
           ref = nested.liftedFunc;
+        } else if (nested.kind === "global.get" || nested.kind === "global.set") {
+          const problem = irGlobalReferenceProblem(nested.target);
+          if (problem !== null) {
+            errors.push({
+              message: `${nested.kind} target ${problem}`,
+              func: func.name,
+              block: block.id as number,
+            });
+          }
+          return;
         } else {
           return;
         }
@@ -244,7 +313,7 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
   const errors: IrVerifyError[] = [];
   const defs = new Set<IrValueId>();
 
-  verifyCallableReferences(func, errors);
+  verifySymbolicReferences(func, errors);
 
   for (const p of func.params) {
     if (defs.has(p.value)) {

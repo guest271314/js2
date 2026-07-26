@@ -6,6 +6,7 @@ export * from "./planning-identity.js";
 export * from "./program-abi.js";
 export * from "./nodes.js";
 export * from "./callable-bindings.js";
+export * from "./abi-bindings.js";
 export * from "./alloc-registry.js";
 export * from "./builder.js";
 export * from "./verify.js";

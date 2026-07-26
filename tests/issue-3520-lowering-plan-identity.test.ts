@@ -10,6 +10,7 @@ import {
   type IrImportedCallLoweringPlan,
   type IrTopLevelFunctionValueLoweringPlan,
 } from "../src/ir/ast-lowering-plans.js";
+import { irSupportGlobalRef } from "../src/ir/abi-bindings.js";
 import {
   irImportFuncRef,
   irIntrinsicFuncRef,
@@ -102,6 +103,7 @@ function functionValueFixture(): {
       target: irUnitFuncRef({ unitId: TARGET_ID, name: "target" }),
       signature: NUMBER_SIGNATURE,
       trampoline: irSupportFuncRef(OWNER_ID, "function-value-trampoline", "__fn_tramp_target_cached"),
+      cacheGlobal: irSupportGlobalRef(TARGET_ID, "function-value-cache", "__fn_closure_target"),
       cacheGlobalName: "__fn_closure_target",
     }) as IrTopLevelFunctionValueLoweringPlan;
   return {
@@ -218,7 +220,7 @@ describe("#3520 lowering-plan owner identity", () => {
     expect(functionValueIr.main.blocks.flatMap((block) => block.instrs)).toContainEqual(
       expect.objectContaining({
         kind: "global.get",
-        target: { kind: "global", name: functionValuePlan.cacheGlobalName },
+        target: functionValuePlan.cacheGlobal,
         resultType: CALLABLE_NUMBER,
       }),
     );

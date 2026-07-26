@@ -915,10 +915,10 @@ function collectGlobalStorage(
   let id: string | undefined;
   let type: IrType | undefined;
   if (instr.kind === "global.get" && instr.resultType) {
-    id = instr.target.name;
+    id = instr.target.binding.bindingId;
     type = instr.resultType;
   } else if (instr.kind === "global.set") {
-    id = instr.target.name;
+    id = instr.target.binding.bindingId;
     type = valueTypes.get(instr.value);
   }
   if (!id || !type) return;

@@ -6,7 +6,8 @@
 
 import { isExternalDeclaredClass } from "../checker/type-mapper.js";
 import { ts } from "../ts-api.js";
-import type { IrClassId, IrUnitId } from "./identity.js";
+import { irModuleGlobalBindingId, irModuleTdzGlobalBindingId } from "./abi-bindings.js";
+import type { IrBindingId, IrClassId, IrSourceId, IrUnitId } from "./identity.js";
 import type { IrClassShape } from "./nodes.js";
 import {
   IrPlanningIdentityInvariantError,
@@ -523,6 +524,13 @@ export interface IrLegacyModuleBindingIdentity {
 /** Exact binding evidence for one AST use site and its terminal owner. */
 export interface IrModuleBindingIdentity extends IrLegacyModuleBindingIdentity {
   readonly ownerUnitId: IrUnitId;
+  /** Stable across every use site of the exact source declaration. */
+  readonly globalBindingId: IrBindingId;
+  /** Separate storage identity for the declaration's TDZ state. */
+  readonly tdzBindingId: IrBindingId;
+  readonly sourceId: IrSourceId;
+  /** Top-level declaration order within the exact source. */
+  readonly declarationOrdinal: number;
 }
 
 /**
@@ -1249,11 +1257,51 @@ export function makeIrModuleBindingResolver(
   if (!identityContext) return legacy;
 
   const ownerAt = (node: ts.Node): IrUnitId => requireIrPlanningOwnerUnitId(identityContext, node);
+  const bindingIdentity = (
+    identity: IrLegacyModuleBindingIdentity,
+  ): Pick<IrModuleBindingIdentity, "globalBindingId" | "tdzBindingId" | "sourceId" | "declarationOrdinal"> => {
+    const sourceFile = identity.declaration.getSourceFile();
+    const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
+    if (identityContext.sourceFileBySourceId.get(sourceId) !== sourceFile) {
+      return planningInvariant(
+        "source-record-mismatch",
+        `module binding source ${sourceFile.fileName} does not resolve back to the exact planning SourceFile`,
+      );
+    }
+    let declarationOrdinal = 0;
+    let found = false;
+    for (const statement of sourceFile.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration === identity.declaration) {
+          found = true;
+          break;
+        }
+        declarationOrdinal++;
+      }
+      if (found) break;
+    }
+    if (!found) {
+      return planningInvariant(
+        "source-record-mismatch",
+        `module binding declaration is not in the exact top-level population of ${sourceFile.fileName}`,
+      );
+    }
+    return {
+      globalBindingId: irModuleGlobalBindingId(sourceId, declarationOrdinal),
+      tdzBindingId: irModuleTdzGlobalBindingId(sourceId, declarationOrdinal),
+      sourceId,
+      declarationOrdinal,
+    };
+  };
   const inspectDirectBinding = (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingInspection => {
     const ownerUnitId = ownerAt(node);
     const inspected = legacy.inspectDirectBinding(node, writeValue);
     return inspected.kind === "supported"
-      ? { kind: "supported", identity: { ...inspected.identity, ownerUnitId } }
+      ? {
+          kind: "supported",
+          identity: { ...inspected.identity, ownerUnitId, ...bindingIdentity(inspected.identity) },
+        }
       : inspected;
   };
   const resolve = (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingIdentity | undefined => {

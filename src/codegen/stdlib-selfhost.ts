@@ -567,14 +567,12 @@ function lowerAndRegister(ctx: CodegenContext, name: string, ir: IrFunction): nu
       throw new Error(`stdlib-selfhost: ${name} must not reference globals (got "${ref.name}")`);
     },
     resolveType(ref) {
-      // (#3256 Tier-1) named-type name-scan, mirroring makeResolver. No
-      // current stdlib source emits a symbolic type ref (the string struct
-      // flows through resolveString as a ValType), but Tier-2+ families will.
-      const idx = ctx.mod.types.findIndex((t) => "name" in t && (t as { name?: string }).name === ref.name);
-      if (idx < 0) {
-        throw new Error(`stdlib-selfhost: ${name} references unknown named type "${ref.name}"`);
-      }
-      return idx;
+      // No current stdlib source emits an explicit symbolic type ref. The
+      // string struct flows through resolveString as a ValType; future type
+      // producers must attach a ProgramAbiSession locator before widening.
+      throw new Error(
+        `stdlib-selfhost: ${name} cannot resolve symbolic type binding ${ref.binding.bindingId} (${ref.name})`,
+      );
     },
     internFuncType(type) {
       return addFuncType(ctx, type.params, type.results, type.name);

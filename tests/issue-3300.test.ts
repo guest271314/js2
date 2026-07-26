@@ -16,6 +16,7 @@ import {
 import { compile } from "../src/index.js";
 import { AllocSiteRegistry } from "../src/ir/alloc-registry.js";
 import { IrFunctionBuilder } from "../src/ir/builder.js";
+import { irSupportGlobalRef } from "../src/ir/abi-bindings.js";
 import {
   ANALYSIS_STACK_ARENA_POLICY,
   DEFAULT_ARENA_POLICY,
@@ -155,7 +156,7 @@ describe("#3300 shared allocation-policy proof", () => {
     stored.openBlock();
     const storedValue = stored.emitConst({ kind: "f64", value: 5 }, ALLOCATION_POLICY_F64);
     const object = stored.emitObjectNew(ALLOCATION_POLICY_SHAPE, [storedValue, storedValue]);
-    stored.emitGlobalSet({ kind: "global", name: "saved" }, object);
+    stored.emitGlobalSet(irSupportGlobalRef(identities.unit(100), "stored-object", "saved"), object);
     stored.terminate({ kind: "return", values: [] });
 
     const plan = planLinearMemory(

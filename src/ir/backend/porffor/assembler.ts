@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import type { ModuleLayout } from "../../../emit/resolve-layout.js";
+import { irGlobalBindingKey } from "../../abi-bindings.js";
 import {
   LINEAR_ARRAY_FORWARDING,
   LINEAR_STACK_ARENA_BYTES,
@@ -20,6 +21,7 @@ import {
   type AllocSiteId,
   type IrFunction,
   type IrFuncRef,
+  type IrGlobalBinding,
   type IrGlobalRef,
   type IrObjectShape,
   type IrTypeRef,
@@ -81,6 +83,7 @@ interface FunctionEntry {
 interface GlobalEntry {
   readonly handle: GlobalHandle;
   readonly name: string;
+  readonly binding?: IrGlobalBinding;
   definition?: PorfforGlobalDefinition;
 }
 
@@ -123,6 +126,7 @@ export class PorfforModuleAssembler
   private readonly irFuncsByDisplayName = new Map<string, FunctionEntry[]>();
   private readonly globalsByHandle = new Map<GlobalHandle, GlobalEntry>();
   private readonly globalsByName = new Map<string, GlobalEntry>();
+  private readonly globalsByBindingKey = new Map<string, GlobalEntry>();
   private readonly typesByHandle = new Map<TypeHandle, TypeEntry>();
   private readonly typesByKey = new Map<string, TypeEntry>();
   private readonly typesByName = new Map<string, TypeEntry>();
@@ -218,6 +222,20 @@ export class PorfforModuleAssembler
       throw new Error(`porffor backend does not support multi-value function '${func.name}'`);
     }
     return entry.handle;
+  }
+
+  declareIrGlobal(ref: IrGlobalRef, type: PorfforValueSlot): GlobalHandle {
+    this.assertMutable("declare structural global");
+    const key = irGlobalBindingKey(ref.binding);
+    if (this.globalsByBindingKey.has(key)) {
+      throw new Error(`porffor assembler: duplicate global binding '${ref.binding.bindingId}'`);
+    }
+    const handle = this.nextGlobalHandle++;
+    const entry: GlobalEntry = { handle, name: ref.name, binding: ref.binding };
+    this.globalsByHandle.set(handle, entry);
+    this.globalsByBindingKey.set(key, entry);
+    this.defineGlobal(handle, { type });
+    return handle;
   }
 
   declarePorfforGlobal(name: string, type: PorfforValueSlot): GlobalHandle {
@@ -434,15 +452,15 @@ export class PorfforModuleAssembler
   }
 
   resolveGlobal(ref: IrGlobalRef): number {
-    const handle = this.lookupGlobal(ref.name);
-    if (handle === undefined) throw new Error(`porffor assembler: unresolved global '${ref.name}'`);
-    return handle;
+    const entry = this.globalsByBindingKey.get(irGlobalBindingKey(ref.binding));
+    if (!entry) {
+      throw new Error(`porffor assembler: unresolved global binding '${ref.binding.bindingId}' (${ref.name})`);
+    }
+    return entry.handle;
   }
 
   resolveType(ref: IrTypeRef): number {
-    const handle = this.lookupType(ref.name);
-    if (handle === undefined) throw new Error(`porffor assembler: unresolved type '${ref.name}'`);
-    return handle;
+    throw new Error(`porffor assembler: symbolic type binding '${ref.binding.bindingId}' is unsupported`);
   }
 
   resolveString(): ValType {
