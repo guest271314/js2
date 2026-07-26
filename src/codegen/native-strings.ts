@@ -43,16 +43,38 @@ export function nativeStringType(ctx: CodegenContext): ValType {
  * a NativeString (FlatString) struct ref. Mirrors `compileNativeStringLiteral`
  * but returns an `Instr[]` for callers that build instruction streams without
  * a `FunctionContext` (e.g. throw-instr builders that return `Instr[]`).
+ *
+ * (#3673) The literal is INTERNED: materialized once in an immutable module
+ * global (array.new_fixed / struct.new are GC constant expressions) and read
+ * back with a single `global.get`. Before this, every EXECUTION of a literal
+ * site re-allocated the backing array + struct — the `__extern_get` member
+ * ladder alone allocated its comparison literal per candidate per call,
+ * making literal allocation + GC the dominant cost of a standalone
+ * compiled-acorn parse. Interning also gives all literal sites one shared
+ * identity, which makes the `__str_equals` `ref.eq` fast path effective.
+ * The 10,000-element `array.new_fixed` cap applies to constant expressions
+ * as well, so oversized literals (rare) stay inline exactly as before.
  */
+const ARRAY_NEW_FIXED_MAX = 10000;
+
 export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string, encoding?: StringEncoding): Instr[] {
   // #1588 PR-B: when `--utf8-storage` is on and the literal is proven
   // `ascii`/`utf8-guaranteed`, materialize an i8-backed `Utf8String` instead
   // of the i16 `NativeString`. When off (or the literal is `wtf16`/unknown),
   // this is byte-identical to before.
   if (ctx.utf8Storage && ctx.utf8StrTypeIdx >= 0 && (encoding === "ascii" || encoding === "utf8-guaranteed")) {
-    return utf8StringLiteralInstrs(ctx, value);
+    const inline = utf8StringLiteralInstrs(ctx, value);
+    if (utf8Encode(value).length > ARRAY_NEW_FIXED_MAX) return inline;
+    return [{ op: "global.get", index: internNativeStringLiteral(ctx, `u8:${value}`, ctx.utf8StrTypeIdx, inline) }];
   }
 
+  const inline = nativeStringLiteralInitInstrs(ctx, value);
+  if (value.length > ARRAY_NEW_FIXED_MAX) return inline;
+  return [{ op: "global.get", index: internNativeStringLiteral(ctx, `u16:${value}`, ctx.nativeStrTypeIdx, inline) }];
+}
+
+/** The raw (uninterned) init sequence for an i16 `NativeString` literal. */
+function nativeStringLiteralInitInstrs(ctx: CodegenContext, value: string): Instr[] {
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
   const strTypeIdx = ctx.nativeStrTypeIdx;
   const instrs: Instr[] = [];
@@ -71,6 +93,29 @@ export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string, en
   // struct.new $NativeString(len, off, data)
   instrs.push({ op: "struct.new", typeIdx: strTypeIdx });
   return instrs;
+}
+
+/**
+ * (#3673) Get-or-create the immutable module global holding an interned
+ * native-string literal. `key` is the encoding-prefixed literal value;
+ * `initInstrs` is the constant-expression init (built by the caller so the
+ * i8/i16 variants share this). Returns the ABSOLUTE global index
+ * (imports + defined position), the same convention `ensureHoleType` uses —
+ * late import-global additions are fixed up by the existing
+ * `fixupModuleGlobalIndices` walk over emitted bodies.
+ */
+function internNativeStringLiteral(ctx: CodegenContext, key: string, refTypeIdx: number, initInstrs: Instr[]): number {
+  const existing = ctx.nativeStrLiteralGlobals.get(key);
+  if (existing !== undefined) return existing;
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: `__strlit_${ctx.nativeStrLiteralGlobals.size}`,
+    type: { kind: "ref", typeIdx: refTypeIdx },
+    mutable: false,
+    init: initInstrs,
+  });
+  ctx.nativeStrLiteralGlobals.set(key, globalIdx);
+  return globalIdx;
 }
 
 /** #1588 PR-B: encoding annotation values the lowering sites consume. Mirrors

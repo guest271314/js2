@@ -496,28 +496,11 @@ export function compileStringLiteral(
  * Emits array.new_fixed with the WTF-16 code units, then struct.new.
  */
 export function compileNativeStringLiteral(ctx: CodegenContext, fctx: FunctionContext, value: string): ValType {
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-
-  // Push len (i32) — field 0
-  fctx.body.push({ op: "i32.const", value: value.length });
-
-  // Push off (i32) = 0 — field 1
-  fctx.body.push({ op: "i32.const", value: 0 });
-
-  // Push each code unit (i16) and create array with array.new_fixed
-  for (let i = 0; i < value.length; i++) {
-    fctx.body.push({ op: "i32.const", value: value.charCodeAt(i) });
-  }
-  fctx.body.push({
-    op: "array.new_fixed",
-    typeIdx: strDataTypeIdx,
-    length: value.length,
-  });
-
-  // struct.new $NativeString(len, off, data)
-  fctx.body.push({ op: "struct.new", typeIdx: strTypeIdx });
-
+  // (#3673) Interned: one immutable module global per distinct literal,
+  // materialized once at instantiation; the site is a single `global.get`.
+  // See `nativeStringLiteralInstrs` for the rationale + the oversized-literal
+  // inline fallback.
+  fctx.body.push(...nativeStringLiteralInstrs(ctx, value));
   return nativeStringType(ctx);
 }
 

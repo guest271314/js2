@@ -7,6 +7,12 @@ created: 2026-07-26
 updated: 2026-07-26
 loc-budget-allow:
   - src/runtime.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/native-strings.ts
+  - src/codegen/native-strings-core.ts
+  - src/codegen/native-strings-basics.ts
+  - src/codegen/native-strings-shared.ts
+  - src/codegen/context/types.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -138,6 +144,69 @@ in a `__box_number` host call (re-boxing to externref) → two more
 externrefs. The increment adds `__host_add` + `__extern_set_strict`. So
 one source line ≈ 7-9 host crossings; nothing numeric ever stays in Wasm.
 This is the mechanical explanation for 45k crossings / 330 bytes.
+
+## Standalone lane (round 2) — Wasm-native runtime now BEATS the host bridge
+
+Question driving this round: can we eliminate host calls entirely by using
+the standalone lane's Wasm-native object runtime (zero imports), while still
+importing only what a Node host must provide? Measured via an in-module
+benchmark driver (fixture + loop compiled INTO the standalone module, so the
+timed region has zero crossings; `.tmp/bench-standalone.mjs`):
+
+**Baseline standalone was 52.4ms/parse on control-flow.js — 3.5x SLOWER
+than the (optimized) host lane's 14.9ms.** Profile: `__extern_get` 37%
+(Wasm-side), `__str_equals` 19%, `__str_flatten` 12%, GC 10%. Root causes,
+all fixed on this branch:
+
+1. **String literals re-allocated per execution.** Every literal site
+   (`nativeStringLiteralInstrs` / `compileNativeStringLiteral`) emitted
+   `array.new_fixed` + `struct.new` inline — the `__extern_get` member
+   ladder allocated its comparison literal PER PROBE PER CALL. Literals are
+   now INTERNED into immutable module globals (GC constant expressions),
+   one allocation per distinct literal at instantiation. Also −24% binary
+   (1.75MB → 1.34MB).
+2. **`__str_flatten` never memoized.** A rope re-copied on every flatten.
+   `ConsString.left/right` are now mutable; flatten rewrites the cons in
+   place to `(left=flat, right="")` and takes a two-field fast path on the
+   next call.
+3. **`__str_equals` had no identity fast path** — added `ref.eq` first
+   (effective now that literals are interned).
+4. **Every wrapped string helper unconditionally CALLED `__str_flatten` per
+   string param** (`wrapBodyWithFlatten` preamble). Now guarded by an
+   inline `ref.test $NativeString` — flat params (the common case) skip
+   the call.
+5. **`__extern_get`'s member ladder** (one arm per distinct field name in
+   the program — hundreds for acorn) flattened the key per arm and called
+   `__str_equals` unconditionally. The key is now flattened once into a
+   scratch local and each arm is guarded by an inline length compare.
+
+**Result: standalone 52.4ms → 8.9ms/parse (5.9x) — now 1.7x FASTER than
+the host lane (14.9ms) on the same input.** Post-fix profile: 
+`__extern_get_idx` 29%, `__apply_closure` 21%, `__extern_get` 14%,
+`__str_equals` 8% — the next round is dispatch-ladder work (indexed-read
+and closure-apply ladders), plus hash-based member routing.
+
+**Answer to the hybrid question**: yes, and it is now the winning
+direction. The standalone object runtime, after this round, outperforms
+the host bridge — so a "standalone-core + thin host imports" artifact
+(host provides only what Wasm can't: I/O, RegExp beyond the native subset,
+Date/locale, etc.) is the right target shape. Two concrete gaps block
+promoting it to the default acorn artifact:
+  - the 17-file corpus-concat fixture TRAPS in the standalone parser
+    (pre-existing, reproduces before this branch — needs its own triage;
+    the 23-input host corpus is all-green, so this is a standalone-runtime
+    gap, not a parser gap);
+  - standalone string output/marshalling back to JS needs a thin
+    `wasm:js-string`-style seam so a Node host can call `parse` with a JS
+    string without compiling the input into the module.
+
+Verification for this round: all four standalone acorn canaries green
+(parse / parseExpressionAt / tokenizer / function-body), 94
+standalone/native-string test suites — zero new failures (9 pre-existing,
+each verified identical on the committed base: issue-1599 JSON-refuse ×3,
+issue-2865 async-await ×2, issue-2879 floor ×2, issue-681 iterators ×2),
+host corpus 23/23 exact, host bench unchanged, 1712 pins green, tsc +
+biome clean.
 
 ## Remaining follow-up (out of scope here, needs codegen)
 

@@ -228,6 +228,18 @@ export function emitStrCompareHelpers(shared: NativeStrShared): void {
 
     // locals: len(2), i(3), aData(4), bData(5), aOff(6), bOff(7)
     const body: Instr[] = [
+      // (#3673) identity fast path: same ref → equal. Literal interning gives
+      // every literal site one shared struct, so comparisons against the same
+      // interned literal (property-name probes, keyword checks) exit here
+      // without touching the character data.
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 1 },
+      { op: "ref.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
       // len = a.len
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },

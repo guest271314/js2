@@ -2110,6 +2110,16 @@ export interface CodegenContext {
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
   /**
+   * (#3673) Interned native-string literal globals: literal value (prefixed by
+   * encoding kind) → module-global index of an immutable `(ref $NativeString)`
+   * / `(ref $Utf8String)` global whose constant init materializes the literal
+   * ONCE at instantiation. Before this, every execution of a literal site
+   * re-allocated the backing array + struct — measured as the dominant
+   * allocation source of a standalone compiled-acorn parse (the `__extern_get`
+   * member ladder allocates its comparison literal per probe per call).
+   */
+  nativeStrLiteralGlobals: Map<string, number>;
+  /**
    * (#3469) Standalone host-free `console.log`/`print` output sink. On
    * `--target standalone` `console.log` has no host import and no `fd_write`
    * (unlike WASI), so it lowered to a pure no-op (#3436) — which made the

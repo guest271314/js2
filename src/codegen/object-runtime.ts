@@ -6016,17 +6016,38 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     return receiverArms;
   };
 
-  const stringKeyArms: Instr[] = [];
+  // (#3673) The key is flattened ONCE into a scratch local, and every arm is
+  // guarded by an inline length compare before the `__str_equals` call. The
+  // old per-arm `flatten(key)` + unconditional equals call made this linear
+  // ladder (one arm per distinct field name in the program — hundreds for
+  // acorn) the dominant cost of a standalone dynamic property read.
+  const fkeyLocal = 2 + fn.locals.length;
+  fn.locals.push({ name: "__fkey_ladder", type: { kind: "ref_null", typeIdx: ctx.nativeStrTypeIdx } });
+  const stringKeyArms: Instr[] = [
+    { op: "local.get", index: 1 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+    { op: "call", funcIdx: flattenIdx },
+    { op: "local.set", index: fkeyLocal },
+  ];
   for (const [fieldName, entries] of byField) {
     const receiverArms = buildReceiverArms(entries);
     stringKeyArms.push(
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
-      { op: "call", funcIdx: flattenIdx },
-      ...nativeStringLiteralInstrs(ctx, fieldName),
-      { op: "call", funcIdx: equalsIdx },
-      { op: "if", blockType: { kind: "empty" }, then: receiverArms },
+      { op: "local.get", index: fkeyLocal },
+      { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 },
+      { op: "i32.const", value: fieldName.length },
+      { op: "i32.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: fkeyLocal },
+          { op: "ref.as_non_null" },
+          ...nativeStringLiteralInstrs(ctx, fieldName),
+          { op: "call", funcIdx: equalsIdx },
+          { op: "if", blockType: { kind: "empty" }, then: receiverArms },
+        ],
+      },
     );
   }
   const numericKeyArms: Instr[] = [];

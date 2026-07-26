@@ -731,8 +731,13 @@ export function registerNativeStringTypes(ctx: CodegenContext): void {
     name: "ConsString",
     fields: [
       { name: "len", type: { kind: "i32" }, mutable: false },
-      { name: "left", type: { kind: "ref", typeIdx: ctx.anyStrTypeIdx }, mutable: false },
-      { name: "right", type: { kind: "ref", typeIdx: ctx.anyStrTypeIdx }, mutable: false },
+      // (#3673) left/right are mutable so `__str_flatten` can memoize: after
+      // flattening a rope it rewrites the cons in place to (left=flat result,
+      // right=""), turning every later flatten of the same rope into a two-
+      // field fast path instead of an O(len) re-copy. `len` stays immutable —
+      // the rewrite preserves the total length.
+      { name: "left", type: { kind: "ref", typeIdx: ctx.anyStrTypeIdx }, mutable: true },
+      { name: "right", type: { kind: "ref", typeIdx: ctx.anyStrTypeIdx }, mutable: true },
     ],
     superTypeIdx: ctx.anyStrTypeIdx,
   });
