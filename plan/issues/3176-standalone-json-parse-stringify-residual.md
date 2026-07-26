@@ -156,19 +156,18 @@ and replacer/space edges likely remain, but the count needs refreshing.
 ## 2026-07-26 — authoritative residual + rawJSON stringify integration
 
 Re-measured all 165 `built-ins/JSON/**` records on pristine
-`origin/main@932e042a20d45ce517668d6a62ad03e9df53fb4` through the literal
+`origin/main@afe92ffd291651bd43c599fc027435a1a5bbe482` through the literal
 test262.fyi original-harness assembler under the authoritative Node 25 /
 Unicode 17 runtime:
 
 - standalone: **73/165**
-- gc/host control: **117/165**
-- host-pass / standalone-fail gap: **45 files**
+- gc/host control: **116/165**
+- host-pass / standalone-fail gap: **44 files**
 
 This replaces the stale 130/165 standalone headline: that number came from an
 older, inflated lane rather than the current de-inflated original-harness
 contract. The current gap is dominated by stringify (27 files), followed by
-parse (9), rawJSON (4), isRawJSON (3), JSON descriptors (1), and
-`Symbol.toStringTag` (1).
+parse (9), rawJSON (4), isRawJSON (3), and `Symbol.toStringTag` (1).
 
 ### Shipped slice
 
@@ -202,9 +201,9 @@ preserving the exact stack order and reusing the same runtime helpers.
   - `built-ins/JSON/rawJSON/basic.js`
   - `built-ins/JSON/stringify/replacer-array-empty.js`
 - standalone PASS → FAIL: **0**
-- gc/host: **117/165 → 117/165**, with **0** file-level verdict changes
+- gc/host: **116/165 → 116/165**, with **0** file-level verdict changes
 
-The honest residual is therefore 42 host-pass / standalone-fail files. Keep
+The honest residual is therefore 41 host-pass / standalone-fail files. Keep
 #3176 `ready`: this PR completes one coherent slice, not the umbrella issue.
 
 ### Test results
