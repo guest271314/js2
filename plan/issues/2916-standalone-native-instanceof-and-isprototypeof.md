@@ -1,9 +1,8 @@
 ---
 id: 2916
 title: "[SUBSTRATE][ARCH] Standalone native instanceof operator + isPrototypeOf residual (~31 leaky-PASS conversions)"
-status: in-progress
+status: ready
 updated: 2026-07-17
-assignee: ttraenkler/sendev-instanceof
 sprint: current
 created: 2026-07-01
 priority: medium

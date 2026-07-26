@@ -342,8 +342,25 @@ export function compileClosureCall(
       const castType: ValType = { kind: "ref_null", typeIdx: selfStructTypeIdx };
       const castLocal = allocLocal(fctx, `__closure_cast_${fctx.locals.length}`, castType);
       fctx.body.push({ op: "local.get", index: localIdx });
-      // struct.get $refCell $value — unwrap to underlying externref/ref
+      // struct.get $refCell $value — unwrap to underlying value.
       fctx.body.push({ op: "struct.get", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 });
+      // (#3547) The #3024 funcref-cell `struct.new` stopgap that used to live
+      // here (rebuild the self carrier when the cell field-0 was a bare
+      // funcref) is REMOVED on two grounds, both load-bearing:
+      //   1. The one known PRODUCER of funcref-typed "cells" is gone: those
+      //      cells were never real ref cells — the variables.ts declaration
+      //      path retyped the capture's cell local to the closure STRUCT and
+      //      re-registered that struct as `boxed.refCellTypeIdx` (field 0 =
+      //      funcref). #3534/#3505 fixed the retype at the source (the
+      //      declaration now writes THROUGH the cell and never retypes it).
+      //   2. A zero-producer probe in `getOrRegisterRefCellType` (env-gated,
+      //      see #3547's issue file for the recipe) confirmed NO ref cell is
+      //      minted over funcref or any closure-struct carrier on the
+      //      post-#3505 tree — across the closure corpus, dedicated
+      //      mutual-recursion shapes, all matcher-invoking files, and the full
+      //      `Function/prototype/toString` + class-elements test262 dirs.
+      // Cells storing closures are externref cells; the externref arm below
+      // unwraps and guard-casts them to the lifted self carrier.
       if (boxed.valType.kind === "externref") {
         fctx.body.push({ op: "any.convert_extern" });
       }

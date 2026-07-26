@@ -87,6 +87,27 @@ describe("#1712 — host-callable fallback for non-closure-shaped callees", () =
 });
 
 describe("#1712 — standalone first-class Object.hasOwn", () => {
+  it("invokes a returned nested closure through an erased dynamic callable", async () => {
+    const result = await compile(
+      `
+        /** @returns {*} */
+        function makeDynamicFunction() {
+          return function (a, b) { return (a + b) | 0; };
+        }
+        export function probe() {
+          var fn = makeDynamicFunction();
+          return fn(1, 2) | 0;
+        }
+      `,
+      { fileName: "dynamic-function-like-call.mjs", target: "standalone", skipSemanticDiagnostics: true },
+    );
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    const module = await WebAssembly.compile(result.binary);
+    expect(WebAssembly.Module.imports(module)).toEqual([]);
+    const instance = await WebAssembly.instantiate(module, {});
+    expect((instance.exports.probe as () => number)()).toBe(3);
+  });
+
   it("reads a computed key from a closed standalone struct", async () => {
     const result = await compile(
       `function read(o, k) { return o[k]; } export function probe() { var o = { ecmaVersion: 2025 }; return (read(o, "ecmaVersion") - 2009) | 0; }`,

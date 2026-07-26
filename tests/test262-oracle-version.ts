@@ -31,7 +31,7 @@
  * version or a date. Two runs with the same ORACLE_VERSION are guaranteed to
  * apply identical verdict logic, so their rows are directly comparable.
  */
-export const ORACLE_VERSION = 9;
+export const ORACLE_VERSION = 11;
 
 /**
  * Append-only log of what each oracle version means. Newest last.
@@ -205,6 +205,54 @@ export const ORACLE_VERSION_HISTORY: ReadonlyArray<{ version: number; note: stri
       "that loader policy, including conventional absent targets which evaluation " +
       "must never reach. Rows whose missing fixtures manufactured passes are " +
       "intentionally reclassified and require an ORACLE_REBASE baseline refresh.",
+  },
+  {
+    version: 10,
+    note:
+      "#3468 F1 standalone assert-harness de-inflation (stakeholder-ruled " +
+      "2026-07-23). The standalone lane's test262 assert harness was a vacuous " +
+      "no-op: function objects could not carry own properties, so " +
+      "assert.sameValue/assert.throws resolved to undefined and every " +
+      "assertion silently passed. F1 (closure-own-property carrier widening + " +
+      "the top-level F.<name>= keep-arm) makes assertions FIRE — what a " +
+      "standalone 'pass' MEANS changes: measured on merge_group run " +
+      "30043224652, 3,637 vacuous passes become honest fails (3,545 " +
+      "assertion-time throws, 97.5%), 18 improvements, honest host-free floor " +
+      "27,557/48,088. Like v4/#3285 these flips compile INTO the wasm " +
+      "(wasm-CHANGE regressions), so the re-baseline lands via the bump + a " +
+      "#3303 regressions-allow ceiling declared in the #3468 issue file. " +
+      "ALSO in v10 (label-only, same bump — the exact v4 pattern): " +
+      "classifyError now bins `^Test262Error`-prefixed messages as " +
+      "assertion_fail BEFORE the trap regexes — newly-firing assertion text " +
+      "quoting the test's own words ('following shrink (out of bounds) " +
+      "Expected …') was matching /out of bounds/ and false-positive-tripping " +
+      "the #3189 trap ratchet (6 false NEW-oob rows on the F1 run; the same " +
+      "Temporal/Duration/…/result-out-of-range-1.js file the v4 fix caught " +
+      "for the 'returned N' shape). No pass/fail flips from the relabel; " +
+      "promote-baseline re-seeds host+standalone baselines at v10 on merge.",
+  },
+  {
+    version: 11,
+    note:
+      "#3595 — the #3189 uncatchable-trap ratchet now treats a `compile_error` " +
+      "baseline as BASELINE-UNKNOWN, alongside the `compile_timeout`, " +
+      "missing-row and identical-`wasm_sha` exclusions it already had. " +
+      "Rationale is the one already written in diff-test262.ts for " +
+      "compile_timeout: an invalid-Wasm module never instantiated, so " +
+      "`__module_init` never ran and never had the opportunity to trap — a " +
+      "later trap on that file is *unknown*, not *introduced*. Measured " +
+      "evidence (#3593): the minimized repro for " +
+      "Iterator/zip/iterables-iteration.js traps IDENTICALLY with and without " +
+      "the PR (#3563) that made the file compile, proving the trap pre-existed " +
+      "the change that merely let the module reach it. Without this, any PR " +
+      "that fixes a compile error is charged for whatever latent trap the " +
+      "now-reachable code already contained — the ratchet punishes exactly the " +
+      "CE-elimination work it should reward. This is a VERDICT-LOGIC change " +
+      "(which transitions count as trap growth), hence the bump; no " +
+      "pass/fail/classification flips, so promote-baseline simply re-seeds at " +
+      "v11 on merge. A genuine pass→trap (or fail→trap) transition still FAILS " +
+      "the ratchet — only baselines that never produced a running module are " +
+      "excluded.",
   },
 ];
 

@@ -158,6 +158,11 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   asyncIterator: 12,
   dispose: 13,
   asyncDispose: 14,
+  // (#3573) `matchAll` drifted out of this mirror of the literals.ts table
+  // (id 15 there) — its absence made `hasNativeBuiltinConstantHandler` refuse
+  // `Symbol.matchAll` value reads under --target standalone even though the
+  // downstream constant emitter supports it. Keep in sync with literals.ts.
+  matchAll: 15,
 };
 
 function getWellKnownSymbolId(name: string): number | undefined {

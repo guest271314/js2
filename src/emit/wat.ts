@@ -414,6 +414,8 @@ function formatInstr(instr: Instr, _depth: number): string {
       return `br ${instr.depth}`;
     case "br_if":
       return `br_if ${instr.depth}`;
+    case "br_table":
+      return `br_table ${[...instr.targets, instr.defaultDepth].join(" ")}`;
     case "call":
       return `call ${resolveFuncIdx(instr.funcIdx)}`;
     case "return_call":

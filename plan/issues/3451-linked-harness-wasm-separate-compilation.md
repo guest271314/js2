@@ -2,7 +2,7 @@
 id: 3451
 title: "arch(#1046/#33/#34): linked harness .wasm as the driving use case for separate compilation"
 status: backlog
-sprint: current
+sprint: Backlog
 created: 2026-07-19
 updated: 2026-07-19
 priority: low

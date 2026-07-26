@@ -150,6 +150,41 @@ function emitExternrefAssignDestructureGuard(ctx: CodegenContext, fctx: Function
   }
 }
 
+/**
+ * (#3546) After a local write to a `__module_init` MODULE-BINDING shadow local
+ * (recorded by the top-level closure declaration in
+ * `fctx.moduleBindingShadowLocals`), re-sync the `$__mod_<name>` global so the
+ * reassignment is visible to every OTHER function's read/call (which resolve
+ * through the global, not the shadow). Pre-fix, `let f = () => 1; f = () => 2;`
+ * at module top level updated only the shadow — cross-function `f()` silently
+ * kept the FIRST closure.
+ *
+ * Exact name→index match keeps this inert for genuine function-locals and
+ * block-scoped shadows (they use different local slots). Expects the assigned
+ * value to be ON THE STACK (post-`local.tee`); net stack effect is zero.
+ */
+function emitModuleShadowGlobalSync(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  name: string,
+  localIdx: number,
+  stackType: ValType,
+): void {
+  if (fctx.moduleBindingShadowLocals?.get(name) !== localIdx) return;
+  const moduleIdx = ctx.moduleGlobals.get(name);
+  if (moduleIdx === undefined) return;
+  const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)];
+  const globalType = globalDef?.type;
+  fctx.body.push({ op: "local.get", index: localIdx });
+  if (globalType?.kind === "externref" && (stackType.kind === "ref" || stackType.kind === "ref_null")) {
+    // Box on store — the #3534 invariant: the global stays externref.
+    fctx.body.push({ op: "extern.convert_any" });
+  } else if (globalType && !valTypesMatch(stackType, globalType)) {
+    coerceType(ctx, fctx, stackType, globalType);
+  }
+  fctx.body.push({ op: "global.set", index: moduleIdx });
+}
+
 export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): InnerResult {
   // Unwrap parenthesized LHS: (x) = 1 → x = 1
   let lhs = expr.left;
@@ -444,14 +479,17 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
           updateLocalType(fctx, localIdx, resultType);
           fctx.body.push({ op: "local.tee", index: localIdx });
           emitMappedArgParamSync(ctx, fctx, localIdx, resultType);
+          emitModuleShadowGlobalSync(ctx, fctx, name, localIdx, resultType);
           return resultType;
         }
         fctx.body.push({ op: "local.tee", index: localIdx });
         emitMappedArgParamSync(ctx, fctx, localIdx, effectiveLocalType);
+        emitModuleShadowGlobalSync(ctx, fctx, name, localIdx, effectiveLocalType);
         return effectiveLocalType;
       }
       fctx.body.push({ op: "local.tee", index: localIdx });
       emitMappedArgParamSync(ctx, fctx, localIdx, resultType);
+      emitModuleShadowGlobalSync(ctx, fctx, name, localIdx, resultType);
       return resultType;
     }
     // (#3039) Boxed captured global — write THROUGH the ref cell (struct.set

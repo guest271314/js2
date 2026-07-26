@@ -334,8 +334,27 @@ export function getTaViewName(ctx: CodegenContext, typeIdx: number): string | un
  * (#3054 D) Canonical ordered list of TypedArray element kinds a first-class
  * `$__ta_ctor` value can name. The array INDEX is the runtime `kind` stored in the
  * struct; every dynamic-construct / `BYTES_PER_ELEMENT` dispatch iterates this list
- * so the ordering is the single source of truth. BigInt64/Float16 views are omitted
+ * so the ordering is the single source of truth. Float16 views are omitted
  * (unsupported elsewhere in the standalone lane).
+ *
+ * (#3613) The two BigInt views are APPENDED at kinds 9/10 — never inserted — so
+ * every already-emitted `kind` constant (baked into the `$__ta_ctor` singleton
+ * globals and into the `if`-chain arms of the decode/encode/BYTES dispatches)
+ * keeps its value. Before this they were absent, so a bare `BigInt64Array` /
+ * `BigUint64Array` in VALUE position fell through `emitTaCtorValue` to the
+ * `ref.null.extern` unimplemented-global default in identifiers.ts — i.e.
+ * `[BigInt64Array, BigUint64Array]` was `[null, null]` and the test262
+ * `testWithBigIntTypedArrayConstructors` harness's `new TA(...)` produced null
+ * for every BigInt row. The host/gc lane had already been fixed (#3087 routes
+ * the same two names through `__extern_get(globalThis, name)`); only the
+ * host-free lane was left behind.
+ *
+ * Element VALUES in a dynamically-constructed BigInt view are still the f64
+ * carrier the rest of the dyn-view substrate uses, NOT i64-branded BigInts —
+ * that representation split is #1349/#2401(b) and deliberately out of scope
+ * here. This entry buys the STRUCTURE (non-null identity-stable ctor, correct
+ * 8-byte element width, working length/byteLength/MOP), which is what the
+ * harness rows actually gate on.
  */
 export const TA_CTOR_KINDS: readonly string[] = [
   "Int8Array",
@@ -347,10 +366,12 @@ export const TA_CTOR_KINDS: readonly string[] = [
   "Uint32Array",
   "Float32Array",
   "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
 ];
 
 /** (#3054 D) Element byte width per `TA_CTOR_KINDS` entry (BYTES_PER_ELEMENT). */
-export const TA_CTOR_BYTES: readonly number[] = [1, 1, 1, 2, 2, 4, 4, 4, 8];
+export const TA_CTOR_BYTES: readonly number[] = [1, 1, 1, 2, 2, 4, 4, 4, 8, 8, 8];
 
 /** (#3054 D) The `kind` index for a TS TypedArray name, or -1 if not a first-class TA ctor. */
 export function taCtorKindOf(name: string): number {

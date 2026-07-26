@@ -2,7 +2,7 @@
 id: 3487
 title: "String.prototype.valueOf non-generic receiver traps illegal_cast (uncatchable) instead of throwing catchable TypeError"
 status: blocked
-sprint: current
+sprint: Backlog
 priority: high
 horizon: l
 feasibility: hard

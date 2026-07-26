@@ -1,7 +1,7 @@
 ---
 id: 3488
 title: "TypedArray compiler trap-gaps (.set / bit-precision / invoked-as-func) — unmasked by #3441, tighten the #3189 ratchet back"
-status: in-progress
+status: ready
 created: 2026-07-20
 priority: medium
 task_type: bug

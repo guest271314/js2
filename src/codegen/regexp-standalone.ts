@@ -752,7 +752,7 @@ export function escapeRegExpPattern(pattern: string): string {
   return out;
 }
 
-function ensureStandaloneRegExpStruct(ctx: CodegenContext): number {
+export function ensureStandaloneRegExpStruct(ctx: CodegenContext): number {
   const existing = ctx.structMap.get(STANDALONE_REGEXP_STRUCT_NAME);
   if (existing !== undefined) return existing;
 

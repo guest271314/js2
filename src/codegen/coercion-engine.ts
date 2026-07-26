@@ -40,7 +40,7 @@ import { boxToAny } from "./value-tags.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
-import { ensureAnyToStringHelper } from "./native-strings.js";
+import { ensureAnyToStringHelper, ensureStrTruthyHelper } from "./native-strings.js";
 import { getBoolToStringEmitter, getNativeStringRefFromExternrefEmitter } from "./string-emitter-registry.js";
 import {
   compileExpression,
@@ -422,22 +422,17 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
     }
     // Native string ref — empty string is falsy (check len > 0 after flatten).
     if (valType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
-      // A nullable native string uses null as the in-band undefined carrier.
-      // Calling __str_flatten on that null traps before ToBoolean can return
-      // false (Acorn's TokenType.keyword is the canonical case: most token
-      // types store undefined, keyword tokens store a string). Route nullable
-      // strings through the canonical dynamic truthiness helper, which handles
-      // null/undefined and empty/non-empty native strings without dereference.
+      // (#3548) NULLABLE string: `__str_flatten(null)` traps — a nullable
+      // string param (an under-applied call site's `undefined`, now inferred
+      // `ref_null` by inferParamTypeFromCallSites) must be FALSY when null.
+      // Route through the null-guarded `__str_truthy` helper. The non-null
+      // `ref` arm below keeps its historical flatten path byte-identical.
       if (kind === "ref_null") {
-        addUnionImports(ctx);
-        const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
-        if (isTruthyIdx !== undefined) {
-          const finalTruthyIdx = ctx.funcMap.get("__is_truthy") ?? isTruthyIdx;
-          sink.push({ op: "extern.convert_any" }, { op: "call", funcIdx: finalTruthyIdx });
+        const truthyIdx = ensureStrTruthyHelper(ctx);
+        if (truthyIdx !== undefined) {
+          sink.push({ op: "call", funcIdx: truthyIdx });
           return sink;
         }
-        sink.push({ op: "ref.is_null" }, { op: "i32.eqz" });
-        return sink;
       }
       const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
       if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {

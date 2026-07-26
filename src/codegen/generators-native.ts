@@ -251,6 +251,26 @@ interface NativeGeneratorState {
 
 interface NativeGeneratorPlan {
   states: NativeGeneratorState[];
+  /**
+   * (#2864 D4) Id of the state that COMPLETES the generator — the state whose
+   * terminator is the final `done`, or the dedicated empty placeholder minted
+   * for it when the fallthrough carries trailing statements.
+   *
+   * This is **not** `states.length - 1`. Every structural lowering
+   * (`for`/`while`/`do`/`if`, and the #3050 try-region) reserves its exit/join
+   * state BEFORE lowering the nested body, so a generator body that ENDS in one
+   * of those leaves the fallthrough cursor at a LOWER id than the last reserved
+   * state — and the last reserved state is then a LIVE yield successor. The
+   * pre-D4 `states.length - 1` therefore aliased "generator completed" onto a
+   * real suspension point, which made `buildNativeGeneratorDispatch`'s
+   * `suspended = state != START && state != doneState` test report DONE for a
+   * genuinely suspended generator: `.throw(e)` / `.return(v)` took the
+   * §27.5.3.4 already-completed arm and never resumed, so an enclosing `catch`
+   * across the yield was skipped and the error escaped raw. Measured on
+   * standalone + wasi for `try { yield … } catch {}` as the whole body, the
+   * same inside `for`/`while`, and nested loops under one try.
+   */
+  doneState: number;
   spills: string[];
   /**
    * (#2864 F1b) The wasm ValType for each spilled local, keyed by name. A local
@@ -801,6 +821,29 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       // could not be routed into the region's catch/finally. Bail to the host
       // path (legacy replay-only regions keep today's behavior).
       if (unwind.some((e) => e.kind !== "replay")) return fail();
+      // (#2864 D2) A yield-star terminator SELF-SUSPENDS (its yield arm re-enters
+      // the SAME state on the next resume), so it must live in a DEDICATED state:
+      //  (a) empty prelude / no resume bindings — otherwise the prelude statements
+      //      re-ran and the `sent`-copy re-executed (clobbering the binding with
+      //      later `.next(v)` values) on EVERY mid-delegation resume;
+      //  (b) never state 0 — the `.return()`/`.throw()` dispatch reads state 0 as
+      //      NOT-STARTED (§27.5.3.4/§27.5.3.6), so a first-statement `yield*`
+      //      suspension was misclassified and completed/threw WITHOUT closing the
+      //      delegate (and without running the outer's own finalizers);
+      //  (c) always carrying an abrupt block — recomputed below from the yield*
+      //      position's replay chain (empty outside any try/finally) — so a
+      //      mid-delegation `.return()`/`.throw()` resume is handled instead of
+      //      silently ignored; the block hosts the D2 delegate-close forwarding.
+      // Split only when needed so already-dedicated states keep their ids.
+      if (curStatements.length > 0 || curResumeBindings.length > 0 || curId === 0) {
+        const starId = reserveState();
+        finishState(curId, { kind: "jump", next: starId });
+        resetCursor(starId);
+      }
+      curAbrupt = {
+        finalizers: unwind.map((e) => [...(e as { statements: readonly ts.Statement[] }).statements]).reverse(),
+      };
+      curUnwind = undefined;
       const subject = yieldExpr.expression;
       const innerName = subject ? nativeGeneratorDelegationName(subject) : undefined;
       if (subject && innerName === undefined) {
@@ -1364,15 +1407,24 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   // (#3050) When the final fallthrough state carries trailing statements
   // (`… yield x; trailing();`), it doubles as BOTH the last executable state
-  // and the completed-generator dispatch target (doneState = last id) — so
-  // every post-completion `.next()` re-dispatched into it and RE-RAN the
-  // trailing prelude (observable via a `unreachable += 1` after the last
-  // yield, GeneratorPrototype/throw/try-*-following-*). Mint a DEDICATED empty
-  // done state in that case; generators whose final state is already empty
-  // keep their exact state graph (byte-identical).
-  if (states[curId]!.statements.length > 0) {
-    reserveState(); // empty placeholder — its default terminator IS `done`
-  }
+  // and the completed-generator dispatch target — so every post-completion
+  // `.next()` re-dispatched into it and RE-RAN the trailing prelude
+  // (observable via a `unreachable += 1` after the last yield,
+  // GeneratorPrototype/throw/try-*-following-*). Mint a DEDICATED empty done
+  // state in that case; generators whose final state is already empty keep
+  // their exact state graph (byte-identical).
+  //
+  // (#2864 D4) `doneState` is the id of the state that COMPLETES the generator,
+  // which is the final fallthrough cursor (or the placeholder just minted for
+  // it) — NOT `states.length - 1`. Those coincide only for a straight-line
+  // body: every structural lowering (`for`/`while`/`do`/`if`/try-region)
+  // reserves its exit/join state BEFORE the nested body's states, so a body
+  // ENDING in one leaves the fallthrough at a LOWER id than the last reserved
+  // state. See the doneState note in `NativeGeneratorPlan`.
+  const doneState =
+    states[curId]!.statements.length > 0
+      ? reserveState() // empty placeholder — its default terminator IS `done`
+      : curId;
 
   // (#3050) Apply the runtime-throw route stamps now that every state object is
   // final (finishState rebuilds them, so stamping placeholders would be lost).
@@ -1455,6 +1507,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
 
   return {
     states,
+    doneState,
     spills,
     spillTypes,
     elemValType,
@@ -2313,10 +2366,38 @@ export function registerNativeGenerator(
     // (#2864 F2) `gen.throw(e)` payload — externref regardless of carrier.
     { name: "error", type: { kind: "externref" }, mutable: true },
   ];
-  for (let i = 0; i < paramTypes.length; i++) {
+  // (#3620) A BINDING-PATTERN parameter's state field must be typed at the
+  // value's actual wasm-boundary representation (`externref`), NOT at the TS
+  // type the checker infers for the pattern.
+  //
+  // Why: for `*m([x] = [1])` the checker infers the parameter as the TUPLE
+  // `[number]`, so `resolveWasmType` mints a `$__tuple_N` struct and the caller
+  // passed one — until the parameter gained a DEFAULT. A defaulted parameter is
+  // widened to `externref` at the wasm boundary (the callee must be able to see
+  // "argument absent"), which removes the call site's tuple conversion, and the
+  // in-callee default materialization emits the array literal in its natural
+  // `$__vec_f64` shape. The state field still claimed `$__tuple_N`, so the
+  // factory's param→field coercion emitted an unconditional
+  // `ref.cast (ref null $__tuple_N)` over a value that is now never a tuple —
+  // an UNCATCHABLE `illegal cast` that aborted the module.
+  //
+  // This is the same defect shape as #3610: a `ref.cast` justified by a static
+  // type that no longer describes the runtime value. The fix is the same in
+  // spirit — do not assert what is not guaranteed. The resume prelude's
+  // destructuring reader already dispatches dynamically over
+  // tuple-struct / vec / generic-iterable receivers (`ref.test` cascade), so an
+  // `externref` field is exactly what it is built to consume.
+  //
+  // Keyed off the synthetic `__genarg{i}` name minted above for binding-pattern
+  // params (#2920) — the one place that already distinguishes them, so the
+  // name/type arrays cannot drift apart.
+  const stateParamTypes = paramTypes.map((t, i) =>
+    (paramNames[i] ?? "").startsWith("__genarg") ? ({ kind: "externref" } as ValType) : t,
+  );
+  for (let i = 0; i < stateParamTypes.length; i++) {
     stateFields.push({
       name: `param_${paramNames[i] ?? i}`,
-      type: paramTypes[i]!,
+      type: stateParamTypes[i]!,
       mutable: false,
     });
   }
@@ -2459,7 +2540,11 @@ export function registerNativeGenerator(
     stateTypeIdx,
     resultTypeIdx,
     paramNames,
-    paramTypes,
+    // (#3620) The STATE-FIELD types, not the caller's declared param types —
+    // the resume prelude allocates its `param_*` locals from this array and
+    // must agree with the field it `struct.get`s. Identical to `paramTypes`
+    // except for binding-pattern params (widened to `externref` above).
+    paramTypes: stateParamTypes,
     paramFieldOffset: PARAM_FIELD_OFFSET,
     sentFieldIdx: SENT_FIELD,
     modeFieldIdx: MODE_FIELD,
@@ -2474,7 +2559,10 @@ export function registerNativeGenerator(
     undefWidenedPatternBindings:
       plan.undefWidenedPatternBindings.size > 0 ? plan.undefWidenedPatternBindings : undefined,
     yieldCount,
-    doneState: plan.states.length - 1, // the final `done` state id
+    // (#2864 D4) The state that COMPLETES the generator, taken from the plan —
+    // NOT `states.length - 1`, which aliases onto a live yield successor for any
+    // body ending in a loop / if / try-region (see `NativeGeneratorPlan.doneState`).
+    doneState: plan.doneState,
     elemValType,
     delegationSlots: delegationSlots.length > 0 ? delegationSlots : undefined,
     vecDelegationSlots: vecDelegationSlots.length > 0 ? vecDelegationSlots : undefined,
@@ -2875,6 +2963,100 @@ function compileState(
     const abruptBody: Instr[] = [];
     const savedAbrupt = fctx.body;
     fctx.body = abruptBody;
+    // (#2864 D2) Delegation abrupt forwarding — iterator close through `yield*`
+    // (§27.5.3.7 steps 7.b/7.c). A `.return(v)` / `.throw(e)` on the OUTER while
+    // suspended in a native-gen yield-star state must forward the abrupt to the
+    // INNER first (drive its resume once with the SAME mode + payloads) so the
+    // inner's `finally` blocks run, then continue the outer's own abrupt path
+    // (its finalizers + completion) exactly as before. Gated on the state's
+    // terminator being a native-gen delegation AND the slot being non-null
+    // (mid-delegation) — byte-inert for non-delegating generators, and inert at
+    // runtime for an abrupt resume at the plain-yield suspension that precedes
+    // the delegation (slot still null). A mode-2 inner re-throws after its
+    // finalizers (F2), and a `finally` that itself throws surfaces a NEW error —
+    // both are caught here, stored as the outer's error, and upgrade the outer
+    // to the throw path (a return completion whose close throws becomes a throw
+    // completion, per spec).
+    if (state.terminator.kind === "yield-star" && state.terminator.delegationKind === "native-gen") {
+      const closeSlot = info.delegationSlots?.[state.terminator.siteIndex];
+      const closeInner = closeSlot ? ctx.nativeGenerators.get(closeSlot.innerName) : undefined;
+      if (closeSlot && closeInner) {
+        const closeResumeIdx = ensureNativeGeneratorResumeFunction(ctx, closeInner);
+        const closeDelegLocal = allocLocal(fctx, `__gen_close_deleg_${fctx.locals.length}`, {
+          kind: "ref",
+          typeIdx: closeInner.stateTypeIdx,
+        });
+        const closeErrLocal = allocLocal(fctx, `__gen_close_err_${fctx.locals.length}`, { kind: "externref" });
+        // The inner is f64-gated (delegation admission), so its `abrupt` field is
+        // f64: copy the outer's `.return(v)` value when the outer's carrier is
+        // also f64; a boxed-any outer's externref abrupt has no unbox seam here —
+        // deliver undefined (the value is unobservable: the inner result is
+        // discarded and the outer completes with its OWN abrupt field).
+        const closeAbruptPayload: Instr[] =
+          genCarrierFieldType(info.elemValType).kind === "f64"
+            ? [
+                { op: "local.get", index: selfLocal },
+                { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx },
+              ]
+            : [{ op: "f64.const", value: NaN }];
+        const closeCatch: Instr[] = [
+          { op: "local.set", index: closeErrLocal },
+          { op: "local.get", index: selfLocal },
+          { op: "local.get", index: closeErrLocal },
+          { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+          ...setModeInstrs(info, selfLocal, MODE_THROW),
+        ];
+        abruptBody.push(
+          { op: "local.get", index: selfLocal },
+          { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+          { op: "ref.is_null" },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: selfLocal },
+              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+              { op: "ref.as_non_null" },
+              { op: "local.set", index: closeDelegLocal },
+              // inner.mode = outer.mode; inner.abrupt = payload; inner.error = outer.error
+              { op: "local.get", index: closeDelegLocal },
+              { op: "local.get", index: selfLocal },
+              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.modeFieldIdx },
+              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.modeFieldIdx },
+              { op: "local.get", index: closeDelegLocal },
+              ...closeAbruptPayload,
+              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: closeInner.abruptFieldIdx },
+              { op: "local.get", index: closeDelegLocal },
+              { op: "local.get", index: selfLocal },
+              { op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: ERROR_FIELD },
+              { op: "struct.set", typeIdx: closeInner.stateTypeIdx, fieldIdx: ERROR_FIELD },
+              // Drive the inner ONCE (result discarded); catch its mode-2
+              // re-throw / a finally-thrown replacement error. Foreign JS
+              // exceptions (host mode) recover via __get_caught_exception when
+              // the resume emitter acquired it (#3050 wrap parity).
+              {
+                op: "try",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: closeDelegLocal },
+                  { op: "call", funcIdx: closeResumeIdx },
+                  { op: "drop" },
+                ],
+                catches: [{ tagIdx: ensureExnTag(ctx), body: closeCatch }],
+                catchAll:
+                  getCaughtExnIdx !== undefined ? [{ op: "call", funcIdx: getCaughtExnIdx }, ...closeCatch] : undefined,
+              },
+              // Close complete — clear the slot.
+              { op: "local.get", index: selfLocal },
+              { op: "ref.null", typeIdx: closeInner.stateTypeIdx },
+              { op: "struct.set", typeIdx: info.stateTypeIdx, fieldIdx: closeSlot.fieldIdx },
+            ],
+            else: [],
+          },
+        );
+      }
+    }
     for (const finalizer of state.abruptResume.finalizers) {
       for (const stmt of finalizer) compileStatement(ctx, fctx, stmt);
     }

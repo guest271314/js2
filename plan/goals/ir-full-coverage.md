@@ -130,23 +130,23 @@ evidence.
 | **2857** | IR: claim static methods under `extends` (class-method 6 → 5) | 69 | done | high |
 | **2858** | IR: drive call-graph-closure fallback bucket to zero (derivative of body-shape + class-method) | 71 | done | high |
 | **2859** | IR: drive param-type-not-resolvable fallback bucket to zero (TypeMap propagation) | 69 | done | high |
-| **2949** | IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable) | current | in-progress | high |
+| **2949** | IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable) | current | ready | high |
 | **2950** | IR-first default flip (historical milestone; retirement moved to #3518) | 71 | done | high |
-| **2951** | IR-first skip set: include generators and class members (retire the two #2138 standing exclusions) | current | in-progress | medium |
-| **2952** | IR multi-exit control flow: labeled break/continue, switch (br_table), do-while, for-in adoption | current | in-progress | medium |
+| **2951** | IR-first skip set: include generators and class members (retire the two #2138 standing exclusions) | current | ready | medium |
+| **2952** | IR multi-exit control flow: labeled break/continue, switch (br_table), do-while, for-in adoption | current | ready | medium |
 | **2955** | De-polymorph the IR front-end on string mode: abstract IR string ops resolved at lower time | current | ready | medium |
 | **3000** | IR: class-member residual — private fields, accessors, inheritance/super (class-method → 0) | 71 | done | medium |
 | **3052** | IR `class.call`: void instance method in statement position | 71 | done | medium |
 | **3065** | IR: claim non-terminating `if (cond) <stmt>;` guard at non-void body position (select↔builder parity, follow-on #1979) | 71 | done | medium |
-| **3090** | Retire direct front-end after IR-only reachability gates close (~59,676 fn-lines) | current | blocked | high |
-| **3113** | Fix IR->codegen reverse layering: move shared vocabulary (js-tag) below IR; contain the bridge to ir/integration.ts | current | in-progress | medium |
+| **3090** | Retire direct front-end after IR-only reachability gates close (~59,676 fn-lines) | Backlog | blocked | high |
+| **3113** | Fix IR->codegen reverse layering: move shared vocabulary (js-tag) below IR; contain the bridge to ir/integration.ts | current | ready | medium |
 | **3141** | Self-hosted stdlib pilot: compile math-helpers as TS builtin source through our own IR pipeline (porffor model) | Backlog | done | high |
 | **3142** | IR module-init overlay adoption (claimability milestone; compile-once remains) | 72 | done | high |
 | **3143** | Flip IR-first (JS2WASM_IR_FIRST) to default — clears gate G1 of the legacy-frontend retirement | 71 | done | high |
 | **3144** | IR: instanceof + static method calls + accessor get/set on local classes (claims classes.ts main) | 71 | done | high |
 | **3153** | IR post-claim divergence meter — empirical census of the #3143 IR-first flip's throw-site set | 71 | done | high |
 | **3156** | IR selector precision: make string .substring / .charCodeAt lowerable (wasm:js-string family) — #3143 flip track | 71 | done | high |
-| **3159** | Self-hosted stdlib, array family slice 1: timsort kernels as TS source through our own IR pipeline | current | in-progress | high |
+| **3159** | Self-hosted stdlib, array family slice 1: timsort kernels as TS source through our own IR pipeline | current | ready | high |
 | **3160** | Self-hosted stdlib: object-runtime slice 1 — getOwnPropertyDescriptors + fromEntries via our own IR pipeline | 71 | done | high |
 | **3161** | Self-hosted stdlib driver: generalized typed-signature emit path (Precursor B/C — unblocks array-methods + object-runtime families) | 71 | done | high |
 | **3167** | IR: lower string relational operators (< > <= >=) — #3143 flip-track post-claim divergence class 2 | 71 | done | high |
@@ -163,19 +163,23 @@ evidence.
 | **3259** | Bloat quick-wins: knip dead-export sweep + jscpd duplication scan of src/codegen | 72 | done | high |
 | **3260** | Whitepaper: auto-update Test262 numbers + date AND surface the JS-host vs standalone lane distinction with both figures | 72 | done | medium |
 | **3262** | CLI: make -o friendlier — accept a file path and/or mkdir the output dir instead of ENOENT | Backlog | backlog | medium |
-| **3305** | Self-host stdlib: convert parse-number-native.ts + number-format-native.ts hand-emitted Instr[] to TS (family #2) | current | in-progress | high |
+| **3305** | Self-host stdlib: convert parse-number-native.ts + number-format-native.ts hand-emitted Instr[] to TS (family #2) | current | ready | high |
 | **3517** | IR: claim the exact generic Map module initializer | 73 | done | high |
 | **3518** | IR-only default and direct front-end retirement | current | in-progress | critical |
 | **3519** | IR-only R0: typed preparation outcomes and an honest readiness gate | 74 | done | critical |
-| **3520** | IR-only R1: source-qualified unit identity and whole-program ABI map | current | ready | critical |
-| **3521** | IR-only R2: prepare-before-emit free-function ownership | current | blocked | critical |
-| **3522** | IR-only R3: compile-once classes, members, and closures | current | blocked | critical |
-| **3523** | IR-only R4: typed ordered module-init compile-once ownership | current | blocked | critical |
-| **3525** | IR-only R5: whole-program single- and multi-source Prepared ownership | current | blocked | critical |
-| **3526** | IR-only R6: typed semantic runtime contract and frozen feature manifest | current | blocked | critical |
-| **3527** | IR-only R7: AST-free async suspension plans and canonical Promise ABI | current | blocked | critical |
-| **3528** | IR-only R8: linear consumes the shared Prepared IR program | current | blocked | critical |
+| **3520** | IR-only R1: source-qualified unit identity and whole-program ABI map | current | in-progress | critical |
+| **3521** | IR-only R2: prepare-before-emit free-function ownership | Backlog | blocked | critical |
+| **3522** | IR-only R3: compile-once classes, members, and closures | Backlog | blocked | critical |
+| **3523** | IR-only R4: typed ordered module-init compile-once ownership | Backlog | blocked | critical |
+| **3525** | IR-only R5: whole-program single- and multi-source Prepared ownership | Backlog | blocked | critical |
+| **3526** | IR-only R6: typed semantic runtime contract and frozen feature manifest | Backlog | blocked | critical |
+| **3527** | IR-only R7: AST-free async suspension plans and canonical Promise ABI | Backlog | blocked | critical |
+| **3528** | IR-only R8: linear consumes the shared Prepared IR program | Backlog | blocked | critical |
 | **3529** | IR R0 prerequisite: typed producer equivalence parity | 74 | done | critical |
+| **3551** | IR ABI-parity withdrawal must cascade to committed IR callers — #3503 partial-commit broke tests/issue-3471.test.ts on main (invalid Wasm: expected f64, found externref) | 76 | done | high |
+| **3553** | IR typed-outcome boundary misclassifies the designed extern-arg coercion rejection as an invariant — 80/178 hard CEs in the standalone RegExp guard suite (`arg 0 of new RegExp expects externref but got string`) | 76 | done | high |
+| **3565** | IR over-promotion: restore 4 documented demote-to-legacy contracts (#3341/#3519) — element-store, element-access slice-12, verify #1798 return gate, compound-assign non-f64 RHS | 76 | done | medium |
+| **3583** | IR adoption matrix: re-own the 28 orphaned mixed/direct-only rows (tracking issues closed or wont-fix) | current | ready | medium |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 

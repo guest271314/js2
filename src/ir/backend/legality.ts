@@ -176,6 +176,13 @@ function linearInstrError(instr: IrInstr): string | null {
     // kinds above (#1852/#1527 axis rule).
     case "br.label":
     case "if.stmt":
+    // #2952 slice 4 — labeled.block is one core `block`; switch is the
+    // block-per-case ladder (core blocks + i32/f64.eq + br/br_table). The
+    // LinearEmitter's sink IS Instr[], so the switch arm's
+    // requireInstrSink holds (unlike porffor/bytecode, which stay
+    // rejected below).
+    case "labeled.block":
+    case "switch":
       return null;
     default:
       return `linear backend does not support IR instruction '${instr.kind}' at the function-lowering boundary`;
@@ -530,6 +537,11 @@ function nestedInstrBuffers(instr: IrInstr): readonly (readonly IrInstr[])[] {
     // #2952 slice 2 — statement-level if arms.
     case "if.stmt":
       return [instr.then, instr.else];
+    // #2952 slice 4 — labeled block / switch clause buffers.
+    case "labeled.block":
+      return [instr.body];
+    case "switch":
+      return instr.bodies;
     default:
       return [];
   }

@@ -29,8 +29,8 @@
 //     the exported `__interp_enter` trampoline and whose capture slot holds the
 //     `$FuncMeta` (doc §"Call protocol") — indistinguishable from a compiled
 //     closure, so codegen needs zero interpreter-awareness. (2) Host dispatch
-//     (`callee.apply`, `Reflect.construct`) is E1's stand-in for the #3098
-//     classifier / `__apply_closure`. (3) The global env backing
+//     (`callee.apply`, fixed-arity positional construction) is E1's stand-in
+//     for the #3098 classifier / `__apply_closure`. (3) The global env backing
 //     (`Object.create(globalThis)`) is E1's stand-in for the module globalThis
 //     `$Object` (#369). None of these three change the opcode semantics.
 
@@ -371,7 +371,7 @@ function run(bottom: Frame): JSValue {
               const r = interpEnter(binding.meta, binding.envRec, self, args); // boundary recursion (Phase 1)
               acc = r !== null && (typeof r === "object" || typeof r === "function") ? r : self;
             } else if (typeof callee === "function") {
-              acc = Reflect.construct(callee as (...a: JSValue[]) => JSValue, args);
+              acc = constructValue(callee, args);
             } else {
               throw new TypeError(`${describe(callee)} is not a constructor`);
             }
@@ -447,6 +447,59 @@ function run(bottom: Frame): JSValue {
       }
       // loop back to the outer `for`, re-entering dispatch at the handler pc
     }
+  }
+}
+
+/**
+ * Construct a non-interpreted callable at the E1/E2 runtime seam.
+ *
+ * Standalone Reflect.construct deliberately accepts only an array-literal
+ * argsList (#3371). Keeping the arity dispatch here lets the self-compiled E2
+ * payload use positional `new` lowering while Node E1 retains real constructor
+ * semantics. Eight arguments matches the generic standalone call/closure ABI
+ * raised by #3310; arities above eight remain an explicit Phase-1 limit.
+ * Preserving dynamic constructor arguments in AOT code remains the #3098
+ * classifier's responsibility.
+ */
+function constructValue(callee: JSValue, args: JSValue[]): JSValue {
+  switch (args.length) {
+    case 0:
+      return new (callee as new (...a: JSValue[]) => JSValue)();
+    case 1:
+      return new (callee as new (...a: JSValue[]) => JSValue)(args[0]);
+    case 2:
+      return new (callee as new (...a: JSValue[]) => JSValue)(args[0], args[1]);
+    case 3:
+      return new (callee as new (...a: JSValue[]) => JSValue)(args[0], args[1], args[2]);
+    case 4:
+      return new (callee as new (...a: JSValue[]) => JSValue)(args[0], args[1], args[2], args[3]);
+    case 5:
+      return new (callee as new (...a: JSValue[]) => JSValue)(args[0], args[1], args[2], args[3], args[4]);
+    case 6:
+      return new (callee as new (...a: JSValue[]) => JSValue)(args[0], args[1], args[2], args[3], args[4], args[5]);
+    case 7:
+      return new (callee as new (...a: JSValue[]) => JSValue)(
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+        args[6],
+      );
+    case 8:
+      return new (callee as new (...a: JSValue[]) => JSValue)(
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+        args[5],
+        args[6],
+        args[7],
+      );
+    default:
+      throw new RangeError("interpreter Construct supports at most 8 arguments in Phase 1");
   }
 }
 

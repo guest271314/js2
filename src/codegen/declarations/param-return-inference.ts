@@ -91,6 +91,7 @@ export function inferParamTypeFromCallSites(
   let agreed: ValType | null = null;
   let conflict = false;
   let sawCallSite = false;
+  let sawUnderApplied = false;
 
   function visit(node: ts.Node) {
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === funcName) {
@@ -98,6 +99,14 @@ export function inferParamTypeFromCallSites(
       // internally, so its params are determined by runtime call args, not the
       // body-usage fallback. Record this before any conflict short-circuit.
       sawCallSite = true;
+      // (#3548) An UNDER-APPLIED call site (`d('m'); d();`) passes `undefined`
+      // for this param — record it so a non-nullable ref inference is widened
+      // to nullable below. Skipping absent args entirely made the inference
+      // UNSOUND: the agreed type became a non-nullable `(ref N)` that the
+      // zero-arg call site's pad could only satisfy with `ref.null` +
+      // `ref.as_non_null` — an unconditional runtime trap on the (usually
+      // passing) zero-arg path.
+      if (node.arguments.length <= paramIndex) sawUnderApplied = true;
       if (!conflict) {
         const arg = node.arguments[paramIndex];
         if (arg) {
@@ -126,7 +135,20 @@ export function inferParamTypeFromCallSites(
   }
 
   forEachChild(sourceFile, visit);
-  return { type: conflict ? null : agreed, sawCallSite };
+  // (TS control-flow can't see the closure mutation of `agreed` — assert its
+  // declared type so the property narrowing below typechecks.)
+  let type: ValType | null = conflict ? null : (agreed as ValType | null);
+  // (#3548) Soundness: if ANY call site under-applies this param, the value can
+  // be `undefined` at runtime, so a NON-NULLABLE ref inference has no valid
+  // filler — widen to the nullable ref of the same type (NOT all the way to
+  // externref: keeps the precise type and the fast paths; approved direction,
+  // see plan/issues/3548). The zero-arg pad then emits a plain `ref.null`,
+  // which the callee (whose body compiles against this same nullable
+  // signature) handles as the absent/undefined case.
+  if (type !== null && type.kind === "ref" && sawUnderApplied) {
+    type = { kind: "ref_null", typeIdx: type.typeIdx };
+  }
+  return { type, sawCallSite };
 }
 
 /**

@@ -6,7 +6,7 @@ import {
   LINEAR_STRING_PAYLOAD_SIZE_OFFSET,
 } from "../ir/analysis/linear-memory-plan.js";
 import type { LinearContext } from "./context.js";
-import { hashProbeAdvanceInstrs } from "./emit-idioms.js";
+import { hashProbeAdvanceInstrs, hashProbeInitInstrs } from "./emit-idioms.js";
 
 /** Heap starts at byte offset 1024 (leave low addresses for null/sentinel) */
 const HEAP_START = 1024;
@@ -2676,10 +2676,7 @@ export function addMapRuntime(mod: WasmModule): void {
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
         // idx = hash % cap (unsigned)
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         // Linear probe loop
         {
           op: "block",
@@ -2790,10 +2787,7 @@ export function addMapRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -2877,10 +2871,7 @@ export function addMapRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3046,10 +3037,7 @@ export function addSetRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3145,10 +3133,7 @@ export function addSetRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3318,10 +3303,7 @@ export function addNumericMapRuntime(mod: WasmModule): void {
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
         // idx = hash % cap
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3427,10 +3409,7 @@ export function addNumericMapRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3514,10 +3493,7 @@ export function addNumericMapRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3678,10 +3654,7 @@ export function addNumericSetRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },
@@ -3776,10 +3749,7 @@ export function addNumericSetRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 12 },
         { op: "local.set", index: capLocal },
-        { op: "local.get", index: hashLocal },
-        { op: "local.get", index: capLocal },
-        { op: "i32.rem_u" },
-        { op: "local.set", index: idxLocal },
+        ...hashProbeInitInstrs(hashLocal, capLocal, idxLocal),
         {
           op: "block",
           blockType: { kind: "empty" },

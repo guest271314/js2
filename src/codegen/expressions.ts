@@ -11,7 +11,7 @@
  *   3. Provides emitCoercedLocalSet and coerceType (used by statements and index)
  *   4. Registers delegates in shared.ts (registerCompileExpression, etc.)
  */
-import { ts } from "../ts-api.js";
+import { ts, forEachChild } from "../ts-api.js";
 import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
 import {
   classifyAsyncConsumer,
@@ -32,6 +32,7 @@ import {
   PROMISE_STATE_REJECTED,
 } from "./async-scheduler.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
+import { ensureExnTag } from "./registry/imports.js"; // (#3178) async-call rejection payload
 import { allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -350,7 +351,7 @@ function asyncAssignedSymbolsInFile(ctx: CodegenContext, sf: ts.SourceFile): Rea
       const assigned = ctx.checker.getSymbolAtLocation(node.left);
       if (assigned) set.add(assigned);
     }
-    ts.forEachChild(node, visit);
+    forEachChild(node, visit); // #3437: shared helper so this per-file scan is counted by the compile-work budget meter
   };
   visit(sf);
   cache.set(sf, set);
@@ -581,15 +582,27 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
   // construction in the catch_all instead.
   if (isStandalonePromiseActive(ctx)) {
     const promiseTypeIdx = getOrRegisterPromiseType(ctx);
+    // (#3178) Complete the #1326 Phase-1C payload wiring this arm deferred:
+    // catch the native `__exn` tag and use its externref payload — the thrown
+    // JS value (e.g. the TypeError instance a sync-unwound async body threw) —
+    // as the rejection reason ($Promise.value). Before this, the reason was
+    // ALWAYS `ref.null.extern`, so every synchronously-unwinding async-fn
+    // throw rejected with NULL: handlers destructuring the reason
+    // (`({ constructor }) => …`, the for-await-dstr test262 template tail)
+    // then threw their OWN "Cannot destructure 'null' or 'undefined'" — the
+    // ~81-test cluster in the F2 harvest (#3417). catch_all stays as the
+    // reason-less fallback for foreign (non-`__exn`) exceptions only.
+    const tagIdx = ensureExnTag(ctx);
+    const reasonLocal = allocTempLocal(fctx, { kind: "externref" });
     const inner = fctx.body.splice(start);
-    // The thrown value is on the catch_all stack as externref (the
-    // `__exn` tag's externref payload); standalone catch_all consumes
-    // it and uses it as the rejection reason. We don't have access to
-    // the wasm exception payload op without `ensureExnTag`, so fall
-    // back to `ref.null.extern` as the reason — Phase 1B doesn't
-    // yet wire the catch-payload binding (Phase 1C will). Most async
-    // throws produce undefined-typed rejections at this stage, so
-    // null-extern is safe.
+    const catchExn: Instr[] = [
+      { op: "local.set", index: reasonLocal },
+      { op: "i32.const", value: PROMISE_STATE_REJECTED },
+      { op: "local.get", index: reasonLocal },
+      { op: "ref.null.extern" },
+      { op: "struct.new", typeIdx: promiseTypeIdx },
+      { op: "extern.convert_any" },
+    ];
     const catchAll: Instr[] = [
       { op: "i32.const", value: PROMISE_STATE_REJECTED },
       { op: "ref.null.extern" },
@@ -601,9 +614,10 @@ function wrapAsyncCallInTryCatch(ctx: CodegenContext, fctx: FunctionContext, sta
       op: "try",
       blockType: { kind: "val", type: { kind: "externref" } },
       body: inner,
-      catches: [],
+      catches: [{ tagIdx, body: catchExn }],
       catchAll,
     });
+    releaseTempLocal(fctx, reasonLocal);
     return;
   }
   const rejectIdx = ensureLateImport(ctx, "Promise_reject", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -1430,7 +1444,11 @@ function compileExpressionInner(
   }
 
   if (ts.isObjectLiteralExpression(expr)) {
-    return compileObjectLiteral(ctx, fctx, expr);
+    // (#3536) Forward the Wasm-level expected type: a literal in call-ARGUMENT
+    // position whose callee param was call-site-narrowed to this literal's own
+    // shape struct must construct THAT struct, not divert to the dynamic
+    // $Object path off its `any` TS-contextual type (see compileObjectLiteral).
+    return compileObjectLiteral(ctx, fctx, expr, expectedType);
   }
 
   if (ts.isArrayLiteralExpression(expr)) {

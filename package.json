@@ -1,6 +1,6 @@
 {
   "name": "@loopdive/js2",
-  "version": "0.65.0",
+  "version": "0.66.0",
   "description": "Direct AOT compilation from JavaScript and TypeScript to WebAssembly GC",
   "keywords": [
     "webassembly",
@@ -48,6 +48,7 @@
       "import": "./dist/optimize.js"
     },
     "./cli": "./dist/cli.js",
+    "./test262-fyi": "./dist/test262-fyi-cli.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -86,6 +87,7 @@
     "build:playground": "vite build --config website/playground/vite.config.ts",
     "dev": "pnpm run build:compiler-bundle && (pnpm run dashboard:watch &) && vite serve --config website/playground/vite.config.ts",
     "test": "node node_modules/vitest/dist/cli.js run",
+    "test:guard": "node scripts/run-guard-suite.mjs",
     "test:watch": "node node_modules/vitest/dist/cli.js",
     "test:porffor-direct-ab": "vitest run tests/issue-3482-direct-porffor-js2-ir-ab.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism --reporter=dot",
     "test:landing-four-lane": "vitest run tests/issue-3498-landing-four-lane-backend-benchmark.test.ts --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism --reporter=dot",
@@ -97,12 +99,16 @@
     "test:262:fyi:smoke": "pnpm run build:compiler-bundle && node scripts/run-test262-fyi.mjs --non-authoritative-smoke",
     "test:262:validate-baseline": "npx tsx scripts/validate-test262-baseline.ts",
     "baseline:fetch": "node scripts/fetch-baseline-jsonl.mjs",
+    "detect:vacuity": "npx tsx scripts/detect-vacuity.ts",
+    "check:test-vacuity-shapes": "npx tsx scripts/check-test-vacuity-shapes.ts",
     "check:ir-fallbacks": "npx tsx scripts/check-ir-fallbacks.ts",
     "check:ir-only": "npx tsx scripts/check-ir-only.ts",
     "check:linear-ir": "npx tsx scripts/check-linear-ir.ts",
     "check:oracle-ratchet": "node scripts/check-oracle-ratchet.mjs",
     "check:pushraw": "node scripts/check-pushraw.mjs",
     "check:loc-budget": "node scripts/check-loc-budget.mjs",
+    "check:func-budget": "node scripts/check-func-budget.mjs",
+    "check:harness-compile-budget": "npx tsx scripts/check-harness-compile-budget.ts",
     "check:dead-exports": "node scripts/audit-legacy-reachability.mjs --check",
     "check:godfiles": "node scripts/profile-godfiles.mjs --check",
     "profile:godfiles": "node scripts/profile-godfiles.mjs",
@@ -116,6 +122,7 @@
     "check:coercion-sites": "node scripts/check-coercion-sites.mjs",
     "check:test262-hard-errors": "node scripts/check-test262-hard-errors.mjs",
     "check:issue-spec-coverage": "node scripts/check-issue-spec-coverage.mjs",
+    "check:done-status-integrity": "node scripts/check-done-status-integrity.mjs",
     "check:verdict-oracle": "node scripts/check-verdict-oracle-bump.mjs",
     "check:issues": "node scripts/update-issues.mjs --check",
     "test:diff": "npx tsx scripts/diff-test.ts",
@@ -167,6 +174,7 @@
     "check:issue-ids": "node scripts/check-issue-ids.mjs",
     "check:issue-ids:staged": "node scripts/check-issue-ids.mjs --staged",
     "check:issue-ids:against-main": "node scripts/check-issue-ids.mjs --against-main",
+    "check:issue-ids:against-open-prs": "node scripts/check-issue-ids.mjs --against-open-prs",
     "new:issue-id:allocate": "node scripts/claim-issue.mjs --allocate"
   },
   "dependencies": {

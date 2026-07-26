@@ -1,0 +1,147 @@
+---
+id: 3559
+title: "Nested-lifted-fn call from a method-call-arg callback bakes the DECLARING fctx's local index (invalid Wasm) — #2043-class cross-fctx capture hole in call-identifier.ts"
+status: ready
+created: 2026-07-23
+priority: high
+feasibility: hard
+task_type: bug
+area: codegen
+goal: standalone
+sprint: current
+horizon: m
+related: [3468, 2043, 1177, 2029]
+---
+
+# #3559 — callback cross-fctx capture: `local.get cap.outerLocalIdx` escapes its fctx
+
+## Symptom (measured, merge_group run 30043224652 / PR #3523)
+
+Exactly **4 test262 files** flip pass→`compile_error` under `--target
+standalone` once #3468 F1's keep-arm retains top-level `F.<name> = …` writes:
+
+- `test/language/statements/const/function-local-closure-get-before-initialization.js`
+- `test/language/statements/let/function-local-closure-get-before-initialization.js`
+- `test/language/statements/let/function-local-closure-set-before-initialization.js`
+- `test/language/statements/using/function-local-closure-get-before-initialization.js`
+
+Error: `Binary emit error: RangeError: Codegen error: local index out of range
+— 18 (valid: [0, 2)) at function '__cb_0'` (the #2043 late-import index-shift
+class message, but the mechanism here is a CROSS-FCTX capture, not an import
+shift — see below).
+
+These 4 are carried inside #3468's `regressions-allow` ceiling with explicit
+stakeholder sign-off (2026-07-23); this issue is the routed fix.
+
+## Root cause (fully traced, 2026-07-23)
+
+Two corruptions in the emitted `__cb_0` (the `assert.throws` second-argument
+callback), confirmed via emit-time dump:
+
+```
+;; failing __cb_0 — locals: [__tdz_box_x]; 1 param (captures externref)
+local.get 2          ;; INVALID — this is the DECLARING (IIFE) fctx's local
+                     ;; holding x's ref-cell box, not a cbFctx local
+i32.const 1
+struct.new $cell<i32> ;; fresh TDZ flag box ("treat as initialized")
+local.tee 1          ;; __tdz_box_x (cbFctx-local — this part is correct)
+call 2097330         ;; STABLE_FUNC_BASE+178 — minted but NEVER PUSHED
+drop
+```
+
+**Corruption 1 — the culprit line.** In
+`src/codegen/expressions/call-identifier.ts`, the direct-call path for a
+lifted nested function (`f()` where `f` is a nested hoisted declaration that
+captures outer bindings) prepends f's value captures at the call site. Its
+fallback else-arm is:
+
+```ts
+fctx.body.push({ op: "local.get", index: cap.outerLocalIdx });
+```
+
+`cap.outerLocalIdx` is a local index in the **declaring** function's fctx (the
+IIFE body). When the call site sits in a **different** fctx — here a
+`compileArrowAsCallback`-compiled method-call-argument callback (`cbFctx`) —
+that index is foreign and either out of range (emit error, our case) or
+silently reads the wrong slot.
+
+The existing cross-fctx rescues do NOT cover this route:
+- The **#2029 "family A"** arms rescue only names promoted to
+  `ctx.capturedBoxGlobals` / `ctx.capturedGlobals` by the accessor-capture
+  pass (object-literal accessor bodies). A method-call-arg callback gets no
+  such promotion, so the lookup falls through to the else-arm.
+- The naive fix (`fctx.localMap.get(cap.name) ?? cap.outerLocalIdx`) was
+  **tried as #1177 Stage 1 and REVERTED** — the in-code comment records it
+  caused 100+ test262 regressions where the "wrong-slot" behavior was
+  load-bearing (async-fn-body null-deref-throw tests). Any fix must not
+  reintroduce that.
+
+**Corruption 2 — never-pushed stable handle.** The callee funcIdx baked into
+the call (`2097330 = STABLE_FUNC_BASE + 178`) is a handle that was
+`mintDefinedFunc`-minted but never `pushDefinedFunc`-pushed — the lifted body
+of the nested TDZ-capturing `f` was abandoned on this compile route (a
+speculative-compile rollback that leaves `ctx.funcMap` poisoned, or a lifting
+path that bails after minting). Even with corruption 1 fixed, the call target
+must actually exist; diagnose whether fixing the capture sourcing also fixes
+the lifting bail, or whether the mint-without-push needs its own guard
+(cf. `check:speculative-rollback`).
+
+## Why #3468 F1 exposes it (it is LATENT on main)
+
+The trigger needs a nested TDZ-capturing function called from a
+**method-call-argument callback**. Before F1, `assert.throws = function…` was
+dropped at top level, so the `assert.throws(ReferenceError, function(){ f(); })`
+call site compiled against an undefined member and the callback compiled on a
+path that never prepended f's captures. With F1's keep-arm the statement is
+retained, the harness member exists, and the callback path reaches the
+cross-fctx else-arm. The hole itself predates F1 — any other route that calls
+a TDZ-capturing nested fn from a callback fctx hits the same line.
+
+## Minimal repro (standalone; CE on the F1 branch, OK without the keep-arm)
+
+```ts
+import { compile } from "../src/index.ts";
+const src = `
+function Test262Error(m){ this.message = m; }
+function assert(b, m){ if (b !== true) throw new Test262Error(m); }
+assert.throws = function(err, cb){ try { cb(); } catch(e){ return; } throw new Test262Error("no throw"); };
+(function() {
+  function f() { return x + 1; }
+  assert.throws(ReferenceError, function() { f(); });
+  const x = 1;
+}());
+`;
+const r = await compile(src, { target: "standalone", allowJs: true, fileName: "m.ts", skipSemanticDiagnostics: true });
+// r.success === false; errors: "local index out of range … at '__cb_0'"
+```
+
+Shrink results (each single removal makes it compile): remove the TDZ (`const
+x` after use) → OK; unwrap the IIFE → OK; make `assert.throws` a plain
+function `assertThrows(…)` (no property carrier) → OK.
+
+## Fix directions (in preference order)
+
+1. **Extend the #2029 promotion to the callback route**: when
+   `compileArrowAsCallback` compiles a body whose call graph reaches a nested
+   lifted fn with captures not sourceable in cbFctx, promote those captures to
+   the shared box-global mechanism (`ctx.capturedBoxGlobals`) exactly as the
+   accessor-capture pass does. Preserves the #1177-revert constraint (owner-
+   fctx behavior unchanged; the promotion arms are already localMap-absence-
+   guarded).
+2. **Refuse loudly instead of emitting garbage**: if promotion is infeasible,
+   the else-arm must detect `cap.outerLocalIdx` ∉ current fctx and fail the
+   compile with a diagnostic (or reject the callback path so the arg lowers
+   via the closure path) — a correct CE beats invalid Wasm, and the closure
+   path may simply work.
+3. Whatever the fix, add the 4 test262 files as a vitest guard and re-shrink
+   #3468's `regressions-allow` accounting in the next measurement window.
+
+## Verification plan
+
+- The minimal repro compiles and instantiates; `assert.throws(ReferenceError,
+  …)` fires correctly (the TDZ read throws).
+- The 4 test262 files flip compile_error→pass (or at minimum →honest fail).
+- No regressions in: `tests/issue-1712-capture-closure-dispatch.test.ts`,
+  `tests/illegal-cast-closures-585.test.ts` (pre-existing local failures
+  noted in #3468 — control against origin/main), the #1177/#2029 test
+  families, and the async-fn null-deref tests the #1177 revert protected.

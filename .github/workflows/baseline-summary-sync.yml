@@ -160,6 +160,11 @@ jobs:
           # only the date would change, so a stable main stays commit-free.
           node scripts/check-loc-budget.mjs --update || \
             echo "WARN: loc-budget baseline update failed (non-fatal)"
+          # #3400 R-FUNC twin: bank per-function shrinkage into the func-budget
+          # baseline (shrink-only floor; the PR gate is change-scoped so this
+          # only feeds the --all audit + no-git fallback). Non-fatal.
+          node scripts/check-func-budget.mjs --update-on-decrease || \
+            echo "WARN: func-budget baseline update failed (non-fatal)"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -183,6 +188,7 @@ jobs:
             git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
             # #3131 — LOC-budget baseline, refreshed just above (sole writer).
             git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
+            git add -f scripts/func-budget-baseline.json 2>/dev/null || true
             git add -f README.md ROADMAP.md CLAUDE.md plan/goals/goal-graph.md \
               2>/dev/null || true
           }
@@ -231,7 +237,10 @@ jobs:
             # (pure source measure; main is its sole writer now).
             node scripts/check-loc-budget.mjs --update || \
               echo "WARN: loc-budget baseline recompute on re-anchored tip failed (non-fatal)"
+            node scripts/check-func-budget.mjs --update-on-decrease || \
+              echo "WARN: func-budget baseline recompute on re-anchored tip failed (non-fatal)"
             git add -f scripts/loc-budget-baseline.json 2>/dev/null || true
+            git add -f scripts/func-budget-baseline.json 2>/dev/null || true
             if git diff --cached --quiet; then
               echo "Summary already current on main after re-anchor — nothing to push."
               PUSHED=1

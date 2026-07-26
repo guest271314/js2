@@ -1,36 +1,79 @@
 ---
 id: 3468
 title: "Standalone: method calls on function objects silently swallow assertions (assert.sameValue/throws never fire) — root cause is function-object own-property gap, NOT a catch_all swallow"
-status: blocked
+status: done
+completed: 2026-07-24
 spec: complete
-assignee: ttraenkler/sendev-3468-closure-props
+assignee: ttraenkler/sendev-3468-f1
 created: 2026-07-19
-blocked_reason: "The captured-closure dynamic-runtime substrate is independently mergeable; shared noncapturing wrappers and top-level test262 harness routing remain blocked after an exact-baseline merge-group measurement found 3,608 stable pass→fail transitions (3,540 assertion-time module-init throws). Fix the exposed semantics; do not rebaseline."
+blocked_reason: "SUPERSEDED 2026-07-23 by stakeholder ruling (see '## STAKEHOLDER RULING' below): land F1 harness routing + HONEST floor de-inflation, routing the exposed failures to trackers by cluster. The prior 'do not rebaseline' stance was a PR-shepherd caution ABSENT a stakeholder decision; the stakeholder has now ruled to proceed with a truthful downward re-baseline (the tests were never really passing)."
 priority: high
 feasibility: hard
 task_type: bug
 area: codegen
 goal: standalone
-sprint: current
+sprint: Backlog
 horizon: l
 related: [2860, 3417]
 # (#3102) C-core keeps the bulk of its logic in the NEW leaf module
 # src/codegen/closure-props.ts; these three touches are the unavoidable minimum:
 # the three dead arms live in object-runtime.ts, the reserve/fill ctx flags in
 # context/types.ts, and the finalize call in index.ts.
+# (F1) declarations.ts carries the restored standalone top-level `F.<name> = …`
+# keep-arm (the front-end routing for the assert-harness shape) — ~45 LOC.
 loc-budget-allow:
   - src/codegen/object-runtime.ts
   - src/codegen/context/types.ts
   - src/codegen/index.ts
+  - src/codegen/declarations.ts
+# (#3303) Ceiling for the stakeholder-ruled F1 de-inflation. DERIVED, not
+# round: 3,637 measured wasm-change regressions (merge_group run 30043224652,
+# vs standalone baseline dbc0162 @2026-07-23T20:20Z, oracle v9=v9) + 13
+# (measured pass→compile_timeout flake rows this run — each can complete on
+# the re-run and convert into a counted regression; conversion bound = all 13)
+# + 25 (ORACLE_REBASE_DRIFT_TOLERANCE, scripts/diff-test262.ts — the repo's
+# codified bound for unavoidable main-side baseline drift during a
+# re-baseline window) = 3,675. Hard-fails above the ceiling (#3303).
+regressions-allow:
+  count: 3675
+  reason: "#3468 F1 stakeholder-ruled assert-harness de-inflation: 3,637 measured vacuous-pass→honest-fail flips (97.5% assertion-time throws; incl. 4 latent #3559 CEs, stakeholder-signed-off) + 13 measured timeout-flake conversion bound + 25 codified drift tolerance"
 ---
 
 # #3468 — Standalone method-dispatch "exception swallow" (root-caused)
+
+> **F1 LANDED (#3523, 2026-07-24)** — standalone honest floor 27,557 (was 31,188
+> inflated); 3,545 vacuous passes now honest + tracker-routed; 4 CEs tracked in
+> #3559; classifier fold cured the false-oob ratchet trip. Remaining
+> C-complete/reflection routing is future scope. Issue closed `done`.
 
 > **Folds under #2860** (standalone↔host gap umbrella); cross-refs #3417
 > (oracle-v8 reclassification). Origin: the Cluster C / C1 finding in the
 > host↔standalone parity investigation (`/workspace/.tmp/parity-findings.md`).
 
-## STATUS: root-caused, BLOCKED ON A SCOPING + FLOOR-REBASELINE DECISION
+## STAKEHOLDER RULING (2026-07-23) — PROCEED with honest de-inflation
+
+**The user (stakeholder the floor-rebaseline gate defers to) ruled: land F1 +
+honest floor de-inflation.** This SUPERSEDES the "do not rebaseline / explicitly
+rejected" language in the PR-shepherd resolution below — that stance was correct
+*absent a stakeholder decision*; the decision is now made. Execution conditions
+(non-negotiable, they are what make this honest de-inflation and NOT the
+banked-regression path the older note rejected):
+
+1. **Route the exposed vacuous-pass→real-fail tests to TRACKERS by signature
+   cluster** (#3178 iterables, #3442/#2865 async continuation, #1781 module-init
+   throw, #3443 illegal_cast, #2903/#3390 promise; file new issues only for
+   genuinely unowned clusters). Cohort-level, not per-test. This is the condition
+   that distinguishes truthful de-inflation from hiding.
+2. **The honest floor number is MEASURED, never the stale 3,608.** That figure is
+   from the 2026-07-20 merge_group run — F3 (#3501 deferTopLevelInit) has since
+   changed exactly the module-init-throw surface those failures live on. The real
+   number comes from the F1 PR's own merge_group park delta on current main.
+3. **Re-baseline downward to the measured honest number**, with the justification
+   recorded in the PR body + this issue. The floor edit is revert-forward
+   reversible; what must be exactly right is the ACCOUNTING (measured number +
+   real tracker routing), not the mechanics.
+
+## STATUS (historical): root-caused, was BLOCKED ON A SCOPING + FLOOR-REBASELINE DECISION — now RULED, see above
 
 The bug is confirmed and multiply-reproduced. **But the root cause is NOT what
 the parity investigation hypothesised, and the real fix is a substantial
@@ -372,6 +415,124 @@ regression, not the truthful correction). The string bug is a SEPARATE issue
 (function-expression externref-param reassign-to-native-string type unification),
 a prerequisite for landing #3468's routing. #3468 stays `blocked`; PR held; not
 merged.
+
+## F1 IMPLEMENTATION (2026-07-23, per the stakeholder ruling) — harness routing landed in this PR
+
+Branch `issue-3468-f1-harness-routing` (agent `ttraenkler/sendev-3468-f1`).
+Two changes, both standalone-gated (host/GC byte-identical):
+
+1. **Carrier widening** (`src/codegen/closure-props.ts`,
+   `fillClosurePropHelpers`): `__is_closure_prop_carrier`'s `ref.test` chain now
+   covers the full closure BASE-wrapper set via
+   `collectClosureBaseWrapperTypeIdxs` — the same classifier as
+   `__is_closure`/`__typeof_function`. A base-root test matches every capturing
+   subtype instance, so this strictly subsumes the #3418 capturing-only set and
+   additionally admits shared noncapturing wrappers (the `function assert(){}`
+   harness receiver). WHY not a union with the `hasCaptures` subtype list: every
+   entry in `closureInfoByTypeIdx` walks to its root inside
+   `collectClosureBaseWrapperTypeIdxs`, so the base set covers all subtypes by
+   construction. The `hasCaptures` metadata itself is KEPT (an IR-lane consumer
+   landed on it since the narrowing: `src/ir/integration.ts` sets
+   `hasCaptures: true` on canonical capture subtypes) — a straight revert of
+   `81b02624a` would have broken that; this PR is a re-application, not a revert.
+2. **Front-end routing restore** (`src/codegen/declarations.ts`): the standalone
+   top-level `F.<name> = …` keep-arm (dropped by `81b02624a`) is restored so the
+   harness shape (`assert.sameValue = function(){…}`) stays in `__module_init`
+   and reaches the ordinary `__extern_set` write-arm → side table. Reads/calls
+   already routed dynamically from function bodies (and `__module_init` IS a
+   function body).
+
+**Deviation from the pre-narrowing original — `.prototype` is now EXCLUDED from
+the keep-arm.** The #2660 S2 arm was UNSCOPED when the original measured run
+happened (it consumed every top-level fnctor-prototype write first); it has
+since gained the RECONSTRUCT-gate, so a non-reconstruct fnctor's
+`F.prototype = …` now falls through. Admitting it into the side-table bag would
+create a second, S3-invisible prototype storage with divergent identity —
+`issue-2660-s2`'s "S2 off" guard test catches exactly this (verified: it fails
+without the exclusion, passes with it). `.prototype` stays owned end-to-end by
+S2/S3.
+
+**Local verification (measured, this branch):** 14/14 in
+`tests/issue-3468-closure-own-props.test.ts` — including the NEW regression
+guards `assert.sameValue(1,2)` THROWS and `assert.throws(TypeError, ()=>{})`
+THROWS under `--target standalone` (the vacuous-pass correction), plus
+exclusions (class statics, `.call`/`.apply`) and the flipped noncapturing
+round-trip. Adjacent surfaces: `issue-3418` (7/7), `issue-3536` (per-file
+pass), `issue-3537` (11/11), `issue-3472`, `issue-2660-s2` (11/11),
+`issue-1896`, `issue-2671-promise-capability` — 82/82 across the 8 suites.
+A control run with `src/` flipped to `origin/main` showed the 8 failures seen
+in a wider sweep (`illegal-cast-closures-585`, `issue-1712-capture-closure-
+dispatch`, `issue-2660-s3` STRUCT-BINDING guard) fail IDENTICALLY on main —
+pre-existing local-environment failures, not introduced by this PR.
+
+**Floor accounting (per the ruling):** the PR is expected to auto-park in the
+merge_group on the standalone floor gates; the park's regressed-test delta is
+the honest number. The floor mechanism is the COMMITTED file
+`benchmarks/results/test262-standalone-highwater.json` (read by
+`scripts/check-standalone-highwater.mjs`; `--update` only ratchets UP, so the
+intentional downward re-seed is an in-PR edit of that file) — no GitHub
+Actions variable involved. The measured delta, tracker routing, and the
+re-baseline edit are recorded below once the merge_group run completes.
+
+## F1 MEASUREMENT (2026-07-23, merge_group run 30043224652) — the honest numbers
+
+PR #3523 parked as designed; the ONLY failed step was **"Standalone regression
+guard (#1897)"**. Measured (run-log-authoritative, reproduced exactly by a
+local rediff of the run's merged JSONL vs the dbc0162 baseline):
+
+- **Honest floor: host_free_pass = 27,557 / 48,088 full corpus** (official
+  scope 27,093 / 43,106). Baseline was 31,188 → delta −3,631.
+- Guard-exact: **3,637 wasm-change regressions, 18 improvements, net −3,619**;
+  13 pass→compile_timeout flake rows excluded by the guard.
+- **The #2097 high-water floor PASSED**: 27,557 vs mark 25,453 (floor 25,403),
+  **+2,104 headroom** — the mark never ratcheted up with recent standalone
+  gains, so NO highwater reseed is needed. The de-inflation lands entirely via
+  the #1897/#3303 rebase-mode path.
+- Host lane: catastrophic guard PASS (7 raw drift regressions) — corpus-scale
+  confirmation of host byte-neutrality.
+
+**Split of the 3,637** (= 3,633 fail + 4 compile_error):
+- 3,545 (97.5%) assertion-time `Test262Error` throws — the designed
+  vacuous→honest-fail flips. Cohorts: 2,328 value/behavior mismatches
+  (assertions now compare real values), 1,016 expected-throw-NOT-thrown
+  (assert.throws fires; builtin lacks the spec validation throw — Temporal
+  480, annexB 96, TypedArray 83…), 137 async continuation, 31 promise, 45
+  misc.
+- 75 missing-capability TypeErrors ("X is not yet callable as a value" 32,
+  property-on-null 33, …).
+- 17 trap-category rows, only 11 REAL traps (7 null_deref, 4 illegal_cast —
+  both categories SHRANK overall: 295→287, 397→376). The ratchet's oob 39→43
+  "+4" was 100% classifier misclassification (assertion TEXT containing "out
+  of bounds"), fixed by the v10 classifyError reorder in this PR — post-fix
+  all four trap categories shrink vs baseline, so no trap-growth-allow is
+  needed.
+- 4 compile_error — the #2043-class latent bug exposed by the keep-arm
+  (**#3559**): `local index out of range at '__cb_0'`. Root-caused to
+  `call-identifier.ts`'s nested-lifted-fn call-site else-arm baking
+  `local.get cap.outerLocalIdx` (the DECLARING fctx's index) when called from
+  a method-call-arg callback (cbFctx) — the #2029 cross-fctx rescue covers
+  only accessor-promoted globals, and the naive #1177 localMap-first fix was
+  reverted for causing 100+ regressions. Minimal repro: retained
+  `assert.throws = fn` × IIFE with TDZ-referencing inner fn + callback; the 4
+  tests are let/const/using `function-local-closure-{get,set}-before-
+  initialization.js`. Carried inside the allowance with explicit stakeholder
+  sign-off; fix tracked separately.
+
+**Tracker routing (cohort-level, per the ruling):**
+- **#2860** (standalone↔host umbrella, established home of the routed
+  de-masked census): the 3,454 demasked semantic-gap rows (2,328 mismatch +
+  1,016 missing-throw + 45 misc + 33 property-on-null + 32
+  builtin-as-value). Temporal (820 rows) is the proposals-scope subcluster.
+- **#3442/#2865**: 137 async-continuation rows.
+- **#2903/#3390**: 31 promise rows.
+- **#3443**: 4 illegal_cast traps (flatMap/flat/sort poisoned-input callbacks).
+- **#1781**: 7 null_deref traps (module-init + bind/callback dispatch).
+- **#3178** (iterables): no separate standalone cohort — iterable failures
+  surface inside the async-continuation texts routed above.
+- **#3559** (new, filed with this PR): the #2043-class callback cross-fctx
+  capture bug (the 4 CEs) — full root cause + inlined minimal repro in
+  `plan/issues/3559-callback-cross-fctx-capture-local-index.md`; carried
+  inside the allowance with explicit stakeholder sign-off (2026-07-23).
 
 ## PR-shepherd resolution (2026-07-20) — land captured-closure substrate; keep harness rollout blocked
 

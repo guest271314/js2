@@ -375,6 +375,52 @@ function ensureErrorToStringHelper(ctx: CodegenContext): number | undefined {
   return funcIdx;
 }
 
+/**
+ * (#3548) `__str_truthy(ref null $AnyString) -> i32` — §7.1.2 ToBoolean for a
+ * NULLABLE native string: `null` (an under-applied param's `undefined`, or a
+ * genuinely-null binding) is falsy; otherwise empty-string falsy via the rope
+ * `len` field (field 0 — maintained on concat, no flatten needed). The
+ * non-null ToBoolean arm in coercion-engine.ts keeps its historical
+ * flatten+len path byte-identical; only `ref_null` strings route here (they
+ * previously called `__str_flatten(null)` → an unconditional trap — the
+ * residual half of the #3548 zero-arg-call fix). Registration is append-only
+ * (a defined func mints at the end of the index space — no shifts).
+ */
+export function ensureStrTruthyHelper(ctx: CodegenContext): number | undefined {
+  const existing = ctx.funcMap.get("__str_truthy");
+  if (existing !== undefined) return existing;
+  if (ctx.anyStrTypeIdx < 0) return undefined;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 }],
+      else: [
+        { op: "local.get", index: 0 },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 }, // rope len
+        { op: "i32.const", value: 0 },
+        { op: "i32.gt_s" },
+      ],
+    },
+  ];
+  const typeIdx = addFuncType(ctx, [{ kind: "ref_null", typeIdx: anyStrTypeIdx }], [{ kind: "i32" }]);
+  const funcIdx = mintDefinedFunc(ctx);
+  ctx.nativeStrHelpers.set("__str_truthy", funcIdx);
+  ctx.funcMap.set("__str_truthy", funcIdx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: "__str_truthy",
+    typeIdx,
+    locals: [],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
 export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ensureNativeStringHelpers(ctx);
   const existing = ctx.nativeStrHelpers.get("__any_to_string");

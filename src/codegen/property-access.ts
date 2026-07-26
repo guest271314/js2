@@ -197,6 +197,7 @@ export {
   TYPED_ARRAY_BYTES_PER_ELEMENT,
   tryEnsureNativeProtoBrand,
 } from "./builtin-value-read.js";
+import { tryBuiltinPrototypeGetterBrandThrow } from "./builtin-prototype-brand.js";
 import {
   finalizeStructAndDynamicMemberGet,
   PA_FALLTHROUGH,
@@ -2989,6 +2990,18 @@ export function compilePropertyAccess(
   {
     const __r = tryBuiltinNamespaceDeferredReads(ctx, fctx, expr, propName, objType);
     if (__r !== PA_FALLTHROUGH) return __r;
+  }
+
+  // (#3610) `<Builtin>.prototype.<brandedGetter>` — the prototype object never
+  // carries the [[ViewedArrayBuffer]] / [[ArrayBufferData]] / [[DataView]]
+  // internal slot the getter requires, so the spec's step-1 RequireInternalSlot
+  // throws unconditionally. Must run BEFORE `tryBufferViewAttributeReads`, whose
+  // arms key on the TS type NAME (`Uint8Array.prototype` has type `Uint8Array`)
+  // and would `ref.cast` the prototype object to the backing vec — an
+  // UNCATCHABLE `illegal cast` trap where a catchable TypeError is required.
+  {
+    const __r = tryBuiltinPrototypeGetterBrandThrow(ctx, fctx, expr, propName);
+    if (__r !== undefined) return __r;
   }
 
   {

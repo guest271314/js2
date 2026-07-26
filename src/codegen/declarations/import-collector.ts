@@ -325,6 +325,24 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
           state.primitiveNeeded.add("string_compare");
         } else if (elemType && isStringType(elemType)) {
           state.primitiveNeeded.add("string_compare");
+        } else if (elemType && (elemType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) {
+          // (#3579) `any`/`unknown` element → boxed externref. The default sort
+          // ToStrings each element via the runtime `__extern_toString` then
+          // compares with `string_compare` (§23.1.3.30). Pre-register the compare
+          // import here so `compileArrayDefaultToStringSort` finds it (else it
+          // returns null and the sort silently no-ops — `[10,9,1].sort()` on an
+          // untyped array stayed unordered). HOST lane only; native/standalone
+          // keeps its externref-bail no-op (a pre-existing gap, unchanged here).
+          state.primitiveNeeded.add("string_compare");
+        } else if (elemType && elemType.isUnion()) {
+          // (#3579) A mixed union element (e.g. `(number|string|undefined)[]`,
+          // the `[-1, obj, 1, "X", …]` shape) also boxes to externref on the host
+          // lane → same ToString+compare path. `string_compare` is only actually
+          // imported when `!ctx.nativeStrings` (see the addImport gate below), and
+          // `compileArrayDefaultToStringSort` gates on the real `externref` ValType,
+          // so a union that lowers to a ref (unreached today) simply no-ops —
+          // registering the import is inert in every other lane.
+          state.primitiveNeeded.add("string_compare");
         }
       }
     }

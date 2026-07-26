@@ -1,8 +1,7 @@
 ---
 id: 3251
 title: "standalone: array-descriptor OVERLAY substrate — $Vec receivers have no per-index/expando property-descriptor storage (blocks array-exotic defineProperty + Array generic-method-over-accessor-index)"
-status: in-progress
-assignee: ttraenkler/fable-1
+status: ready
 sprint: current
 s1_completed: 2026-07-18
 created: 2026-07-13
@@ -105,10 +104,44 @@ Two host-free-FAIL clusters are downstream of the SAME missing substrate:
   `Object.defineProperty(arr, "1", { get() {...} })` then iterate; the getter
   is never stored/consulted during iteration, so the callback never sees the
   accessor value. Same root: no per-index accessor-descriptor storage on `$Vec`.
-  (opus-crashes independently observed array/function EXPANDO writes returning
-  NaN — same substrate; that symptom belongs here.)
+  (Scope narrowed 2026-07-23: the plain named-data EXPANDO-write half of the
+  "array/function expando writes return NaN" symptom LANDED separately via
+  **#3537 / PR #3506** — array expando own-properties on standalone `$Vec`
+  receivers. It no longer belongs to this epic. What REMAINS here for expandos
+  is the descriptor half: accessor entries, attribute enforcement, and
+  ValidateAndApplyPropertyDescriptor legality through the overlay. Function
+  receivers are the #3468 own-property family, not this epic.)
 
 Total addressable ≈ **250–300 host-free-FAIL** once the overlay is coherent.
+
+### Default (JS-host / gc) lane hits the SAME wall (2026-07-24, #3201 measurement)
+
+The overlay is NOT a standalone-only lever — the default host/gc lane's Array
+method residue bottoms out on the identical missing substrate. The #3201
+fork-per-file measurement (default gc/"honest" lane, 2026-07-12→24 baseline)
+found, across `built-ins/Array/prototype/{indexOf,lastIndexOf,slice,splice,
+sort,concat,pop}`:
+
+- **Indexed accessors** ~34 default-lane fails — `sort/precise-getter-*` /
+  `precise-setter-*` (16) + the search/structural analogues. `Object.
+  defineProperty(arr, i, {get/set})` then a method reads/sorts: the accessor is
+  never stored/consulted (returns `undefined`). Same root as the ~204 host-free
+  cluster above, on the host lane.
+- **Prototype-chain index inheritance** — `Array.prototype.indexOf.call(
+  {length:3}, v)` with `Object.prototype[i]=v` (indexOf/lastIndexOf `.call`
+  cluster), and `Array.prototype[i] = v` inherited-index reads (pop/splice/sort
+  `S15.4.4.*_A4`). The flat `$Vec` can't model inherited/own index descriptors,
+  so these read the backing (or trap) instead of the prototype value.
+- **Hole → `undefined` read** — `new Array(2); x[0]` reads **`null`**, not
+  `undefined` (sort `S15.4.4.11_A1.1_T1` etc.). A hole must materialize as the
+  `undefined` singleton on read; the flat vec serves a raw null. (Adjacent to
+  #2001 sparse-holes-materialize-defaults.)
+
+Same fix (per-index descriptor + hole/accessor coherence through the overlay)
+unblocks both lanes. #3201 split its contained slices out (the sort/coercion
+micro-fixes) and its species/@@isConcatSpreadable mass to **#3575**; this
+accessor/proto-index/hole-read mass is recorded HERE as the shared host-lane
+consumer of the overlay.
 
 ## Proposed direction (for the architect to spec)
 
@@ -301,6 +334,28 @@ byte-identical (the #1917 discipline).
     accessor defined on an index read via a STATICALLY-typed local (not
     through the dynamic lane) is not consulted (the ~204-test cluster reads
     through `__hof_*`/`__extern_get_idx`, which are covered).
+
+## 2026-07-23 claim reconciliation — stale `fable-1` claim RELEASED (lead-directed)
+
+- The `ttraenkler/fable-1` in-progress claim was released as **stale** on all
+  three liveness signals: no `3251.json` record on the `issue-assignments` ref,
+  no open PR for #3251, and last branch activity 2026-07-18 (agent no longer
+  active). Status returned to `ready` — the next senior-dev claims fresh via
+  `claim-issue.mjs` (no `--force` needed; there is no live lock).
+- **Do NOT restart from scratch — validated, UNMERGED S2+S3(+S4) work exists**
+  on the fork (`ttraenkler/js2`):
+  - `issue-3251-s2-write-enforcement` (tip `766af9b980`) — S2 write-side
+    enforcement + S3 ArraySetLength + the plural `Object.defineProperties`
+    vec-target fix, all implemented and validated per the Resume State below.
+    It was gated on "open the S2 PR only AFTER #3327 lands" — and S1 PR #3327
+    **has since merged** (2026-07-18). The next step is exactly: fresh
+    `git merge origin/main` into that branch, re-validate, open the S2+S3 PR.
+  - `issue-3251-s4-forin` (tip `be7b292cc0`) — stacked on S2; tip commit says
+    "resume state — unpark clean, S4 validated, stack order recorded".
+  - The **branch copies of this issue file carry fuller resume notes** (S2/S3
+    validation detail, probe lists) than this on-main copy — read them first.
+- The on-main Resume State below predates the release; ignore its "fable-1
+  holds the claim-issue lock" line.
 
 ## Resume State (keep current — session-kill insurance)
 

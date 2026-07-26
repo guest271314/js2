@@ -18,6 +18,10 @@ import { compile, compileMulti, createIncrementalCompiler } from "./compiler-bun
 import { buildImports } from "./runtime-bundle.mjs";
 import { poisonRecycleReason } from "./test262-poison-error.mjs";
 import { negativeCompileErrorMatches, negativeCompileSucceededVerdict } from "./negative-verdict.mjs";
+// (#3613) ONE renderer, shared with tests/test262-runner.ts. The worker's
+// behaviour is unchanged — these bodies moved here verbatim; it is the LOCAL
+// runner that was missing the tryNativeExnRender step.
+import { safeStringifyThrown, tryNativeExnRender } from "./lib/wasm-exn-render.mjs";
 import { SANDBOX_GLOBAL_NAMES } from "./test262-sandbox-globals.mjs";
 
 // ── Bundle hash (#1521) ────────────────────────────────────────────────
@@ -1080,12 +1084,33 @@ async function doCompile(
   // section, and the exec path below calls it right after `setExports` so
   // top-level code runs against a fully-wired runtime. Aligned with
   // compiler-fork-worker.mjs + tests/test262-runner.ts (#1251 both-paths
-  // rule). Standalone/wasi/linear targets keep their own `_start` init model.
+  // rule). Wasi/linear targets keep their own `_start` init model.
   // compileMulti fixture graphs follow the same host rule after #3505: its
   // progressively accumulated dependency-order initializers retain only the
   // final `__module_init` export, so the graph can be wired before that one
   // initializer runs without producing duplicate Wasm exports.
-  const deferOpt = target || (!originalHarness && inferModuleStrictArguments) ? {} : { deferTopLevelInit: true };
+  //
+  // (#2860 F3) The STANDALONE lane joins the defer rule. Under the `(start)`
+  // model a top-level throw — which in originalHarness mode is EVERY runtime
+  // failure, since all test code is top-level — surfaces out of
+  // `WebAssembly.instantiate` with `instance === null`, so the #2962 native
+  // exception-render path (`__exn_render_prepare`/`__exn_render_char`, which
+  // needs a live instance) is unreachable and ~8,600 heterogeneous standalone
+  // failures collapse onto the one opaque "wasm exception during module init"
+  // label. Deferring init makes the throw happen at the explicit
+  // `__module_init()` call below, with a live instance, so the real failure
+  // signature (Test262Error message, TypeError, …) is rendered. Verdicts are
+  // unchanged (same scoring rule, richer error text); the only measured flips
+  // are ≤7 corpus-wide runtime-negative tests whose thrown error TYPE becomes
+  // observable via the tag and now correctly scores pass.
+  // oracle-version-exempt: same re-hosting exemption as the #3123 host-lane
+  // arm below — the EXISTING instantiate-throw classification moves to the
+  // explicit __module_init call site; the scoring rule is byte-identical, so
+  // rows are re-LABELLED (error text), not re-scored by policy.
+  const deferOpt =
+    (target && target !== "standalone") || (!originalHarness && inferModuleStrictArguments)
+      ? {}
+      : { deferTopLevelInit: true };
   if (hasFixtureGraph(fixtureFiles)) {
     if (!originalHarness || typeof entryFile !== "string" || entryFile.length === 0) {
       throw new Error("fixture graph requires an original-harness entryFile");
@@ -1164,16 +1189,11 @@ async function doCompile(
  * the test's failure — masking the REAL signature behind a phantom TypeError and
  * collapsing ~2,014 heterogeneous standalone failures onto one string (#2862).
  */
-function safeStringifyThrown(v) {
-  try {
-    return String(v);
-  } catch {
-    const t = typeof v;
-    return t === "object" || t === "function"
-      ? "uncaught Wasm-GC exception (non-stringifiable payload)"
-      : `uncaught Wasm exception (${t})`;
-  }
-}
+// (#3613) Behaviour-identical: this body moved verbatim into the SHARED
+// renderer so the local runner cannot drift from it again. The doc comment
+// above is retained for the #2870/#2862 history.
+// oracle-version-exempt: pure de-duplication — the worker's policy is
+// unchanged (it IS the shared policy), so no baseline row can reclassify.
 
 /**
  * (#2962) Render a natively-thrown Wasm-GC payload through the module's own
@@ -1183,23 +1203,10 @@ function safeStringifyThrown(v) {
  * `$Error_struct` renders "TypeError: boom" per §20.5.3.4 and a Test262Error
  * yields its real assertion message. Returns `null` when the exports are
  * absent (JS-host binaries), the payload renders empty, or anything throws —
- * the caller then falls back to the #2870 opaque label. Kept in sync with
- * `tryNativeExnRender` in tests/test262-runner.ts.
+ * the caller then falls back to the #2870 opaque label. (#3613) NO LONGER
+ * "kept in sync with tests/test262-runner.ts" by discipline — both lanes now
+ * import the one implementation in scripts/lib/wasm-exn-render.mjs.
  */
-function tryNativeExnRender(instance, payload) {
-  try {
-    const prep = instance?.exports?.__exn_render_prepare;
-    const chr = instance?.exports?.__exn_render_char;
-    if (typeof prep !== "function" || typeof chr !== "function") return null;
-    const len = prep(payload);
-    if (typeof len !== "number" || len <= 0 || len > 65536) return null;
-    let out = "";
-    for (let i = 0; i < len; i++) out += String.fromCharCode(chr(i));
-    return out;
-  } catch {
-    return null;
-  }
-}
 
 function extractWasmExceptionMessage(err, instance) {
   if (err instanceof WebAssembly.Exception) {

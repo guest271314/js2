@@ -421,6 +421,32 @@ export function flushLateImportShifts(ctx: CodegenContext, fctx: FunctionContext
   _flushLateImportShifts(ctx, fctx);
 }
 
+// ── reserveMemberGetDispatch delegate (#3178) ────────────────────────
+// destructuring-params.ts routes `done`/`value` property reads through the
+// finalize-filled `__get_member_<name>` dispatcher (#2674), but a STATIC
+// import of member-get-dispatch.ts from destructuring-params.ts closes an
+// eval-time module cycle (ReferenceError: `COLLECTION_KIND` before
+// initialization in collections-brand.ts). Late-bound like the delegates
+// above; SOFT (returns undefined when unregistered) so the destructure path
+// degrades to its raw `__extern_get` read instead of throwing.
+
+type ReserveMemberGetDispatchFn = (ctx: CodegenContext, propName: string, fctx?: FunctionContext) => number | undefined;
+
+let _reserveMemberGetDispatch: ReserveMemberGetDispatchFn | undefined;
+
+export function registerReserveMemberGetDispatch(fn: ReserveMemberGetDispatchFn): void {
+  _reserveMemberGetDispatch = fn;
+}
+
+/** Late-bound `reserveMemberGetDispatch` (see the delegate note above). */
+export function reserveMemberGetDispatchLate(
+  ctx: CodegenContext,
+  propName: string,
+  fctx?: FunctionContext,
+): number | undefined {
+  return _reserveMemberGetDispatch?.(ctx, propName, fctx);
+}
+
 // ── isAnyValue ────────────────────────────────────────────────────────
 // Moved here from index.ts so expressions.ts and typeof-delete.ts can import
 // it without depending on index.ts (which depends on expressions.ts).

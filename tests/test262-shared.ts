@@ -663,16 +663,29 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
                   skipSemanticDiagnostics: true,
                   target: TEST262_TARGET,
                   inferModuleStrictArguments,
-                  // (#3049 C1 / #3123) NO deferTopLevelInit here — this is the
-                  // multi-module FIXTURE compile, which already synthesizes
-                  // per-module init plumbing; adding the deferred-export flag
-                  // emitted a SECOND `__module_init` export in one binary
-                  // (V8 "Duplicate export name '__module_init'" CompileError —
-                  // the 6-file `language/module-code/*` regression that parked
-                  // the stack PR #2835/#2839 in the merge queue). Single-file
-                  // compiles (the worker path) still defer; the exec block
-                  // calls the exported __module_init after setExports when
-                  // present, and is a no-op for this `(start)`-model binary.
+                  // (#3049 C1 / #3123 / #2900) The FIXTURE compile defers
+                  // top-level init, exactly like the worker's single-file path
+                  // and the worker's own fixture-graph branch
+                  // (scripts/test262-worker.mjs `...deferOpt`). Without it the
+                  // whole harness assembly runs in the wasm `(start)` section,
+                  // i.e. BEFORE `setExports(instance.exports)` wires the
+                  // runtime — and own properties on function objects are not
+                  // yet readable, so `assert.sameValue(...)` threw
+                  // "sameValue is not a function" in 22 module-code tests and
+                  // `assert.throws` in one more. Every OTHER test in the corpus
+                  // already ran deferred; this branch was the lone exception,
+                  // which is why the whole 204-test fixture bucket looked like
+                  // a semantics gap. Measured effect: 31 fail→pass, 0
+                  // pass→fail, identical compile_error set.
+                  // The historical reason for omitting it — compileMulti
+                  // emitting a SECOND `__module_init` export (V8 "Duplicate
+                  // export name '__module_init'", the #2835/#2839 queue park) —
+                  // was fixed by #3505: the progressively accumulated
+                  // dependency-order initializers now retain only the FINAL
+                  // `__module_init` export, so the graph is fully wired before
+                  // that one initializer runs. Re-verified: no duplicate-export
+                  // CompileError across all 204 fixture-graph tests.
+                  deferTopLevelInit: true,
                   // (#2932) Without allowJs, TypeScript excludes the `.js`
                   // _FIXTURE root files from the program entirely — their
                   // top-level declarations are never codegen'd and every

@@ -2,7 +2,7 @@
 id: 3526
 title: "IR-only R6: typed semantic runtime contract and frozen feature manifest"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-21
 updated: 2026-07-21
 priority: critical

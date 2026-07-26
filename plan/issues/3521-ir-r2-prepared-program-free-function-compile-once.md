@@ -2,7 +2,7 @@
 id: 3521
 title: "IR-only R2: prepare-before-emit free-function ownership"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-21
 updated: 2026-07-21
 priority: critical

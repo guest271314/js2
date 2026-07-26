@@ -13,7 +13,7 @@ task_type: bug
 area: codegen, runtime
 es_edition: ES5
 language_feature: string-methods
-goal: test262-conformance
+goal: es5
 related: [2670]
 depends_on: []
 ---

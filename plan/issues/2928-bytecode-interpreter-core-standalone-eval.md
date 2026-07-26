@@ -1,9 +1,9 @@
 ---
 id: 2928
 title: "Bytecode interpreter core + standalone new Function / indirect eval"
-status: backlog
+status: in-progress
 created: 2026-07-02
-updated: 2026-07-04
+updated: 2026-07-21
 priority: medium
 horizon: xl
 feasibility: hard
@@ -15,7 +15,7 @@ language_feature: eval
 goal: runtime-eval
 sprint: Backlog
 parent: 1584
-depends_on: [2927]  # 2853 done (sprint 71) — removed 2026-07-17, see plan/log/analysis-2026-07/02-interpreter-backend-audit-2026-07-17.md
+depends_on: [2927] # 2853 done (sprint 71) — removed 2026-07-17, see plan/log/analysis-2026-07/02-interpreter-backend-audit-2026-07-17.md
 related: [1715, 1713, 2864, 2865, 2960, 3017, 2929]
 ---
 
@@ -116,9 +116,9 @@ executor. Direct-eval scope capture is explicitly NOT here (→ #2929).
 ### Two producers, one bytecode (design constraint — read before the ADR)
 
 The original wording "bytecode emitter as a second IR backend" conflated two
-producers (doc §12.1): **(a)** the *runtime* emitter, ESTree→bytecode,
+producers (doc §12.1): **(a)** the _runtime_ emitter, ESTree→bytecode,
 authored in TS, compiled into the module — that is THIS issue; **(b)** the
-*build-time* IR→bytecode backend (#1715 proof) as a future AOT deopt target
+_build-time_ IR→bytecode backend (#1715 proof) as a future AOT deopt target
 for `with`-class features — NOT built here, but the opcode ADR must not
 preclude it (opcodes take boxed-any operands, carry no "parsed-at-runtime"
 assumptions).
@@ -235,3 +235,52 @@ MOP, generators) starts only after E3/E4/E5.
 - **Size:** compiled Acorn alone is 651 KB — E6 (#2527 linking) is what keeps
   the no-eval floor; do not inline the interpreter unconditionally even as an
   interim step for CI's standalone-floor gate.
+
+## Implementation findings (E2 core canary, 2026-07-21)
+
+The first E2 self-compile canary now passes in
+`tests/issue-2928.test.ts`. It compiles the E1 types, opcode table, encoder,
+runtime ops, ESTree emitter, and dispatch loop as one standalone runtime
+artifact, validates the Wasm, asserts zero imports, then emits and executes an
+open-`$Object` ESTree representation of `1 + 2` entirely inside Wasm. This is
+the first host-free proof of the runtime emitter + interpreter loop; the prior
+E1 tests executed those sources in Node only.
+
+Three source-subset mismatches were exposed and removed:
+
+1. `FunctionEmitter` used TypeScript constructor parameter properties. The
+   self-compiler did not materialize those as WasmGC struct fields, so `emit()`
+   read missing fields through the dynamic MOP. They are now explicit declared
+   fields with constructor assignments, matching the existing ABI classes in
+   `types.ts`.
+2. Switching directly on dynamic ESTree `.type` strings did not share the
+   native-string case representation in standalone. The three AST dispatch
+   sites now use explicit equality chains; Node E1 behavior is unchanged.
+3. The external-constructor seam no longer passes a runtime args vector to
+   `Reflect.construct`, whose standalone lowering requires an array-literal
+   args list (#3371). It uses positional arity dispatch through 8, aligned with
+   the generic closure ABI ceiling from #3310, and throws a catchable
+   `RangeError` above that explicit Phase-1 limit. This removes the E2 compile
+   refusal and preserves the Node E1 seam; argument-preserving dispatch to an
+   AOT constructor is still part of the unlanded #3098 classifier bridge and is
+   not claimed by the arithmetic canary.
+
+Packaging is deliberately not claimed by this canary. `compileMulti` currently
+emits per-source module initializers rather than one ordered standalone runtime
+initializer; non-entry opcode constants can therefore remain TDZ-uninitialized
+when an export is invoked. That whole-program ownership is tracked by #3525,
+while this issue's E6 still owns the on-demand #2527-linked runtime artifact.
+The canary concatenates the import-clean sources to model that one artifact and
+avoid making multi-source initialization an accidental dependency of E2 core.
+
+The parser remains an independent hard gate. The existing Acorn dogfood parity
+was a JS-host result, not proof of a zero-import standalone parser: a combined
+standalone compile currently refuses dynamic RegExp construction (#1539) and
+RegExp-based `String.prototype.match`/`replace` (#1474). #2927 must provide a
+host-free parser acceptance gate before E2 can wire real runtime source text.
+
+Still required for E2 acceptance: the #2927 parser artifact, callable
+materialization and AOT/interpreter classification at the #3098 seam, and the
+`new Function(<dynamic>)` routing change in `new-super.ts`. The landed canary is
+the lower-level prerequisite, not a claim that either public dynamic-code API
+is routed yet.

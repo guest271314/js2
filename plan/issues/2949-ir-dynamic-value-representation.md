@@ -1,8 +1,7 @@
 ---
 id: 2949
 title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType (make untyped JS claimable)"
-status: in-progress
-assignee: ttraenkler/fable-11th
+status: ready
 sprint: current
 created: 2026-07-02
 updated: 2026-07-10

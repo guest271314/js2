@@ -136,7 +136,6 @@ import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import {
   classExpressionDefinesOwnName,
-  chainRootIsGrowable,
   classifyPlainCtorReceiverNamespace,
   compileExternPropertyGet,
   emitExternrefBackedOwnFieldRead,
@@ -3792,19 +3791,48 @@ export function finalizeStructAndDynamicMemberGet(
     // field before the last-resort host-MOP path. Runtime-sidecar properties
     // and accessors were handled above, so this is the ordinary static field
     // lane that a successfully resolved typeName would have taken.
-    const exactStructField =
-      structObjTypeIdx === undefined
-        ? undefined
-        : findAlternateStructsForField(ctx, propName, -1).find(
-            (candidate) => candidate.structTypeIdx === structObjTypeIdx,
-          );
-    // Growable object-literal variables intentionally use the open host object
-    // selected by #2837. Their checker type still describes the original
-    // closed literal, so reading an "exact" field from that stale struct would
-    // bypass late-added nested properties such as Acorn's descriptor `.get`
-    // closures. The dynamic path is authoritative for the whole chain.
-    const growableObjectChain = chainRootIsGrowable(ctx, expr.expression);
-    if (!typeName && exactStructField && !growableObjectChain) {
+    //
+    // (#1712 regression fix — PR #3267's 479f747c broke compiled-acorn) This
+    // lane MUST be restricted to receivers whose runtime representation is
+    // KNOWN to be the exact widened struct: `widenedVarStructMap` structs whose
+    // `propName` was recorded by a data-descriptor `Object.defineProperty`
+    // widening (`widenedDefinePropertyKeys`). The original unrestricted guard
+    // ("any struct typeIdx that has a same-named field") also hijacked reads
+    // whose receiver merely RESOLVES statically to an anon struct while its
+    // runtime value is a growable host `$Object` (acorn's `types$1` token table
+    // and `prototypeAccessors` descriptor tables — both take depth-2 writes, so
+    // `collectGrowableObjectLiterals` routes them to the externref builder and
+    // the anon struct is never instantiated). For a ref_null-typed field the
+    // `emitExternrefToStructGet` __extern_get fallback then ref.tests the HOST
+    // result against the struct type, fails, and substitutes ref.null — so
+    // `prototypeAccessors.inFunction.get = fn` wrote onto null, the scope
+    // accessors installed by `Object.defineProperties(Parser.prototype, …)`
+    // lost their getters, and every scope predicate (inFunction / inGenerator /
+    // allowNewDotTarget) answered undefined→false: "'return' outside of
+    // function", new.target/yield parse throws (probe 13/13 → 8/13). The
+    // widening pre-pass only widens EMPTY literals, so a widened receiver's
+    // runtime value IS the struct and the exact-field read stays sound there —
+    // while non-widened receivers keep the pre-#3267 dynamic host-MOP lane that
+    // matches where their writes land.
+    let exactStructField: ReturnType<typeof findAlternateStructsForField>[number] | undefined;
+    if (!typeName && structObjTypeIdx !== undefined) {
+      const structName = ctx.typeIdxToStructName.get(structObjTypeIdx);
+      let widenedDefinePropStruct = false;
+      if (structName) {
+        for (const [varKey, widenedName] of ctx.widenedVarStructMap) {
+          if (widenedName === structName && ctx.widenedDefinePropertyKeys.has(`${varKey}:${propName}`)) {
+            widenedDefinePropStruct = true;
+            break;
+          }
+        }
+      }
+      if (widenedDefinePropStruct) {
+        exactStructField = findAlternateStructsForField(ctx, propName, -1).find(
+          (candidate) => candidate.structTypeIdx === structObjTypeIdx,
+        );
+      }
+    }
+    if (!typeName && exactStructField) {
       const structExprType = compileExpression(ctx, fctx, expr.expression);
       if (structExprType?.kind === "ref_null") {
         emitNullGuardedStructGet(

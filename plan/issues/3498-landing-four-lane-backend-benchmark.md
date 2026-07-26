@@ -1,7 +1,7 @@
 ---
 id: 3498
 title: "Landing benchmark: four honest backend/runtime lanes"
-status: in-progress
+status: ready
 sprint: current
 created: 2026-07-20
 updated: 2026-07-20
@@ -15,7 +15,6 @@ area: benchmarking, ir, codegen-linear, website, ci
 goal: backend-agnostic-ir
 depends_on: [3482, 3497, 3499, 3500, 3501, 3502]
 related: [1760, 1764, 3288, 3336]
-assignee: ttraenkler/sendev-3498
 origin: "2026-07-20 user request to implement the landing-page four-lane backend benchmark"
 ---
 

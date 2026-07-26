@@ -2,7 +2,7 @@
 id: 3494
 title: "Standalone compileMulti must resolve literal dynamic imports from its module graph"
 status: blocked
-sprint: current
+sprint: Backlog
 created: 2026-07-20
 updated: 2026-07-20
 priority: high
