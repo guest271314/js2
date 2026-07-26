@@ -512,7 +512,13 @@ class FunctionEmitter {
   // ── expressions (each leaves its value in acc, restores regTop) ──────────────
   private emitExpr(node: Node): void {
     if (node.type === "Literal") this.emitLiteral(node);
-    else if (node.type === "Identifier") this.emitLoadName(node.name);
+    else if (node.type === "Identifier") {
+      if (node.name === "globalThis" && !this.isBoundName("globalThis")) {
+        this.enc.emitCallBuiltin(Builtin.GlobalThis, 0, 0);
+      } else {
+        this.emitLoadName(node.name);
+      }
+    }
     else if (node.type === "ThisExpression") this.enc.emitReg(Op.Ldar, 0);
     else if (node.type === "ArrayExpression") this.emitArray(node);
     else if (node.type === "ObjectExpression") this.emitObject(node);

@@ -121,7 +121,7 @@ export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): Interp
     a6?: JSValue,
     a7?: JSValue,
   ): JSValue {
-    return interpEnter(meta, envRec, this, [a0, a1, a2, a3, a4, a5, a6, a7]);
+    return interpEnter(meta, envRec, normalizeSloppyThis(envRec, this), [a0, a1, a2, a3, a4, a5, a6, a7]);
   };
   const nm = typeof meta.name === "string" ? meta.name : "";
   try {
@@ -176,6 +176,21 @@ function envLookup(env: EnvRec | null, name: JSValue): JSValue {
     }
     e = e.parent;
   }
+}
+
+/** Phase-1 functions are non-strict unless/until directive flags land. A bare
+ * call therefore substitutes the captured realm's global object for a
+ * null/undefined receiver; explicit method receivers pass through unchanged. */
+function normalizeSloppyThis(env: EnvRec | null, receiver: JSValue): JSValue {
+  if (receiver !== undefined && receiver !== null) return receiver;
+  let e = env;
+  let globalBacking: JSValue = undefined;
+  for (;;) {
+    if (e === null) break;
+    if (e.kind !== ENV_DECLARATIVE) globalBacking = e.backing;
+    e = e.parent;
+  }
+  return globalBacking;
 }
 function envAssign(env: EnvRec | null, name: JSValue, value: JSValue): void {
   // Phase 1 (non-strict): assign to the nearest record that already has the
@@ -379,7 +394,7 @@ function run(bottom: Frame): JSValue {
               const cm = binding.meta;
               const cregs: Regs = new Array(cm.regCount);
               for (let i = 0; i < cm.regCount; i += 1) cregs[i] = undefined;
-              cregs[0] = regs[base]; // receiver → this
+              cregs[0] = normalizeSloppyThis(binding.envRec, regs[base]); // receiver → sloppy this
               const np = argc < cm.paramCount ? argc : cm.paramCount;
               for (let i = 0; i < np; i += 1) cregs[1 + i] = regs[base + 1 + i];
               // Suspend the caller, install the callee frame (no host recursion).

@@ -33,6 +33,12 @@ describe("#2928 dynamic Function factory", () => {
     expect(fn.name).toBe("anonymous");
     expect(fn.length).toBe(2);
   });
+
+  it("substitutes the function realm global object for a bare-call this", () => {
+    const globalObject: Record<string, unknown> = {};
+    const fn = createDynamicFunction((source) => parse(source), "", "return this", globalObject) as () => unknown;
+    expect(fn()).toBe(globalObject);
+  });
 });
 
 describe("#3101 encoder — packing + operand fields", () => {
@@ -178,6 +184,8 @@ describe("#3101 calls, closures, recursion, this-binding", () => {
   it("invokes a function expression immediately", () => expectValue("(function(x){return x*x;})(6)", 36));
   it("invokes an arrow", () => expectValue("((a,b)=>a*b)(6,7)", 42));
   it("binds this via a method call", () => expectValue("var o={n:5}; function g(){return this.n;} g.call(o)", 5));
+  it("binds bare interpreted calls to the script global object", () =>
+    expectValue("function g(){return this === globalThis ? 1 : 2;} g()", 1));
   it("nested function sees a global var (global resolution, not capture)", () =>
     expectValue("var g=0; function inc(){ g=g+1; return g; } inc(); inc(); inc()", 3));
   it("constructs a non-interpreted callable through the fixed-arity runtime seam", () =>

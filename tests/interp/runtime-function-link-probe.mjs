@@ -143,6 +143,30 @@ function providerSource() {
         return ast;
       }
 
+      function makeThisFunctionAst(): any {
+        const value: any = {};
+        value.type = "ThisExpression";
+        const ret: any = {};
+        ret.type = "ReturnStatement";
+        ret.argument = value;
+        const block: any = {};
+        block.type = "BlockStatement";
+        block.body = [ret];
+        const id: any = {};
+        id.type = "Identifier";
+        id.name = "anonymous";
+        const declaration: any = {};
+        declaration.type = "FunctionDeclaration";
+        declaration.id = id;
+        declaration.params = [];
+        declaration.body = block;
+        const ast: any = {};
+        ast.type = "Program";
+        ast.sourceType = "script";
+        ast.body = [declaration];
+        return ast;
+      }
+
       function parse(source: string, options: any): any {
         if (options.ecmaVersion !== 2025 || options.sourceType !== "script") {
           throw new TypeError("unexpected parser options");
@@ -152,6 +176,9 @@ function providerSource() {
         }
         if (source === "function anonymous(x\\n) {\\nreturn x\\n}") {
           return makeIdentityFunctionAst();
+        }
+        if (source === "function anonymous(\\n) {\\nreturn this\\n}") {
+          return makeThisFunctionAst();
         }
         if (source === "answer + 2") return makeEvalAst();
         if (source === "aotIdentity(globalValue)") {
@@ -264,6 +291,11 @@ const USER_SOURCE = `
     return fn(value) === value ? 1 : 2;
   }
 
+  export function sloppyThis(): number {
+    const fn: any = new Function(dynamic("return this"));
+    return fn() === globalThis ? 1 : 2;
+  }
+
   function aotIdentity(value: any): any {
     return value;
   }
@@ -336,6 +368,7 @@ async function main() {
         ["invokeCall", userInstance.exports.invokeCall],
         ["invokeCallImmediate", userInstance.exports.invokeCallImmediate],
         ["interpretedIdentity", userInstance.exports.interpretedIdentity],
+        ["sloppyThis", userInstance.exports.sloppyThis],
         ["aotIdentityRoundTrip", userInstance.exports.aotIdentityRoundTrip],
         ["indirectEval", userInstance.exports.indirectEval],
         ["indirectEvalNonString", userInstance.exports.indirectEvalNonString],
