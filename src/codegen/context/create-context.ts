@@ -60,6 +60,7 @@ export function createCodegenContext(
     usageInference: new UsageInference(checker),
     useUsageInfer: options?.useUsageInfer ?? process.env.JS2WASM_USAGE_INFER !== "0",
     funcMap: new Map(),
+    irUnitFuncMap: new Map(),
     structMap: new Map(),
     typeIdxToStructName: new Map(),
     structFields: new Map(),

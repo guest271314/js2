@@ -29,12 +29,22 @@ export interface IrFunctionIdentity {
 }
 
 export interface IrLiftedFunctionArtifactIdentity extends IrFunctionIdentity {
+  readonly parentId: IrUnitId;
+  readonly role: "lifted-closure";
   readonly ordinal: number;
 }
 
 export interface IrLiftedFunctionArtifactOwner {
   readonly ownerUnitId: IrUnitId;
   readonly liftedCounter: { value: number };
+}
+
+/** Exact producer-side provenance for one pass-created executable unit. */
+export interface IrDerivedUnitProvenance {
+  readonly id: IrUnitId;
+  readonly parentId: IrUnitId;
+  readonly role: IrSyntheticUnitRole;
+  readonly ordinal: number;
 }
 
 /** Closed role families for compiler/pass-created executable units. */
@@ -251,6 +261,8 @@ export function allocateLiftedFunctionArtifact(
   return {
     unitId: createDerivedIrUnitId({ parentId: owner.ownerUnitId, role: "lifted-closure", ordinal }),
     name: displayNameForOrdinal(ordinal),
+    parentId: owner.ownerUnitId,
+    role: "lifted-closure",
     ordinal,
   };
 }

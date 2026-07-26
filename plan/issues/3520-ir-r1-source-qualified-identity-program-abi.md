@@ -5,9 +5,9 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: symphony/3520-r1-planning-identity
-pr: 3496
-last_merged_pr: 3490
+branch: codex/3520-c10-class-method-aliases
+pr: 3677
+last_merged_pr: 3496
 sprint: current
 created: 2026-07-21
 updated: 2026-07-26
@@ -84,7 +84,10 @@ files:
   - src/codegen/class-member-keys.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
+  - src/codegen/dead-elimination.ts
+  - src/codegen/func-space.ts
   - src/codegen/program-abi-planning.ts
+  - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/ir-first-gate.ts
   - src/codegen/ir-class-shapes.ts
@@ -100,6 +103,8 @@ files:
   - tests/helpers/ir-identities.ts
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
+  - tests/issue-3520-lifted-program-abi.test.ts
+  - tests/issue-3520-monomorph-program-abi.test.ts
   - tests/issue-3520-callable-binding.test.ts
   - tests/issue-3520-global-type-binding.test.ts
   - tests/issue-3520-callable-preregistration.test.ts
@@ -124,8 +129,15 @@ files:
   - tests/issue-3520-promise-plan-identity.test.ts
   - tests/issue-3520-selfhost-cache-identity.test.ts
   - tests/issue-3520-monomorphize-identity.test.ts
+  - tests/issue-3520-program-abi-callable-planning.test.ts
+  - tests/issue-3520-program-abi-type-remap.test.ts
+  - tests/issue-3520-support-callable-abi.test.ts
+  - tests/issue-3520-class-support-callable-abi.test.ts
+  - tests/issue-3520-class-method-alias-abi.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
+  - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
+  - src/codegen/context/types.ts
   - src/ir/integration.ts
   - src/ir/from-ast.ts
   - src/ir/nodes.ts
@@ -1168,6 +1180,355 @@ pnpm run check:ir-only -- --policy=hybrid
 pnpm run check:ir-fallbacks -- --verbose
 node scripts/equivalence-gate.mjs
 ```
+
+### 2026-07-26 production callable/imported-global continuation
+
+The first production ABI populations after PR #3496 are implemented on
+`codex/3520-c4-production-abi`:
+
+- every inventory-backed source/unit callable observed by WasmGC IR integration
+  now receives the canonical `callable/body` binding ID, a structural callable
+  reference key, a canonical signature intention, and an exact
+  `WasmFunction` locator;
+- migrated unit calls resolve through
+  `ProgramAbiSession.resolveCurrentIndex(...)`, so late function-import shifts
+  are resolved from the current allocator layout instead of a captured
+  `funcMap` index;
+- overlay replacement and orphan stubbing update the exact function locator in
+  the same mutation seam, so ABI publication follows the final function object;
+- host string-constant globals now plan exact imported-global intentions
+  anchored to the unique entry source, including deterministic literal order,
+  deduplication, late/interleaved imports, lone-surrogate field encoding, and
+  the valid empty import field; and
+- native-string builds retain the no-import sentinel path and publish no
+  string-constant ABI entries.
+
+The complete #3520 matrix plus #2138 multi-source coverage passes **216/216**
+across **35 files**. Strict TypeScript, LOC budget, Prettier, and diff checks
+pass. Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed
+Unsupported / 0 Invariants / 37 legacy bodies**, and the fallback ratchet
+reports no unintended, post-claim, or module-level increase. Full equivalence
+reports **1,608 passing / 35 known failures / 0 new regressions**, with one
+known baseline failure now passing; the baseline remains unchanged.
+The existing `ir-scaffold` host fixture still fails **1/7** because it does not
+provide the already-requested `env.__unbox_number` import; the identical
+failure reproduces on untouched PR #3496 head `c96312ba`.
+
+This remains a bounded R1 continuation, not the final ABI cutover. Derived
+lifted and monomorphized units remain explicitly unplanned because
+`LoweredFunctionResult` and the monomorphization sidecar do not yet preserve
+the complete `{ parentId, sourceId, terminalOwnerId, role, ordinal }`
+`ProgramAbiDerivedUnitRecord`. No display-label or encoded-ID inference is
+used. Imported/runtime/intrinsic/support callables, remaining imported globals,
+Wasm types and class layouts plus DCE remaps, exports and aliases, and
+production `LegacyAbiAdapter` replacement of the remaining `funcMap`,
+`structMap`, module-array, and display-name scans still remain before R1 can
+close.
+
+### 2026-07-26 lifted-callable provenance continuation
+
+The next stacked continuation on `codex/3520-c5-derived-provenance` moves
+successfully emitted lifted closures into the production Program ABI:
+
+- lifted allocation now preserves exact `{ id, parentId, role, ordinal }`
+  provenance beside `LoweredFunctionResult`; integration joins it to the
+  authoritative inventory's `sourceId` and terminal owner by ID, never by
+  output order, encoded ID, or display label;
+- accepted lifted functions register complete `ProgramAbiDerivedUnitRecord`
+  values only after lowering has produced the settled Wasm function and
+  signature. The owner body retains derived suborder zero and its owner-wide
+  lifted ordinals occupy one-based suborders;
+- the backend keeps an exact `IrUnitId -> WasmFunction` table and resolves the
+  current live or stable function handle from the allocator object. Synthetic
+  compatibility labels may therefore collide with source functions without
+  aliasing their slots or locators;
+- derived callable planning occurs after the placeholder is replaced, so the
+  ABI records the real lowered signature rather than placeholder type zero;
+  and
+- integration telemetry continues to classify terminal versus synthetic
+  artifacts from exact artifact/owner IDs. Equal public labels no longer
+  manufacture a false invariant.
+
+The production collision regression compiles one source owner, two lifted
+closures, and a top-level function deliberately named like the first lift. All
+four callables publish distinct final function slots while the legacy
+name-only adapter correctly rejects the ambiguous label. The complete #3520
+matrix plus #2138 passes **221/221** across **36 files**. Strict TypeScript,
+Prettier, scoped Biome lint, diff, and LOC checks pass. Hybrid readiness remains
+**READY** at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy
+bodies**, and the fallback ratchet reports no unintended, post-claim, or
+module-level increase. The eight-shard equivalence gate passes with **1,608
+passing / 35 known failures / 0 new regressions**; one baseline failure now
+passes.
+
+This is still a bounded lifted-only slice. Monomorphization already creates
+exact clone IDs but its result sidecar drops the clone role and parent-local
+ordinal. More importantly, clone-local ordinals are not injective across
+different lifted parents after structural ordering collapses to the inventory
+ancestor. The next derived-unit slice must preserve full clone provenance and
+assign an explicit provenance-path (or equivalent owner-wide) ABI rank before
+monomorphized clones can leave the compatibility adapter. Provider/import/
+runtime/support callables, remaining imported globals, Wasm types and class
+layouts plus DCE remaps, exports and aliases, and the production
+`LegacyAbiAdapter` cutover remain after that.
+
+### 2026-07-26 monomorph-clone provenance continuation
+
+The next stacked continuation on `codex/3520-c6-monomorph-provenance` moves
+monomorphization clones through the same exact derived-unit Program ABI
+contract:
+
+- `monomorphize` now returns one immutable
+  `{ id, parentId, role: "monomorphization-clone", ordinal }` provenance record
+  for every clone, including clones whose parent is itself a lifted unit. The
+  legacy clone-origin sidecar remains temporarily for compatibility, and
+  integration rejects any disagreement between origins, provenance,
+  signatures, and output functions.
+- Integration composes each clone's `sourceId` and `terminalOwnerId` through
+  its exact parent record. It registers the complete derived graph
+  topologically before callable planning, so module/pass insertion order
+  cannot make a child appear to be an inventory root or erase a lifted parent.
+- `ProgramAbiStructuralOrder` assigns dense, deterministic per-root ranks from
+  complete role/ordinal provenance paths. Source bodies retain rank zero;
+  parents precede descendants; the same clone ordinal under two different
+  lifted parents cannot collide; and reverse registration/planning order
+  produces the same ABI order.
+- Ordering is sealed per inventory root rather than globally. A source that
+  has started planning rejects later descendants beneath that root, while a
+  distinct source may still register a child before its parent. Root-local
+  descendant traversal also prevents an unrelated incomplete provenance graph
+  from poisoning another source's ordering.
+
+The production integration-contract regression runs the real monomorphizer,
+then injects two contract-valid ordinal-zero clones beneath two real lifted
+closures sharing one source owner. The clones are deliberately placed before
+their parents and in reverse order; publication still recovers
+owner/lift/clone provenance order, exact binding IDs, distinct final function
+slots, exact function objects, and the distinguishing `f64` versus branded
+boolean parameter/result types. This seam is intentionally explicit:
+production source lowering currently normalizes direct-call tuples to one
+callee signature, so no natural source fixture reaches monomorphization with
+heterogeneous tuples. Pass-level tests continue to prove real clone discovery,
+call rewriting, and ordinals.
+
+The strengthened regression also exposed the next concrete R1 boundary.
+Callable intents containing capture-reference types retain their pre-DCE
+`typeIdx`, while the final located Wasm function correctly uses the compacted
+post-DCE index. Final identity, locator, and callable dispatch are correct, and
+no current consumer treats the stale signature metadata as authoritative.
+Program ABI type intentions plus DCE remap notification must nevertheless land
+before signatures or aliases can become authoritative; the regression binds
+all stable non-capture positions and documents the deferred ref-index check.
+
+The complete #3520 matrix plus #2138 passes **224/224** across **37 files**.
+Strict TypeScript, Prettier, scoped Biome lint, diff, and LOC checks pass.
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants / 37 legacy bodies**, and the fallback ratchet reports no
+unintended, post-claim, or module-level increase. The eight-shard equivalence
+gate passes with **1,608 passing / 35 known failures / 0 new regressions**; one
+baseline failure now passes, and the baseline remains unchanged.
+
+This remains a bounded R1 slice. Provider/import/runtime/support callables,
+remaining imported globals, Program ABI type intentions and DCE remaps, class
+layouts, exports and aliases, and the production `LegacyAbiAdapter` cutover
+still remain before R1 can close.
+
+### 2026-07-26 type-layout authority continuation
+
+The next stacked continuation on `codex/3520-c7-type-remap` makes the callable
+and global intentions already populated by production code authoritative
+through DCE type compaction:
+
+- callable and global planners retain immutable structured `ValType`
+  contracts beside the frozen public draft. The public canonical strings are
+  materialized only at publication, after all reported layout changes;
+- dead type elimination constructs the complete old-to-final type-index
+  vector, including explicit `null` entries for eliminated types, and reports
+  the exact before/after type arrays while the old layout is still installed;
+- `ProgramAbiSession` validates the complete layout before changing state,
+  remaps every callable/global reference and exact type cell together, and
+  rejects invalid, incomplete, ambiguous, or eliminated-reference layouts;
+- matching aliases inherit the remapped canonical contract. Aliases whose
+  original intent differs retain their own intent and continue through the
+  existing `ProgramAbiMap` mismatch checks; and
+- function/global locator replacements and final publication validate the
+  concrete allocator object against the tracked contract. A late replacement
+  can no longer make stale metadata look authoritative.
+
+The production regression compiles a real lifted closure and a contract-valid
+monomorph clone whose capture reference shifts during DCE. Both published
+signatures now exactly equal their final located Wasm function types, including
+the compacted capture index and their distinct `f64` versus branded-boolean
+parameters/results. Lower-level regressions cover callable, alias, global, and
+type-cell remapping plus transactional rejection of malformed layouts.
+
+The complete #3520 matrix plus #2138 passes **227/227** across **38 files**.
+Strict TypeScript, Prettier, scoped Biome lint, diff, LOC, function-budget,
+dead-export, and oracle-ratchet checks pass. Hybrid readiness remains **READY**
+at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy bodies**,
+and the fallback ratchet reports no unintended, post-claim, or module-level
+increase. The eight-shard equivalence gate passes with **1,608 passing / 35
+known failures / 0 new regressions**; one baseline failure now passes, and the
+baseline remains unchanged.
+
+This closes the concrete stale capture-reference gap exposed by C6, but not all
+of R1. Provider/import/runtime/support callables, remaining imported globals,
+Program ABI type and class-shape intentions, exports and aliases, and production
+`LegacyAbiAdapter` replacement of the remaining `funcMap`, `structMap`,
+module-array, and display-name scans still remain before R1 can close.
+
+### 2026-07-26 function-value support-callable continuation
+
+The next stacked continuation on `codex/3520-c8-support-callable` moves the
+cached top-level function-value trampoline into the production Program ABI:
+
+- function-value preparation now validates and publishes the exact trampoline
+  and closure-cache allocator objects as one pair. The trampoline is a
+  unit-anchored `callable/support` entry; its existing companion cache remains
+  an exact `global/support` entry;
+- support-callable planning recomputes the opaque binding ID from the
+  authoritative unit anchor and semantic role, owns one exact required
+  `WasmFunction` locator, and registers the complete callable type contract.
+  The API deliberately supports only ordinal zero until structural ordering
+  has an explicit artifact-ordinal dimension;
+- the resolver consults a planned support binding by structural key before any
+  intrinsic, runtime, or compatibility-name fallback. Once planned, a support
+  reference cannot silently redirect through `funcMap`; and
+- the paired planning helper lives in `program-abi-planning.ts`, leaving the
+  already-large codegen driver seven lines smaller than the C7 branch.
+
+The production regression passes a deliberately nonexistent compatibility
+label through the real integration resolver and proves that it still reaches
+the exact trampoline slot. It then verifies that the published signature
+contains a reference type and exactly matches the final post-DCE function
+type. A source-name collision separately proves that a demoted owner publishes
+no nonexistent support entry. Planner regressions cover relabelling, a late
+function import, mismatched reference role and final signature, and duplicate
+allocator ownership.
+
+The complete #3520 matrix plus #2138 passes **232/232** across **39 files**.
+The related #3214 callable and imported-HOF matrix passes **60/60** across
+**3 files**.
+Strict TypeScript, Prettier, Biome lint, diff, LOC, function-budget,
+dead-export, and oracle-ratchet checks pass. Hybrid readiness remains **READY**
+at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy bodies**,
+and the fallback ratchet reports no unintended, post-claim, or module-level
+increase. The eight-shard equivalence gate passes with **1,608 passing / 35
+known failures / 0 new regressions**; one baseline failure now passes, and the
+baseline remains unchanged.
+
+This is the first non-unit defined support callable with an authoritative
+production locator, not the end of R1. Non-externref class constructor/init
+callables are covered by C9; class-method adapters and externref/Promise-host
+helpers remain. Exact imported callable IDs and import locators, dual-mode
+runtime/intrinsic providers, remaining imported globals, Program ABI
+type/class-layout entries, exports and aliases, and the production
+`LegacyAbiAdapter` cutover still remain.
+
+### 2026-07-26 class constructor/support-callable continuation
+
+The next stacked continuation on `codex/3520-c9-class-support-callables`
+makes the non-externref WasmGC class constructor pair structurally
+authoritative in the production Program ABI:
+
+- `<Class>_new` now resolves to exactly one inventoried
+  `class-constructor` or `class-implicit-constructor` unit beneath the exact
+  `IrClassId`. The integration seam binds that unit to the allocator-owned
+  constructor slot; an omitted source constructor remains a source-unit
+  callable and never receives a fabricated support identity.
+- `<Class>_init` is now a class-owned `callable/support` entry anchored by the
+  exact `IrClassId` and semantic `class-constructor-init` role. It carries
+  class-local structural order, the exact defined-function locator, and a
+  callable contract that is checked again against the final post-DCE type.
+- Support-callable intent now requires exactly one inventoried owner: a unit
+  or a class, never both. Source callables reject class provenance;
+  import/runtime callables reject source provenance; foreign owners and wrong
+  source order fail with typed Program ABI invariants. Session draft equality
+  includes the class owner.
+- Compatibility-only integration builds and reuses the same exact planning
+  identity context for class-shape resolution. Missing or duplicate
+  constructor units, absent or mismatched allocator slots, and non-function
+  `_init` types fail closed instead of falling back through a display label.
+- A collision fixture relocates a compiler-owned `A_init` beside a user
+  function named `A_init`, proves distinct ABI IDs and final function slots,
+  verifies the published post-DCE signature against the located function, and
+  executes the IR `super(...)` path to `"Rex/4|Lab|99"`.
+
+The focused C9 matrix passes **21/21**. The complete #3520 matrix plus #2138
+passes **243/243 across 41 files**; the class/collision matrix passes
+**27/27**; and the linear/cross-backend/class matrix passes **43/43**. Strict
+TypeScript, Biome lint, Prettier, diff, LOC, function-budget, dead-export,
+oracle-ratchet, and issue-spec checks pass. Hybrid readiness remains **READY**
+at **31 IR-emitted / 6 typed Unsupported / 0 Invariants / 37 legacy bodies**,
+and the fallback ratchet reports no unintended, post-claim, or module-level
+increase. The eight-shard equivalence gate reports **1,608 passing / 35 known
+failures / 0 new regressions**; one baseline failure now passes and the
+baseline remains unchanged. No local Test262 corpus run or baseline refresh
+was performed.
+
+This is a bounded class-constructor ABI slice, not completion of class or R1
+ABI ownership. Externref-backed classes (including the JS-host Promise
+`*_new__onhost` path) have no WasmGC `_init` and remain excluded. Inherited
+ordinary instance-method adapters are covered by C10; inherited accessors,
+statics, and other synthetic helpers remain. Exact imported callables and
+import locators, dual-mode runtime/intrinsic providers, Program ABI
+type/class-layout entries, exports and remaining alias families, and production
+`LegacyAbiAdapter` replacement of the remaining `funcMap`, `structMap`,
+module-array, and display-name scans still remain before R1 can close.
+Preparation/body ownership, routing policy, and R2-R10 work are unchanged.
+
+### 2026-07-26 inherited instance-method alias continuation
+
+The next stacked continuation on `codex/3520-c10-class-method-aliases` moves
+projected local instance-method adapters into the production Program ABI:
+
+- an inherited child method is now an explicit class-owned support alias of
+  the exact ancestor source-method callable. The alias has its own structural
+  reference, provenance, deterministic inventory-derived order, and callable
+  contract, but owns no locator or independent function slot;
+- ancestor class shape, AST declaration, source unit, allocator handle,
+  `WasmFunction` object, and current Program ABI slot must all agree before the
+  alias can be planned. The legacy label is only a consistency assertion and
+  cannot select the canonical method;
+- structural resolution follows `aliasOf` through the canonical source
+  callable. A relocated child compatibility key therefore remains stable
+  across import insertion, type-layout remapping, and final DCE publication;
+  and
+- accessors, statics, externref-backed classes, unresolved projections, and
+  builds without a Program ABI session deliberately remain on the
+  compatibility seam until their member/provider identities are exact.
+
+The production regression covers an `A -> B -> C` hierarchy, a method
+overridden in `B`, a second method inherited transitively from `A`, and a user
+function that collides with `C_m`. It proves that `C.m` aliases the exact `B.m`
+source unit, `C.n` aliases the exact `A.n` source unit, neither child adapter
+allocates a function, both published post-DCE reference-bearing signatures
+match their canonical functions, the colliding user function owns a distinct
+slot, and the emitted program executes to the expected value. Planner
+regressions cover reversed discovery order, multiple derived ordinals,
+relabelling, late function imports, type remapping, structural-reference
+mismatch, and wrong owner/role/ordinal identities.
+
+The complete #3520 matrix plus #2138 passes **246/246 across 42 files**; the
+focused class/planner matrix passes **41/41**; and the
+linear/cross-backend/class matrix passes **43/43**. Strict TypeScript, Biome
+lint, Prettier, diff, LOC, function-budget, dead-export, and oracle-ratchet
+checks pass. Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed
+Unsupported / 0 Invariants / 37 legacy bodies**, and the fallback ratchet
+reports no unintended, post-claim, or module-level increase. The eight-shard
+equivalence gate reports **1,608 passing / 35 known failures / 0 new
+regressions**; one baseline failure now passes and the baseline remains
+unchanged. No local Test262 corpus run was performed.
+
+C10 completes the currently identified inherited ordinary instance-method
+projection, not the remaining class/provider surface or R1. Exact imported
+callable IDs and import locators, dual-mode runtime/intrinsic providers,
+inherited accessors, externref/Promise-host helpers, Program ABI
+type/class-layout entries, exports and remaining alias families, and the
+production `LegacyAbiAdapter` cutover still remain. R2 must then prepare the
+whole IR program before body emission; R3-R8 move function, class,
+module-initializer, multisource, runtime/async, and linear ownership to that
+program; R9 removes fallback policy; and R10 deletes the direct codegen path.
 
 ### R1a validation evidence
 
