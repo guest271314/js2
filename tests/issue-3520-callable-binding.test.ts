@@ -11,6 +11,7 @@ import {
   irIntrinsicFuncRef,
   irRuntimeFuncRef,
   irSupportFuncRef,
+  irUnitCallableBindingId,
   irUnitFuncRef,
   sameIrCallableBinding,
   verifyIrFunction,
@@ -32,6 +33,10 @@ describe("#3520 structural callable bindings", () => {
     const secondRef = irUnitFuncRef(second);
 
     expect(firstRef.name).toBe(secondRef.name);
+    expect(irUnitCallableBindingId(first.unitId)).toBe(
+      createIrBindingId({ ownerId: first.unitId, domain: "callable", role: "body" }),
+    );
+    expect(irUnitCallableBindingId(first.unitId)).not.toBe(irUnitCallableBindingId(second.unitId));
     expect(irCallableBindingKey(firstRef.binding)).not.toBe(irCallableBindingKey(secondRef.binding));
     expect(sameIrCallableBinding(firstRef.binding, secondRef.binding)).toBe(false);
 

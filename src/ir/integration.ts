@@ -52,7 +52,11 @@ import {
   type StringEncoding,
 } from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../codegen/registry/imports.js";
-import { planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "../codegen/program-abi-planning.js";
+import {
+  planProgramAbiGlobal,
+  planProgramAbiUnitCallable,
+  PROGRAM_ABI_GLOBAL_ROLE,
+} from "../codegen/program-abi-planning.js";
 // (#2856) Console-variant parity with the legacy collectConsoleImports scan.
 import { isBooleanType, isNumberType, isStringType } from "../checker/type-mapper.js";
 import {
@@ -95,8 +99,20 @@ import {
   irSupportTypeRef,
   irTypeBindingKey,
 } from "./abi-bindings.js";
-import { irIntrinsicFuncRef, irSupportFuncRef, irUnitFuncRef, sameIrCallableBinding } from "./callable-bindings.js";
-import { buildIrUnitInventory, indexIrTerminalDeclarations, type IrClassId, type IrUnitId } from "./identity.js";
+import {
+  irCallableBindingKey,
+  irIntrinsicFuncRef,
+  irSupportFuncRef,
+  irUnitFuncRef,
+  sameIrCallableBinding,
+} from "./callable-bindings.js";
+import {
+  buildIrUnitInventory,
+  indexIrTerminalDeclarations,
+  type IrBindingId,
+  type IrClassId,
+  type IrUnitId,
+} from "./identity.js";
 import {
   buildIrPlanningIdentityContext,
   buildIrLegacyUnitProjection,
@@ -1494,7 +1510,11 @@ export function compileIrPathFunctions(
   // allocation (e.g. the ABI-parity withdrawal cascade in Phase 3) can stub
   // the orphaned slot instead of leaving an EMPTY body in the module (see
   // the stub pass after the patch loop below).
-  const freshSlots: Array<{ readonly funcIdx: number; readonly terminalOwnerUnitId: IrUnitId }> = [];
+  const freshSlots: Array<{
+    readonly artifactUnitId: IrUnitId;
+    readonly funcIdx: number;
+    readonly terminalOwnerUnitId: IrUnitId;
+  }> = [];
   for (const entry of healthyForLower) {
     // Top-level (non-synthesized) functions already have a funcIdx
     // allocated by `compileDeclarations`. Skip them.
@@ -1516,7 +1536,11 @@ export function compileIrPathFunctions(
       exported: false,
     });
     ctx.funcMap.set(entry.name, funcIdx);
-    freshSlots.push({ funcIdx, terminalOwnerUnitId: entry.terminalOwnerUnitId });
+    freshSlots.push({
+      artifactUnitId: entry.artifactUnitId,
+      funcIdx,
+      terminalOwnerUnitId: entry.terminalOwnerUnitId,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1614,6 +1638,13 @@ export function compileIrPathFunctions(
   // not the helpers map), so we resolve names against `ctx.mod.functions`
   // directly to pick up the current absolute index.
   const unitCallableSlots = new Map<IrUnitId, IrUnitCallableSlot>();
+  // Pass-created lifted/monomorphized units are deliberately absent until
+  // lowering carries explicit parent/role/allocation-ordinal provenance.
+  // Inventory membership is the exact boundary; labels and encoded IDs never
+  // classify a unit as source-owned or derived.
+  const programAbiInventoryUnitIds = ctx.programAbiSession
+    ? new Set(ctx.programAbiSession.inventory.allUnits.map((unit) => unit.id))
+    : undefined;
   const bindUnitCallableSlot = (ref: IrFuncRef, funcIdx: number, physicalName: string): void => {
     if (ref.binding.kind !== "unit") {
       throw new IrInvariantError(
@@ -1642,10 +1673,23 @@ export function compileIrPathFunctions(
       existing.compatibilityNames.add(ref.name);
       return;
     }
+    let programAbiBindingId: IrBindingId | undefined;
+    if (programAbiInventoryUnitIds?.has(ref.binding.unitId)) {
+      const signature = ctx.mod.types[defined.typeIdx];
+      if (!signature || signature.kind !== "func") {
+        throw new IrInvariantError(
+          "abi-type-index-mismatch",
+          "resolve",
+          `ir/integration: exact unit ${ref.binding.unitId} / ${ref.name} has non-function type ${defined.typeIdx}`,
+        );
+      }
+      programAbiBindingId = planProgramAbiUnitCallable(ctx, { ref, signature, func: defined });
+    }
     unitCallableSlots.set(ref.binding.unitId, {
       funcIdx,
       physicalName,
       compatibilityNames: new Set([ref.name]),
+      programAbiBindingId,
     });
   };
   const artifactFuncIdx = (entry: BuiltFn): number | undefined =>
@@ -1770,6 +1814,18 @@ export function compileIrPathFunctions(
     readonly existing: NonNullable<ReturnType<typeof definedFuncAt>>;
     readonly wasmFunc: ReturnType<typeof lowerIrFunctionToWasm>["func"];
     readonly finalBody: Instr[];
+  };
+  const replaceUnitCallableAt = (
+    unitId: IrUnitId,
+    funcIdx: number,
+    previous: NonNullable<ReturnType<typeof definedFuncAt>>,
+    replacement: NonNullable<ReturnType<typeof definedFuncAt>>,
+  ): void => {
+    replaceDefinedFuncAt(ctx, funcIdx, replacement);
+    const bindingId = unitCallableSlots.get(unitId)?.programAbiBindingId;
+    if (bindingId) {
+      ctx.programAbiSession!.replaceDefinedFunctionLocator(bindingId, previous, replacement);
+    }
   };
   const pendingPatches: PendingPatch[] = [];
   // (#3551) Exact artifact identities withdrawn by the typeIdx-parity guard
@@ -1981,13 +2037,14 @@ export function compileIrPathFunctions(
   // main artifact, so the ledger can never report emitted+fatal for one row.
   for (const patch of pendingPatches) {
     if (failedOwners.has(patch.entry.terminalOwnerUnitId)) continue;
-    replaceDefinedFuncAt(ctx, patch.funcIdx, {
+    const replacement = {
       name: patch.existing.name,
       typeIdx: patch.wasmFunc.typeIdx,
       locals: patch.wasmFunc.locals,
       body: patch.finalBody,
       exported: patch.existing.exported,
-    });
+    };
+    replaceUnitCallableAt(patch.entry.artifactUnitId, patch.funcIdx, patch.existing, replacement);
     compiled.push(patch.entry.name);
     compiledArtifactEvidence.push({
       artifactUnitId: patch.entry.artifactUnitId,
@@ -2011,18 +2068,20 @@ export function compileIrPathFunctions(
   // only on a path that actually enters the orphaned artifact. Empty VOID
   // bodies are already valid Wasm (fall-through) — leave those as-is rather
   // than converting today's silent no-op into a trap.
-  const stubIfOrphanedEmpty = (funcIdx: number): void => {
+  const stubIfOrphanedEmpty = (unitId: IrUnitId, funcIdx: number): void => {
     const orphan = definedFuncAt(ctx, funcIdx);
     if (!orphan || orphan.body.length > 0) return;
     const typeDef = ctx.mod.types[orphan.typeIdx];
     if (!typeDef || typeDef.kind !== "func" || typeDef.results.length === 0) return;
-    replaceDefinedFuncAt(ctx, funcIdx, { ...orphan, body: [{ op: "unreachable" }] });
+    replaceUnitCallableAt(unitId, funcIdx, orphan, { ...orphan, body: [{ op: "unreachable" }] });
   };
   for (const slot of freshSlots) {
-    if (failedOwners.has(slot.terminalOwnerUnitId)) stubIfOrphanedEmpty(slot.funcIdx);
+    if (failedOwners.has(slot.terminalOwnerUnitId)) stubIfOrphanedEmpty(slot.artifactUnitId, slot.funcIdx);
   }
   for (const patch of pendingPatches) {
-    if (failedOwners.has(patch.entry.terminalOwnerUnitId)) stubIfOrphanedEmpty(patch.funcIdx);
+    if (failedOwners.has(patch.entry.terminalOwnerUnitId)) {
+      stubIfOrphanedEmpty(patch.entry.artifactUnitId, patch.funcIdx);
+    }
   }
 
   const dropTerminal = process.env.JS2WASM_TEST_DROP_IR_TERMINAL;
@@ -2381,6 +2440,8 @@ interface IrUnitCallableSlot {
   readonly physicalName: string;
   /** Temporary adapter labels admitted for this exact unit and slot only. */
   readonly compatibilityNames: Set<string>;
+  /** Present only for inventory-backed units planned through ProgramAbiSession. */
+  readonly programAbiBindingId?: IrBindingId;
 }
 
 /**
@@ -2792,6 +2853,13 @@ function makeResolver(
             "unknown-function-ref",
             "lower",
             `ir/integration: unknown exact function ref ${ref.binding.unitId} / ${JSON.stringify(ref.name)}`,
+          );
+        }
+        if (ctx.programAbiSession && slot.programAbiBindingId) {
+          return ctx.programAbiSession.resolveCurrentIndex(
+            slot.programAbiBindingId,
+            "function",
+            irCallableBindingKey(ref.binding),
           );
         }
         return slot.funcIdx;
