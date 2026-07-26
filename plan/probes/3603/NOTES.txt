@@ -38,6 +38,30 @@ check `ls -la test262/ | grep harness` and restore the symlink by hand:
 Nothing here modifies compiler or runner source. There is no committed
 force-disable switch.
 
+WORKTREE-SAFE IS NOT SELF-SAFE (learned the hard way, 2026-07-26)
+----------------------------------------------------------------
+The swap above protects OTHER AGENTS. It does NOT protect YOU from your own
+concurrent measurement in the SAME worktree. While armA2/armB are in flight the
+worktree's propertyHelper.js is the INSTRUMENTED one, in which all five
+`__push(failures, …)` sites are replaced by `__vpPush`. Any other harness-
+dependent probe you run in that window silently measures the instrumented
+harness — `__push` is never called, so anything keyed on it reports ZERO and
+tests that should fail come back `pass`.
+
+This produced two consecutive false "0 firings" results for the #3603 S1
+write-back sweep. It was caught ONLY because the second run embedded three
+known-firing POSITIVE CONTROLS in the same process and they failed to fire.
+
+Rules:
+  * Never run a harness-dependent measurement while an arm is running in the
+    same worktree. Serialize, or use a second worktree.
+  * Every sweep that can report zero MUST embed an in-run positive control.
+    A zero without a control is not a result.
+  * To check the current state:
+      ls -ld test262/harness                                   # symlink = clean
+      grep -c '__vpChecks\|__vpFailMsg\|__vpPush' test262/harness/propertyHelper.js
+    A non-zero count means an instrumented harness is installed RIGHT NOW.
+
 Traps that cost real time (see the issue for the full list)
 ----------------------------------------------------------
 * A probe function must be `export`ed; a plain top-level declaration is not
