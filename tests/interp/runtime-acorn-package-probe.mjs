@@ -124,6 +124,15 @@ async function main() {
         }
       }
 
+      export function linkedErrorThrow(): number {
+        try {
+          (0, eval)(dynamic("throw new Error('x')"));
+          return 0;
+        } catch (error) {
+          return error ? 1 : 2;
+        }
+      }
+
       function aotAdd(a: number, b: number): number {
         return a + b;
       }
@@ -173,6 +182,7 @@ async function main() {
           ["eval", instance.exports.__runtime_eval_canary],
           ["linkedEval", userInstance.exports.linkedEval],
           ["linkedThrow", userInstance.exports.linkedThrow],
+          ["linkedErrorThrow", userInstance.exports.linkedErrorThrow],
           ["linkedAotCall", userInstance.exports.linkedAotCall],
         ];
         if (report.functionCanaryEnabled) {

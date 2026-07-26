@@ -52,6 +52,7 @@ describe("#2928 — real Acorn runtime-eval provider", () => {
       eval: 3,
       linkedEval: 42,
       linkedThrow: 1,
+      linkedErrorThrow: 1,
       linkedAotCall: 5,
     });
   });

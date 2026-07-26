@@ -187,6 +187,10 @@ describe("#3101 exceptions (side-table, cross-call unwind)", () => {
     expectValue("function boom(){ throw 'x'; } var r='no'; try { boom(); } catch(e){ r=e; } r", "x"));
   it("host TypeError on a non-callable is catchable", () =>
     expectValue("var r = 'no'; try { var n = 5; n(); } catch(e) { r = e.name; } r", "TypeError"));
+  it("constructs an unshadowed native Error through CallBuiltin", () =>
+    expectValue("var r; try { throw new Error('x'); } catch(e) { r=e.name + ':' + e.message; } r", "Error:x"));
+  it("does not replace a shadowed Error binding with the intrinsic", () =>
+    expectValue("function Error(x){ this.value=x; } (new Error(7)).value", 7));
   it("typeof of an undeclared name does not throw", () => expectValue("typeof someUndeclaredThing", "undefined"));
 });
 

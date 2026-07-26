@@ -578,6 +578,16 @@ function callBuiltin(builtinId: number, regs: Regs, base: number, argc: number, 
       return frame.envRec !== null ? frame.envRec.backing : undefined;
     case Builtin.TypeofName:
       return typeofName(frame.envRec, regs[base]);
+    case Builtin.Error:
+      return argc === 0 ? new Error() : new Error(String(regs[base]));
+    case Builtin.TypeError:
+      return argc === 0 ? new TypeError() : new TypeError(String(regs[base]));
+    case Builtin.RangeError:
+      return argc === 0 ? new RangeError() : new RangeError(String(regs[base]));
+    case Builtin.SyntaxError:
+      return argc === 0 ? new SyntaxError() : new SyntaxError(String(regs[base]));
+    case Builtin.ReferenceError:
+      return argc === 0 ? new ReferenceError() : new ReferenceError(String(regs[base]));
     default:
       throw new InterpInternalError(`unknown builtin id ${builtinId}`);
   }

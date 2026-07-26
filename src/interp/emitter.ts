@@ -557,6 +557,24 @@ class FunctionEmitter {
     else this.enc.emitConst(Op.StName, this.enc.internConst(name));
   }
 
+  /** Whether a syntactic global name is shadowed anywhere in this function.
+   *
+   * Hoisted script bindings are environment-backed rather than register-backed,
+   * so checking only `names` would incorrectly fold `var Error; new Error()`
+   * to the intrinsic. The explicit scans keep this helper inside the
+   * self-compile subset.
+   */
+  private isBoundName(name: string): boolean {
+    if (this.names.get(name) !== undefined) return true;
+    for (const local of this.hoistedVars) {
+      if (local === name) return true;
+    }
+    for (const fn of this.hoistedFuncs) {
+      if (fn.id && fn.id.name === name) return true;
+    }
+    return false;
+  }
+
   private emitArray(node: Node): void {
     const m = this.mark();
     const base = this.regTop;
@@ -670,6 +688,29 @@ class FunctionEmitter {
   }
 
   private emitNew(node: Node): void {
+    // The standalone global object is deliberately a per-module open object,
+    // not a complete JS realm. Lower the direct, unshadowed native Error family
+    // through CallBuiltin so the E4 boundary can transport real catchable error
+    // values without requiring host globals or synthetic constructor carriers.
+    // Alias/dynamic-constructor forms continue through the ordinary Construct
+    // seam; this arm is the Phase-1 acceptance path.
+    if (node.callee.type === "Identifier" && !this.isBoundName(node.callee.name)) {
+      const builtinId = this.errorBuiltinId(node.callee.name);
+      if (builtinId >= 0) {
+        // Keep names distinct from the ordinary Construct locals below. The
+        // self-compiler currently flattens block-scoped locals in this method
+        // before its TDZ pass (#3651), so reusing `m`/`base` in sibling blocks
+        // produces a false "before initialization" diagnostic.
+        const builtinMark = this.mark();
+        const builtinBase = this.regTop;
+        for (let i = 0; i < node.arguments.length; i += 1) this.allocReg();
+        this.emitArgWindow(node.arguments, builtinBase);
+        this.enc.emitCallBuiltin(builtinId, builtinBase, node.arguments.length);
+        this.release(builtinMark);
+        return;
+      }
+    }
+
     const argc = node.arguments.length;
     const m = this.mark();
     const base = this.regTop;
@@ -683,6 +724,15 @@ class FunctionEmitter {
     this.enc.emitReg(Op.Ldar, rCallee);
     this.enc.emitCall(Op.Construct, base, argc);
     this.release(m);
+  }
+
+  private errorBuiltinId(name: string): number {
+    if (name === "Error") return Builtin.Error;
+    if (name === "TypeError") return Builtin.TypeError;
+    if (name === "RangeError") return Builtin.RangeError;
+    if (name === "SyntaxError") return Builtin.SyntaxError;
+    if (name === "ReferenceError") return Builtin.ReferenceError;
+    return -1;
   }
 
   private emitArgWindow(args: Node[], firstSlot: number): void {
