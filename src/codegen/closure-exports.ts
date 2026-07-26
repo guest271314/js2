@@ -121,6 +121,22 @@ function externToClosureParamRef(paramType: ValType): Instr[] {
   return ops;
 }
 
+/** Preserve the structural boolean brand when an i32 crosses the externref ABI. */
+function boxI32ClosureResult(
+  ctx: CodegenContext,
+  returnType: { kind: "i32"; boolean?: true },
+  boxNumberIdx: number | undefined,
+): Instr[] {
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  if (returnType.boolean === true && boxBooleanIdx !== undefined) {
+    return [{ op: "call", funcIdx: boxBooleanIdx }];
+  }
+  if (boxNumberIdx !== undefined) {
+    return [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumberIdx }];
+  }
+  return [{ op: "drop" }, { op: "ref.null.extern" }];
+}
+
 /**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
@@ -229,7 +245,6 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
-  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
 
   // #820l — globals for argc + extras-argv plumbing into the callee's
   // `arguments` object. Both globals are mode-agnostic; ensureExtrasArgvGlobal
@@ -360,19 +375,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        // (#3666) Preserve the ValType's boolean brand across the uniform
-        // externref closure boundary. Boxing `true` as Number(1) makes strict
-        // harness checks (`result === true`) fail even though the callback
-        // returned the correct i32 bit.
-        if ((entry.returnType as { boolean?: true }).boolean === true && boxBooleanIdx !== undefined) {
-          callBody.push({ op: "call", funcIdx: boxBooleanIdx });
-        } else if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" });
-          callBody.push({ op: "call", funcIdx: boxNumberIdx });
-        } else {
-          callBody.push({ op: "drop" });
-          callBody.push({ op: "ref.null.extern" });
-        }
+        callBody.push(...boxI32ClosureResult(ctx, entry.returnType, boxNumberIdx));
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i64_s" });
@@ -547,7 +550,6 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
 
   addUnionImports(ctx);
   const boxNumberIdx = ctx.funcMap.get("__box_number");
-  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
   const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
   // (#2745) Same #820l argc/extras plumbing as `emitClosureCallExportN`, so a
   // method-dispatched closure's `arguments` object observes over-arity args
@@ -694,18 +696,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
           callBody.push({ op: "ref.null.extern" });
         }
       } else if (entry.returnType.kind === "i32") {
-        // (#3666) `i32` may carry the structural boolean brand. Preserve it
-        // when returning through the method dispatcher so dynamic closure calls
-        // observe `true`/`false`, not numeric 1/0.
-        if ((entry.returnType as { boolean?: true }).boolean === true && boxBooleanIdx !== undefined) {
-          callBody.push({ op: "call", funcIdx: boxBooleanIdx });
-        } else if (boxNumberIdx !== undefined) {
-          callBody.push({ op: "f64.convert_i32_s" });
-          callBody.push({ op: "call", funcIdx: boxNumberIdx });
-        } else {
-          callBody.push({ op: "drop" });
-          callBody.push({ op: "ref.null.extern" });
-        }
+        callBody.push(...boxI32ClosureResult(ctx, entry.returnType, boxNumberIdx));
       } else if (entry.returnType.kind === "i64") {
         if (boxNumberIdx !== undefined) {
           callBody.push({ op: "f64.convert_i64_s" });

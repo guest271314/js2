@@ -98,7 +98,8 @@ import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3160) TS-source builtins
-import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js"; // (#3274 wave-B) descriptor/integrity helper builders
+import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js";
+import { isOpenDescriptorShape } from "./property-descriptor-shape.js";
 import { buildObjectEnumerationHelpers } from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
 import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // (#3274 wave-B) prototype-chain helper builders
 import { isSyntheticStructName } from "./emit-helpers.js";
@@ -5905,7 +5906,6 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
   const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
   const boxedNumberTypeIdx = ctx.nativeBoxNumberTypeIdx;
   if (!fn || flattenIdx === undefined || equalsIdx === undefined) return;
-
   type Entry = {
     typeIdx: number;
     fieldIdx: number;
@@ -5917,32 +5917,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
   };
   const byField = new Map<string, Entry[]>();
   for (const [structName, fields] of ctx.structFields) {
-    if (isSyntheticStructName(structName)) continue;
-    // Descriptor contracts without a concrete value carrier are consumed by
-    // the open `$Object` runtime. Adding their anonymous structs here makes a
-    // structurally equivalent arm intercept the descriptor returned for vecs.
-    const descriptorValueField = fields.find((field) => field?.name === "value");
-    if (
-      structName.startsWith("__anon_") &&
-      fields.some((field) => field?.name === "enumerable") &&
-      (descriptorValueField === undefined ||
-        descriptorValueField.type.kind === "externref" ||
-        descriptorValueField.type.kind === "ref_extern") &&
-      fields.every(
-        (field) =>
-          !field?.name ||
-          field.name.startsWith("$") ||
-          field.name.startsWith("__") ||
-          field.name === "value" ||
-          field.name === "writable" ||
-          field.name === "enumerable" ||
-          field.name === "configurable" ||
-          field.name === "get" ||
-          field.name === "set",
-      )
-    ) {
-      continue;
-    }
+    if (isSyntheticStructName(structName) || isOpenDescriptorShape(structName, fields)) continue;
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
     const shapeFieldIdx = fields.findIndex((field) => field?.name === "$shape");

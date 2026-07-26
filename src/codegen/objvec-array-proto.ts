@@ -4,6 +4,13 @@ import type { Instr } from "../ir/types.js";
 import { ensureArrayNativeProtoGlue } from "./array-object-proto.js";
 import { definedFuncAt } from "./func-space.js";
 import { emitLazyNativeProtoGet } from "./native-proto.js";
+import { fillVecOverlayHelpers } from "./vec-overlay.js";
+
+/** Finalize the generic vec overlay before installing the exact `$ObjVec` prototype arm. */
+export function fillObjVecReflectionHelpers(ctx: CodegenContext): void {
+  fillVecOverlayHelpers(ctx);
+  fillObjVecArrayPrototypeArm(ctx);
+}
 
 /**
  * #3666 — make the internal `$ObjVec` array carrier report the exact shared
