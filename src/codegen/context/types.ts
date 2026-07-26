@@ -1961,6 +1961,10 @@ export interface CodegenContext {
   preRegisteredBodyless?: Set<string>;
   /** Map from module-level variable name → global index in mod.globals */
   moduleGlobals: Map<string, number>;
+  /** Script `var` names whose global-object properties are non-configurable. */
+  globalObjectVarBindings?: Set<string>;
+  /** Sloppy unresolvable assignment targets discovered before body compilation. */
+  sloppyImplicitGlobals?: Set<string>;
   /**
    * (#2931) Names of function declarations that are *reassigned* somewhere in the
    * realm (`fn = …`). ES function bindings are live/mutable, so such a name is
@@ -1976,6 +1980,16 @@ export interface CodegenContext {
   deferredDefaultGlobalExport?: string;
   /** Module-level variable initializers (compiled into __module_init) */
   moduleInitStatements: ts.Statement[];
+  /**
+   * (#3623) Top-level ExpressionStatement shapes that the `collectDeclarations`
+   * allow-list did NOT collect and that are not provably inert — shape label →
+   * count. The allow-list has silently dropped an observable statement at least
+   * six times (#1268, #2671, #2992, #3366, #3468, #3592 RC1, #3615), each a
+   * silent wrong answer that turned its test into a vacuous pass. Recording the
+   * fall-through makes the seventh visible instead of invisible; the map is
+   * empty for every program whose top-level statements are all handled.
+   */
+  droppedModuleInitShapes?: Map<string, number>;
   /**
    * (#2976) Module-level dedupe of the value-closure artifacts for a
    * capture-carrying nested function declaration: funcName → its ONE custom

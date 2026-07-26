@@ -155,6 +155,10 @@ describe("#3101 calls, closures, recursion, this-binding", () => {
   it("binds this via a method call", () => expectValue("var o={n:5}; function g(){return this.n;} g.call(o)", 5));
   it("nested function sees a global var (global resolution, not capture)", () =>
     expectValue("var g=0; function inc(){ g=g+1; return g; } inc(); inc(); inc()", 3));
+  it("constructs a non-interpreted callable through the fixed-arity runtime seam", () =>
+    expectValue("new Array(1, 2, 3).length", 3));
+  it("keeps construction beyond the Phase-1 arity ceiling catchable", () =>
+    expectValue("var r; try { new Array(1,2,3,4,5,6,7,8,9); } catch (e) { r=e.name; } r", "RangeError"));
 });
 
 describe("#3101 exceptions (side-table, cross-call unwind)", () => {
