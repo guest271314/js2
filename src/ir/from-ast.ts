@@ -776,6 +776,23 @@ export function lowerFunctionAstToIr(
     builder.setFuncKind("async");
   }
   if (isGenerator) {
+    // (#3565 contract) The generator prologue below needs the HOST-ONLY import
+    // `env.__gen_create_buffer`. In host-free modes (standalone / wasi /
+    // strictNoHostImports) that import is deliberately never registered — the
+    // legacy path lowers generators to the native `__GenState` state machine
+    // instead (see tests/issue-680). Claiming such a function here would emit a
+    // reference to an import that does not exist in the module, which the exact
+    // import resolver reports as a HARD `unknown-function-ref` invariant at the
+    // `lower` stage — where `unsupported` is not expressible. So refuse at BUILD
+    // stage, which demotes the function to legacy as designed rather than
+    // failing the whole compile.
+    if (options.resolver?.jsHostExterns?.() === false) {
+      throw new IrUnsupportedError(
+        "imported-call-planning-unsupported",
+        "build",
+        `ir/from-ast: generator ${name} needs host-only env.__gen_create_buffer; host-free targets lower generators via the legacy native state machine`,
+      );
+    }
     builder.setFuncKind("generator");
     generatorBufferSlot = builder.declareSlot("__gen_buffer", { kind: "externref" });
     builder.setGeneratorBufferSlot(generatorBufferSlot);
