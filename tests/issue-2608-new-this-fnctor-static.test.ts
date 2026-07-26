@@ -322,4 +322,33 @@ describe("#2586 — `new this(...)` in an fnctor static method", () => {
     `);
     expect(exp.probe()).toBe(1);
   });
+
+  it("treats a fnctor field assigned by both if/else arms as always present", async () => {
+    const exp = await runStandalone(`
+      var Cursor = function Cursor(fromOffset) {
+        if (fromOffset) {
+          this.pos = 7;
+          this.lineStart = 4;
+        } else {
+          this.pos = this.lineStart = 0;
+        }
+      };
+      Cursor.prototype.read = function () {
+        return this.pos === 0 && this.lineStart === 0 ? 1 : 0;
+      };
+      Cursor.readStart = function () {
+        return new this(false).read();
+      };
+      export function probe() {
+        var start = new Cursor(false);
+        var offset = new Cursor(true);
+        return start.pos === 0 && start.lineStart === 0 &&
+          offset.pos === 7 && offset.lineStart === 4 &&
+          Object.hasOwn(start, "pos") && Object.hasOwn(start, "lineStart") &&
+          Object.hasOwn(offset, "pos") && Object.hasOwn(offset, "lineStart") &&
+          Cursor.readStart() === 1 ? 1 : 0;
+      }
+    `);
+    expect(exp.probe()).toBe(1);
+  });
 });

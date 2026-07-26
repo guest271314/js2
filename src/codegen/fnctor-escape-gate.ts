@@ -1033,6 +1033,69 @@ export function deriveFnctorFields(
       collectAssignmentChain(expr.right, conditional);
     }
   }
+  function collectAssignmentNames(expr: ts.Expression, names: Set<string>): void {
+    if (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(expr.left) &&
+      expr.left.expression.kind === ts.SyntaxKind.ThisKeyword
+    ) {
+      names.add(expr.left.name.text);
+      collectAssignmentNames(expr.right, names);
+    }
+  }
+  function guaranteedAssignmentsInClosedStatement(stmt: ts.Statement): Set<string> | undefined {
+    if (ts.isExpressionStatement(stmt)) {
+      const names = new Set<string>();
+      collectAssignmentNames(stmt.expression, names);
+      return names;
+    }
+    if (ts.isEmptyStatement(stmt)) return new Set();
+    if (ts.isBlock(stmt)) {
+      const names = new Set<string>();
+      for (const child of stmt.statements) {
+        const childNames = guaranteedAssignmentsInClosedStatement(child);
+        if (childNames === undefined) return undefined;
+        for (const name of childNames) names.add(name);
+      }
+      return names;
+    }
+    if (ts.isIfStatement(stmt) && stmt.elseStatement) {
+      const thenNames = guaranteedAssignmentsInClosedStatement(stmt.thenStatement);
+      const elseNames = guaranteedAssignmentsInClosedStatement(stmt.elseStatement);
+      if (thenNames === undefined || elseNames === undefined) return undefined;
+      return new Set([...thenNames].filter((name) => elseNames.has(name)));
+    }
+    return undefined;
+  }
+  function containsConstructorReturn(stmt: ts.Statement): boolean {
+    let found = false;
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      if (node !== stmt && ts.isFunctionLike(node)) return;
+      if (ts.isReturnStatement(node)) {
+        found = true;
+        return;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(stmt);
+    return found;
+  }
+  function guaranteedAssignmentsInStatements(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): Set<string> {
+    const names = new Set<string>();
+    for (const stmt of stmts) {
+      const statementNames = guaranteedAssignmentsInClosedStatement(stmt);
+      if (statementNames !== undefined) {
+        for (const name of statementNames) names.add(name);
+      }
+      // A constructor return can leave every later write unexecuted on one
+      // successful construction path. Stop the proof at the first statement
+      // that contains one; thrown/non-terminating paths produce no instance.
+      if (containsConstructorReturn(stmt)) break;
+    }
+    return names;
+  }
   function collectStatement(stmt: ts.Statement, conditional: boolean): void {
     if (ts.isExpressionStatement(stmt) && ts.isBinaryExpression(stmt.expression)) {
       collectAssignmentChain(stmt.expression, conditional);
@@ -1065,6 +1128,15 @@ export function deriveFnctorFields(
     }
   }
   collectThisAssignments(body.statements);
+  // Assignments in both arms of a complete `if/else` are definite even though
+  // each individual arm is syntactically conditional. Do not allocate a
+  // presence bit for those fields: every successfully constructed instance has
+  // the slot. Acorn's Parser initializes `pos`, `lineStart`, and `curLine` this
+  // way; treating `pos` as optional made lifted parser-method reads observe
+  // `undefined` and reject otherwise-valid bare arrow functions.
+  for (const name of guaranteedAssignmentsInStatements(body.statements)) {
+    if (onlyConditional.has(name)) onlyConditional.set(name, false);
+  }
 
   // Parser-style data constructors often establish only a small base shape in
   // the constructor and add variant fields later through builder methods. Acorn

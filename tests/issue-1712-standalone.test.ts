@@ -35,6 +35,10 @@ describe("#1712 — standalone compiled Acorn acceptance", () => {
     expect(report.binaryBytes).toBeGreaterThan(0);
     expect(report.functionImports).toEqual([]);
     expect(report.exports).toContain("parse");
+    expect(report.exports).toContain("parseExpressionAt");
+    expect(report.exports).toContain("tokenizer");
     expect(report.runtimeCanary).toBe(2);
+    expect(report.parseExpressionAtCanary).toBe(3);
+    expect(report.tokenizerCanary).toBe(4);
   });
 });

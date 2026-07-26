@@ -44,6 +44,28 @@ export function __acorn_runtime_canary() {
     expression.left.value === 1 &&
     expression.right.value === 2 ? 2 : -1;
 }
+export function __acorn_parse_expression_at_canary() {
+  const expression = parseExpressionAt("xx 1 + 2 yy", 3, {
+    ecmaVersion: 2025,
+    sourceType: "script"
+  });
+  return expression.type === "BinaryExpression" &&
+    expression.operator === "+" &&
+    expression.start === 3 &&
+    expression.end === 8 &&
+    expression.left.value === 1 &&
+    expression.right.value === 2 ? 3 : -1;
+}
+export function __acorn_tokenizer_canary() {
+  const stream = tokenizer("42", { ecmaVersion: 2025, sourceType: "script" });
+  const token = stream.getToken();
+  const eof = stream.getToken();
+  return token.type.label === "num" &&
+    token.value === 42 &&
+    token.start === 0 &&
+    token.end === 2 &&
+    eof.type.label === "eof" ? 4 : -1;
+}
 `;
 
   const started = performance.now();
@@ -63,6 +85,8 @@ export function __acorn_runtime_canary() {
       binaryBytes: 0,
       errors,
       runtimeCanary: null,
+      parseExpressionAtCanary: null,
+      tokenizerCanary: null,
       functionImports: [],
       exports: [],
     };
@@ -71,9 +95,13 @@ export function __acorn_runtime_canary() {
   const module = await WebAssembly.compile(result.binary);
   const imports = WebAssembly.Module.imports(module);
   let runtimeCanary = null;
+  let parseExpressionAtCanary = null;
+  let tokenizerCanary = null;
   if (result.success && imports.length === 0) {
     const { exports } = await WebAssembly.instantiate(module, {});
     runtimeCanary = exports.__acorn_runtime_canary();
+    parseExpressionAtCanary = exports.__acorn_parse_expression_at_canary();
+    tokenizerCanary = exports.__acorn_tokenizer_canary();
   }
 
   return {
@@ -83,6 +111,8 @@ export function __acorn_runtime_canary() {
     binaryBytes: result.binary.length,
     errors,
     runtimeCanary,
+    parseExpressionAtCanary,
+    tokenizerCanary,
     functionImports: imports
       .filter((entry) => entry.kind === "function")
       .map((entry) => `${entry.module}::${entry.name}`),
