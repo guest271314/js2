@@ -105,6 +105,7 @@ import type { NativeGeneratorInfo } from "./context/types.js";
 // that reference these symbols via `./closures.js` are unaffected.
 import {
   getClosureFuncSelfTypeIdx,
+  CLOSURE_CAPTURE_FIELD_BASE,
   getFuncSignature,
   getOrCreateFuncRefWrapperTypes,
   getFuncRefWrapperRootTypeIdx,
@@ -2086,9 +2087,13 @@ export function compileArrowAsClosure(
       }
       const refCellType: ValType = { kind: "ref_null", typeIdx: refCellTypeIdx };
       const localIdx = allocLocal(liftedFctx, cap.name, refCellType);
-      selfCaptureLayoutEntries.push({ name: cap.name, fieldIdx: i + 1, localType: refCellType });
+      selfCaptureLayoutEntries.push({
+        name: cap.name,
+        fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + i,
+        localType: refCellType,
+      });
       liftedFctx.body.push({ op: "local.get", index: selfLocalForCaptures });
-      liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i + 1 });
+      liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + i });
       liftedFctx.body.push({ op: "local.set", index: localIdx });
       // Register as boxed so identifier read/write uses struct.get/set
       if (!liftedFctx.boxedCaptures) liftedFctx.boxedCaptures = new Map();
@@ -2103,17 +2108,21 @@ export function compileArrowAsClosure(
       const valType = outerBoxed?.valType ?? refCellValueType(ctx, refCellTypeIdx) ?? { kind: "f64" as const };
       const refCellType: ValType = { kind: "ref_null", typeIdx: refCellTypeIdx };
       const localIdx = allocLocal(liftedFctx, cap.name, refCellType);
-      selfCaptureLayoutEntries.push({ name: cap.name, fieldIdx: i + 1, localType: refCellType });
+      selfCaptureLayoutEntries.push({
+        name: cap.name,
+        fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + i,
+        localType: refCellType,
+      });
       liftedFctx.body.push({ op: "local.get", index: selfLocalForCaptures });
-      liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i + 1 });
+      liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + i });
       liftedFctx.body.push({ op: "local.set", index: localIdx });
       if (!liftedFctx.boxedCaptures) liftedFctx.boxedCaptures = new Map();
       liftedFctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType });
     } else {
       const localIdx = allocLocal(liftedFctx, cap.name, cap.type);
-      selfCaptureLayoutEntries.push({ name: cap.name, fieldIdx: i + 1, localType: cap.type });
+      selfCaptureLayoutEntries.push({ name: cap.name, fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + i, localType: cap.type });
       liftedFctx.body.push({ op: "local.get", index: selfLocalForCaptures });
-      liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: i + 1 });
+      liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + i });
       liftedFctx.body.push({ op: "local.set", index: localIdx });
     }
   }
@@ -2131,7 +2140,7 @@ export function compileArrowAsClosure(
       const flagRefType: ValType = { kind: "ref_null", typeIdx: i32RefCellTypeIdx };
       for (let ti = 0; ti < tdzFlaggedCapturesForPrologue.length; ti++) {
         const cap = tdzFlaggedCapturesForPrologue[ti]!;
-        const tdzFieldIdx = 1 + captures.length + ti;
+        const tdzFieldIdx = CLOSURE_CAPTURE_FIELD_BASE + captures.length + ti;
         const flagBoxLocal = allocLocal(liftedFctx, `__tdz_box_${cap.name}`, flagRefType);
         liftedFctx.body.push({ op: "local.get", index: selfLocalForCaptures });
         liftedFctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: tdzFieldIdx });
@@ -2330,7 +2339,7 @@ export function compileArrowAsClosure(
         })),
         tdzFlags: tdzFlaggedForGen.map((c, ti) => ({
           name: c.name,
-          fieldIdx: 1 + captures.length + ti,
+          fieldIdx: CLOSURE_CAPTURE_FIELD_BASE + captures.length + ti,
           refCellTypeIdx: i32CellForGen,
         })),
       };
@@ -2568,8 +2577,8 @@ export function compileArrowAsClosure(
   ctx.liveBodies.delete(liftedFctx.body);
   ctx.funcMap.set(closureName, liftedFuncIdx);
 
-  // 7. At the creation site, emit struct.new with funcref + captured values.
-  emitClosureConstruction(ctx, fctx, captures, liftedFuncIdx, structTypeIdx);
+  // 7. At the creation site, emit struct.new with funcref + arity + captured values.
+  emitClosureConstruction(ctx, fctx, captures, liftedFuncIdx, structTypeIdx, arrowParams.length);
 
   // 8. Register closure info so call sites can emit call_ref — see registerClosureBindingInfo.
   registerClosureBindingInfo(ctx, arrow, structTypeIdx, liftedFuncTypeIdx, closureReturnType, arrowParams);

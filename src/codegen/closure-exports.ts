@@ -13,7 +13,7 @@ import type { CodegenContext } from "./context/types.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
 import { addUnionImports } from "./registry/imports.js";
 import { buildClosureRefTestArms, collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
-import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js";
+import { CLOSURE_ARITY_FIELD_IDX, getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
@@ -933,29 +933,68 @@ function buildClosureArityProbe(
 ): Instr[] | undefined {
   const entries = collectClosureArityEntries(ctx);
   if (entries.length === 0) return undefined;
+  // (#3673) Root fast path: every closure struct in the wrapper hierarchy
+  // carries its declared arity as field CLOSURE_ARITY_FIELD_IDX, so ONE
+  // `ref.test <root>` + `struct.get` answers the probe — the per-func-type
+  // `ref.test` chain (90 arms on compiled acorn) survives only for closure
+  // shapes OUTSIDE the hierarchy (e.g. fnctor ctor closures).
+  const rootIdx = getFuncRefWrapperRootTypeIdx(ctx);
+  const isRootDescendant = (typeIdx: number): boolean => {
+    if (rootIdx === undefined) return false;
+    let cur: number | undefined = typeIdx;
+    let guard = 0;
+    while (cur !== undefined && cur >= 0 && guard++ < 64) {
+      if (cur === rootIdx) return true;
+      const t: { kind: string; superTypeIdx?: number } | undefined = ctx.mod.types[cur];
+      cur = t && t.kind === "struct" ? t.superTypeIdx : undefined;
+    }
+    return false;
+  };
+  const ladderEntries = entries.filter((e) => !isRootDescendant(e.selfTypeIdx));
   // Nested if/else so exactly ONE arm wins (the export twin uses early `return`,
   // which is unavailable mid-body).
   let chain: Instr[] = [{ op: "i32.const", value: -1 }];
-  for (let i = entries.length - 1; i >= 0; i--) {
+  for (let i = ladderEntries.length - 1; i >= 0; i--) {
     chain = [
       { op: "local.get", index: funcLocal },
-      { op: "ref.test", typeIdx: entries[i]!.funcTypeIdx },
+      { op: "ref.test", typeIdx: ladderEntries[i]!.funcTypeIdx },
       {
         op: "if",
         blockType: { kind: "val", type: { kind: "i32" } },
-        then: [{ op: "i32.const", value: entries[i]!.closureArity }],
+        then: [{ op: "i32.const", value: ladderEntries[i]!.closureArity }],
         else: chain,
       },
+    ];
+  }
+  const slowPath: Instr[] = [
+    { op: "ref.null.func" },
+    { op: "local.set", index: funcLocal },
+    ...buildFuncrefExtraction(ctx, ladderEntries, anyLocal, funcLocal),
+    ...chain,
+  ];
+  if (rootIdx === undefined) {
+    return [
+      { op: "local.get", index: valueLocal },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: anyLocal },
+      ...slowPath,
     ];
   }
   return [
     { op: "local.get", index: valueLocal },
     { op: "any.convert_extern" },
-    { op: "local.set", index: anyLocal },
-    { op: "ref.null.func" },
-    { op: "local.set", index: funcLocal },
-    ...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal),
-    ...chain,
+    { op: "local.tee", index: anyLocal },
+    { op: "ref.test", typeIdx: rootIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: rootIdx },
+        { op: "struct.get", typeIdx: rootIdx, fieldIdx: CLOSURE_ARITY_FIELD_IDX },
+      ],
+      else: slowPath,
+    },
   ];
 }
 
@@ -1033,13 +1072,45 @@ export function emitClosureArityExport(ctx: CodegenContext): void {
   // Locals: 0 = value externref (param), 1 = anyref, 2 = funcref.
   const anyLocal = 1;
   const funcLocal = 2;
+  // (#3673) Root fast path — mirror of buildClosureArityProbe: one
+  // struct.get on the wrapper root answers every in-hierarchy closure; the
+  // per-func-type chain survives only for shapes outside the hierarchy.
+  const rootIdxForExport = getFuncRefWrapperRootTypeIdx(ctx);
+  const isRootDescendantExport = (typeIdx: number): boolean => {
+    if (rootIdxForExport === undefined) return false;
+    let cur: number | undefined = typeIdx;
+    let guard = 0;
+    while (cur !== undefined && cur >= 0 && guard++ < 64) {
+      if (cur === rootIdxForExport) return true;
+      const t: { kind: string; superTypeIdx?: number } | undefined = ctx.mod.types[cur];
+      cur = t && t.kind === "struct" ? t.superTypeIdx : undefined;
+    }
+    return false;
+  };
+  const ladderEntriesExport = entries.filter((e) => !isRootDescendantExport(e.selfTypeIdx));
   const body: Instr[] = [
     { op: "local.get", index: 0 },
     { op: "any.convert_extern" },
     { op: "local.set", index: anyLocal },
-    ...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal),
   ];
-  for (const entry of entries) {
+  if (rootIdxForExport !== undefined) {
+    body.push(
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: rootIdxForExport },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: rootIdxForExport },
+          { op: "struct.get", typeIdx: rootIdxForExport, fieldIdx: CLOSURE_ARITY_FIELD_IDX },
+          { op: "return" },
+        ],
+      },
+    );
+  }
+  body.push(...buildFuncrefExtraction(ctx, ladderEntriesExport, anyLocal, funcLocal));
+  for (const entry of ladderEntriesExport) {
     body.push({ op: "local.get", index: funcLocal });
     body.push({ op: "ref.test", typeIdx: entry.funcTypeIdx });
     body.push({

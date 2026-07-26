@@ -7134,7 +7134,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
       then: [
         { op: "local.get", index: 2 },
         { op: "ref.cast", typeIdx },
-        { op: "struct.get", typeIdx, fieldIdx: 2 },
+        { op: "struct.get", typeIdx, fieldIdx: 3 },
         { op: "i32.const", value: typeIdx },
         { op: "i32.eq" },
         { op: "if", blockType: { kind: "empty" }, then },
@@ -7197,7 +7197,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
               // deleted? (state & NAME_DELETED)
               { op: "local.get", index: 2 },
               { op: "ref.cast", typeIdx },
-              { op: "struct.get", typeIdx, fieldIdx: 1 },
+              { op: "struct.get", typeIdx, fieldIdx: 2 },
               { op: "i32.const", value: 1 },
               { op: "i32.and" },
               { op: "i32.eqz" },
@@ -7213,7 +7213,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
           // length: deleted? (state & LENGTH_DELETED)
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "struct.get", typeIdx, fieldIdx: 2 },
           { op: "i32.const", value: 2 },
           { op: "i32.and" },
           { op: "i32.eqz" },
@@ -7279,7 +7279,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
           { op: "ref.cast", typeIdx },
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "struct.get", typeIdx, fieldIdx: 2 },
           { op: "local.get", index: 4 },
           {
             op: "if",
@@ -7288,7 +7288,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
             else: [{ op: "i32.const", value: 2 }],
           },
           { op: "i32.or" },
-          { op: "struct.set", typeIdx, fieldIdx: 1 },
+          { op: "struct.set", typeIdx, fieldIdx: 2 },
           { op: "i32.const", value: 1 },
           { op: "return" },
         ]),
@@ -7315,7 +7315,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
           // "length" first (spec order: OrdinaryOwnPropertyKeys creation order).
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "struct.get", typeIdx, fieldIdx: 2 },
           { op: "i32.const", value: 2 },
           { op: "i32.and" },
           { op: "i32.eqz" },
@@ -7331,7 +7331,7 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
           },
           { op: "local.get", index: 2 },
           { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
+          { op: "struct.get", typeIdx, fieldIdx: 2 },
           { op: "i32.const", value: 1 },
           { op: "i32.and" },
           { op: "i32.eqz" },

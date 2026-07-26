@@ -4664,7 +4664,10 @@ class ClosureStructRegistry {
     const base = this.resolveBase(sig);
     if (!base) return null;
 
-    const fields: FieldDef[] = [{ name: "func", type: { kind: "funcref" }, mutable: false }];
+    const fields: FieldDef[] = [
+      { name: "func", type: { kind: "funcref" }, mutable: false },
+      { name: "$arity", type: { kind: "i32" }, mutable: false }, // (#3673)
+    ];
     for (let i = 0; i < captureFieldTypes.length; i++) {
       let ft: ValType;
       try {
@@ -4709,7 +4712,7 @@ class ClosureStructRegistry {
     });
 
     const fieldIdxByCap = new Map<number, number>();
-    for (let i = 0; i < captureFieldTypes.length; i++) fieldIdxByCap.set(i, i + 1);
+    for (let i = 0; i < captureFieldTypes.length; i++) fieldIdxByCap.set(i, i + 2); // after (#3673) $arity
 
     const lowering: IrClosureLowering = {
       structTypeIdx: subIdx,

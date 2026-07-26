@@ -467,6 +467,11 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
               blockType: { kind: "empty" },
               then: [
                 { op: "ref.func", funcIdx: arm.trampIdx },
+                // (#3673) $arity
+                {
+                  op: "i32.const",
+                  value: ctx.closureInfoByTypeIdx.get(arm.closureStructTypeIdx)?.paramTypes.length ?? 0,
+                },
                 { op: "struct.new", typeIdx: arm.closureStructTypeIdx },
                 { op: "extern.convert_any" },
                 { op: "global.set", index: arm.cacheGlobalIdx },

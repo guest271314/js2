@@ -26,6 +26,7 @@ import {
 } from "../index.js";
 import { addFunctionOwnLocals } from "../binding-info.js";
 import {
+  closureArityField,
   getOrCreateConstructibleFuncRefWrapperTypes,
   getOrCreateFuncRefWrapperTypes,
 } from "./funcref-wrapper-types.js";
@@ -395,7 +396,7 @@ export function mintClosureStructTypes(
       liftedParams = [{ kind: "ref", typeIdx: liftedSelfTypeIdx }, ...arrowParams];
     } else {
       // Fallback: create a unique struct type
-      const structFields = [{ name: "func", type: { kind: "funcref" as const }, mutable: false }];
+      const structFields = [{ name: "func", type: { kind: "funcref" as const }, mutable: false }, closureArityField()];
       structTypeIdx = ctx.mod.types.length;
       ctx.mod.types.push({
         kind: "struct",
@@ -409,6 +410,7 @@ export function mintClosureStructTypes(
   } else {
     const structFields = [
       { name: "func", type: { kind: "funcref" as const }, mutable: false },
+      closureArityField(),
       ...captures.map((c) => buildCaptureFieldDef(ctx, c)),
     ];
 
@@ -746,9 +748,12 @@ export function emitClosureConstruction(
   captures: ArrowClosureCapture[],
   liftedFuncIdx: number,
   structTypeIdx: number,
+  arity: number,
 ): void {
-  // 7. At the creation site, emit struct.new with funcref + captured values
+  // 7. At the creation site, emit struct.new with funcref + (#3673) declared
+  // arity + captured values
   fctx.body.push({ op: "ref.func", funcIdx: liftedFuncIdx });
+  fctx.body.push({ op: "i32.const", value: arity });
   for (const cap of captures) {
     if (cap.mutable) {
       // Check if the outer scope already has this variable boxed (nested closure case)

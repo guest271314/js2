@@ -13,6 +13,10 @@ loc-budget-allow:
   - src/codegen/native-strings-basics.ts
   - src/codegen/native-strings-shared.ts
   - src/codegen/context/types.ts
+  - src/codegen/async-scheduler.ts
+  - src/codegen/closures.ts
+  - src/ir/integration.ts
+  - src/ir/lower.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -275,8 +279,40 @@ reproduce IDENTICALLY on the committed base (pre-existing); var-hoisting
 exact; standalone canaries 4/4; 1712 acceptance green; host bench
 unchanged; tsc + biome clean.
 
-**The remaining wall (next slice): closure-arity + funcref-type
-chains, now at 48 arms.** The emitted `__apply_closure` carries a 149-arm `ref.test` chain
+## Round 6 — arity IN the closure representation (the deferred layout change)
+
+Every closure struct in the root wrapper hierarchy now carries an immutable
+`$arity` i32 at field 1 (`CLOSURE_ARITY_FIELD_IDX`); captures/TDZ slots
+start at `CLOSURE_CAPTURE_FIELD_BASE` (2). `buildClosureArityProbe` (inside
+`__apply_closure`) and the `__closure_arity` export answer with ONE
+`ref.test <root>` + `struct.get` — the per-func-type chain survives only
+for shapes outside the hierarchy (fnctor ctor closures). Touched: type
+mints (wrapper root/per-sig/constructible, arrow/named/fallback structs,
+funcref-as-closure `__fn_cap_*`, async-scheduler settle-cap, builtin-fn
+meta, IR `__ir_closure_*`), all allocation sites (emitClosureConstruction,
+trampolines/lazy caches, member-get dispatch arms, promise executor caps,
+builtin closure values, IR `closure.new` via a new optional
+`emitClosureArityOperand` backend-trait method — bytecode/linear backends
+unaffected), capture-index math (closures.ts, funcref-as-closure
+trampolines, IR capFieldIdx), and the bfn meta state/id field shifts in
+`fillBuiltinFnMeta`. One missed site (the IR lowering) was caught by the
+loud struct.new-operand-count validation failure in issue-3546's suite and
+fixed.
+
+**Result: `__apply_closure` VANISHED from the standalone parse profile
+(was 12.5% self).** Wall time ~2.7ms/parse (the arity chain was the last
+of `__apply_closure`'s cost); profile-loop throughput +30%. Post-round
+profile: `__extern_get` 14.1%, `__obj_find` 8.2%, `__str_equals` 6.3%,
+`__vec_overlay_lookup` 5.6% — property lookup is now decisively the top
+family (#3669/#3671 next).
+
+Verification (round 6): 16-shape closure smoke matrix compiles+validates
+both targets; closure/hoisting/arity battery back to exactly the 10 known
+pre-existing failures (3546 green); IR suites — 9 `ir-bytecode-wasmgc-vm`
+failures reproduce identically on base (pre-existing env issue); async +
+generator suites green; standalone batch — same 3 pre-existing; host
+corpus 23/23 exact; standalone canaries 4/4; 1712 acceptance green; tsc +
+biome clean. The emitted `__apply_closure` carries a 149-arm `ref.test` chain
 over distinct closure FUNC types to answer "declared arity of this
 closure" (the #3592 widening probe), and `__call_fn_method_1` a 69-arm
 chain to select the `call_ref` target type. Together `__apply_closure`
