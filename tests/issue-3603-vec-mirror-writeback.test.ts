@@ -221,9 +221,9 @@ describe("#3603 S1 — vec-mirror registry survives deletion of WeakMap intrinsi
     let thrown: unknown;
     let deletionTookEffect = false;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      // biome-ignore lint/performance/noDelete: the test must reproduce verifyProperty deleting the intrinsic.
       delete (WeakMap.prototype as any).get;
-      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      // biome-ignore lint/performance/noDelete: assigning undefined would not exercise the destructive probe.
       delete (WeakMap.prototype as any).set;
       deletionTookEffect =
         typeof (WeakMap.prototype as any).get === "undefined" && typeof (WeakMap.prototype as any).set === "undefined";
