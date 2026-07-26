@@ -65,6 +65,7 @@ import { compileArrayConstructorCall, compileObjectLiteralAsExternref } from "..
 import { emitCollectionIteratorVec, ensureMapGroupBy } from "../map-runtime.js";
 import {
   emitBrandCheckTypeError,
+  emitLazyNativeProtoGet,
   ensureStandaloneNativeMethodClosure,
   getNativeProtoBuiltinGlue,
 } from "../native-proto.js";
@@ -1865,8 +1866,30 @@ export function compileBuiltinStaticCall(
     }
 
     // Fallback: use host import for externref/dynamic objects (e.g. Object.create results)
-    const argTypeF = compileExpression(ctx, fctx, arg0, { kind: "externref" });
+    const argTypeF = compileExpression(ctx, fctx, arg0);
     if (!argTypeF) {
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+    // (#3176 residual) Reified builtin method closures are ordinary function
+    // objects whose [[Prototype]] is %Function.prototype%. The generic native
+    // `__getPrototypeOf` only recognises open `$Object` carriers, so feeding it
+    // a metadata-bearing closure wrapper returned null. Preserve the exact
+    // closure subtype long enough to identify it, then route to the SAME
+    // `%Function.prototype%` singleton a direct `Function.prototype` read uses.
+    // This also covers local aliases (`const f = JSON.parse`) because locals
+    // retain the metadata subtype. Dynamic `any` receivers continue through the
+    // runtime fallback below.
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      (argTypeF.kind === "ref" || argTypeF.kind === "ref_null") &&
+      ctx.builtinFnMetaByTypeIdx?.has(argTypeF.typeIdx)
+    ) {
+      fctx.body.push({ op: "drop" });
+      const functionBrand = tryEnsureNativeProtoBrand(ctx, "Function");
+      if (functionBrand !== undefined && emitLazyNativeProtoGet(ctx, fctx, functionBrand)) {
+        return { kind: "externref" };
+      }
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
     }
