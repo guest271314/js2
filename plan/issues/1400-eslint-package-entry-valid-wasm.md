@@ -1,22 +1,73 @@
 ---
 id: 1400
 title: "npm: compile ESLint package entry to valid Wasm"
-status: done
+status: blocked
 created: 2026-05-11
-updated: 2026-05-20
+updated: 2026-07-26
 completed: 2026-05-20
-priority: high
+priority: critical
 feasibility: hard
 reasoning_effort: high
 task_type: feature
 area: compiler, resolver, codegen
 language_feature: commonjs, package-exports, classes
 goal: npm-library-support
-sprint: 52
+sprint: 76
+depends_on: [3653, 3654, 3655, 3656]
 es_edition: n/a
-related: [1075, 1277, 1279, 1282, 1287, 1289]
+related: [1044, 1075, 1277, 1279, 1282, 1287, 1289, 1573, 1575, 2690, 2691, 2693, 2700, 3657]
 ---
 # #1400 - Compile ESLint package entry to valid Wasm
+
+## Reopened 2026-07-26 — current package entry does not compile
+
+The issue's title-level goal is not satisfied on current `origin/main`
+(`a365357aff6eb6a1a720dfb93ccdb33c2db1c735`, ESLint 10.0.3). The historical
+`completed:` date is retained as the record of the narrower May fix, but the
+issue is reopened as `blocked`.
+
+Measured real-package sample:
+
+| Target | Compile | Validate |
+|---|---:|---:|
+| bare `import { Linter } from "eslint"` | **fail** | not reached |
+| `lib/linter/linter.js` direct | **fail** | not reached |
+| `config/config.js` | pass | pass |
+| `linter/apply-disable-directives.js` | pass | pass |
+| `languages/js/source-code/source-code.js` | pass | pass |
+| `rule-tester/rule-tester.js` | pass | **fail** (#2690) |
+
+Honest split: **3/6 compile+validate, 1/6 compiles invalid, 2/6 do not
+compile**. This is a bounded critical-target sample, not a replacement for the
+older 21-module #1573 survey.
+
+The bare package entry produced four fatal diagnostics and two warnings. Its
+fatal frontier is:
+
+```text
+Module '"eslint"' has no exported member 'Linter'.
+Internal error compiling expression: Cannot read properties of undefined (reading 'kind')  (2×)
+Codegen error: IR path failed for getInactivityReasonMessage:
+  object destructuring source must be IrType.object or IrType.class (got dynamic)
+```
+
+Direct `linter.js` produced **141 diagnostics: 52 errors / 89 warnings**. Those
+counts are not work-item counts; most type/export errors cascade from a smaller
+module-resolution layer.
+
+Current dependency order:
+
+1. #3653 makes the integration tests portable and non-vacuous.
+2. #3654 resolves installed importer-scoped packages, relative
+   extensionless/directory modules, and types-only exports, while preserving
+   Node builtins as dependencies of the Node JS host.
+3. #3655 adds static CommonJS JSON loading for `../../package.json`.
+4. #3656 fixes the independently reproduced IR failure in real
+   `eslint/lib/shared/flags.js`.
+5. Re-measure compile and Wasm validation. #2690 remains the known
+   RuleTester validator blocker; any newly exposed errors must be measured
+   rather than inferred.
+6. Runtime host-delegation then depends on #3657.
 
 ## Goal
 
@@ -36,6 +87,14 @@ export function test(): number {
   return Array.isArray(messages) ? messages.length : -1;
 }
 ```
+
+### First-proof execution lane
+
+The first runnable proof is deliberately **not standalone ESLint**. Compile it
+for the default JS-host lane, instantiate it under Node, and pass Node builtin
+imports through to the real Node host modules. Standalone/WASI implementations
+of `node:*` APIs are follow-up portability work and must not block—or be
+silently substituted into—this initial `Linter.verify()` gate.
 
 ## Current state
 

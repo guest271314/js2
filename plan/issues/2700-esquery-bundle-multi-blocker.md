@@ -1,24 +1,39 @@
 ---
 id: 2700
 title: "esquery@1.7.0 bundle fails to compile — multi-blocker (PEG parser codegen index-shift + syntax + hard-type errors)"
-horizon: l
 status: ready
-assignee: ""
-sprint: current
 created: 2026-06-26
+updated: 2026-07-26
 priority: high
 feasibility: hard
-model: fable
 reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: transpiled-bundle, peg-parser
 goal: real-eslint-runs
-related: [1573, 1282, 2660, 2043]
+sprint: current
+horizon: l
+assignee: ""
+model: fable
+es_edition: n/a
+related: [1573, 1282, 2660, 2043, 2693, 3654, 3657]
 origin: "Surfaced by sd-2674b validating the real-eslint Linter.verify npm dep tree (#1573 gate-list item 6). esquery is the rule-listener selector matcher on the verify path; it is the ONE external dep (of the 5: eslint-scope/eslint-visitor-keys/@eslint/plugin-kit/@eslint/core/esquery) that does NOT compile+validate."
 ---
-
 # #2700 — esquery@1.7.0 bundle: multi-blocker compile failure
+
+## 2026-07-26 integration note
+
+The package is installed and resolvable from ESLint's real importer context.
+Do not add a setup/download issue. Two distinct paths remain:
+
+- native esquery compilation is still owned by this issue;
+- the minimal real-Linter milestone intends to host-delegate selector matching,
+  but its confirmation test currently stops earlier on IR ambient host-call
+  issue #3657 (after #3653 removes the vacuous path return).
+
+Direct `linter.js` also reports installed deps as unresolved inside the compiler
+graph; that importer-context resolver layer is #3654 and is not evidence that
+the npm packages are absent.
 
 ## Context
 
@@ -103,3 +118,7 @@ the entire dep closure (incl. esquery) is already reproducibly installed by the
 normal `pnpm install` CI runs — resolvable from eslint's context via pnpm
 symlinks. No tarball-pinning setup script (the acorn-dogfood pattern, which
 exists because acorn is NOT a devDep) is required for these deps.
+
+Before this issue moves to `done`, `tests/issue-2700.test.ts` must retain the
+reduced bundle repro and assert both compile success and Wasm validation for
+the selected esquery entry.
