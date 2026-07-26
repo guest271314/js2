@@ -9,6 +9,8 @@
 // walk-until-found shape and have no dependency on `CodegenContext`.
 
 import { ts, forEachChild } from "../ts-api.js";
+import type { TypeOracle } from "../checker/oracle.js";
+import { isStrictContext } from "./helpers/is-strict-function.js";
 import { TYPED_ARRAY_NAMES } from "./index.js";
 
 export function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
@@ -48,6 +50,70 @@ export function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
   }
   walk(sourceFile);
   return found;
+}
+
+/**
+ * Names that a simple sloppy assignment may create as configurable properties
+ * of the global object. The pre-scan makes read lowering independent of
+ * function/body compilation order (#2726).
+ */
+export function collectSloppyImplicitGlobalNames(
+  sourceFile: ts.SourceFile,
+  oracle: TypeOracle,
+  inferModuleStrict: boolean,
+): Set<string> {
+  const names = new Set<string>();
+  function walk(node: ts.Node): void {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      let lhs = node.left;
+      while (
+        ts.isParenthesizedExpression(lhs) ||
+        ts.isAsExpression(lhs) ||
+        ts.isNonNullExpression(lhs) ||
+        ts.isTypeAssertionExpression(lhs)
+      ) {
+        lhs = lhs.expression;
+      }
+      if (ts.isIdentifier(lhs) && !isStrictContext(lhs, inferModuleStrict) && oracle.isUnresolvableIdentifier(lhs)) {
+        names.add(lhs.text);
+      }
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return names;
+}
+
+export function recordSloppyImplicitGlobalNames(
+  target: Set<string>,
+  sourceFile: ts.SourceFile,
+  oracle: TypeOracle,
+  inferModuleStrict: boolean,
+): void {
+  for (const name of collectSloppyImplicitGlobalNames(sourceFile, oracle, inferModuleStrict)) target.add(name);
+}
+
+/** Script `var` binding names, including declarations nested in top-level control flow. */
+export function recordScriptVarBindingNames(target: Set<string>, sourceFile: ts.SourceFile): void {
+  const recordName = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) {
+      target.add(name.text);
+      return;
+    }
+    for (const element of name.elements) {
+      if (!ts.isOmittedExpression(element)) recordName(element.name);
+    }
+  };
+  const walk = (node: ts.Node): void => {
+    if (node !== sourceFile && (ts.isFunctionLike(node) || ts.isClassDeclaration(node) || ts.isClassExpression(node))) {
+      return;
+    }
+    if (ts.isVariableDeclarationList(node) && (node.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0) {
+      for (const declaration of node.declarations) recordName(declaration.name);
+    }
+    forEachChild(node, walk);
+  };
+  walk(sourceFile);
 }
 
 /**

@@ -153,6 +153,8 @@ import { fillAccessorDrivers } from "./accessor-driver.js";
 import { fillVecOverlayHelpers } from "./vec-overlay.js"; // (#3251 S1)
 import { fillDisposableStackDisposeDriver } from "./disposable-runtime.js";
 import {
+  recordSloppyImplicitGlobalNames,
+  recordScriptVarBindingNames,
   sourceContainsClass,
   sourceContainsDelete,
   sourceHasDynamicTaConstruct,
@@ -3009,6 +3011,16 @@ function compileMultiIrOverlaySource(
   consumeIrOverlayReport(ctx, report, plan, safeSelection, sourceFile);
 }
 
+function recordSourceGlobalEnvironment(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+  recordScriptVarBindingNames((ctx.globalObjectVarBindings ??= new Set()), sourceFile);
+  recordSloppyImplicitGlobalNames(
+    (ctx.sloppyImplicitGlobals ??= new Set()),
+    sourceFile,
+    ctx.oracle,
+    ctx.inferModuleStrictArguments ?? true,
+  );
+}
+
 /** Compile a typed AST into a WasmModule IR */
 export function generateModule(
   ast: TypedAST,
@@ -3043,6 +3055,7 @@ export function generateModule(
   const ctx = createCodegenContext(mod, ast.checker, options, programAbiSession);
   const sourceFileInternal = ast.sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node };
   ctx.sourceIsModule = sourceFileInternal.externalModuleIndicator !== undefined;
+  recordSourceGlobalEnvironment(ctx, ast.sourceFile);
   // (#2138) Populated only under JS2WASM_IR_FIRST=1 — the top-level functions
   // whose legacy body emission was skipped (IR owns the slot). Declared out
   // here so the return statement below (outside the try) can surface it.
@@ -3115,7 +3128,6 @@ export function generateModule(
         reserveLinearU8AllocType(ctx);
       }
     }
-
     // (#2357/#47) Reserve the standalone TypedArray `$__subview_<elem>` struct
     // types up-front, here — at the SAME deterministic point in every codegen
     // pass — so the subview type index is identical across the hoist pass (which
@@ -5547,7 +5559,6 @@ export function generateMultiModule(
     if (ctx.wasi) {
       registerWasiImports(ctx, multiAst.entryFile);
     }
-
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
 
     // Phase 1: Collect extern declarations first (needed before import collectors)
@@ -5654,6 +5665,7 @@ export function generateMultiModule(
       if (sourceOverridesArrayIterator(sf)) {
         ctx.arrayIteratorMaybeOverridden = true;
       }
+      recordSourceGlobalEnvironment(ctx, sf);
     }
 
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
