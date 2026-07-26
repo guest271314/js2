@@ -15,6 +15,9 @@ es_edition: es2015
 goal: standalone-gap
 related: [1539, 1474, 2868, 3008]
 origin: "2026-07-24 bounded standalone-test audit (dev-opus / #3565 lane): tests/issue-1539-standalone-regex-replace.test.ts silently red on main — outside required checks (#3008)."
+loc-budget-allow:
+  - src/codegen/regexp-standalone.ts
+  - src/codegen/expressions/call-tail-dispatch.ts
 files:
   - src/codegen/regexp-standalone.ts
   - src/codegen/string-ops.ts
@@ -94,6 +97,11 @@ red. Fold once the refusal is restored (green).
   `tests/issue-1539-standalone-regex-replace.test.ts` to
   `tests/guard-suite.json`, closing the #3008 hole that allowed this guard to
   stay red on main.
+- **LOC contract:** the issue explicitly allows the measured 42-line
+  standalone lowering and 14-line WASI dispatch growth. Both additions are
+  required to preserve the fatal diagnostic across the distinct transaction
+  and direct-symbol call paths described above; no project-wide baseline was
+  relaxed.
 - **What did not work:** committing the diagnostic only inside the shared
   RegExp replacement core did not cover WASI's direct `Symbol.replace` form,
   because that dispatcher did not enter the standalone helper. A narrow WASI
