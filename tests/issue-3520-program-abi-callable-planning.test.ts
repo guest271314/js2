@@ -8,6 +8,7 @@ import { generateModule } from "../src/codegen/index.js";
 import {
   PROGRAM_ABI_CALLABLE_ROLE,
   planProgramAbiSupportCallable,
+  planProgramAbiSupportCallableAlias,
   planProgramAbiUnitCallable,
 } from "../src/codegen/program-abi-planning.js";
 import { ProgramAbiSession } from "../src/codegen/program-abi-session.js";
@@ -19,7 +20,7 @@ import {
 } from "../src/ir/callable-bindings.js";
 import { buildIrUnitInventory, createDerivedIrUnitId } from "../src/ir/identity.js";
 import { ProgramAbiInvariantError } from "../src/ir/program-abi.js";
-import { createEmptyModule, type FuncTypeDef, type Import, type WasmFunction } from "../src/ir/types.js";
+import { createEmptyModule, type FuncTypeDef, type Import, type TypeDef, type WasmFunction } from "../src/ir/types.js";
 import { ts } from "../src/ts-api.js";
 
 // Register the codegen expression/statement delegates used by generateModule.
@@ -474,5 +475,217 @@ describe("#3520 production support-callable Program ABI planning", () => {
         roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.functionValueTrampoline + 1,
       }),
     ).toThrowError(expect.objectContaining<ProgramAbiInvariantError>({ code: "duplicate-slot-locator" }));
+  });
+
+  it("plans class-owned aliases in deterministic derived order and resolves the canonical locator", () => {
+    const file = source(
+      "/repo/class-method-alias.ts",
+      `
+        class Base {
+          method(value: number): number {
+            return value;
+          }
+        }
+        class Child extends Base {}
+      `,
+    );
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const baseClass = inventory.classes.find((record) => record.displayName === "Base")!;
+    const childClass = inventory.classes.find((record) => record.displayName === "Child")!;
+    const baseMethod = inventory.allUnits.find(
+      (unit) => unit.lexicalOwnerId === baseClass.id && unit.kind === "class-instance-method",
+    )!;
+    const module = createEmptyModule();
+    const deadType: TypeDef = { kind: "struct", name: "$Dead", fields: [] };
+    const payloadType: TypeDef = { kind: "struct", name: "$Payload", fields: [] };
+    const signature: FuncTypeDef = {
+      kind: "func",
+      name: "$method",
+      params: [{ kind: "ref_null", typeIdx: 1 }],
+      results: [{ kind: "ref", typeIdx: 1 }],
+    };
+    const previousTypes = [deadType, payloadType, signature];
+    module.types = previousTypes;
+    const canonicalFunction = wasmFunction("Base_method", 2);
+    module.functions.push(canonicalFunction);
+
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+    const canonicalRef = irUnitFuncRef({ unitId: baseMethod.id, name: canonicalFunction.name });
+    const canonicalId = planProgramAbiUnitCallable(ctx, {
+      ref: canonicalRef,
+      signature,
+      func: canonicalFunction,
+    })!;
+    const role = "class-method-adapter:instance:method";
+    const aliasRefs = [0, 1].map((derivedOrdinal) =>
+      irSupportFuncRef(childClass.id, role, `Child_method_alias_${derivedOrdinal}`, derivedOrdinal),
+    );
+    const aliasIds = aliasRefs.map((ref) => {
+      if (ref.binding.kind !== "support") throw new Error("expected support reference");
+      return ref.binding.bindingId;
+    });
+
+    // Producer discovery order is deliberately reversed. Structural order is
+    // owned by the explicit artifact ordinal, never Map insertion.
+    for (const derivedOrdinal of [1, 0]) {
+      expect(
+        planProgramAbiSupportCallableAlias(ctx, {
+          ref: aliasRefs[derivedOrdinal]!,
+          anchor: { kind: "class", classId: childClass.id },
+          role,
+          roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classMethodAdapter,
+          derivedOrdinal,
+          aliasOf: canonicalId,
+          signature,
+        }),
+      ).toBe(aliasIds[derivedOrdinal]);
+    }
+
+    expect(aliasIds.map((id) => session.getDraft(id)!.structuralOrder.derivedOrdinal)).toEqual([0, 1]);
+    expect(session.getDraft(aliasIds[0]!)).toMatchObject({
+      structuralReferenceKey: irCallableBindingKey(aliasRefs[0]!.binding),
+      displayName: aliasRefs[0]!.name,
+      slotPolicy: "alias",
+      aliasOf: canonicalId,
+      intent: {
+        kind: "callable",
+        origin: "support",
+        classId: childClass.id,
+        signature: {
+          params: ['{"kind":"ref_null","typeIdx":1}'],
+          results: ['{"kind":"ref","typeIdx":1}'],
+        },
+      },
+    });
+    expect(session.getDraft(aliasIds[0]!)!.intent).not.toHaveProperty("unitId");
+    expect(aliasIds.map((id) => session.hasLocator(id))).toEqual([false, false]);
+    expect(() =>
+      session.attachLocator(aliasIds[0]!, { kind: "defined-function", value: canonicalFunction }),
+    ).toThrowError(expect.objectContaining<ProgramAbiInvariantError>({ code: "locator-not-required" }));
+
+    const finalPayloadType: TypeDef = { kind: "struct", name: "$Payload", fields: [] };
+    const finalSignature: FuncTypeDef = {
+      kind: "func",
+      name: "$method",
+      params: [{ kind: "ref_null", typeIdx: 0 }],
+      results: [{ kind: "ref", typeIdx: 0 }],
+    };
+    const retainedContextTypes = previousTypes.slice(3);
+    const nextTypes = [finalPayloadType, finalSignature, ...retainedContextTypes];
+    session.applyTypeLayoutRemap({
+      previousTypes,
+      nextTypes,
+      targetsByOldIndex: [null, 0, 1, ...retainedContextTypes.map((_, index) => index + 2)],
+    });
+    module.types = nextTypes;
+    canonicalFunction.typeIdx = 1;
+    module.imports.push({
+      module: "env",
+      name: "late",
+      desc: { kind: "func", typeIdx: 1 },
+    });
+
+    const relabelled = aliasRefs.map((_, derivedOrdinal) =>
+      irSupportFuncRef(childClass.id, role, "untrusted-compatibility-label", derivedOrdinal),
+    );
+    expect(
+      aliasIds.map((id, index) =>
+        session.resolveCurrentIndex(id, "function", irCallableBindingKey(relabelled[index]!.binding)),
+      ),
+    ).toEqual([1, 1]);
+    expect(() =>
+      session.resolveCurrentIndex(aliasIds[0]!, "function", irCallableBindingKey(aliasRefs[1]!.binding)),
+    ).toThrowError(expect.objectContaining<ProgramAbiInvariantError>({ code: "binding-reference-mismatch" }));
+
+    const { abi } = session.publish(module);
+    expect(
+      abi
+        .entries()
+        .filter((entry) => aliasIds.includes(entry.id))
+        .map((entry) => entry.id),
+    ).toEqual(aliasIds);
+    expect(aliasIds.map((id) => abi.resolveFinalIndex(id))).toEqual([
+      { space: "function", index: 1 },
+      { space: "function", index: 1 },
+    ]);
+    expect(
+      aliasIds.map((id) => {
+        const entry = abi.get(id)!;
+        return entry.intent.kind === "callable" ? entry.intent.signature : undefined;
+      }),
+    ).toEqual([
+      {
+        params: ['{"kind":"ref_null","typeIdx":0}'],
+        results: ['{"kind":"ref","typeIdx":0}'],
+      },
+      {
+        params: ['{"kind":"ref_null","typeIdx":0}'],
+        results: ['{"kind":"ref","typeIdx":0}'],
+      },
+    ]);
+  });
+
+  it("validates alias identity components and accepts explicit ordinals for required support callables", () => {
+    const file = source("/repo/support-alias-validation.ts", "class Local {} class Other {}");
+    const inventory = buildIrUnitInventory([file], { entrySource: file });
+    const localClass = inventory.classes.find((record) => record.displayName === "Local")!;
+    const otherClass = inventory.classes.find((record) => record.displayName === "Other")!;
+    const module = createEmptyModule();
+    const signature: FuncTypeDef = { kind: "func", params: [], results: [] };
+    module.types.push(signature);
+    const canonicalFunction = wasmFunction("Local_required_support", 0);
+    module.functions.push(canonicalFunction);
+    const session = new ProgramAbiSession(inventory, module);
+    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
+
+    const requiredRole = "class-method-adapter:required";
+    const requiredRef = irSupportFuncRef(localClass.id, requiredRole, canonicalFunction.name, 7);
+    const canonicalId = planProgramAbiSupportCallable(ctx, {
+      ref: requiredRef,
+      anchor: { kind: "class", classId: localClass.id },
+      role: requiredRole,
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classMethodAdapter,
+      derivedOrdinal: 7,
+      signature,
+      func: canonicalFunction,
+    })!;
+    expect(session.getDraft(canonicalId)!.structuralOrder.derivedOrdinal).toBe(7);
+
+    const aliasRole = "class-method-adapter:instance:method";
+    const aliasRef = irSupportFuncRef(localClass.id, aliasRole, "Local_method_alias", 2);
+    const aliasPlan = {
+      ref: aliasRef,
+      anchor: { kind: "class" as const, classId: localClass.id },
+      role: aliasRole,
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.classMethodAdapter,
+      derivedOrdinal: 2,
+      aliasOf: canonicalId,
+      signature,
+    };
+    expect(() =>
+      planProgramAbiSupportCallableAlias(ctx, {
+        ...aliasPlan,
+        anchor: { kind: "class", classId: otherClass.id },
+      }),
+    ).toThrowError(TypeError);
+    expect(() =>
+      planProgramAbiSupportCallableAlias(ctx, {
+        ...aliasPlan,
+        role: "class-method-adapter:instance:other",
+      }),
+    ).toThrowError(TypeError);
+    expect(() =>
+      planProgramAbiSupportCallableAlias(ctx, {
+        ...aliasPlan,
+        derivedOrdinal: 3,
+      }),
+    ).toThrowError(TypeError);
+    expect(() =>
+      planProgramAbiSupportCallableAlias(ctx, {
+        ...aliasPlan,
+        ref: irUnitFuncRef({ unitId: inventory.allUnits[0]!.id, name: aliasRef.name }),
+      }),
+    ).toThrowError(TypeError);
   });
 });
