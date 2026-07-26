@@ -1,12 +1,48 @@
 ---
 id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
-status: in-progress
+status: done
 assignee: ttraenkler/codex-acorn
 created: 2026-05-29
 updated: 2026-07-26
+completed: 2026-07-26
 loc-budget-allow:
   - src/codegen/property-access-dispatch.ts
+  - src/codegen/regexp-standalone.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/property-access.ts
+  - src/codegen/declarations.ts
+  - src/codegen/index.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/expressions/assignment.ts
+  - src/ir/select.ts
+  - src/runtime.ts
+  - src/codegen/expressions/calls-closures.ts
+  - src/codegen/context/types.ts
+  - src/ir/integration.ts
+func-budget-allow:
+  - src/codegen/type-coercion.ts::coerceType
+  - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/codegen/property-access.ts::compileElementAccessBody
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/index.ts::generateModule
+  - src/ir/select.ts::isPhase1Expr
+  - src/codegen/builtin-value-read.ts::ensureStandaloneBuiltinStaticMethodClosure
+  - src/codegen/index.ts::generateMultiModule
+  - src/codegen/expressions/calls-closures.ts::compileCallablePropertyCall
+  - src/codegen/index.ts::resolveWasmType
+  - src/codegen/declarations.ts::collectDeclarations
+  - src/codegen/context/create-context.ts::createCodegenContext
+  - src/codegen/index.ts::planIrOverlay
+  - src/ir/integration.ts::compileIrPathFunctions
+  - src/codegen/regexp-standalone.ts::ensureDynamicStandaloneRegExpCompiler
+  - src/runtime.ts::<anonymous>#77
+oracle-ratchet-allow:
+  - src/codegen/declarations/object-shape-widening.ts
+  - src/codegen/fnctor-escape-gate.ts
+  - src/codegen/regexp-standalone.ts
+coercion-sites-allow:
+  - src/codegen/regexp-standalone.ts
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -19,7 +55,7 @@ model: fable
 depends_on: [1710, 1711]
 es_edition: multi
 related: [1690, 1690b, 1584, 1058, 2928, 3098, 3308, 3651]
-pr: 1293
+pr: 3646
 ---
 
 # #1712 — Acceptance milestone: compiled acorn parses a representative .js with a structurally-equal AST
