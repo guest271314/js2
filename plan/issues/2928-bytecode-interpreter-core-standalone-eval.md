@@ -279,8 +279,41 @@ standalone compile currently refuses dynamic RegExp construction (#1539) and
 RegExp-based `String.prototype.match`/`replace` (#1474). #2927 must provide a
 host-free parser acceptance gate before E2 can wire real runtime source text.
 
-Still required for E2 acceptance: the #2927 parser artifact, callable
-materialization and AOT/interpreter classification at the #3098 seam, and the
-`new Function(<dynamic>)` routing change in `new-super.ts`. The landed canary is
-the lower-level prerequisite, not a claim that either public dynamic-code API
-is routed yet.
+## Implementation findings (parser-injected Function factory, 2026-07-26)
+
+The interpreter now exposes a host-free parser boundary matching the measured
+Acorn artifact:
+
+```text
+parse(source: native string, options: $Object) -> ESTree $Object
+```
+
+`compileDynamicFunctionMeta` wraps the flattened parameter/body strings as a
+synthetic `function anonymous`, parses with `ecmaVersion: 2025` and
+`sourceType: "script"`, and emits the declaration through a new `emitFunction`
+entry point. `createDynamicFunction` then roots the metadata at a global
+`$EnvRec` and returns an ordinary interpreted callable. The E2 canary proves
+that entire injected-parser → emitter → callable → `interpEnter` path in a
+zero-import standalone module: `fn(1, 2) === 3`. Node fixtures also preserve
+the observable `name === "anonymous"` and `length === 2`.
+
+The callable materializer needs eight explicit formal slots, matching the
+Phase-1 generic closure ceiling; a rest-only trampoline is classified as arity
+zero and drops the call arguments. The function expression must also remain
+anonymous: naming it `interpTrampoline` currently selects the standalone
+fnctor-escape path and loses the returned closure carrier. WeakMap branding and
+best-effort `name`/`length` definition are safe after materialization and remain
+unchanged.
+
+The synchronized Acorn slice now separately measures Acorn 8.16.0 at 23/23
+exact AST parity, a 1,699,827-byte zero-import standalone artifact, and a
+successful returned-closure gate. It preserves the boundary above without
+introducing a callable or rec-group ABI. Its publication remains owned by
+#2927.
+
+Still required for public E2 acceptance: land and package the #2927 parser
+artifact, then replace the standalone `new Function(<dynamic>)` Tier-3 stub in
+`new-super.ts` with this factory. Indirect eval remains E3, and on-demand
+ordered-initializer packaging remains E6/#2527. This canary proves the
+production seam but does not yet claim either public dynamic-code API is
+routed.
