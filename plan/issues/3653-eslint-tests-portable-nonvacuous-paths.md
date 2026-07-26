@@ -16,6 +16,7 @@ required_by: [1400]
 es_edition: n/a
 related: [1282, 1400, 1573, 2693]
 ---
+
 # #3653 — Make the ESLint integration ladder portable and non-vacuous
 
 ## Problem
@@ -83,3 +84,36 @@ hide it.
 - Its first runnable `Linter.verify()` proof uses the default JS-host target,
   instantiates in Node, and demonstrates that required Node builtins are passed
   through to that host. Standalone ESLint is explicitly not this first gate.
+
+## Implementation (2026-07-26)
+
+- Added `tests/helpers/eslint.ts`, which prefers the repository's logical
+  `node_modules/eslint` path for `compileProject` while using ESLint's importer
+  context to load host-side dependencies such as `espree` and `esquery`.
+- Converted missing optional fixtures to visible `skipIf` results and known
+  compiler frontiers to issue-linked `fails`/`skip` results.
+- Pinned the first package-entry and runnable seam to
+  `{ target: "gc", platform: "node" }`; the runnable rung uses `buildImports`
+  under Node so builtin modules remain real host dependencies.
+- Moved the long package-entry compile into a child probe. The compiler remains
+  synchronous, but Vitest's worker event loop now stays responsive instead of
+  reporting a false `Timeout calling "onTaskUpdate"` failure.
+
+## Verification (2026-07-26)
+
+Before this change, the seven focused files reported 19 passed, 7 failed, and 2
+skipped tests, plus a Vitest worker timeout. The #2693 test was one of the
+reported passes but returned before loading either real host dependency.
+
+After this change, the focused set contains 29 tests (the real host-dependency
+load is now an independent assertion) and reports 23 passed with 6 explicitly
+skipped across 7 passing files. Real ESLint coverage includes:
+
+- `lib/config/config.js`: compiles and validates;
+- `lib/linter/apply-disable-directives.js`: compiles and validates;
+- `lib/languages/js/source-code/source-code.js`: compiles and validates;
+- real `espree`/`esquery`: loaded before the expected #3657 compile failure.
+
+The Tier 1 package-entry probe now runs once in the Node JS-host lane and
+reports #3654/#3656 as the first frontier without worker timeout or repeated
+full-graph compilation.
