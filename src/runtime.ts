@@ -9898,9 +9898,6 @@ assert._isSameValue = isSameValue;
           // dropped (the bridge ignores `this`). Tracked as Phase 2 / a
           // follow-up; accessors that close over their `this` keep the
           // existing accessor-shim path (__make_getter_callback).
-          // (#2742) Also marshal the getter's RETURN value: a compiled closure
-          // returned by `get valueOf() { return function(){…}; }` must reach the
-          // host as a callable, or §7.1.1.1 IsCallable skips it.
           const wrappedGetter = _wrapAccessorGetterReturn(_maybeWrapCallable(getter, 0, callbackState), callbackState);
           const wrappedSetter = _maybeWrapCallable(setter, 1, callbackState);
           const desc: PropertyDescriptor = {};
