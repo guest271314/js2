@@ -1283,7 +1283,28 @@ function emitVecToVecBody(
   const dstRefIdx =
     dstKind === "ref" || dstKind === "ref_null" ? (dstVec.elemType as { typeIdx: number }).typeIdx : undefined;
   const needsCoerce = srcKind !== dstKind || srcRefIdx !== dstRefIdx;
-  if (needsCoerce) {
+  // (#2161/#2106) RegExp match vectors use a nullable native-string slot for
+  // unmatched captures. When that slot crosses the compareArray-style `any[]`
+  // boundary, preserve its JS meaning: the singleton regime represents
+  // `undefined` as a tag-1 externref, not as a null externref.
+  const undefinedInstrs =
+    srcKind === "ref_null" && srcRefIdx === ctx.anyStrTypeIdx && dstKind === "externref"
+      ? undefinedExternInstrs(ctx)
+      : undefined;
+  if (undefinedInstrs) {
+    const elemLocal = allocTempLocal(fctx, readElemType);
+    fctx.body.push(
+      { op: "local.tee", index: elemLocal },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: undefinedInstrs,
+        else: [{ op: "local.get", index: elemLocal }, { op: "extern.convert_any" }],
+      },
+    );
+    releaseTempLocal(fctx, elemLocal);
+  } else if (needsCoerce) {
     coerceType(ctx, fctx, readElemType, dstVec.elemType);
   }
   // Write to destination

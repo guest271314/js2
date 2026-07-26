@@ -197,6 +197,28 @@ describe("#1712 — standalone first-class Object.hasOwn", () => {
     const instance = await WebAssembly.instantiate(module, {});
     expect((instance.exports.probe as () => number)()).toBe(16);
   });
+
+  it("keeps computed-access implicit-any parameters on an inferred Uint8Array carrier", async () => {
+    const result = await compile(
+      `
+        function writeByte(buf, index, value) {
+          buf[index] = value;
+        }
+        export function probe() {
+          var out = new Uint8Array(4);
+          writeByte(out, 1, 7);
+          writeByte(out, 2, 11);
+          return out[0] + out[1] * 10 + out[2] * 100 + out[3] * 1000;
+        }
+      `,
+      { fileName: "implicit-any-uint8-index.mjs", target: "standalone", skipSemanticDiagnostics: true },
+    );
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    const module = await WebAssembly.compile(result.binary);
+    expect(WebAssembly.Module.imports(module).filter((entry) => entry.kind === "function")).toEqual([]);
+    const instance = await WebAssembly.instantiate(module, {});
+    expect((instance.exports.probe as () => number)()).toBe(1170);
+  });
 });
 
 describe("#1712 — in-ctor prototype-method calls on this", () => {
