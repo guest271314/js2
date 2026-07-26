@@ -39,6 +39,7 @@ func-budget-allow:
   - src/ir/integration.ts::compileIrPathFunctions
   - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
   - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/runtime.ts::resolveImport
 oracle-ratchet-allow:
   - src/codegen/declarations/object-shape-widening.ts
   - src/codegen/fnctor-escape-gate.ts
