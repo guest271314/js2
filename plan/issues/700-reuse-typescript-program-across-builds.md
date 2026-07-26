@@ -27,7 +27,10 @@ files:
 
 ## Status: in review
 
-Implemented in [PR #3645](https://github.com/loopdive/js2/pull/3645).
+The core Language Service landed in
+[PR #3645](https://github.com/loopdive/js2/pull/3645). The authoritative
+Test262 CI integration is in
+[PR #3650](https://github.com/loopdive/js2/pull/3650).
 
 The original issue proposed an explicit `reuseHost` option on
 `compile()`/`compileSource()`. It was closed as superseded after
@@ -163,4 +166,5 @@ several had previously asserted properties on unresolved Promises.
 
 ## Resolution
 
-Merge PR #3645, then transition this issue from `in-review` to `done`.
+PR #3645 is merged. Merge PR #3650, then transition this issue from
+`in-review` to `done`.
