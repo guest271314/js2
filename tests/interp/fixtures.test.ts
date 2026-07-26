@@ -7,7 +7,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { Encoder } from "../../src/interp/encoder.js";
 import { Op, OP_COUNT, OP_INFO } from "../../src/interp/opcodes.js";
-import { compileScript, disassemble } from "../../src/interp/index.js";
+import { compileScript, createDynamicFunction, disassemble } from "../../src/interp/index.js";
 import { loadAcorn, parse, runInterp } from "./harness.js";
 
 beforeAll(async () => {
@@ -20,6 +20,20 @@ function expectValue(body: string, expected: unknown): void {
   expect(r.ok, `body threw: ${r.errName} — ${body}`).toBe(true);
   expect(r.value).toEqual(expected);
 }
+
+describe("#2928 dynamic Function factory", () => {
+  it("constructs a global-scope interpreted function through an injected parser", () => {
+    const globalObject: Record<string, unknown> = {};
+    const fn = createDynamicFunction((source) => parse(source), "a,b", "return a + b", globalObject) as (
+      a: number,
+      b: number,
+    ) => number;
+
+    expect(fn(1, 2)).toBe(3);
+    expect(fn.name).toBe("anonymous");
+    expect(fn.length).toBe(2);
+  });
+});
 
 describe("#3101 encoder — packing + operand fields", () => {
   it("packs op/a/b into one word and the opcode survives the WIDE mask", () => {
