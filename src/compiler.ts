@@ -42,7 +42,8 @@ import { collectNodeBuiltinImports, preprocessImports } from "./import-resolver.
 import { PositionMap } from "./position-map.js";
 import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import { injectIteratorStaticsPrelude } from "./iterator-statics-prelude.js";
-import { elideWithIrIds, makeIrInventoryOptions, type IrInventoryOptions } from "./compiler/ir-outcome-inventory.js";
+import * as irIds from "./compiler/ir-outcome-inventory.js";
+import { buildLinearOptions } from "./compiler/linear-options.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -818,7 +819,7 @@ interface PipelineInput {
   errors: CompileError[];
   /** Resolved codegen option bundle (see buildCodegenOptions). */
   codegenOptions: CodegenOptions;
-  irInventoryOptions?: IrInventoryOptions;
+  irInventoryOptions?: irIds.IrInventoryOptions;
   /** For source-map sourcesContent: original-name → original text. */
   sourcesContent: Map<string, string>;
   /** Anchor file for pushSourceAnchoredDiagnostic on codegen/emit throws. */
@@ -997,10 +998,7 @@ function runPipeline(input: PipelineInput): CompileResult {
     if (useLinear) {
       mod = multiAst
         ? generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" })
-        : generateLinearModule(entryAst, {
-            exposeArenaReset: options.allocator === "arena-reset",
-            allocationPolicy: options.allocator === "analysis-stack" ? "analysis-stack-arena-v1" : "arena-v1",
-          });
+        : generateLinearModule(entryAst, buildLinearOptions(options, input.irInventoryOptions));
       // Fail the compile on unsupported linear-backend constructs instead of
       // emitting a structurally invalid binary (#1868).
       if (collectLinearCodegenErrors(mod, errors)) {
@@ -1330,7 +1328,7 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
-  let irInventory = options.trackIrOutcomes ? makeIrInventoryOptions(positionMap) : undefined;
+  let irInventory = irIds.maybe(positionMap, options.trackIrOutcomes || options.target === "linear");
   // #2645/#2736 — `--target node`/`deno` (formerly `--platform node`) implies
   // node-style emulation so the ambient surface and the importable `node:<mod>`
   // capability gate share one target model. This EFFECTIVE flag drives the
@@ -1351,7 +1349,7 @@ export function compileSourceSync(
   // whitespace blanking needs no PositionMap; syntax errors leave source intact.
   if (options.target === "standalone" || options.target === "wasi") {
     const scriptKind = isJsMode && !forceTsGrammar ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-    const elision = elideWithIrIds(processedSource, effectiveFileName, scriptKind, irInventory);
+    const elision = irIds.elideWithIrIds(processedSource, effectiveFileName, scriptKind, irInventory);
     processedSource = elision.source;
     irInventory = elision.inventoryOptions;
   }

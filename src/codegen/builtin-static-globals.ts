@@ -12,7 +12,7 @@ import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3
 import { ts } from "../ts-api.js";
 import { emitCachedFuncClosureAccess } from "./closures.js";
 import { pushBuiltinCtorOwnPropSeed } from "./builtin-ctor-own-props.js";
-import { pushBuiltinFnSingletonValueInstrs } from "./builtin-fn-meta.js";
+import { BUILTIN_STATIC_METHOD_ARITY, pushBuiltinFnSingletonValueInstrs } from "./builtin-fn-meta.js";
 import { ensureStandaloneBuiltinStaticMethodClosure } from "./builtin-value-read.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
@@ -282,6 +282,11 @@ export function emitBuiltinStaticMethodValue(
   builtinName: string,
   propName: string,
 ): ValType | null {
+  const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName);
+  if (closure) {
+    fctx.body.push(...pushBuiltinFnSingletonValueInstrs(ctx, closure));
+    return closure.type;
+  }
   const funcIdx = ensureBuiltinStaticFunc(ctx, builtinName, propName);
   if (funcIdx === undefined) return null;
   return emitCachedFuncClosureAccess(ctx, fctx, hiddenName(builtinName, propName), funcIdx);
@@ -350,12 +355,23 @@ export function emitBuiltinNamespaceObject(
   fctx: FunctionContext,
   builtinName: string,
 ): ValType | null {
-  const props = SUPPORTED_STATIC_PROPS.get(builtinName);
-  if (!props) return null;
+  const baselineProps = SUPPORTED_STATIC_PROPS.get(builtinName);
+  if (!baselineProps) return null;
+  // A namespace carrier is materialized only when the namespace is used as a
+  // value. At that demand point, source its complete function-valued own
+  // surface from the same canonical registry that drives static value
+  // metadata/closure materialization. This lets runtime reflection through
+  // stored/uncurried helpers observe the same ownership as direct access.
+  const props = Array.from(
+    new Set([
+      ...baselineProps,
+      ...(builtinName === "JSON" ? [] : Object.keys(BUILTIN_STATIC_METHOD_ARITY[builtinName] ?? {})),
+    ]),
+  );
 
   ensureObjectRuntime(ctx);
   const newObjectIdx = ctx.funcMap.get("__new_plain_object")!;
-  const setIdx = ctx.funcMap.get("__extern_set")!;
+  const defineValueIdx = ctx.funcMap.get("__defineProperty_value")!;
 
   let globalIdx = ctx.builtinObjectGlobals.get(builtinName);
   if (globalIdx === undefined) {
@@ -391,7 +407,12 @@ export function emitBuiltinNamespaceObject(
       fctx.body.push(...stringConstantExternrefInstrs(ctx, prop));
       const valueType = emitBuiltinStaticMethodValue(ctx, fctx, builtinName, prop);
       coerceTopToExternref(fctx, valueType);
-      fctx.body.push({ op: "call", funcIdx: setIdx });
+      // Builtin static methods are writable, non-enumerable, configurable.
+      // Host descriptor encoding: value bits 0b101 + all three specified bits
+      // + hasValue = 0xBD.
+      fctx.body.push({ op: "f64.const", value: 0xbd });
+      fctx.body.push({ op: "call", funcIdx: defineValueIdx });
+      fctx.body.push({ op: "drop" });
     }
     if (builtinName === "JSON") {
       pushJsonNamespaceOwnPropSeed(ctx, fctx, objLocal);
