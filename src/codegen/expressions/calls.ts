@@ -2304,32 +2304,6 @@ export function compileFunctionBind(
  * single-assignment `const`/`let`/`var = fn.bind(...)` form is recognised; this
  * matches the bulk of the test262 bound-function-invocation corpus.
  */
-export function calleeIsBoundFunctionVar(ctx: CodegenContext, expr: ts.Expression): boolean {
-  if (!ts.isIdentifier(expr)) return false;
-  const sym = ctx.checker.getSymbolAtLocation(expr);
-  const decl = sym?.valueDeclaration;
-  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
-  const init = decl.initializer;
-  if (!ts.isCallExpression(init)) return false;
-  const callee = init.expression;
-  if (!ts.isPropertyAccessExpression(callee)) return false;
-  // Direct `<receiver>.bind(...)`.
-  if (callee.name.text === "bind") return true;
-  // Indirect `Function.prototype.bind.call(fn, ...)`.
-  if (
-    callee.name.text === "call" &&
-    ts.isPropertyAccessExpression(callee.expression) &&
-    callee.expression.name.text === "bind" &&
-    ts.isPropertyAccessExpression(callee.expression.expression) &&
-    callee.expression.expression.name.text === "prototype" &&
-    ts.isIdentifier(callee.expression.expression.expression) &&
-    callee.expression.expression.expression.text === "Function"
-  ) {
-    return true;
-  }
-  return false;
-}
-
 /**
  * (#1712 / #1941) Static gate for the host-callable dispatch fallback.
  *
