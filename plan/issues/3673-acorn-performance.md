@@ -1425,6 +1425,278 @@ scaffolding on every `this.` access plus extern/any conversion churn
 reads). That is the next big lever, and it is the other half of #1947
 ("non-null params under strictNullChecks; every typed param is
 `(ref null $T)` with per-access null-check-throw blocks").
+## Linear memory vs WasmGC (measured)
+
+Every round so far ran on the WasmGC lane (`src/codegen/`). This round
+answers the standing question from `docs/architecture/codegen-axes.md`:
+would the **linear-memory** backend (`src/codegen-linear/`, `target:
+"linear"`) be faster for parser-shaped work? The two backends are
+deliberate alternatives, so the answer bears on #3673 and on the
+per-backend value-representation work (#1584 / #1852).
+
+Scripts: `.tmp/linear-vs-gc-bench.mjs` (head-to-head),
+`.tmp/linear-capability-probe.mjs`, `.tmp/linear-string-boundary.mjs`,
+`.tmp/linear-charcodeat-matrix.mjs`, `.tmp/linear-w3-diag.mjs`,
+`.tmp/linear-dataseg-overflow.mjs`, `.tmp/linear-arena-limit.mjs`,
+`.tmp/linear-arena-reset.mjs`, `.tmp/wat-opcount.mjs`.
+
+### Capability boundary — the parser shootout does NOT compile on linear
+
+The existing repros (`.tmp/parser-shootout.mjs`,
+`.tmp/tokenize-only.mjs`) are built on a `class Lexer { src: string; … }`
+that does `this.src.charCodeAt(this.pos)`. **That shape cannot compile on
+the linear backend at all**, and the reason is structural, not a missing
+arm:
+
+- `generateLinearModule` (`src/codegen-linear/index.ts:208-251`) runs the
+  linear-IR overlay **only over top-level `FunctionDeclaration`s**. Class
+  constructors and methods always take the direct AST→linear path.
+- The **direct** linear path has no `charCodeAt` arm at all (stated
+  outright at `src/codegen-linear/runtime.ts:2145-2147`). So any
+  `charCodeAt` that lands on it is a hard `Codegen error: Unsupported
+  method call: .charCodeAt()`.
+- Consequently `charCodeAt` works **only** inside a top-level function
+  that the overlay actually claims. A method, a module-level `const`
+  receiver, and even `const t = this.src; t.charCodeAt(0)` all fail.
+
+The second, sharper wall is `string.length`. Linear strings are **UTF-8
+bytes** while `.length` is a **UTF-16 code-unit count**, so the overlay
+demands an ASCII proof. Instrumenting the overlay's rejection list gives
+the exact reason:
+
+```
+{ "func": "f", "reason": "build",
+  "detail": "ir/linear-string: ASCII encoding proof required for length input (got unproven)" }
+```
+
+A `string` **parameter** carries no such proof, so `f(s: string)` with
+both `s.length` and `s.charCodeAt(i)` demotes out of the overlay and then
+dies on the direct path's missing `charCodeAt`. Only a **string literal
+bound to a local** is proven ASCII. Measured matrix:
+
+| shape | linear |
+| --- | --- |
+| `const s = "…"` local; `s.length` + `s.charCodeAt(i)` | works |
+| `f(s: string)`; `s.length` + `s.charCodeAt(i)` | CE (ASCII proof) |
+| `f(s: string, n: number)`; loop bound `n`, `s.charCodeAt(i)` | works |
+| module-level `const S = "…"`; `S.charCodeAt(0)` | CE |
+| `this.src.charCodeAt(i)` in a method | CE |
+| `const t = this.src; t.charCodeAt(0)` | CE |
+| `s[i]` string index | CE (`Unsupported element access`) |
+| `this.inner.method()` / `xs[0].method()` | CE (`Unsupported method call`) |
+| `type i32 = number` native alias | **emits INVALID wasm** (validation failure, no diagnostic) |
+| module-level `const S = "hello world"; S.length` | **returns 0** (silently wrong; GC returns 11) |
+
+Everything else a parser needs *does* work: classes with number fields,
+nullable self-referential class refs (`left: Node \| null`), `new` in a
+loop, arrays of objects, class instances as parameters, mutable module
+globals, recursion, `number[]` params. So the comparison holds — it just
+has to be **restructured**, not run as-is:
+
+- source text as a **proven-ASCII local literal**;
+- **tokenize and parse in separate modules** (a module that both scans a
+  string and runs recursive descent demotes: `parsePrimary
+  select:class-projection-unsupported`, `parseMul`/`parseAdd`
+  `select:body-shape-rejected`, `checksum`
+  `select:param-type-not-resolvable`, and once that happens `bench`'s
+  `charCodeAt` becomes a hard CE).
+
+### Two soundness bugs found while sizing the workload
+
+Both are silent-wrong-answer bugs in the linear backend, worth their own
+issues:
+
+1. **String literals over ~960 bytes are silently corrupted.**
+   `DATA_SEGMENT_BASE = 64` (`src/codegen-linear/index.ts:36`) and the
+   bump allocator's `__heap_ptr` starts at `HEAP_START = 1024`
+   (`src/codegen-linear/runtime.ts:12`). Nothing checks that the literal
+   data fits the 960-byte window between them, so a longer literal spills
+   past `HEAP_START` and the arena's first allocation overwrites it.
+   Measured (`.tmp/linear-dataseg-overflow.mjs`): 960 chars clean, **980
+   chars → `.length` reports 979 and 17 characters read wrong**, 2048
+   chars → 939 wrong, 4096 chars → OOB trap. No diagnostic at any size.
+   This is what first showed up as a checksum mismatch in the tokenizer
+   (linear 29675 vs node/gc 28117 on a 2397-char input). Workaround: any
+   `<number>.toString()` in the source flips number-format mode
+   (`number-format.ts:74-80`), moving literals to 16384 and `heapStart`
+   to 65536 — verified clean to 2048 chars.
+2. **`type i32 = number` produces invalid wasm on linear.** The native
+   type-alias annotation that the GC lane uses for i32 locals makes the
+   linear backend emit a module that fails `WebAssembly.compile()`
+   (`local.set`/`f64.add` type mismatches). It should either be supported
+   or rejected with a diagnostic; today it is a silent miscompile.
+
+### The head-to-head
+
+Largest workload both backends accept, three lanes in one process,
+rotating order, deep warm, min-of-batches over 15–21 rounds, checksums
+asserted identical (`.tmp/linear-vs-gc-bench.mjs`). Input 909 chars / 431
+tokens — deliberately under the 960-byte corruption cliff.
+
+- **W1 scalar** — 200 iterations of a 200-step integer PRNG. No memory
+  traffic; isolates arithmetic.
+- **W2 tokenize** — the full tokenizer over the literal, no allocation.
+- **W3 parse+AST** — recursive descent over pre-built `number[]` token
+  arrays, allocating a `Node` per production, then a recursive checksum.
+  Token arrays are hoisted out of the rep loop on purpose: leaving them
+  inside compares array-literal construction instead (the linear lane
+  emits **862 per-element push calls** where GC emits 3 `array.new`s,
+  which swamped the allocation signal and made the two lanes look tied).
+
+`optimize: 3`, ms per iteration:
+
+| workload | node | GC (min / med) | linear (min / med) | linear ÷ GC | GC ÷ node |
+| --- | --- | --- | --- | --- | --- |
+| W1 scalar | 0.0015 | 0.0112 / 0.0118 | 0.0113 / 0.0118 | **1.00x** | 7.7x |
+| W2 tokenize | 0.0024 | 0.0072 / 0.0077 | 1.3329 / 1.3630 | **184x slower** | 3.0x |
+| W3 parse+AST | 0.0015 | 0.0061 / 0.0075 | 0.0010 / 0.0011 | **0.17x (linear 5.9x faster)** | 4.1x |
+
+Reproduced across four independent invocations; W1 ranged 0.98–1.02x, W2
+183–212x, W3 0.13–0.17x. Per-lane spread (max÷min within a run) was
+1.03–1.2x except the GC lane on W3, which is bimodal (up to **21–56x
+spread**, tail 0.0854 ms) — GC pauses. The linear lane's W3 spread is
+1.6–1.8x. Unoptimized (`OPT=0`) gives the same three verdicts.
+
+Size and compile time (`-O3` / no-opt):
+
+| workload | GC bytes | linear bytes | GC compile | linear compile |
+| --- | --- | --- | --- | --- |
+| W1 | 21,134 / 47,189 | **322** / 5,297 | 2.2 s / 0.9 s | 0.69 s / 0.04 s |
+| W2 | 23,527 / 51,725 | 2,139 / 7,567 | 1.5 s / 0.29 s | 0.77 s / 0.06 s |
+| W3 | 48,399 / 99,555 | 12,651 / 17,203 | 2.3 s / 0.74 s | 0.73 s / 0.12 s |
+
+Linear binaries are **4–65x smaller** and compile **3–20x faster**. Most
+of the GC lane's bytes are the standalone string/number runtime it always
+links.
+
+### Mechanism (from `npx wasm-dis`, op counts via `.tmp/wat-opcount.mjs`)
+
+**W1 — why both lanes lose to node identically.** Both backends carry
+every `number` as **f64** and emulate `|0` with an
+`f64.trunc` → `i32.trunc_sat_f64_u` → `f64.convert_i32_s` round trip plus
+an `f64.floor`/`f64.mul` modulo dance. The linear W1 body is *literally*
+f64 arithmetic with no i32 anywhere. So the 7.8x floor is the **value
+representation** (#1584 / #1852), identical in both backends, and
+**not** a memory-model question. Choosing linear buys nothing here.
+
+**W2 — why linear is 184x slower.** This is a representation difference,
+not a memory-model one:
+
+- GC's `charCodeAt` helper is **O(1)**: bounds check, then
+  `array.get_u` on an `i16` array via `struct.get` of
+  {length, offset, data} — 39 lines, `array.get_u ×1`, `struct.get ×3`,
+  **no loop**.
+- Linear's `__linear_ir_str_char_code_at` is **O(i)**: 297 lines
+  containing a `loop` that walks UTF-8 bytes **from byte 0**, decoding
+  1-/2-/3-/4-byte sequences and incrementing a UTF-16 unit counter until
+  it reaches the requested index (`i32.load8_u ×7`, `i32.load ×8`,
+  `loop ×1`). Source at `src/codegen-linear/runtime.ts:2342+`.
+
+A tokenizer calling `charCodeAt(pos)` across a length-N string is
+therefore **O(N²)** on linear. At N=909 that is ~413k byte loads per pass
+instead of 909 — right order of magnitude for the measured 184–212x.
+`wasm-opt -O3` cannot fix it; it is algorithmic. Linear also **re-copies
+the 909-byte literal from the data segment into a fresh arena block byte
+by byte on every `bench()` call** (an inlined `__str_from_data` loop plus
+a `memory.grow` check), which the GC lane does once via `array.new` +
+`struct.new`.
+
+**W3 — why linear is 5.9x faster.** Not because bump allocation beats
+`struct.new`; those are ~1:1. It is WasmGC's **per-access downcast tax on
+nullable class references**:
+
+| function | GC lane | linear lane |
+| --- | --- | --- |
+| `parsePrimary` | 1414 lines: `struct.get ×40`, **`ref.cast ×38`**, **`ref.test ×45`**, `ref.is_null ×16`, `struct.new ×1` | 190 lines: `i32.store ×4`, `f64.load ×9`, no casts |
+| `checksum` | 247 lines: `struct.get ×8`, **`ref.cast ×8`**, `ref.test ×4`, `ref.is_null ×5` | 41 lines: `i32.load ×2`, `f64.load ×2` |
+
+Every read of a `Node | null`-typed field on the GC lane re-narrows the
+reference — ~4 `ref.cast`/`ref.test` pairs per source-level field access —
+because the nullable union is carried as a supertype ref. The linear lane
+holds a raw i32 pointer and reads at a static offset: no cast is possible
+and none is needed. **This is a type-lowering problem, not a GC problem**,
+and it is the same family as the value-representation work in #1584 /
+#1852.
+
+Note the linear lane pays its *own* representation tax in the same
+function: `st.i` lives as an **f64** field, so every array index does
+`f64.load` → `i32.trunc_f64_s`, and every `&&` becomes an
+`f64.gt (f64.abs …) (f64.const 0)` truthiness dance. It still wins by 5.9x
+— which sizes how expensive the GC downcasts are.
+
+### What the arena costs
+
+The linear backend's allocator is a **bump arena that never reclaims**,
+and `mod.memories.push({ min: 1, max: 256 })`
+(`src/codegen-linear/runtime.ts:64`) caps memory at **16 MiB**. `__malloc`
+deliberately does not branch on `memory.grow` returning −1
+(`runtime.ts:101-102`). Measured with a 1023-node tree built repeatedly
+(`.tmp/linear-arena-limit.mjs`):
+
+| lane | allocations survived | outcome |
+| --- | --- | --- |
+| linear, default `allocator: "bump"` | 409,200 | **TRAPS** — `memory access out of bounds` at 16 MiB |
+| linear, `allocator: "arena-reset"` + `__arena_reset()` per parse | 30,690,000 | no trap, 489 ms |
+| WasmGC (standalone) | 20,460,000 | no trap, 308 ms |
+
+So a linear-lane parser has a **hard ~409k-object lifetime ceiling** out
+of the box. `allocator: "arena-reset"` removes it and is the right mode
+for a parse-then-discard workload (one reset per parse), but it levels the
+allocation advantage: ~15.9 ns/node-allocate-and-traverse for
+linear+reset vs ~15.1 ns for GC on that shape. The 5.9x W3 win is real but
+holds only while the arena stays **warm and unreset**; reset costs the
+cache warmth, not the pointer bump.
+
+### Recommendation
+
+**Do not move the acorn work to the linear backend. Do harvest two
+findings from it.**
+
+1. **It cannot compile the workload.** Real acorn is classes holding a
+   `string` input and calling `this.input.charCodeAt(this.pos)` — the
+   single shape most comprehensively unsupported on linear (methods are
+   outside the IR overlay; the direct path has no `charCodeAt`; a string
+   parameter has no ASCII proof; module-level string consts are wrong or
+   rejected). Getting there is not a small gap: it needs class methods in
+   the linear-IR overlay, an ASCII/encoding proof that survives parameter
+   passing, and a UTF-16-indexable string representation. That is a
+   backend programme, not a #3673 round.
+2. **Even if it compiled, the string half would be catastrophically
+   slower** — 184x, structurally, because UTF-8 storage makes
+   `charCodeAt` O(i). Since #3673 round 31 already measured the character
+   scan as the GC lane's weak point (tokenize-only 3.06x vs full-parse
+   1.59x), moving to a backend whose scan is two orders of magnitude
+   worse is exactly the wrong direction.
+3. **The W3 result is the valuable part, and it is portable.** Linear
+   beats GC 5.9x on parse+AST purely by not emitting `ref.cast`/`ref.test`
+   on every nullable-class-ref field read. That is a **WasmGC
+   type-lowering** issue the GC lane can fix on its own: narrow
+   `Node | null` once per binding instead of re-testing at each use, or
+   carry a non-null ref plus a separate null flag. On the measured op
+   counts (38 casts + 45 tests in one 1400-line function) this is
+   plausibly the largest single remaining win for the AST-building half
+   of an acorn parse — worth a dedicated issue under #1584 / #1852.
+4. **The W1 floor says the 7.8x arithmetic gap is backend-independent.**
+   Both lanes emit identical f64-with-truncation code. Value
+   representation is the shared bottleneck; no backend choice avoids it.
+
+Where the linear lane *is* clearly better and worth keeping in mind:
+binary size (4–65x smaller), compile time (3–20x faster), and predictable
+latency (no GC pause tail — the GC lane's W3 spread hit 21–56x). Those
+matter for the WASI/standalone target, not for beating node-acorn.
+
+### One compiler-source change (diagnostic only)
+
+`src/ir/backend/linear-integration.ts` gained a four-line
+`JS2WASM_LINEAR_IR_DEBUG=1` dump of the overlay's `compiled` / `rejected`
+lists. There was no other way to see *why* a function demotes out of the
+linear-IR overlay — the rejection reasons are computed and then dropped,
+and the user-visible symptom is an unrelated `Unsupported method call:
+.charCodeAt()` from the direct path. It is inert unless the env var is
+set. Gates: `npx tsc --noEmit` clean; the full `linear-*` suite plus
+`issue-2045/3497/3500/3520` linear tests pass (140 tests). The file is
+reachable only via `target: "linear"`, so the GC/standalone paths are
+untouched.
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
