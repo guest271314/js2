@@ -688,6 +688,25 @@ the residual regex share is the UNANCHORED patterns: lineBreak etc.).
 Verification: full regex battery failure set name-identical to the
 round-16 pre-existing set; corpus 23/23; canaries 4/4; tsc clean.
 
+### Round 21 — per-object cache staleness via props-array identity
+
+The global `__obj_table_gen` is retired. It was bumped by EVERY
+`__obj_grow`, and acorn's per-parse options build grows its table twice
+— cold-starting every per-key cache program-wide at each parse start
+(~50 hot keys × 2 storms of slow re-population per parse). Staleness is
+now witnessed per object: population stores the owner's props ARRAY in
+the key's `$HashedString` (field 7), and every hit `ref.eq`s it against
+the live `owner.props` — a grow replaces the array, so exactly the
+grown object's cached entries miss; field 4 degrades to a populated
+flag. All three consumers converted (`__extern_get` hit arm,
+`__method_cache_lookup`, the `__call_m_*` inline arms). Also recorded:
+a NULL result — sorting the `__fnctor_proto_start` ladder by struct
+field count (Parser-first) measured ~4% WORSE (TokenType's per-token
+`updateContext` receivers dominate some phases); reverted.
+Measured: window 0.86-0.90 → **0.82-0.87ms** (~3-4%). Verification:
+cache-semantics battery (accessor/defineProperty/delete/2896/2866/1888/
+2674/2963/twin/i31) 118/118; corpus 23/23; canaries 4/4; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

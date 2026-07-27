@@ -115,6 +115,7 @@ function nativeStringLiteralInitInstrs(ctx: CodegenContext, value: string): Inst
     instrs.push({ op: "i32.const", value: 0 });
     instrs.push({ op: "ref.null", typeIdx: -18 }); // ref.null any
     instrs.push({ op: "ref.null", typeIdx: -18 });
+    instrs.push({ op: "ref.null", typeIdx: -18 }); // cacheProps (round 21)
     instrs.push({ op: "struct.new", typeIdx: ctx.hashedStrTypeIdx });
     return instrs;
   }

@@ -778,6 +778,12 @@ export function registerNativeStringTypes(ctx: CodegenContext): void {
       { name: "cacheGen", type: { kind: "i32" }, mutable: true },
       { name: "cacheOwner", type: { kind: "anyref" }, mutable: true },
       { name: "cacheEntry", type: { kind: "anyref" }, mutable: true },
+      // (#3673 round 21) the owner's props ARRAY at population time — a grow
+      // replaces the array, so `ref.eq` on it is a per-object staleness check
+      // (replaces the global `__obj_table_gen`, whose bump on ANY object's
+      // grow cold-started every cache twice per parse via acorn's options
+      // build). Field 4 degrades to a populated flag (0/1).
+      { name: "cacheProps", type: { kind: "anyref" }, mutable: true },
     ],
     superTypeIdx: ctx.nativeStrTypeIdx,
   });
