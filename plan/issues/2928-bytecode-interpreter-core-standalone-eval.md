@@ -104,7 +104,10 @@ Global-scope evaluation only, deliberately excluding direct-eval scope capture
 - [x] An AOT function calls an interpreted function and vice versa with identical
       boxed-value identity (a `ref.eq` round-trip test).
 - [ ] ≥ 30 test262 eval-positive / Function-positive cases pass under the
-      standalone target.
+      standalone target. (Measured 2026-07-27 after E6 runner wiring: **11
+      attributable** official `eval-code` flips, 0 regressions — see the
+      "Official Test262 `eval-code` measurement" section for the named files
+      and the measured blockers for the rest.)
 - [x] A no-eval module stays within 5% of the current size floor; an
       eval-enabled module documents one measured parser+interpreter size figure.
 - [x] Opcode-set ADR committed under `docs/adr/`.
@@ -484,6 +487,70 @@ Two measurement traps found and fixed/recorded on the way:
    provider-side `__runtime_indirect_eval` returns instantly for the same
    bodies when called with JS carriers, so the pathology is in the
    native-carrier execution path.
+
+## Official Test262 `eval-code` measurement (E6 wiring, 2026-07-27)
+
+Three same-session arms on the same machine, same authoritative command
+(TEST262_TARGET=standalone, TEST262_PATH_FILTER='language/eval-code/',
+COMPILER_POOL_SIZE=2, TEST262_WORKERS=2, --official-scope-only), all with
+`TEST262_IT_TIMEOUT_MS=600000` (see finding 1 above — without it the branch
+arm silently loses 202 of its 816 rows):
+
+| Arm                                            | Run ID          | pass | fail | CE  | compile_timeout |
+| ---------------------------------------------- | --------------- | ---: | ---: | --: | --------------: |
+| control — `main` @ `81dbcad3b`                 | 20260727-020133 |  106 |  670 |  40 |               0 |
+| branch @ `4ac14aacb` + provider                | 20260727-013447 |  117 |  627 |  40 |              32 |
+| branch + `TEST262_DISABLE_RUNTIME_EVAL_PROVIDER=1` | 20260727-021328 |  106 |  670 |  40 |               0 |
+
+- The control **exactly reproduces the 2026-07-26 handoff baseline**
+  (106/816 = 105 standard + 1 annexB) — instrument validated.
+- The kill-switch arm is **status-identical to the control on all 816
+  files** — removing the provider injection alone reverts every delta, so
+  every delta is attributable to the linked interpreter route.
+- **11 files flip fail→pass (11 of the ≥30 acceptance bar), 0 regressions:**
+  - `test/annexB/language/eval-code/indirect/global-block-decl-eval-global-skip-early-err-block.js`
+  - `test/annexB/language/eval-code/indirect/global-block-decl-eval-global-skip-early-err-for.js`
+  - `test/annexB/language/eval-code/indirect/global-if-decl-no-else-eval-global-skip-early-err-block.js`
+  - `test/annexB/language/eval-code/indirect/global-if-decl-no-else-eval-global-skip-early-err-for.js`
+  - `test/language/eval-code/indirect/block-decl-strict.js`
+  - `test/language/eval-code/indirect/export.js`
+  - `test/language/eval-code/indirect/import.js`
+  - `test/language/eval-code/indirect/non-string-object.js`
+  - `test/language/eval-code/indirect/non-string-primitive.js`
+  - `test/language/eval-code/indirect/parse-failure-6.js`
+  - `test/language/eval-code/indirect/var-env-func-strict.js`
+
+  These are exactly the cases the Phase-1 interpreter can already decide:
+  correct SyntaxError refusal of invalid eval code (parse-failure, import/
+  export declarations, skip-early-err), strict/block-scoping negatives, and
+  §19.2.1's non-string pass-through.
+
+**Why the remaining candidates are blocked (measured on the branch arm, not
+estimated).** 595/816 are direct-eval files — out of scope by design
+(#2929). Of the 221 indirect files: 33 pass (22 pre-existing + 11 new),
+32 hang (→ `compile_timeout`; the annexB function-in-if emit hang recorded
+in finding 2), and 156 still fail with this signature breakdown:
+
+| count | blocking cause (verbatim signature class)                              |
+| ----: | ---------------------------------------------------------------------- |
+|    42 | `interp/emitter: unsupported in Phase 1: statement SwitchStatement`     |
+|    34 | `ReferenceError: assert is not defined` (interp global env cannot see the AOT module's harness globals) |
+|    18 | `ReferenceError: fnGlobalObject is not defined` (same bridging class)   |
+|     8 | `interp/emitter: unsupported ... ForOfStatement`                        |
+|     8 | `interp/emitter: unsupported ... ForInStatement`                        |
+|     8 | `SyntaxError: NaN` (error-message rendering defect in the thrown path)  |
+|    38 | assorted semantic gaps (SameValue mismatches, missing expected throws, null-property access) |
+
+So the two biggest levers toward the ≥30 bar are interpreter-side, not
+packaging-side: (a) AOT↔interp **global-binding bridging** (52 files fail
+purely because eval'd code can't resolve `assert`/harness globals), and
+(b) Phase-1 statement coverage (**SwitchStatement** alone gates 42, for-of/
+for-in another 16) plus the **if-statement hang/slowness** family (32 hangs;
+~27 s even for `if (false) ;`). The acceptance box stays unchecked; the E6
+packaging seam itself is done and measured working.
+
+Artifacts: `benchmarks/results/test262-standalone-results-20260727-{020133,013447,021328}.jsonl`
+(local machine; copies retained in the session workspace `.tmp/e6-*.jsonl`).
 
 ## Coercion-sites allowance (`src/codegen/expressions/eval-inline.ts`)
 
