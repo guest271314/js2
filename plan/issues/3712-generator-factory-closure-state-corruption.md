@@ -1,5 +1,5 @@
 ---
-id: 3687
+id: 3712
 title: "Two generator instances created from the same closure-returning factory corrupt each other's captured state"
 status: blocked
 sprint: current
@@ -17,7 +17,7 @@ origin: "#3690 — new tests/differential/corpus/generators/06-closure-state.js 
 related: [3690]
 ---
 
-# #3687 — Concurrent generator instances from a shared closure factory corrupt captured state
+# #3712 — Concurrent generator instances from a shared closure factory corrupt captured state
 
 ## Repro
 
@@ -98,10 +98,10 @@ ordinary mutable closure state**, with no error or diagnostic — the
 program still runs and prints a plausible-looking (wrong) number.
 
 **Not fixed here.** This needs the same Phase-3 native lazy-generator work
-as #3685/#3686 (`src/codegen/generators-native.ts`, `#1687`), specifically
+as #3710/#3711 (`src/codegen/generators-native.ts`, `#1687`), specifically
 extending native-generator candidacy to generator factories that close
 over mutable outer-scope state and infinite/unbounded loop bodies — a
 genuinely architectural change to when/how generator bodies execute, not a
 local patch. Flagging as the highest-severity of the three sibling issues
-(silent correctness bug vs. #3685's wrong-value / #3686's trap) and a good
+(silent correctness bug vs. #3710's wrong-value / #3711's trap) and a good
 canonical repro for that work's acceptance criteria.

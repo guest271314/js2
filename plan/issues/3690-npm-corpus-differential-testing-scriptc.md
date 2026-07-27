@@ -91,12 +91,12 @@ issue:
 
 | file                                        | outcome       | issue | resolution |
 | -------------------------------------------- | ------------- | ----- | ---------- |
-| `generators/03-return-throw.js`              | compile_error | #3691 | false positive — real `tsc` rejects the same program too; fixed the corpus file, not the compiler |
-| `generators/04-sent-values.js`               | runtime_error | #3685 | confirmed real — root cause: eager-buffer generator runtime, see #3685 |
-| `generators/05-yield-star.js`                | runtime_error | #3686 | confirmed real — root cause: eager-buffer generator runtime, see #3686 |
-| `generators/06-closure-state.js`             | mismatch      | #3687 | confirmed real — root cause: eager-buffer generator runtime, see #3687 |
-| `builtins/19-symbol-iterator.js`              | mismatch      | #3688 | confirmed real, under investigation |
-| `private-fields/05-brand-checks.js`          | mismatch      | #3689 | confirmed real, under investigation |
+| `generators/03-return-throw.js`              | compile_error | #3691 | **fixed** — false positive, real `tsc` rejects the same program too; fixed the corpus file, not the compiler |
+| `generators/04-sent-values.js`               | runtime_error | #3710 | root-caused, `blocked` on #1687 (known eager-buffer generator gap, already escalated) |
+| `generators/05-yield-star.js`                | runtime_error | #3711 | root-caused, `blocked` on #1687 (same family) |
+| `generators/06-closure-state.js`             | mismatch      | #3712 | root-caused, `blocked` on #1687 (same family — pins down the `__EAGER_GEN_LIMIT` mechanism) |
+| `builtins/19-symbol-iterator.js`              | mismatch      | #3713 | narrowed to a specific wrong value (`__iterator` receives an empty placeholder, not `range`); exact emission site not yet pinned down |
+| `private-fields/05-brand-checks.js`          | mismatch      | #3714 | root-caused (`ref.test` can't distinguish "wrong class" from "not an object"); fix needs a general anyref-is-object runtime check, out of scope for this pass |
 
 All other new files (`generators/01-basics.js`, `02-for-of.js`,
 `private-fields/01-04`, `builtins/16-18-regex-*`, `builtins/20-symbol-map-key.js`)

@@ -1,5 +1,5 @@
 ---
-id: 3686
+id: 3711
 title: "yield* delegation to an inner generator traps with 'illegal cast'"
 status: blocked
 sprint: current
@@ -17,7 +17,7 @@ origin: "#3690 — new tests/differential/corpus/generators/05-yield-star.js sur
 related: [3690]
 ---
 
-# #3686 — `yield*` delegation traps with "illegal cast"
+# #3711 — `yield*` delegation traps with "illegal cast"
 
 ## Repro
 
@@ -52,16 +52,16 @@ re-checking once this is fixed).
 
 `tests/differential/corpus/generators/05-yield-star.js` (see #3690).
 
-## Root cause (investigated 2026-07-27) — same family as #1687/#3685
+## Root cause (investigated 2026-07-27) — same family as #1687/#3710
 
-Same eager-buffer-vs-lazy-state-machine gap as #3685 (see that issue for
+Same eager-buffer-vs-lazy-state-machine gap as #3710 (see that issue for
 the full trace): `yield*` delegation is explicitly listed as **not
 modeled** by the native lazy generator lowering
 (`src/codegen/generators-native.ts` header: *"yield*, break/continue
 targeting a yield-loop, switch/labeled statements with yields, and
 try/catch with yields are not modeled"*) and the runtime's
 `__gen_yield_star` eager-buffer helper (`src/runtime.ts`) drains the inner
-iterable eagerly into the outer buffer. Unlike #3685 (silently wrong
+iterable eagerly into the outer buffer. Unlike #3710 (silently wrong
 values), this repro **traps** ("illegal cast") rather than degrading
 gracefully — worth flagging to whoever picks up native `yield*` support
 (#1687/Phase 3) as a harder failure mode than a value mismatch: something
@@ -69,5 +69,5 @@ in the delegation path is casting a value to the wrong Wasm type rather
 than just producing an incorrect-but-valid one.
 
 **Not fixed here** — same architecturally-significant, multi-phase
-compiler-lowering scope as #3685. Keeping open as a minimal repro +
+compiler-lowering scope as #3710. Keeping open as a minimal repro +
 differential-corpus regression pin.

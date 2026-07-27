@@ -208,11 +208,11 @@ differential-testing angle (#3690 — a corpus of programs run under both
 Node and compiled js2wasm), with three new minimal repros pinned as
 regression tests, cross-linked here rather than duplicated:
 
-- **#3685** — `x = yield y` sent-value threading (this issue's primary case)
-- **#3686** — `yield*` delegation, but note: **traps** ("illegal cast")
+- **#3710** — `x = yield y` sent-value threading (this issue's primary case)
+- **#3711** — `yield*` delegation, but note: **traps** ("illegal cast")
   rather than degrading to a wrong value, a harder failure mode worth
   checking when Phase 3 lands
-- **#3687** — the sharpest evidence yet for *why* eager evaluation is
+- **#3712** — the sharpest evidence yet for *why* eager evaluation is
   dangerous, not just spec-incomplete: two generator instances from a
   shared closure factory (`while(true) yield total` capturing outer
   `total`) silently corrupt each other's state, because generator

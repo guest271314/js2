@@ -1,5 +1,5 @@
 ---
-id: 3685
+id: 3710
 title: "Generator two-way yield: value passed to .next(x) is not threaded back into the generator body"
 status: blocked
 sprint: current
@@ -17,7 +17,7 @@ origin: "#3690 — new tests/differential/corpus/generators/04-sent-values.js su
 related: [3690]
 ---
 
-# #3685 — `x = yield y` does not receive the value passed to `.next(x)`
+# #3710 — `x = yield y` does not receive the value passed to `.next(x)`
 
 ## Repro
 
@@ -64,7 +64,7 @@ work (see #3690's `01-basics.js`/`02-for-of.js`, both matching).
 
 This is the exact root cause #1687 already documents: generators compile
 through an **eager-buffer** model (`src/runtime.ts` `__gen_push_*` /
-`__EAGER_GEN_LIMIT`, see #3687 for the smoking-gun evidence). The generator
+`__EAGER_GEN_LIMIT`, see #3712 for the smoking-gun evidence). The generator
 body runs to completion (up to a 1,000,000-yield safety cap) at *creation*
 time, buffering every yielded value into an array; `.next(v)` only ever
 drains the next buffered entry — it can never feed `v` back into a `yield`
