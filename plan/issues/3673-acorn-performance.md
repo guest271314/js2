@@ -529,6 +529,23 @@ corpus 23/23; 2151 ×13 suites (3 pre-existing), 2903 ×8 suites — the 4
 identical) — upstream pre-existing, not introduced here; 3117/3309/1712
 green; pins 7/7; tsc clean.
 
+### Round 14 — vec-overlay newest-first scan
+
+The #3251 overlay table (vec identity → companion `$Object`, `ref.eq`
+scan — identity maps can't hash in pure WasmGC) is APPEND-ONLY and the
+standalone regex-exec path appends a pair per match, so it grows across
+a run while `__vec_dp_value`'s per-define lookups walked it FRONT-first
+— oldest (dead) entries before the fresh match array at the end.
+Reversed to newest-first: hits on the active match array are O(1)
+regardless of table size. Profile: `__vec_overlay_lookup` 3.4% → 2.5%;
+the residue is the MISS scan (a fresh array's first define scans the
+whole table to find nothing) — next slice: an ensure-fresh (append
+without scan) callable from the match-result builder, which knows its
+array is brand-new. The unbounded table itself (a genuine leak — WasmGC
+has no weak tables) is recorded as a standing issue for the S3-era
+per-vec companion field design. Verification: 3251 suites 18/18, 3116,
+corpus 23/23, pins 7/7; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
