@@ -15,6 +15,12 @@ language_feature: n/a
 goal: property-model
 origin: "#3690 — new tests/differential/corpus/private-fields/05-brand-checks.js surfaced this on first run"
 related: [3690]
+# The +8 lines are the new `__extern_is_object` host import (implementation
+# + the comment explaining why it's not just `typeof v === "object"`, per
+# #3714's Root cause section below). Genuinely new runtime surface, not
+# god-file drift.
+loc-budget-allow:
+  - src/runtime.ts
 ---
 
 # #3714 — `#field in obj` with `obj === null` should throw a catchable TypeError
