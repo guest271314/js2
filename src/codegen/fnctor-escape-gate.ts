@@ -122,7 +122,38 @@ export interface FnctorEscapeGateResult {
    * the reserved slot (matching the on-demand resolution at the dominant site).
    */
   readonly ctorDeclByName: ReadonlyMap<string, ts.FunctionDeclaration | ts.FunctionExpression>;
+  /**
+   * #3683 S1 — per-fnctor prototype-method WRITE-ONCE verdicts. INERT: no
+   * lowering consumes this yet; #3683 S2 gates typed-`this` twin emission on
+   * it. See {@link analyzeProtoMethodWriteOnce}.
+   */
+  readonly protoMethodWriteOnce: ProtoMethodWriteOnceResult;
 }
+
+/**
+ * #3683 S1 — result of the prototype-method write-once analysis.
+ *
+ * `methods.get(F)?.get(m)` is the SINGLE function-like RHS of the one
+ * unconditional top-level assignment `F.prototype.m = <fn>` (directly or via a
+ * top-level alias `var pp = F.prototype; pp.m = <fn>`), present only when the
+ * program provably never writes that method slot again. `poisoned` holds
+ * fnctor names whose prototype OBJECT cannot be reasoned about at all — its
+ * `prototype` was reassigned, written through a computed key, `delete`d from,
+ * or ESCAPED to any consumer other than a property access or the whitelisted
+ * non-mutating readers (`Object.create` / `Object.getPrototypeOf` argument
+ * position). A poisoned class publishes NO verdicts.
+ *
+ * **Conservative default = not write-once.** Shadowed alias names, writes
+ * inside functions/conditionals, double assignments, and non-function RHS all
+ * demote the method (or poison the class); the failure mode is only ever
+ * "miss a monomorphization candidate", never "typed twin for a mutable slot".
+ */
+export interface ProtoMethodWriteOnceResult {
+  readonly methods: ReadonlyMap<string, ReadonlyMap<string, ts.FunctionLikeDeclaration>>;
+  readonly poisoned: ReadonlySet<string>;
+}
+
+const EMPTY_WRITE_ONCE: ProtoMethodWriteOnceResult = { methods: new Map(), poisoned: new Set() };
 
 const EMPTY_RESULT: FnctorEscapeGateResult = {
   sites: new Map(),
@@ -131,6 +162,7 @@ const EMPTY_RESULT: FnctorEscapeGateResult = {
   receiverStruct: new Map(),
   newThisOwnerNames: new Set(),
   ctorDeclByName: new Map(),
+  protoMethodWriteOnce: EMPTY_WRITE_ONCE,
 };
 
 /**
@@ -443,6 +475,285 @@ function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {
     ts.isArrowFunction(node) ||
     ts.isMethodDeclaration(node)
   );
+}
+
+/**
+ * #3683 S1 — prototype-method write-once analysis (see
+ * {@link ProtoMethodWriteOnceResult} for the contract). Purely syntactic and
+ * whole-source-file; no checker, no codegen, no side effects.
+ */
+export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMethodWriteOnceResult {
+  const aliasToOwner = new Map<string, string>(); // "pp$8" → "Parser"
+  const collidingAliases = new Set<string>();
+  const poisoned = new Set<string>();
+  const writes = new Map<string, Map<string, { decl?: ts.FunctionLikeDeclaration; bad: boolean }>>();
+
+  // Pass 1 — top-level `var pp = F.prototype;` aliases. A name declared twice
+  // for DIFFERENT owners is ambiguous: poison both owners and drop the alias.
+  for (const stmt of sourceFile.statements) {
+    if (!ts.isVariableStatement(stmt)) continue;
+    for (const d of stmt.declarationList.declarations) {
+      if (!ts.isIdentifier(d.name) || !d.initializer) continue;
+      const init = unwrapExpr(d.initializer);
+      if (ts.isPropertyAccessExpression(init) && init.name.text === "prototype" && ts.isIdentifier(init.expression)) {
+        const owner = init.expression.text;
+        const prev = aliasToOwner.get(d.name.text);
+        if (prev !== undefined && prev !== owner) {
+          poisoned.add(prev);
+          poisoned.add(owner);
+          collidingAliases.add(d.name.text);
+        }
+        aliasToOwner.set(d.name.text, owner);
+      }
+    }
+  }
+  for (const name of collidingAliases) aliasToOwner.delete(name);
+
+  const ownerOfBase = (base: ts.Expression): string | undefined => {
+    const b = unwrapExpr(base);
+    if (ts.isPropertyAccessExpression(b) && b.name.text === "prototype" && ts.isIdentifier(b.expression)) {
+      return b.expression.text;
+    }
+    if (ts.isIdentifier(b)) return aliasToOwner.get(b.text);
+    return undefined;
+  };
+
+  /** `Symbol.<wellKnown>` computed-key test — symbol keys cannot collide
+   *  with the string-keyed method slots this analysis reasons about. */
+  const isSymbolKeyed = (idx: ts.Expression | undefined): boolean => {
+    if (idx === undefined) return false;
+    const e = unwrapExpr(idx);
+    return ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "Symbol";
+  };
+
+  // A prototype value handed to these in ARGUMENT position is read, not
+  // mutated — the one escape shape acorn-style inheritance actually uses.
+  const isNonMutatingProtoConsumer = (call: ts.CallExpression): boolean => {
+    const callee = unwrapExpr(call.expression);
+    if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) return false;
+    if (callee.expression.text !== "Object") return false;
+    return callee.name.text === "create" || callee.name.text === "getPrototypeOf";
+  };
+
+  /** `Object.defineProperties` / `Object.defineProperty` callee test. */
+  const objectDefineKind = (call: ts.CallExpression): "many" | "one" | undefined => {
+    const callee = unwrapExpr(call.expression);
+    if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) return undefined;
+    if (callee.expression.text !== "Object") return undefined;
+    if (callee.name.text === "defineProperties") return "many";
+    if (callee.name.text === "defineProperty") return "one";
+    return undefined;
+  };
+
+  /** Own-key names of an object literal, or undefined on computed/spread. */
+  const keysOfLiteral = (lit: ts.ObjectLiteralExpression): Set<string> | undefined => {
+    const keys = new Set<string>();
+    for (const prop of lit.properties) {
+      if (ts.isSpreadAssignment(prop)) return undefined;
+      const name = prop.name;
+      if (name === undefined) return undefined;
+      if (ts.isIdentifier(name) || ts.isStringLiteral(name)) keys.add(name.text);
+      else if (ts.isNumericLiteral(name)) keys.add(name.text);
+      else return undefined; // computed key
+    }
+    return keys;
+  };
+
+  /**
+   * Resolve the descriptor-map argument of `Object.defineProperties(proto, X)`
+   * to its full possible key set: an inline object literal, or an identifier
+   * declared exactly once at top level with an object-literal initializer
+   * (acorn's `prototypeAccessors` pattern). Depth-1 property WRITES `X.k = …`
+   * anywhere widen the set (they add keys before the call); any other use of
+   * `X` beyond property access / the defineProperties argument position makes
+   * the set unresolvable (undefined → caller poisons).
+   */
+  const resolveDescriptorKeys = (arg: ts.Expression): Set<string> | undefined => {
+    const a = unwrapExpr(arg);
+    if (ts.isObjectLiteralExpression(a)) return keysOfLiteral(a);
+    if (!ts.isIdentifier(a)) return undefined;
+    let init: ts.ObjectLiteralExpression | undefined;
+    let declCount = 0;
+    for (const stmt of sourceFile.statements) {
+      if (!ts.isVariableStatement(stmt)) continue;
+      for (const d of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name) || d.name.text !== a.text) continue;
+        declCount++;
+        const i = d.initializer !== undefined ? unwrapExpr(d.initializer) : undefined;
+        init = i !== undefined && ts.isObjectLiteralExpression(i) ? i : undefined;
+      }
+    }
+    if (declCount !== 1 || init === undefined) return undefined;
+    const keys = keysOfLiteral(init);
+    if (keys === undefined) return undefined;
+    let ok = true;
+    const scan = (n: ts.Node): void => {
+      if (!ok) return;
+      if (ts.isIdentifier(n) && n.text === a.text) {
+        const p = n.parent;
+        const asPropBase = p !== undefined && ts.isPropertyAccessExpression(p) && p.expression === n;
+        const asOwnDecl = p !== undefined && ts.isVariableDeclaration(p) && p.name === n;
+        const asDefineArg =
+          p !== undefined && ts.isCallExpression(p) && objectDefineKind(p) === "many" && p.arguments[1] === n;
+        if (asPropBase) {
+          const gp = p.parent;
+          if (
+            gp !== undefined &&
+            ts.isBinaryExpression(gp) &&
+            gp.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+            gp.left === p
+          ) {
+            keys.add(p.name.text); // depth-1 write adds a key
+          }
+        } else if (!asOwnDecl && !asDefineArg) {
+          ok = false;
+        }
+      }
+      forEachChild(n, scan);
+    };
+    scan(sourceFile);
+    return ok ? keys : undefined;
+  };
+
+  /**
+   * Handle `Object.defineProperties(proto, X)` / `Object.defineProperty(proto,
+   * "k", …)` on a tracked prototype: demote exactly the resolvable key set
+   * (they become non-write-once — a definePropertied slot is an accessor or a
+   * redefined data prop), or poison the owner when the keys are unresolvable.
+   */
+  const handleObjectDefine = (call: ts.CallExpression): void => {
+    const kind = objectDefineKind(call);
+    if (kind === undefined || call.arguments.length < 2) return;
+    const owner = ownerOfBase(call.arguments[0]!);
+    if (owner === undefined) return;
+    let demote: Set<string> | undefined;
+    if (kind === "one") {
+      const key = unwrapExpr(call.arguments[1]!);
+      demote = ts.isStringLiteral(key) ? new Set([key.text]) : undefined;
+    } else {
+      demote = resolveDescriptorKeys(call.arguments[1]!);
+    }
+    if (demote === undefined) {
+      poisoned.add(owner);
+      return;
+    }
+    let perOwner = writes.get(owner);
+    if (!perOwner) {
+      perOwner = new Map();
+      writes.set(owner, perOwner);
+    }
+    for (const key of demote) perOwner.set(key, { bad: true });
+  };
+
+  const isUnconditionalTopLevel = (assignment: ts.Node): boolean =>
+    assignment.parent !== undefined &&
+    ts.isExpressionStatement(assignment.parent) &&
+    assignment.parent.parent === sourceFile;
+
+  const walk = (n: ts.Node): void => {
+    if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const left = n.left;
+      // `F.prototype = …` (incl. `Sub.prototype = Object.create(…)`) → poison F.
+      if (ts.isPropertyAccessExpression(left) && left.name.text === "prototype" && ts.isIdentifier(left.expression)) {
+        poisoned.add(left.expression.text);
+      } else if (ts.isIdentifier(left) && aliasToOwner.has(left.text)) {
+        // Alias variable reassigned → the tracked owner is unprovable.
+        poisoned.add(aliasToOwner.get(left.text)!);
+      } else if (ts.isPropertyAccessExpression(left)) {
+        const owner = ownerOfBase(left.expression);
+        if (owner !== undefined) {
+          const rhs = unwrapExpr(n.right);
+          let perOwner = writes.get(owner);
+          if (!perOwner) {
+            perOwner = new Map();
+            writes.set(owner, perOwner);
+          }
+          const name = left.name.text;
+          const prev = perOwner.get(name);
+          if (prev !== undefined || !isFunctionLike(rhs) || !rhs.body || !isUnconditionalTopLevel(n)) {
+            perOwner.set(name, { bad: true });
+          } else {
+            perOwner.set(name, { decl: rhs, bad: false });
+          }
+        }
+      } else if (ts.isElementAccessExpression(left)) {
+        const owner = ownerOfBase(left.expression);
+        // A SYMBOL-keyed write (`pp[Symbol.iterator] = …`) cannot shadow a
+        // string-keyed method slot — ignore it. Any other computed key is
+        // unresolvable → poison.
+        if (owner !== undefined && !isSymbolKeyed(left.argumentExpression)) poisoned.add(owner);
+      }
+    }
+    if (ts.isDeleteExpression(n)) {
+      const t = unwrapExpr(n.expression);
+      if (ts.isPropertyAccessExpression(t) || ts.isElementAccessExpression(t)) {
+        const owner = ownerOfBase(t.expression);
+        const symbolKeyed = ts.isElementAccessExpression(t) && isSymbolKeyed(t.argumentExpression);
+        if (owner !== undefined && !symbolKeyed) poisoned.add(owner);
+      }
+    }
+    // Precise defineProperties/defineProperty handling (demote resolvable
+    // keys; poison on unresolvable) — the generic classifiers below then
+    // ALLOW the arg0 position for these calls.
+    if (ts.isCallExpression(n)) handleObjectDefine(n);
+    const isDefineArg0 = (p: ts.Node | undefined, node: ts.Node): boolean =>
+      p !== undefined && ts.isCallExpression(p) && objectDefineKind(p) !== undefined && p.arguments[0] === node;
+    // Generic escape classification of every reference to a tracked prototype
+    // VALUE. Allowed shapes: base of a property access (read or the write
+    // handled above), the alias's own declaration, the assignment-target
+    // positions handled above, the whitelisted non-mutating call args, and
+    // the precisely-handled defineProperties/defineProperty target position.
+    if (ts.isIdentifier(n) && aliasToOwner.has(n.text)) {
+      const p = n.parent;
+      const allowed =
+        (p !== undefined && ts.isVariableDeclaration(p) && p.name === n) ||
+        (p !== undefined && ts.isPropertyAccessExpression(p) && p.expression === n) ||
+        (p !== undefined &&
+          ts.isBinaryExpression(p) &&
+          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          p.left === n) ||
+        (p !== undefined && ts.isElementAccessExpression(p) && p.expression === n) ||
+        (p !== undefined &&
+          ts.isCallExpression(p) &&
+          p.arguments.some((a) => a === n) &&
+          isNonMutatingProtoConsumer(p)) ||
+        isDefineArg0(p, n);
+      if (!allowed) poisoned.add(aliasToOwner.get(n.text)!);
+    }
+    if (ts.isPropertyAccessExpression(n) && n.name.text === "prototype" && ts.isIdentifier(n.expression)) {
+      const p = n.parent;
+      const allowed =
+        (p !== undefined && ts.isPropertyAccessExpression(p) && p.expression === n) ||
+        (p !== undefined && ts.isElementAccessExpression(p) && p.expression === n) ||
+        (p !== undefined &&
+          ts.isVariableDeclaration(p) &&
+          p.initializer !== undefined &&
+          unwrapExpr(p.initializer) === n) ||
+        (p !== undefined &&
+          ts.isBinaryExpression(p) &&
+          p.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          p.left === n) ||
+        (p !== undefined &&
+          ts.isCallExpression(p) &&
+          p.arguments.some((a) => a === n) &&
+          isNonMutatingProtoConsumer(p)) ||
+        isDefineArg0(p, n);
+      if (!allowed) poisoned.add(n.expression.text);
+    }
+    forEachChild(n, walk);
+  };
+  walk(sourceFile);
+
+  const methods = new Map<string, ReadonlyMap<string, ts.FunctionLikeDeclaration>>();
+  for (const [owner, perOwner] of writes) {
+    if (poisoned.has(owner)) continue;
+    const m = new Map<string, ts.FunctionLikeDeclaration>();
+    for (const [name, v] of perOwner) {
+      if (!v.bad && v.decl) m.set(name, v.decl);
+    }
+    if (m.size > 0) methods.set(owner, m);
+  }
+  return { methods, poisoned };
 }
 
 /**
@@ -942,7 +1253,17 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
     );
   }
 
-  return { sites, approved, approvedNames, receiverStruct, newThisOwnerNames, ctorDeclByName };
+  return {
+    sites,
+    approved,
+    approvedNames,
+    receiverStruct,
+    newThisOwnerNames,
+    ctorDeclByName,
+    // (#3683 S1) inert write-once verdicts — consumed by the S2 typed-twin
+    // emission, no lowering reads them yet.
+    protoMethodWriteOnce: analyzeProtoMethodWriteOnce(sourceFile),
+  };
 }
 
 /**
