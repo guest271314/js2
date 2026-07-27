@@ -221,7 +221,44 @@ instead of dispatching to `Q.prototype.inc`. Verified identical with
 `JS2WASM_DIRECT_CALLS=0` and on the pre-slice compiler, and no trampoline is
 emitted for that shape at all, so this slice never runs there. The pin asserts
 the safety property it owns (no devirtualization of a withdrawn binding)
-rather than freezing the wrong return value into a test. Worth its own issue.
+rather than freezing the wrong return value into a test.
+
+### Root cause of that pre-existing bug (diagnosed 2026-07-27, NOT fixed)
+
+Narrowed far enough that whoever picks it up starts at the failing arm:
+
+- **Not the method cache, and not a name collision.** A method name unique to
+  the second class fails identically (`Q.prototype.bump` → `null`), and calling
+  the first class at the same site still works (`P` → 1, then `Q` → 0 from the
+  SAME call site).
+- **The receiver is correct at runtime and the member resolves.** After the
+  reassignment `p.v` reads `9` (Q's field) and `typeof p.inc === "function"` is
+  `true`. Only the INVOCATION yields undefined.
+- **It is long-standing, not a perf-work regression** — reproduces on
+  `upstream/main` in a fresh worktree.
+- **The trigger is static/dynamic class disagreement.** Every failing shape has
+  the receiver's declared class differing from its runtime class
+  (`var p = new P(); p = new Q()`, or `var p; p = new Q()`). Where they agree,
+  every case passes.
+- **The failing path is `__call_m_<m>_0`'s fallback**: it is
+  `m = __nullish_to_null(__method_cache_lookup(recv, name))`, then a
+  closure/arity fast path, else `__extern_method_call(recv, name, argv)`. The
+  fast path is what handles the matching-class case; the fallback is what a
+  mismatched receiver lands on.
+- **`__extern_method_call` opens with a PER-FNCTOR `ref.test` arm** (visible in
+  the emitted WAT) before its `$Object` test. That arm — not the terminal
+  `else` — is where a fnctor receiver of the "wrong" class is being answered
+  undefined.
+
+One fix was attempted and **reverted**: making the terminal `else` of
+`buildClosurePropMethodCallElseArm` fall back to generic member-get + apply
+instead of `ref.null.extern`. It changed nothing, which is itself the evidence
+that the per-fnctor arm — not the terminal fallback — owns the defect. Not
+landed, because an unverified speculative codegen change is worse than none.
+
+Needs its own issue id; `claim-issue.mjs --allocate` could not be trusted to
+give one here (it returned #3717, already taken on this branch — its open-PR
+scan silently degrades to main-only when `gh` is unavailable).
 
 Remaining in this issue: **S2** (read/write lowering for proven receivers —
 the `__extern_get` 8.8% self-time bucket) and **S4** (hoist the guard to one
