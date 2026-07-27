@@ -167,7 +167,7 @@ import {
   typeErrorThrowInstrs,
 } from "./property-access.js";
 import { tryEmitExactStructFieldGet, tryEmitStructuralContractReadFromLocal } from "./property-access-exact-shapes.js";
-import { tryEmitTypedThisFieldGet } from "./typed-this.js"; // (#3683 S2) typed-`this` field read
+import { tryEmitProvenReceiverFieldGet, tryEmitTypedThisFieldGet } from "./typed-this.js"; // (#3683 S2 / #3685 S2) inline field reads
 
 /**
  * Sentinel returned by every dispatch helper to mean "this guard band did not
@@ -557,6 +557,17 @@ export function tryPinnedAndDeleteAwareDynamicGet(
   {
     const typed = tryEmitTypedThisFieldGet(ctx, fctx, expr, propName);
     if (typed !== undefined) return typed;
+  }
+
+  // (#3685 S2) The same inline `struct.get`, for a receiver the receiver-flow
+  // analysis proves rather than one a twin already `ref.cast`. Runs after the
+  // `this` form (whose proof is strictly stronger and whose lowering is
+  // unguarded) and before the pinned dispatcher below, which it replaces for
+  // the reads it admits. Guarded + dynamic-else, so an imprecise verdict is a
+  // slow read, never a wrong value. See typed-this.ts.
+  {
+    const proven = tryEmitProvenReceiverFieldGet(ctx, fctx, expr, propName);
+    if (proven !== undefined) return proven;
   }
 
   // (#2681/#2686 A3) Pinned-struct dynamic member READ. When the receiver is the

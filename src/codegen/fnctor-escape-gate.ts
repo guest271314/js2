@@ -479,6 +479,34 @@ function bindingOf(newExpr: ts.NewExpression): ts.Identifier | undefined {
   if (ts.isVariableDeclaration(parent) && parent.initializer === newExpr && ts.isIdentifier(parent.name)) {
     return parent.name;
   }
+  // (#3719) A plain ASSIGNMENT to an identifier binds exactly as a declaration
+  // initializer does — `var p; p = new F()` and `p = new F()` after some other
+  // initializer are the same flow as `var p = new F()`.
+  //
+  // Recognising only the declaration form silently mis-classified every other
+  // shape. With no binding, classification fell to the inline branch, saw no
+  // property access directly on the `new`, and settled on `keep-static` — so
+  // the class never entered `approvedNames`, its prototype methods were never
+  // lifted or compiled, and a later `p.m()` resolved to NOTHING at runtime:
+  //
+  //     function Q(){ this.v = 9; }
+  //     Q.prototype.inc = function () { return 1000; };
+  //     var p; p = new Q(); p.inc();     // -> undefined, silently
+  //
+  // Adding ANY separate typed use (even a dead one) put the class in
+  // `approvedNames` and made the same call work, which is what pinned the
+  // cause here rather than in dispatch. Returning the assignment target lets
+  // the normal use-walk classify it: an own-field consumer still yields
+  // `keep-typed` (the fast path is preserved), a method call yields
+  // `reconstruct`.
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    parent.right === newExpr &&
+    ts.isIdentifier(parent.left)
+  ) {
+    return parent.left;
+  }
   return undefined;
 }
 

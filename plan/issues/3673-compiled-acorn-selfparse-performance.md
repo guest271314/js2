@@ -1,6 +1,6 @@
 ---
 id: 3673
-title: "perf: compiled acorn parses 1,400-3,000x slower than node-acorn — host-bridge hot-path costs"
+title: "Compiled Acorn self-parse is 1,300–1,500× slower than node-acorn"
 status: in-progress
 assignee: claude/acorn-performance
 created: 2026-07-26
@@ -45,18 +45,102 @@ loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/binary-ops.ts
   - src/codegen/expressions/call-receiver-method.ts
+func-budget-allow:
+  # Rounds 26-39 of this issue are almost entirely hand-emitted Wasm runtime
+  # (the HIGH ops/LOC class): every fast path added here is more `op:` literals
+  # inside an existing `ensure*`/`fill*`/`emit*` emitter, which is what those
+  # functions ARE. Splitting them would move the same instruction stream behind
+  # a call without shrinking anything. The structural fix is the self-host /
+  # IR-migration lever (#3256-#3258, #2855), not a split in this PR.
+  - src/codegen-linear/runtime.ts::addLinearIrStringRuntime
+  - src/codegen-linear/runtime.ts::addStringRuntime
+  - src/codegen/any-helpers.ts::ensureAnyHelpers
+  - src/codegen/binary-ops.ts::compileBinaryExpression
+  - src/codegen/class-bodies.ts::collectClassDeclaration
+  - src/codegen/closed-method-dispatch.ts::fillClosedMethodDispatch
+  - src/codegen/closure-exports.ts::emitClosureMethodCallExportN
+  - src/codegen/closures.ts::compileLiftedClosureBody
+  - src/codegen/context/create-context.ts::createCodegenContext
+  - src/codegen/declarations.ts::collectDeclarations
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/expressions/call-receiver-method.ts::compileReceiverMethodCall
+  - src/codegen/expressions/operator-assignment.ts::compilePropertyCompoundAssignmentExternref
+  - src/codegen/expressions/unary-updates.ts::compileMemberIncDec
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
+  - src/codegen/json-codec-native.ts::emitJsonRawJson
+  - src/codegen/json-codec-native.ts::emitJsonStringifyValue
+  - src/codegen/native-regex.ts::ensureRegexRun
+  - src/codegen/native-strings-basics.ts::emitStrCompareHelpers
+  - src/codegen/native-strings-core.ts::emitStrFlattenHelpers
+  - src/codegen/native-strings.ts::ensureAnyToStringHelper
+  - src/codegen/object-runtime.ts::ensureObjectRuntime
+  - src/codegen/object-runtime.ts::fillApplyClosure
+  - src/codegen/registry/imports.ts::addUnionImportsAsNativeFuncs
+  - src/codegen/type-coercion.ts::coerceType
+  - src/codegen/vec-overlay.ts::ensureOverlayCore
+  - src/codegen/vec-overlay.ts::fillVecOverlayHelpers
+  - src/emit/binary.ts::encodeInstr
+  - src/ir/backend/linear-integration.ts::compileLinearIrFunctions
+  - src/ir/lower.ts::emitInstrTree
+  - src/ir/lower.ts::lowerIrFunctionBody
+coercion-sites-allow:
+  # Round 39's `charCodeAt`/`length` ASCII fast path and the closed-struct
+  # extern-get arms unbox an already-numeric value / take a primitive off a
+  # receiver whose shape is known. Both go through the existing
+  # `__unbox_number` / `__to_primitive` helpers rather than re-deriving a
+  # ToNumber/ToPrimitive matrix at the call site.
+  - src/codegen/member-get-dispatch.ts
+  - src/codegen/object-runtime.ts
+oracle-ratchet-allow:
+  # Round 39 revived the native i32 annotation whole-chain. Every added site is
+  # `nativeTypeOf{Expression,Declaration}` / `nativeTypeFromTypeNode(ctx.checker, …)`
+  # — a wasm-lowering ValType question (does this annotation mean an i32 local?),
+  # which is deliberately ABOVE what `ctx.oracle` models. There is no oracle
+  # query to route these through; the annotation resolver needs the raw
+  # `ts.Type`/`ts.TypeNode` identity.
+  - src/codegen/binary-ops.ts
+  - src/codegen/class-bodies.ts
+  - src/codegen/declarations.ts
+  - src/codegen/native-type-annotations.ts
+  - src/codegen/statements/variables.ts
 priority: high
-feasibility: medium
+horizon: xl
+feasibility: hard
 reasoning_effort: high
 task_type: perf
 area: runtime, codegen
 goal: self-hosting-dogfood
 sprint: current
 model: fable
-related: [1712, 1946, 1947, 3669, 3671]
+related: [1710, 1712, 1946, 1947, 2928, 3437, 3669, 3671, 3675]
 ---
 
-# #3673 — Horrible performance of compiled acorn
+# #3673 — Make compiled Acorn self-parse performance usable
+
+> This file is the folded record for id 3673. Two lanes opened an issue for the
+> same problem on the same day; the title, the `horizon`/`feasibility` fields and
+> the acceptance criteria below come from the `compiled-acorn-selfparse-performance`
+> framing, and the measured working record that follows is from the
+> `acorn-performance` lane. Scope boundary: this issue owns **parser execution
+> performance**. The standalone full-source illegal cast is #3675; oversized
+> static string initialization is #3674.
+
+## Acceptance criteria (from the folded framing)
+
+- The benchmark is reproducible from a clean checkout and emits machine-readable
+  raw samples plus median, p25, p75, mean, throughput, binary size, compiler
+  time, Wasm compile time, and instantiation time.
+- A before/after profile records the dominant cost centers and explains at least
+  80% of the compiled execution time.
+- Both compiled lanes (public `parse()` and in-module scalar) improve by at least
+  **10x** from the opening measurements, with no more than a 10% node-acorn
+  control drift. If host variability prevents that comparison, use paired sample
+  ratios and record the control distribution.
+- The required 23-input Acorn corpus, the exact full Test262 AST differential,
+  and the zero-import standalone scalar canaries remain green.
+- Any remaining gap above 10x native is split into measured, non-overlapping
+  follow-up issues before this issue closes.
 
 ## Problem
 

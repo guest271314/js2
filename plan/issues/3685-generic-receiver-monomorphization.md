@@ -1,6 +1,17 @@
 ---
 id: 3685
 title: "perf: generic receiver monomorphization — generalize #3683's typed-`this` beyond `this`"
+coercion-sites-allow:
+  # The typed twin reads a numeric field as an f64 and must hand the value back
+  # to the dynamic lane in the same representation the legacy path used. Those
+  # three sites CALL the existing `__unbox_number` helper (`ctx.funcMap.get`) —
+  # they do not hand-roll a ToNumber matrix, which is what this gate exists to
+  # stop.
+  - src/codegen/typed-this.ts
+func-budget-allow:
+  # S1's whole-program receiver-flow walk is one traversal with a per-node-kind
+  # switch; splitting it per kind would scatter the flow state it threads.
+  - src/codegen/receiver-flow-analysis.ts::analyzeReceiverFlow
 status: ready
 created: 2026-07-27
 updated: 2026-07-27
@@ -37,12 +48,12 @@ But the mechanism stops at the `this.` prefix. The #3673 round-26 profile
 shows what that leaves on the table:
 
 - **`__extern_get` 8.8 % self time** — property reads whose receiver is
-  *not* `this`: `node.start`, `parser.options.locations` (once per AST
+  _not_ `this`: `node.start`, `parser.options.locations` (once per AST
   node, from `Node`'s constructor), `state.pos`, `refDestructuringErrors.
-  shorthandAssign`. Every one is a call returning a boxed value, where the
+shorthandAssign`. Every one is a call returning a boxed value, where the
   `this.` form is a bare `struct.get` of an f64 slot.
-- The residual call machinery after S3/S3b — a call whose *callee* is
-  proven but whose *receiver* expression is a local, parameter, or field
+- The residual call machinery after S3/S3b — a call whose _callee_ is
+  proven but whose _receiver_ expression is a local, parameter, or field
   rather than `this`.
 
 Both are the same missing capability: **prove that an arbitrary expression
@@ -55,7 +66,7 @@ Generalize the receiver proof, NOT the lowering — the lowering exists:
 
 1. **Receiver-flow analysis** (new, standalone module — the "land the
    analysis inert first" pattern that worked for `numeric-property-
-   analysis.ts` and `user-method-names.ts`). For each expression position,
+analysis.ts` and `user-method-names.ts`). For each expression position,
    answer: is this provably an instance of exactly one registered fnctor
    struct? Sources of proof, cheapest first:
    - a `new F(...)` result flowing to a `const`/never-reassigned `let`;
@@ -63,14 +74,14 @@ Generalize the receiver proof, NOT the lowering — the lowering exists:
      `Node(parser, …)` — `parser` is always `this` at the call site);
    - a field read whose slot is typed `(ref $__fnctor_F)`;
    - `this` itself (subsumes #3683's case as the degenerate one).
-   Everything unproven falls back to today's dynamic path — no exceptions,
-   no runtime name guards.
+     Everything unproven falls back to today's dynamic path — no exceptions,
+     no runtime name guards.
 2. **Read/write lowering**: a proven receiver + a declared field of that
    struct → `ref.cast` + `struct.get`/`struct.set`, composing with #3683
    S4a's f64 slots so a numeric field read is unboxed end to end.
 3. **Call lowering**: a proven receiver + a write-once method of that
    class → the #3683 S3 direct-call trampoline, unchanged.
-4. **Guard placement**: one `ref.test` per receiver *binding*, not per
+4. **Guard placement**: one `ref.test` per receiver _binding_, not per
    access — the win is destroyed if each field read re-tests.
 
 ## Non-goals
@@ -107,11 +118,11 @@ and the admission machinery it needs.
 acorn (226 KB), the analysis was rebuilt three times against the tally —
 each rebuild driven by a shape the unit tests did not have:**
 
-| iteration | verdicts | non-`this` accesses admitted (of 2,363) |
-| --- | --- | --- |
-| initial rules (const + params + this) | 0 | **0** |
-| + prototype-ALIAS map | 3 | 20 |
-| + return-class inference, `var` bindings, call-return initializers | 50 | **150** |
+| iteration                                                          | verdicts | non-`this` accesses admitted (of 2,363) |
+| ------------------------------------------------------------------ | -------- | --------------------------------------- |
+| initial rules (const + params + this)                              | 0        | **0**                                   |
+| + prototype-ALIAS map                                              | 3        | 20                                      |
+| + return-class inference, `var` bindings, call-return initializers | 50       | **150**                                 |
 
 Three findings worth keeping:
 
@@ -146,11 +157,11 @@ The hot-chain experiment compiled acorn's real `readWord1` loop three
 ways — acorn's dynamic shape (what we emit today), the identical
 algorithm end-to-end typed, and the JavaScript on node:
 
-| variant | ms/scan | vs node |
-| --- | --- | --- |
-| dynamic (today) | 0.4294 | 17.9x |
+| variant              | ms/scan    | vs node  |
+| -------------------- | ---------- | -------- |
+| dynamic (today)      | 0.4294     | 17.9x    |
 | **end-to-end typed** | **0.0659** | **2.8x** |
-| node | 0.0239 | 1x |
+| node                 | 0.0239     | 1x       |
 
 **6.51x from typing alone**, with `__extern_get` 66 → 0, `__apply_closure`
 20 → 0, `__box_number` 70 → 2 in the emitted code. That is this issue's
@@ -172,7 +183,7 @@ speculation would have to.
 
 ## S3 result (2026-07-27) — proven-receiver call lowering landed
 
-**The gap this closes.** #3683 S3 devirtualized `this.m()` *inside* a typed
+**The gap this closes.** #3683 S3 devirtualized `this.m()` _inside_ a typed
 twin. It left the ENTRY from ordinary code untouched: `p.inc()`, where `p` is
 an ordinary local, still compiled to the full dynamic dispatcher
 `__call_m_inc_0` — interned-key lookup, method-cache probe, `ref.test`/cast
@@ -199,11 +210,11 @@ a slow call, never a crash.
 **Measured** (axis benchmark, all three engines re-run on one machine,
 checksums identical):
 
-| axis | node | Porffor | js2 before | js2 after |
-| ---- | ---- | ------- | ---------- | --------- |
-| **method dispatch** | 0.940 ms | 8.104 ms | 9.085 ms | **3.359 ms** |
+| axis                | node     | Porffor  | js2 before | js2 after    |
+| ------------------- | -------- | -------- | ---------- | ------------ |
+| **method dispatch** | 0.940 ms | 8.104 ms | 9.085 ms   | **3.359 ms** |
 
-**9.73x → 3.57x vs node** on that axis, and js2 goes from 1.13x *behind*
+**9.73x → 3.57x vs node** on that axis, and js2 goes from 1.13x _behind_
 Porffor to **2.4x ahead** of it. Other axes flat within noise, as expected —
 the tokenizer axis is `this.nextCode()` inside a twin, which #3683 S3 already
 devirtualized, so it correctly did not move (0.784 → 0.766 ms).
@@ -229,15 +240,26 @@ rather than freezing the wrong return value into a test.
 if the program contains at least one STATICALLY-TYPED use of that method.**
 
 ```js
-function Q() { this.v = 9; }
-Q.prototype.inc = function () { return 1000; };
-export function test() { var p; p = new Q(); return p.inc(); }
+function Q() {
+  this.v = 9;
+}
+Q.prototype.inc = function () {
+  return 1000;
+};
+export function test() {
+  var p;
+  p = new Q();
+  return p.inc();
+}
 // -> 0.  Add ANY typed use of Q.prototype.inc, even one that never runs:
-function dead() { var q = new Q(); return q.inc(); }
+function dead() {
+  var q = new Q();
+  return q.inc();
+}
 // -> test() now returns 1000.
 ```
 
-A *dead* typed use repairs it, which proves this is a compile-time
+A _dead_ typed use repairs it, which proves this is a compile-time
 registration/emission gap, not a runtime one: the typed path is what causes
 the method to be emitted into whatever table the dynamic path consults
 (`__call_m_<m>_<n>` → `__method_cache_lookup` → `__extern_method_call`).
@@ -257,7 +279,7 @@ Evidence trail, in the order it was established:
   typed use exists anywhere in the program.
 - `collectMethodEntries` (closed-method-dispatch) keys on a compiled
   `<Struct>_<method>` function. A fnctor prototype method is a lifted
-  *closure*, not a `Q_inc`, so it contributes NO closed-struct arm — which is
+  _closure_, not a `Q_inc`, so it contributes NO closed-struct arm — which is
   consistent with the emitted `__call_m_inc_0` having no per-struct arms at
   all. That is the most likely place the registration is missing.
 
@@ -273,3 +295,80 @@ scan silently degrades to main-only when `gh` is unavailable).
 Remaining in this issue: **S2** (read/write lowering for proven receivers —
 the `__extern_get` 8.8% self-time bucket) and **S4** (hoist the guard to one
 `ref.test` per binding rather than per call site).
+
+## S2 result (2026-07-27) — proven-receiver field reads landed, −33%
+
+`tryEmitProvenReceiverFieldGet` (`src/codegen/typed-this.ts`, wired into
+`src/codegen/property-access-dispatch.ts` right after the `this`-form
+`tryEmitTypedThisFieldGet`) applies the S1 receiver-flow proof to plain
+property **reads** off a generic binding, not just `this`.
+
+Shape emitted, receiver evaluated exactly once into a temp:
+
+```
+local.get tmp ; any.convert_extern ; ref.test $F
+if (result <fieldType>)
+  then  local.get tmp ; any.convert_extern ; ref.cast $F ; struct.get $F <idx>
+  else  __extern_get(tmp, "<name>")  coerced to <fieldType>
+```
+
+The carve-outs mirror the `this` form exactly (RESERVED_PROPS,
+`classAccessorSet`, presence-tracked fields, call-signature receivers), so a
+proven receiver never bypasses an accessor or a presence check. The `else`
+arm is captured with the body-swap pattern so the pre-existing dynamic
+lowering stays byte-identical when the guard fails.
+
+**Measured** (prop axis, `benchmarks/cross-engine/`, same container, same
+run): `9.1408 ms` dynamic → `6.1577 ms` with S2, **−33%**, checksums
+identical across both lanes.
+
+Two false starts worth recording, both "S2 silently didn't fire":
+
+1. The approved-class set was seeded from `gate.methods.keys()`, i.e. only
+   classes that have prototype **methods**. A data-only class has none, so
+   its fields were never eligible. Widened to every `__fnctor_*` key in
+   `ctx.structMap`.
+2. The escape gate was absent entirely for the benchmark's shape — see the
+   #3719 bug below.
+
+Kill switch: `JS2WASM_PROVEN_FIELDS=0`. Debug counters:
+`JS2WASM_PROVEN_FIELDS_DEBUG=1`.
+
+## S4 result (2026-07-27) — FALSIFIED by measurement, not landed
+
+S4 proposed hoisting the `ref.test` so a proven binding pays one guard per
+binding instead of one per access — in the limit, dropping to a bare
+`ref.cast` + `struct.get` with no branch.
+
+An A/B over three runs of the prop axis, using the deliberately-unsound
+measurement mode `JS2WASM_PROVEN_FIELDS=unguarded` as the upper bound for
+what any amount of guard hoisting could buy:
+
+| lane                     |   prop axis |
+| ------------------------ | ----------: |
+| dynamic (no S2)          |     ~8.7 ms |
+| **guarded (S2, landed)** | **~6.2 ms** |
+| unguarded (S4 ceiling)   |     ~7.7 ms |
+
+The unguarded lane is **slower than the guarded one**. `ref.cast` is itself a
+checked, trapping operation — removing the `ref.test` does not remove the
+check, it just moves it somewhere the engine can no longer fold into the
+branch it already predicts perfectly. So the theoretical S4 win is negative
+on this workload.
+
+S4 is closed as a **null result**. Not landed, deliberately: there is no
+version of "hoist the guard" that beats the guard, because the guard is not
+what costs. Reopen only with a measurement showing a workload where the
+branch itself (not the cast) is the cost.
+
+## Pre-existing bug from S3 — FIXED, split out as #3719
+
+The `.call`/`.apply`-adjacent bug recorded under "Root cause of that
+pre-existing bug" above is fixed. Root cause: `bindingOf` in
+`src/codegen/fnctor-escape-gate.ts` recognised `const p = new Q()` (a
+variable _declaration_) but not `p = new Q()` (an assignment to an existing
+binding), so an assigned-to binding lost fnctor approval and fell all the way
+back to a dispatch that answers `undefined`. Fix and pins in
+`tests/issue-3719-new-assigned-to-binding.test.ts`; write-up in
+`plan/issues/3719-new-assigned-to-binding-loses-fnctor-approval.md`.
+All five original matrix cases plus the untyped-only control now return 1000.

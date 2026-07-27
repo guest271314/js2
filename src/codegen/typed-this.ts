@@ -76,6 +76,7 @@ import { allocLocal } from "./context/locals.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
 import { analyzeReceiverFlow, receiverClassOf } from "./receiver-flow-analysis.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
 // `shared.js` holds the late-bound delegates precisely so a feature module can
 // reach the expression/coercion engines without a cycle back through
 // expressions.ts / index.ts.
@@ -1114,6 +1115,141 @@ function reserveDirectCallTrampoline(
  * Returns the call's ValType on a hit, or `undefined` to decline — in which
  * case the caller's existing `__call_m_*` emission runs unchanged.
  */
+// (#3685 S2) `JS2WASM_PROVEN_FIELDS=0` disables proven-receiver field reads,
+// leaving every non-`this` read on the pre-existing dynamic path. Mirrors the
+// #3683 kill-switches so a suspected miscompile can be bisected to this slice
+// without a rebuild.
+function provenFieldsEnabled(): boolean {
+  return process.env.JS2WASM_PROVEN_FIELDS !== "0";
+}
+
+const provenFieldStats = { gets: 0 };
+
+/** `JS2WASM_PROVEN_FIELDS_DEBUG=1` prints the inlined-read count at exit. */
+if (process.env.JS2WASM_PROVEN_FIELDS_DEBUG === "1") {
+  process.on("exit", () => {
+    if (provenFieldStats.gets > 0) console.error(`[proven-fields] inlined reads=${provenFieldStats.gets}`);
+  });
+}
+
+/**
+ * (#3685 S2) `recv.<field>` READ where the receiver-flow analysis proves
+ * `recv`'s class — the non-`this` counterpart of {@link tryEmitTypedThisFieldGet}.
+ *
+ * #3683 S2 inlined `this.X` to a bare `struct.get` inside a typed twin. Every
+ * OTHER receiver kept the dispatcher call: `node.start`, `state.pos`,
+ * `refDestructuringErrors.shorthandAssign` — the `__extern_get` 8.8% self-time
+ * bucket the #3673 round-26 profile named. This lowers those to the same
+ * `struct.get`.
+ *
+ * Guarded, for the reason spelled out on `DirectCallTrampoline.guardedReceiver`:
+ * the `this` form's proof is the twin's own `ref.cast`, but a receiver-flow
+ * verdict is a whole-program inference, so an unguarded `ref.cast` would turn
+ * imprecision into a trap. Shape:
+ *
+ *     <recv> -> tmp                       ; evaluated exactly once
+ *     if (ref.test $__fnctor_F tmp)
+ *       then struct.get $__fnctor_F <field>
+ *       else <field type>(__extern_get(tmp, "<field>"))
+ *
+ * The else arm is the pre-existing dynamic read, so a wrong verdict costs a
+ * slow read and never a wrong value.
+ */
+export function tryEmitProvenReceiverFieldGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+  propName: string,
+): ValType | undefined {
+  if (!provenFieldsEnabled() || !ctx.standalone) return undefined;
+  // `this` is #3683 S2's, with a strictly stronger proof — never take it here.
+  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword) return undefined;
+  if (ts.isPrivateIdentifier(expr.name)) return undefined;
+  if (expr.questionDotToken) return undefined;
+
+  const cls = provenReceiverClass(ctx, fctx, expr.expression);
+  if (cls === undefined) return undefined;
+  const structName = `__fnctor_${cls}`;
+  const structTypeIdx = ctx.structMap.get(structName);
+  if (structTypeIdx === undefined) return undefined;
+
+  // Same carve-outs as the `this` form — they are semantic, not incidental.
+  if (RESERVED_PROPS.has(propName)) return undefined;
+  if (ctx.classAccessorSet.has(`${structName}_${propName}`)) return undefined;
+  const fields = ctx.structFields.get(structName);
+  if (!fields) return undefined;
+  const fieldIdx = fields.findIndex((f) => f.name === propName);
+  if (fieldIdx < 0) return undefined;
+  const field = fields[fieldIdx]!;
+  // Presence-tracked ⇒ absence is semantic (`undefined`), which a bare
+  // struct.get cannot express.
+  if (field.presenceTracked) return undefined;
+  // A method-typed access keeps its closure lowering (S3 devirtualizes calls;
+  // S2 must not box the callee).
+  const accessType = ctx.checker.getTypeAtLocation(expr);
+  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  if (externGetIdx === undefined) return undefined;
+
+  // Evaluate the receiver ONCE into a temp, before the branch.
+  const tmp = allocLocal(fctx, `__prf_${propName}_${fctx.locals.length}`, { kind: "externref" });
+  const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+  if (recvType === null) return undefined;
+  if (!valTypesMatch(recvType, { kind: "externref" })) {
+    coerceType(ctx, fctx, recvType, { kind: "externref" });
+  }
+  fctx.body.push({ op: "local.set", index: tmp });
+
+  // Build the dynamic arm with the body-swap pattern — `coerceType` emits into
+  // `fctx.body`, so it has to be captured rather than returned.
+  const savedBody = fctx.body;
+  fctx.body = [];
+  fctx.body.push({ op: "local.get", index: tmp });
+  for (const instr of stringConstantExternrefInstrs(ctx, propName)) fctx.body.push(instr);
+  fctx.body.push({ op: "call", funcIdx: externGetIdx });
+  if (!valTypesMatch({ kind: "externref" }, field.type)) {
+    coerceType(ctx, fctx, { kind: "externref" }, field.type);
+  }
+  const elseArm = fctx.body;
+  fctx.body = savedBody;
+
+  // (#3685 S4 measurement) `JS2WASM_PROVEN_FIELDS=unguarded` drops the
+  // `ref.test` and casts directly. UNSOUND as a shipping mode — an imprecise
+  // verdict traps — and refused unless explicitly asked for. It exists to price
+  // the guard: S4 (hoist one test per binding) is only worth building if the
+  // gap between this and the guarded form is real. Mirrors `JS2WASM_TYPED_THIS=shim`.
+  if (process.env.JS2WASM_PROVEN_FIELDS === "unguarded") {
+    fctx.body.push(
+      { op: "local.get", index: tmp },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: structTypeIdx },
+      { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
+    );
+    provenFieldStats.gets++;
+    return field.type;
+  }
+
+  fctx.body.push(
+    { op: "local.get", index: tmp },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: structTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: field.type },
+      then: [
+        { op: "local.get", index: tmp },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: structTypeIdx },
+        { op: "struct.get", typeIdx: structTypeIdx, fieldIdx },
+      ],
+      else: elseArm,
+    },
+  );
+  provenFieldStats.gets++;
+  return field.type;
+}
+
 /**
  * (#3685 S3) Resolve a call's RECEIVER expression to a single approved fnctor
  * class, using the #3685 S1 receiver-flow analysis.
@@ -1126,8 +1262,11 @@ function reserveDirectCallTrampoline(
  * pre-existing dynamic path.
  */
 function provenReceiverClass(ctx: CodegenContext, fctx: FunctionContext, receiver: ts.Expression): string | undefined {
+  // The write-once gate is OPTIONAL here: it only supplies the `poisoned` set,
+  // and a program with no prototype methods at all (a data-only class like
+  // acorn's `Node`) has no gate yet is a perfectly provable receiver. Soundness
+  // does not rest on it — the emitted `ref.test` does.
   const gate = ctx.fnctorEscapeGate?.protoMethodWriteOnce;
-  if (!gate) return undefined;
   // Only bare identifiers for this slice. A property/element receiver
   // (`this.state.pos`) needs the S2 read lowering to type the intermediate, and
   // an arbitrary call receiver would have to be spilled to a temp to keep the
@@ -1138,9 +1277,18 @@ function provenReceiverClass(ctx: CodegenContext, fctx: FunctionContext, receive
   if (sf === undefined) return undefined;
   let result = ctx.receiverFlowByFile?.get(sf);
   if (result === undefined) {
+    // Seed from every REGISTERED fnctor struct, not just classes that own a
+    // write-once prototype method. Seeding from `gate.methods` admitted zero
+    // data-only classes — and acorn's `Node` (the 130-access bucket the #3685
+    // S1 tally named) is exactly that: fields, no prototype methods. A class
+    // with no methods is still a perfectly provable RECEIVER for a field read.
+    // Poisoned classes stay out: their prototype shape is not write-once, so
+    // the method-call route must not admit them either.
     const approved = new Set<string>();
-    for (const cls of gate.methods.keys()) {
-      if (!gate.poisoned.has(cls) && ctx.structMap.has(`__fnctor_${cls}`)) approved.add(cls);
+    for (const structName of ctx.structMap.keys()) {
+      if (!structName.startsWith("__fnctor_")) continue;
+      const cls = structName.slice("__fnctor_".length);
+      if (!gate?.poisoned.has(cls)) approved.add(cls);
     }
     result = analyzeReceiverFlow(sf, approved);
     (ctx.receiverFlowByFile ??= new Map()).set(sf, result);
@@ -1148,7 +1296,14 @@ function provenReceiverClass(ctx: CodegenContext, fctx: FunctionContext, receive
   // `enclosingClass` is the twin's own class when we are inside one; passing it
   // keeps `this` resolvable, though this path never asks about `this`.
   const enclosing = fctx.typedThisStructName?.slice("__fnctor_".length);
-  return receiverClassOf(result, receiver, enclosing);
+  const verdict = receiverClassOf(result, receiver, enclosing);
+  if (process.env.JS2WASM_PROVEN_FIELDS_DEBUG === "1") {
+    console.error(
+      `[proven-fields] receiver ${receiver.getText()} -> ${verdict ?? "(unproven)"}` +
+        ` (verdicts=${result.byDeclaration.size} tally=${JSON.stringify(result.tally)})`,
+    );
+  }
+  return verdict;
 }
 
 export function tryEmitDirectTwinCall(
