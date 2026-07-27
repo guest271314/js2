@@ -627,6 +627,9 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   body.push({ op: "global.set", index: currentThisGlobalIdx });
 
   let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" }];
+  // (#3673 round 10) per-entry callBody capture for the arity-bucketed
+  // dispatch built after the loop.
+  const callBodyByEntry: { entry: (typeof entries)[number]; callBody: Instr[] }[] = [];
 
   for (const entry of entries) {
     const funcTypeDef = mod.types[entry.funcTypeIdx];
@@ -766,6 +769,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
         else: funcrefDispatch,
       },
     ];
+    callBodyByEntry.push({ entry, callBody });
   }
 
   // (#1712) Per-shape funcref extraction — same rationale as
@@ -775,7 +779,77 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // externref result on the stack (null fallthrough when `funcLocal` stayed
   // null because no shape matched).
   body.push(...buildFuncrefExtraction(ctx, entries, anyLocal, funcLocal));
-  body.push(...funcrefDispatch);
+
+  // (#3673 round 10) Arity-bucketed signature dispatch. The full ladder below
+  // is one funcref `ref.test` per DISTINCT closure func type (≈48 in compiled
+  // acorn) per dynamic call. The closure's `$arity` field (round 6, root
+  // wrapper field 1) equals its func type's declared param count at every
+  // compiler allocation site, so an i32 compare narrows the ladder to the
+  // (small) same-arity bucket first. The arity field is NOT trusted for
+  // correctness: builtin-fn metas stamp the SPEC length (e.g. a variadic
+  // `JSON.stringify` value closure declares 1 vec param but `.length` 3), so
+  // a bucket MISS — or a receiver with no root-readable arity — falls through
+  // to the unchanged full ladder. `br 2` exits the wrapping externref block
+  // from inside (entry-if ⊂ bucket-if ⊂ block) carrying the call result.
+  const rootIdxForArity = getFuncRefWrapperRootTypeIdx(ctx);
+  if (rootIdxForArity !== undefined && callBodyByEntry.length > 4) {
+    const declaredLocal = prevThisLocal + 2; // extra i32 local appended below
+    body.push({ op: "i32.const", value: -1 });
+    body.push({ op: "local.set", index: declaredLocal });
+    body.push({ op: "local.get", index: anyLocal });
+    body.push({ op: "ref.test", typeIdx: rootIdxForArity });
+    body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: anyLocal },
+        { op: "ref.cast", typeIdx: rootIdxForArity },
+        { op: "struct.get", typeIdx: rootIdxForArity, fieldIdx: CLOSURE_ARITY_FIELD_IDX },
+        { op: "local.set", index: declaredLocal },
+      ],
+    });
+    const buckets = new Map<number, { entry: (typeof callBodyByEntry)[number]["entry"]; callBody: Instr[] }[]>();
+    for (const item of callBodyByEntry) {
+      let bucket = buckets.get(item.entry.closureArity);
+      if (!bucket) {
+        bucket = [];
+        buckets.set(item.entry.closureArity, bucket);
+      }
+      bucket.push(item);
+    }
+    const bucketArms: Instr[] = [];
+    for (const [closureArity, items] of buckets) {
+      bucketArms.push(
+        { op: "local.get", index: declaredLocal },
+        { op: "i32.const", value: closureArity },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: items.flatMap(({ entry, callBody }): Instr[] => [
+            { op: "local.get", index: funcLocal },
+            { op: "ref.test", typeIdx: entry.funcTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              // Deep-clone: the same Instr OBJECTS also live in the full
+              // ladder below, and shared instr identities get double-remapped
+              // by finalize walks (see
+              // `reference_shared_instr_object_dce_double_remap`).
+              then: [...(structuredClone(callBody) as Instr[]), { op: "br", depth: 2 }],
+            },
+          ]),
+        },
+      );
+    }
+    body.push({
+      op: "block",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      body: [...bucketArms, ...funcrefDispatch],
+    });
+  } else {
+    body.push(...funcrefDispatch);
+  }
 
   // Restore __current_this. The result value remains on the stack as the
   // function's return value — we tee it through a local so we can restore
@@ -800,6 +874,9 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
       { name: "__funcref", type: { kind: "funcref" } },
       { name: "__prev_this", type: { kind: "externref" } },
       { name: "__result", type: { kind: "externref" } },
+      // (#3673 round 10) declared arity read off the root wrapper for the
+      // arity-bucketed signature dispatch (-1 = not root-readable).
+      { name: "__declared_arity", type: { kind: "i32" } },
     ],
     body,
     exported: true,

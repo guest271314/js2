@@ -448,6 +448,34 @@ Verification (round 9c): host corpus 23/23 exact; 2896/2866/accessor/
 defineProperty/delete/1888/2106-S1/2674/1712/2151-nary suites all green;
 #3673 pins 7/7; canaries 4/4; tsc clean.
 
+### Round 10 — cache-arm owner reorder + arity-bucketed signature dispatch
+
+Two smaller slices: (a) the cache-hit arm resolved the owner-candidate by
+calling the `__fnctor_proto_start` ladder even for plain `$Object`
+receivers — now one `ref.test $Object` runs first; (b)
+`__call_fn_method_<N>`'s signature ladder (one funcref `ref.test` per
+distinct closure func type, ≈48 in acorn) is pre-filtered by the round-6
+`$arity` field: an i32 compare narrows to the same-arity bucket, with the
+FULL ladder kept as fallthrough (the arity field is not trusted —
+builtin-fn metas stamp spec `.length`, e.g. a variadic `JSON.stringify`
+value closure declares 1 vec param but `.length` 3; a bucket miss simply
+re-enters the old ladder). Bucket callBodies are `structuredClone`d — the
+same Instr objects living twice in one body would be double-remapped by
+finalize walks.
+
+**Measured: ~flat to slightly better (min 1.98 vs 1.91, medians ≈2.05
+both) — `__call_fn_method_2` off the top list, `_1` residue is the
+callBody itself (argc/extras globals + unbox + call_ref + boxing), not
+the ladder.** Honest read: the round-5 func-type dedup already took the
+ladder below the noise floor for this workload. Remaining top:
+`__extern_get` 7.1%, `__regex_run` 5.3% (per-word-token keyword regex —
+regex-engine subsystem), user closures (real work), `__to_primitive`
+2.9%, GC 3.3%.
+
+Verification (round 10): 2151-nary/dynamic-spread/spread-literal, 1712
+acceptance, 2664-arity-dispatch all green; host corpus 23/23 exact;
+#3673 pins 7/7; canaries 4/4; tsc clean.
+
 ## Round 6 — arity IN the closure representation (the deferred layout change)
 
 Every closure struct in the root wrapper hierarchy now carries an immutable

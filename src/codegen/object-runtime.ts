@@ -6718,33 +6718,35 @@ export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
           then: [
             // owner-candidate → local 2 (overwritten by the normal path
             // below whether or not the arm hits, so safe as scratch here):
-            // a fnctor receiver's per-class prototype, else the receiver
-            // itself when it is a plain $Object (depth-0 own-entry caching).
+            // the receiver itself when it is a plain $Object (depth-0
+            // own-entry caching — tested FIRST, it's one ref.test), else a
+            // fnctor receiver's per-class prototype via the ~one-test-per-
+            // fnctor `__fnctor_proto_start` ladder.
             { op: "ref.null", typeIdx: objectTypeIdx },
             { op: "local.set", index: 2 },
             { op: "local.get", index: 0 },
-            { op: "call", funcIdx: protoStartIdx },
-            { op: "local.tee", index: 7 },
-            { op: "ref.is_null" },
-            { op: "i32.eqz" },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: objectTypeIdx },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [
-                { op: "local.get", index: 7 },
+                { op: "local.get", index: 0 },
                 { op: "any.convert_extern" },
                 { op: "ref.cast", typeIdx: objectTypeIdx },
                 { op: "local.set", index: 2 },
               ],
               else: [
                 { op: "local.get", index: 0 },
-                { op: "any.convert_extern" },
-                { op: "ref.test", typeIdx: objectTypeIdx },
+                { op: "call", funcIdx: protoStartIdx },
+                { op: "local.tee", index: 7 },
+                { op: "ref.is_null" },
+                { op: "i32.eqz" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
                   then: [
-                    { op: "local.get", index: 0 },
+                    { op: "local.get", index: 7 },
                     { op: "any.convert_extern" },
                     { op: "ref.cast", typeIdx: objectTypeIdx },
                     { op: "local.set", index: 2 },
