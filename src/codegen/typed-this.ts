@@ -75,6 +75,7 @@ import { resolveEnclosingFnctorOwner, resolveLiftedMethodThisStruct } from "./fn
 import { allocLocal } from "./context/locals.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
+import { analyzeReceiverFlow, receiverClassOf } from "./receiver-flow-analysis.js";
 // `shared.js` holds the late-bound delegates precisely so a feature module can
 // reach the expression/coercion engines without a cycle back through
 // expressions.ts / index.ts.
@@ -798,6 +799,21 @@ export interface DirectCallTrampoline {
   readonly formals: number;
   /** The receiver's `$__fnctor_F` type index — the trampoline casts back to it. */
   readonly fnctorStructTypeIdx: number;
+  /**
+   * (#3685 S3) The receiver's shape is proven STATICALLY by the receiver-flow
+   * analysis rather than by a `ref.cast` the call site already performed.
+   *
+   * This flips the fill from an unguarded `ref.cast` to a `ref.test`-guarded
+   * two-arm body. It is load-bearing, not defensive: the `this`-receiver form
+   * (#3683 S3) is sound because the ONLY way to reach the call site is through
+   * the twin's own cast, so a mis-cast is impossible by construction. A
+   * receiver-flow verdict carries no such guarantee — it is a whole-program
+   * inference, and an unguarded cast would turn any imprecision in it into a
+   * runtime trap with no fallback. The guard costs one `ref.test` and degrades
+   * to the legacy dispatcher, so an analysis bug becomes a missed optimization
+   * instead of a crash.
+   */
+  readonly guardedReceiver: boolean;
   /** `[externref, ...userParams]`, all non-`ref` (see the ABI note). */
   readonly params: ValType[];
   /**
@@ -1040,14 +1056,19 @@ function reserveDirectCallTrampoline(
     padInstrs: Instr[][];
     padTypes: ValType[];
     results: ValType[];
+    guardedReceiver: boolean;
     deps: DirectCallDeps;
   },
 ): DirectCallTrampoline {
-  const key = `${spec.className}/${spec.methodName}/${spec.arity}`;
+  // The guard flag is part of the KEY: a guarded and an unguarded trampoline
+  // for the same (class, method, arity) have different bodies, so they cannot
+  // share a handle. Without this, whichever site reserved first would silently
+  // decide the other's soundness.
+  const key = `${spec.className}/${spec.methodName}/${spec.arity}${spec.guardedReceiver ? "/g" : ""}`;
   const table = (ctx.directCallTrampolines ??= new Map());
   const existing = table.get(key);
   if (existing) return existing;
-  const name = `__dc_${spec.className}_${spec.methodName}_${spec.arity}`;
+  const name = `__dc_${spec.className}_${spec.methodName}_${spec.arity}${spec.guardedReceiver ? "_g" : ""}`;
   // Reserve the legacy dispatcher FIRST: it is the fill's degradation target,
   // it registers every box/unbox helper the fill needs, and it is the exact
   // dispatcher this call site would have reserved without S3 — so the set of
@@ -1078,6 +1099,7 @@ function reserveDirectCallTrampoline(
     padInstrs: spec.padInstrs,
     padTypes: spec.padTypes,
     results: spec.results,
+    guardedReceiver: spec.guardedReceiver,
     legacyDispatchIdx,
     currentThisGlobalIdx,
     argcGlobalIdx,
@@ -1092,6 +1114,43 @@ function reserveDirectCallTrampoline(
  * Returns the call's ValType on a hit, or `undefined` to decline — in which
  * case the caller's existing `__call_m_*` emission runs unchanged.
  */
+/**
+ * (#3685 S3) Resolve a call's RECEIVER expression to a single approved fnctor
+ * class, using the #3685 S1 receiver-flow analysis.
+ *
+ * The analysis is whole-program and pure, so it is computed once per source
+ * file and memoized on the context. It is only ever consulted for receivers
+ * that are NOT `this` — the `this` case has a stronger, local proof (#3683 S3).
+ *
+ * Returns `undefined` for anything unproven, which lands the call on the
+ * pre-existing dynamic path.
+ */
+function provenReceiverClass(ctx: CodegenContext, fctx: FunctionContext, receiver: ts.Expression): string | undefined {
+  const gate = ctx.fnctorEscapeGate?.protoMethodWriteOnce;
+  if (!gate) return undefined;
+  // Only bare identifiers for this slice. A property/element receiver
+  // (`this.state.pos`) needs the S2 read lowering to type the intermediate, and
+  // an arbitrary call receiver would have to be spilled to a temp to keep the
+  // evaluate-once contract — both are separate slices.
+  if (!ts.isIdentifier(receiver)) return undefined;
+
+  const sf = receiver.getSourceFile();
+  if (sf === undefined) return undefined;
+  let result = ctx.receiverFlowByFile?.get(sf);
+  if (result === undefined) {
+    const approved = new Set<string>();
+    for (const cls of gate.methods.keys()) {
+      if (!gate.poisoned.has(cls) && ctx.structMap.has(`__fnctor_${cls}`)) approved.add(cls);
+    }
+    result = analyzeReceiverFlow(sf, approved);
+    (ctx.receiverFlowByFile ??= new Map()).set(sf, result);
+  }
+  // `enclosingClass` is the twin's own class when we are inside one; passing it
+  // keeps `this` resolvable, though this path never asks about `this`.
+  const enclosing = fctx.typedThisStructName?.slice("__fnctor_".length);
+  return receiverClassOf(result, receiver, enclosing);
+}
+
 export function tryEmitDirectTwinCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1100,13 +1159,36 @@ export function tryEmitDirectTwinCall(
   deps: DirectCallDeps,
 ): ValType | typeof VOID_RESULT | undefined {
   if (!directCallsEnabled() || !ctx.standalone) return undefined;
-  // Only inside a twin: the receiver-shape proof IS the twin's own `ref.cast`.
-  const structName = fctx.typedThisStructName;
-  const thisLocalIdx = fctx.typedThisLocalIdx;
-  const structTypeIdx = fctx.typedThisStructIdx;
-  if (structName === undefined || thisLocalIdx === undefined || structTypeIdx === undefined) return undefined;
-  if (propAccess.expression.kind !== ts.SyntaxKind.ThisKeyword) return undefined;
   if (ts.isPrivateIdentifier(propAccess.name)) return undefined;
+
+  // Two admission routes to the SAME trampoline machinery:
+  //
+  //  (a) #3683 S3 — `this.m()` inside a typed twin. The receiver-shape proof is
+  //      the twin's own `ref.cast`, so the trampoline may cast unguarded.
+  //  (b) #3685 S3 — `recv.m()` anywhere, where the receiver-flow analysis
+  //      proves `recv` denotes exactly one approved fnctor class. The proof is
+  //      an inference, so the trampoline is GUARDED (see `guardedReceiver`).
+  //
+  // (a) is tried first and is unchanged byte-for-byte, so no existing site
+  // moves onto the guarded path.
+  const isThis = propAccess.expression.kind === ts.SyntaxKind.ThisKeyword;
+  let structName = fctx.typedThisStructName;
+  let thisLocalIdx = fctx.typedThisLocalIdx;
+  let structTypeIdx = fctx.typedThisStructIdx;
+  let guardedReceiver = false;
+
+  if (!isThis || structName === undefined || thisLocalIdx === undefined || structTypeIdx === undefined) {
+    if (isThis) return undefined; // in-twin `this` route needs all three
+    const provenClass = provenReceiverClass(ctx, fctx, propAccess.expression);
+    if (provenClass === undefined) return undefined;
+    const proven = `__fnctor_${provenClass}`;
+    const provenIdx = ctx.structMap.get(proven);
+    if (provenIdx === undefined) return declineDirect("no-struct-for-proven-class");
+    structName = proven;
+    structTypeIdx = provenIdx;
+    thisLocalIdx = undefined; // the receiver is an expression, not a local
+    guardedReceiver = true;
+  }
   noteDirectStats();
   // `this.m?.()` / `this?.m()` keep the dynamic path (the nullish short-circuit
   // is the dispatcher's, and a devirtualized call would skip it).
@@ -1165,6 +1247,7 @@ export function tryEmitDirectTwinCall(
     // Void callee ⇒ no wasm result. The legacy degradation target always yields
     // an externref, so the fill drops it in that arm (see below).
     results: sig.returnType === null ? [] : [sig.returnType],
+    guardedReceiver,
     deps,
   });
   // The legacy-dispatcher reservation above may have added late imports; settle
@@ -1176,8 +1259,18 @@ export function tryEmitDirectTwinCall(
   // left to right, matching the dynamic path's evaluation order. `__current_this`
   // is installed INSIDE the trampoline, i.e. after every argument has been
   // evaluated, which is also what the dynamic path does.
-  fctx.body.push({ op: "local.get", index: thisLocalIdx });
-  fctx.body.push({ op: "extern.convert_any" });
+  if (thisLocalIdx !== undefined) {
+    fctx.body.push({ op: "local.get", index: thisLocalIdx });
+    fctx.body.push({ op: "extern.convert_any" });
+  } else {
+    // (#3685 S3) Evaluate the receiver expression ONCE, in receiver-before-args
+    // order — the same order the dynamic path uses.
+    const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+    if (recvType === null) return declineDirect("receiver-compile-failed");
+    if (!valTypesMatch(recvType, { kind: "externref" })) {
+      coerceType(ctx, fctx, recvType, { kind: "externref" });
+    }
+  }
   for (let i = 0; i < argc; i++) {
     // Coerce against the TRAMPOLINE's DECLARED parameter, never the signature
     // just computed: the trampoline is shared by every call site of this
@@ -1333,7 +1426,50 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       twin.params.slice(1 + t.arity).every((p, i) => valTypesMatch(p, t.padTypes[i]!)) &&
       twin.results.length === t.results.length &&
       twin.results.every((r, i) => valTypesMatch(r, t.results[i]!));
-    if (twinIdx !== undefined && twinSignatureAgrees) {
+    // (#3685 S3) Build the legacy sequence up front when the receiver is only
+    // statically PROVEN — the guarded body needs both arms, not one.
+    const buildLegacyArm = (): Instr[] | undefined => {
+      const legacy: Instr[] = [{ op: "local.get", index: 0 }];
+      let ok = true;
+      for (let i = 1; i < paramCount && ok; i++) {
+        legacy.push({ op: "local.get", index: i });
+        ok = boxToExternref(ctx, t.params[i]!, legacy);
+      }
+      if (ok) {
+        legacy.push({ op: "call", funcIdx: t.legacyDispatchIdx });
+        if (resultType === undefined) legacy.push({ op: "drop" });
+        else ok = unboxFromExternref(ctx, resultType, legacy);
+      }
+      return ok ? legacy : undefined;
+    };
+
+    if (twinIdx !== undefined && twinSignatureAgrees && t.guardedReceiver) {
+      // (#3685 S3) Receiver shape is an ANALYSIS verdict, not a cast the caller
+      // already performed. Test it, and fall back to the dispatcher on a miss so
+      // an imprecise verdict costs a slow call rather than trapping the module.
+      const legacyArm = buildLegacyArm();
+      if (legacyArm === undefined) continue;
+      const twinArm: Instr[] = [
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: t.fnctorStructTypeIdx },
+      ];
+      for (let i = 1; i < paramCount; i++) twinArm.push({ op: "local.get", index: i });
+      for (const pad of t.padInstrs) twinArm.push(...pad.map((i) => ({ ...i })));
+      twinArm.push({ op: "call", funcIdx: twinIdx });
+      arm.push(
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: t.fnctorStructTypeIdx },
+        {
+          op: "if",
+          blockType: resultType === undefined ? { kind: "empty" } : { kind: "val", type: resultType },
+          then: twinArm,
+          else: legacyArm,
+        },
+      );
+      directCallStats.twinFills++;
+    } else if (twinIdx !== undefined && twinSignatureAgrees) {
       // The twin's param 0 is the TYPED receiver; the trampoline carries it as
       // externref (ABI note on `DirectCallTrampoline`), so cast it back. The
       // cast cannot fail: every call site passed its own `ref.cast`-verified

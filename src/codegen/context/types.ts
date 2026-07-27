@@ -2968,6 +2968,12 @@ export interface CodegenContext {
    */
   fnctorEscapeGate?: import("../fnctor-escape-gate.js").FnctorEscapeGateResult;
   /**
+   * (#3685 S3) Memoized receiver-flow verdicts, keyed by source file. The
+   * analysis is whole-program and pure; computing it per call site would be
+   * quadratic on a file the size of acorn's dist.
+   */
+  receiverFlowByFile?: Map<import("typescript").SourceFile, import("../receiver-flow-analysis.js").ReceiverFlowResult>;
+  /**
    * (#3683 S2) Memoized inverse of `protoMethodWriteOnce.methods` — the RHS
    * function node of each write-once prototype-method assignment mapped to its
    * owning fnctor name. Built lazily on the first twin-admission query so the

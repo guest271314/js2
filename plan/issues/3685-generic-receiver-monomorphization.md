@@ -14,6 +14,11 @@ language_feature: compiler-internals
 goal: performance
 sprint: current
 related: [3683, 3673, 1947, 1946, 1584, 1852, 2660]
+loc-budget-allow:
+  # S3 adds the proven-receiver admission + the guarded trampoline fill to the
+  # module that already owns the typed-`this` direct-call machinery — cohesion,
+  # not a barrel dumping ground. Crossing 1500 here is intended.
+  - src/codegen/typed-this.ts
 ---
 
 # #3685 — Generic receiver monomorphization
@@ -164,3 +169,107 @@ speculation would have to.
 - No new host imports; standalone canaries keep `imports: ZERO`.
 - Full `tests/equivalence` failure set identical by test NAME to the
   merge parent.
+
+## S3 result (2026-07-27) — proven-receiver call lowering landed
+
+**The gap this closes.** #3683 S3 devirtualized `this.m()` *inside* a typed
+twin. It left the ENTRY from ordinary code untouched: `p.inc()`, where `p` is
+an ordinary local, still compiled to the full dynamic dispatcher
+`__call_m_inc_0` — interned-key lookup, method-cache probe, `ref.test`/cast
+ladder, arity check, `call_ref`. Diagnosed from the emitted WAT: the twins
+existed (`__closure_0__typed_this`), but no call site outside a twin reached
+them.
+
+**What landed.** `tryEmitDirectTwinCall` gained a second admission route. The
+`this` route is unchanged byte-for-byte; the new route proves the receiver's
+class with the S1 analysis (`receiverClassOf`) and reuses the identical
+trampoline machinery. S1 was fully inert before this — it had no caller and no
+context field; it is now computed once per source file and memoized.
+
+**The guard is the design point, not a detail.** #3683's trampoline casts the
+receiver UNGUARDED, sound only because the sole path to such a call site runs
+through the twin's own `ref.cast`. A receiver-flow verdict carries no such
+guarantee — it is a whole-program inference, and an unguarded cast would turn
+any imprecision into a runtime TRAP with no fallback. So proven-receiver sites
+reserve a distinct guarded trampoline (`__dc_<F>_<m>_<n>_g`, guard flag in the
+reservation key so the two variants can never share a handle) whose fill emits
+`ref.test` → twin arm : legacy-dispatcher arm. An analysis bug therefore costs
+a slow call, never a crash.
+
+**Measured** (axis benchmark, all three engines re-run on one machine,
+checksums identical):
+
+| axis | node | Porffor | js2 before | js2 after |
+| ---- | ---- | ------- | ---------- | --------- |
+| **method dispatch** | 0.940 ms | 8.104 ms | 9.085 ms | **3.359 ms** |
+
+**9.73x → 3.57x vs node** on that axis, and js2 goes from 1.13x *behind*
+Porffor to **2.4x ahead** of it. Other axes flat within noise, as expected —
+the tokenizer axis is `this.nextCode()` inside a twin, which #3683 S3 already
+devirtualized, so it correctly did not move (0.784 → 0.766 ms).
+
+Pinned by `tests/issue-3685-proven-receiver-calls.test.ts` (7 cases: guarded
+variant emitted, `ref.test` precedes `ref.cast`, argument values and
+left-to-right order, receiver evaluated once, `this` sites stay on the
+unguarded trampoline, unproven receivers stay dynamic, reassigned bindings
+withdrawn).
+
+**A pre-existing bug found while pinning, NOT introduced here.** For
+`var p = new P(0); p = new Q(); p.inc()` — two classes with a same-named
+prototype method and a reassigned binding — the dynamic path answers `null`
+instead of dispatching to `Q.prototype.inc`. Verified identical with
+`JS2WASM_DIRECT_CALLS=0` and on the pre-slice compiler, and no trampoline is
+emitted for that shape at all, so this slice never runs there. The pin asserts
+the safety property it owns (no devirtualization of a withdrawn binding)
+rather than freezing the wrong return value into a test.
+
+### Root cause of that pre-existing bug (diagnosed 2026-07-27, NOT fixed)
+
+**A fnctor prototype method is only reachable from the DYNAMIC dispatch path
+if the program contains at least one STATICALLY-TYPED use of that method.**
+
+```js
+function Q() { this.v = 9; }
+Q.prototype.inc = function () { return 1000; };
+export function test() { var p; p = new Q(); return p.inc(); }
+// -> 0.  Add ANY typed use of Q.prototype.inc, even one that never runs:
+function dead() { var q = new Q(); return q.inc(); }
+// -> test() now returns 1000.
+```
+
+A *dead* typed use repairs it, which proves this is a compile-time
+registration/emission gap, not a runtime one: the typed path is what causes
+the method to be emitted into whatever table the dynamic path consults
+(`__call_m_<m>_<n>` → `__method_cache_lookup` → `__extern_method_call`).
+
+Evidence trail, in the order it was established:
+
+- Not the method cache and not a name collision — a method name unique to a
+  second class fails identically.
+- The receiver IS correct at runtime and the member DOES resolve: after the
+  reassignment `p.v` reads Q's field and `typeof p.inc === "function"` is
+  `true`. Only the invocation answers undefined.
+- Long-standing, not a perf-work regression — reproduces on `upstream/main`
+  in a fresh worktree.
+- **NOT static/dynamic class disagreement**, which was the first hypothesis
+  and is FALSIFIED: a single-class program with no reassignment conflict
+  (`var p; p = new Q()`) fails just as hard. The real variable is whether a
+  typed use exists anywhere in the program.
+- `collectMethodEntries` (closed-method-dispatch) keys on a compiled
+  `<Struct>_<method>` function. A fnctor prototype method is a lifted
+  *closure*, not a `Q_inc`, so it contributes NO closed-struct arm — which is
+  consistent with the emitted `__call_m_inc_0` having no per-struct arms at
+  all. That is the most likely place the registration is missing.
+
+One fix was attempted and **reverted**: routing the terminal `else` of
+`buildClosurePropMethodCallElseArm` to generic member-get + apply instead of
+`ref.null.extern`. It changed nothing, which rules the terminal fallback out.
+Not landed — an unverified speculative codegen change is worse than none.
+
+Needs its own issue id; `claim-issue.mjs --allocate` could not be trusted to
+give one here (it returned #3717, already taken on this branch — its open-PR
+scan silently degrades to main-only when `gh` is unavailable).
+
+Remaining in this issue: **S2** (read/write lowering for proven receivers —
+the `__extern_get` 8.8% self-time bucket) and **S4** (hoist the guard to one
+`ref.test` per binding rather than per call site).
