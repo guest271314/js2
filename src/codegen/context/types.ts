@@ -1576,6 +1576,16 @@ export interface CodegenContext {
    */
   memberGetDispatchNames?: Set<string>;
   /**
+   * (#3673) Property names that additionally reserved the TYPED f64 read
+   * dispatcher `__get_member_<name>__f64(recv) -> f64`. Reserved by the
+   * externref→f64 coercion rewrite in type-coercion.ts when a ToNumber-context
+   * read site's stack top is literally a generic-dispatcher call — the typed
+   * twin collapses numeric-slot hits to one call with a bare `struct.get`
+   * arm (no `__box_number` / `__to_primitive` / `__unbox_number` round-trip).
+   * Filled by `fillTypedMemberGetF64Dispatch` right after the generic fill.
+   */
+  memberGetTypedF64DispatchNames?: Set<string>;
+  /**
    * (#2963) Class-METHOD arms for the `__get_member_<name>` dispatcher:
    * propName → the receiver-typed arms that answer the canonical method-value
    * singleton (the SAME per-`<Owner>_<method>` cache global the typed

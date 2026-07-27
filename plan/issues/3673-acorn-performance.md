@@ -4,7 +4,7 @@ title: "perf: compiled acorn parses 1,400-3,000x slower than node-acorn — host
 status: in-progress
 assignee: claude/acorn-performance
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-27
 loc-budget-allow:
   - src/runtime.ts
   - src/codegen/object-runtime.ts
@@ -21,6 +21,10 @@ loc-budget-allow:
   - src/codegen/json-codec-native.ts
   - src/codegen/any-helpers.ts
   - src/emit/binary.ts
+  - src/codegen/member-get-dispatch.ts
+  - src/codegen/shared.ts
+  - src/codegen/type-coercion.ts
+  - src/codegen/index.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -323,6 +327,46 @@ acorn canaries 4/4; host corpus 23/23 exact (host lane untouched — its
 `__box_number` is a host import); 30-suite standalone batch + 1712
 acceptance — only the pre-existing 1599 ×3; JSON/Map/Weak suites — same;
 tsc clean.
+
+## Round 8 — typed `__get_member_<name>__f64` dispatchers (slot monomorphism, read side)
+
+The #3669/#3671 issues as filed were correctness bugs (fixed by another
+lane); the PERF continuation is this: a ToNumber-context field read
+through the generic `__get_member_<p>` dispatcher paid three calls plus a
+number box per hit — the struct arm `struct.get`s the f64 slot,
+`__box_number`s it up to the uniform externref, and the read site
+immediately `__to_primitive`s + `__unbox_number`s it back down (the
+`this.pos + size` shape in the .wat evidence above). Now the externref→f64
+coercion in type-coercion.ts detects when the stack top is literally a
+generic-dispatcher call with hint "number", and swaps it for a typed twin
+`__get_member_<p>__f64(recv) -> f64`: numeric-slot arms are a bare
+`ref.test` → `struct.get` (+`f64.convert_i32_s` for i32/boolean slots) —
+no box, no ToPrimitive; non-numeric slots, accessor-bearing props, #2979
+sentinel gen-results, and misses all route to the generic dispatcher +
+the exact chain the site would have emitted, arm-order-preserved. Same
+reserve-then-fill discipline as #2674 (deps registered at reserve, body
+filled after `fillMemberGetDispatch` at finalize); wired through a
+shared.ts late-bound delegate (member-get-dispatch.ts imports
+`coercionInstrs` FROM type-coercion.ts — the reverse static import would
+close an eval-time cycle).
+
+**Measured: wall-clock FLAT again (2.70ms vs 2.67ms)** — 16 typed
+dispatchers mint in compiled acorn (pos/start/end/lastTokEnd/curLine/…)
+and the profile confirms the work is real but small: `__to_primitive`
+self-time 3.7% → 1.4%, `__vec_overlay_lookup` off the top list. The
+remaining wall is crossing VOLUME through `__extern_get` (9-14%) +
+`__obj_find` + `__str_equals` — reads that never had a per-name
+dispatcher (dynamic keys, `$Object` hash props), out of scope for this
+slice.
+
+Verification (round 8): typed-dispatcher probe (fnctor `this.pos` slice
+shape) answers correctly with the typed body confirmed in the .wat (one
+`ref.test` + `struct.get $14 1`, fallback = generic + to_primitive +
+unbox); #3673 pin suite 7/7; host corpus 23/23 exact (rewrite is
+standalone-gated); dispatcher pin suites #2674/#2963/#3041/#3050/#2664
+/#2979 all green; 1712 acceptance green; #2151 ×3 failures verified
+identical on pre-change tree (pre-existing); tsc clean; biome error count
+identical to base (pre-existing drift only).
 
 ## Round 6 — arity IN the closure representation (the deferred layout change)
 

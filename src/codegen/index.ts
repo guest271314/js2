@@ -153,7 +153,7 @@ import { fillSetRecFieldGetters } from "./collections-es2025.js"; // (#3172)
 import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillLazyIterLadderArms } from "./iter-lazy-native.js"; // (#2903 R3)
 import { fillMemberSetDispatch, reserveVecFieldMaterializers } from "./member-set-dispatch.js";
-import { fillMemberGetDispatch } from "./member-get-dispatch.js";
+import { fillMemberGetDispatch, fillTypedMemberGetF64Dispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
@@ -3705,6 +3705,11 @@ export function generateModule(
     // `this.lastTokEnd`) resolving to `__extern_get` → `undefined` (acorn 9th wall).
     fillMemberGetDispatch(ctx);
 
+    // (#3673) Fill the TYPED `__get_member_<name>__f64` twins — numeric-slot
+    // hits collapse to a bare `struct.get` arm; misses fall back to the
+    // generic dispatcher body filled just above.
+    fillTypedMemberGetF64Dispatch(ctx);
+
     // Closed compiler structs are not `$Object` hash maps. Fill the native
     // Object.hasOwn / hasOwnProperty predicates from the complete shape table.
     fillClosedStructHasOwnArms(ctx);
@@ -5721,6 +5726,7 @@ export function generateMultiModule(
     // reserve phase, so these fills do not mutate function indices.
     fillMemberSetDispatch(ctx);
     fillMemberGetDispatch(ctx);
+    fillTypedMemberGetF64Dispatch(ctx); // (#3673) typed f64 twins
 
     // Mirror the single-source closed-struct own-property finalizer.
     fillClosedStructHasOwnArms(ctx);
