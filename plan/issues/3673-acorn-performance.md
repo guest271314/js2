@@ -489,6 +489,20 @@ methodology (`.tmp/bench-min.mjs`) — the single-shot estimator had a
 Verification: string-hint/coercion/class-to-primitive suites (1806,
 1470, 2638, 2358, 1910) all green; corpus 23/23; pins 7/7; tsc clean.
 
+### Round 12 — inline method-lookup cache in the per-fnctor call arms
+
+The round-11 profile still showed 251ms of `__extern_get` self-time
+under `__extern_method_call`: each per-fnctor arm called `__extern_get`,
+which walks its prepended ladder + `__fnctor_proto_start` BEFORE reaching
+the round-9b cache arm. Inside a per-fnctor arm the prototype is a KNOWN
+GLOBAL, so the cache check is now inlined there — interned key +
+generation + owner `ref.eq` against `global.get <proto>` + live-DATA
+flags → apply the cached method closure with zero lookup calls; any miss
+takes the exact old `__extern_get` path (which populates). **1.71 →
+1.54ms/parse (stable min)** — cumulative 52.4 → 1.54 (~34x), node-acorn
+gap ~45x. Verification: corpus 23/23; 1712 + 2151-nary + 2963 ×4
+method-identity suites green; pins 7/7; canaries 4/4; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

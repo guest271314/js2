@@ -6681,10 +6681,102 @@ export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
   const applyClosureIdx = ctx.funcMap.get("__apply_closure");
   if (!fn || externGetIdx === undefined || applyClosureIdx === undefined) return;
 
+  // (#3673 round 12) Inline per-key method-lookup cache in each per-fnctor
+  // arm. The slow path below calls `__extern_get`, which walks its prepended
+  // ladder + `__fnctor_proto_start` before reaching the round-9b cache — but
+  // HERE the fnctor's prototype is a KNOWN GLOBAL, so the cache check is a
+  // handful of loads with zero calls: interned key + generation match +
+  // owner `ref.eq` against `global.get <proto>` + live-DATA entry flags →
+  // apply the cached method closure directly. Any miss falls to the exact
+  // old `__extern_get` path (which also populates the cache). Locals for the
+  // key/entry scratch are appended once below.
+  const HSTR = ctx.hashedStrTypeIdx;
+  const objTypes = ctx.objectRuntimeTypes;
+  const genPos = ctx.mod.globals.findIndex((g) => g.name === "__obj_table_gen");
+  const inlineCacheReady = HSTR >= 0 && objTypes !== undefined && genPos >= 0;
+  let khLocal = -1;
+  let entryLocal = -1;
+  if (inlineCacheReady) {
+    khLocal = 3 + fn.locals.length;
+    entryLocal = khLocal + 1;
+    fn.locals.push(
+      { name: "__mc_kh", type: { kind: "ref_null", typeIdx: HSTR } },
+      { name: "__mc_entry", type: { kind: "ref_null", typeIdx: objTypes.propEntryTypeIdx } },
+    );
+  }
+  const genIdx = ctx.numImportGlobals + genPos;
+
   const arms: Instr[] = [];
-  for (const [fnctorName] of ctx.fnctorPrototypeObject) {
+  for (const [fnctorName, protoGlobalIdx] of ctx.fnctorPrototypeObject) {
     const typeIdx = ctx.structMap.get(`__fnctor_${fnctorName}`);
     if (typeIdx === undefined) continue;
+    const cacheTry: Instr[] = inlineCacheReady
+      ? [
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: HSTR },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "any.convert_extern" },
+              { op: "ref.cast", typeIdx: HSTR },
+              { op: "local.tee", index: khLocal },
+              { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
+              { op: "global.get", index: genIdx },
+              { op: "i32.eq" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // owner (non-null once gen matched) vs this fnctor's proto global
+                  { op: "local.get", index: khLocal },
+                  { op: "ref.as_non_null" },
+                  { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
+                  { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
+                  { op: "global.get", index: protoGlobalIdx },
+                  { op: "any.convert_extern" },
+                  { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
+                  { op: "ref.eq" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      { op: "local.get", index: khLocal },
+                      { op: "ref.as_non_null" },
+                      { op: "struct.get", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
+                      { op: "ref.cast", typeIdx: objTypes!.propEntryTypeIdx },
+                      { op: "local.tee", index: entryLocal },
+                      { op: "struct.get", typeIdx: objTypes!.propEntryTypeIdx, fieldIdx: 2 }, // flags
+                      { op: "i32.const", value: FLAG_TOMBSTONE | FLAG_ACCESSOR },
+                      { op: "i32.and" },
+                      { op: "i32.eqz" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: entryLocal },
+                          { op: "ref.as_non_null" },
+                          { op: "struct.get", typeIdx: objTypes!.propEntryTypeIdx, fieldIdx: 1 }, // value
+                          { op: "extern.convert_any" },
+                          ...(ctx.funcMap.has("__nullish_to_null")
+                            ? ([{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] satisfies Instr[])
+                            : []),
+                          { op: "local.get", index: 0 },
+                          { op: "local.get", index: 2 },
+                          { op: "call", funcIdx: applyClosureIdx },
+                          { op: "return" },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ]
+      : [];
     arms.push(
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -6693,6 +6785,7 @@ export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
         op: "if",
         blockType: { kind: "empty" },
         then: [
+          ...cacheTry,
           { op: "local.get", index: 0 },
           { op: "local.get", index: 1 },
           { op: "call", funcIdx: externGetIdx },
