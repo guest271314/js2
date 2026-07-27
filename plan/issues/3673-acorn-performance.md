@@ -657,6 +657,20 @@ hasOwn → 0 (total 179 → 80ms in the 3k-parse window); window ~0.94 →
 unambiguous). Verification: hasOwn/2896 suites 28/28; canaries 4/4;
 tsc clean.
 
+### Round 19b — builtin-meta probe gated on closure receivers
+
+`__builtinfn_get_meta` runs at the TOP of every `__extern_get` and
+classified the KEY first — two `__str_equals` calls ("name"/"length")
+per property read program-wide, receiver never consulted until the
+arms. Every builtin meta struct subtypes the funcref-wrapper ROOT
+(round 6), so one root `ref.test` now gates the whole classification +
+arm block: non-closure receivers (fnctors, $Objects, strings — the
+overwhelming majority of extern_get traffic) skip it with a single
+test. Measured: deep-warm window 0.92-0.97 → **0.83-0.90ms** (≈5%).
+Verification: #2896 builtin-meta reflection suite green (closure
+receivers unchanged); twin pins 12/12; corpus 23/23; canaries 4/4; tsc
+clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

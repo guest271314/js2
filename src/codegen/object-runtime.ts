@@ -59,6 +59,7 @@
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeCharCodeAtHelper } from "./char-code-at-helpers.js";
+import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js"; // (#3673 round 19b)
 import {
   ensureAnyToStringHelper,
   ensureNativeStringHelpers,
@@ -7979,6 +7980,9 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
     { op: "local.get", index: 0 },
     { op: "any.convert_extern" },
     { op: "local.set", index: 2 },
+    ...classifyKeyPreamble(),
+  ];
+  const classifyKeyPreamble = (): Instr[] => [
     { op: "local.get", index: 1 },
     { op: "any.convert_extern" },
     { op: "ref.test", typeIdx: anyStrTypeIdx },
@@ -8049,10 +8053,17 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
         ]),
       );
     }
-    getMetaFn.body.splice(
-      0,
-      0,
-      ...classifyPreamble(),
+    // (#3673 round 19b) get_meta runs at the TOP of every `__extern_get`, so
+    // its two key compares ("name"/"length") were paid per property read
+    // program-wide. Every builtin meta struct subtypes the funcref-wrapper
+    // ROOT (round 6), so one root `ref.test` gates the whole key
+    // classification + arm block: non-closure receivers (fnctors, $Objects,
+    // strings — the overwhelming majority of extern_get traffic) skip it with
+    // a single test. Falls back to the ungated layout when the root type
+    // isn't minted (no closures in the program ⇒ no meta structs either).
+    const metaRootIdx = getFuncRefWrapperRootTypeIdx(ctx);
+    const gatedTail: Instr[] = [
+      ...classifyKeyPreamble(),
       // Guard: only enter the arm block when the key is "name" or "length".
       { op: "local.get", index: 4 },
       { op: "local.get", index: 5 },
@@ -8062,6 +8073,20 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: arms,
       },
+    ];
+    getMetaFn.body.splice(
+      0,
+      0,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 },
+      ...(metaRootIdx !== undefined
+        ? ([
+            { op: "local.get", index: 2 },
+            { op: "ref.test", typeIdx: metaRootIdx },
+            { op: "if", blockType: { kind: "empty" }, then: gatedTail },
+          ] satisfies Instr[])
+        : gatedTail),
     );
   }
 
