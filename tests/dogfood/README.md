@@ -1,10 +1,28 @@
-# acorn dogfood harness (#1710)
+# Dogfood harnesses — pinned real-package differential testing
 
-A committed, reproducible harness that mechanizes the acorn self-hosting
-dogfood loop: **compile acorn with js2wasm → validate the Wasm → run it →
-differentially diff its AST against node-acorn**. It turns the previously
-throwaway `.tmp/acorn/probe.mjs` scratch work into data that #1711 (triage)
-buckets and that #1712 (acceptance gate) reuses.
+Committed, reproducible harnesses that compile a real, pinned npm package
+with js2wasm, validate the resulting Wasm, run it, and differentially diff
+its output against the SAME package running natively under Node (zero
+version skew — any divergence is a compiler bug, never an oracle mismatch).
+Distinct from the broader `compileProject`-based `npm-library-support` goal
+(lodash, axios, react, hono, eslint, prettier, ...): these harnesses
+specifically target a **single pre-bundled dist file**, so there's no
+multi-file module-resolution graph in the way of isolating compiler bugs.
+
+Two packages so far:
+
+| package | issue | entry file | oracle diff |
+| --- | --- | --- | --- |
+| **acorn** (JS parser) | #1710 | `dist/acorn.mjs` | structural AST diff (`ast-diff.mjs`) |
+| **marked** (Markdown→HTML) | #3716 | `lib/marked.esm.js` | plain string equality (HTML output) |
+
+## acorn (#1710)
+
+Mechanizes the acorn self-hosting dogfood loop: **compile acorn with
+js2wasm → validate the Wasm → run it → differentially diff its AST against
+node-acorn**. It turns the previously throwaway `.tmp/acorn/probe.mjs`
+scratch work into data that #1711 (triage) buckets and that #1712
+(acceptance gate) reuses.
 
 ## Invoke
 
@@ -66,9 +84,38 @@ npm view acorn@<version> dist.shasum dist.integrity   # canonical values to pin
 The oracle dependency is the SAME tarball, so there is no separate `acorn`
 devDependency to keep in sync.
 
-## Scope
+## Scope (acorn)
 
 This harness does **not** fix any compiler bug — pure tooling. Compiler defects
 it surfaces are recorded in the report for #1711 to triage. Standalone
 (`--target wasi`) execution of compiled acorn is an explicit follow-up
 (a #1711 child), not part of this harness.
+
+## marked (#3716)
+
+Same loop, second package, deliberately simpler: marked's observable
+surface is a single HTML **string** (not an AST object graph), so plain
+string equality replaces `ast-diff.mjs`'s structural diff — no marshalling
+layer needed to compare results.
+
+```bash
+pnpm run dogfood:marked          # run the loop, print a human summary, write the JSON report
+npx tsx tests/dogfood/marked-harness.mjs --json   # machine output to stdout
+DOGFOOD_MARKED=1 pnpm test -- tests/dogfood/marked.test.ts   # vitest contract wrapper
+```
+
+Report: `tests/dogfood/report/marked-surface.json` (gitignored). Pin:
+`marked-pin.json` (same acquisition discipline as acorn — refresh via
+`npm pack marked@<version>` + `npm view marked@<version> dist.shasum
+dist.integrity`).
+
+**Current state (first run, 2026-07-27)**: red surface — `marked` does not
+compile at all yet. Root-caused to #3715 (TypeScript's "evolving array
+type" inference — `let x = []` later populated via `.push()` — is not
+implemented in the checker, so any array of this shape stays typed
+`never[]` forever). This harness's job was to surface that, not fix it;
+see #3715 for the minimal repro and scope. Once that lands, re-run
+`pnpm run dogfood:marked` for the first real run+diff data.
+
+This harness does **not** fix any compiler bug — pure tooling, same as
+acorn's scope note above.
