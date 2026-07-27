@@ -3823,6 +3823,47 @@ const _symbolIdToKeys: Map<number, { wasm: string; sym: symbol }> = new Map([
 ]);
 
 /**
+ * (#3676) Resolve the per-instance symbol-id → JS Symbol cache, seeding the
+ * well-known ids on first use.
+ *
+ * Extracted from `__box_symbol` because it now has a SECOND consumer
+ * (`__symbol_for_id`), and the seeding guard is `size === 0`. Left inline, a
+ * `Symbol.for(...)` call that ran before the first `__box_symbol` would put an
+ * entry in the map, making it non-empty, so the well-known seeding would be
+ * skipped forever and `__box_symbol(1)` would hand back `Symbol("wasm_1")`
+ * instead of the real `Symbol.iterator`. React's module init does exactly that
+ * ordering (twelve `Symbol.for` calls on line 12 before anything else), so this
+ * is a live hazard, not a theoretical one. Seeding through one shared helper
+ * makes the order irrelevant.
+ *
+ * Seeds ids 1..14 exactly as the original inline block did — id 15
+ * (`@@matchAll`) was NOT seeded there and is deliberately still not, to keep
+ * this a pure refactor of the existing behaviour.
+ */
+function _resolveSymbolCache(instanceState?: InstanceState): Map<number, symbol> {
+  const symbolCache =
+    instanceState?.symbolCache ??
+    (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
+  if (symbolCache.size === 0) {
+    symbolCache.set(1, Symbol.iterator);
+    symbolCache.set(2, Symbol.hasInstance);
+    symbolCache.set(3, Symbol.toPrimitive);
+    symbolCache.set(4, Symbol.toStringTag);
+    symbolCache.set(5, Symbol.species);
+    symbolCache.set(6, Symbol.isConcatSpreadable);
+    symbolCache.set(7, Symbol.match);
+    symbolCache.set(8, Symbol.replace);
+    symbolCache.set(9, Symbol.search);
+    symbolCache.set(10, Symbol.split);
+    symbolCache.set(11, Symbol.unscopables);
+    symbolCache.set(12, Symbol.asyncIterator);
+    symbolCache.set(13, _disposeSym);
+    symbolCache.set(14, _asyncDisposeSym);
+  }
+  return symbolCache;
+}
+
+/**
  * Resolve a class from a namespace path (#1044).
  * For Node builtins like `import * as http from 'http'`, resolves `http.Server`
  * by trying: deps override → require(root)[className].
@@ -6911,6 +6952,13 @@ interface InstanceState {
   symbolCache?: Map<number, symbol>;
   /** symbol id → user-registered description (`null` = Symbol() w/ no desc). */
   symbolDescRegistry?: Map<number, string | null>;
+  /**
+   * (#3676) `Symbol.for` registry key → the i32 id the compiled module uses for
+   * that registered symbol. Ids are allocated NEGATIVE so they can never
+   * collide with the well-known ids (1..15) or with the in-module
+   * `__symbol_counter` global, which starts at 100 and only ever ascends.
+   */
+  symbolForIds?: Map<string, number>;
   /** legacy RegExp static state (`RegExp.$1` etc.) — per instance, not shared. */
   legacyRegExpState?: LegacyRegExpState;
   /** user-class name → registered subclass constructors (#1933 retention leak). */
@@ -9426,25 +9474,7 @@ assert._isSameValue = isSameValue;
         // #1933 — per-instance symbol cache (was module-level `_symbolCache`,
         // reset per buildImports → clobbered concurrent instances). Falls back
         // to a local map when no instanceState is threaded (legacy callers).
-        const symbolCache =
-          instanceState?.symbolCache ??
-          (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
-        if (symbolCache.size === 0) {
-          symbolCache.set(1, Symbol.iterator);
-          symbolCache.set(2, Symbol.hasInstance);
-          symbolCache.set(3, Symbol.toPrimitive);
-          symbolCache.set(4, Symbol.toStringTag);
-          symbolCache.set(5, Symbol.species);
-          symbolCache.set(6, Symbol.isConcatSpreadable);
-          symbolCache.set(7, Symbol.match);
-          symbolCache.set(8, Symbol.replace);
-          symbolCache.set(9, Symbol.search);
-          symbolCache.set(10, Symbol.split);
-          symbolCache.set(11, Symbol.unscopables);
-          symbolCache.set(12, Symbol.asyncIterator);
-          symbolCache.set(13, _disposeSym);
-          symbolCache.set(14, _asyncDisposeSym);
-        }
+        const symbolCache = _resolveSymbolCache(instanceState);
         const symbolDescRegistry =
           instanceState?.symbolDescRegistry ??
           (instanceState
@@ -11785,6 +11815,58 @@ assert._isSameValue = isSameValue;
       // itself performs ToString, so forwarding a real Symbol primitive
       // reproduces the spec throw; other values stringify normally.
       if (name === "__symbol_for") return (key: any): any => Symbol.for(key);
+      // (#3676) `Symbol.for(key)` returning the module's CANONICAL i32 symbol
+      // id rather than a raw host Symbol.
+      //
+      // The compiler represents a symbol VALUE as an i32 id everywhere:
+      // `mapTsTypeToWasm` maps `symbol` → i32, and `compileSymbolCall`
+      // (`Symbol()`) returns an unbranded i32 counter. `__symbol_for` was the
+      // one producer handing back an `externref`, so `var S = Symbol.for("x")`
+      // stored an externref into an i32 slot — coerced via `__unbox_number`,
+      // i.e. `Number(Symbol())`, which throws TypeError §7.1.4 during
+      // `__module_init`. That single mismatch is what stopped React 19 (twelve
+      // `Symbol.for` calls on its first line) from instantiating at all.
+      //
+      // Ids are allocated NEGATIVE and are provably disjoint from every other
+      // id source: well-knowns occupy 1..15 and the in-module `__symbol_counter`
+      // global starts at 100 and only ascends. Each id is registered into the
+      // SAME per-instance `symbolCache` that `__box_symbol` reads, so boxing the
+      // id back across the boundary yields the genuine registry symbol and
+      // `Symbol.for(k) === Symbol.for(k)` holds in both directions.
+      // §20.4.2.2 step 1 (`stringKey = ? ToString(key)`) is preserved by letting
+      // `Symbol.for` itself perform the coercion — a Symbol key still throws.
+      if (name === "__symbol_for_id") {
+        const symbolCache = _resolveSymbolCache(instanceState);
+        const symbolForIds =
+          instanceState?.symbolForIds ??
+          (instanceState ? (instanceState.symbolForIds = new Map<string, number>()) : new Map<string, number>());
+        return (key: any): number => {
+          // ToString FIRST (spec order, and it may throw); key the map on the
+          // coerced string so `Symbol.for(1)` and `Symbol.for("1")` agree.
+          const sym = Symbol.for(key);
+          const k = sym.description as string;
+          let id = symbolForIds.get(k);
+          if (id === undefined) {
+            id = -(symbolForIds.size + 1);
+            symbolForIds.set(k, id);
+            symbolCache.set(id, sym);
+          }
+          return id;
+        };
+      }
+      // (#3676) `Symbol.keyFor(sym)` taking the canonical i32 symbol id.
+      // Companion to `__symbol_for_id`: resolves the id back through the shared
+      // per-instance cache and applies the real `Symbol.keyFor`, so an
+      // unregistered symbol (well-known, or one made by `Symbol()`) still yields
+      // `undefined` per §20.4.2.6. An id with no cache entry never came from
+      // this instance's registry, so it is likewise `undefined`.
+      if (name === "__symbol_keyFor_id") {
+        const symbolCache = _resolveSymbolCache(instanceState);
+        return (id: number): any => {
+          const sym = symbolCache.get(id);
+          return sym === undefined ? undefined : Symbol.keyFor(sym);
+        };
+      }
       // Symbol.keyFor(sym) — reverse lookup in global registry (#965, #1342)
       // Spec §20.4.2.6: returns the key string for registered symbols, or
       // `undefined` for any other symbol. Returning `null` (the previous
@@ -11853,25 +11935,7 @@ assert._isSameValue = isSameValue;
       // symbol preserves identity/description) then `Object()` it into a wrapper
       // object. `Symbol.prototype.description` already unwraps such wrappers.
       if (name === "__new_Symbol") {
-        const symbolCache =
-          instanceState?.symbolCache ??
-          (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
-        if (symbolCache.size === 0) {
-          symbolCache.set(1, Symbol.iterator);
-          symbolCache.set(2, Symbol.hasInstance);
-          symbolCache.set(3, Symbol.toPrimitive);
-          symbolCache.set(4, Symbol.toStringTag);
-          symbolCache.set(5, Symbol.species);
-          symbolCache.set(6, Symbol.isConcatSpreadable);
-          symbolCache.set(7, Symbol.match);
-          symbolCache.set(8, Symbol.replace);
-          symbolCache.set(9, Symbol.search);
-          symbolCache.set(10, Symbol.split);
-          symbolCache.set(11, Symbol.unscopables);
-          symbolCache.set(12, Symbol.asyncIterator);
-          symbolCache.set(13, _disposeSym);
-          symbolCache.set(14, _asyncDisposeSym);
-        }
+        const symbolCache = _resolveSymbolCache(instanceState);
         const symbolDescRegistry =
           instanceState?.symbolDescRegistry ??
           (instanceState

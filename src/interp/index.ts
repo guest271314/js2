@@ -21,6 +21,7 @@ export {
   compileDynamicFunctionMeta,
   createDynamicFunction,
   dynamicFunctionSource,
+  executeIndirectEval,
   type DynamicParser,
 } from "./dynamic-function.js";
 export { FuncMeta, Frame, EnvRec, type JSValue } from "./types.js";
