@@ -21,6 +21,15 @@ related: [3690]
 # god-file drift.
 loc-budget-allow:
   - src/runtime.ts
+# compileInOperator grew because the new not-an-object throw check is
+# inlined at its one call site rather than factored out (it needs fctx/ctx
+# plus the already-computed externCopy/brandLocal, so extracting a helper
+# would mean threading 4-5 params for a single-caller function). resolveImport
+# is the same shared big-dispatch-table pattern __extern_is_undefined and
+# every other single-arg host import already lives in.
+func-budget-allow:
+  - src/codegen/binary-ops-in.ts::compileInOperator
+  - src/runtime.ts::resolveImport
 ---
 
 # #3714 — `#field in obj` with `obj === null` should throw a catchable TypeError
