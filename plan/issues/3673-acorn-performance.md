@@ -1210,6 +1210,47 @@ Also confirmed during this round: `tests/issue-1817.test.ts` has **3
 pre-existing failures** (`>>>` unsigned semantics) on the clean tip —
 verified against an unmodified tree, unrelated to this attempt.
 
+### Round 34 — native strings vs `wasm:js-string`, ISOLATED
+
+Every #3673 number so far compared LANES (standalone vs gc/host), which
+confounds the string backend with the object runtime it ships alongside.
+This isolates the string backend: the SAME typed tokenizer source
+compiled twice, differing only in `nativeStrings`, both instantiated and
+measured in one process, checksums identical (`84077`), three runs:
+
+| backend | binary | imports | ms | throughput |
+| --- | --- | --- | --- | --- |
+| **native (WasmGC i16 arrays)** | 38,519 B | **0** | 0.0990-0.0998 | **72 MB/s** |
+| `wasm:js-string` (V8 builtins) | **8,738 B** | 4 (2 js-string) | 0.1234-0.1246 | 58 MB/s |
+
+**Native strings are ~1.24x faster; the js-string binary is ~4.4x
+smaller.** Spread inside each backend is under 1 %, so the difference is
+real.
+
+Mechanism: native strings put the character data in a WasmGC `i16` array
+the module owns, so `s.charCodeAt(i)` is `array.get_u` off a `struct.get`
+data pointer — round 32 confirmed that is already the optimal shape.
+`wasm:js-string` keeps the data in V8's own string representation, so
+each access is a builtin CALL across the boundary; V8's implementation of
+that call is excellent, which is why it lands within 24 % rather than
+being routed, but a call still cannot beat an inline load.
+
+The tradeoff is therefore SIZE vs SPEED, not one backend being strictly
+better: js-string needs no rope/flatten/intern machinery in the module
+(hence 4.4x smaller) but pays a call per character; native strings inline
+the access but carry their own string runtime.
+
+Two caveats worth recording. First, native strings only became the
+faster option because rounds 2-3 fixed them — before literal interning
+and `__str_flatten` memoization the standalone lane was **3.5x SLOWER**
+than the host lane. The backend is not inherently superior; the
+implementation was simply bad and then wasn't. Second, this measurement
+needed the full host harness to be honest — `buildImports(imports, deps,
+stringPool)` AND the `setExports` callback. Skipping `setExports` leaves
+the struct getters unwired and the js-string lane traps with
+"illegal cast" inside `length`, which could easily be mistaken for a
+compiler bug. Repro: `.tmp/string-backend.mjs`.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
