@@ -2093,6 +2093,31 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
     releaseTempLocal(fctx, lTmp);
     return { kind: "externref" };
   }
+  return emitAnyAddFromExternTemps(ctx, fctx, lTmp, rTmp);
+}
+
+/**
+ * (#3673) The §13.15.3 `+` dispatch for two operands ALREADY evaluated into
+ * externref temps — the temps-based twin of {@link emitAnyAdd}, mirroring
+ * `emitAnyEqFromExternTemps`.
+ *
+ * Split out because the compound `obj.prop += rhs` lowering
+ * (`operator-assignment.ts`) has no `ts.BinaryExpression` to hand `emitAnyAdd`:
+ * its left operand is the value it just READ back out of the property. The host
+ * lane could paper over that by calling `__host_add` directly (#2850), but the
+ * standalone lane has no such import, so it was left on an unconditional
+ * numeric `f64.add` — which silently NaN'd every dynamic string `+=`.
+ *
+ * Consumes (and releases) both temps; returns the ValType left on the stack —
+ * `externref` on the real dispatch, `f64` on the no-native-strings fallback.
+ */
+export function emitAnyAddFromExternTemps(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  lTmp: number,
+  rTmp: number,
+): ValType {
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
 
   // ── JS-host: JS `+` via __host_add ──
   if (!noJsHost) {
