@@ -1698,6 +1698,31 @@ set. Gates: `npx tsc --noEmit` clean; the full `linear-*` suite plus
 reachable only via `target: "linear"`, so the GC/standalone paths are
 untouched.
 
+### Round 37 — two soundness bugs in the linear backend (filed from the comparison)
+
+The linear-vs-GC measurement surfaced two correctness defects that are
+independent of the performance question and should not be lost:
+
+1. **String literals over ~960 bytes silently CORRUPT on the linear
+   backend.** `DATA_SEGMENT_BASE = 64` versus `HEAP_START = 1024` with no
+   bound check: at 980 chars `.length` reports 979 and 17 characters read
+   wrong; at 4096 it traps. This surfaced as a checksum mismatch during
+   benchmarking — i.e. it is silent data corruption, not a crash.
+2. **`type i32 = number` emits INVALID wasm on the linear backend.**
+
+Also worth recording as capability boundaries (not bugs): the linear
+lane runs its IR overlay only over top-level function declarations, so
+class methods take the direct path which has no `charCodeAt` arm at all;
+`s[i]`, `this.inner.method()` and module-level string constants are
+unsupported (a module-level `S.length` silently returns **0**); and the
+default `allocator: "bump"` never reclaims and traps after 409,200
+allocations at the 16 MiB cap (`allocator: "arena-reset"` fixes it and
+levels the allocation advantage — ~15.9 vs GC's ~15.1 ns/node).
+
+Filed here rather than as separate issues because they are all discovered
+in one pass and all live in the same subsystem; whoever picks up the
+linear lane should triage them together.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
