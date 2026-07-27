@@ -1210,6 +1210,118 @@ Also confirmed during this round: `tests/issue-1817.test.ts` has **3
 pre-existing failures** (`>>>` unsigned semantics) on the clean tip —
 verified against an unmodified tree, unrelated to this attempt.
 
+### Round 34 — the SIMD avenue is DEAD, and the ceiling is 2.3x FASTER than node
+
+Round 32 blamed the character scan for the tokenize-only 3.06x gap, which
+raised an obvious question: could Wasm **SIMD** — a capability V8 cannot
+apply to a scalar JS character loop — buy back the loss? This round
+answered that by measuring the *ceiling* directly with hand-written Wasm,
+independent of our compiler.
+
+**What our compiler supports today.** v128 is fully encoded — `SIMD` in
+`src/emit/opcodes.ts` (all the load/splat/compare/bitmask/shuffle
+opcodes), encoding in `src/emit/binary.ts`, printing in `src/emit/wat.ts`,
+`v128` in the `ValType`/`Instr` unions in `src/ir/types.ts`, and
+`stack-balance.ts` knows the arities. But the **only producer** is
+`src/codegen-linear/simd.ts` — four hand-built runtime helpers
+(`__str_eq_simd`, `__str_indexOf_simd`, `__arr_indexOf_simd`,
+`__arr_fill_simd`) for the **linear-memory** backend. `addSimdRuntime` is
+called from **`tests/simd.test.ts` and nowhere else**, and the
+`simd?: boolean` option declared at `src/index.ts:408` is **never read**.
+So SIMD is dead code: no TypeScript syntax reaches it in either backend.
+It is also structurally unavailable on the WasmGC path — `v128.load`
+addresses *linear memory*, and our strings are `$__str_data`, a WasmGC
+`(array (mut i16))`, which no instruction can vector-load.
+
+**Method.** All lanes measured **interleaved in ONE process**, deep-warmed,
+min-of-14-batches × 50 reps, 5 rounds per process, repeated in 3
+independent processes. Every lane asserts the identical checksum (83717)
+on the identical 7,517-char input, plus a 90-case correctness sweep
+covering non-ASCII, lone surrogates, and **every** length 0..80 (so all
+len % 8 and len % 32 residues). Node was stable this time (min 0.0346 /
+0.0348 / 0.0353 across the three processes) — not the 0.0343→0.0569
+excursion round 32 warned about. Probes:
+`.tmp/simd-tok.wat` (linear-memory + SIMD lanes, `wat2wasm`),
+`.tmp/gc-tok.wat` (WasmGC lanes, binaryen `wasm-as --enable-gc`),
+`.tmp/simd-shootout.mjs` (harness; also compiles the round-32 source with
+our own compiler as the last lane). Node v22 accepts v128 — verified.
+
+| lane | ms/parse | vs node |
+| --- | --- | --- |
+| node (JS, V8) | 0.0346–0.0353 | — |
+| **hand-written WasmGC, i32 char reads** | **0.0148–0.0154** | **2.26–2.34x FASTER** |
+| hand-written WasmGC, + identity call (control) | 0.0149–0.0155 | 2.25–2.33x faster |
+| hand-written WasmGC, + `charCodeAt` f64 round trip | 0.0400–0.0414 | 1.14–1.19x slower |
+| hand-written linear-memory scalar (locals) | 0.0221–0.0230 | 1.51–1.58x faster |
+| hand-written linear-memory scalar, OO shape | 0.0285–0.0288 | 1.21–1.24x faster |
+| SIMD: bitmap prepass + ctz token loop | 0.0276–0.0281 | 1.24–1.26x faster |
+| SIMD: per-run 8-wide probe, no prepass | 0.0373–0.0385 | **1.07–1.11x SLOWER** |
+| same bitmap token loop, *scalar* classification | 0.0540–0.0576 | 1.56–1.63x slower |
+| [SIMD classification prepass alone] | 0.0014–0.0015 | ~5.0 GB/s |
+| our compiler, same TypeScript (round 32 source) | 0.1007–0.1032 | 2.91–2.97x slower |
+
+**1. SIMD is a dead avenue for this workload — a clear negative.** Both
+designs were tried and both lose to plain scalar Wasm. The per-run 8-wide
+probe (0.0373) is the *slowest* Wasm lane and is slower than node. The
+whole-buffer bitmap prepass (0.0276) does beat node 1.25x, but it loses to
+the plain scalar linear-memory lane (0.0221) and loses badly to plain
+scalar WasmGC (0.0148). The reason is not that the vector work is
+expensive — the SIMD classification of the entire buffer costs **0.0015 ms
+(~5 GB/s), 24x less than node's whole tokenize**, and it is 19x cheaper
+than the same classification done scalar (0.0576 − 0.0281 ≈ 0.030 →
+0.0015). The cost is *consuming* the result: this grammar averages **~2.2
+chars per token**, so replacing a 2-iteration character loop with a word
+load + shift + `ctz` per run is a net loss. Vectorizing a scan only pays
+when the runs are long; a JS/TS tokenizer's runs are not. **Do not build a
+SIMD idiom recognizer for this.**
+
+**2. The much bigger finding: WasmGC is not the handicap — it is the
+fastest lane.** Hand-written WasmGC reading `array.get_u` off a
+`struct.get`'d `$__str_data` (exactly the representation we emit) runs at
+**0.0148 ms, 2.3x FASTER than node**, and beats hand-written *linear
+memory* (0.0221) by 1.5x — V8 hoists the GC array's bounds check against a
+known `array.len` better than it can the linear-memory bound plus `shl`
+addressing. Even the deliberately-pessimised linear-memory OO control
+(Lexer state in memory, a real call per token, no local promotion) still
+beats node 1.21x. So "outperform node-acorn" is **not** blocked by AOT, by
+WasmGC, or by our string representation. The entire 2.9x deficit is our
+*lowering*.
+
+**3. The `charCodeAt` f64 round trip is priced: 2.7x, single-handedly.**
+The only difference between the 0.0148 lane and the 0.0403 lane is that
+every character read goes `array.get_u → f64.convert_i32_u →
+i32.trunc_sat_f64_s` instead of staying i32. The identity-call control
+isolates it cleanly: same call shape, identity body, **0.0149** — so the
+call is free and the whole 0.0255 ms delta is the conversion pair. That
+one representation bug moves us from **2.34x faster than node** to **1.16x
+slower**. Round 32 identified it; round 33 failed to fix it with a
+peephole because the pair is never adjacent. This round says it is worth
+**2.7x on the tokenizer**, which justifies the real fix (result-type
+contract or a local-aware dataflow pass, per round 33's two notes) over
+another cheap attempt.
+
+**4. What is left after that.** Our compiler emits 0.1007 for the same
+source, still 2.5x above the f64-round-trip lane (0.0403). That residual
+is everything the hand-written lane does *not* pay: `this.pos` /
+`this.tokKind` field traffic, `src.length` re-read per iteration, the
+per-token `next()` dispatch, `isDigit`/`isIdent` not inlined, and the
+per-parse `new Lexer`. That bucket is exactly the typed-`this` /
+direct-call / value-rep program already in flight (#3683 and friends) —
+this round just confirms it is the *second* lever, not the first.
+
+**Revised ladder for the goal** (all measured, no extrapolation):
+
+| | ratio vs node |
+| --- | --- |
+| compiled acorn today | 31x |
+| our compiler on hand-typed source (round 32) | 2.9x slower |
+| the same, if the `charCodeAt` f64 round trip is removed | ~1.16x slower |
+| the same, plus typed-`this` / direct-call / no boxing | **2.3x FASTER** (the hand-written WasmGC lane) |
+| best SIMD design measured | 1.25x faster — *worse than plain scalar WasmGC* |
+
+No compiler change landed this round: the experiment's own result says the
+change it was scoped to justify (a SIMD lowering) is not worth making.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
