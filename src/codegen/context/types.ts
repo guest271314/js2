@@ -1003,6 +1003,25 @@ export interface FunctionContext {
    * setter + the consuming read/write/compound emitters.
    */
   thisStructName?: string;
+  /**
+   * (#3683 S2) Set ONLY on a typed-`this` TWIN body — the second compilation of
+   * an admitted fnctor prototype method, whose prologue has already cast
+   * `__current_this` down to this struct and parked it in
+   * {@link typedThisLocalIdx}. When present, a `this.<field>` read / write /
+   * compound-update on a PLAIN (non-presence-tracked, non-accessor) field of
+   * this struct lowers to a bare `struct.get`/`struct.set` against that local,
+   * returning the FIELD's ValType — instead of the `__get_member_<name>` /
+   * `__set_member_<name>` dispatcher call plus the externref box/unbox
+   * round-trip the generic body needs for a dynamic `this`. Every OTHER
+   * construct inside the twin keeps its dynamic lowering (`this` as a value
+   * still reads `__current_this`, which the generic body's `ref.test` shim
+   * guarantees holds this instance).
+   */
+  typedThisStructIdx?: number;
+  /** (#3683 S2) `ctx.structFields` key for {@link typedThisStructIdx}. */
+  typedThisStructName?: string;
+  /** (#3683 S2) Local holding the once-cast `(ref $__fnctor_F)` receiver. */
+  typedThisLocalIdx?: number;
 }
 
 export interface CodegenContext {
@@ -2908,6 +2927,19 @@ export interface CodegenContext {
    * Wasm byte-identical.
    */
   fnctorEscapeGate?: import("../fnctor-escape-gate.js").FnctorEscapeGateResult;
+  /**
+   * (#3683 S2) Memoized inverse of `protoMethodWriteOnce.methods` — the RHS
+   * function node of each write-once prototype-method assignment mapped to its
+   * owning fnctor name. Built lazily on the first twin-admission query so the
+   * check is an O(1) node lookup rather than a per-closure scan of every
+   * class's method map. Read-only after construction.
+   */
+  typedThisWriteOnceIndex?: Map<ts.FunctionLikeDeclaration, string>;
+  /**
+   * (#3683 S2) Diagnostic counter: how many prototype methods received a typed
+   * twin in this compilation. Surfaced by the S2 probe/test, not by codegen.
+   */
+  typedThisTwinCount?: number;
   /**
    * #2773 S1 (keystone) — fnctor name → reserved `$__fnctor_<Name>` struct type
    * index. Populated up-front by `reserveFnctorStructTypes` (index.ts) at the

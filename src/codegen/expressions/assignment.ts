@@ -34,6 +34,7 @@ import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-nativ
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
+import { noteTypedThisSet, resolveTypedThisWritableField } from "../typed-this.js"; // (#3683 S2) typed-`this` field write
 import { reserveMemberSetDispatch } from "../member-set-dispatch.js"; // (#2681/#2686 A3) pre-check set dispatcher
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for compound
 import {
@@ -3733,6 +3734,62 @@ function compilePropertyAssignment(
   // a struct instance hits the slot on BOTH sides and a genuine proxy hits the
   // sidecar on BOTH sides — consistent either way. Runs BEFORE the delete-aware
   // write so it wins for pinned receivers.
+  // (#3683 S2 branch b) TYPED-`this` field WRITE inside a typed twin. Runs
+  // BEFORE the pinned dispatcher below, of which it is the `$__fnctor_F` arm
+  // inlined: the receiver is the twin prologue's already-cast typed local, so
+  // the write is a bare `struct.set` with no dispatcher call and no
+  // box→externref→unbox round-trip. Declines (⇒ identical-semantics pinned
+  // path) for presence-tracked / accessor / reserved / method-typed props,
+  // immutable fields, and ref→ref field/value pairs of different struct types
+  // (which only the externref round-trip can bridge). See typed-this.ts.
+  {
+    const f = resolveTypedThisWritableField(ctx, fctx, target);
+    if (f !== undefined) {
+      const propName = target.name.text;
+      // Reference before value (§13.15.2): the receiver is a materialized local,
+      // so pushing it first is side-effect-free and keeps `struct.set`'s operand
+      // order without a scratch slot for the ref.
+      fctx.body.push({ op: "local.get", index: f.localIdx });
+      let valType = compileExpression(ctx, fctx, value);
+      if (valType === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+        valType = { kind: "externref" };
+      }
+      if (ctx.booleanPropertyNames.has(propName)) {
+        // #2847 parity with the pinned write: the whole-program property
+        // analysis proves this slot is boolean, so normalize through ToBoolean
+        // and carry the boolean BRAND (a bare `__box_number` would make
+        // `o.flag === true` false).
+        ensureI32Condition(fctx, valType, ctx);
+        valType = { kind: "i32", boolean: true };
+      }
+      // `=` evaluates to the RHS value as written, NOT the field-coerced value
+      // (§13.15.2 step 1.e returns rval) — stash it before coercing to the slot.
+      const valTmp = allocLocal(fctx, `__tt_val_${fctx.locals.length}`, valType);
+      fctx.body.push({ op: "local.set", index: valTmp });
+      fctx.body.push({ op: "local.get", index: valTmp });
+      // Two DIFFERENT nominal struct types cannot be bridged directly; take the
+      // same externref hop the dispatcher's write arm takes (value→externref at
+      // the call site, externref→field inside the arm). Everything else is a
+      // single coercion-engine step.
+      const bothRefs =
+        (valType.kind === "ref" || valType.kind === "ref_null") &&
+        (f.fieldType.kind === "ref" || f.fieldType.kind === "ref_null");
+      const refTypeMismatch =
+        bothRefs && (valType as { typeIdx: number }).typeIdx !== (f.fieldType as { typeIdx: number }).typeIdx;
+      if (refTypeMismatch) {
+        coerceType(ctx, fctx, valType, { kind: "externref" });
+        coerceType(ctx, fctx, { kind: "externref" }, f.fieldType);
+      } else if (valType.kind !== f.fieldType.kind) {
+        coerceType(ctx, fctx, valType, f.fieldType);
+      }
+      fctx.body.push({ op: "struct.set", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+      fctx.body.push({ op: "local.get", index: valTmp });
+      noteTypedThisSet();
+      return valType;
+    }
+  }
+
   {
     const pinnedThis =
       target.expression.kind === ts.SyntaxKind.ThisKeyword && fctx.thisStructName !== undefined

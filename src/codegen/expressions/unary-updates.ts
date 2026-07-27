@@ -33,6 +33,7 @@ import {
 } from "../property-access.js";
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for inc/dec
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686) pinned reconstructed-fnctor receiver gate
+import { noteTypedThisIncDec, resolveTypedThisWritableField } from "../typed-this.js"; // (#3683 S2) typed-`this` inc/dec
 import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
@@ -479,6 +480,41 @@ function compileMemberIncDec(
       const staticGlobalIdx = resolveStaticPropGlobalForUpdate(ctx, fctx, operand.expression, propName);
       if (staticGlobalIdx !== undefined) {
         return compileStaticPropIncDec(ctx, fctx, staticGlobalIdx, f64Op, mode);
+      }
+    }
+
+    // (#3683 S2 branch c2) TYPED-`this` `++`/`--` inside a typed twin. Acorn's
+    // `this.pos++` is the single hottest update site in the tokenizer; on the
+    // generic body it costs `__get_member_pos` + unbox + f64.add + box +
+    // `__set_member_pos`. Here it is a `struct.get`/`struct.set` pair against
+    // the twin prologue's typed local. Numeric semantics match the externref
+    // read-modify-write it replaces (`emitExternrefMemberIncDec`), including
+    // the postfix/prefix result choice. Emitted before ANY receiver evaluation
+    // so a decline leaves the body untouched.
+    {
+      const f = resolveTypedThisWritableField(ctx, fctx, operand);
+      if (f !== undefined) {
+        fctx.body.push({ op: "local.get", index: f.localIdx });
+        fctx.body.push({ op: "local.get", index: f.localIdx });
+        fctx.body.push({ op: "struct.get", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+        if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, f.fieldType, { kind: "f64" });
+        const tmp = allocLocal(fctx, `__tt_incdec_${fctx.locals.length}`, { kind: "f64" });
+        if (mode === "postfix") {
+          // [ref, old] → stash old, compute new, store, yield old.
+          fctx.body.push({ op: "local.tee", index: tmp });
+          fctx.body.push({ op: "f64.const", value: 1 });
+          fctx.body.push({ op: f64Op });
+        } else {
+          // [ref, old] → compute new, stash it, store, yield new.
+          fctx.body.push({ op: "f64.const", value: 1 });
+          fctx.body.push({ op: f64Op });
+          fctx.body.push({ op: "local.tee", index: tmp });
+        }
+        if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, f.fieldType);
+        fctx.body.push({ op: "struct.set", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+        fctx.body.push({ op: "local.get", index: tmp });
+        noteTypedThisIncDec();
+        return { kind: "f64" };
       }
     }
 

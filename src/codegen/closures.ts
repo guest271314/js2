@@ -81,6 +81,8 @@ import {
   paramDefaultNeedsArgc,
 } from "./statements/nested-declarations.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
+// (#3683 S2) typed-`this` twin admission + prologue/shim emission.
+import { admitTypedThisTwin, buildTypedThisForwardGuard, emitTypedThisPrologue } from "./typed-this.js";
 import { addFunctionOwnLocals, registerOwnLocalsCollector } from "./binding-info.js"; // (#2103) shared, memoized per-function binding-info oracle
 // (#2957 phase 2) arrow/fn-expr async activation. Imported LAST: `async-activation`
 // pulls the `async-cps`/`async-frame` chain which imports back into `closures`
@@ -1932,7 +1934,7 @@ export interface LiftedClosureBodyOptions {
    * lowerings emit bare `struct.get`/`struct.set` against that local instead
    * of the `__get_member_*` / `__set_member_*` dispatcher calls.
    */
-  typedThis?: { fnctorStructTypeIdx: number };
+  typedThis?: { fnctorStructTypeIdx: number; structName: string };
 }
 
 /** (#3683 S2) What {@link compileLiftedClosureBody} produces / may have repaired. */
@@ -2037,6 +2039,20 @@ export function compileLiftedClosureBody(
 
   for (let i = 0; i < liftedFctx.params.length; i++) {
     liftedFctx.localMap.set(liftedFctx.params[i]!.name, i);
+  }
+
+  // (#3683 S2) Typed-`this` TWIN prologue. Emitted FIRST so `typedThisLocalIdx`
+  // is live for every subsequent statement. The generic body's `ref.test` shim
+  // is what makes this `ref.cast` infallible — see typed-this.ts.
+  if (opts.typedThis) {
+    emitTypedThisPrologue(
+      ctx,
+      liftedFctx,
+      opts.typedThis.structName,
+      opts.typedThis.fnctorStructTypeIdx,
+      allocLocal,
+      ensureCurrentThisGlobal(ctx),
+    );
   }
 
   // Initialize locals for captured variables from struct fields.
@@ -2690,6 +2706,74 @@ export function compileArrowAsClosure(
   // remove from liveBodies to keep it tight (the regular walker dedupes anyway).
   ctx.liveBodies.delete(liftedFctx.body);
   ctx.funcMap.set(closureName, liftedFuncIdx);
+
+  // 6b. (#3683 S2) Typed-`this` TWIN. When this lifted closure is an admitted
+  //     write-once fnctor prototype method, compile its body a SECOND time with
+  //     `this` pre-cast to `$__fnctor_F` in a local, then prepend a `ref.test`
+  //     shim to the GENERIC body that forwards every param to the twin on a
+  //     shape hit. Detached receivers / patched prototypes / foreign shapes
+  //     keep the untouched generic body. The twin shares the generic's wasm
+  //     signature (self + params), so the forward is a verbatim `local.get`
+  //     sequence with no marshalling. See typed-this.ts for the equivalence
+  //     argument behind the inline struct.get/struct.set branches.
+  {
+    const admitted = admitTypedThisTwin(ctx, arrow, {
+      thisStructName: liftedFctx.thisStructName,
+      captureCount: captures.length,
+      selfBindingName,
+      isGenerator,
+      isAsync,
+      isNamedFuncExpr: !!isNamedFuncExpr,
+    });
+    if (admitted) {
+      const twinName = `${closureName}__typed_this`;
+      const twin = compileLiftedClosureBody(ctx, fctx, arrow, {
+        closureName: twinName,
+        captures,
+        selfBindingName,
+        arrowParams,
+        // The concise-body return repair cannot fire (admission requires a
+        // BLOCK body), but hand the twin its own array so a future shape
+        // change can never let it rewrite the generic's results in place.
+        closureResults: [...closureResults],
+        liftedParams,
+        structTypeIdx,
+        liftedSelfTypeIdx,
+        liftedFuncTypeIdx,
+        closureReturnType,
+        isGenerator,
+        isAsync,
+        asyncDecision,
+        isNamedFuncExpr: !!isNamedFuncExpr,
+        typedThis: { fnctorStructTypeIdx: admitted.structTypeIdx, structName: admitted.structName },
+      });
+      const twinFuncIdx = mintDefinedFunc(ctx);
+      pushDefinedFunc(ctx, twinFuncIdx, {
+        name: twinName,
+        // Identical signature to the generic body — verified by construction
+        // (same `liftedParams`/`closureResults`, block body ⇒ no repair).
+        typeIdx: twin.liftedFuncTypeIdx,
+        locals: twin.liftedFctx.locals,
+        body: twin.liftedFctx.body,
+        exported: false,
+      });
+      ctx.liveBodies.delete(twin.liftedFctx.body);
+      ctx.funcMap.set(twinName, twinFuncIdx);
+      // Prepend IN PLACE: `liftedFctx.body` is the same array object already
+      // registered as the generic function's body, and it stays covered by
+      // `shiftLateImportIndices` (which walks `ctx.mod.functions`), so the
+      // baked `call twinFuncIdx` shifts with any later late-import addition.
+      liftedFctx.body.unshift(
+        ...buildTypedThisForwardGuard(
+          admitted.structTypeIdx,
+          ensureCurrentThisGlobal(ctx),
+          liftedFctx.params.length,
+          twinFuncIdx,
+        ),
+      );
+      ctx.typedThisTwinCount = (ctx.typedThisTwinCount ?? 0) + 1;
+    }
+  }
 
   // 7. At the creation site, emit struct.new with funcref + arity + captured values.
   emitClosureConstruction(ctx, fctx, captures, liftedFuncIdx, structTypeIdx, arrowParams.length);
