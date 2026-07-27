@@ -843,6 +843,27 @@ Gates: full equivalence diffed BY NAME vs merge parent — identical 33-failure
 set; 16 new pins; corpus 23/23 with 0 real gaps; canaries 4/4 with `imports:
 0`; tsc, LOC-budget and oracle-ratchet clean.
 
+### Round 26b — S3 integration verified on the merged tree
+
+Lead-session re-measurement after merging S3 (agent numbers reproduced
+independently, quiet box):
+
+- **deep-warm window 0.665-0.699 ms** (was 0.78-0.86 pre-S3).
+- **Multi-fixture dashboard, ratios vs node-acorn re-measured same-process:**
+
+| fixture | bytes | wasm ms | node ms | ratio | was (round 25) |
+| --- | --- | --- | --- | --- | --- |
+| members-calls.js | 213 | 0.394 | 0.0127 | **30.9x** | 34.9x |
+| control-flow.js | 330 | 0.590 | 0.0191 | **30.8x** | 38.9x |
+| operators.js | 240 | 0.506 | 0.0161 | **31.4x** | 39.3x |
+| objects.js | 269 | 0.423 | 0.0138 | **30.7x** | 37.1x |
+
+Mean **≈31x**, down from ≈37.5x — and the spread collapsed (34.9-39.3x
+→ 30.7-31.4x), i.e. S3 removed a per-call cost that scaled with every
+fixture rather than a fixture-specific artifact. Gates on the merged
+tree: corpus 23/23 with 0 real gaps; 50/50 across the direct-call /
+twin / numeric-field / i31 pin suites; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
