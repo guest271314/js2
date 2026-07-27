@@ -1411,6 +1411,110 @@ types one link must type the whole chain or measurably lose.
 
 **The census that matters more than either.** Opcodes in the hot
 `Lexer_next` of our -O3 standalone module:
+### Round 34 — the `i32` annotation was INERT, and reviving it is the fix
+
+Round 33 recommended a local-aware dataflow pass in the IR. Before writing
+one, two questions were answered empirically. Both answers redirected the
+work.
+
+**(a) The hot shapes do not route through the IR at all.** Compiling the
+round-32 tokenizer with `trackIrOutcomes`: `Lexer_next` (every charCodeAt
+round trip), `bench` and `<module-init>` are all `body-shape-rejected`;
+only `Lexer_new` / `isDigit` / `isIdent` are IR-emitted. Isolating the
+cause with one-variable probes: `add(a: number, b: number)` → **IR**;
+`add(a: i32, b: i32)` → `type-resolution-unsupported`; a `number`-typed
+body containing one `const t: i32` → `body-shape-rejected`; the alias
+merely *declared* but unused → **IR**. Every function that *uses* an
+`i32` annotation is knocked off the IR path, so an IR pass could not have
+touched this benchmark.
+
+**(b) Outside `fast` mode the `i32` annotation did nothing at all.**
+`resolveNativeTypeAnnotation` detected the annotation via
+`tsType.aliasSymbol?.name`, but TypeScript populates `aliasSymbol` only
+for aliases of OBJECT and UNION types — never for an alias of an
+intrinsic primitive. On TS 5.9.3: `type i32 = number` → `aliasSymbol =
+(none)`, while `type Pair = {a: number}` → `Pair` and `type Uni = number
+| string` → `Uni`. Instrumenting a live compile of the tokenizer:
+**84 calls, 0 hits, no alias name ever observed.** The emitted code
+agreed — `let n: i32; let i: i32; const c: i32` gave
+`locals=[f64,f64,f64,…]` in gc/standalone/wasi and `[i32,…]` only under
+`fast`, where *every* `number` is i32 regardless of annotation. The
+inertness was **accidental, not a semantic gate**: `resolveWasmType`
+consults the native map before any `ctx.fast` branch, so there was no
+fast-gate to remove.
+
+Consequence: round 32's row "same, with native `i32` fields/locals"
+(0.1684 vs 0.1792) is mislabeled — the annotations were inert, so that
+row did not measure typed fields/locals. Round 32's headline "29
+truncations against 41 array reads" is likewise a **whole-module** count:
+22 of the 29 truncs live in an unrelated 2148-line f64→string runtime
+helper. In `Lexer_next` itself it is 5 truncs / 5 converts / 5 array
+reads.
+
+**Partial narrowing is a PESSIMIZATION — the third independent
+confirmation of "whole-chain or negative".** Priced without touching the
+compiler, by rewriting the tokenizer in `| 0` forms the existing
+`collectI32CoercedLocals` analysis already accepts (so the locals really
+do become i32). Interleaved, checksums identical:
+
+| lane | ms |
+| --- | --- |
+| wasmGC hand-written (i32 char reads) | 0.0150 |
+| node (JS, V8) | 0.0328 |
+| wasmGC hand-written (+ f64 round trip) | 0.0405 |
+| ours, baseline | 0.1002 |
+| ours, `\|0` char locals only | 0.1874 |
+| ours, + `\|0` cursor local | 0.2717 |
+
+Narrowing locals inside an otherwise-f64 world re-widens at every field
+write and every call, and each `|0` adds its own NaN-check + `trunc_sat`.
+Same lesson as round 31's hot-chain experiment and #3683 S4a.
+
+**The fix: resolve the annotation syntactically, from the declaration's
+TYPE NODE, and do it whole-chain.** New `src/codegen/native-type-annotations.ts`
+resolves an explicit `TypeReference` whose name binds to a user-declared
+`= number` alias (generic aliases, lib declarations and same-named
+non-`number` types are rejected, so a user type called `i32` cannot be
+hijacked). Wired at every declaration site together: local variables,
+class property declarations (including the constructor-assignment path,
+which mints the slot *before* the property loop runs), constructor and
+method and setter parameters, method/getter/function return types. In
+`binary-ops.ts` the operand check is node-resolved too, with int32
+literals and string/array `.length` reads admitted as *non-anchor*
+compatible operands — at least one operand must carry a real annotation,
+so unannotated code keeps its existing lowering.
+
+Also fixed, in the IR: `this.pos = 0` on an `i32`-annotated field threw
+`ir/from-ast: assignment to C.p (i32) got f64`, which the #2138 IR-first
+gate promotes to a hard compile error (this already broke `fast` mode on
+`main`). `coerceIrNumeric` now inserts exactly the conversion legacy
+`coerceType` inserts at the same seam; the uint32 domain (`signed:
+false`) bails rather than widening through the signed conversion, so
+`-1 >>> 0` is untouched.
+
+**Measured, all lanes interleaved in one process, 5 rounds of
+min-of-14×50, checksums identical (83717):**
+
+| lane | min | median | max | vs node |
+| --- | --- | --- | --- | --- |
+| node (JS, V8) | 0.0327 | 0.0343 | 0.0348 | — |
+| wasmGC hand-written (i32) | 0.0151 | 0.0153 | 0.0160 | 2.17x faster |
+| wasmGC hand-written (+ f64 round trip) | 0.0400 | 0.0413 | 0.0425 | 1.22x slower |
+| ours BEFORE | 0.1002 | 0.1043 | 0.1046 | 3.05x slower |
+| **ours AFTER** | **0.0796** | **0.0815** | **0.0849** | **2.44x slower** |
+
+**−22 %**, 3.05x → 2.44x. Opcode census of `Lexer_next` (-O3 standalone):
+truncs 5→2, `f64.add` 6→2, `f64.lt` 3→0, `f64.ge` 3→2, `i32.lt_s` 5→8,
+`i32.ge_s` 5→6; the `Lexer` struct is now
+`(field $pos (mut i32))` ×5 instead of `(mut f64)`.
+
+This lands within the honest ceiling for this change: the hand-written
+control prices the round trip at ~3.6 ns per char read, i.e. ~0.027 ms of
+our 0.100 ms — **~27 %, not the 2.7x the control shows in isolation**,
+because in our loop the round trip is 10 ops out of ~180.
+
+**The bigger lever, measured and handed on.** Opcode census of the SAME
+hot function:
 
 ```
 throw 54 · ref.is_null 35 · extern.convert_any 73 · any.convert_extern 19
@@ -1828,6 +1932,34 @@ guard is a prerequisite, not an optimisation.
 Also: the round-37 data-segment corruption reproduced at **3127 chars**
 (linear returns 106161 where node and GC return 101058 — silently,
 inside a benchmark).
+Null-check-and-throw scaffolding on every `this.` access plus extern/any
+conversion churn dominate, by a wide margin, the conversions this round
+removed. That is the next lever (it connects to #1947's non-null-params
+half).
+
+Verification: `tsc` clean; prettier + biome clean; full `tests/equivalence`
+(463 suites / 1646 tests) diffed BY TEST NAME against the merge parent —
+**33 failures on both, 0 new, 0 fixed**; pins `issue-1817` / `issue-1818` /
+`issue-869` / `issue-956-957` / `native-i32-type` — identical 12-failure
+set on both (all pre-existing, including the 3 `>>>` ones and a
+`string_constants`-import harness bug in `native-i32-type`);
+`issue-3673-i31-smallint`, `issue-3673-fast-tokenizer`,
+`issue-3683-typed-this-twin`, `issue-3683-numeric-fields`,
+`issue-3685-receiver-flow`, `issue-1712`, `issue-1712-tokenizer-identity`
+all green; `DOGFOOD_ACORN=1 dogfood:acorn-corpus` → 0 real gaps, 21/21 OK;
+standalone acorn canaries smoke=4, **imports ZERO**. Strongest safety
+evidence: compiled acorn (which carries no `i32` annotations) is
+**byte-identical** — sha256 `0e7e2ae1…` on both the merge parent and this
+branch, 1,215,689 bytes.
+
+Not done, and why: full IR *eligibility* for `i32`-annotated signatures
+needs an `i32` scalar in the selector's `ResolvedKind` vocabulary
+(`resolveParamType` maps a `TypeReference` to `"object"` today) threaded
+through `resolvePositionType`, `from-ast` and `lower` — its own slice.
+The `fast`-mode tokenizer still fails to compile, but strictly less than
+before: 3 IR errors on the merge parent, 2 now, and both survivors
+(`class-method typeIdx parity mismatch` on `isDigit`/`isIdent`) reproduce
+unchanged on the merge parent.
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
