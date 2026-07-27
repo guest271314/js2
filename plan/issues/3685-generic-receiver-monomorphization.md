@@ -96,6 +96,45 @@ and the admission machinery it needs.
 - **S3 — call lowering** through the #3683 S3 trampolines.
 - **S4 — binding-level guard hoisting** (one `ref.test` per binding).
 
+## S1 result (2026-07-27) — analysis landed inert
+
+`src/codegen/receiver-flow-analysis.ts` + 17 pins. **Tallied over real
+acorn (226 KB), the analysis was rebuilt three times against the tally —
+each rebuild driven by a shape the unit tests did not have:**
+
+| iteration | verdicts | non-`this` accesses admitted (of 2,363) |
+| --- | --- | --- |
+| initial rules (const + params + this) | 0 | **0** |
+| + prototype-ALIAS map | 3 | 20 |
+| + return-class inference, `var` bindings, call-return initializers | 50 | **150** |
+
+Three findings worth keeping:
+
+1. **The direct `F.prototype.m = …` form is essentially absent from
+   shipping code.** acorn's dist has NINE `var pp$N = Parser.prototype`
+   aliases and assigns every method through one. The first tally admitted
+   literally zero receivers for this reason alone — the unit tests used
+   the textbook form. Any future analysis in this family must model
+   aliases from the start.
+2. **`const`-only admission is worthless on real code.** acorn's dist is
+   ES5 `var`. Safety now comes from the DEMOTION pass (any binding written
+   after its initializer is withdrawn), not from the declaration keyword —
+   which is both stronger and applicable. Pinned both ways.
+3. **Return-class inference is what unlocks the dominant shape.**
+   `var node = this.startNode()` → `finishNode(node, …)` is how acorn
+   moves Nodes around; without it, every `node` parameter and binding is
+   unproven. Requires a fixed point (a return can depend on a parameter
+   verdict) and must refuse any method with a bare `return` path.
+
+Admitted classes: `Node` 130 accesses, `Parser` 20 — i.e. exactly the
+per-AST-node `node.start`/`node.end` traffic the profile blamed. The
+2,213 still-unproven accesses are dominated by `this.options.<x>` (a
+FIELD read — an explicit S1 non-goal, needs the slot's declared type)
+and by `state.<x>` in the RegExp validator (a parameter whose call sites
+pass a field read). Both are S2-or-later work.
+
+Cost: 365 ms for 226 KB, single pass, no checker queries.
+
 ## Acceptance criteria
 
 - `__extern_get` self time on the #3673 deep-warm acorn profile drops
