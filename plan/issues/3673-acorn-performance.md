@@ -782,6 +782,24 @@ map to prove fnctor receivers and inline `struct.get`). Gates: full
 equivalence diffed BY NAME vs merge parent — identical 33-failure set;
 15 new pins; corpus 23/23; canaries; tsc clean.
 
+## Multi-fixture gap dashboard (round 25, same-box deep-warm mins)
+
+`.tmp/bench-multi.mjs` — five fixtures compiled into one standalone
+module, wasm vs node-acorn measured in the same process, deep-warm
+min-of-batches both sides:
+
+| fixture | bytes | wasm ms | node ms | ratio |
+| --- | --- | --- | --- | --- |
+| literals.js | 259 | TRAP | — | (BigInt gap, agent in flight) |
+| members-calls.js | 213 | 0.507 | 0.0145 | 34.9x |
+| control-flow.js | 330 | 0.771 | 0.0198 | 38.9x |
+| operators.js | 240 | 0.624 | 0.0159 | 39.3x |
+| objects.js | 269 | 0.515 | 0.0139 | 37.1x |
+
+Mean ≈37.5x — and control-flow.js, the fixture every round tuned
+against, is near the WORST case, so the single-fixture numbers have
+been a conservative representation of the corpus-wide gap.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
