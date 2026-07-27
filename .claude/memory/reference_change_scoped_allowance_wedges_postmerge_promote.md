@@ -13,7 +13,7 @@ correct PR into a permanent pipeline wedge.** Observed live 2026-07-25 on
 `loopdive/js2`.
 
 PR #3629 carried a correct `trap-growth-allow: count 1` (in
-`plan/issues/2900-*.md`) for
+`plan/issues/2900-es3-module-indirect-default-binding-update.md`) for
 `test/language/module-code/top-level-await/pending-async-dep-from-cycle.js`.
 It cleared PR and `merge_group`, merged — and the post-merge promote job then
 hard-failed `illegal_cast 74 → 75`, exit 1, **on every subsequent push**.
