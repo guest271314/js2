@@ -12,6 +12,8 @@ area: codegen
 goal: value-rep
 sprint: Backlog
 related: [3673, 1946, 1947, 1584]
+loc-budget-allow:
+  - src/codegen/fnctor-escape-gate.ts
 ---
 
 # #3683 — Typed-`this` monomorphization for fnctor prototype methods
