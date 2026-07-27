@@ -1142,6 +1142,16 @@ statement, checksums asserted equal.
 | --- | --- | --- | --- |
 | full parse + AST build | 0.1792 ms | 0.1062 ms | 1.69x |
 | same, with native `i32` fields/locals | 0.1684 ms | 0.1062 ms | **1.59x** |
+
+> **CORRECTION (round 36):** the `i32` row above is MISLABELED. The
+> `type i32 = number` annotation is **inert outside `fast` mode** — the
+> emitted module for that variant carries `locals=[f64,…]` and a `Lexer`
+> struct of `(mut f64)` fields regardless of the annotations. So that row
+> measured the same f64 code as the row above it, and its 6 % is noise or
+> an unrelated effect, NOT native integers. Established by isolated probes
+> (gc/standalone/wasi → f64 locals; `fast: true` → i32 locals + one fewer
+> conversion). Making the annotation take effect is now its own slice.
+
 | **tokenize only (no AST allocation)** | 0.1050 ms | 0.0343 ms | **3.06x** |
 
 **The counterintuitive result is the useful one: our gap is WORSE without
