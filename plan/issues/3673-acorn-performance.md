@@ -1013,6 +1013,31 @@ Verification: full regex battery failure set identical to the known
 pre-existing 40; corpus 23/23 with 0 real gaps; canaries `imports:
 ZERO`; tsc clean.
 
+### Round 30 — dogfood the SHIPPED artifact configuration (wasm-opt on)
+
+The CLI has defaulted to `-O3` since #1950, but the dogfood standalone
+artifact and every bench compiled through the programmatic `compile()`
+API, whose `optimize` defaults to false — so we were measuring (and
+dogfooding) a configuration nobody ships. Both now pass `optimize: 3`.
+`optimizeBinaryAsync` validates its own output and falls back to the raw
+binary with a warning, so this can only change performance, never
+correctness. NOT changed: `compile()`'s API default stays false —
+flipping it would add ~20 s of Binaryen to every one of the hundreds of
+compiles in the test suite.
+
+**Measured: deep-warm 0.693-0.718 → 0.597-0.665 ms; binary 1,808 KB →
+1,216 KB (−33 %).** Multi-fixture dashboard on the shipped config:
+
+| fixture | wasm ms | node ms | ratio |
+| --- | --- | --- | --- |
+| members-calls.js | 0.442 | 0.0142 | 31.1x |
+| control-flow.js | 0.655 | 0.0209 | 31.4x |
+| operators.js | 0.493 | 0.0162 | 30.4x |
+| objects.js | 0.394 | 0.0138 | **28.6x** |
+
+First fixture under 30x. Corpus 23/23 with 0 real gaps on the optimized
+artifact.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
