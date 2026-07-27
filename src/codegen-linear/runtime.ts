@@ -15,6 +15,30 @@ const HEAP_START = 1024;
 const WASM_PAGE_SIZE = 65536;
 
 /**
+ * Byte 1 of a record header, used by the string runtime to memoise "is this
+ * string pure ASCII?" (#3673).
+ *
+ * Byte 0 is the record *tag* namespace (`LINEAR_ARRAY_FORWARDING.tag = 6`,
+ * class instances = 5) and is read by the array-forwarding probe, so it is left
+ * alone. Bytes 1..3 of the header word are unused by every string producer —
+ * `__str_from_data` and friends write only the capacity at +4, the byte length
+ * at +8 and the payload from +12.
+ *
+ * `__malloc` zeroes the whole header word on every hand-out, so
+ * {@link STRING_ASCII_UNKNOWN} is the guaranteed initial state even when an
+ * embedder recycles the arena via `__arena_reset` (without that, a recycled
+ * address could hand a *stale* verdict to a different string — silent wrong
+ * answers, the exact failure class this file just fixed for data segments).
+ */
+const STRING_ASCII_CACHE_OFFSET = 1;
+/** Not yet determined — take the slow path and memoise the answer. */
+const STRING_ASCII_UNKNOWN = 0;
+/** Every byte < 0x80: UTF-8 byte index == UTF-16 code-unit index. */
+const STRING_ASCII_YES = 1;
+/** At least one multi-byte sequence: indices diverge, decode is required. */
+const STRING_ASCII_NO = 2;
+
+/**
  * Options for the linear-memory bump/arena allocator (#1856).
  *
  * The linear backend owns allocation. Its allocator is a **bump/arena**:
@@ -146,6 +170,26 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
     // __heap_ptr = next
     { op: "local.get", index: local_next },
     { op: "global.set", index: heapPtrGlobalIdx },
+    // Zero the record header word so every hand-out starts in a known state.
+    // The string runtime memoises its ASCII verdict in byte 1 of this word
+    // (see STRING_ASCII_CACHE_OFFSET); without this, an embedder that recycles
+    // the arena through `__arena_reset` could serve a *stale* verdict from the
+    // previous tenant of the address. Guarded on `size >= 4` purely so a
+    // zero-size request at the very end of memory cannot store out of bounds —
+    // every real record is header-bearing and takes the store.
+    { op: "local.get", index: 0 }, // size
+    { op: "i32.const", value: 4 },
+    { op: "i32.ge_u" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: local_ret },
+        { op: "i32.const", value: 0 },
+        { op: "i32.store", align: 2, offset: 0 },
+      ],
+      else: [],
+    },
     // return ret
     { op: "local.get", index: local_ret },
   ];
@@ -1274,6 +1318,101 @@ export function addStringRuntime(mod: WasmModule): void {
     { op: "i32.load", align: 2, offset: 8 },
   ]);
 
+  // __str_is_ascii: 1 when every byte is < 0x80, else 0 (#3673).
+  //
+  // For an ASCII string the UTF-8 byte index *is* the UTF-16 code-unit index
+  // and the byte count *is* `.length`, which turns two otherwise O(n) walks
+  // (__str_length_utf16 and __linear_ir_str_char_code_at) into single loads.
+  // Both are called once per character by any tokenizer, so without this the
+  // pair costs O(n^2) — measured at 208x slower than the WasmGC lane, which
+  // stores fixed-width i16 and indexes in O(1).
+  //
+  // The verdict is a pure function of immutable string bytes, so it is
+  // computed once and memoised in the record header; that is what removes the
+  // quadratic term rather than merely shrinking its constant. `__malloc`
+  // zeroes the header word on every hand-out, so STRING_ASCII_UNKNOWN is the
+  // guaranteed initial state and a recycled arena address cannot inherit the
+  // previous tenant's verdict.
+  // locals: state(1), byteLen(2), i(3)
+  addRuntimeFunc(
+    mod,
+    "__str_is_ascii",
+    [{ kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const state = firstLocalIdx;
+      const byteLen = firstLocalIdx + 1;
+      const i = firstLocalIdx + 2;
+      return [
+        { op: "local.get", index: 0 },
+        { op: "i32.load8_u", align: 0, offset: STRING_ASCII_CACHE_OFFSET },
+        { op: "local.set", index: state },
+        { op: "local.get", index: state },
+        { op: "i32.const", value: STRING_ASCII_UNKNOWN },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "i32.load", align: 2, offset: 8 },
+            { op: "local.set", index: byteLen },
+            { op: "i32.const", value: 0 },
+            { op: "local.set", index: i },
+            { op: "i32.const", value: STRING_ASCII_YES },
+            { op: "local.set", index: state },
+            {
+              op: "block",
+              blockType: { kind: "empty" },
+              body: [
+                {
+                  op: "loop",
+                  blockType: { kind: "empty" },
+                  body: [
+                    { op: "local.get", index: i },
+                    { op: "local.get", index: byteLen },
+                    { op: "i32.ge_u" },
+                    { op: "br_if", depth: 1 },
+                    { op: "local.get", index: 0 },
+                    { op: "local.get", index: i },
+                    { op: "i32.add" },
+                    { op: "i32.load8_u", align: 0, offset: 12 },
+                    { op: "i32.const", value: 0x80 },
+                    { op: "i32.ge_u" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "i32.const", value: STRING_ASCII_NO },
+                        { op: "local.set", index: state },
+                        { op: "br", depth: 2 },
+                      ],
+                      else: [],
+                    },
+                    { op: "local.get", index: i },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: i },
+                    { op: "br", depth: 0 },
+                  ],
+                },
+              ],
+            },
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: state },
+            { op: "i32.store8", align: 0, offset: STRING_ASCII_CACHE_OFFSET },
+          ],
+          else: [],
+        },
+        { op: "local.get", index: state },
+        { op: "i32.const", value: STRING_ASCII_YES },
+        { op: "i32.eq" },
+      ];
+    },
+    3,
+  );
+
   // __str_length_utf16: JS `String.prototype.length` = number of UTF-16 code
   // units (#1976). Linear strings are stored as UTF-8 bytes, so walk the leading
   // bytes and count code units: a leading byte 0xxxxxxx/110xxxxx/1110xxxx starts
@@ -1299,6 +1438,17 @@ export function addStringRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 8 },
         { op: "local.set", index: byteLen },
+        // ASCII fast path (#3673): code units == bytes, so skip the walk. A
+        // `while (pos < s.length)` scan calls this once per character, which is
+        // what made the walk quadratic.
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: findFuncIndex(mod, "__str_is_ascii") },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "local.get", index: byteLen }, { op: "return" }],
+          else: [],
+        },
         // i = 0; count = 0
         { op: "i32.const", value: 0 },
         { op: "local.set", index: i },
@@ -2561,6 +2711,44 @@ export function addLinearIrStringRuntime(mod: WasmModule): void {
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 8 },
         { op: "local.set", index: byteLen },
+        // A UTF-8 sequence never encodes more code units than it occupies
+        // bytes (4 bytes -> at most 2 units), so unitLen <= byteLen and an
+        // index at or past byteLen is out of range for *any* string. This
+        // replaces a full walk-to-the-end with one compare (§22.1.3.3 NaN).
+        { op: "local.get", index: 1 },
+        { op: "local.get", index: byteLen },
+        { op: "i32.ge_u" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "f64.const", value: Number.NaN }, { op: "return" }],
+        },
+        // ── ASCII fast path ────────────────────────────────────────────────
+        // Indexing the i-th UTF-16 code unit by decoding UTF-8 from byte 0 is
+        // O(i), so an N-character scan — a tokenizer — costs O(N^2). That is
+        // an implementation choice, not a property of linear memory: the GC
+        // lane stores fixed-width i16 and indexes in O(1). For a pure-ASCII
+        // string the byte index *is* the code-unit index, so the whole decode
+        // collapses to one `i32.load8_u`. `__str_is_ascii` memoises its verdict
+        // in the header, which is what removes the quadratic term rather than
+        // merely shrinking its constant.
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: findFuncIndex(mod, "__str_is_ascii") },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // `index < byteLen` is already established above, so this load is
+            // in bounds.
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "i32.add" },
+            { op: "i32.load8_u", align: 0, offset: 12 },
+            { op: "f64.convert_i32_u" },
+            { op: "return" },
+          ],
+        },
+        // ── Slow path: mixed-width string, decode sequence by sequence ─────
         { op: "i32.const", value: 0 },
         { op: "local.set", index: bytePos },
         { op: "i32.const", value: 0 },
