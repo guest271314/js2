@@ -82,7 +82,13 @@ import {
 } from "./statements/nested-declarations.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 // (#3683 S2) typed-`this` twin admission + prologue/shim emission.
-import { admitTypedThisTwin, buildTypedThisForwardGuard, emitTypedThisPrologue } from "./typed-this.js";
+import {
+  admitTypedThisTwin,
+  buildTypedThisForwardGuard,
+  directCallLoweringEnabled,
+  emitTypedThisPrologue,
+  recordDirectCallTwin,
+} from "./typed-this.js";
 import { addFunctionOwnLocals, registerOwnLocalsCollector } from "./binding-info.js"; // (#2103) shared, memoized per-function binding-info oracle
 // (#2957 phase 2) arrow/fn-expr async activation. Imported LAST: `async-activation`
 // pulls the `async-cps`/`async-frame` chain which imports back into `closures`
@@ -1928,11 +1934,11 @@ export interface LiftedClosureBodyOptions {
   isNamedFuncExpr: boolean;
   /**
    * (#3683 S2) When set, compile this body as the TYPED TWIN of an admitted
-   * fnctor prototype method: a prologue casts `__current_this` down to
-   * `fnctorStructTypeIdx` once, and `fctx.typedThisStructIdx` /
+   * fnctor prototype method: param 0 is the `(ref $__fnctor_F)` receiver (see
+   * `emitTypedThisPrologue`), and `fctx.typedThisStructIdx` /
    * `typedThisLocalIdx` let the property-read / assignment / compound-update
-   * lowerings emit bare `struct.get`/`struct.set` against that local instead
-   * of the `__get_member_*` / `__set_member_*` dispatcher calls.
+   * lowerings emit bare `struct.get`/`struct.set` against it instead of the
+   * `__get_member_*` / `__set_member_*` dispatcher calls.
    */
   typedThis?: { fnctorStructTypeIdx: number; structName: string };
 }
@@ -1987,10 +1993,20 @@ export function compileLiftedClosureBody(
   const usesWrapperFuncType = liftedSelfTypeIdx !== structTypeIdx;
   const selfParamKind = isNamedFuncExpr ? ("ref_null" as const) : ("ref" as const);
   const selfTypeIdx = liftedSelfTypeIdx;
+  // (#3683 S3) A twin's param 0 carries the RECEIVER, not the closure env. See
+  // `emitTypedThisPrologue` for the full argument; the short version is that
+  // admission already requires zero captures / no self binding / not a named
+  // function expression, so nothing in an admitted body can read `__self` — and
+  // handing the receiver in as a real parameter is what lets a devirtualized
+  // caller invoke the twin without first materializing the closure singleton.
+  const twinSelfTypeIdx =
+    opts.typedThis && directCallLoweringEnabled() ? opts.typedThis.fnctorStructTypeIdx : undefined;
   const liftedFctx: FunctionContext = {
     name: closureName,
     params: [
-      { name: "__self", type: { kind: selfParamKind, typeIdx: selfTypeIdx } },
+      twinSelfTypeIdx !== undefined
+        ? { name: "__self", type: { kind: "ref" as const, typeIdx: twinSelfTypeIdx } }
+        : { name: "__self", type: { kind: selfParamKind, typeIdx: selfTypeIdx } },
       // (#3359) Skip a TS `this` param — type-level only, never a runtime arg.
       ...runtimeParameters(arrow).map((p, i) => ({
         name: ts.isIdentifier(p.name) ? p.name.text : `__param${i}`,
@@ -2041,15 +2057,15 @@ export function compileLiftedClosureBody(
     liftedFctx.localMap.set(liftedFctx.params[i]!.name, i);
   }
 
-  // (#3683 S2) Typed-`this` TWIN prologue. Emitted FIRST so `typedThisLocalIdx`
-  // is live for every subsequent statement. The generic body's `ref.test` shim
-  // is what makes this `ref.cast` infallible — see typed-this.ts.
+  // (#3683 S2/S3) Typed-`this` TWIN prologue. Runs FIRST so `typedThisLocalIdx`
+  // is live for every subsequent statement. Since S3 this emits NO instructions
+  // at all — the receiver arrives as param 0 — see typed-this.ts.
   if (opts.typedThis) {
     emitTypedThisPrologue(
       liftedFctx,
       opts.typedThis.structName,
       opts.typedThis.fnctorStructTypeIdx,
-      ensureCurrentThisGlobal(ctx),
+      twinSelfTypeIdx === undefined ? ensureCurrentThisGlobal(ctx) : undefined,
     );
   }
 
@@ -2707,13 +2723,15 @@ export function compileArrowAsClosure(
 
   // 6b. (#3683 S2) Typed-`this` TWIN. When this lifted closure is an admitted
   //     write-once fnctor prototype method, compile its body a SECOND time with
-  //     `this` pre-cast to `$__fnctor_F` in a local, then prepend a `ref.test`
-  //     shim to the GENERIC body that forwards every param to the twin on a
-  //     shape hit. Detached receivers / patched prototypes / foreign shapes
-  //     keep the untouched generic body. The twin shares the generic's wasm
-  //     signature (self + params), so the forward is a verbatim `local.get`
-  //     sequence with no marshalling. See typed-this.ts for the equivalence
-  //     argument behind the inline struct.get/struct.set branches.
+  //     the receiver arriving as a typed `(ref $__fnctor_F)` PARAMETER, then
+  //     prepend a `ref.test` shim to the GENERIC body that casts
+  //     `__current_this` and forwards on a shape hit. Detached receivers /
+  //     patched prototypes / foreign shapes keep the untouched generic body.
+  //     (#3683 S3) The twin's param 0 replaces `__self` — admission guarantees
+  //     nothing reads it — which is what makes a devirtualized DIRECT call
+  //     possible without materializing the closure singleton. See typed-this.ts
+  //     for the equivalence argument behind the inline struct.get/struct.set
+  //     branches and for the receiver-param design note.
   {
     const admitted = admitTypedThisTwin(ctx, arrow, {
       thisStructName: liftedFctx.thisStructName,
@@ -2725,6 +2743,16 @@ export function compileArrowAsClosure(
     });
     if (admitted) {
       const twinName = `${closureName}__typed_this`;
+      // The twin's own wasm type: `(ref $__fnctor_F, ...userParams) -> results`.
+      // `return_call` constrains only RESULTS to match the caller, so the shim
+      // in the generic body can tail-call across this param-type difference.
+      const useReceiverParam = directCallLoweringEnabled();
+      const twinParams: ValType[] = useReceiverParam
+        ? [{ kind: "ref", typeIdx: admitted.structTypeIdx }, ...arrowParams]
+        : liftedParams;
+      const twinTypeIdx = useReceiverParam
+        ? addFuncType(ctx, twinParams, closureResults, `${twinName}_type`)
+        : liftedFuncTypeIdx;
       const twin = compileLiftedClosureBody(ctx, fctx, arrow, {
         closureName: twinName,
         captures,
@@ -2734,10 +2762,10 @@ export function compileArrowAsClosure(
         // BLOCK body), but hand the twin its own array so a future shape
         // change can never let it rewrite the generic's results in place.
         closureResults: [...closureResults],
-        liftedParams,
+        liftedParams: twinParams,
         structTypeIdx,
         liftedSelfTypeIdx,
-        liftedFuncTypeIdx,
+        liftedFuncTypeIdx: twinTypeIdx,
         closureReturnType,
         isGenerator,
         isAsync,
@@ -2745,13 +2773,13 @@ export function compileArrowAsClosure(
         isNamedFuncExpr: !!isNamedFuncExpr,
         typedThis: { fnctorStructTypeIdx: admitted.structTypeIdx, structName: admitted.structName },
       });
-      // `return_call` demands the callee's type EQUAL the caller's. Admission
-      // requires a block body, so the concise-body return-type repair (the only
-      // thing that can rewrite `liftedFuncTypeIdx`) cannot have fired — but
-      // assert it rather than trust it: a future body-shape change that repaired
-      // only the twin would emit a module that fails validation, which is a much
-      // worse failure than silently skipping one monomorphization.
-      if (twin.liftedFuncTypeIdx !== liftedFuncTypeIdx) {
+      // Admission requires a block body, so the concise-body return-type repair
+      // (the only thing that can rewrite `liftedFuncTypeIdx`) cannot have fired
+      // — but assert it rather than trust it: a repaired twin's RESULTS would no
+      // longer match the generic's, and the shim's `return_call` would emit a
+      // module that fails validation. That is much worse than silently skipping
+      // one monomorphization.
+      if (twin.liftedFuncTypeIdx !== twinTypeIdx) {
         // Discard the twin (its body is unreferenced; the compile's other
         // effects — late imports, string constants, dispatcher reservations —
         // are all idempotent) and keep the generic body as the only lowering.
@@ -2767,17 +2795,23 @@ export function compileArrowAsClosure(
         });
         ctx.liveBodies.delete(twin.liftedFctx.body);
         ctx.funcMap.set(twinName, twinFuncIdx);
+        recordDirectCallTwin(ctx, arrow, twinName, twinParams, closureResults);
         // Prepend IN PLACE: `liftedFctx.body` is the same array object already
         // registered as the generic function's body, and it stays covered by
         // `shiftLateImportIndices` (which walks `ctx.mod.functions`), so the
         // baked `return_call twinFuncIdx` shifts with any later late-import
-        // addition.
+        // addition. The guard's scratch anyref local is appended to the SAME
+        // `locals` array `pushDefinedFunc` already captured by reference.
+        const guardTmp = useReceiverParam
+          ? allocLocal(liftedFctx, `__tt_shim_${liftedFctx.locals.length}`, { kind: "anyref" })
+          : undefined;
         liftedFctx.body.unshift(
           ...buildTypedThisForwardGuard(
             admitted.structTypeIdx,
             ensureCurrentThisGlobal(ctx),
             liftedFctx.params.length,
             twinFuncIdx,
+            guardTmp,
           ),
         );
         ctx.typedThisTwinCount = (ctx.typedThisTwinCount ?? 0) + 1;

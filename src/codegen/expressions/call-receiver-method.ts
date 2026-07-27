@@ -33,7 +33,8 @@ import {
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import { classMemberFuncKey, fnctorAncestorOfClass } from "../class-member-keys.js";
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
-import { compileArrowAsClosure } from "../closures.js";
+import { compileArrowAsClosure, computeClosureWrapperSig } from "../closures.js";
+import { tryEmitDirectTwinCall } from "../typed-this.js"; // (#3683 S3) direct-call devirtualization
 import { pushBody } from "../context/bodies.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -80,7 +81,12 @@ import {
 import type { InnerResult } from "../shared.js";
 import { brandExternMethodResult, coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { tryBuiltinPrototypeMethodBrandThrow } from "../builtin-prototype-brand.js";
-import { emitSetExtrasArgv, maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
+import {
+  emitSetExtrasArgv,
+  ensureArgcGlobal,
+  ensureCurrentThisGlobal,
+  maybeSetArgcForKnownCall,
+} from "../statements/nested-declarations.js";
 import {
   compileGuardedNativeStringMethodCall,
   compileNativeStringMethodCall,
@@ -314,6 +320,19 @@ function tryCompileLateFnctorPrototypeMethodCall(
     // unpinned receivers retain the host MOP path.
     if (ctx.wasi || !pinnedFnctor) return undefined;
   }
+
+  // (#3683 S3) Inside a typed twin, `this.<m>(...)` on a write-once prototype
+  // method of the SAME fnctor lowers to a direct call. MUST run before the
+  // `__call_m_*` reservation below — a decline falls straight through to it and
+  // is byte-for-byte the pre-S3 lowering. See typed-this.ts for the soundness
+  // argument and the reserve-then-fill rationale.
+  const devirtualized = tryEmitDirectTwinCall(ctx, fctx, expr, propAccess, {
+    computeSig: (fn) => computeClosureWrapperSig(ctx, fn),
+    reserveLegacyDispatch: (name, arity) => reserveClosedMethodDispatch(ctx, name, arity),
+    ensureCurrentThisGlobal: () => ensureCurrentThisGlobal(ctx),
+    ensureArgcGlobal: () => ensureArgcGlobal(ctx),
+  });
+  if (devirtualized !== undefined) return devirtualized;
 
   const dispatchArgs = expr.arguments.some((arg) => ts.isSpreadElement(arg))
     ? flattenCallArgs(expr.arguments)

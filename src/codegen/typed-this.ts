@@ -70,13 +70,15 @@
  */
 import { ts, forEachChild } from "../ts-api.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import type { Instr, ValType } from "../ir/types.js";
-import { resolveEnclosingFnctorOwner } from "./fnctor-escape-gate.js";
+import type { Instr, LocalDef, ValType } from "../ir/types.js";
+import { resolveEnclosingFnctorOwner, resolveLiftedMethodThisStruct } from "./fnctor-escape-gate.js";
 import { allocLocal } from "./context/locals.js";
+import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
+import { addFuncType } from "./registry/types.js";
 // `shared.js` holds the late-bound delegates precisely so a feature module can
 // reach the expression/coercion engines without a cycle back through
 // expressions.ts / index.ts.
-import { coerceType, compileExpression } from "./shared.js";
+import { coerceType, compileExpression, flushLateImportShifts, valTypesMatch } from "./shared.js";
 
 /**
  * Property names whose reads/writes have dedicated lowerings (array length,
@@ -240,25 +242,63 @@ export function admitTypedThisTwin(
 }
 
 /**
- * (#3683 S2) Twin prologue: `__current_this` → `any.convert_extern` →
- * `ref.cast $__fnctor_F` → a non-nullable typed local. The generic body's
- * `ref.test` shim is what makes the cast infallible, so no null guard is
- * emitted here.
+ * (#3683 S2/S3) Twin prologue — since S3 this emits NOTHING.
+ *
+ * S2 opened every twin with `global.get __current_this; any.convert_extern;
+ * ref.cast $__fnctor_F; local.set $tt`. S3 replaces the twin's unread `__self`
+ * parameter with the RECEIVER itself, typed `(ref $__fnctor_F)`, so the typed
+ * local IS param 0 and the entry cast disappears. Three things make that safe:
+ *
+ *   - **Nothing reads `__self` in an admitted body.** {@link admitTypedThisTwin}
+ *     already requires zero captures, no self-recursive binding and no named
+ *     function expression — the three (and only) consumers of param 0 in
+ *     `compileLiftedClosureBody`.
+ *   - **The generic shim can still tail-call it.** `return_call` constrains only
+ *     the callee's RESULTS to equal the caller's; parameters are ordinary stack
+ *     operands, so the shim may push a cast receiver where the generic's own
+ *     param 0 is a closure struct.
+ *   - **It is what makes S3 possible at all.** A devirtualized `this.m2(…)`
+ *     inside another twin has the receiver in a typed register but no handle on
+ *     `m2`'s closure singleton — that value is built during `__module_init` and
+ *     stored straight into the prototype `$Object`, and the lifted `__self`
+ *     param is non-nullable, so neither `ref.null` nor a global-free reload is
+ *     available. Taking the receiver as the parameter sidesteps the whole
+ *     question (the S1 design note's option (b), chosen over the per-method
+ *     singleton globals of option (a) because it adds no module state and
+ *     removes the per-entry cast instead of adding a per-call `global.get`).
+ *
+ * `__current_this` is still installed by the caller for every twin entry, since
+ * a twin body's NON-field uses of `this` (a `this` passed as an argument, a
+ * dispatcher fallback read, a nested legacy method call) read that global.
  */
 export function emitTypedThisPrologue(
   fctx: FunctionContext,
   structName: string,
   structTypeIdx: number,
-  currentThisGlobalIdx: number,
+  /**
+   * Only set under the `JS2WASM_DIRECT_CALLS=0` kill-switch, which keeps the S2
+   * twin ABI (`__self` at param 0) so the switch bisects the WHOLE slice — the
+   * receiver-parameter change included — not just the call sites.
+   */
+  legacyCurrentThisGlobalIdx?: number,
 ): void {
+  fctx.typedThisStructIdx = structTypeIdx;
+  fctx.typedThisStructName = structName;
+  if (legacyCurrentThisGlobalIdx === undefined) {
+    fctx.typedThisLocalIdx = 0;
+    return;
+  }
   const localIdx = allocLocal(fctx, "__typed_this", { kind: "ref", typeIdx: structTypeIdx });
-  fctx.body.push({ op: "global.get", index: currentThisGlobalIdx });
+  fctx.body.push({ op: "global.get", index: legacyCurrentThisGlobalIdx });
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
   fctx.body.push({ op: "local.set", index: localIdx });
-  fctx.typedThisStructIdx = structTypeIdx;
-  fctx.typedThisStructName = structName;
   fctx.typedThisLocalIdx = localIdx;
+}
+
+/** True unless the `JS2WASM_DIRECT_CALLS=0` kill-switch is set. */
+export function directCallLoweringEnabled(): boolean {
+  return directCallsEnabled();
 }
 
 /**
@@ -266,9 +306,12 @@ export function emitTypedThisPrologue(
  *
  *     global.get __current_this
  *     any.convert_extern
+ *     local.tee $tmp
  *     ref.test $__fnctor_F
  *     if
- *       local.get 0 … local.get n   ;; __self + every declared param, verbatim
+ *       local.get $tmp
+ *       ref.cast $__fnctor_F         ;; the twin's typed receiver param
+ *       local.get 1 … local.get n    ;; every declared param, verbatim
  *       return_call $twin
  *     end
  *
@@ -282,18 +325,29 @@ export function buildTypedThisForwardGuard(
   currentThisGlobalIdx: number,
   paramCount: number,
   twinFuncIdx: number,
+  /** `undefined` under the kill-switch — the S2 twin shares this signature. */
+  scratchLocalIdx: number | undefined,
 ): Instr[] {
-  const forward: Instr[] = [];
-  for (let i = 0; i < paramCount; i++) forward.push({ op: "local.get", index: i });
-  // `return_call`, not `call; return`: the twin shares the generic body's
-  // wasm signature exactly (same params, same results), so the tail call is
-  // well-typed and the shim costs no extra frame. The guard sits at function
-  // ENTRY, outside any `try`, so the tail-call restriction on handler scopes
-  // cannot apply.
+  const forward: Instr[] =
+    scratchLocalIdx === undefined
+      ? [{ op: "local.get", index: 0 }]
+      : [
+          { op: "local.get", index: scratchLocalIdx },
+          { op: "ref.cast", typeIdx: structTypeIdx },
+        ];
+  // Param 0 is the generic body's `__self`; the twin takes the receiver there
+  // instead, so forwarding starts at 1.
+  for (let i = 1; i < paramCount; i++) forward.push({ op: "local.get", index: i });
+  // `return_call`, not `call; return`: `return_call` requires only that the
+  // callee's RESULTS equal the caller's, which holds by construction (the twin
+  // is minted with `closureResults`), so the tail call is well-typed and the
+  // shim costs no extra frame. The guard sits at function ENTRY, outside any
+  // `try`, so the tail-call restriction on handler scopes cannot apply.
   forward.push({ op: "return_call", funcIdx: twinFuncIdx });
   return [
     { op: "global.get", index: currentThisGlobalIdx },
     { op: "any.convert_extern" },
+    ...(scratchLocalIdx === undefined ? [] : ([{ op: "local.tee", index: scratchLocalIdx }] satisfies Instr[])),
     { op: "ref.test", typeIdx: structTypeIdx },
     { op: "if", blockType: { kind: "empty" }, then: forward, else: [] },
   ];
@@ -562,4 +616,622 @@ export function tryEmitTypedThisIncDec(
   fctx.body.push({ op: "local.get", index: tmp });
   typedThisStats.inlineIncDec++;
   return { kind: "f64" };
+}
+
+// ===========================================================================
+// #3683 S3 — direct-call devirtualization between typed twins
+// ===========================================================================
+//
+// ## What it replaces
+//
+// Inside a twin, `this.parseStatement(x)` still crossed the full dynamic
+// method-call bridge: `__call_m_parseStatement_1` → `__method_cache_lookup`
+// (interned-name probe + per-object cache validation) → `__call_fn_method_1`
+// (argc globals, `__current_this` install, an N-arm `ref.test` ladder over
+// closure func types, `call_ref`) → the lifted body, with every argument boxed
+// to externref on the way in and the result boxed on the way out. The #3673
+// round-25 profile put that family at ≈13% of the deep-warm parse
+// (`__call_fn_method_1` 4.9%, `_0` 3.6%, `__method_cache_lookup` 2.3%,
+// `__extern_method_call` 1.2%, `__apply_closure` 1.1%).
+//
+// S3 lowers such a call to `local.get <this>; <args>; call $__dc_<F>_<m>_<n>`
+// — one direct call, arguments in their NATIVE types, result in its native
+// type. The trampoline is 8 instructions of `__current_this`/`__argc`
+// bookkeeping around a second direct call to the twin.
+//
+// ## Why the trampoline exists (it is not laziness)
+//
+// Acorn's parser is mutually recursive: `parseMaybeAssign` calls
+// `parseExprOps`, which calls `parseMaybeUnary`, which calls back into
+// `parseMaybeAssign`. Whichever body compiles first references a twin that does
+// not exist yet, so the call site CANNOT bake the callee's index. The project's
+// established answer to that is reserve-then-fill (`reserveMemberGetDispatch` /
+// `reserveClosedMethodDispatch`): mint a stable handle now, fill the body at
+// finalize when every name is resolvable. Patching the call instruction later
+// was rejected — it would mean holding `Instr` object identities across the
+// whole compile, exactly the aliasing hazard the codebase forbids.
+//
+// The trampoline earns its keep twice over:
+//   1. it OWNS the `__current_this` save/install/restore, so N call sites cost
+//      one instruction each instead of five (and the discipline lives in ONE
+//      place, mirroring `__call_fn_method_N`, closure-exports.ts);
+//   2. it gives the fill a place to DEGRADE. Admission at the call site is
+//      decided from the AST + the S1 verdicts; the twin's own admission
+//      additionally needs capture analysis, which is only available once the
+//      method's closure is compiled. When the two disagree, the fill emits the
+//      byte-for-byte legacy `__call_m_<m>_<n>` sequence instead — so a call site
+//      can never point at a twin that failed to materialize.
+//
+// ## Why the devirtualization is sound
+//
+// The receiver is the twin's own `this`, already proven `(ref $__fnctor_F)` by
+// the shim's `ref.test`. `this.<m>` therefore resolves through exactly two
+// steps, and both are pinned at compile time:
+//
+//   - **Own property?** In STANDALONE mode a `$__fnctor_F` instance is a CLOSED
+//     WasmGC struct: `deriveFnctorFields` computes the complete field list, and
+//     the expando sidecar that would let a property appear at runtime is
+//     explicitly host-mode-only ("Host mode already has its fnctor sidecar for
+//     expando properties… This native shape growth is the host-free standalone
+//     replacement only", fnctor-escape-gate.ts). So the only own-property
+//     shadow possible is a DECLARED field of that struct, which
+//     {@link admitDirectCall} rejects by name — together with accessor names
+//     and the reserved-name set the pinned path itself refuses. This is why S3
+//     does not need `otherNameWrites` to be non-null: acorn trips that sentinel
+//     with `keywordTypes[name] = …` (a plain object, not a Parser), and the
+//     closed-struct argument is both stronger and receiver-shape-based, exactly
+//     as the S1 design note required.
+//   - **Prototype slot?** The S1 write-once verdict says `F.prototype.<m>` is
+//     assigned exactly once, unconditionally, at module top level, and never
+//     written again; `poisoned` excludes any class whose prototype OBJECT was
+//     reassigned, computed-written, deleted from, or escaped. `inheritedFrom`
+//     excludes classes whose prototype is an `Object.create` argument, so no
+//     foreign receiver can inherit `m` and override it.
+//
+// Everything the analysis cannot prove DECLINES, and a decline is
+// byte-for-byte the pre-S3 lowering (the call falls through to
+// `tryCompileLateFnctorPrototypeMethodCall`'s `__call_m_*` emission). The
+// failure mode is only ever "miss a devirtualization".
+//
+// ## Kill-switch / diagnostics
+//
+// `JS2WASM_DIRECT_CALLS=0` disables the whole slice (call sites decline before
+// any reservation, so the module is pre-S3 byte-for-byte).
+// `JS2WASM_DIRECT_CALLS_DEBUG=1` prints, at process exit, the number of
+// devirtualized sites, the number of trampolines that had to degrade to the
+// legacy fill, and a histogram of decline reasons.
+
+/** Env kill-switch: `JS2WASM_DIRECT_CALLS=0` disables S3 devirtualization. */
+function directCallsEnabled(): boolean {
+  return process.env.JS2WASM_DIRECT_CALLS !== "0";
+}
+
+/** (#3683 S3) Devirtualization tallies — inert unless `_DEBUG=1`. */
+export const directCallStats = {
+  sites: 0,
+  trampolines: 0,
+  twinFills: 0,
+  legacyFills: 0,
+  declined: new Map<string, number>(),
+};
+let directStatsHookInstalled = false;
+function noteDirectStats(): void {
+  if (directStatsHookInstalled || process.env.JS2WASM_DIRECT_CALLS_DEBUG !== "1") return;
+  directStatsHookInstalled = true;
+  process.on("exit", () => {
+    const top = [...directCallStats.declined.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25);
+    process.stderr.write(
+      `[direct-calls] sites=${directCallStats.sites} trampolines=${directCallStats.trampolines} ` +
+        `twinFills=${directCallStats.twinFills} legacyFills=${directCallStats.legacyFills}\n` +
+        `[direct-calls] declined: ${top.map(([k, v]) => `${k}=${v}`).join(" ")}\n`,
+    );
+  });
+}
+function declineDirect(reason: string): undefined {
+  if (process.env.JS2WASM_DIRECT_CALLS_DEBUG === "1") {
+    noteDirectStats();
+    directCallStats.declined.set(reason, (directCallStats.declined.get(reason) ?? 0) + 1);
+  }
+  return undefined;
+}
+
+/**
+ * (#3683 S3) One reserved `__dc_<F>_<m>_<n>` trampoline, filled at finalize.
+ *
+ * ## ABI note: why the RECEIVER parameter is `externref`, not `(ref $__fnctor_F)`
+ *
+ * The natural signature is `(ref $__fnctor_F, ...params)` — the receiver is
+ * already in a typed register at every call site. It cannot be used, because of
+ * a latent imprecision in the `ref.null.extern` retyping fixup
+ * (`fixups.ts`, the backward walk at the end of `applyRefNullFixups`): from a
+ * `call`, it walks backwards mapping ONE INSTRUCTION per parameter, and skips a
+ * nested `call`'s own arguments by subtracting the callee's PARAMETER COUNT —
+ * i.e. it silently assumes every argument is produced by exactly one
+ * instruction. Acorn's
+ *
+ *     this.parseExprOp(this.parseMaybeUnary(null, false, false, forInit), …)
+ *
+ * breaks that assumption: the two `false` arguments are `i32.const 0` +
+ * `call __box_boolean`, two instructions each, so the OUTER walk under-skips by
+ * two and lands the inner call's `ref.null.extern` on the outer callee's
+ * PARAMETER 0. Every pre-existing callee in that position (`__call_m_*`,
+ * `__extern_method_call`) has an all-`externref` signature, so the misaligned
+ * landing was harmless — the fixup only rewrites when the parameter is a
+ * `ref`/`ref_null`. A typed receiver made parameter 0 a struct ref for the
+ * first time, and the null was rewritten to `ref.null $__fnctor_Parser`,
+ * failing validation ("call[1] expected type externref").
+ *
+ * Rather than re-engineer a shared fixup that would need a real operand-count
+ * model (and whose current approximations other lowerings may depend on), S3
+ * keeps its own signature outside the hazard: the receiver travels as
+ * `externref` and a call with any `ref`-typed user parameter simply declines.
+ * No `__dc_*` signature then contains a `ref`/`ref_null`, so a misaligned
+ * landing is a no-op exactly as it is for `__call_m_*`. The cost is one
+ * `extern.convert_any` per call site and one `any.convert_extern; ref.cast`
+ * per trampoline — both trivial against the bridge being removed. The fixup
+ * imprecision itself is a genuine pre-existing bug and is recorded in the
+ * #3683 issue notes.
+ */
+export interface DirectCallTrampoline {
+  /** Stable defined-function handle — safe to bake into `call` immediates. */
+  readonly funcIdx: number;
+  readonly className: string;
+  readonly methodName: string;
+  readonly arity: number;
+  /** The receiver's `$__fnctor_F` type index — the trampoline casts back to it. */
+  readonly fnctorStructTypeIdx: number;
+  /** `[externref, ...userParams]`, all non-`ref` (see the ABI note). */
+  readonly params: ValType[];
+  /** Exactly one result (a void-returning callee declines at the call site). */
+  readonly results: ValType[];
+  /** `__call_m_<m>_<n>` handle — the byte-for-byte legacy degradation target. */
+  readonly legacyDispatchIdx: number;
+  readonly currentThisGlobalIdx: number;
+  readonly argcGlobalIdx: number;
+}
+
+/**
+ * (#3683 S3) The few compiler services the call-site emitter needs that live in
+ * modules importing THIS one (`closures.ts`, `closed-method-dispatch.ts`).
+ * Passed in as thunks rather than imported so the module graph stays acyclic
+ * and so the globals are only materialized on a site that actually devirtualizes.
+ */
+export interface DirectCallDeps {
+  /** `computeClosureWrapperSig` — the twin's exact param/return ValTypes. */
+  computeSig(fn: ts.FunctionExpression): { params: ValType[]; returnType: ValType | null };
+  /** `reserveClosedMethodDispatch` — the SAME dispatcher this site would
+   *  otherwise have reserved, so no new dispatcher appears in the module. */
+  reserveLegacyDispatch(methodName: string, arity: number): number;
+  ensureCurrentThisGlobal(): number;
+  ensureArgcGlobal(): number;
+}
+
+/** `runtimeParameters` (closures.ts), duplicated to keep this module acyclic. */
+function runtimeParams(fn: ts.FunctionExpression): readonly ts.ParameterDeclaration[] {
+  const ps = fn.parameters;
+  const first = ps.length > 0 ? ps[0] : undefined;
+  return first && ts.isIdentifier(first.name) && first.name.escapedText === "this" ? ps.slice(1) : ps;
+}
+
+/**
+ * Does the body reference `arguments`? A direct call bypasses the
+ * `__argc`/`__extras_argv` extras protocol the `arguments` vec is built from,
+ * so such a method keeps the dynamic path. Admission already forbids nested
+ * function-likes, so a plain walk cannot cross a scope boundary that would
+ * rebind the name.
+ */
+function bodyUsesArguments(body: ts.Node): boolean {
+  let found = false;
+  const walk = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(n) && n.text === "arguments") {
+      found = true;
+      return;
+    }
+    forEachChild(n, walk);
+  };
+  forEachChild(body, walk);
+  return found;
+}
+
+/**
+ * (#3683 S3) Record the compiled twin of a write-once prototype method so
+ * `fillDirectCallTrampolines` can resolve it BY NAME (never by index —
+ * `ctx.funcMap` is the shift-maintained source of truth, a captured raw index
+ * is not). The recorded signature is what the fill checks the trampoline's
+ * against before baking a direct `call`.
+ */
+export function recordDirectCallTwin(
+  ctx: CodegenContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+  twinName: string,
+  params: ValType[],
+  results: ValType[],
+): void {
+  const key = writeOnceMethodKeyOf(ctx, arrow);
+  if (key === undefined) return;
+  (ctx.directCallTwins ??= new Map()).set(key, { twinName, params: [...params], results: [...results] });
+}
+
+/**
+ * Memoized `FunctionLikeDeclaration → "<F>/<m>"` view of the S1 verdicts — the
+ * method-name-carrying twin of {@link writeOnceOwnerOf}.
+ */
+function writeOnceMethodKeyOf(ctx: CodegenContext, fn: ts.FunctionLikeDeclaration): string | undefined {
+  let index = ctx.typedThisWriteOnceKeyIndex;
+  if (index === undefined) {
+    index = new Map<ts.FunctionLikeDeclaration, string>();
+    for (const [className, methods] of ctx.fnctorEscapeGate?.protoMethodWriteOnce.methods ?? []) {
+      for (const [methodName, rhs] of methods) index.set(rhs, `${className}/${methodName}`);
+    }
+    ctx.typedThisWriteOnceKeyIndex = index;
+  }
+  return index.get(fn);
+}
+
+/**
+ * (#3683 S3) Decide whether `this.<methodName>(...)` inside the twin of class
+ * `className` may be devirtualized. Returns the callee's write-once RHS on a
+ * hit. Every clause is documented in the module-section header above; the short
+ * form is "the receiver's shape is proven, the slot is provably the single
+ * write-once closure, and the twin ABI can express this call exactly".
+ */
+function admitDirectCall(
+  ctx: CodegenContext,
+  structName: string,
+  className: string,
+  methodName: string,
+): ts.FunctionExpression | undefined {
+  const gate = ctx.fnctorEscapeGate?.protoMethodWriteOnce;
+  if (!gate) return declineDirect("no-gate");
+  if (gate.poisoned.has(className)) return declineDirect("poisoned-class");
+  // `Object.create(F.prototype)` — some foreign object inherits `m` and may
+  // override it. The `ref.cast $__fnctor_F` receiver excludes such an object in
+  // practice (it is a `$Object`, not this struct), but the whole point of the
+  // S1 fact is to not have to rely on that.
+  if (gate.inheritedFrom.has(className)) return declineDirect("inherited-from");
+  const fn = gate.methods.get(className)?.get(methodName);
+  if (fn === undefined) return declineDirect("no-write-once-verdict");
+  if (!ts.isFunctionExpression(fn)) return declineDirect("not-fn-expr");
+  if (fn.name) return declineDirect("named-fn-expr");
+  if (fn.asteriskToken) return declineDirect("generator");
+  if (fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return declineDirect("async");
+  if (!fn.body || !ts.isBlock(fn.body)) return declineDirect("no-block-body");
+  // Mirror the twin's own admission so a devirtualized site normally lands on a
+  // real twin rather than the trampoline's legacy degradation.
+  if (bodyHasNestedFunctionLikeOrWith(fn.body)) return declineDirect("nested-fn-like");
+  if (bodyUsesArguments(fn.body)) return declineDirect("uses-arguments");
+  if (runtimeParams(fn).some((p) => p.dotDotDotToken !== undefined)) return declineDirect("rest-param");
+
+  // Own-property shadowing (see the header): the only slot that can shadow the
+  // prototype on a closed standalone fnctor struct is a DECLARED field.
+  if (RESERVED_PROPS.has(methodName)) return declineDirect(`reserved:${methodName}`);
+  if (ctx.classAccessorSet.has(`${structName}_${methodName}`)) return declineDirect("accessor-name");
+  if (ctx.structFields.get(structName)?.some((f) => f.name === methodName)) return declineDirect("own-field");
+
+  // The callee must be a PROTOTYPE method of this very class, and its lifted
+  // body's `this` pin must resolve to the same struct the caller's does —
+  // otherwise its twin (if any) is typed against a different receiver.
+  const owner = resolveEnclosingFnctorOwner(ctx.checker, fn);
+  if (!owner || !owner.viaPrototype || owner.name !== className) return declineDirect("owner-mismatch");
+  if (resolveLiftedMethodThisStruct(ctx, fn) !== structName) return declineDirect("this-pin-mismatch");
+  return fn;
+}
+
+/** Idempotently reserve the `__dc_<F>_<m>_<n>` trampoline for one method. */
+function reserveDirectCallTrampoline(
+  ctx: CodegenContext,
+  spec: {
+    className: string;
+    methodName: string;
+    arity: number;
+    fnctorStructTypeIdx: number;
+    params: ValType[];
+    results: ValType[];
+    deps: DirectCallDeps;
+  },
+): DirectCallTrampoline {
+  const key = `${spec.className}/${spec.methodName}/${spec.arity}`;
+  const table = (ctx.directCallTrampolines ??= new Map());
+  const existing = table.get(key);
+  if (existing) return existing;
+  const name = `__dc_${spec.className}_${spec.methodName}_${spec.arity}`;
+  // Reserve the legacy dispatcher FIRST: it is the fill's degradation target,
+  // it registers every box/unbox helper the fill needs, and it is the exact
+  // dispatcher this call site would have reserved without S3 — so the set of
+  // `__call_m_*` functions in the module is unchanged. Its import churn must
+  // settle before this trampoline's own handle is minted (the #2681 ordering
+  // trap `reserveMemberGetDispatch` documents).
+  const legacyDispatchIdx = spec.deps.reserveLegacyDispatch(spec.methodName, spec.arity);
+  const currentThisGlobalIdx = spec.deps.ensureCurrentThisGlobal();
+  const argcGlobalIdx = spec.deps.ensureArgcGlobal();
+  const typeIdx = addFuncType(ctx, spec.params, spec.results, `${name}_type`);
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name,
+    typeIdx,
+    locals: [],
+    body: [{ op: "unreachable" }], // filled by fillDirectCallTrampolines
+    exported: false,
+  });
+  ctx.funcMap.set(name, funcIdx);
+  const record: DirectCallTrampoline = {
+    funcIdx,
+    className: spec.className,
+    methodName: spec.methodName,
+    arity: spec.arity,
+    fnctorStructTypeIdx: spec.fnctorStructTypeIdx,
+    params: spec.params,
+    results: spec.results,
+    legacyDispatchIdx,
+    currentThisGlobalIdx,
+    argcGlobalIdx,
+  };
+  table.set(key, record);
+  directCallStats.trampolines++;
+  return record;
+}
+
+/**
+ * (#3683 S3) Lower `this.<m>(a, b)` inside a typed twin to a direct call.
+ * Returns the call's ValType on a hit, or `undefined` to decline — in which
+ * case the caller's existing `__call_m_*` emission runs unchanged.
+ */
+export function tryEmitDirectTwinCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+  deps: DirectCallDeps,
+): ValType | undefined {
+  if (!directCallsEnabled() || !ctx.standalone) return undefined;
+  // Only inside a twin: the receiver-shape proof IS the twin's own `ref.cast`.
+  const structName = fctx.typedThisStructName;
+  const thisLocalIdx = fctx.typedThisLocalIdx;
+  const structTypeIdx = fctx.typedThisStructIdx;
+  if (structName === undefined || thisLocalIdx === undefined || structTypeIdx === undefined) return undefined;
+  if (propAccess.expression.kind !== ts.SyntaxKind.ThisKeyword) return undefined;
+  if (ts.isPrivateIdentifier(propAccess.name)) return undefined;
+  noteDirectStats();
+  // `this.m?.()` / `this?.m()` keep the dynamic path (the nullish short-circuit
+  // is the dispatcher's, and a devirtualized call would skip it).
+  if (propAccess.questionDotToken || expr.questionDotToken) return declineDirect("optional-chain");
+  if (expr.typeArguments && expr.typeArguments.length > 0) return declineDirect("type-arguments");
+  if (expr.arguments.some((a) => ts.isSpreadElement(a))) return declineDirect("spread-arg");
+
+  const methodName = propAccess.name.text;
+  const className = structName.slice("__fnctor_".length);
+  const fn = admitDirectCall(ctx, structName, className, methodName);
+  if (fn === undefined) return undefined;
+
+  // Exact arity only. An under- or over-applied call needs the extras protocol
+  // (`__argc` / `__extras_argv`) that the dynamic bridge implements.
+  const formals = runtimeParams(fn);
+  if (expr.arguments.length !== formals.length) return declineDirect("arity-mismatch");
+
+  const sig = deps.computeSig(fn);
+  // A void-returning callee has NO wasm result, but the legacy degradation
+  // target (`__call_m_*`) always yields an externref — the two ABIs cannot be
+  // reconciled behind one trampoline signature, so decline.
+  if (sig.returnType === null) return declineDirect("void-return");
+  if (sig.params.length !== formals.length) return declineDirect("sig-arity-skew");
+
+  // No `ref`/`ref_null` in the trampoline's own signature — see the ABI note on
+  // `DirectCallTrampoline`. A struct-typed formal is rare (acorn has none) and
+  // declining costs only a missed devirtualization.
+  if (sig.params.some((p) => p.kind === "ref" || p.kind === "ref_null")) {
+    return declineDirect("ref-typed-param");
+  }
+  const tramp = reserveDirectCallTrampoline(ctx, {
+    className,
+    methodName,
+    arity: formals.length,
+    fnctorStructTypeIdx: structTypeIdx,
+    params: [{ kind: "externref" }, ...sig.params],
+    results: [sig.returnType],
+    deps,
+  });
+  // The legacy-dispatcher reservation above may have added late imports; settle
+  // the index shift before emitting into this body (the pre-existing
+  // `tryCompileLateFnctorPrototypeMethodCall` does exactly the same).
+  flushLateImportShifts(ctx, fctx);
+
+  // Receiver first (a `local.get` — side-effect-free), then arguments strictly
+  // left to right, matching the dynamic path's evaluation order. `__current_this`
+  // is installed INSIDE the trampoline, i.e. after every argument has been
+  // evaluated, which is also what the dynamic path does.
+  fctx.body.push({ op: "local.get", index: thisLocalIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  for (let i = 0; i < formals.length; i++) {
+    // Coerce against the TRAMPOLINE's DECLARED parameter, never the signature
+    // just computed: the trampoline is shared by every call site of this
+    // method, and it is its declaration the validator checks the call against.
+    const want = tramp.params[i + 1] ?? { kind: "externref" as const };
+    const got = compileExpression(ctx, fctx, expr.arguments[i]!, want);
+    if (got === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+      coerceType(ctx, fctx, { kind: "externref" }, want);
+    } else if (!valTypesMatch(got, want)) {
+      coerceType(ctx, fctx, got, want);
+    }
+  }
+  fctx.body.push({ op: "call", funcIdx: tramp.funcIdx });
+  directCallStats.sites++;
+  return sig.returnType;
+}
+
+/** Box one native value already on the stack up to `externref`. */
+function boxToExternref(ctx: CodegenContext, type: ValType, out: Instr[]): boolean {
+  if (type.kind === "externref") return true;
+  if (type.kind === "ref" || type.kind === "ref_null" || type.kind === "anyref") {
+    out.push({ op: "extern.convert_any" });
+    return true;
+  }
+  const boxNumIdx = ctx.funcMap.get("__box_number");
+  if (boxNumIdx === undefined) return false;
+  if (type.kind === "i32") {
+    if (type.boolean) {
+      const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+      if (boxBoolIdx === undefined) return false;
+      out.push({ op: "call", funcIdx: boxBoolIdx });
+      return true;
+    }
+    out.push({ op: "f64.convert_i32_s" });
+  } else if (type.kind !== "f64") {
+    return false;
+  }
+  out.push({ op: "call", funcIdx: boxNumIdx });
+  return true;
+}
+
+/** Unbox one `externref` already on the stack down to `type`. */
+function unboxFromExternref(ctx: CodegenContext, type: ValType, out: Instr[]): boolean {
+  if (type.kind === "externref") return true;
+  if (type.kind === "anyref") {
+    out.push({ op: "any.convert_extern" });
+    return true;
+  }
+  if (type.kind === "ref" || type.kind === "ref_null") {
+    out.push({ op: "any.convert_extern" });
+    out.push({ op: "ref.cast", typeIdx: type.typeIdx });
+    return true;
+  }
+  if (type.kind === "i32" && type.boolean) {
+    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean");
+    if (unboxBoolIdx === undefined) return false;
+    out.push({ op: "call", funcIdx: unboxBoolIdx });
+    return true;
+  }
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  if (unboxNumIdx === undefined) return false;
+  if (type.kind === "f64") {
+    out.push({ op: "call", funcIdx: unboxNumIdx });
+    return true;
+  }
+  if (type.kind === "i32") {
+    out.push({ op: "call", funcIdx: unboxNumIdx });
+    out.push({ op: "i32.trunc_sat_f64_s" });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * (#3683 S3) Fill every reserved `__dc_<F>_<m>_<n>` at FINALIZE, when the twin
+ * set is complete. Strictly read-only over `funcMap` — it mints nothing and
+ * adds no imports (every dependency was registered at reserve time, mirroring
+ * `fillMemberGetDispatch`). Must run AFTER `fillClosedMethodDispatch` is
+ * reserved and after `addUnionImports`, so the box/unbox helpers resolve.
+ *
+ * Body shape (`P = 1 + arity` params, `prev`/`res` appended as locals):
+ *
+ *     global.get __current_this ; local.set $prev
+ *     local.get 0 ; global.set __current_this
+ *     i32.const <arity> ; global.set __argc
+ *     <arm>                       ;; leaves the result on the stack
+ *     local.set $res
+ *     i32.const -1 ; global.set __argc
+ *     local.get $prev ; global.set __current_this
+ *     local.get $res
+ *
+ * where `<arm>` is either
+ *
+ *     local.get 0 ; any.convert_extern ; ref.cast $__fnctor_F   ;; the twin's
+ *     local.get 1 … local.get n ; call $twin                    ;; receiver
+ *
+ * or, when the twin did not materialize, the legacy sequence
+ * (`local.get 0; <args boxed>; call __call_m_<m>_<n>; <result unboxed>`).
+ *
+ * `__current_this` is installed even though the twin takes its receiver as a
+ * parameter, because a twin body's NON-field uses of `this` (a `this` argument,
+ * a dispatcher fallback read, a nested legacy `__call_m_*`) read the global.
+ * The save/restore mirrors `__call_fn_method_N` exactly — including its one
+ * known limitation, that an exceptional unwind skips the restore.
+ */
+export function fillDirectCallTrampolines(ctx: CodegenContext): void {
+  const table = ctx.directCallTrampolines;
+  if (!table || table.size === 0) return;
+  for (const t of table.values()) {
+    const fn = definedFuncAt(ctx, t.funcIdx);
+    if (!fn) continue;
+    const paramCount = t.params.length;
+    const resultType = t.results[0];
+    if (resultType === undefined) continue;
+    const locals: LocalDef[] = [
+      { name: "__dc_prev_this", type: { kind: "externref" } },
+      { name: "__dc_res", type: resultType },
+    ];
+    const prevLocal = paramCount;
+    const resLocal = paramCount + 1;
+
+    // --- the arm: a direct call to the twin, or the legacy dispatcher ---
+    const arm: Instr[] = [];
+    const twin = ctx.directCallTwins?.get(`${t.className}/${t.methodName}`);
+    const twinIdx = twin ? ctx.funcMap.get(twin.twinName) : undefined;
+    // Param 0 differs BY DESIGN (twin: `(ref $F)`, trampoline: externref), so
+    // compare the user params only — plus the twin's own receiver type, which
+    // must be the struct this trampoline casts to.
+    const twinSignatureAgrees =
+      twin !== undefined &&
+      twin.params.length === t.params.length &&
+      valTypesMatch(twin.params[0]!, { kind: "ref", typeIdx: t.fnctorStructTypeIdx }) &&
+      twin.params.slice(1).every((p, i) => valTypesMatch(p, t.params[i + 1]!)) &&
+      twin.results.length === t.results.length &&
+      twin.results.every((r, i) => valTypesMatch(r, t.results[i]!));
+    if (twinIdx !== undefined && twinSignatureAgrees) {
+      // The twin's param 0 is the TYPED receiver; the trampoline carries it as
+      // externref (ABI note on `DirectCallTrampoline`), so cast it back. The
+      // cast cannot fail: every call site passed its own `ref.cast`-verified
+      // `this` of exactly this struct.
+      arm.push({ op: "local.get", index: 0 });
+      arm.push({ op: "any.convert_extern" });
+      arm.push({ op: "ref.cast", typeIdx: t.fnctorStructTypeIdx });
+      for (let i = 1; i < paramCount; i++) arm.push({ op: "local.get", index: i });
+      arm.push({ op: "call", funcIdx: twinIdx });
+      directCallStats.twinFills++;
+    } else {
+      // Degradation: the call-site admission passed but the twin did not
+      // materialize (capture analysis is only available once the method's
+      // closure compiles) or its ABI was repaired. Reproduce the legacy
+      // sequence — receiver + arguments boxed to externref through
+      // `__call_m_<m>_<n>`, result unboxed back.
+      const legacy: Instr[] = [{ op: "local.get", index: 0 }];
+      let ok = true;
+      for (let i = 1; i < paramCount && ok; i++) {
+        legacy.push({ op: "local.get", index: i });
+        ok = boxToExternref(ctx, t.params[i]!, legacy);
+      }
+      if (ok) {
+        legacy.push({ op: "call", funcIdx: t.legacyDispatchIdx });
+        ok = unboxFromExternref(ctx, resultType, legacy);
+      }
+      if (!ok) {
+        // No box/unbox helper for this shape. Cannot express the call; leave
+        // the `unreachable` placeholder rather than emit something wrong.
+        // Unreachable in practice: the closed-method dispatcher registers
+        // `__box_number`/`__unbox_number` at reserve time, and every closure
+        // ABI type is one of externref / f64 / i32 / ref.
+        continue;
+      }
+      arm.push(...legacy);
+      directCallStats.legacyFills++;
+    }
+
+    fn.locals = locals;
+    fn.body = [
+      { op: "global.get", index: t.currentThisGlobalIdx },
+      { op: "local.set", index: prevLocal },
+      { op: "local.get", index: 0 },
+      { op: "global.set", index: t.currentThisGlobalIdx },
+      { op: "i32.const", value: t.arity },
+      { op: "global.set", index: t.argcGlobalIdx },
+      ...arm,
+      { op: "local.set", index: resLocal },
+      { op: "i32.const", value: -1 },
+      { op: "global.set", index: t.argcGlobalIdx },
+      { op: "local.get", index: prevLocal },
+      { op: "global.set", index: t.currentThisGlobalIdx },
+      { op: "local.get", index: resLocal },
+    ];
+  }
 }

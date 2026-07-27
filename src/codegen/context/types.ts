@@ -2965,10 +2965,33 @@ export interface CodegenContext {
    */
   typedThisWriteOnceIndex?: Map<ts.FunctionLikeDeclaration, string>;
   /**
+   * (#3683 S3) The same inverse index keyed to `"<F>/<m>"` instead of just
+   * `<F>` — S3 needs the METHOD name to pair a compiled twin with the
+   * trampoline reserved for it. Built lazily, read-only after construction.
+   */
+  typedThisWriteOnceKeyIndex?: Map<ts.FunctionLikeDeclaration, string>;
+  /**
    * (#3683 S2) Diagnostic counter: how many prototype methods received a typed
    * twin in this compilation. Surfaced by the S2 probe/test, not by codegen.
    */
   typedThisTwinCount?: number;
+  /**
+   * (#3683 S3) `"<F>/<m>/<arity>"` → the direct-call TRAMPOLINE reserved for
+   * that prototype method. Reserved lazily at the first devirtualized call site
+   * and FILLED at finalize (`fillDirectCallTrampolines`), because a twin body
+   * routinely calls a method whose own body has not been compiled yet (acorn's
+   * mutually recursive `parseMaybeAssign` ↔ `parseExprOps` ↔ …). See
+   * `typed-this.ts` for why the indirection exists and what each field means.
+   */
+  directCallTrampolines?: Map<string, import("../typed-this.js").DirectCallTrampoline>;
+  /**
+   * (#3683 S3) `"<F>/<m>"` → the compiled typed TWIN of that prototype method:
+   * its wasm function NAME (never a raw index — funcMap is the shift-maintained
+   * source of truth) and its exact param/result ValTypes, so the finalize fill
+   * can prove the trampoline's signature and the twin's agree before baking a
+   * direct `call`. Populated by `compileArrowAsClosure` at twin-mint time.
+   */
+  directCallTwins?: Map<string, { twinName: string; params: ValType[]; results: ValType[] }>;
   /**
    * #2773 S1 (keystone) — fnctor name → reserved `$__fnctor_<Name>` struct type
    * index. Populated up-front by `reserveFnctorStructTypes` (index.ts) at the
