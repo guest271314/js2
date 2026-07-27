@@ -754,12 +754,21 @@ unmodified base, so they are **not** regressions from this round:
    no `toAssignable` case matches (cf. the known #2668 for-in gap). Then
    (1) turns the bogus raise into a trap.
 3. **RegExp construction.** `var re = /ab+c/g` traps with `illegal cast` in
-   `parseFloat` via the regexp validator's `reset`.
+   `parseFloat` via the regexp validator's `reset`. — **already tracked as
+   #3675** (same trap, same `parseFloat`/`reset` dispatch site), confirmed
+   after merging `upstream/main`.
 
-Each deserves its own issue; the standalone lane's correctness gate is
-currently 4 canaries, which is why all four of these (including the `.call`
-bug) were invisible. **A full acorn self-parse is the gate that would have
-caught them** — worth adding once (2) and (3) land.
+Ownership after the 2026-07-27 upstream merge: (3) is **#3675**. The
+oversized-string-literal limit this benchmark also tripped (a single 245 KB
+literal overflows the compiler, hence the 8 KB chunking in
+`.tmp/bench-acorn-full.mjs`) is **#3674**. (1) and (2) are **not yet owned
+by any issue** — #1243 covers `for-in`/`Object.keys` enumeration but is
+`done` and did not cover the standalone lane's fnctor instances.
+
+The standalone lane's correctness gate is currently 4 canaries, which is why
+all of these (including the `.call` bug) were invisible. **A full acorn
+self-parse is the gate that would have caught them** — worth adding once
+(1), (2) and #3675 land.
 
 ## Remaining follow-up (out of scope here, needs codegen)
 

@@ -237,7 +237,14 @@ import {
   tryExternClassMethodOnAny,
 } from "./calls-closures.js";
 import { compileOptionalCallExpression } from "./calls-optional.js";
-import { isFunctionCtorImmediateCall, tryStaticEvalInline, tryStaticFunctionCtorCall } from "./eval-inline.js";
+import {
+  emitStandaloneIndirectEvalRuntime,
+  ensureRuntimeEvalCallableCarrier,
+  isFunctionCtorImmediateCall,
+  tryStandaloneDynamicFunctionCtorValue,
+  tryStaticEvalInline,
+  tryStaticFunctionCtorCall,
+} from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -5577,6 +5584,38 @@ function canDeferStandaloneDynamicImport(fctx: FunctionContext): boolean {
   return fctx.deferredDynamicImportTrap === true;
 }
 
+/**
+ * #2928 — interpreter-owned external-call intrinsic. The source helper keeps
+ * ordinary Node execution on Function#apply; the self-compiled provider lowers
+ * it directly to the native closure bridge so a foreign callable carrier does
+ * not need to expose `.apply` through the provider's object-property runtime.
+ */
+function tryRuntimeEvalApplyCallableIntrinsic(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (
+    (!ctx.standalone && !ctx.wasi) ||
+    ctx.runtimeEvalCallableBoundaryEnabled !== true ||
+    !ts.isIdentifier(expr.expression) ||
+    expr.expression.text !== "__runtime_eval_apply_callable" ||
+    expr.arguments.length !== 3
+  ) {
+    return undefined;
+  }
+
+  const externref: ValType = { kind: "externref" };
+  for (const arg of expr.arguments) {
+    const type = compileExpression(ctx, fctx, arg, externref);
+    if (type && type.kind !== "externref") coerceType(ctx, fctx, type, externref);
+  }
+  ensureObjectRuntime(ctx);
+  const applyIdx = reserveApplyClosure(ctx);
+  fctx.body.push({ op: "call", funcIdx: applyIdx });
+  return externref;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -5594,6 +5633,11 @@ function compileCallExpression(
   // route to the short-circuiting path.
   if (ts.isOptionalChain(expr) && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
+  }
+
+  {
+    const r = tryRuntimeEvalApplyCallableIntrinsic(ctx, fctx, expr);
+    if (r !== undefined) return r;
   }
 
   // (#1732/#2180) Calling a built-in non-constructor namespace (Math, JSON,
@@ -5629,6 +5673,19 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // #2928 — dynamic standalone Function(...) value form, plus the immediate
+  // `new Function(...)(args)` / `Function(...)(args)` form. Seed the canonical
+  // runtime callable before the dynamic-dispatch candidate scan.
+  const immediateFunctionCtor = isFunctionCtorImmediateCall(expr, ctx.checker);
+  {
+    const r = tryStandaloneDynamicFunctionCtorValue(ctx, fctx, expr);
+    if (r !== undefined) return r;
+    if (ctx.standalone && immediateFunctionCtor && ensureRuntimeEvalCallableCarrier(ctx, fctx)) {
+      const dyn = tryEmitInlineDynamicCall(ctx, fctx, expr, true);
+      if (dyn !== null) return dyn;
+    }
+  }
+
   // (#2960) DYNAMIC immediate-call `new Function(<non-const>)(args)` /
   // `Function(<non-const>)(args)` in JS-host mode. The constant compile-away
   // above declined (non-constant args), so the callee compiles to the
@@ -5636,7 +5693,7 @@ function compileCallExpression(
   // plain host-function externref returns undefined (the general any-callee
   // host-function limitation), so route the call through the `__call_function`
   // host helper (the same packer bound functions use).
-  if (!noJsHost(ctx) && !ctx.nativeStrings && isFunctionCtorImmediateCall(expr, ctx.checker)) {
+  if (!noJsHost(ctx) && !ctx.nativeStrings && immediateFunctionCtor) {
     const r = emitBoundFunctionCall(ctx, fctx, expr);
     if (r !== null) return r;
   }
@@ -5746,13 +5803,16 @@ function compileCallExpression(
       if (rewritten !== undefined) return rewritten;
       const inlined = tryStaticEvalInline(ctx, fctx, expr, evalKind === "direct");
       if (inlined !== undefined) return inlined;
-      // (#2960) No-JS-host (standalone / wasi): the `__extern_eval` host import
-      // is unsatisfiable and previously leaked into the binary, trapping only at
-      // instantiation with zero compile-time signal. Instead emit a
-      // source-located WARNING and, for the dynamic case, a CATCHABLE throw at
-      // the eval call site (a program that never reaches this eval keeps
-      // working). The static-constant path (tryStaticEvalInline above) already
-      // splices inline and returned; only genuine dynamic eval reaches here.
+      // #2928 — indirect eval is global-scoped, so standalone can route it to
+      // the linked interpreter without caller-scope reification. Direct eval
+      // still needs #2929 and retains #2960's catchable failure.
+      if (evalKind === "indirect") {
+        const runtimeEval = emitStandaloneIndirectEvalRuntime(ctx, fctx, expr.arguments);
+        if (runtimeEval !== undefined) return runtimeEval;
+      }
+      // (#2960) No-JS-host direct eval (and WASI until its linker grows the
+      // provider): refuse the unsatisfiable `__extern_eval` import with a
+      // source-located warning and a catchable call-site throw.
       if (noJsHost(ctx)) {
         reportError(
           ctx,

@@ -56,7 +56,16 @@ import {
   anyTypeof,
   isTruthy,
 } from "./runtime-ops.js";
-import { ENV_DECLARATIVE, type EnvRec, EXN_ROW, Frame, type FuncMeta, type JSValue, type Regs } from "./types.js";
+import {
+  ENV_DECLARATIVE,
+  type EnvRec,
+  EXN_ROW,
+  FLAG_STRICT,
+  Frame,
+  type FuncMeta,
+  type JSValue,
+  type Regs,
+} from "./types.js";
 
 /** A genuine interpreter-invariant violation (bad opcode, stalled decode). Never
  *  routed through the exception table — rethrown so it cannot be masked by a
@@ -121,7 +130,8 @@ export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): Interp
     a6?: JSValue,
     a7?: JSValue,
   ): JSValue {
-    return interpEnter(meta, envRec, this, [a0, a1, a2, a3, a4, a5, a6, a7]);
+    const receiver = (meta.flags & FLAG_STRICT) !== 0 ? this : normalizeSloppyThis(envRec, this);
+    return interpEnter(meta, envRec, receiver, [a0, a1, a2, a3, a4, a5, a6, a7]);
   };
   const nm = typeof meta.name === "string" ? meta.name : "";
   try {
@@ -132,6 +142,22 @@ export function makeInterpClosure(meta: FuncMeta, envRec: EnvRec | null): Interp
   }
   INTERP_BINDINGS.set(closure, { meta, envRec });
   return closure;
+}
+
+/**
+ * Invoke a non-interpreted callable at the runtime boundary.
+ *
+ * In ordinary TypeScript/Node execution this is exactly Function#apply. The
+ * standalone compiler recognizes this deliberately private intrinsic name and
+ * lowers it straight to `__apply_closure(callee, receiver, args)`, avoiding a
+ * second dynamic lookup of the foreign carrier's `.apply` property.
+ */
+export function __runtime_eval_apply_callable(
+  callee: (...a: JSValue[]) => JSValue,
+  receiver: JSValue,
+  args: JSValue[],
+): JSValue {
+  return callee.apply(receiver, args);
 }
 
 /**
@@ -160,6 +186,21 @@ function envLookup(env: EnvRec | null, name: JSValue): JSValue {
     }
     e = e.parent;
   }
+}
+
+/** Phase-1 functions are non-strict unless/until directive flags land. A bare
+ * call therefore substitutes the captured realm's global object for a
+ * null/undefined receiver; explicit method receivers pass through unchanged. */
+function normalizeSloppyThis(env: EnvRec | null, receiver: JSValue): JSValue {
+  if (receiver !== undefined && receiver !== null) return receiver;
+  let e = env;
+  let globalBacking: JSValue = undefined;
+  for (;;) {
+    if (e === null) break;
+    if (e.kind !== ENV_DECLARATIVE) globalBacking = e.backing;
+    e = e.parent;
+  }
+  return globalBacking;
 }
 function envAssign(env: EnvRec | null, name: JSValue, value: JSValue): void {
   // Phase 1 (non-strict): assign to the nearest record that already has the
@@ -363,7 +404,7 @@ function run(bottom: Frame): JSValue {
               const cm = binding.meta;
               const cregs: Regs = new Array(cm.regCount);
               for (let i = 0; i < cm.regCount; i += 1) cregs[i] = undefined;
-              cregs[0] = regs[base]; // receiver → this
+              cregs[0] = (cm.flags & FLAG_STRICT) !== 0 ? regs[base] : normalizeSloppyThis(binding.envRec, regs[base]); // receiver → this
               const np = argc < cm.paramCount ? argc : cm.paramCount;
               for (let i = 0; i < np; i += 1) cregs[1 + i] = regs[base + 1 + i];
               // Suspend the caller, install the callee frame (no host recursion).
@@ -385,7 +426,7 @@ function run(bottom: Frame): JSValue {
               const recv = regs[base];
               const args: JSValue[] = new Array(argc);
               for (let i = 0; i < argc; i += 1) args[i] = regs[base + 1 + i];
-              acc = (callee as (...a: JSValue[]) => JSValue).apply(recv, args);
+              acc = __runtime_eval_apply_callable(callee as (...a: JSValue[]) => JSValue, recv, args);
             }
             break;
           }
@@ -562,9 +603,52 @@ function callBuiltin(builtinId: number, regs: Regs, base: number, argc: number, 
       return frame.envRec !== null ? frame.envRec.backing : undefined;
     case Builtin.TypeofName:
       return typeofName(frame.envRec, regs[base]);
+    case Builtin.Error:
+      return argc === 0 ? new Error() : new Error(String(regs[base]));
+    case Builtin.TypeError:
+      return argc === 0 ? new TypeError() : new TypeError(String(regs[base]));
+    case Builtin.RangeError:
+      return argc === 0 ? new RangeError() : new RangeError(String(regs[base]));
+    case Builtin.SyntaxError:
+      return argc === 0 ? new SyntaxError() : new SyntaxError(String(regs[base]));
+    case Builtin.ReferenceError:
+      return argc === 0 ? new ReferenceError() : new ReferenceError(String(regs[base]));
+    case Builtin.Number:
+      return argc === 0 ? 0 : Number(regs[base]);
+    case Builtin.MathMax:
+      return builtinMathExtremum(regs, base, argc, true);
+    case Builtin.MathMin:
+      return builtinMathExtremum(regs, base, argc, false);
+    case Builtin.MathAbs:
+      return Math.abs(Number(regs[base]));
+    case Builtin.MathFloor:
+      return Math.floor(Number(regs[base]));
+    case Builtin.MathCeil:
+      return Math.ceil(Number(regs[base]));
+    case Builtin.MathRound:
+      return Math.round(Number(regs[base]));
     default:
       throw new InterpInternalError(`unknown builtin id ${builtinId}`);
   }
+}
+
+/** Host-free Math.max/min over the bytecode argument window. The signed-zero
+ * tie-breaks match ECMA-262: max prefers +0 and min prefers -0. */
+function builtinMathExtremum(regs: Regs, base: number, argc: number, wantMax: boolean): JSValue {
+  let result = wantMax ? -Infinity : Infinity;
+  let i = 0;
+  for (;;) {
+    if (i >= argc) break;
+    const value = Number(regs[base + i]);
+    if (Number.isNaN(value)) return NaN;
+    if (wantMax) {
+      if (value > result || (value === 0 && result === 0 && 1 / value === Infinity)) result = value;
+    } else if (value < result || (value === 0 && result === 0 && 1 / value === -Infinity)) {
+      result = value;
+    }
+    i += 1;
+  }
+  return result;
 }
 
 /** A short description of a non-callable value for TypeError messages. */

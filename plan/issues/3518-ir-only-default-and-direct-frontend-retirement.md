@@ -4,7 +4,7 @@ title: "IR-only default and direct front-end retirement"
 status: in-progress
 sprint: current
 created: 2026-07-21
-updated: 2026-07-21
+updated: 2026-07-26
 priority: critical
 horizon: xl
 complexity: XL
@@ -118,18 +118,21 @@ their order and acceptance boundaries.
 | **R6 — #3526 (blocked)**     | Typed semantic intrinsic/runtime-feature/host-capability contract                                     | #3521                                 | The ~47K runtime/builtin emission lines are reached from a frozen semantic manifest, never AST dispatch; families land in measured sub-slices                   |
 | **R7 — #3527 (blocked)**     | AST-free async suspension plans and canonical Promise ABI                                             | #3522, #3525, #3526                   | Every supported async container uses one verified `IrAsyncPlan` and the existing frame engine; no AST callback/direct async route remains                       |
 | **R8 — #3528 (blocked)**     | Linear consumes the shared Prepared program                                                           | #3525–#3527                           | WasmGC and linear receive the exact same program/ABI/runtime/async plans; `src/codegen-linear/` has no source-AST lowering path                                 |
-| **R9**                       | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8                                 | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
+| **R9**                       | Fail-closed IR-only default; remove escape hatches                                                    | R3–R8; #2949, #2952, #1373b, #3583    | Default policy is IR-only; hybrid demotion, `experimentalIR: false`, `JS2WASM_IR_FIRST`, `disableIrFirst`, skip allowlists, and compile-twice switches are gone |
 | **R10**                      | Reachability-proven direct-front-end deletion                                                         | R9                                    | Re-run #3090 audit; delete the ~59,676 frontend-only fn-lines and dispatch roots; zero direct AST→Wasm reachability remains                                     |
 
-R0a and R0b completed on 2026-07-21. **#3520 is active on draft PR #3496. Its
-R1a identity/shadow-ABI foundation is on main, and Stage 9 / Commit 3.2 is the
-current continuation checkpoint. Structural pass/integration maps (Commit 3.3)
-and the `ProgramAbiMap` slot adapter (Commit 4) remain before R1 can close.**
-R2–R8 remain blocked on the concrete dependency spine. R4 follows R3 because
-its ordered plan consumes the class/static-intent census owned by #3522.
-Runtime-family sub-slices in #3526 may proceed in parallel after R2 once C0
-fixes their semantic contract. #3525, #3527, #3528, and R9 are integration
-barriers, not parallel deletion opportunities.
+R0a and R0b completed on 2026-07-21. **#3520 is active on draft PR #3679.
+Commits 1–3 and the C9/C10 class-callable continuations are on main. C11 moves
+retained function imports into the Program ABI. The remainder of Commit 4 is
+runtime/intrinsic provider ownership, inherited accessors and static/support
+families, type/class-layout entries, exports and remaining aliases, and the
+production `LegacyAbiAdapter` cutover.** R2–R8 remain blocked on the concrete
+dependency spine. R4 follows R3 because its ordered plan consumes the
+class/static-intent census owned by #3522. Runtime-family sub-slices in #3526
+may proceed in parallel after R2 once C0 fixes their semantic contract. #3525,
+#3527, #3528, and R9 are integration barriers, not parallel deletion
+opportunities. R9 also requires the explicit dynamic-value, control-flow,
+async, adoption-owner, and broader-corpus coverage closure named above.
 
 ## Program rules
 

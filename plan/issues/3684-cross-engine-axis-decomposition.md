@@ -1,0 +1,197 @@
+---
+id: 3684
+title: "perf: what actually makes node and Porffor faster — per-axis decomposition, and the two gaps it leaves unowned"
+status: ready
+created: 2026-07-27
+updated: 2026-07-27
+priority: medium
+feasibility: medium
+reasoning_effort: high
+task_type: perf
+area: codegen, runtime, benchmarks
+goal: value-rep
+horizon: m
+sprint: current
+related: [3673, 3674, 3675, 3683, 1946, 1947, 1584, 3288]
+---
+
+# #3684 — What actually makes node and Porffor faster
+
+## Why this issue exists
+
+We have been reasoning about compiled-acorn performance from a single
+aggregate number, and that number is **misleading in a way that points the
+roadmap at the wrong thing**. Measured on acorn 8.16.0 parsing its own 245 KB
+`dist/acorn.js`:
+
+| engine | median/parse | vs node |
+| ------ | ------------ | ------- |
+| node (V8) | 10.7 ms | 1x |
+| Porffor (JS -> C -> native) | 253 ms | ~24x |
+| js2 **host** lane | 3,534 ms | ~330x |
+| js2 **standalone** lane | (cannot run yet — see #3673 follow-ups) | — |
+
+Read naively this says "Porffor is 14x faster than us." That conclusion is
+wrong, because it compares Porffor against the js2 **host** lane, whose cost is
+dominated by the JS-bridge tax (#3673), not by codegen quality. **The lane we
+actually ship for pure-Wasm targets — standalone — beats Porffor on most axes.**
+
+So: a per-axis decomposition, same source, same checksums, three engines.
+
+## Harness (committed, reproducible)
+
+`benchmarks/cross-engine/` — `axes-core.js` is plain ES5 that node, Porffor and
+js2 all accept verbatim; every bench returns a checksum and **all three engines
+agree on every one**, so no engine is skipping work.
+
+```bash
+node benchmarks/cross-engine/run-node-porffor.mjs
+node --import tsx benchmarks/cross-engine/run-js2.mjs
+```
+
+## Measured (min-of-5 after warmup; 8-core container, 2026-07-27)
+
+| axis | node | Porffor | js2-standalone | js2/node | porf/node |
+| ---- | ---- | ------- | -------------- | -------- | --------- |
+| numeric loop (1M iters, no objects) | 1.274 ms | 3.819 ms | **1.236 ms** | **0.97x** | 3.0x |
+| property r/w on object literal (300K) | 0.560 ms | 6.837 ms | 0.766 ms | 1.4x | 12.2x |
+| **prototype method dispatch (300K)** | 0.472 ms | 7.168 ms | 12.268 ms | **26x** | 15.2x |
+| short-lived object alloc (100K) | 0.122 ms | 7.040 ms | **0.121 ms** | **1.0x** | 57.8x |
+| **tokenizer shape (`this` fields + `this.m()`)** | 0.065 ms | 1.791 ms | 2.208 ms | **34x** | 27.4x |
+| bare loop, isolated (700K iters) | 0.435 ms | 0.769 ms | **0.428 ms** | **0.98x** | 1.8x |
+| **`charCodeAt`, isolated (700K calls)** | 0.440 ms | 2.806 ms | 1.969 ms | **4.5x** | 6.4x |
+
+The last two rows are the string axis re-measured at 20x scale. **The first cut
+was invalid**: at 35 K chars, deleting `charCodeAt` entirely did not change the
+time, i.e. it measured loop overhead, not string access. Recorded here because
+the same trap will catch the next person — anything under ~0.1 ms on this
+harness is loop-bound.
+
+### What the table says
+
+1. **js2-standalone already matches V8 on scalar loops (0.97x) and on
+   allocation (1.0x)**, and beats Porffor on 5 of 7 axes — by 58x on
+   allocation and 9x on property access.
+2. **One axis dominates everything: dynamic `this` dispatch** — 26x on method
+   calls, 34x on the tokenizer shape. That single axis is the whole
+   compiled-acorn story. It is already owned by **#3683**; this issue does not
+   duplicate it, it quantifies it against the other engines.
+3. **Porffor's acorn win is not codegen quality.** It has no host boundary,
+   and js2's host lane does. On like-for-like codegen (the tokenizer proxy)
+   Porffor is only ~1.2x ahead of js2-standalone, not 14x.
+4. **String element access is ~4.5x off V8 and is unowned** (see Deliverable 2).
+
+## Why node is faster — the mechanisms
+
+V8 wins the two axes where we lose, and it wins them with runtime feedback that
+an AOT compiler does not have:
+
+- **Hidden classes + inline caches.** `this.pos` becomes a shape check plus a
+  load at a constant offset; `p.inc()` becomes a shape check plus a direct,
+  usually inlined, call. We must instead resolve a name at runtime, because we
+  have no feedback to speculate on. This is exactly the gap #3683 closes
+  *statically* via write-once prototype admission.
+- **Speculation with deopt as a safety net.** V8 assumes monomorphism and bails
+  out if wrong. An AOT compiler has to *prove* it — hence #3683's conservative
+  admission analysis — or stay generic. Proving is strictly harder, which is
+  why 26x is not going to become 1x, but 26x -> low single digits is available.
+- **Unboxed Smi/double + generational bump allocation.** We already match this:
+  the numeric and allocation axes are at parity, and i31 boxing (#3673 round 7)
+  plus WasmGC's nursery are why.
+
+## Why Porffor is faster than our host lane — the mechanisms
+
+Read from source (this checkout is the `loopdive/porffor` fork, which compiles
+**direct to C**; the README's "Wasm IR + 2c" description is stale — `2c.js` no
+longer exists):
+
+- **No host boundary at all.** One uniform in-process representation, so a
+  property read never crosses into JS. This — not codegen — is the entire
+  delta against our host lane.
+- **Values never heap-allocate.** `typedef struct jsval { f64 val; i32 type; }`
+  (`compiler/render.js:4728`) travels in registers; the type tag is the second
+  struct field, NaN-boxed into a u64 only when spilled to memory
+  (`porf_pack`/`porf_unpack`, `render.js:4884-4899`).
+- **Compile-time property hashing.** `codegen.js:2779-2808` reimplements the
+  runtime hash in the compiler, so `obj.foo` compiles to a call with a
+  *constant* 32-bit hash immediate.
+- **Static builtin dispatch.** `str.charCodeAt(i)` collapses at compile time to
+  a direct C call (`codegen.js:1907-1943`, `typeSwitch` collapse at
+  `:2126-2133`) — no lookup at all.
+- **The C backend does the optimizer's job**: register allocation, SROA (which
+  is what splits `jsval` into two registers and deletes the dead tag half),
+  inlining, LICM, jump tables. Porffor itself has *no lowering passes*
+  (`compiler/ir.js:1-6`) and delegates all of it to `cc -O3 -flto`. Note it is
+  `-O3`, not `-Ofast`, and `-march` is unset (`compiler/index.js:119-235`) —
+  the README is stale here too.
+
+### What Porffor gives up for it — and why we cannot copy the wins wholesale
+
+Its property model is a **linear scan comparing hashes only, never the key**
+(`compiler/builtins/_internal_object.ts:496-523`). Consequences, all
+source-verifiable:
+
+- A 32-bit hash collision returns the **wrong property**. There is no key
+  compare fallback and no runtime detection.
+- Builtin prototype methods are statically bound and **cannot be shadowed or
+  monkey-patched** (`codegen.js:1926-1933`) — an own property named `map` on an
+  array is ignored.
+- Own properties are capped at **65535** (u16 size field); string index-property
+  materialization is skipped above 4096 chars.
+
+These are correctness-for-speed trades that a compiler targeting test262
+conformance cannot take. The measurements also show the model's cost: O(N)
+per access is *why* Porffor is 12x node on property access and 58x on
+allocation, both axes where we are already at parity with V8. **We should not
+adopt Porffor's object model.**
+
+## Deliverables
+
+**D1 — the harness itself (done in this issue's PR).**
+`benchmarks/cross-engine/` committed and reproducing. Re-run it whenever a
+perf claim spans engines, and quote the axis, never the aggregate.
+
+**D2 — string element access: 4.5x vs V8, currently unowned.**
+The isolated measurement (700 K `charCodeAt` calls, loop cost subtracted) is
+0.63 ns/call on node vs 2.81 ns on js2 — and the bare loop around it is already
+at V8 parity, so this is genuinely the string access, not the loop. Worth a
+scoped look at whether the rope/flat + one-byte/two-byte discrimination can be
+hoisted out of the per-element path when the receiver is a loop-invariant flat
+native string. Porffor is *worse* here (4.01 ns) despite compile-time static
+dispatch, which suggests the cost is in the representation, not the dispatch.
+
+**D3 — stop quoting the host-lane number as "our" acorn performance.**
+The host lane's 330x is a bridge-tax measurement (#3673/#3669/#3671); the
+standalone lane is the one to compare against other AOT engines. The
+standalone lane cannot run acorn yet — blocked on **#3675** (the
+`parseFloat`/`reset` illegal cast) plus two bugs not yet owned by any issue
+(a `raise`/`getLineInfo` null deref on any syntax error, and `for-in` over a
+fnctor instance enumerating nothing, which breaks acorn's `copyNode` and so
+shorthand destructuring). Once those land, re-run acorn on standalone and
+replace the headline number. Note the harness itself trips **#3674** — a
+single 245 KB string literal overflows the compiler, hence the chunking in
+`benchmarks/cross-engine/run-js2.mjs`.
+
+## Explicitly NOT in scope
+
+- **Method dispatch / typed-`this`** — owned by **#3683** (typed twin emission,
+  direct-call devirtualization, numeric locals). This issue supplies the
+  cross-engine numbers that size that work; it must not fork it.
+- The host-lane bridge tax — #3673, #3669, #3671.
+- Porffor-backend integration — #3288 and the existing
+  `benchmark:porffor-direct-ab` / `benchmark:landing-four-lane` harnesses,
+  which measure *lanes end-to-end*. This harness is complementary: it isolates
+  *axes* within a lane.
+
+## Methodology caveats (read before quoting these numbers)
+
+- Absolute times are machine-specific; only same-axis ratios transfer.
+- Porffor was measured on **plain JS**, matching what acorn is. With `.ts`
+  annotations it promotes locals to raw `i32`/`f64` (`codegen.js:2370-2375`)
+  and the numeric axis improves substantially. Do not quote its numeric row as
+  its ceiling.
+- The microbenchmarks are statically analysable in a way real parser code is
+  not — js2's monomorphisation handles the object-literal property axis but
+  does not survive acorn's dynamic `this`. That is exactly why the tokenizer
+  axis is in the table: it is the shape that has to survive, and it is the one
+  where we are 34x off.

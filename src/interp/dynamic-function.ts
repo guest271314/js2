@@ -8,8 +8,8 @@
 // function at the module global environment, and materializes an ordinary
 // callable through the interpreter's existing closure seam.
 
-import { emitFunction } from "./emitter.js";
-import { makeInterpClosure, type InterpCallable } from "./loop.js";
+import { emitFunction, emitProgram } from "./emitter.js";
+import { interpEnter, makeInterpClosure, type InterpCallable } from "./loop.js";
 import { ENV_GLOBAL, EnvRec, type FuncMeta, type JSValue } from "./types.js";
 
 /** Host-free Acorn entry shape. `source` uses the compiler's native string
@@ -54,4 +54,21 @@ export function createDynamicFunction(
   const meta = compileDynamicFunctionMeta(parse, paramString, bodyString);
   const env = new EnvRec(ENV_GLOBAL, null, null, null, globalObject);
   return makeInterpClosure(meta, env);
+}
+
+/** Execute indirect eval in the global environment.
+ *
+ * ECMA-262 eval returns a non-string argument unchanged. String input is parsed
+ * as Script and entered through the same global EnvRec used by dynamic
+ * Function, so it cannot capture caller locals.
+ */
+export function executeIndirectEval(parse: DynamicParser, source: JSValue, globalObject: JSValue): JSValue {
+  if (typeof source !== "string") return source;
+
+  const options: JSValue = {};
+  options.ecmaVersion = 2025;
+  options.sourceType = "script";
+  const ast = parse(source, options);
+  const env = new EnvRec(ENV_GLOBAL, null, null, null, globalObject);
+  return interpEnter(emitProgram(ast), env, globalObject, []);
 }

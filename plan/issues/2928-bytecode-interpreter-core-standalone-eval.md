@@ -3,7 +3,7 @@ id: 2928
 title: "Bytecode interpreter core + standalone new Function / indirect eval"
 status: in-progress
 created: 2026-07-02
-updated: 2026-07-21
+updated: 2026-07-26
 priority: medium
 horizon: xl
 feasibility: hard
@@ -13,10 +13,30 @@ task_type: feature
 area: runtime
 language_feature: eval
 goal: runtime-eval
-sprint: Backlog
+sprint: current
 parent: 1584
 depends_on: [2927] # 2853 done (sprint 71) — removed 2026-07-17, see plan/log/analysis-2026-07/02-interpreter-backend-audit-2026-07-17.md
 related: [1715, 1713, 2864, 2865, 2960, 3017, 2929]
+oracle-ratchet-allow:
+  - src/codegen/expressions/eval-inline.ts
+# See "Coercion-sites allowance" below for the justification. In short: the two
+# `__is_truthy` sites read field 0 of the provider's `[ok, value]` ABI envelope
+# — a protocol discriminator the runtime-eval provider writes itself — not a
+# §7.1.2 ToBoolean on a JS value flowing from user code.
+coercion-sites-allow:
+  - src/codegen/expressions/eval-inline.ts
+loc-budget-allow:
+  - src/codegen/index.ts
+  - src/codegen/expressions/calls.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/context/types.ts
+func-budget-allow:
+  - src/codegen/expressions/calls.ts::compileCallExpression
+  - src/codegen/index.ts::planIrOverlay
+  - src/codegen/index.ts::generateModule
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/expressions/new-builtin-globals.ts::tryCompileBuiltinGlobalNew
 ---
 
 # #2928 — Bytecode interpreter core + standalone `new Function` / indirect eval
@@ -76,18 +96,21 @@ Global-scope evaluation only, deliberately excluding direct-eval scope capture
 
 ## Acceptance criteria
 
-- [ ] `new Function("a","b","return a+b")(1,2) === 3` in **standalone** mode via
+- [x] `new Function("a","b","return a+b")(1,2) === 3` in **standalone** mode via
       the interpreter (dynamic body, no host).
-- [ ] `(0, eval)("1 + 2") === 3` in standalone mode (indirect eval).
-- [ ] `eval("throw new Error('x')")` propagates through the AOT↔interpreter
+- [x] `(0, eval)("1 + 2") === 3` in standalone mode (indirect eval).
+- [x] `eval("throw new Error('x')")` propagates through the AOT↔interpreter
       boundary into a catching `try/catch`.
-- [ ] An AOT function calls an interpreted function and vice versa with identical
+- [x] An AOT function calls an interpreted function and vice versa with identical
       boxed-value identity (a `ref.eq` round-trip test).
 - [ ] ≥ 30 test262 eval-positive / Function-positive cases pass under the
-      standalone target.
-- [ ] A no-eval module stays within 5% of the current size floor; an
+      standalone target. (Measured 2026-07-27 after E6 runner wiring: **11
+      attributable** official `eval-code` flips, 0 regressions — see the
+      "Official Test262 `eval-code` measurement" section for the named files
+      and the measured blockers for the rest.)
+- [x] A no-eval module stays within 5% of the current size floor; an
       eval-enabled module documents one measured parser+interpreter size figure.
-- [ ] Opcode-set ADR committed under `docs/adr/`.
+- [x] Opcode-set ADR committed under `docs/adr/`.
 
 ## Notes
 
@@ -311,9 +334,264 @@ successful returned-closure gate. It preserves the boundary above without
 introducing a callable or rec-group ABI. Its publication remains owned by
 #2927.
 
-Still required for public E2 acceptance: land and package the #2927 parser
-artifact, then replace the standalone `new Function(<dynamic>)` Tier-3 stub in
-`new-super.ts` with this factory. Indirect eval remains E3, and on-demand
-ordered-initializer packaging remains E6/#2527. This canary proves the
-production seam but does not yet claim either public dynamic-code API is
-routed.
+## Implementation findings (public linked runtime, 2026-07-26)
+
+Standalone dynamic `new Function`, `Function(...)`, and indirect eval now route
+to the core-Wasm `js2wasm:runtime-eval` provider instead of the Tier-3 throwing
+stub. The user module and provider share the canonical callable/value carrier;
+provider exceptions cross the module boundary in a result envelope and are
+re-thrown through the caller's Wasm EH tag. Tests cover AOT→interpreted and
+interpreted→AOT calls, boxed object identity in both directions, native error
+construction, numeric built-ins, and sloppy/strict dynamic-function `this`.
+
+The real pinned Acorn source and the import-clean interpreter sources compile
+as one ordered-initializer provider. At the published Acorn consumption head
+(`1ea2f888fb7b12a9904c8f46734027dd6fe3b19b`), the provider is 2,389,936
+bytes, has zero imports, and links to a separately compiled user module whose
+only dynamic-code dependencies are
+`__runtime_new_function` and `__runtime_indirect_eval`. The mandatory acceptance
+executes stored and immediate `new Function` values, the `Function(...)` call
+form, indirect eval, exception propagation, built-ins, and the reverse AOT call
+through that real parser. A thirty-body synthetic, Test262-shaped
+Phase-1-positive corpus additionally executes arithmetic, comparison, name
+resolution, object access, interpreted calls, exceptions, and built-ins through
+the same real pipeline. It is a provider-harness capability gate, not the
+official Test262 acceptance criterion above.
+
+The remaining E6 distribution work is to publish/build that provider on demand
+through the #2527 linker instead of constructing it inside the test harness.
+The no-eval control (`export function add(a,b) { return a + b; }`) is 46,023
+bytes both before runtime routing (`542dbe5e9f529b`) and at this head: exactly
+byte-identical, a 0% size-floor change.
+
+## Official Test262 `eval-code` handoff (2026-07-26)
+
+The ordinary standalone Test262 lane was measured at PR #3678 head
+`d50379add2f0d7f46314a48612602baeffe04a4d` and compared file-for-file with a
+fresh `origin/main` control at
+`c17d14ed966eb63cbf315c2cc059390fab2caaec`. The authoritative command was:
+
+```sh
+TEST262_TARGET=standalone \
+TEST262_PATH_FILTER='language/eval-code/' \
+TEST262_REPORTER=dot \
+COMPILER_POOL_SIZE=2 \
+TEST262_WORKERS=2 \
+TEST262_MAX_UNCLASSIFIED_ROOT_CAUSES=9999 \
+pnpm run test:262 -- --official-scope-only
+```
+
+The path filter covers both `test/language/eval-code/` and
+`test/annexB/language/eval-code/`.
+
+| Scope                | Official files |            Pass |
+| -------------------- | -------------: | --------------: |
+| Standard `eval-code` |            347 |             105 |
+| Annex B `eval-code`  |            469 |               1 |
+| **Combined**         |        **816** | **106 (13.0%)** |
+
+The remaining outcomes were 670 runtime failures and 40 compile errors, with no
+skips. Passing cases split into 83 standard direct-eval files, 22 standard
+indirect-eval files, and one Annex B direct-eval file
+(`var-env-lower-lex-catch-non-strict.js`).
+
+The branch and control had identical statuses for all 816 files: **zero files
+flipped to pass on the interpreter branch**. Therefore none of the 106 existing
+passes can be credited to the new runtime route. They are pre-existing
+constant-string compile-away cases, expected negative/error paths, or tests
+whose dynamic evaluation path is not reached.
+
+### Measured blocker
+
+PR #3678's dedicated linked-provider harness is green, but the ordinary
+Test262 runner does not build and supply that provider. Genuine runtime
+indirect-eval cases therefore fail while instantiating the user module:
+
+```text
+WebAssembly.instantiate(): Import #0 "js2wasm:runtime-eval":
+module is not an object or function
+```
+
+Some are classified as `host_import_leak` for the same missing-provider
+boundary. Dynamic direct eval still reaches the intentional
+`TypeError: dynamic eval is not supported in standalone mode (#2928)` fallback;
+lexical capture remains #2929 and is not part of this handoff.
+
+### Next-agent sequence (E6 / official acceptance)
+
+1. PR #3678 has landed on `main` (merge commit `d4ab6613e`, 2026-07-26 —
+   including the coercion-sites allowance recorded below). Consume it without
+   changing the published parser/callable seam:
+   `parse(nativeString, optionsObject) -> ESTree $Object`, then
+   `emitProgram`/`emitFunction -> FuncMeta -> interpEnter`.
+2. Move the provider construction now proven by
+   `tests/issue-2928-runtime-link.test.ts` into the normal standalone packaging
+   path through #2527, with one ordered initializer. The Test262 runner must
+   instantiate the user module with a real `js2wasm:runtime-eval` namespace,
+   not `{}`.
+3. Start with indirect eval and `Function` constructor cases. Do not broaden
+   this slice into direct-eval lexical capture (#2929).
+4. Re-run the exact command above against a same-run `origin/main` control and
+   report exact per-file status flips. Do not count the synthetic thirty-body
+   provider corpus as official Test262 passes.
+5. Check the Test262 acceptance box only after at least 30 named official
+   source files pass because of the linked interpreter route.
+
+## Implementation findings (E6 Test262-runner provider link, 2026-07-27)
+
+The ordinary standalone Test262 lane now links the runtime-eval provider.
+The wiring is deliberately thin and lives at the distribution seam, not in
+the compiler:
+
+- `scripts/runtime-eval-provider.mjs` — ONE shared source assembly (pinned
+  Acorn tarball via `tests/dogfood/setup-acorn.mjs` + import-clean
+  `src/interp/*` + the export wrapper proven by
+  `tests/issue-2928-runtime-link.test.ts`), the provider compile options,
+  a disk cache keyed by (source, options, compiler-bundle hash), and
+  fresh-per-test namespace instantiation.
+  `tests/interp/runtime-acorn-package-probe.mjs` consumes the same assembly,
+  so the artifact the harness proves and the artifact the runner links are
+  byte-identical (re-verified: 14/14 canaries, 2,513,425 bytes).
+- `scripts/build-runtime-eval-provider.mjs` — idempotent prebuild wired into
+  `run-test262-vitest.sh` for `TEST262_TARGET=standalone`. It canary-verifies
+  (eval/function/30-body corpus) BEFORE caching; a provider that cannot
+  evaluate `1 + 2` can never be published. Build cost ~71–81 s; cache hit
+  <1 s.
+- `scripts/test262-worker.mjs` — the standalone path goes Module-first; when
+  `WebAssembly.Module.imports()` names `js2wasm:runtime-eval`, the worker
+  links a FRESH provider instance (per-test isolation; instance ≈ 0.4 s,
+  Module compile ≈ 27 ms, once per worker). **Cache miss degrades to the
+  exact status quo** (unresolved import → LinkError): workers never compile
+  the provider, because Acorn compilation takes minutes and the pool kills
+  jobs at 30 s. `TEST262_DISABLE_RUNTIME_EVAL_PROVIDER=1` is the attribution
+  kill-switch — it byte-restores pre-wiring behavior for A/B runs.
+- CI chunk shards see a cache miss and keep status-quo behavior; publishing
+  the provider artifact for CI (through #2527 packaging) is follow-up work.
+
+Two measurement traps found and fixed/recorded on the way:
+
+1. **The authoritative command under-reports its own denominator on this
+   branch.** The per-test vitest timeout was a hardcoded 90 s that also
+   measures POOL-QUEUE wait. Once the provider made the annexB eval bodies
+   actually execute (slow — see finding 2), queued tests blew the 90 s and
+   vitest killed them WITHOUT a jsonl row: 202 of 816 files simply vanished
+   from the results (a file that PASSES in isolation was among the missing).
+   Fixed: `TEST262_IT_TIMEOUT_MS` env override (default unchanged at 90 s, CI
+   byte-identical); measurement sweeps pass it explicitly.
+2. **Newly-reachable interpreter executions are pathologically slow or hang**
+   (interpreter-side, out of E6 scope, needs its own issue): an eval body of
+   `if (false) ;` takes ~27 s before throwing through the linked route;
+   `if (false) ; else function f() { ... }` (the annexB function-in-if
+   family, ~100 files) never terminates and eats the 30 s pool timeout.
+   Simple bodies (`1 + 2`, `var`, `function f(){} f()`) run in <1 s. The
+   provider-side `__runtime_indirect_eval` returns instantly for the same
+   bodies when called with JS carriers, so the pathology is in the
+   native-carrier execution path.
+
+## Official Test262 `eval-code` measurement (E6 wiring, 2026-07-27)
+
+Three same-session arms on the same machine, same authoritative command
+(TEST262_TARGET=standalone, TEST262_PATH_FILTER='language/eval-code/',
+COMPILER_POOL_SIZE=2, TEST262_WORKERS=2, --official-scope-only), all with
+`TEST262_IT_TIMEOUT_MS=600000` (see finding 1 above — without it the branch
+arm silently loses 202 of its 816 rows):
+
+| Arm                                            | Run ID          | pass | fail | CE  | compile_timeout |
+| ---------------------------------------------- | --------------- | ---: | ---: | --: | --------------: |
+| control — `main` @ `81dbcad3b`                 | 20260727-020133 |  106 |  670 |  40 |               0 |
+| branch @ `4ac14aacb` + provider                | 20260727-013447 |  117 |  627 |  40 |              32 |
+| branch + `TEST262_DISABLE_RUNTIME_EVAL_PROVIDER=1` | 20260727-021328 |  106 |  670 |  40 |               0 |
+
+- The control **exactly reproduces the 2026-07-26 handoff baseline**
+  (106/816 = 105 standard + 1 annexB) — instrument validated.
+- The kill-switch arm is **status-identical to the control on all 816
+  files** — removing the provider injection alone reverts every delta, so
+  every delta is attributable to the linked interpreter route.
+- **11 files flip fail→pass (11 of the ≥30 acceptance bar), 0 regressions:**
+  - `test/annexB/language/eval-code/indirect/global-block-decl-eval-global-skip-early-err-block.js`
+  - `test/annexB/language/eval-code/indirect/global-block-decl-eval-global-skip-early-err-for.js`
+  - `test/annexB/language/eval-code/indirect/global-if-decl-no-else-eval-global-skip-early-err-block.js`
+  - `test/annexB/language/eval-code/indirect/global-if-decl-no-else-eval-global-skip-early-err-for.js`
+  - `test/language/eval-code/indirect/block-decl-strict.js`
+  - `test/language/eval-code/indirect/export.js`
+  - `test/language/eval-code/indirect/import.js`
+  - `test/language/eval-code/indirect/non-string-object.js`
+  - `test/language/eval-code/indirect/non-string-primitive.js`
+  - `test/language/eval-code/indirect/parse-failure-6.js`
+  - `test/language/eval-code/indirect/var-env-func-strict.js`
+
+  These are exactly the cases the Phase-1 interpreter can already decide:
+  correct SyntaxError refusal of invalid eval code (parse-failure, import/
+  export declarations, skip-early-err), strict/block-scoping negatives, and
+  §19.2.1's non-string pass-through.
+
+**Why the remaining candidates are blocked (measured on the branch arm, not
+estimated).** 595/816 are direct-eval files — out of scope by design
+(#2929). Of the 221 indirect files: 33 pass (22 pre-existing + 11 new),
+32 hang (→ `compile_timeout`; the annexB function-in-if emit hang recorded
+in finding 2), and 156 still fail with this signature breakdown:
+
+| count | blocking cause (verbatim signature class)                              |
+| ----: | ---------------------------------------------------------------------- |
+|    42 | `interp/emitter: unsupported in Phase 1: statement SwitchStatement`     |
+|    34 | `ReferenceError: assert is not defined` (interp global env cannot see the AOT module's harness globals) |
+|    18 | `ReferenceError: fnGlobalObject is not defined` (same bridging class)   |
+|     8 | `interp/emitter: unsupported ... ForOfStatement`                        |
+|     8 | `interp/emitter: unsupported ... ForInStatement`                        |
+|     8 | `SyntaxError: NaN` (error-message rendering defect in the thrown path)  |
+|    38 | assorted semantic gaps (SameValue mismatches, missing expected throws, null-property access) |
+
+So the two biggest levers toward the ≥30 bar are interpreter-side, not
+packaging-side: (a) AOT↔interp **global-binding bridging** (52 files fail
+purely because eval'd code can't resolve `assert`/harness globals), and
+(b) Phase-1 statement coverage (**SwitchStatement** alone gates 42, for-of/
+for-in another 16) plus the **if-statement hang/slowness** family (32 hangs;
+~27 s even for `if (false) ;`). The acceptance box stays unchecked; the E6
+packaging seam itself is done and measured working.
+
+Artifacts: `benchmarks/results/test262-standalone-results-20260727-{020133,013447,021328}.jsonl`
+(local machine; copies retained in the session workspace `.tmp/e6-*.jsonl`).
+
+## Coercion-sites allowance (`src/codegen/expressions/eval-inline.ts`)
+
+`pnpm run check:coercion-sites` fired on this change-set:
+
+```
+coercion-sites gate FAILED — this change-set ADDS hand-rolled coercion vocabulary on net (__is_truthy +2).
+  codegen/expressions/eval-inline.ts: 0 → 2 (__is_truthy 0→2)
+```
+
+The gate fired **correctly** — `eval-inline.ts` is genuinely absent from
+`scripts/coercion-sites-baseline.json`, so `0 → 2` is real net growth. The
+allowance is granted deliberately, with this reasoning recorded so it can be
+audited or reversed later.
+
+**Why this is not what #2108 protects against.** The gate is a *net-growth
+ratchet on a normal vocabulary token*, not a prohibition: the baseline carries
+376 sites across 65 files, `__is_truthy` appears in a dozen-plus codegen files
+**including `coercion-engine.ts` itself**, and `array-methods.ts` alone holds
+19. What #1917/#2108 exist to stop is **JS-semantic coercion leaking outside
+the engine** — a hand-rolled ToString/ToNumber/ToPrimitive/equality matrix
+applied to user operands.
+
+Both new sites are in `emitRuntimeEvalResultUnwrap`, which reads **field 0 of
+the provider's `[ok, value]` ABI envelope**. That field is a *protocol
+discriminator written by the runtime-eval provider itself*, never a JS value
+flowing from user code. Reading it is a **representation** conversion
+(externref-carrying-a-bool → i32), not a §7.1.2 ToBoolean on a JS operand.
+
+Routing it through the coercion engine would therefore be **actively wrong**,
+not merely heavier: it would assert JS ToBoolean semantics on a value that is
+not a JS operand. So of the gate's two suggested remedies, "route through the
+coercion engine" is the worse one here.
+
+**Follow-up (not done here, deliberately).** That the envelope needs *any*
+coercion to read `ok` is an ABI smell. If field 0 were carried as an `i32` — or
+discriminated the way `__vec_len` does — the site would **disappear** rather
+than be excepted, and the allowance could be dropped. That is a change to the
+runtime-eval provider ABI, owned by this issue's author, and out of scope for
+unblocking the gate.
+
+Granted by the tech lead on 2026-07-26 (ruling recorded rather than parked on
+the absent author, to stop #3678 stalling indefinitely; a one-line frontmatter
+grant is cheap to reverse if the author disagrees).
