@@ -1129,6 +1129,58 @@ profiling. #3685 is that program; the residual ~2.8x is where
 speculation (profile-guided AOT) would be needed. Repro:
 `.tmp/chain-experiment.mjs`.
 
+### Round 32 — the shootout: is "outperform node-acorn" reachable at all?
+
+Round 31 measured a typed CHAR LOOP at 2.8x node and projected full
+acorn at ~5x. That still left the goal question open, because a parser is
+not a char loop — it ALLOCATES. So: a complete recursive-descent
+expression parser (tokenizer + precedence climbing + real AST nodes +
+a post-walk), written twice with the same algorithm statement for
+statement, checksums asserted equal.
+
+| workload | ours (typed) | node (same JS) | ratio |
+| --- | --- | --- | --- |
+| full parse + AST build | 0.1792 ms | 0.1062 ms | 1.69x |
+| same, with native `i32` fields/locals | 0.1684 ms | 0.1062 ms | **1.59x** |
+| **tokenize only (no AST allocation)** | 0.1050 ms | 0.0343 ms | **3.06x** |
+
+**The counterintuitive result is the useful one: our gap is WORSE without
+allocation (3.06x) than with it (1.59x).** WasmGC struct allocation plus
+AST construction is competitive with V8's inline-allocated hidden-class
+objects — V8's relative advantage SHRINKS once it has to allocate. What
+we are actually bad at is the tokenizer's character loop.
+
+Emitted-code evidence for why: the char access itself is already ideal
+(`array.get_u` off a `struct.get` data pointer, no flatten call, no
+per-access `ref.test`), but `String.prototype.charCodeAt` is typed to
+return `number` — so every character does **`array.get_u` → i32 →
+`f64.convert_i32_u` → compare/`i32.trunc_sat_f64_s` → i32** even when
+BOTH ends are `i32` (the module shows 29 `i32.trunc_sat_f64_s` and 9
+`f64.convert_i32_u` against 41 `array.get_u`). It is the round-31 lesson
+again, one level down: a fully typed chain broken by ONE f64 boundary in
+the middle.
+
+**Where this leaves the goal.** Best case measured with today's compiler
+on ideal (hand-typed) input is **1.59x slower than node**, not faster.
+The ladder is now fully measured, no extrapolation:
+
+| | ratio vs node |
+| --- | --- |
+| compiled acorn today | 31x |
+| acorn with perfect type inference (projected, round 31) | ~5x |
+| a parser WRITTEN typed, compiled today | 1.59x |
+| a parser written typed, if the charCodeAt f64 boundary is fixed | ? (the next experiment) |
+
+So "outperform node-acorn" is not reachable by inference on acorn alone
+— but the residual on ideal input is 1.59x, not an order of magnitude,
+and its largest identified component is a fixable representation bug in
+our own string-index lowering rather than anything structural about AOT
+or WasmGC. That makes **typed `charCodeAt` result flow** the highest-value
+next compiler slice for this goal, ahead of further receiver work.
+
+Repros: `.tmp/parser-shootout.mjs`, `.tmp/shootout-c.mjs`,
+`.tmp/tokenize-only.mjs`.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
