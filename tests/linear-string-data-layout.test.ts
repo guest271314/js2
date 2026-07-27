@@ -66,9 +66,12 @@ async function instantiate(source: string): Promise<Record<string, CallableFunct
 
 describe("linear backend: string-literal data segment vs heap", { timeout: 60_000 }, () => {
   // 900 is under the old 960-byte window, 960 is exactly at it, and everything
-  // above used to corrupt. 70000 additionally exceeds the initial one-page
+  // above used to corrupt. 3127 is not a synthetic boundary — it is the length
+  // at which the #3687 hybrid study observed the corruption in the wild (linear
+  // returned a checksum of 106161 where both node and the GC lane returned
+  // 101058, with no error). 70000 additionally exceeds the initial one-page
   // memory, which the old layout could not even instantiate.
-  for (const length of [900, 960, 1024, 4096, 16384, 70000]) {
+  for (const length of [900, 960, 1024, 3127, 4096, 16384, 70000]) {
     it(`round-trips a ${length}-char literal without corruption`, async () => {
       const literal = makeLiteral(length);
       const exports = await instantiate(probeSource(literal));
