@@ -12,7 +12,7 @@ area: codegen, runtime, benchmarks
 goal: value-rep
 horizon: m
 sprint: current
-related: [3673, 3683, 1946, 1947, 1584, 3288]
+related: [3673, 3674, 3675, 3683, 1946, 1947, 1584, 3288]
 ---
 
 # #3684 — What actually makes node and Porffor faster
@@ -162,9 +162,15 @@ dispatch, which suggests the cost is in the representation, not the dispatch.
 
 **D3 — stop quoting the host-lane number as "our" acorn performance.**
 The host lane's 330x is a bridge-tax measurement (#3673/#3669/#3671); the
-standalone lane is the one to compare against other AOT engines. Once the three
-standalone blockers in #3673's follow-up section are fixed, re-run acorn on
-standalone and replace the headline number.
+standalone lane is the one to compare against other AOT engines. The
+standalone lane cannot run acorn yet — blocked on **#3675** (the
+`parseFloat`/`reset` illegal cast) plus two bugs not yet owned by any issue
+(a `raise`/`getLineInfo` null deref on any syntax error, and `for-in` over a
+fnctor instance enumerating nothing, which breaks acorn's `copyNode` and so
+shorthand destructuring). Once those land, re-run acorn on standalone and
+replace the headline number. Note the harness itself trips **#3674** — a
+single 245 KB string literal overflows the compiler, hence the chunking in
+`benchmarks/cross-engine/run-js2.mjs`.
 
 ## Explicitly NOT in scope
 
