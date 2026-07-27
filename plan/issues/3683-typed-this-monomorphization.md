@@ -102,6 +102,36 @@ field layout prefix used by the body; otherwise skip (conservative).
 Each slice is independently landable and measurable on the #3673 bench
 (`.tmp/bench-min.mjs` methodology, 330B corpus input, min-of-batches).
 
+## S3 design notes (scoped during S1, 2026-07-27)
+
+- **Admission facts landed (S1b)**: `otherNameWrites` (name-shadowing
+  proof, with a null sentinel when any dynamic computed member write
+  exists — acorn's `keywordTypes[name] = …` trips it, so S3 on acorn MUST
+  use receiver-shape runtime guards, not name-only proofs) and
+  `inheritedFrom` (`Object.create(F.prototype)` consumers).
+- **The `self` operand is the real S3 design problem.** A direct call to
+  the lifted method function needs its closure-struct `self` argument.
+  The write-once closure singleton is materialized during `__module_init`
+  straight into the prototype `$Object` entry — there is no global
+  holding it, and anonymous function expressions get a NON-NULLABLE
+  `(ref $struct)` self param, so `ref.null` cannot be passed even though
+  admitted (capture-free) methods never read it. Two viable designs:
+  (a) per-admitted-method singleton GLOBALS `__pm_<F>_<m>` written at the
+  construction site (extend `emitClosureConstruction` to `global.tee`
+  when the assignment target is an admitted prototype slot) — trampoline
+  loads the global, `struct.get` funcref + `call_ref`; or (b) widen
+  admitted methods' lifted self params to the nullable root (the round-5
+  named-expr mechanism generalized), enabling plain `call` with
+  `ref.null`. (a) is less invasive (no signature changes ripple into
+  `__call_fn_method_N` entries); prefer it.
+- **funcIdx staleness**: record lifted-function NAMES (funcMap is
+  late-import-shift-maintained), never raw indices, in any node→function
+  map added for the trampoline fill.
+- **Runtime guard set** (mirrors the round-12/13 cache guards, all O(1)):
+  `ref.test $__fnctor_F(recv)` + own-dynamic-props emptiness (when the
+  fnctor struct carries a sidecar field) + compile-time `m ∉ F's struct
+  fields`; miss → the legacy `__call_m_` path unchanged.
+
 ## Acceptance criteria
 
 - S2: standalone acorn parse measurably faster than the #3673 round-13
