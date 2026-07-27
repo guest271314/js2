@@ -737,6 +737,28 @@ the alloc win shows in the probe and GC pressure, not clearly in wall).
 Verification: regex battery failure set identical; corpus 23/23;
 canaries 4/4; tsc clean.
 
+## Standalone medium-fixture trap — BISECTED (round 24 diagnostics)
+
+The pre-existing 17-file-concat standalone trap decomposes into SIX
+independent per-file parse failures (host lane parses all 17 exactly;
+each repro'd standalone via an in-module line prober, .tmp/bisect-*):
+
+| fixture | first failing construct | class |
+| --- | --- | --- |
+| literals.js | `const big = 9007199254740993n;` | BigInt literal path |
+| arrow-params.js | `({ a, b }) => a + b` | destructured arrow params |
+| destructuring.js | `const { x, y: yy, z = 10, ...others } = obj` | object pattern conversion |
+| escapes-unicode.js | `'\x41\102'` | string escape reading (parseInt radix 8/16 verified OK standalone — cause is deeper, possibly a wrong `this.strict` read → octal raise) |
+| generators-async.js | (module-level) `illegal cast` | cast bug, not a parse raise |
+| regex.js | (module-level) `illegal cast` | cast bug, not a parse raise |
+
+The two `illegal cast` entries are COMPILER/runtime bugs (trap, not a
+thrown SyntaxError); the four raises are standalone-runtime divergences
+inside acorn's own code paths. Each is a self-contained investigation —
+filed here so the medium-input benchmark (where per-parse fixed costs
+amortize and the node-acorn ratio is expected to be materially better)
+can be unlocked. Not chased further in this session (perf focus).
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
