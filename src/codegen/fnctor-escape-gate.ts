@@ -151,9 +151,35 @@ export interface FnctorEscapeGateResult {
 export interface ProtoMethodWriteOnceResult {
   readonly methods: ReadonlyMap<string, ReadonlyMap<string, ts.FunctionLikeDeclaration>>;
   readonly poisoned: ReadonlySet<string>;
+  /**
+   * #3683 S1b — property NAMES written ANYWHERE outside the recognized
+   * write-once prototype assignments: instance expando writes (`this.x = …`,
+   * `obj.m = …`), double/conditional proto writes, defineProperty keys.
+   * A method admitted for DIRECT-CALL devirtualization (S3) must not appear
+   * here — a name never written elsewhere cannot be shadowed by an own
+   * property or a second definition, so `this.<m>()` provably resolves to
+   * the single write-once closure. `null` (the sentinel) means a non-symbol
+   * COMPUTED member write exists somewhere (`obj[k] = …`) — any name could
+   * be written, so S3 must not devirtualize by name alone (receiver-shape
+   * runtime guards are then required).
+   */
+  readonly otherNameWrites: ReadonlySet<string> | null;
+  /**
+   * #3683 S1b — fnctor names whose `.prototype` appears as an
+   * `Object.create(F.prototype)` argument: some OTHER object inherits from
+   * F's prototype, so an inherited `this.<m>()` in F's methods may execute
+   * with a receiver whose own chain overrides `m`. S3 must not devirtualize
+   * methods of these classes without a receiver-type runtime guard.
+   */
+  readonly inheritedFrom: ReadonlySet<string>;
 }
 
-const EMPTY_WRITE_ONCE: ProtoMethodWriteOnceResult = { methods: new Map(), poisoned: new Set() };
+const EMPTY_WRITE_ONCE: ProtoMethodWriteOnceResult = {
+  methods: new Map(),
+  poisoned: new Set(),
+  otherNameWrites: new Set(),
+  inheritedFrom: new Set(),
+};
 
 const EMPTY_RESULT: FnctorEscapeGateResult = {
   sites: new Map(),
@@ -487,6 +513,9 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
   const collidingAliases = new Set<string>();
   const poisoned = new Set<string>();
   const writes = new Map<string, Map<string, { decl?: ts.FunctionLikeDeclaration; bad: boolean }>>();
+  // (#3683 S1b) direct-call admission facts.
+  let otherNameWrites: Set<string> | null = new Set<string>();
+  const inheritedFrom = new Set<string>();
 
   // Pass 1 — top-level `var pp = F.prototype;` aliases. A name declared twice
   // for DIFFERENT owners is ambiguous: poison both owners and drop the alias.
@@ -642,7 +671,10 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
       perOwner = new Map();
       writes.set(owner, perOwner);
     }
-    for (const key of demote) perOwner.set(key, { bad: true });
+    for (const key of demote) {
+      perOwner.set(key, { bad: true });
+      otherNameWrites?.add(key); // (#3683 S1b) definePropertied slots are written elsewhere
+    }
   };
 
   const isUnconditionalTopLevel = (assignment: ts.Node): boolean =>
@@ -661,6 +693,11 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
         poisoned.add(aliasToOwner.get(left.text)!);
       } else if (ts.isPropertyAccessExpression(left)) {
         const owner = ownerOfBase(left.expression);
+        if (owner === undefined) {
+          // (#3683 S1b) a property write to a NON-prototype receiver: the name
+          // is writable elsewhere — it can shadow / be redefined.
+          otherNameWrites?.add(left.name.text);
+        }
         if (owner !== undefined) {
           const rhs = unwrapExpr(n.right);
           let perOwner = writes.get(owner);
@@ -672,6 +709,7 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
           const prev = perOwner.get(name);
           if (prev !== undefined || !isFunctionLike(rhs) || !rhs.body || !isUnconditionalTopLevel(n)) {
             perOwner.set(name, { bad: true });
+            otherNameWrites?.add(name); // (#3683 S1b) not the single admitted write
           } else {
             perOwner.set(name, { decl: rhs, bad: false });
           }
@@ -680,8 +718,16 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
         const owner = ownerOfBase(left.expression);
         // A SYMBOL-keyed write (`pp[Symbol.iterator] = …`) cannot shadow a
         // string-keyed method slot — ignore it. Any other computed key is
-        // unresolvable → poison.
-        if (owner !== undefined && !isSymbolKeyed(left.argumentExpression)) poisoned.add(owner);
+        // unresolvable → poison the owner; and regardless of receiver, a
+        // non-symbol computed member write can target ANY name (#3683 S1b).
+        if (!isSymbolKeyed(left.argumentExpression)) {
+          if (owner !== undefined) poisoned.add(owner);
+          if (ts.isStringLiteral(unwrapExpr(left.argumentExpression))) {
+            otherNameWrites?.add((unwrapExpr(left.argumentExpression) as ts.StringLiteral).text);
+          } else {
+            otherNameWrites = null; // dynamic key — any name writable
+          }
+        }
       }
     }
     if (ts.isDeleteExpression(n)) {
@@ -696,6 +742,11 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
     // keys; poison on unresolvable) — the generic classifiers below then
     // ALLOW the arg0 position for these calls.
     if (ts.isCallExpression(n)) handleObjectDefine(n);
+    // (#3683 S1b) `Object.create(F.prototype)` — F is inherited from.
+    if (ts.isCallExpression(n) && isNonMutatingProtoConsumer(n) && n.arguments.length >= 1) {
+      const owner = ownerOfBase(n.arguments[0]!);
+      if (owner !== undefined) inheritedFrom.add(owner);
+    }
     const isDefineArg0 = (p: ts.Node | undefined, node: ts.Node): boolean =>
       p !== undefined && ts.isCallExpression(p) && objectDefineKind(p) !== undefined && p.arguments[0] === node;
     // Generic escape classification of every reference to a tracked prototype
@@ -753,7 +804,7 @@ export function analyzeProtoMethodWriteOnce(sourceFile: ts.SourceFile): ProtoMet
     }
     if (m.size > 0) methods.set(owner, m);
   }
-  return { methods, poisoned };
+  return { methods, poisoned, otherNameWrites, inheritedFrom };
 }
 
 /**

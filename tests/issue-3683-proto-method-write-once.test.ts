@@ -120,3 +120,48 @@ describe("#3683 S1 — prototype-method write-once analysis", () => {
     expect((parser?.size ?? 0) > 100).toBe(true);
   });
 });
+
+describe("#3683 S1b — direct-call admission facts", () => {
+  it("records other-name writes and the computed-write sentinel", () => {
+    const r = analyze(`
+      function F() { this.count = 0; }
+      F.prototype.m = function () { return 1; };
+      var o = {}; o.helper = function () {};
+    `);
+    expect(r.otherNameWrites).not.toBeNull();
+    expect(r.otherNameWrites?.has("count")).toBe(true); // this.count = … in ctor
+    expect(r.otherNameWrites?.has("helper")).toBe(true);
+    expect(r.otherNameWrites?.has("m")).toBe(false); // only the admitted write
+
+    const dyn = analyze(`
+      function F() {}
+      F.prototype.m = function () {};
+      var kw = {}; kw[someKey] = 1;
+    `);
+    expect(dyn.otherNameWrites).toBeNull(); // dynamic computed key → sentinel
+  });
+
+  it("records Object.create inheritance consumers", () => {
+    const r = analyze(`
+      function Base() {}
+      Base.prototype.m = function () {};
+      function Sub() {}
+      Sub.prototype = Object.create(Base.prototype);
+    `);
+    expect(r.inheritedFrom.has("Base")).toBe(true);
+    expect(r.inheritedFrom.has("Sub")).toBe(false);
+  });
+
+  it("REAL ACORN: computed keyword-table writes trip the sentinel (honest)", () => {
+    const { entryModulePath } = setupAcorn();
+    const source = readFileSync(entryModulePath, "utf-8");
+    const sf = ts.createSourceFile("acorn.mjs", source, ts.ScriptTarget.ES2022, true);
+    const r = analyzeProtoMethodWriteOnce(sf);
+    // acorn writes `keywordTypes[name] = …` with a dynamic key at init, so
+    // name-only shadowing proofs are unavailable — S3 must pair the verdicts
+    // with receiver-shape runtime guards. Pin the fact so a future refinement
+    // (per-receiver computed-write attribution) flips this consciously.
+    expect(r.otherNameWrites).toBeNull();
+    expect(r.inheritedFrom.has("Parser")).toBe(false);
+  });
+});
