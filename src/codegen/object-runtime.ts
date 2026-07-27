@@ -1549,6 +1549,101 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     });
   }
 
+  // (#3673 round 13) `__method_cache_lookup(recv, name) -> externref` — the
+  // per-key prototype-method cache probe as a standalone helper: interned key
+  // + generation match + owner `ref.eq` against the receiver's fnctor
+  // prototype + live-DATA entry flags → the cached method value; every miss
+  // answers null (caller takes its legacy resolution path, which populates
+  // the cache via `__extern_get`). Used by the `__call_m_<name>_<arity>`
+  // dispatcher fallbacks to call `__call_fn_method_<arity>` DIRECTLY with
+  // unpacked args on a hit — skipping the per-call `$ObjVec` allocation,
+  // `__extern_method_call`, and `__apply_closure` re-extraction.
+  if (protoCacheEnabled) {
+    const HSTR = ctx.hashedStrTypeIdx;
+    registerNative(
+      "__method_cache_lookup",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "kh", type: { kind: "ref_null", typeIdx: HSTR } }, // 2
+        { name: "e", type: { kind: "ref_null", typeIdx: propEntryTypeIdx } }, // 3
+        { name: "p", type: { kind: "externref" } }, // 4
+      ],
+      [
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: HSTR },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: HSTR },
+            { op: "local.tee", index: 2 },
+            { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
+            { op: "global.get", index: objTableGenGlobalIdx },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: fnctorProtoStartIdx! },
+                { op: "local.tee", index: 4 },
+                { op: "ref.is_null" },
+                { op: "i32.eqz" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: 4 },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: objectTypeIdx },
+                    // owner non-null once gen matched (population writes all
+                    // three cache fields together).
+                    { op: "local.get", index: 2 },
+                    { op: "ref.as_non_null" },
+                    { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
+                    { op: "ref.cast", typeIdx: objectTypeIdx },
+                    { op: "ref.eq" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "local.get", index: 2 },
+                        { op: "ref.as_non_null" },
+                        { op: "struct.get", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
+                        { op: "ref.cast", typeIdx: propEntryTypeIdx },
+                        { op: "local.tee", index: 3 },
+                        { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 }, // flags
+                        { op: "i32.const", value: FLAG_TOMBSTONE | FLAG_ACCESSOR },
+                        { op: "i32.and" },
+                        { op: "i32.eqz" },
+                        {
+                          op: "if",
+                          blockType: { kind: "empty" },
+                          then: [
+                            { op: "local.get", index: 3 },
+                            { op: "ref.as_non_null" },
+                            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value
+                            { op: "extern.convert_any" },
+                            { op: "return" },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        { op: "ref.null.extern" },
+      ],
+    );
+  }
+
   // ── __extern_get(externref obj, externref key) -> externref ──────────────
   //
   // Unwrap obj to $Object (return null on non-object), walk the own-property
