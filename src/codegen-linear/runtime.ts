@@ -169,6 +169,90 @@ export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
 }
 
 /**
+ * Align an address up to the next 8-byte boundary — the alignment `__malloc`
+ * itself maintains for every allocation.
+ */
+function align8(value: number): number {
+  return (value + 7) & ~7;
+}
+
+/**
+ * Place the heap **above every emitted data segment** (#3686 bug 1).
+ *
+ * The linear backend appends string literals to a data segment while it
+ * compiles, but `__heap_ptr`'s initial value is baked in much earlier, by
+ * {@link addRuntime}, from a *fixed* floor (1024 by default, 65536 when the
+ * Ryū number formatter is linked). Nothing reconciled the two: a module whose
+ * literals ran past the floor had its first `__malloc` hand back an address
+ * that still belonged to the data segment, so the string runtime's own header
+ * writes silently overwrote literal bytes — wrong `.length`, wrong characters,
+ * and (once past the initial page) an out-of-bounds trap. It corrupted rather
+ * than failed, which is the dangerous kind.
+ *
+ * This finalizer runs after *all* data segments exist and lifts the heap floor
+ * to `align8(max(segment end))` when that is higher than the baked-in floor.
+ * It scans `mod.dataSegments` rather than just the literal cursor so the Ryū
+ * tables (emitted at their own base) are covered by the same rule, and it
+ * grows `memory.min` so the active segment initialisers themselves stay in
+ * bounds at instantiation time.
+ *
+ * Small modules are unaffected: their segments end below the existing floor,
+ * so the baked-in value wins and the emitted bytes are unchanged.
+ */
+export function finalizeLinearHeapLayout(mod: WasmModule): void {
+  let dataEnd = 0;
+  for (const seg of mod.dataSegments ?? []) {
+    dataEnd = Math.max(dataEnd, seg.offset + seg.bytes.length);
+  }
+  if (dataEnd === 0) return;
+
+  const heapPtr = mod.globals.find((g) => g.name === "__heap_ptr");
+  if (heapPtr === undefined) return;
+  const init = heapPtr.init[0];
+  if (heapPtr.init.length !== 1 || init.op !== "i32.const") {
+    throw new Error("linear runtime: unexpected __heap_ptr initialiser shape");
+  }
+  const oldHeapStart = init.value;
+  const newHeapStart = Math.max(oldHeapStart, align8(dataEnd));
+
+  // Data segments are initialised before any code runs, so the *declared*
+  // minimum has to cover them (memory.grow in __malloc is too late).
+  const memory = mod.memories[0];
+  if (memory !== undefined) {
+    const neededPages = Math.ceil(dataEnd / WASM_PAGE_SIZE);
+    if (neededPages > memory.min) memory.min = neededPages;
+    if (memory.max !== undefined && memory.max < memory.min) memory.max = memory.min;
+  }
+
+  if (newHeapStart === oldHeapStart) return;
+  init.value = newHeapStart;
+  retargetArenaHeapStart(mod, oldHeapStart, newHeapStart);
+}
+
+/**
+ * Re-point the optional `__arena_reset` / `__arena_used` constants at the
+ * finalized heap floor. Both bodies embed `heapStart` as a literal, so lifting
+ * `__heap_ptr` without them would let `__arena_reset()` rewind *into* the data
+ * segment and make `__arena_used()` report a bogus, too-large figure.
+ */
+function retargetArenaHeapStart(mod: WasmModule, oldHeapStart: number, newHeapStart: number): void {
+  for (const name of ["__arena_reset", "__arena_used"] as const) {
+    const func = mod.functions.find((f) => f.name === name);
+    if (func === undefined) continue;
+    let patched = 0;
+    for (const instr of func.body) {
+      if (instr.op === "i32.const" && instr.value === oldHeapStart) {
+        instr.value = newHeapStart;
+        patched++;
+      }
+    }
+    if (patched !== 1) {
+      throw new Error(`linear runtime: expected exactly one heapStart constant in ${name}, found ${patched}`);
+    }
+  }
+}
+
+/**
  * Emit the explicit arena-management exports (#1856):
  * - `__arena_reset()`     — rewind the bump pointer to `HEAP_START`, freeing
  *                           the entire arena in O(1). Lets a host reuse one

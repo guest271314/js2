@@ -25,6 +25,7 @@ import {
   addSetRuntime,
   addStringRuntime,
   addUint8ArrayRuntime,
+  finalizeLinearHeapLayout,
   FMOD_FN,
   linearStringLiteralInstrs,
 } from "./runtime.js";
@@ -264,6 +265,8 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
 
   // ── Emit data segments for string literals ──
   numberFormat.emitLinearStringData(ctx, dataSegmentBase);
+  // Literals are only known now, so the heap floor is fixed up last (#3686).
+  finalizeLinearHeapLayout(mod);
 
   emitClosureTable(ctx);
 
@@ -425,6 +428,8 @@ export function generateLinearMultiModule(multiAst: MultiTypedAST, opts: LinearO
     }
     mod.dataSegments.push({ offset: DATA_SEGMENT_BASE, bytes });
   }
+  // Literals are only known now, so the heap floor is fixed up last (#3686).
+  finalizeLinearHeapLayout(mod);
 
   emitClosureTable(ctx);
 
