@@ -225,36 +225,46 @@ rather than freezing the wrong return value into a test.
 
 ### Root cause of that pre-existing bug (diagnosed 2026-07-27, NOT fixed)
 
-Narrowed far enough that whoever picks it up starts at the failing arm:
+**A fnctor prototype method is only reachable from the DYNAMIC dispatch path
+if the program contains at least one STATICALLY-TYPED use of that method.**
 
-- **Not the method cache, and not a name collision.** A method name unique to
-  the second class fails identically (`Q.prototype.bump` → `null`), and calling
-  the first class at the same site still works (`P` → 1, then `Q` → 0 from the
-  SAME call site).
-- **The receiver is correct at runtime and the member resolves.** After the
-  reassignment `p.v` reads `9` (Q's field) and `typeof p.inc === "function"` is
-  `true`. Only the INVOCATION yields undefined.
-- **It is long-standing, not a perf-work regression** — reproduces on
-  `upstream/main` in a fresh worktree.
-- **The trigger is static/dynamic class disagreement.** Every failing shape has
-  the receiver's declared class differing from its runtime class
-  (`var p = new P(); p = new Q()`, or `var p; p = new Q()`). Where they agree,
-  every case passes.
-- **The failing path is `__call_m_<m>_0`'s fallback**: it is
-  `m = __nullish_to_null(__method_cache_lookup(recv, name))`, then a
-  closure/arity fast path, else `__extern_method_call(recv, name, argv)`. The
-  fast path is what handles the matching-class case; the fallback is what a
-  mismatched receiver lands on.
-- **`__extern_method_call` opens with a PER-FNCTOR `ref.test` arm** (visible in
-  the emitted WAT) before its `$Object` test. That arm — not the terminal
-  `else` — is where a fnctor receiver of the "wrong" class is being answered
-  undefined.
+```js
+function Q() { this.v = 9; }
+Q.prototype.inc = function () { return 1000; };
+export function test() { var p; p = new Q(); return p.inc(); }
+// -> 0.  Add ANY typed use of Q.prototype.inc, even one that never runs:
+function dead() { var q = new Q(); return q.inc(); }
+// -> test() now returns 1000.
+```
 
-One fix was attempted and **reverted**: making the terminal `else` of
-`buildClosurePropMethodCallElseArm` fall back to generic member-get + apply
-instead of `ref.null.extern`. It changed nothing, which is itself the evidence
-that the per-fnctor arm — not the terminal fallback — owns the defect. Not
-landed, because an unverified speculative codegen change is worse than none.
+A *dead* typed use repairs it, which proves this is a compile-time
+registration/emission gap, not a runtime one: the typed path is what causes
+the method to be emitted into whatever table the dynamic path consults
+(`__call_m_<m>_<n>` → `__method_cache_lookup` → `__extern_method_call`).
+
+Evidence trail, in the order it was established:
+
+- Not the method cache and not a name collision — a method name unique to a
+  second class fails identically.
+- The receiver IS correct at runtime and the member DOES resolve: after the
+  reassignment `p.v` reads Q's field and `typeof p.inc === "function"` is
+  `true`. Only the invocation answers undefined.
+- Long-standing, not a perf-work regression — reproduces on `upstream/main`
+  in a fresh worktree.
+- **NOT static/dynamic class disagreement**, which was the first hypothesis
+  and is FALSIFIED: a single-class program with no reassignment conflict
+  (`var p; p = new Q()`) fails just as hard. The real variable is whether a
+  typed use exists anywhere in the program.
+- `collectMethodEntries` (closed-method-dispatch) keys on a compiled
+  `<Struct>_<method>` function. A fnctor prototype method is a lifted
+  *closure*, not a `Q_inc`, so it contributes NO closed-struct arm — which is
+  consistent with the emitted `__call_m_inc_0` having no per-struct arms at
+  all. That is the most likely place the registration is missing.
+
+One fix was attempted and **reverted**: routing the terminal `else` of
+`buildClosurePropMethodCallElseArm` to generic member-get + apply instead of
+`ref.null.extern`. It changed nothing, which rules the terminal fallback out.
+Not landed — an unverified speculative codegen change is worse than none.
 
 Needs its own issue id; `claim-issue.mjs --allocate` could not be trusted to
 give one here (it returned #3717, already taken on this branch — its open-PR
