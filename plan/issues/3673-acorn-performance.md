@@ -584,6 +584,17 @@ inline-modifier family + 2175 ×3); trie probe (14 keyword cases,
 prefix words, ordered-priority exec) green; corpus 23/23; canaries 4/4;
 tsc clean.
 
+### Round 17 — hasOwn key flattened once
+
+`__object_hasOwn`/`__hasOwnProperty`/`__propertyIsEnumerable`'s
+closed-struct field arms re-ran `__str_flatten(key)` per arm (~one call
++ ref.test per field name, ~70ms self across a bench run under
+`__object_hasOwn`). The prologue now flattens the key ONCE into a
+scratch local; arms compare the local against their interned literals
+(hash-rejected O(1) since round 9). Verification: hasOwn/2896 suites
+28/28; corpus 23/23; canaries 4/4; tsc clean. End-to-end bench still
+deferred to a quiet box (S2 agent compiling concurrently).
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

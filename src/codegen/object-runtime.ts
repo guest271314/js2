@@ -6327,7 +6327,7 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
   // Factory, not a shared Instr tree: finalize remaps every function body in
   // place, so sharing these objects between the two predicates would remap all
   // embedded type indices twice (#1719 reserve/fill discipline).
-  const buildPrologue = (): Instr[] => {
+  const buildPrologue = (flatLocalIdx: number): Instr[] => {
     const keyArms: Instr[] = [];
     for (const [fieldName, entries] of byField) {
       const receiverArms: Instr[] = [];
@@ -6366,10 +6366,9 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
         );
       }
       keyArms.push(
-        { op: "local.get", index: 1 },
-        { op: "any.convert_extern" },
-        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
-        { op: "call", funcIdx: flattenIdx },
+        // (#3673 round 17) key flattened ONCE into the scratch local below —
+        // the old per-arm re-flatten paid a call + ref.test per field arm.
+        { op: "local.get", index: flatLocalIdx },
         ...nativeStringLiteralInstrs(ctx, fieldName),
         { op: "call", funcIdx: equalsIdx },
         { op: "if", blockType: { kind: "empty" }, then: receiverArms },
@@ -6379,7 +6378,18 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "any.convert_extern" },
       { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
-      { op: "if", blockType: { kind: "empty" }, then: keyArms },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+          { op: "call", funcIdx: flattenIdx },
+          { op: "local.set", index: flatLocalIdx },
+          ...keyArms,
+        ],
+      },
     ];
   };
   // Closed compiler fields are ordinary own data properties and therefore
@@ -6388,7 +6398,11 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
   // this physical-field path.
   for (const name of ["__object_hasOwn", "__hasOwnProperty", "__propertyIsEnumerable"]) {
     const fn = ctx.mod.functions.find((candidate) => candidate.name === name);
-    if (fn) fn.body.unshift(...buildPrologue());
+    if (fn) {
+      const flatLocalIdx = 2 + fn.locals.length; // 2 params on all three
+      fn.locals.push({ name: "__ho_flatkey", type: { kind: "ref_null", typeIdx: ctx.nativeStrTypeIdx } });
+      fn.body.unshift(...buildPrologue(flatLocalIdx));
+    }
   }
 }
 
