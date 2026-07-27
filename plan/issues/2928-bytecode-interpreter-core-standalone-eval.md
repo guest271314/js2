@@ -434,6 +434,57 @@ lexical capture remains #2929 and is not part of this handoff.
 5. Check the Test262 acceptance box only after at least 30 named official
    source files pass because of the linked interpreter route.
 
+## Implementation findings (E6 Test262-runner provider link, 2026-07-27)
+
+The ordinary standalone Test262 lane now links the runtime-eval provider.
+The wiring is deliberately thin and lives at the distribution seam, not in
+the compiler:
+
+- `scripts/runtime-eval-provider.mjs` — ONE shared source assembly (pinned
+  Acorn tarball via `tests/dogfood/setup-acorn.mjs` + import-clean
+  `src/interp/*` + the export wrapper proven by
+  `tests/issue-2928-runtime-link.test.ts`), the provider compile options,
+  a disk cache keyed by (source, options, compiler-bundle hash), and
+  fresh-per-test namespace instantiation.
+  `tests/interp/runtime-acorn-package-probe.mjs` consumes the same assembly,
+  so the artifact the harness proves and the artifact the runner links are
+  byte-identical (re-verified: 14/14 canaries, 2,513,425 bytes).
+- `scripts/build-runtime-eval-provider.mjs` — idempotent prebuild wired into
+  `run-test262-vitest.sh` for `TEST262_TARGET=standalone`. It canary-verifies
+  (eval/function/30-body corpus) BEFORE caching; a provider that cannot
+  evaluate `1 + 2` can never be published. Build cost ~71–81 s; cache hit
+  <1 s.
+- `scripts/test262-worker.mjs` — the standalone path goes Module-first; when
+  `WebAssembly.Module.imports()` names `js2wasm:runtime-eval`, the worker
+  links a FRESH provider instance (per-test isolation; instance ≈ 0.4 s,
+  Module compile ≈ 27 ms, once per worker). **Cache miss degrades to the
+  exact status quo** (unresolved import → LinkError): workers never compile
+  the provider, because Acorn compilation takes minutes and the pool kills
+  jobs at 30 s. `TEST262_DISABLE_RUNTIME_EVAL_PROVIDER=1` is the attribution
+  kill-switch — it byte-restores pre-wiring behavior for A/B runs.
+- CI chunk shards see a cache miss and keep status-quo behavior; publishing
+  the provider artifact for CI (through #2527 packaging) is follow-up work.
+
+Two measurement traps found and fixed/recorded on the way:
+
+1. **The authoritative command under-reports its own denominator on this
+   branch.** The per-test vitest timeout was a hardcoded 90 s that also
+   measures POOL-QUEUE wait. Once the provider made the annexB eval bodies
+   actually execute (slow — see finding 2), queued tests blew the 90 s and
+   vitest killed them WITHOUT a jsonl row: 202 of 816 files simply vanished
+   from the results (a file that PASSES in isolation was among the missing).
+   Fixed: `TEST262_IT_TIMEOUT_MS` env override (default unchanged at 90 s, CI
+   byte-identical); measurement sweeps pass it explicitly.
+2. **Newly-reachable interpreter executions are pathologically slow or hang**
+   (interpreter-side, out of E6 scope, needs its own issue): an eval body of
+   `if (false) ;` takes ~27 s before throwing through the linked route;
+   `if (false) ; else function f() { ... }` (the annexB function-in-if
+   family, ~100 files) never terminates and eats the 30 s pool timeout.
+   Simple bodies (`1 + 2`, `var`, `function f(){} f()`) run in <1 s. The
+   provider-side `__runtime_indirect_eval` returns instantly for the same
+   bodies when called with JS carriers, so the pathology is in the
+   native-carrier execution path.
+
 ## Coercion-sites allowance (`src/codegen/expressions/eval-inline.ts`)
 
 `pnpm run check:coercion-sites` fired on this change-set:
