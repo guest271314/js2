@@ -27,7 +27,7 @@ import {
 } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js";
-import { noteTypedThisCompound, resolveTypedThisWritableField } from "../typed-this.js"; // (#3683 S2) typed-`this` compound
+import { EMIT_COMPOUND_OP_HANDLES, tryEmitTypedThisCompound } from "../typed-this.js"; // (#3683 S2) typed-`this` compound
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js";
 import {
   emitAlternateStructSetDispatch,
@@ -2099,26 +2099,6 @@ function emitBitwiseCompoundOp(fctx: FunctionContext, op: ts.SyntaxKind): void {
   });
 }
 
-/**
- * (#3683 S2) Exactly the operators {@link emitCompoundOp}'s switch lowers. Its
- * missing `default` makes an unlisted operator a silent no-op, which is only
- * safe for callers that pre-checked — the typed-`this` compound branch does.
- */
-const EMIT_COMPOUND_OP_HANDLES: ReadonlySet<ts.SyntaxKind> = new Set([
-  ts.SyntaxKind.PlusEqualsToken,
-  ts.SyntaxKind.MinusEqualsToken,
-  ts.SyntaxKind.AsteriskEqualsToken,
-  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
-  ts.SyntaxKind.SlashEqualsToken,
-  ts.SyntaxKind.PercentEqualsToken,
-  ts.SyntaxKind.AmpersandEqualsToken,
-  ts.SyntaxKind.BarEqualsToken,
-  ts.SyntaxKind.CaretEqualsToken,
-  ts.SyntaxKind.LessThanLessThanEqualsToken,
-  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
-  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
-]);
-
 /** Emit the arithmetic/bitwise operation for a compound assignment operator.
  *  Stack must contain [left_f64, right_f64]. Replaces with result f64. */
 function emitCompoundOp(ctx: CodegenContext, fctx: FunctionContext, op: ts.SyntaxKind): void {
@@ -2168,37 +2148,12 @@ function compilePropertyCompoundAssignment(
   const objType = ctx.checker.getTypeAtLocation(target.expression);
   const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
 
-  // (#3683 S2 branch c1) TYPED-`this` compound assignment inside a typed twin.
-  // Structurally identical to the existing struct-ref "Path A" in
-  // `compilePropertyCompoundAssignmentExternref` (read slot → coerce to f64 →
-  // RHS as f64 → `emitCompoundOp` → coerce back → store → yield the f64
-  // result), with the receiver being the twin prologue's typed local instead of
-  // a freshly compiled struct ref. A `this` receiver never reaches Path A today
-  // (it compiles to externref via `__current_this`), so it lands on Path B and
-  // pays `__get_member_<p>` + unbox + box + `__set_member_<p>`; both paths are
-  // numeric in standalone, so the arithmetic semantics are unchanged.
-  {
-    // `emitCompoundOp` silently emits NOTHING for an operator outside its
-    // switch, which would leave the read + RHS stranded on the stack. Only
-    // enter the branch for operators it actually lowers.
-    const f = EMIT_COMPOUND_OP_HANDLES.has(op) ? resolveTypedThisWritableField(ctx, fctx, target) : undefined;
-    if (f !== undefined) {
-      fctx.body.push({ op: "local.get", index: f.localIdx });
-      fctx.body.push({ op: "local.get", index: f.localIdx });
-      fctx.body.push({ op: "struct.get", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
-      if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, f.fieldType, { kind: "f64" });
-      const rhsType = compileExpression(ctx, fctx, rhs, { kind: "f64" });
-      if (rhsType === null) return null;
-      if (rhsType.kind !== "f64") coerceType(ctx, fctx, rhsType, { kind: "f64" });
-      emitCompoundOp(ctx, fctx, op);
-      const resTmp = allocLocal(fctx, `__tt_cmpd_${fctx.locals.length}`, { kind: "f64" });
-      fctx.body.push({ op: "local.tee", index: resTmp });
-      if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, f.fieldType);
-      fctx.body.push({ op: "struct.set", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
-      fctx.body.push({ op: "local.get", index: resTmp });
-      noteTypedThisCompound();
-      return { kind: "f64" };
-    }
+  // (#3683 S2 branch c1) TYPED-`this` compound assignment inside a twin. Only
+  // entered for operators `emitCompoundOp` actually lowers — its switch has no
+  // `default`, so an unlisted one would strand the read + RHS on the stack.
+  if (EMIT_COMPOUND_OP_HANDLES.has(op)) {
+    const typed = tryEmitTypedThisCompound(ctx, fctx, target, rhs, op, emitCompoundOp);
+    if (typed !== undefined) return typed;
   }
 
   // (#3496 merge-queue follow-up) `globalThis.<name> op= value` must keep the

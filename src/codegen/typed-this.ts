@@ -72,6 +72,11 @@ import { ts, forEachChild } from "../ts-api.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { resolveEnclosingFnctorOwner } from "./fnctor-escape-gate.js";
+import { allocLocal } from "./context/locals.js";
+// `shared.js` holds the late-bound delegates precisely so a feature module can
+// reach the expression/coercion engines without a cycle back through
+// expressions.ts / index.ts.
+import { coerceType, compileExpression } from "./shared.js";
 
 /**
  * Property names whose reads/writes have dedicated lowerings (array length,
@@ -403,15 +408,162 @@ export function resolveTypedThisWritableField(
   return f;
 }
 
-/** Bump the `set` tally (branch b landed its store). */
-export function noteTypedThisSet(): void {
+/**
+ * (#3683 S2 branch b) `this.X = v` WRITE inside a twin → `local.get
+ * $typed_this; <value>; coerce; struct.set`. Returns the RHS value's ValType
+ * (§13.15.2 step 1.e: an assignment evaluates to `rval` as written, NOT to the
+ * field-coerced value), or `undefined` to decline.
+ *
+ * `toBoolean` is injected rather than imported: `ensureI32Condition` lives in
+ * `codegen/index.ts`, which transitively imports this module.
+ */
+export function tryEmitTypedThisFieldSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression,
+  value: ts.Expression,
+  toBoolean: (fctx: FunctionContext, t: ValType | null, ctx: CodegenContext) => void,
+): ValType | undefined {
+  const f = resolveTypedThisWritableField(ctx, fctx, target);
+  if (f === undefined) return undefined;
+  const propName = (target.name as ts.Identifier).text;
+  // Reference before value (§13.15.2): the receiver is a materialized local, so
+  // pushing it first is side-effect-free and gives `struct.set` its operand
+  // order without a scratch slot for the ref.
+  fctx.body.push({ op: "local.get", index: f.localIdx });
+  let valType = compileExpression(ctx, fctx, value);
+  if (valType === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+    valType = { kind: "externref" };
+  }
+  if (ctx.booleanPropertyNames.has(propName)) {
+    // #2847 parity with the pinned write: the whole-program property analysis
+    // proves this slot is boolean, so normalize through ToBoolean and carry the
+    // boolean BRAND (a bare `__box_number` would make `o.flag === true` false).
+    toBoolean(fctx, valType, ctx);
+    valType = { kind: "i32", boolean: true };
+  }
+  const valTmp = allocLocal(fctx, `__tt_val_${fctx.locals.length}`, valType);
+  fctx.body.push({ op: "local.set", index: valTmp });
+  fctx.body.push({ op: "local.get", index: valTmp });
+  // Two DIFFERENT nominal struct types cannot be bridged directly; take the
+  // same externref hop the dispatcher's write arm takes (value→externref at the
+  // call site, externref→field inside the arm). Everything else is one
+  // coercion-engine step.
+  const bothRefs =
+    (valType.kind === "ref" || valType.kind === "ref_null") &&
+    (f.fieldType.kind === "ref" || f.fieldType.kind === "ref_null");
+  if (bothRefs && (valType as { typeIdx: number }).typeIdx !== (f.fieldType as { typeIdx: number }).typeIdx) {
+    coerceType(ctx, fctx, valType, { kind: "externref" });
+    coerceType(ctx, fctx, { kind: "externref" }, f.fieldType);
+  } else if (valType.kind !== f.fieldType.kind) {
+    coerceType(ctx, fctx, valType, f.fieldType);
+  }
+  fctx.body.push({ op: "struct.set", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+  fctx.body.push({ op: "local.get", index: valTmp });
   typedThisStats.inlineSet++;
+  return valType;
 }
-/** Bump the compound tally (branch c1 landed its read-modify-write). */
-export function noteTypedThisCompound(): void {
+
+/**
+ * (#3683 S2) Exactly the operators `operator-assignment.ts`'s private `emitCompoundOp`
+ * switch lowers. That switch has no `default`, so an unlisted operator is a
+ * silent no-op that would strand its operands on the stack — only a caller
+ * that pre-checks against this set may enter {@link tryEmitTypedThisCompound}.
+ * Kept here, with its only consumer; MUST be updated in lockstep with the
+ * switch.
+ */
+export const EMIT_COMPOUND_OP_HANDLES: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.PlusEqualsToken,
+  ts.SyntaxKind.MinusEqualsToken,
+  ts.SyntaxKind.AsteriskEqualsToken,
+  ts.SyntaxKind.AsteriskAsteriskEqualsToken,
+  ts.SyntaxKind.SlashEqualsToken,
+  ts.SyntaxKind.PercentEqualsToken,
+  ts.SyntaxKind.AmpersandEqualsToken,
+  ts.SyntaxKind.BarEqualsToken,
+  ts.SyntaxKind.CaretEqualsToken,
+  ts.SyntaxKind.LessThanLessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanEqualsToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken,
+]);
+
+/**
+ * (#3683 S2 branch c1) `this.X op= v` inside a twin. Structurally identical to
+ * the existing struct-ref "Path A" in `compilePropertyCompoundAssignmentExternref`
+ * (read slot → coerce to f64 → RHS as f64 → op → coerce back → store → yield the
+ * f64 result), with the receiver being the twin's typed local. A `this` receiver
+ * never reaches Path A today (it compiles to externref via `__current_this`), so
+ * it lands on Path B and pays `__get_member_<p>` + unbox + box + `__set_member_<p>`;
+ * both are numeric under standalone, so the arithmetic semantics are unchanged.
+ *
+ * `emitOp` is injected because `emitCompoundOp` is private to
+ * `operator-assignment.ts`; the caller MUST have pre-checked that the operator
+ * is one `emitOp` actually lowers (its switch has no `default`, so an unlisted
+ * operator would silently strand the read + RHS on the stack).
+ */
+export function tryEmitTypedThisCompound(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression,
+  rhs: ts.Expression,
+  op: ts.SyntaxKind,
+  emitOp: (ctx: CodegenContext, fctx: FunctionContext, op: ts.SyntaxKind) => void,
+): ValType | null | undefined {
+  const f = resolveTypedThisWritableField(ctx, fctx, target);
+  if (f === undefined) return undefined;
+  fctx.body.push({ op: "local.get", index: f.localIdx });
+  fctx.body.push({ op: "local.get", index: f.localIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+  if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, f.fieldType, { kind: "f64" });
+  const rhsType = compileExpression(ctx, fctx, rhs, { kind: "f64" });
+  if (rhsType === null) return null;
+  if (rhsType.kind !== "f64") coerceType(ctx, fctx, rhsType, { kind: "f64" });
+  emitOp(ctx, fctx, op);
+  const resTmp = allocLocal(fctx, `__tt_cmpd_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: resTmp });
+  if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, f.fieldType);
+  fctx.body.push({ op: "struct.set", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+  fctx.body.push({ op: "local.get", index: resTmp });
   typedThisStats.inlineCompound++;
+  return { kind: "f64" };
 }
-/** Bump the inc/dec tally (branch c2 landed its read-modify-write). */
-export function noteTypedThisIncDec(): void {
+
+/**
+ * (#3683 S2 branch c2) `this.X++` / `--this.X` inside a twin. Acorn's
+ * `this.pos++` is the hottest update site in the tokenizer; on the generic body
+ * it costs `__get_member_pos` + unbox + `f64.add` + box + `__set_member_pos`.
+ * Numeric semantics (and the prefix/postfix result choice) match the externref
+ * read-modify-write it replaces, `emitExternrefMemberIncDec`.
+ */
+export function tryEmitTypedThisIncDec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  operand: ts.PropertyAccessExpression,
+  f64Op: "f64.add" | "f64.sub",
+  mode: "prefix" | "postfix",
+): ValType | undefined {
+  const f = resolveTypedThisWritableField(ctx, fctx, operand);
+  if (f === undefined) return undefined;
+  fctx.body.push({ op: "local.get", index: f.localIdx });
+  fctx.body.push({ op: "local.get", index: f.localIdx });
+  fctx.body.push({ op: "struct.get", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+  if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, f.fieldType, { kind: "f64" });
+  const tmp = allocLocal(fctx, `__tt_incdec_${fctx.locals.length}`, { kind: "f64" });
+  if (mode === "postfix") {
+    // [ref, old] → stash old, compute new, store, yield old.
+    fctx.body.push({ op: "local.tee", index: tmp });
+    fctx.body.push({ op: "f64.const", value: 1 });
+    fctx.body.push({ op: f64Op });
+  } else {
+    // [ref, old] → compute new, stash it, store, yield new.
+    fctx.body.push({ op: "f64.const", value: 1 });
+    fctx.body.push({ op: f64Op });
+    fctx.body.push({ op: "local.tee", index: tmp });
+  }
+  if (f.fieldType.kind !== "f64") coerceType(ctx, fctx, { kind: "f64" }, f.fieldType);
+  fctx.body.push({ op: "struct.set", typeIdx: f.structTypeIdx, fieldIdx: f.fieldIdx });
+  fctx.body.push({ op: "local.get", index: tmp });
   typedThisStats.inlineIncDec++;
+  return { kind: "f64" };
 }

@@ -14,6 +14,15 @@ sprint: Backlog
 related: [3673, 1946, 1947, 1584]
 loc-budget-allow:
   - src/codegen/fnctor-escape-gate.ts
+  # S2: the four lowering-branch call sites. The emitters themselves live in
+  # the new subsystem module `src/codegen/typed-this.ts` (which also absorbed
+  # `EMIT_COMPOUND_OP_HANDLES`); what remains in each god-file is one guarded
+  # call plus the comment explaining why it must run before the pinned
+  # dispatcher — 42 net lines across all four, down from 161 before the move.
+  - src/codegen/property-access-dispatch.ts
+  - src/codegen/expressions/assignment.ts
+  - src/codegen/expressions/operator-assignment.ts
+  - src/codegen/expressions/unary-updates.ts
 ---
 
 # #3683 — Typed-`this` monomorphization for fnctor prototype methods
@@ -157,6 +166,84 @@ re-mint their closures), presence-tracked/optional fields excluded from
 the inline branches (the dispatcher's presence check is semantic), and
 `!moduleUsesDelete` (tombstone-aware reads). The shim keeps
 `__current_this` semantics for all non-field uses inside the twin.
+
+## S2 implementation notes (2026-07-27) — landed
+
+**Step 1 (the risky one) — `compileLiftedClosureBody` extraction.** Phase 5 of
+`compileArrowAsClosure` (the ~590 lines from "5. Build the lifted function
+body" to the `ctx.currentFunc = savedFunc` restore) moved verbatim into
+`compileLiftedClosureBody(ctx, fctx, arrow, opts)`. Minting/registering the
+wasm function, the construction site and `registerClosureBindingInfo` stayed
+with the caller — they must run exactly ONCE per arrow even when two bodies are
+emitted. Verified **byte-identical**: the standalone acorn bench binary before
+and after `cmp`s equal at 1,353,337 bytes. One non-behavioural edit was
+required: `arrow` used to be narrowed to `FunctionExpression` at the
+native-generator arm by TS aliased-condition analysis on `const isGenerator =
+ts.isFunctionExpression(arrow) && …`; that alias no longer reaches the
+extracted scope, so the arm restates a condition its own non-null
+`nativeGenExprInfo` already implies.
+
+**Why `!moduleUsesDelete` was dropped.** The scoping note listed it as an
+admission gate on tombstone grounds. It is not what makes the inline branches
+safe, and applying it would have made S2 a **measured no-op**: acorn contains
+`delete node.operator` and `delete this.undefinedExports[name]`, so the flag is
+TRUE for the entire benchmark target. The tombstone-aware read
+(`tryEmitDeleteAwareDynamicGet`) is a JS-HOST lowering that runs *after* the
+pinned branch in `tryPinnedAndDeleteAwareDynamicGet`, so a pinned `this`
+receiver never reaches it today. What actually protects a deleted slot is the
+presence-bit carve-out plus the standalone struct-delete lowering, which writes
+a delete sentinel into the field itself. A regression pin covers exactly this.
+
+**Why the inline branches are equivalent** (the load-bearing argument, restated
+in full in `src/codegen/typed-this.ts`'s header): they fire only where today's
+lowering is the pinned dispatcher path, and they are that path's own
+`$__fnctor_F` arm inlined. The dispatcher's arm is `ref.test $C → ref.cast $C →
+struct.get/set`; the twin's receiver is `ref.cast $__fnctor_F`-verified, so the
+arm the dispatcher would select is that struct's own or a super/subtype's in
+the same WasmGC chain, whose shared field PREFIX puts the same-named field at
+the same index. The caller then immediately unboxed back via
+`coerceType(externref → fieldType)`, so inlining collapses box∘unbox to the
+identity.
+
+**Measured result (this is the headline, and it is NOT what S2 alone was hoped
+to deliver).** Interleaved min-of-batches, three builds in one process, 330B
+corpus:
+
+| build | ms/parse |
+| --- | --- |
+| baseline (S1 tip) | ~1.51 – 1.65 |
+| twins + shim, lowering DISABLED (`JS2WASM_TYPED_THIS=shim`) | ~1.59 – 1.68 |
+| full S2 | ~1.44 – 1.59 |
+
+Consistently: the **inline branches are worth ≈10 %** of parse time, the
+**`ref.test` forward shim costs ≈5 %**, net ≈**5 %** faster than baseline. The
+shim is pure S2 scaffolding — S3's direct calls into the twin remove it from
+the hot path, at which point the full 10 % banks.
+
+**Why S2 alone cannot deliver more, and what that means for S4.** With
+`JS2WASM_TYPED_THIS_DEBUG=1`, acorn gets 244 twins and 1,340 inline reads / 98
+writes / 20 compounds / 98 inc-decs — essentially full coverage, with almost no
+declines (top declines are `nofield:inAsync`, `nofield:canAwait` — option flags
+that are not struct fields at all; **zero** presence-tracked declines). But the
+per-site win is small because **`$__fnctor_Parser`'s hot fields are
+`externref`**: `type`, `pos`, `options`, `start`, `value`, `strict`,
+`lastTokEnd`… all boxed (`input`, `labels`, `scopeStack` are `ref_null`; only
+`awaitPos`/`yieldPos`/`awaitIdentPos` are `f64` and `containsEsc`/`inModule`/
+`exprAllowed` are `i32`). So `struct.get` hands back an externref and the
+consumer still unboxes — S2 removes the *dispatcher call*, not the *boxing*.
+The boxing is the #1584 value-rep question, i.e. **S4 is where the typed lane
+pays off**, and S2's branches are the substrate it needs. Recommend
+re-sequencing S4 ahead of, or alongside, S3.
+
+**Diagnostics shipped**: `JS2WASM_TYPED_THIS=0` (kill-switch — reproduces
+pre-S2 output byte-for-byte on any program), `=shim` (twins + shim, no inline
+lowering — isolates shim cost from branch win; this is what produced the table
+above), `JS2WASM_TYPED_THIS_DEBUG=1` (per-compile tallies + declined-field
+histogram).
+
+**Binary size**: 1,353,337 → 1,808,339 bytes (+34 %) on acorn, from duplicating
+244 method bodies. If size becomes a gate, admission can be narrowed to methods
+with ≥N inline sites.
 
 ## Acceptance criteria
 
