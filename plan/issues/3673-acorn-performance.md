@@ -1372,6 +1372,60 @@ this round just confirms it is the *second* lever, not the first.
 No compiler change landed this round: the experiment's own result says the
 change it was scoped to justify (a SIMD lowering) is not worth making.
 
+### Round 36 — corrections, and the opcode census that reprices everything
+
+Two measured corrections to earlier rounds, both from the IR-narrowing
+investigation, both of which supersede numbers published above.
+
+**(a) The 2.7x round-trip price was MIS-SCALED (my error).** The
+hand-assembled control measured the `i32→f64→i32` round trip in code
+where it was the ONLY work. In our actual hot function it is 10 ops out
+of ~180. Worse, round 32's headline "29 truncations / 41 array reads"
+is a WHOLE-MODULE count — 22 of those 29 live in an unrelated 2,148-line
+f64→string runtime helper; in the hot loop it is 5 and 5. Scaling the
+control properly (~7.5k char reads/run, 0.0267 ms delta ⇒ ~3.6 ns/read)
+prices the round trip at **~0.027 ms of our 0.100 ms — about 27 %, not
+2.7x.** Fixing it should land the tokenizer near **0.073 ms (~2.2x
+node)**, not near the 0.015 ms hand-written ceiling.
+
+**(b) Partial narrowing is a 2.7x PESSIMIZATION.** Rewriting the
+tokenizer so the EXISTING `| 0` analysis makes char locals genuinely i32
+(no compiler change) measured, same harness, identical checksums:
+
+| lane | ms |
+| --- | --- |
+| node | 0.0328 |
+| hand WasmGC (i32) | 0.0150 |
+| hand WasmGC (+ f64 round trip) | 0.0405 |
+| ours, baseline | 0.1002 |
+| ours, i32 char locals only | **0.1874** |
+| ours, + i32 cursor local | **0.2717** |
+
+Narrowing locals inside an otherwise-f64 world means every narrowed value
+is immediately re-widened (the fields are f64, `isDigit`'s param is f64)
+and each `| 0` adds a NaN check plus a `trunc_sat` on top. **This is the
+third independent confirmation of the whole-chain law** (after S4a's f64
+fields gaining ~1 % and round 33's peephole): typing is whole-chain or
+NEGATIVE. Treat it as a law of this codebase — any future slice that
+types one link must type the whole chain or measurably lose.
+
+**The census that matters more than either.** Opcodes in the hot
+`Lexer_next` of our -O3 standalone module:
+
+```
+throw 54 · ref.is_null 35 · extern.convert_any 73 · any.convert_extern 19
+ref.cast 38 · ref.test 19 · struct.get 57 · struct.set 16 · call 7
+array.get_u 5 · i32.trunc_sat_f64_s 5 · f64.convert_i32_u 5 · f64.add 6
+```
+
+**54 throws and 35 null checks in one tokenizer function.** The dominant
+cost is not the round trip and not dispatch — it is null-check-and-throw
+scaffolding on every `this.` access plus extern/any conversion churn
+(73 + 19 + 38 + 19 = 149 conversion/cast ops against 5 actual character
+reads). That is the next big lever, and it is the other half of #1947
+("non-null params under strictNullChecks; every typed param is
+`(ref null $T)` with per-access null-check-throw blocks").
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
