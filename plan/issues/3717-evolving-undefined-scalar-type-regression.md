@@ -118,3 +118,11 @@ currently red on.
 - [x] Fix `acorn-harness.mjs` to pass `skipSemanticDiagnostics: true`.
 - [x] `pnpm run dogfood:acorn` (`acorn-harness.mjs`) is green:
       `compile.success: true`, binary validates, 7/7 fixtures equal.
+- [x] Pin the invariant permanently in
+      `tests/issue-3717-dogfood-skip-semantic-diagnostics.test.ts` (#2093):
+      every acorn dogfood script that calls `compile()` passes
+      `skipSemanticDiagnostics: true`, asserted as a set so a future script
+      cannot silently drift out of step the way `acorn-harness.mjs` did.
+      `tests/dogfood/acorn.test.ts` drives the harness end-to-end but its
+      compile case is opt-in (`DOGFOOD_ACORN=1`) and skipped in the default
+      sweep, so it cannot catch this drift on an ordinary PR.
