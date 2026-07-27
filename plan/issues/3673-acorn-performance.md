@@ -32,6 +32,7 @@ loc-budget-allow:
   - src/codegen/closure-exports.ts
   - src/codegen/vec-overlay.ts
   - src/codegen/regexp-standalone.ts
+  - src/codegen/native-regex.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -623,6 +624,140 @@ shim cost). Verification: twin pins 12/12, write-once pins 10/10, i31
 pins 7/7, 1712 + 2151-nary + 2674 + 2963 green, corpus 23/23, canaries
 4/4; the agent additionally ran full equivalence (213 files) on its
 branch — identical failure set to its base; tsc clean.
+
+### Round 18b — same-box re-baseline + warm-up methodology correction
+
+The container restarted ~2x faster, so BOTH lanes re-measured on the
+same box, same process discipline (deep warm-up ≥400 parses, then
+min-of-24×200): compiled standalone **0.785ms**, warm node-acorn
+**0.0177ms** — **gap ≈44x**, consistent with the pre-restart ~41x (the
+box lifted both sides equally; no methodology-driven progress, recorded
+to keep cross-round ratios honest). Two findings:
+- **Warm-up matters more than previously accounted**: the bench's
+  scale-to-2s single measurement includes V8 tier-up of the 1.8MB
+  module — a shallow-warm run reads ~1.4ms where the tiered steady
+  state is ~0.79ms. All future numbers use deep-warm min-of-batches.
+- **Binaryen -O3 post-S2 is worth ~5%** under matched warm-up (0.801 vs
+  0.846 interleaved same-process) — up from pre-S2 flat (the twins give
+  it monomorphic struct.gets to optimize), and worth shipping in the
+  artifact configuration, but the initial cold comparison that suggested
+  −41% was a tier-up artifact, not a real win.
+
+### Round 19 — hasOwn field arms gated on non-$Object receivers
+
+Deep-warm caller profiling showed `__str_equals` 121ms under
+`__object_hasOwn`: acorn's hot hasOwn receivers are plain `$Object`s
+(options, refDestructuringErrors), but every call walked ~50
+closed-struct field arms — one `__str_equals` call each — before
+reaching the base-body `$Object` path, even though those arms can only
+ever MATCH a struct receiver (each `ref.test`s its struct). One
+receiver test now skips the whole block for `$Object` receivers;
+behavior-identical by construction. Measured: `__str_equals`-under-
+hasOwn → 0 (total 179 → 80ms in the 3k-parse window); window ~0.94 →
+~0.92-0.96ms (≈2-3%, within the noise band but the profile delta is
+unambiguous). Verification: hasOwn/2896 suites 28/28; canaries 4/4;
+tsc clean.
+
+### Round 19b — builtin-meta probe gated on closure receivers
+
+`__builtinfn_get_meta` runs at the TOP of every `__extern_get` and
+classified the KEY first — two `__str_equals` calls ("name"/"length")
+per property read program-wide, receiver never consulted until the
+arms. Every builtin meta struct subtypes the funcref-wrapper ROOT
+(round 6), so one root `ref.test` now gates the whole classification +
+arm block: non-closure receivers (fnctors, $Objects, strings — the
+overwhelming majority of extern_get traffic) skip it with a single
+test. Measured: deep-warm window 0.92-0.97 → **0.83-0.90ms** (≈5%).
+Verification: #2896 builtin-meta reflection suite green (closure
+receivers unchanged); twin pins 12/12; corpus 23/23; canaries 4/4; tsc
+clean.
+
+### Round 20 — start-anchored fast-out in `__regex_search`
+
+`__regex_search` tried a full VM run at EVERY start position; for a
+start-anchored pattern (`^…`, multiline off) every position after the
+first fails the `BOL` assertion immediately, so the scan was pure
+overhead — acorn's anchored keyword `.test`s paid ~word-length VM
+attempts each. The search prologue now reads the program's first
+non-SAVE opcode (two-three array reads, no compile-time plumbing): a
+multiline-0 `BOL` head sets the sticky flag, trying exactly one
+position. Conservative: `^a|b` starts with SPLIT and keeps the scan.
+Measured: 400k-keyword probe 425 → 146ms (2.9x on that path);
+end-to-end `__regex_run` 6.4% → 5.5% and window ~0.86ms (within noise —
+the residual regex share is the UNANCHORED patterns: lineBreak etc.).
+Verification: full regex battery failure set name-identical to the
+round-16 pre-existing set; corpus 23/23; canaries 4/4; tsc clean.
+
+### Round 21 — per-object cache staleness via props-array identity
+
+The global `__obj_table_gen` is retired. It was bumped by EVERY
+`__obj_grow`, and acorn's per-parse options build grows its table twice
+— cold-starting every per-key cache program-wide at each parse start
+(~50 hot keys × 2 storms of slow re-population per parse). Staleness is
+now witnessed per object: population stores the owner's props ARRAY in
+the key's `$HashedString` (field 7), and every hit `ref.eq`s it against
+the live `owner.props` — a grow replaces the array, so exactly the
+grown object's cached entries miss; field 4 degrades to a populated
+flag. All three consumers converted (`__extern_get` hit arm,
+`__method_cache_lookup`, the `__call_m_*` inline arms). Also recorded:
+a NULL result — sorting the `__fnctor_proto_start` ladder by struct
+field count (Parser-first) measured ~4% WORSE (TokenType's per-token
+`updateContext` receivers dominate some phases); reverted.
+Measured: window 0.86-0.90 → **0.82-0.87ms** (~3-4%). Verification:
+cache-semantics battery (accessor/defineProperty/delete/2896/2866/1888/
+2674/2963/twin/i31) 118/118; corpus 23/23; canaries 4/4; tsc clean.
+
+### Round 22 — backtrack-stack pool in the regex VM
+
+`__regex_run` allocated (and zeroed) a fresh 64-slot backtrack-frame
+array per invocation — and `__regex_search` invokes it once per scan
+position. A single module-global pool slot now lets the top-level run
+REUSE the previous run's (possibly grown) stack: checkout nulls the
+slot, so a NESTED lookaround run simply allocates fresh
+(reentrancy-safe); both VM exits check the stack back in (the cap-throw
+path doesn't — a thrown parse abandons the pool entry, refilled on the
+next run). Frames above `top` may retain stale snapshot refs until
+overwritten — bounded by the deepest stack seen, the standard engine
+trade. Measured: window 0.82-0.87 → **0.78-0.83ms**. Verification: full
+regex battery failure set identical to base (timing-stripped name
+diff); trie probe green; corpus 23/23; canaries 4/4; tsc clean.
+
+### Round 23 — caps-snapshot elision for group-free regex programs
+
+Every backtrack-frame push snapshotted the caps array into a fresh
+allocation. For a group-free, scratch-free program (`nSlots == 2` —
+whole-match slots only) the restore is provably dead: caps[0] is set
+once at entry and never changes within a run; caps[1] is written only
+at `SAVE 1` immediately before MATCH returns; backrefs and PROGRESS
+both imply `nSlots > 2`. Snapshot and restore are now both guarded on
+`nSlots > 2`, with a shared zero-length dummy filling the frame field —
+acorn's keyword and lineBreak tests push zero-alloc frames. Keyword
+probe 154 → 117ms; window ~0.78-0.84 (noise band overlapping round 22 —
+the alloc win shows in the probe and GC pressure, not clearly in wall).
+Verification: regex battery failure set identical; corpus 23/23;
+canaries 4/4; tsc clean.
+
+## Standalone medium-fixture trap — BISECTED (round 24 diagnostics)
+
+The pre-existing 17-file-concat standalone trap decomposes into SIX
+independent per-file parse failures (host lane parses all 17 exactly;
+each repro'd standalone via an in-module line prober, .tmp/bisect-*):
+
+| fixture | first failing construct | class |
+| --- | --- | --- |
+| literals.js | `const big = 9007199254740993n;` | BigInt literal path |
+| arrow-params.js | `({ a, b }) => a + b` | destructured arrow params |
+| destructuring.js | `const { x, y: yy, z = 10, ...others } = obj` | object pattern conversion |
+| escapes-unicode.js | `'\x41\102'` | string escape reading (parseInt radix 8/16 verified OK standalone — cause is deeper, possibly a wrong `this.strict` read → octal raise) |
+| generators-async.js | (module-level) `illegal cast` | cast bug, not a parse raise |
+| regex.js | (module-level) `illegal cast` | cast bug, not a parse raise |
+
+The two `illegal cast` entries are COMPILER/runtime bugs (trap, not a
+thrown SyntaxError); the four raises are standalone-runtime divergences
+inside acorn's own code paths. Each is a self-contained investigation —
+filed here so the medium-input benchmark (where per-parse fixed costs
+amortize and the node-acorn ratio is expected to be materially better)
+can be unlocked. Not chased further in this session (perf focus).
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 

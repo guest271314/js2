@@ -59,6 +59,7 @@
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeCharCodeAtHelper } from "./char-code-at-helpers.js";
+import { getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js"; // (#3673 round 19b)
 import {
   ensureAnyToStringHelper,
   ensureNativeStringHelpers,
@@ -1537,17 +1538,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // FLAG_TOMBSTONE and defineProperty morphs set FLAG_ACCESSOR on the entry
   // itself, both checked at cache-hit time — neither needs a generation bump.
   // Starts at 1 so a literal's baked cacheGen of 0 can never spuriously match.
+  // (#3673 round 21) The global `__obj_table_gen` generation is RETIRED: a
+  // grow of ANY object (acorn's per-parse options build grows twice) bumped it
+  // and cold-started every per-key cache program-wide. Staleness is now
+  // per-object: the cache stores the owner's props ARRAY (`$HashedString`
+  // field 7) at population, and the hit guard `ref.eq`s it against the live
+  // `owner.props` — a grow replaces the array, so exactly the grown object's
+  // caches miss. Field 4 degrades to a populated flag (0/1).
   const protoCacheEnabled = ctx.hashedStrTypeIdx >= 0 && fnctorProtoStartIdx !== undefined;
-  let objTableGenGlobalIdx = -1;
-  if (ctx.hashedStrTypeIdx >= 0) {
-    objTableGenGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
-    ctx.mod.globals.push({
-      name: "__obj_table_gen",
-      type: { kind: "i32" },
-      mutable: true,
-      init: [{ op: "i32.const", value: 1 }],
-    });
-  }
 
   // (#3673 round 13) `__method_cache_lookup(recv, name) -> externref` — the
   // per-key prototype-method cache probe as a standalone helper: interned key
@@ -1581,9 +1579,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             { op: "any.convert_extern" },
             { op: "ref.cast", typeIdx: HSTR },
             { op: "local.tee", index: 2 },
-            { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
-            { op: "global.get", index: objTableGenGlobalIdx },
-            { op: "i32.eq" },
+            { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // populated flag
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -1600,13 +1596,25 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                     { op: "local.get", index: 4 },
                     { op: "any.convert_extern" },
                     { op: "ref.cast", typeIdx: objectTypeIdx },
-                    // owner non-null once gen matched (population writes all
-                    // three cache fields together).
+                    // owner non-null once populated (population writes all
+                    // cache fields together).
                     { op: "local.get", index: 2 },
                     { op: "ref.as_non_null" },
                     { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
                     { op: "ref.cast", typeIdx: objectTypeIdx },
                     { op: "ref.eq" },
+                    // (#3673 round 21) per-object staleness: owner.props must
+                    // be the SAME array as at population (a grow replaces it).
+                    { op: "local.get", index: 4 },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: objectTypeIdx },
+                    { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 }, // props
+                    { op: "local.get", index: 2 },
+                    { op: "ref.as_non_null" },
+                    { op: "struct.get", typeIdx: HSTR, fieldIdx: 7 }, // cacheProps
+                    { op: "ref.cast", typeIdx: propMapTypeIdx },
+                    { op: "ref.eq" },
+                    { op: "i32.and" },
                     {
                       op: "if",
                       blockType: { kind: "empty" },
@@ -1844,10 +1852,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                                 { op: "local.get", index: 3 },
                                 { op: "ref.as_non_null" },
                                 { op: "struct.set", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
+                                // (#3673 round 21) owner's props array — the
+                                // per-object staleness witness (grow replaces it).
                                 { op: "local.get", index: 8 },
                                 { op: "ref.as_non_null" },
-                                { op: "global.get", index: objTableGenGlobalIdx },
-                                { op: "struct.set", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
+                                { op: "local.get", index: 2 },
+                                { op: "ref.as_non_null" },
+                                { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 }, // props
+                                { op: "struct.set", typeIdx: HSTR, fieldIdx: 7 }, // cacheProps
+                                { op: "local.get", index: 8 },
+                                { op: "ref.as_non_null" },
+                                { op: "i32.const", value: 1 },
+                                { op: "struct.set", typeIdx: HSTR, fieldIdx: 4 }, // populated
                               ],
                             },
                           ],
@@ -2248,16 +2264,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //         6=inserted(ref null $PropEntry)
   {
     const body: Instr[] = [
-      // (#3673 round 9b) Rehash re-mints $PropEntry structs — invalidate every
-      // per-key prototype-lookup cache by bumping the table generation.
-      ...(objTableGenGlobalIdx >= 0
-        ? ([
-            { op: "global.get", index: objTableGenGlobalIdx },
-            { op: "i32.const", value: 1 },
-            { op: "i32.add" },
-            { op: "global.set", index: objTableGenGlobalIdx },
-          ] satisfies Instr[])
-        : []),
+      // (#3673 round 21) No generation bump: a grow REPLACES `o.props`, and
+      // every per-key cache hit `ref.eq`s the stored props array against the
+      // live one — the replacement itself invalidates exactly this object's
+      // cached entries.
       // old = o.props ; oldLen = old.len ; newCap = oldLen * 2
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
@@ -6374,20 +6384,43 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
         { op: "if", blockType: { kind: "empty" }, then: receiverArms },
       );
     }
+    // (#3673 round 19) The field arms can only ever MATCH a closed-STRUCT
+    // receiver (each arm `ref.test`s its struct type), yet acorn's hot hasOwn
+    // receivers are plain `$Object`s (options, refDestructuringErrors) — which
+    // walked all ~50 arms (one `__str_equals` call each) before reaching the
+    // base-body `$Object` path. One receiver test skips the whole block:
+    // behavior-identical, since an `$Object` can never match any arm.
+    const objTypeIdx = ctx.objectRuntimeTypes?.objectTypeIdx;
+    const structReceiverGuard: Instr[] =
+      objTypeIdx !== undefined
+        ? [
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: objTypeIdx },
+            { op: "i32.eqz" },
+          ]
+        : [{ op: "i32.const", value: 1 }];
     return [
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+      ...structReceiverGuard,
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
           { op: "any.convert_extern" },
-          { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
-          { op: "call", funcIdx: flattenIdx },
-          { op: "local.set", index: flatLocalIdx },
-          ...keyArms,
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "any.convert_extern" },
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+              { op: "call", funcIdx: flattenIdx },
+              { op: "local.set", index: flatLocalIdx },
+              ...keyArms,
+            ],
+          },
         ],
       },
     ];
@@ -6833,8 +6866,7 @@ export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
   // key/entry scratch are appended once below.
   const HSTR = ctx.hashedStrTypeIdx;
   const objTypes = ctx.objectRuntimeTypes;
-  const genPos = ctx.mod.globals.findIndex((g) => g.name === "__obj_table_gen");
-  const inlineCacheReady = HSTR >= 0 && objTypes !== undefined && genPos >= 0;
+  const inlineCacheReady = HSTR >= 0 && objTypes !== undefined;
   let khLocal = -1;
   let entryLocal = -1;
   if (inlineCacheReady) {
@@ -6845,79 +6877,99 @@ export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
       { name: "__mc_entry", type: { kind: "ref_null", typeIdx: objTypes.propEntryTypeIdx } },
     );
   }
-  const genIdx = ctx.numImportGlobals + genPos;
+  // (#3673 round 21) props-array type for the per-object staleness cast.
+  const objStructDef = objTypes !== undefined ? ctx.mod.types[objTypes.objectTypeIdx] : undefined;
+  const propMapIdxForCache =
+    objStructDef?.kind === "struct" && objStructDef.fields[1]?.type.kind === "ref"
+      ? (objStructDef.fields[1].type as { typeIdx: number }).typeIdx
+      : objStructDef?.kind === "sub" &&
+          objStructDef.type.kind === "struct" &&
+          objStructDef.type.fields[1]?.type.kind === "ref"
+        ? (objStructDef.type.fields[1].type as { typeIdx: number }).typeIdx
+        : undefined;
 
   const arms: Instr[] = [];
   for (const [fnctorName, protoGlobalIdx] of ctx.fnctorPrototypeObject) {
     const typeIdx = ctx.structMap.get(`__fnctor_${fnctorName}`);
     if (typeIdx === undefined) continue;
-    const cacheTry: Instr[] = inlineCacheReady
-      ? [
-          { op: "local.get", index: 1 },
-          { op: "any.convert_extern" },
-          { op: "ref.test", typeIdx: HSTR },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: 1 },
-              { op: "any.convert_extern" },
-              { op: "ref.cast", typeIdx: HSTR },
-              { op: "local.tee", index: khLocal },
-              { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
-              { op: "global.get", index: genIdx },
-              { op: "i32.eq" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  // owner (non-null once gen matched) vs this fnctor's proto global
-                  { op: "local.get", index: khLocal },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
-                  { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
-                  { op: "global.get", index: protoGlobalIdx },
-                  { op: "any.convert_extern" },
-                  { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
-                  { op: "ref.eq" },
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [
-                      { op: "local.get", index: khLocal },
-                      { op: "ref.as_non_null" },
-                      { op: "struct.get", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
-                      { op: "ref.cast", typeIdx: objTypes!.propEntryTypeIdx },
-                      { op: "local.tee", index: entryLocal },
-                      { op: "struct.get", typeIdx: objTypes!.propEntryTypeIdx, fieldIdx: 2 }, // flags
-                      { op: "i32.const", value: FLAG_TOMBSTONE | FLAG_ACCESSOR },
-                      { op: "i32.and" },
-                      { op: "i32.eqz" },
-                      {
-                        op: "if",
-                        blockType: { kind: "empty" },
-                        then: [
-                          { op: "local.get", index: entryLocal },
-                          { op: "ref.as_non_null" },
-                          { op: "struct.get", typeIdx: objTypes!.propEntryTypeIdx, fieldIdx: 1 }, // value
-                          { op: "extern.convert_any" },
-                          ...(ctx.funcMap.has("__nullish_to_null")
-                            ? ([{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] satisfies Instr[])
-                            : []),
-                          { op: "local.get", index: 0 },
-                          { op: "local.get", index: 2 },
-                          { op: "call", funcIdx: applyClosureIdx },
-                          { op: "return" },
-                        ],
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        ]
-      : [];
+    const cacheTry: Instr[] =
+      inlineCacheReady && propMapIdxForCache !== undefined
+        ? [
+            { op: "local.get", index: 1 },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: HSTR },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "any.convert_extern" },
+                { op: "ref.cast", typeIdx: HSTR },
+                { op: "local.tee", index: khLocal },
+                { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // populated flag
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    // owner (non-null once populated) vs this fnctor's proto global
+                    { op: "local.get", index: khLocal },
+                    { op: "ref.as_non_null" },
+                    { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
+                    { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
+                    { op: "global.get", index: protoGlobalIdx },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
+                    { op: "ref.eq" },
+                    // (#3673 round 21) per-object staleness: proto.props must be
+                    // the SAME array as at population (a grow replaces it).
+                    { op: "global.get", index: protoGlobalIdx },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: objTypes!.objectTypeIdx },
+                    { op: "struct.get", typeIdx: objTypes!.objectTypeIdx, fieldIdx: 1 }, // props
+                    { op: "local.get", index: khLocal },
+                    { op: "ref.as_non_null" },
+                    { op: "struct.get", typeIdx: HSTR, fieldIdx: 7 }, // cacheProps
+                    { op: "ref.cast", typeIdx: propMapIdxForCache! },
+                    { op: "ref.eq" },
+                    { op: "i32.and" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "local.get", index: khLocal },
+                        { op: "ref.as_non_null" },
+                        { op: "struct.get", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
+                        { op: "ref.cast", typeIdx: objTypes!.propEntryTypeIdx },
+                        { op: "local.tee", index: entryLocal },
+                        { op: "struct.get", typeIdx: objTypes!.propEntryTypeIdx, fieldIdx: 2 }, // flags
+                        { op: "i32.const", value: FLAG_TOMBSTONE | FLAG_ACCESSOR },
+                        { op: "i32.and" },
+                        { op: "i32.eqz" },
+                        {
+                          op: "if",
+                          blockType: { kind: "empty" },
+                          then: [
+                            { op: "local.get", index: entryLocal },
+                            { op: "ref.as_non_null" },
+                            { op: "struct.get", typeIdx: objTypes!.propEntryTypeIdx, fieldIdx: 1 }, // value
+                            { op: "extern.convert_any" },
+                            ...(ctx.funcMap.has("__nullish_to_null")
+                              ? ([{ op: "call", funcIdx: ctx.funcMap.get("__nullish_to_null")! }] satisfies Instr[])
+                              : []),
+                            { op: "local.get", index: 0 },
+                            { op: "local.get", index: 2 },
+                            { op: "call", funcIdx: applyClosureIdx },
+                            { op: "return" },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ]
+        : [];
     arms.push(
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -6951,7 +7003,7 @@ export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
  * builtin-meta probe, AND the hash-table walk in one shot. Soundness: the
  * population site (registration-time body, data-property branch) only runs
  * when all of those paths missed for the populating fnctor class, and the hit
- * guard (`cacheGen == __obj_table_gen` + owner-proto `ref.eq` + live-DATA
+ * guard (populated flag + owner-proto `ref.eq` + props-array `ref.eq` + live-DATA
  * entry flags) confines hits to receivers of that same class. MUST be called
  * LAST among the `__extern_get` body fills.
  */
@@ -6964,9 +7016,17 @@ export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
   const { objectTypeIdx, propEntryTypeIdx } = objTypes;
   const fn = ctx.mod.functions.find((candidate) => candidate.name === "__extern_get");
   if (!fn || !fn.locals.some((l) => l.name === "kh")) return;
-  const genPos = ctx.mod.globals.findIndex((g) => g.name === "__obj_table_gen");
-  if (genPos < 0) return;
-  const genIdx = ctx.numImportGlobals + genPos;
+  // (#3673 round 21) props-array type for the per-object staleness cast.
+  const objDefForArm = ctx.mod.types[objectTypeIdx];
+  const propMapIdxForArm =
+    objDefForArm?.kind === "struct" && objDefForArm.fields[1]?.type.kind === "ref"
+      ? (objDefForArm.fields[1].type as { typeIdx: number }).typeIdx
+      : objDefForArm?.kind === "sub" &&
+          objDefForArm.type.kind === "struct" &&
+          objDefForArm.type.fields[1]?.type.kind === "ref"
+        ? (objDefForArm.type.fields[1].type as { typeIdx: number }).typeIdx
+        : undefined;
+  if (propMapIdxForArm === undefined) return;
   fn.body.unshift(
     { op: "local.get", index: 1 },
     { op: "any.convert_extern" },
@@ -6979,9 +7039,7 @@ export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
         { op: "any.convert_extern" },
         { op: "ref.cast", typeIdx: HSTR },
         { op: "local.tee", index: 8 },
-        { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
-        { op: "global.get", index: genIdx },
-        { op: "i32.eq" },
+        { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // populated flag
         {
           op: "if",
           blockType: { kind: "empty" },
@@ -7033,13 +7091,24 @@ export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
               then: [
                 { op: "local.get", index: 2 },
                 { op: "ref.as_non_null" },
-                // owner: non-null whenever cacheGen matched (gen ≥ 1 and the
-                // population site writes all three cache fields together).
+                // owner: non-null whenever populated (the population site
+                // writes all cache fields together).
                 { op: "local.get", index: 8 },
                 { op: "ref.as_non_null" },
                 { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
                 { op: "ref.cast", typeIdx: objectTypeIdx },
                 { op: "ref.eq" },
+                // (#3673 round 21) per-object staleness: owner.props must be
+                // the SAME array as at population (a grow replaces it).
+                { op: "local.get", index: 2 },
+                { op: "ref.as_non_null" },
+                { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 }, // props
+                { op: "local.get", index: 8 },
+                { op: "ref.as_non_null" },
+                { op: "struct.get", typeIdx: HSTR, fieldIdx: 7 }, // cacheProps
+                { op: "ref.cast", typeIdx: propMapIdxForArm },
+                { op: "ref.eq" },
+                { op: "i32.and" },
                 {
                   op: "if",
                   blockType: { kind: "empty" },
@@ -7956,6 +8025,9 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
     { op: "local.get", index: 0 },
     { op: "any.convert_extern" },
     { op: "local.set", index: 2 },
+    ...classifyKeyPreamble(),
+  ];
+  const classifyKeyPreamble = (): Instr[] => [
     { op: "local.get", index: 1 },
     { op: "any.convert_extern" },
     { op: "ref.test", typeIdx: anyStrTypeIdx },
@@ -8026,10 +8098,17 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
         ]),
       );
     }
-    getMetaFn.body.splice(
-      0,
-      0,
-      ...classifyPreamble(),
+    // (#3673 round 19b) get_meta runs at the TOP of every `__extern_get`, so
+    // its two key compares ("name"/"length") were paid per property read
+    // program-wide. Every builtin meta struct subtypes the funcref-wrapper
+    // ROOT (round 6), so one root `ref.test` gates the whole key
+    // classification + arm block: non-closure receivers (fnctors, $Objects,
+    // strings — the overwhelming majority of extern_get traffic) skip it with
+    // a single test. Falls back to the ungated layout when the root type
+    // isn't minted (no closures in the program ⇒ no meta structs either).
+    const metaRootIdx = getFuncRefWrapperRootTypeIdx(ctx);
+    const gatedTail: Instr[] = [
+      ...classifyKeyPreamble(),
       // Guard: only enter the arm block when the key is "name" or "length".
       { op: "local.get", index: 4 },
       { op: "local.get", index: 5 },
@@ -8039,6 +8118,20 @@ export function fillBuiltinFnMeta(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: arms,
       },
+    ];
+    getMetaFn.body.splice(
+      0,
+      0,
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.set", index: 2 },
+      ...(metaRootIdx !== undefined
+        ? ([
+            { op: "local.get", index: 2 },
+            { op: "ref.test", typeIdx: metaRootIdx },
+            { op: "if", blockType: { kind: "empty" }, then: gatedTail },
+          ] satisfies Instr[])
+        : gatedTail),
     );
   }
 

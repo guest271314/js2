@@ -110,6 +110,7 @@ function flattenConsBody(
           { op: "i32.const", value: 0 }, // cacheGen: never populated
           { op: "ref.null", typeIdx: -18 }, // cacheOwner
           { op: "ref.null", typeIdx: -18 }, // cacheEntry
+          { op: "ref.null", typeIdx: -18 }, // cacheProps (round 21)
           { op: "struct.new", typeIdx: ctx.hashedStrTypeIdx },
         ] satisfies Instr[])
       : ([{ op: "struct.new", typeIdx: strTypeIdx }] satisfies Instr[])),
