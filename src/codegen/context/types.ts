@@ -1905,6 +1905,16 @@ export interface CodegenContext {
    * numeric carriers and sidecar writes; computed conservatively per module.
    */
   booleanPropertyNames: Set<string>;
+  /**
+   * #3683 S4a: property names whose complete source write set is NUMERIC
+   * (`analyzeNumericPropertyNames`). `deriveFnctorFields` promotes a fnctor
+   * struct field with such a name from the boxed `externref` carrier to a
+   * physical `f64` slot, which is what lets an S2 typed-`this` twin's
+   * `struct.get` hand back an unboxed number instead of a value the consumer
+   * has to `__unbox_number`. Standalone lane only; `undefined` (⇒ never
+   * promote) in host mode and before the pre-pass runs.
+   */
+  numericPropertyNames?: ReadonlySet<string>;
   /** Set of function names that are async (for .d.ts generation) */
   asyncFunctions: Set<string>;
   /** Set of function names that are generators (function*) */

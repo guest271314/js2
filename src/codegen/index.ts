@@ -343,6 +343,7 @@ import {
   resolveSameShapeFieldNameCollisions,
 } from "./struct-field-exports.js"; // (#3272) extracted verbatim
 import { analyzeBooleanPropertyNames, recoverBooleanStructFieldBrands } from "./struct-field-boolean-brand.js";
+import { analyzeNumericPropertyNames } from "./numeric-property-analysis.js"; // (#3683 S4a)
 import {
   registerWasiImports,
   emitDeferredWasiHelpers,
@@ -2979,6 +2980,24 @@ export function generateModule(
   // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
   // `new` sites ⇒ empty result ⇒ no-op).
   ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
+  // (#3683 S4a) Whole-program numeric-property verdict, consumed by
+  // `deriveFnctorFields` to give a fnctor field a PHYSICAL f64 slot. MUST run
+  // before `reserveFnctorStructTypes` below — that is what derives the struct
+  // shapes. Standalone-only: the promotion's ToNumber-coercing write is a
+  // deliberate narrowing that the host lane (arbitrary JS callers) does not take.
+  // #2847's boolean verdict is recomputed here rather than read from
+  // `ctx.booleanPropertyNames` (assigned much later) so the exclusion is exact
+  // without reordering an established pass.
+  if (ctx.standalone) {
+    ctx.numericPropertyNames = analyzeNumericPropertyNames(
+      {
+        oracle: ctx.oracle,
+        fnctorReceivers: new Set(ctx.fnctorEscapeGate.receiverStruct.keys()),
+        excludeNames: analyzeBooleanPropertyNames(ctx, [ast.sourceFile]),
+      },
+      [ast.sourceFile],
+    );
+  }
   // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
   // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
   // for an `any` receiver) is enabled in helper functions compiled BEFORE the

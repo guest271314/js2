@@ -1553,6 +1553,32 @@ export function deriveFnctorFields(
     }
   }
 
+  // (#3683 S4a) Promote provably-numeric slots from the boxed `externref`
+  // carrier to a PHYSICAL f64. This is the value-representation half of the
+  // typed-`this` work: S2 made `this.pos` inside a twin a bare `struct.get`,
+  // but an externref field still hands back a boxed value the consumer has to
+  // `__unbox_number`, so the twin removed the dispatcher CALL and none of the
+  // BOXING. The field derives externref only because the FIRST constructor
+  // write types it and acorn's is `this.pos = startPos` under `this: any`;
+  // `analyzeNumericPropertyNames` replaces that one-write guess with a
+  // whole-program "every write to this NAME is numeric" verdict.
+  //
+  // Three carve-outs, each matching a mechanism a raw f64 slot cannot express:
+  //   - only `externref` fields are touched, so a slot the checker already
+  //     typed (i32 booleans, ref carriers, existing f64) is left exactly as is;
+  //   - presence-tracked (conditional-only, incl. every flow-grown) field keeps
+  //     its carrier: the read dispatcher's presence check answers `undefined`,
+  //     and the S2 twin declines those sites for the same reason;
+  //   - accessor-backed names keep the dispatcher's accessor arm.
+  // `numericPropertyNames` is populated in the standalone lane only.
+  for (const field of fields) {
+    if (field.type.kind !== "externref") continue;
+    if (onlyConditional.get(field.name) === true) continue;
+    if (!ctx.numericPropertyNames?.has(field.name)) continue;
+    if (ctx.classAccessorSet.has(`${flowStructName}_${field.name}`)) continue;
+    field.type = { kind: "f64" };
+  }
+
   // Widen non-null ref fields to ref_null so struct.new can use ref.null defaults.
   // (Kept INSIDE the derivation so the reserved field set matches exactly what the
   // struct.new default-init loop expects — see new-super.ts.)

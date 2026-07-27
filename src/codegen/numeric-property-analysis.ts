@@ -157,6 +157,15 @@ interface PropWrite {
   readonly name: string;
   readonly value?: ts.Expression;
   readonly forcedNumeric?: boolean;
+  /**
+   * For a `this.f += rhs` write, the RHS alone. `+=` is the one compound JS can
+   * answer with a string, so unlike `-=`/`*=` it is not `forcedNumeric`; but the
+   * LHS is the slot itself (numeric by induction) so `number + <opaque param>`
+   * lands in exactly the ToNumber-coerced trust boundary a plain
+   * `this.f = <param>` write already takes. Acorn's `this.pos += size` in
+   * `finishOp` is the shape.
+   */
+  readonly plusEqualsRhs?: ts.Expression;
 }
 
 /** Binary operators whose result is a number for ANY operand (ToNumeric). */
@@ -438,6 +447,46 @@ interface NumericFlowFacts {
   poisoned: boolean;
 }
 
+/**
+ * Trip the hard sentinel, reporting the offending site under
+ * `JS2WASM_NUMERIC_FIELDS_DEBUG=1` — a single unrecognised computed write in a
+ * 230 KB module zeroes the whole analysis, so it must be nameable.
+ */
+function notePoison(facts: { poisoned: boolean }, node: ts.Node): void {
+  facts.poisoned = true;
+  if (process.env.JS2WASM_NUMERIC_FIELDS_DEBUG === "1") {
+    process.stderr.write(`[numeric-fields] poison site: ${node.getText().slice(0, 90).replace(/\s+/g, " ")}\n`);
+  }
+}
+
+/**
+ * The one computed-write shape that does NOT poison a name-keyed analysis:
+ * `a[k] = b[k]` with the SAME key variable on both sides — acorn's
+ * `pp.copyNode`'s `for (var prop in node) { newNode[prop] = node[prop] }`.
+ *
+ * Whatever name it writes, it writes the value it just read from **that same
+ * name**. A name-keyed verdict says "every write to name X anywhere is
+ * numeric", so `b[X]` is a number whenever X is a promoted slot, and copying it
+ * into `a[X]` preserves that. The receivers may even be different classes: the
+ * verdict is not per-class, so it holds for both.
+ *
+ * The two key reads are provably equal: a bare identifier read has no side
+ * effects, and nothing between the LHS reference evaluation and the RHS
+ * evaluation can rebind it. Both keys must therefore resolve to the SAME
+ * lexical slot, not merely share a name.
+ */
+function isSameKeyCopy(node: ts.Node, scopes: ScopeTable): boolean {
+  if (!ts.isBinaryExpression(node) || node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false;
+  const lhs = unwrap(node.left);
+  const rhs = unwrap(node.right);
+  if (!ts.isElementAccessExpression(lhs) || !ts.isElementAccessExpression(rhs)) return false;
+  const lhsKey = unwrap(lhs.argumentExpression);
+  const rhsKey = unwrap(rhs.argumentExpression);
+  if (!ts.isIdentifier(lhsKey) || !ts.isIdentifier(rhsKey) || lhsKey.text !== rhsKey.text) return false;
+  const slot = scopes.resolve(lhsKey, lhsKey.text);
+  return slot !== undefined && slot === scopes.resolve(rhsKey, rhsKey.text);
+}
+
 /** Pass 2 — index every definition, call, property write and delete. */
 function collectNumericFlowFacts(
   sourceFiles: readonly ts.SourceFile[],
@@ -537,12 +586,12 @@ function collectNumericFlowFacts(
         const lhs = unwrap(node.left);
         const op = node.operatorToken.kind;
         if (ts.isElementAccessExpression(lhs) && assignmentPropertyName(lhs) === undefined) {
-          if (isFnctorInstanceReceiver(lhs.expression, host)) facts.poisoned = true;
+          if (isFnctorInstanceReceiver(lhs.expression, host) && !isSameKeyCopy(node, scopes)) notePoison(facts, node);
         } else if (ts.isPropertyAccessExpression(lhs) || ts.isElementAccessExpression(lhs)) {
           const name = assignmentPropertyName(lhs);
           if (op === ts.SyntaxKind.EqualsToken) recordWrite(name, { value: node.right });
           else if (ALWAYS_NUMERIC_COMPOUND.has(op)) recordWrite(name, { forcedNumeric: true });
-          else if (op === ts.SyntaxKind.PlusEqualsToken) recordWrite(name, { value: node });
+          else if (op === ts.SyntaxKind.PlusEqualsToken) recordWrite(name, { value: node, plusEqualsRhs: node.right });
           else recordWrite(name, {});
         }
       } else if (
@@ -551,7 +600,7 @@ function collectNumericFlowFacts(
       ) {
         const operand = unwrap(node.operand as ts.Expression);
         if (ts.isElementAccessExpression(operand) && assignmentPropertyName(operand) === undefined) {
-          if (isFnctorInstanceReceiver(operand.expression, host)) facts.poisoned = true;
+          if (isFnctorInstanceReceiver(operand.expression, host)) notePoison(facts, node);
         } else if (ts.isPropertyAccessExpression(operand) || ts.isElementAccessExpression(operand)) {
           recordWrite(assignmentPropertyName(operand), { forcedNumeric: true });
         } else if (ts.isIdentifier(operand)) {
@@ -573,7 +622,7 @@ function collectNumericFlowFacts(
         else if (ts.isElementAccessExpression(target)) {
           const name = assignmentPropertyName(target);
           if (name !== undefined) facts.deletedNames.add(name);
-          else if (isFnctorInstanceReceiver(target.expression, host)) facts.poisoned = true;
+          else if (isFnctorInstanceReceiver(target.expression, host)) notePoison(facts, node);
         }
       }
 
@@ -889,6 +938,10 @@ export function analyzeNumericPropertyNames(
   host: NumericPropertyAnalysisHost,
   sourceFiles: readonly ts.SourceFile[],
 ): Set<string> {
+  // Kill-switch: `JS2WASM_NUMERIC_FIELDS=0` reproduces the pre-S4a field
+  // shapes byte-for-byte on any program, which is what makes the twin/generic
+  // and promoted/unpromoted differentials in the pin suite possible.
+  if (process.env.JS2WASM_NUMERIC_FIELDS === "0") return new Set();
   const scopes = buildScopes(sourceFiles);
   const facts = collectNumericFlowFacts(sourceFiles, scopes, host);
   if (facts.poisoned) {
@@ -936,7 +989,9 @@ export function analyzeNumericPropertyNames(
   const writeAcceptable = (write: PropWrite): boolean => {
     if (write.forcedNumeric) return true;
     if (write.value === undefined) return false;
-    return prover.isNumeric(write.value) || prover.isOpaqueParamRead(write.value);
+    if (prover.isNumeric(write.value) || prover.isOpaqueParamRead(write.value)) return true;
+    // `this.f += <opaque param>` — see {@link PropWrite.plusEqualsRhs}.
+    return write.plusEqualsRhs !== undefined && prover.isOpaqueParamRead(write.plusEqualsRhs);
   };
 
   let changed = true;
