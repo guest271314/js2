@@ -33,6 +33,9 @@ loc-budget-allow:
   - src/codegen/vec-overlay.ts
   - src/codegen/regexp-standalone.ts
   - src/codegen/native-regex.ts
+  - src/codegen/string-ops.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/expressions/call-receiver-method.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -759,6 +762,44 @@ filed here so the medium-input benchmark (where per-parse fixed costs
 amortize and the node-acorn ratio is expected to be materially better)
 can be unlocked. Not chased further in this session (perf focus).
 
+### Round 26 — four root causes fixed, `escapes-unicode.js` green
+
+Standalone fixture failures **6 → 5**; the two `illegal cast` traps and
+the `u`-flag infinite HANG they were masking are gone. Diagnostics used:
+`.tmp/sa.mjs` (compile one tiny standalone program, print result/trap
+stack) and an instrumented-acorn probe (`.tmp/diag-raise.mjs`, which
+records acorn's RAW raise message before acorn's own
+`message += " (line:col)"` rewrite) — worth keeping, they turn
+`[object WebAssembly.Exception]` into a named cause in one 16s compile.
+
+| # | root cause | fixture |
+| --- | --- | --- |
+| 1 | `substr` missing from the guarded any-receiver string gate (Annex-B ⇒ absent from `STRING_METHODS`, which doubles as the JS-host import manifest, but a native `__str_substr` arm exists). Dynamic `this.input.substr(a, b)` fell to the generic `__extern_method_call` string-brand arm ⇒ `undefined` ⇒ `""`. | escapes-unicode ✅ |
+| 2 | `x \| 0` on an externref preferred `parseFloat` whenever the module had registered it. Wrong semantics (`"10abc"\|0`→10, `"0x10"\|0`→0) AND a hard trap: native `parseFloat` opens with an unguarded `ref.cast $AnyString`, so a boxed NUMBER operand → "illegal cast". acorn hit it on EVERY regex (`reset`'s `this.start = start \| 0`). Same class as #2109. | regex, generators-async (unmasked) |
+| 3 | A user method sharing a `String.prototype` name was answered with the string arm's *miss sentinel*. acorn's `RegExpValidationState.prototype.at` vs `String.prototype.at`: `state.at(i)` read back `0` instead of the `-1` EOF sentinel, so `regexp_eatPatternCharacters`'s `while ((ch = state.current()) !== -1 …)` **never terminated** — every `u`-flag regex HUNG the standalone parser. New `collectUserMethodNames` pre-pass + a `__call_m_<name>_<arity>` fallback on the miss, scoped to names the source actually defines so the unboxed hot path (charCodeAt/slice/substr) is untouched. | regex (hang) |
+| 4 | `obj.prop += rhs` on a dynamic receiver was an unconditional `f64.add` standalone. #2850 fixed exactly this for the host lane and explicitly excluded standalone; `emitAnyAddFromExternTemps` (split out of `emitAnyAdd`) gives the standalone lane the same §13.15.3 dispatch. | (independent; pinned) |
+
+Pins: `tests/issue-3673-standalone-gaps.test.ts` (20).
+
+### Remaining standalone fixture gaps (round 26 diagnosis)
+
+Now that the traps/hangs are gone, the failures are **named acorn
+raises** rather than opaque exceptions:
+
+| fixture | acorn's own message | diagnosis |
+| --- | --- | --- |
+| destructuring.js | `Binding rvalue` @ the shorthand key | `const { x } = o` fails, `{ y: yy }` / `{ ...r }` PASS ⇒ isolated to the **shorthand** property, whose value node acorn builds with `copyNode` = `for (var p in node) newNode[p] = node[p]`. On a fnctor instance standalone, `for…in` enumerates **0 keys**, `Object.keys` returns **0**, and a computed write `n[k] = v` is a **no-op** (all three verified minimal). So the copy is empty ⇒ `.type` undefined ⇒ `checkLValSimple` default. |
+| arrow-params.js | `Assigning to rvalue` | same `copyNode`/shorthand cause, non-binding side. |
+| regex.js | `Duplicate capture group name` on `/(?<year>…)-(?<month>…)/` | the two names collapse to one `groupNames` key ⇒ `state.lastStringValue += codePointToString(…)` is not accumulating. NOT fully explained by gap 4 above (that fix is landed and pinned; regex.js still fails), so the residue is in the fnctor `this.<field>` read/write path. **Caveat: not established.** Minimal probes of that path are confounded — an external `s.pos` read returns 0 even in shapes where acorn's own internal `this.pos` demonstrably works, so the probe may be measuring the READ, not the write. Needs a probe that observes the field from INSIDE the fnctor. |
+| generators-async.js | `Unexpected token` @ pos 124 (`async function* ag`) | async-generator declaration parse; not yet investigated. |
+| literals.js | our runtime throws `Cannot convert string to a BigInt in standalone mode` | `BigInt(str)` has no native standalone implementation (`__bigint_ctor` defers string parsing). acorn's `stringToBigInt` calls it directly. Bounded: parse decimal + `0x`/`0o`/`0b` into the i64 carrier. |
+
+The `for…in` / `Object.keys` / computed-write gap on fnctor instances is
+the highest-value next slice — it alone unblocks two fixtures and is a
+general reflection hole, not an acorn quirk. It lives in the
+fnctor/typed-this machinery (`deriveFnctorFields` + the member-set
+dispatchers), so it wants to be sequenced against #3683's owner.
+
 ### Round 25 — #3683 S4a integrated (numeric f64 fields)
 
 Merged `claude/3683-s4-value-rep`: `analyzeNumericPropertyNames` (whole-
@@ -863,6 +904,139 @@ Mean **≈31x**, down from ≈37.5x — and the spread collapsed (34.9-39.3x
 fixture rather than a fixture-specific artifact. Gates on the merged
 tree: corpus 23/23 with 0 real gaps; 50/50 across the direct-call /
 twin / numeric-field / i31 pin suites; tsc clean.
+
+### Round 27 — the gap is PER-BYTE, not per-parse (scaling decomposition)
+
+`.tmp/bench-scaling.mjs` parses the same source repeated 1x/2x/4x/8x
+(334 B → 2,679 B) on both lanes, same process, deep-warm mins, and
+least-squares-fits `t = fixed + slope·bytes`:
+
+| mult | bytes | wasm ms | node ms | ratio |
+| --- | --- | --- | --- | --- |
+| 1 | 334 | 0.625 | 0.0202 | 30.9x |
+| 2 | 669 | 1.172 | 0.0360 | 32.6x |
+| 4 | 1,339 | 2.286 | 0.0722 | 31.7x |
+| 8 | 2,679 | 4.695 | 0.1450 | 32.4x |
+
+**wasm: 0.011 ms fixed + 1.781 ms/KB · node: 0.0011 ms fixed +
+0.0548 ms/KB → fixed-cost ratio 9.5x, per-KB ratio 32.5x.**
+
+Three consequences worth acting on:
+1. **The ratio is size-INDEPENDENT.** Larger inputs will not improve it;
+   the medium-fixture work (round 24 bisect, in flight) is a
+   CORRECTNESS goal, not a benchmark-ratio goal. Recorded so nobody
+   expects a ratio win from unblocking it.
+2. **Per-parse fixed cost is already excellent** (0.011 ms — Parser
+   construction, keyword-regex build, context init). Nothing to win there.
+3. **Everything left is the per-character tokenizer + per-node builder
+   path**, which is exactly where the remaining profile sits
+   (`__extern_get` 8.8 %, regex 7.6 %, GC 3.7 %, and ~25-30 % spread
+   across the `__closure_*__typed_this` parser bodies themselves).
+
+Also measured this round: `__str_substring`/`__str_slice` already SHARE
+the backing array (`off = sOff + start`, no copy) — the obvious
+"identifier extraction copies" hypothesis is already handled, no lever
+there. And **Binaryen `-O3` is now worth 7.1 %** post-S3 (0.618 →
+0.574 ms, matched deep-warm) — up from ~5 % post-S2 and ~0 % pre-S2, as
+the monomorphic direct calls give it something to inline. Worth wiring
+into the shipped standalone artifact configuration.
+
+### Round 28 — standalone correctness gaps: 4 root causes fixed (6 → 5 failing fixtures)
+
+Merged `claude/3673-standalone-gaps`. `escapes-unicode.js` is green and
+BOTH `illegal cast` traps plus an infinite hang they masked are gone;
+the remaining five fixtures now fail with NAMED acorn raises instead of
+opaque exceptions. Four root causes, all general bugs rather than
+acorn quirks:
+
+1. **`substr` missing from the guarded any-receiver string gate** — it
+   is Annex-B so absent from `STRING_METHODS`, but that table doubles as
+   the JS-host import manifest while a native `__str_substr` arm already
+   existed. Dynamic `o.f.substr(a,b)` fell to `__extern_method_call` →
+   undefined → `""`.
+2. **`x | 0` on an externref called `parseFloat`** — wrong semantics
+   (`"10abc"|0` → 10, spec 0) AND a hard trap (native `parseFloat` opens
+   with an unguarded `ref.cast $AnyString`, so a boxed NUMBER operand
+   trapped). Same class as the #2109 comparison fix; routed through
+   `__unbox_number`. Note the "obvious" `coerceType(…,"number")` fix blew
+   acorn's build from ~18s to >10min and was rejected.
+3. **A user method colliding with a `String.prototype` name got the miss
+   sentinel** — `RegExpValidationState.prototype.at` vs
+   `String.prototype.at`: `state.at(i)` read back `0` instead of the `-1`
+   EOF sentinel, so `regexp_eatPatternCharacters` never terminated —
+   **every `u`-flag regex hung the parser**. New `user-method-names.ts`
+   pre-pass scopes the `__call_m_*` fallback to names the source actually
+   defines, so charCodeAt/slice/substr keep their unboxed hot path.
+4. **`obj.prop += rhs` on a dynamic receiver was an unconditional
+   `f64.add` standalone** — #2850 fixed this host-only; the compound path
+   now reaches the in-module §13.15.3 dispatch.
+
+Fixture status 12/17 pass (was 11), verified no regressions via
+`.tmp/bisect-medium.mjs`. Cost: deep-warm 0.682 → 0.708 ms (**≈4 %
+slower, accepted** — it buys two hard traps and a hang). Gates: new
+20-test suite; 70/70 across gaps/direct-calls/twin/numeric-fields/i31;
+corpus 0 real gaps incl. acorn self-parse; canaries `imports: ZERO`.
+
+Remaining five, with diagnosis (see the agent's notes in #3673):
+`destructuring.js` + `arrow-params.js` share ONE cause — `for…in` over a
+fnctor instance enumerates 0 keys standalone, `Object.keys` returns 0,
+and computed writes are no-ops, so acorn's `copyNode` produces an empty
+node (highest-value next slice: one fix, two fixtures, general
+reflection hole); `regex.js` duplicate-capture-name (undiagnosed —
+probes confounded by an external-read hole); `generators-async.js`
+uninvestigated; `literals.js` needs decimal + `0x/0o/0b` BigInt parsing
+into the existing i64 carrier. Reusable diagnostics left in `.tmp/`:
+`sa.mjs` and `diag-raise.mjs` turn an opaque exception into a named
+cause in one 16 s compile.
+
+### Round 29 — unanchored leading-literal prefilter (general win, FLAT on acorn)
+
+Round 20 made *anchored* programs try exactly one start position. An
+UNANCHORED program whose first non-SAVE op is `CHAR c` still ran the
+full backtracking VM at every position, even though a match must begin
+with `c`. `__regex_search` now records that leading unit and advances
+past non-matching positions with one `array.get` each. Narrow by
+design: plain `CHAR` only — not `CHARI` (ASCII fold needs two compares)
+and not `CLASS` (table walk) — with `-1` disabling the filter so every
+other program keeps round-20 behavior exactly.
+
+**Synthetic probe: 200k unanchored literal scans 146.7 → 24.6 ms (6x),
+identical results. End-to-end on acorn: FLAT (0.693-0.718 ms vs
+0.708-0.709).** Honest reading: acorn's hot regexes are anchored
+(round 20 already handles them) or class-headed (filter stays off), so
+this pattern class barely appears in the parse. Kept because it is a
+correct, general engine improvement that costs one compare per skipped
+position against a whole VM invocation — but recorded as NOT a
+benchmark win, in the same spirit as the i31 and ladder-reorder nulls.
+
+Verification: full regex battery failure set identical to the known
+pre-existing 40; corpus 23/23 with 0 real gaps; canaries `imports:
+ZERO`; tsc clean.
+
+### Round 30 — dogfood the SHIPPED artifact configuration (wasm-opt on)
+
+The CLI has defaulted to `-O3` since #1950, but the dogfood standalone
+artifact and every bench compiled through the programmatic `compile()`
+API, whose `optimize` defaults to false — so we were measuring (and
+dogfooding) a configuration nobody ships. Both now pass `optimize: 3`.
+`optimizeBinaryAsync` validates its own output and falls back to the raw
+binary with a warning, so this can only change performance, never
+correctness. NOT changed: `compile()`'s API default stays false —
+flipping it would add ~20 s of Binaryen to every one of the hundreds of
+compiles in the test suite.
+
+**Measured: deep-warm 0.693-0.718 → 0.597-0.665 ms; binary 1,808 KB →
+1,216 KB (−33 %).** Multi-fixture dashboard on the shipped config:
+
+| fixture | wasm ms | node ms | ratio |
+| --- | --- | --- | --- |
+| members-calls.js | 0.442 | 0.0142 | 31.1x |
+| control-flow.js | 0.655 | 0.0209 | 31.4x |
+| operators.js | 0.493 | 0.0162 | 30.4x |
+| objects.js | 0.394 | 0.0138 | **28.6x** |
+
+First fixture under 30x. Corpus 23/23 with 0 real gaps on the optimized
+artifact.
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
