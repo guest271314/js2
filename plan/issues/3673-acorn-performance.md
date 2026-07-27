@@ -759,6 +759,29 @@ filed here so the medium-input benchmark (where per-parse fixed costs
 amortize and the node-acorn ratio is expected to be materially better)
 can be unlocked. Not chased further in this session (perf focus).
 
+### Round 25 — #3683 S4a integrated (numeric f64 fields)
+
+Merged `claude/3683-s4-value-rep`: `analyzeNumericPropertyNames` (whole-
+program numeric write-set analysis with ONE documented trust boundary —
+the `parseExpressionAt` position parameter, ToNumber-coerced on write,
+pinned as an explicit divergence test) promotes acorn's ENTIRE tokenizer
+hot set (`pos` 232 twin sites, `start` 92, `lastTokStart`/`lastTokEnd`,
+`end`, `curLine`, `potentialArrowAt`, `yieldPos`, `awaitPos`,
+`awaitIdentPos`) from boxed externref carriers to physical f64 slots.
+Kill-switch `JS2WASM_NUMERIC_FIELDS=0`. The agent's honest measurement:
+**≈1-2% wall, indistinguishable from zero on this harness** (it added a
+byte-identical duplicate-baseline control arm that itself disagrees by
+0.6-3.4% — a methodology contribution worth keeping); the profile
+confirms the targeted boxing removed (`__box_number` 1.81→1.33%,
+`__unbox_number` 1.66→1.32%) but the whole box/unbox surface was only
+≈4.5% to begin with. S4b bounded at ~3% and correctly skipped. The
+REAL remaining levers, from its post-S4a profile: **method-call bridge
+≈13% (S3)** and **generic property lookup on non-`this` receivers ≈14%**
+(`node.start`, `this.options.locations` — extend the #2660 receiver-flow
+map to prove fnctor receivers and inline `struct.get`). Gates: full
+equivalence diffed BY NAME vs merge parent — identical 33-failure set;
+15 new pins; corpus 23/23; canaries; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
