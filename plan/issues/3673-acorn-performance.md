@@ -17,6 +17,10 @@ loc-budget-allow:
   - src/codegen/closures.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
+  - src/codegen/registry/imports.ts
+  - src/codegen/json-codec-native.ts
+  - src/codegen/any-helpers.ts
+  - src/emit/binary.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
