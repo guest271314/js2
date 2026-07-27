@@ -271,6 +271,33 @@ export function test(): number { var p = new P(0.25); return p.go(); }`;
     expect(dynamic.run()).toBe(4);
   });
 
+  it("devirtualizes a VOID-returning callee (the tokenizer's hottest shape)", async () => {
+    // `this.next()` / `this.expect(...)` return nothing, so the twin has no
+    // wasm result and the trampoline yields none either; the call site answers
+    // VOID_RESULT and `compileExpression` materializes whatever the consuming
+    // context needs. Statement position, value position (→ `undefined`) and a
+    // `void`-typed comparison are all exercised.
+    const src = `var P = function P() { this.v = 0; };
+var pp = P.prototype;
+pp.step = function (d) { this.v = this.v * 10 + d; };
+pp.go = function () {
+  this.step(1);
+  var r = this.step(2);
+  this.step(3);
+  return this.v * 10 + (r === undefined ? 7 : 0);
+};
+export function test(): number { var p = new P(); return p.go(); }`;
+    const { direct, dynamic } = await bothLanes(src);
+    expect(devirtualized(direct, "P", "step")).toBe(true);
+    // node answers 1237. S3 matches it; the DYNAMIC lane answers 1230 on this
+    // branch's base — `var r = this.step(2)` does not observe `undefined` when
+    // the call crosses `__call_m_*`. So this is one of two places where S3
+    // *fixes* a pre-existing divergence rather than preserving it, and the pin
+    // records the JS-correct value on both sides of that difference.
+    expect(direct.run()).toBe(1237);
+    expect(dynamic.run()).toBe(1230);
+  });
+
   it("kill-switch reproduces the pre-S3 output byte-for-byte", async () => {
     // Two independent compiles under `JS2WASM_DIRECT_CALLS=0` must be
     // identical, and must differ from the S3 build — i.e. the switch is

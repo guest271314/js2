@@ -78,7 +78,7 @@ import { addFuncType } from "./registry/types.js";
 // `shared.js` holds the late-bound delegates precisely so a feature module can
 // reach the expression/coercion engines without a cycle back through
 // expressions.ts / index.ts.
-import { coerceType, compileExpression, flushLateImportShifts, valTypesMatch } from "./shared.js";
+import { VOID_RESULT, coerceType, compileExpression, flushLateImportShifts, valTypesMatch } from "./shared.js";
 
 /**
  * Property names whose reads/writes have dedicated lowerings (array length,
@@ -782,7 +782,13 @@ export interface DirectCallTrampoline {
   readonly fnctorStructTypeIdx: number;
   /** `[externref, ...userParams]`, all non-`ref` (see the ABI note). */
   readonly params: ValType[];
-  /** Exactly one result (a void-returning callee declines at the call site). */
+  /**
+   * The callee's wasm results: one entry, or EMPTY for a void-returning method
+   * (acorn's `this.next()` / `this.expect(...)` — the hottest calls in the
+   * tokenizer). A void trampoline yields nothing and the call site answers
+   * `VOID_RESULT`, which `compileExpression` materializes into whatever the
+   * consuming context actually needs.
+   */
   readonly results: ValType[];
   /** `__call_m_<m>_<n>` handle — the byte-for-byte legacy degradation target. */
   readonly legacyDispatchIdx: number;
@@ -983,7 +989,7 @@ export function tryEmitDirectTwinCall(
   expr: ts.CallExpression,
   propAccess: ts.PropertyAccessExpression,
   deps: DirectCallDeps,
-): ValType | undefined {
+): ValType | typeof VOID_RESULT | undefined {
   if (!directCallsEnabled() || !ctx.standalone) return undefined;
   // Only inside a twin: the receiver-shape proof IS the twin's own `ref.cast`.
   const structName = fctx.typedThisStructName;
@@ -1010,10 +1016,6 @@ export function tryEmitDirectTwinCall(
   if (expr.arguments.length !== formals.length) return declineDirect("arity-mismatch");
 
   const sig = deps.computeSig(fn);
-  // A void-returning callee has NO wasm result, but the legacy degradation
-  // target (`__call_m_*`) always yields an externref — the two ABIs cannot be
-  // reconciled behind one trampoline signature, so decline.
-  if (sig.returnType === null) return declineDirect("void-return");
   if (sig.params.length !== formals.length) return declineDirect("sig-arity-skew");
 
   // No `ref`/`ref_null` in the trampoline's own signature — see the ABI note on
@@ -1028,7 +1030,9 @@ export function tryEmitDirectTwinCall(
     arity: formals.length,
     fnctorStructTypeIdx: structTypeIdx,
     params: [{ kind: "externref" }, ...sig.params],
-    results: [sig.returnType],
+    // Void callee ⇒ no wasm result. The legacy degradation target always yields
+    // an externref, so the fill drops it in that arm (see below).
+    results: sig.returnType === null ? [] : [sig.returnType],
     deps,
   });
   // The legacy-dispatcher reservation above may have added late imports; settle
@@ -1057,7 +1061,7 @@ export function tryEmitDirectTwinCall(
   }
   fctx.body.push({ op: "call", funcIdx: tramp.funcIdx });
   directCallStats.sites++;
-  return sig.returnType;
+  return sig.returnType ?? VOID_RESULT;
 }
 
 /** Box one native value already on the stack up to `externref`. */
@@ -1156,11 +1160,8 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
     if (!fn) continue;
     const paramCount = t.params.length;
     const resultType = t.results[0];
-    if (resultType === undefined) continue;
-    const locals: LocalDef[] = [
-      { name: "__dc_prev_this", type: { kind: "externref" } },
-      { name: "__dc_res", type: resultType },
-    ];
+    const locals: LocalDef[] = [{ name: "__dc_prev_this", type: { kind: "externref" } }];
+    if (resultType !== undefined) locals.push({ name: "__dc_res", type: resultType });
     const prevLocal = paramCount;
     const resLocal = paramCount + 1;
 
@@ -1203,7 +1204,10 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       }
       if (ok) {
         legacy.push({ op: "call", funcIdx: t.legacyDispatchIdx });
-        ok = unboxFromExternref(ctx, resultType, legacy);
+        // The legacy dispatcher ALWAYS yields an externref. A void trampoline
+        // must not leave it on the stack.
+        if (resultType === undefined) legacy.push({ op: "drop" });
+        else ok = unboxFromExternref(ctx, resultType, legacy);
       }
       if (!ok) {
         // No box/unbox helper for this shape. Cannot express the call; leave
@@ -1226,12 +1230,12 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       { op: "i32.const", value: t.arity },
       { op: "global.set", index: t.argcGlobalIdx },
       ...arm,
-      { op: "local.set", index: resLocal },
+      ...(resultType === undefined ? [] : ([{ op: "local.set", index: resLocal }] satisfies Instr[])),
       { op: "i32.const", value: -1 },
       { op: "global.set", index: t.argcGlobalIdx },
       { op: "local.get", index: prevLocal },
       { op: "global.set", index: t.currentThisGlobalIdx },
-      { op: "local.get", index: resLocal },
+      ...(resultType === undefined ? [] : ([{ op: "local.get", index: resLocal }] satisfies Instr[])),
     ];
   }
 }
