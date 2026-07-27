@@ -125,6 +125,8 @@ const DP_ACCESSOR_NAME = "__vec_dp_accessor";
 const GOPD_NAME = "__vec_gopd";
 const LOOKUP_NAME = "__vec_overlay_lookup";
 const ENSURE_NAME = "__vec_overlay_ensure";
+const ENSURE_FRESH_NAME = "__vec_overlay_ensure_fresh"; // (#3673 round 15)
+const PRIME_NAME = "__vec_overlay_prime"; // (#3673 round 15)
 
 /** Reserved helper funcIdxs handed to the descriptor-native builders. */
 export interface VecOverlayReserved {
@@ -414,6 +416,104 @@ function ensureOverlayCore(ctx: CodegenContext, objectTypeIdx: number, newPlainO
   }
   const lookupIdx = ctx.funcMap.get(LOOKUP_NAME)!;
 
+  // Shared append tail for `__vec_overlay_ensure` (post-lookup-miss) and
+  // (#3673 round 15) `__vec_overlay_ensure_fresh` (no lookup — the caller
+  // GUARANTEES the vec is brand-new, e.g. a regex match result right after
+  // construction, so a table scan would only ever miss). Built per call so
+  // the two natives never share Instr object identities.
+  const buildEnsureAppendBody = (): Instr[] => [
+    // st = state ; if null → state = {count: 0, tab: new [4]}
+    { op: "global.get", index: stateGlobalIdx },
+    { op: "local.tee", index: 2 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "i32.const", value: 4 },
+        { op: "array.new_default", typeIdx: tabTypeIdx },
+        { op: "struct.new", typeIdx: stateTypeIdx },
+        { op: "local.tee", index: 2 },
+        { op: "global.set", index: stateGlobalIdx },
+      ],
+    },
+    // count / tab / cap
+    { op: "local.get", index: 2 },
+    { op: "ref.as_non_null" },
+    { op: "struct.get", typeIdx: stateTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: 4 },
+    { op: "local.get", index: 2 },
+    { op: "ref.as_non_null" },
+    { op: "struct.get", typeIdx: stateTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: 3 },
+    { op: "local.get", index: 3 },
+    { op: "ref.as_non_null" },
+    { op: "array.len" },
+    { op: "local.set", index: 5 },
+    // grow when count == cap
+    { op: "local.get", index: 4 },
+    { op: "local.get", index: 5 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 5 },
+        { op: "i32.const", value: 2 },
+        { op: "i32.mul" },
+        { op: "array.new_default", typeIdx: tabTypeIdx },
+        { op: "local.set", index: 6 },
+        { op: "local.get", index: 6 },
+        { op: "ref.as_non_null" },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: 3 },
+        { op: "ref.as_non_null" },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: 4 },
+        { op: "array.copy", dstTypeIdx: tabTypeIdx, srcTypeIdx: tabTypeIdx },
+        { op: "local.get", index: 2 },
+        { op: "ref.as_non_null" },
+        { op: "local.get", index: 6 },
+        { op: "ref.as_non_null" },
+        { op: "struct.set", typeIdx: stateTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 6 },
+        { op: "local.set", index: 3 },
+      ],
+    },
+    // compNN = fresh $Object (via the plain-object native, cast back down)
+    { op: "call", funcIdx: newPlainObjectIdx },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: objectTypeIdx },
+    { op: "local.set", index: 7 },
+    // tab[count] = {vec, compNN} ; state.count = count + 1
+    { op: "local.get", index: 3 },
+    { op: "ref.as_non_null" },
+    { op: "local.get", index: 4 },
+    { op: "local.get", index: 0 },
+    { op: "local.get", index: 7 },
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: pairTypeIdx },
+    { op: "array.set", typeIdx: tabTypeIdx },
+    { op: "local.get", index: 2 },
+    { op: "ref.as_non_null" },
+    { op: "local.get", index: 4 },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "struct.set", typeIdx: stateTypeIdx, fieldIdx: 0 },
+    { op: "local.get", index: 7 },
+    { op: "ref.as_non_null" },
+  ];
+  const ensureLocals = (): { name: string; type: ValType }[] => [
+    { name: "comp", type: objRefNull },
+    { name: "st", type: { kind: "ref_null", typeIdx: stateTypeIdx } },
+    { name: "tab", type: { kind: "ref_null", typeIdx: tabTypeIdx } },
+    { name: "count", type: { kind: "i32" } },
+    { name: "cap", type: { kind: "i32" } },
+    { name: "newTab", type: { kind: "ref_null", typeIdx: tabTypeIdx } },
+    { name: "compNN", type: objRefNull },
+  ];
+
   // ── __vec_overlay_ensure(anyref vec) -> (ref $Object) ────────────────────
   // params: 0=vec; locals: 1=comp 2=st 3=tab 4=count 5=cap 6=newTab 7=compNN
   {
@@ -436,107 +536,83 @@ function ensureOverlayCore(ctx: CodegenContext, objectTypeIdx: number, newPlainO
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 1 }, { op: "ref.as_non_null" }, { op: "return" }],
       },
-      // st = state ; if null → state = {count: 0, tab: new [4]}
-      { op: "global.get", index: stateGlobalIdx },
-      { op: "local.tee", index: 2 },
-      { op: "ref.is_null" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "i32.const", value: 0 },
-          { op: "i32.const", value: 4 },
-          { op: "array.new_default", typeIdx: tabTypeIdx },
-          { op: "struct.new", typeIdx: stateTypeIdx },
-          { op: "local.tee", index: 2 },
-          { op: "global.set", index: stateGlobalIdx },
-        ],
-      },
-      // count / tab / cap
-      { op: "local.get", index: 2 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: stateTypeIdx, fieldIdx: 0 },
-      { op: "local.set", index: 4 },
-      { op: "local.get", index: 2 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: stateTypeIdx, fieldIdx: 1 },
-      { op: "local.set", index: 3 },
-      { op: "local.get", index: 3 },
-      { op: "ref.as_non_null" },
-      { op: "array.len" },
-      { op: "local.set", index: 5 },
-      // grow when count == cap
-      { op: "local.get", index: 4 },
-      { op: "local.get", index: 5 },
-      { op: "i32.ge_s" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: 5 },
-          { op: "i32.const", value: 2 },
-          { op: "i32.mul" },
-          { op: "array.new_default", typeIdx: tabTypeIdx },
-          { op: "local.set", index: 6 },
-          { op: "local.get", index: 6 },
-          { op: "ref.as_non_null" },
-          { op: "i32.const", value: 0 },
-          { op: "local.get", index: 3 },
-          { op: "ref.as_non_null" },
-          { op: "i32.const", value: 0 },
-          { op: "local.get", index: 4 },
-          { op: "array.copy", dstTypeIdx: tabTypeIdx, srcTypeIdx: tabTypeIdx },
-          { op: "local.get", index: 2 },
-          { op: "ref.as_non_null" },
-          { op: "local.get", index: 6 },
-          { op: "ref.as_non_null" },
-          { op: "struct.set", typeIdx: stateTypeIdx, fieldIdx: 1 },
-          { op: "local.get", index: 6 },
-          { op: "local.set", index: 3 },
-        ],
-      },
-      // compNN = fresh $Object (via the plain-object native, cast back down)
-      { op: "call", funcIdx: newPlainObjectIdx },
-      { op: "any.convert_extern" },
-      { op: "ref.cast", typeIdx: objectTypeIdx },
-      { op: "local.set", index: 7 },
-      // tab[count] = {vec, compNN} ; state.count = count + 1
-      { op: "local.get", index: 3 },
-      { op: "ref.as_non_null" },
-      { op: "local.get", index: 4 },
-      { op: "local.get", index: 0 },
-      { op: "local.get", index: 7 },
-      { op: "ref.as_non_null" },
-      { op: "struct.new", typeIdx: pairTypeIdx },
-      { op: "array.set", typeIdx: tabTypeIdx },
-      { op: "local.get", index: 2 },
-      { op: "ref.as_non_null" },
-      { op: "local.get", index: 4 },
-      { op: "i32.const", value: 1 },
-      { op: "i32.add" },
-      { op: "struct.set", typeIdx: stateTypeIdx, fieldIdx: 0 },
-      { op: "local.get", index: 7 },
-      { op: "ref.as_non_null" },
+      ...buildEnsureAppendBody(),
     ];
     pushDefinedFunc(ctx, funcIdx, {
       name: ENSURE_NAME,
       typeIdx: sigIdx,
-      locals: [
-        { name: "comp", type: objRefNull },
-        { name: "st", type: { kind: "ref_null", typeIdx: stateTypeIdx } },
-        { name: "tab", type: { kind: "ref_null", typeIdx: tabTypeIdx } },
-        { name: "count", type: { kind: "i32" } },
-        { name: "cap", type: { kind: "i32" } },
-        { name: "newTab", type: { kind: "ref_null", typeIdx: tabTypeIdx } },
-        { name: "compNN", type: objRefNull },
-      ],
+      locals: ensureLocals(),
       body,
       exported: false,
     });
     ctx.funcMap.set(ENSURE_NAME, funcIdx);
   }
 
+  // ── (#3673 round 15) __vec_overlay_ensure_fresh(anyref vec) -> (ref $Object)
+  // The append tail WITHOUT the lookup. Sound only when the vec provably has
+  // no existing companion — the regex match-result builder calls it via the
+  // reserved `__vec_overlay_prime` immediately after constructing the result,
+  // so the subsequent per-match `index`/`input`/`groups` defines hit the
+  // freshly appended pair at tab[count-1] on the newest-first scan (O(1))
+  // instead of each paying a full-table miss scan.
+  {
+    const sigIdx = addFuncType(
+      ctx,
+      [{ kind: "anyref" }],
+      [{ kind: "ref", typeIdx: objectTypeIdx }],
+      `$${ENSURE_FRESH_NAME}_type`,
+    );
+    const funcIdx = mintDefinedFunc(ctx);
+    pushDefinedFunc(ctx, funcIdx, {
+      name: ENSURE_FRESH_NAME,
+      typeIdx: sigIdx,
+      locals: ensureLocals(),
+      body: buildEnsureAppendBody(),
+      exported: false,
+    });
+    ctx.funcMap.set(ENSURE_FRESH_NAME, funcIdx);
+  }
+
+  // Fill the reserved `__vec_overlay_prime` placeholder (reserved at regex
+  // match-result compile time; no-op body until the core exists).
+  {
+    const primeFn = ctx.mod.functions.find((f) => f.name === PRIME_NAME);
+    const freshIdx = ctx.funcMap.get(ENSURE_FRESH_NAME);
+    if (primeFn && freshIdx !== undefined) {
+      primeFn.body = [
+        { op: "local.get", index: 0 },
+        { op: "any.convert_extern" },
+        { op: "call", funcIdx: freshIdx },
+        { op: "drop" },
+      ];
+    }
+  }
+
   return { stateTypeIdx, stateGlobalIdx, numericFlagGlobalIdx, lookupIdx, ensureIdx: ctx.funcMap.get(ENSURE_NAME)! };
+}
+
+/**
+ * (#3673 round 15) Reserve the `__vec_overlay_prime(externref) -> ()` no-op
+ * placeholder at a match-result construction site. Filled by
+ * `ensureOverlayCore` at finalize to call `__vec_overlay_ensure_fresh` —
+ * pre-appending the fresh vec's companion so the immediately following
+ * descriptor defines skip the full-table miss scan. When the overlay core is
+ * never built (no descriptor ops anywhere), the placeholder stays a no-op.
+ */
+export function reserveVecOverlayPrime(ctx: CodegenContext): number | undefined {
+  const existing = ctx.funcMap.get(PRIME_NAME);
+  if (existing !== undefined) return existing;
+  const sigIdx = addFuncType(ctx, [{ kind: "externref" }], [], `$${PRIME_NAME}_type`);
+  const funcIdx = mintDefinedFunc(ctx);
+  pushDefinedFunc(ctx, funcIdx, {
+    name: PRIME_NAME,
+    typeIdx: sigIdx,
+    locals: [],
+    body: [],
+    exported: false,
+  });
+  ctx.funcMap.set(PRIME_NAME, funcIdx);
+  return funcIdx;
 }
 
 function fillVecHasOwnHelpers(ctx: CodegenContext, vecBaseIdx: number): void {
