@@ -135,6 +135,24 @@ pass a field read). Both are S2-or-later work.
 
 Cost: 365 ms for 226 KB, single pass, no checker queries.
 
+## The measurement that sizes this issue (#3673 round 31)
+
+The hot-chain experiment compiled acorn's real `readWord1` loop three
+ways — acorn's dynamic shape (what we emit today), the identical
+algorithm end-to-end typed, and the JavaScript on node:
+
+| variant | ms/scan | vs node |
+| --- | --- | --- |
+| dynamic (today) | 0.4294 | 17.9x |
+| **end-to-end typed** | **0.0659** | **2.8x** |
+| node | 0.0239 | 1x |
+
+**6.51x from typing alone**, with `__extern_get` 66 → 0, `__apply_closure`
+20 → 0, `__box_number` 70 → 2 in the emitted code. That is this issue's
+prize: everything the typed variant states by hand, #3685 must DERIVE.
+The residual 2.8x is the part inference cannot reach and profile-guided
+speculation would have to.
+
 ## Acceptance criteria
 
 - `__extern_get` self time on the #3673 deep-warm acorn profile drops

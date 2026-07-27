@@ -1086,6 +1086,49 @@ parser written for V8.**
 Reproduce: `npx tsx benchmarks/tokenizer/validate.mjs` (stream equality)
 then `npx tsx benchmarks/tokenizer/bench.mjs --recompile`.
 
+### Round 31 — the hot-chain experiment: what typing is actually worth
+
+Hand-verification of the question "could the IR reach node-acorn on
+UNMODIFIED acorn?", using acorn's real `readWord1` inner loop
+(`this.input.charCodeAt(this.pos)` → classify → `this.pos += 1` → final
+`slice`) scanning the 4 KB corpus. THREE compilations of the SAME
+algorithm, answers asserted identical (`653002199` all three):
+
+| variant | shape | ms/scan | throughput | vs node |
+| --- | --- | --- | --- | --- |
+| **A dynamic** | acorn's verbatim shape (fnctor + `pp` alias + untyped fields) — what we compile today | 0.4294 | 8.8 MB/s | **17.9x** |
+| **B typed** | identical algorithm, TS types on fields/params/locals — the ceiling an IR reaches by DERIVING what B states | 0.0659 | 57.2 MB/s | **2.8x** |
+| **N node** | variant A's JavaScript on node | 0.0239 | 157.7 MB/s | 1x |
+
+**Typing multiplier on the parser body: 6.51x.** Mechanism confirmed by
+opcode counts in the emitted modules:
+
+| | `__extern_get` | `__box_number` | `__unbox_number` | `__apply_closure` |
+| --- | --- | --- | --- | --- |
+| A dynamic | 66 | 70 | 85 | 20 |
+| B typed | **0** | 2 | 5 | **0** |
+
+Typing does not shave the dispatch and boxing — it DELETES them. This is
+the same lesson #3683 S4a taught from the other direction (typing one
+field gained ~1 % because its consumers still boxed): the win is a
+whole-chain property, all-or-nothing per chain.
+
+**What it implies for full acorn.** Today 1.78 ms/KB; ÷6.51 ≈ 0.27 ms/KB
+against node's 0.055 ⇒ **~31x → ~5x** if the IR derived types across the
+whole parser. That is a projection, not a measurement, and it is an upper
+bound: acorn has constructs that will not type (polymorphic `Node` field
+sets, `copyNode`'s `for…in` + computed writes, the `options` bag), so
+expect the achieved figure to be worse than 5x. But B's **2.8x** is a
+real, measured floor for well-typed WasmGC against V8's JIT on this kind
+of code — far closer than the 17.9x the same algorithm pays today.
+
+**Conclusion for sequencing**: the remaining gap is NOT irreducible
+"AOT vs JIT" overhead. It is our own dynamic lowering, and ~6.5x of it is
+reachable by inference alone — no speculation, no deopt, no runtime
+profiling. #3685 is that program; the residual ~2.8x is where
+speculation (profile-guided AOT) would be needed. Repro:
+`.tmp/chain-experiment.mjs`.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
