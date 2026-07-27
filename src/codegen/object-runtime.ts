@@ -3290,6 +3290,42 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 0 }, { op: "return" }],
       },
+      // (#3673 round 11) Primitive identity early-out (§7.1.1 step 1): an i31
+      // small int, a `$BoxedNumber`, or a native string IS already a
+      // primitive — return it before the object test. Previously a plain
+      // number fell into the non-$Object arm and paid a
+      // `__class_to_primitive` dispatcher walk per ToNumber site.
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: L_ANY },
+      { op: "ref.test", typeIdx: -20 }, // abstract i31
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      ...(ctx.nativeBoxNumberTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: L_ANY },
+            { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 0 }, { op: "return" }],
+            },
+          ] satisfies Instr[])
+        : []),
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: L_ANY },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 0 }, { op: "return" }],
+            },
+          ] satisfies Instr[])
+        : []),
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "local.tee", index: L_ANY },

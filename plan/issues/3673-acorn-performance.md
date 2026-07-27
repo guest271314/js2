@@ -476,6 +476,19 @@ Verification (round 10): 2151-nary/dynamic-spread/spread-literal, 1712
 acceptance, 2664-arity-dispatch all green; host corpus 23/23 exact;
 #3673 pins 7/7; canaries 4/4; tsc clean.
 
+### Round 11 — `__to_primitive` primitive identity early-out
+
+§7.1.1 step 1: ToPrimitive of a primitive is the identity — but a plain
+number (i31 / `$BoxedNumber`) or native string fell into the non-`$Object`
+arm and paid a `__class_to_primitive` dispatcher walk per remaining
+ToNumber site. Three `ref.test` early-outs at the top return the input
+unchanged. Also switched measurement to a min-of-10-batches in-process
+methodology (`.tmp/bench-min.mjs`) — the single-shot estimator had a
+±0.5ms noise band from tier-up/GC timing. **Current: 1.71ms/parse
+(stable min)** — cumulative 52.4 → 1.71 (~31x), node-acorn gap ~50x.
+Verification: string-hint/coercion/class-to-primitive suites (1806,
+1470, 2638, 2358, 1910) all green; corpus 23/23; pins 7/7; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
