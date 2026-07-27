@@ -1181,6 +1181,35 @@ next compiler slice for this goal, ahead of further receiver work.
 Repros: `.tmp/parser-shootout.mjs`, `.tmp/shootout-c.mjs`,
 `.tmp/tokenize-only.mjs`.
 
+### Round 33 — attempted charCodeAt round-trip fix: NULL RESULT (reverted)
+
+Round 32 identified the per-character `i32 → f64 → i32` round trip as the
+top lever. Attempted the cheap version: a peephole cancelling a MATCHED
+`f64.convert_i32_s`/`i32.trunc_sat_f64_s` pair (exact — every i32 is
+representable in f64; the MISMATCHED u→s pair is deliberately not folded
+since `convert_i32_u` of ≥2^31 saturates), plus switching the char-read
+conversions to signed so they form a foldable pair.
+
+**It did not fire.** Opcode counts were unchanged (29 truncations before
+and after) and wall-clock was flat (0.1050 → 0.1070 ms). The pairs are
+NOT adjacent: codegen emits `array.get_u; f64.convert_i32_*` and then
+`local.set` / `local.get` before the consumer's truncation, so a
+two-instruction window can never see them. Reverted rather than shipped —
+a correct rule that never matches is dead weight.
+
+Two notes for whoever takes the real fix:
+- A **local-aware** pass (a local written only from `convert_i32_*` and
+  read only into `trunc_sat_f64_*` can hold i32 directly) would catch it,
+  but that is a small dataflow pass, not a peephole.
+- The **right** fix is the result-type contract: `charCodeAt` should be
+  able to yield i32 when its consumer is an integer context, the same way
+  #3673 round 8's typed `__get_member_<n>__f64` dispatchers avoid the
+  box→unbox round trip. That is a proper slice.
+
+Also confirmed during this round: `tests/issue-1817.test.ts` has **3
+pre-existing failures** (`>>>` unsigned semantics) on the clean tip —
+verified against an unmodified tree, unrelated to this attempt.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
