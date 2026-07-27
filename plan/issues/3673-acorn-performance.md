@@ -32,6 +32,15 @@ loc-budget-allow:
   - src/codegen/closure-exports.ts
   - src/codegen/vec-overlay.ts
   - src/codegen/regexp-standalone.ts
+  # round 39: native-i32 annotation wiring (whole-chain) + linear soundness
+  # fixes (data-segment heap floor, checker-based alias resolution) + the
+  # charCodeAt/length ASCII fast path.
+  - src/codegen-linear/runtime.ts
+  - src/codegen-linear/index.ts
+  - src/ir/from-ast.ts
+  - src/codegen/class-bodies.ts
+  - src/codegen/declarations.ts
+  - src/codegen/statements/variables.ts
   - src/codegen/native-regex.ts
   - src/codegen/string-ops.ts
   - src/codegen/binary-ops.ts
