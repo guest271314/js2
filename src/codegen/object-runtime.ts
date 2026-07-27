@@ -1618,6 +1618,17 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "local.get", index: 4 },
           { op: "ref.cast", typeIdx: objectTypeIdx },
           { op: "local.set", index: 2 },
+          // (#3673 round 9b) a depth-0 (OWN) data hit on a plain $Object may
+          // populate the per-key cache too — covers acorn's per-parse
+          // `options.<x>` singleton reads. Same soundness argument as the
+          // fnctor arm: population implies every earlier arm missed for this
+          // exact receiver, and hits are owner-`ref.eq`-confined to it.
+          ...(protoCacheEnabled
+            ? ([
+                { op: "i32.const", value: 1 },
+                { op: "local.set", index: 9 },
+              ] satisfies Instr[])
+            : []),
         ],
         else:
           fnctorProtoStartIdx === undefined
@@ -6705,6 +6716,12 @@ export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
           op: "if",
           blockType: { kind: "empty" },
           then: [
+            // owner-candidate → local 2 (overwritten by the normal path
+            // below whether or not the arm hits, so safe as scratch here):
+            // a fnctor receiver's per-class prototype, else the receiver
+            // itself when it is a plain $Object (depth-0 own-entry caching).
+            { op: "ref.null", typeIdx: objectTypeIdx },
+            { op: "local.set", index: 2 },
             { op: "local.get", index: 0 },
             { op: "call", funcIdx: protoStartIdx },
             { op: "local.tee", index: 7 },
@@ -6717,6 +6734,33 @@ export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
                 { op: "local.get", index: 7 },
                 { op: "any.convert_extern" },
                 { op: "ref.cast", typeIdx: objectTypeIdx },
+                { op: "local.set", index: 2 },
+              ],
+              else: [
+                { op: "local.get", index: 0 },
+                { op: "any.convert_extern" },
+                { op: "ref.test", typeIdx: objectTypeIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: 0 },
+                    { op: "any.convert_extern" },
+                    { op: "ref.cast", typeIdx: objectTypeIdx },
+                    { op: "local.set", index: 2 },
+                  ],
+                },
+              ],
+            },
+            { op: "local.get", index: 2 },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 2 },
+                { op: "ref.as_non_null" },
                 // owner: non-null whenever cacheGen matched (gen ≥ 1 and the
                 // population site writes all three cache fields together).
                 { op: "local.get", index: 8 },

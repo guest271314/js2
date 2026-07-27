@@ -424,6 +424,30 @@ the pre-existing sets (1599 ×5, 2151 ×3, getters-setters ×6,
 imported-string-constants ×4 — each verified identical on base); tsc
 clean.
 
+### Round 9c — cache extension to plain `$Object` own entries
+
+The residual `__extern_get` share was dominated by acorn's per-parse
+`this.options.<x>` reads — an open `$Object` receiver, so the fnctor-proto
+cache never fired. The walk's depth-0 arm now also sets `canCache` for a
+plain `$Object` receiver (own DATA entries), and the hit arm's
+owner-candidate falls back to the receiver itself when it has no fnctor
+prototype. Same soundness shape: population implies every earlier arm
+missed for this exact receiver identity; hits are owner-`ref.eq`-confined;
+own always shadows proto so chain mutations can't stale a cached own
+entry; tombstone/accessor/generation checks as before.
+
+**Measured: ~2.5 → 1.91-2.08ms/parse (min 1.91, 5 reps)** — cumulative
+52.4 → ~1.92ms (~27x); node-acorn warm 0.0341ms → gap ~56x. Profile:
+`__str_equals` 5.1% → 2.1%, `__obj_find` off the top-15; remaining top:
+`__extern_get` residue 6.6% (cache-guard overhead + uncached reads),
+`__call_fn_method_{0,1,2}` ~9.4% (signature-id devirtualization is the
+next structural slice), `__regex_run` 3.4%, `__to_primitive` 3.4%, GC
+4.4%.
+
+Verification (round 9c): host corpus 23/23 exact; 2896/2866/accessor/
+defineProperty/delete/1888/2106-S1/2674/1712/2151-nary suites all green;
+#3673 pins 7/7; canaries 4/4; tsc clean.
+
 ## Round 6 — arity IN the closure representation (the deferred layout change)
 
 Every closure struct in the root wrapper hierarchy now carries an immutable
