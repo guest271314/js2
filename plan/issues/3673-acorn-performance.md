@@ -864,6 +864,42 @@ fixture rather than a fixture-specific artifact. Gates on the merged
 tree: corpus 23/23 with 0 real gaps; 50/50 across the direct-call /
 twin / numeric-field / i31 pin suites; tsc clean.
 
+### Round 27 — the gap is PER-BYTE, not per-parse (scaling decomposition)
+
+`.tmp/bench-scaling.mjs` parses the same source repeated 1x/2x/4x/8x
+(334 B → 2,679 B) on both lanes, same process, deep-warm mins, and
+least-squares-fits `t = fixed + slope·bytes`:
+
+| mult | bytes | wasm ms | node ms | ratio |
+| --- | --- | --- | --- | --- |
+| 1 | 334 | 0.625 | 0.0202 | 30.9x |
+| 2 | 669 | 1.172 | 0.0360 | 32.6x |
+| 4 | 1,339 | 2.286 | 0.0722 | 31.7x |
+| 8 | 2,679 | 4.695 | 0.1450 | 32.4x |
+
+**wasm: 0.011 ms fixed + 1.781 ms/KB · node: 0.0011 ms fixed +
+0.0548 ms/KB → fixed-cost ratio 9.5x, per-KB ratio 32.5x.**
+
+Three consequences worth acting on:
+1. **The ratio is size-INDEPENDENT.** Larger inputs will not improve it;
+   the medium-fixture work (round 24 bisect, in flight) is a
+   CORRECTNESS goal, not a benchmark-ratio goal. Recorded so nobody
+   expects a ratio win from unblocking it.
+2. **Per-parse fixed cost is already excellent** (0.011 ms — Parser
+   construction, keyword-regex build, context init). Nothing to win there.
+3. **Everything left is the per-character tokenizer + per-node builder
+   path**, which is exactly where the remaining profile sits
+   (`__extern_get` 8.8 %, regex 7.6 %, GC 3.7 %, and ~25-30 % spread
+   across the `__closure_*__typed_this` parser bodies themselves).
+
+Also measured this round: `__str_substring`/`__str_slice` already SHARE
+the backing array (`off = sOff + start`, no copy) — the obvious
+"identifier extraction copies" hypothesis is already handled, no lever
+there. And **Binaryen `-O3` is now worth 7.1 %** post-S3 (0.618 →
+0.574 ms, matched deep-warm) — up from ~5 % post-S2 and ~0 % pre-S2, as
+the monomorphic direct calls give it something to inline. Worth wiring
+into the shipped standalone artifact configuration.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
