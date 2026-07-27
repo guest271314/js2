@@ -104,6 +104,49 @@ Caveats, so nobody over-reads this:
   not arrival. S3 (direct-call devirtualization between admitted methods) has
   not landed.
 
+## Re-measured after #3683 S3 + S3b (2026-07-27, later)
+
+Third run, after S3 (direct-call devirtualization between typed twins) and S3b
+(arity-padding trampolines) landed, plus rounds 26–38.
+
+**Read the ratio column, not the ms column.** This run is on a DIFFERENT
+container instance — the box itself is ~2x slower than the previous two runs
+(node's own numeric axis went 1.249 → 2.463 ms on identical source). Diffing
+raw ms against the earlier tables would report a catastrophic across-the-board
+js2 regression that did not happen. All three engines were re-measured together
+here; checksums identical.
+
+| axis | node | Porffor | js2 | **js2/node** | prev | porf/node |
+| ---- | ---- | ------- | --- | ------------ | ---- | --------- |
+| numeric loop | 2.463 ms | 4.644 ms | 2.402 ms | **0.98x** | 0.99x | 1.89x |
+| **property r/w** | 1.081 ms | 8.139 ms | 1.082 ms | **1.00x** | 1.39x | 7.53x |
+| **method dispatch** | 0.934 ms | 8.068 ms | 9.085 ms | **9.73x** | 18.1x | 8.64x |
+| string scan | 0.063 ms | 0.223 ms | 0.312 ms | 4.98x | 4.08x | 3.56x |
+| object allocation | 0.236 ms | 7.520 ms | 0.235 ms | **1.00x** | 1.10x | 31.9x |
+| **tokenizer (`this`-loop)** | 0.106 ms | 2.225 ms | 0.784 ms | **7.37x** | 21.1x | 20.9x |
+
+### The dominant axis has now improved ~4.6x across three runs
+
+- **tokenizer: 33.8x → 21.1x → 7.37x**
+- **method dispatch: 26.0x → 18.1x → 9.73x**
+- **property r/w reached parity: 1.40x → 1.39x → 1.00x** — new this round; S3's
+  direct calls remove the dispatch that the literal-object path was still paying.
+- numeric and allocation held parity throughout (0.98x / 1.00x).
+
+**js2-standalone now beats Porffor on 4 of 6 axes**, including the tokenizer by
+**2.8x** (0.784 ms vs 2.225 ms) — an axis where it was 1.23x *behind* two runs
+ago. It remains slightly behind Porffor on method dispatch (1.13x) and string
+scan (1.40x).
+
+### Caveats
+
+- **The string axis is the one that looks worse (4.08x → 4.98x) and should not
+  be read as a regression.** node's own string number moved 0.043 → 0.063 ms on
+  this box, and the axis sits at ~0.06 ms — under the ~0.1 ms floor this
+  harness's own README flags as loop-bound. It needs the 20x-scaled variant to
+  say anything; the scaled numbers in the section above are the ones to trust.
+- Still 7–10x on the two dynamic-dispatch axes. Real progress, not arrival.
+
 ### What the table says
 
 1. **js2-standalone already matches V8 on scalar loops (0.97x) and on

@@ -38,6 +38,15 @@ Report **min-of-5** after a warmup call. The absolute numbers are
 machine-specific; only the **ratios between engines on the same axis** are
 meaningful, and only when the checksums match.
 
+> **Always re-run all three legs together.** Absolute ms are NOT comparable
+> across container restarts — this is not a small effect. Measured 2026-07-27:
+> after a restart the same node build ran the numeric axis in 2.46 ms where the
+> previous instance did 1.25 ms, i.e. **the whole box was ~2x slower**.
+> Re-running only the js2 leg and diffing against a previous session's node
+> numbers reported "numeric regressed 95%" when nothing had changed — the real
+> same-machine ratio was flat at 0.98x. `uptime` is the tell: a low value means
+> a fresh instance and every stored absolute is void.
+
 Axes below ~0.1 ms are loop-bound rather than measuring the named operation —
 scale the iteration count up before drawing a conclusion. (The first cut of
 this harness "measured" `charCodeAt` at a size where deleting `charCodeAt`
