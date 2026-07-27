@@ -18,8 +18,8 @@
  * `struct.get`/`struct.set` returning the field's own ValType. The GENERIC body
  * keeps its dynamic lowering and gains a 4-instruction prepend —
  * `global.get __current_this; any.convert_extern; ref.test $__fnctor_F; if →
- * forward all params to the twin and return` — so detached receivers, patched
- * prototypes and foreign shapes still take the original path unchanged.
+ * return_call the twin with every param forwarded` — so detached receivers,
+ * patched prototypes and foreign shapes still take the original path unchanged.
  *
  * ## Why the inline branches are semantically equivalent (the load-bearing part)
  *
@@ -246,14 +246,12 @@ export function admitTypedThisTwin(
  * emitted here.
  */
 export function emitTypedThisPrologue(
-  ctx: CodegenContext,
   fctx: FunctionContext,
   structName: string,
   structTypeIdx: number,
-  allocLocalFn: (fctx: FunctionContext, name: string, type: ValType) => number,
   currentThisGlobalIdx: number,
 ): void {
-  const localIdx = allocLocalFn(fctx, "__typed_this", { kind: "ref", typeIdx: structTypeIdx });
+  const localIdx = allocLocal(fctx, "__typed_this", { kind: "ref", typeIdx: structTypeIdx });
   fctx.body.push({ op: "global.get", index: currentThisGlobalIdx });
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "ref.cast", typeIdx: structTypeIdx });
@@ -261,7 +259,6 @@ export function emitTypedThisPrologue(
   fctx.typedThisStructIdx = structTypeIdx;
   fctx.typedThisStructName = structName;
   fctx.typedThisLocalIdx = localIdx;
-  void ctx;
 }
 
 /**
@@ -272,14 +269,13 @@ export function emitTypedThisPrologue(
  *     ref.test $__fnctor_F
  *     if
  *       local.get 0 … local.get n   ;; __self + every declared param, verbatim
- *       call $twin
- *       return
+ *       return_call $twin
  *     end
  *
  * Placed as the very FIRST instructions, before param defaults / destructuring
  * / the `arguments` vec, so a hit re-derives all of them inside the twin from
  * the untouched raw params (and the untouched `__argc` / `__extras_argv`
- * globals, which a plain `call` does not disturb).
+ * globals, which a call does not disturb).
  */
 export function buildTypedThisForwardGuard(
   structTypeIdx: number,

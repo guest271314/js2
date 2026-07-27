@@ -2046,11 +2046,9 @@ export function compileLiftedClosureBody(
   // is what makes this `ref.cast` infallible — see typed-this.ts.
   if (opts.typedThis) {
     emitTypedThisPrologue(
-      ctx,
       liftedFctx,
       opts.typedThis.structName,
       opts.typedThis.fnctorStructTypeIdx,
-      allocLocal,
       ensureCurrentThisGlobal(ctx),
     );
   }
@@ -2747,31 +2745,43 @@ export function compileArrowAsClosure(
         isNamedFuncExpr: !!isNamedFuncExpr,
         typedThis: { fnctorStructTypeIdx: admitted.structTypeIdx, structName: admitted.structName },
       });
-      const twinFuncIdx = mintDefinedFunc(ctx);
-      pushDefinedFunc(ctx, twinFuncIdx, {
-        name: twinName,
-        // Identical signature to the generic body — verified by construction
-        // (same `liftedParams`/`closureResults`, block body ⇒ no repair).
-        typeIdx: twin.liftedFuncTypeIdx,
-        locals: twin.liftedFctx.locals,
-        body: twin.liftedFctx.body,
-        exported: false,
-      });
-      ctx.liveBodies.delete(twin.liftedFctx.body);
-      ctx.funcMap.set(twinName, twinFuncIdx);
-      // Prepend IN PLACE: `liftedFctx.body` is the same array object already
-      // registered as the generic function's body, and it stays covered by
-      // `shiftLateImportIndices` (which walks `ctx.mod.functions`), so the
-      // baked `call twinFuncIdx` shifts with any later late-import addition.
-      liftedFctx.body.unshift(
-        ...buildTypedThisForwardGuard(
-          admitted.structTypeIdx,
-          ensureCurrentThisGlobal(ctx),
-          liftedFctx.params.length,
-          twinFuncIdx,
-        ),
-      );
-      ctx.typedThisTwinCount = (ctx.typedThisTwinCount ?? 0) + 1;
+      // `return_call` demands the callee's type EQUAL the caller's. Admission
+      // requires a block body, so the concise-body return-type repair (the only
+      // thing that can rewrite `liftedFuncTypeIdx`) cannot have fired — but
+      // assert it rather than trust it: a future body-shape change that repaired
+      // only the twin would emit a module that fails validation, which is a much
+      // worse failure than silently skipping one monomorphization.
+      if (twin.liftedFuncTypeIdx !== liftedFuncTypeIdx) {
+        // Discard the twin (its body is unreferenced; the compile's other
+        // effects — late imports, string constants, dispatcher reservations —
+        // are all idempotent) and keep the generic body as the only lowering.
+        ctx.liveBodies.delete(twin.liftedFctx.body);
+      } else {
+        const twinFuncIdx = mintDefinedFunc(ctx);
+        pushDefinedFunc(ctx, twinFuncIdx, {
+          name: twinName,
+          typeIdx: twin.liftedFuncTypeIdx,
+          locals: twin.liftedFctx.locals,
+          body: twin.liftedFctx.body,
+          exported: false,
+        });
+        ctx.liveBodies.delete(twin.liftedFctx.body);
+        ctx.funcMap.set(twinName, twinFuncIdx);
+        // Prepend IN PLACE: `liftedFctx.body` is the same array object already
+        // registered as the generic function's body, and it stays covered by
+        // `shiftLateImportIndices` (which walks `ctx.mod.functions`), so the
+        // baked `return_call twinFuncIdx` shifts with any later late-import
+        // addition.
+        liftedFctx.body.unshift(
+          ...buildTypedThisForwardGuard(
+            admitted.structTypeIdx,
+            ensureCurrentThisGlobal(ctx),
+            liftedFctx.params.length,
+            twinFuncIdx,
+          ),
+        );
+        ctx.typedThisTwinCount = (ctx.typedThisTwinCount ?? 0) + 1;
+      }
     }
   }
 
