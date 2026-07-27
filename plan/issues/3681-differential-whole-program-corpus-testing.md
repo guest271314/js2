@@ -3,6 +3,7 @@ id: 3681
 title: "Differential whole-program corpus testing — diff stdout/stderr/exit-code against Node (scriptc-inspired)"
 status: backlog
 sprint: Backlog
+updated: 2026-07-27
 created: 2026-07-26
 priority: medium
 horizon: m
@@ -75,3 +76,22 @@ from expression-level equivalence to **process-level** equivalence.
 - [ ] Wired into CI as a blocking check on a lane that runs per-PR
 - [ ] `docs/divergences.md` exists; every normalization in the harness cites a
       numbered entry
+
+## 2026-07-27 update — the proposed harness already exists
+
+Filed independently the same day: **the runner this issue proposes already
+exists** — `tests/differential/corpus/` + `scripts/diff-test.ts` (#1203),
+predating this issue. It already does exactly item 1 (Node vs compiled-wasm
+stdout diff, JS-host mode, `benchmarks/results/diff-test.json`) and item 3
+(`scripts/diff-test-gate.ts` delta gate, wired in `.github/workflows/diff-test.yml`).
+#3690 grew its corpus (generators/, private-fields/, deeper regex/symbol —
+also scriptc-inspired) and found the existing gate design already matches
+this issue's "failures block like equivalence failures" goal, scoped to
+regressions only (new/still-failing corpus entries are informational, not
+blocking, so the corpus can grow ahead of the compiler).
+
+**Still genuinely open from this proposal**: no `stderr`/exit-code diffing
+(stdout only today), no standalone/WASI lane, no `docs/divergences.md`
+ledger, and the corpus is ~120 programs vs the ~100+ target. Worth
+re-scoping this issue as "extend the existing harness" rather than "build
+a harness" to avoid a future duplicate build.
