@@ -494,6 +494,25 @@ export function emitStandaloneArrayConstructor(ctx: CodegenContext, argCount: nu
         op: "if",
         blockType: { kind: "empty" },
         then: [
+          // (#3673) Normalize an i31-boxed count to a $BoxedNumber so the
+          // legacy validation arm below handles both encodings verbatim.
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: -20 },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "any.convert_extern" },
+              { op: "ref.cast", typeIdx: -20 },
+              { op: "i31.get_s" },
+              { op: "f64.convert_i32_s" },
+              { op: "struct.new", typeIdx: boxNumTypeIdx },
+              { op: "extern.convert_any" },
+              { op: "local.set", index: 0 },
+            ],
+          },
           { op: "local.get", index: 0 },
           { op: "any.convert_extern" },
           { op: "local.tee", index: anyLocal },
@@ -997,6 +1016,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         ? ([
             { op: "local.get", index: 1 },
             { op: "ref.test", typeIdx: boxNumTypeIdx },
+            // (#3673) …or an i31-boxed small int (unbox helper handles both).
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: -20 },
+            { op: "i32.or" },
             {
               op: "if",
               blockType: { kind: "empty" },
@@ -6177,6 +6200,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     );
   }
   const numericKeyArms: Instr[] = [];
+  const i31NumericKeyArms: Instr[] = [];
   if (boxedNumberTypeIdx >= 0) {
     for (const [fieldName, entries] of byField) {
       if (!/^(?:0|[1-9]\d*)$/.test(fieldName)) continue;
@@ -6189,6 +6213,16 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
         { op: "f64.eq" },
         { op: "if", blockType: { kind: "empty" }, then: buildReceiverArms(entries) },
       );
+      // (#3673) i31-boxed numeric key twin — integer field names fit i31.
+      i31NumericKeyArms.push(
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: -20 },
+        { op: "i31.get_s" },
+        { op: "i32.const", value: Number(fieldName) },
+        { op: "i32.eq" },
+        { op: "if", blockType: { kind: "empty" }, then: buildReceiverArms(entries) },
+      );
     }
   }
   fn.body.unshift(
@@ -6198,6 +6232,11 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
           { op: "any.convert_extern" },
           { op: "ref.test", typeIdx: boxedNumberTypeIdx },
           { op: "if", blockType: { kind: "empty" }, then: numericKeyArms },
+          // (#3673) i31 numeric-key gate.
+          { op: "local.get", index: 1 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: -20 },
+          { op: "if", blockType: { kind: "empty" }, then: i31NumericKeyArms },
         ] satisfies Instr[])
       : []),
     { op: "local.get", index: 1 },

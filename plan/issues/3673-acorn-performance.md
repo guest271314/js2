@@ -279,6 +279,47 @@ reproduce IDENTICALLY on the committed base (pre-existing); var-hoisting
 exact; standalone canaries 4/4; 1712 acceptance green; host bench
 unchanged; tsc + biome clean.
 
+## Round 7 — i31 small-int boxing (linear memory's value-rep trick, natively)
+
+`__box_number` (standalone native) now encodes integral values in the
+signed-31-bit range as an UNBOXED `(ref i31)` — zero allocation — instead
+of a `$BoxedNumber` struct. Excluded: -0 (i31 cannot carry the sign), NaN
+and infinities (fail the trunc round-trip), and out-of-range values.
+Encoder gained `ref.i31` / `i31.get_s` (GC opcodes 0x1C/0x1D); abstract
+i31 `ref.test`/`ref.cast` ride the existing negative-heap-type encoding
+(-20 → SLEB 0x6C).
+
+Every discriminator that detects boxed numbers gained an i31 arm:
+`__unbox_number`/`__typeof_number`/`__is_truthy`/`__to_bigint`/
+`__typeof_string`-class/`__typeof` (imports.ts natives);
+`__any_from_extern` tag-3 classification, `__any_to_f64`'s tag-5
+`$BoxedNumber` recovery, `tag5ToNumber`, and the tag-5 "is a real string"
+guard (any-helpers — the tag-5 lane was the subtle one: the "tag-5 lie"
+wraps every non-nullish externref, so i31 numbers hid inside tag-5 boxes
+and `this.pos + size` in a prototype method answered NaN until the
+recovery arms landed — pinned by
+`tests/issue-3673-i31-smallint.test.ts`); the `__extern_get` numeric-key
+gate + i31-twin arms, `__obj_hash` key coercion, the Array-length
+validation normalize, `__vec_dp_value` f64 write-back, `__weak_key_ok`
+number rejection, JSON stringify/parse-revive arms, and the two
+native-string number-coercion arms. Equality/compare/Map-SameValueZero
+route through the i31-aware `__typeof_number`/`__unbox_number`, so mixed
+i31-vs-struct encodings of the same value stay `===`.
+
+**Measured: wall-clock FLAT on the acorn microbench (2.67ms vs 2.66ms)**
+— GC was already only ~1.2% of the profile and V8's young-gen bump
+allocation is near-free at this scale. The win is allocation VOLUME
+(every small-int box removed), which matters under memory pressure and
+for larger workloads, not this 330B parse. Recorded honestly; the arms
+are correctness-neutral by construction and pinned by the new test.
+
+Verification (round 7): probe matrix (dyn fields/===/arrays/obj/string
+concat/switch/floats/-0) green; new 7-test pin suite green; standalone
+acorn canaries 4/4; host corpus 23/23 exact (host lane untouched — its
+`__box_number` is a host import); 30-suite standalone batch + 1712
+acceptance — only the pre-existing 1599 ×3; JSON/Map/Weak suites — same;
+tsc clean.
+
 ## Round 6 — arity IN the closure representation (the deferred layout change)
 
 Every closure struct in the root wrapper hierarchy now carries an immutable

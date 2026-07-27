@@ -613,13 +613,31 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
             else: [
               { op: "local.get", index: L_RECOVER },
               { op: "ref.test", typeIdx: boxNumIdxEarly },
+              // (#3673) …or an i31-boxed small int.
+              { op: "local.get", index: L_RECOVER },
+              { op: "ref.test", typeIdx: -20 },
+              { op: "i32.or" },
               {
                 op: "if",
                 blockType: { kind: "val", type: strRef },
                 then: numberArm([
                   { op: "local.get", index: L_RECOVER },
-                  { op: "ref.cast", typeIdx: boxNumIdxEarly },
-                  { op: "struct.get", typeIdx: boxNumIdxEarly, fieldIdx: 0 },
+                  { op: "ref.test", typeIdx: -20 },
+                  {
+                    op: "if",
+                    blockType: { kind: "val", type: { kind: "f64" } },
+                    then: [
+                      { op: "local.get", index: L_RECOVER },
+                      { op: "ref.cast", typeIdx: -20 },
+                      { op: "i31.get_s" },
+                      { op: "f64.convert_i32_s" },
+                    ],
+                    else: [
+                      { op: "local.get", index: L_RECOVER },
+                      { op: "ref.cast", typeIdx: boxNumIdxEarly },
+                      { op: "struct.get", typeIdx: boxNumIdxEarly, fieldIdx: 0 },
+                    ],
+                  },
                 ]),
                 else: [
                   { op: "local.get", index: L_RECOVER },
@@ -809,16 +827,33 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   const residualArm: Instr[] =
     boxNumIdx >= 0 && boxBoolIdx >= 0
       ? [
-          // $__box_number_struct? → number_toString(value)
+          // $__box_number_struct (or #3673 i31 small int)? → number_toString(value)
           { op: "local.get", index: L_V },
           { op: "ref.test", typeIdx: boxNumIdx },
+          { op: "local.get", index: L_V },
+          { op: "ref.test", typeIdx: -20 },
+          { op: "i32.or" },
           {
             op: "if",
             blockType: { kind: "val", type: strRef },
             then: numberArm([
               { op: "local.get", index: L_V },
-              { op: "ref.cast", typeIdx: boxNumIdx },
-              { op: "struct.get", typeIdx: boxNumIdx, fieldIdx: 0 },
+              { op: "ref.test", typeIdx: -20 },
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "f64" } },
+                then: [
+                  { op: "local.get", index: L_V },
+                  { op: "ref.cast", typeIdx: -20 },
+                  { op: "i31.get_s" },
+                  { op: "f64.convert_i32_s" },
+                ],
+                else: [
+                  { op: "local.get", index: L_V },
+                  { op: "ref.cast", typeIdx: boxNumIdx },
+                  { op: "struct.get", typeIdx: boxNumIdx, fieldIdx: 0 },
+                ],
+              },
             ]),
             else: [
               // $__box_boolean_struct? → "true" / "false"

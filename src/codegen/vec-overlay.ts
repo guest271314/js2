@@ -811,6 +811,22 @@ export function fillVecOverlayHelpers(ctx: CodegenContext): void {
                   ...wrote.map((i) => ({ ...i })),
                 ],
               },
+              // (#3673) i31-boxed small int is a strict number too.
+              { op: "local.get", index: 12 },
+              { op: "ref.test", typeIdx: -20 },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  ...castVecAndIdx.map((i) => ({ ...i })),
+                  { op: "local.get", index: 12 },
+                  { op: "ref.cast", typeIdx: -20 },
+                  { op: "i31.get_s" },
+                  { op: "f64.convert_i32_s" },
+                  { op: "call", funcIdx: elemSetIdx },
+                  ...wrote.map((i) => ({ ...i })),
+                ],
+              },
             );
           }
           if (anyValTypeIdx !== undefined && anyValTypeIdx >= 0) {
