@@ -706,6 +706,17 @@ function directCallsEnabled(): boolean {
   return process.env.JS2WASM_DIRECT_CALLS !== "0";
 }
 
+/**
+ * (#3683 S3b) `JS2WASM_DIRECT_CALLS=nopad` keeps S3's exact-arity devirtualization
+ * but declines every UNDER-APPLIED site, reproducing the S3-only module. This is
+ * the isolation switch the S3b measurement is taken against: `0` bisects the
+ * whole direct-call slice, `nopad` bisects only the arity padding, so the two
+ * A/B arms attribute the delta to the right change.
+ */
+function arityPaddingEnabled(): boolean {
+  return process.env.JS2WASM_DIRECT_CALLS !== "nopad";
+}
+
 /** (#3683 S3) Devirtualization tallies — inert unless `_DEBUG=1`. */
 export const directCallStats = {
   sites: 0,
@@ -777,11 +788,28 @@ export interface DirectCallTrampoline {
   readonly funcIdx: number;
   readonly className: string;
   readonly methodName: string;
+  /** CALL-SITE argument count. `arity <= formals`; see {@link padInstrs}. */
   readonly arity: number;
+  /**
+   * (#3683 S3b) The CALLEE's declared parameter count. Equal to `arity` for an
+   * exact-arity site; strictly greater for an UNDER-APPLIED one, in which case
+   * the trampoline materializes the `formals - arity` missing arguments itself.
+   */
+  readonly formals: number;
   /** The receiver's `$__fnctor_F` type index — the trampoline casts back to it. */
   readonly fnctorStructTypeIdx: number;
   /** `[externref, ...userParams]`, all non-`ref` (see the ABI note). */
   readonly params: ValType[];
+  /**
+   * (#3683 S3b) One instruction sequence per MISSING formal (`formals - arity`
+   * entries, for callee param indices `arity .. formals-1`), each leaving one
+   * value of the matching {@link padTypes} entry on the stack. Built at RESERVE
+   * time — the fill is read-only over the module — and funcIdx-free, so it is
+   * immune to late-import index shifts.
+   */
+  readonly padInstrs: Instr[][];
+  /** The twin's declared param types for the padded slots (fill-time check). */
+  readonly padTypes: ValType[];
   /**
    * The callee's wasm results: one entry, or EMPTY for a void-returning method
    * (acorn's `this.next()` / `this.expect(...)` — the hottest calls in the
@@ -810,6 +838,15 @@ export interface DirectCallDeps {
   reserveLegacyDispatch(methodName: string, arity: number): number;
   ensureCurrentThisGlobal(): number;
   ensureArgcGlobal(): number;
+  /**
+   * (#3683 S3b) `undefinedExternInstrs` — the canonical externref-plane
+   * `undefined` (`global.get $undefined; extern.convert_any` under the #2106
+   * singleton regime, `undefined` when the regime is off so the caller falls
+   * back to `ref.null.extern`). This is the EXACT value `__apply_closure`'s
+   * `ARG_OF(k)` hands a missing argument, so it is what a padding trampoline
+   * must reproduce.
+   */
+  undefinedExtern(): Instr[] | undefined;
 }
 
 /** `runtimeParameters` (closures.ts), duplicated to keep this module acyclic. */
@@ -930,6 +967,66 @@ function admitDirectCall(
   return fn;
 }
 
+/**
+ * (#3683 S3b) Build the value a padding trampoline passes for ONE missing
+ * formal, or `undefined` to decline the whole call site.
+ *
+ * ## The convention this reproduces — MEASURED, not inferred
+ *
+ * An under-applied dynamic call reaches the callee through `__extern_method_call`
+ * → `__apply_closure` → `__call_fn_method_<formals>`. Two pieces of state decide
+ * what the body observes, and BOTH are reproduced here + in the trampoline
+ * prologue:
+ *
+ *  1. **The missing argument's VALUE.** `__apply_closure`'s `ARG_OF(k)` answers
+ *     `undefinedExternInstrs(ctx)` (the #2106 `$undefined` singleton, or
+ *     `ref.null.extern` with the regime off) for every `k >= args.length` — the
+ *     #3592 widening raises the DISPATCH SELECTOR to `declaredArity` without
+ *     padding the args vector, so the out-of-bounds read is the pad. An
+ *     `externref` formal therefore receives exactly that, and a defaulted
+ *     `externref` formal fires its default because
+ *     `emitParamDefaultCheckInline` tests `__extern_is_undefined`.
+ *
+ *  2. **`__argc`.** The S3 implementation note claimed the widening leaves
+ *     `__argc` at `formals`. **It does not** — `fillApplyClosure` presets
+ *     `__argc` to the RAW call-site count *before* widening only the selector
+ *     ("Preserve the raw call-site count in `__argc`…"), and
+ *     `emitClosureMethodCallExportN`'s #2745 setup then clamps it to
+ *     `min(preset, closureArity)`, which for an under-applied call is the
+ *     call-site count again. Measured on this branch: a 3-formal method called
+ *     with one argument observes `arguments.length === 1`, and an f64 defaulted
+ *     formal (whose default check is the argc-driven
+ *     `emitParamDefaultArgMissingCheck`, NOT a value test) correctly takes its
+ *     default. So the trampoline keeps writing `i32.const <call-site arity>` —
+ *     which is what it already did, since S3's `arity` IS the call-site count.
+ *
+ * Given (2), a NATIVE-typed (`f64`/`i32`) padded slot splits in two:
+ *
+ *  - **with an initializer** — the argc check `argc != -1 && argc <= k` is TRUE
+ *    for every padded index `k >= arity`, so the default unconditionally
+ *    overwrites the slot and the padded bits are dead. A zero constant is then
+ *    exactly as correct as the legacy `__unbox_number(undefined)` and costs one
+ *    instruction instead of a call.
+ *  - **without an initializer** — the body READS the raw value, whose legacy
+ *    production is `__unbox_number(<undefined>)` (and, for `i32`, a
+ *    `i32.trunc_f64_s` that TRAPS on the resulting NaN). Reproducing a trap is
+ *    not worth a devirtualization, and guessing a different value would be a
+ *    silent divergence, so the site DECLINES. Acorn has no such formal (every
+ *    parser method parameter is `any` ⇒ `externref`).
+ */
+function buildPadValue(type: ValType, formal: ts.ParameterDeclaration, deps: DirectCallDeps): Instr[] | undefined {
+  if (type.kind === "externref") {
+    // Copy the instructions: the record is long-lived and shared by every call
+    // site of this (method, arity), while `Instr` objects are rewritten in place
+    // by the late-import shifter.
+    return (deps.undefinedExtern() ?? [{ op: "ref.null.extern" }]).map((i) => ({ ...i }));
+  }
+  if (formal.initializer === undefined) return undefined;
+  if (type.kind === "f64") return [{ op: "f64.const", value: 0 }];
+  if (type.kind === "i32") return [{ op: "i32.const", value: 0 }];
+  return undefined;
+}
+
 /** Idempotently reserve the `__dc_<F>_<m>_<n>` trampoline for one method. */
 function reserveDirectCallTrampoline(
   ctx: CodegenContext,
@@ -937,8 +1034,11 @@ function reserveDirectCallTrampoline(
     className: string;
     methodName: string;
     arity: number;
+    formals: number;
     fnctorStructTypeIdx: number;
     params: ValType[];
+    padInstrs: Instr[][];
+    padTypes: ValType[];
     results: ValType[];
     deps: DirectCallDeps;
   },
@@ -972,8 +1072,11 @@ function reserveDirectCallTrampoline(
     className: spec.className,
     methodName: spec.methodName,
     arity: spec.arity,
+    formals: spec.formals,
     fnctorStructTypeIdx: spec.fnctorStructTypeIdx,
     params: spec.params,
+    padInstrs: spec.padInstrs,
+    padTypes: spec.padTypes,
     results: spec.results,
     legacyDispatchIdx,
     currentThisGlobalIdx,
@@ -1016,26 +1119,49 @@ export function tryEmitDirectTwinCall(
   const fn = admitDirectCall(ctx, structName, className, methodName);
   if (fn === undefined) return undefined;
 
-  // Exact arity only. An under- or over-applied call needs the extras protocol
-  // (`__argc` / `__extras_argv`) that the dynamic bridge implements.
+  // (#3683 S3b) UNDER-application (`this.parseIdent()` into a 1-formal method)
+  // is admitted: the trampoline materializes the missing arguments itself, per
+  // the convention documented on {@link buildPadValue}. OVER-application still
+  // declines — the extra arguments must be evaluated for their side effects and
+  // then routed into the `__extras_argv` canonical vector, a separate protocol.
   const formals = runtimeParams(fn);
-  if (expr.arguments.length !== formals.length) return declineDirect("arity-mismatch");
+  const argc = expr.arguments.length;
+  if (argc > formals.length) return declineDirect("arity-over");
+  if (argc < formals.length && !arityPaddingEnabled()) return declineDirect("arity-under-nopad");
 
   const sig = deps.computeSig(fn);
   if (sig.params.length !== formals.length) return declineDirect("sig-arity-skew");
 
   // No `ref`/`ref_null` in the trampoline's own signature — see the ABI note on
   // `DirectCallTrampoline`. A struct-typed formal is rare (acorn has none) and
-  // declining costs only a missed devirtualization.
+  // declining costs only a missed devirtualization. The check covers the PADDED
+  // slots too: they are the twin's parameters, not the trampoline's, but a
+  // `ref`-typed pad would be a `ref.null $T` the fixup walk could still land on.
   if (sig.params.some((p) => p.kind === "ref" || p.kind === "ref_null")) {
     return declineDirect("ref-typed-param");
   }
+
+  // Build the pad BEFORE reserving: a slot we cannot express must decline
+  // without leaving an orphan trampoline behind.
+  const padTypes = sig.params.slice(argc);
+  const padInstrs: Instr[][] = [];
+  for (let k = argc; k < formals.length; k++) {
+    const pad = buildPadValue(sig.params[k]!, formals[k]!, deps);
+    if (pad === undefined) return declineDirect("pad-native-param");
+    padInstrs.push(pad);
+  }
+
   const tramp = reserveDirectCallTrampoline(ctx, {
     className,
     methodName,
-    arity: formals.length,
+    arity: argc,
+    formals: formals.length,
     fnctorStructTypeIdx: structTypeIdx,
-    params: [{ kind: "externref" }, ...sig.params],
+    // Only the SUPPLIED arguments are trampoline parameters; the rest are
+    // synthesized inside it, so N call sites share one copy of the pad.
+    params: [{ kind: "externref" }, ...sig.params.slice(0, argc)],
+    padInstrs,
+    padTypes,
     // Void callee ⇒ no wasm result. The legacy degradation target always yields
     // an externref, so the fill drops it in that arm (see below).
     results: sig.returnType === null ? [] : [sig.returnType],
@@ -1052,7 +1178,7 @@ export function tryEmitDirectTwinCall(
   // evaluated, which is also what the dynamic path does.
   fctx.body.push({ op: "local.get", index: thisLocalIdx });
   fctx.body.push({ op: "extern.convert_any" });
-  for (let i = 0; i < formals.length; i++) {
+  for (let i = 0; i < argc; i++) {
     // Coerce against the TRAMPOLINE's DECLARED parameter, never the signature
     // just computed: the trampoline is shared by every call site of this
     // method, and it is its declaration the validator checks the call against.
@@ -1147,10 +1273,22 @@ function unboxFromExternref(ctx: CodegenContext, type: ValType, out: Instr[]): b
  * where `<arm>` is either
  *
  *     local.get 0 ; any.convert_extern ; ref.cast $__fnctor_F   ;; the twin's
- *     local.get 1 … local.get n ; call $twin                    ;; receiver
+ *     local.get 1 … local.get n                                 ;; receiver
+ *     <pad>                       ;; (#3683 S3b) one per MISSING formal
+ *     call $twin
  *
  * or, when the twin did not materialize, the legacy sequence
- * (`local.get 0; <args boxed>; call __call_m_<m>_<n>; <result unboxed>`).
+ * (`local.get 0; <args boxed>; call __call_m_<m>_<n>; <result unboxed>`) —
+ * which needs NO pad: `__call_m_<m>_<arity>` is the exact dispatcher this site
+ * would have reserved without S3, and the dynamic bridge behind it does its own
+ * #3592 widening.
+ *
+ * `__argc` carries the CALL-SITE count (`t.arity`), which is also what the
+ * dynamic path leaves there for an under-applied call — see the measurement
+ * recorded on {@link buildPadValue}. It is the only thing that makes an
+ * argc-driven parameter default (`emitParamDefaultArgMissingCheck`, used for
+ * every `f64`/`i32` formal) fire in the padded slots and NOT in the supplied
+ * ones.
  *
  * `__current_this` is installed even though the twin takes its receiver as a
  * parameter, because a twin body's NON-field uses of `this` (a `this` argument,
@@ -1178,11 +1316,21 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
     // Param 0 differs BY DESIGN (twin: `(ref $F)`, trampoline: externref), so
     // compare the user params only — plus the twin's own receiver type, which
     // must be the struct this trampoline casts to.
+    //
+    // (#3683 S3b) The twin always declares ALL `formals`; the trampoline
+    // declares only the `arity` SUPPLIED ones. So the supplied prefix is
+    // compared against the trampoline's params and the padded suffix against
+    // `padTypes` — the types the reserve-time pad was built for. A twin whose
+    // ABI was repaired between reserve and fill therefore fails the check and
+    // degrades, exactly as in the exact-arity case.
     const twinSignatureAgrees =
       twin !== undefined &&
-      twin.params.length === t.params.length &&
+      twin.params.length === t.formals + 1 &&
       valTypesMatch(twin.params[0]!, { kind: "ref", typeIdx: t.fnctorStructTypeIdx }) &&
-      twin.params.slice(1).every((p, i) => valTypesMatch(p, t.params[i + 1]!)) &&
+      twin.params.slice(1, 1 + t.arity).every((p, i) => valTypesMatch(p, t.params[i + 1]!)) &&
+      t.padTypes.length === t.formals - t.arity &&
+      t.padInstrs.length === t.padTypes.length &&
+      twin.params.slice(1 + t.arity).every((p, i) => valTypesMatch(p, t.padTypes[i]!)) &&
       twin.results.length === t.results.length &&
       twin.results.every((r, i) => valTypesMatch(r, t.results[i]!));
     if (twinIdx !== undefined && twinSignatureAgrees) {
@@ -1194,6 +1342,7 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       arm.push({ op: "any.convert_extern" });
       arm.push({ op: "ref.cast", typeIdx: t.fnctorStructTypeIdx });
       for (let i = 1; i < paramCount; i++) arm.push({ op: "local.get", index: i });
+      for (const pad of t.padInstrs) arm.push(...pad.map((i) => ({ ...i })));
       arm.push({ op: "call", funcIdx: twinIdx });
       directCallStats.twinFills++;
     } else {

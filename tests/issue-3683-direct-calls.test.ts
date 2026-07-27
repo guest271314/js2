@@ -165,7 +165,7 @@ export function test(): number { var p = new P(0); return p.call2(3); }`;
     expect(dynamic.run()).toBe(30);
   });
 
-  it("declines on arity mismatch (under- and over-applied calls)", async () => {
+  it("declines on OVER-application; under-application is padded (S3b)", async () => {
     const src = `var P = function P() { this.v = 0; };
 var pp = P.prototype;
 pp.two = function (a, b) { if (b === undefined) { return 1; } return 2; };
@@ -174,12 +174,22 @@ pp.over = function () { return this.two(1, 2, 3); };
 pp.exact = function () { return this.two(1, 2); };
 export function test(): number { var p = new P(); return p.under() * 100 + p.over() * 10 + p.exact(); }`;
     const { direct, dynamic } = await bothLanes(src);
-    // `exact` devirtualizes; `under`/`over` need the extras protocol, so the
-    // trampoline is arity-2 only and both skewed sites keep the dynamic path.
+    // `exact` devirtualizes, and since #3683 S3b so does `under` — through its
+    // own arity-1 trampoline, which materializes the missing formal as the
+    // canonical `undefined` (see tests/issue-3683-arity-padding.test.ts).
+    // `over` still keeps the dynamic path: the extra arguments must be evaluated
+    // for their side effects and routed into the `__extras_argv` vector, which
+    // is a separate protocol from padding.
     expect(direct.wat).toMatch(/__dc_P_two_2/);
-    expect(direct.wat).not.toMatch(/__dc_P_two_1|__dc_P_two_3/);
+    expect(direct.wat).toMatch(/__dc_P_two_1\b/);
+    expect(direct.wat).not.toMatch(/__dc_P_two_3/);
+    // The observable answer is unchanged by S3b — that is the whole point.
     expect(direct.run()).toBe(1 * 100 + 2 * 10 + 2);
     expect(dynamic.run()).toBe(direct.run());
+    // …and the S3-only lowering of the same program answers it too.
+    const nopad = await build(src, { JS2WASM_DIRECT_CALLS: "nopad" });
+    expect(nopad.wat).not.toMatch(/__dc_P_two_1\b/);
+    expect(nopad.run()).toBe(direct.run());
   });
 
   it("declines when an own INSTANCE field shadows the method name", async () => {

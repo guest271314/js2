@@ -618,6 +618,11 @@ slice rather than being bolted on here:
   at **`formals`, not the call-site argc**. A padding trampoline must reproduce
   BOTH halves exactly, or default-parameter presence (`paramDefaultNeedsArgc`)
   silently flips for every under-applied call in the program.
+  > **CORRECTION (S3b, measured).** The `__argc` half of that sentence is
+  > WRONG — see the S3b notes below. `__argc` ends at the **call-site count**,
+  > not `formals`. The warning it carries is still the right one: this is
+  > exactly the state whose mis-guess flips default-parameter presence
+  > program-wide, which is why S3b measured it instead of reading it.
 - Over-application must still EVALUATE the extra arguments (side effects) and
   discard them, and `__extras_argv` only matters for bodies that read
   `arguments` — which already decline.
@@ -656,6 +661,167 @@ Full `tests/equivalence` (1,646 tests) run on the final commit AND on the merge
 parent `17816991`, both with `--reporter=json`, diffed by FULL TEST NAME:
 **1,610 passed / 33 failed / 3 todo on both, identical set, zero tests failing
 on only one side.**
+
+## S3b implementation notes (2026-07-27) — landed
+
+**What landed.** The direct-call trampoline is now keyed by CALL-SITE arity and
+materializes the missing arguments itself, so an UNDER-APPLIED `this.m(a)` into
+a 2-formal method devirtualizes. On acorn: **1,458 → 1,886 devirtualized sites
+across 229 → 264 trampolines** (250 twin fills, 14 legacy), and the
+`arity-mismatch` decline bucket — 428, the largest one S3 left — is now **ZERO**.
+The remaining declines are `no-write-once-verdict` 102 and `uses-arguments` 4.
+Binary 1,806,262 → 1,804,245 bytes (again SMALLER: a shared padded trampoline
+costs less than the `__call_m_*` sequences it replaces).
+
+### The convention — and why the S3 note's reading of it was wrong
+
+S3 handed this slice one instruction: reproduce both halves of what the dynamic
+bridge leaves for an under-applied callee, because a wrong guess flips
+default-parameter presence program-wide. Half of what it handed over was wrong,
+and only a differential measurement caught it.
+
+- **The VALUE half was right.** `__apply_closure`'s #3592 widening raises only
+  the dispatch SELECTOR to `declaredArity`; the args vector is not padded, so
+  `ARG_OF(k)` reads out of bounds for `k >= len` and answers
+  `undefinedExternInstrs(ctx)` — the #2106 `$undefined` singleton (or
+  `ref.null.extern` with the regime off). That is what the trampoline pads with.
+- **The `__argc` half was wrong.** The claim was "`__argc` ends up at `formals`,
+  not the call-site argc". It does not. `fillApplyClosure` writes the RAW
+  call-site count *before* the widening ("Preserve the raw call-site count in
+  `__argc`…", object-runtime.ts), and `emitClosureMethodCallExportN`'s #2745
+  setup then clamps it to `min(preset, closureArity)` — which for an
+  under-applied call is the call-site count again. Measured directly on this
+  branch before writing any code: a 3-formal method called with one argument
+  observes `arguments.length === 1`, and an f64 defaulted formal (whose default
+  check is the argc-driven `emitParamDefaultArgMissingCheck`, NOT a value test)
+  correctly takes its default.
+
+The practical consequence is the happy one: S3's trampoline already wrote
+`i32.const <call-site arity>` into `__argc`, because its `arity` IS the
+call-site count. **No change was needed** — but had the note been trusted, the
+"fix" would have been to write `formals` there, which would have silenced every
+argc-driven parameter default in every under-applied call in the program while
+leaving all the externref-typed ones (the ones a hand-written test reaches for
+first) perfectly correct. That is the failure mode the slice was carved out to
+avoid, and it is the reason the convention is now documented on
+`buildPadValue` with the measurement rather than the inference.
+
+### What a padded slot costs, per type
+
+Given that `__argc` carries the call-site count, the argc check
+`argc != -1 && argc <= k` is TRUE for every padded index `k >= arity`. So:
+
+| padded slot | pad emitted | why it is exact |
+| --- | --- | --- |
+| `externref` | `global.get $undefined; extern.convert_any` | byte-for-byte `ARG_OF(k)`'s OOB answer; fires `__extern_is_undefined` and NOT `ref.is_null` |
+| `f64`/`i32` **with** an initializer | `f64.const 0` / `i32.const 0` | the argc check always fires, so the default overwrites the slot — the bits are dead |
+| `f64`/`i32` **without** an initializer | — DECLINES (`pad-native-param`) | the body reads the raw value, whose legacy production is `__unbox_number(<undefined>)`, i.e. a NaN that `i32.trunc_f64_s` TRAPS on. Reproducing a trap is not worth a devirtualization and guessing a different value is a silent divergence. Acorn has no such formal (every parser parameter is `any`). |
+
+OVER-application still declines (`arity-over`): the extra arguments must be
+evaluated for their side effects and routed into the canonical `__extras_argv`
+vector, which is a different protocol from padding, not a bigger version of it.
+
+The legacy degradation arm needs **no** pad — `__call_m_<m>_<arity>` is the
+exact dispatcher the site would have reserved without S3, and the dynamic bridge
+behind it does its own widening. Only the twin arm pads.
+
+`padInstrs` are built at RESERVE time and stored on the trampoline record: the
+fill is read-only over the module, and the sequences are funcIdx-free
+(`global.get` / `extern.convert_any` / constants), so they are immune to the
+late-import index shift.
+
+### Isolation switch, and the byte-identity that makes the measurement mean something
+
+`JS2WASM_DIRECT_CALLS=nopad` keeps S3's exact-arity devirtualization and
+declines every under-applied site. Two checks make it a usable control arm:
+
+- an exact-arity-only module is **byte-identical** compiled with and without
+  `nopad`, and
+- **the acorn binary compiled on this branch under `nopad` is byte-identical to
+  the acorn binary compiled at the merge parent `dae75375`** (`cmp` clean,
+  1,806,262 bytes), with an identical tally (1458 / 229 / 219 / 10 — exactly the
+  numbers in the S3 notes above).
+
+So the `base` arm below is not "a build that should be equivalent"; it is
+provably the same bytes as S3. The `JS2WASM_DIRECT_CALLS=0` kill-switch is
+likewise byte-identical across the two commits.
+
+### Measured result
+
+Same methodology as S3/S4a: all arms in ONE process, round-robin, deep warm
+(600 parses) before any measured batch, min-of-N batches × 200 parses of the
+330 B corpus, with the duplicate-baseline control arm (`base2` is the same bytes
+as `base`, asserted with `Buffer.equals`, so its true delta is zero by
+construction).
+
+| session | batches | order | S3b | base | base2 | control band | S3b vs mean |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 40 | s3b,base,base2 | 0.5441 | 0.5695 | 0.5742 | 0.83 % | **−4.85 %** |
+| 2 | 40 | base2,base,s3b | 0.5721 | 0.5964 | 0.5978 | 0.23 % | **−4.19 %** |
+| 3 | 60 | base,s3b,base2 | 0.5698 | 0.6009 | 0.5937 | 1.21 % | **−4.59 %** |
+
+**≈4.5 % faster against a 0.2–1.2 % noise floor** — outside the control band in
+all three orders, but a fifth the size of S3's ≈16 %. That ratio is worth
+recording: S3b devirtualizes 29 % more sites (1,458 → 1,886) for a fifth of the
+win, because the 428 under-applied sites are the *colder* ones — acorn's hot
+tokenizer edges (`this.next()`, `this.expect(t)`) are exact-arity and S3 already
+took them.
+
+The profile says the same thing, two independent 6,000-parse windows:
+
+| helper | base | S3b (run 1) | base | S3b (run 2) |
+| --- | --- | --- | --- | --- |
+| `__call_fn_method_0` | 1.67 % | 1.26 % | 1.51 % | 1.53 % |
+| `__call_fn_method_1` | 2.03 % | 2.28 % | 2.23 % | 2.56 % |
+| `__call_fn_method_2` | 1.73 % | 0.71 % | 1.50 % | 0.30 % |
+| `__call_fn_method_3` | 1.02 % | 0.36 % | 1.26 % | 0.30 % |
+| `__method_cache_lookup` | 1.12 % | 0.99 % | 1.61 % | 0.77 % |
+| `__extern_method_call` | 1.59 % | 1.24 % | 1.26 % | 0.88 % |
+| `__apply_closure` | 1.83 % | 0.73 % | 1.21 % | 0.65 % |
+| **bridge total** | **11.26 %** | **7.99 %** | **10.84 %** | **7.17 %** |
+
+Bridge absolute cost over the same workload: 561 → 374 ms and 553 → 343 ms
+(≈−33 %). The two entries that collapse are exactly the ones the theory predicts:
+**`__apply_closure` roughly halves** (it is the only entry point that performed
+the #3592 widening, i.e. it was the under-applied calls' bridge), and
+`__call_fn_method_2`/`_3` fall by ~⅔ (an under-applied call was dispatched to
+the arity-`formals` export, not the arity-`argc` one). `__call_fn_method_1`
+*rises* slightly — a share of an 8 % smaller total, and the residue is the
+non-`this` receivers S3/S3b do not claim.
+
+### Verification
+
+`tsc` clean; `check:loc-budget` and `check:oracle-ratchet` both green (S3b adds
+ZERO checker usage). Standalone acorn canary on a fresh compile: `smoke=4`,
+`imports: ZERO`, 1,804,245 bytes. `DOGFOOD_ACORN=1 dogfood:acorn-corpus` 23/23,
+**distinct REAL gaps 0**. 14 new pins in
+`tests/issue-3683-arity-padding.test.ts`; `issue-3683-direct-calls` 16/16 (one
+pre-existing pin updated — the S3 arity pin asserted that BOTH skewed arities
+decline, which is now true only of over-application),
+`issue-3683-typed-this-twin` 12/12, `issue-3683-numeric-fields` 15/15,
+`issue-3683-proto-method-write-once` 10/10, `issue-3673-i31-smallint` 7/7,
+`issue-2674` ×2, `issue-2664` ×2 green. Pre-existing and unchanged by this
+slice, verified by re-running them at `dae75375`: 3 `issue-2151` failures
+(including "empty dynamic spread: trailing numeric param reads 0"), and the 12
+`issue-1712` failures which are `ENOENT` on an unchecked-out test262 submodule.
+The `medium` bench fixture traps ("dereferencing a null pointer") on the base
+commit and under both switches too — also pre-existing, not an S3b regression.
+
+Full `tests/equivalence` (1,646 tests) run on the final commit AND on the merge
+parent `dae75375`, both with `--reporter=json`, diffed by FULL TEST NAME:
+**1,610 passed / 33 failed / 3 todo on both, identical set, zero tests failing
+on only one side.**
+
+### One divergence this slice documents rather than fixes
+
+An EXPLICIT `undefined` argument does not fire the callee's parameter default
+when the call crosses `__call_m_*` — `p.m(1, undefined)` answers as if `1` were
+passed. It is pre-existing and devirtualization-independent (reproducible with a
+plain top-level call on every lane), and S3's exact-arity devirtualization
+already fixes it where it applies. The `nopad` and `direct` lanes therefore
+answer the node-correct value while the fully dynamic lane does not, so the pin
+records the value per lane instead of asserting lane agreement — the same
+treatment the two S3 divergences got.
 
 ## Acceptance criteria
 
