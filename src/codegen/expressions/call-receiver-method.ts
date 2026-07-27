@@ -35,6 +35,7 @@ import { classMemberFuncKey, fnctorAncestorOfClass } from "../class-member-keys.
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { compileArrowAsClosure, computeClosureWrapperSig } from "../closures.js";
 import { tryEmitDirectTwinCall } from "../typed-this.js"; // (#3683 S3) direct-call devirtualization
+import { undefinedExternInstrs } from "../any-helpers.js"; // (#3683 S3b) arity-padding sentinel
 import { pushBody } from "../context/bodies.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -331,6 +332,7 @@ function tryCompileLateFnctorPrototypeMethodCall(
     reserveLegacyDispatch: (name, arity) => reserveClosedMethodDispatch(ctx, name, arity),
     ensureCurrentThisGlobal: () => ensureCurrentThisGlobal(ctx),
     ensureArgcGlobal: () => ensureArgcGlobal(ctx),
+    undefinedExtern: () => undefinedExternInstrs(ctx),
   });
   if (devirtualized !== undefined) return devirtualized;
 
