@@ -1723,6 +1723,57 @@ Filed here rather than as separate issues because they are all discovered
 in one pass and all live in the same subsystem; whoever picks up the
 linear lane should triage them together.
 
+### Hybrid study — verdict: **don't build it** (#3687)
+
+Asked whether a WasmGC/linear **hybrid** ("linear for character data, GC
+for AST nodes") would give best-of-both. Measured answer: no — and two of
+the three rows above do not survive the check. Full write-up in
+[#3687](3687-wasmgc-linear-hybrid-study.md).
+
+1. **The W3 "linear 5.9x faster" row is retracted.** The input contains
+   `fn0(x0, …)` call syntax the toy grammar cannot parse, so `parseAdd`
+   returns at the first `(` after `fn0`: **11 of 431 tokens parsed, 11
+   nodes allocated per "parse"** (`.tmp/w3-sanity.mjs`). With the call
+   syntax removed so the grammar consumes the whole stream, linear's win
+   is **1.5x, not 5.9x**, flat across a 16x size sweep (63→1023 nodes;
+   node ~18-23, linear ~62-72, GC ~101-110 ns/node).
+2. **Even the 1.5x is not a memory-model property.** Same corrected
+   workload, same algorithm and allocation count, changing only which
+   construct carries parser state: class cursor + class Node → linear
+   0.66x; `number[]` cursor + class Node → **1.06x (GC faster)**;
+   `number[]` cursor + array arena → **3.35x (GC faster)**. Linear is good
+   at class field access and bad at array element access; GC is the
+   reverse. Both are lowering quality, fixable in place. There is no
+   stable advantage for a hybrid to allocate work across.
+3. **"Linear is bad at strings" is a BUG, not a fact** — correcting
+   recommendation #2 above on the word *structurally*. Swap the string for
+   a `number[]` of char codes (O(1) indexed on both backends, same
+   tokenizer) and linear goes from **503x** slower to **1.17x** slower. It
+   is `__linear_ir_str_char_code_at`'s decode-from-byte-0, nothing else.
+   Fixing it makes linear competitive on scans, not superior.
+4. **The narrow hybrid (source buffer in linear memory) is measurably
+   negative.** It swaps `array.get_u` for `i32.load8_u`; round 35's
+   hand-written lanes say GC wins that read 1.49x, and our own compiler
+   says 1.16x. It also needs no ownership protocol and still loses.
+5. **The scaffolding (#3686) is priced, and the op counts overstate it.**
+   A hand-written WasmGC control carrying the *complete* cast/null/extern
+   scaffolding costs **+10-16 %** on build+walk and **+23-29 %** on a pure
+   walk (0.45-0.53 ns/read) — not a multiple; `extern.convert_any` is a V8
+   no-op. #3686 is still worth doing, but its "evidence 2" (the 5.9x) is
+   void, and the GC lane's real 5x is the **generic `===` ladder** on
+   laundered values: `tk[i] === 40` with both operands statically `number`
+   emits 4 `__box_number`, 4 unboxes, an object→string conversion and a
+   string comparison per token. That is #3685 / #1584 / #1852 territory.
+6. **Blocker found for #3686**: `class Node { left: Node }` — a
+   non-nullable field of the class's own type, i.e. exactly the AST shape
+   #3686 wants — makes codegen recurse until stack overflow
+   (`objectIrTypeFromTsType` ↔ `tsTypeToFieldIr`, `src/codegen/index.ts`
+   1081/1099, no cycle guard). The nullable spelling only works because a
+   union misses the `Object` flag and bails to legacy.
+7. The >960-byte data-segment corruption (round 37) **reproduced at 3127
+   chars**: linear returns checksum 106161 where node and GC both return
+   101058. Silent, no diagnostic, inside a benchmark.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
