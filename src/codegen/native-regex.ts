@@ -1608,8 +1608,83 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     STICKY = 7,
     CAPS = 8;
   const I = 9; // current start position
+  const PC = 10; // (#3673 round 20) anchored-detection scan cursor
 
   const body: Instr[] = [
+    // (#3673 round 20) Start-anchored fast-out: when the program's first
+    // non-SAVE instruction is `BOL` with multiline=0, a match can only ever
+    // begin where `^` holds — every later start position fails the assertion
+    // immediately, so the position scan is pure overhead (acorn's anchored
+    // keyword tests paid ~word-length VM attempts per `.test`). Detecting it
+    // here (two or three array reads per call) needs no compile-time plumbing
+    // and is conservative: any other leading op (SPLIT for `^a|b`, CHAR, …)
+    // leaves the scan untouched. Equivalent by construction: with a
+    // multiline=0 BOL head, run(i) for i>start fails BOL exactly as the scan
+    // would discover, one attempt at `start` decides the result.
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: PC },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: PC },
+            { op: "i32.const", value: 2 },
+            { op: "i32.add" },
+            { op: "local.get", index: PROG },
+            { op: "array.len" },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: PROG },
+            { op: "local.get", index: PC },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "i32.const", value: 5 }, // ReOp.SAVE
+            { op: "i32.ne" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: PC },
+            { op: "i32.const", value: 3 },
+            { op: "i32.add" },
+            { op: "local.set", index: PC },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: PC },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.get", index: PROG },
+    { op: "array.len" },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: PROG },
+        { op: "local.get", index: PC },
+        { op: "array.get", typeIdx: i32Arr },
+        { op: "i32.const", value: 7 }, // ReOp.BOL
+        { op: "i32.eq" },
+        { op: "local.get", index: PROG },
+        { op: "local.get", index: PC },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "array.get", typeIdx: i32Arr },
+        { op: "i32.eqz" }, // operand a == 0 ⇒ not multiline
+        { op: "i32.and" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i32.const", value: 1 },
+            { op: "local.set", index: STICKY },
+          ],
+        },
+      ],
+    },
     // i = max(0, start)
     // `select` returns its 1st operand when the condition is non-zero, so to
     // compute `start < 0 ? 0 : start` the operands must be (0, start, start<0):
@@ -1676,7 +1751,10 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
   pushDefinedFunc(ctx, funcIdx, {
     name: "__regex_search",
     typeIdx,
-    locals: [{ name: "i", type: { kind: "i32" } }],
+    locals: [
+      { name: "i", type: { kind: "i32" } },
+      { name: "pc", type: { kind: "i32" } }, // (#3673 round 20)
+    ],
     body,
     exported: false,
   });

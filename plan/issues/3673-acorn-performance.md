@@ -32,6 +32,7 @@ loc-budget-allow:
   - src/codegen/closure-exports.ts
   - src/codegen/vec-overlay.ts
   - src/codegen/regexp-standalone.ts
+  - src/codegen/native-regex.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -670,6 +671,22 @@ test. Measured: deep-warm window 0.92-0.97 → **0.83-0.90ms** (≈5%).
 Verification: #2896 builtin-meta reflection suite green (closure
 receivers unchanged); twin pins 12/12; corpus 23/23; canaries 4/4; tsc
 clean.
+
+### Round 20 — start-anchored fast-out in `__regex_search`
+
+`__regex_search` tried a full VM run at EVERY start position; for a
+start-anchored pattern (`^…`, multiline off) every position after the
+first fails the `BOL` assertion immediately, so the scan was pure
+overhead — acorn's anchored keyword `.test`s paid ~word-length VM
+attempts each. The search prologue now reads the program's first
+non-SAVE opcode (two-three array reads, no compile-time plumbing): a
+multiline-0 `BOL` head sets the sticky flag, trying exactly one
+position. Conservative: `^a|b` starts with SPLIT and keeps the scan.
+Measured: 400k-keyword probe 425 → 146ms (2.9x on that path);
+end-to-end `__regex_run` 6.4% → 5.5% and window ~0.86ms (within noise —
+the residual regex share is the UNANCHORED patterns: lineBreak etc.).
+Verification: full regex battery failure set name-identical to the
+round-16 pre-existing set; corpus 23/23; canaries 4/4; tsc clean.
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
