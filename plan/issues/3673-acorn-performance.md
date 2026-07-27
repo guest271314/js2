@@ -1038,6 +1038,54 @@ compiles in the test suite.
 First fixture under 30x. Corpus 23/23 with 0 real gaps on the optimized
 artifact.
 
+## Round 31 — a compile-friendly tokenizer BEATS node-acorn (goal reached, for lexing)
+
+Round 27 concluded with an assertion: "a parser written to compile well
+would skip most of this list by construction." That was never tested, so
+this round tests it. `benchmarks/tokenizer/fast-tokenizer.ts` is a JS
+tokenizer written to the compiler's strengths — `i32` native annotations
+for every position (no boxing), top-level typed functions (no closures,
+no `this`, so no closure structs and no call bridge), flat preallocated
+`Int32Array` output (no property access in the hot loop), `charCodeAt`
+on a string param (lowers to `array.get_u`). Compiled `--target
+standalone`, **zero imports, 36 KB**.
+
+Correctness first: its token stream is compared position-by-position
+against `acorn.tokenizer` on all 17 corpus files. **13 match EXACTLY**
+and are the benchmark set; the other 4 use constructs it simplifies
+(class private fields, unicode escapes in identifiers, a numeric-literal
+edge, and `${}` splitting inside templates) and are EXCLUDED. Both facts
+are pinned in `tests/issue-3673-fast-tokenizer.test.ts` — including the
+divergence list, so growing coverage is a deliberate act rather than a
+silent benchmark change.
+
+| mode | total (13 files, 2,949 B) | vs node-acorn |
+| --- | --- | --- |
+| node-acorn `tokenizer` | 0.1176 ms | 1.00x |
+| ours, boundaries only | 0.0636 ms | **0.54x (1.85x faster)** |
+| ours, materializing token values | 0.0915 ms | **0.78x (1.28x faster)** |
+
+The value-materializing row is the apples-to-apples one: acorn's
+tokenizer eagerly builds `token.value`, so ours slices name/string text
+and `parseFloat`s numerics too. It wins on **all 13 files** in both
+modes (throughput 44.2 vs 23.9 MB/s boundaries-only). `regex.js` is the
+outlier at 0.23x because acorn additionally runs full RegExp validation
+there.
+
+**What this does and does not establish.** It establishes that
+js2wasm-compiled code CAN outperform node-acorn on the per-byte lexical
+core — the exact cost centre round 27 isolated (1.78 ms/KB of which
+~two thirds is parser-body execution). It does NOT establish that
+compiled ACORN can: acorn's own source is `any`-typed prototype-style JS
+whose every field read is a dispatcher call, which is why it sits at
+~31x, and no slice of #3683/#3685 changes that source. The two results
+together are the honest answer to "can we beat node-acorn": **yes, by
+writing the parser for the compiler — not by optimizing a compiled
+parser written for V8.**
+
+Reproduce: `npx tsx benchmarks/tokenizer/validate.mjs` (stream equality)
+then `npx tsx benchmarks/tokenizer/bench.mjs --recompile`.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
