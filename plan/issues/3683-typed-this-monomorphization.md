@@ -28,6 +28,24 @@ loc-budget-allow:
   # `context/types.ts` / `index.ts` one field + one pre-pass call each.
   - src/codegen/numeric-property-analysis.ts
   - src/codegen/context/types.ts
+  # S3: the whole direct-call subsystem (admission, trampoline reserve, the
+  # call-site emitter and the finalize fill) lives in `typed-this.ts`. What
+  # lands in the god-file is ONE guarded call plus the comment explaining why
+  # it must run before the `__call_m_*` reservation it falls through to —
+  # +19 lines, of which 5 are the dependency thunks that keep `typed-this.ts`
+  # out of an import cycle with `closures.ts`.
+  - src/codegen/expressions/call-receiver-method.ts
+oracle-ratchet-allow:
+  # S2 (granted retroactively here — the gate is measured against `main`, which
+  # predates the whole typed-`this` branch). The two `getTypeAtLocation` calls
+  # ask whether a property access is CALL-SIGNATURE typed, i.e. whether the
+  # slot holds a method rather than data; that is a raw `ts.Type` identity
+  # question the oracle deliberately does not model, and it is the precise
+  # carve-out the ratchet documents. The `ctx.checker` uses are the three
+  # `resolveEnclosingFnctorOwner` arguments, whose signature takes a checker.
+  # S3 itself adds ZERO new checker usage — `admitDirectCall` reads its owner
+  # from the S1 verdict map instead of re-deriving it.
+  - src/codegen/typed-this.ts
 ---
 
 # #3683 — Typed-`this` monomorphization for fnctor prototype methods

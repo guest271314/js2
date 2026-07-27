@@ -915,11 +915,17 @@ function admitDirectCall(
   if (ctx.classAccessorSet.has(`${structName}_${methodName}`)) return declineDirect("accessor-name");
   if (ctx.structFields.get(structName)?.some((f) => f.name === methodName)) return declineDirect("own-field");
 
-  // The callee must be a PROTOTYPE method of this very class, and its lifted
-  // body's `this` pin must resolve to the same struct the caller's does —
-  // otherwise its twin (if any) is typed against a different receiver.
-  const owner = resolveEnclosingFnctorOwner(ctx.checker, fn);
-  if (!owner || !owner.viaPrototype || owner.name !== className) return declineDirect("owner-mismatch");
+  // The callee's lifted body must pin `this` to the SAME struct the caller's
+  // does — otherwise its twin (if any) is typed against a different receiver.
+  //
+  // "is `fn` a prototype method of `className`?" is NOT re-derived here: `fn`
+  // was read out of `gate.methods.get(className)`, so S1 has already
+  // established `<className>.prototype.<methodName> = fn` as the program's
+  // single unconditional top-level write. Re-asking the checker
+  // (`resolveEnclosingFnctorOwner`) would answer the same question from a
+  // second source, and it is the one query in this admission that needs the raw
+  // `ts.Type` surface the oracle ratchet (#1930/#3273) is steering code away
+  // from — so the redundancy is worth avoiding on both counts.
   if (resolveLiftedMethodThisStruct(ctx, fn) !== structName) return declineDirect("this-pin-mismatch");
   return fn;
 }
