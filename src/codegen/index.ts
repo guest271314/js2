@@ -344,6 +344,7 @@ import {
 } from "./struct-field-exports.js"; // (#3272) extracted verbatim
 import { analyzeBooleanPropertyNames, recoverBooleanStructFieldBrands } from "./struct-field-boolean-brand.js";
 import { analyzeNumericPropertyNames } from "./numeric-property-analysis.js"; // (#3683 S4a)
+import { collectUserMethodNames } from "./user-method-names.js"; // (#3673)
 import {
   registerWasiImports,
   emitDeferredWasiHelpers,
@@ -2980,6 +2981,11 @@ export function generateModule(
   // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
   // `new` sites ⇒ empty result ⇒ no-op).
   ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
+  // (#3673) Names the source itself defines as function-valued members, so the
+  // guarded native-string method lowering can tell a genuine `String.prototype`
+  // call apart from a same-named USER method on an object receiver. Cheap
+  // single walk; an empty result restores the previous lowering exactly.
+  ctx.userMethodNames = collectUserMethodNames(ast.sourceFile);
   // (#3683 S4a) Whole-program numeric-property verdict, consumed by
   // `deriveFnctorFields` to give a fnctor field a PHYSICAL f64 slot. MUST run
   // before `reserveFnctorStructTypes` below — that is what derives the struct

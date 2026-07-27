@@ -2266,14 +2266,24 @@ export function compileReceiverMethodCall(
   // #2187's static `receiverIsNativeStringValType` (bare-identifier-with-
   // string-ref-local) cannot recognise. A runtime `ref.test $AnyString` keeps a
   // non-string `any` (array, number, null) on its benign default. Scoped to a
-  // known STRING_METHODS name (+`charCodeAt`, which has a dedicated arm but is
-  // not in the table), native-string mode, and an `any`/unknown receiver NOT
-  // already handled by the static string arms below.
+  // known STRING_METHODS name (+`charCodeAt`/`substr`, which have dedicated
+  // native arms but are not in the table), native-string mode, and an
+  // `any`/unknown receiver NOT already handled by the static string arms below.
+  //
+  // (#3673) `substr` is Annex-B and deliberately absent from `STRING_METHODS`
+  // (that table doubles as the JS-host `string_<method>` import manifest), but
+  // `compileNativeStringMethodCall` HAS a native `__str_substr` arm. Without
+  // this name in the gate, a dynamic `obj.field.substr(a, b)` fell through to
+  // the generic `__extern_method_call` ladder, whose string-brand arm returns
+  // undefined ⇒ the empty string standalone. That is exactly how compiled
+  // acorn's octal-escape reader (`this.input.substr(this.pos - 1, 3)`) got ""
+  // and then threw on `.match(/^[0-7]+/)[0]`.
   if (
     ctx.nativeStrings &&
     ctx.nativeStrTypeIdx >= 0 &&
     (Object.prototype.hasOwnProperty.call(STRING_METHODS, propAccess.name.text) ||
-      propAccess.name.text === "charCodeAt") &&
+      propAccess.name.text === "charCodeAt" ||
+      propAccess.name.text === "substr") &&
     !isStringType(receiverType) &&
     !receiverIsCaughtErrorStringRead(ctx, propAccess.expression) &&
     !receiverIsNativeStringValType(ctx, fctx, propAccess.expression) &&

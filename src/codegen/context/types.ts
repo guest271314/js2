@@ -1915,6 +1915,17 @@ export interface CodegenContext {
    * promote) in host mode and before the pre-pass runs.
    */
   numericPropertyNames?: ReadonlySet<string>;
+  /**
+   * #3673: property names the SOURCE defines as a function-valued member
+   * (`collectUserMethodNames`). Consulted by
+   * `compileGuardedNativeStringMethodCall` so a `String.prototype`-named
+   * method that the program ALSO defines on its own objects (acorn's
+   * `RegExpValidationState.prototype.at` vs `String.prototype.at`) gets a real
+   * dynamic-dispatch fallback on the `ref.test $AnyString` miss instead of a
+   * benign sentinel. `undefined` before the pre-pass ⇒ behave exactly as
+   * before.
+   */
+  userMethodNames?: ReadonlySet<string>;
   /** Set of function names that are async (for .d.ts generation) */
   asyncFunctions: Set<string>;
   /** Set of function names that are generators (function*) */
