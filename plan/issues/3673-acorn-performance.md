@@ -941,6 +941,54 @@ there. And **Binaryen `-O3` is now worth 7.1 %** post-S3 (0.618 →
 the monomorphic direct calls give it something to inline. Worth wiring
 into the shipped standalone artifact configuration.
 
+### Round 28 — standalone correctness gaps: 4 root causes fixed (6 → 5 failing fixtures)
+
+Merged `claude/3673-standalone-gaps`. `escapes-unicode.js` is green and
+BOTH `illegal cast` traps plus an infinite hang they masked are gone;
+the remaining five fixtures now fail with NAMED acorn raises instead of
+opaque exceptions. Four root causes, all general bugs rather than
+acorn quirks:
+
+1. **`substr` missing from the guarded any-receiver string gate** — it
+   is Annex-B so absent from `STRING_METHODS`, but that table doubles as
+   the JS-host import manifest while a native `__str_substr` arm already
+   existed. Dynamic `o.f.substr(a,b)` fell to `__extern_method_call` →
+   undefined → `""`.
+2. **`x | 0` on an externref called `parseFloat`** — wrong semantics
+   (`"10abc"|0` → 10, spec 0) AND a hard trap (native `parseFloat` opens
+   with an unguarded `ref.cast $AnyString`, so a boxed NUMBER operand
+   trapped). Same class as the #2109 comparison fix; routed through
+   `__unbox_number`. Note the "obvious" `coerceType(…,"number")` fix blew
+   acorn's build from ~18s to >10min and was rejected.
+3. **A user method colliding with a `String.prototype` name got the miss
+   sentinel** — `RegExpValidationState.prototype.at` vs
+   `String.prototype.at`: `state.at(i)` read back `0` instead of the `-1`
+   EOF sentinel, so `regexp_eatPatternCharacters` never terminated —
+   **every `u`-flag regex hung the parser**. New `user-method-names.ts`
+   pre-pass scopes the `__call_m_*` fallback to names the source actually
+   defines, so charCodeAt/slice/substr keep their unboxed hot path.
+4. **`obj.prop += rhs` on a dynamic receiver was an unconditional
+   `f64.add` standalone** — #2850 fixed this host-only; the compound path
+   now reaches the in-module §13.15.3 dispatch.
+
+Fixture status 12/17 pass (was 11), verified no regressions via
+`.tmp/bisect-medium.mjs`. Cost: deep-warm 0.682 → 0.708 ms (**≈4 %
+slower, accepted** — it buys two hard traps and a hang). Gates: new
+20-test suite; 70/70 across gaps/direct-calls/twin/numeric-fields/i31;
+corpus 0 real gaps incl. acorn self-parse; canaries `imports: ZERO`.
+
+Remaining five, with diagnosis (see the agent's notes in #3673):
+`destructuring.js` + `arrow-params.js` share ONE cause — `for…in` over a
+fnctor instance enumerates 0 keys standalone, `Object.keys` returns 0,
+and computed writes are no-ops, so acorn's `copyNode` produces an empty
+node (highest-value next slice: one fix, two fixtures, general
+reflection hole); `regex.js` duplicate-capture-name (undiagnosed —
+probes confounded by an external-read hole); `generators-async.js`
+uninvestigated; `literals.js` needs decimal + `0x/0o/0b` BigInt parsing
+into the existing i64 carrier. Reusable diagnostics left in `.tmp/`:
+`sa.mjs` and `diag-raise.mjs` turn an opaque exception into a named
+cause in one 16 s compile.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
