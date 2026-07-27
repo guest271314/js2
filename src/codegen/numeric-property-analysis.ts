@@ -316,9 +316,26 @@ function callName(expr: ts.CallExpression | ts.NewExpression): string | undefine
   return undefined;
 }
 
+/**
+ * Statements after which control provably cannot reach the end of the body.
+ * Without this, `function f(c) { if (c) return 1; }` looks like it returns only
+ * numbers when in fact it returns `undefined` on the other path — the same
+ * guard #2847's boolean-function inference uses, and load-bearing for the same
+ * reason.
+ */
+function statementDefinitelyReturns(stmt: ts.Statement): boolean {
+  if (ts.isReturnStatement(stmt) || ts.isThrowStatement(stmt)) return true;
+  if (ts.isBlock(stmt)) return stmt.statements.some(statementDefinitelyReturns);
+  if (ts.isIfStatement(stmt) && stmt.elseStatement) {
+    return statementDefinitelyReturns(stmt.thenStatement) && statementDefinitelyReturns(stmt.elseStatement);
+  }
+  return false;
+}
+
 /** Return expressions of `fn`, or `undefined` when a path falls off the end. */
 function ownReturnExpressions(fn: FunctionLike): ts.Expression[] | undefined {
   if (!ts.isBlock(fn.body)) return [fn.body];
+  if (!fn.body.statements.some(statementDefinitelyReturns)) return undefined;
   const returns: ts.Expression[] = [];
   let bareReturn = false;
   const visit = (node: ts.Node): void => {
@@ -394,9 +411,8 @@ class ScopeTable {
     while (current) {
       const slot = this.declared.get(current)?.get(name);
       if (slot) return slot;
-      if (ts.isSourceFile(current)) return undefined;
+      if (ts.isSourceFile(current) || current.parent === undefined) return undefined;
       current = this.frameOf(current.parent);
-      if (current === undefined) return undefined;
     }
     return undefined;
   }
@@ -720,6 +736,8 @@ function makeProver(
    * itself and a string-valued TokenType slot gets promoted to f64.
    */
   let excludedName: string | undefined;
+  /** Re-entrancy guard for the slot recursion in {@link isString}. */
+  const stringSlotsInFlight = new Set<Slot>();
 
   const isString = (expr: ts.Expression, depth: number): boolean => {
     if (depth > MAX_DEPTH) return false;
@@ -731,10 +749,16 @@ function makeProver(
     if (ts.isIdentifier(value)) {
       const slot = facts.scopes.resolve(value, value.text);
       // A local whose every definition is a string (`var s = this.source`).
-      if (slot && slot.defs.length > 0) {
+      if (!slot || slot.defs.length === 0) return false;
+      // `var a = b; var b = a` would otherwise branch exponentially inside the
+      // depth cap; a slot already on the stack answers `false` (conservative).
+      if (stringSlotsInFlight.has(slot)) return false;
+      stringSlotsInFlight.add(slot);
+      try {
         return slot.defs.every((def) => def.expr !== undefined && isString(def.expr, depth + 1));
+      } finally {
+        stringSlotsInFlight.delete(slot);
       }
-      return false;
     }
     if (ts.isCallExpression(value)) {
       const callee = unwrap(value.expression);
