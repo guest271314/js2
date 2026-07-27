@@ -1732,8 +1732,9 @@ export function lowerIrFunctionBody<S, Slot>(
           throw new Error(`ir/lower: resolver cannot lower closure subtype (${func.name})`);
         }
         const liftedIdx = resolver.resolveFunc(instr.liftedFunc);
-        // ref.func $lifted, push captures, struct.new <subtype>.
+        // ref.func $lifted, (#3673) $arity, push captures, struct.new <subtype>.
         emitter.emitFuncRef(liftedIdx, out);
+        emitter.emitClosureArityOperand?.(instr.signature.params.length, out);
         for (const cap of instr.captures) emitValue(cap, out);
         emitter.emitClosureNew(sub, instr.captures.length, out);
         return;

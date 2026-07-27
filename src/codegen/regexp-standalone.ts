@@ -19,6 +19,7 @@
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { undefinedExternInstrs } from "./any-helpers.js";
+import { reserveVecOverlayPrime } from "./vec-overlay.js"; // (#3673 round 15)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -2425,6 +2426,16 @@ function emitRegexExecArrayCall(
   });
   fctx.body.push({ op: "local.set", index: resultLocal });
   if (defineIdx !== undefined) {
+    // (#3673 round 15) Pre-append the brand-new result's overlay companion
+    // (no-scan ensure via the reserved prime) so the defines below hit
+    // tab[count-1] on the newest-first scan instead of each paying a
+    // full-table miss scan. No-op placeholder until the overlay core builds.
+    const primeIdx = reserveVecOverlayPrime(ctx);
+    if (primeIdx !== undefined) {
+      fctx.body.push({ op: "local.get", index: resultLocal });
+      fctx.body.push({ op: "extern.convert_any" });
+      fctx.body.push({ op: "call", funcIdx: primeIdx });
+    }
     const defineOwn = (name: string, value: Instr[]): void => {
       fctx.body.push({ op: "local.get", index: resultLocal });
       fctx.body.push({ op: "extern.convert_any" });

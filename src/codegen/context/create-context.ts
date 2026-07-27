@@ -193,6 +193,8 @@ export function createCodegenContext(
     anyStrTypeIdx: -1,
     nativeStrTypeIdx: -1,
     consStrTypeIdx: -1,
+    hashedStrTypeIdx: -1,
+    nativeStrLiteralGlobals: new Map(),
     usesStandaloneConsoleSink: false,
     stdoutAccGlobalIdx: -1,
     symbolTypeIdx: -1,
