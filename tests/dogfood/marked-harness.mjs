@@ -1,52 +1,48 @@
-// acorn dogfood harness (#1710) — compile + validate + differential-AST.
+// marked dogfood harness — compile + validate + differential-HTML-output.
 //
-// Mechanizes the previously-throwaway `.tmp/acorn/probe.mjs` loop into a
-// committed, reproducible tool that regenerates the acorn failure surface as
-// machine-readable data for #1711 (triage) and reuses the #1712 differential
-// AST gate.
+// Second entry in the pinned-tarball dogfood pattern established by acorn
+// (#1710/acorn-harness.mjs): a different-shaped real npm package (a
+// markdown-to-HTML renderer instead of a JS parser) exercising a different
+// slice of the compiler (string-heavy transform logic, regex-driven
+// tokenizing, no AST marshalling needed since the observable surface is a
+// single string, not an object graph).
 //
-// Loop (per the #1710 spec):
-//   1. ACQUIRE  — pinned npm-pack tarball (no run-time network); see setup-acorn.mjs.
-//   2. COMPILE  — feed acorn's entry module through compile(src,{fileName}); record
-//                 success + categorized errors (the known TS "Property does not
-//                 exist" JS-noise is collapsed into one non-blocking bucket).
-//   3. VALIDATE — WebAssembly.compile(binary); record the first validator error
-//                 verbatim (the surface that exposed #1690).
-//   4. RUN+DIFF — when the binary validates AND exposes a callable parse, run it
-//                 over a small fixture corpus and structurally diff each AST
-//                 against node-acorn (same pinned tarball = oracle). Robust to a
-//                 red surface: a non-validating binary skips run+diff and is
-//                 RECORDED, never crashes the harness.
+// Loop:
+//   1. ACQUIRE  — pinned npm-pack tarball (no run-time network); see setup-marked.mjs.
+//   2. COMPILE  — feed marked's entry module through compile(src,{fileName}); record
+//                 success + categorized errors.
+//   3. VALIDATE — WebAssembly.compile(binary); record the first validator error verbatim.
+//   4. RUN+DIFF — when the binary validates and exposes a callable parse/marked
+//                 export, run it over a markdown fixture corpus and diff the
+//                 rendered HTML STRING against node-marked (same pinned tarball
+//                 = oracle, zero version skew). Robust to a red surface: a
+//                 non-validating binary skips run+diff and is RECORDED, never
+//                 crashes the harness.
 //   5. REPORT   — emit JSON surface report + human summary.
 //
-// Invoke:  pnpm run dogfood:acorn        (writes the JSON report, prints summary)
-//          node tests/dogfood/acorn-harness.mjs --json   (machine output only)
+// Invoke:  pnpm run dogfood:marked        (writes the JSON report, prints summary)
+//          node tests/dogfood/marked-harness.mjs --json   (machine output only)
 //
-// This file does NOT fix any compiler bug — pure tooling (acceptance #5).
+// This file does NOT fix any compiler bug — pure tooling, same acceptance
+// bar as the acorn harness.
 
 import { readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
-import { dirname, join, basename } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 
 import { compile } from "../../src/index.ts";
 import { wrapExports } from "../../src/runtime.ts";
-import { setupAcorn } from "./setup-acorn.mjs";
-import { diffAst } from "./ast-diff.mjs";
+import { setupMarked } from "./setup-marked.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const INPUTS_DIR = join(HERE, "fixtures", "inputs");
-const REPORT_PATH = join(HERE, "report", "acorn-surface.json");
-
-const PARSE_OPTIONS = { ecmaVersion: 2022, sourceType: "module" };
+const INPUTS_DIR = join(HERE, "fixtures", "marked-inputs");
+const REPORT_PATH = join(HERE, "report", "marked-surface.json");
 
 // ---------------------------------------------------------------------------
-// Error categorization
+// Error categorization — same buckets as acorn-harness.mjs (marked is also
+// plain JS run through the TS checker, so the same TS-noise shapes apply).
 // ---------------------------------------------------------------------------
-// The known TS JS-noise ("Property 'x' does not exist on type ...") is NOT a
-// compile blocker per #1679/#1690 — acorn is plain JS run through the TS
-// checker, so member access on untyped objects diagnoses noisily. Collapse it
-// into one bucket so the real surface is legible.
 function categorizeError(message) {
   if (/Property '.*' does not exist on type/.test(message)) return "ts-property-noise";
   if (/Cannot find name/.test(message)) return "ts-cannot-find-name";
@@ -72,17 +68,12 @@ export async function runHarness({ quiet = false } = {}) {
 
   /** @type {any} */
   const report = {
-    issue: 1710,
+    issue: null, // filled in by whoever files the corresponding issue
     generatedAt: new Date().toISOString(),
-    acorn: null,
+    marked: null,
     compile: null,
     validation: null,
     diff: {
-      // Self-check proves the differential function works even when compiled
-      // acorn can't run yet — required so #1712 can rely on it.
-      oracleSelfCheck: null,
-      // Per-fixture compiled-acorn vs node-acorn results (populated only when
-      // the binary validates AND exposes a callable parse export).
       fixtures: [],
       runnable: false,
       skippedReason: null,
@@ -91,25 +82,18 @@ export async function runHarness({ quiet = false } = {}) {
   };
 
   // --- 1. ACQUIRE ----------------------------------------------------------
-  const { entryModulePath, version, pin } = setupAcorn();
-  report.acorn = { version, source: pin.tarball, entryModule: pin.entryModule };
-  log(`[dogfood] acorn@${version} (pinned ${pin.shasum.slice(0, 12)}…) — entry ${pin.entryModule}`);
+  const { entryModulePath, version, pin } = setupMarked();
+  report.marked = { version, source: pin.tarball, entryModule: pin.entryModule };
+  log(`[dogfood] marked@${version} (pinned ${pin.shasum.slice(0, 12)}…) — entry ${pin.entryModule}`);
 
-  const acornSource = readFileSync(entryModulePath, "utf-8");
+  const markedSource = readFileSync(entryModulePath, "utf-8");
 
   // --- 2. COMPILE ----------------------------------------------------------
   const t0 = performance.now();
   let result;
   let threw = null;
   try {
-    // #3717 — acorn is plain pre-strict-mode JS; compiling it through full
-    // strict-mode TS type-checking surfaces a wall of legitimate-but-irrelevant
-    // strict-null-check diagnostics (verified against real `tsc --strict`, not
-    // a compiler bug). skipSemanticDiagnostics routes around this exact class
-    // of noise, same as the other three acorn dogfood scripts
-    // (acorn-corpus.mjs/acorn-probe.mjs/acorn-test262.mjs) already do — this
-    // harness was the one outlier still doing full semantic checking.
-    result = await compile(acornSource, { fileName: "acorn.mjs", skipSemanticDiagnostics: true });
+    result = await compile(markedSource, { fileName: "marked.esm.js" });
   } catch (e) {
     threw = e instanceof Error ? `${e.message}` : String(e);
   }
@@ -166,44 +150,31 @@ export async function runHarness({ quiet = false } = {}) {
   );
 
   // --- 4. RUN + DIFF -------------------------------------------------------
-  // Always run the oracle self-check so the differential gate is proven usable
-  // by #1712 regardless of whether compiled-acorn runs.
   const oracleMod = await import(pathToFileURL(entryModulePath).href);
-  report.diff.oracleSelfCheck = oracleSelfCheck(oracleMod);
 
   const fixtures = readdirSync(INPUTS_DIR)
-    .filter((f) => f.endsWith(".js"))
+    .filter((f) => f.endsWith(".md"))
     .sort()
     .map((f) => ({ name: f, src: readFileSync(join(INPUTS_DIR, f), "utf-8") }));
 
-  // Attempt to obtain a callable compiled-acorn parse. The compiled module is a
-  // raw Wasm instance; acorn's parse() returns a deep object graph that we'd
-  // need marshalled back across the JS-host boundary as an externref. The first
-  // lap simply attempts instantiation + a `parse` export and records what it
-  // finds; when the binary does not validate this is skipped (and RECORDED),
-  // which is the expected state until #1690 is resolved.
+  // Attempt to obtain a callable compiled-marked render function. Unlike
+  // acorn, the observable surface here is a plain string (rendered HTML), not
+  // an object graph — no wrapExports-driven struct marshalling is needed for
+  // the RESULT, only for locating the export itself.
   let compiledParse = null;
   if (validates) {
     try {
       const importObject = result.importObject ?? {};
       const { instance } = await WebAssembly.instantiate(result.binary, importObject);
-      // (#1712) Wire the host runtime's exports hook so exports-backed
-      // capabilities (closure wrapping, __sget_* struct reads, deferred
-      // start-window Object.defineProperties) work on this convenience path.
       importObject.__setExports?.(instance.exports);
-      // (#1712) Marshal struct/vec returns to plain JS via wrapExports —
-      // a raw `exports.parse` returns an opaque WasmGC struct that diffs as
-      // an empty object. wrapExports (#1504) recursively converts the node
-      // graph (struct fields via __sget_*, sidecar props, vecs as arrays)
-      // so diffAst compares real tree shape.
       const exp = wrapExports(instance.exports, { signatures: result.exportSignatures });
       report.diff.exports = Object.keys(exp).slice(0, 40);
-      if (typeof exp.parse === "function") {
-        compiledParse = (src, opts) => exp.parse(src, opts);
+      const parseFn =
+        typeof exp.marked === "function" ? exp.marked : typeof exp.parse === "function" ? exp.parse : null;
+      if (parseFn) {
+        compiledParse = (src) => parseFn(src);
       } else {
-        report.diff.skippedReason =
-          "binary validates + instantiates but exposes no callable `parse` export " +
-          "(compiled-acorn AST marshalling across the JS-host boundary is a #1711 child)";
+        report.diff.skippedReason = "binary validates + instantiates but exposes no callable `marked`/`parse` export";
       }
     } catch (e) {
       report.diff.skippedReason = `instantiate failed: ${e instanceof Error ? e.message : String(e)}`;
@@ -216,11 +187,10 @@ export async function runHarness({ quiet = false } = {}) {
 
   for (const fx of fixtures) {
     const entry = { fixture: fx.name };
-    let oracleAst, oracleErr;
+    let oracleHtml, oracleErr;
     try {
-      oracleAst = oracleMod.parse(fx.src, PARSE_OPTIONS);
-      entry.oracleType = oracleAst?.type ?? null;
-      entry.oracleBodyLen = Array.isArray(oracleAst?.body) ? oracleAst.body.length : null;
+      oracleHtml = oracleMod.marked.parse(fx.src);
+      entry.oracleLength = typeof oracleHtml === "string" ? oracleHtml.length : null;
     } catch (e) {
       oracleErr = e instanceof Error ? e.message : String(e);
       entry.oracleError = oracleErr;
@@ -233,9 +203,9 @@ export async function runHarness({ quiet = false } = {}) {
       continue;
     }
 
-    let compiledAst, compiledErr;
+    let compiledHtml, compiledErr;
     try {
-      compiledAst = compiledParse(fx.src, PARSE_OPTIONS);
+      compiledHtml = compiledParse(fx.src);
     } catch (e) {
       compiledErr = e instanceof Error ? e.message : String(e);
     }
@@ -245,9 +215,25 @@ export async function runHarness({ quiet = false } = {}) {
       report.diff.fixtures.push(entry);
       continue;
     }
-    const d = diffAst(oracleAst, compiledAst, { ignorePositions: true, maxDivergences: 1 });
-    entry.status = d.equal ? "equal" : "divergent";
-    entry.divergences = d.divergences;
+    if (typeof compiledHtml !== "string") {
+      entry.status = "compiled-non-string-result";
+      entry.compiledType = typeof compiledHtml;
+      report.diff.fixtures.push(entry);
+      continue;
+    }
+    if (compiledHtml === oracleHtml) {
+      entry.status = "equal";
+    } else {
+      entry.status = "divergent";
+      // First-diverging-character context, not a full diff — enough to triage.
+      let i = 0;
+      while (i < compiledHtml.length && i < oracleHtml.length && compiledHtml[i] === oracleHtml[i]) i++;
+      entry.divergesAt = i;
+      entry.oracleContext = oracleHtml.slice(Math.max(0, i - 20), i + 40);
+      entry.compiledContext = compiledHtml.slice(Math.max(0, i - 20), i + 40);
+      entry.oracleLength = oracleHtml.length;
+      entry.compiledLength = compiledHtml.length;
+    }
     report.diff.fixtures.push(entry);
   }
 
@@ -260,7 +246,7 @@ export async function runHarness({ quiet = false } = {}) {
         ? "compiled, but binary INVALID (run+diff skipped — surface red)"
         : compiledParse
           ? "compiled + valid + runnable — see per-fixture diff"
-          : "compiled + valid, but no runnable parse export yet",
+          : "compiled + valid, but no runnable marked/parse export yet",
     compileMs,
     compileSuccess: result.success,
     binaryValidates: validates,
@@ -273,38 +259,15 @@ export async function runHarness({ quiet = false } = {}) {
           errored: report.diff.fixtures.filter((f) => f.status === "compiled-parse-threw").length,
         }
       : { skipped: report.diff.fixtures.length, reason: report.diff.skippedReason },
-    oracleSelfCheckPassed: report.diff.oracleSelfCheck?.passed ?? false,
   };
 
   return finalize(report, log);
 }
 
-// Prove the differential function detects both equality and divergence using
-// node-acorn alone. Required so #1712's acceptance gate can trust diffAst even
-// while compiled-acorn can't run.
-function oracleSelfCheck(oracleMod) {
-  try {
-    const a = oracleMod.parse("const x = 1 + 2;", PARSE_OPTIONS);
-    const b = oracleMod.parse("const x = 1 + 2;", PARSE_OPTIONS);
-    const same = diffAst(a, b, { ignorePositions: true });
-    const c = oracleMod.parse("const x = 1 - 2;", PARSE_OPTIONS); // BinaryExpression operator differs
-    const diff = diffAst(a, c, { ignorePositions: true, maxDivergences: 1 });
-    const passed = same.equal === true && diff.equal === false;
-    return {
-      passed,
-      identicalSourcesEqual: same.equal,
-      differingSourcesDivergent: !diff.equal,
-      sampleDivergence: diff.divergences[0] ?? null,
-    };
-  } catch (e) {
-    return { passed: false, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-
 function finalize(report, log) {
   mkdirSync(dirname(REPORT_PATH), { recursive: true });
   writeFileSync(REPORT_PATH, JSON.stringify(report, null, 2) + "\n");
-  log(`\n[dogfood] === acorn surface report ===`);
+  log(`\n[dogfood] === marked surface report ===`);
   log(JSON.stringify(report.summary, null, 2));
   log(`[dogfood] full report → ${REPORT_PATH}`);
   return report;
@@ -316,9 +279,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   runHarness({ quiet: jsonOnly })
     .then((report) => {
       if (jsonOnly) process.stdout.write(JSON.stringify(report, null, 2) + "\n");
-      // The harness "passing" means it RAN to completion and emitted a report
-      // (acceptance #3) — NOT that acorn fully parses. #1712 is the pass/fail
-      // gate. So we exit 0 on a successful run even when the surface is red.
+      // Same acceptance bar as acorn: "passing" means the harness ran to
+      // completion and emitted a report, not that marked fully compiles.
       process.exit(0);
     })
     .catch((e) => {

@@ -1,128 +1,120 @@
 ---
 id: 3717
-title: "Checker regression: scalar `var x = (void 0)` / `let x;` locals stay permanently typed `undefined`, rejecting later reassignment — acorn dogfood no longer compiles"
-status: ready
+title: "acorn-harness.mjs was the only acorn dogfood script not passing skipSemanticDiagnostics — hard-failed on legitimate strict-mode TS noise, not a compiler bug"
+status: done
 sprint: current
 created: 2026-07-27
 updated: 2026-07-27
+completed: 2026-07-27
 priority: high
-horizon: l
-feasibility: hard
+horizon: s
+feasibility: easy
 reasoning_effort: medium
 task_type: bugfix
-area: checker
-language_feature: type-inference
+area: testing
+language_feature: n/a
 goal: core-semantics
 origin: "tests/dogfood/acorn-harness.mjs — re-run 2026-07-27 while investigating #3715/#3716"
 related: [3715, 1710, 1711, 1725]
 ---
 
-# #3717 — Scalar evolving-`undefined` type regression (acorn dogfood now red)
+# #3717 — acorn-harness.mjs missing `skipSemanticDiagnostics` (NOT a checker bug)
 
-## Problem
+## Original (incorrect) claim — retracted
 
-Re-running `pnpm run dogfood:acorn` locally (2026-07-27, main `85ab628b`) to
-sanity-check the new marked dogfood harness (#3716) turned up a regression:
-**acorn no longer compiles at all.**
+This issue was originally filed as a checker regression: "scalar `var x =
+(void 0)` locals stay permanently typed `undefined`, rejecting later
+reassignment, unlike real `tsc`." That claim was **wrong** and is retracted
+here rather than left to mislead a future reader.
 
-The #1711 triage (2026-05-29) recorded `compile.success: true` (827,839-byte
-binary, 471 non-blocking diagnostics) — the only blocker at the time was a
-*validation*-layer bug (#1725, `any.convert_extern` on a narrowed ref),
-since fixed. As of this run, `compile()` itself returns `success: false`,
-`binaryBytes: 0`, 491 diagnostics — 5 of which are `severity: "error"`
-(TS2322, hard-blocking), up from 0 previously.
-
-## Repro (minimal, verified against real `tsc` — zero errors there)
+The verification repro was checked against `tsc --noEmit --target es2022
+--lib es2022 --skipLibCheck` — **without `--strict`**. js2wasm's checker
+(`src/checker/index.ts`) hard-codes `strict: true` unconditionally for
+every compile. Re-running the identical repro with `--strict` added:
 
 ```ts
 function test(): number {
   var elt = (void 0);
-  if (Math.random() > 0.5) {
-    elt = null;
-  } else {
-    elt = 5;
-  }
+  if (Math.random() > 0.5) { elt = null; } else { elt = 5; }
   return elt as any;
 }
 ```
 
-js2wasm:
-
 ```
-Type 'null' is not assignable to type 'undefined'.
-Type 'number' is not assignable to type 'undefined'.
-```
-
-Real `tsc --noEmit --target es2022 --lib es2022 --skipLibCheck`: no errors.
-
-## Root cause (hypothesis)
-
-TypeScript widens an annotation-less `var`/`let` initialized to
-`undefined`/`void 0` based on control-flow-visible later assignments,
-rather than permanently fixing its type to `undefined`. js2wasm's
-checker/oracle appears to keep the initializer's literal type
-(`undefined`) forever, same failure shape as **#3715** (evolving array
-types: `let x = []` stuck at `never[]`) — this looks like the scalar
-sibling of that same missing "evolving type" feature family, not the
-identical code path (arrays vs. `undefined`-initialized scalars are
-different TS mechanisms), but likely worth investigating together since a
-fix to one checker area may inform the other.
-
-Found live in acorn's own dist bundle (`dist/acorn.mjs`), e.g.:
-
-```js
-// line 3622 area (readExprList):
-var elt = (void 0);
-if (allowEmpty && this.type === types$1.comma) { elt = null; }
-else if (...) { elt = this.parseSpread(...); }
-...
-
-// line 5865-5868 (readInt):
-var code = this.input.charCodeAt(this.pos), val = (void 0);
-...
-if (code >= 97) { val = code - 97 + 10; }
-else if (code >= 65) { val = code - 65 + 10; }
-else if (code >= 48 && code <= 57) { val = code - 48; }
-else { val = Infinity; }
+$ npx tsc --noEmit --target es2022 --lib es2022 --skipLibCheck --strict repro.ts
+error TS2322: Type 'null' is not assignable to type 'undefined'.
+error TS2322: Type '5' is not assignable to type 'undefined'.
 ```
 
-Both are ordinary, idiomatic "declare then conditionally assign" JS —
-exactly the shape a Babel/pre-ES2015-var-hoisting-era codebase like acorn
-uses throughout. That's likely why this wasn't caught earlier: it's common
-enough that it's probably not new to acorn's source (acorn hasn't changed
-under us — a committed pinned tarball), so the regression is on the
-js2wasm checker side, introduced sometime between the 2026-05-29 #1711
-triage and now.
+**Real `tsc` under strict mode produces the identical errors js2wasm
+does.** There is no missing "evolving type" feature, no checker gap, no
+regression — js2wasm's checker matches real strict-mode TypeScript exactly
+for this pattern. `var x = (void 0)` genuinely stays typed `undefined`
+under `strictNullChecks`; reassigning it to another type is a real TS
+error under `--strict`, full stop.
 
-## Why this wasn't caught by CI
+## Actual root cause
 
-The dogfood harnesses (#1710/#3716) are **not currently wired into any CI
-gate** — `pnpm run dogfood:acorn`/`dogfood:marked` are manual/local-only
-invocations, and `tests/dogfood/*.test.ts`'s heavy diff loop is opt-in via
-an env var (`DOGFOOD_MARKED=1` etc.), skipped by default in the vitest
-suite. So a regression here has no automated tripwire — worth a follow-up
-issue to at least run these on a schedule/nightly and alert on
-`compile.success` flipping to `false`, separate from this bug itself.
+Acorn is plain, pre-strict-mode-TS JavaScript. Running it through
+TypeScript with `strict: true` surfaces a wall of legitimate-but-irrelevant
+strict-mode diagnostics that have nothing to do with whether compiled
+acorn actually works correctly — the exact same category of noise as the
+pre-existing `ts-property-noise` bucket (`Property 'X' does not exist on
+type 'Y'`, #1679/#1690).
 
-## Scope
+The project already has a sanctioned, first-class mechanism for this:
+`compile(source, { skipSemanticDiagnostics: true })` (`src/index.ts:451`,
+threaded through `src/compiler.ts` and `src/checker/index.ts`), which
+still preserves genuine ES-spec early errors
+(`ES_EARLY_ERROR_CODES`, `src/checker/index.ts:414`) — it only suppresses
+TS semantic/type diagnostics, not real syntax/spec violations.
 
-- [ ] Bisect what changed between 2026-05-29 (#1711, acorn compiled) and
-      now that turned these TS2322s from absent/warning into hard
-      `severity: "error"` blockers — could be a checker tightening, could
-      be a genuine new gap that was always latent but only recently
-      started emitting `error` instead of `warning` severity.
-- [ ] Fix or extend the checker's evolving-type handling to cover
-      `undefined`-initialized scalars reassigned under visible control
-      flow (mirrors #3715's array case).
-- [ ] Re-run `pnpm run dogfood:acorn` — expect `compile.success: true`
-      again (matching the #1711 baseline), then re-triage whatever the
-      binary-validation layer shows now that #1725 is fixed.
+**`acorn-corpus.mjs`, `acorn-probe.mjs`, and `acorn-test262.mjs` already
+pass this flag.** `acorn-harness.mjs` (#1710 — the harness the dogfood
+README documents as "the" acorn entry, and the one #3716's marked-parity
+comparison was made against) was the sole outlier that never got it, so it
+alone sat permanently red on noise the other three scripts had already
+solved.
+
+## Fix
+
+One line in `tests/dogfood/acorn-harness.mjs`:
+
+```diff
+- result = await compile(acornSource, { fileName: "acorn.mjs" });
++ result = await compile(acornSource, { fileName: "acorn.mjs", skipSemanticDiagnostics: true });
+```
+
+## Verification
+
+`npx tsx tests/dogfood/acorn-harness.mjs --json` before → after:
+
+| | before | after |
+|---|---|---|
+| `compile.success` | `false` | `true` |
+| `binaryValidates` | `false` | `true` |
+| diagnostics | 491 | 0 |
+| fixtures `equal` | 0 (all skipped) | 7 / 7 |
+
+All 7 fixtures (`arith.js`, `class.js`, `control.js`, `fn.js`,
+`member-keyword-props.js`, `strings.js`, `vardecl.js`) now run and
+structurally diff equal against node-acorn (same pinned tarball, zero
+version skew). Oracle self-check still passes.
+
+## Lesson for future dogfood packages
+
+Any new pinned-tarball dogfood harness compiling **plain JS** (not authored
+against strict-mode TS) should pass `skipSemanticDiagnostics: true` from
+the start, matching `acorn-corpus.mjs`/`acorn-probe.mjs`/
+`acorn-test262.mjs`/`marked-harness.mjs`'s own default `compile()` call —
+worth checking marked-harness.mjs doesn't hit the same class of noise
+separately from the real #3715 (evolving array types) blocker it's
+currently red on.
 
 ## Acceptance criteria
 
-- [ ] The minimal repro above compiles successfully and `test()` returns
-      the assigned value.
-- [ ] `pnpm run dogfood:acorn` regains `compile.success: true`.
-- [ ] No regression in the currently-passing evolving-array fix path once
-      #3715 lands (if the fixes end up sharing code, both repros must keep
-      passing).
+- [x] Retract the false checker-bug claim with the corrected repro
+      (`--strict` matching js2wasm's real compiler options).
+- [x] Fix `acorn-harness.mjs` to pass `skipSemanticDiagnostics: true`.
+- [x] `pnpm run dogfood:acorn` (`acorn-harness.mjs`) is green:
+      `compile.success: true`, binary validates, 7/7 fixtures equal.

@@ -353,6 +353,87 @@ function bigIntHostBinopOpcode(op: ts.SyntaxKind): number | undefined {
   }
 }
 
+/**
+ * (#3688) An identifier whose value physically cannot be `undefined`: the
+ * global `NaN`/`Infinity`, or a binding held in an f64/i32/i64 local slot
+ * (an externref slot CAN hold `undefined`, so it does not qualify).
+ *
+ * The local lookup comes FIRST so a user binding that shadows `NaN` is judged
+ * by its slot like any other identifier.
+ */
+function isNeverUndefinedIdent(fctx: FunctionContext, e: ts.Expression): boolean {
+  if (!ts.isIdentifier(e)) return false;
+  const idx = fctx.localMap.get(e.text);
+  if (idx === undefined) return e.text === "NaN" || e.text === "Infinity";
+  const entry = idx < fctx.params.length ? fctx.params[idx] : fctx.locals[idx - fctx.params.length];
+  const t =
+    entry && typeof entry === "object" && "type" in entry
+      ? (entry as { type: ValType }).type
+      : (entry as ValType | undefined);
+  return t?.kind === "f64" || t?.kind === "i32" || t?.kind === "i64";
+}
+
+/**
+ * (#3688) Whether `e` — already known to be typed `number` — is guaranteed to
+ * hold a real Number at runtime rather than `undefined`.
+ *
+ * TypeScript's index signatures are unsound (`tk[9]` on a `number[]` is typed
+ * `number` but is `undefined` at runtime), and the f64 lowering represents an
+ * absent value as NaN. That conflation is harmless for arithmetic and
+ * relational operators but NOT for equality: `undefined === undefined` is true
+ * while `NaN === NaN` is false. Requiring one such operand makes the narrowed
+ * and generic lowerings agree on every input — see the long note at the
+ * `bothStaticNumberEq` gate.
+ *
+ * The whitelist is everything COMPUTED rather than FETCHED, plus identifiers in
+ * slots that cannot hold `undefined`. Element access, property access and call
+ * results are deliberately excluded: those are exactly the expressions that can
+ * hand back `undefined` behind a `number` type.
+ */
+function isNeverUndefinedNumber(fctx: FunctionContext, e: ts.Expression): boolean {
+  let inner: ts.Expression = e;
+  while (
+    ts.isParenthesizedExpression(inner) ||
+    ts.isAsExpression(inner) ||
+    ts.isTypeAssertionExpression(inner) ||
+    ts.isNonNullExpression(inner)
+  ) {
+    inner = inner.expression;
+  }
+  // Numeric literal.
+  if (ts.isNumericLiteral(inner)) return true;
+  // Prefix `-` / `+` / `~` apply ToNumber, so the result is always a Number.
+  if (
+    ts.isPrefixUnaryExpression(inner) &&
+    (inner.operator === ts.SyntaxKind.MinusToken ||
+      inner.operator === ts.SyntaxKind.PlusToken ||
+      inner.operator === ts.SyntaxKind.TildeToken)
+  ) {
+    return true;
+  }
+  // Nested arithmetic / bitwise: likewise always a Number. (`+` here cannot be
+  // concatenation — the caller has already established this operand is typed
+  // `number`.)
+  if (ts.isBinaryExpression(inner)) {
+    const k = inner.operatorToken.kind;
+    return (
+      k === ts.SyntaxKind.PlusToken ||
+      k === ts.SyntaxKind.MinusToken ||
+      k === ts.SyntaxKind.AsteriskToken ||
+      k === ts.SyntaxKind.AsteriskAsteriskToken ||
+      k === ts.SyntaxKind.SlashToken ||
+      k === ts.SyntaxKind.PercentToken ||
+      k === ts.SyntaxKind.AmpersandToken ||
+      k === ts.SyntaxKind.BarToken ||
+      k === ts.SyntaxKind.CaretToken ||
+      k === ts.SyntaxKind.LessThanLessThanToken ||
+      k === ts.SyntaxKind.GreaterThanGreaterThanToken ||
+      k === ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken
+    );
+  }
+  return isNeverUndefinedIdent(fctx, inner);
+}
+
 export function compileBinaryExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -930,6 +1011,77 @@ export function compileBinaryExpression(
   const leftIsWrapperObj = isWrapperObjectType(leftTsType);
   const rightIsWrapperObj = isWrapperObjectType(rightTsType);
   const wrapperEquality = isEqualityOp && (leftIsWrapperObj || rightIsWrapperObj);
+
+  // (#3688) Statically-`number` equality gets the SAME numeric operand hint the
+  // relational ops already get.
+  //
+  // Root cause this fixes: `isNumericOp` (below, ~line 1371) lists `+ - * / %`,
+  // the four relationals and the six bitwise ops — but NOT `=== !== == !=`. So
+  // equality compiled its operands with `numericHint === undefined`, i.e. in
+  // each operand's *natural* representation. For an operand whose natural
+  // representation is boxed — the legacy element-access path emits
+  // `array.get` → `__box_number` → externref so it can express the
+  // out-of-bounds `undefined` — the typed dispatch then saw externref×f64,
+  // boxed the f64 side too, and fell into the inline abstract-equality
+  // cascade: `__extern_is_nullish` ×2 → `__extern_is_undefined` ×2 →
+  // `__typeof_number` ×2 → `__unbox_number` ×2 → `__typeof_boolean` ×2 →
+  // `__unbox_boolean` ×2 → `__typeof_bigint` ×2 → `__to_bigint` ×2 →
+  // `__str_flatten` ×2 + `__str_equals` → `ref.eq`. That is ~35 instructions
+  // and TWO STRING COMPARISONS for `tk[i] === 40`, on a tokenizer's hottest
+  // line. The identical expression with `<` instead of `===` already compiled
+  // to bare `array.get` + `f64.lt`, purely because `<` is in `isNumericOp`.
+  //
+  // The hint is the whole-chain fix, not a peephole: it propagates DOWN into
+  // the operand emitters, so the element read is produced unboxed in the first
+  // place (`array.get` → f64, NaN for OOB) rather than being boxed and then
+  // unboxed back. Narrowing only the comparison while leaving the operands
+  // boxed is the partial-narrowing shape that measured as a 2.7x pessimization
+  // in #3673 round 36 — this deliberately avoids it.
+  //
+  // Semantics (§7.2.15): both operands statically `number` ⇒ SameType, so
+  // strict and loose equality coincide and reduce to `Number::equal`, which is
+  // exactly `f64.eq` — `NaN === NaN` is false (f64.eq on NaN is 0) and
+  // `+0 === -0` is true (f64.eq on ±0 is 1). No coercion arm is reachable, so
+  // dropping the cascade is not an approximation.
+  //
+  // Gate part 1: BOTH sides `number`/number-literal per the checker
+  // (`isNumberType` rejects unions, `any`, `unknown`, `null`/`undefined`, bigint
+  // and string), and not a wrapper-object equality (`new Number(1) === …` keeps
+  // object identity). Genuinely dynamic operands are untouched — #3688's stated
+  // non-goal.
+  //
+  // Gate part 2, and the reason this is not just `isNumericOp || isEqualityOp`:
+  // TypeScript's index signatures are UNSOUND. `tk[9]` on a `number[]` is typed
+  // `number` but is `undefined` at runtime (absent `noUncheckedIndexedAccess`),
+  // and the f64 lowering represents that absent value as NaN (the project-wide
+  // "null/undefined in f64 context → NaN" convention). NaN and undefined agree
+  // under every operator this hint already covers — `undefined + 1`, `undefined
+  // < 1` and `NaN + 1`, `NaN < 1` are the same — but they DISAGREE under
+  // equality, and in exactly one shape: `undefined === undefined` is TRUE while
+  // `NaN === NaN` is FALSE. Measured: `s.tk[9] === s.tk[8]` with both reads out
+  // of bounds flips true → false with an unrefined gate. Every other pairing is
+  // unaffected, because `undefined === <a real number>` and `NaN === <a real
+  // number>` are both false.
+  //
+  // So require that at least ONE operand can never be `undefined` at runtime.
+  // That is sufficient, not merely conservative: with one side a genuine Number
+  // the comparison is false on both lowerings whenever the other side is
+  // absent, so no observable result can change. It also keeps #3688's entire
+  // motivating shape — a tokenizer compares a buffer read against a literal
+  // code (`tk[i] === 40`, `c === 95`, `this.tokKind !== 0`), and a literal is
+  // the canonical never-undefined operand.
+  //
+  // The whitelist lives in `isNeverUndefinedNumber` (module scope, so no
+  // closure is allocated per binary node). The `process.env` read is LAST in
+  // the chain on purpose: it is the most expensive term and only sites that
+  // would actually narrow ever reach it.
+  const bothStaticNumberEq =
+    isEqualityOp &&
+    !wrapperEquality &&
+    isNumberType(leftTsType) &&
+    isNumberType(rightTsType) &&
+    (isNeverUndefinedNumber(fctx, expr.left) || isNeverUndefinedNumber(fctx, expr.right)) &&
+    process.env.JS2WASM_STATIC_NUMBER_EQ !== "0";
 
   // (#1961) In nativeStrings mode a `string | undefined` / `string | null`
   // operand (e.g. `"x".at(i)`, optional chains/params) lowers to a NULLABLE
@@ -1721,14 +1873,27 @@ export function compileBinaryExpression(
     op !== ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken &&
     isI32PureExpr(expr.left) &&
     isI32PureExpr(expr.right);
-  const numericHint: ValType | undefined = isNumericOp
-    ? {
-        kind:
-          (ctx.fast || bothNativeI32 || hasI32LocalOperand || arithI32WithToInt32Wrap || bitwiseI32) && !isDivOrPow
-            ? "i32"
-            : "f64",
-      }
-    : undefined;
+  // (#3688) `bothStaticNumberEq` joins `isNumericOp` here so equality's operands
+  // are emitted in the same unboxed numeric representation the relationals get.
+  // It deliberately reuses the SAME i32-vs-f64 term list rather than a bespoke
+  // one, so the `type i32 = number` alias work lands `i32.eq` for free through
+  // `bothNativeI32`. Note the three remaining i32 terms are self-gating for
+  // equality — `hasI32LocalOperand` requires `isRelational`,
+  // `arithI32WithToInt32Wrap` requires a ToInt32-coercing bitwise parent, and
+  // `bitwiseI32` requires the op itself to be bitwise — so an equality resolves
+  // to `(ctx.fast || bothNativeI32) ? i32 : f64`. That is intentional: those
+  // three rest on `isI32PureExpr`, whose add/sub/mul arms are only wrap-sound
+  // "under the parent's ToInt32 guarantee" (see its comment), which an equality
+  // does NOT provide. `(a + b) === c` must not silently compare wrapped i32s.
+  const numericHint: ValType | undefined =
+    isNumericOp || bothStaticNumberEq
+      ? {
+          kind:
+            (ctx.fast || bothNativeI32 || hasI32LocalOperand || arithI32WithToInt32Wrap || bitwiseI32) && !isDivOrPow
+              ? "i32"
+              : "f64",
+        }
+      : undefined;
 
   // #1746: when both operands are proven i32-pure and the result is ToInt32-
   // wrapped (arith under `| 0`/bitwise) or this op is itself bitwise, emit the
