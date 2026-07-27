@@ -283,14 +283,21 @@ Evidence trail, in the order it was established:
   consistent with the emitted `__call_m_inc_0` having no per-struct arms at
   all. That is the most likely place the registration is missing.
 
+> **Superseded — this last bullet was the right neighbourhood but the wrong
+> function.** The methods were never lifted or compiled in the first place, so
+> there was nothing for `collectMethodEntries` to key on. The registration is
+> lost one step earlier, in `bindingOf` (fnctor escape gate). See the fix
+> section below and #3719.
+
 One fix was attempted and **reverted**: routing the terminal `else` of
 `buildClosurePropMethodCallElseArm` to generic member-get + apply instead of
 `ref.null.extern`. It changed nothing, which rules the terminal fallback out.
 Not landed — an unverified speculative codegen change is worse than none.
 
-Needs its own issue id; `claim-issue.mjs --allocate` could not be trusted to
-give one here (it returned #3717, already taken on this branch — its open-PR
-scan silently degrades to main-only when `gh` is unavailable).
+Split out as **#3719** (fixed — see below). `claim-issue.mjs --allocate` could
+not be trusted to hand out the id here: it returned #3717, already taken on
+this branch, because its open-PR scan silently degrades to main-only when `gh`
+is unavailable. #3719 was picked by hand after verifying it was free.
 
 Remaining in this issue: **S2** (read/write lowering for proven receivers —
 the `__extern_get` 8.8% self-time bucket) and **S4** (hoist the guard to one
