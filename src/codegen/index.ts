@@ -150,6 +150,7 @@ import { ensureNativeIteratorRuntime, fillNativeIteratorLateArms } from "./itera
 import { emitResizableAbExports } from "./dataview-native.js"; // (#3058)
 import { fillCombinatorToVec } from "./promise-combinators.js"; // (#2922) dynamic combinator-arg drain fill
 import { fillClosedMethodDispatch, fillPromiseThenableHelpers } from "./closed-method-dispatch.js";
+import { fillDirectCallTrampolines } from "./typed-this.js"; // (#3683 S3) direct-call trampoline fill
 import { fillSetRecFieldGetters } from "./collections-es2025.js"; // (#3172)
 import { fillIterHofSteppers } from "./iter-hof-native.js"; // (#2903)
 import { fillLazyIterLadderArms } from "./iter-lazy-native.js"; // (#2903 R3)
@@ -3790,6 +3791,12 @@ export function generateModule(
     // reserved a dispatcher (standalone/wasi only).
     fillClosedMethodDispatch(ctx);
 
+    // (#3683 S3) Fill the reserved `__dc_<F>_<m>_<n>` direct-call trampolines
+    // now that every typed twin exists. Runs AFTER the closed-method fill
+    // because a trampoline whose twin did not materialize degrades to that
+    // dispatcher. Read-only over funcMap.
+    fillDirectCallTrampolines(ctx);
+
     // (#3125) Fill the reserved `__promise_has_callable_then` predicate — the
     // native-Promise resolve path's §27.2.1.3.2 Get("then")+IsCallable test —
     // from the SAME struct/closure collectors as the `__call_m_then_vararg`
@@ -5837,6 +5844,12 @@ export function generateMultiModule(
     // The fill is read-only over the function map because its dependencies are
     // registered when the dispatcher is reserved.
     fillClosedMethodDispatch(ctx);
+
+    // (#3683 S3) Fill the reserved `__dc_<F>_<m>_<n>` direct-call trampolines
+    // now that every typed twin exists. Runs AFTER the closed-method fill
+    // because a trampoline whose twin did not materialize degrades to that
+    // dispatcher. Read-only over funcMap.
+    fillDirectCallTrampolines(ctx);
 
     // (#3493) compileMulti shares the same property-access lowering as the
     // single-source path, so a dynamic property write/read can reserve one of

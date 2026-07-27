@@ -28,6 +28,24 @@ loc-budget-allow:
   # `context/types.ts` / `index.ts` one field + one pre-pass call each.
   - src/codegen/numeric-property-analysis.ts
   - src/codegen/context/types.ts
+  # S3: the whole direct-call subsystem (admission, trampoline reserve, the
+  # call-site emitter and the finalize fill) lives in `typed-this.ts`. What
+  # lands in the god-file is ONE guarded call plus the comment explaining why
+  # it must run before the `__call_m_*` reservation it falls through to —
+  # +19 lines, of which 5 are the dependency thunks that keep `typed-this.ts`
+  # out of an import cycle with `closures.ts`.
+  - src/codegen/expressions/call-receiver-method.ts
+oracle-ratchet-allow:
+  # S2 (granted retroactively here — the gate is measured against `main`, which
+  # predates the whole typed-`this` branch). The two `getTypeAtLocation` calls
+  # ask whether a property access is CALL-SIGNATURE typed, i.e. whether the
+  # slot holds a method rather than data; that is a raw `ts.Type` identity
+  # question the oracle deliberately does not model, and it is the precise
+  # carve-out the ratchet documents. The `ctx.checker` uses are the three
+  # `resolveEnclosingFnctorOwner` arguments, whose signature takes a checker.
+  # S3 itself adds ZERO new checker usage — `admitDirectCall` reads its owner
+  # from the S1 verdict map instead of re-deriving it.
+  - src/codegen/typed-this.ts
 ---
 
 # #3683 — Typed-`this` monomorphization for fnctor prototype methods
@@ -414,6 +432,230 @@ their own commit: `ownReturnExpressions` missing #2847's definite-return guard
 (a function that falls off the end returns `undefined`, which is invisible in
 its return list), an unguarded `parent` deref in the scope walk, and
 exponential branching in `isString`'s slot recursion.
+
+## S3 implementation notes (2026-07-27) — landed
+
+**What landed.** Inside a typed twin, `this.<m>(args…)` on a write-once
+prototype method of the SAME fnctor lowers to `local.get <this>;
+extern.convert_any; <args>; call $__dc_<F>_<m>_<n>` — one direct call, arguments
+in their NATIVE types, result in its native type — instead of the `__call_m_*`
+→ `__method_cache_lookup` → `__call_fn_method_N` → `call_ref` bridge. On acorn:
+**1,458 devirtualized call sites across 229 trampolines** (219 resolve straight
+to a twin, 10 degrade to the legacy fill). Kill-switch `JS2WASM_DIRECT_CALLS=0`,
+diagnostics `JS2WASM_DIRECT_CALLS_DEBUG=1`. Emitters live in `typed-this.ts`;
+the god-file gains one guarded call (+19 lines).
+
+### The `self`-operand problem, and why option (b) won
+
+The S1 note framed the design choice as (a) per-admitted-method singleton
+GLOBALS holding the closure, vs (b) widening the twin's lifted `self` param.
+**(b) was chosen, in a form the note did not anticipate: the twin's unread
+`__self` parameter is REPLACED by the receiver**, typed `(ref $__fnctor_F)`.
+Three facts make that work:
+
+- **Nothing in an admitted body reads `__self`.** `admitTypedThisTwin` already
+  requires zero captures, no self-recursive binding and no named function
+  expression — the three (and only) consumers of param 0.
+- **The generic shim can still tail-forward.** `return_call` constrains only the
+  callee's RESULTS to equal the caller's; parameters are ordinary stack
+  operands. The shim tees `__current_this` into an anyref scratch, `ref.test`s
+  it, and on a hit pushes `ref.cast $__fnctor_F` plus `local.get 1..n`.
+- **It removes work instead of adding it.** The S2 twin prologue's
+  `global.get; any.convert_extern; ref.cast; local.set` is gone — the typed
+  local IS param 0 — where option (a) would have ADDED a `global.get` +
+  `ref.cast` per call and a `global.set` at every construction site.
+
+`__current_this` is still installed for every twin entry: a twin body's
+NON-field uses of `this` (a `this` argument, a dispatcher fallback read, a
+nested legacy `__call_m_*`) read the global. That install, plus the
+save/restore, is owned by the trampoline — one place, mirroring
+`__call_fn_method_N` (including its known limitation that an exceptional unwind
+skips the restore).
+
+### Why a trampoline at all
+
+Acorn's parser is mutually recursive (`parseMaybeAssign` → `parseExprOps` →
+`parseMaybeUnary` → back), so whichever body compiles first references a twin
+that does not exist yet. Patching the call instruction later was rejected: it
+means holding `Instr` object identities across the whole compile, exactly the
+aliasing hazard the codebase forbids. The project's established answer is
+reserve-then-fill (`reserveMemberGetDispatch` / `reserveClosedMethodDispatch`),
+and it earns its keep three times over here:
+
+1. the stable-handle regime (`mintDefinedFunc`, `STABLE_FUNC_BASE`) makes the
+   baked `call` immediate immune to late-import shifts;
+2. the trampoline owns the `__current_this` / `__argc` bookkeeping, so N call
+   sites cost one instruction each instead of five;
+3. it gives the fill somewhere to **degrade**. Call-site admission is decided
+   from the AST + the S1 verdicts, but the twin's own admission additionally
+   needs capture analysis, available only once the method's closure compiles.
+   When the two disagree the fill emits the byte-for-byte legacy
+   `__call_m_<m>_<n>` sequence instead, so a call site can never point at a twin
+   that failed to materialize (10 of acorn's 229 land here).
+
+The legacy dispatcher is reserved at trampoline-reserve time — it is the exact
+dispatcher this site would have reserved without S3, so the set of `__call_m_*`
+functions in the module is unchanged, and it registers every box/unbox helper
+the fill needs (the fill is strictly read-only over `funcMap`).
+
+### Soundness: the `otherNameWrites = null` sentinel is not a blocker
+
+The S1 note warned that acorn trips the computed-write sentinel
+(`keywordTypes[name] = …`) so S3 "MUST use receiver-shape runtime guards, not
+name-only proofs". The receiver-shape guard turns out to be **free**: it is the
+twin's own `ref.cast`, already established at entry. Given that, `this.<m>`
+resolves through exactly two steps and both are pinned at compile time:
+
+- **Own property?** In STANDALONE mode a `$__fnctor_F` instance is a CLOSED
+  WasmGC struct. `deriveFnctorFields` computes the complete field list, and the
+  expando sidecar that would let a property appear at runtime is explicitly
+  host-mode-only ("Host mode already has its fnctor sidecar for expando
+  properties… This native shape growth is the host-free standalone replacement
+  only"). So the only own-property shadow possible is a DECLARED field, rejected
+  by name — together with accessor names and the reserved-name set the pinned
+  path itself refuses. `keywordTypes` is a plain object, not a Parser, so the
+  sentinel was over-conservative for this question all along.
+- **Prototype slot?** The S1 write-once verdict, with `poisoned` (prototype
+  reassigned / computed-written / deleted from / escaped) and `inheritedFrom`
+  (`Object.create(F.prototype)`) both declining.
+
+Everything unproven declines, and a decline is byte-for-byte the pre-S3
+lowering (the call falls through to `tryCompileLateFnctorPrototypeMethodCall`).
+
+### The `fixups.ts` landmine — a genuine pre-existing bug, worth its own issue
+
+The natural trampoline signature is `(ref $__fnctor_F, …params)`. It **cannot be
+used**, and the reason is not S3's: `fixups.ts`'s `ref.null.extern` retyping
+walks a call's arguments backwards **one INSTRUCTION per parameter**, and skips
+a nested call by subtracting that callee's **PARAMETER count** — i.e. it
+silently assumes every argument is produced by exactly one instruction. Acorn's
+
+```js
+this.parseExprOp(this.parseMaybeUnary(null, false, false, forInit), …)
+```
+
+breaks the assumption: each `false` is `i32.const 0` + `call __box_boolean`, two
+instructions, so the OUTER walk under-skips by two and lands the inner call's
+`ref.null.extern` on the outer callee's **parameter 0**. Every pre-existing
+callee in that position (`__call_m_*`, `__extern_method_call`) has an
+all-`externref` signature, so a misaligned landing was harmless — the fixup only
+rewrites when the parameter is a `ref`/`ref_null`. A typed receiver made
+parameter 0 a struct ref for the first time in that position, the null was
+rewritten to `ref.null $__fnctor_Parser`, and the module failed validation
+(`call[1] expected type externref`).
+
+S3 therefore keeps its own signature outside the hazard: **the receiver travels
+as `externref`** (one `extern.convert_any` per call site, one
+`any.convert_extern; ref.cast` per trampoline — trivial against the bridge being
+removed) and a call with any `ref`-typed user parameter simply declines. No
+`__dc_*` signature contains a `ref`/`ref_null`, so a misaligned landing is a
+no-op exactly as it is for `__call_m_*`. Re-engineering the shared fixup would
+need a real operand-count model, and its current approximations (`struct.new`,
+`array.new_fixed` and the `call` case are all instruction-count guesses) may
+have consumers that depend on them — that is a separate slice.
+
+### Void-returning callees are 30 % of the win
+
+`this.next()` / `this.expect(…)` — the tokenizer's hottest calls — return
+nothing, so `computeClosureWrapperSig` gives them a null return type. The first
+cut declined them (430 of the 1,458 sites); the trampoline now carries an EMPTY
+result list, the legacy arm drops the externref the dispatcher unconditionally
+yields, and the call site answers `VOID_RESULT` — which `compileExpression`
+already materializes into whatever the consuming context needs.
+
+### Measured result
+
+Same interleaved methodology as S2/S4a (all arms in ONE process, round-robin,
+deep warm ≥600 parses, min-of-N batches × 200 parses), with the S4a
+**duplicate-baseline control arm** — and here it is stronger than S4a's, because
+the kill-switch reproduces the pre-S3 tip **byte-for-byte**, so `base` and
+`base2` are provably identical binaries (asserted with `Buffer.equals`), making
+the control arm's true delta exactly zero by construction.
+
+| session | batches | order | S3 | base | base2 | control band | S3 vs mean |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 40 | s3,base,base2 | 1.1046 | 1.3085 | 1.3110 | **0.19 %** | **−15.7 %** |
+| 2 | 40 | base2,base,s3 | 1.1047 | 1.3225 | 1.3175 | **0.38 %** | **−16.3 %** |
+| 3 | 60 | base,s3,base2 | 1.0443 | 1.2866 | 1.2806 | **0.47 %** | **−18.7 %** |
+
+**≈16 % faster, against a 0.2–0.5 % noise floor — the first change in this
+family whose wall-clock effect is unambiguously outside the control band.**
+(Contrast S4a, whose ≈1 % was correctly reported as indistinguishable from zero
+because the two control arms disagreed by 0.6–3.4 %. The control arm is doing
+its job in both directions.)
+
+The profile says exactly where it came from. Base → S3, self time, 6,000-parse
+window (total 10,276 ms → 8,773 ms):
+
+| helper | base | S3 |
+| --- | --- | --- |
+| `__call_fn_method_1` | 5.78 % | 2.57 % |
+| `__call_fn_method_0` | 3.81 % | 1.56 % |
+| `__method_cache_lookup` | 3.21 % | 1.13 % |
+| `__call_fn_method_2` | 2.13 % | 1.14 % |
+| `__call_fn_method_3` | 1.09 % | 0.86 % |
+| `__extern_method_call` | 1.13 % | 1.27 % |
+| `__apply_closure` | 0.94 % | 1.09 % |
+| **bridge total** | **18.10 %** | **9.62 %** |
+
+The bridge is roughly HALVED (−8.5 pp). Read the remaining entries carefully:
+`__extern_get` "rises" 7.44 → 9.07 % and `__regex_run` 6.15 → 7.06 % purely
+because they are a share of a 15 % smaller total — their absolute cost is flat.
+The residual 9.6 % of bridge is the traffic S3 does not claim: the arity-skewed
+calls (below) and every non-`this` receiver (`node.start`, `other.inner()`).
+
+### What is left on the table, and the exact convention the next slice must match
+
+The decline histogram on acorn is now: **`arity-mismatch` 428**,
+`no-write-once-verdict` 102, `uses-arguments` 4. The first is the whole
+remaining prize and it is NOT hard, but it is subtle enough to deserve its own
+slice rather than being bolted on here:
+
+- Under-application (`this.parseIdent()` into a 1-formal method) is the common
+  JS shape. `__apply_closure`'s #3592 widening handles it by raising the
+  dispatch index to `declaredArity` and letting `ARG_OF(k)` answer the
+  **undefined externref sentinel** for `k >= len`, which means `__argc` ends up
+  at **`formals`, not the call-site argc**. A padding trampoline must reproduce
+  BOTH halves exactly, or default-parameter presence (`paramDefaultNeedsArgc`)
+  silently flips for every under-applied call in the program.
+- Over-application must still EVALUATE the extra arguments (side effects) and
+  discard them, and `__extras_argv` only matters for bodies that read
+  `arguments` — which already decline.
+
+Expected shape: key the trampoline by call-site arity (already done), give it
+the twin's first `argc` params, and pad the rest inside the trampoline.
+
+### Two places S3 FIXES a pre-existing divergence
+
+Both are pinned with explicit values on each side rather than as lane
+agreement, so the difference is documented instead of averaged away:
+
+- `var r = this.step(2)` with a void `step`: node and the devirtualized lane
+  answer `undefined`; the dynamic `__call_m_*` lane does not.
+- `this.take(this.tag(1), this.tag(2))` where `take` reads `this.<field>`: node
+  and S3 answer 12; the dynamic lane answers `NaN` after two nested bridge
+  frames.
+
+### Verification
+
+`tsc` clean; `check:loc-budget` and `check:oracle-ratchet` both green (S3 adds
+ZERO checker usage — `admitDirectCall` reads its owner from the S1 verdict map
+instead of re-deriving it; the `oracle-ratchet-allow` in this file's frontmatter
+grants S2's pre-existing +2/+3, which has been red since S2 landed because the
+gate measures against `main`). Standalone acorn canaries 4/4 with `imports: 0`,
+binary 1,808,486 → 1,807,913 bytes (S3 is SMALLER than base — a direct call
+takes fewer bytes than the dispatcher call it replaces).
+`DOGFOOD_ACORN=1 dogfood:acorn-corpus` 23/23, distinct REAL gaps 0. 16 new S3
+pins; `issue-3683-typed-this-twin` 12/12, `issue-3683-numeric-fields` 15/15,
+`issue-3683-proto-method-write-once` 10/10, `issue-3673-i31-smallint` 7/7,
+`issue-2151-nary`, `issue-2674` ×2, `issue-2664` ×2 green (the 12
+`issue-1712` failures are `ENOENT` on an unchecked-out test262 submodule, not a
+code result).
+
+Full `tests/equivalence` (1,646 tests) run on the final commit AND on the merge
+parent `17816991`, both with `--reporter=json`, diffed by FULL TEST NAME:
+**1,610 passed / 33 failed / 3 todo on both, identical set, zero tests failing
+on only one side.**
 
 ## Acceptance criteria
 
