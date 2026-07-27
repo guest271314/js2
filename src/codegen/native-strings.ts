@@ -73,6 +73,20 @@ export function nativeStringLiteralInstrs(ctx: CodegenContext, value: string, en
   return [{ op: "global.get", index: internNativeStringLiteral(ctx, `u16:${value}`, ctx.nativeStrTypeIdx, inline) }];
 }
 
+/**
+ * (#3673 round 9) FNV-1a over UTF-16 code units, in the STORED `$HashedString`
+ * encoding: `(fnv & 0x7fffffff) | 0x80000000` — the sign bit marks "computed"
+ * (0 = uncomputed sentinel). MUST match `__obj_hash`'s wasm loop exactly
+ * (offset 0x811c9dc5, prime 0x01000193, xor-then-mul, i32 wraparound).
+ */
+export function nativeStringLiteralHash(value: string): number {
+  let h = 0x811c9dc5 | 0;
+  for (let i = 0; i < value.length; i++) {
+    h = Math.imul(h ^ value.charCodeAt(i), 0x01000193);
+  }
+  return (h & 0x7fffffff) | 0x80000000 | 0;
+}
+
 /** The raw (uninterned) init sequence for an i16 `NativeString` literal. */
 function nativeStringLiteralInitInstrs(ctx: CodegenContext, value: string): Instr[] {
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
@@ -90,6 +104,20 @@ function nativeStringLiteralInitInstrs(ctx: CodegenContext, value: string): Inst
     typeIdx: strDataTypeIdx,
     length: value.length,
   });
+  // (#3673 round 9) struct.new $HashedString(len, off, data, bakedHash) — the
+  // literal's FNV-1a hash is a compile-time constant, so `__obj_hash` on a
+  // constant key becomes a single struct.get. Subtype of $NativeString: every
+  // existing consumer accepts it unchanged. Falls back to plain $NativeString
+  // when the hashed subtype isn't registered (host mode never gets here).
+  if (ctx.hashedStrTypeIdx >= 0) {
+    instrs.push({ op: "i32.const", value: nativeStringLiteralHash(value) });
+    // proto-lookup cache slots (round 9b): gen 0 = never populated.
+    instrs.push({ op: "i32.const", value: 0 });
+    instrs.push({ op: "ref.null", typeIdx: -18 }); // ref.null any
+    instrs.push({ op: "ref.null", typeIdx: -18 });
+    instrs.push({ op: "struct.new", typeIdx: ctx.hashedStrTypeIdx });
+    return instrs;
+  }
   // struct.new $NativeString(len, off, data)
   instrs.push({ op: "struct.new", typeIdx: strTypeIdx });
   return instrs;

@@ -25,6 +25,9 @@ loc-budget-allow:
   - src/codegen/shared.ts
   - src/codegen/type-coercion.ts
   - src/codegen/index.ts
+  - src/codegen/registry/types.ts
+  - src/codegen/context/create-context.ts
+  - src/codegen/native-strings-basics.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -367,6 +370,59 @@ standalone-gated); dispatcher pin suites #2674/#2963/#3041/#3050/#2664
 /#2979 all green; 1712 acceptance green; #2151 ×3 failures verified
 identical on pre-change tree (pre-existing); tsc clean; biome error count
 identical to base (pre-existing drift only).
+
+## Round 9 — $HashedString + per-key prototype-lookup inline cache
+
+Goal escalated to "surpass node-acorn" (warm node-acorn on the same 330B
+input: **0.0341 ms/parse**, measured — the real gap was ~79x, not 45x).
+Three sub-slices this round, driven by caller-edge profiling:
+
+1. **`$HashedString <: $NativeString`** — a flat string carrying a cached
+   FNV-1a hash (field 3; 0 = uncomputed, else `(h & 0x7fffffff) | signbit`)
+   plus a per-key prototype-lookup cache (fields 4-6: cacheGen/cacheOwner/
+   cacheEntry, `anyref` — `$Object`/`$PropEntry` register later). Only two
+   producers: interned literal globals (hash BAKED at compile time by
+   `nativeStringLiteralHash` — must stay bit-identical to `__obj_hash`'s
+   wasm loop) and `__str_flatten`'s memoized flat copies (lazy).
+   `__obj_hash` gained the cache fast path + write-back; `__str_equals`
+   gained a both-sides-hashed O(1) reject. Measured: `__obj_hash` 3.2% →
+   1.0% self.
+2. **String-method fast path in `__extern_method_call`** — `ref.eq` on the
+   interned name against "charCodeAt"/"slice" dispatches straight to
+   `__str_charCodeAt`/`__str_slice`, skipping `__extern_get` + builtin-meta
+   + apply. Emitted and reachable, but WAT inspection showed dynamic
+   `.charCodeAt` READS already lower inline — the hot `__extern_method_call`
+   traffic is Parser PROTOTYPE method calls, which led to:
+3. **Per-key prototype-lookup inline cache** (the big one): acorn assigns
+   parser methods at runtime (`pp.readToken = fn`) onto per-fnctor
+   prototype `$Object`s, so EVERY `this.readToken()` re-resolved through
+   the full `__extern_get` (closed-struct field ladder ≈15 compares +
+   builtin-meta probe + prototype hash walk) before `__apply_closure`. Now
+   a first-proto DATA hit with an interned key memoizes (owner-proto,
+   entry, generation) ON THE KEY STRING; the hit arm — prepended at
+   finalize AFTER the ladder fills so it runs FIRST
+   (`unshiftExternGetProtoCacheArm`) — answers in O(1). Soundness:
+   population only runs when ladder+meta MISSED for that fnctor class;
+   hits are confined by owner-proto `ref.eq` to the same class; validity =
+   generation match (bumped ONLY by `__obj_grow` — rehash re-mints
+   entries) + live-DATA flags check (delete → TOMBSTONE, defineProperty
+   morph → ACCESSOR, both checked per hit; value updates mutate the entry
+   in place and stay visible).
+
+**Measured: 2.9 → ~2.5ms/parse** (bench noise band ±0.15); profile:
+`__obj_find` 5.7% → 3.4%, `__builtinfn_get_meta` off the top-15,
+`__extern_get` 9.7% → 8.0%. Binaryen `optimizeBinaryAsync` (level 3) on
+the bench module: **2.31ms before this round** — re-measure after.
+Remaining top: `__extern_get` residue (options/$Object reads + cache-guard
+overhead), `__str_equals` ladder compares for non-cached reads,
+`__call_fn_method_*` signature ladders (next: signature-id
+devirtualization), `__regex_run`, `__to_primitive`.
+
+Verification (round 9): host corpus 23/23 exact; #3673 pin suite 7/7;
+canaries 4/4; dispatcher/JSON/collections/1712 batch — failures only in
+the pre-existing sets (1599 ×5, 2151 ×3, getters-setters ×6,
+imported-string-constants ×4 — each verified identical on base); tsc
+clean.
 
 ## Round 6 — arity IN the closure representation (the deferred layout change)
 

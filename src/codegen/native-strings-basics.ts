@@ -256,6 +256,62 @@ export function emitStrCompareHelpers(shared: NativeStrShared): void {
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
 
+      // (#3673 round 9) Hash fast-reject: when BOTH sides are `$HashedString`
+      // with computed hashes (interned literals bake theirs at compile time)
+      // and the hashes differ, the strings cannot be equal — O(1) instead of
+      // the char loop. Equal hashes (match or collision) fall through to the
+      // authoritative char compare. The `__extern_get` member-ladder arms
+      // compare an interned probe key against interned field-name constants
+      // bucketed by length + first char, so this reject does the real work.
+      ...(ctx.hashedStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 0 },
+            { op: "ref.test", typeIdx: ctx.hashedStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.test", typeIdx: ctx.hashedStrTypeIdx },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: 0 },
+                    { op: "ref.cast", typeIdx: ctx.hashedStrTypeIdx },
+                    { op: "struct.get", typeIdx: ctx.hashedStrTypeIdx, fieldIdx: 3 },
+                    { op: "local.tee", index: 8 },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "local.get", index: 1 },
+                        { op: "ref.cast", typeIdx: ctx.hashedStrTypeIdx },
+                        { op: "struct.get", typeIdx: ctx.hashedStrTypeIdx, fieldIdx: 3 },
+                        { op: "local.tee", index: 9 },
+                        {
+                          op: "if",
+                          blockType: { kind: "empty" },
+                          then: [
+                            { op: "local.get", index: 8 },
+                            { op: "local.get", index: 9 },
+                            { op: "i32.ne" },
+                            {
+                              op: "if",
+                              blockType: { kind: "empty" },
+                              then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ] satisfies Instr[])
+        : []),
+
       // aOff = a.off
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
@@ -338,6 +394,9 @@ export function emitStrCompareHelpers(shared: NativeStrShared): void {
         { name: "bData", type: strDataRef },
         { name: "aOff", type: { kind: "i32" } },
         { name: "bOff", type: { kind: "i32" } },
+        // (#3673 round 9) hash fast-reject scratch (locals 8/9).
+        { name: "aHash", type: { kind: "i32" } },
+        { name: "bHash", type: { kind: "i32" } },
       ],
       body: wrapBodyWithFlatten(body, [0, 1]),
       exported: false,

@@ -96,11 +96,23 @@ function flattenConsBody(
     { op: "i32.const", value: 0 },
     { op: "call", funcIdx: copyTreeIdx },
     { op: "drop" },
-    // flat = struct.new $NativeString(len, 0, buf)
+    // flat = struct.new $HashedString(len, 0, buf, 0) — (#3673 round 9) the
+    // memoized flat copy carries an uncomputed (0) hash slot so `__obj_hash`
+    // can cache into it on first probe; plain $NativeString when the hashed
+    // subtype isn't registered. Subtype of $NativeString — every consumer
+    // (incl. the memoized-cons fast path's `ref.test`/`ref.cast`) unchanged.
     { op: "local.get", index: 1 },
     { op: "i32.const", value: 0 },
     { op: "local.get", index: 2 },
-    { op: "struct.new", typeIdx: strTypeIdx },
+    ...(ctx.hashedStrTypeIdx >= 0
+      ? ([
+          { op: "i32.const", value: 0 }, // hash: uncomputed
+          { op: "i32.const", value: 0 }, // cacheGen: never populated
+          { op: "ref.null", typeIdx: -18 }, // cacheOwner
+          { op: "ref.null", typeIdx: -18 }, // cacheEntry
+          { op: "struct.new", typeIdx: ctx.hashedStrTypeIdx },
+        ] satisfies Instr[])
+      : ([{ op: "struct.new", typeIdx: strTypeIdx }] satisfies Instr[])),
     { op: "local.set", index: 3 },
     // (#3673) Memoize: rewrite the cons in place to (left=flat, right="") so
     // the next flatten of this rope takes the fast path above. `len` is

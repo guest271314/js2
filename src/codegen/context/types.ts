@@ -2122,6 +2122,11 @@ export interface CodegenContext {
   anyStrTypeIdx: number;
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
+  /** (#3673 round 9) `$HashedString <: $NativeString` with a cached FNV-1a
+   *  hash field — allocated only by interned literal globals (hash baked at
+   *  compile time) and `__str_flatten` memoized flat copies (lazy); consumed
+   *  by `__obj_hash`'s cache fast path. -1 when native strings are off. */
+  hashedStrTypeIdx: number;
   /**
    * (#3673) Interned native-string literal globals: literal value (prefixed by
    * encoding kind) → module-global index of an immutable `(ref $NativeString)`

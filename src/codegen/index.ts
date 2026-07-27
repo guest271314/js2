@@ -183,6 +183,7 @@ import {
   fillFnctorPrototypeDispatchArms,
   fillExternIsArray,
   fillProxyDispatch,
+  unshiftExternGetProtoCacheArm,
 } from "./object-runtime.js";
 import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
 import { fillVecPropHelpers } from "./vec-props.js"; // (#3537) array ($Vec) expando side table
@@ -3717,6 +3718,10 @@ export function generateModule(
     fillClosedStructExternGetArms(ctx);
     fillFnctorPrototypeDispatchArms(ctx);
 
+    // (#3673 round 9b) LAST __extern_get body fill: prepend the per-key
+    // prototype-lookup cache hit arm ahead of the ladder arms unshifted above.
+    unshiftExternGetProtoCacheArm(ctx);
+
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
     fillExternIsArray(ctx);
@@ -5733,6 +5738,10 @@ export function generateMultiModule(
     fillClosedStructOwnPropertyNamesArms(ctx);
     fillClosedStructExternGetArms(ctx);
     fillFnctorPrototypeDispatchArms(ctx);
+
+    // (#3673 round 9b) LAST __extern_get body fill: prepend the per-key
+    // prototype-lookup cache hit arm ahead of the ladder arms unshifted above.
+    unshiftExternGetProtoCacheArm(ctx);
 
     // (#3495) `__extern_get_idx` is reserved while compiling standalone
     // numeric reads through an externref (for example `globalThis.logs[i]`).

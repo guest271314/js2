@@ -58,6 +58,7 @@
  */
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
+import { ensureNativeCharCodeAtHelper } from "./char-code-at-helpers.js";
 import {
   ensureAnyToStringHelper,
   ensureNativeStringHelpers,
@@ -1115,6 +1116,36 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "ref.cast", typeIdx: anyStrTypeIdx },
       { op: "call", funcIdx: strFlattenIdx },
       { op: "local.tee", index: 1 },
+      // (#3673 round 9) Cached-hash fast path: interned literal keys carry a
+      // compile-time-baked FNV hash in the `$HashedString` subtype's field 3
+      // (0 = uncomputed; else masked hash | sign bit). Most $Object probes use
+      // constant keys, so this turns the O(len) FNV walk into one struct.get.
+      ...(ctx.hashedStrTypeIdx >= 0
+        ? ([
+            { op: "ref.test", typeIdx: ctx.hashedStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: ctx.hashedStrTypeIdx },
+                { op: "struct.get", typeIdx: ctx.hashedStrTypeIdx, fieldIdx: 3 },
+                { op: "local.tee", index: 6 },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: 6 },
+                    { op: "i32.const", value: 0x7fffffff },
+                    { op: "i32.and" },
+                    { op: "return" },
+                  ],
+                },
+              ],
+            },
+            { op: "local.get", index: 1 },
+          ] satisfies Instr[])
+        : []),
       // len = str.len ; off = str.off ; data = str.data
       { op: "struct.get", typeIdx: nativeStrTypeIdx, fieldIdx: 0 },
       { op: "local.set", index: 3 },
@@ -1163,6 +1194,30 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           },
         ],
       },
+      // (#3673 round 9) Cache write-back: a `$HashedString` probe key (a
+      // flatten-memoized flat copy) stores `(h & mask) | signbit` so its next
+      // probe takes the fast path above. Interned literals never reach here
+      // (their baked hash short-circuits).
+      ...(ctx.hashedStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.hashedStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: ctx.hashedStrTypeIdx },
+                { op: "local.get", index: 6 },
+                { op: "i32.const", value: 0x7fffffff },
+                { op: "i32.and" },
+                { op: "i32.const", value: -0x80000000 },
+                { op: "i32.or" },
+                { op: "struct.set", typeIdx: ctx.hashedStrTypeIdx, fieldIdx: 3 },
+              ],
+            },
+          ] satisfies Instr[])
+        : []),
       // return h & 0x7fffffff  (non-negative; masking happens at call sites too)
       { op: "local.get", index: 6 },
       { op: "i32.const", value: 0x7fffffff },
@@ -1474,6 +1529,26 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         )
       : undefined;
 
+  // (#3673 round 9b) Table generation for the per-key prototype-lookup cache
+  // (see the `$HashedString` cacheGen/cacheOwner/cacheEntry fields). Bumped
+  // ONLY by `__obj_grow` — a rehash re-mints `$PropEntry` structs, so cached
+  // entry refs from before a grow must be treated as stale. Value updates
+  // mutate entries in place (visible through the cache); deletes set
+  // FLAG_TOMBSTONE and defineProperty morphs set FLAG_ACCESSOR on the entry
+  // itself, both checked at cache-hit time — neither needs a generation bump.
+  // Starts at 1 so a literal's baked cacheGen of 0 can never spuriously match.
+  const protoCacheEnabled = ctx.hashedStrTypeIdx >= 0 && fnctorProtoStartIdx !== undefined;
+  let objTableGenGlobalIdx = -1;
+  if (ctx.hashedStrTypeIdx >= 0) {
+    objTableGenGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: "__obj_table_gen",
+      type: { kind: "i32" },
+      mutable: true,
+      init: [{ op: "i32.const", value: 1 }],
+    });
+  }
+
   // ── __extern_get(externref obj, externref key) -> externref ──────────────
   //
   // Unwrap obj to $Object (return null on non-object), walk the own-property
@@ -1500,7 +1575,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // shared Instr objects get double-remapped by finalize walks (see
     // `reference_shared_instr_object_dce_double_remap`).
     const getMiss = (): Instr[] => undefinedExternInstrs(ctx) ?? [{ op: "ref.null.extern" }];
+    const HSTR = ctx.hashedStrTypeIdx;
     const body: Instr[] = [
+      // (#3673 round 9b) The per-key prototype-lookup cache HIT arm is NOT
+      // here — it is prepended at FINALIZE by `unshiftExternGetProtoCacheArm`
+      // so it lands BEFORE the closed-struct field-ladder arms that the
+      // finalize fills unshift onto this body (the ladder is most of the cost
+      // the cache exists to skip). Population lives inline below (data-
+      // property branch); locals 8/9 are reserved at registration.
       // (#2896) Builtin-fn metadata arm: `fn[key]` for key "name"/"length" on a
       // builtin function value answers its spec metadata (host-free). Non-meta
       // receivers/keys fall through unchanged (the helper returns null).
@@ -1554,6 +1636,14 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 { op: "any.convert_extern" },
                 { op: "ref.cast", typeIdx: objectTypeIdx },
                 { op: "local.set", index: 2 },
+                // (#3673 round 9b) walk starts at a fnctor prototype → a
+                // first-proto data hit below may populate the per-key cache.
+                ...(protoCacheEnabled
+                  ? ([
+                      { op: "i32.const", value: 1 },
+                      { op: "local.set", index: 9 },
+                    ] satisfies Instr[])
+                  : []),
               ],
       },
       // proto-walk loop
@@ -1614,6 +1704,50 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                       { op: "return" },
                     ],
                   },
+                  // (#3673 round 9b) Populate the per-key cache: a DATA entry
+                  // found on the FIRST prototype object of a fnctor receiver
+                  // (canCache still 1 — cleared on every proto advance) with
+                  // an interned `$HashedString` key. All the earlier arms
+                  // (field ladder, builtin meta) missed for this fnctor class,
+                  // so the cache-hit shortcut is sound for the whole class.
+                  ...(protoCacheEnabled
+                    ? ([
+                        { op: "local.get", index: 9 },
+                        {
+                          op: "if",
+                          blockType: { kind: "empty" },
+                          then: [
+                            { op: "local.get", index: 1 },
+                            { op: "any.convert_extern" },
+                            { op: "ref.test", typeIdx: HSTR },
+                            {
+                              op: "if",
+                              blockType: { kind: "empty" },
+                              then: [
+                                { op: "local.get", index: 1 },
+                                { op: "any.convert_extern" },
+                                { op: "ref.cast", typeIdx: HSTR },
+                                { op: "local.set", index: 8 },
+                                { op: "local.get", index: 8 },
+                                { op: "ref.as_non_null" },
+                                { op: "local.get", index: 2 },
+                                { op: "ref.as_non_null" },
+                                { op: "struct.set", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
+                                { op: "local.get", index: 8 },
+                                { op: "ref.as_non_null" },
+                                { op: "local.get", index: 3 },
+                                { op: "ref.as_non_null" },
+                                { op: "struct.set", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
+                                { op: "local.get", index: 8 },
+                                { op: "ref.as_non_null" },
+                                { op: "global.get", index: objTableGenGlobalIdx },
+                                { op: "struct.set", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
+                              ],
+                            },
+                          ],
+                        },
+                      ] satisfies Instr[])
+                    : []),
                   // Data property → return extern.convert_any(e.value)
                   { op: "local.get", index: 3 },
                   { op: "ref.as_non_null" },
@@ -1627,6 +1761,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
               { op: "ref.as_non_null" },
               { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 0 },
               { op: "local.set", index: 2 },
+              // (#3673 round 9b) left the first prototype — stop cache writes.
+              ...(protoCacheEnabled
+                ? ([
+                    { op: "i32.const", value: 0 },
+                    { op: "local.set", index: 9 },
+                  ] satisfies Instr[])
+                : []),
               { op: "br", depth: 0 },
             ],
           },
@@ -1646,6 +1787,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "getter", type: { kind: "externref" } }, // (#1888 S5b) accessor $get
         { name: "bfmeta", type: { kind: "externref" } }, // (#2896) builtin-fn meta
         { name: "fnctorProto", type: { kind: "externref" } },
+        ...(protoCacheEnabled
+          ? [
+              // (#3673 round 9b) per-key proto-cache scratch (locals 8/9).
+              { name: "kh", type: { kind: "ref_null", typeIdx: ctx.hashedStrTypeIdx } as ValType },
+              { name: "canCache", type: { kind: "i32" } as ValType },
+            ]
+          : []),
       ],
       body,
     );
@@ -1994,6 +2142,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //         6=inserted(ref null $PropEntry)
   {
     const body: Instr[] = [
+      // (#3673 round 9b) Rehash re-mints $PropEntry structs — invalidate every
+      // per-key prototype-lookup cache by bumping the table generation.
+      ...(objTableGenGlobalIdx >= 0
+        ? ([
+            { op: "global.get", index: objTableGenGlobalIdx },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "global.set", index: objTableGenGlobalIdx },
+          ] satisfies Instr[])
+        : []),
       // old = o.props ; oldLen = old.len ; newCap = oldLen * 2
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
@@ -4146,6 +4304,184 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   if (S2_OPENANY_DISPATCH_WIRED) {
     const applyClosureIdx = reserveApplyClosure(ctx);
     const externGetIdx = ctx.funcMap.get("__extern_get")!;
+
+    // (#3673 round 9) STRING-receiver hot-method fast path. A dynamic
+    // `input.charCodeAt(pos)` / `input.slice(a, b)` (acorn's per-character
+    // tokenizer loop — `this.input` is a dynamic field, so every call lands
+    // here) previously paid the FULL generic pipeline per call:
+    // `__extern_get(str, name)` (member ladder + `__builtinfn_get_meta` name
+    // compares + builtin-closure materialization) → `__apply_closure` →
+    // `__call_fn_method_N` ladder → the native helper. Method-name literals
+    // are interned (#3673 round 2), so ONE `ref.eq` against the interned name
+    // global identifies the method and dispatches straight to the native
+    // helper. A name that isn't the interned literal (a rope, a runtime-built
+    // string) simply misses the `ref.eq` and falls through to the generic
+    // path — semantics unchanged. Gated on every dep resolving; emits nothing
+    // otherwise (host mode: `nativeStrings` off ⇒ no arm).
+    const strFastPath = ((): Instr[] => {
+      if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0 || ctx.nativeStrTypeIdx < 0) return [];
+      const unboxIdx = ctx.funcMap.get("__unbox_number");
+      const boxIdx = ctx.funcMap.get("__box_number");
+      const sliceIdx = ctx.funcMap.get("__str_slice") ?? ctx.nativeStrHelpers.get("__str_slice");
+      const isUndefIdx = ctx.funcMap.get("__extern_is_undefined");
+      const ccaIdx = ensureNativeCharCodeAtHelper(ctx);
+      if (unboxIdx === undefined || boxIdx === undefined || sliceIdx === undefined || isUndefIdx === undefined)
+        return [];
+      if (ccaIdx === null) return [];
+      // Locals (beyond param 0..2 + local 3 `any`): 4 nflat, 5 argc, 6 arg0,
+      // 7 arg1, 8 argsAny.
+      const NFLAT = 4;
+      const ARGC = 5;
+      const ARG0 = 6;
+      const ARG1 = 7;
+      const ARGSANY = 8;
+      // argc/arg0/arg1 from the $ObjVec args carrier (null-safe: argc 0).
+      const loadArgs: Instr[] = [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: ARGC },
+        { op: "local.get", index: 2 },
+        { op: "any.convert_extern" },
+        { op: "local.tee", index: ARGSANY },
+        { op: "ref.test", typeIdx: objVecTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: ARGSANY },
+            { op: "ref.cast", typeIdx: objVecTypeIdx },
+            { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+            { op: "local.tee", index: ARGC },
+            { op: "i32.const", value: 1 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: ARGSANY },
+                { op: "ref.cast", typeIdx: objVecTypeIdx },
+                { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+                { op: "i32.const", value: 0 },
+                { op: "array.get", typeIdx: objVecArrTypeIdx },
+                { op: "local.set", index: ARG0 },
+              ],
+            },
+            { op: "local.get", index: ARGC },
+            { op: "i32.const", value: 2 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: ARGSANY },
+                { op: "ref.cast", typeIdx: objVecTypeIdx },
+                { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+                { op: "i32.const", value: 1 },
+                { op: "array.get", typeIdx: objVecArrTypeIdx },
+                { op: "local.set", index: ARG1 },
+              ],
+            },
+          ],
+        },
+      ];
+      const nameEq = (lit: string): Instr[] => [
+        { op: "local.get", index: NFLAT },
+        ...nativeStringLiteralInstrs(ctx, lit),
+        { op: "ref.eq" },
+      ];
+      return [
+        { op: "local.get", index: 3 }, // any (recv)
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 }, // name
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: ctx.nativeStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "any.convert_extern" },
+                { op: "ref.cast", typeIdx: ctx.nativeStrTypeIdx },
+                { op: "local.set", index: NFLAT },
+                // ── charCodeAt(i) → box(__str_charCodeAt(recv, trunc(unbox(arg0))))
+                ...nameEq("charCodeAt"),
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    ...loadArgs,
+                    { op: "local.get", index: 3 },
+                    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                    { op: "local.get", index: ARG0 },
+                    { op: "call", funcIdx: unboxIdx },
+                    { op: "i32.trunc_sat_f64_s" },
+                    { op: "call", funcIdx: ccaIdx },
+                    { op: "call", funcIdx: boxIdx },
+                    { op: "return" },
+                  ],
+                },
+                // ── slice(a, b?) → extern(__str_slice(recv, trunc(unbox(a)),
+                //     b omitted/undefined → INT32_MAX (clamped to len)))
+                ...nameEq("slice"),
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    ...loadArgs,
+                    { op: "local.get", index: 3 },
+                    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                    // start = argc >= 1 ? trunc(unbox(arg0)) : 0
+                    { op: "local.get", index: ARG0 },
+                    { op: "call", funcIdx: unboxIdx },
+                    { op: "i32.trunc_sat_f64_s" },
+                    // end: present and not undefined/null → trunc(unbox(arg1));
+                    // else INT32_MAX (→ clamped to len; §22.1.3.21 undefined end).
+                    { op: "local.get", index: ARGC },
+                    { op: "i32.const", value: 2 },
+                    { op: "i32.ge_s" },
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: { kind: "i32" } },
+                      then: [
+                        { op: "local.get", index: ARG1 },
+                        { op: "ref.is_null" },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: { kind: "i32" } },
+                          then: [{ op: "i32.const", value: 0x7fffffff }],
+                          else: [
+                            { op: "local.get", index: ARG1 },
+                            { op: "call", funcIdx: isUndefIdx },
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: { kind: "i32" } },
+                              then: [{ op: "i32.const", value: 0x7fffffff }],
+                              else: [
+                                { op: "local.get", index: ARG1 },
+                                { op: "call", funcIdx: unboxIdx },
+                                { op: "i32.trunc_sat_f64_s" },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                      else: [{ op: "i32.const", value: 0x7fffffff }],
+                    },
+                    { op: "call", funcIdx: sliceIdx },
+                    { op: "extern.convert_any" },
+                    { op: "return" },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ];
+    })();
+
     const body: Instr[] = [
       // any = any.convert_extern(recv); if null → return undefined
       { op: "local.get", index: 0 },
@@ -4157,6 +4493,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "ref.null.extern" }, { op: "return" }],
       },
+      // (#3673 round 9) string-receiver hot-method direct dispatch (see above).
+      ...strFastPath,
       // if ref.test $Object(any) → __apply_closure(__extern_get(recv,name), recv, args)
       { op: "local.get", index: 3 },
       { op: "ref.test", typeIdx: objectTypeIdx },
@@ -4189,7 +4527,17 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       "__extern_method_call",
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [{ kind: "externref" }],
-      [{ name: "any", type: { kind: "anyref" } }],
+      strFastPath.length > 0
+        ? [
+            { name: "any", type: { kind: "anyref" } },
+            // (#3673 round 9) string fast-path scratch (locals 4-8).
+            { name: "nflat", type: { kind: "ref_null", typeIdx: ctx.nativeStrTypeIdx } },
+            { name: "argc", type: { kind: "i32" } },
+            { name: "arg0", type: { kind: "externref" } },
+            { name: "arg1", type: { kind: "externref" } },
+            { name: "argsAny", type: { kind: "anyref" } },
+          ]
+        : [{ name: "any", type: { kind: "anyref" } }],
       body,
     );
   }
@@ -6313,6 +6661,102 @@ export function fillFnctorPrototypeDispatchArms(ctx: CodegenContext): void {
     );
   }
   fn.body.unshift(...arms);
+}
+
+/**
+ * (#3673 round 9b) Prepend the per-key prototype-lookup cache HIT arm onto the
+ * FINAL `__extern_get` body — after every other finalize fill has unshifted
+ * its arms, so a cache hit skips the closed-struct field ladder, the
+ * builtin-meta probe, AND the hash-table walk in one shot. Soundness: the
+ * population site (registration-time body, data-property branch) only runs
+ * when all of those paths missed for the populating fnctor class, and the hit
+ * guard (`cacheGen == __obj_table_gen` + owner-proto `ref.eq` + live-DATA
+ * entry flags) confines hits to receivers of that same class. MUST be called
+ * LAST among the `__extern_get` body fills.
+ */
+export function unshiftExternGetProtoCacheArm(ctx: CodegenContext): void {
+  if (!ctx.standalone || ctx.hashedStrTypeIdx < 0) return;
+  const HSTR = ctx.hashedStrTypeIdx;
+  const protoStartIdx = ctx.funcMap.get("__fnctor_proto_start");
+  const objTypes = ctx.objectRuntimeTypes;
+  if (protoStartIdx === undefined || objTypes === undefined) return;
+  const { objectTypeIdx, propEntryTypeIdx } = objTypes;
+  const fn = ctx.mod.functions.find((candidate) => candidate.name === "__extern_get");
+  if (!fn || !fn.locals.some((l) => l.name === "kh")) return;
+  const genPos = ctx.mod.globals.findIndex((g) => g.name === "__obj_table_gen");
+  if (genPos < 0) return;
+  const genIdx = ctx.numImportGlobals + genPos;
+  fn.body.unshift(
+    { op: "local.get", index: 1 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: HSTR },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 1 },
+        { op: "any.convert_extern" },
+        { op: "ref.cast", typeIdx: HSTR },
+        { op: "local.tee", index: 8 },
+        { op: "struct.get", typeIdx: HSTR, fieldIdx: 4 }, // cacheGen
+        { op: "global.get", index: genIdx },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "call", funcIdx: protoStartIdx },
+            { op: "local.tee", index: 7 },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 7 },
+                { op: "any.convert_extern" },
+                { op: "ref.cast", typeIdx: objectTypeIdx },
+                // owner: non-null whenever cacheGen matched (gen ≥ 1 and the
+                // population site writes all three cache fields together).
+                { op: "local.get", index: 8 },
+                { op: "ref.as_non_null" },
+                { op: "struct.get", typeIdx: HSTR, fieldIdx: 5 }, // cacheOwner
+                { op: "ref.cast", typeIdx: objectTypeIdx },
+                { op: "ref.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: 8 },
+                    { op: "ref.as_non_null" },
+                    { op: "struct.get", typeIdx: HSTR, fieldIdx: 6 }, // cacheEntry
+                    { op: "ref.cast", typeIdx: propEntryTypeIdx },
+                    { op: "local.tee", index: 3 },
+                    { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 }, // flags
+                    { op: "i32.const", value: FLAG_TOMBSTONE | FLAG_ACCESSOR },
+                    { op: "i32.and" },
+                    { op: "i32.eqz" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "local.get", index: 3 },
+                        { op: "ref.as_non_null" },
+                        { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value
+                        { op: "extern.convert_any" },
+                        { op: "return" },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  );
 }
 
 export function fillDynamicForinVecArms(ctx: CodegenContext): void {
