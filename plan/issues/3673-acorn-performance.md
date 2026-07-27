@@ -624,6 +624,24 @@ pins 7/7, 1712 + 2151-nary + 2674 + 2963 green, corpus 23/23, canaries
 4/4; the agent additionally ran full equivalence (213 files) on its
 branch — identical failure set to its base; tsc clean.
 
+### Round 18b — same-box re-baseline + warm-up methodology correction
+
+The container restarted ~2x faster, so BOTH lanes re-measured on the
+same box, same process discipline (deep warm-up ≥400 parses, then
+min-of-24×200): compiled standalone **0.785ms**, warm node-acorn
+**0.0177ms** — **gap ≈44x**, consistent with the pre-restart ~41x (the
+box lifted both sides equally; no methodology-driven progress, recorded
+to keep cross-round ratios honest). Two findings:
+- **Warm-up matters more than previously accounted**: the bench's
+  scale-to-2s single measurement includes V8 tier-up of the 1.8MB
+  module — a shallow-warm run reads ~1.4ms where the tiered steady
+  state is ~0.79ms. All future numbers use deep-warm min-of-batches.
+- **Binaryen -O3 post-S2 is worth ~5%** under matched warm-up (0.801 vs
+  0.846 interleaved same-process) — up from pre-S2 flat (the twins give
+  it monomorphic struct.gets to optimize), and worth shipping in the
+  artifact configuration, but the initial cold comparison that suggested
+  −41% was a tier-up artifact, not a real win.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
