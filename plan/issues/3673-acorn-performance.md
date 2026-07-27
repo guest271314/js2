@@ -722,6 +722,21 @@ trade. Measured: window 0.82-0.87 → **0.78-0.83ms**. Verification: full
 regex battery failure set identical to base (timing-stripped name
 diff); trie probe green; corpus 23/23; canaries 4/4; tsc clean.
 
+### Round 23 — caps-snapshot elision for group-free regex programs
+
+Every backtrack-frame push snapshotted the caps array into a fresh
+allocation. For a group-free, scratch-free program (`nSlots == 2` —
+whole-match slots only) the restore is provably dead: caps[0] is set
+once at entry and never changes within a run; caps[1] is written only
+at `SAVE 1` immediately before MATCH returns; backrefs and PROGRESS
+both imply `nSlots > 2`. Snapshot and restore are now both guarded on
+`nSlots > 2`, with a shared zero-length dummy filling the frame field —
+acorn's keyword and lineBreak tests push zero-alloc frames. Keyword
+probe 154 → 117ms; window ~0.78-0.84 (noise band overlapping round 22 —
+the alloc win shows in the probe and GC pressure, not clearly in wall).
+Verification: regex battery failure set identical; corpus 23/23;
+canaries 4/4; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

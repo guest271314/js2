@@ -326,6 +326,23 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     mutable: true,
     init: [{ op: "ref.null", typeIdx: frameArrIdx }],
   });
+  // (#3673 round 23) Shared zero-length caps placeholder: a group-free,
+  // scratch-free program (nSlots == 2) provably never needs its caps
+  // restored on backtrack — caps[0] is set once at entry and never changes
+  // within a run, caps[1] is written only at SAVE 1 immediately before MATCH
+  // returns; backrefs/PROGRESS both imply nSlots > 2. So frame pushes for
+  // such programs skip the per-push snapshot allocation entirely and store
+  // this dummy (the restore side is guarded by the same nSlots test).
+  const capsDummyGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__re_caps_dummy",
+    type: { kind: "ref", typeIdx: regexI32ArrayType(ctx) },
+    mutable: false,
+    init: [
+      { op: "i32.const", value: 0 },
+      { op: "array.new_default", typeIdx: regexI32ArrayType(ctx) },
+    ],
+  });
 
   // params
   const PROG = 0,
@@ -373,28 +390,54 @@ export function ensureRegexRun(ctx: CodegenContext): number {
   ];
 
   // Helper: copy caps -> a fresh array<i32> of length NSLOTS (snapshot).
+  // (#3673 round 23) Both halves are guarded on `nSlots > 2`: group-free,
+  // scratch-free programs (whole-match slots only) need neither the per-push
+  // snapshot allocation nor the restore copy — see the dummy global above.
   const snapshotCaps = (intoLocal: number): Instr[] => [
-    // SNAP = array.new_default(NSLOTS)
     { op: "local.get", index: NSLOTS },
-    { op: "array.new_default", typeIdx: i32Arr },
-    { op: "local.set", index: intoLocal },
-    // array.copy(dst=SNAP, dstIdx=0, src=CAPS, srcIdx=0, len=NSLOTS)
-    { op: "local.get", index: intoLocal },
-    { op: "i32.const", value: 0 },
-    { op: "local.get", index: CAPS },
-    { op: "i32.const", value: 0 },
-    { op: "local.get", index: NSLOTS },
-    { op: "array.copy", dstTypeIdx: i32Arr, srcTypeIdx: i32Arr },
+    { op: "i32.const", value: 2 },
+    { op: "i32.gt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // SNAP = array.new_default(NSLOTS)
+        { op: "local.get", index: NSLOTS },
+        { op: "array.new_default", typeIdx: i32Arr },
+        { op: "local.set", index: intoLocal },
+        // array.copy(dst=SNAP, dstIdx=0, src=CAPS, srcIdx=0, len=NSLOTS)
+        { op: "local.get", index: intoLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: CAPS },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: NSLOTS },
+        { op: "array.copy", dstTypeIdx: i32Arr, srcTypeIdx: i32Arr },
+      ],
+      else: [
+        { op: "global.get", index: capsDummyGlobalIdx },
+        { op: "local.set", index: intoLocal },
+      ],
+    },
   ];
 
-  // Helper: restore CAPS <- snapshot SNAP (copy back).
+  // Helper: restore CAPS <- snapshot SNAP (copy back). No-op when nSlots <= 2
+  // (the snapshot was the dummy).
   const restoreCaps = (fromLocal: number): Instr[] => [
-    { op: "local.get", index: CAPS },
-    { op: "i32.const", value: 0 },
-    { op: "local.get", index: fromLocal },
-    { op: "i32.const", value: 0 },
     { op: "local.get", index: NSLOTS },
-    { op: "array.copy", dstTypeIdx: i32Arr, srcTypeIdx: i32Arr },
+    { op: "i32.const", value: 2 },
+    { op: "i32.gt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: CAPS },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: fromLocal },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: NSLOTS },
+        { op: "array.copy", dstTypeIdx: i32Arr, srcTypeIdx: i32Arr },
+      ],
+    },
   ];
 
   // The dispatch switch over OP. We emit an if/else chain (op === k) … .
