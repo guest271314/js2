@@ -642,6 +642,21 @@ to keep cross-round ratios honest). Two findings:
   artifact configuration, but the initial cold comparison that suggested
   −41% was a tier-up artifact, not a real win.
 
+### Round 19 — hasOwn field arms gated on non-$Object receivers
+
+Deep-warm caller profiling showed `__str_equals` 121ms under
+`__object_hasOwn`: acorn's hot hasOwn receivers are plain `$Object`s
+(options, refDestructuringErrors), but every call walked ~50
+closed-struct field arms — one `__str_equals` call each — before
+reaching the base-body `$Object` path, even though those arms can only
+ever MATCH a struct receiver (each `ref.test`s its struct). One
+receiver test now skips the whole block for `$Object` receivers;
+behavior-identical by construction. Measured: `__str_equals`-under-
+hasOwn → 0 (total 179 → 80ms in the 3k-parse window); window ~0.94 →
+~0.92-0.96ms (≈2-3%, within the noise band but the profile delta is
+unambiguous). Verification: hasOwn/2896 suites 28/28; canaries 4/4;
+tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

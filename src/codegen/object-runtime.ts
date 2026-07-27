@@ -6374,20 +6374,43 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
         { op: "if", blockType: { kind: "empty" }, then: receiverArms },
       );
     }
+    // (#3673 round 19) The field arms can only ever MATCH a closed-STRUCT
+    // receiver (each arm `ref.test`s its struct type), yet acorn's hot hasOwn
+    // receivers are plain `$Object`s (options, refDestructuringErrors) — which
+    // walked all ~50 arms (one `__str_equals` call each) before reaching the
+    // base-body `$Object` path. One receiver test skips the whole block:
+    // behavior-identical, since an `$Object` can never match any arm.
+    const objTypeIdx = ctx.objectRuntimeTypes?.objectTypeIdx;
+    const structReceiverGuard: Instr[] =
+      objTypeIdx !== undefined
+        ? [
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "ref.test", typeIdx: objTypeIdx },
+            { op: "i32.eqz" },
+          ]
+        : [{ op: "i32.const", value: 1 }];
     return [
-      { op: "local.get", index: 1 },
-      { op: "any.convert_extern" },
-      { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+      ...structReceiverGuard,
       {
         op: "if",
         blockType: { kind: "empty" },
         then: [
           { op: "local.get", index: 1 },
           { op: "any.convert_extern" },
-          { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
-          { op: "call", funcIdx: flattenIdx },
-          { op: "local.set", index: flatLocalIdx },
-          ...keyArms,
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "any.convert_extern" },
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+              { op: "call", funcIdx: flattenIdx },
+              { op: "local.set", index: flatLocalIdx },
+              ...keyArms,
+            ],
+          },
         ],
       },
     ];
