@@ -1970,6 +1970,41 @@ before: 3 IR errors on the merge parent, 2 now, and both survivors
 (`class-method typeIdx parity mismatch` on `isDigit`/`isIdent`) reproduce
 unchanged on the merge parent.
 
+### Round 40 — the typed-parser gap after the i32 and `===` fixes
+
+Round 32 measured a hand-typed recursive-descent parser at **1.59x**
+node. That number predated two fixes that both apply directly to it: the
+`type i32 = number` annotation being inert (round 39) and the
+static-number `===` ladder (#3688). Re-measured on the merged tree, same
+harness, same input:
+
+| variant | ms/parse | throughput | vs node | was (round 32) |
+| --- | --- | --- | --- | --- |
+| plain `number` fields | 0.1556 | 46.1 MB/s | **1.45x** | 1.69x |
+| **native `i32` fields** | **0.1276** | **56.2 MB/s** | **1.20x** | 1.59x (inert — see round 39) |
+| node (same JS) | 0.1062-0.1070 | 67.0 MB/s | 1x | — |
+
+**1.59x → 1.20x**, and the `i32` row is now measuring what its label
+says for the first time.
+
+**Checksum note (this is a correctness observation, not a discrepancy):**
+the i32 variant answers `-2015914222` where node answers `2279053074`.
+That is exact i32 wraparound — `2279053074 | 0 === -2015914222`, verified
+— of the benchmark's own final `nodes * 1000000 + sumTree(root)`
+arithmetic, NOT a difference in parsing. Wrapping is precisely the
+contract `type i32 = number` opts into (#323: "a performance escape hatch
+for developers who know their value ranges"), so this is the annotation
+working as documented. The parse work is identical; only the summary
+arithmetic overflows i32.
+
+**Where the last 1.20x sits.** Not in the character loop and not in
+allocation — both were addressed. The census points at the remaining
+item: null-check/throw scaffolding on every `this.` access plus
+extern/any churn (#3686), which is blocked behind a codegen cycle-guard
+bug (`class Node { left: Node }` recurses to stack overflow). That is the
+next lever, and it is the only measured one left between here and parity
+on well-typed input.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
