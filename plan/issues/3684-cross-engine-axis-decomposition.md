@@ -67,6 +67,43 @@ time, i.e. it measured loop overhead, not string access. Recorded here because
 the same trap will catch the next person — anything under ~0.1 ms on this
 harness is loop-bound.
 
+## Re-measured after #3683 S2 + S4a landed (2026-07-27)
+
+The table above was taken BEFORE #3683 S2 (typed-`this` twin compilation, 244
+twins on acorn) and S4a (provably-numeric fnctor fields promoted to physical
+f64 slots) landed on the branch. Re-run on the same box, same session, all
+three engines re-measured together, checksums identical throughout:
+
+| axis | node | Porffor | js2 before | js2 now | js2/node before → now |
+| ---- | ---- | ------- | ---------- | ------- | --------------------- |
+| numeric loop | 1.249 ms | 3.969 ms | 1.236 ms | **1.233 ms** | 0.97x → **0.99x** |
+| property r/w (literal) | 0.548 ms | 6.807 ms | 0.766 ms | 0.762 ms | 1.40x → 1.39x |
+| **method dispatch** | 0.485 ms | 8.163 ms | 12.268 ms | **8.759 ms** | 26.0x → **18.1x** (−29%) |
+| string scan | 0.043 ms | 0.183 ms | 0.179 ms | 0.175 ms | 4.17x → 4.08x |
+| object allocation | 0.122 ms | 6.969 ms | 0.121 ms | 0.134 ms | 0.99x → 1.10x |
+| **tokenizer (`this`-loop)** | 0.065 ms | 1.717 ms | 2.208 ms | **1.376 ms** | 33.8x → **21.1x** (−38%) |
+
+**The prediction held.** This issue argued the deficit was concentrated in one
+axis — dynamic `this` dispatch — and that #3683 owned it. The two axes that
+moved are exactly those two, and *only* those two: numeric, property, string
+and allocation are flat within noise, which is what a targeted fix should look
+like. A broad regression or a broad win would both have been evidence the
+decomposition was wrong.
+
+**js2-standalone now beats Porffor on the tokenizer axis** (1.376 ms vs
+1.717 ms — a 1.25x lead where it was 1.23x behind), and is within 7% of it on
+method dispatch (8.76 vs 8.16, previously 1.7x behind). That makes it **6 of 7
+axes ahead of Porffor**, on identical source.
+
+Caveats, so nobody over-reads this:
+
+- The allocation row moved 0.121 → 0.134 ms. Repeat runs of that axis span
+  ~0.121–0.135 ms across the session, so this is run-to-run variance, **not** a
+  measured S4a regression. Do not quote it as one without a dedicated run.
+- 18x and 21x are still 18x and 21x. This is a large step on the dominant axis,
+  not arrival. S3 (direct-call devirtualization between admitted methods) has
+  not landed.
+
 ### What the table says
 
 1. **js2-standalone already matches V8 on scalar loops (0.97x) and on
