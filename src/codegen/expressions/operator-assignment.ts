@@ -27,6 +27,7 @@ import {
 } from "../index.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js";
+import { EMIT_COMPOUND_OP_HANDLES, tryEmitTypedThisCompound } from "../typed-this.js"; // (#3683 S2) typed-`this` compound
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js";
 import {
   emitAlternateStructSetDispatch,
@@ -2146,6 +2147,14 @@ function compilePropertyCompoundAssignment(
 ): ValType | null {
   const objType = ctx.checker.getTypeAtLocation(target.expression);
   const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
+
+  // (#3683 S2 branch c1) TYPED-`this` compound assignment inside a twin. Only
+  // entered for operators `emitCompoundOp` actually lowers — its switch has no
+  // `default`, so an unlisted one would strand the read + RHS on the stack.
+  if (EMIT_COMPOUND_OP_HANDLES.has(op)) {
+    const typed = tryEmitTypedThisCompound(ctx, fctx, target, rhs, op, emitCompoundOp);
+    if (typed !== undefined) return typed;
+  }
 
   // (#3496 merge-queue follow-up) `globalThis.<name> op= value` must keep the
   // receiver on the realm-object externref path for both its read and write.
