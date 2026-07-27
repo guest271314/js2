@@ -206,19 +206,26 @@ the same index. The caller then immediately unboxed back via
 identity.
 
 **Measured result (this is the headline, and it is NOT what S2 alone was hoped
-to deliver).** Interleaved min-of-batches, three builds in one process, 330B
-corpus:
+to deliver).** Three builds loaded into ONE process and benchmarked
+round-robin, min-of-24-batches × 200 parses, 330B corpus — interleaving is what
+made the signal readable, cross-process runs were pure noise at this effect
+size. Five independent sessions:
 
-| build | ms/parse |
-| --- | --- |
-| baseline (S1 tip) | ~1.51 – 1.65 |
-| twins + shim, lowering DISABLED (`JS2WASM_TYPED_THIS=shim`) | ~1.59 – 1.68 |
-| full S2 | ~1.44 – 1.59 |
+| session | baseline (S1 tip) | shim only (`=shim`) | full S2 | full vs base | full vs shim |
+| --- | --- | --- | --- | --- | --- |
+| A | 1.5902 | 1.6652 | 1.5074 | −5.2 % | −9.5 % |
+| B | 1.5102 | 1.5863 | 1.4373 | −4.8 % | −9.4 % |
+| C | 1.6527 | 1.7700 | 1.5996 | −3.2 % | −9.6 % |
+| D | 1.6429 | 1.7507 | 1.5400 | −6.3 % | −12.0 % |
+| E | 1.6991 | 1.7804 | 1.6543 | −2.6 % | −7.1 % |
 
-Consistently: the **inline branches are worth ≈10 %** of parse time, the
-**`ref.test` forward shim costs ≈5 %**, net ≈**5 %** faster than baseline. The
-shim is pure S2 scaffolding — S3's direct calls into the twin remove it from
-the hot path, at which point the full 10 % banks.
+The ORDERING (`full < baseline < shim`) is identical in all five, which is the
+robust result; the absolute ms wander with machine load. Median: **≈5 % faster
+than baseline, ≈9.5 % faster than shim-only.** Read that as: the inline
+branches are worth **≈10 %** of parse time, and the `ref.test` forward shim
+gives **≈5 %** of it straight back. The shim is pure S2 scaffolding — S3's
+direct calls into the twin delete it from the hot path, at which point the full
+10 % banks.
 
 **Why S2 alone cannot deliver more, and what that means for S4.** With
 `JS2WASM_TYPED_THIS_DEBUG=1`, acorn gets 244 twins and 1,340 inline reads / 98
@@ -244,6 +251,17 @@ histogram).
 **Binary size**: 1,353,337 → 1,808,339 bytes (+34 %) on acorn, from duplicating
 244 method bodies. If size becomes a gate, admission can be narrowed to methods
 with ≥N inline sites.
+
+**Regression evidence.** `tests/equivalence` (213 files / 1,646 tests) run on
+this branch AND on the base commit `ff944acc`: **identical** — 14 failed files
+/ 35 failed tests / 1,608 passed / 3 todo on both. All 14 are pre-existing
+(`coercion-arithmetic-add`, `delete-sentinel`, `reflect-api`, `symbol-basic`,
+`tdz-reference-error`, `yield-as-expression`, …); `coercion-arithmetic-add` was
+additionally re-run alone at the base commit and fails 8/20 there too. Also
+green: `DOGFOOD_ACORN=1 dogfood:acorn-corpus` (distinct REAL gaps 0),
+`issue-1712` acorn differential AST parity, `issue-3673-i31-smallint`,
+`issue-2151-nary`, `issue-2674-*`, `issue-3683-proto-method-write-once`, and
+the 12 new `issue-3683-typed-this-twin` pins.
 
 ## Acceptance criteria
 
