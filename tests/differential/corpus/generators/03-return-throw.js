@@ -5,6 +5,7 @@ function* gen() {
   } finally {
     console.log("cleanup");
   }
+  return 0;
 }
 
 const a = gen();

@@ -12,8 +12,8 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: iterators
 goal: iterator-protocol
-origin: "#3683 — new tests/differential/corpus/builtins/19-symbol-iterator.js surfaced this on first run"
-related: [3683]
+origin: "#3690 — new tests/differential/corpus/builtins/19-symbol-iterator.js surfaced this on first run"
+related: [3690]
 ---
 
 # #3688 — Custom `[Symbol.iterator]()` on a plain object literal doesn't drive spread/for-of
@@ -49,10 +49,10 @@ Both the spread (`[...range]`) and `for-of` consumption produce empty/zero
 results, as if `range` is treated as an empty iterable rather than invoking
 the computed `[Symbol.iterator]()` method and driving its returned
 `{next()}` protocol object. Built-in iterables (arrays, generator objects
-per #3683's `generators/02-for-of.js`, which matches) already work — the
+per #3690's `generators/02-for-of.js`, which matches) already work — the
 gap is specifically a **user-defined** iterable via a computed
 `[Symbol.iterator]` method on an object literal.
 
 ## Repro file
 
-`tests/differential/corpus/builtins/19-symbol-iterator.js` (see #3683).
+`tests/differential/corpus/builtins/19-symbol-iterator.js` (see #3690).

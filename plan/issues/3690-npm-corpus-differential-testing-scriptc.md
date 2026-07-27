@@ -1,5 +1,5 @@
 ---
-id: 3683
+id: 3690
 title: "Integrate npm package testing corpus patterns from vercel-labs/scriptc into the differential corpus"
 status: done
 sprint: current
@@ -17,7 +17,7 @@ language_feature: n/a
 goal: dogfood
 ---
 
-# #3683 — Integrate npm package testing corpus patterns from vercel-labs/scriptc
+# #3690 — Integrate npm package testing corpus patterns from vercel-labs/scriptc
 
 ## Problem
 
@@ -89,14 +89,14 @@ forward known gaps unrelated to this change). Filed as separate issues so
 they can be triaged/prioritized independently of this corpus-integration
 issue:
 
-| file                                        | outcome       | issue |
-| -------------------------------------------- | ------------- | ----- |
-| `generators/03-return-throw.js`              | compile_error | #3684 |
-| `generators/04-sent-values.js`               | runtime_error | #3685 |
-| `generators/05-yield-star.js`                | runtime_error | #3686 |
-| `generators/06-closure-state.js`             | mismatch      | #3687 |
-| `builtins/19-symbol-iterator.js`              | mismatch      | #3688 |
-| `private-fields/05-brand-checks.js`          | mismatch      | #3689 |
+| file                                        | outcome       | issue | resolution |
+| -------------------------------------------- | ------------- | ----- | ---------- |
+| `generators/03-return-throw.js`              | compile_error | #3691 | false positive — real `tsc` rejects the same program too; fixed the corpus file, not the compiler |
+| `generators/04-sent-values.js`               | runtime_error | #3685 | confirmed real — root cause: eager-buffer generator runtime, see #3685 |
+| `generators/05-yield-star.js`                | runtime_error | #3686 | confirmed real — root cause: eager-buffer generator runtime, see #3686 |
+| `generators/06-closure-state.js`             | mismatch      | #3687 | confirmed real — root cause: eager-buffer generator runtime, see #3687 |
+| `builtins/19-symbol-iterator.js`              | mismatch      | #3688 | confirmed real, under investigation |
+| `private-fields/05-brand-checks.js`          | mismatch      | #3689 | confirmed real, under investigation |
 
 All other new files (`generators/01-basics.js`, `02-for-of.js`,
 `private-fields/01-04`, `builtins/16-18-regex-*`, `builtins/20-symbol-map-key.js`)

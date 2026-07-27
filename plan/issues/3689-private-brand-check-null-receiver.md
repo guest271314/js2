@@ -12,8 +12,8 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: n/a
 goal: property-model
-origin: "#3683 — new tests/differential/corpus/private-fields/05-brand-checks.js surfaced this on first run"
-related: [3683]
+origin: "#3690 — new tests/differential/corpus/private-fields/05-brand-checks.js surfaced this on first run"
+related: [3690]
 ---
 
 # #3689 — `#field in obj` with `obj === null` should throw a catchable TypeError
@@ -42,7 +42,7 @@ try {
 - js2wasm: `true\nfalse` (third line never printed)
 
 The first two brand-check cases (own instance → `true`, unrelated plain
-object → `false`) already match — see #3683's `private-fields/01-fields.js`
+object → `false`) already match — see #3690's `private-fields/01-fields.js`
 through `04-accessors.js`, all matching. Per spec, the ergonomic
 brand-check form `#x in obj` must return `false` for any non-`Box`
 *object*, but throw a `TypeError` when `obj` is not an object at all (e.g.
@@ -55,4 +55,4 @@ issues (`tests/issue-private-access-brand.test.ts` fixed an analogous
 
 ## Repro file
 
-`tests/differential/corpus/private-fields/05-brand-checks.js` (see #3683).
+`tests/differential/corpus/private-fields/05-brand-checks.js` (see #3690).

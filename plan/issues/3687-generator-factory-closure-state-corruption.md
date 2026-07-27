@@ -1,8 +1,9 @@
 ---
 id: 3687
 title: "Two generator instances created from the same closure-returning factory corrupt each other's captured state"
-status: ready
+status: blocked
 sprint: current
+blocked_on: 1687
 created: 2026-07-27
 updated: 2026-07-27
 priority: high
@@ -12,8 +13,8 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: generators
 goal: generator-model
-origin: "#3683 — new tests/differential/corpus/generators/06-closure-state.js surfaced this on first run"
-related: [3683]
+origin: "#3690 — new tests/differential/corpus/generators/06-closure-state.js surfaced this on first run"
+related: [3690]
 ---
 
 # #3687 — Concurrent generator instances from a shared closure factory corrupt captured state
@@ -57,4 +58,50 @@ pattern real code (iterator adapters, shared-counter utilities) can hit.
 
 ## Repro file
 
-`tests/differential/corpus/generators/06-closure-state.js` (see #3683).
+`tests/differential/corpus/generators/06-closure-state.js` (see #3690).
+
+## Root cause (confirmed 2026-07-27) — the smoking gun for the eager-buffer model
+
+Found it exactly: `src/runtime.ts` implements generators via an
+**eager-buffer** host runtime (`__gen_create_buffer` / `__gen_push_f64` /
+`__gen_push_i32` / `__gen_push_ref`), with a documented, deliberate hard
+cap:
+
+```
+// Eager-generator hard cap (#991/#992): we lower generators to an array
+// that is fully populated before .next() can be called. An infinite
+// generator (e.g. `while (true) { yield; }`) would push forever, OOMing
+// the Node process ... The cap is high enough (1M) that real-world
+// generators are never affected.
+const __EAGER_GEN_LIMIT = 1_000_000;
+```
+
+**`1000002` in the mismatch is not a random wrong value — it's the cap
+leaking into observable output.** `start()` (calling the closure-returning
+factory) creates a generator whose body is `while (true) { total += 1;
+yield total; }`. Because the model is eager, *creating* `g1` immediately
+runs that infinite loop to the 1,000,000-yield cap, incrementing the
+**shared closure variable `total`** all the way from 0 to 1,000,000 (buffer
+`[1..1000000]`) — before a single `.next()` is called. Creating `g2` right
+after does the same thing again, against the SAME now-already-1,000,000
+`total`, producing buffer `[1000001..2000000]`. `g1.next()`/`g1.next()`
+then just pop 1, 2 from `g1`'s buffer (looks correct by coincidence); the
+first `g2.next()` pops `g2`'s buffer head, in the `1,000,00x` range — hence
+`1000002` instead of the lazily-correct `3`.
+
+This confirms the `generator-model` goal doc's own diagnosis verbatim:
+*"The current eager-buffer implementation is fundamentally broken (infinite
+generators are impossible, lazy evaluation lost)."* This repro is a clean,
+concrete demonstration of exactly that: not just "infinite generators
+misbehave" in the abstract, but **silent, wrong-answer data corruption of
+ordinary mutable closure state**, with no error or diagnostic — the
+program still runs and prints a plausible-looking (wrong) number.
+
+**Not fixed here.** This needs the same Phase-3 native lazy-generator work
+as #3685/#3686 (`src/codegen/generators-native.ts`, `#1687`), specifically
+extending native-generator candidacy to generator factories that close
+over mutable outer-scope state and infinite/unbounded loop bodies — a
+genuinely architectural change to when/how generator bodies execute, not a
+local patch. Flagging as the highest-severity of the three sibling issues
+(silent correctness bug vs. #3685's wrong-value / #3686's trap) and a good
+canonical repro for that work's acceptance criteria.
