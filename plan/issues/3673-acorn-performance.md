@@ -564,6 +564,26 @@ Verification: 3251 ×18 green; regex/regexp suites — 17 failures
 identical on base (pre-existing (?i:) modifier-group set); corpus
 23/23; canaries 4/4; tsc clean.
 
+### Round 16 — literal-alternation trie in the regex bytecode compiler
+
+Acorn's keyword regexes (`^(?:break|case|…)$`, ~30 words) compiled to a
+linear SPLIT chain — every `keywords.test(word)` pushed one backtrack
+frame per word before failing. Literal alternations (≥4 pure-literal
+options, case-sensitive) now compile to a shared-prefix trie: grouping
+options with DISTINCT first chars is priority-safe (branches consume
+disjoint next chars, so ordered-alternation semantics are unobservable
+across groups); same-first-char options keep relative order recursively,
+prefix words become ε suffixes which BLOCK grouping across them, and
+case-insensitive alternations bail (folded first chars can collide).
+Measured (comparative probe, same load): 400k keyword tests 550 →
+425ms (−23% on the kw path). End-to-end bench deferred — the #3683 S2
+agent is compiling concurrently (loadavg ~4.3) and pollutes wall-clock;
+re-measure when quiet. Verification: full regex battery 40 failures,
+name-level identical to base (the pre-existing (?i:)/(?s:)/(?m:)
+inline-modifier family + 2175 ×3); trie probe (14 keyword cases,
+prefix words, ordered-priority exec) green; corpus 23/23; canaries 4/4;
+tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
