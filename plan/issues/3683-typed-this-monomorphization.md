@@ -132,6 +132,32 @@ Each slice is independently landable and measurable on the #3673 bench
   fnctor struct carries a sidecar field) + compile-time `m ∉ F's struct
   fields`; miss → the legacy `__call_m_` path unchanged.
 
+## S2 scoping (2026-07-27) — prerequisite refactor identified
+
+The twin emission point is `compileArrowAsClosure` (closures.ts ~1900-
+2500): the generic lifted body is compiled through ~200 lines of coupled
+machinery (capture/TDZ materialization, named-expr self bindings,
+savedFunc swap + liveBodies tracking, param defaults/destructuring,
+`arguments` vec, string-builder detection, var/let-const hoisting,
+generator/async lanes) that is NOT reusable as-is for a second
+compilation of the same AST. **S2 therefore starts with an extraction
+refactor**: pull the body-compilation core into a parameterized
+`compileLiftedClosureBody(ctx, arrow, opts)` consumed twice — once for
+the generic body (byte-identical output, verified by the full battery)
+and once for the twin with `opts.typedThis = {structTypeIdx,
+thisLocalIdx}`. Only then do the three lowering branches land
+(property-read, assignment, compound/update on a ThisKeyword receiver
+with `typedThisStructIdx` set — each an additive early-return that emits
+`struct.get`/`struct.set` and returns the FIELD's unboxed ValType, which
+is what lets downstream expression lowering stay numeric). Twin entry:
+`this` cast once from `__current_this`; the generic body gets a 3-instr
+`ref.test → forward-call` prepend. Additional S2 admission gates
+discovered: no nested function-likes in the body (a second compile would
+re-mint their closures), presence-tracked/optional fields excluded from
+the inline branches (the dispatcher's presence check is semantic), and
+`!moduleUsesDelete` (tombstone-aware reads). The shim keeps
+`__current_this` semantics for all non-field uses inside the twin.
+
 ## Acceptance criteria
 
 - S2: standalone acorn parse measurably faster than the #3673 round-13
