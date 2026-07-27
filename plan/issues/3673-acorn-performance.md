@@ -782,6 +782,50 @@ map to prove fnctor receivers and inline `struct.get`). Gates: full
 equivalence diffed BY NAME vs merge parent — identical 33-failure set;
 15 new pins; corpus 23/23; canaries; tsc clean.
 
+### Round 26 — #3683 S3 integrated (direct-call devirtualization)
+
+Merged `claude/3683-s3-direct-calls`: inside a typed twin, `this.<m>(args…)`
+on a write-once prototype method of the same fnctor lowers to a direct
+`call $__dc_<F>_<m>_<n>` with native-typed arguments — **1,458 sites across
+229 trampolines on acorn** (219 hit a twin, 10 degrade to the legacy fill).
+Kill-switch `JS2WASM_DIRECT_CALLS=0` reproduces the S4a tip byte-for-byte.
+
+**This is the first change in the #3683 family whose wall-clock effect is
+unambiguously outside the noise floor.** Same interleaved deep-warm
+min-of-batches methodology, with the S4a duplicate-baseline control arm made
+provably exact (the kill-switch build IS the base, asserted byte-identical):
+
+| session | batches | S3 | base | base2 | control band | S3 vs mean |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 (40) | s3,base,base2 | 1.1046 | 1.3085 | 1.3110 | 0.19 % | **−15.7 %** |
+| 2 (40) | base2,base,s3 | 1.1047 | 1.3225 | 1.3175 | 0.38 % | **−16.3 %** |
+| 3 (60) | base,s3,base2 | 1.0443 | 1.2866 | 1.2806 | 0.47 % | **−18.7 %** |
+
+The profile confirms the mechanism: the method-call bridge is **halved**,
+18.10 % → 9.62 % self time (`__call_fn_method_1` 5.78→2.57,
+`__call_fn_method_0` 3.81→1.56, `__method_cache_lookup` 3.21→1.13). Note that
+`__extern_get` 7.44→9.07 % and `__regex_run` 6.15→7.06 % are SHARE increases
+against a 15 % smaller total, not absolute regressions. Binary 1,808,486 →
+1,807,913 bytes (smaller — a direct call is fewer bytes than the dispatcher
+call it replaces).
+
+Two findings worth carrying forward:
+- **The remaining 428 declines are all `arity-mismatch`** — under-applied calls
+  (`this.parseIdent()` into a 1-formal method), the common JS shape. That is
+  the next increment, and #3683's S3 notes record the exact `__argc` = *formals*
+  + undefined-sentinel padding convention `__apply_closure`'s #3592 widening
+  uses, which a padding trampoline must reproduce or default-parameter presence
+  silently flips program-wide.
+- **A pre-existing latent bug in `fixups.ts` was surfaced and worked around, not
+  fixed**: its `ref.null.extern` retyping walks call arguments one INSTRUCTION
+  per parameter and skips a nested call by its PARAMETER count, so any argument
+  built from >1 instruction misaligns it. It was harmless only because every
+  callee in that position had an all-`externref` signature. Worth its own issue.
+
+Gates: full equivalence diffed BY NAME vs merge parent — identical 33-failure
+set; 16 new pins; corpus 23/23 with 0 real gaps; canaries 4/4 with `imports:
+0`; tsc, LOC-budget and oracle-ratchet clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
