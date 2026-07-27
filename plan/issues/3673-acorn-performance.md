@@ -30,6 +30,8 @@ loc-budget-allow:
   - src/codegen/native-strings-basics.ts
   - src/codegen/closed-method-dispatch.ts
   - src/codegen/closure-exports.ts
+  - src/codegen/vec-overlay.ts
+  - src/codegen/regexp-standalone.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -545,6 +547,22 @@ array is brand-new. The unbounded table itself (a genuine leak — WasmGC
 has no weak tables) is recorded as a standing issue for the S3-era
 per-vec companion field design. Verification: 3251 suites 18/18, 3116,
 corpus 23/23, pins 7/7; tsc clean.
+
+### Round 15 — overlay ensure-fresh priming at match-result construction
+
+The round-14 residue was the MISS scan: a fresh match array's first
+`index` define scanned the whole table to find nothing. The regex
+match-result builder KNOWS its array is brand-new, so it now calls the
+reserved `__vec_overlay_prime` (filled at finalize to
+`__vec_overlay_ensure_fresh` — the ensure append tail without the
+lookup) right after construction; the subsequent defines hit
+tab[count-1] first-probe on the newest-first scan. Per-match overlay
+cost is now O(1); the unbounded-table LEAK remains (WasmGC has no weak
+tables — needs the per-vec companion-field design, recorded for the
+#3683-era layout work). Measured: ~1.48-1.53ms min (≈2%).
+Verification: 3251 ×18 green; regex/regexp suites — 17 failures
+identical on base (pre-existing (?i:) modifier-group set); corpus
+23/23; canaries 4/4; tsc clean.
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
