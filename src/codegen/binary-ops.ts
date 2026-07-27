@@ -44,7 +44,12 @@ import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts, VOID_RESULT } from "./shared.js";
 import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
 import { compileStringBinaryOp, emitHoistedCharCodeAtRead, matchHoistedCharRead } from "./string-ops.js";
-import { emitAnyEqFromExternTemps, emitLooseEq, emitStrictEq } from "./coercion-engine.js";
+import {
+  emitAnyEqFromExternTemps,
+  emitLooseEq,
+  emitStrictEq,
+  ensureExternrefToNumberProvider,
+} from "./coercion-engine.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 import { compileTypedBinaryDispatch } from "./binary-ops-typed-dispatch.js";
 import { compileInOperator } from "./binary-ops-in.js";
@@ -425,10 +430,35 @@ export function compileBinaryExpression(
       // Already i32 — `x | 0` is identity, no work to do.
       return { kind: "i32" };
     } else if (leftType.kind === "externref") {
-      // externref → coerce to f64 first, then ToInt32
-      const pfIdx = ctx.funcMap.get("parseFloat");
-      if (pfIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: pfIdx });
+      // externref → coerce to f64 first, then ToInt32.
+      //
+      // (#3673, same class as the #2109 comparison-path fix below) This used to
+      // prefer `parseFloat` whenever the module happened to have registered it
+      // in `funcMap`, which is wrong twice over:
+      //   - SEMANTICS: `x | 0` is ToInt32(ToNumber(x)) (§13.15.3), NOT
+      //     ToInt32(parseFloat(ToString(x))). parseFloat takes the longest
+      //     numeric PREFIX and does not understand the radix prefixes, so
+      //     `"10abc" | 0` wrongly became 10 (spec: NaN → 0) and `"0x10" | 0`
+      //     wrongly became 0 (spec: 16) — but only in modules that also used
+      //     parseFloat somewhere, which is exactly the kind of action-at-a-
+      //     distance #2109 removed from the loose-equality/comparison arms.
+      //   - STANDALONE TRAP: the native `parseFloat` opens with an unguarded
+      //     `ref.cast $AnyString` on its externref param, so passing a boxed
+      //     NUMBER (the overwhelmingly common `x | 0` operand) trapped with
+      //     "illegal cast". Compiled acorn hit this on EVERY regex literal —
+      //     `RegExpValidationState.prototype.reset` does `this.start = start | 0`
+      //     with a numeric `start`.
+      // `__unbox_number` is the spec ToNumber frontier and — importantly for a
+      // hot operator — a SINGLE call: JS `Number()` under a host, and under
+      // `--target standalone` the native `addUnionImports` body (null → 0,
+      // i31/boxed number → value, boxed boolean → 0/1, native string →
+      // `__str_to_number` = StringToNumber §7.1.4.1, otherwise NaN). The
+      // inline `coerceType(..., "number")` ToPrimitive walk is NOT usable here:
+      // expanded at every `x | 0` site it made compiled acorn's standalone
+      // build time explode from ~18s to >10min.
+      const unboxIdx = ensureExternrefToNumberProvider(ctx, fctx);
+      if (unboxIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: unboxIdx });
       } else {
         coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       }
@@ -2063,6 +2093,31 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
     releaseTempLocal(fctx, lTmp);
     return { kind: "externref" };
   }
+  return emitAnyAddFromExternTemps(ctx, fctx, lTmp, rTmp);
+}
+
+/**
+ * (#3673) The §13.15.3 `+` dispatch for two operands ALREADY evaluated into
+ * externref temps — the temps-based twin of {@link emitAnyAdd}, mirroring
+ * `emitAnyEqFromExternTemps`.
+ *
+ * Split out because the compound `obj.prop += rhs` lowering
+ * (`operator-assignment.ts`) has no `ts.BinaryExpression` to hand `emitAnyAdd`:
+ * its left operand is the value it just READ back out of the property. The host
+ * lane could paper over that by calling `__host_add` directly (#2850), but the
+ * standalone lane has no such import, so it was left on an unconditional
+ * numeric `f64.add` — which silently NaN'd every dynamic string `+=`.
+ *
+ * Consumes (and releases) both temps; returns the ValType left on the stack —
+ * `externref` on the real dispatch, `f64` on the no-native-strings fallback.
+ */
+export function emitAnyAddFromExternTemps(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  lTmp: number,
+  rTmp: number,
+): ValType {
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
 
   // ── JS-host: JS `+` via __host_add ──
   if (!noJsHost) {

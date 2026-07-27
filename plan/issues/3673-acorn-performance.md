@@ -33,6 +33,9 @@ loc-budget-allow:
   - src/codegen/vec-overlay.ts
   - src/codegen/regexp-standalone.ts
   - src/codegen/native-regex.ts
+  - src/codegen/string-ops.ts
+  - src/codegen/binary-ops.ts
+  - src/codegen/expressions/call-receiver-method.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -758,6 +761,44 @@ inside acorn's own code paths. Each is a self-contained investigation —
 filed here so the medium-input benchmark (where per-parse fixed costs
 amortize and the node-acorn ratio is expected to be materially better)
 can be unlocked. Not chased further in this session (perf focus).
+
+### Round 26 — four root causes fixed, `escapes-unicode.js` green
+
+Standalone fixture failures **6 → 5**; the two `illegal cast` traps and
+the `u`-flag infinite HANG they were masking are gone. Diagnostics used:
+`.tmp/sa.mjs` (compile one tiny standalone program, print result/trap
+stack) and an instrumented-acorn probe (`.tmp/diag-raise.mjs`, which
+records acorn's RAW raise message before acorn's own
+`message += " (line:col)"` rewrite) — worth keeping, they turn
+`[object WebAssembly.Exception]` into a named cause in one 16s compile.
+
+| # | root cause | fixture |
+| --- | --- | --- |
+| 1 | `substr` missing from the guarded any-receiver string gate (Annex-B ⇒ absent from `STRING_METHODS`, which doubles as the JS-host import manifest, but a native `__str_substr` arm exists). Dynamic `this.input.substr(a, b)` fell to the generic `__extern_method_call` string-brand arm ⇒ `undefined` ⇒ `""`. | escapes-unicode ✅ |
+| 2 | `x \| 0` on an externref preferred `parseFloat` whenever the module had registered it. Wrong semantics (`"10abc"\|0`→10, `"0x10"\|0`→0) AND a hard trap: native `parseFloat` opens with an unguarded `ref.cast $AnyString`, so a boxed NUMBER operand → "illegal cast". acorn hit it on EVERY regex (`reset`'s `this.start = start \| 0`). Same class as #2109. | regex, generators-async (unmasked) |
+| 3 | A user method sharing a `String.prototype` name was answered with the string arm's *miss sentinel*. acorn's `RegExpValidationState.prototype.at` vs `String.prototype.at`: `state.at(i)` read back `0` instead of the `-1` EOF sentinel, so `regexp_eatPatternCharacters`'s `while ((ch = state.current()) !== -1 …)` **never terminated** — every `u`-flag regex HUNG the standalone parser. New `collectUserMethodNames` pre-pass + a `__call_m_<name>_<arity>` fallback on the miss, scoped to names the source actually defines so the unboxed hot path (charCodeAt/slice/substr) is untouched. | regex (hang) |
+| 4 | `obj.prop += rhs` on a dynamic receiver was an unconditional `f64.add` standalone. #2850 fixed exactly this for the host lane and explicitly excluded standalone; `emitAnyAddFromExternTemps` (split out of `emitAnyAdd`) gives the standalone lane the same §13.15.3 dispatch. | (independent; pinned) |
+
+Pins: `tests/issue-3673-standalone-gaps.test.ts` (20).
+
+### Remaining standalone fixture gaps (round 26 diagnosis)
+
+Now that the traps/hangs are gone, the failures are **named acorn
+raises** rather than opaque exceptions:
+
+| fixture | acorn's own message | diagnosis |
+| --- | --- | --- |
+| destructuring.js | `Binding rvalue` @ the shorthand key | `const { x } = o` fails, `{ y: yy }` / `{ ...r }` PASS ⇒ isolated to the **shorthand** property, whose value node acorn builds with `copyNode` = `for (var p in node) newNode[p] = node[p]`. On a fnctor instance standalone, `for…in` enumerates **0 keys**, `Object.keys` returns **0**, and a computed write `n[k] = v` is a **no-op** (all three verified minimal). So the copy is empty ⇒ `.type` undefined ⇒ `checkLValSimple` default. |
+| arrow-params.js | `Assigning to rvalue` | same `copyNode`/shorthand cause, non-binding side. |
+| regex.js | `Duplicate capture group name` on `/(?<year>…)-(?<month>…)/` | the two names collapse to one `groupNames` key ⇒ `state.lastStringValue += codePointToString(…)` is not accumulating. NOT fully explained by gap 4 above (that fix is landed and pinned; regex.js still fails), so the residue is in the fnctor `this.<field>` read/write path. **Caveat: not established.** Minimal probes of that path are confounded — an external `s.pos` read returns 0 even in shapes where acorn's own internal `this.pos` demonstrably works, so the probe may be measuring the READ, not the write. Needs a probe that observes the field from INSIDE the fnctor. |
+| generators-async.js | `Unexpected token` @ pos 124 (`async function* ag`) | async-generator declaration parse; not yet investigated. |
+| literals.js | our runtime throws `Cannot convert string to a BigInt in standalone mode` | `BigInt(str)` has no native standalone implementation (`__bigint_ctor` defers string parsing). acorn's `stringToBigInt` calls it directly. Bounded: parse decimal + `0x`/`0o`/`0b` into the i64 carrier. |
+
+The `for…in` / `Object.keys` / computed-write gap on fnctor instances is
+the highest-value next slice — it alone unblocks two fixtures and is a
+general reflection hole, not an acorn quirk. It lives in the
+fnctor/typed-this machinery (`deriveFnctorFields` + the member-set
+dispatchers), so it wants to be sequenced against #3683's owner.
 
 ### Round 25 — #3683 S4a integrated (numeric f64 fields)
 
