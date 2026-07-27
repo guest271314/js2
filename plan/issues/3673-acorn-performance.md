@@ -476,6 +476,53 @@ Verification (round 10): 2151-nary/dynamic-spread/spread-literal, 1712
 acceptance, 2664-arity-dispatch all green; host corpus 23/23 exact;
 #3673 pins 7/7; canaries 4/4; tsc clean.
 
+## What "surpass node-acorn" actually requires (measured decomposition)
+
+Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
+the same input is **0.0341ms** (measured; the earlier 0.06 estimate was
+generous) — the remaining gap is **~56x**. Two more null results recorded
+honestly: aggressive Binaryen inlining
+(`--flexible-inline-max-function-size=500
+--one-caller-inline-max-function-size=1000`) is wall-flat (1.92ms — V8's
+wasm tiering already absorbs the call overhead), and cold single-parse
+also loses (wasm compile of the 1.27MB module ~75ms vs ~23ms for V8
+parsing+evaluating acorn.mjs and one interpreter-tier parse).
+
+Time split of the round-10 profile (excluding harness noise): **runtime
+helpers ≈58%, user-closure code ≈38%, GC ≈5%**. Zeroing every remaining
+runtime helper — the asymptote of the inline-cache/fast-path program this
+branch has been executing — lands around **0.8ms, still ~23x off**. The
+user-closure share is the compiled parser itself: every field read is a
+dispatcher CALL returning a boxed value, every arithmetic op round-trips
+through externref boxing, every method call crosses the closure-call
+bridge. node-acorn's equivalents are single machine loads under inline
+caches.
+
+Surpassing node-acorn is therefore a CODEGEN-ARCHITECTURE goal, not a
+runtime-tuning goal. The concrete path (maps to existing goals):
+
+1. **Typed `this` monomorphization for fnctor prototype methods**
+   (#1946/#1947 class of work): when every callee of
+   `Parser.prototype.readToken` is provably a `$__fnctor_Parser`
+   receiver, compile the method with `this: (ref $__fnctor_Parser)` —
+   field reads become bare `struct.get`, writes `struct.set`, no
+   dispatcher calls.
+2. **Unboxed value representation** (#1584 / value-rep goal): keep
+   number-typed locals/fields as raw f64/i32 through expressions;
+   box only at genuine `any` boundaries. Kills the
+   `__box_number`/`__unbox_number`/`$AnyValue` churn that dominates the
+   user-closure share.
+3. **Direct-call devirtualization**: `this.method(...)` on a
+   monomorphized receiver becomes a direct `call` to the compiled
+   method function (no closure struct, no `__apply_closure`, no
+   `call_ref` type ladder).
+4. Only then do the residual runtime helpers (`__regex_run`,
+   `__to_primitive`, iterator glue) matter again.
+
+Items 1-3 are the standing IR/value-rep roadmap; this branch's inline
+caches remain valuable as the fallback path those optimizations demote
+to.
+
 ## Round 6 — arity IN the closure representation (the deferred layout change)
 
 Every closure struct in the root wrapper hierarchy now carries an immutable
