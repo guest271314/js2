@@ -23,6 +23,11 @@ loc-budget-allow:
   - src/codegen/expressions/assignment.ts
   - src/codegen/expressions/operator-assignment.ts
   - src/codegen/expressions/unary-updates.ts
+  # S4a: the whole-program numeric-property analysis lives in its own module;
+  # `fnctor-escape-gate.ts` (already listed) gains the promotion loop and
+  # `context/types.ts` / `index.ts` one field + one pre-pass call each.
+  - src/codegen/numeric-property-analysis.ts
+  - src/codegen/context/types.ts
 ---
 
 # #3683 — Typed-`this` monomorphization for fnctor prototype methods
@@ -262,6 +267,153 @@ green: `DOGFOOD_ACORN=1 dogfood:acorn-corpus` (distinct REAL gaps 0),
 `issue-1712` acorn differential AST parity, `issue-3673-i31-smallint`,
 `issue-2151-nary`, `issue-2674-*`, `issue-3683-proto-method-write-once`, and
 the 12 new `issue-3683-typed-this-twin` pins.
+
+## S4a implementation notes (2026-07-27) — landed, and the measurement that
+## redirects the roadmap
+
+**What landed.** A new whole-program analysis,
+`src/codegen/numeric-property-analysis.ts`
+(`analyzeNumericPropertyNames`), computes the property NAMES whose complete
+statically visible write set is numeric; `deriveFnctorFields` then gives such a
+field a PHYSICAL `f64` slot instead of the boxed `externref` carrier.
+Standalone lane only. 13 pins in `tests/issue-3683-numeric-fields.test.ts`;
+kill-switch `JS2WASM_NUMERIC_FIELDS=0`, diagnostics
+`JS2WASM_NUMERIC_FIELDS_DEBUG=1` / `JS2WASM_NUMERIC_FIELDS_EXPLAIN=<names>`.
+
+**Why the field was externref at all** (the thing S2's note asked S4 to fix):
+`deriveFnctorFields` types a field from the FIRST constructor write's checker
+type. Acorn's is `if (startPos) { this.pos = startPos; … } else { this.pos =
+this.lineStart = 0; }` with `this: any`, so the first write wins and `pos` —
+82 numeric writes across the whole parser — carries a box.
+
+**`pos` is the keystone, and a fully SOUND analysis proves nothing.** `start`,
+`end`, `lastTokStart`, `lastTokEnd`, `potentialArrowAt`, `yieldPos` are all
+written from `this.pos`, so they stand or fall with it. Its one
+non-numeric-provable write is `this.pos = startPos`, whose value comes from the
+public `parseExpressionAt(input, pos, options)` entry point — unprovable by
+construction. The analysis therefore has exactly ONE trust boundary: a bare
+read of a PARAMETER slot counts as *opaque* rather than *non-numeric*, so a
+non-number written through such a site is ToNumber-coerced. This demands
+strictly MORE evidence than the status quo (which types a field from ONE write
+and coerces all the others — `awaitPos` is f64 today for exactly that reason),
+requires ≥1 provably-numeric write to ground the slot, and is off in host mode.
+The divergence is pinned (`p.pos = "5"` stores `5` promoted, `"5"` unpromoted).
+
+**Design points worth keeping.** Name-keyed like #2847's boolean brand (strictly
+more conservative than per-class, and it sidesteps the alias problem a
+per-class verdict would need a points-to analysis for). Value inference uses
+LEXICAL SLOTS, not #2847's pooled bare names — pooling every `i`/`end`/`size`
+in a 230 KB module into one verdict sinks the analysis on one non-numeric use,
+and switching to slots is what took acorn from 0 hot fields to all of them.
+Three carve-outs (presence-tracked, `delete` targets, accessor names) each have
+a positive control in the pin suite. Boolean names are excluded by passing
+#2847's REAL verdict in as `excludeNames` — deriving a second opinion raced the
+brand and would have made `node.static === false` answer `false`.
+
+Two refinements integration forced, both documented in the module:
+- **`a[k] = b[k]` with the same key slot is not a poison.** Acorn's `copyNode`
+  is a computed write through a #2660-proven fnctor instance, which tripped the
+  hard sentinel and zeroed the entire slice. It is name-PRESERVING, which is
+  exactly what a name-keyed verdict already covers. A real `this[k] = …` still
+  poisons.
+- **`this.f += <opaque param>` is acceptable** (acorn's `this.pos += size`), on
+  the same trust boundary — but it does NOT ground a slot.
+
+**Acorn verdict** (22 names program-wide): `pos` (232 inline twin read sites),
+`start` (92), `lastTokStart` (18), `lastTokEnd` (18), `end`, `curLine`,
+`potentialArrowAt`, `yieldPos`, `awaitPos`, `awaitIdentPos` promoted; `type`
+(242 sites), `options` (224), `value`, `strict`, `context`, `input`, `labels`,
+`scopeStack`, `lineStart` correctly kept. Binary 1,794,038 → 1,793,281 bytes.
+
+### The measurement — and why it is the most useful thing in this slice
+
+Same interleaved methodology as S2 (all arms in ONE process, round-robin,
+min-of-N-batches × 200 parses of the 330 B corpus) with one addition that turned
+out to be decisive: **a duplicate baseline arm built from the identical commit**
+(`base2`), which measures the harness's own noise floor.
+
+| session | batches | S4a | base | base2 (identical to base) | control spread |
+| --- | --- | --- | --- | --- | --- |
+| pre-merge | 24 | 0.8648 | 0.8647 | 0.8089 | **6.5 %** |
+| pre-merge (reordered) | 24 | 0.8434 | 0.8663 | 0.8583 | 0.9 % |
+| pre-merge | 40 | 0.8323 | 0.8345 | 0.8393 | 0.6 % |
+| merged | 40 | 0.5700 | 0.5818 | 0.5914 | 1.6 % |
+| merged (reordered) | 40 | 0.7225 | 0.7251 | 0.7164 | 1.2 % |
+| merged | 60 | 0.7302 | 0.7457 | 0.7209 | **3.4 %** |
+
+S4a against the mean of the two baselines: −2.8 %, +0.2 %, −0.4 %, −0.5 % on the
+four ≥40-batch sessions (mean ≈ −0.9 %). Directionally consistent, but **the two
+byte-identical control arms disagree by 0.6–3.4 % in the same runs**, so the
+wall-clock effect is NOT separable from noise at this scale. Read the honest
+result as: *at most ~1–2 %, indistinguishable from zero on this harness.*
+(Anything read off a 24-batch run at this effect size is noise — the first row
+is the proof, and it is worth remembering before trusting a future 5 % claim.)
+
+The reliable evidence is the profile, not the clock.
+
+The V8 CPU profile says exactly why, and this is the finding that should
+re-sequence the remaining work. Base → S4a, self time:
+
+| helper | base | S4a |
+| --- | --- | --- |
+| `__box_number` | 1.81 % | 1.33 % |
+| `__unbox_number` | 1.66 % | 1.32 % |
+| `__to_primitive` | 1.00 % | 0.68 % |
+| `__apply_closure` | 1.47 % | 1.05 % |
+
+**The entire boxing/unboxing surface was only ≈4.5 % of the profile to begin
+with**, and S4a took about a third of it. The S2 note's inference — "the win is
+the boxing" — was qualitatively right about the mechanism (the box IS removed:
+`__unbox_number` sites 5576 → 5270, `__to_primitive` 1500 → 1207) and
+quantitatively wrong about the size of the prize. Where the time actually is,
+in the S4a profile:
+
+- **method-call bridge ≈13 %** — `__call_fn_method_1` 4.9 %,
+  `__call_fn_method_0` 3.6 %, `__method_cache_lookup` 2.3 %,
+  `__extern_method_call` 1.2 %, `__apply_closure` 1.1 %. **This is S3.**
+- **generic property lookup ≈14 %** — `__extern_get` 7.9 % plus `__str_equals`
+  6.1 % (the name compare inside the dispatchers). These are the reads S2/S4
+  do NOT reach: non-`this` receivers (`node.start`, `this.options.locations`).
+  The natural follow-on is extending the #2660 receiver-flow map so a proven
+  fnctor receiver gets the same inline `struct.get` a twin's `this` gets.
+- **regex engine 8.7 %** (`__regex_run`), **GC 1.9 %**.
+
+One caveat S4a itself surfaces: promoting a slot moves cost, it does not only
+remove it. Static `__box_number` call sites went UP 3412 → 4793, because an f64
+field read that feeds an externref consumer (a call argument, an untyped local)
+must now box on the way out. The dynamic share still fell, because #3673's i31
+small-int boxing makes those added boxes allocation-free while the removed
+unboxes were real calls — but it means the promotion only pays where the
+consumer is numeric, and **S4b (raw f64 locals inside twins) is what would
+close the loop**. Its ceiling is now measurable and small: box + unbox +
+to_primitive in S4a total **3.3 %**, so perfect elimination of all remaining
+boxing is worth ~3 %. That is why S4b was NOT attempted here — the same effort
+against `__extern_get`/`__str_equals` or S3's call bridge addresses 4× more
+time.
+
+**Verification.** `tsc` clean; acorn standalone canaries 2/3/4/5 with
+`imports: 0`; `DOGFOOD_ACORN=1 dogfood:acorn-corpus` 23/23 exact, distinct REAL
+gaps 0; 15 S4a pins; `issue-3683-typed-this-twin` 12/12,
+`issue-3683-proto-method-write-once` 10/10, `issue-3673-i31-smallint` 7/7,
+`issue-2151-nary`, `issue-1712` ×5, `issue-2674` ×2, `issue-2664` ×2 all green.
+
+Full `tests/equivalence` (213 files / 1,646 tests) run on the merged state AND
+on the merge parent `5d8dafd2`, both with `--reporter=json`, and diffed by FULL
+TEST NAME rather than by counts: **33 failed / 1,610 passed / 3 todo on both,
+identical set, zero tests failing on only one side.** The 13 failing files
+(`arguments-nested-and-loops`, `array-inline-return`, `delete-sentinel`,
+`issue-1197`, `logical-conditional-identity`, `misc-small-patterns`,
+`new-non-constructor`, `null-dereference-guards`, `optional-direct-closure-call`,
+`reflect-api`, `spec/coercion-arithmetic-add`, `tdz-reference-error`,
+`yield-as-expression`) are all pre-existing. `delete-sentinel` failing on both
+sides is worth noting explicitly given S4a's delete carve-out: the carve-out is
+what keeps it from getting WORSE, and it was already failing.
+
+Three soundness fixes were found by review before that differential and are in
+their own commit: `ownReturnExpressions` missing #2847's definite-return guard
+(a function that falls off the end returns `undefined`, which is invisible in
+its return list), an unguarded `parent` deref in the scope walk, and
+exponential branching in `isString`'s slot recursion.
 
 ## Acceptance criteria
 

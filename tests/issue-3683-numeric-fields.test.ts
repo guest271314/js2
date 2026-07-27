@@ -267,6 +267,51 @@ export function test(): number { return p.kind(); }`,
     expect(l.off.result).toBe(0); // unpromoted: the string survives
   });
 
+  it("a promoted slot still marshals through the reflection arms", async () => {
+    // `fillClosedStructExternGetArms` and the hasOwn / getOwnPropertyDescriptor
+    // / ownKeys arms all read the slot generically. A promoted f64 has to box
+    // on the way out of each of them exactly as the boxed carrier did.
+    const l = await lanes(
+      `var P = function P(startPos) { this.pos = startPos; };
+var p = new P(0);
+p.pos = 7;
+export function test(): number {
+  var viaComputed = p["pos"];
+  var d = Object.getOwnPropertyDescriptor(p, "pos");
+  var keys = Object.keys(p);
+  return (viaComputed === 7 ? 1 : 0)
+    + (Object.prototype.hasOwnProperty.call(p, "pos") ? 2 : 0)
+    + (d !== undefined && d.value === 7 ? 4 : 0)
+    + (keys.length === 1 && keys[0] === "pos" ? 8 : 0)
+    + (JSON.stringify(p) === "{\\"pos\\":7}" ? 16 : 0);
+}`,
+    );
+    expectPromoted(l, "P", "pos");
+    // The claim is COHERENCE, not completeness: the two lanes must answer
+    // identically. (They currently answer 3 — the computed read and `hasOwn`
+    // arms work, while `getOwnPropertyDescriptor` / `Object.keys` /
+    // `JSON.stringify` over a standalone fnctor instance are pre-existing gaps
+    // that behave the same with and without the promotion. Asserting the ideal
+    // 31 here would pin an unrelated bug rather than this slice.)
+    expect(l.on.result).toBe(l.off.result);
+    expect(l.on.result).toBe(3);
+  });
+
+  it("a promoted slot enumerates and reads back through `for…in`", async () => {
+    const l = await lanes(
+      `var P = function P(startPos) { this.pos = startPos; };
+var p = new P(0);
+p.pos = 9;
+export function test(): number {
+  var sum = 0; var seen = 0;
+  for (var k in p) { seen++; sum += p[k]; }
+  return seen * 100 + sum;
+}`,
+    );
+    expectPromoted(l, "P", "pos");
+    expect(l.on.result).toBe(l.off.result);
+  });
+
   it("host mode is untouched by the promotion", async () => {
     // The trust boundary is only defensible where the module owns every write.
     // A JS host can hand the module anything, so the host lane never promotes.
