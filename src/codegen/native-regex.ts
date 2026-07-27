@@ -311,6 +311,22 @@ export function ensureRegexRun(ctx: CodegenContext): number {
   const funcIdx = mintDefinedFunc(ctx);
   ctx.nativeRegexHelpers.set("__regex_run", funcIdx);
 
+  // (#3673 round 22) Backtrack-stack POOL: `__regex_search` invokes the VM
+  // once per scan position, and every invocation allocated (and zeroed) a
+  // fresh 64-slot frame array. A single module-global pool slot makes the
+  // top-level run REUSE the previous run's (possibly grown) stack: checkout
+  // nulls the slot (a NESTED lookaround run then simply allocates fresh —
+  // reentrancy-safe), and both VM exits check the stack back in. Frames above
+  // `top` may retain stale snapshot refs until overwritten — bounded by the
+  // deepest stack seen, the standard engine trade.
+  const stackPoolGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: "__re_stack_pool",
+    type: { kind: "ref_null", typeIdx: frameArrIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: frameArrIdx }],
+  });
+
   // params
   const PROG = 0,
     CTAB = 1,
@@ -608,7 +624,12 @@ export function ensureRegexRun(ctx: CodegenContext): number {
                                                         blockType: { kind: "empty" },
                                                         then: clearArm(),
                                                         // op == MATCH (the only remaining op): return 1
-                                                        else: [{ op: "i32.const", value: 1 }, { op: "return" }],
+                                                        else: [
+                                                          { op: "local.get", index: STACK },
+                                                          { op: "global.set", index: stackPoolGlobalIdx }, // (#3673 r22) pool check-in
+                                                          { op: "i32.const", value: 1 },
+                                                          { op: "return" },
+                                                        ],
                                                       },
                                                     ],
                                                   },
@@ -1451,14 +1472,32 @@ export function ensureRegexRun(ctx: CodegenContext): number {
     { op: "i32.const", value: REGEX_STEP_CAP },
     { op: "i32.add" },
     { op: "local.set", index: BUDGET },
-    // stack = array.new_default(INITIAL_STACK_CAP); top=0; capUsed=INITIAL
-    { op: "i32.const", value: INITIAL_STACK_CAP },
-    { op: "array.new_default", typeIdx: frameArrIdx },
-    { op: "local.set", index: STACK },
+    // stack = pool checkout ?? array.new_default(INITIAL_STACK_CAP); top=0
+    { op: "global.get", index: stackPoolGlobalIdx },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: INITIAL_STACK_CAP },
+        { op: "array.new_default", typeIdx: frameArrIdx },
+        { op: "local.set", index: STACK },
+        { op: "i32.const", value: INITIAL_STACK_CAP },
+        { op: "local.set", index: CAP_USED },
+      ],
+      else: [
+        { op: "global.get", index: stackPoolGlobalIdx },
+        { op: "ref.as_non_null" },
+        { op: "local.set", index: STACK },
+        { op: "local.get", index: STACK },
+        { op: "array.len" },
+        { op: "local.set", index: CAP_USED },
+        { op: "ref.null", typeIdx: frameArrIdx },
+        { op: "global.set", index: stackPoolGlobalIdx },
+      ],
+    },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: TOP },
-    { op: "i32.const", value: INITIAL_STACK_CAP },
-    { op: "local.set", index: CAP_USED },
     {
       op: "loop",
       blockType: { kind: "empty" },
@@ -1494,7 +1533,16 @@ export function ensureRegexRun(ctx: CodegenContext): number {
             // if top == 0 return 0
             { op: "local.get", index: TOP },
             { op: "i32.eqz" },
-            { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 0 }, { op: "return" }] },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: STACK },
+                { op: "global.set", index: stackPoolGlobalIdx }, // (#3673 r22) pool check-in
+                { op: "i32.const", value: 0 },
+                { op: "return" },
+              ],
+            },
             // top--; frame = stack[top]
             { op: "local.get", index: TOP },
             { op: "i32.const", value: 1 },

@@ -707,6 +707,21 @@ Measured: window 0.86-0.90 → **0.82-0.87ms** (~3-4%). Verification:
 cache-semantics battery (accessor/defineProperty/delete/2896/2866/1888/
 2674/2963/twin/i31) 118/118; corpus 23/23; canaries 4/4; tsc clean.
 
+### Round 22 — backtrack-stack pool in the regex VM
+
+`__regex_run` allocated (and zeroed) a fresh 64-slot backtrack-frame
+array per invocation — and `__regex_search` invokes it once per scan
+position. A single module-global pool slot now lets the top-level run
+REUSE the previous run's (possibly grown) stack: checkout nulls the
+slot, so a NESTED lookaround run simply allocates fresh
+(reentrancy-safe); both VM exits check the stack back in (the cap-throw
+path doesn't — a thrown parse abandons the pool entry, refilled on the
+next run). Frames above `top` may retain stale snapshot refs until
+overwritten — bounded by the deepest stack seen, the standard engine
+trade. Measured: window 0.82-0.87 → **0.78-0.83ms**. Verification: full
+regex battery failure set identical to base (timing-stripped name
+diff); trie probe green; corpus 23/23; canaries 4/4; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on
