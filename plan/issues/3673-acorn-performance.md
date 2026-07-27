@@ -595,6 +595,35 @@ scratch local; arms compare the local against their interned literals
 28/28; corpus 23/23; canaries 4/4; tsc clean. End-to-end bench still
 deferred to a quiet box (S2 agent compiling concurrently).
 
+### Round 18 — #3683 S2 integrated (typed-`this` twins)
+
+Merged `claude/3683-s2-typed-this` (5 commits, built by a parallel
+session against the S2 spec): `compileLiftedClosureBody` extracted from
+`compileArrowAsClosure` (verified byte-identical pre-twin), then 244
+typed twins on acorn's admitted prototype methods — `this.field`
+reads/writes/compounds/inc-decs lower to bare `struct.get`/`struct.set`
+inside the twin (1,340/98/20/98 sites), with a `return_call` shim in the
+generic body (`ref.test $__fnctor_F` → twin; miss → original dynamic
+body). Kill-switch `JS2WASM_TYPED_THIS=0`; `=shim` isolates the twin
+overhead. The S2 agent's isolated measurement: full ≈5% under baseline,
+≈9.5% under shim-only. One pin updated at integration: the
+detached-receiver absolute value is now the JS-correct 199 — the sibling
+`Function.prototype.call/apply` fix (absent from the agent's base) makes
+`.call(plain)` read the real receiver in both lanes; twin ≡ generic held
+throughout.
+
+**Merged-tree quiet-box bench: 1.392ms min (median ≈1.44)** — cumulative
+52.4 → 1.39 (~38x); node-acorn gap ~41x. KEY SEQUENCING FINDING from the
+S2 measurement: Parser's hot fields are mostly `externref` (`type`,
+`pos`, `options`, `start`, `value`…; only awaitPos/yieldPos/awaitIdentPos
+are f64) — S2 removes the dispatcher CALL but not the BOXING, so **S4
+(value-rep: f64/i32-typed struct fields + unboxed locals in twins) is
+re-sequenced ahead of S3** (S3's direct calls then also recover the ~5%
+shim cost). Verification: twin pins 12/12, write-once pins 10/10, i31
+pins 7/7, 1712 + 2151-nary + 2674 + 2963 green, corpus 23/23, canaries
+4/4; the agent additionally ran full equivalence (213 files) on its
+branch — identical failure set to its base; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

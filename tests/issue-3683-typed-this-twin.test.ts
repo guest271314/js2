@@ -163,12 +163,14 @@ pp.get = function () { return this.v; };
 var p = new P();
 var plain = { v: 99 };
 export function test(): number { return p.get() * 100 + pp.get.call(plain); }`;
-    // twin ≡ generic is the S2 invariant. (The absolute value is a separate
-    // pre-existing gap: a `.call()`-detached plain-object receiver already
-    // reads 0 for `this.v` on `main`, in BOTH lanes.)
+    // twin ≡ generic is the S2 invariant. The absolute value is the
+    // JS-correct 199 (1*100 + 99): the sibling `Function.prototype.call/
+    // apply on a closure` fix (merged after this pin was written against a
+    // base where the detached read answered 0) makes `.call(plain)` read the
+    // real receiver — in BOTH lanes.
     const { twin, generic } = await bothLanes(src);
     expect(twin).toBe(generic);
-    expect(twin).toBe(100);
+    expect(twin).toBe(199);
   });
 
   it("params, defaults and locals survive the second compilation", async () => {
