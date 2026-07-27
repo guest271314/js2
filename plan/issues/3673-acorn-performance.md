@@ -989,6 +989,30 @@ into the existing i64 carrier. Reusable diagnostics left in `.tmp/`:
 `sa.mjs` and `diag-raise.mjs` turn an opaque exception into a named
 cause in one 16 s compile.
 
+### Round 29 — unanchored leading-literal prefilter (general win, FLAT on acorn)
+
+Round 20 made *anchored* programs try exactly one start position. An
+UNANCHORED program whose first non-SAVE op is `CHAR c` still ran the
+full backtracking VM at every position, even though a match must begin
+with `c`. `__regex_search` now records that leading unit and advances
+past non-matching positions with one `array.get` each. Narrow by
+design: plain `CHAR` only — not `CHARI` (ASCII fold needs two compares)
+and not `CLASS` (table walk) — with `-1` disabling the filter so every
+other program keeps round-20 behavior exactly.
+
+**Synthetic probe: 200k unanchored literal scans 146.7 → 24.6 ms (6x),
+identical results. End-to-end on acorn: FLAT (0.693-0.718 ms vs
+0.708-0.709).** Honest reading: acorn's hot regexes are anchored
+(round 20 already handles them) or class-headed (filter stays off), so
+this pattern class barely appears in the parse. Kept because it is a
+correct, general engine improvement that costs one compare per skipped
+position against a whole VM invocation — but recorded as NOT a
+benchmark win, in the same spirit as the i31 and ladder-reorder nulls.
+
+Verification: full regex battery failure set identical to the known
+pre-existing 40; corpus 23/23 with 0 real gaps; canaries `imports:
+ZERO`; tsc clean.
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

@@ -1700,6 +1700,7 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     CAPS = 8;
   const I = 9; // current start position
   const PC = 10; // (#3673 round 20) anchored-detection scan cursor
+  const LEADCH = 11; // (#3673 round 29) leading literal code unit, -1 when none
 
   const body: Instr[] = [
     // (#3673 round 20) Start-anchored fast-out: when the program's first
@@ -1712,6 +1713,8 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     // leaves the scan untouched. Equivalent by construction: with a
     // multiline=0 BOL head, run(i) for i>start fails BOL exactly as the scan
     // would discover, one attempt at `start` decides the result.
+    { op: "i32.const", value: -1 },
+    { op: "local.set", index: LEADCH }, // (#3673 round 29) filter disabled by default
     { op: "i32.const", value: 0 },
     { op: "local.set", index: PC },
     {
@@ -1774,6 +1777,32 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
             { op: "local.set", index: STICKY },
           ],
         },
+        // (#3673 round 29) UNANCHORED first-literal prefilter. When the first
+        // non-SAVE op is `CHAR c`, every match MUST begin with `c`, so start
+        // positions whose code unit differs cannot match — the full VM attempt
+        // there is pure overhead. Record `c` in LEADCH; the scan loop below
+        // advances past non-`c` positions with one `array.get` each instead of
+        // a `__regex_run` call. Deliberately narrow: only plain `CHAR` (not
+        // `CHARI`, whose ASCII fold would need two comparisons, and not
+        // `CLASS`, which needs a table walk); `-1` disables the filter, so
+        // every other program keeps the exact round-20 behavior.
+        { op: "local.get", index: PROG },
+        { op: "local.get", index: PC },
+        { op: "array.get", typeIdx: i32Arr },
+        { op: "i32.const", value: 0 }, // ReOp.CHAR
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: PROG },
+            { op: "local.get", index: PC },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: LEADCH },
+          ],
+        },
       ],
     },
     // i = max(0, start)
@@ -1804,6 +1833,50 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
             { op: "local.get", index: SLEN },
             { op: "i32.gt_s" },
             { op: "br_if", depth: 1 },
+            // (#3673 round 29) leading-literal prefilter: advance `i` past any
+            // position whose code unit cannot start a match. Bounds: stops at
+            // `i == slen` so the final empty-tail position still gets its
+            // regular attempt (a CHAR program fails there anyway, but keeping
+            // the loop shape identical avoids reasoning about EOL/lookaround
+            // interactions).
+            { op: "local.get", index: LEADCH },
+            { op: "i32.const", value: 0 },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                {
+                  op: "block",
+                  blockType: { kind: "empty" },
+                  body: [
+                    {
+                      op: "loop",
+                      blockType: { kind: "empty" },
+                      body: [
+                        { op: "local.get", index: I },
+                        { op: "local.get", index: SLEN },
+                        { op: "i32.ge_s" },
+                        { op: "br_if", depth: 1 },
+                        { op: "local.get", index: SDATA },
+                        { op: "local.get", index: SOFF },
+                        { op: "local.get", index: I },
+                        { op: "i32.add" },
+                        { op: "array.get_u", typeIdx: strDataIdx },
+                        { op: "local.get", index: LEADCH },
+                        { op: "i32.eq" },
+                        { op: "br_if", depth: 1 },
+                        { op: "local.get", index: I },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: I },
+                        { op: "br", depth: 0 },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
             // re-init caps to -1
             { op: "local.get", index: CAPS },
             { op: "i32.const", value: 0 },
@@ -1845,6 +1918,7 @@ export function ensureRegexSearch(ctx: CodegenContext): number {
     locals: [
       { name: "i", type: { kind: "i32" } },
       { name: "pc", type: { kind: "i32" } }, // (#3673 round 20)
+      { name: "leadch", type: { kind: "i32" } }, // (#3673 round 29)
     ],
     body,
     exported: false,
