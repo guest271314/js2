@@ -623,6 +623,83 @@ issue-2865 async-await ×2, issue-2879 floor ×2, issue-681 iterators ×2),
 host corpus 23/23 exact, host bench unchanged, 1712 pins green, tsc +
 biome clean.
 
+## Correctness fix — `Function.prototype.call`/`apply` on a closure
+
+(Not a perf round: a semantics bug surfaced by scaling the standalone
+benchmark up to a full-size input.)
+
+Found by scaling the standalone benchmark from the 4 tiny canaries + the
+330 B fixture up to acorn parsing **its own 245 KB `dist/acorn.js`**. The
+canaries pass; the full self-parse did not — it died with
+`TypeError: Cannot access property on null or undefined at 2724:51`
+(`parseMaybeAssign`, `refDestructuringErrors.shorthandAssign >= left.start`).
+
+Root cause, and it is a **correctness bug, not a perf one**: a closure is
+not a `$Object`, so `__extern_method_call` sent a method call on a function
+value to the #3468 closure own-property side table. That table has no
+`call`/`apply` entry, so the lookup missed and the whole call expression
+evaluated to `undefined` — the function was never invoked. It only bites
+where the receiver is **dynamic** (a parameter or field), because a static
+receiver is rewritten by the `.call`/`.apply` cases in `calls.ts` long
+before the runtime sees it. acorn hits exactly that shape:
+`left = afterLeftParse.call(this, left, startPos, startLoc)` with
+`afterLeftParse` a parameter (`this.parseParenItem`), so `left` came back
+`undefined` and every parenthesized or destructuring assignment crashed on
+the following line.
+
+Fix: a new reserved helper `__closure_method_call(fn, name, args)` (same
+reserve-then-fill discipline as the rest of C-core, so no funcIdx shift),
+spliced into `__extern_method_call`'s non-`$Object` arm. Two routes in spec
+precedence order — an own property in the closure's bag still wins (§10.2
+[[Get]], the #3468 `assert` harness behaviour, unchanged), otherwise
+`call`/`apply` resolve to the %Function.prototype% builtins and invoke the
+receiver itself via the existing `__apply_closure` bridge
+(`fn.call(t, a, b)` → `__apply_closure(fn, t, [a, b])`;
+`fn.apply(t, arr)` → `__apply_closure(fn, t, arr)`). The method name is
+matched by `ref.eq` against the interned literal (round 2), the same
+identity test the string-receiver fast path uses; a non-interned name
+misses and falls through to the old undefined result, so nothing regresses.
+Throw-free, per the C-core discipline.
+
+Measured on a 29-case assignment/call matrix through standalone-compiled
+acorn: **12 broken → 8 broken, 0 regressions** (each of the 8 verified
+byte-identical on the committed base). Newly correct: `({a: b} = c)`,
+`({...a} = b)`, `(a) = 1`, `(function(){…}).call(null)`, and direct
+`f.call(a, b)` / `f.apply(a, [b, c])`. Pinned by
+`tests/issue-3673-closure-call-apply.test.ts` (7 cases). Host/gc mode is
+**byte-identical** (verified by sha256 of a compiled binary before/after —
+the whole helper is behind the `ctx.standalone || ctx.wasi` gate).
+
+### Full self-parse is still blocked — three SEPARATE pre-existing bugs
+
+Fixing `.call` moves the 245 KB self-parse deeper but not to green. The
+remaining blockers are independent of it and each reproduces on the
+unmodified base, so they are **not** regressions from this round:
+
+1. **`raise`/`getLineInfo` null deref.** Any acorn `raise(...)` traps with
+   `dereferencing a null pointer` inside `getLineInfo` — `this.input` reads
+   non-null at the `raise` entry but the `input` parameter is null one frame
+   in. Reproduces on the base with a bare `1 = 2` or `var 3 = x`, i.e. it
+   needs no destructuring and no `.call`.
+2. **`for-in` over a fnctor instance enumerates nothing**, which breaks
+   shorthand object destructuring. `({a} = b)`, `({a = 1} = b)`,
+   `({a, b: [c]} = d)` reach `toAssignable`'s `default:` arm and raise
+   "Assigning to rvalue" although they are valid; the trace shows the
+   `Property` arm entered with `kind=init`, so the bad node is the shorthand
+   `prop.value`, which acorn builds with `copyNode`'s
+   `for (var prop in node) { newNode[prop] = node[prop] }`. Confirmed with a
+   9-line repro — copying a fnctor instance carrying expando properties
+   yields a copy with **none** of them, so `value.type` is `undefined` and
+   no `toAssignable` case matches (cf. the known #2668 for-in gap). Then
+   (1) turns the bogus raise into a trap.
+3. **RegExp construction.** `var re = /ab+c/g` traps with `illegal cast` in
+   `parseFloat` via the regexp validator's `reset`.
+
+Each deserves its own issue; the standalone lane's correctness gate is
+currently 4 canaries, which is why all four of these (including the `.call`
+bug) were invisible. **A full acorn self-parse is the gate that would have
+caught them** — worth adding once (2) and (3) land.
+
 ## Remaining follow-up (out of scope here, needs codegen)
 
 The residual ~150-300x is dominated by crossing VOLUME, not per-call cost.
