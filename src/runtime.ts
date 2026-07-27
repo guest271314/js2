@@ -9419,6 +9419,14 @@ assert._isSameValue = isSameValue;
           return v.toLocaleString();
         };
       if (name === "__extern_is_undefined") return (v: any) => (v === undefined ? 1 : 0);
+      // (#3714) ECMA-262 Type(x) is Object — used by the private-field
+      // brand-check (`#x in obj`, §12.10.3 step 5) to distinguish "a real
+      // object of the wrong class" (false, no throw) from "not an object at
+      // all" (TypeError) when a WasmGC `ref.test` alone can't see past an
+      // opaque externref. Deliberately NOT `typeof v === "object"` alone —
+      // that's `true` for `null` too, but `null` is not an ECMAScript Object.
+      if (name === "__extern_is_object")
+        return (v: any) => (v !== null && (typeof v === "object" || typeof v === "function") ? 1 : 0);
       // (#1328) Array.isArray on an externref value (e.g. a RegExp match
       // result returned from the host). The compile-time type can't decide
       // this for `externref`, so defer to the real spec predicate.
