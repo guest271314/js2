@@ -37,6 +37,9 @@ to Linux/Windows. No WebAssembly target.
 - #3679 — `comptime()` build-time evaluation baked as literals
 - #3680 — checked casts / runtime-validated trust boundaries
 - #3681 — differential whole-program corpus testing vs Node
+- #3682 — feasibility record: lowering our middle-end IR to scriptc's IR as a
+  native backend (conceivable, not recommended now — see the issue for the
+  full analysis)
 
 ## Collaboration potential
 
