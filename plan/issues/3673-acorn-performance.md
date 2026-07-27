@@ -1774,6 +1774,61 @@ the three rows above do not survive the check. Full write-up in
    chars**: linear returns checksum 106161 where node and GC both return
    101058. Silent, no diagnostic, inside a benchmark.
 
+### Round 38 — the hybrid study refutes both hypotheses (see #3687)
+
+The hybrid question is answered **don't build it** — but NOT for the
+reason I proposed. I hypothesised that #3686 would dissolve linear's
+advantage; the agent priced the whole cast/null/extern scaffolding with a
+hand-written WasmGC control and found it worth **+10-16 % on build+walk
+and +23-29 % on a pure walk** (0.45-0.53 ns/read) — a percentage, not a
+multiple, and not enough to cross linear's number on its own.
+(`extern.convert_any` is a V8 no-op.) My hypothesis was wrong and is
+recorded as wrong.
+
+The case collapses for a **stronger** reason: **there is no stable
+backend advantage to hybridise.** The sign flips under a one-word change
+— same algorithm, same allocation count, two independent runs:
+
+| parser state carried by | linear ÷ GC |
+| --- | --- |
+| `class St` cursor + `class Node` | 0.66x / 0.68x — linear faster |
+| `number[]` cursor + `class Node` | 1.06x / 1.24x — **GC faster** |
+| `number[]` cursor + array arena | 3.35x / 3.53x — **GC faster** |
+
+Linear is good at class-field access and bad at array-element access; GC
+is the reverse. Neither is a property of the memory model, so there is
+nothing durable to split along.
+
+Three further corrections to the record:
+
+- **"Linear is bad at strings" is a BUG, not a fact.** Swapping the
+  string for a `number[]` of codes — O(1) on both backends, same
+  tokenizer — takes linear from **503x** slower to **1.17x** slower.
+  Fixing `charCodeAt` makes linear COMPETITIVE, not superior.
+- **The narrow hybrid is priced NEGATIVE.** Keeping only the immutable
+  source buffer in linear memory — the version needing no ownership
+  protocol — *loses* the very read it exists to win: 1.49x (hand-written)
+  / 1.16x (our compiler). Only byte density could rescue it, and that
+  needs a cache-bound measurement nobody has done.
+- **The GC lane's real 5x is not the scaffolding — it is the generic
+  `===` ladder.** `tk[i] === 40` with BOTH operands statically `number`
+  emits 4 `__box_number`, 4 unboxes, **an object→string conversion and a
+  string comparison per token**. That is #3685/#1584/#1852 territory and
+  is a bigger prize than #3686.
+
+**Blocker discovered for #3686:** `class Node { left: Node }` — a
+non-nullable field of the class's own type, exactly the AST shape #3686
+targets — makes codegen recurse until stack overflow
+(`objectIrTypeFromTsType` ↔ `tsTypeToFieldIr`, `src/codegen/index.ts`
+~1081/~1099, no cycle guard). Nullable/optional variants only work
+because a union misses the `Object` flag and bails to the legacy path.
+**#3686's end state is not expressible in source today** — the cycle
+guard is a prerequisite, not an optimisation.
+
+Also: the round-37 data-segment corruption reproduced at **3127 chars**
+(linear returns 106161 where node and GC return 101058 — silently,
+inside a benchmark).
+
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
 Session cumulative: **52.4 → ~1.92ms/parse (~27x)**; warm node-acorn on

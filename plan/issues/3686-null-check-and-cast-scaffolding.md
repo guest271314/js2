@@ -61,6 +61,33 @@ GC lane for parser-shaped code.
   in, which is where the `extern.convert_any`/`any.convert_extern`/
   `ref.cast` triples come from.
 
+## PREREQUISITE (found 2026-07-27 by the #3687 study) — read before starting
+
+**`class Node { left: Node }` — a non-nullable field of the class's own
+type, which is exactly the AST shape this issue targets — makes codegen
+recurse until stack overflow.** `objectIrTypeFromTsType` ↔
+`tsTypeToFieldIr` (`src/codegen/index.ts` ~1081/~1099) have no cycle
+guard. The nullable/optional spellings only work because a union misses
+the `Object` flag and bails to the legacy path — i.e. today's code
+survives *because* it is untyped. **This issue's end state is therefore
+not expressible in source yet; the cycle guard is a prerequisite, not an
+optimisation.** Fix that first or this work cannot land.
+
+## Revised expectations (same study)
+
+The scaffolding was PRICED with a hand-written WasmGC control: **+10-16 %
+on build+walk, +23-29 % on a pure walk** (0.45-0.53 ns/read). That is a
+percentage, not the multiple the opening evidence suggested, and
+`extern.convert_any` turns out to be a V8 no-op — so the `extern`/`any`
+half of the census is cheaper than the raw count implies. Size the work
+accordingly.
+
+**A bigger prize sits next door**: the generic `===` ladder. `tk[i] === 40`
+with BOTH operands statically `number` emits 4 `__box_number`, 4 unboxes,
+**an object→string conversion and a string comparison per token**. That
+is #3685/#1584/#1852 territory and, on the measured evidence, worth more
+than this issue. Consider sequencing it first.
+
 ## Direction
 
 1. **Hoist the check to the binding, not the access.** A local proven
