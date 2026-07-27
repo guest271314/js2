@@ -39,7 +39,8 @@ import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from ".
 import { tryStaticToNumber } from "./expressions/misc.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
-import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
+import { addStringImports, addUnionImports, resolveWasmType } from "./index.js";
+import { isI32CompatibleOperand, nativeTypeOfExpression } from "./native-type-annotations.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts, VOID_RESULT } from "./shared.js";
 import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
@@ -226,14 +227,22 @@ function tryFlattenBinaryChain(
   const isDivOrPow = op === ts.SyntaxKind.SlashToken || op === ts.SyntaxKind.AsteriskAsteriskToken;
   let allNativeI32 = !isDivOrPow;
   if (allNativeI32 && !ctx.fast) {
+    // (#3673) The annotation only survives on the declaration's type NODE, so
+    // resolve each operand through the declaration it reads. An int32 literal
+    // is exactly representable in both domains and therefore does not break the
+    // chain — without that, `this.pos + 1` on an `i32` field would still be
+    // computed in f64 and truncated back on store.
+    let sawNative = false;
     for (const operand of operands) {
-      const tsType = ctx.checker.getTypeAtLocation(operand);
-      const native = resolveNativeTypeAnnotation(tsType);
-      if (native?.kind !== "i32") {
-        allNativeI32 = false;
-        break;
+      if (nativeTypeOfExpression(ctx.checker, operand)?.kind === "i32") {
+        sawNative = true;
+        continue;
       }
+      if (isI32CompatibleOperand(ctx.checker, operand)) continue;
+      allNativeI32 = false;
+      break;
     }
+    if (!sawNative) allNativeI32 = false;
   }
   const numericHint: ValType = { kind: (ctx.fast || allNativeI32) && !isDivOrPow ? "i32" : "f64" };
 
@@ -1438,9 +1447,15 @@ export function compileBinaryExpression(
   // In fast mode, numeric hint is i32 (unless division/power which promotes to f64).
   // Also use i32 hint when operands have native i32 type annotations (type i32 = number).
   const isDivOrPow = op === ts.SyntaxKind.SlashToken || op === ts.SyntaxKind.AsteriskAsteriskToken;
-  const leftNativeType = resolveNativeTypeAnnotation(leftTsType);
-  const rightNativeType = resolveNativeTypeAnnotation(rightTsType);
-  const bothNativeI32 = leftNativeType?.kind === "i32" && rightNativeType?.kind === "i32";
+  // (#3673) node-resolved — see `native-type-annotations.ts`. An int32 literal
+  // counts as i32-compatible on either side, but at least one side must carry a
+  // real annotation before the i32 hint is taken.
+  const leftNativeType = nativeTypeOfExpression(ctx.checker, expr.left);
+  const rightNativeType = nativeTypeOfExpression(ctx.checker, expr.right);
+  const leftI32ish = leftNativeType?.kind === "i32" || isI32CompatibleOperand(ctx.checker, expr.left);
+  const rightI32ish = rightNativeType?.kind === "i32" || isI32CompatibleOperand(ctx.checker, expr.right);
+  const bothNativeI32 =
+    leftI32ish && rightI32ish && (leftNativeType?.kind === "i32" || rightNativeType?.kind === "i32");
   // Use i32 hint for relational comparisons where one operand is a known i32 local.
   // This avoids f64 conversion churn in for-loop conditions like `i < 10000` where
   // detectI32LoopVar already promoted the loop variable to i32.

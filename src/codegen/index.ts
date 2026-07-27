@@ -6372,9 +6372,17 @@ const NATIVE_TYPE_MAP: Record<string, ValType> = {
  * alias symbol. Returns the corresponding Wasm ValType, or null if not a native
  * type annotation.
  *
- * TypeScript preserves the alias symbol on types at the usage site, so
- * `let x: i32` where `type i32 = number` will have aliasSymbol.name === "i32"
- * even though the resolved type is `number`.
+ * **(#3673) This premise is false and this function can never fire.**
+ * TypeScript populates `aliasSymbol` for aliases of OBJECT and UNION types,
+ * but not for an alias of an intrinsic primitive: `type i32 = number` resolves
+ * to the shared `numberType`, which carries no alias identity (verified on TS
+ * 5.9.3; instrumenting a full compile of an `i32`-annotated program gave 84
+ * calls, 0 hits, and no alias name ever observed). The live resolution now
+ * happens syntactically, from the declaration's TYPE NODE — see
+ * `native-type-annotations.ts`. This function is kept because it is on the
+ * `resolveWasmType` fast path and returning `null` there is exactly the
+ * historical behaviour; do NOT "fix" it by widening the type test, and do not
+ * add new callers.
  */
 export function resolveNativeTypeAnnotation(tsType: ts.Type): ValType | null {
   const aliasName = tsType.aliasSymbol?.name;
