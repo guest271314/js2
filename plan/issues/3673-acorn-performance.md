@@ -28,6 +28,8 @@ loc-budget-allow:
   - src/codegen/registry/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/native-strings-basics.ts
+  - src/codegen/closed-method-dispatch.ts
+  - src/codegen/closure-exports.ts
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -502,6 +504,30 @@ takes the exact old `__extern_get` path (which populates). **1.71 →
 1.54ms/parse (stable min)** — cumulative 52.4 → 1.54 (~34x), node-acorn
 gap ~45x. Verification: corpus 23/23; 1712 + 2151-nary + 2963 ×4
 method-identity suites green; pins 7/7; canaries 4/4; tsc clean.
+
+### Round 13 — cached-method DIRECT call in `__call_m_<name>_<arity>`
+
+`__method_cache_lookup(recv, name)` (new native — the per-key cache probe
+as a callable helper) lets the fixed-arity dispatchers call
+`__call_fn_method_<arity>` DIRECTLY with unpacked args on a hit —
+skipping the per-call `$ObjVec` allocation, `__extern_method_call`, and
+`__apply_closure`. Two correctness lessons baked in: (a) the exact-arity
+export only carries closures with formals ≤ call-site arity, so an
+UNDER-applied call (declared > arity, read off the root wrapper's
+`$arity` field) must divert to the legacy path whose #3592 widening pads
+missing args — the first cut without this gate broke `raise` paths
+(`getLineInfo` null-deref via a method silently answering undefined);
+(b) argc is preset/reset around the direct call exactly as
+`fillApplyClosure` does. Scratch-local slot patched after the fill's
+locals array finalizes (placeholder-index pattern).
+
+**Measured: 1.54 → ~1.51ms min (marginal — most calls either hit
+closed-struct arms above or divert on under-application).** Battery:
+corpus 23/23; 2151 ×13 suites (3 pre-existing), 2903 ×8 suites — the 4
+`issue-2903-iter-helpers` failures REPRODUCE AT THE MERGE-BASE with main
+(verified by checkout bisect: merge-base 5805049, rounds 6-13 all
+identical) — upstream pre-existing, not introduced here; 3117/3309/1712
+green; pins 7/7; tsc clean.
 
 ## What "surpass node-acorn" actually requires (measured decomposition)
 
