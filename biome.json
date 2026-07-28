@@ -12,7 +12,8 @@
       "test262/**",
       "tests/dogfood/.acorn/**",
       "tests/dogfood/.marked/**",
-      "tests/dogfood/.acorn-test-suite/**"
+      "tests/dogfood/.acorn-test-suite/**",
+      "tests/dogfood/.clsx/**"
     ]
   },
   "linter": {
