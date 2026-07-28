@@ -9,7 +9,7 @@ Distinct from the broader `compileProject`-based `npm-library-support` goal
 specifically target a **single pre-bundled dist file**, so there's no
 multi-file module-resolution graph in the way of isolating compiler bugs.
 
-Three packages so far, plus one deeper conformance check on acorn:
+Four packages so far, plus one deeper conformance check on acorn:
 
 | package | issue | entry file | oracle diff |
 | --- | --- | --- | --- |
@@ -17,6 +17,7 @@ Three packages so far, plus one deeper conformance check on acorn:
 | **marked** (Markdown→HTML) | #3716 | `lib/marked.esm.js` | plain string equality (HTML output) |
 | **acorn official suite** | #3729 | `dist/acorn.mjs` | acorn's own real `test/tests*.js` (~3,500 cases) |
 | **clsx** (className joiner) | #3748 | `dist/clsx.mjs` | per-op string equality (see below — driver epilogue, not a raw export call) |
+| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js` | per-op JSON-normalized equality (direct export calls, no epilogue) |
 
 ## acorn (#1710)
 
@@ -237,6 +238,43 @@ filed as **#3749**, not fixed here. Like the other vitest wrappers, this
 one gates on a real regression floor (`equal >= 17` at `total === 18`) —
 tight enough to be meaningful at this scale; raise it after a genuine fix,
 never to paper over a regression.
+
+This harness does **not** fix any compiler bug — pure tooling, same as the
+other harnesses' scope notes above.
+
+## cookie (#3751)
+
+A fourth differently-shaped real npm package: `cookie@2.0.1`'s
+`dist/index.js` is a genuine single-file ESM bundle (RFC-6265
+`Cookie`/`Set-Cookie` header parsing and serialization) — same shape as
+acorn/marked/clsx. Unlike clsx, cookie's four exports (`parseCookie`,
+`stringifyCookie`, `stringifySetCookie`, `parseSetCookie`) are all
+fixed-arity with real declared parameters, so `cookie-harness.mjs` calls
+them DIRECTLY across the wasm export boundary — no driver-epilogue shim
+needed (contrast clsx's variadic `arguments`-based export, above).
+
+```bash
+pnpm run dogfood:cookie                                    # run the loop, print a human summary, write the JSON report
+npx tsx tests/dogfood/cookie-harness.mjs --json             # machine output to stdout
+DOGFOOD_COOKIE=1 pnpm test -- tests/dogfood/cookie.test.ts  # vitest contract wrapper
+```
+
+Report: `tests/dogfood/report/cookie-surface.json` (gitignored). Pin:
+`cookie-pin.json`.
+
+**Current state (2026-07-28): 18 / 21 ops match.** The three divergences
+— all three `parseSetCookie` ops that pass a `Set-Cookie` attribute
+(`HttpOnly`, `Path`, or several combined) — share one root cause: the
+attribute gets assigned onto the result object dynamically inside the
+attribute-parsing loop/switch, and that write is silently dropped (no
+crash, no wrong type — the property is just completely absent from the
+result). The base `{name, value}` shape with zero attributes round-trips
+correctly. Reduced to a minimal repro fully independent of cookie and
+filed as **#3750**, not fixed here — cross-referenced against #3747
+(dayjs) and #3749 (clsx) as likely-related instances of the same general
+"object/array shape representation" gap, each with its own distinct
+symptom. Like the other vitest wrappers, this one gates on a real
+regression floor (`equal >= 18` at `total === 21`).
 
 This harness does **not** fix any compiler bug — pure tooling, same as the
 other harnesses' scope notes above.
