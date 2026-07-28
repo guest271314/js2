@@ -2290,7 +2290,6 @@ export function compileReceiverMethodCall(
   // known STRING_METHODS name (+`charCodeAt`/`substr`, which have dedicated
   // native arms but are not in the table), native-string mode, and an
   // `any`/unknown receiver NOT already handled by the static string arms below.
-  //
   // (#3673) `substr` is Annex-B and deliberately absent from `STRING_METHODS`
   // (that table doubles as the JS-host `string_<method>` import manifest), but
   // `compileNativeStringMethodCall` HAS a native `__str_substr` arm. Without
@@ -2308,10 +2307,6 @@ export function compileReceiverMethodCall(
     !isStringType(receiverType) &&
     !receiverIsCaughtErrorStringRead(ctx, propAccess.expression) &&
     !receiverIsNativeStringValType(ctx, fctx, propAccess.expression) &&
-    // A transferred `String.prototype.substring` installed as an own/prototype
-    // method must run with the non-string receiver as `this`. The guarded native
-    // string fast path would instead reject that receiver and return null before
-    // the dynamic property call can reach the stored closure.
     !(propAccess.name.text === "substring" && sourceHasMethodReassignment(ctx, propAccess.expression, "substring")) &&
     receiverMayBeNativeStringAtRuntime(ctx, propAccess.expression)
   ) {
