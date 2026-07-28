@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c20-class-integration-abi
-pr: 3783
+branch: codex/3520-c21-inherited-class-alias-abi
+pr: 3786
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -2150,7 +2150,8 @@ behind structural authorities before R1 can close.
 ### 2026-07-29 inherited class integration callable continuation
 
 The next stacked continuation on
-`codex/3520-c21-inherited-class-alias-abi` removes the production
+`codex/3520-c21-inherited-class-alias-abi`
+([PR #3786](https://github.com/loopdive/js2/pull/3786)) removes the production
 physical-key dependency for inherited class callables:
 
 - class collection observes each compatibility alias beside its exact child
