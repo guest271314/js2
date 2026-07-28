@@ -77,7 +77,7 @@ import {
   sourceNeedsGeneratorHostImports,
 } from "./generators-native.js";
 import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
-import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
+import { addImport, addStringConstantGlobal, localGlobalIdx } from "./registry/imports.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
@@ -93,6 +93,7 @@ import { definedFuncAt, mintDefinedFunc } from "./func-space.js"; // (#1916 S2) 
 import { pushProgramAbiModuleInitCallable } from "./program-abi-module-init-planning.js";
 import { pushProgramAbiTopLevelCallable } from "./program-abi-source-callable-planning.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
+import { registerModuleGlobal, registerModuleTdzGlobal } from "./module-global-registration.js";
 
 // ── Extracted subsystems (#3268) — re-exported for external consumers ─────
 export {
@@ -1330,85 +1331,6 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
   }
 
   // Fourth: collect module-level variable declarations as wasm globals
-  /** Register a single module-level global variable with the given name and wasm type. */
-  function registerModuleGlobal(name: string, wasmType: ValType): void {
-    // Skip if shadowed by a *user* function — but NOT by a wasm:js-string
-    // builtin import (#2669). `addStringImports` registers `concat`, `length`,
-    // `equals`, `substring`, `charCodeAt` into `ctx.funcMap` (and mirrors them
-    // in `ctx.jsStringImports`). Those builtin names are not user bindings, so a
-    // module-level variable that merely *collides* with one — e.g. the test262
-    // `let length = "outer"` dstr template (`ary-ptrn-rest-obj-prop-id` family),
-    // or any captured `let concat`/`equals`/`substring`/`charCodeAt` — must still
-    // be promoted to a `$__mod_<name>` global. Otherwise it stays a
-    // `__module_init` local, invisible to every other function: reads from a
-    // nested/exported function return null. The bare `funcMap.has` gate
-    // conflated the two. Discriminate by index: when the funcMap entry IS the
-    // js-string builtin (no genuine user function shadows the name), fall
-    // through and register the global; a real user function of the same name
-    // keeps the original skip behaviour.
-    // Only a GENUINE user-defined function (a *defined* function, whose
-    // funcIdx >= numImportFuncs) shadows a module-level `var` of the same name.
-    // A funcMap entry that is a host IMPORT or a reserved stdlib slot
-    // (funcIdx < numImportFuncs) does NOT: per ECMAScript a module-level
-    // `var <name>` binding shadows the ambient host global, so the user's value
-    // must still get its `$__mod_<name>` global. Otherwise the binding stays a
-    // `__module_init` local, invisible to every other function, and reads from a
-    // nested/helper function silently return null.
-    //
-    // (#3428) The test262 host harness triggers exactly this: the runtime shim
-    // declares `var print = function (v) { console.log(v); }` while
-    // `doneprintHandle.js` defines `function __consolePrintHandle__(m){ print(m); }`.
-    // Whenever the compiled module ALSO references another host builtin (e.g.
-    // `String(error)` inside `$DONE`), the whitelisted `print` host global lands
-    // in `funcMap` first, so `registerModuleGlobal("print", …)` was skipped —
-    // `print` never got a `$__mod_print` global, `compileClosureCall` bailed
-    // (neither local nor module-global), and the `$DONE → __consolePrintHandle__
-    // → print → console.log(marker)` chain emitted nothing. The async completion
-    // marker was therefore never observed (4,617 tests). The wasm:js-string
-    // builtin carve-out (#2669: concat/length/equals/substring/charCodeAt, which
-    // are ALSO imports with funcIdx < numImportFuncs) is the special case this
-    // generalises — every import-slot collision now correctly yields the global.
-    const fnIdx = ctx.funcMap.get(name);
-    if (fnIdx !== undefined && fnIdx >= ctx.numImportFuncs) return; // shadowed by a real user-defined function
-    if (ctx.moduleGlobals.has(name)) return; // skip if already registered
-    if (ctx.classSet.has(name)) return; // skip class expression variables
-
-    // Build null/zero initializer for the global
-    const init: Instr[] =
-      wasmType.kind === "f64"
-        ? [{ op: "f64.const", value: 0 }]
-        : wasmType.kind === "i32"
-          ? [{ op: "i32.const", value: 0 }]
-          : wasmType.kind === "i64"
-            ? [{ op: "i64.const", value: 0n }]
-            : wasmType.kind === "ref_null" || wasmType.kind === "ref"
-              ? [
-                  {
-                    op: "ref.null",
-                    typeIdx: (wasmType as { typeIdx: number }).typeIdx,
-                  },
-                ]
-              : [{ op: "ref.null.extern" }];
-
-    // Widen non-nullable ref to ref_null so the global can hold null initially
-    const globalType: ValType =
-      wasmType.kind === "ref"
-        ? {
-            kind: "ref_null",
-            typeIdx: (wasmType as { typeIdx: number }).typeIdx,
-          }
-        : wasmType;
-
-    const globalIdx = nextModuleGlobalIdx(ctx);
-    ctx.mod.globals.push({
-      name: `__mod_${name}`,
-      type: globalType,
-      mutable: true,
-      init,
-    });
-    ctx.moduleGlobals.set(name, globalIdx);
-  }
-
   /** Register binding names from destructuring patterns as module globals. */
   function registerBindingNames(pattern: ts.BindingPattern): void {
     for (const element of pattern.elements) {
@@ -1416,7 +1338,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       if (ts.isIdentifier(element.name)) {
         const elemType = ctx.checker.getTypeAtLocation(element);
         const wasmType = resolveWasmType(ctx, elemType);
-        registerModuleGlobal(element.name.text, wasmType);
+        registerModuleGlobal(ctx, element.name.text, wasmType);
       } else if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
         registerBindingNames(element.name);
       }
@@ -1562,7 +1484,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       if (ts.isIdentifier(decl.name)) {
         const varType = moduleVarDeclType(decl);
         const wasmType = moduleGlobalWasmType(decl, varType);
-        registerModuleGlobal(decl.name.text, wasmType);
+        registerModuleGlobal(ctx, decl.name.text, wasmType);
       } else if (ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) {
         registerBindingNames(decl.name);
       }
@@ -1645,7 +1567,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           // externref global (+ externrefAccessorVars tag); otherwise fall back
           // to the standalone-regexp / inferred type. See moduleGlobalWasmType.
           const wasmType = moduleGlobalWasmType(decl, varType);
-          registerModuleGlobal(decl.name.text, wasmType);
+          registerModuleGlobal(ctx, decl.name.text, wasmType, decl);
           if (isLetOrConst) {
             ctx.tdzLetConstNames.add(decl.name.text);
           }
@@ -2403,15 +2325,7 @@ export function compileDeclarations(
   // When the variable's initializer runs, the flag is set to 1.
   // Reads of the variable check the flag and throw ReferenceError if 0.
   for (const name of ctx.tdzLetConstNames) {
-    if (!ctx.moduleGlobals.has(name)) continue; // safety check
-    const flagGlobalIdx = nextModuleGlobalIdx(ctx);
-    ctx.mod.globals.push({
-      name: `__tdz_${name}`,
-      type: { kind: "i32" },
-      mutable: true,
-      init: [{ op: "i32.const", value: 0 }],
-    });
-    ctx.tdzGlobals.set(name, flagGlobalIdx);
+    registerModuleTdzGlobal(ctx, sourceFile, name);
   }
 
   // Compile module-level init statements BEFORE function bodies so that
