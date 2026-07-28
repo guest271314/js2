@@ -162,7 +162,6 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
-  - src/codegen/class-bodies.ts
   - src/codegen/context/types.ts
   - src/ir/integration.ts
   - src/ir/from-ast.ts
