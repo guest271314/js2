@@ -667,6 +667,8 @@ export interface TrapCategoryGrowthOptions {
    * for baseline artifacts that are expected to cover the same Test262 corpus:
    * there an absent row is an incomplete observation, not evidence of a new
    * test. The pure helper defaults to strict candidate-only/new-test semantics.
+   * (#3735) `check-baseline-trap-growth.ts`'s before/after root-baseline
+   * compare passes `true` here — see that call site for why.
    */
   missingBaselineRowsAreUnknown?: boolean;
   /**
