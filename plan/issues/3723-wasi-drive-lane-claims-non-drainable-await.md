@@ -1,10 +1,25 @@
 ---
 id: 3723
 title: "WASI async drive lane claims `return await <ident>` and yields NaN — the result $Promise has no drainer"
-status: ready
+loc-budget-allow:
+  # The two narrowing predicates plus the reasoning for why each is sound and
+  # which direction it errs in. Both live next to the gate they guard, in the
+  # module that already owns the drive-lane claim decision.
+  - src/codegen/async-frame.ts
+oracle-ratchet-allow:
+  # Two structural questions the oracle deliberately does not model:
+  #   * "does this type carry a `then` member" — thenable-ness is a STRUCTURAL
+  #     ts.Type property (§27.7.5.3 decides suspension on it), not a wasm
+  #     lowering question `ctx.oracle` can express;
+  #   * ts.Symbol IDENTITY for the write-once flow test — comparing symbols is
+  #     precisely what makes shadowing / same-named params safe, and name-based
+  #     matching (the only oracle-expressible alternative) would be UNSOUND here.
+  - src/codegen/async-frame.ts
+status: done
 sprint: current
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-28
+completed: 2026-07-28
 priority: high
 horizon: m
 feasibility: medium
@@ -103,11 +118,54 @@ lanes' contract for a truly pending await under WASI still needs a decision —
 that is a design call, not a bug fix, so it is recorded here rather than
 guessed at.
 
+## Resolution (2026-07-28) — both narrowings landed
+
+Both fixes above are implemented in `asyncFnNeedsDrive` (`async-frame.ts`), the
+WASI/standalone gate. The drive lane is NOT disabled — it still claims every
+genuinely-suspending shape; it simply stops claiming awaits that provably
+cannot suspend.
+
+1. **`awaitProvablyCannotSuspend`** — the TYPE test. Declines when no
+   constituent of the operand's type carries a `then`. Conservative on
+   `any`/`unknown` (may hold a thenable at runtime) and on unions (safe only if
+   every constituent is non-thenable). Fixes `await (n + 1)`.
+2. **`awaitedLocalIsProvablySettled`** — the FLOW test, resting on ts.Symbol
+   IDENTITY rather than names: the operand's symbol must have exactly one
+   declaration, whose initializer `awaitIsStaticallyResolved` certifies, with no
+   assignment to that same symbol anywhere in the enclosing function (the scan
+   walks nested closures). Symbol comparison is what makes shadowing, a
+   same-named parameter, and a same-named sibling-scope binding all safe — each
+   is a different symbol. Fixes `await p`.
+
+Every uncertain answer is `false`, which leaves the previous behaviour intact.
+
+**Result:** `tests/issue-2865-standalone-async-await-unwrap.test.ts` **7/7**.
+
+The negative cases are the load-bearing ones and are pinned in
+`tests/issue-3723-wasi-drive-claim-narrowing.test.ts` (8 cases): a reassigned
+binding, a same-named binding in a sibling scope, an `any`-typed operand, and a
+declaration with no initializer are all still treated as able to suspend.
+
+Regression-checked by bisect against the same tree without the change: the async
+suite set is **10 failed / 36 passed both with and without**, i.e. identical —
+those failures (`#3492` top-level-await parity, `symbol-async-iterator`,
+`#2856`, `#2978`) are pre-existing.
+
+## Still open — the design question this did NOT settle
+
+Narrowing the claim resolves every shape where the await provably cannot
+suspend. It does **not** answer what a WASI async function should return for a
+**genuinely pending** await: AG0 says "compile synchronously, unwrap the
+carrier", PATH B says "return a real `$Promise`", and nothing under WASI drains
+the latter. That contract is still unstated in `async-activation.ts`. It is a
+design call, deliberately left rather than guessed at.
+
 ## Acceptance criteria
 
-- [ ] `tests/issue-2865-standalone-async-await-unwrap.test.ts` passes 7/7.
-- [ ] The drive lane is narrowed by a PROVABLE non-suspension test, not by
+- [x] `tests/issue-2865-standalone-async-await-unwrap.test.ts` passes 7/7.
+- [x] The drive lane is narrowed by a PROVABLE non-suspension test, not by
       disabling it (which would regress the genuinely-suspending shapes #2895
       PATH B exists for).
+- [x] Negative cases pinned so the narrowing cannot silently widen.
 - [ ] The pending-await-under-WASI contract is stated explicitly in
-      `async-activation.ts`.
+      `async-activation.ts` (needs the design decision above).
