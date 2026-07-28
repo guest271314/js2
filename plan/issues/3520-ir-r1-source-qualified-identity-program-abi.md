@@ -2310,6 +2310,48 @@ behavior retire. Remaining class/type consumers, lifted and other support
 allocation, function expressions, and module-array or display-name scans must
 still move behind structural authorities before R1 can close.
 
+### 2026-07-29 exact synthesized artifact allocation continuation
+
+The current stacked continuation on
+`codex/3520-c24-synthetic-slot-abi` removes the production display-name join
+from fresh lifted and monomorphized artifact allocation:
+
+- every synthesized artifact in a Program ABI session now receives a fresh
+  allocator-owned `WasmFunction` keyed through its exact derived `IrUnitId`.
+  Production no longer probes `funcMap` for an empty same-labelled function;
+- production also stops publishing the synthesized slot back into `funcMap`,
+  so an exact source function with the same compatibility label cannot have
+  its physical mapping overwritten. Low-level integration callers without a
+  Program ABI session retain the old compatibility behavior; and
+- the anti-vacuity fixture pairs a captured lifted closure named
+  `owner__closure_0` with an empty top-level source function of that exact
+  label. C23 reproduces a duplicate-locator invariant because both Program ABI
+  owners share one allocator object; C24 proves they publish distinct final
+  function slots.
+
+The focused lifted, monomorphization, integration-pass, outcome-correlation,
+and callable-planning matrix passes **29/29 across eight files**. The #3520
+plus #2138 migration matrix advances to **285 passing / 1 inherited known
+failure across 55 files**. The sole failure remains the linear
+inventory-count spy assertion (two builds observed versus one expected).
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet reports no unintended, post-claim, or
+module-level increase. The supported eight-shard equivalence gate remains
+**1,611 passing / 32 known failing / 0 new regressions**.
+
+Strict TypeScript, Biome lint, formatting, LOC/function budget, dead-export,
+and godfile gates pass. No local Test262 corpus run was performed because this
+continuation is stacked rather than targeting `main`; the full corpus runs at
+the merge-group boundary. Neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C24 closes fresh synthesized artifact slot allocation, not R1. Remaining
+class/type consumers, preflight reservations for lifted support, function
+expressions, and module-array or display-name scans must still move behind
+structural authorities before R1 can close.
+
 ### R1a validation evidence
 
 - Representative inventory denominator: **1 source / 2 classes / 12 allUnits /

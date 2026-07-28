@@ -1703,7 +1703,13 @@ export function compileIrPathFunctions(
     // allocator slot from the source-unit registry — never a fresh one.
     if (entry.moduleInit) continue;
     if (ctx.irUnitFuncMap.has(entry.artifactUnitId)) continue;
-    const namedIdx = ctx.funcMap.get(entry.name);
+    // Production synthesized artifacts have exact derived-unit identities and
+    // therefore always own fresh allocator objects. Reusing an empty
+    // same-labelled source slot aliases two Program ABI owners; publishing the
+    // new slot back through funcMap can likewise overwrite that source
+    // binding. Keep the old name-keyed reuse only for low-level compatibility
+    // callers that deliberately omit a Program ABI session.
+    const namedIdx = ctx.programAbiSession ? undefined : ctx.funcMap.get(entry.name);
     const named = namedIdx === undefined ? undefined : definedFuncAt(ctx, namedIdx);
     const func =
       named && named.body.length === 0 && !claimedIrFunctions.has(named)
@@ -1726,7 +1732,7 @@ export function compileIrPathFunctions(
     }
     ctx.irUnitFuncMap.set(entry.artifactUnitId, func);
     claimedIrFunctions.add(func);
-    ctx.funcMap.set(entry.name, funcIdx);
+    if (!ctx.programAbiSession) ctx.funcMap.set(entry.name, funcIdx);
     freshSlots.push({
       artifactUnitId: entry.artifactUnitId,
       funcIdx,
