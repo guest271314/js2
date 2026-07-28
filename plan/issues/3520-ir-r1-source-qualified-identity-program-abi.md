@@ -6,7 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c13-type-class-abi
-pr: 3739
+pr: 3746
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -1647,7 +1647,7 @@ remain before R1 can close.
 
 ### 2026-07-28 retained type and class-layout continuation
 
-The stacked continuation on `codex/3520-c13-type-class-abi` makes the complete
+The continuation on `codex/3520-c13-type-class-abi` makes the complete
 post-DCE Wasm type population and every inventoried class explicit in the
 production Program ABI:
 
