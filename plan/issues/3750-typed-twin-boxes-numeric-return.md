@@ -8,6 +8,19 @@ loc-budget-allow:
   - src/codegen/numeric-property-analysis.ts
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/property-access.ts
+  # S1's seeding wire-up in the driver: deriveFnctorFields runs from
+  # generateModule and the promoted-slot maps thread through the barrel (+8).
+  - src/codegen/index.ts
+  # S2's numeric-return fast path at the existing binary-op dispatch (+33)
+  # and the promoted-slot map fields on the shared context types (+16).
+  - src/codegen/binary-ops.ts
+  - src/codegen/context/types.ts
+func-budget-allow:
+  # S2's numeric-return recognition sits at the existing binary-op dispatch
+  # (+33) and S1's seeding call in the driver (+8) — both are at the sites
+  # the machinery must hook, not organic sprawl.
+  - src/codegen/binary-ops.ts::compileBinaryExpression
+  - src/codegen/index.ts::generateModule
 status: ready
 sprint: current
 created: 2026-07-28
