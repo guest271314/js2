@@ -40,7 +40,8 @@ import { boxToAny } from "./value-tags.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
-import { ensureAnyToStringHelper, ensureStrTruthyHelper } from "./native-strings.js";
+import { ensureAnyToStringHelper, ensureStrTruthyHelper, stringConstantExternrefInstrs } from "./native-strings.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
 import { getBoolToStringEmitter, getNativeStringRefFromExternrefEmitter } from "./string-emitter-registry.js";
 import {
   compileExpression,
@@ -68,6 +69,22 @@ export function coercionMode(ctx: CodegenContext): CoercionMode {
   if (noJsHost(ctx)) return "standalone";
   if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) return "native-strings-host";
   return "js-host";
+}
+
+/**
+ * Build the shared runtime ToPrimitive call for a value already on the stack.
+ * Raw runtime bodies do not have an AST expression for `emitToString`, so this
+ * is their narrow entry point into the coercion engine instead of spelling the
+ * helper lookup and hint ABI at each call site.
+ */
+export function runtimeToPrimitiveInstrs(ctx: CodegenContext, hint: "string" | "number" | "default"): Instr[] | null {
+  const funcIdx = ctx.funcMap.get("__to_primitive");
+  if (funcIdx === undefined) return null;
+  if (hint === "default") {
+    return [{ op: "ref.null.extern" }, { op: "call", funcIdx }];
+  }
+  addStringConstantGlobal(ctx, hint);
+  return [...stringConstantExternrefInstrs(ctx, hint), { op: "call", funcIdx }];
 }
 
 /** True when the active mode represents strings as a native `$AnyString` GC ref. */

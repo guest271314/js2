@@ -10,6 +10,7 @@
  */
 import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
+import { runtimeToPrimitiveInstrs } from "./coercion-engine.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./js-errors.js";
@@ -18,9 +19,7 @@ import {
   ensureNativeStringHelpers,
   flatStringType,
   nativeStringLiteralInstrs,
-  stringConstantExternrefInstrs,
 } from "./native-strings.js";
-import { addStringConstantGlobal } from "./registry/imports.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts } from "./shared.js";
 
 /**
@@ -94,19 +93,17 @@ export function emitTransferredCharAtProtoMemberBody(
   const positionLocal = unboxProtoArgToI32(ctx, fctx, 2);
   const deferredPosition = fctx.body.splice(positionStart, fctx.body.length - positionStart);
   const anyToStringIdx = ensureAnyToStringHelper(ctx);
-  const toPrimitiveIdx = ctx.funcMap.get("__to_primitive");
+  const toPrimitive = runtimeToPrimitiveInstrs(ctx, "string");
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
   const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
-  if (toPrimitiveIdx === undefined || flattenIdx === undefined || charAtIdx === undefined) {
+  if (toPrimitive === null || flattenIdx === undefined || charAtIdx === undefined) {
     emitThrowTypeError(ctx, fctx, "String.prototype.charAt is not yet implemented in --target standalone");
     return null;
   }
 
   emitReceiverGuard();
   fctx.body.push({ op: "local.get", index: 1 });
-  addStringConstantGlobal(ctx, "string");
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
-  fctx.body.push({ op: "call", funcIdx: toPrimitiveIdx });
+  fctx.body.push(...toPrimitive);
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "call", funcIdx: anyToStringIdx });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
