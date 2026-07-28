@@ -621,8 +621,8 @@ export function compileIrPathFunctions(
     readonly classMember?: boolean;
     /**
      * (#3142 Slice 2) The synthetic `<module-init>` unit. Its target slot is
-     * the legacy `__module_init` function (located by NAME at Phase 3 — it
-     * is never in `ctx.funcMap`), patched in place with the same typeIdx
+     * the legacy module-initializer function (resolved from its exact source
+     * unit through the allocator registry), patched in place with the same typeIdx
      * parity guard class members use. Never allocated a fresh slot.
      */
     readonly moduleInit?: boolean;
@@ -956,7 +956,7 @@ export function compileIrPathFunctions(
   // Integration-time gates (each throws → the whole unit demotes to the
   // legacy body, which is ALWAYS still emitted — module-init is never in the
   // IR-first skip set):
-  //   - the legacy `__module_init` slot must exist (legacy may drop
+  //   - the exact legacy module-init slot must exist (legacy may drop
   //     side-effect-free statements and emit nothing — then there is nothing
   //     to patch and nothing to gain),
   //   - no static class initializers / live-func-binding seeds (legacy
@@ -970,11 +970,11 @@ export function compileIrPathFunctions(
   const moduleInitOwner = moduleInitClaim ? requireTerminalOwner(MODULE_INIT_UNIT_NAME) : undefined;
   if (moduleInitClaim && moduleInitOwner && !unsupportedHostDateOwners.has(moduleInitOwner.unitId)) {
     try {
-      if (!ctx.mod.functions.some((f) => f.name === "__module_init")) {
+      if (!ctx.programAbiModuleInitCallables?.functionForUnit(moduleInitOwner.unitId)) {
         throw new IrUnsupportedError(
           "module-init-legacy-coupling",
           "build",
-          "module-init: no legacy __module_init slot to patch (legacy collected no init statements)",
+          "module-init: no exact legacy initializer slot to patch (legacy collected no init statements)",
         );
       }
       if (ctx.staticInitExprs.length > 0) {
@@ -1663,10 +1663,7 @@ export function compileIrPathFunctions(
   };
   const legacyArtifactFuncIdx = (entry: BuiltFn): number | undefined =>
     entry.moduleInit
-      ? (() => {
-          const local = ctx.mod.functions.findIndex((candidate) => candidate.name === "__module_init");
-          return local >= 0 ? ctx.numImportFuncs + local : undefined;
-        })()
+      ? ctx.programAbiModuleInitCallables?.handleForUnit(entry.artifactUnitId)
       : ctx.funcMap.get(entry.name);
   const hasPreallocatedArtifactSlot = (entry: BuiltFn): boolean =>
     (originalArtifactUnitIds.has(entry.artifactUnitId) && !entry.synthesized) ||
@@ -1692,8 +1689,8 @@ export function compileIrPathFunctions(
     // legacy `class-bodies.ts` pass (`ctorFuncIdx` / `methodFuncIdx`).
     // Don't allocate a new slot — Phase 3 will patch the existing one.
     if (entry.classMember) continue;
-    // (#3142 Slice 2) The module-init unit patches the legacy
-    // `__module_init` slot (located by name at Phase 3) — never a fresh one.
+    // (#3142 Slice 2) The module-init unit patches its exact legacy
+    // allocator slot from the source-unit registry — never a fresh one.
     if (entry.moduleInit) continue;
     if (ctx.irUnitFuncMap.has(entry.artifactUnitId)) continue;
     const namedIdx = ctx.funcMap.get(entry.name);
@@ -2127,9 +2124,9 @@ export function compileIrPathFunctions(
       if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "lower-synthetic" && entry.synthesized) {
         throw new Error("injected synthetic lower failure");
       }
-      // (#3142 Slice 2) The module-init unit's slot is the legacy
-      // `__module_init` function — located by NAME (it is never in
-      // `ctx.funcMap`; the slot was pushed directly by compileDeclarations).
+      // (#3142 Slice 2) The module-init unit's slot is its exact legacy
+      // allocator function (it is never in `ctx.funcMap`; the slot was
+      // registered structurally by compileDeclarations).
       const funcIdx = artifactFuncIdx(entry);
       if (funcIdx === undefined) {
         markOwnerInvariant(

@@ -89,7 +89,8 @@ import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.j
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { pushProgramAbiModuleInitCallable } from "./program-abi-module-init-planning.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 // ── Extracted subsystems (#3268) — re-exported for external consumers ─────
@@ -2712,12 +2713,11 @@ export function compileDeclarations(
     // instantiation, before `setExports`) enumerates zero keys. Exporting it and
     // letting the host call it after `setExports` is symmetric with the
     // standalone/WASI `_start` model and gives the diff-test HOST lane the same
-    // fully-wired runtime the standalone lane has. The export's func index is
-    // shifted alongside every other export by the late-import shift logic.
+    // fully-wired runtime; late-import shifting keeps its function index aligned with every other export.
     const exportModuleInit = ctx.deferTopLevelInit && !ctx.wasi;
     const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
-    const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const initFuncIdx = mintDefinedFunc(ctx);
+    pushProgramAbiModuleInitCallable(ctx, sourceFile, initFuncIdx, {
       name: "__module_init",
       typeIdx: initTypeIdx,
       locals: compiledInitFctx.locals,
