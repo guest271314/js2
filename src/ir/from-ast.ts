@@ -55,9 +55,7 @@ import {
   type IsPromotedI32,
   isWrapI32Lowerable,
   jsBitwiseBinop,
-  makePlannedI32Probe,
   peelExpr,
-  planI32Slots,
   referencesPromotedI32Slot,
 } from "./analysis/i32-slots.js";
 import { IrFunctionBuilder } from "./builder.js";
@@ -95,9 +93,18 @@ import { proveTypedStringAppend, proveTypedStringMethod, type TypedValueEvidence
 import {
   EmptyArrayElementInference,
   emptyArrayInferenceDiagnostic,
-  type ExactInt32Proof,
   inferEmptyArrayElementTypes,
 } from "./array-element-inference.js";
+import {
+  emitForwardingAwareLinearVecLen,
+  emitSafeNarrowedI32VecGet,
+  emitSafeVecGet,
+  emptyLiteralElementValType,
+  isNarrowedI32Vec,
+  lowerNarrowedI32Element as lowerNarrowedI32ElementWith,
+  planI32ArrayElements,
+  tryLowerVecPush,
+} from "./array-element-lowering.js";
 import {
   assertNotDeferred,
   binaryOpCapability,
@@ -838,17 +845,11 @@ export function lowerFunctionAstToIr(
   const liftedCounter = { value: 0 };
   const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
   const i32PureNames = computeI32PureNames(fn);
-  // (#3741) Native-i32 slot storage for provably-int32 mutable locals.
-  // Generators are excluded: their cross-yield state machinery is built around
-  // the existing slot shapes and is out of scope there.
-  // (#3734) Planned FIRST because the empty-array element inference needs the
-  // same "is this identifier an exact int32?" answer to decide whether an
-  // integer-only `number[]` may use an i32 element layout.
-  const i32Slots = isGenerator ? undefined : planI32Slots(fn, mutatedLets);
-  const emptyArrayInference = inferEmptyArrayElementTypes(
+  const { i32Slots, emptyArrayInference } = planI32ArrayElements(
     fn,
+    mutatedLets,
+    isGenerator,
     options.checker ? new TsCheckerOracle(options.checker) : undefined,
-    plannedExactInt32Proof(i32Slots),
   );
   const cx: LowerCtx = {
     builder,
@@ -2176,125 +2177,18 @@ function isEmptyStringLiteral(expression: ts.Expression): boolean {
 const IR_I32: IrType = irVal({ kind: "i32" });
 const IR_F64: IrType = irVal({ kind: "f64" });
 
-// ---------------------------------------------------------------------------
-// (#3734) Native-i32 ELEMENT storage for integer-only inferred `number[]`
-//
-// Legacy lowers a `number[]` filled exclusively with int32-range integers to
-// `(array (mut i32))` and widens with `f64.convert_i32_s` on read; the IR
-// front-end kept `(array (mut f64))`, i.e. twice the memory traffic on the
-// landing-page `array.ts` benchmark. This block closes that gap under the same
-// invariants #3741 used for i32 SLOT storage — one added, because an array is
-// aliasable where a local is not:
-//
-//   C (closure) — `array-element-inference.ts` already proves the vector never
-//       ESCAPES: every surviving use is `arr[i]`, `arr.length`, `arr.push(v)`
-//       or an assignment between local aliases. So the complete set of stores
-//       is visible in this one function body. A group that reaches a call, a
-//       return, a property, a closure or a for-of is rejected outright.
-//   W (write) — every store lowers its value DIRECTLY to an exact i32 via
-//       `lowerAsI32(.., "canon")`, gated by the SAME `isCanonI32Lowerable`
-//       proof re-checked against the live scope. Never by truncating an
-//       already-lowered f64: that would saturate where the source wraps.
-//   R (read)  — every read immediately widens with `f64.convert_i32_s`, and
-//       the bounds-checked arm's out-of-bounds value stays `f64` NaN (the
-//       numeric image of JS `undefined` — a number an i32 vector cannot hold,
-//       which is exactly why the widen happens INSIDE the if/else arms). No
-//       consumer anywhere else in this file can observe the narrowing.
-//
-// A narrowed `number[]` and a genuine `boolean[]` share one `$__vec_i32`
-// registry entry, so `vec.elementValType.kind === "i32"` alone is NOT the
-// discriminator: every site below pairs it with
-// `isInt32NarrowedVectorExpression`, which answers per RECEIVER EXPRESSION.
-// ---------------------------------------------------------------------------
-
-/**
- * The element ValType an empty array literal's vector should be built with:
- * `i32` when the inference proved the whole may-alias group integer-only AND
- * the backend can actually register an i32 vector, else `f64` (unchanged).
- *
- * The capability probe is what keeps the linear lane out of this: its
- * `resolveVecForElement` answers only for `f64`, so a linear-lowered function
- * silently keeps the representation it has today.
- */
-function emptyLiteralElementValType(initializer: ts.Expression, cx: LowerCtx): ValType {
-  const f64: ValType = { kind: "f64" };
-  // The `<module-init>` unit is the one place where a binding declared in the
-  // scanned body outlives it — its value lands in a legacy-allocated global
-  // that OTHER functions read, so this function-local escape analysis cannot
-  // see the full set of uses. Never narrow there.
-  if (cx.moduleBindings !== undefined) return f64;
-  if (!ts.isArrayLiteralExpression(initializer) || initializer.elements.length !== 0) return f64;
-  const inference = cx.emptyArrayInference.resultForLiteral(initializer);
-  if (inference?.kind !== "resolved" || !inference.int32Narrowed) return f64;
-  const i32: ValType = { kind: "i32" };
-  return cx.resolver?.resolveVecForElement?.(i32) ? i32 : f64;
-}
-
-/**
- * Is `receiver` a vector whose elements are stored NARROWED to i32 (so reads
- * must widen and stores must narrow)? Both halves are required: `vec` supplies
- * the actual registered representation, the inference supplies the proof that
- * this particular receiver is a narrowed `number[]` rather than, say, a
- * `boolean[]` that legitimately has i32 elements and expects i32 reads.
- */
-function isNarrowedI32Vec(vec: IrVecLowering, receiver: ts.Expression, cx: LowerCtx): boolean {
-  return vec.elementValType.kind === "i32" && cx.emptyArrayInference.isInt32NarrowedVectorExpression(receiver);
-}
-
-/**
- * (#3734) The exact-int32 VALUE proof handed to the empty-array element
- * inference, which runs BEFORE any lowering and therefore cannot use the live
- * `cx.scope` probe.
- *
- * It is the same Q-CANON question #3741's slot promotion answers — "is this
- * expression's value always exactly a signed int32?" — with identifiers
- * resolved against the PLANNED i32 slot set, i.e. against declarations that
- * `collectI32CoercedLocals` / `detectI32LoopVar` already proved int32-valued.
- * Every store site re-checks a strictly WEAKER predicate against the live
- * scope before emitting (see `narrowedI32ValueProbe`), so an accepted plan can
- * never turn into a failed emit.
- */
-function plannedExactInt32Proof(slots: ReadonlySet<ts.VariableDeclaration> | undefined): ExactInt32Proof | undefined {
-  if (slots === undefined) return undefined;
-  const promoted = makePlannedI32Probe(slots);
-  return (expression: ts.Expression): boolean => isCanonI32Lowerable(expression, promoted);
-}
-
-/**
- * The live identifier arm for invariant W: the UNION of "is an i32-promoted
- * slot right now" and "is a Q-CANON-proven int32 name" (#3758's
- * `i32PureNames`). The union makes it provably WEAKER than the plan-time arm
- * and therefore impossible to fail after the plan accepted — every declaration
- * `planI32Slots` promotes was admitted via `collectI32CoercedLocals` or
- * `detectI32LoopVar`, and `computeI32PureNames` is exactly the union of those
- * two over the same function. Without it, a local that plans as promotable but
- * is bound some other way at lowering time (say an annotated
- * `let i: number = 0`) would demote the whole function — a needless legacy
- * fallback for a value that is still exactly int32.
- */
-function narrowedI32ValueProbe(cx: LowerCtx): IsPromotedI32 {
-  const promoted = promotedI32Probe(cx);
-  return (id: ts.Identifier): boolean => promoted(id) || cx.i32PureNames.has(id.text);
-}
-
-/** Invariant W — lower `value` as the exact i32 to store into a narrowed vector. */
-function lowerNarrowedI32Element(value: ts.Expression, cx: LowerCtx): IrValueId {
-  if (!isCanonI32Lowerable(value, narrowedI32ValueProbe(cx))) {
-    throw new IrUnsupportedError(
-      "operand-coercion-unsupported",
-      "build",
-      `ir/from-ast: store into an i32-narrowed vector is not exact-i32 lowerable in ${cx.funcName} (#3734)`,
-    );
-  }
-  return lowerAsI32(value, cx, "canon");
-}
-
 /** `cx`-bound "is this name an i32-promoted slot right now?" predicate. */
 function promotedI32Probe(cx: LowerCtx): IsPromotedI32 {
   return (id: ts.Identifier): boolean => {
     const b = cx.scope.get(id.text);
     return b !== undefined && b.kind === "slot" && b.i32Storage === true;
   };
+}
+
+function lowerNarrowedI32Element(value: ts.Expression, cx: LowerCtx): IrValueId {
+  return lowerNarrowedI32ElementWith(value, cx, promotedI32Probe(cx), (expression) =>
+    lowerAsI32(expression, cx, "canon"),
+  );
 }
 
 /**
@@ -4110,138 +4004,6 @@ function isProvenInBoundsIr(expr: ts.ElementAccessExpression, cx: LowerCtx): boo
 }
 
 /**
- * #2766 — the SAFE (hybrid-invariant default) bounds-checked vec read. Emits
- * `inBounds ? vec.get(idx) : <JS-correct OOB default>` so an out-of-bounds index
- * NEVER traps — the IR counterpart of #2760's legacy floor F1
- * (`emitPlainArrayUndefinedOobGet`). The read result type is UNCHANGED from the
- * fast `emitVecGet` (the element ValType), so there is **no downstream type
- * cascade**: only the runtime semantics change (trap → JS-correct value).
- *
- * Element-kind dispatch for the OOB default (mirrors
- * `lowerOptionalExternPropertyAccess`'s sentinel table, and legacy's
- * `emitBoundsCheckedArrayGet(useUndefinedSentinel=false)` type-defaults):
- *   - `f64`       → `f64.const NaN` — `ToNumber(undefined)` is NaN, the
- *                   JS-correct image of an OOB read in the numeric context the IR
- *                   retains a primitive read in. (A `number[]` read whose result
- *                   must be *observed* as `undefined` flows to an `any`/externref
- *                   sink, which has no IR box primitive and already demotes the
- *                   whole function to legacy F1 — so NaN here is never observed
- *                   as a wrong `undefined`.) Stays UNBOXED: no late import is
- *                   added, so the R1 Math.* funcIdx-shift miscompile cannot recur.
- *   - `i32`       → `i32.const 0` — `ToBoolean(undefined)` is false (0) for
- *                   `boolean[]`; 0 for an i32-specialized numeric read.
- *   - `externref` → `ref.null.extern` — matches legacy's *non-widened* externref
- *                   OOB default (JS `null`). Full externref OOB→`undefined` is
- *                   the documented R1-deferred follow-up (it trips the
- *                   map-on-array-like canary `15.4.4.19-8-b-2.js` via a separate
- *                   length bug); matching legacy here keeps that canary green.
- *   - `ref_null`  → `ref.null` of the element heap type.
- *   - other (non-null `ref`, `i64`, packed `i8`/`i16`, `f32`, …) → demote to
- *     legacy (throw): a null-ish default isn't expressible in an `if`-arm without
- *     widening the result to `ref_null`, which WOULD cascade to consumers (the
- *     same limitation `lowerOptionalExternPropertyAccess` documents). Legacy
- *     bounds-checks all element kinds (returns the type-default, never traps), so
- *     the demote is still trap-free.
- */
-function emitForwardingAwareLinearVecLen(recv: IrValueId, cx: LowerCtx): IrValueId {
-  const lenI32 = cx.builder.emitCall(irIntrinsicFuncRef("__arr_len"), [recv], irVal({ kind: "i32" }));
-  if (lenI32 === null) {
-    throw new Error(`ir/from-ast: forwarding-aware vec length produced no value (${cx.funcName})`);
-  }
-  return cx.builder.emitUnary("f64.convert_i32_s", lenI32, irVal({ kind: "f64" }));
-}
-
-/**
- * (#3734) Invariant R for a narrowed i32 vector, bounds-checked arm.
- *
- * The widen has to happen INSIDE the `then` arm rather than around the whole
- * `if`: the out-of-bounds arm must still yield f64 NaN (JS `undefined` in a
- * numeric context), and `i32.const 0` — what the generic i32 arm of
- * `emitSafeVecGet` would produce — is a DIFFERENT NUMBER. Producing an f64
- * result from both arms is what makes the narrowing invisible to consumers.
- */
-function emitSafeNarrowedI32VecGet(recv: IrValueId, idxI32: IrValueId, cx: LowerCtx): IrValueId {
-  const elemIr = irVal({ kind: "i32" });
-  const lenF64 = cx.builder.emitVecLen(recv);
-  const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
-  const cond = cx.builder.emitBinary("i32.lt_u", idxI32, lenI32, irVal({ kind: "i32" }));
-
-  let thenValue!: IrValueId;
-  const thenBody = cx.builder.collectBodyInstrs(() => {
-    thenValue = cx.builder.emitUnary("f64.convert_i32_s", cx.builder.emitVecGet(recv, idxI32, elemIr), IR_F64);
-  });
-  let elseValue!: IrValueId;
-  const elseBody = cx.builder.collectBodyInstrs(() => {
-    elseValue = cx.builder.emitConst({ kind: "f64", value: NaN }, IR_F64);
-  });
-
-  return cx.builder.emitIfElse({
-    cond,
-    then: thenBody,
-    thenValue,
-    else: elseBody,
-    elseValue,
-    resultType: IR_F64,
-  });
-}
-
-function emitSafeVecGet(recv: IrValueId, idxI32: IrValueId, elemValType: ValType, cx: LowerCtx): IrValueId {
-  const elemIr = irVal(elemValType);
-  let makeOobDefault: (() => IrValueId) | null = null;
-  const backendDefault = cx.resolver?.resolveVecOutOfBoundsConst?.(elemValType);
-  if (backendDefault) {
-    makeOobDefault = () => cx.builder.emitConst(backendDefault, elemIr);
-  } else {
-    switch (elemValType.kind) {
-      case "f64":
-        makeOobDefault = () => cx.builder.emitConst({ kind: "f64", value: NaN }, elemIr);
-        break;
-      case "i32":
-        makeOobDefault = () => cx.builder.emitConst({ kind: "i32", value: 0 }, elemIr);
-        break;
-      case "externref":
-      case "ref_null":
-        makeOobDefault = () => cx.builder.emitConst({ kind: "null", ty: elemIr }, elemIr);
-        break;
-      default:
-        throw new Error(
-          `ir/from-ast: SAFE OOB vec read for element kind '${elemValType.kind}' needs legacy ` +
-            `(no in-arm default without a result-type widen) in ${cx.funcName}`,
-        );
-    }
-  }
-
-  // cond = (unsigned) idx < len. `emitVecLen` yields an f64 JS length; convert
-  // back to i32 for the unsigned compare. A negative index wraps to a huge
-  // unsigned value > any length, so it lands in the OOB arm (JS-correct: a plain
-  // array reads a negative index as `undefined`). The comparison uses the SAME
-  // truncated i32 index the read uses, so it agrees with the read exactly.
-  const lenF64 = cx.builder.emitVecLen(recv);
-  const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
-  const cond = cx.builder.emitBinary("i32.lt_u", idxI32, lenI32, irVal({ kind: "i32" }));
-
-  // then arm: in-bounds → the unchecked vec.get (provably safe inside this arm).
-  let thenValue!: IrValueId;
-  const thenBody = cx.builder.collectBodyInstrs(() => {
-    thenValue = cx.builder.emitVecGet(recv, idxI32, elemIr);
-  });
-  // else arm: OOB → the JS-correct default (pure const; no late import).
-  let elseValue!: IrValueId;
-  const elseBody = cx.builder.collectBodyInstrs(() => {
-    elseValue = makeOobDefault!();
-  });
-
-  return cx.builder.emitIfElse({
-    cond,
-    then: thenBody,
-    thenValue,
-    else: elseBody,
-    elseValue,
-    resultType: elemIr,
-  });
-}
-
-/**
  * Lower an element access whose argument is a string literal — sugar
  * for property access on a known shape. Numeric / computed keys are
  * out of slice 2's scope and throw, so the function falls back to
@@ -5624,81 +5386,13 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
     return r;
   }
 
-  // (#2856) `arr.push(v)` on a growable vec receiver. Rides the C2
-  // element-store helper: `__vec_elem_set_<vecTypeIdx>(recv, len, v)` writes
-  // at index == length, which is EXACTLY the legacy push semantics (grow the
-  // backing array when at capacity, store, length = idx + 1 — see
-  // src/codegen/vec-elem-set.ts). The length is read BEFORE the store.
-  // Restricted to a NON-NULL `(ref $vec)` receiver: `emitVecLen` struct-reads
-  // the receiver without a null guard, so a nullable receiver (`ref_null`,
-  // e.g. an unnarrowed param) demotes to legacy, which carries the runtime
-  // TypeError null-guard. Single-arg only (multi-arg push demotes); f64 /
-  // externref element vecs only (mirrors `lowerElementStore`).
-  {
-    const vecRecvVal = asVal(recvType);
-    // (#2956 L2) Linear vec receivers are scalar i32 arena pointers — admit
-    // them alongside the non-null GC ref (same probe as the read arms; the
-    // linear runtime's __arr_set target resolves #1977 forwarding itself).
-    const scalarVecPushReceiver =
-      vecRecvVal?.kind === "i32" &&
-      ts.isPropertyAccessExpression(expr.expression) &&
-      (cx.resolver?.isVecValueExpression?.(expr.expression.expression) === true ||
-        cx.emptyArrayInference.isResolvedVectorExpression(expr.expression.expression));
-    if (methodName === "push" && vecRecvVal && (vecRecvVal.kind === "ref" || scalarVecPushReceiver)) {
-      const vec = cx.resolver?.resolveVec?.(vecRecvVal);
-      if (vec) {
-        if (expr.arguments.length !== 1 || ts.isSpreadElement(expr.arguments[0]!)) {
-          throw new Error(
-            `ir/from-ast: .push with ${expr.arguments.length} args / spread not in IR scope (single plain arg only) (${cx.funcName})`,
-          );
-        }
-        const elem = vec.elementValType;
-        // (#3734) `.push` is a STORE at index == length, so a narrowed i32
-        // vector applies the same invariant W as `arr[i] = v`.
-        const narrowedI32 = isNarrowedI32Vec(vec, expr.expression.expression, cx);
-        if (!narrowedI32 && elem.kind !== "f64" && elem.kind !== "externref") {
-          throw new Error(`ir/from-ast: .push into '${elem.kind}' vec not in IR scope (${cx.funcName})`);
-        }
-        // Old length — the store index. `emitVecLen` yields the f64 JS length.
-        const lenF64 =
-          scalarVecPushReceiver && cx.emptyArrayInference.isResolvedVectorExpression(expr.expression.expression)
-            ? emitForwardingAwareLinearVecLen(recv, cx)
-            : cx.builder.emitVecLen(recv);
-        const lenI32 = cx.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
-        if (narrowedI32) {
-          const narrowVal = lowerNarrowedI32Element(expr.arguments[0]!, cx);
-          cx.builder.emitCall(
-            irIntrinsicFuncRef(`__vec_elem_set_${vec.vecStructTypeIdx}`),
-            [recv, lenI32, narrowVal],
-            null,
-          );
-          if (statementPosition) return null;
-          // Expression position: JS `push` returns the NEW length = old + 1.
-          const oneF64 = cx.builder.emitConst({ kind: "f64", value: 1 }, irVal({ kind: "f64" }));
-          return cx.builder.emitBinary("f64.add", lenF64, oneF64, irVal({ kind: "f64" }));
-        }
-        const valRaw = lowerExpr(expr.arguments[0]!, cx, irVal(elem));
-        let val: IrValueId;
-        if (elem.kind === "f64") {
-          const valTy = asVal(cx.builder.typeOf(valRaw));
-          if (valTy?.kind !== "f64") {
-            throw new Error(
-              `ir/from-ast: .push value ${describeIrType(cx.builder.typeOf(valRaw))} into f64 vec ` +
-                `not in IR scope (${cx.funcName})`,
-            );
-          }
-          val = valRaw;
-        } else {
-          val = coerceToExpectedExtern(valRaw, elem, cx, `value of .push`);
-        }
-        cx.builder.emitCall(irIntrinsicFuncRef(`__vec_elem_set_${vec.vecStructTypeIdx}`), [recv, lenI32, val], null);
-        if (statementPosition) return null;
-        // Expression position: JS `push` returns the NEW length = old + 1.
-        const one = cx.builder.emitConst({ kind: "f64", value: 1 }, irVal({ kind: "f64" }));
-        return cx.builder.emitBinary("f64.add", lenF64, one, irVal({ kind: "f64" }));
-      }
-    }
-  }
+  const vecPush = tryLowerVecPush(expr, methodName, recv, recvType, statementPosition, cx, {
+    lowerExpr: (expression, expected) => lowerExpr(expression, cx, expected),
+    lowerNarrowedElement: (expression) => lowerNarrowedI32Element(expression, cx),
+    coerceToExpectedExtern: (value, expected, detail) => coerceToExpectedExtern(value, expected, cx, detail),
+    describeType: describeIrType,
+  });
+  if (vecPush !== undefined) return vecPush;
 
   if (recvType.kind !== "class") {
     throwMethodCallNotInSlice(methodName, recvType, cx.funcName);

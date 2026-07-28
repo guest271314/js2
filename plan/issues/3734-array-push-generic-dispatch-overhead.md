@@ -16,14 +16,6 @@ language_feature: arrays
 goal: performance
 depends_on: []
 related: [3704, 3733, 3739, 3741]
-# `.push(v)` on a narrowed vector must lower its argument through
-# `lowerAsI32(.., "canon")` instead of the generic f64 path, and must fall back
-# cleanly when the receiver is not a narrowed group. That branch lives at the
-# `push` case inside `lowerMethodCall`, which already dispatches every method
-# on a vec receiver — splitting it out would mean re-deriving the receiver's
-# resolved vec type in a second function purely to satisfy the line budget.
-func-budget-allow:
-  - src/ir/from-ast.ts::lowerMethodCall
 ---
 # #3734 — `array.ts` push loop: IR emits a non-inlined helper call, legacy fully inlines
 
