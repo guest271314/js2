@@ -3005,11 +3005,11 @@ export function generateModule(
       [ast.sourceFile],
     );
     ctx.numericPropertyNames = propertyKinds.numeric;
-    // (#3739 S1) The string half of the same walk. A field every write proves a
+    // (#3750 S1) The string half of the same walk. A field every write proves a
     // string gets a NATIVE STRING slot instead of the boxed `externref`, which
     // deletes the per-access `ref.test` / `ref.cast` / `__str_flatten`.
     ctx.stringPropertyNames = propertyKinds.string;
-    // (#3739 S2) Names the fixpoint proved return a number on every path, so
+    // (#3750 S2) Names the fixpoint proved return a number on every path, so
     // `this.acc + this.nextCode()` can unbox once instead of boxing both sides.
     ctx.numericFunctionNames = propertyKinds.numericFunctions;
   }

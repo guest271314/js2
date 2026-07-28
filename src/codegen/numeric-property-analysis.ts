@@ -658,7 +658,7 @@ function collectNumericFlowFacts(
  * `this.input.slice(…).split(…).length` as numeric.
  */
 /**
- * (#3739 S1) Property names whose EVERY write is provably a string.
+ * (#3750 S1) Property names whose EVERY write is provably a string.
  *
  * `scopes` makes the prover slot-aware. Without it this was purely syntactic —
  * a literal, a template, `String(x)`, a string method on a ground string, or a
@@ -669,7 +669,7 @@ function collectNumericFlowFacts(
  *
  * A parameter read is not a literal, so `this.input` was never provably a
  * string and its fnctor slot stayed `externref` — costing a
- * `ref.test` + `ref.cast` + `__str_flatten` on every access (#3739).
+ * `ref.test` + `ref.cast` + `__str_flatten` on every access (#3750).
  *
  * Following an identifier to its slot and requiring EVERY definition to be a
  * ground string closes that. The slot's defs are already seeded from call-site
@@ -993,14 +993,14 @@ function debugEnabled(): boolean {
  * dropped.
  */
 /**
- * (#3739 S1) The whole-program field verdicts `deriveFnctorFields` promotes on.
+ * (#3750 S1) The whole-program field verdicts `deriveFnctorFields` promotes on.
  * `numeric` is #3683 S4a's; `string` is the slot-aware string-carrier set.
  */
 export interface PropertyKindVerdicts {
   readonly numeric: Set<string>;
   readonly string: Set<string>;
   /**
-   * (#3739 S2) Function NAMES the fixpoint proved return a number on every
+   * (#3750 S2) Function NAMES the fixpoint proved return a number on every
    * path. Already used internally to decide `this.<m>()` is numeric; exported
    * so the `+` lowering can too.
    */
@@ -1038,9 +1038,9 @@ export function analyzeNumericPropertyNames(
     if (parameter.slot.defs.length === before) parameter.slot.defs.push({});
   }
 
-  // (#3739 S1) AFTER the seeding above: the slot-aware string prover follows a
+  // (#3750 S1) AFTER the seeding above: the slot-aware string prover follows a
   // parameter to the arguments actually passed, which only exist once the
-  // seeding loop has run. Before #3739 this ran earlier and was purely
+  // seeding loop has run. Before #3750 this ran earlier and was purely
   // syntactic, so the ordering did not matter — now it does.
   const stringProperties = collectStringProperties(facts, scopes);
 

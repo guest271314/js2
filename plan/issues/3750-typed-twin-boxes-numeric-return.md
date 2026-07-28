@@ -1,5 +1,5 @@
 ---
-id: 3739
+id: 3750
 title: "perf: fnctor STRING fields stay externref — ref.test+cast+flatten per access; 6.6x on the tokenizer axis (9.5x vs node)"
 loc-budget-allow:
   # S1's three pieces: the slot-aware string prover, the field promotion, and
@@ -24,7 +24,7 @@ related: [3673, 3683, 3684, 3685, 3686]
 origin: "benchmarks/cross-engine — measured on main 02a5512e0, 2026-07-28"
 ---
 
-# #3739 — the typed twin boxes a number it already has
+# #3750 — the typed twin boxes a number it already has
 
 ## Where the remaining gap actually is
 

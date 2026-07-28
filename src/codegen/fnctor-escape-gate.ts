@@ -1607,7 +1607,7 @@ export function deriveFnctorFields(
     field.type = { kind: "f64" };
   }
 
-  // (#3739 S1) The STRING half of the same promotion. A field whose every write
+  // (#3750 S1) The STRING half of the same promotion. A field whose every write
   // is provably a string (`ctx.stringPropertyNames`, the slot-aware verdict from
   // the same whole-program walk) carries a native `$AnyString` ref instead of the
   // boxed `externref`.
@@ -1615,7 +1615,7 @@ export function deriveFnctorFields(
   // The cost this removes is per-ACCESS, not per-write: reading a boxed slot
   // emits `any.convert_extern` + `ref.test` + `ref.cast` + `__str_flatten`
   // before the string is usable, so `this.input.charCodeAt(i)` in a scan loop
-  // pays all four per character. #3739 measured that at 6.6x on the tokenizer
+  // pays all four per character. #3750 measured that at 6.6x on the tokenizer
   // axis — the single largest remaining gap to node.
   //
   // Same three carve-outs as the numeric promotion above, for the same reasons
@@ -1626,7 +1626,7 @@ export function deriveFnctorFields(
   //     since this runs during struct derivation and the type is lazy;
   //   - `nativeStrings` must be on, which is what makes `$AnyString` the
   //     module's string carrier at all.
-  // `JS2WASM_STRING_FIELDS=0` reproduces the pre-#3739 field shapes exactly,
+  // `JS2WASM_STRING_FIELDS=0` reproduces the pre-#3750 field shapes exactly,
   // which is what makes a same-container A/B possible (mirrors S4a's
   // `JS2WASM_NUMERIC_FIELDS=0`).
   if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && process.env.JS2WASM_STRING_FIELDS !== "0") {

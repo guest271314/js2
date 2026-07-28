@@ -934,12 +934,12 @@ export function compileBinaryExpression(
   // skip AnyValue and compile with a numeric hint so operands unbox to f64
   // directly, avoiding the overhead of AnyValue tag dispatch.
   if (ctx.anyValueTypeIdx >= 0) {
-    // (#3739 S2) An `any`-typed operand the whole-program fixpoint already PROVED
+    // (#3750 S2) An `any`-typed operand the whole-program fixpoint already PROVED
     // numeric is not really `any` for arithmetic purposes. Inside a fnctor
     // prototype method `this` is untyped, so `this.acc + this.nextCode()` reads
     // as any+any and routes to the generic `__any_add` — boxing BOTH operands
     // into `$AnyValue` and tag-dispatching the result back out, five box/unbox
-    // operations per iteration on values that are f64 on both sides (#3739).
+    // operations per iteration on values that are f64 on both sides (#3750).
     //
     // `numericPropertyNames` (#3683 S4a) and `numericFunctionNames` are verdicts
     // from the same fixpoint that already gave `this.acc` a physical f64 slot —
@@ -2918,7 +2918,7 @@ export function compileI64BinaryOp(
 /**
  * Emit JS ToInt32 via IEEE-754 bit decomposition (sign/exponent/significand),
  * matching how native JS engines implement it in C++. Deliberately avoids
- * f64.floor/f64.div: a handwritten-Wasm bisection (#3739) found that the
+ * f64.floor/f64.div: a handwritten-Wasm bisection (#3750) found that the
  * floor-based modulo-reduction sequence this replaced never gets tiered up
  * by V8 in a tight loop (stuck at Liftoff baseline speed indefinitely,
  * ~12x slower than an equivalent pure-f64 loop with no floor at all) — an
