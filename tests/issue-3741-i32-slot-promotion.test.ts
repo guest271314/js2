@@ -101,6 +101,40 @@ describe("#3741 — i32 slot promotion (shape)", () => {
     expect(body).not.toContain("i32.trunc_sat_f64_s");
     expect(body).toContain("array.get");
   });
+
+  // Eligibility is keyed on the DECLARATION NODE, not on identifier text. Two
+  // sibling `for (let i = …)` loops are two distinct bindings that happen to
+  // share a name; a name-keyed set has to reject BOTH to stay safe, which
+  // silently disabled the promotion on one of the most common shapes in real
+  // code. Alpha-renaming the second counter must make no difference at all.
+  it("two sibling loops that both declare `i` promote BOTH counters", async () => {
+    const sameName = `export function run(): number {
+      let t = 0;
+      for (let i = 0; i < 100; i++) t = (t + i) | 0;
+      for (let i = 0; i < 100; i++) t = (t + i) | 0;
+      return t;
+    }`;
+    const renamed = `export function run(): number {
+      let t = 0;
+      for (let i = 0; i < 100; i++) t = (t + i) | 0;
+      for (let j = 0; j < 100; j++) t = (t + j) | 0;
+      return t;
+    }`;
+    const [a, b] = await Promise.all([compile(sameName, { emitWat: true }), compile(renamed, { emitWat: true })]);
+    expect(a.success && b.success).toBe(true);
+    const bodyA = funcBody(a.wat, "run");
+    const bodyB = funcBody(b.wat, "run");
+
+    // Three i32 slots either way: the accumulator plus both counters.
+    expect([...bodyA.matchAll(/\(local \$\$slot_\w+ i32\)/g)]).toHaveLength(3);
+    expect(bodyA).not.toMatch(/\(local \$\$slot_\w+ f64\)/);
+    // Same instruction mix as the alpha-renamed program — the ONLY difference
+    // between the two sources is the second counter's name.
+    const mix = (w: string): string =>
+      [/i32\.add/g, /i32\.lt_s/g, /f64\.add/g, /f64\.lt/g].map((re) => (w.match(re) ?? []).length).join("/");
+    expect(mix(bodyA)).toBe(mix(bodyB));
+    expect(bodyA).not.toContain("f64.add");
+  });
 });
 
 interface Case {
@@ -412,20 +446,113 @@ const CASES: readonly Case[] = [
     // #1179-followup / #3758 `isI32MulSafe` bound from either side.
     name: "unguarded large multiply stays f64-faithful",
     source: `export function bigmul(): number {
-      let a = 2147483647 | 0;
-      let b = 2147483647 | 0;
+      let a = 0;
+      let b = 0;
       let r = 0;
+      a = 2147483647 | 0;
+      b = 2147483647 | 0;
       r = (a * b) | 0;
       return r;
     }`,
     fn: "bigmul",
     args: [],
     js: () => {
-      let a = 2147483647 | 0;
-      let b = 2147483647 | 0;
+      let a = 0;
+      let b = 0;
       let r = 0;
+      a = 2147483647 | 0;
+      b = 2147483647 | 0;
       r = (a * b) | 0;
       return r;
+    },
+  },
+  {
+    // The name-keying regression, end to end: two sibling loops declaring the
+    // same counter name, both promoted, plus an indexed read of a vec built by
+    // the first loop. This is the `array.ts` benchmark shape.
+    name: "two sibling loops that both declare `i` (array.ts shape)",
+    source: `export function run(): number {
+      const arr: number[] = [];
+      for (let i = 0; i < 500; i++) arr.push(i);
+      let total = 0;
+      for (let i = 0; i < arr.length; i++) total = (total + arr[i]) | 0;
+      return total;
+    }`,
+    fn: "run",
+    args: [],
+    js: () => {
+      const arr: number[] = [];
+      for (let i = 0; i < 500; i++) arr.push(i);
+      let total = 0;
+      for (let i = 0; i < arr.length; i++) total = (total + arr[i]!) | 0;
+      return total;
+    },
+  },
+  {
+    // Genuine shadowing: the inner `i` is a DIFFERENT binding whose scope is
+    // nested inside the outer one. The planner drops both (distinguishing them
+    // needs use-site scope resolution the planner deliberately does not do),
+    // but the ANSWER must still be right — that is what this asserts.
+    name: "nested loops shadowing the counter name",
+    source: `export function sh(): number {
+      let t = 0;
+      for (let i = 0; i < 7; i++) {
+        for (let i = 0; i < 5; i++) t = (t + i) | 0;
+        t = (t + 100) | 0;
+      }
+      return t;
+    }`,
+    fn: "sh",
+    args: [],
+    js: () => {
+      let t = 0;
+      for (let i = 0; i < 7; i++) {
+        for (let i = 0; i < 5; i++) t = (t + i) | 0;
+        t = (t + 100) | 0;
+      }
+      return t;
+    },
+  },
+  {
+    // A loop counter shadowing an OUTER `let i` that is itself i32-coerced.
+    // The two bindings' scopes nest, so neither is promoted — and the outer
+    // `i` must still read back its own value after the loop.
+    name: "loop counter shadows an outer i32-coerced `let i`",
+    source: `export function outer(): number {
+      let i = 5 | 0;
+      let t = 0;
+      for (let i = 0; i < 10; i++) t = (t + i) | 0;
+      i = (i + 1) | 0;
+      return (t * 1000 + i) | 0;
+    }`,
+    fn: "outer",
+    args: [],
+    js: () => {
+      let i = 5 | 0;
+      let t = 0;
+      for (let i = 0; i < 10; i++) t = (t + i) | 0;
+      i = (i + 1) | 0;
+      return (t * 1000 + i) | 0;
+    },
+  },
+  {
+    // Sibling loops where only ONE counter is promotable (the second is
+    // written with a non-i32-safe value). Keying on the declaration means the
+    // first must still promote; a name-keyed set would drop both.
+    name: "sibling loops, only the first counter promotable",
+    source: `export function part(n: number): number {
+      let t = 0;
+      for (let i = 0; i < 10; i++) t = (t + i) | 0;
+      for (let i = n; i < 10; i++) t = (t + 1) | 0;
+      return t;
+    }`,
+    fn: "part",
+    args: [3],
+    js: (n) => {
+      let t = 0;
+      for (let i = 0; i < 10; i++) t = (t + i) | 0;
+      for (let i = n; i < 10; i++) t = (t + 1) | 0;
+      return t;
     },
   },
   {
@@ -452,6 +579,37 @@ const CASES: readonly Case[] = [
     },
   },
 ];
+
+// The planner's eligibility check is strictly MORE conservative than legacy's
+// for-counter path, and here that matters for correctness, not just coverage.
+// Legacy's `detectI32LoopVar` promotes a counter on the loop HEAD's shape alone
+// and never inspects the body, so a body that assigns a non-integer to the
+// counter (`i = i + 0.5`) silently truncates and changes the iteration count.
+// #3741's planner rejects the binding instead, because `i = i + n` is not a
+// write shape `lowerAsI32` can emit exactly.
+//
+// Asserted IR-vs-JS only: legacy is KNOWN-WRONG here (returns 55; the spec
+// value is 52) — a pre-existing `detectI32LoopVar` bug, independent of #3741.
+// Reproduce with `experimentalIR: false`. Worth its own issue; not fixed here.
+describe("#3741 — planner is stricter than legacy's counter promotion", () => {
+  it("a counter mutated to a non-integer in the loop body is NOT promoted", async () => {
+    const source = `export function part(n: number): number {
+      let t = 0;
+      for (let i = 0; i < 10; i++) { i = i + n; t = (t + 1) | 0; }
+      return t;
+    }`;
+    const expected = ((n: number): number => {
+      let t = 0;
+      for (let i = 0; i < 10; i++) {
+        i = i + n;
+        t = (t + 1) | 0;
+      }
+      return t;
+    })(0.5);
+    const ir = await instantiate(source, true);
+    expect((ir.part as (n: number) => number)(0.5), "IR vs JS").toBe(expected);
+  });
+});
 
 describe("#3741 — i32 slot promotion (IR == legacy == JS)", () => {
   for (const c of CASES) {

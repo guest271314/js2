@@ -62,6 +62,7 @@
  *      new legacy fallback, no fallback-budget growth).
  */
 import { forEachChild, ts } from "../../ts-api.js";
+import type { IrBinop } from "../nodes.js";
 import { collectI32CoercedLocals } from "../../codegen/analysis/i32-coerced-locals.js";
 import { detectI32LoopVar } from "../../codegen/statements/loop-analysis.js";
 
@@ -73,7 +74,7 @@ const I32_MAX = 2147483647;
  * from its own candidate set; `from-ast.ts` answers from the live `cx.scope`,
  * so an inner shadowing binding can never be mistaken for the promoted one.
  */
-export type IsPromotedI32 = (name: string) => boolean;
+export type IsPromotedI32 = (id: ts.Identifier) => boolean;
 
 /** Peel parens / `as` casts / `!` assertions. */
 export function peelExpr(e: ts.Expression): ts.Expression {
@@ -147,7 +148,7 @@ export function isCanonI32Lowerable(e: ts.Expression, promoted: IsPromotedI32, d
   if (depth > 64) return false;
   const inner = peelExpr(e);
   if (i32LiteralValue(inner) !== null) return true;
-  if (ts.isIdentifier(inner)) return promoted(inner.text);
+  if (ts.isIdentifier(inner)) return promoted(inner);
   if (ts.isBinaryExpression(inner)) {
     const k = inner.operatorToken.kind;
     // Bitwise (minus `>>>`) always yields an exact int32 regardless of operands.
@@ -189,18 +190,17 @@ export function isWrapI32Lowerable(e: ts.Expression, promoted: IsPromotedI32, de
   return false;
 }
 
-/** Every declaration site of `name` in `fn` (used for shadow detection). */
-function countDeclarations(fn: ts.FunctionLikeDeclaration, name: string): number {
-  let n = 0;
-  const walk = (node: ts.Node): void => {
-    if (node !== fn && isFunctionLikeNode(node)) return;
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) n++;
-    if (ts.isParameter(node) && ts.isIdentifier(node.name) && node.name.text === name) n++;
-    forEachChild(node, walk);
-  };
-  if (fn.body) forEachChild(fn.body, walk);
-  return n;
-}
+// ---------------------------------------------------------------------------
+// The planner: WHICH declarations get an i32 slot
+//
+// Keyed on the DECLARATION NODE, never on the identifier text. Two sibling
+// `for (let i = …)` loops are two distinct bindings that happen to share a
+// name; a name-keyed set has to reject both to stay safe, which silently
+// disables the optimization on one of the most common shapes in real code
+// (`for (let i …) …; for (let i …) …`). Legacy does not have that problem
+// because its own promotion is applied per-loop at emit time; the IR port
+// has to reproduce that by resolving each candidate to its binding.
+// ---------------------------------------------------------------------------
 
 function isFunctionLikeNode(node: ts.Node): boolean {
   return (
@@ -213,12 +213,69 @@ function isFunctionLikeNode(node: ts.Node): boolean {
   );
 }
 
-/** `name` is referenced from inside a nested function (i.e. captured). */
-function isCapturedByNestedFunction(fn: ts.FunctionLikeDeclaration, name: string): boolean {
+/** `inner` lies inside `outer`'s source range (same file, real nodes only). */
+function nodeContains(outer: ts.Node, inner: ts.Node): boolean {
+  return outer.pos <= inner.pos && inner.end <= outer.end;
+}
+
+/**
+ * The subtree a `let`/`const` declaration's binding is visible in.
+ *
+ * For a `for` head the binding's scope is the ForStatement itself (head +
+ * body), which is exactly what makes two SIBLING loops' counters disjoint.
+ * For a plain `let` it is the innermost enclosing block-like node.
+ */
+function declarationScope(d: ts.VariableDeclaration): ts.Node {
+  const owner = d.parent.parent;
+  if (ts.isForStatement(owner) || ts.isForOfStatement(owner) || ts.isForInStatement(owner)) return owner;
+  let cur: ts.Node | undefined = owner.parent;
+  while (cur) {
+    if (ts.isBlock(cur) || ts.isSourceFile(cur) || ts.isCaseBlock(cur) || ts.isModuleBlock(cur)) return cur;
+    cur = cur.parent;
+  }
+  return owner;
+}
+
+/** Every `let`/`const`/`var` declaration and parameter name in `fn`'s own scope. */
+function collectDeclarationSites(fn: ts.FunctionLikeDeclaration): {
+  readonly byName: ReadonlyMap<string, readonly ts.VariableDeclaration[]>;
+  readonly paramNames: ReadonlySet<string>;
+} {
+  const byName = new Map<string, ts.VariableDeclaration[]>();
+  const paramNames = new Set<string>();
+  for (const p of fn.parameters) {
+    if (ts.isIdentifier(p.name)) paramNames.add(p.name.text);
+  }
+  const walk = (node: ts.Node): void => {
+    if (node !== fn && isFunctionLikeNode(node)) return;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const list = byName.get(node.name.text);
+      if (list) list.push(node);
+      else byName.set(node.name.text, [node]);
+    }
+    forEachChild(node, walk);
+  };
+  if (fn.body) forEachChild(fn.body, walk);
+  return { byName, paramNames };
+}
+
+/** Walk `scope`, skipping nested functions and any sibling binding's scope. */
+function walkBindingScope(scope: ts.Node, excluded: readonly ts.Node[], visit: (node: ts.Node) => void): void {
+  const walk = (node: ts.Node): void => {
+    if (node !== scope && isFunctionLikeNode(node)) return;
+    if (node !== scope && excluded.some((e) => e === node)) return;
+    visit(node);
+    forEachChild(node, walk);
+  };
+  walk(scope);
+}
+
+/** `name` is read from inside a nested function anywhere in `scope`. */
+function isCapturedByNestedFunction(scope: ts.Node, name: string): boolean {
   let captured = false;
   const walk = (node: ts.Node, insideNested: boolean): void => {
     if (captured) return;
-    if (node !== fn && isFunctionLikeNode(node)) {
+    if (node !== scope && isFunctionLikeNode(node)) {
       forEachChild(node, (c) => walk(c, true));
       return;
     }
@@ -228,70 +285,8 @@ function isCapturedByNestedFunction(fn: ts.FunctionLikeDeclaration, name: string
     }
     forEachChild(node, (c) => walk(c, insideNested));
   };
-  if (fn.body) forEachChild(fn.body, (c) => walk(c, false));
+  walk(scope, false);
   return captured;
-}
-
-/**
- * Every write to `name` must be a shape the IR can emit as an exact i32.
- * `candidates` is the set being considered for promotion — membership is
- * assumed while checking (the caller iterates to a fixpoint by shrinking).
- */
-function writeShapesAreLowerable(
-  fn: ts.FunctionLikeDeclaration,
-  name: string,
-  candidates: ReadonlySet<string>,
-  provenCounters: ReadonlySet<string>,
-): boolean {
-  let ok = true;
-  const walk = (node: ts.Node): void => {
-    if (!ok) return;
-    if (node !== fn && isFunctionLikeNode(node)) return;
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
-      // Declaration: the initializer must be exactly-i32 lowerable. A missing
-      // initializer (`let x;`) is not promotable — the IR's `undefined` init
-      // path is unrelated to numeric slots.
-      if (!node.initializer || !isCanonI32Lowerable(node.initializer, (n) => candidates.has(n))) ok = false;
-    } else if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === name) {
-      const k = node.operatorToken.kind;
-      if (k === ts.SyntaxKind.EqualsToken) {
-        if (!isCanonI32Lowerable(node.right, (n) => candidates.has(n))) ok = false;
-      } else if (
-        k === ts.SyntaxKind.AmpersandEqualsToken ||
-        k === ts.SyntaxKind.BarEqualsToken ||
-        k === ts.SyntaxKind.CaretEqualsToken ||
-        k === ts.SyntaxKind.LessThanLessThanEqualsToken ||
-        k === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken
-      ) {
-        // Bitwise compound assignment always yields an exact int32.
-      } else if (
-        (k === ts.SyntaxKind.PlusEqualsToken || k === ts.SyntaxKind.MinusEqualsToken) &&
-        provenCounters.has(name) &&
-        i32LiteralValue(node.right) !== null
-      ) {
-        // `i += <int literal>` on a `detectI32LoopVar`-proven counter — the same
-        // bounded-by-the-loop-condition step legacy promotes. NOT accepted for a
-        // general accumulator (that is exactly the #1236 saturation trap).
-      } else if (COMPOUND_ASSIGN_TOKENS.has(k)) {
-        ok = false;
-      }
-    } else if (
-      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
-      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
-      ts.isIdentifier(node.operand) &&
-      node.operand.text === name
-    ) {
-      // `x++` / `--x` lower to `i32.add`/`i32.sub` of 1 — the same wrap legacy
-      // has emitted for promoted locals since #1120. from-ast only lowers these
-      // in result-discarding position (`lowerIncrementDecrement` returns void);
-      // a value-position `x++` throws there today, so require the same shape
-      // here rather than promoting a local whose write we would never reach.
-      if (!isDiscardedIncDecPosition(node)) ok = false;
-    }
-    forEachChild(node, walk);
-  };
-  if (fn.body) forEachChild(fn.body, walk);
-  return ok;
 }
 
 const COMPOUND_ASSIGN_TOKENS: ReadonlySet<ts.SyntaxKind> = new Set([
@@ -323,51 +318,169 @@ function isDiscardedIncDecPosition(node: ts.Node): boolean {
 }
 
 /**
+ * Every write to `d`'s binding must be a shape `lowerAsI32` can emit exactly.
+ * Scanned over `d`'s own scope only, so a same-named sibling binding's writes
+ * are never attributed here.
+ */
+function writeShapesAreLowerable(
+  d: ts.VariableDeclaration,
+  scope: ts.Node,
+  excluded: readonly ts.Node[],
+  promoted: IsPromotedI32,
+  isProvenCounter: boolean,
+): boolean {
+  const name = (d.name as ts.Identifier).text;
+  // Declaration: the initializer must be exactly-i32 lowerable. A missing
+  // initializer (`let x;`) is not promotable — the IR's `undefined` init path
+  // is unrelated to numeric slots.
+  if (!d.initializer || !isCanonI32Lowerable(d.initializer, promoted)) return false;
+
+  let ok = true;
+  walkBindingScope(scope, excluded, (node) => {
+    if (!ok) return;
+    if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === name) {
+      const k = node.operatorToken.kind;
+      if (k === ts.SyntaxKind.EqualsToken) {
+        if (!isCanonI32Lowerable(node.right, promoted)) ok = false;
+      } else if (
+        k === ts.SyntaxKind.AmpersandEqualsToken ||
+        k === ts.SyntaxKind.BarEqualsToken ||
+        k === ts.SyntaxKind.CaretEqualsToken ||
+        k === ts.SyntaxKind.LessThanLessThanEqualsToken ||
+        k === ts.SyntaxKind.GreaterThanGreaterThanEqualsToken
+      ) {
+        // Bitwise compound assignment always yields an exact int32.
+      } else if (
+        (k === ts.SyntaxKind.PlusEqualsToken || k === ts.SyntaxKind.MinusEqualsToken) &&
+        isProvenCounter &&
+        i32LiteralValue(node.right) !== null
+      ) {
+        // `i += <int literal>` on a `detectI32LoopVar`-proven counter — the same
+        // bounded-by-the-loop-condition step legacy promotes. NOT accepted for a
+        // general accumulator (that is exactly the #1236 saturation trap).
+      } else if (COMPOUND_ASSIGN_TOKENS.has(k)) {
+        ok = false;
+      }
+    } else if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(node.operand) &&
+      node.operand.text === name
+    ) {
+      // `x++` / `--x` lower to `i32.add`/`i32.sub` of 1 — the same wrap legacy
+      // has emitted for promoted locals since #1120. from-ast only lowers these
+      // in result-discarding position (`lowerIncrementDecrement` returns void),
+      // so require the same shape here.
+      if (!isDiscardedIncDecPosition(node)) ok = false;
+    }
+  });
+  return ok;
+}
+
+/** One promotion candidate: a declaration plus its resolved binding scope. */
+interface Candidate {
+  readonly decl: ts.VariableDeclaration;
+  readonly name: string;
+  readonly scope: ts.Node;
+  /** Same-name sibling scopes to skip when scanning (always disjoint). */
+  readonly siblingScopes: readonly ts.Node[];
+  /** Proven by `detectI32LoopVar` (unlocks the `i += <lit>` step shape). */
+  readonly isProvenCounter: boolean;
+}
+
+/**
  * Plan which slot-bound locals of `fn` get native i32 storage.
  *
- * `mutatedLets` is from-ast's own "this name is reassigned somewhere" set — only
- * those names get a slot at all, so only those can be promoted.
+ * `mutatedLets` is from-ast's own "this name is reassigned somewhere" set —
+ * only those names get a slot at all, so only those can be promoted.
+ *
+ * Returns the set of DECLARATION NODES (not names): `from-ast.ts` matches on
+ * node identity at `lowerVarDecl`, and every read/write already resolves
+ * through `cx.scope`, so shadowing can never mis-target a promotion.
  */
-export function planI32Slots(fn: ts.FunctionLikeDeclaration, mutatedLets: ReadonlySet<string>): ReadonlySet<string> {
+export function planI32Slots(
+  fn: ts.FunctionLikeDeclaration,
+  mutatedLets: ReadonlySet<string>,
+): ReadonlySet<ts.VariableDeclaration> {
   if (!fn.body || !ts.isBlock(fn.body) || mutatedLets.size === 0) return EMPTY;
 
-  // (1) Q-CANON — legacy's hardened value proof, reused verbatim.
-  const canon = collectI32CoercedLocals(fn);
+  // (1) Q-CANON — legacy's hardened value proof, reused verbatim. Name-keyed,
+  // and it already drops any name declared twice among `VariableStatement`s.
+  const canonNames = collectI32CoercedLocals(fn);
 
   // (1b) for-loop counters, via legacy's `detectI32LoopVar` (also verbatim).
   // `collectI32CoercedLocals` deliberately does NOT return these (it only
   // records them as dependencies) because legacy promotes them through the
   // separate loop path.
-  const counters = new Set<string>();
+  const counterDecls = new Set<ts.VariableDeclaration>();
   const collectCounters = (node: ts.Node): void => {
     if (node !== fn && isFunctionLikeNode(node)) return;
     if (ts.isForStatement(node)) {
       const info = detectI32LoopVar(node);
-      if (info) counters.add(info.name);
+      const init = node.initializer;
+      if (info && init && ts.isVariableDeclarationList(init) && init.declarations.length === 1) {
+        counterDecls.add(init.declarations[0]!);
+      }
     }
     forEachChild(node, collectCounters);
   };
   forEachChild(fn.body, collectCounters);
 
-  const candidates = new Set<string>();
-  for (const n of canon) if (mutatedLets.has(n)) candidates.add(n);
-  for (const n of counters) if (mutatedLets.has(n)) candidates.add(n);
+  const { byName, paramNames } = collectDeclarationSites(fn);
+
+  // (2) Build candidates, resolving each to its binding scope. A name whose
+  // declarations do NOT have pairwise-disjoint scopes (genuine shadowing, e.g.
+  // nested `for (let i …)` inside `for (let i …)`, or a counter shadowing an
+  // outer `let i`) is dropped wholesale: distinguishing those bindings needs
+  // real scope resolution at every use site, and the conservative answer costs
+  // nothing on the shapes that matter. Sibling loops ARE disjoint, which is
+  // the whole point of keying on the declaration.
+  const candidates = new Map<ts.VariableDeclaration, Candidate>();
+  for (const [name, decls] of byName) {
+    if (!mutatedLets.has(name) || paramNames.has(name)) continue;
+    const scopes = decls.map(declarationScope);
+    const disjoint = scopes.every((a, i) =>
+      scopes.every((b, j) => i === j || (!nodeContains(a, b) && !nodeContains(b, a))),
+    );
+    if (!disjoint) continue;
+    for (let i = 0; i < decls.length; i++) {
+      const decl = decls[i]!;
+      const isProvenCounter = counterDecls.has(decl);
+      // A plain `let` qualifies only through the Q-CANON name proof; a for
+      // counter qualifies through `detectI32LoopVar`.
+      if (!isProvenCounter && !canonNames.has(name)) continue;
+      candidates.set(decl, {
+        decl,
+        name,
+        scope: scopes[i]!,
+        siblingScopes: scopes.filter((_, j) => j !== i),
+        isProvenCounter,
+      });
+    }
+  }
   if (candidates.size === 0) return EMPTY;
 
-  // (2) Structural guards. `collectI32CoercedLocals` already applies the
-  // shadowing / capture guards to ITS candidates, but the counter set comes
-  // from a shape matcher that does not, so apply them uniformly here.
-  for (const name of [...candidates]) {
-    if (countDeclarations(fn, name) !== 1 || isCapturedByNestedFunction(fn, name)) candidates.delete(name);
+  // (3) Capture guard — a captured binding is read through the closure's
+  // capture struct, which is built from the binding's declared type.
+  for (const c of [...candidates.values()]) {
+    if (isCapturedByNestedFunction(c.scope, c.name)) candidates.delete(c.decl);
   }
 
-  // (3) Producibility fixpoint: shrink until every remaining name's writes are
-  // all lowerable to an exact i32 *using only the surviving names*.
+  // (4) Producibility fixpoint: shrink until every surviving candidate's writes
+  // are all lowerable to an exact i32 *using only the surviving candidates*.
+  // The identifier probe resolves a use site to its GOVERNING declaration, so
+  // a same-named sibling binding never leaks its promotion into another scope.
+  const promotedAt: IsPromotedI32 = (id: ts.Identifier): boolean => {
+    for (const c of candidates.values()) {
+      if (c.name === id.text && nodeContains(c.scope, id)) return true;
+    }
+    return false;
+  };
   for (;;) {
     let changed = false;
-    for (const name of [...candidates]) {
-      if (!writeShapesAreLowerable(fn, name, candidates, counters)) {
-        candidates.delete(name);
+    for (const c of [...candidates.values()]) {
+      if (!writeShapesAreLowerable(c.decl, c.scope, c.siblingScopes, promotedAt, c.isProvenCounter)) {
+        candidates.delete(c.decl);
         changed = true;
       }
     }
@@ -375,7 +488,64 @@ export function planI32Slots(fn: ts.FunctionLikeDeclaration, mutatedLets: Readon
     if (candidates.size === 0) return EMPTY;
   }
 
-  return candidates.size === 0 ? EMPTY : candidates;
+  return candidates.size === 0 ? EMPTY : new Set(candidates.keys());
 }
 
-const EMPTY: ReadonlySet<string> = new Set<string>();
+const EMPTY: ReadonlySet<ts.VariableDeclaration> = new Set<ts.VariableDeclaration>();
+// ---------------------------------------------------------------------------
+// Pure token/op tables shared with `from-ast.ts`'s emitter
+// ---------------------------------------------------------------------------
+
+/** The `js.bit*` IrBinop for a bitwise operator token, or null. */
+export function jsBitwiseBinop(k: ts.SyntaxKind): IrBinop | null {
+  switch (k) {
+    case ts.SyntaxKind.AmpersandToken:
+      return "js.bitand";
+    case ts.SyntaxKind.BarToken:
+      return "js.bitor";
+    case ts.SyntaxKind.CaretToken:
+      return "js.bitxor";
+    case ts.SyntaxKind.LessThanLessThanToken:
+      return "js.shl";
+    case ts.SyntaxKind.GreaterThanGreaterThanToken:
+      return "js.shr_s";
+    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
+      return "js.shr_u";
+    default:
+      return null;
+  }
+}
+
+/** Signed native i32 magnitude compare for a relational operator token. */
+export const I32_COMPARE_BINOPS = {
+  [ts.SyntaxKind.LessThanToken]: "i32.lt_s",
+  [ts.SyntaxKind.LessThanEqualsToken]: "i32.le_s",
+  [ts.SyntaxKind.GreaterThanToken]: "i32.gt_s",
+  [ts.SyntaxKind.GreaterThanEqualsToken]: "i32.ge_s",
+} as const satisfies Partial<Record<ts.SyntaxKind, IrBinop>>;
+
+/**
+ * The plain bitwise operator a bitwise COMPOUND assignment desugars to.
+ * `>>>=` is absent for the same reason `>>>` is absent from `isBitwiseToken`.
+ */
+export const COMPOUND_TO_BITWISE_TOKEN = {
+  [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken,
+  [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken,
+  [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken,
+  [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken,
+  [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken,
+} as const satisfies Partial<Record<ts.SyntaxKind, ts.SyntaxKind>>;
+
+/**
+ * Does `e` read at least one i32-promoted slot? This is the gate that keeps
+ * #3741's slot-promotion fusion from pre-empting #3758's expression-level
+ * fusion on expressions where #3758 does strictly better.
+ */
+export function referencesPromotedI32Slot(e: ts.Expression, promoted: IsPromotedI32): boolean {
+  const inner = peelExpr(e);
+  if (ts.isIdentifier(inner)) return promoted(inner);
+  if (ts.isBinaryExpression(inner)) {
+    return referencesPromotedI32Slot(inner.left, promoted) || referencesPromotedI32Slot(inner.right, promoted);
+  }
+  return false;
+}

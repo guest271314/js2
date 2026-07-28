@@ -15,6 +15,29 @@ language_feature: bitwise-operators
 goal: performance
 depends_on: []
 related: [3707, 3733, 3734, 3739, 3758]
+# (#3102) The slot-promotion LOWERING needs `LowerCtx` / `lowerExpr` / the IR
+# builder, so it cannot live outside `from-ast.ts` without an import cycle —
+# the same constraint #3758's own `ir/i32-pure-bitwise.ts` header records for
+# its paired `emitI32PureExpr`. Everything that IS pure (the planner, the
+# Q-CANON/Q-WRAP predicates, the token/op tables) already lives in the new
+# `src/ir/analysis/i32-slots.ts` (+381) and `src/codegen/analysis/
+# i32-coerced-locals.ts`, which is why from-ast's share is +421 and not +800.
+# `builder.ts` (+26) is the `trunc_sat(convert(x)) === x` cancellation, which
+# must be in the builder to catch every emitter; `nodes.ts` (+7) is the
+# IrBinop doc note.
+loc-budget-allow:
+  - src/ir/from-ast.ts
+  - src/ir/builder.ts
+  - src/ir/nodes.ts
+# (#3400) `lowerBinary` +6 is the two-line fused-path hook plus its comment;
+# `lowerFunctionAstToIr` +4 is the `i32Slots:` context field plus its comment.
+# `collectI32CoercedLocals` is NOT growth — it is a byte-identical MOVE out of
+# `src/codegen/function-body.ts`, where the baseline already records it at
+# exactly 422; only its path key changed, so the gate reads it as new.
+func-budget-allow:
+  - src/ir/from-ast.ts::lowerBinary
+  - src/ir/from-ast.ts::lowerFunctionAstToIr
+  - src/codegen/analysis/i32-coerced-locals.ts::collectI32CoercedLocals
 ---
 
 # #3741 — IR path lacks legacy's i32-coerced-local promotion (no-box i32 loop accumulators)
@@ -361,3 +384,60 @@ execution, not by reading the emitted ops) and this closure (a performance
 non-fix passed by reading the emitted ops) point the same way — for a
 `task_type: performance` issue, the acceptance criterion has to be a measured
 number against the stated baseline, not a `.wat` inspection.
+
+### Eligibility is keyed on the BINDING, not the name
+
+A first cut of the planner returned a `Set<string>` and guarded shadowing with
+"this name must be declared exactly once in the function". That is safe but
+badly pessimistic, because **two sibling `for (let i = …)` loops are two
+distinct bindings that happen to share a name** — the guard rejected *both*:
+
+```ts
+const arr: number[] = [];
+for (let i = 0; i < 10000; i++) arr.push(i);
+let total = 0;
+for (let i = 0; i < arr.length; i++) total = total + arr[i];   // ← both `i` f64
+```
+
+Alpha-renaming the second `i` to `j` — no semantic change whatsoever — flipped
+both counters to i32. Two sibling `for (let i …)` loops is one of the most
+common shapes in real JS/TS, so a name-keyed set silently disabled the whole
+optimization across a wide swath of ordinary code. Legacy does not have this
+problem: its promotion is applied per-loop at emit time, so it never has to
+reconcile two same-named bindings in one set.
+
+The planner now returns `ReadonlySet<ts.VariableDeclaration>` and resolves each
+candidate to its **binding scope** (the `ForStatement` for a loop head, the
+innermost enclosing block for a plain `let`). Write scans, capture scans and
+the producibility fixpoint's identifier probe are all scoped to that subtree,
+so a same-named sibling binding can never contribute a write or leak its
+promotion. Genuine shadowing (nested `for (let i …)` inside `for (let i …)`, or
+a counter shadowing an outer `let i`) has *non-disjoint* scopes and is still
+dropped wholesale — distinguishing those needs full use-site scope resolution,
+and the conservative answer costs nothing on the shapes that matter.
+
+Verified deterministically on the `array.ts` shape above: the sibling-`i` and
+alpha-renamed programs now emit byte-identical instruction mixes
+(`slots=[i:i32 total:f64 i:i32]`, same `i32.add`/`i32.lt_s`/`f64.add` counts).
+`total` correctly stays f64 — its write is not `| 0`-wrapped.
+
+### Side finding: a pre-existing `detectI32LoopVar` bug in LEGACY
+
+Writing the regression tests surfaced an unrelated **legacy** defect.
+`detectI32LoopVar` promotes a for-counter on the loop HEAD's shape alone and
+never inspects the body, so a body that assigns a non-integer to the counter
+silently truncates and changes the iteration count:
+
+```ts
+export function part(n: number): number {
+  let t = 0;
+  for (let i = 0; i < 10; i++) { i = i + n; t = (t + 1) | 0; }
+  return t;
+}
+// part(0.5): JS and IR = 52, legacy = 55
+```
+
+#3741's planner rejects that binding (the write is not a shape `lowerAsI32`
+can emit exactly), so the IR path is correct. Not fixed here — it needs its own
+issue against `src/codegen/statements/loop-analysis.ts`. Covered by an
+IR-vs-JS-only assertion in `tests/issue-3741-i32-slot-promotion.test.ts`.

@@ -47,13 +47,17 @@ import { evaluateConstantCondition } from "../codegen/statements/control-flow.js
 import { isIncreasingStep, loopBodyMutatesIndexOrArray } from "../codegen/statements/loop-analysis.js";
 // (#3741) native-i32 slot storage for provably-int32 mutable locals
 import {
+  COMPOUND_TO_BITWISE_TOKEN,
+  I32_COMPARE_BINOPS,
   i32LiteralValue,
   isBitwiseToken,
   isCanonI32Lowerable,
   type IsPromotedI32,
   isWrapI32Lowerable,
+  jsBitwiseBinop,
   peelExpr,
   planI32Slots,
+  referencesPromotedI32Slot,
 } from "./analysis/i32-slots.js";
 import { IrFunctionBuilder } from "./builder.js";
 import { sameIrGlobalBinding } from "./abi-bindings.js";
@@ -1593,9 +1597,13 @@ interface LowerCtx {
    */
   readonly i32PureNames: I32PureNames;
   /**
-   * (#3741) Names (a subset of `mutatedLets`) whose Wasm SLOT is declared
+   * (#3741) DECLARATION NODES (whose names are a subset of `mutatedLets`)
+   * whose Wasm SLOT is declared
    * `i32` instead of `f64`. Planned once per outer function by
-   * `planI32Slots`. Distinct from `i32PureNames` above, which is a
+   * `planI32Slots`. Keyed on the declaration NODE, never on identifier text:
+   * two sibling `for (let i = …)` loops are two distinct bindings that share
+   * a name, and a name-keyed set has to reject both to stay safe — silently
+   * disabling the optimization on one of the most common shapes in real code. Distinct from `i32PureNames` above, which is a
    * VALUE-range fact used to pick cheaper arithmetic while the local keeps
    * its f64 storage: this one changes the STORAGE, which is what removes the
    * loop-carried `f64 -> i32 -> f64` round trip (see #3741's Correction
@@ -1604,7 +1612,7 @@ interface LowerCtx {
    * `readPromotedI32Slot` / `writePromotedI32Slot`. Absent (undefined) for
    * nested-function / closure contexts, which keep the pre-#3741 behaviour.
    */
-  readonly i32Slots?: ReadonlySet<string>;
+  readonly i32Slots?: ReadonlySet<ts.VariableDeclaration>;
   /**
    * #3502 conservative ownership proof for string builders. Each symbol is a
    * fresh empty-string `let` whose loop-local uses are discarded `+=` writes
@@ -2163,8 +2171,8 @@ const IR_F64: IrType = irVal({ kind: "f64" });
 
 /** `cx`-bound "is this name an i32-promoted slot right now?" predicate. */
 function promotedI32Probe(cx: LowerCtx): IsPromotedI32 {
-  return (name: string): boolean => {
-    const b = cx.scope.get(name);
+  return (id: ts.Identifier): boolean => {
+    const b = cx.scope.get(id.text);
     return b !== undefined && b.kind === "slot" && b.i32Storage === true;
   };
 }
@@ -2190,26 +2198,6 @@ function isFusedI32Lowerable(e: ts.Expression, cx: LowerCtx): boolean {
 /** Invariant R — read a promoted slot and widen to the f64 every consumer expects. */
 function readPromotedI32Slot(slotIndex: number, cx: LowerCtx): IrValueId {
   return cx.builder.emitUnary("f64.convert_i32_s", cx.builder.emitSlotRead(slotIndex), IR_F64);
-}
-
-/** The `js.bit*` IrBinop for a bitwise operator token. */
-function jsBitwiseBinop(k: ts.SyntaxKind): IrBinop | null {
-  switch (k) {
-    case ts.SyntaxKind.AmpersandToken:
-      return "js.bitand";
-    case ts.SyntaxKind.BarToken:
-      return "js.bitor";
-    case ts.SyntaxKind.CaretToken:
-      return "js.bitxor";
-    case ts.SyntaxKind.LessThanLessThanToken:
-      return "js.shl";
-    case ts.SyntaxKind.GreaterThanGreaterThanToken:
-      return "js.shr_s";
-    case ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken:
-      return "js.shr_u";
-    default:
-      return null;
-  }
 }
 
 /**
@@ -2399,14 +2387,6 @@ function lowerPromotedI32CompoundAssignment(
   );
 }
 
-const COMPOUND_TO_BITWISE_TOKEN = {
-  [ts.SyntaxKind.AmpersandEqualsToken]: ts.SyntaxKind.AmpersandToken,
-  [ts.SyntaxKind.BarEqualsToken]: ts.SyntaxKind.BarToken,
-  [ts.SyntaxKind.CaretEqualsToken]: ts.SyntaxKind.CaretToken,
-  [ts.SyntaxKind.LessThanLessThanEqualsToken]: ts.SyntaxKind.LessThanLessThanToken,
-  [ts.SyntaxKind.GreaterThanGreaterThanEqualsToken]: ts.SyntaxKind.GreaterThanGreaterThanToken,
-} as const satisfies Partial<Record<ts.SyntaxKind, ts.SyntaxKind>>;
-
 /**
  * (#3741) Fused i32 fast paths for `lowerBinary`. Both arms are peepholes:
  * they return a value of the SAME IrType the unfused lowering would, so no
@@ -2416,6 +2396,20 @@ const COMPOUND_TO_BITWISE_TOKEN = {
  */
 function tryLowerFusedI32Binary(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
   const promoted = promotedI32Probe(cx);
+
+  // (0) `x | 0` / `x ^ 0` is the identity on the ToInt32 bit pattern, so the
+  //     operator disappears whenever `x` is i32-lowerable by EITHER proof.
+  //     For a #3758-only `x` this also removes a redundant `i32.const 0;
+  //     i32.or`: that path lowers the `0` as `i32.trunc_sat_f64_s(f64.const
+  //     0)`, which `lower.ts`'s #3733 `tryConstOf(rhs) === 0` check cannot
+  //     see through.
+  if (
+    (op === ts.SyntaxKind.BarToken || op === ts.SyntaxKind.CaretToken) &&
+    i32LiteralValue(expr.right) === 0 &&
+    isFusedI32Lowerable(expr.left, cx)
+  ) {
+    return cx.builder.emitUnary("f64.convert_i32_s", lowerAsI32(expr.left, cx, "wrap"), IR_F64);
+  }
 
   // (a) Bitwise op that actually READS an i32-promoted slot. The
   //     "reads a promoted slot" gate is load-bearing: without it this arm would
@@ -2459,27 +2453,6 @@ function tryLowerFusedI32Binary(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx
   }
 
   return null;
-}
-
-const I32_COMPARE_BINOPS = {
-  [ts.SyntaxKind.LessThanToken]: "i32.lt_s",
-  [ts.SyntaxKind.LessThanEqualsToken]: "i32.le_s",
-  [ts.SyntaxKind.GreaterThanToken]: "i32.gt_s",
-  [ts.SyntaxKind.GreaterThanEqualsToken]: "i32.ge_s",
-} as const satisfies Partial<Record<ts.SyntaxKind, IrBinop>>;
-
-/**
- * Does `e` read at least one i32-promoted slot? This is the gate that keeps
- * #3741's fused path from pre-empting #3758's on expressions where #3758 does
- * strictly better (see `tryLowerFusedI32Binary` arm (a)).
- */
-function referencesPromotedI32Slot(e: ts.Expression, promoted: IsPromotedI32): boolean {
-  const inner = peelExpr(e);
-  if (ts.isIdentifier(inner)) return promoted(inner.text);
-  if (ts.isBinaryExpression(inner)) {
-    return referencesPromotedI32Slot(inner.left, promoted) || referencesPromotedI32Slot(inner.right, promoted);
-  }
-  return false;
 }
 
 function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
@@ -2618,7 +2591,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       moduleBinding === undefined &&
       !isConst &&
       cx.mutatedLets.has(name) &&
-      cx.i32Slots?.has(name) === true &&
+      cx.i32Slots?.has(d) === true &&
       d.initializer !== undefined &&
       isCanonI32Lowerable(d.initializer, promotedI32Probe(cx));
     const hint: IrType =
@@ -8209,14 +8182,9 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
   }
 
-  // (#3741) Slot-promotion fused fast path. Runs BEFORE #3758's
-  // expression-level fusion below because the two answer different questions
-  // at different layers: #3758 keeps the local in its f64 slot and narrows
-  // each LEAF with `i32.trunc_sat_f64_s`, which leaves a loop-carried
-  // `f64 -> i32 -> f64` round trip in place; when the local's SLOT is itself
-  // i32 there is nothing to narrow — the read IS the i32. Returns null unless
-  // an i32-promoted slot actually participates, in which case #3758's path
-  // below runs exactly as before.
+  // (#3741) i32 fast paths that need to choose the OPERANDS' representation:
+  // slot-promotion fusion, and the `x | 0` identity. Null ⇒ nothing applied
+  // and #3758's expression-level fusion below runs exactly as before.
   const fusedI32 = tryLowerFusedI32Binary(expr, op, cx);
   if (fusedI32 !== null) return fusedI32;
 
@@ -8233,18 +8201,6 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     isIrBitwiseOperatorToken(op) &&
     isI32PureExprIR(expr.left, cx.i32PureNames) &&
     isI32PureExprIR(expr.right, cx.i32PureNames);
-  // (#3741) `x | 0` / `x ^ 0` over an i32-pure lhs is the identity on the
-  // ToInt32 bit pattern, so the operator disappears entirely. Without this the
-  // #3758 path emits a redundant `i32.const 0; i32.or` per evaluation: its
-  // rhs lowers as `i32.trunc_sat_f64_s(f64.const 0)`, which `lower.ts`'s
-  // #3733 `tryConstOf(rhs) === 0` identity check cannot see through.
-  if (
-    i32PureBitwiseOperands &&
-    (op === ts.SyntaxKind.BarToken || op === ts.SyntaxKind.CaretToken) &&
-    i32LiteralValue(expr.right) === 0
-  ) {
-    return cx.builder.emitUnary("f64.convert_i32_s", emitI32PureExpr(expr.left, cx), IR_F64);
-  }
   const lhs = i32PureBitwiseOperands
     ? emitI32PureExpr(expr.left, cx)
     : lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
