@@ -216,6 +216,27 @@ describe("#3765 — a provably-numeric local gets an f64 slot", () => {
     expect(w.twinLocalTypes("c")).not.toContain("f64");
   });
 
+  it("declines a boolean local, which an f64 slot would stringify as 1/0", async () => {
+    // The fixpoint's `isNumeric` deliberately answers TRUE for booleans: for a
+    // FIELD that is fine, because #2847 brands boolean fields as i32 and the
+    // property path defers to that brand via its `anyBoolean` filter. A local
+    // has no brand path, so an f64 slot would make `${b}` print "1".
+    // Regression: `coercion/tostring > standalone-O > template over any-boolean`.
+    const { wat, binary } = await build(`
+      function Tok(n) { this.n = n; }
+      Tok.prototype.describe = function () {
+        var b = this.n < 10;
+        return "" + b;
+      };
+      function drive(n) { var t = new Tok(n); return t.describe(); }
+      export function main() { return drive(1); }
+    `);
+    expect(readWat(wat!).twinLocalTypes("b")).not.toContain("f64");
+    const { exports } = await WebAssembly.instantiate(await WebAssembly.compile(binary!), {});
+    // The interesting assertion is that it is "true", not "1".
+    expect(typeof (exports as { main: () => unknown }).main()).not.toBe("number");
+  });
+
   it("declines a pure definition cycle, which has no numeric evidence at all", async () => {
     // `numericSlots` is a GREATEST fixpoint, so `a` and `b` each keep the other
     // alive; both are `undefined` at runtime. The grounded (least-fixpoint) set

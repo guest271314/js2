@@ -1243,11 +1243,20 @@ export function analyzeNumericPropertyNames(
     let added = false;
     for (const slot of groundedCandidates) {
       if (groundedSlots.has(slot)) continue;
+      // ANY booleanish definition disqualifies the slot, mirroring the
+      // `anyBoolean` filter on the property path — but for a STRICTER reason.
+      // `isNumeric` deliberately answers true for booleans, which is fine for a
+      // FIELD because #2847 brands boolean fields as i32 and the property path
+      // defers to that brand. A local has no such brand path: an f64 local
+      // holding a comparison result makes `` `${b}` `` print "1" where JS says
+      // "true". Caught by `coercion/tostring > standalone-O > template over
+      // any-boolean`.
       const allNumeric =
         slot.defs.length > 0 &&
         slot.defs.every(
           (def) => def.forcedNumeric === true || (def.expr !== undefined && groundedProver.isNumeric(def.expr)),
-        );
+        ) &&
+        !slot.defs.some((def) => def.expr !== undefined && groundedProver.isBooleanish(def.expr));
       if (allNumeric) {
         groundedSlots.add(slot);
         added = true;

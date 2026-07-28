@@ -104,7 +104,8 @@ tokenizer shape, measured before any of this work landed.
       ≈2.3x** — see below.
 - [x] A captured local, and a `var` read before assignment, both still behave.
       Both decline, with tests.
-- [x] No equivalence-suite regressions.
+- [x] No equivalence-suite regressions. **The first full run found one** — see
+      "The boolean carrier" below. Fixed, with a regression test; re-run clean.
 
 ## Result
 
@@ -153,6 +154,26 @@ Both are `undefined` at runtime; an f64 local would read `0`. So this consumer
 gets a LEAST fixpoint instead — start empty, only ever ADD a slot provable
 against slots already admitted, which a cycle can never enter. Test:
 "declines a pure definition cycle".
+
+### The boolean carrier — the one real bug this introduced
+
+The full equivalence run caught `coercion/tostring > standalone-O > template
+over any-boolean`. The mechanism is worth recording because it is a trap
+inherited from the pass, not a slip in the new code:
+
+**`isNumeric` deliberately answers TRUE for booleans.** `true`/`false` literals
+and every `BOOLEAN_BINARY` comparison are numeric by that prover's definition.
+For a FIELD that is correct-by-construction: #2847 brands boolean fields as
+branded i32, and the property path defers to the brand with an explicit
+`anyBoolean` filter ("ANY boolean write, not just an all-boolean set").
+
+A LOCAL has no brand path. So an f64 local holding `this.n < 10` makes
+`` `${b}` `` print `"1"` where JS says `"true"`.
+
+The grounded slot set therefore applies the same ANY-booleanish exclusion. The
+lesson generalises: **reusing a prover means inheriting the assumptions of its
+original consumer**, and `isNumeric`'s boolean answer is only safe downstream of
+a brand that the local path does not have.
 
 ## The finding that actually unblocked the measurement
 
