@@ -1,5 +1,5 @@
 ---
-id: 3746
+id: 3747
 title: "Silent runtime bug: assigning a closure to an existing object-literal property loses callability (typeof reports 'object', call throws/returns null) — no diagnostic"
 status: ready
 sprint: current
@@ -17,7 +17,7 @@ origin: "surfaced testing more npm packages for tests/dogfood/ — dayjs@1.11.21
 related: [3720, 3721, 3743, 1710, 3716]
 ---
 
-# #3746 — object-property closure assignment silently loses callability
+# #3747 — object-property closure assignment silently loses callability
 
 ## Severity
 
