@@ -1927,6 +1927,29 @@ export function compileBuiltinStaticCall(
   ) {
     const arg0 = expr.arguments[0]!;
 
+    // ES5 §15.2.3.5 step 1: the requested [[Prototype]] must be an Object
+    // or null. The standalone native helper can only see an externref carrier;
+    // it historically treated every non-$Object carrier like null, so
+    // statically known primitive arguments silently created a null-prototype
+    // object instead of throwing. Preserve argument evaluation, then emit a
+    // catchable TypeError before entering the lenient native helper.
+    if (noJsHost(ctx)) {
+      const protoTag = ctx.oracle.staticJsTypeOf(arg0);
+      if (
+        protoTag === "number" ||
+        protoTag === "string" ||
+        protoTag === "boolean" ||
+        protoTag === "bigint" ||
+        protoTag === "symbol" ||
+        protoTag === "undefined"
+      ) {
+        const argType = compileExpression(ctx, fctx, arg0);
+        if (argType) fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, "Object prototype may only be an Object or null");
+        return { kind: "externref" };
+      }
+    }
+
     // Object.create(Foo.prototype) → struct.new with default fields (Wasm-native fast path)
     if (ts.isPropertyAccessExpression(arg0) && ts.isIdentifier(arg0.expression) && arg0.name.text === "prototype") {
       const protoClassName = arg0.expression.text;
