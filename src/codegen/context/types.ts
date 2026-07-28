@@ -1941,6 +1941,22 @@ export interface CodegenContext {
    */
   numericPropertyNames?: ReadonlySet<string>;
   /**
+   * (#3753 S1) Property names whose EVERY write is provably a string, from the
+   * same whole-program walk as {@link numericPropertyNames}. `deriveFnctorFields`
+   * gives such a field a native string slot rather than the boxed `externref`
+   * carrier, which removes the `ref.test` + `ref.cast` + `__str_flatten` that a
+   * boxed slot forces on every read. Standalone lane only, like the numeric
+   * verdict.
+   */
+  stringPropertyNames?: ReadonlySet<string>;
+  /**
+   * (#3753 S2) Function names proven to return a number on every path, from the
+   * same whole-program fixpoint. Lets a `+` whose RHS is such a call unbox the
+   * result once rather than boxing BOTH operands into `$AnyValue` and running
+   * the generic `__any_add` with a tag-dispatch unbox after it.
+   */
+  numericFunctionNames?: ReadonlySet<string>;
+  /**
    * #3673: property names the SOURCE defines as a function-valued member
    * (`collectUserMethodNames`). Consulted by
    * `compileGuardedNativeStringMethodCall` so a `String.prototype`-named

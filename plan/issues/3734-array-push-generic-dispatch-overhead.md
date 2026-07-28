@@ -1,10 +1,11 @@
 ---
 id: 3734
 title: "array.ts landing-page benchmark: IR compiles .push() to a non-inlined helper call while legacy fully inlines it — same IR-vs-legacy gap as #3739/#3741, not a generic-dispatch problem"
-status: ready
-sprint: Backlog
+status: done
+sprint: current
 created: 2026-07-28
 updated: 2026-07-28
+completed: 2026-07-28
 priority: high
 horizon: l
 feasibility: hard
@@ -17,6 +18,42 @@ depends_on: []
 related: [3704, 3733, 3739, 3741]
 ---
 # #3734 — `array.ts` push loop: IR emits a non-inlined helper call, legacy fully inlines
+
+## Re-verified 2026-07-28: the real benchmark pipeline already inlines this — no code change landed
+
+The "partially worked" experiment below (raising Binaryen inline thresholds)
+was measured against the wrong optimize path. Directly reproducing the
+**actual** landing-page artifact pipeline —
+`compileMulti(..., {})` (no internal optimize, i.e. `optimize: 0`) followed
+by up to 4 rounds of external `optimizeBinaryAsync({level: 4})` run to a
+byte-identical fixpoint, exactly what `optimizeBenchmarkWasm()` in
+`scripts/generate-playground-benchmark-sidebar.mjs` (and its `-no-jit`
+sibling) does — shows **zero remaining calls** to `__vec_elem_set_<N>` inside
+`bench_array`'s compiled body. Confirmed three ways: (1) grepping the `.wat`
+for `call \d+` inside the function found none after the 4-round fixpoint,
+where a single in-process `compile({ optimize: 4 })` call (only one
+`setOptimizeLevel`+double-`mod.optimize()` pass, not a repeated-to-fixpoint
+external pass) still leaves exactly one `call` per iteration — the discrepancy
+is the number of optimization rounds, not a naming/measurement artifact; (2)
+instantiating and running the fixpoint-optimized binary returns the
+mathematically correct result (`49995000` = sum 0..9999), ruling out the
+call site having been eliminated via whole-function constant-folding rather
+than genuine inlining; (3) timing it directly gives ~240µs/call in local
+sandbox measurement — real per-iteration work, not a near-zero folded
+constant.
+
+**Conclusion**: Binaryen's existing repeated-`wasm-opt -O4`-to-fixpoint
+pipeline (already in place, unchanged) already achieves what this issue set
+out to fix — no compiler source change was needed or made. The acceptance
+criterion "`array.ts`'s IR-compiled `.push()` loop matches (or comes close
+to) legacy's speed... under the same `-O4` settings the real landing-page
+benchmark uses" is satisfied by the status quo. The residual ~2-3x wasm-vs-js
+gap that remains even with full inlining (measured via the tier-pinned
+warm-chart methodology, #3724/#3726) is a genuine, separate architectural
+question — WasmGC array/struct representation overhead vs. V8's native array
+fast paths — not a missing-inlining bug, and not scoped here. Closing this
+issue; a new issue should be filed if that deeper architectural gap is worth
+pursuing.
 
 ## Context
 
