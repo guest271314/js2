@@ -82,19 +82,12 @@ const BENCHMARKS = [
 //                               `--always-turbofan`.
 //   --no-concurrent-recompilation
 //                               forces TurboFan compilation onto the main
-//                               thread instead of a background thread. CI's
-//                               Node v26 V8 build hit a fatal internal
-//                               assertion ("Check failed:
-//                               CheckMarkedForManualOptimization") when
-//                               `%OptimizeFunctionOnNextCall` raced a
-//                               concurrent background recompile job V8 had
-//                               already queued on its own for a hot,
-//                               deeply-recursive function (fib.ts's `fib`
-//                               calling itself ~2.7M times before the
-//                               benchmark's own outer call completes) --
-//                               didn't reproduce locally (older V8), but this
-//                               flag removes the race entirely rather than
-//                               chasing a version-specific timing window.
+//                               thread instead of a background thread —
+//                               defense-in-depth for determinism (no
+//                               background-thread timing variance in when a
+//                               compile actually completes relative to the
+//                               calling code). NOT what fixes the fatal
+//                               crash below; see `buildWarmJsFactorySource`.
 const JS_WARM_FLAGS = ["--allow-natives-syntax", "--no-concurrent-recompilation"];
 
 // V8 startup flag that skips Liftoff (the single-pass Wasm baseline
@@ -122,6 +115,14 @@ function buildJsFactorySource(source, exportName) {
 // run under `--allow-natives-syntax` (JS_WARM_FLAGS), so this is only used
 // for the artifact written for the child process, never for the in-process
 // smoke test (the parent isn't launched with that flag).
+//
+// `%PrepareFunctionForOptimization` MUST be called before
+// `%OptimizeFunctionOnNextCall` — V8's `CanOptimizeFunction` unconditionally
+// CHECKs `ManualOptimizationTable::IsMarkedForManualOptimization` outside
+// fuzzing mode (`src/runtime/runtime-test.cc`) and V8_Fatal()s ("Check
+// failed: CheckMarkedForManualOptimization") if the function was never
+// registered. Omitting this call happened to not crash on this sandbox's
+// older V8 build but reliably crashed CI's Node v26 build on fib.ts.
 function buildWarmJsFactorySource(source, exportName) {
   const transpiled = ts.transpileModule(stripImportsAndExports(source), {
     compilerOptions: {
@@ -129,7 +130,7 @@ function buildWarmJsFactorySource(source, exportName) {
       module: ts.ModuleKind.None,
     },
   }).outputText;
-  return `${transpiled}\n${exportName}();\n%OptimizeFunctionOnNextCall(${exportName});\n${exportName}();\nreturn { ${exportName} };`;
+  return `${transpiled}\n%PrepareFunctionForOptimization(${exportName});\n${exportName}();\n%OptimizeFunctionOnNextCall(${exportName});\n${exportName}();\nreturn { ${exportName} };`;
 }
 
 function median(values) {
