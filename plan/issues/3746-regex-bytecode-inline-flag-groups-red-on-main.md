@@ -1,6 +1,6 @@
 ---
 id: 3746
-title: "~40 tests red on main in no required check — 37 were the HOST oracle, not our lowering (ES2025 regexp-modifiers postdate Node 22)"
+title: '37 "red on main" regex tests were a LOCAL Node-22 artifact (green in CI on 24); 6 real failures remain in #2175/#1817'
 status: ready
 sprint: current
 created: 2026-07-28
@@ -91,23 +91,49 @@ engine is the durable form of the question.
 Result: `regex-bytecode` 258 passed / 20 skipped; `issue-1911` 70 passed /
 17 skipped. Both green.
 
-## Still open
+## VERIFIED ON NODE 24 — the 37 were never red in CI
 
-- [ ] `tests/issue-2175-regexp-proto-readers.test.ts` — 3 failures,
+`.github/workflows` already runs Node **24 / 25 / latest**; only this dev
+container was on 22. Installing 24 and re-running settles it:
+
+```
+node v24.18.0  →  new RegExp("(?i:abc)")  OK
+
+regex-bytecode:  278 passed (0 skipped)   ← all 20 modifier cases RUN and PASS
+issue-1911:       87 passed               ← all 17 modifier cases RUN and PASS
+```
+
+So our pipeline lowers inline modifiers correctly, and always did. The 37 were
+red **only on Node 22**, where the host oracle cannot parse the pattern.
+
+That corrects this issue twice over. The first filing blamed our flag-group
+scoping (wrong — it was the oracle). The second said "~40 red on main in no
+required check, nobody was told" (also wrong for these 37 — CI is on 24, where
+they are green and always were). The capability probe is still the right fix:
+it makes a local run on an older Node accurate instead of noisy, and the cases
+run for real wherever the engine supports them — which the Node-24 run above
+demonstrates.
+
+`.nvmrc` now pins **24** so a local checkout matches CI and this class of
+false-positive stops recurring. `engines.node` is deliberately left at `>=20` —
+that is a statement about what the published package supports, not about what
+developing it needs.
+
+## Still open — the 6 that ARE real
+
+Both reproduce on Node 24, so they are genuinely ours and red in CI too:
+
+- [ ] `tests/issue-2175-regexp-proto-readers.test.ts` — 3 failures.
       `RegExp.prototype` flag-bool / `.flags` / `.source` accessor dispatch on a
-      correct `this`. A different family; not host-oracle, genuinely ours.
+      correct `this`.
 - [ ] `tests/issue-1817.test.ts` — 3 failures in the `>>>` unsigned-result
-      family. Different again.
-- [ ] **The class fix.** None of these suites is in a required check, which is
-      why ~40 red tests sat on `main` unnoticed — the same structural gap that
-      let the four suites #3705 fixed go unreported, and that #3726 recorded the
-      lesson for. Fixing the tests while leaving the gap open means the next
-      batch is equally invisible. Decide which of these belong in a required
-      check.
+      family (`(-1 >>> 0) === 4294967295` in fast mode and under the native i32
+      annotation).
 
 ## Acceptance criteria
 
-- [x] `regex-bytecode` and `issue-1911` pass on `main`.
-- [ ] `issue-2175`'s three accessor cases fixed or re-pinned.
-- [ ] `issue-1817`'s three `>>>` cases triaged.
-- [ ] A decision recorded on required-check coverage for these suites.
+- [x] `regex-bytecode` and `issue-1911` pass — verified on Node 24 (fully) and
+      on Node 22 (with the unsupported cases skipped).
+- [x] Local Node pinned to match CI.
+- [ ] `issue-2175`'s three accessor cases fixed.
+- [ ] `issue-1817`'s three `>>>` cases fixed.
