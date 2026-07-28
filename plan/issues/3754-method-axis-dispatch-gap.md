@@ -1,6 +1,6 @@
 ---
-id: 3751
-title: "perf: the `method` axis is 6.21x node — the second-largest remaining gap after #3750"
+id: 3754
+title: "perf: the `method` axis is 6.21x node — the second-largest remaining gap after #3753"
 status: ready
 sprint: current
 created: 2026-07-28
@@ -13,39 +13,39 @@ task_type: performance
 area: codegen
 language_feature: compiler-internals
 goal: performance
-related: [3750, 3683, 3684, 3685]
+related: [3753, 3683, 3684, 3685]
 origin: "benchmarks/cross-engine — measured on main 02a5512e0, 2026-07-28"
 ---
 
-# #3751 — the `method` axis, 6.21x
+# #3754 — the `method` axis, 6.21x
 
 ## Measurement
 
-Same run as #3750 (one container, checksums matching, min-of-5):
+Same run as #3753 (one container, checksums matching, min-of-5):
 
 | axis      |  node |   js2 |  js2/node |
 | --------- | ----: | ----: | --------: |
 | method    | 0.552 | 3.433 | **6.21x** |
 | tokenizer | 0.076 | 0.725 |     9.54x |
 
-#3750 addressed the tokenizer axis (now 1.92x better there). `method` is
+#3753 addressed the tokenizer axis (now 1.92x better there). `method` is
 untouched and is now the largest gap.
 
-## Why it is a separate issue from #3750
+## Why it is a separate issue from #3753
 
-The tokenizer axis is a fnctor with `this.<field>` state; #3750's levers were
+The tokenizer axis is a fnctor with `this.<field>` state; #3753's levers were
 field REPRESENTATION and the boxed arithmetic around it. The `method` axis
 (`benchmarks/cross-engine/axes-core.js`) isolates **dispatch** — repeated calls
-through a receiver — with far less field traffic, so #3750's two fixes do not
+through a receiver — with far less field traffic, so #3753's two fixes do not
 obviously transfer. It needs its own profile before any lever is chosen.
 
 Notably js2 is only 2.61x off Porffor here while being 10.96x BETTER than
 Porffor on `prop` — so the deficit is specific to call dispatch, not to object
 representation generally.
 
-## Profile (done — 2026-07-28, Node 24, main + #3750)
+## Profile (done — 2026-07-28, Node 24, main + #3753)
 
-Re-measured after #3750's slices landed on the branch. Node 24 this time, so the node column moved;
+Re-measured after #3753's slices landed on the branch. Node 24 this time, so the node column moved;
 only the same-run ratios are meaningful:
 
 | axis       |  node |   js2 |  js2/node |
@@ -57,7 +57,7 @@ only the same-run ratios are meaningful:
 | tokenizer  | 0.140 | 0.606 |     4.32x |
 | **method** | 0.426 | 3.783 | **8.88x** |
 
-#3750 took the tokenizer axis from 9.54x to 4.32x and `prop` to parity.
+#3753 took the tokenizer axis from 9.54x to 4.32x and `prop` to parity.
 `method` is now the worst by a wide margin.
 
 ### The loop body, calls resolved by index
@@ -76,7 +76,7 @@ trampoline.
 
 ### What did NOT fix it
 
-#3750 S2's numeric-operand recognition was restricted to `this.<m>()` — an
+#3753 S2's numeric-operand recognition was restricted to `this.<m>()` — an
 accident of where it was measured (a tokenizer, whose calls are all
 `this.next()`). Widening it to ANY receiver is sound (the verdict is a
 whole-program property of the method NAME, not of the receiver) and is landed,
@@ -88,7 +88,7 @@ the cost here — the cost is the ABI.
 `P.prototype.inc` returns a number, but its typed twin is declared to return
 `externref`, so every call boxes on the way out and pays `__to_primitive` +
 `__unbox_number` on the way in. That is the **numeric-return twin** — the very
-first thing #3750 proposed, deferred twice because it changes the trampoline
+first thing #3753 proposed, deferred twice because it changes the trampoline
 ABI, and now the measured blocker on the largest remaining axis.
 
 Required together (they must agree or the module fails validation):

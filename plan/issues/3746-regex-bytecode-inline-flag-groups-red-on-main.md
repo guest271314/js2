@@ -14,7 +14,7 @@ area: codegen
 language_feature: regexp
 goal: core-semantics
 related: [1911, 2175, 1817, 3726]
-origin: "bisected against clean upstream/main during #3705/#3750 work, 2026-07-28"
+origin: "bisected against clean upstream/main during #3705/#3753 work, 2026-07-28"
 ---
 
 # #3746 — ~40 tests red on `main`, invisible

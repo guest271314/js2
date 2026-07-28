@@ -1,6 +1,6 @@
 ---
-id: 3752
-title: "perf: `__str_flatten` runs per call on a receiver field that cannot change (#3750 S3)"
+id: 3755
+title: "perf: `__str_flatten` runs per call on a receiver field that cannot change (#3753 S3)"
 status: ready
 sprint: current
 created: 2026-07-28
@@ -13,14 +13,14 @@ task_type: performance
 area: codegen
 language_feature: compiler-internals
 goal: performance
-related: [3750, 3683, 682]
+related: [3753, 3683, 682]
 ---
 
-# #3752 — the per-call `__str_flatten`
+# #3755 — the per-call `__str_flatten`
 
-Split out of #3750 as its S3.
+Split out of #3753 as its S3.
 
-After #3750 S1c removed the `ref.test` + `ref.cast` from a promoted string
+After #3753 S1c removed the `ref.test` + `ref.cast` from a promoted string
 field's read, one call remains in the tokenizer's hot body:
 
 ```
@@ -38,7 +38,7 @@ The cons-cell memoization makes the repeat calls cheap (a load and a branch, not
 a copy), which is why this is medium and not high priority. But it is still a
 call plus a branch per character in the innermost loop of a parser, and the
 value is loop-invariant by construction: the field is written once in the
-constructor and #3750 proved it a string.
+constructor and #3753 proved it a string.
 
 ## Candidate approaches
 
