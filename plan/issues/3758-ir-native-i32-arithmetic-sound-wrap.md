@@ -11,7 +11,7 @@ task_type: performance
 area: ir, codegen
 goal: performance
 language_feature: bitwise-operators, arithmetic
-related: [3740, 3744, 3741, 3745, 3739, 1948]
+related: [3740, 3744, 3741, 3745, 3739, 1948, 3759]
 # loc-budget-allow justification: `emitI32PureExpr`/`peelParensExpr` (the
 # emitter half of the fast path — needs `LowerCtx`/`lowerExpr`/the IR
 # builder, so it can't live in the dependency-free `ir/i32-pure-bitwise.ts`
@@ -196,6 +196,17 @@ Node WasmGC, `optimize: 3`, median of repeated warm calls:
   it runs once per character rather than once per two characters) is
   untouched.
 
+## Also closes #3741
+
+This fix implements exactly the "recommended alternative strategy" #3741's
+own analysis pointed to (a fused-pattern, bitwise-operator-site-only i32
+computation that never retypes any local's declared `IrType`, sidestepping
+the consumption-site blast-radius problem that sank #3741's first attempt).
+Verified directly: `loop.ts`'s `bench_loop` (`let s = 0; for (let i = 0; i
+< 1000000; i++) s = (s + i) | 0;`) — #3741's own target benchmark — now
+compiles through IR with exactly one `i32.add`, zero ToInt32-dance
+instructions. #3741 is marked `done` accordingly.
+
 ## Non-goals / follow-up
 
 Closing the string-hash HASH loop's remaining gap (`hash = (hash * 31 +
@@ -205,4 +216,5 @@ proof ported from legacy's #2682 (`detectCanonicalCharReadLoop`,
 has no equivalent of yet. That is a substantial, separate feature (not a
 small patch) and is intentionally NOT attempted here — rushing it into the
 same change as this fix is exactly the kind of shortcut that caused the
-prior attempt's revert. Left as backlog follow-up work.
+prior attempt's revert. Filed as **#3759** with the full scope and a
+suggested implementation path.
