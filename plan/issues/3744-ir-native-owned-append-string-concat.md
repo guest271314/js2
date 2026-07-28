@@ -11,7 +11,7 @@ task_type: performance
 area: ir, codegen, strings
 goal: performance
 language_feature: strings, loops
-related: [3740, 1210, 1761]
+related: [3740, 1210, 1761, 3741, 3745]
 ---
 
 # #3744 — IR-native fast path for `owned-append` `string.concat`
@@ -89,14 +89,20 @@ forces this shape back to legacy, kept for A/B comparison and rollback.
 Measured trade-off on the actual `string-hash` benchmark (Node WasmGC
 engine, no local `wasmtime` available to reproduce the Cranelift-AOT numbers
 #1580/#1746/#2619 measured): warm avg dropped from the pre-#3740 ~5.4ms
-default-IR baseline to ~3.1ms under this fix — real, but legacy (forced via
-`JS2WASM_IR_STRING_BUILDER=0`) still measures ~0.19ms. Root cause of the
-residual gap: legacy promotes the build loop's untyped `number` index
-arithmetic (`(i * 13) & 31` etc.) to native i32 (avoiding a costly
-float-based ToInt32 emulation per bitwise op); IR does not yet have an
-equivalent loop-local i32 promotion (see #1948's loop-var-promotion note) —
-a *separate*, unrelated codegen gap, tracked independently. Closing THAT gap
-(not in scope here) would let this exact benchmark reach legacy parity
+default-IR baseline to ~3.1ms under this fix alone. **#3741** ("IR path has
+no equivalent to legacy's #1120 i32-coerced-local promotion") — an
+independent same-day rediscovery of the identical root cause via a
+different benchmark (`loop.ts`) — merged into `main` while this issue was in
+flight (`#3718`); re-measuring after picking it up via merge narrows it
+further to **~1.8ms**. Legacy (forced via `JS2WASM_IR_STRING_BUILDER=0`)
+still measures ~0.18ms, so a real, separate gap remains even with #3741's
+fix. Disassembly shows why: IR still emits zero `i32.mul` anywhere in `run`
+— every bitwise/`| 0` op goes through the #3739 i64-bit-manipulation ToInt32
+rewrite instead of native i32 arithmetic, because #3741's inference doesn't
+reach this benchmark's specific shapes (two chained bitwise-derived locals
+per build-loop iteration; a multiply-then-add hash accumulator). Filed as
+**#3745** with the disassembly evidence and a concrete next step. Fully
+closing that gap would let this exact benchmark reach legacy parity
 entirely through IR, with no gate involved at all.
 
 ## Validation

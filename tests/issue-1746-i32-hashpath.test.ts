@@ -100,7 +100,17 @@ describe("#1746 i32-typed string-hash hot path", () => {
   });
 
   it("lowers the hash accumulator without the f64 ToInt32 dance", async () => {
-    const { wat } = await compileAndRun(STRING_HASH_SRC, { target: "wasi", nativeStrings: true });
+    // (#3744) This is specifically a legacy-codegen assertion (the #1746
+    // i32-pure-leaf lowering in src/codegen/binary-ops.ts) — pin
+    // experimentalIR: false so it stays independent of whichever backend the
+    // default IR selector happens to claim STRING_HASH_SRC's shape with.
+    // IR's own arithmetic lowering for this shape is tracked separately
+    // (#3741 — IR lacks legacy's i32-loop-accumulator promotion).
+    const { wat } = await compileAndRun(STRING_HASH_SRC, {
+      target: "wasi",
+      nativeStrings: true,
+      experimentalIR: false,
+    });
     // Isolate the second loop (the hash loop) — it starts after the build
     // loop's text assembly. The whole `run` body should no longer contain the
     // ToInt32-by-2^32 modulo emulation that the old f64 accumulator needed.
