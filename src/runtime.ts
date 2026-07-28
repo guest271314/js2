@@ -1103,6 +1103,43 @@ const _wasmGetterCallbackWrappers = new WeakSet<Function>();
 const _wasmVoidHostCallbackCache = new WeakMap<object, Function>();
 const _test262ErrorConstructors = new WeakSet<Function>();
 
+// #3540 — Compiled closures do not retain source text, so their observable
+// Function stringification uses the implementation-defined NativeFunction
+// grammar rather than exposing a WasmGC struct fallback (`[object Object]`) or
+// the source of an internal JS callback bridge. This is deliberately a facade:
+// closure storage/call dispatch stays unchanged.
+const _NATIVE_FUNCTION_SOURCE = "function () { [native code] }";
+
+function _installNativeFunctionSourceFacade<T extends Function>(fn: T): T {
+  try {
+    Object.defineProperty(fn, "toString", {
+      value: function toString(): string {
+        return _NATIVE_FUNCTION_SOURCE;
+      },
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+  } catch {
+    /* Bridge source facades are best-effort for non-extensible host functions. */
+  }
+  return fn;
+}
+
+function _compiledClosureNativeSource(
+  value: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): string | undefined {
+  if (value == null || typeof value !== "object") return undefined;
+  const isClosure = callbackState?.getExports()?.__is_closure as ((v: any) => number) | undefined;
+  if (typeof isClosure !== "function") return undefined;
+  try {
+    return isClosure(value) === 1 ? _NATIVE_FUNCTION_SOURCE : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // (#3369) Callback bridges must remain usable while the evaluated program has
 // installed non-writable numeric properties on Array.prototype. `[].push(x)`
 // and direct indexed assignment perform [[Set]] and can be rejected by such an
@@ -1285,6 +1322,7 @@ function _wrapWasmClosure(
     const ret = callFn(closure, ...padded);
     return _wasmAccessorGetterReturnWrappers.has(wrapped) ? _maybeWrapAccessorGetterCallable(ret, callbackState) : ret;
   };
+  _installNativeFunctionSourceFacade(wrapped);
   _wasmClosureWrapperSource.set(wrapped, { closure, arity });
   if (_canBeWeakKey(closure)) {
     if (!byArity) {
@@ -1446,6 +1484,7 @@ function _wrapWasmClosureUnknownArity(
   } catch {
     /* best-effort constructor identity for function-expression wrappers */
   }
+  _installNativeFunctionSourceFacade(wrapped);
   _wasmClosureWrapperSource.set(wrapped, { closure, arity: -1 });
   if (closure != null && typeof closure === "object") {
     _wasmClosureDynamicWrapperCache.set(closure, wrapped);
@@ -1586,6 +1625,7 @@ function _wrapVoidHostCallback(
   const wrapped = (..._args: any[]): void => {
     dispatch();
   };
+  _installNativeFunctionSourceFacade(wrapped);
   _wasmVoidHostCallbackCache.set(closure as object, wrapped);
   _wasmClosureWrapperTargets.set(wrapped, closure as object);
   return wrapped;
@@ -1666,13 +1706,13 @@ function _wrapExecReturnForHost(
   fn: (...args: any[]) => any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
 ): (...args: any[]) => any {
-  return function execReturnBridge(this: any, ...args: any[]): any {
+  return _installNativeFunctionSourceFacade(function execReturnBridge(this: any, ...args: any[]): any {
     const ret = fn.apply(this, args);
     if (ret != null && typeof ret === "object" && _isWasmStruct(ret)) {
       return _wrapForHost(ret, callbackState?.getExports());
     }
     return ret;
-  };
+  });
 }
 
 /**
@@ -2611,6 +2651,12 @@ function _toPrimitive(
     if (ts !== _PRIM_ABSENT) return ts;
   }
 
+  // A compiled closure with no user-defined coercion method behaves like a
+  // function whose inherited Function.prototype.toString is implementation
+  // defined. Keep this fallback after @@toPrimitive/valueOf/toString so own
+  // user overrides retain ordinary JavaScript precedence.
+  const closureSource = _compiledClosureNativeSource(raw, callbackState);
+  if (closureSource !== undefined) return closureSource;
   return undefined;
 }
 
@@ -2949,6 +2995,8 @@ function _hostToPrimitive(
   // silently swallow the error and produce NaN, breaking
   // `+{ valueOf: () => ({}), toString: () => ({}) }` which the spec
   // requires to throw.
+  const closureSource = _compiledClosureNativeSource(raw, callbackState);
+  if (closureSource !== undefined && !methodInvokedReturnedObject) return closureSource;
   if (_isWasmStruct(raw) && !methodInvokedReturnedObject) return "[object Object]";
   throw new TypeError("Cannot convert object to primitive value");
 }
@@ -14254,7 +14302,7 @@ assert._isSameValue = isSameValue;
         // closure. Legacy callbacks keep their non-negative `__cb_N` ids and
         // therefore remain byte-for-byte on the existing dispatch path.
         if (id === -1) return _wrapVoidHostCallback(cap, callbackState);
-        return (...args: any[]) => {
+        return _installNativeFunctionSourceFacade((...args: any[]) => {
           const exports = callbackState?.getExports();
           // (#3284) A callback whose reaction fires DURING WebAssembly.instantiate
           // — e.g. a top-level `Promise.resolve(x).then(cb)` whose microtask
@@ -14277,7 +14325,7 @@ assert._isSameValue = isSameValue;
             }
           }
           return exports?.[`__cb_${id}`]?.(cap, ...args);
-        };
+        });
       };
     case "getter_callback_maker":
       return (id: number, cap: any) => {
@@ -14329,6 +14377,7 @@ assert._isSameValue = isSameValue;
             ? _maybeWrapAccessorGetterCallable(ret, callbackState)
             : ret;
         };
+        _installNativeFunctionSourceFacade(bridge);
         _wasmGetterCallbackWrappers.add(bridge);
         return bridge;
       };
