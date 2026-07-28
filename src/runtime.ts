@@ -7744,7 +7744,24 @@ function _wrapRawCallableHostValue(
 ): any {
   if (!_isWasmStruct(value)) return value;
   const callable = _maybeWrapCallableUnknownArity(value, callbackState);
-  return callable !== value ? callable : _wrapForHost(value, exports);
+  return callable !== value ? callable : _wrapForHost(value, exports ?? callbackState?.getExports());
+}
+
+function _deferStringDataArg(
+  value: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+  fallback: (value: any) => any,
+): any {
+  const exports = callbackState?.getExports();
+  const isData = exports?.__is_data_struct as ((value: any) => number) | undefined;
+  if (_isWasmStruct(value) && typeof isData === "function") {
+    try {
+      if (isData(value) === 1) return _wrapForHost(value, exports);
+    } catch {
+      /* fall through to the pre-existing coercion path */
+    }
+  }
+  return fallback(value);
 }
 
 /** Build the live-method fallback used when raw lookup returns a JS callable. */
@@ -7877,7 +7894,7 @@ function resolveImport(
           } else {
             wrapped = first;
           }
-          args = [wrapped, ...a.slice(1).map(coerce)];
+          args = [wrapped, ...a.slice(1).map((value) => _deferStringDataArg(value, callbackState, coerce))];
         } else {
           args = a.map(coerce);
         }
