@@ -6,7 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c17-host-class-abi
-pr: 3763
+pr: 3770
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -1877,9 +1877,10 @@ can close.
 
 ### 2026-07-28 retained host-class callable continuation
 
-The next stacked continuation on `codex/3520-c17-host-class-abi` makes every
-retained class source callable and the JS-host Promise constructor helper
-structurally authoritative:
+The next stacked continuation on `codex/3520-c17-host-class-abi`
+([PR #3770](https://github.com/loopdive/js2/pull/3770)) makes every retained
+class source callable and the JS-host Promise constructor helper structurally
+authoritative:
 
 - class collection now observes the exact allocator-owned function object for
   each explicit or implicit constructor, method, getter, and setter beside its
