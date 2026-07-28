@@ -934,8 +934,41 @@ export function compileBinaryExpression(
   // skip AnyValue and compile with a numeric hint so operands unbox to f64
   // directly, avoiding the overhead of AnyValue tag dispatch.
   if (ctx.anyValueTypeIdx >= 0) {
-    const leftIsAny = (leftTsType.flags & ts.TypeFlags.Any) !== 0;
-    const rightIsAny = (rightTsType.flags & ts.TypeFlags.Any) !== 0;
+    // (#3739 S2) An `any`-typed operand the whole-program fixpoint already PROVED
+    // numeric is not really `any` for arithmetic purposes. Inside a fnctor
+    // prototype method `this` is untyped, so `this.acc + this.nextCode()` reads
+    // as any+any and routes to the generic `__any_add` — boxing BOTH operands
+    // into `$AnyValue` and tag-dispatching the result back out, five box/unbox
+    // operations per iteration on values that are f64 on both sides (#3739).
+    //
+    // `numericPropertyNames` (#3683 S4a) and `numericFunctionNames` are verdicts
+    // from the same fixpoint that already gave `this.acc` a physical f64 slot —
+    // so trusting them here is consistent with the representation those fields
+    // ALREADY have, not a new claim. Standalone-only, like the verdicts.
+    const provenNumericOperand = (e: ts.Expression): boolean => {
+      if (!ctx.standalone || process.env.JS2WASM_NUMERIC_OPERANDS === "0") return false;
+      const bare = ts.isParenthesizedExpression(e) ? e.expression : e;
+      // `this.f` where every write to `f` is numeric.
+      if (
+        ts.isPropertyAccessExpression(bare) &&
+        bare.expression.kind === ts.SyntaxKind.ThisKeyword &&
+        ctx.numericPropertyNames?.has(bare.name.text) === true
+      ) {
+        return true;
+      }
+      // `this.m()` where `m` provably returns a number on every path.
+      if (
+        ts.isCallExpression(bare) &&
+        ts.isPropertyAccessExpression(bare.expression) &&
+        bare.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
+        ctx.numericFunctionNames?.has(bare.expression.name.text) === true
+      ) {
+        return true;
+      }
+      return false;
+    };
+    const leftIsAny = (leftTsType.flags & ts.TypeFlags.Any) !== 0 && !provenNumericOperand(expr.left);
+    const rightIsAny = (rightTsType.flags & ts.TypeFlags.Any) !== 0 && !provenNumericOperand(expr.right);
     // (#745 S3) A local whose static type is (or whose DECLARED symbol type
     // is) a heterogeneous primitive union compiles to `ref_null $AnyValue`
     // under `unionAnyRep` (S2 mapping) — no legacy path (string/numeric/

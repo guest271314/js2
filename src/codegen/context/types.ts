@@ -1950,6 +1950,13 @@ export interface CodegenContext {
    */
   stringPropertyNames?: ReadonlySet<string>;
   /**
+   * (#3739 S2) Function names proven to return a number on every path, from the
+   * same whole-program fixpoint. Lets a `+` whose RHS is such a call unbox the
+   * result once rather than boxing BOTH operands into `$AnyValue` and running
+   * the generic `__any_add` with a tag-dispatch unbox after it.
+   */
+  numericFunctionNames?: ReadonlySet<string>;
+  /**
    * #3673: property names the SOURCE defines as a function-valued member
    * (`collectUserMethodNames`). Consulted by
    * `compileGuardedNativeStringMethodCall` so a `String.prototype`-named

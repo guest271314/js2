@@ -999,6 +999,12 @@ function debugEnabled(): boolean {
 export interface PropertyKindVerdicts {
   readonly numeric: Set<string>;
   readonly string: Set<string>;
+  /**
+   * (#3739 S2) Function NAMES the fixpoint proved return a number on every
+   * path. Already used internally to decide `this.<m>()` is numeric; exported
+   * so the `+` lowering can too.
+   */
+  readonly numericFunctions: Set<string>;
 }
 
 export function analyzeNumericPropertyNames(
@@ -1008,14 +1014,15 @@ export function analyzeNumericPropertyNames(
   // Kill-switch: `JS2WASM_NUMERIC_FIELDS=0` reproduces the pre-S4a field
   // shapes byte-for-byte on any program, which is what makes the twin/generic
   // and promoted/unpromoted differentials in the pin suite possible.
-  if (process.env.JS2WASM_NUMERIC_FIELDS === "0") return { numeric: new Set(), string: new Set() };
+  if (process.env.JS2WASM_NUMERIC_FIELDS === "0")
+    return { numeric: new Set(), string: new Set(), numericFunctions: new Set() };
   const scopes = buildScopes(sourceFiles);
   const facts = collectNumericFlowFacts(sourceFiles, scopes, host);
   if (facts.poisoned) {
     if (debugEnabled()) {
       process.stderr.write("[numeric-fields] POISONED: computed write/delete through a fnctor instance\n");
     }
-    return { numeric: new Set(), string: new Set() };
+    return { numeric: new Set(), string: new Set(), numericFunctions: new Set() };
   }
   // Seed parameter slots from their call sites, the same way #2847 does: a
   // parameter with no visible call site contributes one opaque definition (so
@@ -1161,5 +1168,5 @@ export function analyzeNumericPropertyNames(
       });
     }
   }
-  return { numeric: numericProperties, string: stringProperties };
+  return { numeric: numericProperties, string: stringProperties, numericFunctions };
 }

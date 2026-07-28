@@ -3009,6 +3009,9 @@ export function generateModule(
     // string gets a NATIVE STRING slot instead of the boxed `externref`, which
     // deletes the per-access `ref.test` / `ref.cast` / `__str_flatten`.
     ctx.stringPropertyNames = propertyKinds.string;
+    // (#3739 S2) Names the fixpoint proved return a number on every path, so
+    // `this.acc + this.nextCode()` can unbox once instead of boxing both sides.
+    ctx.numericFunctionNames = propertyKinds.numericFunctions;
   }
   // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
   // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
