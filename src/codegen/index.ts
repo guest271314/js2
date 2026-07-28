@@ -5934,6 +5934,24 @@ export function generateMultiModule(
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch.
     emitToPrimitiveMethodExports(ctx);
 
+    // (#2358 #10 / #2638) Fill the reserved `__array_to_primitive_string` /
+    // `__class_to_primitive` driver bodies now that `__extern_length` /
+    // `__extern_get_idx` (filled by fillExternGetIdxVecArms above) and the
+    // `__call_valueOf`/`__call_toString` dispatchers (emitToPrimitiveMethodExports
+    // just above) are registered. Mirrors the single-module `generateModule`
+    // pipeline, which called these two fills but this multi-file path never
+    // did — every standalone multi-file compile reaching `__to_primitive`'s
+    // array/class arms (e.g. `TypedArray.prototype.set(arr, offset)` where
+    // `offset` needs ToNumber on a plain object or array) left both driver
+    // placeholders as their bare `unreachable` stub, so a would-be-catchable
+    // coercion crashed the whole module with an uncatchable Wasm trap instead
+    // of the value it should have produced. No-op when neither driver was
+    // reserved (`ctx.arrayToPrimitiveReserved`/`ctx.classToPrimitiveReserved`
+    // unset) — byte-identical for modules that never reach `__to_primitive`'s
+    // array/class-instance arms.
+    fillArrayToPrimitive(ctx);
+    fillClassToPrimitive(ctx);
+
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
