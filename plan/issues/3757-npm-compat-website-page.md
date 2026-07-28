@@ -78,6 +78,16 @@ separately as **#3756**, not fixed here (`feasibility: hard`) — this
 harness's job was to surface it via a real head-to-head measurement,
 same as every other dogfood finding this session.
 
+## Permanent test reference
+
+The page's underlying data is only as good as the harnesses that produce
+it — those are already pinned by permanent, existing tests:
+`tests/dogfood/clsx.test.ts` and `tests/dogfood/cookie.test.ts` (both
+opt-in, `DOGFOOD_CLSX=1`/`DOGFOOD_COOKIE=1`) gate on the exact op-diff
+counts the new generator reuses via each harness's `runHarness()`. No
+new test file for this issue specifically — the website page/generator
+script is presentation-layer glue over data those tests already pin.
+
 ## Acceptance criteria
 
 - [x] `pnpm run generate:npm-compat` regenerates a committed,
