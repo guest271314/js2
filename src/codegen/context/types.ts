@@ -40,7 +40,7 @@ export interface CodegenError {
    */
   severity?: "error" | "warning" | "degrade";
   /**
-   * (#3720) Survive a speculative rollback.
+   * (#3725) Survive a speculative rollback.
    *
    * `rollbackSpeculative` (#1919) truncates `ctx.errors` back to the snapshot,
    * which is correct for a genuine PROBE — one of several candidate lowerings,
@@ -61,7 +61,7 @@ export interface CodegenError {
    * the retain-all behaviour surfaced pre-existing sites that depend on the
    * swallow (60 `#1539` standalone-RegExp refusals inside the compiled-Acorn
    * acceptance module alone), so flipping it wholesale is its own remediation
-   * project. See #3720.
+   * project. See #3725.
    */
   sticky?: true;
 }

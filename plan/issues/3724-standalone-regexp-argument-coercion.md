@@ -14,7 +14,7 @@ task_type: bugfix
 area: codegen
 language_feature: regexp
 goal: standalone-gap
-related: [1539, 3720, 1712, 682]
+related: [1539, 3725, 1712, 682]
 ---
 
 # #3724 — the standalone RegExp argument gate was refusing work the lane already did
@@ -45,7 +45,7 @@ values are `any`; its tokenizer is built on regexes. **Roughly 60 `.test`/
 `.exec` call sites in the compiled-Acorn standalone module hit this single
 guard.**
 
-Worse, those refusals were **invisible**: #3720 showed the speculative rollback
+Worse, those refusals were **invisible**: #3725 showed the speculative rollback
 erases a `reportError(...); return null` refusal and substitutes a value, so
 the build reported `success: true` with zero errors while ~60 regex calls had
 been quietly replaced. The compiled-Acorn standalone acceptance test (#1712)
@@ -82,8 +82,8 @@ symbol-like.
 `tests/issue-1712-standalone.test.ts`).
 
 Because the count is now zero, the remaining `#1539` refusals were also marked
-`sticky` (#3720): they now fail the build honestly instead of being erased and
-papered over. That closes the RegExp half of #3720's audit — it cost nothing
+`sticky` (#3725): they now fail the build honestly instead of being erased and
+papered over. That closes the RegExp half of #3725's audit — it cost nothing
 precisely because there was nothing left to swallow.
 
 ## Not in scope (pre-existing, separate)

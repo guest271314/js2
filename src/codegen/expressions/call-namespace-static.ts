@@ -2012,7 +2012,7 @@ export function compileNamespaceStaticCall(
             `numbers, objects, arrays, strings, and JSON.parse require the Phase 2 pure-Wasm codec (#1599 Phase 2). ` +
             `Avoid JSON for these shapes in standalone/WASI targets for now.`,
           "error",
-          // (#3720) STICKY. This `reportError(...); return null` pair is a
+          // (#3725) STICKY. This `reportError(...); return null` pair is a
           // deliberate refusal, but `return null` is indistinguishable from an
           // ordinary probe miss at `compileExpression`'s rollback, which
           // truncated the diagnostic and substituted a default value. The

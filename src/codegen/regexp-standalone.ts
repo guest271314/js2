@@ -184,7 +184,7 @@ function reportStandaloneRegExpUnsupported(ctx: CodegenContext, node: ts.Node, d
     `Codegen error: standalone RegExp engine does not support ${detail} (#1539 Phase 2a). ` +
       "Use a supported pattern/flag set, or recompile with a JS host target.",
     "error",
-    // (#3724/#3720) STICKY. These refusals were being erased by the speculative
+    // (#3724/#3725) STICKY. These refusals were being erased by the speculative
     // rollback (`reportError(...); return null` is indistinguishable from a probe
     // miss), so ~60 of them inside the compiled-Acorn standalone module were
     // silently replaced with substituted values while the build reported success.

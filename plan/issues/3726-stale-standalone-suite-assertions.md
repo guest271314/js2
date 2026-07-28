@@ -1,5 +1,5 @@
 ---
-id: 3721
+id: 3726
 title: "Standalone suites red on main: assertions pinned to superseded mechanisms and a snapshot of a ratcheting metric"
 status: done
 sprint: current
@@ -17,7 +17,7 @@ goal: standalone-gap
 related: [681, 1320, 2879, 2889, 3592]
 ---
 
-# #3721 — two standalone suites asserted mechanisms, not invariants
+# #3726 — two standalone suites asserted mechanisms, not invariants
 
 Both were failing on `upstream/main` itself, unnoticed, because neither sits in
 a required check.

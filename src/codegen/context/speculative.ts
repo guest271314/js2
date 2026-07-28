@@ -120,7 +120,7 @@ export function rollbackSpeculative(ctx: CodegenContext, fctx: FunctionContext, 
   // 2. Locals (#1847).
   restoreLocals(fctx, snap.locals);
   // 3. Diagnostics pushed during the probe — EXCEPT the ones marked `sticky`.
-  //    (#3720) A probe's diagnostic describes emission this unwind just erased,
+  //    (#3725) A probe's diagnostic describes emission this unwind just erased,
   //    so dropping it is right. A `sticky` diagnostic is not a probe result: it
   //    is a deliberate refusal ("this program cannot be compiled for this
   //    target"), which no fallback value can repair. Discarding those turned the

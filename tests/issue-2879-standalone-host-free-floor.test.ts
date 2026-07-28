@@ -75,7 +75,7 @@ describe("#2879 §4 — carrier-migration crediting (raw pass dip does not breac
 });
 
 describe("#2879 §2 — the committed high-water file is re-baselined to the honest number", () => {
-  // (#3721) These two cases originally asserted `pass < 20000` — the band that
+  // (#3726) These two cases originally asserted `pass < 20000` — the band that
   // separated the honest host-free count (~12.9k at the time) from the leaky raw
   // one (~26k). That ceiling was a SNAPSHOT of a deliberately RATCHETING metric,
   // so every legitimate improvement walked toward it, and #3592's measured

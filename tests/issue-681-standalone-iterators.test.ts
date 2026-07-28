@@ -11,7 +11,7 @@ function importNames(result: Awaited<ReturnType<typeof compile>>): string[] {
 function expectNoIteratorHostImports(result: Awaited<ReturnType<typeof compile>>) {
   const names = importNames(result);
   expect(names.filter((name) => ITERATOR_HOST_IMPORT_RE.test(name))).toEqual([]);
-  // (#3721) Scan only the WAT's IMPORT lines. The original check ran the regex
+  // (#3726) Scan only the WAT's IMPORT lines. The original check ran the regex
   // over the whole module, which was equivalent back when any mention of
   // `__iterator` could only be an import. Since #1320 Slice 1 the standalone
   // iterator protocol is bound to LOCALLY DEFINED Wasm functions with those same
@@ -68,7 +68,7 @@ describe("#681 standalone iterator protocol slice", () => {
     expectNoIteratorHostImports(result);
   });
 
-  // (#3721) This case asserted a COMPILE-TIME REFUSAL for an unknown iterable.
+  // (#3726) This case asserted a COMPILE-TIME REFUSAL for an unknown iterable.
   // That refusal was the #681-era mechanism for one goal: never leak an
   // `__iterator` HOST import into a standalone module. #1320 Slice 1 replaced the
   // mechanism — `ensureNativeIteratorRuntime` binds the iterator protocol to

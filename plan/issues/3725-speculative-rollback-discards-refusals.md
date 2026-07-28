@@ -1,5 +1,5 @@
 ---
-id: 3720
+id: 3725
 title: "Speculative rollback discards deliberate compile-time REFUSALS — a refusal becomes a runtime trap"
 loc-budget-allow:
   # The sticky-refusal marker plus the comment explaining WHY the #1599 refusal
@@ -23,7 +23,7 @@ goal: standalone-gap
 related: [1919, 1921, 1599, 1539, 2508, 1712, 3724]
 ---
 
-# #3720 — a speculative rollback erases refusals, turning them into runtime traps
+# #3725 — a speculative rollback erases refusals, turning them into runtime traps
 
 ## Problem
 
