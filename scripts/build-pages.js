@@ -448,7 +448,13 @@ writeFileSync(join(PAGES_DIST, "CNAME"), "js2.loopdive.com\n");
 
 // Copy web components to pages-dist root and dashboard
 const COMPONENTS_DIR = join(WEBSITE, "components");
-for (const file of ["site-nav.js", "t262-charts.js", "trend-chart.js", "perf-benchmark-chart.js"]) {
+for (const file of [
+  "site-nav.js",
+  "t262-charts.js",
+  "trend-chart.js",
+  "perf-benchmark-chart.js",
+  "npm-compat-chart.js",
+]) {
   copyFileIfExists(join(COMPONENTS_DIR, file), join(PAGES_DIST, "components", file));
 }
 
