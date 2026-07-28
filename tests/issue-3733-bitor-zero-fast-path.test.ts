@@ -10,7 +10,11 @@
 // `s = (s + i) | 0` — paid the full double-ToInt32 cost every iteration.
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
-import { compileAndRunStubs as compileAndRun } from "./helpers/compile.js";
+// compileAndRunStubs's minimal env-only imports omit "string_constants" and
+// fail to instantiate when this file runs isolated (CI's root-test gate
+// singleFork mode) — pre-existing, unrelated to #3733. Use the full host
+// import object instead.
+import { compileAndRunBuildImports as compileAndRun } from "./helpers/compile.js";
 
 async function wat(src: string): Promise<string> {
   const r = await compile(src, {
