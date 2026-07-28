@@ -6,7 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c16-legacy-abi-cutover
-pr: 3756
+pr: 3763
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -1816,8 +1816,9 @@ only name-keyed boundary by replacing direct `funcMap`, `structMap`,
 
 ### 2026-07-28 semantic inherited class-member continuation
 
-The next stacked continuation on `codex/3520-c16-legacy-abi-cutover` removes
-the inherited accessor/static callable seam:
+The next stacked continuation on `codex/3520-c16-legacy-abi-cutover`
+([PR #3763](https://github.com/loopdive/js2/pull/3763)) removes the inherited
+accessor/static callable seam:
 
 - `class.call` now retains the semantic member kind separately from the
   source-level member name. Getters and setters no longer smuggle backend
