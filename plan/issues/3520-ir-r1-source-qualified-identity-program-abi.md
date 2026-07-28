@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c22-class-layout-integration-abi
-pr: 3787
+branch: codex/3520-c23-module-global-integration-abi
+pr: 3789
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -2258,7 +2258,8 @@ can close.
 ### 2026-07-29 exact module-global integration continuation
 
 The current stacked continuation on
-`codex/3520-c23-module-global-integration-abi` removes the production
+`codex/3520-c23-module-global-integration-abi`
+([PR #3789](https://github.com/loopdive/js2/pull/3789)) removes the production
 module-binding join through `moduleGlobals` and `tdzGlobals`:
 
 - declaration collection exposes each direct top-level identifier
