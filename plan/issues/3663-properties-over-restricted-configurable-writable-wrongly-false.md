@@ -21,6 +21,12 @@ loc-budget-allow:
   - src/ir/select.ts
   - src/ir/integration.ts
   - src/ir/lower.ts
+func-budget-allow:
+  - src/ir/from-ast.ts::lowerMethodCall
+  - src/ir/select.ts::isPhase1Expr
+  - src/ir/integration.ts::makeFromAstResolver
+  - src/ir/lower.ts::lowerIrFunctionBody
+  - src/ir/lower.ts::emitInstrTree
 ---
 
 # #3663 — properties are OVER-restricted
