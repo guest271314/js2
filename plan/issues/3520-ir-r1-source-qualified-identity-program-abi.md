@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c15-callable-export-abi
+branch: codex/3520-c16-legacy-abi-cutover
 pr: 3756
 last_merged_pr: 3679
 sprint: current
@@ -108,6 +108,7 @@ files:
   - docs/ir/ir-module.schema.json
   - benchmarks/allocation-policy-proof.ts
   - tests/helpers/ir-identities.ts
+  - tests/issue-3520-class-member-alias-abi.test.ts
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
   - tests/issue-3520-lifted-program-abi.test.ts
@@ -1812,6 +1813,64 @@ selection seams. Production consumers must then route through the populated
 callable/global/type/class authorities, and `LegacyAbiAdapter` must become the
 only name-keyed boundary by replacing direct `funcMap`, `structMap`,
 `moduleGlobals`, module-array, and display-name scans before R1 can close.
+
+### 2026-07-28 semantic inherited class-member continuation
+
+The next stacked continuation on `codex/3520-c16-legacy-abi-cutover` removes
+the inherited accessor/static callable seam:
+
+- `class.call` now retains the semantic member kind separately from the
+  source-level member name. Getters and setters no longer smuggle backend
+  spellings such as `get_value` through the IR, and
+  `IrClassLowering.memberFunc(kind, name)` replaces the kind-erasing
+  `methodFunc(name)` contract;
+- own instance methods, getters, setters, and static methods resolve only to an
+  exact inventoried source-unit kind. With a production Program ABI session,
+  a projected member that has neither an exact source owner nor an exact
+  inherited owner is an Invariant instead of silently reaching the generic
+  name adapter;
+- inherited methods, getters, setters, and statics walk the source-qualified
+  class-shape chain, prove one exact ancestor AST declaration and terminal
+  unit, and verify that the child compatibility key and ancestor key identify
+  the same allocator-owned `WasmFunction`; and
+- getter/setter/static child bindings are non-allocating, class-owned Program
+  ABI aliases of the canonical ancestor source callable. Ordinary method alias
+  IDs retain their existing role for compatibility; the new roles include the
+  semantic kind and member name.
+
+The production regression covers an `A -> B -> C` hierarchy with an inherited
+getter, setter, and static method plus colliding top-level `C_get_value`,
+`C_set_value`, and `C_scale` functions. It proves distinct source identities,
+collision-relocated child aliases, exact canonical signatures/final slots, no
+child function allocation, distinct user-function ownership, and end-to-end
+execution.
+
+The focused class-member matrix passes **13/13 across 3 files**. The complete
+#3520 matrix reports **261 passing / 1 failing across 47 files**; the sole
+failure remains the inherited linear inventory-count spy assertion previously
+reproduced on the exact C14 parent. The adjacent accessor/class,
+cross-backend, integration-preflight, constructor/super, and linear matrix
+passes **86/86 across 8 files**. Strict TypeScript, Biome lint, scoped
+Prettier, diff, LOC/function budget, dead-export, checker-oracle, issue-spec,
+and fallback gates pass.
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The supported eight-shard equivalence gate reports **1,611 passing /
+32 known failing / 0 new regressions**; four baseline rows now pass and the
+shared baseline remains unchanged. Two attempted unsharded runs exhausted
+their Vitest worker channel before producing JSON, so the final evidence uses
+the repository's lower-memory shard mode. No local Test262 corpus run was
+performed, and neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C16 closes projected local class-method/accessor/static callable identity, not
+R1. Externref-backed class and Promise-host support helpers still need exact
+semantic ownership. Production consumers must then route through the
+populated callable/global/type/class authorities, and `LegacyAbiAdapter` must
+become the only name-keyed boundary by replacing direct `funcMap`,
+`structMap`, `moduleGlobals`, module-array, and display-name scans before R1
+can close.
 
 ### R1a validation evidence
 
