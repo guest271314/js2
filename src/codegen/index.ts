@@ -85,7 +85,7 @@ import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
 import { createCodegenContext } from "./context/create-context.js";
 import { ProgramAbiSession, type PublishedProgramAbi } from "./program-abi-session.js";
-import { eliminateDeadImportsAndPlanAbiCallables } from "./program-abi-import-planning.js";
+import { eliminateDeadLayoutAndPlanProgramAbi } from "./program-abi-finalization.js";
 import { planProgramAbiFunctionValue, planProgramAbiGlobal, PROGRAM_ABI_GLOBAL_ROLE } from "./program-abi-planning.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
 import {
@@ -4034,7 +4034,7 @@ export function generateModule(
     markLeafStructsFinal(mod, ctx.wasi, callableRootTypeIdx === undefined ? undefined : new Set([callableRootTypeIdx]));
 
     // Dead import and type elimination pass
-    eliminateDeadImportsAndPlanAbiCallables(ctx); // #1899 authoritative remap, then #3520 retained ABI
+    eliminateDeadLayoutAndPlanProgramAbi(ctx); // #1899 authoritative remap, then #3520 retained ABI
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
@@ -6032,7 +6032,7 @@ export function generateMultiModule(
     markLeafStructsFinal(mod, ctx.wasi, callableRootTypeIdx === undefined ? undefined : new Set([callableRootTypeIdx]));
 
     // Dead import and type elimination pass
-    eliminateDeadImportsAndPlanAbiCallables(ctx); // #1899 authoritative remap, then #3520 retained ABI
+    eliminateDeadLayoutAndPlanProgramAbi(ctx); // #1899 authoritative remap, then #3520 retained ABI
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
