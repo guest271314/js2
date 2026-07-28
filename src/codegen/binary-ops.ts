@@ -2883,36 +2883,118 @@ export function compileI64BinaryOp(
 }
 
 /**
- * Emit JS ToInt32: reduce f64 modulo 2^32 then truncate to i32.
- * Handles NaN→0, Infinity→0, and large values that wrap.
+ * Emit JS ToInt32 via IEEE-754 bit decomposition (sign/exponent/significand),
+ * matching how native JS engines implement it in C++. Deliberately avoids
+ * f64.floor/f64.div: a handwritten-Wasm bisection (#3739) found that the
+ * floor-based modulo-reduction sequence this replaced never gets tiered up
+ * by V8 in a tight loop (stuck at Liftoff baseline speed indefinitely,
+ * ~12x slower than an equivalent pure-f64 loop with no floor at all) — an
+ * engine limitation, not a codegen bug, but avoidable here since ToInt32
+ * doesn't need floor: the exponent already tells us exactly which bits of
+ * the significand land in the low 32 bits of floor(|x|).
  * Stack: [f64] → [i32]
  */
 export function emitToInt32(fctx: FunctionContext): void {
-  // JS ToInt32 algorithm:
-  //   if NaN/Infinity/0 → 0
-  //   n = sign(x) * floor(abs(x))
-  //   int32bit = n mod 2^32
-  //   if int32bit >= 2^31 → int32bit - 2^32
+  // ECMA-262 ToInt32 (7.1.6): NaN/±0/±Infinity → 0; else
+  // int32bit = (sign(x) * floor(abs(x))) mod 2^32, wrapped to signed range.
   //
-  // In wasm: x - floor(x / 2^32) * 2^32, then trunc_sat
-  // For values in i32 range, trunc_sat alone works. We only need the
-  // modulo reduction for out-of-range values.
-  // Step 1: truncate fractional part toward zero (JS ToInt32 does this first)
-  // Step 2: x - floor(x / 2^32) * 2^32 → maps to [0, 2^32)
-  // Step 3: trunc_sat_f64_u gives correct bit pattern
-  // NaN/Infinity: trunc(NaN)=NaN, Inf-Inf=NaN, trunc_sat_u(NaN)=0. Correct.
-  fctx.body.push({ op: "f64.trunc" });
-  const tmp = allocTempLocal(fctx, { kind: "f64" });
-  fctx.body.push({ op: "local.tee", index: tmp });
-  fctx.body.push({ op: "local.get", index: tmp });
-  fctx.body.push({ op: "f64.const", value: 4294967296 });
-  fctx.body.push({ op: "f64.div" });
-  fctx.body.push({ op: "f64.floor" });
-  fctx.body.push({ op: "f64.const", value: 4294967296 });
-  fctx.body.push({ op: "f64.mul" });
-  fctx.body.push({ op: "f64.sub" });
-  fctx.body.push({ op: "i32.trunc_sat_f64_u" });
-  releaseTempLocal(fctx, tmp);
+  // bits = i64 reinterpret of x. biasedExp = bits[62:52]; e = biasedExp - 1023
+  // (unbiased exponent — negative for |x|<1 and denormals; 1024 for NaN/Inf,
+  // both of which fall out of the valid window below and yield 0 for free).
+  // significand = 53-bit magnitude (mantissa | implicit leading bit).
+  //
+  // floor(|x|)'s bit `k` is significand's bit `k - (e - 52)`. Only bits
+  // [0,31] of floor(|x|) mod 2^32 matter, so:
+  //   e < 0 or e > 83  → those bits are always 0 (either |x|<1, or the
+  //                       significand's bits all sit at position >=32)
+  //   e >= 52          → shift significand LEFT by (e-52); only 0..31 needed
+  //   0 <= e < 52      → shift significand RIGHT (u) by (52-e), truncating
+  //                       the fractional bits, matching floor()
+  // i32.wrap_i64 keeps exactly the low 32 bits either way. Negate at the end
+  // if x's sign bit was set (two's-complement wraparound negation is correct
+  // ToInt32 behavior — no separate overflow case to handle).
+  const bits = allocTempLocal(fctx, { kind: "i64" });
+  const e = allocTempLocal(fctx, { kind: "i64" });
+  const significand = allocTempLocal(fctx, { kind: "i64" });
+  const magnitude = allocTempLocal(fctx, { kind: "i64" });
+
+  fctx.body.push({ op: "i64.reinterpret_f64" });
+  fctx.body.push({ op: "local.set", index: bits });
+
+  fctx.body.push({ op: "local.get", index: bits });
+  fctx.body.push({ op: "i64.const", value: 52n });
+  fctx.body.push({ op: "i64.shr_u" });
+  fctx.body.push({ op: "i64.const", value: 0x7ffn });
+  fctx.body.push({ op: "i64.and" });
+  fctx.body.push({ op: "i64.const", value: 1023n });
+  fctx.body.push({ op: "i64.sub" });
+  fctx.body.push({ op: "local.set", index: e });
+
+  fctx.body.push({ op: "local.get", index: bits });
+  fctx.body.push({ op: "i64.const", value: 0xfffffffffffffn });
+  fctx.body.push({ op: "i64.and" });
+  fctx.body.push({ op: "i64.const", value: 0x10000000000000n });
+  fctx.body.push({ op: "i64.or" });
+  fctx.body.push({ op: "local.set", index: significand });
+
+  const shiftLeft: Instr[] = [
+    { op: "local.get", index: significand },
+    { op: "local.get", index: e },
+    { op: "i64.const", value: 52n },
+    { op: "i64.sub" },
+    { op: "i64.shl" },
+  ];
+  const shiftRight: Instr[] = [
+    { op: "local.get", index: significand },
+    { op: "i64.const", value: 52n },
+    { op: "local.get", index: e },
+    { op: "i64.sub" },
+    { op: "i64.shr_u" },
+  ];
+  fctx.body.push({ op: "local.get", index: e });
+  fctx.body.push({ op: "i64.const", value: 0n });
+  fctx.body.push({ op: "i64.ge_s" });
+  fctx.body.push({ op: "local.get", index: e });
+  fctx.body.push({ op: "i64.const", value: 83n });
+  fctx.body.push({ op: "i64.le_s" });
+  fctx.body.push({ op: "i32.and" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i64" } as ValType },
+    then: [
+      { op: "local.get", index: e },
+      { op: "i64.const", value: 52n },
+      { op: "i64.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i64" } as ValType },
+        then: shiftLeft,
+        else: shiftRight,
+      },
+    ],
+    else: [{ op: "i64.const", value: 0n }],
+  });
+  fctx.body.push({ op: "local.set", index: magnitude });
+
+  fctx.body.push({ op: "local.get", index: bits });
+  fctx.body.push({ op: "i64.const", value: 0n });
+  fctx.body.push({ op: "i64.lt_s" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } as ValType },
+    then: [
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: magnitude },
+      { op: "i32.wrap_i64" },
+      { op: "i32.sub" },
+    ],
+    else: [{ op: "local.get", index: magnitude }, { op: "i32.wrap_i64" }],
+  });
+
+  releaseTempLocal(fctx, bits);
+  releaseTempLocal(fctx, e);
+  releaseTempLocal(fctx, significand);
+  releaseTempLocal(fctx, magnitude);
 }
 
 /**
