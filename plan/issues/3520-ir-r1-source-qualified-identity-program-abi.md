@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c23-module-global-integration-abi
-pr: 3789
+branch: codex/3520-c24-synthetic-slot-abi
+pr: 3790
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -2313,8 +2313,9 @@ still move behind structural authorities before R1 can close.
 ### 2026-07-29 exact synthesized artifact allocation continuation
 
 The current stacked continuation on
-`codex/3520-c24-synthetic-slot-abi` removes the production display-name join
-from fresh lifted and monomorphized artifact allocation:
+`codex/3520-c24-synthetic-slot-abi`
+([PR #3790](https://github.com/loopdive/js2/pull/3790)) removes the production
+display-name join from fresh lifted and monomorphized artifact allocation:
 
 - every synthesized artifact in a Program ABI session now receives a fresh
   allocator-owned `WasmFunction` keyed through its exact derived `IrUnitId`.
