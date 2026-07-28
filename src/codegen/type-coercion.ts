@@ -24,6 +24,7 @@ import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
 import {
   elemGetOp,
+  ensureExternrefToStringProvider,
   ensureLateImport,
   flushLateImportShifts,
   materializeStructAsObject,
@@ -293,7 +294,8 @@ function tryStructPrimitiveToStringAsExternref(
  * not accept the carrier as proof of success. Keep the closure call in Wasm so
  * module-start initializers are safe, classify its result with the existing
  * Type(x)-is-Object predicate, and fall through from an object-returning
- * `toString` to `valueOf`. Only primitive results reach `__extern_toString`.
+ * `toString` to `valueOf`. Only primitive results reach the coercion engine's
+ * canonical externref ToString provider.
  */
 function tryStructStringHintHostDispatch(
   ctx: CodegenContext,
@@ -356,13 +358,13 @@ function tryStructStringHintHostDispatch(
   // late import can shift defined-function indices; resolving from funcMap only
   // after the final flush keeps the nested instruction arrays relocation-safe.
   ensureLateImport(ctx, "__extern_is_object", [{ kind: "externref" }], [{ kind: "i32" }]);
-  ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+  ensureExternrefToStringProvider(ctx, fctx, "string");
   const throwTypeError = buildThrowJsErrorInstrs(ctx, "TypeError", "Cannot convert object to primitive value", {
     flush: fctx,
   });
   flushLateImportShifts(ctx, fctx);
   const externIsObjectIdx = ctx.funcMap.get("__extern_is_object");
-  const externToStringIdx = ctx.funcMap.get("__extern_toString");
+  const externToStringIdx = ensureExternrefToStringProvider(ctx, fctx, "string");
   if (externIsObjectIdx === undefined || externToStringIdx === undefined) return false;
 
   addStringConstantGlobal(ctx, "undefined");

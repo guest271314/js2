@@ -17,7 +17,9 @@ goal: test262-conformance
 assignee: "ttraenkler/codex-es5-string-indexof-receiver"
 related: [2742, 3751, 3763]
 loc-budget-allow:
+  - src/codegen/coercion-engine.ts
   - src/codegen/type-coercion.ts
+  - src/codegen/shared.ts
   - src/codegen/expressions/call-identifier.ts
   - src/codegen/expressions/new-builtin-globals.ts
   - tests/issue-3766-string-indexof-receiver-coercion.test.ts
@@ -122,3 +124,17 @@ Regression controls use the exact two merge-queue rows:
 
 A focused closed-struct case separately proves that opaque `toString` results
 are classified before the in-Wasm `valueOf` dispatch.
+
+## Coercion-engine gate repair
+
+The merge-queue repair initially reserved and looked up the host
+`externref`-to-string import directly in `type-coercion.ts`. Although the
+runtime behavior was correct, that created a second owner for sealed ToString
+vocabulary and failed the coercion-site drift gate.
+
+The canonical provider reservation now lives in `coercion-engine.ts`, and both
+the engine's ordinary dynamic-externref arm and the nested struct dispatch use
+that provider. A registered delegate in `shared.ts` breaks the existing
+engine↔type-coercion import cycle; it does not duplicate the conversion matrix.
+This matters beyond satisfying the gate: future changes to default-hint versus
+string-hint host routing now have one implementation point.
