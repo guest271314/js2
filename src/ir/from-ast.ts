@@ -7797,8 +7797,8 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
   }
 
-  let ltVal = asVal(lt);
-  let rtVal = asVal(rt);
+  const ltVal = asVal(lt);
+  const rtVal = asVal(rt);
   if (!ltVal || !rtVal || ltVal.kind !== rtVal.kind) {
     // A representation mismatch is a stable capability gap only when the TS
     // evidence says JavaScript coercion is genuinely required (for example,
