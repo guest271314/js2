@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c17-host-class-abi
-pr: 3770
+branch: codex/3520-c18-module-init-abi
+pr: 3774
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
