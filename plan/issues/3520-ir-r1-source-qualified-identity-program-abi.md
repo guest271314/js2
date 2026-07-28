@@ -6,7 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c20-class-integration-abi
-pr: null
+pr: 3783
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
