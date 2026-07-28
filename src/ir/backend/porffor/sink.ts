@@ -670,6 +670,23 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
     const effects = left!.effects | right!.effects;
     if (effects !== PORFFOR_FX.none) [left, right] = out.sequence([left!, right!]);
 
+    // (#3741) i32 wrapping arithmetic. Signed overflow is UB in C, so do the
+    // bit movement in u32 (defined modular wrap) and reinterpret the result as
+    // i32 — exactly the shape `emitI32Bitwise` already uses for `i32.shl`.
+    if (op === "i32.add" || op === "i32.sub") {
+      const wrapped: PorfforExpr = {
+        kind: "binary",
+        type: "u32",
+        effects: left!.effects | right!.effects,
+        op: op === "i32.add" ? "+" : "-",
+        left: convertExpr("u32", left!, 0),
+        right: convertExpr("u32", right!, 0),
+        comparison: false,
+      };
+      out.push(convertExpr("i32", wrapped, 1));
+      return;
+    }
+
     const mapped = binaryOp(op);
     const operandType = mapped.operandType ?? left!.type;
     if (mapped.operandType && mapped.operandType !== left!.type) {

@@ -312,6 +312,10 @@ function porfforBinopLegal(op: IrBinop): boolean {
     case "i32.ne":
     case "i32.and":
     case "i32.or":
+    // (#3741) i32 wrapping add/sub — the sink lowers these through a u32
+    // intermediate (C signed overflow is UB), same shape as `i32.shl`.
+    case "i32.add":
+    case "i32.sub":
     case "i32.lt_s":
     case "i32.le_s":
     case "i32.gt_s":

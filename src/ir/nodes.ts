@@ -674,6 +674,23 @@ export type IrBinop =
   // i32 logical (for bool && / || — operands assumed 0|1)
   | "i32.and"
   | "i32.or"
+  // (#3741) Native i32 wrapping arithmetic. Emitted ONLY by the
+  // Q-WRAP fused lowering in `from-ast.ts` (`lowerI32Wrapped`), i.e. for an
+  // `a + b` / `a - b` whose result is IMMEDIATELY ToInt32-coerced by an
+  // enclosing bitwise operator (`(a + b) | 0`) or by a store into an
+  // i32-promoted local slot. That guarantee is what makes the two-complement
+  // wrap of `i32.add` bit-identical to `ToInt32(f64.add(a, b))` when both
+  // operands are already int32-range (|a ± b| < 2^32 < 2^53, so the f64 sum is
+  // exact and `mod 2^32` agrees). They are deliberately NOT reachable from the
+  // general `+`/`-` lowering, which stays f64-only — the same #1236 boundary
+  // legacy draws (see `analysis/i32-coerced-locals.ts`'s Q-CANON header).
+  //
+  // `*` is deliberately absent: an i32×i32 product can need 62 bits, which f64
+  // cannot represent exactly, so `i32.mul` and `ToInt32(f64.mul(a,b))` genuinely
+  // disagree (legacy guards its own i32 `*` with a `|operand| < 2^21` proof —
+  // see `isI32MulSafe` in binary-ops.ts). Out of scope here.
+  | "i32.add"
+  | "i32.sub"
   // #1126 Stage 3 — native i32 magnitude compares. Emitted by the
   // AST→IR lowerer when both operands of `<`, `<=`, `>`, `>=` are
   // i32-typed (a bool, a comparison result, or an i32-domain value

@@ -155,7 +155,6 @@ export const INLINE_DISALLOWED_OPS = new Set([
   "local.tee",
 ]);
 
-
 /**
  * After compiling a function, check if it is eligible for call-site inlining.
  * Criteria:
