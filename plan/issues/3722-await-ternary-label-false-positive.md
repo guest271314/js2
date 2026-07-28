@@ -16,6 +16,11 @@ language_feature: async-await
 goal: core-semantics
 origin: "found re-testing marked (#3715/#3716) with skipSemanticDiagnostics to see if it unblocks the same way #3717 unblocked acorn"
 related: [3715, 3716, 3717, 1068]
+loc-budget-allow:
+  # The isInTernary guard mirrors the existing yield-as-label check +10 LOC
+  # to src/compiler/early-errors/node-checks.ts's baseline (1866 -> 1876).
+  # Same file, same kind of grant as #3714's brand-check fix.
+  - src/compiler/early-errors/node-checks.ts
 ---
 
 # #3722 — `cond ? await x() : y` false-flagged as `await:` label
