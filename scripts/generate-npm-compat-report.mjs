@@ -126,7 +126,9 @@ function measurePerf(sampleOp, wasmFn, nodeFn) {
 async function perfAcorn() {
   const { entryModulePath } = setupAcorn();
   const source = readFileSync(entryModulePath, "utf-8");
-  const result = await compile(source, { fileName: "acorn.mjs", skipSemanticDiagnostics: true });
+  // optimize: 4 — perf numbers must reflect a realistic (wasm-opt'd) deployment,
+  // not the debug-friendly unoptimized binary the correctness harnesses use.
+  const result = await compile(source, { fileName: "acorn.mjs", skipSemanticDiagnostics: true, optimize: 4 });
   if (!result.success || !result.binary?.length) return null;
   const importObject = result.importObject ?? {};
   const { instance } = await WebAssembly.instantiate(result.binary, importObject);
@@ -153,7 +155,11 @@ async function perfClsx() {
   // confirmed produces IDENTICAL output keeps the comparison meaningful.
   const op = CLSX_OPS.find((o) => o.name === "op_mixed_all_kinds");
   const epilogue = `export function ${op.name}() {\n${op.code}\n}\n`;
-  const result = await compile(clsxSource + "\n" + epilogue, { fileName: "clsx.mjs", skipSemanticDiagnostics: true });
+  const result = await compile(clsxSource + "\n" + epilogue, {
+    fileName: "clsx.mjs",
+    skipSemanticDiagnostics: true,
+    optimize: 4,
+  });
   if (!result.success || !result.binary?.length) return null;
   const importObject = result.importObject ?? {};
   const { instance } = await WebAssembly.instantiate(result.binary, importObject);
@@ -176,7 +182,7 @@ async function perfClsx() {
 async function perfCookie() {
   const { entryModulePath } = setupCookie();
   const cookieSource = readFileSync(entryModulePath, "utf-8");
-  const result = await compile(cookieSource, { fileName: "index.js", skipSemanticDiagnostics: true });
+  const result = await compile(cookieSource, { fileName: "index.js", skipSemanticDiagnostics: true, optimize: 4 });
   if (!result.success || !result.binary?.length) return null;
   const importObject = result.importObject ?? {};
   const { instance } = await WebAssembly.instantiate(result.binary, importObject);
@@ -200,7 +206,12 @@ async function perfCookie() {
 // ---------------------------------------------------------------------------
 function knownBugsFor(name) {
   const map = {
-    acorn: [],
+    acorn: [
+      {
+        issue: 3756,
+        summary: "parse() scales super-linearly with input size — 14x slower than native at 4.9KB, 424x at 313KB",
+      },
+    ],
     marked: [{ issue: 3715, summary: "TS 'evolving array type' inference unimplemented — blocks compile entirely" }],
     clsx: [{ issue: 3749, summary: "for...in over an array of heterogeneously-shaped object literals derefs null" }],
     cookie: [
