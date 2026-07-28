@@ -184,11 +184,19 @@ jobs:
       # GH013 the way a GITHUB_TOKEN push is.
       #
       # Guards (same intent as the original #1216 design):
-      #   - Only on `push: main` (not pull_request, not workflow_dispatch).
-      #     The actor check excludes the bot itself to avoid commit loops.
+      #   - `push: main` (not pull_request). The actor check excludes the
+      #     bot itself to avoid commit loops.
       #   - Skip if the benchmark diff reported regressions — promoting
       #     "regressed" numbers would mask real perf regressions instead
-      #     of catching them.
+      #     of catching them. `workflow_dispatch` with
+      #     `allow_performance_regressions: true` is the one-time manual
+      #     override for the case where the guard itself is what's stuck
+      #     (a stale committed baseline makes every push look regressed,
+      #     so the auto-commit can never fire to refresh it — see the
+      #     2026-07-27 incident where 5 days of drift made every push
+      #     trip the diff). Same override input the hard-fail step already
+      #     used on `workflow_dispatch`; this just extends it to also
+      #     unblock the auto-commit.
       #   - Defer (exit 0, no error) while the merge queue is non-empty —
       #     any push to main, even `[skip ci]`, makes GitHub rebuild every
       #     queued merge group (see #1951, the same reasoning
@@ -201,10 +209,12 @@ jobs:
       #     retriggering the workflow.
       - name: Auto-commit refreshed baseline (#1216)
         if: |
-          github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&
           github.actor != 'github-actions[bot]' &&
-          steps.benchmark_diff.outputs.regressions != 'true'
+          (
+            (github.event_name == 'push' && steps.benchmark_diff.outputs.regressions != 'true') ||
+            (github.event_name == 'workflow_dispatch' && inputs.allow_performance_regressions)
+          )
         env:
           MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
