@@ -57,6 +57,8 @@ describe("#3663 Object.defineProperty IR routing", () => {
     });
     imports.env!.__defineProperty_desc = defineProperty as CallableFunction;
 
+    const priorValue = Object.getOwnPropertyDescriptor(RegExp.prototype, "value");
+    const priorWritable = Object.getOwnPropertyDescriptor(RegExp.prototype, "writable");
     (RegExp.prototype as { value?: unknown }).value = 7;
     (RegExp.prototype as { writable?: unknown }).writable = true;
     try {
@@ -67,8 +69,10 @@ describe("#3663 Object.defineProperty IR routing", () => {
       definedTarget!.x = 9;
       expect(definedTarget?.x).toBe(9);
     } finally {
-      delete (RegExp.prototype as { value?: unknown }).value;
-      delete (RegExp.prototype as { writable?: unknown }).writable;
+      if (priorValue) Object.defineProperty(RegExp.prototype, "value", priorValue);
+      else Reflect.deleteProperty(RegExp.prototype, "value");
+      if (priorWritable) Object.defineProperty(RegExp.prototype, "writable", priorWritable);
+      else Reflect.deleteProperty(RegExp.prototype, "writable");
     }
   });
 
