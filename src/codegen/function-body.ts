@@ -49,6 +49,7 @@ import { emitThrowReferenceError } from "./expressions/helpers.js";
 import { compileObjectLiteralAsExternref } from "./literals.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction, isSimpleParameterList } from "./helpers/is-strict-function.js";
+import { initializeFunctionPoisonPillContext } from "./function-poison-pill.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 // (#3741) `collectI32CoercedLocals` moved out of this file into a pure,
@@ -349,6 +350,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   }
 
   ctx.currentFunc = fctx;
+  initializeFunctionPoisonPillContext(ctx, fctx, decl);
 
   // Mark function entry with source position
   const funcPos = getSourcePos(ctx, decl);

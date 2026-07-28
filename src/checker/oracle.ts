@@ -321,15 +321,6 @@ export class TsCheckerOracle implements TypeOracle {
     return this.variableDeclarationOf(id)?.initializer;
   }
 
-  valueDeclarationOf(id: ts.Node): ts.Declaration | undefined {
-    try {
-      if (!ts.isIdentifier(id)) return undefined;
-      return this.checker.getSymbolAtLocation(id)?.valueDeclaration;
-    } catch {
-      return undefined;
-    }
-  }
-
   variableDeclarationOf(id: ts.Node): ts.VariableDeclaration | undefined {
     try {
       const decl = this.valueDeclarationOf(id);
@@ -337,6 +328,16 @@ export class TsCheckerOracle implements TypeOracle {
         return undefined;
       }
       return decl;
+    } catch {
+      return undefined;
+    }
+  }
+
+  valueDeclarationOf(id: ts.Node): ts.Declaration | undefined {
+    try {
+      if (!ts.isIdentifier(id)) return undefined;
+      const sym = this.checker.getSymbolAtLocation(id);
+      return sym?.valueDeclaration ?? sym?.declarations?.[0];
     } catch {
       return undefined;
     }
