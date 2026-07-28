@@ -33,14 +33,14 @@ function count(haystack: string, needle: string): number {
 describe("#3733 — bitwise-with-literal-zero fast path", () => {
   it("`x | 0` runs ToInt32 exactly once (on `x`), not twice (once per operand)", async () => {
     const w = await wat(`export function run(x: number): number { return x | 0; }`);
-    // The full emitJsToInt32/emitToInt32 sequence divides and floors by
-    // 2^32 for the modulo-reduction step. The dynamic operand `x` still
-    // legitimately needs this (real ToInt32 wraparound is observable), so
-    // it appears exactly ONCE — the fast path's entire point is that the
-    // constant-zero operand's ToInt32 (which would make it TWICE) is
-    // elided.
-    expect(count(w, "f64.div")).toBe(1);
-    expect(count(w, "f64.floor")).toBe(1);
+    // (#3739) emitJsToInt32's fast path decomposes the f64's IEEE-754 bits
+    // instead of the old div/floor modulo-reduction — i64.reinterpret_f64 is
+    // its first instruction, so counting it pins "ToInt32 runs once, not
+    // twice" the same way the old f64.div count did. The dynamic operand `x`
+    // still legitimately needs it (real ToInt32 wraparound is observable);
+    // the fast path's entire point is that the constant-zero operand's
+    // ToInt32 (which would make it TWICE) is elided.
+    expect(count(w, "i64.reinterpret_f64")).toBe(1);
     // No bitwise instruction either — `x | 0` is emitted as pure ToInt32(x),
     // not `ToInt32(x) | ToInt32(0)`.
     expect(w).not.toContain("i32.or");
@@ -48,8 +48,7 @@ describe("#3733 — bitwise-with-literal-zero fast path", () => {
 
   it("`x ^ 0` gets the same identity fast path", async () => {
     const w = await wat(`export function run(x: number): number { return x ^ 0; }`);
-    expect(count(w, "f64.div")).toBe(1);
-    expect(count(w, "f64.floor")).toBe(1);
+    expect(count(w, "i64.reinterpret_f64")).toBe(1);
     expect(w).not.toContain("i32.xor");
   });
 

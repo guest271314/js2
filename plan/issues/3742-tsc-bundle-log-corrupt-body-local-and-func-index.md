@@ -80,9 +80,13 @@ The source being compiled is:
 
 ```js
 function logMessage(level, s) {
-  if (Debug2.loggingHost && shouldLog(level)) { Debug2.loggingHost.log(level, s); }
+  if (Debug2.loggingHost && shouldLog(level)) {
+    Debug2.loggingHost.log(level, s);
+  }
 }
-function log(s) { logMessage(3 /* Info */, s); }
+function log(s) {
+  logMessage(3 /* Info */, s);
+}
 Debug2.log = log;
 ```
 
@@ -138,7 +142,7 @@ before assuming the shift is the cause.
       itself is too large to commit — a fixture-generating test that slices
       the installed `typescript` package is acceptable).
 - [ ] No new equivalence or test262 regressions.
-- [ ] If the root cause is *not* the late-import shift, `failIndex`'s
+- [ ] If the root cause is _not_ the late-import shift, `failIndex`'s
       hard-coded `#2043` message is amended so it stops mis-attributing this
       family.
 
