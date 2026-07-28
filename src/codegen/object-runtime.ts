@@ -96,6 +96,7 @@ import { UNDEF_F64_BITS } from "./value-tags.js";
 // (#2106 S1) function-level-only cycle with any-helpers.ts (which imports
 // ensureObjectRuntime) — same tolerated shape as native-strings ↔ any-helpers.
 import { buildIsUndefinedExternBody, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
+import { buildTransferredCharAtApplyArm } from "./char-at-transfer.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice
@@ -5558,7 +5559,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     );
   }
 
-  bridgeFn.body = body;
+  bridgeFn.body = [...buildTransferredCharAtApplyArm(ctx, ARG_OF), ...body];
   bridgeFn.locals = locals;
 }
 

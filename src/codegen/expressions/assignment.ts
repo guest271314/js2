@@ -3933,7 +3933,7 @@ function compilePropertyAssignment(
   // `new Foo()`, `this`) — no trap is possible there and the check is dead
   // weight. Mirrors the array-element write guard below (`isProvablyNonNull`).
   const guardNull = structObjResult.kind === "ref_null" && !isProvablyNonNull(target.expression, ctx.checker);
-  const valType = compileExpression(ctx, fctx, value, fields[fieldIdx]!.type);
+  const valType = compileTrackedFieldValue(ctx, fctx, value, fields[fieldIdx]!.type, typeName, fieldName);
   if (!valType) return null;
   // Save value so the assignment expression returns the RHS.
   const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);
@@ -3979,6 +3979,41 @@ function compilePropertyAssignment(
   fctx.body.push({ op: "local.get", index: tmpVal });
 
   return valType;
+}
+
+/**
+ * Compile one struct-field RHS and retain closure provenance for the
+ * OrdinaryToPrimitive method names whose physical carrier is externref.
+ */
+function compileTrackedFieldValue(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  value: ts.Expression,
+  expectedType: ValType,
+  typeName: string,
+  fieldName: string,
+): ValType | null {
+  const closureTypesBefore =
+    fieldName === "toString" || fieldName === "valueOf" ? new Set(ctx.closureInfoByTypeIdx.keys()) : undefined;
+  const valueType = compileExpression(ctx, fctx, value, expectedType);
+  if (!valueType || !closureTypesBefore) return valueType;
+
+  // A function-constructor body commonly stores a function expression in an
+  // externref field (`this.toString = function () { ... }`). Record closure(s)
+  // materialized by this exact RHS so the finalize-time `__call_toString` /
+  // `__call_valueOf` dispatcher can recover the per-instance field value.
+  const tracked = ctx.valueOfClosureTypes.get(typeName) ?? [];
+  for (const [closureTypeIdx, closureInfo] of ctx.closureInfoByTypeIdx) {
+    if (
+      !closureTypesBefore.has(closureTypeIdx) &&
+      closureInfo.paramTypes.length === 0 &&
+      !tracked.includes(closureTypeIdx)
+    ) {
+      tracked.push(closureTypeIdx);
+    }
+  }
+  if (tracked.length > 0) ctx.valueOfClosureTypes.set(typeName, tracked);
+  return valueType;
 }
 
 /** Conservative proof used only for the linked runtime-eval global seam. */

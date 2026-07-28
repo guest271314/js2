@@ -858,7 +858,14 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   const needsNumBox = member === "charCodeAt" || member === "codePointAt";
   // Do ALL late-import-adding ops FIRST (mirrors emitArrayProtoMemberBody), so
   // every helper funcIdx fetched by NAME afterwards is post-shift-correct.
+  // Register/flush the numeric helper before fetching any later funcIdxs, but
+  // keep charAt's emitted position coercion aside until AFTER ToString(this).
+  // §22.1.3.2 orders those observable coercions receiver-first; in particular,
+  // an omitted position must not mask a receiver.toString() throw.
+  const posBodyStart = fctx.body.length;
   const posLocal = unboxArgToI32(ctx, fctx, 2); // → __unbox_number import + flush
+  const deferredCharAtPosition =
+    member === "charAt" ? fctx.body.splice(posBodyStart, fctx.body.length - posBodyStart) : [];
   let boxIdx: number | undefined;
   if (needsNumBox) {
     boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
@@ -867,9 +874,10 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   }
   // Fetch helper funcIdxs AFTER the import shifts, by name.
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const toPrimitiveIdx = member === "charAt" ? ctx.funcMap.get("__to_primitive") : undefined;
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
   const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
-  if (flattenIdx === undefined || charAtIdx === undefined) {
+  if (flattenIdx === undefined || charAtIdx === undefined || (member === "charAt" && toPrimitiveIdx === undefined)) {
     return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
   }
 
@@ -882,11 +890,20 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   // (2) S = ToString(this): externref → anyref → $__any_to_string → $AnyString →
   // flatten. Store the flat string in a local.
   fctx.body.push({ op: "local.get", index: 1 });
+  if (member === "charAt") {
+    // A transferred charAt receives its original object as `this`. Reduce it
+    // with the string hint before the shared dynamic-value formatter; otherwise
+    // closed/class structs collapse to the generic "[object Object]" fallback.
+    addStringConstantGlobal(ctx, "string");
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
+    fctx.body.push({ op: "call", funcIdx: toPrimitiveIdx! });
+  }
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const flatLocal = allocLocal(fctx, `__str_pm_flat_${fctx.locals.length}`, flatStringType(ctx));
   fctx.body.push({ op: "local.set", index: flatLocal });
+  fctx.body.push(...deferredCharAtPosition);
 
   if (member === "charAt") {
     // §22.1.3.1: __str_charAt(flat, pos) → 1-char string (out-of-range → "").
