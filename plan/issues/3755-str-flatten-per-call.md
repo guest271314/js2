@@ -91,7 +91,7 @@ gain; (3) would be a real LICM pass for the same zero.
 
 The same dump that motivated this issue shows four calls per character in the
 `nextCode` twin. Three of them are the **local** `var c`, not the flatten — see
-**#3763**, which prices that at #3753's own variant-B measurement (1.34x). That
+**#3765**, which prices that at #3753's own variant-B measurement (1.34x). That
 is the tokenizer lever; this one was a decoy.
 
 ## Acceptance criteria

@@ -206,5 +206,5 @@ That is the recommended slice: strengthen the admission for write-once
 
 - **second lever** — priced at 2.24x above, NOT yet implemented.
 - **#3755** (per-call `__str_flatten`) — measured, worth 0, closed wont-fix.
-- **#3763** (numeric locals stay boxed) — the tokenizer's real remaining lever,
+- **#3765** (numeric locals stay boxed) — the tokenizer's real remaining lever,
   filed from the same profiling round.

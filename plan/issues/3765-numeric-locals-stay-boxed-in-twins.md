@@ -1,5 +1,5 @@
 ---
-id: 3763
+id: 3765
 title: "perf: a provably-numeric LOCAL still boxes inside a typed twin — 3 of the 4 per-character calls in the tokenizer's hot body"
 status: ready
 sprint: current
@@ -17,7 +17,7 @@ related: [3753, 3754, 3755, 3683]
 origin: "measured on claude/numeric-return-twin-3754, 2026-07-28"
 ---
 
-# #3763 — provably-numeric locals stay boxed
+# #3765 — provably-numeric locals stay boxed
 
 ## The finding
 
