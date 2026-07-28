@@ -101,7 +101,7 @@ import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3160) TS-source builtins
 import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js";
-import { isOpenDescriptorShape } from "./property-descriptor-shape.js";
+import { exposedClosedStructFieldName, isOpenDescriptorShape } from "./property-descriptor-shape.js";
 import { buildObjectEnumerationHelpers } from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
 import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // (#3274 wave-B) prototype-chain helper builders
 import * as fnctorArray from "./fnctor-array-prototype.js";
@@ -6593,7 +6593,8 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     const shapeId = ctx.shapeIdByStructName.get(structName);
     for (let fieldIdx = 0; fieldIdx < fields.length; fieldIdx++) {
       const field = fields[fieldIdx];
-      if (!field?.name || field.name.startsWith("$") || field.name.startsWith("__")) continue;
+      const exposedFieldName = exposedClosedStructFieldName(field?.name);
+      if (!field || !exposedFieldName) continue;
       const boxable =
         field.type.kind === "externref" ||
         field.type.kind === "ref_extern" ||
@@ -6608,10 +6609,10 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
       const presenceFieldIdx = field.presenceTracked
         ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
         : -1;
-      let entries = byField.get(field.name);
+      let entries = byField.get(exposedFieldName);
       if (!entries) {
         entries = [];
-        byField.set(field.name, entries);
+        byField.set(exposedFieldName, entries);
       }
       entries.push({
         typeIdx,
@@ -6624,7 +6625,6 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     }
   }
   if (byField.size === 0) return;
-
   const readAndBox = (entry: Entry): Instr[] => {
     const read: Instr[] = [
       { op: "local.get", index: 0 },
