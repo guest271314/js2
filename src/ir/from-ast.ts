@@ -7797,8 +7797,8 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
   }
 
-  const ltVal = asVal(lt);
-  const rtVal = asVal(rt);
+  let ltVal = asVal(lt);
+  let rtVal = asVal(rt);
   if (!ltVal || !rtVal || ltVal.kind !== rtVal.kind) {
     // A representation mismatch is a stable capability gap only when the TS
     // evidence says JavaScript coercion is genuinely required (for example,
@@ -7808,6 +7808,18 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     // iterator numeric-value path exercises that distinction.
     const detail = `ir/from-ast: Phase 1 requires matching operand types for '${ts.tokenToString(op)}' in ${cx.funcName}`;
     if (checkerProvesBinarySourceCapabilityGap(expr.left, expr.right, cx)) {
+      throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
+    }
+    // (#3722) A PACKED operand (`i8`/`i16`) is a stable capability gap, not a
+    // broken producer promise. Packed kinds are storage-only — WasmGC has no
+    // i8/i16 value type, and the binary emitter rejects one in a value position
+    // ("a packed type leaked"). So the IR simply cannot carry, say, a
+    // `Uint8Array` element into f64 arithmetic
+    // (`for (const v of xs) sum = sum + v`) today, however the operands are
+    // coerced. Classifying it `invariant` made that a HARD compile error and
+    // took the whole function down; the legacy backend lowers this shape fine.
+    // Demote to the unsupported channel so the function falls back instead.
+    if (ltVal?.kind === "i8" || ltVal?.kind === "i16" || rtVal?.kind === "i8" || rtVal?.kind === "i16") {
       throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
     }
     throw new Error(detail);
