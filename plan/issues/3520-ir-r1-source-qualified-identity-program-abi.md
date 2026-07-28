@@ -2203,6 +2203,55 @@ and other support allocation, function expressions, and remaining
 module-array/display-name scans must still move behind structural authorities
 before R1 can close.
 
+### 2026-07-29 exact class layout integration continuation
+
+The next stacked continuation on
+`codex/3520-c22-class-layout-integration-abi` removes the production
+class-name join for struct layouts and field indices:
+
+- the existing type registry now resolves the current allocator-owned
+  `StructTypeDef` and module type index by exact `IrClassId`. It follows the
+  type cell through allocator replacement and DCE remapping instead of
+  recovering the layout from `structMap`;
+- IR class integration derives its field-index table from that exact struct
+  object. `structMap` and `structFields` remain fallback inputs only for
+  low-level compatibility contexts that deliberately omit the production
+  registry; and
+- the inherited-class anti-vacuity fixture now deletes the `A`, `B`, and `C`
+  entries from both physical layout maps, in addition to deleting every
+  physical callable mapping. IR integration still resolves all three layouts,
+  their inherited fields, and the four inherited callable kinds.
+
+The focused layout/callable suite passes **6/6**. The broader exact class/type,
+integration, optimization, inheritance, `super`, private-member, and linear
+matrix passes **69/69 across 15 files** when each file runs in a fresh Vitest
+process.
+
+The #3520 plus #2138 migration matrix remains **283 passing / 1 inherited
+known failure across 54 files**. The sole failure is the unchanged linear
+inventory-count spy assertion (two builds observed versus one expected).
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet reports no unintended, post-claim, or
+module-level increase.
+
+The supported eight-shard equivalence gate remains **1,611 passing / 32 known
+failing / 0 new regressions**; the same four baseline rows pass and the shared
+baseline remains unchanged. Strict TypeScript, Biome lint, formatting, diff,
+LOC/function budget, dead-export, and godfile gates pass.
+
+No local Test262 corpus run was performed. The stacked continuation does not
+target `main`, while the full Test262 workflow runs at the merge-group
+boundary. Neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C22 closes exact class layout and field integration, not R1. Direct codegen
+still owns the compatibility layout maps until its class optimizations and
+runtime behavior retire. Module globals, remaining class/type consumers,
+lifted and other support allocation, function expressions, and module-array
+or display-name scans must still move behind structural authorities before R1
+can close.
+
 ### R1a validation evidence
 
 - Representative inventory denominator: **1 source / 2 classes / 12 allUnits /
