@@ -1,5 +1,5 @@
 ---
-id: 3745
+id: 3752
 title: "perf: `__str_flatten` runs per call on a receiver field that cannot change (#3750 S3)"
 status: ready
 sprint: current
@@ -16,7 +16,7 @@ goal: performance
 related: [3750, 3683, 682]
 ---
 
-# #3745 — the per-call `__str_flatten`
+# #3752 — the per-call `__str_flatten`
 
 Split out of #3750 as its S3.
 

@@ -1,5 +1,5 @@
 ---
-id: 3744
+id: 3751
 title: "perf: the `method` axis is 6.21x node — the second-largest remaining gap after #3750"
 status: ready
 sprint: current
@@ -17,7 +17,7 @@ related: [3750, 3683, 3684, 3685]
 origin: "benchmarks/cross-engine — measured on main 02a5512e0, 2026-07-28"
 ---
 
-# #3744 — the `method` axis, 6.21x
+# #3751 — the `method` axis, 6.21x
 
 ## Measurement
 
