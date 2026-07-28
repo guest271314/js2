@@ -55,6 +55,15 @@ This issue exists only to carry the `trap-growth-allow` declaration so the
 #3189 ratchet does not permanently freeze the landing-page baseline over a
 change that is a net improvement (-4 traps overall).
 
+## Scoping note (this PR)
+
+This PR merged as docs-only (no `src/**`/test262-paths files touched), so
+`test262-sharded.yml`'s `push` trigger path-filter skipped it entirely —
+`promote-baseline` never ran against this commit and never read the
+declaration above. Re-touching this file in a follow-up PR that also
+touches `scripts/diff-test262.ts` so the declaration lands in a diff that
+actually triggers the workflow.
+
 ## Acceptance criteria
 
 - [x] `trap-growth-allow` declared and verified by `check-baseline-trap-growth.ts`'s
