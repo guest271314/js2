@@ -20,11 +20,23 @@
  * tier explicitly (this file: TurboFan/optimized; the no-jit sibling:
  * Liftoff/baseline) removes that source of variance entirely.
  *
- * Why this needs child processes: `--no-liftoff` / `--always-turbofan` are
- * V8 startup flags — they cannot be flipped at runtime. So each measurement
- * runs in a fresh `node` subprocess via `scripts/no-jit-bench-child.mjs`
- * (shared, unmodified, with the no-jit sibling — the child is flag-agnostic;
- * it just warms up, calibrates, and measures whatever function it's given).
+ * Why this needs child processes: `--no-liftoff` is a V8 startup flag — it
+ * cannot be flipped at runtime. So each measurement runs in a fresh `node`
+ * subprocess via `scripts/no-jit-bench-child.mjs` (shared, unmodified, with
+ * the no-jit sibling — the child is flag-agnostic; it just warms up,
+ * calibrates, and measures whatever function it's given).
+ *
+ * JS side: pinning via `%OptimizeFunctionOnNextCall`, not `--always-turbofan`.
+ * `--always-turbofan` is a tuning/testing flag whose exact name and behavior
+ * has drifted across V8 releases (confirmed: it exists on the sandbox's
+ * Node v22 build but CI's Node v26 rejects it outright with "bad option").
+ * `%OptimizeFunctionOnNextCall` is a stable native-syntax intrinsic V8's own
+ * test suites depend on — it deterministically forces one specific function
+ * to tier up on its next invocation, gated behind `--allow-natives-syntax`
+ * (a flag that has existed, unchanged, for the intrinsic's entire lifetime).
+ * The generated JS factory calls the benchmark once, requests the tier-up,
+ * then calls it again so the exported function is already optimized before
+ * the child's own warmup/measurement loop ever touches it.
  */
 
 import { spawnSync } from "node:child_process";
@@ -60,11 +72,11 @@ const BENCHMARKS = [
   { path: "examples/benchmarks/array.ts", exportName: "bench_array" },
 ];
 
-// V8 startup flags that force JS execution straight to the optimizing tier.
-// `--always-turbofan` makes V8 try to optimize on (effectively) every call,
-// so timed samples run fully-optimized code without depending on the
-// dynamic tier-up heuristic crossing its budget threshold mid-benchmark.
-const JS_WARM_FLAGS = ["--always-turbofan"];
+// V8 startup flag that permits `%`-prefixed native-syntax intrinsics, so the
+// generated JS factory (see `buildWarmJsFactorySource`) can force its own
+// tier-up via `%OptimizeFunctionOnNextCall` instead of depending on a
+// version-sensitive tuning flag like `--always-turbofan`.
+const JS_WARM_FLAGS = ["--allow-natives-syntax"];
 
 // V8 startup flag that skips Liftoff (the single-pass Wasm baseline
 // compiler) entirely and compiles straight to TurboFan. This is the Wasm-side
@@ -84,6 +96,21 @@ function buildJsFactorySource(source, exportName) {
     },
   }).outputText;
   return `${transpiled}\nreturn { ${exportName} };`;
+}
+
+// Same as `buildJsFactorySource`, but forces the exported (niladic) function
+// to tier up to TurboFan before handing it back — requires the factory to
+// run under `--allow-natives-syntax` (JS_WARM_FLAGS), so this is only used
+// for the artifact written for the child process, never for the in-process
+// smoke test (the parent isn't launched with that flag).
+function buildWarmJsFactorySource(source, exportName) {
+  const transpiled = ts.transpileModule(stripImportsAndExports(source), {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.None,
+    },
+  }).outputText;
+  return `${transpiled}\n${exportName}();\n%OptimizeFunctionOnNextCall(${exportName});\n${exportName}();\nreturn { ${exportName} };`;
 }
 
 function median(values) {
@@ -179,13 +206,19 @@ async function prepareArtifacts(entry) {
   const jsFactorySource = buildJsFactorySource(source, entry.exportName);
   smokeTestInProcess(new Function(jsFactorySource)()[entry.exportName]);
 
+  // The artifact handed to the child process forces its own tier-up (see
+  // buildWarmJsFactorySource) — that requires --allow-natives-syntax, which
+  // this (parent) process does not run under, so it's kept separate from the
+  // plain factory used for the smoke test above.
+  const warmJsFactorySource = buildWarmJsFactorySource(source, entry.exportName);
+
   const slug = entry.path.replace(/[^a-z0-9]+/gi, "_");
   const wasmPath = resolve(ARTIFACT_DIR, `${slug}.wasm`);
   const jsSourcePath = resolve(ARTIFACT_DIR, `${slug}.factory.js`);
   const importsPath = resolve(ARTIFACT_DIR, `${slug}.imports.json`);
 
   writeFileSync(wasmPath, wasmBinary);
-  writeFileSync(jsSourcePath, jsFactorySource);
+  writeFileSync(jsSourcePath, warmJsFactorySource);
   writeFileSync(
     importsPath,
     JSON.stringify({
