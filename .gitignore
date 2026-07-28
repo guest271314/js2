@@ -71,6 +71,7 @@ tests/test*_check*.ts
 tests/dogfood/.acorn/
 tests/dogfood/.marked/
 tests/dogfood/.acorn-test-suite/
+tests/dogfood/.clsx/
 tests/dogfood/report/
 /check-*.ts
 /check-*.mts
