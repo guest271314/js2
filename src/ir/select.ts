@@ -55,6 +55,7 @@
 //     `localClasses` set drives that exemption.
 
 import { ts, forEachChild } from "../ts-api.js";
+import { containsStringBuilderLoopShape } from "./string-builder-shape.js";
 // (#1373b C-1) Pure-syntactic async helpers from the LEAF module (safe for
 // ir/* — async-static.ts imports only ts-api, so no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
@@ -136,6 +137,11 @@ export type IrFallbackReason =
   // future slice can tell "method-specific gate failure" apart from generic
   // body-shape rejections that apply to top-level FunctionDeclarations too.
   | "class-method"
+  // (#3740) `let s = ""; for (...) s += <expr>` shape — legacy rewrites this
+  // into a growable/presized buffer (#1210/#1761); IR doesn't implement
+  // that rewrite yet, so an IR claim here would silently regress to
+  // per-append allocation. See `containsStringBuilderLoopShape`.
+  | "string-builder-candidate"
   | "deferred-feature"; // permanently excluded (eval, with, import(), Proxy)
 
 export interface IrFallback {
@@ -1372,6 +1378,9 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
+  // (#3740) Defer `let s = ""; for (...) s += <expr>` builder loops to
+  // legacy — see `containsStringBuilderLoopShape` for why.
+  if (containsStringBuilderLoopShape(body)) return "string-builder-candidate";
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;

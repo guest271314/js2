@@ -66,7 +66,7 @@ async function compileAndRun(
   src: string,
   opts: Record<string, unknown>,
 ): Promise<{ exports: Record<string, CallableFunction>; wat: string }> {
-  const r = compile(src, { fileName: "string-hash.js", ...opts });
+  const r = await compile(src, { fileName: "string-hash.js", ...opts });
   if (!r.success) {
     throw new Error(`Compile failed:\n${r.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`);
   }
