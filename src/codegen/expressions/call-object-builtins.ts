@@ -116,20 +116,15 @@ export function tryCompileStoredObjectBuiltinCall(
     // the incomplete generic Function.call → builtin-method carrier chain.
     const receiver = expr.arguments[0];
     if (!receiver) return undefined;
+    const receiverFact = ctx.oracle.typeFactOf(receiver);
+    if (receiverFact.kind !== "array" && receiverFact.kind !== "tuple") return undefined;
     const propAccess = ts.factory.createPropertyAccessExpression(receiver, uncurriedMethod.method);
     ts.setTextRange(propAccess, expr);
     (propAccess as { parent: ts.Node }).parent = expr.parent;
     const call = ts.factory.createCallExpression(propAccess, undefined, expr.arguments.slice(1));
     ts.setTextRange(call, expr);
     (call as { parent: ts.Node }).parent = expr.parent;
-    return compileArrayMethodCall(
-      ctx,
-      fctx,
-      propAccess,
-      call,
-      ctx.checker.getTypeAtLocation(receiver),
-      uncurriedMethod.method,
-    );
+    return compileArrayMethodCall(ctx, fctx, propAccess, call, undefined, uncurriedMethod.method);
   }
 
   const externRef: ValType = { kind: "externref" };
