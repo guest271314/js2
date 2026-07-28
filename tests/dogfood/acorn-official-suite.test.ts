@@ -1,4 +1,4 @@
-// Thin vitest wrapper around the acorn OFFICIAL test suite harness (#3726).
+// Thin vitest wrapper around the acorn OFFICIAL test suite harness (#3729).
 //
 // Unlike acorn.test.ts (which wraps the hand-written fixture corpus and only
 // asserts "the harness runs, robust to a red surface"), this suite is
@@ -24,7 +24,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const BASELINE_PASSED = 3507;
 const BASELINE_TOTAL = 3518;
 
-describe("acorn official test suite harness (#3726)", () => {
+describe("acorn official test suite harness (#3729)", () => {
   it("acquires the pinned acorn tarball and test-suite pin", () => {
     const { version, pin } = setupAcorn();
     expect(version).toBe("8.16.0");
@@ -38,7 +38,7 @@ describe("acorn official test suite harness (#3726)", () => {
   // Same rationale as acorn.test.ts: run as a CHILD PROCESS so the ~17s
   // synchronous compile + ~4s test run never blocks the vitest worker's
   // event loop / RPC heartbeat. Opt-in (DOGFOOD_ACORN_OFFICIAL=1) AND
-  // requires run-time network (git clone of acorn's test/ source, #3726 —
+  // requires run-time network (git clone of acorn's test/ source, #3729 —
   // npm does not publish it) — the canonical entrypoint is
   // `pnpm run dogfood:acorn-official-suite`.
   const heavy = process.env.DOGFOOD_ACORN_OFFICIAL === "1" ? it : it.skip;

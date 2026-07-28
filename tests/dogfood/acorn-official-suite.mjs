@@ -1,4 +1,4 @@
-// acorn OFFICIAL test suite harness (#3726) — runs acorn's own real
+// acorn OFFICIAL test suite harness (#3729) — runs acorn's own real
 // conformance tests (test/tests*.js, ~3,500 cases at the pinned version)
 // against js2wasm-compiled acorn, instead of the small hand-written fixture
 // corpus the other acorn dogfood scripts use. Distinct value: this is
@@ -92,7 +92,7 @@ export async function runHarness({ quiet = false } = {}) {
 
   /** @type {any} */
   const report = {
-    issue: 3726,
+    issue: 3729,
     generatedAt: new Date().toISOString(),
     acorn: null,
     testSuite: null,

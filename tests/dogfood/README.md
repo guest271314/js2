@@ -15,7 +15,7 @@ Two packages so far, plus one deeper conformance check on acorn:
 | --- | --- | --- | --- |
 | **acorn** (JS parser) | #1710 | `dist/acorn.mjs` | structural AST diff (`ast-diff.mjs`) |
 | **marked** (Markdown→HTML) | #3716 | `lib/marked.esm.js` | plain string equality (HTML output) |
-| **acorn official suite** | #3726 | `dist/acorn.mjs` | acorn's own real `test/tests*.js` (~3,500 cases) |
+| **acorn official suite** | #3729 | `dist/acorn.mjs` | acorn's own real `test/tests*.js` (~3,500 cases) |
 
 ## acorn (#1710)
 
@@ -121,7 +121,7 @@ see #3715 for the minimal repro and scope. Once that lands, re-run
 This harness does **not** fix any compiler bug — pure tooling, same as
 acorn's scope note above.
 
-## acorn official suite (#3726)
+## acorn official suite (#3729)
 
 The other acorn/marked harnesses above diff compiled output against a small,
 hand-written fixture corpus. This one instead runs acorn's **own real test
@@ -161,7 +161,7 @@ payload, which initially made the pass rate look like 55.2% (every
 correctly-thrown syntax error was indistinguishable from "didn't throw at
 all"). Routing through `extractWasmExceptionMessage`
 (`tests/test262-runner.ts`, the project's established #2962 mechanism)
-fixed that. The 11 real residual failures are filed separately: **#3727**
+fixed that. The 11 real residual failures are filed separately: **#3730**
 (comment-collection `onComment` arrays lost across a compiled-internal
 closure, 6 cases) and **#3728** (astral/surrogate-pair Unicode identifier
 character misclassification, 4 cases, plus one unrelated narrow oddity).
