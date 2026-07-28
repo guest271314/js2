@@ -956,11 +956,17 @@ export function compileBinaryExpression(
       ) {
         return true;
       }
-      // `this.m()` where `m` provably returns a number on every path.
+      // `<recv>.m()` where `m` provably returns a number on every path.
+      //
+      // (#3744) The receiver is deliberately NOT constrained to `this`. The
+      // verdict is a WHOLE-PROGRAM property of the method NAME — "every function
+      // named `m` returns a number on every path" — so it holds for any
+      // receiver. Restricting it to `this` was an accident of where #3739 was
+      // measured (a tokenizer, whose calls are all `this.next()`); the `method`
+      // axis calls `p.inc()` on a plain local and got none of the benefit.
       if (
         ts.isCallExpression(bare) &&
         ts.isPropertyAccessExpression(bare.expression) &&
-        bare.expression.expression.kind === ts.SyntaxKind.ThisKeyword &&
         ctx.numericFunctionNames?.has(bare.expression.name.text) === true
       ) {
         return true;

@@ -43,16 +43,72 @@ Notably js2 is only 2.61x off Porffor here while being 10.96x BETTER than
 Porffor on `prop` — so the deficit is specific to call dispatch, not to object
 representation generally.
 
-## First step (do this before proposing a fix)
+## Profile (done — 2026-07-28, Node 24, main + #3739)
 
-Dump the WAT for `benchMethod` and resolve every `call` by index, exactly as
-#3739 did — that is what turned a guess into a mechanism there. Do not slice the
-work before the profile exists; #3739's first two slicings were both wrong and
-were corrected only by measurement.
+Re-measured after #3739 landed. Node 24 this time, so the node column moved;
+only the same-run ratios are meaningful:
+
+| axis       |  node |   js2 |  js2/node |
+| ---------- | ----: | ----: | --------: |
+| alloc      | 0.659 | 0.128 |     0.19x |
+| numeric    | 1.258 | 1.231 |     0.98x |
+| prop       | 0.549 | 0.546 |     1.00x |
+| string     | 0.117 | 0.135 |     1.15x |
+| tokenizer  | 0.140 | 0.606 |     4.32x |
+| **method** | 0.426 | 3.783 | **8.88x** |
+
+#3739 took the tokenizer axis from 9.54x to 4.32x and `prop` to parity.
+`method` is now the worst by a wide margin.
+
+### The loop body, calls resolved by index
+
+`benchMethod` is `s = s + p.inc()` 300,000 times, where `p` is a **plain
+local** — not `this`:
+
+```
+call $__dc_P_inc_0_g     ;; guarded devirtualized call
+call $__to_primitive     ;; the returned externref -> primitive
+call $__unbox_number     ;;                        -> f64
+```
+
+Two conversion calls per iteration, plus a `ref.test` guard inside the `_g`
+trampoline.
+
+### What did NOT fix it
+
+#3739 S2's numeric-operand recognition was restricted to `this.<m>()` — an
+accident of where it was measured (a tokenizer, whose calls are all
+`this.next()`). Widening it to ANY receiver is sound (the verdict is a
+whole-program property of the method NAME, not of the receiver) and is landed,
+but it moved the axis only 3.783 -> 3.756ms. So boxing at the ARITHMETIC is not
+the cost here — the cost is the ABI.
+
+### The actual cost, and the fix
+
+`P.prototype.inc` returns a number, but its typed twin is declared to return
+`externref`, so every call boxes on the way out and pays `__to_primitive` +
+`__unbox_number` on the way in. That is the **numeric-return twin** — the very
+first thing #3739 proposed, deferred twice because it changes the trampoline
+ABI, and now the measured blocker on the largest remaining axis.
+
+Required together (they must agree or the module fails validation):
+
+1. twin declared `results: [f64]` when its returns are provably numeric;
+2. `reserveDirectCallTrampoline` results follow the twin;
+3. the legacy degradation arm unboxes once, so both arms yield the same wasm
+   result type;
+4. the generic body's shim can no longer `return_call` across differing
+   results — it needs `call` + box.
+
+A second, independent lever: `__dc_P_inc_0_g` is GUARDED. With a receiver whose
+class is proven for the whole loop, the `ref.test` should hoist out rather than
+run per call.
 
 ## Acceptance criteria
 
-- [ ] A per-call cost table for the `method` axis, calls resolved by name.
-- [ ] The dominant cost named, with WAT evidence.
-- [ ] Any fix measured by same-container interleaved A/B behind a kill switch,
-      with matching checksums.
+- [x] A per-call cost table for the `method` axis, calls resolved by name.
+- [x] The dominant cost named, with WAT evidence: the externref twin ABI, not
+      the arithmetic.
+- [ ] Numeric-return twins implemented across all four points above.
+- [ ] Measured by same-container interleaved A/B behind a kill switch, with
+      matching checksums.
