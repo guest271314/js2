@@ -6593,7 +6593,14 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     const shapeId = ctx.shapeIdByStructName.get(structName);
     for (let fieldIdx = 0; fieldIdx < fields.length; fieldIdx++) {
       const field = fields[fieldIdx];
-      if (!field?.name || field.name.startsWith("$") || field.name.startsWith("__")) continue;
+      if (!field?.name) continue;
+      // (#3617) `$constructor` is a hidden physical instance→fnctor link, not
+      // an own source property. Expose it only through an ordinary dynamic
+      // `"constructor"` read; the hasOwn/enumeration/descriptor finalizers keep
+      // skipping `$` fields, so the observable property remains inherited and
+      // non-enumerable as required by Function.prototype construction.
+      const exposedFieldName = field.name === "$constructor" ? "constructor" : field.name;
+      if (field.name !== "$constructor" && (field.name.startsWith("$") || field.name.startsWith("__"))) continue;
       const boxable =
         field.type.kind === "externref" ||
         field.type.kind === "ref_extern" ||
@@ -6608,10 +6615,10 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
       const presenceFieldIdx = field.presenceTracked
         ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
         : -1;
-      let entries = byField.get(field.name);
+      let entries = byField.get(exposedFieldName);
       if (!entries) {
         entries = [];
-        byField.set(field.name, entries);
+        byField.set(exposedFieldName, entries);
       }
       entries.push({
         typeIdx,

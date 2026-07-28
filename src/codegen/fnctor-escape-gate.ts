@@ -1661,5 +1661,21 @@ export function deriveFnctorFields(
     fields.push({ name: `$has_${field.name}`, type: { kind: "i32" }, mutable: true });
   }
 
+  // (#3617) A standalone function-constructor instance needs a genuine
+  // instance → constructor back-pointer. The JS-host lane keeps that relation
+  // in `_fnctorInstanceCtor`; standalone has no host sidecar, so reserve one
+  // hidden physical slot on the native `$__fnctor_<Name>` struct instead.
+  //
+  // Keep it LAST so every source-field and presence-bit index remains stable.
+  // It is intentionally `$`-prefixed: own-property enumeration / hasOwn /
+  // descriptor finalizers already exclude compiler-internal fields, matching
+  // ECMAScript's inherited, non-enumerable `prototype.constructor` property.
+  // `new-super.ts` initializes it from the exact runtime callee value before
+  // the user constructor body executes, and the standalone dynamic getter
+  // exposes only the ordinary `"constructor"` read.
+  if (ctx.standalone) {
+    fields.push({ name: "$constructor", type: { kind: "externref" }, mutable: false });
+  }
+
   return fields;
 }

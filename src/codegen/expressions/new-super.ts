@@ -1263,6 +1263,37 @@ function emitCallSiteFnctorRegistration(
 }
 
 /**
+ * (#3617) Evaluate and park the exact standalone fnctor callee value before
+ * evaluating constructor arguments. The synthesized native constructor takes
+ * this as one hidden trailing externref parameter and stores it in the
+ * instance's hidden `$constructor` field before executing the user body.
+ *
+ * Reading the source callee is important: a fresh closure reconstructed from a
+ * declaration would not be identity-equal for function-expression bindings,
+ * locals, or `new this()`. Evaluating it here also restores the spec's
+ * callee-before-arguments order; the legacy direct-call lowering did not need
+ * the callee value at runtime.
+ */
+function captureStandaloneFnctorConstructor(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  callee: ts.Expression,
+): number | undefined {
+  if (!ctx.standalone) return undefined;
+  const valueType = compileExpression(ctx, fctx, callee, { kind: "externref" });
+  if (!valueType) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (valueType.kind !== "externref" && valueType.kind !== "ref_extern") {
+    coerceType(ctx, fctx, valueType, { kind: "externref" });
+  }
+  const local = allocLocal(fctx, `__fnctor_ctor_value_${fctx.locals.length}`, {
+    kind: "externref",
+  });
+  fctx.body.push({ op: "local.set", index: local });
+  return local;
+}
+
+/**
  * (#1712 / #3486) Ctor-PROLOGUE instance→ctor-closure registration for a
  * MODULE-scope fnctor. Sibling of `emitCallSiteFnctorRegistration` above, which
  * covers the function-LOCAL case (#3138).
@@ -1458,12 +1489,17 @@ function compileNewFunctionDeclaration(
 
   // 3. Build the constructor function
   // Constructor params match the function declaration params
-  const ctorParams: ValType[] = [];
+  const userCtorParams: ValType[] = [];
   for (let i = 0; i < funcDecl.parameters.length; i++) {
     const param = funcDecl.parameters[i]!;
     const paramType = ctx.checker.getTypeAtLocation(param);
-    ctorParams.push(resolveWasmType(ctx, paramType));
+    userCtorParams.push(resolveWasmType(ctx, paramType));
   }
+  // (#3617) Standalone passes the exact runtime callee as a hidden TRAILING
+  // parameter. Trailing keeps every user parameter index stable; call sites
+  // park the callee before compiling arguments, then reload it last.
+  const ctorIdentityParamIdx = userCtorParams.length;
+  const ctorParams: ValType[] = ctx.standalone ? [...userCtorParams, { kind: "externref" }] : userCtorParams;
 
   const ctorName = `${structName}_new`;
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
@@ -1492,7 +1528,13 @@ function compileNewFunctionDeclaration(
     const p = funcDecl.parameters[i]!;
     paramDefs.push({
       name: ts.isIdentifier(p.name) ? p.name.text : `__param${i}`,
-      type: ctorParams[i] ?? { kind: "f64" },
+      type: userCtorParams[i] ?? { kind: "f64" },
+    });
+  }
+  if (ctx.standalone) {
+    paramDefs.push({
+      name: "__constructor_identity",
+      type: { kind: "externref" },
     });
   }
 
@@ -1517,7 +1559,11 @@ function compileNewFunctionDeclaration(
 
   // Allocate the struct instance with default values
   for (const field of fields) {
-    if (field.type.kind === "f64") {
+    if (ctx.standalone && field.name === "$constructor") {
+      // (#3617) The link is present before the user body starts, so
+      // `this.constructor` inside F itself observes F.
+      ctorFctx.body.push({ op: "local.get", index: ctorIdentityParamIdx });
+    } else if (field.type.kind === "f64") {
       ctorFctx.body.push({ op: "f64.const", value: 0 });
     } else if (field.type.kind === "i32") {
       ctorFctx.body.push({ op: "i32.const", value: 0 });
@@ -1597,13 +1643,14 @@ function compileNewFunctionDeclaration(
 
   // 5. Emit the call to the constructor at the call site
   const args = expr.arguments ?? [];
+  const ctorIdentityLocal = captureStandaloneFnctorConstructor(ctx, fctx, expr.expression);
   // Use the in-scope ctorParams, NOT getFuncParamTypes(ctx, ctorFuncIdx): the
   // (#1712) __register_fnctor_instance late import above opens a deferred
   // index-shift window (#329/#1899) in which ctorFuncIdx is stale-low against
   // the already-incremented numImportFuncs, so an index-based signature lookup
   // would read the PREVIOUS function's params and coerce arguments against the
   // wrong types (observed: `call[0] expected externref, found (ref null $N)`).
-  const paramTypes: ValType[] | undefined = ctorParams;
+  const paramTypes: ValType[] | undefined = userCtorParams;
   for (let i = 0; i < args.length; i++) {
     compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
   }
@@ -1611,6 +1658,9 @@ function compileNewFunctionDeclaration(
     for (let i = args.length; i < paramTypes.length; i++) {
       pushDefaultValue(fctx, paramTypes[i]!, ctx);
     }
+  }
+  if (ctorIdentityLocal !== undefined) {
+    fctx.body.push({ op: "local.get", index: ctorIdentityLocal });
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
   const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? ctorFuncIdx; // (#1983)
@@ -3451,8 +3501,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (cachedFnCtor) {
       const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
       if (ctorFuncIdx !== undefined) {
-        const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const allParamTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const paramTypes = ctx.standalone ? allParamTypes?.slice(0, -1) : allParamTypes;
         const args = expr.arguments ?? [];
+        const ctorIdentityLocal = captureStandaloneFnctorConstructor(ctx, fctx, expr.expression);
         for (let i = 0; i < args.length; i++) {
           compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
         }
@@ -3460,6 +3512,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           for (let i = args.length; i < paramTypes.length; i++) {
             pushDefaultValue(fctx, paramTypes[i]!, ctx);
           }
+        }
+        if (ctorIdentityLocal !== undefined) {
+          fctx.body.push({ op: "local.get", index: ctorIdentityLocal });
         }
         maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
@@ -3522,8 +3577,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (cachedFnCtor) {
       const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
       if (ctorFuncIdx !== undefined) {
-        const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const allParamTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+        const paramTypes = ctx.standalone ? allParamTypes?.slice(0, -1) : allParamTypes;
         const args = expr.arguments ?? [];
+        const ctorIdentityLocal = captureStandaloneFnctorConstructor(ctx, fctx, expr.expression);
         for (let i = 0; i < args.length; i++) {
           compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
         }
@@ -3531,6 +3588,9 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           for (let i = args.length; i < paramTypes.length; i++) {
             pushDefaultValue(fctx, paramTypes[i]!, ctx);
           }
+        }
+        if (ctorIdentityLocal !== undefined) {
+          fctx.body.push({ op: "local.get", index: ctorIdentityLocal });
         }
         const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
         maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
