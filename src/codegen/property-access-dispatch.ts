@@ -2174,20 +2174,20 @@ function emitStandaloneAnyLength(ctx: CodegenContext, fctx: FunctionContext): Va
       [{ kind: "externref" }, { kind: "externref" }],
       [{ kind: "externref" }],
     );
-    ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
     addStringConstantGlobal(ctx, "length");
   }
+  const metaLengthToI32 =
+    closureRootIdx === undefined ? undefined : coercionInstrs(ctx, { kind: "externref" }, { kind: "i32" }, fctx);
   flushLateImportShifts(ctx, fctx);
 
   const lenFn = ctx.funcMap.get("__extern_length");
   const bfnGetMetaFn = ctx.funcMap.get("__builtinfn_get_meta");
-  const unboxNumberFn = ctx.funcMap.get("__unbox_number");
   const genericLength = (recvExternLocal: number): Instr[] =>
     lenFn !== undefined
       ? [{ op: "local.get", index: recvExternLocal }, { op: "call", funcIdx: lenFn }, { op: "i32.trunc_sat_f64_s" }]
       : [{ op: "i32.const", value: 0 }];
   const guardedLength = (recvExternLocal: number): Instr[] => {
-    if (closureRootIdx === undefined || bfnGetMetaFn === undefined || unboxNumberFn === undefined) {
+    if (closureRootIdx === undefined || bfnGetMetaFn === undefined || metaLengthToI32 === undefined) {
       return genericLength(recvExternLocal);
     }
     const metaLocal = allocLocal(fctx, `__bfn_len_meta_${fctx.locals.length}`, { kind: "externref" });
@@ -2208,11 +2208,7 @@ function emitStandaloneAnyLength(ctx: CodegenContext, fctx: FunctionContext): Va
             op: "if",
             blockType: { kind: "val", type: { kind: "i32" } },
             then: [{ op: "i32.const", value: 0 }],
-            else: [
-              { op: "local.get", index: metaLocal },
-              { op: "call", funcIdx: unboxNumberFn },
-              { op: "i32.trunc_sat_f64_s" },
-            ],
+            else: [{ op: "local.get", index: metaLocal }, ...metaLengthToI32],
           },
         ],
         else: genericLength(recvExternLocal),
@@ -2222,7 +2218,7 @@ function emitStandaloneAnyLength(ctx: CodegenContext, fctx: FunctionContext): Va
 
   if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
     emitGuardedNativeStringLength(ctx, fctx, guardedLength);
-  } else if (closureRootIdx !== undefined && bfnGetMetaFn !== undefined && unboxNumberFn !== undefined) {
+  } else if (closureRootIdx !== undefined && bfnGetMetaFn !== undefined && metaLengthToI32 !== undefined) {
     const recvExternLocal = allocLocal(fctx, `__bfn_len_recv_${fctx.locals.length}`, { kind: "externref" });
     fctx.body.push({ op: "local.set", index: recvExternLocal }, ...guardedLength(recvExternLocal));
   } else if (lenFn !== undefined) {
