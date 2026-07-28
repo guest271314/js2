@@ -1084,6 +1084,21 @@ export interface PropertyKindVerdicts {
   readonly isNumericLocal: (node: ts.Node, name: string) => boolean;
 }
 
+/**
+ * The compiler state updated by this subsystem's three carrier verdicts.
+ *
+ * Keeping application beside analysis prevents the module driver from growing
+ * one assignment/feature-switch block per new carrier.
+ */
+export interface NumericPropertyAnalysisTarget {
+  numericPropertyNames?: ReadonlySet<string>;
+  stringPropertyNames?: ReadonlySet<string>;
+  numericFunctionNames?: ReadonlySet<string>;
+  readonly usageInference: {
+    setNumericLocalOracle(oracle: PropertyKindVerdicts["isNumericLocal"]): void;
+  };
+}
+
 /** The verdict shape returned when the analysis declines to run at all. */
 function noVerdicts(): PropertyKindVerdicts {
   return {
@@ -1314,4 +1329,25 @@ export function analyzeNumericPropertyNames(
       return slot !== undefined && groundedSlots.has(slot);
     },
   };
+}
+
+/**
+ * Run the whole-program analysis and apply every carrier verdict together.
+ *
+ * The local kill switch only withholds the local oracle. Field, string, and
+ * return verdicts remain installed because they have independent switches and
+ * predate #3765.
+ */
+export function applyNumericPropertyAnalysis(
+  target: NumericPropertyAnalysisTarget,
+  host: NumericPropertyAnalysisHost,
+  sourceFiles: readonly ts.SourceFile[],
+): void {
+  const verdicts = analyzeNumericPropertyNames(host, sourceFiles);
+  target.numericPropertyNames = verdicts.numeric;
+  target.stringPropertyNames = verdicts.string;
+  target.numericFunctionNames = verdicts.numericFunctions;
+  if (process.env.JS2WASM_NUMERIC_LOCALS !== "0") {
+    target.usageInference.setNumericLocalOracle(verdicts.isNumericLocal);
+  }
 }

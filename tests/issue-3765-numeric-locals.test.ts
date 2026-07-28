@@ -20,6 +20,12 @@
 import { describe, expect, it } from "vitest";
 
 import { compile } from "../src/index.js";
+import {
+  applyNumericPropertyAnalysis,
+  type NumericPropertyAnalysisTarget,
+  type PropertyKindVerdicts,
+} from "../src/codegen/numeric-property-analysis.js";
+import { ts } from "../src/ts-api.js";
 
 async function build(source: string, env?: Record<string, string>) {
   const saved: Record<string, string | undefined> = {};
@@ -279,6 +285,42 @@ describe("#3765 — a provably-numeric local gets an f64 slot", () => {
     expect(types.some((t) => t !== "f64")).toBe(true);
     const { exports } = await WebAssembly.instantiate(await WebAssembly.compile(binary!), {});
     expect((exports as { main: () => number }).main()).toBe(70); // 65 + "tok:1".length
+  });
+});
+
+describe("#3765 — carrier verdict application stays structural", () => {
+  it("keeps field/return verdicts while the local kill switch withholds only the oracle", () => {
+    const calls: PropertyKindVerdicts["isNumericLocal"][] = [];
+    const target: NumericPropertyAnalysisTarget = {
+      numericPropertyNames: new Set(),
+      stringPropertyNames: new Set(),
+      numericFunctionNames: new Set(),
+      usageInference: {
+        setNumericLocalOracle: (oracle) => calls.push(oracle),
+      },
+    };
+    const sourceFile = ts.createSourceFile(
+      "t.js",
+      `
+        function Box() { this.count = 1; this.label = "ok"; }
+        function numericResult() { return 42; }
+      `,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.JS,
+    );
+    const saved = process.env.JS2WASM_NUMERIC_LOCALS;
+    process.env.JS2WASM_NUMERIC_LOCALS = "0";
+    try {
+      applyNumericPropertyAnalysis(target, {}, [sourceFile]);
+    } finally {
+      if (saved === undefined) delete process.env.JS2WASM_NUMERIC_LOCALS;
+      else process.env.JS2WASM_NUMERIC_LOCALS = saved;
+    }
+    expect(target.numericPropertyNames).toContain("count");
+    expect(target.stringPropertyNames).toContain("label");
+    expect(target.numericFunctionNames).toContain("numericResult");
+    expect(calls).toHaveLength(0);
   });
 });
 
