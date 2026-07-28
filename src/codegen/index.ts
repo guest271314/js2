@@ -3012,6 +3012,17 @@ export function generateModule(
     // (#3753 S2) Names the fixpoint proved return a number on every path, so
     // `this.acc + this.nextCode()` can unbox once instead of boxing both sides.
     ctx.numericFunctionNames = propertyKinds.numericFunctions;
+    // (#3765) The third and last carrier. Fields (#3683 S4a) and returns
+    // (#3754) already unbox; a LOCAL still does not, which is what the
+    // tokenizer's `var c = …charCodeAt(…); …; return c` was paying for — three
+    // of the four calls in that twin's body. The verdict feeds #684's
+    // `usageInference` as a second admission route rather than a parallel
+    // mechanism, so all three local-slot minting sites (var hoister, let/const
+    // pre-hoister, `localTypeForDeclaration`) pick it up through the entry
+    // point they already share.
+    if (process.env.JS2WASM_NUMERIC_LOCALS !== "0") {
+      ctx.usageInference.setNumericLocalOracle(propertyKinds.isNumericLocal);
+    }
   }
   // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
   // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
