@@ -13,6 +13,7 @@ import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/typ
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import { createFallbackCounts } from "../fallback-telemetry.js";
 import type { ProgramAbiSession } from "../program-abi-session.js";
+import { ProgramAbiCallableProviderRegistry } from "../program-abi-provider-planning.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
 export function createCodegenContext(
@@ -362,6 +363,9 @@ export function createCodegenContext(
     nodeBuiltinGlobals: new Map(),
     jsxRuntime: options?.jsxRuntime,
   };
+  if (programAbiSession) {
+    ctx.programAbiCallableProviders = new ProgramAbiCallableProviderRegistry(programAbiSession, ctx);
+  }
 
   // (#2083) Pre-register the `externref` + `f64` vec struct types up front for
   // type-index stability (every module reserves these slots regardless of
