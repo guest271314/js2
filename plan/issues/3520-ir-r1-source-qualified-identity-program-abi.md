@@ -5,12 +5,12 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c11-import-callables
-pr: 3679
-last_merged_pr: 3677
+branch: codex/3520-c12-callable-providers
+pr: 3739
+last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
-updated: 2026-07-26
+updated: 2026-07-28
 priority: critical
 horizon: l
 complexity: L
@@ -1585,6 +1585,62 @@ not semantic provider ownership or R1. Dual-mode runtime/intrinsic providers,
 inherited accessors, static and externref/Promise-host support helpers, Program
 ABI type/class-layout entries, exports and remaining alias families, and the
 production `LegacyAbiAdapter` cutover still remain before R2 can start.
+
+### 2026-07-28 runtime/intrinsic callable-provider continuation
+
+The continuation on `codex/3520-c12-callable-providers` moves every
+runtime/intrinsic callable that crosses the WasmGC IR resolver into a
+compilation-wide exact-provider sidecar and the production Program ABI:
+
+- the resolver still performs the existing mode-specific provider selection
+  exactly once, including lazy helper materialization. It immediately captures
+  the selected `Import` or `WasmFunction` object under the structural
+  runtime/intrinsic binding key; later resolutions follow that exact object
+  through live import shifts or stable defined-function handles without
+  consulting `funcMap` or scanning a display name;
+- provider discovery remains lazy, so helper allocation order and the
+  compatibility pipeline's side effects do not move. Planning is delayed until
+  dead-import and type compaction settle. Imports observed only while lowering
+  an IR candidate that later withdraws are discarded with that candidate;
+  retained provider keys are then sorted and assigned deterministic
+  entry-source-owned identities;
+- a provider that points at an already planned import, source body, or support
+  callable becomes an exact ABI alias. Otherwise the lexically first semantic
+  provider for an allocator object owns its locator and any additional
+  runtime/intrinsic identities alias it. One structural provider changing
+  allocator ownership is a typed invariant; and
+- `intrinsic` is now explicit Program ABI callable provenance rather than
+  being collapsed into runtime/import provenance.
+
+Production coverage proves defined `Math_sin` and `__fmod` providers, and the
+dual-mode `__ir_string_compare` binding: host mode aliases the retained
+`env.string_compare` import while native-string mode owns the exact
+`__str_compare` definition. Planner coverage reverses discovery order,
+deliberately relabels references, shifts imports after observation, shares one
+defined object across runtime/intrinsic identities, and rejects provider
+rebinding. A withdrawal regression proves a candidate-only provider import can
+be removed without manufacturing a required ABI entry.
+
+The focused provider matrix passes **6/6**. The sharded #3520 matrix reports
+**247 passing / 1 failing across 43 files**; the sole failure is the existing
+linear inventory-count assertion in
+`issue-3520-context-integration.test.ts`, and an untouched `origin/main`
+control reproduces it exactly. The #2138 multi-source matrix passes **6/6**,
+and the linear/cross-backend/constructor matrix passes **43/43**. Strict
+TypeScript, scoped lint/Prettier, diff, LOC/function budget, dead-export,
+checker-oracle, issue-spec, and fallback gates pass. Hybrid readiness remains
+**31 IR-emitted / 6 typed Unsupported / 0 Invariants across 37 terminal
+units**, with all 37 legacy bodies still emitted. Full equivalence reports
+**1,611 passing / 32 known failing / 0 new regressions**; four baseline rows
+now pass and the shared baseline remains unchanged.
+
+C12 removes the generic runtime/intrinsic resolver's repeated name/index
+ownership, but it does not yet remove the compatibility provider-selection
+step that chooses the first exact object. Inherited accessors, static and
+externref/Promise-host support helpers, Program ABI type/class-layout entries,
+exports and remaining alias families, and production `LegacyAbiAdapter`
+replacement of `funcMap`, `structMap`, module-array, and name scans still
+remain before R1 can close.
 
 ### R1a validation evidence
 
