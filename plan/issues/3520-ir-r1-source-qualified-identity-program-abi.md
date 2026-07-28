@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c14-global-abi
+branch: codex/3520-c15-callable-export-abi
 pr: 3752
 last_merged_pr: 3679
 sprint: current
@@ -87,6 +87,9 @@ files:
   - src/codegen/context/create-context.ts
   - src/codegen/dead-elimination.ts
   - src/codegen/func-space.ts
+  - src/codegen/program-abi-callable-planning.ts
+  - src/codegen/program-abi-export-planning.ts
+  - src/codegen/program-abi-finalization.ts
   - src/codegen/program-abi-import-planning.ts
   - src/codegen/program-abi-global-planning.ts
   - src/codegen/program-abi-planning.ts
@@ -140,6 +143,7 @@ files:
   - tests/issue-3520-class-method-alias-abi.test.ts
   - tests/issue-3520-type-class-abi.test.ts
   - tests/issue-3520-global-population-abi.test.ts
+  - tests/issue-3520-callable-export-population-abi.test.ts
   - tests/issue-3520-program-abi-import-callable-planning.test.ts
   - tests/issue-3520-imported-callable-abi.test.ts
   - tests/issue-2856-calendar-residuals.test.ts
@@ -1746,6 +1750,68 @@ and public aliases, production consumers of the populated class/type/global
 authorities, and the `LegacyAbiAdapter` replacement of direct `funcMap`,
 `structMap`, module-array, and display-name scans still remain before R1 can
 close.
+
+### 2026-07-28 complete callable-space and public value-export continuation
+
+The stacked continuation on `codex/3520-c15-callable-export-abi` makes the
+complete final Wasm function index space and every public function/global
+export explicit in the production Program ABI:
+
+- after dead-import elimination and semantic import/provider planning, final
+  callable population walks exact retained function-import objects followed by
+  exact defined `WasmFunction` objects. Existing source, import, runtime,
+  intrinsic, class, and support owners remain canonical; every otherwise
+  unowned definition receives one deterministic entry-source support identity.
+  The result is a one-to-one function-space population without reading
+  `funcMap`, a module-array position through a captured import count, or a
+  display name;
+- generic retained definitions use explicit source support provenance. Support
+  callable validation now requires exactly one unit, class, or source anchor,
+  checks that anchor against the authoritative inventory, and retains it in the
+  immutable callable intent;
+- one finalization boundary now orders dead-import/type compaction, retained
+  callable imports, semantic providers, total callable ownership, total global
+  ownership, public export aliases, and retained type/class publication. An
+  export can therefore target only an exact allocator object that already has
+  one required owner;
+- every public function/global spelling becomes a non-allocating `export`
+  alias of that exact callable/global binding. Equal public targets share one
+  canonical owner, same-named internal functions remain distinct, ambiguous
+  legacy reverse lookup fails, duplicate external names fail across all export
+  kinds, and missing targets are typed invariants; and
+- function export descriptors may carry either a live index or a stable
+  `#1916` function handle. Export planning resolves the handle through
+  `absoluteFuncIndex`, whose current-import count and
+  `funcOrdinalToPosition` registry are the existing final-layout authority,
+  then selects the exact import/function object. The descriptor remains a
+  handle until serialization; Program ABI records the resolved final slot.
+  Memory/table/tag exports remain backend-layout concerns outside the Program
+  ABI's function/global/type value spaces.
+
+The focused callable/export population matrix passes **5/5**, including a real
+stable-handle export. The complete #3520 matrix reports **260 passing / 1
+failing across 46 files**; the sole failure is the unchanged linear
+inventory-count spy assertion in `issue-3520-context-integration.test.ts`, and
+the exact C14 parent reproduces it. The broad class/accessor/externref/Promise,
+cross-backend, #2138, and linear matrix passes **101/101 across 12 files**.
+Strict TypeScript, scoped Biome/Prettier, diff, LOC/function budget,
+dead-export, checker-oracle, issue-spec, and fallback gates pass.
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The full equivalence gate reports **1,611 passing / 32 known failing /
+0 new regressions**; four baseline rows now pass and the shared baseline
+remains unchanged. No local Test262 corpus run was performed, and neither
+`benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C15 closes total final callable-slot population and public function/global
+export aliases, not R1. Semantic inherited accessor, static, externref, and
+Promise-host support identities still need to replace their compatibility
+selection seams. Production consumers must then route through the populated
+callable/global/type/class authorities, and `LegacyAbiAdapter` must become the
+only name-keyed boundary by replacing direct `funcMap`, `structMap`,
+`moduleGlobals`, module-array, and display-name scans before R1 can close.
 
 ### R1a validation evidence
 
