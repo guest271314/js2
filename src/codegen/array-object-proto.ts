@@ -33,6 +33,7 @@ import {
 } from "./native-proto.js";
 import { pushBuiltinFnSingletonValueInstrs } from "./builtin-fn-meta.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { buildThrowJsErrorInstrs } from "./js-errors.js";
 import { emitDataViewProtoMemberBody } from "./dataview-native.js"; // (#3173) reflective DataView member bodies
 import { emitDateProtoMemberBody } from "./expressions/builtins.js"; // (#3219) reflective Date getter bodies
 import { emitDateReflectiveSetterBody } from "./date-reflective-setters.js"; // (#3174) reflective Date setter/toISOString bodies
@@ -832,6 +833,9 @@ function emitStringRequireObjectCoercible(ctx: CodegenContext, fctx: FunctionCon
  */
 function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
   const IN_SCOPE = new Set(["charAt", "at", "charCodeAt", "codePointAt"]);
+  // `substring` has two integer bounds and returns a string, so it needs its own
+  // body rather than the single-position index-accessor path below.
+  if (member === "substring") return emitStringSubstringMemberBody(ctx, fctx);
   // (#2875 slice 3a) The number-returning search family — `indexOf` /
   // `lastIndexOf` — has a DIFFERENT closure ABI from the index accessors
   // (param 2 is the search STRING, not an integer position; the optional
@@ -1065,6 +1069,94 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
       { op: "extern.convert_any" },
     ],
   });
+  return { kind: "externref" };
+}
+
+/**
+ * Native body for a reflective `String.prototype.substring` closure.
+ * Closure ABI: `this` = param 1, start = param 2, end = param 3. Preserve the
+ * spec's observable coercion order: RequireObjectCoercible(this), ToString(this),
+ * ToInteger(start), then ToInteger(end). An absent/undefined end uses the same
+ * MAX_INT sentinel as the direct-call path and is clamped to the receiver length
+ * by `__str_substring`; the core also implements substring's bound swap.
+ */
+function emitStringSubstringMemberBody(ctx: CodegenContext, fctx: FunctionContext): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  // Generic substring is deliberately callable on arrays and wrapper objects.
+  // Their ToString path needs the object runtime's ToPrimitive(string) ladder
+  // (array join, wrapper [[PrimitiveValue]], user toString), not the terminal
+  // "[object Object]" fallback of a raw anyref conversion.
+  ensureObjectRuntime(ctx);
+  ensureStringRocUndefinedNative(ctx, fctx);
+
+  // Register the only late import before fetching helper indices. The actual
+  // argument conversions are emitted later, after ToString(this), by
+  // `unboxArgToI32`; this up-front registration prevents their calls from
+  // shifting already-emitted function indices.
+  ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+  flushLateImportShifts(ctx, fctx);
+
+  const anyToStrIdx = ensureAnyToStringHelper(ctx);
+  const toPrimitiveIdx = ctx.funcMap.get("__to_primitive");
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const substringIdx = ctx.nativeStrHelpers.get("__str_substring");
+  if (toPrimitiveIdx === undefined || flattenIdx === undefined || substringIdx === undefined) {
+    return emitProtoMemberBodyRefusal(ctx, fctx, "String", "substring");
+  }
+
+  emitStringRequireObjectCoercible(ctx, fctx, "substring");
+
+  // S = ToString(this).
+  // `__any_to_string` intentionally has a printable Symbol fallback for
+  // diagnostic/property-name paths. The abstract ToString operation used by
+  // String.prototype methods must instead reject Symbols.
+  if (ctx.symbolTypeIdx >= 0) {
+    const symbolThrow = buildThrowJsErrorInstrs(ctx, "TypeError", "Cannot convert a Symbol value to a string", {
+      flush: fctx,
+    });
+    fctx.body.push({ op: "local.get", index: 1 });
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.test", typeIdx: ctx.symbolTypeIdx });
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: symbolThrow, else: [] });
+  }
+  fctx.body.push({ op: "local.get", index: 1 });
+  addStringConstantGlobal(ctx, "string");
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
+  fctx.body.push({ op: "call", funcIdx: toPrimitiveIdx });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const flatLocal = allocLocal(fctx, `__str_pm_substring_${fctx.locals.length}`, flatStringType(ctx));
+  fctx.body.push({ op: "local.set", index: flatLocal });
+
+  // ToIntegerOrInfinity(start/end). `i32.trunc_sat_f64_s` supplies the integer
+  // conversion used by the existing reflective string method bodies.
+  const startLocal = unboxArgToI32(ctx, fctx, 2);
+  const endLocal = unboxArgToI32(ctx, fctx, 3);
+
+  // The reflective closure ABI pads an omitted end with null; canonical
+  // standalone `undefined` is a distinct sentinel, so recognize both.
+  fctx.body.push({ op: "local.get", index: 3 });
+  fctx.body.push({ op: "ref.is_null" });
+  const isUndefIdx = undefinedSingletonActive(ctx) ? ctx.funcMap.get("__extern_is_undefined") : undefined;
+  if (isUndefIdx !== undefined) {
+    fctx.body.push({ op: "local.get", index: 3 });
+    fctx.body.push({ op: "call", funcIdx: isUndefIdx });
+    fctx.body.push({ op: "i32.or" });
+  }
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "i32.const", value: 0x7fffffff }],
+    else: [{ op: "local.get", index: endLocal }],
+  });
+  fctx.body.push({ op: "local.set", index: endLocal });
+
+  fctx.body.push({ op: "local.get", index: flatLocal });
+  fctx.body.push({ op: "local.get", index: startLocal });
+  fctx.body.push({ op: "local.get", index: endLocal });
+  fctx.body.push({ op: "call", funcIdx: substringIdx });
+  fctx.body.push({ op: "extern.convert_any" });
   return { kind: "externref" };
 }
 

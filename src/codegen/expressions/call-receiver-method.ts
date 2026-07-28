@@ -2308,6 +2308,11 @@ export function compileReceiverMethodCall(
     !isStringType(receiverType) &&
     !receiverIsCaughtErrorStringRead(ctx, propAccess.expression) &&
     !receiverIsNativeStringValType(ctx, fctx, propAccess.expression) &&
+    // A transferred `String.prototype.substring` installed as an own/prototype
+    // method must run with the non-string receiver as `this`. The guarded native
+    // string fast path would instead reject that receiver and return null before
+    // the dynamic property call can reach the stored closure.
+    !(propAccess.name.text === "substring" && sourceHasMethodReassignment(ctx, propAccess.expression, "substring")) &&
     receiverMayBeNativeStringAtRuntime(ctx, propAccess.expression)
   ) {
     const guarded = compileGuardedNativeStringMethodCall(ctx, fctx, expr, propAccess, propAccess.name.text);

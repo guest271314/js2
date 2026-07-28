@@ -540,6 +540,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // #1712 per-shape extraction note in emitClosureCallExportN).
   const funcLocal = totalParams + 2;
   const prevThisLocal = totalParams + 3;
+  const resultSaveLocal = prevThisLocal + 1;
 
   let baseWrapperIdx: number | undefined;
   const seenFuncTypeIdx = new Set<number>();
@@ -549,8 +550,25 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
     selfTypeIdx: number;
     closureArity: number;
   }[] = [];
+  // Native-prototype method closures carry an INTERNAL leading receiver param
+  // in addition to their user-visible arguments. The ordinary dispatcher below
+  // treats every closure param as a user argument, so a transferred
+  // `String.prototype.substring` value stored on an object can never match the
+  // arity-2 method bridge: its lifted signature has three params
+  // (`this,start,end`). Keep this residual substring fix exact by recognizing
+  // only its metadata singleton here; the special arm below threads the method
+  // call's separate `thisVal` into that internal slot.
+  const substringReceiverEntries: { typeIdx: number; funcTypeIdx: number }[] = [];
 
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (
+      arity === 2 &&
+      info.paramTypes.length === 3 &&
+      ctx.nativeProtoReceiverClosureStructTypes?.has(typeIdx) &&
+      ctx.builtinFnMetaByTypeIdx?.get(typeIdx)?.name === "substring"
+    ) {
+      substringReceiverEntries.push({ typeIdx, funcTypeIdx: info.funcTypeIdx });
+    }
     if (info.paramTypes.length > arity) continue;
     const typeDef = mod.types[typeIdx];
     if (!typeDef || typeDef.kind !== "struct") continue;
@@ -573,7 +591,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
       });
     }
   }
-  if (entries.length === 0) return;
+  if (entries.length === 0 && substringReceiverEntries.length === 0) return;
 
   if (baseWrapperIdx === undefined) {
     for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
@@ -625,6 +643,49 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   body.push({ op: "local.set", index: prevThisLocal });
   body.push({ op: "local.get", index: 0 });
   body.push({ op: "global.set", index: currentThisGlobalIdx });
+
+  // A builtin-meta `ref.test` is only a FAMILY guard because the meta structs
+  // are structurally equivalent. Check immutable `bfnid` as well, then invoke
+  // the substring closure with `(self, thisVal, start, end)`. Returning from the
+  // arm requires restoring `__current_this`, just like the common tail.
+  for (const special of substringReceiverEntries) {
+    body.push(
+      { op: "local.get", index: anyLocal },
+      { op: "ref.test", typeIdx: special.typeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: anyLocal },
+          { op: "ref.cast", typeIdx: special.typeIdx },
+          { op: "struct.get", typeIdx: special.typeIdx, fieldIdx: 3 },
+          { op: "i32.const", value: special.typeIdx },
+          { op: "i32.eq" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: anyLocal },
+              { op: "ref.cast", typeIdx: special.typeIdx },
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 2 },
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: anyLocal },
+              { op: "ref.cast", typeIdx: special.typeIdx },
+              { op: "struct.get", typeIdx: special.typeIdx, fieldIdx: 0 },
+              { op: "ref.cast", typeIdx: special.funcTypeIdx },
+              { op: "call_ref", typeIdx: special.funcTypeIdx },
+              { op: "local.set", index: resultSaveLocal },
+              { op: "local.get", index: prevThisLocal },
+              { op: "global.set", index: currentThisGlobalIdx },
+              { op: "local.get", index: resultSaveLocal },
+              { op: "return" },
+            ],
+          },
+        ],
+      },
+    );
+  }
 
   let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" }];
   // (#3673 round 10) per-entry callBody capture for the arity-bucketed
@@ -859,7 +920,6 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // Reuse `prevThisLocal` is not safe since we still need its contents;
   // use `anyLocal` is also not safe (externref vs anyref). Add a dedicated
   // result-save slot at index `prevThisLocal + 1`.
-  const resultSaveLocal = prevThisLocal + 1;
   body.push({ op: "local.set", index: resultSaveLocal });
   body.push({ op: "local.get", index: prevThisLocal });
   body.push({ op: "global.set", index: currentThisGlobalIdx });
