@@ -245,3 +245,104 @@ existing IR consumer).
   assumes "un-annotated locals are always f64" — needed regardless of which
   strategy (global retype vs. scoped shadow) a future attempt takes, unless
   the scoped-shadow strategy above sidesteps it entirely by construction.
+
+---
+
+## ADDENDUM (2026-07-28, senior-dev lane — branch `claude/issue-3741-i32-loop-shadow`, NOT merged)
+
+**#3758 does not actually close this issue.** It was closed on a *shape*
+verification ("zero ToInt32 instructions, one `i32.add`, correct result"),
+not on a *timing* measurement. Measured on `origin/main` at b12a84a8, with
+#3758 merged, compiling the exact `loop.ts` benchmark and timing the
+instantiated export (median of 40 runs after 30 warm-up calls):
+
+| build                                   | IR path | legacy path |
+| --------------------------------------- | ------- | ----------- |
+| `origin/main` b12a84a8 (with #3758)      | 7.63 ms | 0.405 ms    |
+| this branch (`6a710844`)                 | 0.388 ms| 0.406 ms    |
+
+#3758 leaves both locals in **f64 slots** and composes the arithmetic in i32
+by narrowing each leaf with `i32.trunc_sat_f64_s` and widening the result
+with `f64.convert_i32_s`. That is a *loop-carried* `f64 → i32 → f64` round
+trip on the accumulator, and a hand-written-`.wat` A/B of the candidate
+lowering shapes (node/V8, 1M iterations) shows that round trip costs as much
+as the entire ToInt32 sequence it replaces:
+
+| loop-body shape                                              | median  |
+| ------------------------------------------------------------ | ------- |
+| both locals `i32` (legacy)                                    | 0.41 ms |
+| both `i32`, f64 view only at the loop condition               | 0.70 ms |
+| accumulator `i32`, counter `f64`                              | 1.88 ms |
+| both `f64`, `trunc_sat` / `i32.add` / `convert` per iter (=#3758) | 7.25 ms |
+| both `f64`, `f64.add` + `i64.trunc`/`wrap` per iter (=pre-#3758) | 6.10 ms |
+
+**Conclusion: the storage kind is the lever, not the arithmetic.** Any design
+that keeps the local in an f64 slot is worth ~0 however cheap ToInt32 becomes.
+`i32.trunc_sat_f64_s` traps-check/range-check on V8, and the convert/trunc
+pair sits directly on the loop-carried dependency chain.
+
+### What this branch implements (complementary to #3758, not an alternative)
+
+`planI32Slots` (`src/ir/analysis/i32-slots.ts`) gives a provably-int32 mutable
+local a native **i32 Wasm slot** while keeping its `ScopeBinding.type` at
+**f64**, under two invariants:
+
+- **R (read)** — every read widens with `f64.convert_i32_s`, so the SSA value
+  every consumer receives is f64-typed and numerically identical to before.
+  No consumer in the ~9k-line `from-ast.ts` can tell the difference. This is
+  what avoids the consumption-site blast radius that sank the first attempt.
+- **W (write)** — every write lowers its RHS *directly* to an exact i32; it is
+  never an f64 that gets truncated. An unproducible write shape simply is not
+  promoted (so: no new legacy fallback, no fallback-budget growth).
+
+Eligibility = legacy's own `collectI32CoercedLocals` (#1120/#1236/#2789) +
+`detectI32LoopVar`, reused verbatim, intersected with a *producibility*
+fixpoint over the write shapes, plus shadowing/capture guards applied
+uniformly (legacy's counter path lacks these, so this is strictly more
+conservative than legacy about *which* locals it promotes).
+
+Also adds `IrFunctionBuilder.emitUnary`'s algebraic cancellation
+`i32.trunc_sat_f64_s(f64.convert_i32_s(x)) === x`. Without it the most common
+consumer of a promoted counter — an array index `arr[i]` — would pay
+convert+truncate where it used to pay just truncate, i.e. the promotion would
+*pessimize* indexed loops.
+
+### Validation performed (before the stop-work)
+
+- `tests/ir-*.test.ts` (16 files) + `tests/equivalence/ts-wasm-equivalence.test.ts`:
+  **zero new failures** vs a `git stash` A/B baseline (14 pre-existing
+  failures on both sides, all pre-existing host-stub / legacy-fallback cases).
+- New `tests/issue-3741-i32-slot-promotion.test.ts` — 17/17 pass: WAT-shape
+  assertions plus IR == legacy == real-JS on wrap-past-2^31, negative wrap,
+  iterative fib, FNV mixer, bitwise compounds, `>>>` uint32, the `+=`
+  accumulator that must STAY f64 (#1236 trap), literal-step and descending
+  counters, index reads/stores, early return, `-0`.
+- 15-case differential probe (while/do-while/nested/labeled/switch/ternary/
+  try-catch/closure-capture/2^31 boundary): all IR == legacy == JS.
+- `check:ir-fallbacks` OK; `check:oracle-ratchet`, `check:pushraw`,
+  `check:stack-balance`, `check:codegen-fallbacks`, `check:any-box-sites`,
+  `check:speculative-rollback`, `check:coercion-sites` all OK;
+  lint / format / typecheck clean.
+- `scripts/equivalence-gate.mjs` (full `tests/equivalence/`) was still running
+  when work stopped — **not** completed.
+
+### If this is picked up again
+
+Rebase onto #3758 rather than replacing it — the two are complementary and
+conflict only mechanically:
+
+- Both add `i32.add`/`i32.sub` to `IrBinop` (+ constant-fold entries, Porffor
+  sink u32 lowering, legality). Keep ONE copy. #3758's is a superset (it also
+  has `i32.mul` with legacy's `|operand| < 2^21` guard).
+- Keep #3758's `src/ir/i32-pure-bitwise.ts` — it fuses arithmetic under a
+  bitwise operator for expressions built from *any* proven-bounded leaves,
+  which is broader than this branch's fused path.
+- Layer the **slot promotion** (`i32-slots.ts` + the R/W invariants + the
+  `trunc_sat(convert(x))` cancellation) on top. With f64 slots gone, #3758's
+  leaf narrowing becomes a no-op on promoted locals and the two collapse into
+  legacy's shape.
+- Conflicting files on merge: `src/ir/from-ast.ts`, `src/ir/nodes.ts`,
+  `src/ir/passes/constant-fold.ts`, `src/ir/backend/porffor/sink.ts`.
+
+Minor unrelated observation: #3758 does not apply the `x | 0` identity, so it
+emits a redundant `i32.const 0; i32.or` per iteration.
