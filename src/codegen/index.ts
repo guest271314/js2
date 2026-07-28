@@ -2996,7 +2996,7 @@ export function generateModule(
   // `ctx.booleanPropertyNames` (assigned much later) so the exclusion is exact
   // without reordering an established pass.
   if (ctx.standalone) {
-    ctx.numericPropertyNames = analyzeNumericPropertyNames(
+    const propertyKinds = analyzeNumericPropertyNames(
       {
         oracle: ctx.oracle,
         fnctorReceivers: new Set(ctx.fnctorEscapeGate.receiverStruct.keys()),
@@ -3004,6 +3004,11 @@ export function generateModule(
       },
       [ast.sourceFile],
     );
+    ctx.numericPropertyNames = propertyKinds.numeric;
+    // (#3739 S1) The string half of the same walk. A field every write proves a
+    // string gets a NATIVE STRING slot instead of the boxed `externref`, which
+    // deletes the per-access `ref.test` / `ref.cast` / `__str_flatten`.
+    ctx.stringPropertyNames = propertyKinds.string;
   }
   // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
   // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`

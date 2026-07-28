@@ -992,21 +992,30 @@ function debugEnabled(): boolean {
  * only on a cycle of other names contributes no provably-numeric write and is
  * dropped.
  */
+/**
+ * (#3739 S1) The whole-program field verdicts `deriveFnctorFields` promotes on.
+ * `numeric` is #3683 S4a's; `string` is the slot-aware string-carrier set.
+ */
+export interface PropertyKindVerdicts {
+  readonly numeric: Set<string>;
+  readonly string: Set<string>;
+}
+
 export function analyzeNumericPropertyNames(
   host: NumericPropertyAnalysisHost,
   sourceFiles: readonly ts.SourceFile[],
-): Set<string> {
+): PropertyKindVerdicts {
   // Kill-switch: `JS2WASM_NUMERIC_FIELDS=0` reproduces the pre-S4a field
   // shapes byte-for-byte on any program, which is what makes the twin/generic
   // and promoted/unpromoted differentials in the pin suite possible.
-  if (process.env.JS2WASM_NUMERIC_FIELDS === "0") return new Set();
+  if (process.env.JS2WASM_NUMERIC_FIELDS === "0") return { numeric: new Set(), string: new Set() };
   const scopes = buildScopes(sourceFiles);
   const facts = collectNumericFlowFacts(sourceFiles, scopes, host);
   if (facts.poisoned) {
     if (debugEnabled()) {
       process.stderr.write("[numeric-fields] POISONED: computed write/delete through a fnctor instance\n");
     }
-    return new Set();
+    return { numeric: new Set(), string: new Set() };
   }
   // Seed parameter slots from their call sites, the same way #2847 does: a
   // parameter with no visible call site contributes one opaque definition (so
@@ -1152,5 +1161,5 @@ export function analyzeNumericPropertyNames(
       });
     }
   }
-  return numericProperties;
+  return { numeric: numericProperties, string: stringProperties };
 }
