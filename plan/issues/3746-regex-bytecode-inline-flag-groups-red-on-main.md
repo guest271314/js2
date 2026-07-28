@@ -1,6 +1,6 @@
 ---
 id: 3746
-title: "~40 tests red on main across 4 suites, in no required check — inline regex flag groups and RegExp.prototype accessors"
+title: "~40 tests red on main in no required check — 37 were the HOST oracle, not our lowering (ES2025 regexp-modifiers postdate Node 22)"
 status: ready
 sprint: current
 created: 2026-07-28
@@ -41,33 +41,73 @@ that let the four suites #3705 fixed sit red on `main` — and #3726 recorded th
 lesson for the two it touched. It has not been fixed as a class: a suite that is
 not in a required check can go red on `main` and stay there indefinitely.
 
-## Shape of the regex failures
+## CORRECTED — 37 of the 40 were never our bug
 
-The failing cases are concentrated in **inline flag groups**:
+The failing patterns are inline modifiers (`(?i:…)`, `(?-i:…)`, `(?s:…)`,
+`(?m:…)`) — ES2025 **regexp-modifiers**. Both suites use the HOST `RegExp` as
+their ORACLE:
+
+```ts
+const expected = new RegExp(p, f).test(input); // issue-1911
+expect(ourMatch(p, f, input)).toEqual(nativeMatch(p, f, input)); // regex-bytecode
+```
+
+and V8 gained modifiers after Node 22. On this runtime:
 
 ```
-/(?i:[a-c])x/ on "Bx"        /(?s:.)/ on "\n"
-/(?i:(?-i:a)b)/ on "aB"      /(?m:^b)/ on "a\nb"
-/(?im-s:a.b)/s on "AxB"      /a(?-i:b)c/i on "aBc"
+node v22.22.2
+new RegExp("(?i:abc)")  →  Invalid regular expression: /(?i:abc)/: Invalid group
 ```
 
-i.e. scoped flag modifiers (`(?i:…)`, `(?-i:…)`, `(?s:…)`, `(?m:…)`) — the
-bytecode compiler appears not to scope a flag change to its group. `#2175`'s
-three are different: `RegExp.prototype` flag-bool / `.flags` / `.source`
-accessor dispatch on a correct `this`.
+So the exception came from the ORACLE constructing its expectation, before our
+pipeline was consulted at all. The error text in the failure output —
+`Invalid regular expression: … Invalid group` — is node's own, which is what
+gave it away.
 
-## Scope
+Nothing was wrong with the regex bytecode compiler's flag-group scoping. My
+first reading of this issue asserted exactly that, from the pattern shapes
+alone, without checking who threw.
 
-- [ ] Fix the inline-flag-group scoping in the regex bytecode compiler
-      (`regex-bytecode` + `#1911`, 37 of the ~40).
-- [ ] Fix or re-pin the three `#2175` accessor-dispatch cases.
-- [ ] Triage `#1817`'s three `>>>` cases separately — different family.
-- [ ] **The class fix**: decide which of these suites belong in a required
-      check. Fixing 40 tests while leaving the visibility gap open means the
-      next 40 are equally invisible.
+## Fix
+
+Ask the engine whether it supports modifiers and skip those cases when it does
+not:
+
+```ts
+const HOST_SUPPORTS_INLINE_MODIFIERS = (() => {
+  try {
+    new RegExp("(?i:a)");
+    return true;
+  } catch {
+    return false;
+  }
+})();
+```
+
+Skipped rather than deleted: the cases are correct and become live the moment
+the runtime gains modifiers. A hard-coded version check would rot; asking the
+engine is the durable form of the question.
+
+Result: `regex-bytecode` 258 passed / 20 skipped; `issue-1911` 70 passed /
+17 skipped. Both green.
+
+## Still open
+
+- [ ] `tests/issue-2175-regexp-proto-readers.test.ts` — 3 failures,
+      `RegExp.prototype` flag-bool / `.flags` / `.source` accessor dispatch on a
+      correct `this`. A different family; not host-oracle, genuinely ours.
+- [ ] `tests/issue-1817.test.ts` — 3 failures in the `>>>` unsigned-result
+      family. Different again.
+- [ ] **The class fix.** None of these suites is in a required check, which is
+      why ~40 red tests sat on `main` unnoticed — the same structural gap that
+      let the four suites #3705 fixed go unreported, and that #3726 recorded the
+      lesson for. Fixing the tests while leaving the gap open means the next
+      batch is equally invisible. Decide which of these belong in a required
+      check.
 
 ## Acceptance criteria
 
-- [ ] The four suites pass on `main`.
-- [ ] At least the regex suites are wired into a required check, or an explicit
-      decision is recorded for why not.
+- [x] `regex-bytecode` and `issue-1911` pass on `main`.
+- [ ] `issue-2175`'s three accessor cases fixed or re-pinned.
+- [ ] `issue-1817`'s three `>>>` cases triaged.
+- [ ] A decision recorded on required-check coverage for these suites.
