@@ -1378,9 +1378,21 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
-  // (#3740) Defer `let s = ""; for (...) s += <expr>` builder loops to
-  // legacy — see `containsStringBuilderLoopShape` for why.
-  if (containsStringBuilderLoopShape(body)) return "string-builder-candidate";
+  // (#3740 / #3744) `let s = ""; for (...) s += <expr>` builder loops are now
+  // claimed by IR BY DEFAULT: IR has its own fast path for this shape
+  // (`__str_concat_owned`, wired through `string.concat`'s `owned-append`
+  // mode in `ir/integration.ts`) that produces correct, meaningfully faster
+  // results than IR's old default (verified — no more O(N) cons/flatten
+  // allocation per append). `JS2WASM_IR_STRING_BUILDER=0` forces this shape
+  // back to legacy (kill switch, same convention as e.g.
+  // `JS2WASM_UNION_ANYREP=0`) — legacy remains strictly faster for
+  // benchmarks whose index arithmetic ALSO uses bitwise ops on untyped
+  // `number`s (e.g. `(i * 13) & 31`): legacy promotes such loop-local
+  // arithmetic to native i32 (see #1948's loop-var-promotion note), IR does
+  // not yet, and that gap is unrelated to string-building.
+  if (process.env.JS2WASM_IR_STRING_BUILDER === "0" && containsStringBuilderLoopShape(body)) {
+    return "string-builder-candidate";
+  }
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;

@@ -123,10 +123,17 @@ lowering. This is a narrow, additive selector change:
 ## Non-goals / what this does NOT fix
 
 This does not teach IR the string-builder/presize rewrite — it only stops
-IR from silently regressing on the shape until it does. A genuinely faster
-fix would extend `src/ir/lower.ts`'s string-concat lowering to reuse (or
-reimplement) the #1210/#1761 machinery; that's a much larger IR-adoption
-slice (comparable in scope to #3502) and is left for a follow-up if IR
-coverage of builder loops is prioritized. The BCE epic (#2621) and the
-V8-JIT-parity levers (#1746) remain independently valid follow-ups for the
-*legacy* codegen path, now that the shipped benchmark actually reaches it.
+IR from silently regressing on the shape until it does. The BCE epic
+(#2621) and the V8-JIT-parity levers (#1746) remain independently valid
+follow-ups for the *legacy* codegen path, now that the shipped benchmark
+actually reaches it.
+
+**Update (#3744):** IR now has a native fast path for this shape
+(`__str_concat_owned`, dispatched via `string.concat`'s `owned-append`
+mode) — see #3744. This selector gate has been REMOVED (IR now claims this
+shape by default); `JS2WASM_IR_STRING_BUILDER=0` is a kill switch for
+reverting to legacy. Note this means the specific `string-hash` benchmark's
+own absolute number moved from legacy's ~0.19ms back up to ~3.1ms (still
+~1.8x faster than the original pre-#3740 regression, but not legacy parity)
+— see #3744's "residual gap" note: IR still lacks a *separate* i32
+loop-arithmetic promotion legacy has, tracked independently.

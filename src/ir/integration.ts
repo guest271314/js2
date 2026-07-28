@@ -2678,7 +2678,7 @@ function computeStringBackend(ctx: CodegenContext): StringBackendIndices {
   if (ctx.nativeStrings) {
     for (let i = 0; i < ctx.mod.functions.length; i++) {
       const f = ctx.mod.functions[i]!;
-      if (f.name === "__str_concat" || f.name === "__str_equals") {
+      if (f.name === "__str_concat" || f.name === "__str_equals" || f.name === "__str_concat_owned") {
         nativeHelpers.set(f.name, ctx.numImportFuncs + i);
       }
     }
@@ -3466,8 +3466,23 @@ function makeResolver(
       }
       return [{ op: "global.get", index: globalIdx }];
     },
-    emitStringConcat(): readonly Instr[] {
+    emitStringConcat(_alloc, mode): readonly Instr[] {
       if (ctx.nativeStrings) {
+        // (#3740 follow-up) `owned-append` mode is the license the front end
+        // (`ir/from-ast.ts`'s `collectOwnedStringAppendSymbols`) computes for
+        // exactly the `let s = ""; for (...) s += <expr>` builder-loop shape
+        // — the same shape #3740's selector gate defers to legacy for
+        // OTHERWISE-untyped functions. A typed/IR-claimable function with
+        // this shape gets the fast growable-buffer append here instead.
+        if (mode === "owned-append") {
+          const ownedIdx = stringBackend.nativeHelpers.get("__str_concat_owned");
+          if (ownedIdx !== undefined) {
+            return [{ op: "call", funcIdx: ownedIdx }];
+          }
+          // Helper not registered (shouldn't happen once nativeStrings string
+          // support is initialized) — fall through to the general path
+          // rather than throw; correctness over the extra speedup.
+        }
         const idx = stringBackend.nativeHelpers.get("__str_concat");
         if (idx === undefined) {
           throw new Error("ir/integration: __str_concat helper not registered");
