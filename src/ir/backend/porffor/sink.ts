@@ -670,20 +670,26 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
     const effects = left!.effects | right!.effects;
     if (effects !== PORFFOR_FX.none) [left, right] = out.sequence([left!, right!]);
 
-    // (#3741) i32 wrapping arithmetic. Signed overflow is UB in C, so do the
-    // bit movement in u32 (defined modular wrap) and reinterpret the result as
-    // i32 — exactly the shape `emitI32Bitwise` already uses for `i32.shl`.
-    if (op === "i32.add" || op === "i32.sub") {
-      const wrapped: PorfforExpr = {
+    // (#3758) Native i32 arithmetic — computed via u32 (unsigned) arithmetic
+    // and converted back to i32. Signed-integer-overflow is undefined
+    // behavior in C; unsigned arithmetic wraps modulo 2^32 by definition,
+    // and the resulting BIT PATTERN is identical to true two's-complement
+    // wrapped signed arithmetic (the same fact `emitI32Bitwise`'s shl/shr_s
+    // arms already lean on to sidestep C UB — see their comments below).
+    if (op === "i32.add" || op === "i32.sub" || op === "i32.mul") {
+      const lu = convertExpr("u32", left!, 0);
+      const ru = convertExpr("u32", right!, 0);
+      const opSymbol = op === "i32.add" ? "+" : op === "i32.sub" ? "-" : "*";
+      const sum: PorfforExpr = {
         kind: "binary",
         type: "u32",
-        effects: left!.effects | right!.effects,
-        op: op === "i32.add" ? "+" : "-",
-        left: convertExpr("u32", left!, 0),
-        right: convertExpr("u32", right!, 0),
+        effects: lu.effects | ru.effects,
+        op: opSymbol,
+        left: lu,
+        right: ru,
         comparison: false,
       };
-      out.push(convertExpr("i32", wrapped, 1));
+      out.push(convertExpr("i32", sum, 1));
       return;
     }
 

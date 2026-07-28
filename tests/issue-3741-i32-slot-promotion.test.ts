@@ -366,6 +366,69 @@ const CASES: readonly Case[] = [
     },
   },
   {
+    // The #3741 x #3758 seam. `s` is slot-promoted (every write is `| 0`
+    // wrapped); `k` is NOT (a `const`, so it never gets a slot) but IS
+    // i32-pure, so only #3758 can fuse it. `isFusedI32Lowerable` takes the
+    // union of both proofs — without that, this mixed subtree would satisfy
+    // neither and fall back to the full ToInt32 dance, i.e. #3741 would have
+    // REGRESSED an expression #3758 already handled.
+    name: "mixed promoted-slot + i32-pure-but-not-promoted operands",
+    source: `export function mix(n: number): number {
+      const k = 12345 | 0;
+      let s = 0;
+      for (let i = 0; i < n; i++) s = (s + i + k) | 0;
+      return s;
+    }`,
+    fn: "mix",
+    args: [500],
+    js: (n) => {
+      const k = 12345 | 0;
+      let s = 0;
+      for (let i = 0; i < n; i++) s = (s + i + k) | 0;
+      return s;
+    },
+  },
+  {
+    // #3758 owns `*` (guarded by legacy's |operand| < 2^21 proof); #3741 does
+    // not add `i32.mul`. A promoted local flowing into a guarded multiply must
+    // still agree with JS.
+    name: "guarded i32 multiply over a promoted local (#3758's arm)",
+    source: `export function mul(n: number): number {
+      let h = 0;
+      for (let i = 0; i < n; i++) h = (h * 31 + i) | 0;
+      return h;
+    }`,
+    fn: "mul",
+    args: [200],
+    js: (n) => {
+      let h = 0;
+      for (let i = 0; i < n; i++) h = (h * 31 + i) | 0;
+      return h;
+    },
+  },
+  {
+    // Large-operand multiply: NEITHER path may use native i32.mul here (JS
+    // computes the product in f64 first and rounds above 2^53). Guards the
+    // #1179-followup / #3758 `isI32MulSafe` bound from either side.
+    name: "unguarded large multiply stays f64-faithful",
+    source: `export function bigmul(): number {
+      let a = 2147483647 | 0;
+      let b = 2147483647 | 0;
+      let r = 0;
+      r = (a * b) | 0;
+      return r;
+    }`,
+    fn: "bigmul",
+    args: [],
+    js: () => {
+      let a = 2147483647 | 0;
+      let b = 2147483647 | 0;
+      let r = 0;
+      r = (a * b) | 0;
+      return r;
+    },
+  },
+  {
     name: "comparison of two promoted locals",
     source: `export function cmp(n: number): number {
       let a = 0;

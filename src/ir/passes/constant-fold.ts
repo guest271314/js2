@@ -248,11 +248,13 @@ const BINARY_FOLD_TABLE: Readonly<Record<IrBinop, BinaryFolder>> = {
   // i32 logical (bool && / bool ||, operands are 0|1).
   "i32.and": (l, r) => i32Bool(l, r, (a, b) => a !== 0 && b !== 0),
   "i32.or": (l, r) => i32Bool(l, r, (a, b) => a !== 0 || b !== 0),
-  // (#3741) i32 wrapping arithmetic. `| 0` after the JS add/sub reproduces
-  // Wasm's two's-complement wrap exactly (both are `mod 2^32`, signed
-  // reinterpretation), and the operands are i32 by the op's own contract.
-  "i32.add": (l, r) => i32Arith(l, r, (a, b) => (a + b) | 0),
-  "i32.sub": (l, r) => i32Arith(l, r, (a, b) => (a - b) | 0),
+  // (#3758) native i32 arithmetic — only ever emitted (see `ir/from-ast.ts`'s
+  // `emitI32PureArithmetic`) for operands already proven int32-range under a
+  // guard that keeps the true result f64-exact, so folding via plain JS
+  // arithmetic + `| 0` wrap is exact here (see `i32Arith`'s doc comment).
+  "i32.add": (l, r) => i32Arith(l, r, (a, b) => a + b),
+  "i32.sub": (l, r) => i32Arith(l, r, (a, b) => a - b),
+  "i32.mul": (l, r) => i32Arith(l, r, (a, b) => a * b),
   // #1126 Stage 3 — i32 magnitude compares. Signed ops compare values as
   // signed 32-bit integers; unsigned ops as unsigned. We coerce constants
   // to i32 first then compare in the appropriate domain. JS `>>>0` gives
@@ -346,14 +348,18 @@ function i32Bool(l: IrConst, r: IrConst, fn: (a: number, b: number) => boolean):
 }
 
 /**
- * (#3741) Fold an i32 wrapping arithmetic op over two i32 / bool constants.
- * The caller's lambda is responsible for the `| 0` wrap.
+ * (#3758) Fold native i32 arithmetic — WRAPS modulo 2^32 like real
+ * `i32.add`/`i32.sub`/`i32.mul`, via `| 0` (JS bitwise ops coerce through
+ * ToInt32, matching Wasm i32 wraparound exactly). This must NOT use
+ * `i32.trunc_sat_f64_s`-style saturation — that was the exact bug (#3745's
+ * revert) this op exists to avoid; the constant folder has to reproduce the
+ * same wrap semantics the runtime instruction has, not saturate.
  */
 function i32Arith(l: IrConst, r: IrConst, fn: (a: number, b: number) => number): IrConst | null {
   const la = toI32(l);
   const ra = toI32(r);
   if (la === null || ra === null) return null;
-  return { kind: "i32", value: fn(la | 0, ra | 0) };
+  return { kind: "i32", value: fn(la, ra) | 0 };
 }
 
 function toI32(c: IrConst): number | null {

@@ -108,6 +108,12 @@ import {
   type IrLiftedFunctionArtifactIdentity,
   type IrUnitId,
 } from "./identity.js";
+import {
+  computeI32PureNames,
+  type I32PureNames,
+  isI32PureExprIR,
+  isIrBitwiseOperatorToken,
+} from "./i32-pure-bitwise.js";
 import { IrUnsupportedError } from "./outcomes.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
@@ -825,6 +831,7 @@ export function lowerFunctionAstToIr(
   const liftedUnitProvenance: IrDerivedUnitProvenance[] = [];
   const liftedCounter = { value: 0 };
   const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
+  const i32PureNames = computeI32PureNames(fn);
   const emptyArrayInference = inferEmptyArrayElementTypes(
     fn,
     options.checker ? new TsCheckerOracle(options.checker) : undefined,
@@ -847,6 +854,7 @@ export function lowerFunctionAstToIr(
     liftedUnitProvenance,
     liftedCounter,
     mutatedLets,
+    i32PureNames,
     // (#3741) Native-i32 slot storage for provably-int32 mutable locals.
     // Generators are excluded: their cross-yield state machinery is built
     // around the existing slot shapes and is out of scope here.
@@ -1573,10 +1581,26 @@ interface LowerCtx {
    */
   readonly mutatedLets: ReadonlySet<string>;
   /**
-   * (#3741) Names (a subset of `mutatedLets`) whose Wasm slot is declared
+   * (#3758) Names proven, by the SAME analyses legacy's own #1120/#1236
+   * i32-local promotion uses (`collectI32CoercedLocals`, `detectI32LoopVar`),
+   * to always hold a clean int32 value when read. Consulted ONLY by
+   * `isI32PureExprIR`/`emitI32PureExpr` (`ir/i32-pure-bitwise.ts` /
+   * this file) to fast-path a bitwise operator's operand lowering through
+   * genuine native i32 arithmetic instead of the expensive ToInt32 dance —
+   * never used to change any local's declared IrType, so no other consumer
+   * in the function is affected. Computed once per outer/nested/closure
+   * function body, mirroring `mutatedLets`.
+   */
+  readonly i32PureNames: I32PureNames;
+  /**
+   * (#3741) Names (a subset of `mutatedLets`) whose Wasm SLOT is declared
    * `i32` instead of `f64`. Planned once per outer function by
-   * `planI32Slots`. The binding's LOGICAL `IrType` stays `f64`, so no
-   * consumer of an identifier read observes the promotion — see
+   * `planI32Slots`. Distinct from `i32PureNames` above, which is a
+   * VALUE-range fact used to pick cheaper arithmetic while the local keeps
+   * its f64 storage: this one changes the STORAGE, which is what removes the
+   * loop-carried `f64 -> i32 -> f64` round trip (see #3741's Correction
+   * section for the measurements). The binding's LOGICAL `IrType` still stays
+   * `f64`, so no consumer of an identifier read observes the promotion — see
    * `readPromotedI32Slot` / `writePromotedI32Slot`. Absent (undefined) for
    * nested-function / closure contexts, which keep the pre-#3741 behaviour.
    */
@@ -2145,6 +2169,24 @@ function promotedI32Probe(cx: LowerCtx): IsPromotedI32 {
   };
 }
 
+/**
+ * Union of the two i32 proofs available in an already-ToInt32'd (Q-WRAP)
+ * position:
+ *   - #3741's SLOT promotion — the local's Wasm storage IS i32, so the read is
+ *     the i32 (no narrowing instruction at all);
+ *   - #3758's VALUE proof — the local keeps f64 storage but its value is
+ *     provably int32-range, so it can be narrowed with the cheap
+ *     `i32.trunc_sat_f64_s` (`isI32PureExprIR` / `emitI32PureExpr`).
+ *
+ * Taking the union matters: without it, a mixed expression like
+ * `(promoted + notPromotedButPure) | 0` would satisfy neither predicate alone
+ * and fall all the way back to the full ToInt32 dance — i.e. #3741 would
+ * REGRESS an expression #3758 already handles.
+ */
+function isFusedI32Lowerable(e: ts.Expression, cx: LowerCtx): boolean {
+  return isWrapI32Lowerable(e, promotedI32Probe(cx)) || isI32PureExprIR(e, cx.i32PureNames);
+}
+
 /** Invariant R — read a promoted slot and widen to the f64 every consumer expects. */
 function readPromotedI32Slot(slotIndex: number, cx: LowerCtx): IrValueId {
   return cx.builder.emitUnary("f64.convert_i32_s", cx.builder.emitSlotRead(slotIndex), IR_F64);
@@ -2178,7 +2220,7 @@ function jsBitwiseBinop(k: ts.SyntaxKind): IrBinop | null {
  * `lower.ts` applies its usual `emitJsToInt32`.
  */
 function lowerBitwiseOperand(e: ts.Expression, parent: ts.BinaryExpression | null, cx: LowerCtx): IrValueId {
-  if (isWrapI32Lowerable(e, promotedI32Probe(cx))) return lowerAsI32(e, cx, "wrap");
+  if (isFusedI32Lowerable(e, cx)) return lowerAsI32(e, cx, "wrap");
   const v = lowerExpr(e, cx, IR_F64);
   // Taking the fused path means we bypassed `lowerBinary`'s operand-shape
   // gates (string / dynamic / packed). Reproduce its verdict EXACTLY for a
@@ -2233,7 +2275,12 @@ function lowerAsI32(expr: ts.Expression, cx: LowerCtx, mode: "canon" | "wrap"): 
   if (ts.isBinaryExpression(inner)) {
     const k = inner.operatorToken.kind;
     if (isBitwiseToken(k)) return lowerBitwiseAsI32(inner, cx);
-    if (mode === "wrap" && (k === ts.SyntaxKind.PlusToken || k === ts.SyntaxKind.MinusToken)) {
+    if (
+      mode === "wrap" &&
+      (k === ts.SyntaxKind.PlusToken || k === ts.SyntaxKind.MinusToken) &&
+      isFusedI32Lowerable(inner.left, cx) &&
+      isFusedI32Lowerable(inner.right, cx)
+    ) {
       // The fused unit #3741 exists for. `i32.add` / `i32.sub` wrap mod 2^32,
       // which equals `ToInt32(f64.add/sub(a, b))` because both operands are
       // int32-range so the f64 result is exact (|a ± b| < 2^32 < 2^53).
@@ -2242,6 +2289,13 @@ function lowerAsI32(expr: ts.Expression, cx: LowerCtx, mode: "canon" | "wrap"): 
       return cx.builder.emitBinary(k === ts.SyntaxKind.PlusToken ? "i32.add" : "i32.sub", lhs, rhs, IR_I32);
     }
   }
+
+  // (#3758) Anything this function cannot produce itself but whose VALUE is
+  // provably int32-range falls to #3758's emitter, which composes `i32.add`/
+  // `i32.sub`/guarded-`i32.mul` and narrows genuine leaves with the cheap
+  // `i32.trunc_sat_f64_s`. Checked BEFORE the generic lowering below so a
+  // mixed promoted/pure subtree never degrades to the full ToInt32 dance.
+  if (isI32PureExprIR(inner, cx.i32PureNames)) return emitI32PureExpr(inner, cx);
 
   // Comparisons (and anything else the predicates admit) already lower to i32
   // through the ordinary path — take it and assert the representation.
@@ -2269,7 +2323,7 @@ function lowerBitwiseAsI32(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   if (
     (k === ts.SyntaxKind.BarToken || k === ts.SyntaxKind.CaretToken) &&
     i32LiteralValue(expr.right) === 0 &&
-    isWrapI32Lowerable(expr.left, promotedI32Probe(cx))
+    isFusedI32Lowerable(expr.left, cx)
   ) {
     return lowerAsI32(expr.left, cx, "wrap");
   }
@@ -2363,12 +2417,18 @@ const COMPOUND_TO_BITWISE_TOKEN = {
 function tryLowerFusedI32Binary(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId | null {
   const promoted = promotedI32Probe(cx);
 
-  // (a) Bitwise op with at least one i32-lowerable operand. Without this the
-  //     operands lower to f64 and `lower.ts` runs `emitJsToInt32` on each.
+  // (a) Bitwise op that actually READS an i32-promoted slot. The
+  //     "reads a promoted slot" gate is load-bearing: without it this arm would
+  //     also swallow expressions that only #3758 can fuse well (e.g.
+  //     `(a + b) | 0` over i32-pure-but-f64-STORED locals), where our narrower
+  //     Q-WRAP matcher rejects the `a + b` and we would fall back to an f64 add
+  //     plus a full ToInt32 — strictly worse than #3758's `i32.add`. When no
+  //     promoted slot participates we return null and #3758's path runs
+  //     unchanged.
   if (jsBitwiseBinop(op) !== null) {
-    const leftI32 = isWrapI32Lowerable(expr.left, promoted);
-    const rightI32 = isWrapI32Lowerable(expr.right, promoted);
-    if (!leftI32 && !rightI32) return null;
+    if (!referencesPromotedI32Slot(expr.left, promoted) && !referencesPromotedI32Slot(expr.right, promoted)) {
+      return null;
+    }
     if (isBitwiseToken(op)) {
       // Result is an exact int32 → compute in i32 and widen once, matching the
       // f64 result type `lowerBinary` would have produced.
@@ -2408,7 +2468,11 @@ const I32_COMPARE_BINOPS = {
   [ts.SyntaxKind.GreaterThanEqualsToken]: "i32.ge_s",
 } as const satisfies Partial<Record<ts.SyntaxKind, IrBinop>>;
 
-/** Does `e` read at least one i32-promoted slot? (fusion-worthwhile check) */
+/**
+ * Does `e` read at least one i32-promoted slot? This is the gate that keeps
+ * #3741's fused path from pre-empting #3758's on expressions where #3758 does
+ * strictly better (see `tryLowerFusedI32Binary` arm (a)).
+ */
 function referencesPromotedI32Slot(e: ts.Expression, promoted: IsPromotedI32): boolean {
   const inner = peelExpr(e);
   if (ts.isIdentifier(inner)) return promoted(inner.text);
@@ -8001,6 +8065,51 @@ function lowerInstanceOf(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   );
 }
 
+function peelParensExpr(e: ts.Expression): ts.Expression {
+  let inner: ts.Expression = e;
+  while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+  return inner;
+}
+
+/**
+ * (#3758) Emit `e` — the caller MUST have already verified
+ * `isI32PureExprIR(e, cx.i32PureNames)` — as a genuine i32-typed IrValueId.
+ * `+`/`-`/guarded-`*` compositions use REAL native `i32.add`/`i32.sub`/
+ * `i32.mul` (added in `ir/nodes.ts`), which wrap modulo 2^32 exactly like
+ * ECMA-262 ToInt32 — never `i32.trunc_sat_f64_s` as a substitute for
+ * arithmetic (that conflation is exactly what made a prior version of this
+ * fast path unsound and reverted — see `ir/i32-pure-bitwise.ts`'s header
+ * comment). Leaves (a proven-pure identifier, an in-range literal, or a
+ * nested bitwise/shift sub-expression — always int32-range by spec
+ * regardless of ITS OWN operands) are lowered via the existing, UNCHANGED
+ * general path and then narrowed via the cheap `i32.trunc_sat_f64_s`,
+ * which is exact here because each leaf's value is independently proven
+ * bounded, not inferred from composing other values.
+ */
+function emitI32PureExpr(e: ts.Expression, cx: LowerCtx): IrValueId {
+  const inner = peelParensExpr(e);
+  if (ts.isBinaryExpression(inner)) {
+    const k = inner.operatorToken.kind;
+    if (k === ts.SyntaxKind.PlusToken || k === ts.SyntaxKind.MinusToken) {
+      const l = emitI32PureExpr(inner.left, cx);
+      const r = emitI32PureExpr(inner.right, cx);
+      const binop = k === ts.SyntaxKind.PlusToken ? "i32.add" : "i32.sub";
+      return cx.builder.emitBinary(binop, l, r, irVal({ kind: "i32" }));
+    }
+    if (k === ts.SyntaxKind.AsteriskToken) {
+      const l = emitI32PureExpr(inner.left, cx);
+      const r = emitI32PureExpr(inner.right, cx);
+      return cx.builder.emitBinary("i32.mul", l, r, irVal({ kind: "i32" }));
+    }
+    // Nested bitwise/shift result — falls through to the leaf case below:
+    // lower via the existing general path (unchanged), then narrow.
+  }
+  const f64Value = lowerExpr(e, cx, irVal({ kind: "f64" }));
+  const valueType = asVal(typeOfValue(f64Value, cx));
+  if (valueType?.kind === "i32") return f64Value; // already i32 — no redundant narrowing
+  return cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Value, irVal({ kind: "i32" }));
+}
+
 function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
   const op = expr.operatorToken.kind;
 
@@ -8100,16 +8209,48 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
   }
 
-  // (#3741) Fused native-i32 fast paths. Placed here — after every semantic
-  // gate above (null/undefined folds, the `+` operand proof, deferred-capability
-  // assert) and before the eager f64 operand lowering — so it can choose the
-  // operands' representation. Returns null unless an i32-promoted slot is
-  // actually involved, in which case nothing below changes.
+  // (#3741) Slot-promotion fused fast path. Runs BEFORE #3758's
+  // expression-level fusion below because the two answer different questions
+  // at different layers: #3758 keeps the local in its f64 slot and narrows
+  // each LEAF with `i32.trunc_sat_f64_s`, which leaves a loop-carried
+  // `f64 -> i32 -> f64` round trip in place; when the local's SLOT is itself
+  // i32 there is nothing to narrow — the read IS the i32. Returns null unless
+  // an i32-promoted slot actually participates, in which case #3758's path
+  // below runs exactly as before.
   const fusedI32 = tryLowerFusedI32Binary(expr, op, cx);
   if (fusedI32 !== null) return fusedI32;
 
-  const lhs = lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
-  const rhs = lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
+  // (#3758) A bitwise/shift operator whose BOTH operand expressions are
+  // provably computable via genuine native i32 arithmetic (no ToInt32
+  // dance anywhere in either subtree — `isI32PureExprIR`, reusing legacy's
+  // own #1120/#1236 proofs) skips the expensive per-operand ToInt32
+  // emulation (`js.bit*`'s IEEE-754 bit-decomposition, #3739) entirely.
+  // See `ir/i32-pure-bitwise.ts` for the full soundness argument — this
+  // NEVER uses `i32.trunc_sat_f64_s` as a substitute for arithmetic
+  // (that was the exact bug that made a prior version of this fast path
+  // unsound; see #3745's revert history).
+  const i32PureBitwiseOperands =
+    isIrBitwiseOperatorToken(op) &&
+    isI32PureExprIR(expr.left, cx.i32PureNames) &&
+    isI32PureExprIR(expr.right, cx.i32PureNames);
+  // (#3741) `x | 0` / `x ^ 0` over an i32-pure lhs is the identity on the
+  // ToInt32 bit pattern, so the operator disappears entirely. Without this the
+  // #3758 path emits a redundant `i32.const 0; i32.or` per evaluation: its
+  // rhs lowers as `i32.trunc_sat_f64_s(f64.const 0)`, which `lower.ts`'s
+  // #3733 `tryConstOf(rhs) === 0` identity check cannot see through.
+  if (
+    i32PureBitwiseOperands &&
+    (op === ts.SyntaxKind.BarToken || op === ts.SyntaxKind.CaretToken) &&
+    i32LiteralValue(expr.right) === 0
+  ) {
+    return cx.builder.emitUnary("f64.convert_i32_s", emitI32PureExpr(expr.left, cx), IR_F64);
+  }
+  const lhs = i32PureBitwiseOperands
+    ? emitI32PureExpr(expr.left, cx)
+    : lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
+  const rhs = i32PureBitwiseOperands
+    ? emitI32PureExpr(expr.right, cx)
+    : lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
   const lt = typeOfValue(lhs, cx);
   const rt = typeOfValue(rhs, cx);
 
@@ -9203,6 +9344,9 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    // (#3758) nested functions get their own independent i32-pure-names set,
+    // same reasoning as mutatedLets above.
+    i32PureNames: computeI32PureNames(fn),
     ownedStringAppendSymbols: fn.body ? collectOwnedStringAppendSymbols(fn.body, cx.checker) : new Set<ts.Symbol>(),
     emptyArrayInference: inferEmptyArrayElementTypes(fn, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — nested function decls are NEVER generators
@@ -9298,6 +9442,9 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    // (#3758) same independent-per-closure reasoning as mutatedLets above;
+    // computeI32PureNames itself no-ops on a non-block (concise) body.
+    i32PureNames: computeI32PureNames(expr),
     ownedStringAppendSymbols: ts.isBlock(expr.body)
       ? collectOwnedStringAppendSymbols(expr.body, cx.checker)
       : new Set<ts.Symbol>(),

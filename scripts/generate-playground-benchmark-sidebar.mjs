@@ -72,11 +72,23 @@ const BENCHMARKS = [
   { path: "examples/benchmarks/array.ts", exportName: "bench_array" },
 ];
 
-// V8 startup flag that permits `%`-prefixed native-syntax intrinsics, so the
-// generated JS factory (see `buildWarmJsFactorySource`) can force its own
-// tier-up via `%OptimizeFunctionOnNextCall` instead of depending on a
-// version-sensitive tuning flag like `--always-turbofan`.
-const JS_WARM_FLAGS = ["--allow-natives-syntax"];
+// V8 startup flags for the JS lane:
+//   --allow-natives-syntax      permits the `%`-prefixed native-syntax
+//                               intrinsics the generated JS factory (see
+//                               `buildWarmJsFactorySource`) uses to force its
+//                               own tier-up via `%OptimizeFunctionOnNextCall`,
+//                               instead of depending on a version-sensitive
+//                               tuning flag like the now-removed
+//                               `--always-turbofan`.
+//   --no-concurrent-recompilation
+//                               forces TurboFan compilation onto the main
+//                               thread instead of a background thread —
+//                               defense-in-depth for determinism (no
+//                               background-thread timing variance in when a
+//                               compile actually completes relative to the
+//                               calling code). NOT what fixes the fatal
+//                               crash below; see `buildWarmJsFactorySource`.
+const JS_WARM_FLAGS = ["--allow-natives-syntax", "--no-concurrent-recompilation"];
 
 // V8 startup flag that skips Liftoff (the single-pass Wasm baseline
 // compiler) entirely and compiles straight to TurboFan. This is the Wasm-side
@@ -103,6 +115,14 @@ function buildJsFactorySource(source, exportName) {
 // run under `--allow-natives-syntax` (JS_WARM_FLAGS), so this is only used
 // for the artifact written for the child process, never for the in-process
 // smoke test (the parent isn't launched with that flag).
+//
+// `%PrepareFunctionForOptimization` MUST be called before
+// `%OptimizeFunctionOnNextCall` — V8's `CanOptimizeFunction` unconditionally
+// CHECKs `ManualOptimizationTable::IsMarkedForManualOptimization` outside
+// fuzzing mode (`src/runtime/runtime-test.cc`) and V8_Fatal()s ("Check
+// failed: CheckMarkedForManualOptimization") if the function was never
+// registered. Omitting this call happened to not crash on this sandbox's
+// older V8 build but reliably crashed CI's Node v26 build on fib.ts.
 function buildWarmJsFactorySource(source, exportName) {
   const transpiled = ts.transpileModule(stripImportsAndExports(source), {
     compilerOptions: {
@@ -110,7 +130,7 @@ function buildWarmJsFactorySource(source, exportName) {
       module: ts.ModuleKind.None,
     },
   }).outputText;
-  return `${transpiled}\n${exportName}();\n%OptimizeFunctionOnNextCall(${exportName});\n${exportName}();\nreturn { ${exportName} };`;
+  return `${transpiled}\n%PrepareFunctionForOptimization(${exportName});\n${exportName}();\n%OptimizeFunctionOnNextCall(${exportName});\n${exportName}();\nreturn { ${exportName} };`;
 }
 
 function median(values) {
