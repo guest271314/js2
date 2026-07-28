@@ -657,10 +657,44 @@ function collectNumericFlowFacts(
  * `this.input = String(input)`) to unlock `this.input.indexOf(…)` and
  * `this.input.slice(…).split(…).length` as numeric.
  */
-function collectStringProperties(facts: NumericFlowFacts): Set<string> {
+/**
+ * (#3739 S1) Property names whose EVERY write is provably a string.
+ *
+ * `scopes` makes the prover slot-aware. Without it this was purely syntactic —
+ * a literal, a template, `String(x)`, a string method on a ground string, or a
+ * `+` with one ground side — which cannot see through the single most common
+ * shape there is:
+ *
+ *     function Tok(input) { this.input = input; }   // `input` is a PARAMETER
+ *
+ * A parameter read is not a literal, so `this.input` was never provably a
+ * string and its fnctor slot stayed `externref` — costing a
+ * `ref.test` + `ref.cast` + `__str_flatten` on every access (#3739).
+ *
+ * Following an identifier to its slot and requiring EVERY definition to be a
+ * ground string closes that. The slot's defs are already seeded from call-site
+ * arguments by the caller, so a constructor parameter resolves to the values
+ * actually passed. `visited` breaks the cycles that seeding can create
+ * (`f(x)` calling `f(x)`), and an EMPTY def list or a def with no expression is
+ * an opaque value — the trust boundary — and answers false.
+ */
+function collectStringProperties(facts: NumericFlowFacts, scopes: ScopeTable): Set<string> {
+  const visited = new Set<Slot>();
   const isGroundString = (expr: ts.Expression, depth: number): boolean => {
     if (depth > 8) return false;
     const value = unwrap(expr);
+    if (ts.isIdentifier(value)) {
+      const slot = scopes.resolve(value, value.text);
+      // No slot (a global / import) or a slot we are already proving (a cycle)
+      // is not provable. `defs.length === 0` means "declared, never defined".
+      if (!slot || slot.defs.length === 0 || visited.has(slot)) return false;
+      visited.add(slot);
+      try {
+        return slot.defs.every((def) => def.expr !== undefined && isGroundString(def.expr, depth + 1));
+      } finally {
+        visited.delete(slot);
+      }
+    }
     if (ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) || ts.isTemplateExpression(value)) {
       return true;
     }
@@ -974,8 +1008,6 @@ export function analyzeNumericPropertyNames(
     }
     return new Set();
   }
-  const stringProperties = collectStringProperties(facts);
-
   // Seed parameter slots from their call sites, the same way #2847 does: a
   // parameter with no visible call site contributes one opaque definition (so
   // it is never "numeric", but IS still an opaque param read at a property
@@ -989,6 +1021,12 @@ export function analyzeNumericPropertyNames(
     }
     if (parameter.slot.defs.length === before) parameter.slot.defs.push({});
   }
+
+  // (#3739 S1) AFTER the seeding above: the slot-aware string prover follows a
+  // parameter to the arguments actually passed, which only exist once the
+  // seeding loop has run. Before #3739 this ran earlier and was purely
+  // syntactic, so the ordering did not matter — now it does.
+  const stringProperties = collectStringProperties(facts, scopes);
 
   const numericSlots = new Set(scopes.allSlots());
   const numericFunctions = new Set(facts.functionsByName.keys());
