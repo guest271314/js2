@@ -7,7 +7,7 @@ import { ProgramAbiInvariantError } from "../ir/program-abi.js";
 import type { FuncHandle, FuncTypeDef, WasmFunction } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext } from "./context/types.js";
-import { definedFuncAt, pushDefinedFunc } from "./func-space.js";
+import { definedFuncAt, definedFuncHandleOf, pushDefinedFunc } from "./func-space.js";
 import {
   planProgramAbiSupportCallable,
   planProgramAbiUnitCallable,
@@ -298,6 +298,24 @@ export class ProgramAbiClassCallableRegistry {
         );
       }
     }
+  }
+
+  /** Resolve one exact class source unit to its current stable allocator handle. */
+  handleForUnit(unitId: IrUnitId): FuncHandle | undefined {
+    const canonical = this.units
+      .get(unitId)
+      ?.filter((observation) => this.ctx.mod.functions.includes(observation.func))
+      .at(-1);
+    return canonical ? definedFuncHandleOf(this.ctx, canonical.func) : undefined;
+  }
+
+  /** Resolve one exact class support binding to its current stable allocator handle. */
+  handleForSupport(bindingId: IrBindingId): FuncHandle | undefined {
+    const canonical = this.supports
+      .get(bindingId)
+      ?.filter((observation) => this.ctx.mod.functions.includes(observation.func))
+      .at(-1);
+    return canonical ? definedFuncHandleOf(this.ctx, canonical.func) : undefined;
   }
 
   private assertOpen(displayName: string): void {
