@@ -20,7 +20,7 @@ task_type: bugfix
 area: codegen
 language_feature: compiler-internals
 goal: standalone-gap
-related: [1919, 1921, 1599, 1539, 2508, 1712]
+related: [1919, 1921, 1599, 1539, 2508, 1712, 3724]
 ---
 
 # #3720 — a speculative rollback erases refusals, turning them into runtime traps
@@ -94,10 +94,12 @@ wholesale is its own remediation project, not a side effect of a bug fix.
       deliberate refusal (`sticky`), deliberate degrade (`severity: "degrade"`,
       per #1921's own rule that a degrade site must cite a tracking issue), or
       genuine probe (leave as-is).
-- [ ] `#1539` — decide whether the 60 standalone-RegExp refusals in compiled
-      Acorn are refusals (then `#1712`'s acceptance criteria must change, since
-      the artifact cannot honour those operations) or degrades (then say so
-      explicitly, and state what the substituted value does at runtime).
+- [x] `#1539` — **RESOLVED by #3724.** They were neither: the gate was refusing
+      work the lane already did (`emitRegexSearchCall` already routes every
+      subject through `__extern_toString`, so the ToString `re.test(x)` needs was
+      already running). Widening the argument gate took the compiled-Acorn
+      refusal count from ~60 to **0**, after which the remaining `#1539`
+      refusals were marked `sticky` — so this whole bucket is now honest.
 - [ ] `#2508` — `ensureExternStrictEqHelper` returns undefined for the
       string-element `any[]` case; that branch reads as an internal failure, not
       an intended degrade. Fix the helper or reclassify the site.
