@@ -72,11 +72,30 @@ const BENCHMARKS = [
   { path: "examples/benchmarks/array.ts", exportName: "bench_array" },
 ];
 
-// V8 startup flag that permits `%`-prefixed native-syntax intrinsics, so the
-// generated JS factory (see `buildWarmJsFactorySource`) can force its own
-// tier-up via `%OptimizeFunctionOnNextCall` instead of depending on a
-// version-sensitive tuning flag like `--always-turbofan`.
-const JS_WARM_FLAGS = ["--allow-natives-syntax"];
+// V8 startup flags for the JS lane:
+//   --allow-natives-syntax      permits the `%`-prefixed native-syntax
+//                               intrinsics the generated JS factory (see
+//                               `buildWarmJsFactorySource`) uses to force its
+//                               own tier-up via `%OptimizeFunctionOnNextCall`,
+//                               instead of depending on a version-sensitive
+//                               tuning flag like the now-removed
+//                               `--always-turbofan`.
+//   --no-concurrent-recompilation
+//                               forces TurboFan compilation onto the main
+//                               thread instead of a background thread. CI's
+//                               Node v26 V8 build hit a fatal internal
+//                               assertion ("Check failed:
+//                               CheckMarkedForManualOptimization") when
+//                               `%OptimizeFunctionOnNextCall` raced a
+//                               concurrent background recompile job V8 had
+//                               already queued on its own for a hot,
+//                               deeply-recursive function (fib.ts's `fib`
+//                               calling itself ~2.7M times before the
+//                               benchmark's own outer call completes) --
+//                               didn't reproduce locally (older V8), but this
+//                               flag removes the race entirely rather than
+//                               chasing a version-specific timing window.
+const JS_WARM_FLAGS = ["--allow-natives-syntax", "--no-concurrent-recompilation"];
 
 // V8 startup flag that skips Liftoff (the single-pass Wasm baseline
 // compiler) entirely and compiles straight to TurboFan. This is the Wasm-side
