@@ -1,5 +1,5 @@
 ---
-id: 3722
+id: 3727
 title: "IR classifies a PACKED (i8/i16) binary operand as an invariant violation — hard-fails a compile the legacy path handles"
 func-budget-allow:
   # The packed-operand capability-gap branch + the argument for why a packed
@@ -21,7 +21,7 @@ goal: ir-full-coverage
 related: [681, 1131, 2855, 3341, 3519]
 ---
 
-# #3722 — a packed IR operand is a capability gap, not a broken invariant
+# #3727 — a packed IR operand is a capability gap, not a broken invariant
 
 ## Problem
 

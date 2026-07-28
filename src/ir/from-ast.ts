@@ -7810,7 +7810,7 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     if (checkerProvesBinarySourceCapabilityGap(expr.left, expr.right, cx)) {
       throw new IrUnsupportedError("operand-coercion-unsupported", "build", detail);
     }
-    // (#3722) A PACKED operand (`i8`/`i16`) is a stable capability gap, not a
+    // (#3727) A PACKED operand (`i8`/`i16`) is a stable capability gap, not a
     // broken producer promise. Packed kinds are storage-only — WasmGC has no
     // i8/i16 value type, and the binary emitter rejects one in a value position
     // ("a packed type leaked"). So the IR simply cannot carry, say, a
