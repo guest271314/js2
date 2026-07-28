@@ -157,8 +157,54 @@ The two conversion calls per iteration that #3754's profile named
 (`__to_primitive`, `__unbox_number`) are gone, and the twin no longer ends in
 `__box_number`.
 
-### Follow-on, deliberately not taken here
+## The second lever, now PRICED (2026-07-28) — worth 2.24x, still open
 
-The second lever this issue identified — hoisting the per-call `ref.test` out
-of the guarded `__dc_*_g` trampoline — is untouched and still open. It is
-independent of the ABI change and wants its own measurement.
+The per-call `ref.test` in the guarded `__dc_*_g` trampoline was measured the
+same way #3755 was falsified: a throwaway patch making the fill emit the twin
+arm unconditionally (unsound in general; valid for this benchmark, whose
+receiver really is a `P`). That measures the CEILING of any hoisting scheme.
+
+Same container, interleaved, checksums matching:
+
+| arm             | numeric | method     |
+| --------------- | ------: | ---------: |
+| guarded (today) |  1.4017 |     0.9501 |
+| **unguarded**   |  1.4186 | **0.4240** |
+| guarded (today) |  1.4134 |     0.9556 |
+| **unguarded**   |  1.4170 | **0.4331** |
+
+**2.24x.** And 0.424 ms is *node parity* — node measured 0.426–0.474 ms on this
+axis in the same container. `numeric` is flat across all four arms, so this is
+signal, not drift.
+
+That is a much larger residual than expected for one `ref.test`: ~1.8 ns per
+iteration, far more than a well-predicted branch. The likely mechanism is not
+the test itself but the two-armed `if` around it defeating inlining of the
+trampoline at the call site — worth confirming before choosing an approach,
+because it changes which fix is right.
+
+### A sound approach that does NOT need general LICM
+
+The guard exists because a receiver-flow verdict (#3685) is a whole-program
+*inference*, so an unguarded `ref.cast` would turn imprecision into a trap.
+But the benchmark's shape is stronger than an inference:
+
+```js
+var p = new P(0);          // the ONLY definition of this slot
+for (…) { s = s + p.inc(); }
+```
+
+A local whose **every** definition is a `new <Class>(…)` has a *proven* class,
+not an inferred one — the same "every def" formulation `numericSlots` already
+uses, on the same `ScopeTable`/`Slot` machinery. For that narrow case the
+unguarded `__dc_<F>_<m>_<n>` trampoline is sound with no hoisting pass at all.
+
+That is the recommended slice: strengthen the admission for write-once
+`new`-initialised locals, rather than building loop-invariant code motion.
+
+## Follow-on status
+
+- **second lever** — priced at 2.24x above, NOT yet implemented.
+- **#3755** (per-call `__str_flatten`) — measured, worth 0, closed wont-fix.
+- **#3763** (numeric locals stay boxed) — the tokenizer's real remaining lever,
+  filed from the same profiling round.
