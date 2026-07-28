@@ -1,6 +1,13 @@
 ---
 id: 3739
 title: "perf: fnctor STRING fields stay externref — ref.test+cast+flatten per access; 6.6x on the tokenizer axis (9.5x vs node)"
+loc-budget-allow:
+  # S1's three pieces: the slot-aware string prover, the field promotion, and
+  # the read-site recognition — each carrying the reasoning for why it is sound
+  # and what it measured, since two of the three measured far below projection.
+  - src/codegen/numeric-property-analysis.ts
+  - src/codegen/fnctor-escape-gate.ts
+  - src/codegen/property-access.ts
 status: ready
 sprint: current
 created: 2026-07-28
