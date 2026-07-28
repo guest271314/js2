@@ -2945,7 +2945,7 @@ export function generateModule(
   const programAbiSession = irPlanningIdentityContext
     ? new ProgramAbiSession(irPlanningIdentityContext.inventory, mod)
     : undefined;
-  const ctx = createCodegenContext(mod, ast.checker, options, programAbiSession);
+  const ctx = createCodegenContext(mod, ast.checker, options, programAbiSession, irPlanningIdentityContext);
   const sourceFileInternal = ast.sourceFile as ts.SourceFile & { externalModuleIndicator?: ts.Node };
   ctx.sourceIsModule = sourceFileInternal.externalModuleIndicator !== undefined;
   recordSourceGlobalEnvironment(ctx, ast.sourceFile);
@@ -5536,7 +5536,7 @@ export function generateMultiModule(
   const programAbiSession = irPlanningIdentityContext
     ? new ProgramAbiSession(irPlanningIdentityContext.inventory, mod)
     : undefined;
-  const ctx = createCodegenContext(mod, multiAst.checker, options, programAbiSession);
+  const ctx = createCodegenContext(mod, multiAst.checker, options, programAbiSession, irPlanningIdentityContext);
   // Multi-file compilation is linked through import/export module records.
   ctx.sourceIsModule = true;
   try {
