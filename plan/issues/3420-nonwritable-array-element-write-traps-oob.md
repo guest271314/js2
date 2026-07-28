@@ -12,6 +12,15 @@ model: fable
 sprint: current
 horizon: m
 related: [3370, 3417, 3335, 3189]
+# The standalone follow-up extends the existing vec descriptor-overlay owner
+# with numeric-key reflection, ordinary [[Set]], and semantic delete markers.
+# These finalize-time splices share the overlay's private companion-table ABI;
+# extracting them would duplicate that state machine rather than isolate a
+# subsystem. The implementation therefore remains in its owning module.
+loc-budget-allow:
+  - src/codegen/vec-overlay.ts
+func-budget-allow:
+  - src/codegen/vec-overlay.ts::fillVecOverlayHelpers
 ---
 
 # #3420 — non-writable Array element write traps `oob` instead of throwing TypeError
