@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-07-28T12:15:19.610Z",
+  "generatedAt": "2026-07-28T14:37:32.809Z",
   "note": "Only packages with a committed, reproducible tests/dogfood/*-harness.mjs are listed. mustache (#3720), diff (#3721), and dayjs (#3747) were probed ad-hoc and surfaced real bugs but have no committed harness yet.",
   "packages": [
     {
@@ -10,7 +10,7 @@
       "shape": "esm-direct",
       "compile": {
         "success": true,
-        "durationMs": 35218,
+        "durationMs": 28340,
         "errorCount": 0,
         "binaryBytes": 596610,
         "categories": {}
@@ -28,11 +28,11 @@
       },
       "perf": {
         "sampleOp": "parse(own 226KB dist bundle)",
-        "wasmUs": 6746717.585,
-        "nodeUs": 18216.244999994524,
-        "wasmStdUs": 569299.8665617505,
-        "nodeStdUs": 2879.4930425771936,
-        "ratio": 0.002700015936711915,
+        "wasmUs": 6214971.531799994,
+        "nodeUs": 15288.137799990363,
+        "wasmStdUs": 208274.35427490805,
+        "nodeStdUs": 866.406171122399,
+        "ratio": 0.002459888628896515,
         "warmupRounds": 2,
         "measuredRounds": 9
       },
@@ -51,7 +51,7 @@
       "shape": "esm-direct",
       "compile": {
         "success": false,
-        "durationMs": 1669,
+        "durationMs": 1292,
         "errorCount": 64,
         "binaryBytes": 0,
         "categories": {
@@ -109,7 +109,7 @@
       "shape": "esm-driver-epilogue",
       "compile": {
         "success": true,
-        "durationMs": 448,
+        "durationMs": 312,
         "errorCount": 0,
         "binaryBytes": 7905,
         "categories": {}
@@ -126,11 +126,11 @@
       },
       "perf": {
         "sampleOp": "op_mixed_all_kinds",
-        "wasmUs": 38.94746578648218,
-        "nodeUs": 0.19274375354236523,
-        "wasmStdUs": 1.7171935788385917,
-        "nodeStdUs": 0.4884818906367938,
-        "ratio": 0.004948813732811915,
+        "wasmUs": 37.805664478182095,
+        "nodeUs": 0.1818245110123526,
+        "wasmStdUs": 2.312647765992195,
+        "nodeStdUs": 0.008531962475355178,
+        "ratio": 0.0048094515338378665,
         "warmupRounds": 2,
         "measuredRounds": 9
       },
@@ -149,7 +149,7 @@
       "shape": "esm-direct",
       "compile": {
         "success": true,
-        "durationMs": 639,
+        "durationMs": 564,
         "errorCount": 9,
         "binaryBytes": 17569,
         "categories": {
@@ -177,11 +177,11 @@
       },
       "perf": {
         "sampleOp": "parseCookie(8-pair header)",
-        "wasmUs": 436.0232056277044,
-        "nodeUs": 0.8756720779203605,
-        "wasmStdUs": 86.9280083809816,
-        "nodeStdUs": 0.07705462137474296,
-        "ratio": 0.002008315306658351,
+        "wasmUs": 401.9859283054733,
+        "nodeUs": 0.8369040968342297,
+        "wasmStdUs": 46.322671286609484,
+        "nodeStdUs": 0.08388455814051107,
+        "ratio": 0.0020819238632608494,
         "warmupRounds": 2,
         "measuredRounds": 9
       },

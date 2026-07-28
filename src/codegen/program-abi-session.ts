@@ -645,6 +645,11 @@ export class ProgramAbiSession {
     return locator !== undefined && (allocatorObject === undefined || locatorObject(locator) === allocatorObject);
   }
 
+  /** Return the canonical ABI binding that already owns an exact allocator object. */
+  locatorBindingId(allocatorObject: object): IrBindingId | undefined {
+    return this.locatorOwners.get(allocatorObject);
+  }
+
   registerStructuralReference(id: IrBindingId, key: string): void {
     this.assertOpen(`register structural reference for ${id}`);
     this.assertStructuralReference(id, key, true);
