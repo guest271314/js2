@@ -6,6 +6,10 @@ loc-budget-allow:
   # must survive rollback (a swallowed refusal compiled to a trapping module).
   - src/codegen/expressions.ts
   - src/codegen/expressions/call-namespace-static.ts
+  # The `sticky?: true` field on CodegenError plus the doc-comment stating the
+  # opt-in rule (refusal sites only, never a probe's failure). The flag has to
+  # live on the diagnostic interface, which is what this file declares.
+  - src/codegen/context/types.ts
 func-budget-allow:
   - src/codegen/expressions/call-namespace-static.ts::compileNamespaceStaticCall
 status: in-progress

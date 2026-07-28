@@ -1,6 +1,10 @@
 ---
 id: 3724
 title: "Standalone `re.test(x)`/`re.exec(x)` refused any argument not PROVABLY a string — in front of a ToString that was already running"
+loc-budget-allow:
+  # The argument-coercion path (ToString ahead of the match) is emitted by the
+  # standalone RegExp lowering itself, so the ~74 net lines land in this file.
+  - src/codegen/regexp-standalone.ts
 status: done
 sprint: current
 created: 2026-07-28

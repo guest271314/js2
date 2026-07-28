@@ -1,6 +1,10 @@
 ---
 id: 3727
 title: "IR classifies a PACKED (i8/i16) binary operand as an invariant violation — hard-fails a compile the legacy path handles"
+loc-budget-allow:
+  # Same 12 lines as the func-budget grant below — the packed-operand branch is
+  # a guard inside `lowerBinary`, so it necessarily lands in this god-file.
+  - src/ir/from-ast.ts
 func-budget-allow:
   # The packed-operand capability-gap branch + the argument for why a packed
   # kind is not a producer-invariant violation.
