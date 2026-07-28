@@ -213,6 +213,20 @@ export function emitStrConcatHelpers(shared: NativeStrShared): void {
     });
   }
 
+  emitStrConcatOwnedHelper(shared);
+}
+
+/**
+ * `__str_concat_owned` — IR-only owned-append fast path (#3740 / #3744),
+ * called by `string.concat` in `owned-append` mode (`ir/integration.ts`; shape
+ * license in `src/ir/string-builder-shape.ts`). Split out of
+ * `emitStrConcatHelpers` for the #3400 per-function LOC ceiling; emission
+ * order (and thus every minted funcIdx) is unchanged — this runs as that
+ * builder's final step.
+ */
+function emitStrConcatOwnedHelper(shared: NativeStrShared): void {
+  const { ctx, strTypeIdx, strDataTypeIdx, strRef } = shared;
+
   // --- $__str_concat_owned(lhs: ref $AnyString, rhs: ref $AnyString) -> ref $AnyString ---
   // (#3740 follow-up) IR-only fast path for a `string.concat` whose LHS is
   // proven "owned-append" — the caller (`ir/from-ast.ts`'s

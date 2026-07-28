@@ -12,6 +12,27 @@ area: ir, codegen, strings
 goal: performance
 language_feature: strings, loops
 related: [3740, 1210, 1761, 3741, 3745]
+# loc-budget-allow justification: the detector, kill-switch predicate and all
+# documentation live in the subsystem module src/ir/string-builder-shape.ts;
+# what remains in the two driver files is irreducible wiring — select.ts (+3):
+# the `string-builder-candidate` IrFallbackReason union variant, its import,
+# and the one-line `stringBuilderForcedLegacy(body)` gate call, which must sit
+# in `whyNotIrClaimable`; integration.ts (+7): the `owned-append` dispatch in
+# the `emitStringConcat` resolver, which needs the closure-scoped
+# `stringBackend` helper table and cannot move out of `makeResolver`.
+loc-budget-allow:
+  - src/ir/select.ts
+  - src/ir/integration.ts
+# func-budget-allow justification: same irreducible wiring as above —
+# `whyNotIrClaimable` gains exactly one line (the kill-switch gate call) and
+# `makeResolver` gains the 7-line `owned-append` dispatch, which must live in
+# its `emitStringConcat` resolver method because it reads the closure-scoped
+# `stringBackend` helper table. The helper emission itself
+# (`emitStrConcatOwnedHelper`, ~180 LOC) is a separate function in
+# src/codegen/native-strings-basics.ts, under the 300-LOC ceiling.
+func-budget-allow:
+  - src/ir/select.ts::whyNotIrClaimable
+  - src/ir/integration.ts::makeResolver
 ---
 
 # #3744 — IR-native fast path for `owned-append` `string.concat`

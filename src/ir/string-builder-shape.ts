@@ -102,6 +102,24 @@ function loopBodyOnlyAppends(loopBody: ts.Node, name: string): boolean {
  * where the loop only ever appends to `s`. Does not recurse into nested
  * function scopes — those make their own, independent IR-claim decision.
  */
+/**
+ * (#3740 / #3744) Kill-switch gate called by `whyNotIrClaimable`
+ * (`src/ir/select.ts`). Builder loops are claimed by IR BY DEFAULT: IR has its
+ * own fast path for this shape (`__str_concat_owned`, wired through
+ * `string.concat`'s `owned-append` mode in `ir/integration.ts`) that produces
+ * correct, meaningfully faster results than IR's old default (verified — no
+ * more O(N) cons/flatten allocation per append). `JS2WASM_IR_STRING_BUILDER=0`
+ * forces this shape back to legacy (kill switch, same convention as e.g.
+ * `JS2WASM_UNION_ANYREP=0`) — legacy remains strictly faster for benchmarks
+ * whose index arithmetic ALSO uses bitwise ops on untyped `number`s (e.g.
+ * `(i * 13) & 31`): legacy promotes such loop-local arithmetic to native i32
+ * (see #1948's loop-var-promotion note), IR does not yet (#3745), and that gap
+ * is unrelated to string-building.
+ */
+export function stringBuilderForcedLegacy(body: ts.Node): boolean {
+  return process.env.JS2WASM_IR_STRING_BUILDER === "0" && containsStringBuilderLoopShape(body);
+}
+
 export function containsStringBuilderLoopShape(root: ts.Node): boolean {
   let found = false;
   const scanStatements = (stmts: readonly ts.Statement[]): void => {

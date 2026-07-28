@@ -55,7 +55,7 @@
 //     `localClasses` set drives that exemption.
 
 import { ts, forEachChild } from "../ts-api.js";
-import { containsStringBuilderLoopShape } from "./string-builder-shape.js";
+import { stringBuilderForcedLegacy } from "./string-builder-shape.js";
 // (#1373b C-1) Pure-syntactic async helpers from the LEAF module (safe for
 // ir/* — async-static.ts imports only ts-api, so no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
@@ -137,11 +137,7 @@ export type IrFallbackReason =
   // future slice can tell "method-specific gate failure" apart from generic
   // body-shape rejections that apply to top-level FunctionDeclarations too.
   | "class-method"
-  // (#3740) `let s = ""; for (...) s += <expr>` shape — legacy rewrites this
-  // into a growable/presized buffer (#1210/#1761); IR doesn't implement
-  // that rewrite yet, so an IR claim here would silently regress to
-  // per-append allocation. See `containsStringBuilderLoopShape`.
-  | "string-builder-candidate"
+  | "string-builder-candidate" // (#3740/#3744) kill-switch-forced legacy — see ./string-builder-shape.ts
   | "deferred-feature"; // permanently excluded (eval, with, import(), Proxy)
 
 export interface IrFallback {
@@ -1378,21 +1374,7 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
-  // (#3740 / #3744) `let s = ""; for (...) s += <expr>` builder loops are now
-  // claimed by IR BY DEFAULT: IR has its own fast path for this shape
-  // (`__str_concat_owned`, wired through `string.concat`'s `owned-append`
-  // mode in `ir/integration.ts`) that produces correct, meaningfully faster
-  // results than IR's old default (verified — no more O(N) cons/flatten
-  // allocation per append). `JS2WASM_IR_STRING_BUILDER=0` forces this shape
-  // back to legacy (kill switch, same convention as e.g.
-  // `JS2WASM_UNION_ANYREP=0`) — legacy remains strictly faster for
-  // benchmarks whose index arithmetic ALSO uses bitwise ops on untyped
-  // `number`s (e.g. `(i * 13) & 31`): legacy promotes such loop-local
-  // arithmetic to native i32 (see #1948's loop-var-promotion note), IR does
-  // not yet, and that gap is unrelated to string-building.
-  if (process.env.JS2WASM_IR_STRING_BUILDER === "0" && containsStringBuilderLoopShape(body)) {
-    return "string-builder-candidate";
-  }
+  if (stringBuilderForcedLegacy(body)) return "string-builder-candidate";
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;
