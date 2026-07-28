@@ -121,6 +121,17 @@
 
     <npm-compat-chart src="./benchmarks/results/npm-compat.json"></npm-compat-chart>
 
+    <!-- Same chart component the landing page uses for the wasm/JS sidebar, so
+         the comparison is drawn identically here; the baseline tick is native
+         Node running the SAME pinned package. -->
+    <perf-benchmark-chart
+      src="./benchmarks/results/npm-compat-perf.json"
+      mode="perf"
+      baseline-label="Node"
+      title="Compiled Wasm vs native Node — same pinned package"
+      legend="Bar = compiled Wasm throughput relative to the same package running natively under Node (tick). Left of the tick is slower than Node."
+    ></perf-benchmark-chart>
+
     <footer>
       <div>
         <h2>What is measured</h2>
@@ -152,5 +163,6 @@
 
     <script type="module" src="./components/site-nav.js"></script>
     <script type="module" src="./components/npm-compat-chart.js"></script>
+    <script type="module" src="./components/perf-benchmark-chart.js"></script>
   </body>
 </html>
