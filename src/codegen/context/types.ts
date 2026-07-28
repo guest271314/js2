@@ -39,6 +39,31 @@ export interface CodegenError {
    * classification fails loudly instead of silently degrading.
    */
   severity?: "error" | "warning" | "degrade";
+  /**
+   * (#3725) Survive a speculative rollback.
+   *
+   * `rollbackSpeculative` (#1919) truncates `ctx.errors` back to the snapshot,
+   * which is correct for a genuine PROBE — one of several candidate lowerings,
+   * where a failure just means "not this one". But the backend's REFUSAL idiom
+   * is also `reportError(...); return null`, and that lands on the very same
+   * "inner produced no usable value" exit in `compileExpression`. So a
+   * deliberate "this program cannot be compiled for this target" was discarded
+   * and `pushDefaultValue` substituted a null — the compile reported
+   * `success: true` with zero errors and the module trapped at runtime
+   * ("dereferencing a null pointer"). A refusal silently became a trap.
+   *
+   * Marking a diagnostic `sticky` opts it out of that truncation. Use it ONLY at
+   * sites that are a deliberate, documented refusal (target capability gaps like
+   * the #1599 standalone JSON refusal) — never on a probe's failure, which
+   * SHOULD vanish with the emission it described.
+   *
+   * Deliberately opt-IN rather than "retain every fatal diagnostic": auditing
+   * the retain-all behaviour surfaced pre-existing sites that depend on the
+   * swallow (60 `#1539` standalone-RegExp refusals inside the compiled-Acorn
+   * acceptance module alone), so flipping it wholesale is its own remediation
+   * project. See #3725.
+   */
+  sticky?: true;
 }
 
 /** Result returned by generateModule / generateMultiModule. */
