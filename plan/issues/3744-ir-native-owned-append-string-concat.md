@@ -62,7 +62,7 @@ computed and then silently discarded.
 
 - **`src/codegen/native-strings-basics.ts`**: new WasmGC helper
   `__str_concat_owned(lhs: ref $AnyString, rhs: ref $AnyString) -> ref
-  $AnyString`, added inside `emitStrConcatHelpers` (needs `__str_flatten`
+$AnyString`, added inside `emitStrConcatHelpers` (needs `__str_flatten`
   and `__str_buf_next_cap`, both already registered by that point). Flattens
   both operands (cheap identity when already flat), then:
   - if `lhs`'s backing array has spare capacity beyond its own recorded
@@ -122,9 +122,16 @@ fix. Disassembly shows why: IR still emits zero `i32.mul` anywhere in `run`
 rewrite instead of native i32 arithmetic, because #3741's inference doesn't
 reach this benchmark's specific shapes (two chained bitwise-derived locals
 per build-loop iteration; a multiply-then-add hash accumulator). Filed as
-**#3745** with the disassembly evidence and a concrete next step. Fully
-closing that gap would let this exact benchmark reach legacy parity
-entirely through IR, with no gate involved at all.
+**#3745** with the disassembly evidence and a concrete next step.
+
+**Update**: #3745 landed a narrower IR-native fast path
+(`src/ir/i32-pure-bitwise.ts`) that closes the build loop's chained-bitwise
+shape (an ~83% cut in ToInt32-dance instructions there) but deliberately
+excludes the hash loop's `charCodeAt`-involving accumulator (a documented
+NaN-preservation correctness hazard). That residual gap is tracked
+separately as **#3752** (needs legacy's #2682-style hoisted-in-bounds-read
+proof). The `JS2WASM_IR_STRING_BUILDER` kill switch therefore remains
+useful until #3752 lands.
 
 ## Validation
 
@@ -134,7 +141,7 @@ entirely through IR, with no gate involved at all.
   - confirms owned-append output matches the JS reference across several
     geometric-doubling-boundary trip counts (0,1,2,7,8,9,15,16,17,31,32,33,
     63,64,65,100,1000,5000);
-  - confirms the *actual* string-hash benchmark source is byte-for-byte
+  - confirms the _actual_ string-hash benchmark source is byte-for-byte
     correct through the new path too (0..20000).
 - `tests/issue-1761.test.ts`'s `growCalls` helper counted
   `call $__str_buf_next_cap` **module-wide**, which broke once

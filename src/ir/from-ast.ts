@@ -98,6 +98,12 @@ import {
   type IrLiftedFunctionArtifactIdentity,
   type IrUnitId,
 } from "./identity.js";
+import {
+  computeI32PureNames,
+  type I32PureNames,
+  isI32PureExprIR,
+  isIrBitwiseOperatorToken,
+} from "./i32-pure-bitwise.js";
 import { IrUnsupportedError } from "./outcomes.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
@@ -815,6 +821,7 @@ export function lowerFunctionAstToIr(
   const liftedUnitProvenance: IrDerivedUnitProvenance[] = [];
   const liftedCounter = { value: 0 };
   const ownedStringAppendSymbols = collectOwnedStringAppendSymbols(fn.body, options.checker);
+  const i32PureNames = computeI32PureNames(fn);
   const emptyArrayInference = inferEmptyArrayElementTypes(
     fn,
     options.checker ? new TsCheckerOracle(options.checker) : undefined,
@@ -837,6 +844,7 @@ export function lowerFunctionAstToIr(
     liftedUnitProvenance,
     liftedCounter,
     mutatedLets,
+    i32PureNames,
     ownedStringAppendSymbols,
     emptyArrayInference,
     // (#2972) statically-known literal string lengths — proven-in-bounds
@@ -1546,6 +1554,17 @@ interface LowerCtx {
    * `lowerFunctionAstToIr` via `collectMutatedLetNames`.
    */
   readonly mutatedLets: ReadonlySet<string>;
+  /**
+   * (#3745) Names proven, by the SAME analyses legacy's own #1120/#1236
+   * i32-local promotion uses (`collectI32CoercedLocals`, `detectI32LoopVar`),
+   * to always hold a clean int32 value when read. Consulted ONLY by
+   * `isI32PureExprIR` (`ir/i32-pure-bitwise.ts`) to fast-path a bitwise
+   * operator's operand lowering (cheap `i32.trunc_sat_f64_s` instead of the
+   * full ToInt32 dance) — never used to change any local's declared IrType,
+   * so no other consumer in the function is affected. Computed once per
+   * outer/nested/closure function body, mirroring `mutatedLets`.
+   */
+  readonly i32PureNames: I32PureNames;
   /**
    * #3502 conservative ownership proof for string builders. Each symbol is a
    * fresh empty-string `let` whose loop-local uses are discarded `+=` writes
@@ -7702,8 +7721,28 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
     }
   }
 
-  const lhs = lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
-  const rhs = lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
+  const lhsF64 = lowerExpr(expr.left, cx, irVal({ kind: "f64" }));
+  const rhsF64 = lowerExpr(expr.right, cx, irVal({ kind: "f64" }));
+  // (#3745) A bitwise/shift operator whose BOTH operand expressions are
+  // provably already clean int32-range values (per `isI32PureExprIR`, reusing
+  // legacy's own #1120/#1236 proofs) can skip the expensive ToInt32 dance
+  // (`js.bit*`'s per-operand IEEE-754 bit-decomposition, #3739) for a cheap
+  // `i32.trunc_sat_f64_s` instead — bit-for-bit identical to ToInt32 exactly
+  // under that precondition. This never changes any local's declared IrType;
+  // `lhsF64`/`rhsF64` above are computed by the SAME unchanged f64 lowering
+  // as always, only the values fed into the switch below differ. Falls
+  // through unchanged (`lhs`/`rhs` stay the plain f64 values) whenever the
+  // predicate fails for either operand or `op` isn't bitwise.
+  const i32PureBitwiseOperands =
+    isIrBitwiseOperatorToken(op) &&
+    isI32PureExprIR(expr.left, cx.i32PureNames) &&
+    isI32PureExprIR(expr.right, cx.i32PureNames);
+  const lhs = i32PureBitwiseOperands
+    ? cx.builder.emitUnary("i32.trunc_sat_f64_s", lhsF64, irVal({ kind: "i32" }))
+    : lhsF64;
+  const rhs = i32PureBitwiseOperands
+    ? cx.builder.emitUnary("i32.trunc_sat_f64_s", rhsF64, irVal({ kind: "i32" }))
+    : rhsF64;
   const lt = typeOfValue(lhs, cx);
   const rt = typeOfValue(rhs, cx);
 
@@ -8797,6 +8836,9 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    // (#3745) nested functions get their own independent i32-pure-names set,
+    // same reasoning as mutatedLets above.
+    i32PureNames: computeI32PureNames(fn),
     ownedStringAppendSymbols: fn.body ? collectOwnedStringAppendSymbols(fn.body, cx.checker) : new Set<ts.Symbol>(),
     emptyArrayInference: inferEmptyArrayElementTypes(fn, cx.checker ? new TsCheckerOracle(cx.checker) : undefined),
     // Slice 7a (#1169f) — nested function decls are NEVER generators
@@ -8892,6 +8934,9 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    // (#3745) same independent-per-closure reasoning as mutatedLets above;
+    // computeI32PureNames itself no-ops on a non-block (concise) body.
+    i32PureNames: computeI32PureNames(expr),
     ownedStringAppendSymbols: ts.isBlock(expr.body)
       ? collectOwnedStringAppendSymbols(expr.body, cx.checker)
       : new Set<ts.Symbol>(),
