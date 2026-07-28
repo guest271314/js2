@@ -1,11 +1,10 @@
 ---
 id: 3734
 title: "array.ts landing-page benchmark: IR compiles .push() to a non-inlined helper call while legacy fully inlines it — same IR-vs-legacy gap as #3739/#3741, not a generic-dispatch problem"
-status: done
+status: ready
 sprint: current
 created: 2026-07-28
 updated: 2026-07-28
-completed: 2026-07-28
 priority: high
 horizon: l
 feasibility: hard
@@ -18,6 +17,108 @@ depends_on: []
 related: [3704, 3733, 3739, 3741]
 ---
 # #3734 — `array.ts` push loop: IR emits a non-inlined helper call, legacy fully inlines
+
+## REOPENED 2026-07-28 — the close-out below reached the WRONG conclusion
+
+The close-out section immediately below is **correct about inlining** (the
+repeated-`wasm-opt`-to-fixpoint pipeline really does inline
+`__vec_elem_set_<N>`) but its **conclusion was wrong**. It attributed the
+residual ~2-3x wasm-vs-js gap to "WasmGC array/struct representation
+overhead vs. V8's native array fast paths" and closed the issue as
+not-actionable-here. That attribution is refuted by direct measurement.
+
+### The measurement that refutes it
+
+Same source, same 4-round `-O4` fixpoint, same process, median of 9 rounds
+× 200 calls after 200 warm-up calls:
+
+| build                    | time     | vs JS             |
+| ------------------------ | -------- | ----------------- |
+| **legacy** (`experimentalIR: false`) | **36.5 µs** | **0.51x — 2x FASTER than JS** |
+| JS (V8, native arrays)   | 71.8 µs  | 1.00x             |
+| **IR** (default path)    | **200.9 µs** | **2.80x slower**  |
+
+Legacy WasmGC beats V8's native arrays by 2x on this exact benchmark. So
+there is **no architectural WasmGC-vs-native-array penalty** here — the
+entire gap is an **IR-vs-legacy codegen gap** (5.5x), the same family as
+#3739/#3741. Re-measured on the #3741 branch (`6a710844`): still 2.78x, so
+#3741's i32-slot promotion as currently scoped does **not** cover this.
+
+Both loops are uniformly ~5x slower, i.e. a per-iteration overhead, not an
+allocation/growth artifact:
+
+| variant              | IR       | legacy   | ratio |
+| -------------------- | -------- | -------- | ----- |
+| fill+sum (benchmark) | 203.8 µs | 38.9 µs  | 5.2x  |
+| fill only            | 121.6 µs | 25.0 µs  | 4.9x  |
+| sum ×10 (prefilled)  | 862.7 µs | 150.2 µs | 5.7x  |
+
+### Cause 1 — i32-promotion analysis is keyed by variable NAME, not binding identity
+
+The dominant cause. `bench_array` has two **sibling** `for` loops that each
+declare their own block-scoped `let i`. These are two distinct bindings, but
+the promotion analysis treats them as one name and conservatively rejects
+**both**. Isolated on the #3741 branch (counting `i32.add`/`i32.lt_s` vs
+`f64.add`/`f64.lt` in the loop bodies):
+
+| case                                    | promoted?             |
+| --------------------------------------- | --------------------- |
+| one loop, counter `i`                   | ✅ i32                |
+| two sibling loops, **both** named `i`   | ❌ **all f64**        |
+| two sibling loops, `i` then `j`         | ✅ i32                |
+| two sibling loops, both `i` (2nd trivial) | ❌ **all f64**      |
+
+Renaming the second counter `i`→`j` — a pure alpha-rename, no semantic
+change — takes the benchmark from **196.3 µs → 132.0 µs (33% faster)** on
+the #3741 branch, both producing the correct `49995000`. Two sibling
+`for (let i …)` loops is among the most common shapes in real JS/TS, so this
+silently disables the optimization across a wide swath of ordinary code, not
+just this benchmark. Legacy does **not** have this bug (it promotes both
+counters in the same function), so this is specific to the IR port.
+
+### Cause 2 — IR picks an f64 element type where legacy picks i32
+
+Secondary, but structural. For the same `const arr: number[] = []` filled
+exclusively with int32-range integers:
+
+- **legacy** lowers `arr` to `(array (mut i32))` — 4 bytes/element, and
+  widens with `f64.convert_i32_s` on read.
+- **IR** lowers it to `(array (mut f64))` — 8 bytes/element, 2x the memory
+  traffic over the 10k-element array, plus a `f64.convert_i32_s` on every
+  store from an i32-typed counter.
+
+### What's left after Cause 1
+
+Renaming alone gets IR to 132 µs vs legacy's 36.5 µs — still 3.6x — so
+Cause 2 (and possibly further per-iteration conversion overhead) accounts
+for the remainder. Fixing Cause 1 is the cheap, high-leverage first step;
+Cause 2 is a separate, larger element-type-inference question.
+
+### Acceptance criteria (revised)
+
+- [ ] Fix the name-keying: the promotion analysis must key on **binding
+      identity** (symbol / declaration node), not the identifier's text, so
+      sibling loops that reuse a counter name are each judged independently.
+      Regression test: two sibling `for (let i …)` loops in one function
+      must both promote, and must still produce identical results to JS.
+- [ ] Re-measure `array.ts` — expect ≥33% improvement from Cause 1 alone.
+- [ ] Decide separately whether to pursue Cause 2 (i32 element-type
+      inference for integer-only `number[]`), or split it into its own issue.
+
+### Note on ownership
+
+Cause 1 lives in the same IR i32-promotion code #3741 is actively changing
+(branch `claude/issue-3741-i32-loop-shadow`). It should be fixed **there**,
+not in a parallel branch, to avoid two lanes editing `src/ir/from-ast.ts`
+concurrently. This issue tracks the array.ts outcome and Cause 2.
+
+---
+
+## Superseded close-out (2026-07-28) — inlining claim correct, conclusion wrong
+
+**Everything below this line is retained for the record. Its inlining
+finding stands; its "residual gap is architectural" conclusion is refuted
+by the measurements above.**
 
 ## Re-verified 2026-07-28: the real benchmark pipeline already inlines this — no code change landed
 
