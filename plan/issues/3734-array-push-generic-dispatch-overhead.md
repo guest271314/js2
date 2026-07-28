@@ -24,7 +24,34 @@ related: [3704, 3733, 3739, 3741]
 # resolved vec type in a second function purely to satisfy the line budget.
 func-budget-allow:
   - src/ir/from-ast.ts::lowerMethodCall
+  # `lowerFunctionAstToIr` +5 (366 → 371, measured against origin/main, so this is
+  # this PR's own growth and not un-baselined spill from #3740). The element
+  # inference must now run AFTER `planI32Slots` — it needs the slot plan to decide
+  # whether an integer-only `number[]` may use an i32 element layout — and the
+  # resulting `plannedExactInt32Proof(i32Slots)` has to be threaded into the
+  # builder at construction. That is a sequencing constraint in the driver, so it
+  # cannot be pushed down into a callee.
+  #
+  # #3741's issue file already granted this exact key, and covered it while that
+  # PR was this branch's base. PR #3740 has since merged, taking its issue file
+  # out of this diff and the grant with it.
+  - src/ir/from-ast.ts::lowerFunctionAstToIr
+# +193 lines in `from-ast.ts` for the narrowed-vector lowering: the store/read
+# emitters, the live i32-producibility probe, and the bounds-checked read that
+# must widen INSIDE the `then` arm. All of it needs `LowerCtx`/`lowerExpr`/the
+# builder, so it cannot move to a pure module without an import cycle — the
+# same constraint #3758's `ir/i32-pure-bitwise.ts` header records for
+# `emitI32PureExpr`. The parts that ARE pure already live in
+# `src/ir/array-element-inference.ts` and `src/ir/analysis/i32-slots.ts`.
+#
+# This grant was previously satisfied via #3741's issue file, which was in this
+# PR's diff while the branch was stacked on PR #3740. That PR has now merged, so
+# its issue file left the diff and the allowance had to be restated here — the
+# `from-ast.ts` growth itself is unchanged (merge-base and main are both 9683).
+loc-budget-allow:
+  - src/ir/from-ast.ts
 ---
+
 # #3734 — `array.ts` push loop: IR emits a non-inlined helper call, legacy fully inlines
 
 ## RESOLVED 2026-07-28 — Cause 1 landed in #3741, Cause 2 landed here
@@ -34,13 +61,13 @@ Both causes are now fixed. Measured on this box with one calibrated harness
 `wasm-opt -O4` fixpoint the real landing-page artifact pipeline runs), JS pinned
 to V8's optimizing tier via `%OptimizeFunctionOnNextCall`:
 
-| build                                    | time      | vs JS            |
-| ---------------------------------------- | --------- | ---------------- |
-| `main` before #3741 (as filed)           | 204.3 µs  | 5.3x slower      |
-| with #3741 (Cause 1) — this branch's base | 100.4 µs  | 2.25x slower     |
-| **with Cause 2 (this change)**           | **34.2 µs** | **0.85x — FASTER than JS** |
-| legacy (reference)                       | 28.0 µs   | 0.70x            |
-| JS (V8, native arrays)                   | 40.3 µs   | 1.00x            |
+| build                                     | time        | vs JS                      |
+| ----------------------------------------- | ----------- | -------------------------- |
+| `main` before #3741 (as filed)            | 204.3 µs    | 5.3x slower                |
+| with #3741 (Cause 1) — this branch's base | 100.4 µs    | 2.25x slower               |
+| **with Cause 2 (this change)**            | **34.2 µs** | **0.85x — FASTER than JS** |
+| legacy (reference)                        | 28.0 µs     | 0.70x                      |
+| JS (V8, native arrays)                    | 40.3 µs     | 1.00x                      |
 
 The IR lane went from **2.25x slower than V8 to 0.85x** — a **2.9x** improvement
 over its own base — and the IR-vs-legacy gap closed from 3.5x to 1.22x.
@@ -128,7 +155,7 @@ nothing; a wrong narrowing is a silent wrong answer.
 
 ### One real bug found and fixed during implementation
 
-The first version of the element-access classifier treated *any* binary
+The first version of the element-access classifier treated _any_ binary
 expression with the element access as its LEFT operand as a store. `arr[i] * 2`
 matches that shape and is a plain read — so a perfectly narrowable array
 silently stayed f64 whenever the sum loop did anything with the element. Fixed
@@ -161,11 +188,11 @@ not-actionable-here. That attribution is refuted by direct measurement.
 Same source, same 4-round `-O4` fixpoint, same process, median of 9 rounds
 × 200 calls after 200 warm-up calls:
 
-| build                    | time     | vs JS             |
-| ------------------------ | -------- | ----------------- |
-| **legacy** (`experimentalIR: false`) | **36.5 µs** | **0.51x — 2x FASTER than JS** |
-| JS (V8, native arrays)   | 71.8 µs  | 1.00x             |
-| **IR** (default path)    | **200.9 µs** | **2.80x slower**  |
+| build                                | time         | vs JS                         |
+| ------------------------------------ | ------------ | ----------------------------- |
+| **legacy** (`experimentalIR: false`) | **36.5 µs**  | **0.51x — 2x FASTER than JS** |
+| JS (V8, native arrays)               | 71.8 µs      | 1.00x                         |
+| **IR** (default path)                | **200.9 µs** | **2.80x slower**              |
 
 Legacy WasmGC beats V8's native arrays by 2x on this exact benchmark. So
 there is **no architectural WasmGC-vs-native-array penalty** here — the
@@ -190,12 +217,12 @@ the promotion analysis treats them as one name and conservatively rejects
 **both**. Isolated on the #3741 branch (counting `i32.add`/`i32.lt_s` vs
 `f64.add`/`f64.lt` in the loop bodies):
 
-| case                                    | promoted?             |
-| --------------------------------------- | --------------------- |
-| one loop, counter `i`                   | ✅ i32                |
-| two sibling loops, **both** named `i`   | ❌ **all f64**        |
-| two sibling loops, `i` then `j`         | ✅ i32                |
-| two sibling loops, both `i` (2nd trivial) | ❌ **all f64**      |
+| case                                      | promoted?      |
+| ----------------------------------------- | -------------- |
+| one loop, counter `i`                     | ✅ i32         |
+| two sibling loops, **both** named `i`     | ❌ **all f64** |
+| two sibling loops, `i` then `j`           | ✅ i32         |
+| two sibling loops, both `i` (2nd trivial) | ❌ **all f64** |
 
 Renaming the second counter `i`→`j` — a pure alpha-rename, no semantic
 change — takes the benchmark from **196.3 µs → 132.0 µs (33% faster)** on
