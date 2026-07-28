@@ -314,7 +314,7 @@ describe("#3765 — carrier verdict application stays structural", () => {
     try {
       applyNumericPropertyAnalysis(target, {}, [sourceFile]);
     } finally {
-      if (saved === undefined) delete process.env.JS2WASM_NUMERIC_LOCALS;
+      if (saved === undefined) Reflect.deleteProperty(process.env, "JS2WASM_NUMERIC_LOCALS");
       else process.env.JS2WASM_NUMERIC_LOCALS = saved;
     }
     expect(target.numericPropertyNames).toContain("count");
