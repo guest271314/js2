@@ -114,10 +114,24 @@ it makes a local run on an older Node accurate instead of noisy, and the cases
 run for real wherever the engine supports them — which the Node-24 run above
 demonstrates.
 
-`.nvmrc` now pins **24** so a local checkout matches CI and this class of
-false-positive stops recurring. `engines.node` is deliberately left at `>=20` —
+### The devcontainer was never the problem
+
+`.devcontainer/Dockerfile` is already `FROM node:25`, and the CI matrix is
+overwhelmingly 25 (23 references) with a few on 24. So every _sanctioned_
+environment for this repo already has RegExp modifiers.
+
+The Node-22 runtime was specific to the **Claude Code on the web** remote
+execution container — a different, multi-runtime agent image
+(`/opt/node20`, `/opt/node21`, `/opt/node22`) that is provisioned outside this
+repo and cannot be changed from a Dockerfile here. That is the whole source of
+the false positive: an environment nobody declared, running two majors behind
+everything that is declared.
+
+`.nvmrc` now pins **25**, matching `.devcontainer/Dockerfile` and the dominant
+CI version, so an nvm-based local checkout lands on the same major as every
+other sanctioned environment. `engines.node` is deliberately left at `>=20` —
 that is a statement about what the published package supports, not about what
-developing it needs.
+developing it needs, and nothing in the compiler requires 24+.
 
 ## Still open — the 6 that ARE real
 
