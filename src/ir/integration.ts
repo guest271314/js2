@@ -2799,6 +2799,10 @@ function externResultClassName(
 
 function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
   return {
+    objectDefinePropertyTarget() {
+      if (ctx.standalone || ctx.wasi || ctx.strictNoHostImports) return null;
+      return irImportFuncRef("env", "__defineProperty_desc");
+    },
     // (#2955 slice 5) No raw `nativeStrings()` here anymore — from-ast's
     // interface no longer carries the mode discriminator; every mode
     // decision flows through the named capability/rep/strategy queries
