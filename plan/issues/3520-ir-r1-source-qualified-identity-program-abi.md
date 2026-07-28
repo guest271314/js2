@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c16-legacy-abi-cutover
+branch: codex/3520-c17-host-class-abi
 pr: 3763
 last_merged_pr: 3679
 sprint: current
@@ -87,6 +87,7 @@ files:
   - src/codegen/context/create-context.ts
   - src/codegen/dead-elimination.ts
   - src/codegen/func-space.ts
+  - src/codegen/program-abi-class-callable-planning.ts
   - src/codegen/program-abi-callable-planning.ts
   - src/codegen/program-abi-export-planning.ts
   - src/codegen/program-abi-finalization.ts
@@ -109,6 +110,7 @@ files:
   - benchmarks/allocation-policy-proof.ts
   - tests/helpers/ir-identities.ts
   - tests/issue-3520-class-member-alias-abi.test.ts
+  - tests/issue-3520-host-class-callable-abi.test.ts
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
   - tests/issue-3520-lifted-program-abi.test.ts
@@ -1872,6 +1874,70 @@ populated callable/global/type/class authorities, and `LegacyAbiAdapter` must
 become the only name-keyed boundary by replacing direct `funcMap`,
 `structMap`, `moduleGlobals`, module-array, and display-name scans before R1
 can close.
+
+### 2026-07-28 retained host-class callable continuation
+
+The next stacked continuation on `codex/3520-c17-host-class-abi` makes every
+retained class source callable and the JS-host Promise constructor helper
+structurally authoritative:
+
+- class collection now observes the exact allocator-owned function object for
+  each explicit or implicit constructor, method, getter, and setter beside its
+  exact AST declaration. It likewise records WasmGC `<Class>_init` and
+  Promise-subclass `<Class>_new__onhost` helpers beneath the exact
+  `IrClassId`;
+- after DCE, one class-callable registry selects the structurally last live
+  allocation for each source unit or class support identity. A retained direct
+  body receives the canonical unit owner even when IR selection rejected the
+  class, while an IR-replaced object keeps the locator already installed by
+  integration;
+- the Promise run-on-host body now has the semantic
+  `promise-subclass-onhost-constructor` role and a class-owned structural
+  reference. Collision relocation remains a diagnostic/allocator name only;
+  it cannot select the helper or its final slot; and
+- class semantic planning runs before total retained-callable population.
+  Only genuinely unclassified functions can therefore receive the generic
+  `retained-module-function` identity. Reusing a retained allocator object
+  under a different semantic owner is a typed duplicate-locator invariant.
+
+The production anti-vacuity fixture combines `Error`-backed and
+`Promise`-backed subclasses with six colliding top-level function names. All
+five class source units are explicitly Unsupported by IR selection and retain
+their direct bodies, yet each publishes its exact source-unit callable ID,
+collision-relocated allocator object, final slot, and post-DCE signature. The
+retained Promise `__onhost` body separately publishes the exact class support
+identity and final function object.
+
+The focused host-class, inherited-member, Promise-constructor, and externref
+runtime matrix passes **18/18 across 6 files**. The sharded #3520 matrix reports
+**262 passing / 1 failing across 48 files**; the sole failure remains the
+inherited linear inventory-count spy assertion documented by C12-C16. The
+adjacent #2138 multi-source matrix passes **6/6**, for **268 passing / 1 known
+failing across 49 files** in the combined migration run.
+The broader accessor/class, constructor/super, integration-preflight,
+cross-backend, and linear matrix reports **91 passing / 27 failing across 12
+files** on both C17 and the exact C16 parent. Every failure is the identical
+known host-fixture omission of the `string_constants` import; C17 adds none.
+
+Strict TypeScript, full error-level and scoped Biome lint, Prettier, diff,
+LOC/function budget, dead-export, godfile, checker-oracle, issue-spec,
+test-vacuity, verdict-oracle, done-status, and issue-index consistency gates
+pass.
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet reports no unintended, post-claim, or
+module-level increase. The supported eight-shard equivalence gate reports
+**1,611 passing / 32 known failing / 0 new regressions**; four baseline rows
+now pass and the shared baseline remains unchanged. No local Test262 corpus run
+was performed, and neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C17 closes retained local, externref-backed, and Promise-host class callable
+identity, not R1. Production consumers must still route through the populated
+callable/global/type/class authorities, and `LegacyAbiAdapter` must become the
+only name-keyed boundary by replacing direct `funcMap`, `structMap`,
+`moduleGlobals`, module-array, and display-name scans before R1 can close.
 
 ### R1a validation evidence
 
