@@ -14,6 +14,8 @@ import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/typ
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import { createFallbackCounts } from "../fallback-telemetry.js";
 import type { ProgramAbiSession } from "../program-abi-session.js";
+import { ProgramAbiCallableRegistry } from "../program-abi-callable-planning.js";
+import { ProgramAbiExportRegistry } from "../program-abi-export-planning.js";
 import { ProgramAbiCallableProviderRegistry } from "../program-abi-provider-planning.js";
 import { ProgramAbiGlobalRegistry } from "../program-abi-global-planning.js";
 import { ProgramAbiTypeRegistry } from "../program-abi-type-planning.js";
@@ -370,7 +372,9 @@ export function createCodegenContext(
   };
   if (programAbiSession) {
     ctx.programAbiCallableProviders = new ProgramAbiCallableProviderRegistry(programAbiSession, ctx);
+    ctx.programAbiCallables = new ProgramAbiCallableRegistry(programAbiSession, ctx);
     ctx.programAbiGlobals = new ProgramAbiGlobalRegistry(programAbiSession, ctx);
+    ctx.programAbiExports = new ProgramAbiExportRegistry(programAbiSession, ctx);
     if (irPlanningIdentityContext) {
       ctx.programAbiTypes = new ProgramAbiTypeRegistry(programAbiSession, ctx, irPlanningIdentityContext);
     }
