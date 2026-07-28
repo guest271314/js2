@@ -46,6 +46,17 @@ describe("#2742 — standalone transferred String.prototype.charAt", () => {
     expect(await runEs5("S15.5.4.4_A2.js")).toBe("pass");
   });
 
+  it("passes the explicit receiver through the transferred closure call ABI", async () => {
+    expect(
+      await runStandalone(`
+        export function test(): number {
+          const method: any = String.prototype.charAt;
+          return method.call("xyz", 1) === "y" ? 1 : 0;
+        }
+      `),
+    ).toBe(1);
+  });
+
   it("does not hijack a user function stored under the charAt name", async () => {
     expect(
       await runStandalone(`

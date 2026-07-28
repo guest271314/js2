@@ -52,6 +52,7 @@ import {
 } from "./native-strings.js";
 import { COLLECTION_KIND, MAP_LAYOUT, ensureMapHelpers } from "./map-runtime.js"; // (#3171) size getter
 import { emitReceiverBrandCheck } from "./receiver-brand.js"; // (#3171) shared brand preamble
+import { emitTransferredCharAtProtoMemberBody, unboxProtoArgToI32 as unboxArgToI32 } from "./char-at-transfer.js";
 
 /**
  * `Array.prototype`'s own enumerable+non-enumerable method names (ES2024
@@ -698,27 +699,6 @@ function emitProtoMemberBodyRefusal(
 }
 
 /**
- * (#2193 PR-B) Unbox an externref closure-arg (a boxed JS number) at `paramIdx`
- * into an i32, leaving it on the stack. `default0` is used when the arg is
- * absent/non-number (the closure ABI over-pads with externref args).
- */
-function unboxArgToI32(ctx: CodegenContext, fctx: FunctionContext, paramIdx: number): number {
-  const local = allocLocal(fctx, `__pm_arg_${fctx.locals.length}`, { kind: "i32" });
-  const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
-  flushLateImportShifts(ctx, fctx);
-  fctx.body.push({ op: "local.get", index: paramIdx });
-  if (unboxIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: unboxIdx });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-  } else {
-    fctx.body.push({ op: "drop" });
-    fctx.body.push({ op: "i32.const", value: 0 });
-  }
-  fctx.body.push({ op: "local.set", index: local });
-  return local;
-}
-
-/**
  * (#2193 PR-B) Emit the native body for an `Array.prototype.<member>` closure
  * value. `this` is closure-param 1 (externref boxed array), args at 2.. . Recovers
  * the array instance via the registered-vec `ref.test`/`ref.cast` guard, then
@@ -831,7 +811,7 @@ function emitStringRequireObjectCoercible(ctx: CodegenContext, fctx: FunctionCon
  * `$__any_to_string` are functions (append-only, no index shift).
  */
 function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, member: string): ValType | null {
-  const IN_SCOPE = new Set(["charAt", "at", "charCodeAt", "codePointAt"]);
+  const IN_SCOPE = new Set(["at", "charCodeAt", "codePointAt"]);
   // (#2875 slice 3a) The number-returning search family — `indexOf` /
   // `lastIndexOf` — has a DIFFERENT closure ABI from the index accessors
   // (param 2 is the search STRING, not an integer position; the optional
@@ -851,6 +831,14 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   // arg-2 slot the char/search bodies unbox (these closures have arity 0).
   const TRIM = new Set(["trim", "trimStart", "trimEnd"]);
   if (TRIM.has(member)) return emitStringTrimMemberBody(ctx, fctx, member);
+  if (member === "charAt") {
+    return emitTransferredCharAtProtoMemberBody(
+      ctx,
+      fctx,
+      () => ensureStringRocUndefinedNative(ctx, fctx),
+      () => emitStringRequireObjectCoercible(ctx, fctx, member),
+    );
+  }
   if (!IN_SCOPE.has(member)) return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
 
   ensureNativeStringHelpers(ctx);
@@ -858,14 +846,7 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   const needsNumBox = member === "charCodeAt" || member === "codePointAt";
   // Do ALL late-import-adding ops FIRST (mirrors emitArrayProtoMemberBody), so
   // every helper funcIdx fetched by NAME afterwards is post-shift-correct.
-  // Register/flush the numeric helper before fetching any later funcIdxs, but
-  // keep charAt's emitted position coercion aside until AFTER ToString(this).
-  // §22.1.3.2 orders those observable coercions receiver-first; in particular,
-  // an omitted position must not mask a receiver.toString() throw.
-  const posBodyStart = fctx.body.length;
   const posLocal = unboxArgToI32(ctx, fctx, 2); // → __unbox_number import + flush
-  const deferredCharAtPosition =
-    member === "charAt" ? fctx.body.splice(posBodyStart, fctx.body.length - posBodyStart) : [];
   let boxIdx: number | undefined;
   if (needsNumBox) {
     boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
@@ -874,10 +855,9 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   }
   // Fetch helper funcIdxs AFTER the import shifts, by name.
   const anyToStrIdx = ensureAnyToStringHelper(ctx);
-  const toPrimitiveIdx = member === "charAt" ? ctx.funcMap.get("__to_primitive") : undefined;
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
   const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
-  if (flattenIdx === undefined || charAtIdx === undefined || (member === "charAt" && toPrimitiveIdx === undefined)) {
+  if (flattenIdx === undefined || charAtIdx === undefined) {
     return emitProtoMemberBodyRefusal(ctx, fctx, "String", member);
   }
 
@@ -890,29 +870,11 @@ function emitStringProtoMemberBody(ctx: CodegenContext, fctx: FunctionContext, m
   // (2) S = ToString(this): externref → anyref → $__any_to_string → $AnyString →
   // flatten. Store the flat string in a local.
   fctx.body.push({ op: "local.get", index: 1 });
-  if (member === "charAt") {
-    // A transferred charAt receives its original object as `this`. Reduce it
-    // with the string hint before the shared dynamic-value formatter; otherwise
-    // closed/class structs collapse to the generic "[object Object]" fallback.
-    addStringConstantGlobal(ctx, "string");
-    fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
-    fctx.body.push({ op: "call", funcIdx: toPrimitiveIdx! });
-  }
   fctx.body.push({ op: "any.convert_extern" });
   fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const flatLocal = allocLocal(fctx, `__str_pm_flat_${fctx.locals.length}`, flatStringType(ctx));
   fctx.body.push({ op: "local.set", index: flatLocal });
-  fctx.body.push(...deferredCharAtPosition);
-
-  if (member === "charAt") {
-    // §22.1.3.1: __str_charAt(flat, pos) → 1-char string (out-of-range → "").
-    fctx.body.push({ op: "local.get", index: flatLocal });
-    fctx.body.push({ op: "local.get", index: posLocal });
-    fctx.body.push({ op: "call", funcIdx: charAtIdx });
-    fctx.body.push({ op: "extern.convert_any" }); // native string → externref
-    return { kind: "externref" };
-  }
 
   const strTy = ctx.nativeStrTypeIdx; // flat string struct: 0=len, 1=off, 2=data
   const dataTy = ctx.nativeStrDataTypeIdx;

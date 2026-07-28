@@ -78,7 +78,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
-import { buildApplyClosureArityWidening } from "./closure-exports.js"; // (#3592) under-application widening
+import { buildApplyClosureArityWidening, buildTransferredCharAtApplyArm } from "./closure-exports.js"; // (#3592) under-application widening
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { reserveClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
@@ -96,7 +96,6 @@ import { UNDEF_F64_BITS } from "./value-tags.js";
 // (#2106 S1) function-level-only cycle with any-helpers.ts (which imports
 // ensureObjectRuntime) — same tolerated shape as native-strings ↔ any-helpers.
 import { buildIsUndefinedExternBody, undefinedExternInstrs, undefinedSingletonActive } from "./any-helpers.js";
-import { buildTransferredCharAtApplyArm } from "./char-at-transfer.js";
 import { reserveClassToPrimitive } from "./class-to-primitive.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hosted object-runtime slice

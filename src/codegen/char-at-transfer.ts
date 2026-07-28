@@ -8,9 +8,117 @@
  * Keep the exception local to charAt: the builtin metadata id distinguishes its
  * closure even though WasmGC canonicalizes structurally equivalent meta types.
  */
-import type { Instr } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
-import { nativeStringLiteralInstrs } from "./native-strings.js";
+import type { Instr, ValType } from "../ir/types.js";
+import { ts } from "../ts-api.js";
+import { allocLocal } from "./context/locals.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { emitThrowTypeError } from "./js-errors.js";
+import {
+  ensureAnyToStringHelper,
+  ensureNativeStringHelpers,
+  flatStringType,
+  nativeStringLiteralInstrs,
+  stringConstantExternrefInstrs,
+} from "./native-strings.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
+import { compileExpression, ensureLateImport, flushLateImportShifts } from "./shared.js";
+
+/**
+ * Unbox an externref native-prototype argument to i32. Keeping this beside the
+ * transferred-charAt lowering lets the generic proto emitter stay a dispatcher
+ * instead of owning another argument-coercion implementation.
+ */
+export function unboxProtoArgToI32(ctx: CodegenContext, fctx: FunctionContext, paramIdx: number): number {
+  const local = allocLocal(fctx, `__pm_arg_${fctx.locals.length}`, { kind: "i32" });
+  const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+  flushLateImportShifts(ctx, fctx);
+  fctx.body.push({ op: "local.get", index: paramIdx });
+  if (unboxIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: unboxIdx });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  } else {
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+  }
+  fctx.body.push({ op: "local.set", index: local });
+  return local;
+}
+
+/**
+ * Compile one field RHS and retain new zero-argument closures when the field
+ * participates in OrdinaryToPrimitive. Function-constructor instances store
+ * these methods as externref, so finalization needs the closure provenance to
+ * recover the per-instance callable.
+ */
+export function compileCoercionRhs(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  value: ts.Expression,
+  expectedType: ValType,
+  typeName: string,
+  fieldName: string,
+): [ValType, number] | null {
+  const before =
+    fieldName === "toString" || fieldName === "valueOf" ? new Set(ctx.closureInfoByTypeIdx.keys()) : undefined;
+  const valueType = compileExpression(ctx, fctx, value, expectedType);
+  if (!valueType) return null;
+
+  if (before) {
+    const tracked = ctx.valueOfClosureTypes.get(typeName) ?? [];
+    for (const [closureTypeIdx, closureInfo] of ctx.closureInfoByTypeIdx) {
+      if (!before.has(closureTypeIdx) && closureInfo.paramTypes.length === 0 && !tracked.includes(closureTypeIdx)) {
+        tracked.push(closureTypeIdx);
+      }
+    }
+    if (tracked.length > 0) ctx.valueOfClosureTypes.set(typeName, tracked);
+  }
+
+  return [valueType, allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valueType)];
+}
+
+/**
+ * Emit the exact transferred-charAt prototype body. Receiver ToString must
+ * precede position coercion, so unboxing is registered early for funcidx
+ * stability but its instructions are replayed only after the receiver is flat.
+ */
+export function emitTransferredCharAtProtoMemberBody(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  prepareReceiverGuard: () => void,
+  emitReceiverGuard: () => void,
+): ValType | null {
+  ensureNativeStringHelpers(ctx);
+  prepareReceiverGuard();
+
+  const positionStart = fctx.body.length;
+  const positionLocal = unboxProtoArgToI32(ctx, fctx, 2);
+  const deferredPosition = fctx.body.splice(positionStart, fctx.body.length - positionStart);
+  const anyToStringIdx = ensureAnyToStringHelper(ctx);
+  const toPrimitiveIdx = ctx.funcMap.get("__to_primitive");
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
+  if (toPrimitiveIdx === undefined || flattenIdx === undefined || charAtIdx === undefined) {
+    emitThrowTypeError(ctx, fctx, "String.prototype.charAt is not yet implemented in --target standalone");
+    return null;
+  }
+
+  emitReceiverGuard();
+  fctx.body.push({ op: "local.get", index: 1 });
+  addStringConstantGlobal(ctx, "string");
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
+  fctx.body.push({ op: "call", funcIdx: toPrimitiveIdx });
+  fctx.body.push({ op: "any.convert_extern" });
+  fctx.body.push({ op: "call", funcIdx: anyToStringIdx });
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const flatLocal = allocLocal(fctx, `__str_pm_flat_${fctx.locals.length}`, flatStringType(ctx));
+  fctx.body.push({ op: "local.set", index: flatLocal });
+  fctx.body.push(...deferredPosition);
+  fctx.body.push({ op: "local.get", index: flatLocal });
+  fctx.body.push({ op: "local.get", index: positionLocal });
+  fctx.body.push({ op: "call", funcIdx: charAtIdx });
+  fctx.body.push({ op: "extern.convert_any" });
+  return { kind: "externref" };
+}
 
 /**
  * Non-$Object arm for `__extern_method_call`. Closed/fnctor structs are outside
