@@ -1,4 +1,4 @@
-// Acquisition for acorn's OWN real test suite (#3723) — a much more
+// Acquisition for acorn's OWN real test suite (#3726) — a much more
 // rigorous conformance check than the hand-written fixture corpus, but a
 // DIFFERENT acquisition shape than setup-acorn.mjs's pinned-tarball pattern:
 // npm does not publish acorn's `test/` directory (stripped by its package

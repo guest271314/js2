@@ -1,5 +1,5 @@
 ---
-id: 3725
+id: 3728
 title: "Astral (surrogate-pair) Unicode identifier characters misclassified in a few edge positions — acorn official suite"
 status: ready
 sprint: current
@@ -13,16 +13,16 @@ task_type: bugfix
 area: checker, codegen
 language_feature: unicode
 goal: core-semantics
-origin: "tests/dogfood/acorn-official-suite.mjs (#3723) — acorn's own test suite, 4/3518 failures + 1 unrelated oddity"
-related: [3723, 1710]
+origin: "tests/dogfood/acorn-official-suite.mjs (#3726) — acorn's own test suite, 4/3518 failures + 1 unrelated oddity"
+related: [3726, 1710]
 ---
 
-# #3725 — astral identifier-char classification edge cases
+# #3728 — astral identifier-char classification edge cases
 
 ## Repro
 
 Compile acorn (pinned `acorn@8.16.0`) with js2wasm and run acorn's own
-driver against it (`pnpm run dogfood:acorn-official-suite`, #3723). 4 of
+driver against it (`pnpm run dogfood:acorn-official-suite`, #3726). 4 of
 acorn's own test cases fail on astral (supplementary-plane, i.e.
 surrogate-pair-encoded) identifier characters:
 

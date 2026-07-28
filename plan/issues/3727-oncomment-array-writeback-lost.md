@@ -1,5 +1,5 @@
 ---
-id: 3724
+id: 3727
 title: "acorn onComment array option: writes from a compiled-acorn-internal closure don't propagate back to the caller's array"
 status: ready
 sprint: current
@@ -13,17 +13,17 @@ task_type: bugfix
 area: codegen
 language_feature: closures
 goal: core-semantics
-origin: "tests/dogfood/acorn-official-suite.mjs (#3723) — acorn's own test suite, 6/3518 failures"
-related: [3723, 1710]
+origin: "tests/dogfood/acorn-official-suite.mjs (#3726) — acorn's own test suite, 6/3518 failures"
+related: [3726, 1710]
 ---
 
-# #3724 — `onComment` array option writes lost across a compiled-internal closure
+# #3727 — `onComment` array option writes lost across a compiled-internal closure
 
 ## Repro
 
 Compile acorn (pinned `acorn@8.16.0`, `dist/acorn.mjs`) with js2wasm and
 run acorn's own driver against it (`pnpm run dogfood:acorn-official-suite`,
-#3723). 6 of acorn's own test cases fail with `array length mismatch N !==
+#3726). 6 of acorn's own test cases fail with `array length mismatch N !==
 0` — the caller's `onComment` array stays empty after parsing, when it
 should have been populated:
 

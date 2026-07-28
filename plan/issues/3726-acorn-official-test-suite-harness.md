@@ -1,5 +1,5 @@
 ---
-id: 3723
+id: 3726
 title: "Run acorn's OWN real test suite (not just fixtures) against compiled acorn — 99.7% pass"
 status: done
 sprint: current
@@ -15,10 +15,10 @@ area: testing
 language_feature: n/a
 goal: core-semantics
 origin: "user asked whether the dogfood harness runs the packages' own bundled unit tests — it didn't (npm tarballs strip test/); this adds the real suite via source acquisition"
-related: [1710, 3717, 3724, 3725]
+related: [1710, 3717, 3727, 3728]
 ---
 
-# #3723 — acorn official test-suite harness
+# #3726 — acorn official test-suite harness
 
 ## Problem
 
@@ -90,9 +90,9 @@ harness itself was the entire gap, not the compiler.
 11 real residual failures, filed separately (properly scoped, not fixed
 here — this issue is the harness):
 
-- **#3724** — comment-collection (`onComment`) arrays come back empty
+- **#3727** — comment-collection (`onComment`) arrays come back empty
   across the Wasm boundary (6 cases).
-- **#3725** — astral (surrogate-pair) Unicode identifier characters
+- **#3728** — astral (surrogate-pair) Unicode identifier characters
   misclassified in a few edge positions (4 cases), plus one unrelated
   extremely narrow CJK string-literal-export-binding error-message
   oddity (1 case).
@@ -108,4 +108,4 @@ here — this issue is the harness):
 - [x] The exception-message extraction gap is fixed via the project's
       existing #2962 mechanism, not a new one.
 - [x] Residual failures triaged into buckets and filed as separate,
-      properly scoped issues (#3724, #3725).
+      properly scoped issues (#3727, #3728).
