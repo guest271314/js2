@@ -1,7 +1,8 @@
 ---
 id: 3741
 title: "IR path has no equivalent to legacy's #1120 i32-coerced-local promotion — loop.ts benchmark accumulator pattern still 16x slower under IR than legacy"
-status: in-progress
+status: done
+completed: 2026-07-28
 sprint: current
 created: 2026-07-28
 updated: 2026-07-28
