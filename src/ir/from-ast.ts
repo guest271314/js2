@@ -105,6 +105,7 @@ import {
   isIrBitwiseOperatorToken,
 } from "./i32-pure-bitwise.js";
 import { IrUnsupportedError } from "./outcomes.js";
+import { isPristineEs5IntrinsicIsFrozenCall } from "./object-integrity.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
 import { JsTag } from "./js-tag.js"; // #2949 S5.2 — box-refinement tags for dynamic equality operands
 import {
@@ -4719,6 +4720,15 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   const receiverIdentifier = ts.isIdentifier(expr.expression.expression) ? expr.expression.expression : undefined;
   const receiverIsDirectModuleBinding =
     receiverIdentifier !== undefined && cx.resolver?.isDirectModuleBinding?.(receiverIdentifier) === true;
+
+  if (
+    isPristineEs5IntrinsicIsFrozenCall(
+      expr,
+      (node) => cx.resolver?.isAmbientBinding?.(node) === true && cx.scope.get(node.text) === undefined,
+    )
+  ) {
+    return cx.builder.emitConst({ kind: "bool", value: false }, irVal({ kind: "i32", boolean: true }));
+  }
 
   // #3000-E: `super.method(args)` — static-dispatch to the PARENT's method slot.
   // Intercepted BEFORE receiver lowering: `super` is a keyword lowerExpr can't
