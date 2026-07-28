@@ -86,6 +86,18 @@ function isNativeStringMode(mode: CoercionMode): boolean {
  */
 export type ToStringHint = "string" | "default";
 
+function isTypeFact(value: ts.Type | TypeFact): value is TypeFact {
+  return typeof (value as { kind?: unknown }).kind === "string";
+}
+
+function isStaticString(value: ts.Type | TypeFact): boolean {
+  return isTypeFact(value) ? value.kind === "string" : isStringType(value);
+}
+
+function isStaticBoolean(value: ts.Type | TypeFact): boolean {
+  return isTypeFact(value) ? value.kind === "boolean" : isBooleanType(value);
+}
+
 /**
  * Emit `ToString(operand)` for an operand that has ALREADY been compiled to the
  * top of the value stack with ValType `valType` and static TS type `tsType`.
@@ -117,7 +129,7 @@ export function emitToString(
   ctx: CodegenContext,
   fctx: FunctionContext,
   valType: ValType | null,
-  tsType: ts.Type,
+  tsType: ts.Type | TypeFact,
   hint: ToStringHint,
 ): ValType {
   const mode = coercionMode(ctx);
@@ -131,14 +143,14 @@ export function emitToString(
 
   // ── string-typed ref passthrough (native modes only — a native string-typed
   //    substitution is already an $AnyString/NativeString ref) ──
-  if (native && (valType.kind === "ref" || valType.kind === "ref_null") && isStringType(tsType)) {
+  if (native && (valType.kind === "ref" || valType.kind === "ref_null") && isStaticString(tsType)) {
     return valType;
   }
 
   // ── i32 boolean → "true"/"false" ──
   // Honour the boolean brand on the ValType (#2016/#2030: i32 predicates carry
   // `boolean: true`) as well as the static TS type.
-  if (valType.kind === "i32" && (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)) {
+  if (valType.kind === "i32" && (isStaticBoolean(tsType) || (valType as { boolean?: true }).boolean)) {
     emitBoolToString(ctx, fctx);
     return native ? nativeStringType(ctx) : { kind: "externref" };
   }
@@ -172,8 +184,10 @@ export function emitToString(
 
   // ── externref ──
   if (valType.kind === "externref") {
-    const isNull = (tsType.flags & ts.TypeFlags.Null) !== 0;
-    const isUndef = (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const isNull = isTypeFact(tsType) ? tsType.kind === "null" : (tsType.flags & ts.TypeFlags.Null) !== 0;
+    const isUndef = isTypeFact(tsType)
+      ? tsType.kind === "undefined" || tsType.kind === "void"
+      : (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
     if (isNull) {
       fctx.body.push({ op: "drop" });
       pushStringLiteral(ctx, fctx, "null");
@@ -184,7 +198,7 @@ export function emitToString(
       pushStringLiteral(ctx, fctx, "undefined");
       return native ? nativeStringType(ctx) : { kind: "externref" };
     }
-    if (isStringType(tsType)) {
+    if (isStaticString(tsType)) {
       // A real string externref — already concat-ready.
       return { kind: "externref" };
     }

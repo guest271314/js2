@@ -159,6 +159,136 @@ function structHasUserToPrimitive(ctx: CodegenContext, name: string): boolean {
 }
 
 /**
+ * Resolve START-safe OrdinaryToPrimitive(string) for statically-known
+ * object-literal closures. Void closures produce the JavaScript primitive
+ * `undefined`; the host lane also preserves directly returned strings.
+ *
+ * This dispatch must remain in Wasm because a host bridge cannot call exported
+ * closure trampolines while the module start section is still running.
+ */
+function tryStructPrimitiveToStringAsExternref(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  from: ValType,
+  typeIdx: number,
+  name: string,
+  includeStringResults = false,
+): boolean {
+  const fields = ctx.structFields.get(name);
+  if (!fields) return false;
+  const isVoid = (info: ClosureInfo | undefined): boolean =>
+    info !== undefined && (info.returnType === null || info.returnType === undefined);
+  const isSupported = (info: ClosureInfo | undefined): info is ClosureInfo =>
+    info !== undefined &&
+    (isVoid(info) ||
+      (includeStringResults && (info.returnType?.kind === "externref" || info.returnType?.kind === "ref_extern")));
+  const candidates = (): { closureTypeIdx: number; info: ClosureInfo }[] =>
+    (ctx.valueOfClosureTypes.get(name) ?? [])
+      .map((closureTypeIdx) => ({ closureTypeIdx, info: ctx.closureInfoByTypeIdx.get(closureTypeIdx) }))
+      .filter(
+        (candidate): candidate is { closureTypeIdx: number; info: ClosureInfo } =>
+          candidate.info?.paramTypes.length === 0 && isSupported(candidate.info),
+      );
+  const isCallableField = (field: (typeof fields)[number]): boolean =>
+    field.type.kind === "ref" || field.type.kind === "ref_null" || field.type.kind === "eqref";
+  const supportsDispatch = (field: (typeof fields)[number]): boolean => {
+    if (field.type.kind === "ref" || field.type.kind === "ref_null") {
+      return isSupported(ctx.closureInfoByTypeIdx.get((field.type as { typeIdx: number }).typeIdx));
+    }
+    return field.type.kind === "eqref" && candidates().length > 0;
+  };
+
+  // OrdinaryToPrimitive with the string hint checks toString first. A
+  // non-callable own toString is skipped, so the void-returning valueOf case
+  // (the ES5 T9 shape) becomes the next successful primitive conversion.
+  let fieldIdx = fields.findIndex((field) => field.name === "toString");
+  if (fieldIdx >= 0 && isCallableField(fields[fieldIdx]!)) {
+    if (!supportsDispatch(fields[fieldIdx]!)) return false;
+  } else {
+    fieldIdx = fields.findIndex((field) => field.name === "valueOf");
+    if (fieldIdx < 0 || !supportsDispatch(fields[fieldIdx]!)) return false;
+  }
+  const field = fields[fieldIdx]!;
+
+  if (field.type.kind === "ref" || field.type.kind === "ref_null") {
+    const closureTypeIdx = (field.type as { typeIdx: number }).typeIdx;
+    const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+    if (!isSupported(closureInfo)) return false;
+
+    const structLocal = allocLocal(fctx, `__primitive_ts_struct_${fctx.locals.length}`, from);
+    const closureLocal = allocLocal(fctx, `__primitive_ts_closure_${fctx.locals.length}`, field.type);
+    fctx.body.push({ op: "local.set", index: structLocal });
+    fctx.body.push({ op: "local.get", index: structLocal });
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx });
+    fctx.body.push({ op: "local.tee", index: closureLocal });
+    fctx.body.push({ op: "local.get", index: closureLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 });
+    emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
+    fctx.body.push({ op: "ref.as_non_null" });
+    fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
+    if (isVoid(closureInfo)) pushStringHint(ctx, fctx, "undefined");
+    return true;
+  }
+
+  if (field.type.kind !== "eqref") return false;
+  const dispatchCandidates = candidates();
+  if (dispatchCandidates.length === 0) return false;
+
+  const structLocal = allocLocal(fctx, `__primitive_ts_struct_${fctx.locals.length}`, from);
+  const eqLocal = allocLocal(fctx, `__primitive_ts_eq_${fctx.locals.length}`, { kind: "eqref" });
+  fctx.body.push({ op: "local.set", index: structLocal });
+  fctx.body.push({ op: "local.get", index: structLocal });
+  fctx.body.push({ op: "struct.get", typeIdx, fieldIdx });
+  fctx.body.push({ op: "local.set", index: eqLocal });
+  addStringConstantGlobal(ctx, "undefined");
+  const undefinedString = stringConstantExternrefInstrs(ctx, "undefined");
+
+  const buildDispatch = (candidateIdx: number): Instr[] => {
+    if (candidateIdx >= dispatchCandidates.length) {
+      return [{ op: "local.get", index: structLocal }, { op: "extern.convert_any" }];
+    }
+    const { closureTypeIdx, info } = dispatchCandidates[candidateIdx]!;
+    const closureLocal = allocLocal(fctx, `__primitive_ts_closure_${fctx.locals.length}`, {
+      kind: "ref",
+      typeIdx: closureTypeIdx,
+    });
+    const funcLocal = allocLocal(fctx, `__primitive_ts_func_${fctx.locals.length}`, { kind: "funcref" });
+    return [
+      { op: "local.get", index: eqLocal },
+      { op: "ref.test", typeIdx: closureTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [
+          { op: "local.get", index: eqLocal },
+          { op: "ref.cast", typeIdx: closureTypeIdx },
+          { op: "local.tee", index: closureLocal },
+          { op: "local.get", index: closureLocal },
+          { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 },
+          { op: "local.tee", index: funcLocal },
+          { op: "ref.test", typeIdx: info.funcTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: info.funcTypeIdx } },
+            then: [
+              { op: "local.get", index: funcLocal },
+              { op: "ref.cast_null", typeIdx: info.funcTypeIdx },
+            ],
+            else: [{ op: "ref.null", typeIdx: info.funcTypeIdx }],
+          },
+          { op: "ref.as_non_null" },
+          { op: "call_ref", typeIdx: info.funcTypeIdx },
+          ...(isVoid(info) ? undefinedString.map((instr) => ({ ...instr })) : []),
+        ],
+        else: buildDispatch(candidateIdx + 1),
+      },
+    ];
+  };
+  fctx.body.push(...buildDispatch(0));
+  return true;
+}
+
+/**
  * Push a string constant onto the Wasm stack using the string_constants global import.
  * Registers the string if not already registered, then emits global.get.
  */
@@ -2120,11 +2250,23 @@ export function coerceType(
         }
         return;
       }
+      if (tryStructPrimitiveToStringAsExternref(ctx, fctx, from, typeIdx, name, !ctx.nativeStrings)) {
+        return;
+      }
       const toStringFuncIdx = ctx.funcMap.get(`${name}_toString`);
       if (toStringFuncIdx !== undefined) {
         // Call ClassName_toString(self) — self is already on stack.
         // Only fire when ToPrimitive("string") was explicitly requested.
         fctx.body.push({ op: "call", funcIdx: toStringFuncIdx });
+        // A JavaScript function with no return statement produces the
+        // primitive `undefined`; it is not a failed OrdinaryToPrimitive
+        // attempt. The named wrapper has no Wasm result in that case, so
+        // materialize ToString(undefined) for this externref string target.
+        const funcDef = definedFuncAt(ctx, toStringFuncIdx);
+        const funcType = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
+        if (funcType?.kind === "func" && (funcType.results?.length ?? 0) === 0) {
+          pushStringHint(ctx, fctx, "undefined");
+        }
         return;
       }
     }
@@ -3025,23 +3167,31 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   ensureAnyToStringHelper(ctx);
   if (ctx.anyStrTypeIdx < 0) return false;
 
+  // START-safe void-returning object-literal methods need the same dispatch in
+  // native-string mode as the externref target above. The helper leaves the
+  // canonical "undefined" string as externref; recover its `$AnyString` ref.
+  if (tryStructPrimitiveToStringAsExternref(ctx, fctx, from, typeIdx, name)) {
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
+    return true;
+  }
+
   // Normalise whatever the dispatched method left on the stack into a
   // `ref $AnyString`. Strings come back as externref / ref $AnyString; numbers
   // and booleans are routed through the standalone `$__any_to_string` dispatcher
   // (which handles AnyValue boxes + AnyString passthrough). A bare ref_null
   // string is cast to the concrete $AnyString so the value type is exact.
   const normaliseToString = (retKind: string | undefined): void => {
-    // (#2934 slice 3) A dispatched method whose Wasm func type has NO result —
-    // it either always throws (never; e.g. `toString(){ throw "x"; }`,
-    // S15.5.4.6_A4_T2) or returns undefined (void). Nothing is on the stack, so
-    // the arms below would under-feed their consumer (`call $__any_to_string`
-    // with 0 operands — "not enough arguments on the stack"). Per §7.1.1
-    // OrdinaryToPrimitive, a toString that yields no primitive ends in
-    // TypeError; emit that throw — for the always-throwing case it is dead
-    // code after the call, and `throw` leaves the stack polymorphic so the
-    // enclosing arm's declared `ref $AnyString` result validates.
+    // A dispatched method with no Wasm result either always throws (`never`) or
+    // returns JavaScript `undefined` (`void`). In the first case the following
+    // literal is dead code; in the second, `undefined` is a legitimate
+    // primitive result of OrdinaryToPrimitive and the surrounding ToString
+    // must produce the string "undefined".
     if (retKind === undefined || retKind === "void") {
-      emitThrowTypeError(ctx, fctx, "Cannot convert object to primitive value");
+      addStringConstantGlobal(ctx, "undefined");
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, "undefined"));
+      fctx.body.push({ op: "any.convert_extern" });
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
       return;
     }
     if (retKind === "externref" || retKind === "ref_extern") {

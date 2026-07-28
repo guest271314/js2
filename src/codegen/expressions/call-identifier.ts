@@ -765,6 +765,13 @@ export function compileIdentifierCall(
           // Already a native string — return as-is
           return argType;
         }
+        // Native/standalone object ToString needs a real `$AnyString` result.
+        // The coercion engine dispatches a statically-known toString/valueOf
+        // method in Wasm and normalizes every primitive result, including a
+        // void-returning method's legitimate `undefined`.
+        if (ctx.nativeStrings) {
+          return emitToString(ctx, fctx, argType, argTsType, "string");
+        }
         // Object ref → coerce via @@toPrimitive("string") or toString(), else "[object Object]"
         coerceType(ctx, fctx, argType, { kind: "externref" }, "string");
         return { kind: "externref" };

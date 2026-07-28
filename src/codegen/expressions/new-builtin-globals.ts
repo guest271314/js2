@@ -56,17 +56,13 @@ export const NEW_GLOBAL_FALLTHROUGH = Symbol("new-builtin-global-fallthrough");
  * Returns true when a statically-known Symbol emitted a terminal TypeError.
  */
 function emitStringWrapperValue(ctx: CodegenContext, fctx: FunctionContext, value: ts.Expression): boolean {
-  if (!noJsHost(ctx)) {
-    compileExpression(ctx, fctx, value, { kind: "externref" });
-    return false;
-  }
   if (ctx.oracle.staticJsTypeOf(value) === "symbol") {
     const valueType = compileExpression(ctx, fctx, value);
     if (valueType !== null) fctx.body.push({ op: "drop" });
     emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a string");
     return true;
   }
-  const valueTsType = ctx.checker.getTypeAtLocation(value);
+  const valueTsType = ctx.oracle.typeFactOf(value);
   const valueType = compileExpression(ctx, fctx, value);
   const stringType = emitToString(ctx, fctx, valueType, valueTsType, "string");
   if (stringType.kind !== "externref") coerceType(ctx, fctx, stringType, { kind: "externref" });
