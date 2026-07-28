@@ -1053,6 +1053,7 @@ export interface CodegenContext {
   mod: WasmModule;
   programAbiSession?: import("../program-abi-session.js").ProgramAbiSession;
   programAbiCallableProviders?: import("../program-abi-provider-planning.js").ProgramAbiCallableProviderRegistry;
+  programAbiGlobals?: import("../program-abi-global-planning.js").ProgramAbiGlobalRegistry;
   programAbiTypes?: import("../program-abi-type-planning.js").ProgramAbiTypeRegistry;
   irPlanningIdentityContext?: import("../../ir/planning-identity.js").IrPlanningIdentityContext;
   checker: ts.TypeChecker;

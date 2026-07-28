@@ -15,6 +15,7 @@ import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
 import { createFallbackCounts } from "../fallback-telemetry.js";
 import type { ProgramAbiSession } from "../program-abi-session.js";
 import { ProgramAbiCallableProviderRegistry } from "../program-abi-provider-planning.js";
+import { ProgramAbiGlobalRegistry } from "../program-abi-global-planning.js";
 import { ProgramAbiTypeRegistry } from "../program-abi-type-planning.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
@@ -369,6 +370,7 @@ export function createCodegenContext(
   };
   if (programAbiSession) {
     ctx.programAbiCallableProviders = new ProgramAbiCallableProviderRegistry(programAbiSession, ctx);
+    ctx.programAbiGlobals = new ProgramAbiGlobalRegistry(programAbiSession, ctx);
     if (irPlanningIdentityContext) {
       ctx.programAbiTypes = new ProgramAbiTypeRegistry(programAbiSession, ctx, irPlanningIdentityContext);
     }
