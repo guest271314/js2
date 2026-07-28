@@ -17,6 +17,8 @@ depends_on: []
 related: [3707]
 loc-budget-allow:
   - src/codegen/index.ts
+func-budget-allow:
+  - src/codegen/index.ts::generateMultiModule
 ---
 # #3731 — `generateMultiModule` is missing ~19 `fill*()` driver calls that `generateModule` has
 
