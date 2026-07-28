@@ -15,6 +15,8 @@ language_feature: bitwise-operators
 goal: performance
 depends_on: []
 related: [3704, 3734]
+loc-budget-allow:
+  - src/ir/lower.ts
 ---
 # #3733 — `x | 0` runs the full float-based ToInt32 on the literal `0` too
 
