@@ -50,6 +50,33 @@ Real-world confirmation: parsing acorn's own actual 226KB
 **~6.7 seconds** compiled vs **~17ms** native — a ≈400x gap, consistent
 with the scaling table's high end.
 
+## Verified against #3753's fix after it landed (2026-07-28)
+
+#3753 (fnctor string-field typing, the "tokenizer axis" constant-factor
+fix referenced below) merged as `loopdive/js2@d4cb839a` shortly after
+this issue was filed. Re-measured on top of it, same methodology
+(calibrated median-of-9 via `scripts/generate-npm-compat-report.mjs`):
+
+| | before #3753 | after #3753 |
+| --- | ---: | ---: |
+| full acorn dist parse, compiled | ~6.75s | ~6.21s |
+| full acorn dist parse, native | ~18.2ms | ~15.3ms |
+| **ratio** | **~370x** | **~407x** |
+
+The ratio did not improve — if anything it's flat/noisy in the same
+range. This is expected, not a sign #3753 didn't work: #3753 fixed a
+per-access constant-factor cost (verified ~8% faster absolute wasm time
+here), but at 226KB of real input the super-linear term this issue
+documents dominates the total so completely that shaving a constant
+factor off is invisible in the ratio. The synthetic repeated-snippet
+scaling table (above) still shows the same shape post-fix — every point
+dropped in absolute time (~30% faster), but the ratio still visibly
+grows with input size (28x at 4.9KB → 336x at 313KB) — confirming the
+scaling problem is untouched and is the dominant cost at real-file
+scale. Do not expect any future constant-factor fix on the "tokenizer
+axis" pattern to move this issue's numbers — only fixing the
+super-linear operation itself will.
+
 ## What's already known (related, but NOT the same finding)
 
 `plan/issues/3739` / the loopdive/js2#3715 PR (fnctor field typing,
