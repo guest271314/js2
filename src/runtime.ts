@@ -30,6 +30,11 @@ import {
 } from "./runtime/iterator-polyfills.js";
 import { buildStringConstants, buildStringConstants16 } from "./runtime/string-constants.js";
 export { buildStringConstants, buildStringConstants16 };
+import {
+  compiledClosureNativeSource,
+  createNativeFunctionCallbackBridge,
+  installNativeFunctionSourceFacade,
+} from "./runtime/native-function-source.js";
 import { _arrayProtoSparseFastPaths } from "./runtime/array-proto-sparse.js"; // (#3103, #1234) sparse-aware Array.prototype fast paths
 import { registerVecMirror, snapshotVecMirrors, reconcileVecMirrors } from "./runtime/vec-mirror-writeback.js"; // (#3603 S1) vec-mirror write-back
 import {
@@ -1103,43 +1108,6 @@ const _wasmGetterCallbackWrappers = new WeakSet<Function>();
 const _wasmVoidHostCallbackCache = new WeakMap<object, Function>();
 const _test262ErrorConstructors = new WeakSet<Function>();
 
-// #3540 — Compiled closures do not retain source text, so their observable
-// Function stringification uses the implementation-defined NativeFunction
-// grammar rather than exposing a WasmGC struct fallback (`[object Object]`) or
-// the source of an internal JS callback bridge. This is deliberately a facade:
-// closure storage/call dispatch stays unchanged.
-const _NATIVE_FUNCTION_SOURCE = "function () { [native code] }";
-
-function _installNativeFunctionSourceFacade<T extends Function>(fn: T): T {
-  try {
-    Object.defineProperty(fn, "toString", {
-      value: function toString(): string {
-        return _NATIVE_FUNCTION_SOURCE;
-      },
-      writable: true,
-      enumerable: false,
-      configurable: true,
-    });
-  } catch {
-    /* Bridge source facades are best-effort for non-extensible host functions. */
-  }
-  return fn;
-}
-
-function _compiledClosureNativeSource(
-  value: any,
-  callbackState?: { getExports: () => Record<string, Function> | undefined },
-): string | undefined {
-  if (value == null || typeof value !== "object") return undefined;
-  const isClosure = callbackState?.getExports()?.__is_closure as ((v: any) => number) | undefined;
-  if (typeof isClosure !== "function") return undefined;
-  try {
-    return isClosure(value) === 1 ? _NATIVE_FUNCTION_SOURCE : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 // (#3369) Callback bridges must remain usable while the evaluated program has
 // installed non-writable numeric properties on Array.prototype. `[].push(x)`
 // and direct indexed assignment perform [[Set]] and can be rejected by such an
@@ -1322,7 +1290,7 @@ function _wrapWasmClosure(
     const ret = callFn(closure, ...padded);
     return _wasmAccessorGetterReturnWrappers.has(wrapped) ? _maybeWrapAccessorGetterCallable(ret, callbackState) : ret;
   };
-  _installNativeFunctionSourceFacade(wrapped);
+  installNativeFunctionSourceFacade(wrapped);
   _wasmClosureWrapperSource.set(wrapped, { closure, arity });
   if (_canBeWeakKey(closure)) {
     if (!byArity) {
@@ -1484,7 +1452,7 @@ function _wrapWasmClosureUnknownArity(
   } catch {
     /* best-effort constructor identity for function-expression wrappers */
   }
-  _installNativeFunctionSourceFacade(wrapped);
+  installNativeFunctionSourceFacade(wrapped);
   _wasmClosureWrapperSource.set(wrapped, { closure, arity: -1 });
   if (closure != null && typeof closure === "object") {
     _wasmClosureDynamicWrapperCache.set(closure, wrapped);
@@ -1625,7 +1593,7 @@ function _wrapVoidHostCallback(
   const wrapped = (..._args: any[]): void => {
     dispatch();
   };
-  _installNativeFunctionSourceFacade(wrapped);
+  installNativeFunctionSourceFacade(wrapped);
   _wasmVoidHostCallbackCache.set(closure as object, wrapped);
   _wasmClosureWrapperTargets.set(wrapped, closure as object);
   return wrapped;
@@ -1706,7 +1674,7 @@ function _wrapExecReturnForHost(
   fn: (...args: any[]) => any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
 ): (...args: any[]) => any {
-  return _installNativeFunctionSourceFacade(function execReturnBridge(this: any, ...args: any[]): any {
+  return installNativeFunctionSourceFacade(function execReturnBridge(this: any, ...args: any[]): any {
     const ret = fn.apply(this, args);
     if (ret != null && typeof ret === "object" && _isWasmStruct(ret)) {
       return _wrapForHost(ret, callbackState?.getExports());
@@ -2655,7 +2623,7 @@ function _toPrimitive(
   // function whose inherited Function.prototype.toString is implementation
   // defined. Keep this fallback after @@toPrimitive/valueOf/toString so own
   // user overrides retain ordinary JavaScript precedence.
-  const closureSource = _compiledClosureNativeSource(raw, callbackState);
+  const closureSource = compiledClosureNativeSource(raw, callbackState);
   if (closureSource !== undefined) return closureSource;
   return undefined;
 }
@@ -2995,7 +2963,7 @@ function _hostToPrimitive(
   // silently swallow the error and produce NaN, breaking
   // `+{ valueOf: () => ({}), toString: () => ({}) }` which the spec
   // requires to throw.
-  const closureSource = _compiledClosureNativeSource(raw, callbackState);
+  const closureSource = compiledClosureNativeSource(raw, callbackState);
   if (closureSource !== undefined && !methodInvokedReturnedObject) return closureSource;
   if (_isWasmStruct(raw) && !methodInvokedReturnedObject) return "[object Object]";
   throw new TypeError("Cannot convert object to primitive value");
@@ -14319,30 +14287,7 @@ assert._isSameValue = isSameValue;
         // closure. Legacy callbacks keep their non-negative `__cb_N` ids and
         // therefore remain byte-for-byte on the existing dispatch path.
         if (id === -1) return _wrapVoidHostCallback(cap, callbackState);
-        return _installNativeFunctionSourceFacade((...args: any[]) => {
-          const exports = callbackState?.getExports();
-          // (#3284) A callback whose reaction fires DURING WebAssembly.instantiate
-          // — e.g. a top-level `Promise.resolve(x).then(cb)` whose microtask
-          // drains while the async instantiate helper is still awaiting, BEFORE
-          // the caller wires `setExports` — sees `getExports()` undefined and
-          // would otherwise silently no-op (the `.then` callback never runs).
-          // Park it and replay the moment setExports wires the instance, mirroring
-          // the #2128 `getter_callback_maker` setter fix. Purely additive: when
-          // exports are already wired (the normal post-instantiation path, incl.
-          // every wrapTest/equivalence body that runs inside an exported function
-          // the host calls AFTER setExports), the branch is skipped and behaviour
-          // below is unchanged — so no harness-executed callback is affected.
-          if (exports === undefined && callbackState) {
-            const defer = (callbackState as { deferToExports?: (fn: () => void) => void }).deferToExports;
-            if (defer) {
-              defer(() => {
-                callbackState.getExports()?.[`__cb_${id}`]?.(cap, ...args);
-              });
-              return undefined;
-            }
-          }
-          return exports?.[`__cb_${id}`]?.(cap, ...args);
-        });
+        return createNativeFunctionCallbackBridge(id, cap, callbackState);
       };
     case "getter_callback_maker":
       return (id: number, cap: any) => {
@@ -14394,7 +14339,7 @@ assert._isSameValue = isSameValue;
             ? _maybeWrapAccessorGetterCallable(ret, callbackState)
             : ret;
         };
-        _installNativeFunctionSourceFacade(bridge);
+        installNativeFunctionSourceFacade(bridge);
         _wasmGetterCallbackWrappers.add(bridge);
         return bridge;
       };

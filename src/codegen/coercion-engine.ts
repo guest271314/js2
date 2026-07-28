@@ -32,7 +32,7 @@
  * top and never re-hand-rolls a box/unbox row.
  */
 import { isBooleanType, isStringType } from "../checker/type-mapper.js";
-import type { Instr, ValType } from "../ir/types.js";
+import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { TypeFact } from "../checker/oracle.js";
 import { ts } from "../ts-api.js";
 import { ensureAnyFromExternHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
@@ -40,8 +40,9 @@ import { boxToAny } from "./value-tags.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
-import { ensureAnyToStringHelper, ensureStrTruthyHelper } from "./native-strings.js";
+import { ensureAnyToStringHelper, ensureStrTruthyHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { getBoolToStringEmitter, getNativeStringRefFromExternrefEmitter } from "./string-emitter-registry.js";
+import { buildClosureRefTestArms } from "./closure-classifier.js";
 import {
   compileExpression,
   compileStringLiteral,
@@ -85,6 +86,35 @@ function isNativeStringMode(mode: CoercionMode): boolean {
  *     `"string"` on the struct/ref arm.
  */
 export type ToStringHint = "string" | "default";
+
+/**
+ * #3540 — Give compiled closures the NativeFunction source facade in the
+ * standalone ToString native after closure shapes have been finalized.
+ *
+ * The runtime helper is registered before every closure wrapper exists, so its
+ * closure classifier arm must be installed during the same finalization pass
+ * that seals `typeof`. The coercion engine owns the string result and dispatch;
+ * the closure finalizer only decides when the complete classifier is available.
+ */
+export function installCompiledClosureToStringArm(ctx: CodegenContext): void {
+  const toStringFn = ctx.mod.functions.find((fn) => (fn as { name?: string }).name === "__extern_toString") as
+    | WasmFunction
+    | undefined;
+  if (!toStringFn) return;
+
+  const anyLocalIdx = 1 + toStringFn.locals.length;
+  toStringFn.locals.push({ name: "$closure_tostring_any", type: { kind: "anyref" } });
+  toStringFn.body = [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: anyLocalIdx },
+    ...buildClosureRefTestArms(ctx, anyLocalIdx, [
+      ...stringConstantExternrefInstrs(ctx, "function () { [native code] }"),
+      { op: "return" },
+    ]),
+    ...toStringFn.body,
+  ];
+}
 
 /**
  * Emit `ToString(operand)` for an operand that has ALREADY been compiled to the

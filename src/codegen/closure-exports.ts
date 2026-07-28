@@ -18,6 +18,7 @@ import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } fro
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { isSyntheticStructName } from "./emit-helpers.js";
+import { installCompiledClosureToStringArm } from "./coercion-engine.js";
 
 /**
  * Emit __call_fn_0 export (#851): call a zero-arg WasmGC closure from JS.
@@ -1385,26 +1386,9 @@ export function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
   const closureI32Arms = (anyLocalIdx: number, matchValue: number): Instr[] =>
     buildClosureRefTestArms(ctx, anyLocalIdx, [{ op: "i32.const", value: matchValue }, { op: "return" }]);
 
-  // --- (#3540) __extern_toString: compiled closures have no retained source
-  // text. Recognise them with the shared finalized closure classifier and
-  // return an implementation-defined NativeFunction source facade instead of
-  // falling through to __any_to_string's `[object Object]`. This only rewrites
-  // the coercion native; closure representation and dispatch stay untouched.
-  const ets = fnByName("__extern_toString");
-  if (ets) {
-    const anyLocalIdx = 1 + ets.locals.length;
-    ets.locals.push({ name: "$closure_tostring_any", type: { kind: "anyref" } });
-    ets.body = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: anyLocalIdx },
-      ...buildClosureRefTestArms(ctx, anyLocalIdx, [
-        ...stringConstantExternrefInstrs(ctx, "function () { [native code] }"),
-        { op: "return" },
-      ]),
-      ...ets.body,
-    ];
-  }
+  // #3540: the single coercion engine owns compiled-closure stringification;
+  // this finalizer supplies the now-complete closure classifier.
+  installCompiledClosureToStringArm(ctx);
 
   // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
   const tf = fnByName("__typeof_function");
