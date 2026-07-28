@@ -10,7 +10,7 @@ pr: 3783
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
-updated: 2026-07-28
+updated: 2026-07-29
 priority: critical
 horizon: l
 complexity: L
@@ -82,6 +82,7 @@ files:
   - src/position-map.ts
   - src/process-stdin-prelude.ts
   - src/codegen/class-member-keys.ts
+  - src/codegen/class-bodies.ts
   - src/codegen/class-layout-registration.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
@@ -114,6 +115,7 @@ files:
   - tests/helpers/ir-identities.ts
   - tests/issue-3520-class-member-alias-abi.test.ts
   - tests/issue-3520-host-class-callable-abi.test.ts
+  - tests/issue-3520-inherited-class-integration-abi.test.ts
   - tests/backend-contract.test.ts
   - tests/issue-3520-function-artifact-identity.test.ts
   - tests/issue-3520-lifted-program-abi.test.ts
@@ -158,6 +160,7 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
+  - src/codegen/class-bodies.ts
   - src/codegen/context/types.ts
   - src/ir/integration.ts
   - src/ir/from-ast.ts
@@ -2143,6 +2146,61 @@ Inherited child alias validation still consumes physical compatibility keys.
 Class/type/global registries, lifted and other support allocation, function
 expressions, and remaining module-array/display-name scans must still move
 behind structural authorities before R1 can close.
+
+### 2026-07-29 inherited class integration callable continuation
+
+The next stacked continuation on
+`codex/3520-c21-inherited-class-alias-abi` removes the production
+physical-key dependency for inherited class callables:
+
+- class collection observes each compatibility alias beside its exact child
+  `IrClassId` and canonical ancestor `IrUnitId`. The registry follows the
+  allocator-owned function object back to its exact source unit and never
+  reconstructs identity from class, member, getter/setter, or static display
+  labels;
+- IR class integration resolves the ancestor allocation through the exact
+  source-unit handle and the child alias through the exact
+  `(child class, canonical unit)` pair. Physical `funcMap` lookup remains only
+  for low-level compatibility contexts that deliberately omit the production
+  registry; and
+- the anti-vacuity fixture uses an `A -> B -> C` hierarchy with an inherited
+  instance method, getter, setter, and static method. It deletes every
+  physical-name entry sharing the four allocator handles before integration,
+  then proves all four child aliases plan against their exact canonical units.
+
+The focused method/member/integration alias suite passes **3/3**. The broader
+class ABI, integration, optimization, inheritance, `super`, private-member,
+linear, host, and native-string matrix has **181 passing tests across 20 green
+files**. Six adjacent legacy runtime files reproduce the exact parent result:
+**45 failures / 2 passes**, all failures reporting the unchanged missing
+`string_constants` runtime import. They are a control-matched harness issue,
+not a new C21 result.
+
+The #3520 plus #2138 migration matrix passes **283 tests with one inherited
+known failure across 54 files** when each file runs in a fresh Vitest process.
+The sole failure is the unchanged linear inventory-count spy assertion (two
+builds observed versus one expected). Running the full matrix in one child
+process reaches the documented Vitest heap ceiling, so no result is inferred
+from that runner failure.
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet remains unchanged with zero unintended,
+post-claim, or module-level increase. Strict TypeScript, Biome lint,
+formatting, and diff checks pass.
+
+The supported eight-shard equivalence gate reports **1,611 passing / 32 known
+failing / 0 new regressions**; the same four baseline rows pass and the shared
+baseline remains unchanged. No local Test262 corpus run was performed, and
+neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C21 closes inherited class callable integration, not R1. The compatibility
+alias map remains for direct-codegen consumers until their optimizations and
+runtime behavior are structurally owned. Class/type/global registries, lifted
+and other support allocation, function expressions, and remaining
+module-array/display-name scans must still move behind structural authorities
+before R1 can close.
 
 ### R1a validation evidence
 

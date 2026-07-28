@@ -5103,8 +5103,30 @@ class ClassRegistry {
       }
 
       const ancestorPhysicalName = classMemberFuncKey(this.ctx, ancestorLegacyName);
-      const ancestorFuncIdx = this.ctx.funcMap.get(ancestorPhysicalName);
-      const childFuncIdx = this.ctx.funcMap.get(childPhysicalName);
+      const role =
+        memberKind === "method"
+          ? `class-method-adapter:instance:${memberName}`
+          : `class-member-adapter:${memberKind}:${memberName}`;
+      const ref = irSupportFuncRef(classId, role, childPhysicalName, derivedOrdinal);
+      if (ref.binding.kind !== "support") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has a non-support adapter reference`,
+        );
+      }
+      const inheritedAlias = this.ctx.programAbiClassCallables?.inheritedAlias(classId, terminal.id);
+      if (inheritedAlias && inheritedAlias.canonicalUnitId !== terminal.id) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} aliases ${inheritedAlias.canonicalUnitId}, not exact ancestor ${terminal.id}`,
+        );
+      }
+      const ancestorFuncIdx = this.unitFuncIdx(terminal.id, ancestorPhysicalName);
+      const childFuncIdx =
+        inheritedAlias?.handle ??
+        (this.ctx.programAbiClassCallables ? undefined : this.ctx.funcMap.get(childPhysicalName));
       const ancestorFunc = ancestorFuncIdx === undefined ? undefined : definedFuncAt(this.ctx, ancestorFuncIdx);
       const childFunc = childFuncIdx === undefined ? undefined : definedFuncAt(this.ctx, childFuncIdx);
       if (ancestorFuncIdx === undefined || !ancestorFunc || ancestorFunc.name !== ancestorPhysicalName) {
@@ -5161,18 +5183,6 @@ class ClassRegistry {
         );
       }
 
-      const role =
-        memberKind === "method"
-          ? `class-method-adapter:instance:${memberName}`
-          : `class-member-adapter:${memberKind}:${memberName}`;
-      const ref = irSupportFuncRef(classId, role, childPhysicalName, derivedOrdinal);
-      if (ref.binding.kind !== "support") {
-        throw new IrInvariantError(
-          "selection-preparation-mismatch",
-          "resolve",
-          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has a non-support adapter reference`,
-        );
-      }
       const bindingId = planProgramAbiSupportCallableAlias(this.ctx, {
         ref,
         anchor: { kind: "class", classId },

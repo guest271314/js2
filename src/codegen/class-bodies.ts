@@ -21,7 +21,11 @@ import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
 import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
 import { commitClassStructLayout } from "./class-layout-registration.js";
-import { mintDefinedFunc, pushProgramAbiClassCallable } from "./program-abi-class-callable-planning.js";
+import {
+  mintDefinedFunc,
+  pushProgramAbiClassCallable,
+  setProgramAbiInheritedClassCallableAlias,
+} from "./program-abi-class-callable-planning.js";
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { popBody, pushBody } from "./context/bodies.js";
@@ -1346,7 +1350,7 @@ export function collectClassDeclaration(
               const childFullName = `${className}_${suffix}`;
               const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
               if (!ctx.funcMap.has(childKey)) {
-                ctx.funcMap.set(childKey, funcIdx);
+                setProgramAbiInheritedClassCallableAlias(ctx, decl, childKey, funcIdx);
               }
               // Also inherit accessor set entry
               const parentAccessorKey = `${ancestor}_${accPropName}`;
@@ -1361,7 +1365,7 @@ export function collectClassDeclaration(
             const childFullName = `${className}_${suffix}`;
             const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
             if (!ownMethodNames.has(suffix) && !ctx.funcMap.has(childKey)) {
-              ctx.funcMap.set(childKey, funcIdx);
+              setProgramAbiInheritedClassCallableAlias(ctx, decl, childKey, funcIdx);
               ctx.classMethodSet.add(childFullName);
             }
           }
