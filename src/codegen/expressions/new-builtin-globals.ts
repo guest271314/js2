@@ -18,6 +18,7 @@ import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import { addUnionImports, getArrTypeIdxFromVec, getOrRegisterVecType, typedArrayVecStorage } from "../index.js";
 import { coercionPlan } from "../coercion-plan.js";
+import { emitToString } from "../coercion-engine.js";
 import { emitTaViewConstruct, emitTaViewConstructWindowed } from "../dataview-native.js";
 import { emitNativeDateParse } from "../date-parse-native.js";
 import { compileObjectLiteralAsExternref } from "../literals.js";
@@ -49,6 +50,28 @@ import {
 
 /** Sentinel: the `new` target is not one of the built-in global constructors. */
 export const NEW_GLOBAL_FALLTHROUGH = Symbol("new-builtin-global-fallthrough");
+
+/**
+ * Emit the argument stored in a String wrapper's [[StringData]] slot.
+ * Returns true when a statically-known Symbol emitted a terminal TypeError.
+ */
+function emitStringWrapperValue(ctx: CodegenContext, fctx: FunctionContext, value: ts.Expression): boolean {
+  if (!noJsHost(ctx)) {
+    compileExpression(ctx, fctx, value, { kind: "externref" });
+    return false;
+  }
+  if (ctx.oracle.staticJsTypeOf(value) === "symbol") {
+    const valueType = compileExpression(ctx, fctx, value);
+    if (valueType !== null) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a string");
+    return true;
+  }
+  const valueTsType = ctx.checker.getTypeAtLocation(value);
+  const valueType = compileExpression(ctx, fctx, value);
+  const stringType = emitToString(ctx, fctx, valueType, valueTsType, "string");
+  if (stringType.kind !== "externref") coerceType(ctx, fctx, stringType, { kind: "externref" });
+  return false;
+}
 
 export function tryCompileBuiltinGlobalNew(
   ctx: CodegenContext,
@@ -161,7 +184,7 @@ export function tryCompileBuiltinGlobalNew(
         // new String(x) → create real JS String wrapper object via __new_String host import
         // (typeof new String("") === "object", not "string")
         if (args.length >= 1) {
-          compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+          if (emitStringWrapperValue(ctx, fctx, args[0]!)) return { kind: "externref" };
         } else {
           const emptyStrResult = compileStringLiteral(ctx, fctx, "");
           if (!emptyStrResult) {
