@@ -3,11 +3,19 @@
     "path": "examples/benchmarks/fib.ts",
     "wasmOptimized": true,
     "wasmOptimizeLevel": 4,
-    "wasmUs": 3496.4618505747167,
-    "jsUs": 8691.944149425299,
-    "wasmStdUs": 6.541894879990899,
-    "jsStdUs": 36.71927719287465,
-    "ratioStd": 0.01175694893426417,
+    "mode": "warm",
+    "jsFlags": [
+      "--allow-natives-syntax",
+      "--no-concurrent-recompilation"
+    ],
+    "wasmFlags": [
+      "--no-liftoff"
+    ],
+    "wasmUs": 4016.198919999997,
+    "jsUs": 9962.118242424243,
+    "wasmStdUs": 2.703918804778232,
+    "jsStdUs": 8.429364255474965,
+    "ratioStd": 0.0032455856054932077,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -15,11 +23,19 @@
     "path": "examples/benchmarks/loop.ts",
     "wasmOptimized": true,
     "wasmOptimizeLevel": 4,
-    "wasmUs": 8154.932923076931,
-    "jsUs": 344.1108205128657,
-    "wasmStdUs": 114.53230878490103,
-    "jsStdUs": 0.13598301824291426,
-    "ratioStd": 0.0005809816165603681,
+    "mode": "warm",
+    "jsFlags": [
+      "--allow-natives-syntax",
+      "--no-concurrent-recompilation"
+    ],
+    "wasmFlags": [
+      "--no-liftoff"
+    ],
+    "wasmUs": 5767.778055555557,
+    "jsUs": 5621.163629107981,
+    "wasmStdUs": 1.1856508973383353,
+    "jsStdUs": 1656.091399501844,
+    "ratioStd": 0.28710692585466246,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -27,11 +43,19 @@
     "path": "examples/benchmarks/string.ts",
     "wasmOptimized": true,
     "wasmOptimizeLevel": 4,
-    "wasmUs": 4.827876473280799,
-    "jsUs": 4.502120894839216,
-    "wasmStdUs": 0.01634990047766386,
-    "jsStdUs": 0.05121597869551106,
-    "ratioStd": 0.010321229265435355,
+    "mode": "warm",
+    "jsFlags": [
+      "--allow-natives-syntax",
+      "--no-concurrent-recompilation"
+    ],
+    "wasmFlags": [
+      "--no-liftoff"
+    ],
+    "wasmUs": 5.510741357069146,
+    "jsUs": 3.912063376945816,
+    "wasmStdUs": 0.05666211188581849,
+    "jsStdUs": 0.09708139558963184,
+    "ratioStd": 0.015598776534120807,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -39,11 +63,19 @@
     "path": "examples/benchmarks/array.ts",
     "wasmOptimized": true,
     "wasmOptimizeLevel": 4,
-    "wasmUs": 80.89347252747129,
-    "jsUs": 55.364494505495344,
-    "wasmStdUs": 0.2963552567085456,
-    "jsStdUs": 0.35675238870477266,
-    "ratioStd": 0.004810451541765708,
+    "mode": "warm",
+    "jsFlags": [
+      "--allow-natives-syntax",
+      "--no-concurrent-recompilation"
+    ],
+    "wasmFlags": [
+      "--no-liftoff"
+    ],
+    "wasmUs": 78.94525233644859,
+    "jsUs": 48.16926314586189,
+    "wasmStdUs": 1.3389707567039035,
+    "jsStdUs": 5.364700363671319,
+    "ratioStd": 0.06919592892809055,
     "warmupRounds": 2,
     "measuredRounds": 9
   }
