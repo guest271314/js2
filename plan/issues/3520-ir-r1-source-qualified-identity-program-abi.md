@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c21-inherited-class-alias-abi
-pr: 3786
+branch: codex/3520-c22-class-layout-integration-abi
+pr: 3787
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -2206,7 +2206,8 @@ before R1 can close.
 ### 2026-07-29 exact class layout integration continuation
 
 The next stacked continuation on
-`codex/3520-c22-class-layout-integration-abi` removes the production
+`codex/3520-c22-class-layout-integration-abi`
+([PR #3787](https://github.com/loopdive/js2/pull/3787)) removes the production
 class-name join for struct layouts and field indices:
 
 - the existing type registry now resolves the current allocator-owned
