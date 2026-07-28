@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
+import { runTest262File } from "./test262-runner.js";
 
 type Target = "gc" | "standalone";
 
@@ -88,4 +91,54 @@ describe.each<Target>(["gc", "standalone"])("#3766 String receiver coercion (%s)
       ),
     ).toBe(1);
   });
+});
+
+describe("#3762 merge-queue ToPrimitive regression controls", () => {
+  it("classifies an opaque toString result before falling through to valueOf", async () => {
+    expect(
+      await run(
+        `
+          var calls = 0;
+          var value = {
+            toString: function () {
+              return function returnedObject() {};
+            },
+            valueOf: function () {
+              calls++;
+              return "ok";
+            }
+          };
+          var observed = String(value).indexOf("ok");
+          export function test(): number {
+            return observed === 0 && calls === 1 ? 1 : 0;
+          }
+        `,
+        "gc",
+      ),
+    ).toBe(1);
+  });
+
+  it.runIf(existsSync(resolve("test262")))(
+    "keeps BigInt on default-hint valueOf-before-toString ordering",
+    async () => {
+      const result = await runTest262File(
+        resolve("test262/test/built-ins/BigInt/call-value-of-when-to-string-present.js"),
+        "built-ins/BigInt",
+      );
+      expect(result.status, String(result.error ?? result.reason ?? "")).toBe("pass");
+    },
+    60_000,
+  );
+
+  it.runIf(existsSync(resolve("test262")))(
+    "falls through an object-returning toString to valueOf",
+    async () => {
+      const result = await runTest262File(
+        resolve("test262/test/built-ins/String/S15.5.2.1_A1_T13.js"),
+        "built-ins/String",
+      );
+      expect(result.status, String(result.error ?? result.reason ?? "")).toBe("pass");
+    },
+    60_000,
+  );
 });

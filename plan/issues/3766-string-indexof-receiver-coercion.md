@@ -19,9 +19,13 @@ related: [2742, 3751, 3763]
 loc-budget-allow:
   - src/codegen/type-coercion.ts
   - src/codegen/expressions/call-identifier.ts
+  - src/codegen/expressions/new-builtin-globals.ts
+  - tests/issue-3766-string-indexof-receiver-coercion.test.ts
 func-budget-allow:
   - src/codegen/type-coercion.ts::coerceType
+  - src/codegen/type-coercion.ts::tryStructStringHintHostDispatch
   - src/codegen/expressions/call-identifier.ts::compileIdentifierCall
+  - src/codegen/expressions/new-builtin-globals.ts::emitStringWrapperValue
 ---
 
 # #3766 — preserve primitive `undefined` during String receiver coercion
@@ -81,3 +85,40 @@ fingerprints are byte-identical between arms:
   `ef5897e0c2aa169c65307df2b61296e58c5e45f7d1b7a5f42aab138bea14c3d9`;
 - standalone:
   `6a859a54be467e19d13e91183db2f2fc90d9f3584b5003aa481292f1e9720148`.
+
+## Merge-queue regression repair
+
+The first merge-group run exposed two assumptions that were narrower than the
+ECMAScript operations this code serves:
+
+- the struct fast path ran for the `"default"` hint as well as `"string"`.
+  That changed `BigInt(object)` from `valueOf`-first to `toString`-first and
+  trapped the exact Test262 row
+  `built-ins/BigInt/call-value-of-when-to-string-present.js`;
+- an `externref` closure result was treated as proof that `toString` returned a
+  primitive string. `externref` is only the Wasm carrier and can also contain an
+  object/function, in which case OrdinaryToPrimitive must continue to
+  `valueOf`.
+
+The repair therefore keeps the direct closure call restricted to the string
+hint and classifies opaque host results with the existing Type(x)-is-Object
+predicate. A primitive result is stringified; an object result falls through to
+the next method, and a second object result throws the required TypeError.
+
+The same failed merge group also caught a representation boundary in
+`new String(value)`: a host `externref` can be a dynamic object whose
+conversion methods live in the host sidecar, including properties assigned
+after literal construction. Pre-stringifying that value during module start
+cannot invoke its callback-backed methods. Host `externref` values now remain
+raw for the real `__new_String` constructor, while statically-known WasmGC refs
+still use the module-start-safe in-Wasm conversion above.
+
+Regression controls use the exact two merge-queue rows:
+
+- `built-ins/BigInt/call-value-of-when-to-string-present.js` guards default-hint
+  ordering;
+- `built-ins/String/S15.5.2.1_A1_T13.js` guards object-result fallthrough and a
+  dynamically assigned throwing `valueOf`.
+
+A focused closed-struct case separately proves that opaque `toString` results
+are classified before the in-Wasm `valueOf` dispatch.
