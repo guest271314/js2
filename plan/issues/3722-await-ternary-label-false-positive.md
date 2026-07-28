@@ -21,6 +21,10 @@ loc-budget-allow:
   # to src/compiler/early-errors/node-checks.ts's baseline (1866 -> 1876).
   # Same file, same kind of grant as #3714's brand-check fix.
   - src/compiler/early-errors/node-checks.ts
+func-budget-allow:
+  # Same +10 LOC lands inside runNodeChecks itself (1785 -> 1795) since the
+  # await-as-label check is one branch inside that single dispatch function.
+  - src/compiler/early-errors/node-checks.ts::runNodeChecks
 ---
 
 # #3722 — `cond ? await x() : y` false-flagged as `await:` label
