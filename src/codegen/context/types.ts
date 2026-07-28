@@ -1053,6 +1053,7 @@ export interface CodegenContext {
   mod: WasmModule;
   programAbiSession?: import("../program-abi-session.js").ProgramAbiSession;
   programAbiModuleInitCallables?: import("../program-abi-module-init-planning.js").ProgramAbiModuleInitCallableRegistry;
+  programAbiSourceCallables?: import("../program-abi-source-callable-planning.js").ProgramAbiSourceCallableRegistry;
   programAbiCallableProviders?: import("../program-abi-provider-planning.js").ProgramAbiCallableProviderRegistry;
   programAbiClassCallables?: import("../program-abi-class-callable-planning.js").ProgramAbiClassCallableRegistry;
   programAbiCallables?: import("../program-abi-callable-planning.js").ProgramAbiCallableRegistry;

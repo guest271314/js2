@@ -91,6 +91,7 @@ import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
 import { definedFuncAt, mintDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { pushProgramAbiModuleInitCallable } from "./program-abi-module-init-planning.js";
+import { pushProgramAbiTopLevelCallable } from "./program-abi-source-callable-planning.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 // ── Extracted subsystems (#3268) — re-exported for external consumers ─────
@@ -1042,11 +1043,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       }
 
       const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-      const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const funcIdx = mintDefinedFunc(ctx);
       ctx.funcMap.set(name, funcIdx);
 
-      // Create placeholder function to be filled in second pass
-      // Only export as Wasm exports if this is the entry file
+      // Create the placeholder now; only entry-file functions become Wasm exports.
       const isExported = isEntryFile && hasExportModifier(stmt);
       const func: WasmFunction = {
         name,
@@ -1055,7 +1055,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         body: [],
         exported: isExported,
       };
-      ctx.mod.functions.push(func);
+      pushProgramAbiTopLevelCallable(ctx, stmt, funcIdx, func);
 
       if (isExported) {
         ctx.mod.exports.push({

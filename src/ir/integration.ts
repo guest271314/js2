@@ -1661,10 +1661,17 @@ export function compileIrPathFunctions(
     const func = ctx.irUnitFuncMap.get(unitId);
     return func ? definedFuncHandleOf(ctx, func) : undefined;
   };
+  // Low-level compatibility tests may call integration without a production
+  // identity context. Production contexts must resolve the exact allocation.
+  const sourceArtifactFuncIdx = (unitId: IrUnitId, compatibilityName: string): number | undefined =>
+    ctx.programAbiSourceCallables?.handleForUnit(unitId) ??
+    (ctx.programAbiSourceCallables?.identityContext ? undefined : ctx.funcMap.get(compatibilityName));
   const legacyArtifactFuncIdx = (entry: BuiltFn): number | undefined =>
     entry.moduleInit
       ? ctx.programAbiModuleInitCallables?.handleForUnit(entry.artifactUnitId)
-      : ctx.funcMap.get(entry.name);
+      : entry.classMember
+        ? ctx.funcMap.get(entry.name)
+        : sourceArtifactFuncIdx(entry.artifactUnitId, entry.name);
   const hasPreallocatedArtifactSlot = (entry: BuiltFn): boolean =>
     (originalArtifactUnitIds.has(entry.artifactUnitId) && !entry.synthesized) ||
     entry.classMember === true ||
@@ -1885,12 +1892,12 @@ export function compileIrPathFunctions(
       existing.compatibilityNames.add(ref.name);
       return;
     }
-    const funcIdx = ctx.funcMap.get(ref.name);
+    const funcIdx = sourceArtifactFuncIdx(ref.binding.unitId, ref.name);
     if (funcIdx === undefined) {
       throw new IrInvariantError(
         "missing-function-slot",
         "resolve",
-        `ir/integration: planned unit ${ref.binding.unitId} / ${ref.name} has no registered slot`,
+        `ir/integration: planned source unit ${ref.binding.unitId} / ${ref.name} has no exact registered slot`,
       );
     }
     bindUnitCallableSlot(ref, funcIdx, ref.name);

@@ -19,6 +19,7 @@ export function eliminateDeadLayoutAndPlanProgramAbi(ctx: CodegenContext): void 
   ctx.programAbiCallableProviders?.planRetained();
   ctx.programAbiClassCallables?.planRetained();
   ctx.programAbiModuleInitCallables?.planRetained();
+  ctx.programAbiSourceCallables?.planRetained();
   ctx.programAbiCallables?.planRetained();
   ctx.programAbiGlobals?.planRetained();
   ctx.programAbiExports?.planRetained();
