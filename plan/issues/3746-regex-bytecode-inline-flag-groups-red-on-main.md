@@ -126,9 +126,29 @@ Both reproduce on Node 24, so they are genuinely ours and red in CI too:
 - [ ] `tests/issue-2175-regexp-proto-readers.test.ts` — 3 failures.
       `RegExp.prototype` flag-bool / `.flags` / `.source` accessor dispatch on a
       correct `this`.
-- [ ] `tests/issue-1817.test.ts` — 3 failures in the `>>>` unsigned-result
-      family (`(-1 >>> 0) === 4294967295` in fast mode and under the native i32
-      annotation).
+- [ ] `tests/issue-1817.test.ts` — 3 failures. **NOT the `>>>` semantics the
+      suite name suggests.** The four plain `>>>` cases pass; the three that
+      fail are the ones compiled with `{ fast: true }` / the native i32
+      annotation, and they fail to COMPILE:
+
+      ```
+      IR path failed for shr: function typeIdx parity mismatch: IR=36, legacy=14
+        — keeping legacy body [IR-FALLBACK]
+      IR-first (#2138): shr failed after its legacy body was skipped
+        [unpatched-slot; ir-unified]
+      ```
+
+      So it is an **IR-first slot/type-parity** bug (#2138): the IR and legacy
+      lowerings disagree on a function type index, and under IR-first the legacy
+      body has already been skipped, so there is nothing to fall back to and the
+      compile fails outright. The `>>>` unsigned result is incidental — it is
+      just what these particular fixtures happen to compute. Needs its own issue
+      against the IR-first slot machinery rather than the bitwise lowering.
+
+      Recorded rather than fixed: this is the third time in this issue that the
+      obvious reading of a failure was wrong (flag-group scoping → host oracle;
+      "red in CI" → red only on Node 22; "`>>>` family" → IR-first parity), and
+      a fourth guess is worth less than a correct hand-off.
 
 ## Acceptance criteria
 
