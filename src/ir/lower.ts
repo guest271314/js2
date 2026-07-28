@@ -914,26 +914,34 @@ export function lowerIrFunctionBody<S, Slot>(
     vecElementScratch.set(key, idx);
     return idx;
   };
-  const ensureJsBitwiseScratch = (rhsIsI32: boolean): { rhs: number; tmp: number } => {
+  // #3733 — tmp-only accessor, split out of `ensureJsBitwiseScratch` so the
+  // `x | 0` / `x ^ 0` zero-operand fast path below (which needs only the
+  // ToInt32 scratch, not an rhs-holding slot) doesn't allocate an unused
+  // rhs local on every call.
+  const ensureJsBitwiseTmp = (): number => {
     if (jsBitwiseTmpIdx === null) {
       jsBitwiseTmpIdx = func.params.length + locals.length;
       const type: ValType = { kind: "f64" };
       locals.push({ name: "$js_bitwise_tmp", type, logicalType: { kind: "val", val: type } });
     }
+    return jsBitwiseTmpIdx;
+  };
+  const ensureJsBitwiseScratch = (rhsIsI32: boolean): { rhs: number; tmp: number } => {
+    const tmp = ensureJsBitwiseTmp();
     if (rhsIsI32) {
       if (jsBitwiseRhsIdxI32 === null) {
         jsBitwiseRhsIdxI32 = func.params.length + locals.length;
         const type: ValType = { kind: "i32" };
         locals.push({ name: "$js_bitwise_rhs_i32", type, logicalType: { kind: "val", val: type } });
       }
-      return { rhs: jsBitwiseRhsIdxI32, tmp: jsBitwiseTmpIdx };
+      return { rhs: jsBitwiseRhsIdxI32, tmp };
     }
     if (jsBitwiseRhsIdxF64 === null) {
       jsBitwiseRhsIdxF64 = func.params.length + locals.length;
       const type: ValType = { kind: "f64" };
       locals.push({ name: "$js_bitwise_rhs", type, logicalType: { kind: "val", val: type } });
     }
-    return { rhs: jsBitwiseRhsIdxF64, tmp: jsBitwiseTmpIdx };
+    return { rhs: jsBitwiseRhsIdxF64, tmp };
   };
   // #2949 slice 3 — scratch local for dynamic `tag.test` arms that must read
   // the carrier twice (host-mode Object test: `typeof === "object" && !null`).
@@ -973,6 +981,19 @@ export function lowerIrFunctionBody<S, Slot>(
     } catch {
       return null;
     }
+  };
+
+  // #3733 — best-effort constant-value peek, same defensive shape as
+  // `tryTypeOf`. Used by the `js.bitor`/`js.bitxor` zero-operand fast path
+  // below to recognise the `x | 0` / `x ^ 0` ToInt32-coercion idiom without
+  // requiring the operand to already be i32-typed in IR (an untyped `number`
+  // literal like the `0` in `s = (s + i) | 0` lowers as f64, so the existing
+  // "both already i32" fast path above doesn't catch it).
+  const tryConstOf = (v: IrValueId): number | null => {
+    const d = defBy.get(v);
+    if (!d || d.kind !== "const") return null;
+    const c = d.value;
+    return c.kind === "i32" || c.kind === "f64" ? c.value : null;
   };
 
   // --- emission -----------------------------------------------------------
@@ -1230,6 +1251,27 @@ export function lowerIrFunctionBody<S, Slot>(
             } else {
               emitter.emitNumericConversion("f64.convert_i32_s", out);
             }
+          }
+          return;
+        }
+
+        if (isJsBitwise && (instr.op === "js.bitor" || instr.op === "js.bitxor") && tryConstOf(instr.rhs) === 0) {
+          // #3733 — `x | 0` / `x ^ 0`: OR/XOR with 0 is the identity on the
+          // ToInt32 bit pattern, so the whole rhs sub-expression — including
+          // its `emitJsToInt32` float round-trip, since an untyped `number`
+          // literal like this `0` lowers as f64, not i32 — is dead work.
+          // `x | 0` is the single most common "coerce to int32" idiom in JS
+          // (e.g. `s = (s + i) | 0`); the legacy AST-direct codegen in
+          // binary-ops.ts already special-cases it, but the IR lowerer
+          // never did, so any function compiled through IR paid the full
+          // double-ToInt32 cost for it (landing-page `loop.ts` benchmark).
+          emitValue(instr.lhs, out);
+          if (!lhsIsI32) {
+            coerceToF64ForBitwise(instr.lhs, out);
+            emitJsToInt32(emitter, out, ensureJsBitwiseTmp());
+          }
+          if (!resultIsI32) {
+            emitter.emitNumericConversion("f64.convert_i32_s", out);
           }
           return;
         }
