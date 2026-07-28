@@ -2156,6 +2156,26 @@ export function receiverIsNativeStringValType(
 ): boolean {
   if (!(ctx.wasi || ctx.standalone)) return false;
   if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) return false;
+  // (#3753 S1c) `this.<field>` inside a typed twin, where #3753 S1b promoted the
+  // slot to a native string ref. The value IS a `$AnyString` by construction —
+  // the struct field's own wasm type says so — but the receiver's TS type is
+  // still `any` (the twin's `this` is untyped in the source), so without this
+  // the call fell to the RUNTIME-guarded arm and re-emitted
+  // `ref.test` + `ref.cast` + `__str_flatten` on a value already known to be a
+  // flat native string. That is the per-character cost #3753 measured: promoting
+  // the slot alone moved nothing because the READ never consulted it.
+  if (ts.isPropertyAccessExpression(recv) && recv.expression.kind === ts.SyntaxKind.ThisKeyword) {
+    const structName = fctx.typedThisStructName;
+    if (structName === undefined) return false;
+    const fields = ctx.structFields.get(structName);
+    const field = fields?.find((f) => f.name === recv.name.text);
+    if (field === undefined) return false;
+    if (field.presenceTracked) return false; // absence must stay expressible
+    if (ctx.classAccessorSet.has(`${structName}_${recv.name.text}`)) return false;
+    if (field.type.kind !== "ref" && field.type.kind !== "ref_null") return false;
+    const fieldTypeIdx = (field.type as { typeIdx?: number }).typeIdx;
+    return fieldTypeIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && fieldTypeIdx === ctx.nativeStrTypeIdx);
+  }
   if (!ts.isIdentifier(recv)) return false;
   // Only when the static type genuinely lost the string info (`any`/`unknown`).
   // A concrete `string` already routes through the existing isStringType gate;
