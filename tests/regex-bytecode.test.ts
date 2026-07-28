@@ -179,6 +179,7 @@ const CORPUS_2D: Array<{ p: string; f: string; inputs: string[] }> = [
  */
 const HOST_SUPPORTS_INLINE_MODIFIERS = (() => {
   try {
+    // biome-ignore lint/complexity/useRegexLiterals: a /(?i:a)/ literal is a parse-time SyntaxError on hosts without inline modifiers — the constructor defers it to runtime so try/catch can probe
     new RegExp("(?i:a)");
     return true;
   } catch {
