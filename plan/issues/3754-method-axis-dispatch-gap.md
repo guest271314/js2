@@ -1,10 +1,18 @@
 ---
 id: 3754
 title: "perf: the `method` axis is 6.21x node — the second-largest remaining gap after #3753"
-status: ready
+loc-budget-allow:
+  # The numeric-return twin touches exactly the four sites that must agree on
+  # the ABI (twin minting, trampoline results, the shim, the verdict itself),
+  # each carrying the soundness argument for why it can impose a type the
+  # declaration does not have.
+  - src/codegen/typed-this.ts
+  - src/codegen/closures.ts
+status: done
 sprint: current
 created: 2026-07-28
 updated: 2026-07-28
+completed: 2026-07-28
 priority: high
 horizon: l
 feasibility: medium
@@ -109,6 +117,48 @@ run per call.
 - [x] A per-call cost table for the `method` axis, calls resolved by name.
 - [x] The dominant cost named, with WAT evidence: the externref twin ABI, not
       the arithmetic.
-- [ ] Numeric-return twins implemented across all four points above.
-- [ ] Measured by same-container interleaved A/B behind a kill switch, with
+- [x] Numeric-return twins implemented across all four points above.
+- [x] Measured by same-container interleaved A/B behind a kill switch, with
       matching checksums.
+
+## Result (2026-07-28)
+
+Implemented across all four points. `refinedTwinReturnType` (typed-this.ts) is
+the single verdict both the twin's minting and the trampoline's reservation
+consult, so they cannot disagree; `JS2WASM_NUMERIC_TWINS=0` restores the boxed
+ABI byte-for-byte.
+
+### Measurement — same container, interleaved, checksums matching
+
+Three interleaved rounds of the js2 leg, `JS2WASM_NUMERIC_TWINS` on/off. Every
+checksum matched on every axis in every round. Round 1 is discarded as warmup:
+its `numeric` reading (3.63 ms against a 1.41 ms steady state) shows the
+container was still noisy, and `numeric` is an axis this change cannot touch —
+which is exactly what makes it a usable noise detector rather than a judgement
+call.
+
+| axis      | twins off | twins on | note                        |
+| --------- | --------: | -------: | --------------------------- |
+| method    |     4.22 | **0.95** | **4.4x**                    |
+| numeric   |     1.41 |     1.41 | untouched (the noise probe) |
+| prop      |     0.63 |     0.64 | untouched                   |
+| alloc     |    0.138 |    0.139 | untouched                   |
+| tokenizer |     0.76 |     0.74 | untouched (within noise)    |
+
+Against node measured in the same container minutes later (0.426 ms → 0.474 ms
+this run), the `method` axis goes from **8.88x to 1.99x**.
+
+### What the loop body became
+
+    call $__dc_P_inc_0_g     ;; -> f64
+    f64.add
+
+The two conversion calls per iteration that #3754's profile named
+(`__to_primitive`, `__unbox_number`) are gone, and the twin no longer ends in
+`__box_number`.
+
+### Follow-on, deliberately not taken here
+
+The second lever this issue identified — hoisting the per-call `ref.test` out
+of the guarded `__dc_*_g` trampoline — is untouched and still open. It is
+independent of the ABI change and wants its own measurement.
