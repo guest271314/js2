@@ -78,7 +78,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { buildClosureRefTestArms } from "./closure-classifier.js"; // (#3140) __bind_dyn callable gate
-import { buildApplyClosureArityWidening } from "./closure-exports.js"; // (#3592) under-application widening
+import { buildApplyClosureArityWidening, buildTransferredCharAtApplyArm } from "./closure-exports.js"; // (#3592) under-application widening
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { reserveClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
@@ -5559,7 +5559,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
     );
   }
 
-  bridgeFn.body = body;
+  bridgeFn.body = [...buildTransferredCharAtApplyArm(ctx, ARG_OF), ...body];
   bridgeFn.locals = locals;
 }
 

@@ -23,6 +23,7 @@ import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } fro
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { isSyntheticStructName } from "./emit-helpers.js";
+export { buildTransferredCharAtApplyArm } from "./char-at-transfer.js";
 import { installCompiledClosureToStringArm } from "./coercion-engine.js";
 
 /**
