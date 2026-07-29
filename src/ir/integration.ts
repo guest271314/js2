@@ -185,7 +185,7 @@ import { verifyIrFunction } from "./verify.js";
 import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
-import type { FieldDef, FuncTypeDef, Import, Instr, StructTypeDef, ValType } from "./types.js";
+import type { FieldDef, FuncTypeDef, GlobalDef, Import, Instr, StructTypeDef, ValType } from "./types.js";
 import { definedFuncAt, definedFuncHandleOf, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
 import {
   classifyIrFailure,
@@ -2477,22 +2477,34 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
     );
   }
   const name = declaration.name.text;
-  const globalIdx = ctx.moduleGlobals.get(name);
-  if (globalIdx === undefined) {
-    throw new IrInvariantError(
-      "unknown-global-ref",
-      "build",
-      `module-init: supported binding '${name}' is absent from the legacy module-global registry`,
-    );
-  }
-
   const globalName = `__mod_${name}`;
-  const global = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  const observed = ctx.programAbiGlobals?.moduleBinding(declaration);
+  let global: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    if (!observed || observed.displayName !== name) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `module-init: supported binding '${name}' has no exact allocator-owned module global`,
+      );
+    }
+    global = observed.value;
+  } else {
+    const globalIdx = ctx.moduleGlobals.get(name);
+    if (globalIdx === undefined) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `module-init: supported binding '${name}' is absent from the compatibility module-global registry`,
+      );
+    }
+    global = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  }
   if (!global || global.name !== globalName) {
     throw new IrInvariantError(
       "unknown-global-ref",
       "build",
-      `module-init: legacy module-global registry contains '${name}' but ${globalName} is missing`,
+      `module-init: module-global allocation for '${name}' does not resolve ${globalName}`,
     );
   }
   if (!global.mutable) {
@@ -2534,14 +2546,26 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
     );
   }
 
-  const tdzGlobalIdx = ctx.tdzGlobals.get(name);
-  const tdzGlobal = tdzGlobalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, tdzGlobalIdx)];
   const expectedTdzGlobalName = `__tdz_${name}`;
-  if (tdzGlobalIdx !== undefined && (!tdzGlobal || tdzGlobal.name !== expectedTdzGlobalName)) {
+  let tdzGlobal: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    tdzGlobal = observed?.tdz;
+    if (ctx.tdzLetConstNames.has(name) && !tdzGlobal) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `module-init: supported binding '${name}' has no exact allocator-owned TDZ global`,
+      );
+    }
+  } else {
+    const tdzGlobalIdx = ctx.tdzGlobals.get(name);
+    tdzGlobal = tdzGlobalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, tdzGlobalIdx)];
+  }
+  if (tdzGlobal && tdzGlobal.name !== expectedTdzGlobalName) {
     throw new IrInvariantError(
       "unknown-global-ref",
       "build",
-      `module-init: TDZ registry contains '${name}' but ${expectedTdzGlobalName} is missing`,
+      `module-init: TDZ allocation for '${name}' does not resolve ${expectedTdzGlobalName}`,
     );
   }
   const tdzGlobalName = tdzGlobal ? expectedTdzGlobalName : null;

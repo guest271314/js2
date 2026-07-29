@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c22-class-layout-integration-abi
-pr: 3787
+branch: codex/3520-c23-module-global-integration-abi
+pr: 3789
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -89,6 +89,7 @@ files:
   - src/codegen/dead-elimination.ts
   - src/codegen/declarations.ts
   - src/codegen/func-space.ts
+  - src/codegen/module-global-registration.ts
   - src/codegen/program-abi-class-callable-planning.ts
   - src/codegen/program-abi-callable-planning.ts
   - src/codegen/program-abi-export-planning.ts
@@ -154,6 +155,7 @@ files:
   - tests/issue-3520-source-callable-abi.test.ts
   - tests/issue-3520-type-class-abi.test.ts
   - tests/issue-3520-global-population-abi.test.ts
+  - tests/issue-3520-module-global-integration-abi.test.ts
   - tests/issue-3520-callable-export-population-abi.test.ts
   - tests/issue-3520-program-abi-import-callable-planning.test.ts
   - tests/issue-3520-imported-callable-abi.test.ts
@@ -2251,6 +2253,61 @@ runtime behavior retire. Module globals, remaining class/type consumers,
 lifted and other support allocation, function expressions, and module-array
 or display-name scans must still move behind structural authorities before R1
 can close.
+
+### 2026-07-29 exact module-global integration continuation
+
+The current stacked continuation on
+`codex/3520-c23-module-global-integration-abi`
+([PR #3789](https://github.com/loopdive/js2/pull/3789)) removes the production
+module-binding join through `moduleGlobals` and `tdzGlobals`:
+
+- declaration collection exposes each direct top-level identifier
+  declaration's exact allocator-owned value global to the Program ABI global
+  registry. Retained TDZ allocation attaches the exact flag object to that
+  same `ts.VariableDeclaration`;
+- repeated declarations that share one compatibility allocation observe the
+  same object without reallocating it. The user-function/import collision
+  behavior from #2669 and #3428 is preserved in a focused module-global
+  registration subsystem rather than growing the declaration driver;
+- IR module-binding integration resolves value and TDZ storage by the exact
+  declaration observation whenever the production registry exists. Missing
+  structural observations fail closed; the two name maps are consulted only
+  by low-level compatibility contexts that omit Program ABI ownership; and
+- the anti-vacuity fixture deletes both the `state` value entry from
+  `moduleGlobals` and its flag entry from `tdzGlobals` before integration.
+  `<module-init>` still emits, and both exact `GlobalDef` objects receive their
+  source-owned Program ABI plans and locators.
+
+The focused Program ABI global/module-init matrix passes **19/19 across five
+files**. The allocation extraction's #2669, #3428, module-global, and TDZ
+regression controls pass **25/25**. The adjacent #3142 selector control remains
+**14/15**, and #3529 compatibility preflight remains **11/13**; their three
+assertion failures reproduce unchanged on the exact C22 parent.
+
+The #3520 plus #2138 migration matrix advances to **284 passing / 1 inherited
+known failure across 55 files**. The sole failure remains the linear
+inventory-count spy assertion (two builds observed versus one expected).
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet reports no unintended, post-claim, or
+module-level increase.
+
+The supported eight-shard equivalence gate remains **1,611 passing / 32 known
+failing / 0 new regressions**; the same four baseline rows pass and the shared
+baseline remains unchanged. Strict TypeScript, Biome lint, formatting, diff,
+LOC/function budget, dead-export, godfile, oracle-ratchet, and adoption gates
+pass.
+
+No local Test262 corpus run was performed. This continuation is stacked rather
+than targeting `main`, while the full Test262 workflow runs at the merge-group
+boundary. Neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C23 closes exact module value/TDZ integration, not R1. Direct codegen still
+owns the compatibility maps until its module-state optimizations and runtime
+behavior retire. Remaining class/type consumers, lifted and other support
+allocation, function expressions, and module-array or display-name scans must
+still move behind structural authorities before R1 can close.
 
 ### R1a validation evidence
 
