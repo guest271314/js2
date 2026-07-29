@@ -68,6 +68,7 @@ import {
   type IrPlanningIdentityContext,
 } from "../ir/planning-identity.js";
 import { makeIrPromiseDelayResolver } from "../ir/promise-delay.js";
+import { containsStringBuilderLoopShape } from "../ir/string-builder-shape.js";
 import {
   buildIrPromiseDelayLoweringPlans,
   collectIrPromiseDelayOwners,
@@ -1802,6 +1803,10 @@ const IR_IMPLICIT_PARAM_PROJECTION_BINARY_OPS = new Set<ts.SyntaxKind>([
 function collectIrImplicitParamProjectionCandidates(
   declaration: ts.FunctionDeclaration,
 ): ReadonlySet<ts.ParameterDeclaration> {
+  // Projecting an untyped numeric parameter can make an existing builder
+  // benchmark newly IR-claimable. Until #3745 migrates the legacy loop-local
+  // integer promotion, keep that family on its current optimized path.
+  if (declaration.body && containsStringBuilderLoopShape(declaration.body)) return new Set();
   const paramsByName = new Map<string, ts.ParameterDeclaration>();
   for (const parameter of declaration.parameters) {
     if (!parameter.type && ts.isIdentifier(parameter.name)) paramsByName.set(parameter.name.text, parameter);

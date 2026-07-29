@@ -1891,6 +1891,13 @@ removed the three measured Acorn parity withdrawals. Projection is restricted
 to parameters feeding the admitted scalar operators, avoiding a whole-source
 call-site scan for unrelated harness parameters.
 
+That projection deliberately excludes functions containing the #1210
+string-builder loop shape. Making an untyped builder function claimable would
+move it off the legacy cached-buffer and loop-local integer optimizations before
+#3745 has migrated the latter. The existing IR owned-append path remains
+available to already-typed functions; newly inferred builder functions stay on
+their current optimized path until the remaining optimization is present in IR.
+
 Non-fast standalone needed two runtime corrections exposed only after the
 claim became live:
 
