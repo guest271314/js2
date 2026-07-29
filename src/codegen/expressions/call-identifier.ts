@@ -67,6 +67,7 @@ import {
   wasmFuncReturnsVoid,
 } from "./helpers.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
+import { isForeignEvalNode } from "./eval-source.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import {
   buildArgcExtrasReset,
@@ -2195,13 +2196,12 @@ export function compileIdentifierCall(
       maybeSetArgcForKnownCall(ctx, fctx, funcName, expr.arguments.length, paramCount);
     }
 
-    // Re-lookup funcIdx: argument compilation may trigger addUnionImports
-    // which shifts defined-function indices, making the earlier lookup stale.
+    // Argument compilation may shift defined-function indices.
     const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx;
     fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
-
-    // Determine return type from function signature
-    const sig = ctx.checker.getResolvedSignature(expr);
+    // Foreign eval calls lack checker signatures; the resolved Wasm signature is authoritative.
+    if (isForeignEvalNode(expr) && wasmFuncReturnsVoid(ctx, finalFuncIdx)) return VOID_RESULT;
+    const sig = isForeignEvalNode(expr) ? undefined : ctx.checker.getResolvedSignature(expr);
     if (sig) {
       const retType = ctx.checker.getReturnTypeOfSignature(sig);
       if (isEffectivelyVoidReturn(ctx, retType, funcName)) return VOID_RESULT;
