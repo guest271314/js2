@@ -19,6 +19,7 @@ import { isVoidType, unwrapPromiseType, isPromiseType } from "../checker/type-ma
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
+import { pushProgramAbiNestedCallable, pushProgramAbiTypedThisTwin } from "./program-abi-source-callable-planning.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3b) manual import-shift must skip stable handles
 import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
@@ -2710,9 +2711,8 @@ export function compileArrowAsClosure(
   closureReturnType = generic.closureReturnType;
   liftedFuncTypeIdx = generic.liftedFuncTypeIdx;
 
-  // 6. Register the lifted function
   const liftedFuncIdx = mintDefinedFunc(ctx);
-  pushDefinedFunc(ctx, liftedFuncIdx, {
+  pushProgramAbiNestedCallable(ctx, arrow, liftedFuncIdx, {
     name: closureName,
     typeIdx: liftedFuncTypeIdx,
     locals: liftedFctx.locals,
@@ -2800,7 +2800,7 @@ export function compileArrowAsClosure(
         ctx.liveBodies.delete(twin.liftedFctx.body);
       } else {
         const twinFuncIdx = mintDefinedFunc(ctx);
-        pushDefinedFunc(ctx, twinFuncIdx, {
+        pushProgramAbiTypedThisTwin(ctx, arrow, twinFuncIdx, {
           name: twinName,
           typeIdx: twin.liftedFuncTypeIdx,
           locals: twin.liftedFctx.locals,
@@ -3203,9 +3203,8 @@ export function compileArrowAsCallback(
   if (savedFunc) ctx.parentBodiesStack.pop();
   ctx.currentFunc = savedFunc;
 
-  // 6. Register and export the callback function
   const cbFuncIdx = mintDefinedFunc(ctx);
-  pushDefinedFunc(ctx, cbFuncIdx, {
+  pushProgramAbiNestedCallable(ctx, arrow, cbFuncIdx, {
     name: cbName,
     typeIdx: cbTypeIdx,
     locals: cbFctx.locals,

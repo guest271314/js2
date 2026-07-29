@@ -18,6 +18,7 @@ import {
   IrBinop,
   IrBlock,
   IrBlockId,
+  IrClassMemberKind,
   IrClassShape,
   IrClosureSignature,
   IrConst,
@@ -723,11 +724,14 @@ export class IrFunctionBuilder {
 
   /**
    * Invoke a closure value. Caller passes `resultType` (= signature.returnType)
-   * for the SSA def.
+   * for the SSA def, or null for a void call in statement position.
    */
-  emitClosureCall(callee: IrValueId, args: readonly IrValueId[], resultType: IrType): IrValueId {
-    const result = this.allocator.fresh();
-    this.valueTypes.set(result, resultType);
+  emitClosureCall(callee: IrValueId, args: readonly IrValueId[], resultType: IrType | null): IrValueId | null {
+    let result: IrValueId | null = null;
+    if (resultType !== null) {
+      result = this.allocator.fresh();
+      this.valueTypes.set(result, resultType);
+    }
     this.pushInstr({
       kind: "closure.call",
       callee,
@@ -890,15 +894,13 @@ export class IrFunctionBuilder {
     });
   }
 
-  /**
-   * Emit `class.call` to invoke an instance method. `resultType` is the
-   * method descriptor's `returnType` (or `null` for void). Returns `null`
-   * for void methods — callers using the result in expression position
-   * must reject `null` themselves.
+  /** Invoke an instance member while keeping semantic kind separate from its
+   * compatibility spelling. A void method/setter returns `null`.
    */
   emitClassCall(
     receiver: IrValueId,
     methodName: string,
+    memberKind: Exclude<IrClassMemberKind, "static">,
     args: readonly IrValueId[],
     resultType: IrType | null,
   ): IrValueId | null {
@@ -910,6 +912,7 @@ export class IrFunctionBuilder {
     this.pushInstr({
       kind: "class.call",
       receiver,
+      memberKind,
       methodName,
       args: [...args],
       result,

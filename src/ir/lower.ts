@@ -1993,7 +1993,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc(cl.methodFunc(instr.methodName)),
+          funcIdx: resolver.resolveFunc(cl.memberFunc(instr.memberKind, instr.methodName)),
         });
         return;
       }
@@ -2029,7 +2029,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc(cl.methodFunc(instr.methodName)),
+          funcIdx: resolver.resolveFunc(cl.memberFunc("method", instr.methodName)),
         });
         return;
       }
@@ -2095,7 +2095,7 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const a of instr.args) emitValue(a, out);
         emitter.pushRaw(out, {
           op: "call",
-          funcIdx: resolver.resolveFunc(cl.methodFunc(instr.methodName)),
+          funcIdx: resolver.resolveFunc(cl.memberFunc("static", instr.methodName)),
         });
         return;
       }

@@ -492,6 +492,7 @@ function intentsEqual(a: ProgramAbiDraft["intent"], b: ProgramAbiDraft["intent"]
       a.origin === b.origin &&
       a.unitId === b.unitId &&
       a.classId === b.classId &&
+      a.sourceId === b.sourceId &&
       a.signature.params.length === b.signature.params.length &&
       a.signature.params.every((value, index) => value === b.signature.params[index]) &&
       a.signature.results.length === b.signature.results.length &&

@@ -12,6 +12,7 @@ import { ts } from "../../ts-api.js";
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import { integrityVarKey, widenedVarKeyFromDecl } from "../widened-var-key.js";
 import type { Instr, ValType } from "../../ir/types.js";
+import { isPristineEs5IntrinsicIsFrozenCall } from "../../ir/object-integrity.js";
 import { resolveArrayInfo } from "../array-methods.js";
 import { numberIsPredicateOps } from "../number-is-predicate-ops.js";
 import { sameValueNumberOps } from "../same-value-number-ops.js";
@@ -1489,6 +1490,17 @@ export function compileBuiltinStaticCall(
   ) {
     const method = propAccess.name.text;
     const arg0 = expr.arguments[0]!;
+
+    // Test262's original top-level harness is not yet IR-claimed. Keep this
+    // compatibility adapter thin: the semantic classification remains owned
+    // by ir/object-integrity and is shared with selector + AST→IR lowering.
+    if (
+      method === "isFrozen" &&
+      isPristineEs5IntrinsicIsFrozenCall(expr, (node) => isGlobalBuiltinIdentifier(ctx, fctx, node))
+    ) {
+      fctx.body.push({ op: "i32.const", value: 0 });
+      return { kind: "i32" };
+    }
 
     // (#2744) The host-mode static fold (`ctx.frozenVars`/`ctx.sealedVars`
     // keyed on the identifier) was execution-order-blind — `Object.freeze(o)`

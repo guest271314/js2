@@ -492,6 +492,30 @@ export function planI32Slots(
 }
 
 const EMPTY: ReadonlySet<ts.VariableDeclaration> = new Set<ts.VariableDeclaration>();
+
+/**
+ * (#3734) An `IsPromotedI32` probe answerable BEFORE lowering starts, built
+ * from `planI32Slots`'s own output.
+ *
+ * `from-ast.ts`'s live probe (`promotedI32Probe`) reads `cx.scope`, so it only
+ * exists once lowering reaches a use site. Analyses that must decide something
+ * up front — e.g. whether an empty `number[]` may be given an i32 element
+ * representation — need the same answer during the pre-pass. This reproduces
+ * exactly the containment test `planI32Slots` itself used to reach its
+ * fixpoint (name match + the declaration's binding scope contains the use), so
+ * the two probes agree by construction on every declaration the planner kept.
+ *
+ * Consumers must still re-check with the LIVE probe at lowering time and fail
+ * closed if it disagrees — this one is a planning aid, not a licence.
+ */
+export function makePlannedI32Probe(slots: ReadonlySet<ts.VariableDeclaration>): IsPromotedI32 {
+  if (slots.size === 0) return () => false;
+  const scoped = [...slots].map((decl) => ({
+    name: (decl.name as ts.Identifier).text,
+    scope: declarationScope(decl),
+  }));
+  return (id: ts.Identifier): boolean => scoped.some((s) => s.name === id.text && nodeContains(s.scope, id));
+}
 // ---------------------------------------------------------------------------
 // Pure token/op tables shared with `from-ast.ts`'s emitter
 // ---------------------------------------------------------------------------
