@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-29",
   "threshold": 1500,
-  "totalCeiling": 498569,
+  "totalCeiling": 499319,
   "files": {
     "src/codegen-linear/index.ts": 5615,
     "src/codegen-linear/runtime.ts": 4306,
@@ -15,7 +15,7 @@
     "src/codegen/class-bodies.ts": 3211,
     "src/codegen/closed-method-dispatch.ts": 1698,
     "src/codegen/closures.ts": 3374,
-    "src/codegen/context/types.ts": 3210,
+    "src/codegen/context/types.ts": 3213,
     "src/codegen/dataview-native.ts": 5892,
     "src/codegen/declarations.ts": 2764,
     "src/codegen/declarations/import-collector.ts": 2018,
@@ -37,7 +37,7 @@
     "src/codegen/extern-declarations.ts": 1650,
     "src/codegen/fnctor-escape-gate.ts": 1658,
     "src/codegen/generators-native.ts": 4121,
-    "src/codegen/index.ts": 8513,
+    "src/codegen/index.ts": 8497,
     "src/codegen/iterator-native.ts": 3056,
     "src/codegen/json-codec-native.ts": 3567,
     "src/codegen/literals.ts": 4693,
@@ -71,9 +71,9 @@
     "src/ir/backend/porffor/assembler.ts": 1507,
     "src/ir/builder.ts": 1795,
     "src/ir/from-ast.ts": 9580,
-    "src/ir/integration.ts": 5336,
+    "src/ir/integration.ts": 5358,
     "src/ir/lower.ts": 3973,
-    "src/ir/nodes.ts": 3216,
+    "src/ir/nodes.ts": 3220,
     "src/ir/select.ts": 6600,
     "src/ir/verify.ts": 1593,
     "src/runtime.ts": 15628
