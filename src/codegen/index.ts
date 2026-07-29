@@ -1833,6 +1833,7 @@ function collectIrImplicitParamProjectionCandidates(
       return parent.name.text === "length";
     }
     if (ts.isElementAccessExpression(parent) && parent.expression === child) return true;
+    if (ts.isConditionalExpression(parent) && parent.condition === child) return true;
     return false;
   };
   const visit = (node: ts.Node): void => {
@@ -2029,13 +2030,17 @@ function planIrOverlay(
   const resolveImplicitParamType = makeIrImplicitParamTypeResolver(ctx, ast.sourceFile);
   const legacyCallerAbiIsProjected = (declaration: ts.FunctionDeclaration): boolean => {
     let hasIndexedCarrier = false;
+    let hasBooleanProjection = false;
+    let allProjectionsAreBoolean = true;
     for (const parameter of declaration.parameters) {
       if (effectiveIrParamTypeNode(parameter)) continue;
       const projection = resolveImplicitParamType(parameter);
       if (!projection) return false;
       if (projection.kind === "object") hasIndexedCarrier = true;
+      if (projection.kind === "bool") hasBooleanProjection = true;
+      else allProjectionsAreBoolean = false;
     }
-    return hasIndexedCarrier;
+    return hasIndexedCarrier || (hasBooleanProjection && allProjectionsAreBoolean);
   };
   const identityPlan = irOverlayIdentity.planIrOverlayByIdentity(
     ast.sourceFile,

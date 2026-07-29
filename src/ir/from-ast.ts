@@ -2677,7 +2677,11 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
       cx.emptyArrayInference.isResolvedVectorExpression(d.initializer);
     if (!scalarVecValue && !proveUnboxedNumberLocal(d.name, inferred, cx)) {
       const boundKind = asVal(inferred)?.kind === "i32" ? "i32" : "f64";
-      throw new Error(
+      // (#3784) Typed `unsupported`, never a plain `Error` — an untyped throw is
+      // classified `invariant` and hard-fails, defeating the demotion below.
+      throw new IrUnsupportedError(
+        "unboxed-number-local-unprovable",
+        "build",
         `ir/from-ast: local '${name}' is bound as an unboxed ${boundKind} but its TS type is not ` +
           `provably a pure number${boundKind === "i32" ? " or boolean" : ""} — keeping the no-box ` +
           `number representation is unsound (the ${boundKind} Wasm kind conflates number / boolean / ` +
