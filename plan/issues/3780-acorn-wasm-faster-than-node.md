@@ -21,6 +21,9 @@ files:
   - plan/issues/3780-acorn-wasm-faster-than-node.md
   - plan/issues/backlog/backlog.md
   - scripts/generate-npm-compat-report.mjs
+  - src/codegen/closures.ts
+  - src/codegen/context/types.ts
+  - src/codegen/declarations/param-return-inference.ts
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/index.ts
   - src/codegen/native-regex.ts
@@ -29,6 +32,7 @@ files:
   - src/codegen/property-access-dispatch.ts
   - src/codegen/regexp-standalone.ts
   - src/codegen/statements/control-flow.ts
+  - src/codegen/typed-this.ts
   - src/compiler.ts
   - src/compiler/ground-call-fold.ts
   - src/index.ts
@@ -36,7 +40,12 @@ files:
   - src/runtime.ts
   - tests/issue-1474-standalone-regex-refuse.test.ts
   - tests/issue-2063-switch-strict-equality.test.ts
+  - tests/issue-3683-direct-calls.test.ts
+  - tests/issue-3765-numeric-locals.test.ts
 loc-budget-allow:
+  - src/codegen/closures.ts
+  - src/codegen/context/types.ts
+  - src/codegen/declarations/param-return-inference.ts
   - src/compiler.ts
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/index.ts
@@ -45,17 +54,23 @@ loc-budget-allow:
   - src/codegen/property-access.ts
   - src/codegen/regexp-standalone.ts
   - src/codegen/statements/control-flow.ts
+  - src/codegen/typed-this.ts
   - src/index.ts
   - src/optimize.ts
   - src/runtime.ts
 func-budget-allow:
   - scripts/generate-npm-compat-report.mjs::compileStandaloneLane
+  - src/codegen/closures.ts::compileArrowAsClosure
+  - src/codegen/declarations/param-return-inference.ts::inferParamTypeFromCallSites
   - src/codegen/fnctor-escape-gate.ts::analyzeProtoMethodWriteOnce
   - src/codegen/index.ts::generateMultiModule
   - src/codegen/native-regex.ts::ensureRegexSearch
   - src/codegen/object-ops.ts::compileObjectDefineProperties
   - src/codegen/regexp-standalone.ts::ensureDynamicStandaloneRegExpCompiler
   - src/codegen/statements/control-flow.ts::compileSwitchStatement
+  - src/codegen/typed-this.ts::fillDirectCallTrampolines
+  - src/codegen/typed-this.ts::recordDirectCallGeneric
+  - src/codegen/typed-this.ts::tryEmitDirectTwinCall
   - src/compiler/ground-call-fold.ts::foldGroundCallsInMultiFiles
 origin: "user request to repeat the measured clsx and cookie optimization process for Acorn and beat native Node"
 ---
@@ -223,6 +238,57 @@ attributes 8.7% to internal `__extern_get`, 5.3% to regexp test dispatch, 3.6%
 to generic one-argument function dispatch, 3.0% to `ToPrimitive`, 2.4% to
 number unboxing, and only 1.1% to GC. The parser remains on the legacy backend;
 `irCompiledFunctions` is empty.
+
+### Runtime-dynamic optimization round
+
+The follow-up compiler work remains package-agnostic and executes the same
+runtime parse on both sides. Four generic changes reduce the representative
+standalone median from 71.25 ms to 54.79 ms (23.1%):
+
+1. A homogeneous numeric `switch` unboxes the discriminant once and emits
+   ordered `f64.eq` comparisons. A runtime number guard preserves strict
+   equality for strings, objects, `NaN`, and side-effecting case expressions.
+2. Call-site ABI inference carries an existing grounded numeric-local proof
+   into an otherwise `any` helper parameter. This removes repeated
+   box/`ToPrimitive`/unbox work in helpers such as character classifiers
+   without guessing from the helper body or specializing Acorn.
+3. A write-once prototype method without a typed twin now retains its exact
+   closure instance and calls the known lifted body directly. Captures remain
+   live; the old dynamic dispatcher remains the pre-initialization fallback.
+4. A generic lifted prototype body may devirtualize its own pinned `this.m()`
+   calls behind a runtime receiver-shape guard. Detached or foreign receivers
+   take the original dispatcher.
+
+The direct-call diagnostics move from 1,886 sites / 264 trampolines / 14 legacy
+fills to 3,980 sites / 547 trampolines / zero legacy fills: 518 trampolines call
+typed twins and 29 call retained generic closures. The paired
+`JS2WASM_PINNED_THIS_DIRECT_CALLS=0` control measures 58.22 ms, versus 54.31 ms
+enabled, attributing about a 6.7% improvement to the fourth change alone.
+
+Final official nine-round run (checksum 422):
+
+| lane                               |          median |
+| ---------------------------------- | --------------: |
+| standalone runtime-dynamic Wasm    |   54,792.653 us |
+| native Node                        |    3,905.500 us |
+| remaining Node advantage           |      **14.03x** |
+| optimized binary / runtime imports | 1,775,322 B / 0 |
+
+The separate named-profile run measures 54,169.951 us in Wasm versus
+4,047.042 us in Node. Its 1,816,942-byte binary only differs by preserved debug
+names. The largest exclusive buckets are `__extern_get` (11.2%), runtime RegExp
+`.test` dispatch (6.5%), GC (4.0%), `ToPrimitive` (2.0%), and `Node`
+construction (2.3%). Generic one-argument closure dispatch falls from 4.0%
+before the pinned route to 1.0%. A speculative call-site RegExp brand split was
+removed after its paired control showed it was about 2% slower; no non-winning
+experiment remains in the patch.
+
+The dynamic parser is still emitted by the legacy WasmGC backend
+(`benchmarkUsesIr: false`, empty `irCompiledFunctions`). The zero-import module
+has no host crossings during the parse—the remaining 14.03x gap is internal
+Wasm object/string/regexp representation and dispatch cost, not 17.67 million
+Node callbacks. Beating Node remains the open acceptance criterion; the static
+IR residual is reported separately and does not satisfy it.
 
 ## Compile-time static outcome
 

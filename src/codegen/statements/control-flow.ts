@@ -934,6 +934,39 @@ function homogeneousSwitchClass(ctx: CodegenContext, stmt: ts.SwitchStatement): 
   return cls;
 }
 
+/**
+ * Return the common primitive class of every case expression without requiring
+ * the discriminant to have that static class. This supports a guarded fast path
+ * for JavaScript such as `switch (anyValue) { case 1: ... }`: test the
+ * discriminant's runtime type once, then compare all numeric cases directly.
+ *
+ * Case expressions are still evaluated in source order even when the runtime
+ * discriminant has another type, preserving their side effects.
+ */
+function homogeneousSwitchCaseClass(
+  ctx: CodegenContext,
+  stmt: ts.SwitchStatement,
+): "number" | "string" | "boolean" | null {
+  let cls: "number" | "string" | "boolean" | null = null;
+  let sawCase = false;
+  for (const clause of stmt.caseBlock.clauses) {
+    if (!ts.isCaseClause(clause)) continue;
+    sawCase = true;
+    const caseType = ctx.checker.getTypeAtLocation(clause.expression);
+    const caseCls = isNumberType(caseType)
+      ? "number"
+      : isStringType(caseType)
+        ? "string"
+        : isBooleanType(caseType)
+          ? "boolean"
+          : null;
+    if (caseCls === null) return null;
+    if (cls === null) cls = caseCls;
+    else if (caseCls !== cls) return null;
+  }
+  return sawCase ? cls : null;
+}
+
 function isDefinitelyObjectSwitchFact(fact: TypeFact): boolean {
   switch (fact.kind) {
     case "array":
@@ -1209,8 +1242,15 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
   // non-null exactly when the legacy fast path is sound.
   const homogeneousClass = homogeneousSwitchClass(ctx, stmt);
   const strictPerCase = homogeneousClass === null;
+  const guardedNumericCases =
+    strictPerCase &&
+    (ctx.standalone === true || ctx.wasi === true) &&
+    homogeneousSwitchCaseClass(ctx, stmt) === "number";
   const objectIdentityPerCase =
-    strictPerCase && (ctx.standalone === true || ctx.wasi === true) && switchHasOnlyObjectCases(ctx, stmt);
+    strictPerCase &&
+    !guardedNumericCases &&
+    (ctx.standalone === true || ctx.wasi === true) &&
+    switchHasOnlyObjectCases(ctx, stmt);
 
   // Detect if the switch discriminant or any case value involves strings (#245).
   // Check both the discriminant type and case expression types, since the
@@ -1230,9 +1270,12 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
 
   // (#2063) Strict per-case path: keep the discriminant boxed as externref and
   // compare each case with `emitSwitchStrictEq` (no coercion across types).
-  if (strictPerCase) {
+  if (strictPerCase && !guardedNumericCases) {
     wasmType = { kind: "externref" };
     switchIsString = false; // suppress the string fast path; strict-eq handles strings
+  } else if (guardedNumericCases) {
+    wasmType = { kind: "f64" };
+    switchIsString = false;
   }
 
   // For string switch: use the appropriate string type and comparison
@@ -1258,8 +1301,35 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
   }
 
   const tmpLocalIdx = allocLocal(fctx, `__sw_${fctx.locals.length}`, wasmType);
-  compileExpression(ctx, fctx, stmt.expression, wasmType);
-  fctx.body.push({ op: "local.set", index: tmpLocalIdx });
+  let guardedNumericMatchLocal = -1;
+  if (guardedNumericCases) {
+    addUnionImports(ctx);
+    const typeofNum = ctx.funcMap.get("__typeof_number")!;
+    const unboxNum = ctx.funcMap.get("__unbox_number")!;
+    const discriminant = allocLocal(fctx, `__sw_disc_${fctx.locals.length}`, { kind: "externref" });
+    guardedNumericMatchLocal = allocLocal(fctx, `__sw_num_${fctx.locals.length}`, { kind: "i32" });
+    compileExpression(ctx, fctx, stmt.expression, { kind: "externref" });
+    fctx.body.push(
+      { op: "local.set", index: discriminant },
+      { op: "f64.const", value: Number.NaN },
+      { op: "local.set", index: tmpLocalIdx },
+      { op: "local.get", index: discriminant },
+      { op: "call", funcIdx: typeofNum },
+      { op: "local.tee", index: guardedNumericMatchLocal },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: discriminant },
+          { op: "call", funcIdx: unboxNum },
+          { op: "local.set", index: tmpLocalIdx },
+        ],
+      },
+    );
+  } else {
+    compileExpression(ctx, fctx, stmt.expression, wasmType);
+    fctx.body.push({ op: "local.set", index: tmpLocalIdx });
+  }
 
   // Use a "target" local to track which clause index to start executing from.
   // Sentinel value = number of clauses means "no match yet".
@@ -1300,7 +1370,7 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
     // fixups when new string-constant imports are added during case compilation.
     const savedCaseBody = pushBody(fctx);
 
-    if (strictPerCase) {
+    if (strictPerCase && !guardedNumericCases) {
       // (#2063) Compile the case to externref and compare with the discriminant
       // (already boxed in tmpLocalIdx) using §7.2.16 StrictEquality. Pushes i32.
       const caseTmp = allocLocal(fctx, `__sw_case_${fctx.locals.length}`, { kind: "externref" });
@@ -1326,6 +1396,9 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
         fctx.body.push({ op: "call", funcIdx: strEqFuncIdx });
       } else {
         fctx.body.push({ op: eqOp });
+      }
+      if (guardedNumericCases) {
+        fctx.body.push({ op: "local.get", index: guardedNumericMatchLocal }, { op: "i32.and" });
       }
     }
     // if (comparison result) { target = ci; }

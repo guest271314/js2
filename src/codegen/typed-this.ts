@@ -745,7 +745,9 @@ export const directCallStats = {
   sites: 0,
   trampolines: 0,
   twinFills: 0,
+  genericFills: 0,
   legacyFills: 0,
+  legacyReasons: new Map<string, number>(),
   declined: new Map<string, number>(),
 };
 let directStatsHookInstalled = false;
@@ -756,7 +758,12 @@ function noteDirectStats(): void {
     const top = [...directCallStats.declined.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25);
     process.stderr.write(
       `[direct-calls] sites=${directCallStats.sites} trampolines=${directCallStats.trampolines} ` +
-        `twinFills=${directCallStats.twinFills} legacyFills=${directCallStats.legacyFills}\n` +
+        `twinFills=${directCallStats.twinFills} genericFills=${directCallStats.genericFills} ` +
+        `legacyFills=${directCallStats.legacyFills}\n` +
+        `[direct-calls] legacy: ${[...directCallStats.legacyReasons.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .map(([k, v]) => `${k}=${v}`)
+          .join(" ")}\n` +
         `[direct-calls] declined: ${top.map(([k, v]) => `${k}=${v}`).join(" ")}\n`,
     );
   });
@@ -932,6 +939,54 @@ export function recordDirectCallTwin(
   const key = writeOnceMethodKeyOf(ctx, arrow);
   if (key === undefined) return;
   (ctx.directCallTwins ??= new Map()).set(key, { twinName, params: [...params], results: [...results] });
+}
+
+/**
+ * (#3780) Record a direct target for an admitted write-once method whose body
+ * could not be compiled as a typed-`this` twin, usually because the closure
+ * captures module state. The lifted body is still statically known; it only
+ * needs the exact closure instance as parameter 0. Retaining that instance in
+ * a typed nullable global lets the final trampoline call the lifted body
+ * directly while preserving every capture.
+ *
+ * Returns the global index so the closure construction site can store the
+ * instance without changing the value subsequently assigned to the prototype.
+ */
+export function recordDirectCallGeneric(
+  ctx: CodegenContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+  liftedName: string,
+  selfTypeIdx: number,
+  params: ValType[],
+  results: ValType[],
+): number | undefined {
+  if (!ctx.standalone || !directCallsEnabled()) return undefined;
+  if (!ts.isFunctionExpression(arrow) || arrow.name || arrow.asteriskToken) return undefined;
+  if (arrow.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return undefined;
+  if (!arrow.body || !ts.isBlock(arrow.body)) return undefined;
+  if (bodyHasNestedFunctionLikeOrWith(arrow.body) || bodyUsesArguments(arrow.body)) return undefined;
+  if (runtimeParams(arrow).some((p) => p.dotDotDotToken !== undefined)) return undefined;
+  const key = writeOnceMethodKeyOf(ctx, arrow);
+  if (key === undefined) return undefined;
+  const existing = ctx.directCallGenerics?.get(key);
+  if (existing) return existing.selfGlobalIdx;
+
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  const safeName = key.replace(/[^A-Za-z0-9_$]/g, "_");
+  ctx.mod.globals.push({
+    name: `__dc_self_${safeName}`,
+    type: { kind: "ref_null", typeIdx: selfTypeIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: selfTypeIdx }],
+  });
+  (ctx.directCallGenerics ??= new Map()).set(key, {
+    liftedName,
+    selfGlobalIdx: globalIdx,
+    selfTypeIdx,
+    params: [...params],
+    results: [...results],
+  });
+  return globalIdx;
 }
 
 /**
@@ -1408,11 +1463,14 @@ export function tryEmitDirectTwinCall(
   if (!directCallsEnabled() || !ctx.standalone) return undefined;
   if (ts.isPrivateIdentifier(propAccess.name)) return undefined;
 
-  // Two admission routes to the SAME trampoline machinery:
+  // Three admission routes to the SAME trampoline machinery:
   //
   //  (a) #3683 S3 — `this.m()` inside a typed twin. The receiver-shape proof is
   //      the twin's own `ref.cast`, so the trampoline may cast unguarded.
-  //  (b) #3685 S3 — `recv.m()` anywhere, where the receiver-flow analysis
+  //  (b) #3780 — `this.m()` inside the generic lifted body of a statically
+  //      pinned prototype method. The body can be invoked detached, so this
+  //      route is guarded against the runtime `this` just like receiver flow.
+  //  (c) #3685 S3 — `recv.m()` anywhere, where the receiver-flow analysis
   //      proves `recv` denotes exactly one approved fnctor class. The proof is
   //      an inference, so the trampoline is GUARDED (see `guardedReceiver`).
   //
@@ -1425,16 +1483,26 @@ export function tryEmitDirectTwinCall(
   let guardedReceiver = false;
 
   if (!isThis || structName === undefined || thisLocalIdx === undefined || structTypeIdx === undefined) {
-    if (isThis) return undefined; // in-twin `this` route needs all three
-    const provenClass = provenReceiverClass(ctx, fctx, propAccess.expression);
-    if (provenClass === undefined) return undefined;
-    const proven = `__fnctor_${provenClass}`;
-    const provenIdx = ctx.structMap.get(proven);
-    if (provenIdx === undefined) return declineDirect("no-struct-for-proven-class");
-    structName = proven;
-    structTypeIdx = provenIdx;
-    thisLocalIdx = undefined; // the receiver is an expression, not a local
-    guardedReceiver = true;
+    if (isThis) {
+      if (process.env.JS2WASM_PINNED_THIS_DIRECT_CALLS === "0") return undefined;
+      const pinned = fctx.thisStructName;
+      const pinnedIdx = pinned === undefined ? undefined : ctx.structMap.get(pinned);
+      if (pinned === undefined || pinnedIdx === undefined) return undefined;
+      structName = pinned;
+      structTypeIdx = pinnedIdx;
+      thisLocalIdx = undefined; // compile `this` from `__current_this`
+      guardedReceiver = true;
+    } else {
+      const provenClass = provenReceiverClass(ctx, fctx, propAccess.expression);
+      if (provenClass === undefined) return undefined;
+      const proven = `__fnctor_${provenClass}`;
+      const provenIdx = ctx.structMap.get(proven);
+      if (provenIdx === undefined) return declineDirect("no-struct-for-proven-class");
+      structName = proven;
+      structTypeIdx = provenIdx;
+      thisLocalIdx = undefined; // the receiver is an expression, not a local
+      guardedReceiver = true;
+    }
   }
   noteDirectStats();
   // `this.m?.()` / `this?.m()` keep the dynamic path (the nullish short-circuit
@@ -1660,10 +1728,12 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
     const prevLocal = paramCount;
     const resLocal = paramCount + 1;
 
-    // --- the arm: a direct call to the twin, or the legacy dispatcher ---
+    // --- the arm: a direct twin/generic call, or the legacy dispatcher ---
     const arm: Instr[] = [];
     const twin = ctx.directCallTwins?.get(`${t.className}/${t.methodName}`);
     const twinIdx = twin ? ctx.funcMap.get(twin.twinName) : undefined;
+    const generic = ctx.directCallGenerics?.get(`${t.className}/${t.methodName}`);
+    const genericIdx = generic ? ctx.funcMap.get(generic.liftedName) : undefined;
     // Param 0 differs BY DESIGN (twin: `(ref $F)`, trampoline: externref), so
     // compare the user params only — plus the twin's own receiver type, which
     // must be the struct this trampoline casts to.
@@ -1699,6 +1769,38 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
         else ok = unboxFromExternref(ctx, resultType, legacy);
       }
       return ok ? legacy : undefined;
+    };
+    const genericSignatureAgrees =
+      generic !== undefined &&
+      generic.params.length === t.formals + 1 &&
+      generic.params.slice(1, 1 + t.arity).every((p, i) => valTypesMatch(p, t.params[i + 1]!)) &&
+      t.padTypes.length === t.formals - t.arity &&
+      generic.params.slice(1 + t.arity).every((p, i) => valTypesMatch(p, t.padTypes[i]!));
+    const buildGenericArm = (): Instr[] | undefined => {
+      if (generic === undefined || genericIdx === undefined || !genericSignatureAgrees) return undefined;
+      const direct: Instr[] = [{ op: "global.get", index: generic.selfGlobalIdx }, { op: "ref.as_non_null" }];
+      for (let i = 1; i < paramCount; i++) direct.push({ op: "local.get", index: i });
+      for (const pad of t.padInstrs) direct.push(...pad.map((i) => ({ ...i })));
+      direct.push({ op: "call", funcIdx: genericIdx });
+
+      if (
+        generic.results.length === t.results.length &&
+        generic.results.every((r, i) => valTypesMatch(r, t.results[i]!))
+      ) {
+        return direct;
+      }
+      // Numeric-return refinement belongs to typed twins. A generic closure
+      // body retains its declared externref result, so adapt it once at the
+      // trampoline edge when the call-site ABI was refined independently.
+      if (
+        generic.results.length === 1 &&
+        generic.results[0]?.kind === "externref" &&
+        resultType !== undefined &&
+        t.results.length === 1
+      ) {
+        return unboxFromExternref(ctx, resultType, direct) ? direct : undefined;
+      }
+      return undefined;
     };
 
     if (twinIdx !== undefined && twinSignatureAgrees && t.guardedReceiver) {
@@ -1739,6 +1841,34 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       for (const pad of t.padInstrs) arm.push(...pad.map((i) => ({ ...i })));
       arm.push({ op: "call", funcIdx: twinIdx });
       directCallStats.twinFills++;
+    } else if (genericIdx !== undefined && genericSignatureAgrees) {
+      const genericArm = buildGenericArm();
+      const legacyArm = buildLegacyArm();
+      if (genericArm === undefined || legacyArm === undefined) continue;
+      // The retained closure is initialized at the original prototype
+      // assignment. Before that point, preserve the dynamic route rather than
+      // turning an uninitialized method into a null-cast trap. A receiver-flow
+      // admission additionally keeps its existing shape guard.
+      const hasUsableSelf: Instr[] = [
+        { op: "global.get", index: generic.selfGlobalIdx },
+        { op: "ref.is_null" },
+        { op: "i32.eqz" },
+      ];
+      if (t.guardedReceiver) {
+        hasUsableSelf.push(
+          { op: "local.get", index: 0 },
+          { op: "any.convert_extern" },
+          { op: "ref.test", typeIdx: t.fnctorStructTypeIdx },
+          { op: "i32.and" },
+        );
+      }
+      arm.push(...hasUsableSelf, {
+        op: "if",
+        blockType: resultType === undefined ? { kind: "empty" } : { kind: "val", type: resultType },
+        then: genericArm,
+        else: legacyArm,
+      });
+      directCallStats.genericFills++;
     } else {
       // Degradation: the call-site admission passed but the twin did not
       // materialize (capture analysis is only available once the method's
@@ -1768,6 +1898,22 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       }
       arm.push(...legacy);
       directCallStats.legacyFills++;
+      if (process.env.JS2WASM_DIRECT_CALLS_DEBUG === "1") {
+        const reason =
+          twin === undefined
+            ? "no-twin"
+            : twinIdx === undefined
+              ? "no-twin-index"
+              : `signature-mismatch:${JSON.stringify({
+                  trampolineParams: t.params,
+                  trampolineResults: t.results,
+                  padTypes: t.padTypes,
+                  twinParams: twin.params,
+                  twinResults: twin.results,
+                })}`;
+        const key = `${t.className}.${t.methodName}/${t.arity}:${reason}`;
+        directCallStats.legacyReasons.set(key, (directCallStats.legacyReasons.get(key) ?? 0) + 1);
+      }
     }
 
     fn.locals = locals;

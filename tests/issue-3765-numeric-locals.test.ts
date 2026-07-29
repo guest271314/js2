@@ -136,6 +136,24 @@ describe("#3765 — a provably-numeric local gets an f64 slot", () => {
     expect(twins).not.toMatch(/call \$__unbox_number/);
   });
 
+  it("carries a grounded numeric-local proof into an untyped helper parameter", async () => {
+    const { wat, binary } = await build(`
+      function isAscii(c) { return c >= 0 && c <= 127; }
+      function scan(input) {
+        var c = input.charCodeAt(0);
+        return isAscii(c);
+      }
+      export function main() { return scan("A"); }
+    `);
+    const inlineParam = wat!.match(/\(func \$isAscii \(param f64\)/);
+    const sharedType = wat!.match(/\(func \$isAscii \(type (\d+)\)/);
+    const sharedTypeIsF64 =
+      sharedType !== null && wat!.includes(`(type $type${sharedType[1]} (func (param f64) (result i32)))`);
+    expect(inlineParam !== null || sharedTypeIsF64).toBe(true);
+    const { exports } = await WebAssembly.instantiate(await WebAssembly.compile(binary!), {});
+    expect((exports as { main: () => number }).main()).toBe(1);
+  });
+
   it("is off under the kill switch, restoring the boxed carrier", async () => {
     const { wat } = await build(TOKENIZER, { JS2WASM_NUMERIC_LOCALS: "0" });
     const w = readWat(wat!);

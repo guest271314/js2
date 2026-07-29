@@ -187,4 +187,34 @@ describe("#2063 switch StrictEquality (standalone / pure WasmGC)", () => {
     expect(await runStandalone(source, "f", [1])).toBe(20);
     expect(await runStandalone(source, "f", [2])).toBe(0);
   });
+
+  it("guards an any discriminant once for homogeneous numeric cases without coercion", async () => {
+    const source = `
+      var visits = 0;
+      function numericCase(value: number): number {
+        visits++;
+        return value;
+      }
+      export function f(which: number): number {
+        visits = 0;
+        const value: any =
+          which === 0 ? 2 :
+          which === 1 ? "2" :
+          which === 2 ? { valueOf: function(): number { return 2; } } :
+          NaN;
+        var result = 0;
+        switch (value) {
+          case numericCase(1): result = 10; break;
+          case numericCase(2): result = 20; break;
+          case numericCase(3): result = 30; break;
+          default: result = 40;
+        }
+        return result + visits;
+      }
+    `;
+    expect(await runStandalone(source, "f", [0])).toBe(22);
+    expect(await runStandalone(source, "f", [1])).toBe(43);
+    expect(await runStandalone(source, "f", [2])).toBe(43);
+    expect(await runStandalone(source, "f", [3])).toBe(43);
+  });
 });

@@ -131,6 +131,60 @@ export function test(): number { var p = new P(); return p.down(10) * 100 + p.ev
     expect(dynamic.run()).toBe(direct.run());
   });
 
+  it("calls a captured write-once method body directly while retaining its live closure", async () => {
+    const src = `var bias = 7;
+var adjust = function (k) { return k + bias; };
+var P = function P(v) { this.v = v; };
+var pp = P.prototype;
+pp.add = function (k) { return this.v + adjust(k); };
+pp.go = function (k) { return this.add(k); };
+export function test(): number {
+  var p = new P(1);
+  var before = p.go(2);
+  bias = 20;
+  return before * 100 + p.go(2);
+}`;
+    const { direct, dynamic } = await bothLanes(src);
+    expect(devirtualized(direct, "P", "add")).toBe(true);
+    const directValue = direct.run();
+    const dynamicValue = dynamic.run();
+    expect(directValue).toBe(1023);
+    expect(dynamicValue).toBe(directValue);
+
+    const start = direct.wat.indexOf("(func $__dc_P_add_1");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const trampoline = direct.wat.slice(start, start + 1800);
+    // The WAT renderer currently numbers internal globals/functions. Pin the
+    // structural distinction: test the retained closure global, reload that
+    // SAME global in the hit arm, and call the lifted body directly. The miss
+    // arm remains the legacy dispatcher for pre-initialization safety.
+    expect(trampoline).toMatch(
+      /global\.get (\d+)\s+ref\.is_null\s+i32\.eqz[\s\S]*?\(then\s+global\.get \1\s+ref\.as_non_null[\s\S]*?call \d+/,
+    );
+  });
+
+  it("devirtualizes guarded this-calls inside a captured generic method body", async () => {
+    const src = `var bias = 4;
+var adjust = function (k) { return k + bias; };
+var P = function P(v) { this.v = v; };
+var pp = P.prototype;
+pp.add = function (k) { return this.v + k; };
+pp.go = function (k) { return this.add(adjust(k)); };
+export function test(): number {
+  var p = new P(3);
+  var before = p.go(2);
+  bias = 10;
+  return before * 100 + p.go(2);
+}`;
+    const { direct, dynamic } = await bothLanes(src);
+    expect(direct.wat).toMatch(/\(func \$__dc_P_add_1_g\b/);
+    expect(dynamic.wat).not.toMatch(/\(func \$__dc_P_add_1_g\b/);
+    const directValue = direct.run();
+    const dynamicValue = dynamic.run();
+    expect(directValue).toBe(915);
+    expect(dynamicValue).toBe(directValue);
+  });
+
   it("keeps .call / .apply detached receivers on the generic (non-twin) body", async () => {
     const src = `var P = function P(n) { this.pos = n; };
 var pp = P.prototype;
