@@ -35,7 +35,12 @@ const SECTIONS = [
   {
     title: "Statements",
     rows: [
-      ["`VariableStatement`", "mixed", "Single-binding `let/const/var` works. Destructuring init throws.", "#1372"],
+      [
+        "`VariableStatement`",
+        "mixed",
+        "Initialized `let`/`const` plus function-local `var` proven free of hoisting, redeclaration, capture, and scope escape (#3783). Destructuring and module-global `var` remain partial.",
+        "#3783",
+      ],
       ["`ExpressionStatement`", "mixed", "Calls / assignments / pre-post `++ --` work. Other shapes throw.", "#1131"],
       [
         "`IfStatement`",

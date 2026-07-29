@@ -55,6 +55,7 @@
 //     `localClasses` set drives that exemption.
 
 import { ts, forEachChild } from "../ts-api.js";
+import { collectIrSafeVarDeclarationLists } from "./function-local-var.js";
 import { stringBuilderForcedLegacy } from "./string-builder-shape.js";
 // (#1373b C-1) Pure-syntactic async helpers from the LEAF module (safe for
 // ir/* — async-static.ts imports only ts-api, so no codegen/index cycle).
@@ -1095,6 +1096,12 @@ let currentFnIsAsync = false;
 // `moduleGlobal` bindings; ordinary functions intentionally keep those wider
 // module writes on legacy until their coercion semantics are modeled.
 let currentSubjectIsModuleInit = false;
+// #3783 — `var` declarations are accepted only after a whole-function
+// syntactic proof shows that their function-scoped behavior is indistinguishable
+// from the IR's existing lexical local/slot representation. Keyed by the exact
+// declaration-list node so nested statement walkers cannot accidentally widen
+// another `var` with the same text.
+let currentIrSafeVarDeclarationLists: ReadonlySet<ts.VariableDeclarationList> = new Set();
 // Current-run state shared by the deep isPhase1* recursion. The structural
 // selector configures the same predicates through the narrow hooks below.
 let currentSelectionOptions: IrSelectionOptions | undefined;
@@ -1123,6 +1130,15 @@ let currentAsyncDeclNames: ReadonlySet<string> = new Set();
  * (select↔build parity, #2138). Reset per function walk.
  */
 let forInitLeakedNames = new Set<string>();
+
+function prepareFunctionBodySelection(
+  fn: IrClaimableSubject,
+  parameterNames: ReadonlySet<string>,
+  body: ts.Block,
+): boolean {
+  currentIrSafeVarDeclarationLists = collectIrSafeVarDeclarationLists(fn, parameterNames);
+  return stringBuilderForcedLegacy(body);
+}
 
 // Current-run checker resolvers. A null host resolver means host-free/deferred.
 let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
@@ -1390,7 +1406,7 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
-  if (stringBuilderForcedLegacy(body)) return "string-builder-candidate";
+  if (prepareFunctionBodySelection(fn, scope, body)) return "string-builder-candidate";
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;
@@ -3019,7 +3035,8 @@ function isPhase1ForStatementInScope(
   if (stmt.initializer) {
     if (ts.isVariableDeclarationList(stmt.initializer)) {
       const flags = stmt.initializer.flags;
-      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const))
+      const isLexical = !!(flags & (ts.NodeFlags.Let | ts.NodeFlags.Const));
+      if (!isLexical && !currentIrSafeVarDeclarationLists.has(stmt.initializer))
         return shapeNo("for-init-var-kind", stmt.initializer);
       for (const d of stmt.initializer.declarations) {
         if (!ts.isIdentifier(d.name)) return shapeNo("for-init-name", d.name);
@@ -3576,7 +3593,10 @@ function isPhase1Tail(
 
 function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
   const flags = stmt.declarationList.flags;
-  if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return shapeNo("vardecl-var-kind", stmt);
+  const isLexical = !!(flags & (ts.NodeFlags.Let | ts.NodeFlags.Const));
+  if (!isLexical && !currentIrSafeVarDeclarationLists.has(stmt.declarationList)) {
+    return shapeNo("vardecl-var-kind", stmt);
+  }
   if (stmt.modifiers && stmt.modifiers.length > 0) return shapeNo("vardecl-modifier", stmt);
   const isConst = !!(flags & ts.NodeFlags.Const);
   for (const d of stmt.declarationList.declarations) {
@@ -6255,7 +6275,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     for (const el of expr.elements) {
       if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
       if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope
-      if (!isPhase1Expr(el, scope, localClasses)) return false;
+      if (!isPhase1Expr(el, scope, localClasses) || localClassNameForExpression(el, scope) !== null) return false;
       const family =
         currentSelectionOptions?.classifyPrimitiveExpression?.(el) ??
         (ts.isStringLiteral(el) || el.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral
@@ -6515,6 +6535,7 @@ export function assessModuleInit(
   currentFnIsVoidReturn = true;
   currentFnIsAsync = false; // (#1373b C-1) module-init is never an async body
   currentSubjectIsModuleInit = true;
+  currentIrSafeVarDeclarationLists = new Set();
   currentModuleMapGetAliases = new Set<ts.VariableDeclaration>();
   currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "boolean">();
   const scope = new Set<string>();
