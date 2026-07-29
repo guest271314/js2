@@ -24,7 +24,7 @@ loc-budget-allow:
   - src/codegen/any-helpers.ts
 func-budget-allow:
   - src/codegen/index.ts::planIrOverlay
-branch: codex/2949-acorn-direct-member-equality
+branch: codex/2949-acorn-implicit-array-param
 ---
 
 # #2949 — the IR's type system is Wasm types, not JS types
@@ -1965,3 +1965,46 @@ IR emission plus zero post-claim failures. The exact #3796 driver remains the
 per-slice measurement input. Its synthesized module uses a 32,768-element
 `array.new_fixed`; V8 rejects fixed arrays above 10,000 elements, so that
 driver is a compile/outcome probe rather than the focused runtime fixture.
+
+## Implementation Notes — implicit indexed-parameter ABI (2026-07-29)
+
+Acorn's untyped `isInAstralSet(code, set)` now emits through IR. Direct
+declaration lowering already infers `set` as the exact
+`ref null __vec_f64` carrier from its call sites. Planning now reuses that
+exact `IrType` instead of reducing the decision to a scalar-only label.
+Projection remains restricted to `__vec_*` / `__arr_*` carriers; incidental
+anonymous object shapes are not admitted.
+
+Two selector seams were required by the exact source:
+
+- the dynamic `code` parameter is compared with the proven numeric local
+  `pos` inside a `for` loop, so the existing dynamic-to-number relational
+  lowering is admitted for proven f64 counterparts and the dynamic-use scan
+  now descends through ordinary `for` statements;
+- `isIdentifierStart` and `isIdentifierChar` remain on the direct path because
+  of their RegExp constructors. Standalone caller closure is relaxed only when
+  every untyped parameter has a production-certified projection and at least
+  one is an indexed carrier. Their already-emitted calls therefore keep the
+  exact direct callable ABI while the leaf body moves to IR.
+
+The unchanged #3796 runtime-dynamic compile/outcome driver moves from 16 to
+**17 emitted functions out of 43**, with `isInAstralSet` added and zero
+post-claim withdrawals. Remaining terminal blockers are:
+
+- 15 body-shape rejections;
+- 3 parameter-type rejections;
+- 3 logical-value rejections;
+- 2 RegExp-constructor rejections;
+- 2 call-graph closures;
+- 1 constructor-resolution rejection.
+
+The slice does not touch the direct-backend files owned by draft PR #3796.
+
+Validation for this slice:
+
+- exact #3796 driver: 17/43 emitted, zero post-claim withdrawals;
+- focused implicit-parameter and IR guard suites: 26/26 pass;
+- broader curated guard matrix: 182 pass, 4 skipped;
+- equivalence matrix: 8/8 shards, zero new regressions;
+- typecheck, lint, fallback/adoption/oracle, LOC, function-budget, harness
+  compile-budget, and linear-IR gates pass.

@@ -317,7 +317,13 @@ export interface IrSelectionOptions {
    */
   readonly resolveImplicitParamType?: (
     parameter: ts.ParameterDeclaration,
-  ) => "f64" | "bool" | "string" | "dynamic" | undefined;
+  ) => "f64" | "bool" | "string" | "object" | "dynamic" | undefined;
+  /**
+   * Standalone/WASI normally close claims over local callers. A production
+   * planner may exempt a callee when its direct callable and IR overlay share
+   * one fully certified ABI, making a legacy caller's pre-emitted call safe.
+   */
+  readonly legacyCallerAbiIsProjected?: (declaration: ts.FunctionDeclaration) => boolean;
   /**
    * Checker-backed certification for recursive call-graph components. A
    * rejected component is kept on the direct path even when optimistic
@@ -562,6 +568,15 @@ function bodyHasAsyncOutOfIrScope(body: ts.Node): boolean {
 }
 
 const EMPTY: IrSelection = { funcs: new Set<string>() };
+
+function legacyCallerAbiIsProjected(
+  options: IrSelectionOptions | undefined,
+  declarations: ReadonlyMap<string, ts.FunctionDeclaration>,
+  name: string,
+): boolean {
+  const declaration = declarations.get(name);
+  return declaration !== undefined && options?.legacyCallerAbiIsProjected?.(declaration) === true;
+}
 
 export function planIrCompilation(
   sourceFile: ts.SourceFile,
@@ -976,8 +991,8 @@ export function planIrCompilation(
     for (const name of [...claimed]) {
       const myCallees = callees.get(name) ?? new Set<string>();
       let safe = true;
-      // Caller-direction demotion remains only in standalone/wasi (#2858).
-      if (demoteOnLegacyCaller) {
+      // Standalone/WASI keep caller closure unless production certifies one exact ABI.
+      if (demoteOnLegacyCaller && !legacyCallerAbiIsProjected(options, declByName, name)) {
         const myCallers = callers.get(name) ?? new Set<string>();
         for (const c of myCallers) {
           if (!claimed.has(c)) {
@@ -2197,10 +2212,13 @@ function dynamicUsesAreMoveOnly(
         if (leftIsDyn || rightIsDyn) {
           // #2949 S5.P — the landed relational producer is deliberately the
           // numeric-abstract arm. Admit exactly one dynamic operand against a
-          // numeric literal; dyn-vs-dyn may require the string/string ARC arm.
+          // proven numeric expression; dyn-vs-dyn may require the
+          // string/string ARC arm. A concrete f64 counterpart makes the ARC
+          // numeric by construction, so locals such as Acorn's `pos > code`
+          // are as safe as numeric literals.
           if (leftIsDyn === rightIsDyn) return false;
           const concrete = unwrap(leftIsDyn ? e.right : e.left);
-          if (!ts.isNumericLiteral(concrete)) return false;
+          if (!expressionIsProvenNumber(concrete)) return false;
           return scanExpr(leftIsDyn ? e.left : e.right, true) && scanExpr(concrete, false);
         }
       }
@@ -2324,6 +2342,12 @@ function dynamicUsesAreMoveOnly(
     if (ts.isWhileStatement(s)) {
       return scanExpr(s.expression, isDynShaped(s.expression)) && scanStmt(s.statement);
     }
+    if (ts.isForStatement(s)) {
+      if (s.initializer && subtreeTouchesDynamic(s.initializer, dynNames)) return false;
+      if (s.condition && !scanExpr(s.condition, isDynShaped(s.condition))) return false;
+      if (s.incrementor && !scanExpr(s.incrementor, false)) return false;
+      return scanStmt(s.statement);
+    }
     if (ts.isForInStatement(s)) {
       return (
         currentSelectionOptions?.isDynamicForInReceiver?.(s.expression) === true &&
@@ -2332,7 +2356,7 @@ function dynamicUsesAreMoveOnly(
         scanStmt(s.statement)
       );
     }
-    // For / for-of / switch / try / throw / nested functions /
+    // For-of / switch / try / throw / nested functions /
     // anything else: conservative — claimable exactly when the statement
     // doesn't touch a dynamic value at all.
     return !subtreeTouchesDynamic(s, dynNames);
