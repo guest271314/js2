@@ -74,6 +74,30 @@ export function pushProgramAbiNestedCallable(
   registry.observe(declaration, funcIdx);
 }
 
+/** Push and structurally observe one nested function declaration atomically. */
+export function pushProgramAbiNestedFunctionDeclaration(
+  ctx: CodegenContext,
+  declaration: ts.FunctionDeclaration,
+  funcIdx: FuncHandle,
+  func: WasmFunction,
+): void {
+  pushDefinedFunc(ctx, funcIdx, func);
+  const registry = ctx.programAbiSourceCallables;
+  if (!registry) {
+    throw new ProgramAbiInvariantError(
+      "context-session-mismatch",
+      "nested function declaration was allocated without its structural registry",
+    );
+  }
+  // Literal-eval and other compiler support paths can create function
+  // declarations after the whole-program inventory was frozen. They remain
+  // generic support callables until synthetic identities are introduced.
+  if (!registry.identityContext?.unitIdByDeclaration.has(declaration)) {
+    return;
+  }
+  registry.observeNestedFunctionDeclaration(declaration, funcIdx);
+}
+
 function functionSignature(ctx: CodegenContext, func: WasmFunction): FuncTypeDef {
   const signature = ctx.mod.types[func.typeIdx];
   if (!signature || signature.kind !== "func") {
@@ -128,6 +152,18 @@ export class ProgramAbiSourceCallableRegistry {
   }
 
   observe(declaration: SourceCallableDeclaration, funcIdx: FuncHandle): IrUnitId | undefined {
+    return this.observeWithExpectedKind(declaration, funcIdx, expectedSourceCallableUnitKind(declaration));
+  }
+
+  observeNestedFunctionDeclaration(declaration: ts.FunctionDeclaration, funcIdx: FuncHandle): IrUnitId | undefined {
+    return this.observeWithExpectedKind(declaration, funcIdx, "nested-function");
+  }
+
+  private observeWithExpectedKind(
+    declaration: SourceCallableDeclaration,
+    funcIdx: FuncHandle,
+    expectedKind: string | undefined,
+  ): IrUnitId | undefined {
     if (this.planned) {
       throw new ProgramAbiInvariantError(
         "planning-sealed",
@@ -146,7 +182,6 @@ export class ProgramAbiSourceCallableRegistry {
 
     const unitId = identityContext.unitIdByDeclaration.get(declaration);
     const unit = unitId === undefined ? undefined : identityContext.unitByUnitId.get(unitId);
-    const expectedKind = expectedSourceCallableUnitKind(declaration);
     const supportedUnit = expectedKind
       ? unit?.kind === expectedKind
       : unit?.kind === "top-level-function" || (unit?.kind === "synthetic-support" && unit.syntheticRole !== undefined);
@@ -158,9 +193,11 @@ export class ProgramAbiSourceCallableRegistry {
     ) {
       throw new ProgramAbiInvariantError(
         "missing-source-unit",
-        ts.isFunctionDeclaration(declaration)
-          ? `source callable ${func.name} has no consistent exact top-level or compiler-support inventory owner`
-          : `source callable ${func.name} has no consistent exact nested callable inventory owner`,
+        expectedKind === "nested-function"
+          ? `source callable ${func.name} has no consistent exact nested-function inventory owner`
+          : ts.isFunctionDeclaration(declaration)
+            ? `source callable ${func.name} has no consistent exact top-level or compiler-support inventory owner`
+            : `source callable ${func.name} has no consistent exact nested callable inventory owner`,
       );
     }
 
