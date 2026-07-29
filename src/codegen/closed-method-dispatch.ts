@@ -1257,6 +1257,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     // Dispatch `.test(subject)` by the runtime `$NativeRegExp` brand, not by
     // the first ambient extern class named `test`. User closed-struct methods
     // are wrapped outside this arm below and therefore retain precedence.
+    let wrapNativeRegExpTest: ((fallback: Instr[]) => Instr[]) | undefined;
     {
       const regexpTypeIdx = ctx.structMap.get("__StandaloneRegExp");
       const regexpTestIdx = ctx.funcMap.get("__regexp_test_carrier");
@@ -1269,7 +1270,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         regexpTestIdx !== undefined &&
         boxBoolIdx !== undefined
       ) {
-        current = [
+        wrapNativeRegExpTest = (fallback: Instr[]): Instr[] => [
           { op: "local.get", index: anyLocalIdx },
           { op: "ref.test", typeIdx: regexpTypeIdx },
           {
@@ -1281,9 +1282,12 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
               { op: "call", funcIdx: regexpTestIdx },
               { op: "call", funcIdx: boxBoolIdx },
             ],
-            else: current,
+            else: fallback,
           },
         ];
+        if (process.env.JS2WASM_REGEXP_TEST_OUTER_BRAND === "0") {
+          current = wrapNativeRegExpTest(current);
+        }
       }
     }
 
@@ -1348,6 +1352,16 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
         { op: "ref.test", typeIdx: entry.typeIdx },
         { op: "if", blockType: { kind: "val", type: { kind: "externref" } }, then: callAndCoerce, else: current },
       ];
+    }
+
+    // A `$NativeRegExp` is representation-disjoint from every user closed
+    // struct and field-carrier arm wrapped above. Put the same native `test`
+    // brand arm outermost so tokenizer calls do one ref.test before entering
+    // the regex engine instead of walking the generated user-method ladder.
+    // The inner arm remains the fallback under the kill switch and keeps the
+    // construction order of all unrelated dispatchers byte-identical.
+    if (process.env.JS2WASM_REGEXP_TEST_OUTER_BRAND !== "0" && wrapNativeRegExpTest !== undefined) {
+      current = wrapNativeRegExpTest(current);
     }
 
     // (#3673 round 13) Patch the cached-direct-call arm's scratch-local slot

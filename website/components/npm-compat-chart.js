@@ -132,6 +132,7 @@ class NpmCompatChart extends HTMLElement {
       perf =
         renderLane("jsHost", "JS host") +
         renderLane("standalone", "standalone") +
+        renderLane("standaloneDynamic", "standalone") +
         `<div class="row sub"><span class="k"></span><span class="v muted">${this._esc(pkg.perf.sampleOp)}</span></div>`;
     }
 

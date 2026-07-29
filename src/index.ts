@@ -293,6 +293,8 @@ export interface CompileOptions {
   moduleName?: string;
   /** Generate source map (default: false) */
   sourceMap?: boolean;
+  /** Preserve the Wasm name section through optimization for profiling. */
+  preserveDebugNames?: boolean;
   /** Source map URL to embed in the wasm binary (default: "module.wasm.map") */
   sourceMapUrl?: string;
   /** Compilation target: "gc" (WasmGC, default), "linear" (linear memory),
