@@ -189,6 +189,7 @@ import {
 } from "./object-runtime.js";
 import { fillClosurePropHelpers } from "./closure-props.js"; // (#3468 C-core) closure-own-property side table
 import { fillVecPropHelpers } from "./vec-props.js"; // (#3537) array ($Vec) expando side table
+import { finalizeFunctionPoisonPillCalls } from "./function-poison-pill.js";
 import { fillDataViewConstructProtoArm, fillTaDynViewMopArms } from "./ta-dyn-mop.js"; // (#3177/#3371) native view prototype arms
 import { fillObjVecReflectionHelpers } from "./objvec-array-proto.js"; // (#3666) RegExp indices Array reflection
 import { fillReflectIsConstructor } from "./reflect-construct-native.js";
@@ -344,7 +345,7 @@ import {
   resolveSameShapeFieldNameCollisions,
 } from "./struct-field-exports.js"; // (#3272) extracted verbatim
 import { analyzeBooleanPropertyNames, recoverBooleanStructFieldBrands } from "./struct-field-boolean-brand.js";
-import { analyzeNumericPropertyNames } from "./numeric-property-analysis.js"; // (#3683 S4a)
+import { applyNumericPropertyAnalysis } from "./numeric-property-analysis.js"; // (#3683 S4a)
 import { collectUserMethodNames } from "./user-method-names.js"; // (#3673)
 import {
   registerWasiImports,
@@ -2996,7 +2997,8 @@ export function generateModule(
   // `ctx.booleanPropertyNames` (assigned much later) so the exclusion is exact
   // without reordering an established pass.
   if (ctx.standalone) {
-    const propertyKinds = analyzeNumericPropertyNames(
+    applyNumericPropertyAnalysis(
+      ctx,
       {
         oracle: ctx.oracle,
         fnctorReceivers: new Set(ctx.fnctorEscapeGate.receiverStruct.keys()),
@@ -3004,14 +3006,6 @@ export function generateModule(
       },
       [ast.sourceFile],
     );
-    ctx.numericPropertyNames = propertyKinds.numeric;
-    // (#3753 S1) The string half of the same walk. A field every write proves a
-    // string gets a NATIVE STRING slot instead of the boxed `externref`, which
-    // deletes the per-access `ref.test` / `ref.cast` / `__str_flatten`.
-    ctx.stringPropertyNames = propertyKinds.string;
-    // (#3753 S2) Names the fixpoint proved return a number on every path, so
-    // `this.acc + this.nextCode()` can unbox once instead of boxing both sides.
-    ctx.numericFunctionNames = propertyKinds.numericFunctions;
   }
   // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
   // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
@@ -4040,6 +4034,11 @@ export function generateModule(
 
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
+
+    // ES5 Function `caller`: after dead-import elimination has finalized
+    // function indices, thread each source caller's strictness into source
+    // direct/call_ref invocations. The callee snapshot was emitted at entry.
+    finalizeFunctionPoisonPillCalls(ctx);
 
     // #1984 — freeze the index spaces. Every legitimate late import mutation
     // (addUnionImports / addStringImports / reconcileNativeStrFinalizeShift,
@@ -6034,6 +6033,9 @@ export function generateMultiModule(
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
 
+    // Mirror the single-source ES5 Function `caller` finalizer.
+    finalizeFunctionPoisonPillCalls(ctx);
+
     // #1984 — freeze the index spaces (multi-module path). Same boundary as the
     // single-module generateModule: all legitimate late import mutations have
     // run; stackBalance / fixupExternConvertAny / emit add no imports. Any
@@ -6130,9 +6132,9 @@ export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType
     params: [{ kind: "f64" }, { kind: "externref" }],
     result: { kind: "externref" },
   },
-  // split: separator (externref) + limit (f64, NaN sentinel for "no limit" — #1441).
-  // The host runtime in `string_method` detects NaN and calls `split(sep)` without
-  // the limit so the spec default 2^32-1 applies (instead of ToUint32(NaN) === 0).
+  // split: separator (externref) + limit (f64, -1 sentinel for "no limit" — #3761).
+  // The host runtime in `string_method` detects -1 and calls `split(sep)` without
+  // the limit. An explicit NaN must remain distinct: ToUint32(NaN) is 0.
   split: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "externref" } },
   match: { params: [{ kind: "externref" }], result: { kind: "externref" } },
   search: { params: [{ kind: "externref" }], result: { kind: "f64" } },

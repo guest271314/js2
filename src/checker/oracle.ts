@@ -120,6 +120,15 @@ export interface TypeOracle {
    * single assignment and therefore must not narrow the query to `const`.
    */
   variableInitializerOf(id: ts.Node): ts.Expression | undefined;
+  /**
+   * Variable declaration for a plain identifier binding. Returning the AST
+   * declaration (rather than the checker Symbol) keeps binding-identity
+   * queries inside the oracle boundary while allowing callers to inspect
+   * declaration syntax such as `var` versus `let`/`const`.
+   */
+  variableDeclarationOf(id: ts.Node): ts.VariableDeclaration | undefined;
+  /** Value declaration bound to an identifier, without exposing a checker Symbol. */
+  valueDeclarationOf(id: ts.Node): ts.Declaration | undefined;
 }
 
 /** Builtins with first-class compiler handling (mirrors type-mapper's set —
@@ -305,14 +314,28 @@ export class TsCheckerOracle implements TypeOracle {
   }
 
   variableInitializerOf(id: ts.Node): ts.Expression | undefined {
+    return this.variableDeclarationOf(id)?.initializer;
+  }
+
+  variableDeclarationOf(id: ts.Node): ts.VariableDeclaration | undefined {
     try {
       if (!ts.isIdentifier(id)) return undefined;
       const sym = this.checker.getSymbolAtLocation(id);
       const decl = sym?.valueDeclaration;
-      if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer || !ts.isIdentifier(decl.name)) {
+      if (!decl || !ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name)) {
         return undefined;
       }
-      return decl.initializer;
+      return decl;
+    } catch {
+      return undefined;
+    }
+  }
+
+  valueDeclarationOf(id: ts.Node): ts.Declaration | undefined {
+    try {
+      if (!ts.isIdentifier(id)) return undefined;
+      const sym = this.checker.getSymbolAtLocation(id);
+      return sym?.valueDeclaration ?? sym?.declarations?.[0];
     } catch {
       return undefined;
     }

@@ -14,10 +14,17 @@ import { addFuncType, getArrTypeIdxFromVec } from "./registry/types.js";
 import { addUnionImports } from "./registry/imports.js";
 import { buildClosureRefTestArms, collectClosureBaseWrapperTypeIdxs } from "./closure-classifier.js";
 import { CLOSURE_ARITY_FIELD_IDX, getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js";
+import {
+  buildTransferredSubstringCallInstrs,
+  collectTransferredSubstringReceivers,
+  resolveClosureBaseWrapperTypeIdx,
+} from "./closures/transferred-native-proto.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { isSyntheticStructName } from "./emit-helpers.js";
+export { buildTransferredCharAtApplyArm } from "./char-at-transfer.js";
+import { installCompiledClosureToStringArm } from "./coercion-engine.js";
 
 /**
  * Emit __call_fn_0 export (#851): call a zero-arg WasmGC closure from JS.
@@ -225,23 +232,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   // selected it. Shared signature wrappers are distinct children, not
   // canonicalized peers; only the permanently-open root admits every shared
   // signature wrapper for the initial ref.test + struct.get.
-  if (baseWrapperIdx === undefined) {
-    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
-      const typeDef = mod.types[typeIdx];
-      if (typeDef && typeDef.kind === "struct" && typeDef.superTypeIdx === -1) {
-        baseWrapperIdx = typeIdx;
-        break;
-      }
-    }
-  }
-  if (baseWrapperIdx === undefined) {
-    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
-      if (ctx.closureInfoByTypeIdx.get(typeIdx)!.paramTypes.length === arity) {
-        baseWrapperIdx = typeIdx;
-        break;
-      }
-    }
-  }
+  baseWrapperIdx = resolveClosureBaseWrapperTypeIdx(ctx, arity, baseWrapperIdx);
   if (baseWrapperIdx === undefined) return;
 
   addUnionImports(ctx);
@@ -540,6 +531,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // #1712 per-shape extraction note in emitClosureCallExportN).
   const funcLocal = totalParams + 2;
   const prevThisLocal = totalParams + 3;
+  const resultSaveLocal = prevThisLocal + 1;
 
   let baseWrapperIdx: number | undefined;
   const seenFuncTypeIdx = new Set<number>();
@@ -549,6 +541,7 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
     selfTypeIdx: number;
     closureArity: number;
   }[] = [];
+  const substringReceiverEntries = collectTransferredSubstringReceivers(ctx, arity);
 
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
     if (info.paramTypes.length > arity) continue;
@@ -573,25 +566,9 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
       });
     }
   }
-  if (entries.length === 0) return;
+  if (entries.length === 0 && substringReceiverEntries.length === 0) return;
 
-  if (baseWrapperIdx === undefined) {
-    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
-      const typeDef = mod.types[typeIdx];
-      if (typeDef && typeDef.kind === "struct" && typeDef.superTypeIdx === -1) {
-        baseWrapperIdx = typeIdx;
-        break;
-      }
-    }
-  }
-  if (baseWrapperIdx === undefined) {
-    for (const [typeIdx] of ctx.closureInfoByTypeIdx) {
-      if (ctx.closureInfoByTypeIdx.get(typeIdx)!.paramTypes.length === arity) {
-        baseWrapperIdx = typeIdx;
-        break;
-      }
-    }
-  }
+  baseWrapperIdx = resolveClosureBaseWrapperTypeIdx(ctx, arity, baseWrapperIdx);
   if (baseWrapperIdx === undefined) return;
 
   addUnionImports(ctx);
@@ -625,6 +602,16 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   body.push({ op: "local.set", index: prevThisLocal });
   body.push({ op: "local.get", index: 0 });
   body.push({ op: "global.set", index: currentThisGlobalIdx });
+
+  body.push(
+    ...buildTransferredSubstringCallInstrs(
+      substringReceiverEntries,
+      anyLocal,
+      resultSaveLocal,
+      prevThisLocal,
+      currentThisGlobalIdx,
+    ),
+  );
 
   let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" }];
   // (#3673 round 10) per-entry callBody capture for the arity-bucketed
@@ -859,7 +846,6 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // Reuse `prevThisLocal` is not safe since we still need its contents;
   // use `anyLocal` is also not safe (externref vs anyref). Add a dedicated
   // result-save slot at index `prevThisLocal + 1`.
-  const resultSaveLocal = prevThisLocal + 1;
   body.push({ op: "local.set", index: resultSaveLocal });
   body.push({ op: "local.get", index: prevThisLocal });
   body.push({ op: "global.set", index: currentThisGlobalIdx });
@@ -1384,6 +1370,10 @@ export function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
   // closure-base-wrapper list (`closure-classifier.ts`).
   const closureI32Arms = (anyLocalIdx: number, matchValue: number): Instr[] =>
     buildClosureRefTestArms(ctx, anyLocalIdx, [{ op: "i32.const", value: matchValue }, { op: "return" }]);
+
+  // #3540: the single coercion engine owns compiled-closure stringification;
+  // this finalizer supplies the now-complete closure classifier.
+  installCompiledClosureToStringArm(ctx);
 
   // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
   const tf = fnByName("__typeof_function");
