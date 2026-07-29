@@ -18,6 +18,7 @@ import {
   IrBinop,
   IrBlock,
   IrBlockId,
+  IrClassMemberKind,
   IrClassShape,
   IrClosureSignature,
   IrConst,
@@ -890,15 +891,13 @@ export class IrFunctionBuilder {
     });
   }
 
-  /**
-   * Emit `class.call` to invoke an instance method. `resultType` is the
-   * method descriptor's `returnType` (or `null` for void). Returns `null`
-   * for void methods — callers using the result in expression position
-   * must reject `null` themselves.
+  /** Invoke an instance member while keeping semantic kind separate from its
+   * compatibility spelling. A void method/setter returns `null`.
    */
   emitClassCall(
     receiver: IrValueId,
     methodName: string,
+    memberKind: Exclude<IrClassMemberKind, "static">,
     args: readonly IrValueId[],
     resultType: IrType | null,
   ): IrValueId | null {
@@ -910,6 +909,7 @@ export class IrFunctionBuilder {
     this.pushInstr({
       kind: "class.call",
       receiver,
+      memberKind,
       methodName,
       args: [...args],
       result,

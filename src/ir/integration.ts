@@ -153,6 +153,7 @@ import {
 import {
   forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
   irTypeEquals,
+  type IrClassMemberKind,
   type IrClassShape,
   type IrClosureSignature,
   type IrFuncRef,
@@ -4879,12 +4880,13 @@ function defaultFieldAllocInstr(field: FieldDef, tagValue: number): Instr {
  *   - the canonical fields list in `ctx.structFields` (with `__tag` at
  *     field 0 for root classes)
  *   - a constructor function `<className>_new` in `ctx.funcMap`
- *   - one method function `<className>_<methodName>` per instance
- *     method in `ctx.funcMap`
+ *   - one function per callable class member in `ctx.funcMap`
  *
- * `ClassRegistry.resolve` validates the shape's exact `IrClassId`, then maps
- * it to the remaining name-keyed legacy state at this backend seam. A class
- * that wasn't registered surfaces as `null` and the caller falls back.
+ * `ClassRegistry.resolve` validates the shape's exact `IrClassId`. Callable
+ * member refs retain their semantic kind and source name, bind exact source
+ * units, and publish inherited compatibility keys as structural aliases.
+ * Names remain consistency checks at the allocator seam, never identities.
+ * A class that wasn't registered surfaces as `null` and the caller falls back.
  *
  * Cached per `IrClassId`; display labels never establish class identity.
  */
@@ -4921,9 +4923,21 @@ class ClassRegistry {
     return shape.classId;
   }
 
-  private memberRef(classId: IrClassId, legacyName: string, physicalName: string): IrFuncRef | null {
+  private memberRef(
+    classId: IrClassId,
+    memberKind: IrClassMemberKind,
+    legacyName: string,
+    physicalName: string,
+  ): IrFuncRef | null {
+    const terminalKind = {
+      method: "class-instance-method",
+      getter: "class-instance-getter",
+      setter: "class-instance-setter",
+      static: "class-static-method",
+    }[memberKind];
     const matches = [...(this.identityContext?.terminalByUnitId.values() ?? [])].filter(
       (terminal) =>
+        terminal.kind === terminalKind &&
         terminal.observedKind === "class-member" &&
         terminal.lexicalOwnerId === classId &&
         terminal.legacyMatchName === legacyName,
@@ -4951,20 +4965,19 @@ class ClassRegistry {
   }
 
   /**
-   * Publish one inherited ordinary instance method as an explicit alias of the
-   * exact ancestor source unit that owns its allocator slot.
+   * Publish one inherited class member as an explicit alias of the exact
+   * ancestor source unit that owns its allocator slot.
    *
-   * Accessors and statics deliberately stay on the compatibility seam: the
-   * current `IrClassLowering.methodFunc(name)` handle does not retain their
-   * member kind. An exact projected ordinary method is safe because the class
-   * shape identifies the ancestor declaration, the inventory identifies its
-   * source unit, and legacy inheritance must map the child's physical key to
-   * that same allocator-owned function.
+   * The IR retains the semantic member kind separately from its compatibility
+   * spelling. The class shape identifies the ancestor declaration, the
+   * inventory identifies its source unit, and legacy inheritance must map the
+   * child's physical key to that same allocator-owned function.
    */
-  private inheritedInstanceMethodRef(
+  private inheritedMemberRef(
     shape: IrClassShape,
     classId: IrClassId,
-    methodName: string,
+    memberKind: IrClassMemberKind,
+    memberName: string,
     childPhysicalName: string,
   ): IrFuncRef | null {
     const session = this.ctx.programAbiSession;
@@ -4974,36 +4987,18 @@ class ClassRegistry {
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "resolve",
-        `ir/integration: inherited class method ${classId} / ${methodName} has no structural inventory`,
+        `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has no structural inventory`,
       );
     }
 
-    const descriptorCallName = (descriptor: IrClassShape["methods"][number]): string => {
-      if (descriptor.memberKind === "getter") return `get_${descriptor.name}`;
-      if (descriptor.memberKind === "setter") return `set_${descriptor.name}`;
-      return descriptor.name;
-    };
-    for (let cursor: IrClassShape | undefined = shape; cursor; cursor = cursor.parent) {
-      if (
-        cursor.methods.some(
-          (descriptor) =>
-            descriptorCallName(descriptor) === methodName &&
-            descriptor.memberKind !== undefined &&
-            descriptor.memberKind !== "method",
-        )
-      ) {
-        return null;
-      }
-    }
-
-    const ownOrdinary = shape.methods.filter(
-      (descriptor) => descriptor.name === methodName && (descriptor.memberKind ?? "method") === "method",
+    const ownDescriptors = shape.methods.filter(
+      (descriptor) => descriptor.name === memberName && (descriptor.memberKind ?? "method") === memberKind,
     );
-    if (ownOrdinary.length > 0) {
+    if (ownDescriptors.length > 0) {
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "resolve",
-        `ir/integration: own instance method ${classId} / ${methodName} has no exact source slot`,
+        `ir/integration: own class ${memberKind} ${classId} / ${memberName} has no exact source slot`,
       );
     }
 
@@ -5014,18 +5009,18 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${methodName} has a cyclic class shape`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has a cyclic class shape`,
         );
       }
       visited.add(ancestorClassId);
       const descriptors = ancestor.methods.filter(
-        (descriptor) => descriptor.name === methodName && (descriptor.memberKind ?? "method") === "method",
+        (descriptor) => descriptor.name === memberName && (descriptor.memberKind ?? "method") === memberKind,
       );
       if (descriptors.length > 1) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} is not structurally unique`,
+          `ir/integration: ancestor class ${memberKind} ${ancestorClassId} / ${memberName} is not structurally unique`,
         );
       }
       if (descriptors.length === 0) continue;
@@ -5038,37 +5033,49 @@ class ClassRegistry {
           `ir/integration: ancestor class ${ancestorClassId} / ${ancestor.className} has no exact declaration`,
         );
       }
-      const methodDeclarations = ancestorDeclaration.members.filter(
-        (member): member is ts.MethodDeclaration =>
-          ts.isMethodDeclaration(member) &&
-          ts.isIdentifier(member.name) &&
-          member.name.text === methodName &&
-          !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
-      );
-      if (methodDeclarations.length !== 1) {
+      const declarations = ancestorDeclaration.members.filter((member) => {
+        if (!member.name || !ts.isIdentifier(member.name) || member.name.text !== memberName) return false;
+        const isStatic =
+          (ts.canHaveModifiers(member) &&
+            ts.getModifiers(member)?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)) ??
+          false;
+        if (memberKind === "method") return ts.isMethodDeclaration(member) && !isStatic;
+        if (memberKind === "getter") return ts.isGetAccessorDeclaration(member) && !isStatic;
+        if (memberKind === "setter") return ts.isSetAccessorDeclaration(member) && !isStatic;
+        return ts.isMethodDeclaration(member) && isStatic;
+      });
+      if (declarations.length !== 1) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} has ${methodDeclarations.length} exact declarations`,
+          `ir/integration: ancestor class ${memberKind} ${ancestorClassId} / ${memberName} has ${declarations.length} exact declarations`,
         );
       }
-      const methodDeclaration = methodDeclarations[0]!;
-      const terminalId = identity.unitIdByDeclaration.get(methodDeclaration);
+      const declaration = declarations[0]!;
+      const terminalId = identity.unitIdByDeclaration.get(declaration);
       const terminal = terminalId === undefined ? undefined : identity.terminalByUnitId.get(terminalId);
-      const ancestorLegacyName = `${ancestor.className}_${methodName}`;
+      const terminalKind = {
+        method: "class-instance-method",
+        getter: "class-instance-getter",
+        setter: "class-instance-setter",
+        static: "class-static-method",
+      }[memberKind];
+      const memberSuffix =
+        memberKind === "getter" ? `get_${memberName}` : memberKind === "setter" ? `set_${memberName}` : memberName;
+      const ancestorLegacyName = `${ancestor.className}_${memberSuffix}`;
       if (
         !terminal ||
-        identity.declarationByUnitId.get(terminal.id) !== methodDeclaration ||
-        terminal.kind !== "class-instance-method" ||
+        identity.declarationByUnitId.get(terminal.id) !== declaration ||
+        terminal.kind !== terminalKind ||
         terminal.observedKind !== "class-member" ||
         terminal.lexicalOwnerId !== ancestorClassId ||
-        terminal.staticClassMember ||
+        terminal.staticClassMember !== (memberKind === "static") ||
         terminal.legacyMatchName !== ancestorLegacyName
       ) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} has no consistent exact source unit`,
+          `ir/integration: ancestor class ${memberKind} ${ancestorClassId} / ${memberName} has no consistent exact source unit`,
         );
       }
       const derivedOrdinal = identity.inventory.allUnits.findIndex((unit) => unit.id === terminal.id);
@@ -5076,7 +5083,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} is absent from structural inventory order`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} is absent from structural inventory order`,
         );
       }
 
@@ -5089,21 +5096,21 @@ class ClassRegistry {
         throw new IrInvariantError(
           "missing-function-slot",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} has no defined slot ${ancestorPhysicalName}`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} has no defined slot ${ancestorPhysicalName}`,
         );
       }
       if (!childFunc) {
         throw new IrInvariantError(
           "missing-function-slot",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${childPhysicalName} has no defined slot`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${childPhysicalName} has no defined slot`,
         );
       }
       if (childFuncIdx !== ancestorFuncIdx || childFunc !== ancestorFunc) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${childPhysicalName} does not alias exact ancestor ${terminal.id} / ${ancestorPhysicalName}`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${childPhysicalName} does not alias exact ancestor ${terminal.id} / ${ancestorPhysicalName}`,
         );
       }
       const signature = this.ctx.mod.types[ancestorFunc.typeIdx];
@@ -5111,7 +5118,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "abi-type-index-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} / ${ancestorPhysicalName} has non-function type ${ancestorFunc.typeIdx}`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} / ${ancestorPhysicalName} has non-function type ${ancestorFunc.typeIdx}`,
         );
       }
 
@@ -5122,7 +5129,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} has no Program ABI callable plan`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} has no Program ABI callable plan`,
         );
       }
       const resolvedAncestorFuncIdx = session.resolveCurrentIndex(
@@ -5135,17 +5142,20 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${childPhysicalName} resolves structurally to slot ${resolvedAncestorFuncIdx}, not exact ancestor ${terminal.id}`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${childPhysicalName} resolves structurally to slot ${resolvedAncestorFuncIdx}, not exact ancestor ${terminal.id}`,
         );
       }
 
-      const role = `class-method-adapter:instance:${methodName}`;
+      const role =
+        memberKind === "method"
+          ? `class-method-adapter:instance:${memberName}`
+          : `class-member-adapter:${memberKind}:${memberName}`;
       const ref = irSupportFuncRef(classId, role, childPhysicalName, derivedOrdinal);
       if (ref.binding.kind !== "support") {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${methodName} has a non-support adapter reference`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has a non-support adapter reference`,
         );
       }
       const bindingId = planProgramAbiSupportCallableAlias(this.ctx, {
@@ -5161,7 +5171,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${methodName} was not accepted as a Program ABI alias`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} was not accepted as a Program ABI alias`,
         );
       }
       return ref;
@@ -5319,13 +5329,21 @@ class ClassRegistry {
       constructorFunc,
       initFunc,
       instanceOfTags,
-      methodFunc: (name: string): IrFuncRef => {
-        const legacyName = `${shape.className}_${name}`;
+      memberFunc: (memberKind: IrClassMemberKind, name: string): IrFuncRef => {
+        const suffix = memberKind === "getter" ? `get_${name}` : memberKind === "setter" ? `set_${name}` : name;
+        const legacyName = `${shape.className}_${suffix}`;
         const physicalName = classMemberFuncKey(ctx, legacyName);
-        return (
-          this.memberRef(classId, legacyName, physicalName) ??
-          this.inheritedInstanceMethodRef(shape, classId, name, physicalName) ??
-          irSupportFuncRef(classId, `class-method-adapter:${name}`, physicalName)
+        const exact =
+          this.memberRef(classId, memberKind, legacyName, physicalName) ??
+          this.inheritedMemberRef(shape, classId, memberKind, name, physicalName);
+        if (exact) return exact;
+        if (!ctx.programAbiSession) {
+          return irSupportFuncRef(classId, `class-member-adapter:${memberKind}:${name}`, physicalName);
+        }
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: class ${memberKind} ${classId} / ${name} has no exact source or inherited ABI owner`,
         );
       },
       allocInstrs,

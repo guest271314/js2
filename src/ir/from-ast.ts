@@ -3827,7 +3827,7 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
       // right prefix).
       const getter = findClassMember(recvType.shape, propName, "getter");
       if (getter && getter.returnType !== null) {
-        const r = cx.builder.emitClassCall(recv, `get_${propName}`, [], getter.returnType);
+        const r = cx.builder.emitClassCall(recv, propName, "getter", [], getter.returnType);
         if (r === null) {
           throw new Error(
             `ir/from-ast: getter ${recvType.shape.className}.${propName} produced no value (${cx.funcName})`,
@@ -5447,7 +5447,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       `ir/from-ast: void method ${recvType.shape.className}.${methodName} used in expression position (${cx.funcName})`,
     );
   }
-  const r = cx.builder.emitClassCall(recv, methodName, args, method.returnType);
+  const r = cx.builder.emitClassCall(recv, methodName, "method", args, method.returnType);
   if (method.returnType !== null && r === null) {
     // Defensive — emitClassCall returns null only when resultType is null.
     throw new Error(`ir/from-ast: class.call produced no result in ${cx.funcName}`);
@@ -5819,7 +5819,7 @@ function lowerPropertyAssignment(expr: ts.BinaryExpression, cx: LowerCtx): void 
             `ir/from-ast: assignment to setter ${recvType.shape.className}.${fieldName} (${describeIrType(setter.params[0]!)}) got ${describeIrType(newValueType)} (${cx.funcName})`,
           );
         }
-        cx.builder.emitClassCall(recv, `set_${fieldName}`, [newValue], null);
+        cx.builder.emitClassCall(recv, fieldName, "setter", [newValue], null);
         return;
       }
       throw new Error(`ir/from-ast: class ${recvType.shape.className} has no field "${fieldName}" in ${cx.funcName}`);
