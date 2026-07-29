@@ -178,6 +178,21 @@ if grep -q '"check:oracle-ratchet"' package.json 2>/dev/null; then
   echo "Pre-push: oracle ratchet OK."
 fi
 
+# ---------- (3d) change-scoped coercion-site ratchet ----------------------
+#
+# Keep new ToNumber/ToString/equality work on the shared coercion engine. This
+# is the exact fast, read-only gate used by CI.
+
+if grep -q '"check:coercion-sites"' package.json 2>/dev/null; then
+  echo "Pre-push: coercion-site ratchet ..."
+  if ! pnpm run check:coercion-sites; then
+    echo ""
+    echo "Route new coercions through the shared engine before pushing, or use --no-verify (CI will catch)."
+    exit 1
+  fi
+  echo "Pre-push: coercion-site ratchet OK."
+fi
+
 # ---------- (4) sync conformance numbers in docs -------------------------
 #
 # Keeps README.md / ROADMAP.md / CLAUDE.md / plan/goals/goal-graph.md in

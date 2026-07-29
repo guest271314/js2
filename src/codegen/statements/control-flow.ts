@@ -9,6 +9,7 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, allocTempLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
+import { emitToNumber } from "../coercion-engine.js";
 import { emitThrowTypeError } from "../expressions/helpers.js";
 import {
   addStringImports,
@@ -1328,9 +1329,14 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
   if (guardedNumericCases) {
     addUnionImports(ctx);
     const typeofNum = ctx.funcMap.get("__typeof_number")!;
-    const unboxNum = ctx.funcMap.get("__unbox_number")!;
     const discriminant = allocLocal(fctx, `__sw_disc_${fctx.locals.length}`, { kind: "externref" });
     guardedNumericMatchLocal = allocLocal(fctx, `__sw_num_${fctx.locals.length}`, { kind: "i32" });
+    const savedBody = pushBody(fctx);
+    fctx.body.push({ op: "local.get", index: discriminant });
+    emitToNumber(ctx, fctx, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: tmpLocalIdx });
+    const numericThen = fctx.body;
+    popBody(fctx, savedBody);
     compileExpression(ctx, fctx, stmt.expression, { kind: "externref" });
     fctx.body.push(
       { op: "local.set", index: discriminant },
@@ -1342,11 +1348,7 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
       {
         op: "if",
         blockType: { kind: "empty" },
-        then: [
-          { op: "local.get", index: discriminant },
-          { op: "call", funcIdx: unboxNum },
-          { op: "local.set", index: tmpLocalIdx },
-        ],
+        then: numericThen,
       },
     );
   } else {
