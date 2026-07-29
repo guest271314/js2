@@ -6,6 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c28-typed-this-abi
+pr: 3798
 last_merged_pr: 3797
 sprint: current
 created: 2026-07-21
@@ -2499,7 +2500,8 @@ authorities before R1 can close.
 
 ### 2026-07-29 typed-this twin callable ownership continuation
 
-The continuation on `codex/3520-c28-typed-this-abi` gives every admitted
+The continuation on `codex/3520-c28-typed-this-abi`
+([PR #3798](https://github.com/loopdive/js2/pull/3798)) gives every admitted
 typed-`this` twin its own structural Program ABI owner:
 
 - the original function-expression body keeps the callable binding derived
