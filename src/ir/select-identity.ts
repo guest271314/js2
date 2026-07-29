@@ -102,6 +102,15 @@ interface IndexedClass {
   readonly declaration: ts.ClassDeclaration;
 }
 
+function legacyCallerAbiIsProjectedForIdentity(
+  options: IrIdentitySelectionOptions,
+  functions: ReadonlyArray<IndexedFunction>,
+  unitId: IrUnitId,
+): boolean {
+  const declaration = functions.find(({ unit }) => unit.unitId === unitId)?.declaration;
+  return declaration !== undefined && options.legacyCallerAbiIsProjected?.(declaration) === true;
+}
+
 interface IdentityCallGraph {
   readonly callers: ReadonlyMap<IrUnitId, ReadonlySet<IrUnitId>>;
   readonly callees: ReadonlyMap<IrUnitId, ReadonlySet<IrUnitId>>;
@@ -679,8 +688,11 @@ export function planIrCompilationByIdentity(
     while (changed) {
       changed = false;
       for (const unitId of [...claimed.keys()]) {
+        const legacyCallerAbiIsProjected = legacyCallerAbiIsProjectedForIdentity(options, functions, unitId);
         const unsafeCaller =
-          demoteOnLegacyCaller && [...(graph.callers.get(unitId) ?? [])].some((caller) => !claimed.has(caller));
+          demoteOnLegacyCaller &&
+          !legacyCallerAbiIsProjected &&
+          [...(graph.callers.get(unitId) ?? [])].some((caller) => !claimed.has(caller));
         const unsafeCallee = [...(graph.callees.get(unitId) ?? [])].some((callee) => !claimed.has(callee));
         if (!unsafeCaller && !unsafeCallee) continue;
         claimed.delete(unitId);

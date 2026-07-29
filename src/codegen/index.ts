@@ -1829,6 +1829,10 @@ function collectIrImplicitParamProjectionCandidates(
     ) {
       return parent.operand === child;
     }
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === child) {
+      return parent.name.text === "length";
+    }
+    if (ts.isElementAccessExpression(parent) && parent.expression === child) return true;
     return false;
   };
   const visit = (node: ts.Node): void => {
@@ -1843,14 +1847,19 @@ function collectIrImplicitParamProjectionCandidates(
 }
 
 // #2949 S5.P — declaration lowering already specializes an implicit-any
-// parameter when its call sites establish one concrete scalar ABI. Project
+// parameter when its call sites establish one concrete ABI. Project
 // that same decision into structural selection and the IR override map so a
 // claimed function cannot widen to dynamic and then lose ABI parity after
 // the direct callable has been allocated.
+interface IrImplicitParamProjection {
+  readonly kind: "f64" | "bool" | "string" | "object" | "dynamic";
+  readonly type: IrType;
+}
+
 function makeIrImplicitParamTypeResolver(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
-): (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | "dynamic" | undefined {
+): (parameter: ts.ParameterDeclaration) => IrImplicitParamProjection | undefined {
   const candidatesByDeclaration = new WeakMap<ts.FunctionDeclaration, ReadonlySet<ts.ParameterDeclaration>>();
   return (parameter) => {
     if (parameter.type) return undefined;
@@ -1869,17 +1878,27 @@ function makeIrImplicitParamTypeResolver(
     const parameterIndex = declaration.parameters.indexOf(parameter);
     if (parameterIndex < 0) return undefined;
     const callSites = inferParamTypeFromCallSites(ctx, declaration.name.text, parameterIndex, sourceFile);
-    if (callSites.sawCallSite && callSites.type === null) return "dynamic";
+    if (callSites.sawCallSite && callSites.type === null) {
+      return { kind: "dynamic", type: irDynamic() };
+    }
     const inferred = inferImplicitAnyParamType(ctx, declaration.name.text, parameterIndex, sourceFile, declaration);
-    if (inferred?.kind === "f64") return "f64";
-    if (inferred?.kind === "i32" && inferred.boolean === true) return "bool";
+    if (inferred?.kind === "f64") return { kind: "f64", type: irVal(inferred) };
+    if (inferred?.kind === "i32" && inferred.boolean === true) {
+      return { kind: "bool", type: irVal(inferred) };
+    }
     if (
       inferred?.kind === "ref" &&
       ctx.nativeStrings &&
       ctx.anyStrTypeIdx >= 0 &&
       inferred.typeIdx === ctx.anyStrTypeIdx
     ) {
-      return "string";
+      return { kind: "string", type: { kind: "string" } };
+    }
+    if (inferred?.kind === "ref" || inferred?.kind === "ref_null") {
+      const structName = ctx.typeIdxToStructName.get(inferred.typeIdx);
+      if (structName?.startsWith("__vec_") || structName?.startsWith("__arr_")) {
+        return { kind: "object", type: irVal(inferred) };
+      }
     }
     return undefined;
   };
@@ -1893,16 +1912,13 @@ function resolveIrOverrideParamType(
   resolveImplicitParamType: ReturnType<typeof makeIrImplicitParamTypeResolver>,
 ): IrType {
   const projected = resolveImplicitParamType(parameter);
-  if (projected === "f64") return irVal({ kind: "f64" });
-  if (projected === "bool") return irVal({ kind: "i32", boolean: true });
-  if (projected === "string") return { kind: "string" };
   // Keep the established numeric parity-withdrawal path (#3551): lattice f64
   // may still form the speculative IR view, and the patch-time ABI guard then
   // withdraws the complete caller cluster if legacy kept the param dynamic.
   // Nonnumeric mapped kinds cannot lower polymorphic equality soundly before
   // that guard (the #3471 string failure), so those retain the direct dynamic
   // ABI in the IR view.
-  if (projected === "dynamic" && mapped?.kind !== "f64") return irDynamic();
+  if (projected && !(projected.kind === "dynamic" && mapped?.kind === "f64")) return projected.type;
   return resolvePositionType(effectiveIrParamTypeNode(parameter), mapped, ctx, classShapes);
 }
 
@@ -2011,6 +2027,16 @@ function planIrOverlay(
   // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
   const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
   const resolveImplicitParamType = makeIrImplicitParamTypeResolver(ctx, ast.sourceFile);
+  const legacyCallerAbiIsProjected = (declaration: ts.FunctionDeclaration): boolean => {
+    let hasIndexedCarrier = false;
+    for (const parameter of declaration.parameters) {
+      if (effectiveIrParamTypeNode(parameter)) continue;
+      const projection = resolveImplicitParamType(parameter);
+      if (!projection) return false;
+      if (projection.kind === "object") hasIndexedCarrier = true;
+    }
+    return hasIndexedCarrier;
+  };
   const identityPlan = irOverlayIdentity.planIrOverlayByIdentity(
     ast.sourceFile,
     identityContext,
@@ -2037,7 +2063,8 @@ function planIrOverlay(
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
       isRegExpExpression,
-      resolveImplicitParamType,
+      resolveImplicitParamType: (parameter) => resolveImplicitParamType(parameter)?.kind,
+      legacyCallerAbiIsProjected,
       projectedClassShapes: classShapes,
       resolveLocalClassExpression,
       supportsSymbolicMathHelpers: true,
