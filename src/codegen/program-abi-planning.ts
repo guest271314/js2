@@ -20,6 +20,7 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   classHostConstructor: 4,
   moduleInit: 5,
   retainedModuleFunction: 6,
+  typedThisTwin: 7,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({

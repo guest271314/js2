@@ -1,13 +1,14 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { analyzeMultiSource, analyzeSource } from "../src/checker/index.js";
 import { generateModule, generateMultiModule } from "../src/codegen/index.js";
 import { compile, compileMulti, type CompileResult } from "../src/index.js";
-import { irUnitCallableBindingId } from "../src/ir/callable-bindings.js";
+import { irSupportFuncRef, irUnitCallableBindingId } from "../src/ir/callable-bindings.js";
 import { buildIrUnitInventory, type IrUnitInventory, type IrUnitRecord } from "../src/ir/identity.js";
 import type { ProgramAbiPlanEntry } from "../src/ir/program-abi.js";
+import { ProgramAbiSession } from "../src/codegen/program-abi-session.js";
 import { buildImports, instantiateWasm } from "../src/runtime.js";
 
 // Register the codegen expression/statement delegates used by generateModule.
@@ -211,6 +212,65 @@ describe("#3520 source callable Program ABI ownership", () => {
     });
     const exports = await instantiate(runtime);
     expect((exports.run as (value: number) => number)(7)).toBe(22);
+  });
+
+  it("owns an admitted typed-this twin as support beneath its exact function expression", async () => {
+    const source = `
+      var P = function P(n) { this.pos = n; this.acc = 0; };
+      var pp = P.prototype;
+      pp.step = function (k) {
+        this.pos = this.pos + k;
+        return this.pos;
+      };
+      var p = new P(3);
+      export function test(): number { return p.step(4); }
+    `;
+    const ast = analyzeSource(source, "source-callable-typed-this-twin.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const expression = exactUnit(inventory, "function-expression", "<anonymous-function>");
+
+    const publish = vi.spyOn(ProgramAbiSession.prototype, "publish");
+    const runtime = await compile(source, {
+      fileName: "source-callable-typed-this-twin.ts",
+      experimentalIR: true,
+      target: "standalone",
+      skipSemanticDiagnostics: true,
+    });
+    const publication = publish.mock.instances.at(-1)?.publication;
+    publish.mockRestore();
+    expect(runtime.success, runtime.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(runtime.wat).toMatch(/__typed_this/);
+    expect(publication).toBeDefined();
+
+    const bodyBindingId = irUnitCallableBindingId(expression.id);
+    const twinRef = irSupportFuncRef(expression.id, "typed-this-twin", "diagnostic-name-is-not-identity");
+    if (twinRef.binding.kind !== "support") throw new Error("missing typed-this support reference");
+    const twinBindingId = twinRef.binding.bindingId;
+    const entries = publication!.abi.entries();
+    const body = requiredCallable(entries, bodyBindingId);
+    expect(body.intent).toMatchObject({ kind: "callable", origin: "source", unitId: expression.id });
+    expect(entries.find((entry) => entry.id === twinBindingId)).toMatchObject({
+      id: twinBindingId,
+      displayName: expect.stringMatching(/__typed_this$/),
+      slotPolicy: "required",
+      slotSpace: "function",
+      intent: {
+        kind: "callable",
+        origin: "support",
+        unitId: expression.id,
+      },
+    });
+    const bodySlot = publication!.abi.resolveFinalIndex(bodyBindingId);
+    const twinSlot = publication!.abi.resolveFinalIndex(twinBindingId);
+    expect(bodySlot).toEqual(expect.objectContaining({ space: "function" }));
+    expect(twinSlot).toEqual(expect.objectContaining({ space: "function" }));
+    expect(twinSlot).not.toEqual(bodySlot);
+
+    const exports = await instantiate(runtime);
+    expect((exports.test as () => number)()).toBe(7);
   });
 
   it("owns a retained direct host-callback body by its exact arrow unit", () => {
