@@ -708,6 +708,8 @@ export function compileIrPathFunctions(
         // #2780 (hybrid Row 6): thread the TS checker so `lowerArrayLiteral`
         // can discharge the widening-escape proof via `getContextualType`.
         checker: ctx.checker,
+        // #3765: share direct-codegen's grounded numeric-local oracle with IR.
+        numericLocalScalarForDecl: (decl) => ctx.usageInference.scalarForDecl(decl),
       });
       if (result.main.unitId !== ownerUnitId) {
         throw new IrInvariantError(
@@ -898,6 +900,7 @@ export function compileIrPathFunctions(
             // #2780 (hybrid Row 6): thread the TS checker for the
             // ArrayLiteral widening-escape proof in method bodies too.
             checker: ctx.checker,
+            numericLocalScalarForDecl: (decl) => ctx.usageInference.scalarForDecl(decl),
           });
           if (result.main.unitId !== ownerUnitId) {
             throw new IrInvariantError(
@@ -1044,6 +1047,7 @@ export function compileIrPathFunctions(
         resolver: fromAstResolver,
         allocRegistry,
         checker: ctx.checker,
+        numericLocalScalarForDecl: (decl) => ctx.usageInference.scalarForDecl(decl),
       });
       if (result.main.unitId !== moduleInitUnitId) {
         throw new IrInvariantError(

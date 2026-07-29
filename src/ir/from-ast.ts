@@ -566,6 +566,13 @@ export interface AstToIrOptions {
   /** Optional-chain nullability check (#1281). When absent, `?.` / `?.()` throw to legacy. */
   readonly checker?: ts.TypeChecker;
   /**
+   * (#3765) Direct-codegen's whole-program proof that an implicit-any local
+   * always contains a number. IR consumes the same proof before rejecting an
+   * unboxed f64 local: the checker type remains `any` for ordinary JavaScript
+   * even when every definition is grounded numeric.
+   */
+  readonly numericLocalScalarForDecl?: (decl: ts.VariableDeclaration) => "number" | undefined;
+  /**
    * #1586: module-global allocation-site registry. When supplied, the builder
    * mints a stable `AllocSiteId` for every value-creating instr (object.new,
    * closure.new, string.const, …). Optional — when absent, `alloc` fields stay
@@ -891,6 +898,7 @@ export function lowerFunctionAstToIr(
     funcKind: isGenerator ? "generator" : isAsync ? "async" : "regular",
     generatorBufferSlot,
     checker: options.checker,
+    numericLocalScalarForDecl: options.numericLocalScalarForDecl,
     allocRegistry: options.allocRegistry,
     moduleBindings: options.moduleInitUnit ? options.moduleBindings : undefined,
   };
@@ -1675,6 +1683,8 @@ interface LowerCtx {
   readonly generatorBufferSlot?: number;
   /** Optional-chain nullability check (#1281). When absent, `?.` / `?.()` throw to legacy. */
   readonly checker?: ts.TypeChecker;
+  /** See {@link AstToIrOptions.numericLocalScalarForDecl}. */
+  readonly numericLocalScalarForDecl?: (decl: ts.VariableDeclaration) => "number" | undefined;
   /**
    * #1586: module-global allocation-site registry, threaded so lifted-closure
    * builders mint stable ids on the same registry as the outer function.
@@ -2665,7 +2675,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     const scalarVecValue =
       cx.resolver?.isVecValueExpression?.(d.initializer) === true ||
       cx.emptyArrayInference.isResolvedVectorExpression(d.initializer);
-    if (!scalarVecValue && !proveUnboxedNumberLocal(d.name, inferred, cx)) {
+    if (!scalarVecValue && !proveUnboxedNumberLocal(d, inferred, cx)) {
       const boundKind = asVal(inferred)?.kind === "i32" ? "i32" : "f64";
       throw new Error(
         `ir/from-ast: local '${name}' is bound as an unboxed ${boundKind} but its TS type is not ` +
@@ -7998,12 +8008,13 @@ function isProvablyBoolean(t: ts.Type): boolean {
  * (every boundary use is still type-checked), so keep the existing behavior
  * unchanged (mirrors #2780 / #2781's no-checker arm).
  */
-function proveUnboxedNumberLocal(name: ts.Identifier, boundType: IrType, cx: LowerCtx): boolean {
+function proveUnboxedNumberLocal(decl: ts.VariableDeclaration, boundType: IrType, cx: LowerCtx): boolean {
   const bv = asVal(boundType);
   if (!bv || (bv.kind !== "f64" && bv.kind !== "i32")) return true; // not a no-box scalar NUMBER representation — out of scope.
+  if (cx.numericLocalScalarForDecl?.(decl) === "number") return true;
   const checker = cx.checker;
   if (!checker) return true; // no checker → leave behavior unchanged.
-  const tsType = checker.getTypeAtLocation(name);
+  const tsType = checker.getTypeAtLocation(decl.name);
   if (classifyPrimitiveProof(tsType) === "number") return true; // provable number — keep (boxes __box_number on escape).
   // f64 hosts only the number brand: a non-number f64 was opaquely coerced and
   // is unsound to keep unboxed → demote.
@@ -9354,6 +9365,7 @@ function liftNestedFunction(
     // `isPhase1NestedFunc`).
     funcKind: "regular",
     checker: cx.checker,
+    numericLocalScalarForDecl: cx.numericLocalScalarForDecl,
     allocRegistry: cx.allocRegistry,
   };
   if (!fn.body) {
@@ -9453,6 +9465,7 @@ function liftClosureBody(
     // (the selector rejects them in `isPhase1ClosureLiteral`).
     funcKind: "regular",
     checker: cx.checker,
+    numericLocalScalarForDecl: cx.numericLocalScalarForDecl,
     allocRegistry: cx.allocRegistry,
   };
 
