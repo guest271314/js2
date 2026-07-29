@@ -2395,6 +2395,14 @@ runs when the stack targets `main` or reaches the merge-group boundary.
 Neither `benchmarks/results/test262-run.log` nor
 `scripts/equivalence-baseline.json` is changed.
 
+Queue shepherding found one inherited current-`main` gap in the changed root
+tests: a void closure parameter call in statement position was still rejected
+after IR selection. C25 now represents that `closure.call` with a null result
+while preserving the existing expression-position refusal. The shadowed
+`setTimeout` fixture proves the helper remains IR-compiled, and the focused
+callback, Promise, overlay, and Program ABI matrix passes **86/86** with strict
+TypeScript and Biome lint green.
+
 C25 closes the callback and Promise-delay synthesized-name reservations, not
 R1. Remaining class/type consumers, function expressions, other support
 families, and module-array or display-name scans must still move behind

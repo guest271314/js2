@@ -4196,7 +4196,7 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   //   - top-level callee in calleeTypes → vanilla `call`
   const binding = cx.scope.get(calleeName);
   if (binding?.kind === "local" && (binding.type.kind === "closure" || binding.type.kind === "callable")) {
-    return lowerClosureCall(binding.value, binding.type.signature, expr.arguments, cx);
+    return lowerClosureCall(binding.value, binding.type.signature, expr.arguments, cx, statementPosition);
   }
   if (binding?.kind === "nestedFunc") {
     return lowerNestedFuncCall(binding, expr.arguments, cx);
@@ -4346,8 +4346,9 @@ function lowerClosureCall(
   signature: IrClosureSignature,
   argExprs: readonly ts.Expression[],
   cx: LowerCtx,
-): IrValueId {
-  if (signature.returnType === null) {
+  statementPosition = false,
+): IrValueId | null {
+  if (signature.returnType === null && !statementPosition) {
     unsupportedVoidCallExpression(`ir/from-ast: void closure calls are not in value position scope (${cx.funcName})`);
   }
   if (argExprs.length !== signature.params.length) {
