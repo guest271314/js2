@@ -110,6 +110,37 @@ function describeOptStatus(status, mask) {
   return `${status} (${(status & mask) === mask ? "matches" : "MISSING"} optimized-signature ${mask})`;
 }
 
+/**
+ * (#3777) Keep a measurement wrapper OUT of the optimizing tiers.
+ *
+ * `timeIt` is scaffolding, not the subject. Left optimizable, V8 eventually
+ * tiers it up and INLINES `fn` into it — and then the hot loop executes as the
+ * wrapper's code, not as the code the subject actually has. On Node 26 that
+ * turned the warm `loop.ts` JS lane from ~370 us into ~5615 us per call
+ * (measured), because Maglev claimed `timeIt` and ran the inlined 1M-iteration
+ * body at mid-tier speed while `bench_loop`'s own TurboFan code object sat
+ * unused. `%GetOptimizationStatus(fn)` stayed 41 (optimized|turbofanned)
+ * throughout, which is exactly why the #3759 tier assertion could not see it:
+ * it interrogates the SUBJECT, and the subject was never the problem.
+ *
+ * Pinning the wrapper is preferable to pinning the engine (`--no-maglev`,
+ * #3769): it fixes the mechanism rather than one tier's symptom, needs no
+ * startup flag, keeps the JS lane on the same tier configuration a real browser
+ * has, and covers the wasm lane and any future tier for free.
+ *
+ * Best-effort: needs `--allow-natives-syntax`, which the COLD lane does not
+ * enable (it runs `--jitless`, where there is no tier to opt out of anyway), so
+ * a failure here is silently fine.
+ */
+function neverOptimize(...fns) {
+  try {
+    const pin = new Function("f", "%NeverOptimizeFunction(f);");
+    for (const fn of fns) pin(fn);
+  } catch {
+    // no natives syntax (cold lane) — nothing to pin.
+  }
+}
+
 function calibrate(fn) {
   let iters = 0;
   const t0 = performance.now();
@@ -164,11 +195,19 @@ async function main() {
       ? await loadJsFn(args["js-source"], exportName)
       : await loadWasmFn(args.wasm, args.imports, exportName);
 
+  // (#3777) Pin the scaffolding before it is ever called, so no tier-up can
+  // fuse the subject into the timer. See `neverOptimize`.
+  neverOptimize(timeIt, calibrate);
+
   // Warmup pass mirrors the in-process sidebar generator to avoid a cold-call
   // outlier dominating the first measured sample.
   for (let i = 0; i < 80; i++) fn();
 
+  const calibrateStart = performance.now();
   const iters = calibrate(fn);
+  // Per-call cost implied by calibration, i.e. by a code path that has NOT yet
+  // run through `timeIt`. Cross-checked against the measured median below.
+  const calibratedUsPerCall = ((performance.now() - calibrateStart) / (iters / 3)) * 1000;
   const warmupRounds = 2;
   const measuredRounds = 9;
   for (let i = 0; i < warmupRounds; i++) timeIt(fn, iters);
@@ -203,10 +242,39 @@ async function main() {
     }
   }
 
+  // (#3777) Cross-check the measured median against calibration.
+  //
+  // The tier assertion above interrogates the SUBJECT, so it is blind to a
+  // wrapper-side artifact: on Node 26 the subject reported `optimized` for the
+  // entire run while the measured rounds were 15x slower than calibration had
+  // just observed. Calibration is an INDEPENDENT measurement path — it calls
+  // `fn` directly, never through `timeIt` — so disagreement between the two is
+  // evidence that something about the measurement changed, whatever the cause
+  // (a new tier, a different inlining decision, a deopt the mask cannot see).
+  //
+  // Threshold is deliberately loose: CI runners are noisy and calibration is a
+  // shorter sample, so ordinary variance runs well under 2x. 4x catches the
+  // 15x class without flagging drift. Skipped when `iters` hit its floor of 10,
+  // where the clamp breaks the implied-per-call arithmetic.
+  const measuredMedianUs = [...samplesUs].sort((a, b) => a - b)[Math.floor(samplesUs.length / 2)];
+  const driftRatio = calibratedUsPerCall > 0 ? measuredMedianUs / calibratedUsPerCall : 1;
+  if (iters > 10 && driftRatio > 4) {
+    throw new Error(
+      `measurement instability for '${exportName}': calibration implied ` +
+        `~${calibratedUsPerCall.toFixed(1)}us/call but the measured median is ` +
+        `${measuredMedianUs.toFixed(1)}us/call (${driftRatio.toFixed(1)}x). Calibration calls the ` +
+        `subject directly while the measured rounds go through 'timeIt', so a gap this large means ` +
+        `the timing wrapper is affecting what is being measured (see #3777) — not that the subject ` +
+        `is slow. The reported timings would not represent the subject's speed.`,
+    );
+  }
+
   process.stdout.write(
     JSON.stringify({
       samplesUs,
       iters,
+      calibratedUsPerCall,
+      driftRatio,
       ...(expectTier
         ? {
             optimizedMask,
