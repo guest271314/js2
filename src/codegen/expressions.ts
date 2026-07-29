@@ -1050,6 +1050,19 @@ function compileExpressionInner(
   }
 
   if (expr.kind === ts.SyntaxKind.ThisKeyword) {
+    // A typed-this twin receives its exact runtime receiver in param/local 0.
+    // Reuse that value for bare/non-field `this` expressions too, rather than
+    // round-tripping through the ambient `__current_this` global. This makes
+    // the receiver parameter a complete representation of `this`, so direct
+    // twin-to-twin calls do not need to install a dynamic receiver frame.
+    if (
+      process.env.JS2WASM_TWIN_RECEIVER_PARAM !== "0" &&
+      fctx.typedThisLocalIdx !== undefined &&
+      fctx.typedThisStructIdx !== undefined
+    ) {
+      fctx.body.push({ op: "local.get", index: fctx.typedThisLocalIdx });
+      return { kind: "ref", typeIdx: fctx.typedThisStructIdx };
+    }
     const selfIdx = fctx.localMap.get("this");
     if (selfIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: selfIdx });
