@@ -14,8 +14,8 @@ area: tooling, dogfood, website
 language_feature: npm packages, standalone, JS host
 goal: performance
 assignee: "ttraenkler/codex"
-depends_on: [3778, 3779]
-related: [1710, 3748, 3751]
+depends_on: [3778, 3779, 3780]
+related: [1710, 3748, 3751, 3782]
 files:
   - benchmarks/results/npm-compat-perf.json
   - benchmarks/results/npm-compat.json
@@ -74,7 +74,7 @@ The two placements must never be conflated.
 
 ## Acceptance criteria
 
-- [x] `clsx` and `cookie` each emit a `perf.lanes.jsHost` entry and a
+- [x] `clsx`, `cookie`, and Acorn each emit a `perf.lanes.jsHost` entry and a
       `perf.lanes.standalone` entry.
 - [x] A successful lane reports raw samples, median, standard deviation,
       iteration count, optimization level, binary size, workload placement, and
@@ -93,20 +93,38 @@ The two placements must never be conflated.
       `compile-time-static` or `runtime-dynamic`; the page explains that a
       generic compiler may eliminate closed static work and never combines the
       two modes.
+- [x] Acorn additionally reports runtime-dynamic input with the complete test
+      loop inside standalone Wasm, keeping harness placement and input
+      knowledge as independent dimensions.
 
 ## Outcome
 
 The committed report now keeps the two execution placements separate and
 publishes all nine raw samples for every successful lane:
 
-| Package | Placement  | Input knowledge     | Wasm median | Node median | Outcome             |
-| ------- | ---------- | ------------------- | ----------: | ----------: | ------------------- |
-| clsx    | JS host    | runtime dynamic     |   0.4089 us |   0.0160 us | Node 25.62x faster  |
-| clsx    | standalone | compile-time static |  0.00066 us |   0.0112 us | Wasm 17.02x faster  |
-| cookie  | JS host    | runtime dynamic     | 150.9021 us |   0.2569 us | Node 587.42x faster |
-| cookie  | standalone | compile-time static |  0.00066 us |   0.2606 us | Wasm 397.02x faster |
+| Package | Placement  | Input knowledge     |     Wasm median | Node median | Outcome                 |
+| ------- | ---------- | ------------------- | --------------: | ----------: | ----------------------- |
+| Acorn   | JS host    | runtime dynamic     | 1,241,301.50 us | 4,204.58 us | Node 295.23x faster     |
+| Acorn   | standalone | runtime dynamic     |    71,248.30 us | 4,129.78 us | Node 17.25x faster      |
+| Acorn   | standalone | compile-time static |       0.0247 us | 4,658.37 us | Wasm 188,335.86x faster |
+| clsx    | JS host    | runtime dynamic     |       0.3961 us |   0.0160 us | Node 24.83x faster      |
+| clsx    | standalone | compile-time static |      0.00065 us |   0.0112 us | Wasm 17.15x faster      |
+| cookie  | JS host    | runtime dynamic     |     148.1413 us |   0.2657 us | Node 557.64x faster     |
+| cookie  | standalone | compile-time static |      0.00065 us |   0.2577 us | Wasm 395.33x faster     |
 
 The standalone clsx and Cookie drivers now use the IR backend after a generic
 closed-call proof. Their 20,340-byte zero-import modules contain the scalar
 test loop rather than the residual package hot path. The JS-host rows remain
 the parameterized runtime-execution measurements and are reported separately.
+
+Standalone Acorn first initializes and performs the real 226 KB parse in a
+1,784,473-byte zero-import evaluation-stage module. Generic staged evaluation
+then emits a 20,874-byte zero-import residual whose benchmark export uses the
+IR backend. The stage runs the exact operation once inside Wasm, records its
+421.46 ms cost, and has no cache or Node-derived result. This static row is
+therefore reported separately from runtime execution.
+
+The Acorn JS-host row still performs every parse after compilation and remains
+295.23x slower than Node. Its standalone runtime-dynamic counterpart performs
+the same class of work with no host imports and narrows the gap to 17.25x.
+Neither runtime result is combined with the static residual result.

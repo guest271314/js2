@@ -4,6 +4,7 @@
  */
 import { ts } from "../../ts-api.js";
 import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
+import type { TypeFact } from "../../checker/oracle.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, allocTempLocal, getLocalType } from "../context/locals.js";
@@ -933,6 +934,74 @@ function homogeneousSwitchClass(ctx: CodegenContext, stmt: ts.SwitchStatement): 
   return cls;
 }
 
+function isDefinitelyObjectSwitchFact(fact: TypeFact): boolean {
+  switch (fact.kind) {
+    case "array":
+    case "tuple":
+    case "function":
+    case "class":
+    case "builtin":
+    case "object":
+      return true;
+    case "union":
+      return fact.parts.length > 0 && fact.parts.every(isDefinitelyObjectSwitchFact);
+    default:
+      return false;
+  }
+}
+
+/**
+ * StrictEquality against a definitely-object case value only needs reference
+ * identity. A primitive discriminant cannot match the object; the same object
+ * compares true by `ref.eq`; every distinct object compares false. This is
+ * deliberately a whole-switch proof so a mixed primitive/object case set keeps
+ * the full per-case StrictEquality lowering.
+ */
+function switchHasOnlyObjectCases(ctx: CodegenContext, stmt: ts.SwitchStatement): boolean {
+  let sawCase = false;
+  for (const clause of stmt.caseBlock.clauses) {
+    if (!ts.isCaseClause(clause)) continue;
+    sawCase = true;
+    if (!isDefinitelyObjectSwitchFact(ctx.oracle.typeFactOf(clause.expression))) return false;
+  }
+  return sawCase;
+}
+
+function emitSwitchObjectIdentityEq(
+  fctx: FunctionContext,
+  lTmp: number,
+  rTmp: number,
+  lAny: number,
+  rAny: number,
+): void {
+  const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
+  fctx.body.push(
+    { op: "local.get", index: lTmp },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: lAny },
+    { op: "local.get", index: rTmp },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: rAny },
+    { op: "local.get", index: lAny },
+    { op: "ref.test", typeIdx: EQ_HEAP },
+    { op: "local.get", index: rAny },
+    { op: "ref.test", typeIdx: EQ_HEAP },
+    { op: "i32.and" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [
+        { op: "local.get", index: lAny },
+        { op: "ref.cast", typeIdx: EQ_HEAP },
+        { op: "local.get", index: rAny },
+        { op: "ref.cast", typeIdx: EQ_HEAP },
+        { op: "ref.eq" },
+      ],
+      else: [{ op: "i32.const", value: 0 }],
+    },
+  );
+}
+
 /**
  * (#2063) Emit a §7.2.16 StrictEquality comparison of two externref operands
  * already spilled to temps `lTmp` / `rTmp`, pushing an i32 (1 = equal).
@@ -1140,6 +1209,8 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
   // non-null exactly when the legacy fast path is sound.
   const homogeneousClass = homogeneousSwitchClass(ctx, stmt);
   const strictPerCase = homogeneousClass === null;
+  const objectIdentityPerCase =
+    strictPerCase && (ctx.standalone === true || ctx.wasi === true) && switchHasOnlyObjectCases(ctx, stmt);
 
   // Detect if the switch discriminant or any case value involves strings (#245).
   // Check both the discriminant type and case expression types, since the
@@ -1200,6 +1271,16 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
   fctx.body.push({ op: "i32.const", value: noMatchSentinel });
   fctx.body.push({ op: "local.set", index: targetLocalIdx });
 
+  // Reuse two internal-reference temps for the whole object-valued switch.
+  // The prior generic lowering allocated two temps and emitted a complete
+  // primitive/tag cascade for every case.
+  const objectIdentityLAny = objectIdentityPerCase
+    ? allocLocal(fctx, `__sw_obj_l_${fctx.locals.length}`, { kind: "anyref" })
+    : -1;
+  const objectIdentityRAny = objectIdentityPerCase
+    ? allocLocal(fctx, `__sw_obj_r_${fctx.locals.length}`, { kind: "anyref" })
+    : -1;
+
   // Choose the equality opcode based on the switch expression type
   const eqOp: "f64.eq" | "i32.eq" = wasmType.kind === "i32" ? "i32.eq" : "f64.eq";
 
@@ -1225,7 +1306,11 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
       const caseTmp = allocLocal(fctx, `__sw_case_${fctx.locals.length}`, { kind: "externref" });
       compileExpression(ctx, fctx, caseClause.expression, { kind: "externref" });
       fctx.body.push({ op: "local.set", index: caseTmp });
-      emitSwitchStrictEq(ctx, fctx, tmpLocalIdx, caseTmp);
+      if (objectIdentityPerCase) {
+        emitSwitchObjectIdentityEq(fctx, tmpLocalIdx, caseTmp, objectIdentityLAny, objectIdentityRAny);
+      } else {
+        emitSwitchStrictEq(ctx, fctx, tmpLocalIdx, caseTmp);
+      }
     } else {
       fctx.body.push({ op: "local.get", index: tmpLocalIdx });
       if (switchIsString && ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {

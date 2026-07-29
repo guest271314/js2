@@ -63,6 +63,21 @@ describe("#3781 npm performance harness placement", () => {
     expect(nodeBatchSizes.filter((size) => size === result.iters)).toHaveLength(3);
   });
 
+  it("reports a standalone runtime input separately from a compile-time-static standalone input", () => {
+    const result = measureStandalonePerf(
+      "runtime-selected increment",
+      (iterations) => iterations,
+      (iterations) => iterations,
+      {
+        ...FAST_TIMING,
+        inputMode: "runtime-dynamic",
+      },
+    );
+
+    expect(result.placement).toBe("standalone");
+    expect(result.inputMode).toBe("runtime-dynamic");
+  });
+
   it("keeps both placements in package JSON and excludes failures from chart rows", () => {
     const jsHost = {
       status: "measured",
@@ -95,5 +110,40 @@ describe("#3781 npm performance harness placement", () => {
       inputMode: "runtime-dynamic",
     });
     expect(rows.some((row: { path: string }) => row.path.endsWith("#standalone"))).toBe(false);
+  });
+
+  it("emits a distinct chart row for standalone runtime-dynamic work", () => {
+    const measured = {
+      status: "measured",
+      placement: "standalone",
+      inputMode: "runtime-dynamic",
+      sampleOp: "op",
+      wasmUs: 2,
+      nodeUs: 1,
+      wasmStdUs: 0.1,
+      nodeStdUs: 0.1,
+      ratio: 0.5,
+      ratioStd: 0.01,
+      iters: 10,
+      warmupRounds: 2,
+      measuredRounds: 9,
+      wasmSamplesUs: [2],
+      nodeSamplesUs: [1],
+    };
+    const perf = packagePerfRecord(
+      "op",
+      failedPerfLane("js-host", "compile-error", "not run"),
+      failedPerfLane("standalone", "compile-error", "not run"),
+      { standaloneDynamic: measured },
+    );
+    const rows = npmPerfRows([{ name: "pkg", entryFile: "index.js", perf }]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      name: "pkg · standalone · runtime dynamic",
+      path: "index.js#standaloneDynamic",
+      harnessPlacement: "standalone",
+      inputMode: "runtime-dynamic",
+    });
   });
 });

@@ -131,7 +131,7 @@
       mode="perf"
       baseline-label="Node"
       title="Standalone and JS-host Wasm vs native Node"
-      legend="Runtime dynamic / JS host = Node owns inputs and the test loop after Wasm compilation. Compile-time static / standalone = package, fixed inputs, and test driver are visible to the compiler in host-free Wasm. Both consume the result and use the same native Node operation as the tick."
+      legend="Input knowledge and harness placement are separate: runtime-dynamic values arrive after compilation, while compile-time-static inputs are compiler-visible; JS-host loops run in Node, while standalone loops run inside host-free Wasm. Every row consumes the result and uses the same native Node operation as the tick."
     ></perf-benchmark-chart>
 
     <footer>
@@ -162,9 +162,13 @@
         <strong>static at compile time</strong>
         because the same package operation and test driver are compiled together with
         <code>target: "standalone"</code>
-        . A generic optimizer may therefore prove and erase closed work; the row still records and verifies the result.
-        The outer timing call is divided by the number of package operations. Both are calibrated medians of 9 rounds
-        after warmup against the same native package, and the two input modes are never combined.
+        . A generic optimizer may therefore evaluate closed work during compilation and emit only a result-preserving
+        residual; the row still records and verifies the result. This static timing describes the residual executable,
+        not the cost of performing the package operation on a new runtime input. The dynamic row is the runtime
+        performance comparison. Where a standalone dynamic row is available, a runtime value enters only after
+        compilation while the test loop and result observation remain inside Wasm. The outer timing call is divided by
+        the number of package operations. All are calibrated medians of 9 rounds after warmup against the same native
+        package, and the input modes are never combined.
       </div>
       <div>
         <h2>Divergences</h2>

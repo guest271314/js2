@@ -49,7 +49,7 @@ function inputModeForPlacement(placement) {
   return placement === "standalone" ? "compile-time-static" : "runtime-dynamic";
 }
 
-function measuredResult(sampleOp, placement, iterations, wasmSamplesUs, nodeSamplesUs, config) {
+function measuredResult(sampleOp, placement, inputMode, iterations, wasmSamplesUs, nodeSamplesUs, config) {
   const wasmUs = median(wasmSamplesUs);
   const nodeUs = median(nodeSamplesUs);
   const ratioSamples = wasmSamplesUs.map(
@@ -58,7 +58,7 @@ function measuredResult(sampleOp, placement, iterations, wasmSamplesUs, nodeSamp
   return {
     status: "measured",
     placement,
-    inputMode: inputModeForPlacement(placement),
+    inputMode,
     sampleOp,
     wasmUs,
     nodeUs,
@@ -98,7 +98,15 @@ export function measureJsHostPerf(sampleOp, wasmOperation, nodeOperation, option
     wasmSamplesUs.push((timeIt(wasmOperation, iterations) / iterations) * 1000);
     nodeSamplesUs.push((timeIt(nodeOperation, iterations) / iterations) * 1000);
   }
-  return measuredResult(sampleOp, "js-host", iterations, wasmSamplesUs, nodeSamplesUs, config);
+  return measuredResult(
+    sampleOp,
+    "js-host",
+    options.inputMode ?? inputModeForPlacement("js-host"),
+    iterations,
+    wasmSamplesUs,
+    nodeSamplesUs,
+    config,
+  );
 }
 
 /**
@@ -129,14 +137,22 @@ export function measureStandalonePerf(sampleOp, wasmBatch, nodeBatch, options = 
     nodeBatch(iterations);
     nodeSamplesUs.push(((performance.now() - nodeStarted) / iterations) * 1000);
   }
-  return measuredResult(sampleOp, "standalone", iterations, wasmSamplesUs, nodeSamplesUs, config);
+  return measuredResult(
+    sampleOp,
+    "standalone",
+    options.inputMode ?? inputModeForPlacement("standalone"),
+    iterations,
+    wasmSamplesUs,
+    nodeSamplesUs,
+    config,
+  );
 }
 
-export function skippedPerfLane(placement) {
+export function skippedPerfLane(placement, inputMode = inputModeForPlacement(placement)) {
   return {
     status: "skipped",
     placement,
-    inputMode: inputModeForPlacement(placement),
+    inputMode,
     reason: "lane not selected",
   };
 }
@@ -151,10 +167,10 @@ export function failedPerfLane(placement, status, diagnostic, extra = {}) {
   };
 }
 
-export function packagePerfRecord(sampleOp, jsHost, standalone) {
+export function packagePerfRecord(sampleOp, jsHost, standalone, additionalLanes = {}) {
   const record = {
     sampleOp,
-    lanes: { jsHost, standalone },
+    lanes: { jsHost, standalone, ...additionalLanes },
   };
   // Transitional aliases keep older npm-compat consumers rendering the
   // JS-host lane while the committed JSON and website move to `lanes`.
@@ -185,6 +201,7 @@ export function npmPerfRows(packages) {
     for (const [key, label] of [
       ["jsHost", "JS host · runtime dynamic"],
       ["standalone", "standalone · compile-time static"],
+      ["standaloneDynamic", "standalone · runtime dynamic"],
     ]) {
       const lane = pkg.perf.lanes[key];
       if (lane?.status !== "measured") continue;

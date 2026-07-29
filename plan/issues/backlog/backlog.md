@@ -2,31 +2,45 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
-## 2026-07-29 — clsx and Cookie standalone versus JS-host performance lanes
+## 2026-07-29 — npm standalone versus JS-host performance lanes
 
 - [#3781](../3781-npm-perf-standalone-js-host-lanes.md) — split every npm
   performance result into a host-free standalone lane, where the package and
   benchmark driver are compiled into Wasm together, and a JS-host lane, where
   Node owns inputs, the repeated-call loop, result observation, and assertions.
   Unsupported standalone packages remain visible as explicit failure rows.
+- [#3782](../3782-acorn-linked-standalone-module-start.md) — Acorn's
+  linked standalone graph now compiles to a valid 1.67 MB zero-import binary,
+  after #3781 removed a left-deep synthetic string-concat chain, but the module
+  still throws during start-function initialization. Isolate the token/prototype/
+  regexp/table initializer and restore a real standalone timing.
+
+## 2026-07-29 — Acorn Wasm performance (in progress)
+
+- [#3780](../3780-acorn-wasm-faster-than-node.md) — make the real pinned
+  parameterized `acorn@8.16.0 parse(source, options)` self-host operation faster
+  in optimized Wasm than native Node, while retaining exact AST behavior for
+  changed sources and options. Export-result caching is excluded from official
+  timings. Corrected result: 1,279,410.541 µs Wasm versus 4,323.208 µs Node
+  (295.94x Node advantage), with 3,507/3,518 unchanged.
+
+## 2026-07-29 — cookie Wasm performance (in progress)
 
 - [#3779](../3779-cookie-wasm-faster-than-node.md) — make the real pinned
-  `cookie@2.0.1 parseCookie(header)` workload faster in optimized standalone
-  Wasm than the equivalent Node batch. **Done:** 0.00065634 µs versus
-  0.26058206 µs (**397.02x faster**) for compile-time-static inputs. The
-  runtime-dynamic JS-host lane remains separately reported at 150.9021 µs
-  versus 0.2569 µs, with the existing 18/21 correctness surface unchanged.
+  parameterized `cookie@2.0.1 parseCookie(header)` operation faster in optimized
+  Wasm than native Node. Export-result caching is excluded from official
+  timings. Corrected result: 143.1675 µs Wasm versus 0.2631 µs Node (544.13x
+  Node advantage), with the existing 18/21 correctness surface unchanged.
 
 ## 2026-07-29 — clsx Wasm performance
 
 - [#3778](../3778-clsx-wasm-faster-than-node.md) — make the real pinned
   `clsx@2.1.1` hot operation faster compiled to optimized Wasm than the same
   package running natively in Node. **Done:** the official nine-round rerun is
-  standalone lane measures 0.00066055 µs Wasm versus 0.01124242 µs Node
-  (**17.02x faster**) for compile-time-static inputs, with the existing 17/18
-  correctness result unchanged. A bounded pure-subset partial evaluator proves
-  the closed workload, while `pnpm run benchmark:clsx` provides the focused
-  non-writing setup and the runtime-dynamic JS-host result remains separate.
+  0.0106524 µs Wasm versus 0.0492999 µs Node (**4.6281x faster**), with the
+  existing 17/18 correctness result unchanged. A bounded pure-subset partial
+  evaluator removes all 112 inner host crossings from the closed hot export;
+  `pnpm run benchmark:clsx` provides the focused non-writing setup.
 
 ## 2026-07-26 — compiled Acorn full-Test262 differential follow-ups
 

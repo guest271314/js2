@@ -657,7 +657,10 @@ async function applyOptimize(
 ): Promise<CompileResult> {
   if (!options.optimize || !result.success) return result;
   const level = typeof options.optimize === "number" ? options.optimize : 3;
-  const optResult = await optimizeBinaryAsync(result.binary, { level });
+  const optResult = await optimizeBinaryAsync(result.binary, {
+    level,
+    preserveNames: options.preserveDebugNames,
+  });
   if (optResult.optimized) {
     result.binary = optResult.binary;
   }
@@ -1166,7 +1169,10 @@ export async function compileSource(
 
   if (options.optimize && result.success) {
     const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = await optimizeBinaryAsync(result.binary, { level });
+    const optResult = await optimizeBinaryAsync(result.binary, {
+      level,
+      preserveNames: options.preserveDebugNames,
+    });
     if (optResult.optimized) {
       result.binary = optResult.binary;
     }

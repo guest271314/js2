@@ -139,4 +139,52 @@ describe("#2063 switch StrictEquality (standalone / pure WasmGC)", () => {
       ),
     ).toBe(20);
   });
+
+  it("object-only cases use identity and reject primitives and distinct objects", async () => {
+    const source = `
+      const first: any = { id: 1 };
+      const second: any = { id: 1 };
+      export function f(which: number): number {
+        const value: any =
+          which === 0 ? first :
+          which === 1 ? second :
+          which === 2 ? {} :
+          which === 3 ? 1 :
+          which === 4 ? "first" :
+          which === 5 ? true :
+          which === 6 ? null :
+          undefined;
+        switch (value) {
+          case first: return 10;
+          case second: return 20;
+          default: return 0;
+        }
+      }
+    `;
+    expect(await runStandalone(source, "f", [0])).toBe(10);
+    expect(await runStandalone(source, "f", [1])).toBe(20);
+    expect(await runStandalone(source, "f", [2])).toBe(0);
+    expect(await runStandalone(source, "f", [3])).toBe(0);
+    expect(await runStandalone(source, "f", [4])).toBe(0);
+    expect(await runStandalone(source, "f", [5])).toBe(0);
+    expect(await runStandalone(source, "f", [6])).toBe(0);
+    expect(await runStandalone(source, "f", [7])).toBe(0);
+  });
+
+  it("mixed object and primitive cases keep full StrictEquality semantics", async () => {
+    const source = `
+      const objectCase: any = {};
+      export function f(which: number): number {
+        const value: any = which === 0 ? objectCase : which === 1 ? 1 : {};
+        switch (value) {
+          case objectCase: return 10;
+          case 1: return 20;
+          default: return 0;
+        }
+      }
+    `;
+    expect(await runStandalone(source, "f", [0])).toBe(10);
+    expect(await runStandalone(source, "f", [1])).toBe(20);
+    expect(await runStandalone(source, "f", [2])).toBe(0);
+  });
 });

@@ -26,6 +26,7 @@ import { copyFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
+import { Session } from "node:inspector";
 
 import { compile, compileMulti } from "../src/index.ts";
 import { buildStringConstants, buildStringConstants16, jsString, wrapExports } from "../src/runtime.ts";
@@ -82,22 +83,44 @@ const inspectWatFunctions = optionValue("--inspect-wat")
   ?.split(",")
   .map((name) => name.trim())
   .filter(Boolean);
+const inspectWatOutputPath = optionValue("--wat-output");
 const inspectConstantFloor = cliArgs.includes("--inspect-constant-floor");
 const inspectBoundaries = cliArgs.includes("--inspect-boundaries");
 const inspectImports = cliArgs.includes("--inspect-imports");
+const inspectResultFloor = cliArgs.includes("--inspect-result-floor");
+const inspectIr = cliArgs.includes("--inspect-ir");
+const inspectRuntimeErrors = cliArgs.includes("--inspect-runtime-errors");
+const inspectBinaryPath = optionValue("--inspect-binary");
+const preserveDebugNames = cliArgs.includes("--preserve-debug-names");
+const linkedStandalone = cliArgs.includes("--linked-standalone");
+const reuseStandaloneBinaryPath = optionValue("--reuse-standalone-binary");
+const profileRuntime = optionValue("--profile-runtime");
+const profileOutputPath = optionValue("--profile-output");
+const profileIterations = Number(optionValue("--profile-iterations") ?? 40);
 const perfOnly = cliArgs.includes("--perf-only");
 const diagnosticsOnly = cliArgs.includes("--diagnostics-only");
 const selectedLane = optionValue("--lane") ?? "both";
-if (!["both", "js-host", "standalone"].includes(selectedLane)) {
-  throw new Error("--lane expects one of both, js-host, or standalone");
+if (!["both", "js-host", "standalone", "standalone-static", "standalone-dynamic"].includes(selectedLane)) {
+  throw new Error("--lane expects one of both, js-host, standalone, standalone-static, or standalone-dynamic");
 }
 const runJsHostLane = selectedLane === "both" || selectedLane === "js-host";
-const runStandaloneLane = selectedLane === "both" || selectedLane === "standalone";
+const runStandaloneLane =
+  selectedLane === "both" || selectedLane === "standalone" || selectedLane === "standalone-static";
+const runStandaloneDynamicLane = selectedLane === "both" || selectedLane === "standalone-dynamic";
 if (perfOnly && (selectedPackages.size !== 1 || !selectedPackages.has("acorn"))) {
   throw new Error("--perf-only currently requires --only acorn");
 }
 if ((diagnosticsOnly || inspectBoundaries) && !runJsHostLane) {
   throw new Error("--diagnostics-only and --inspect-boundaries require --lane js-host or --lane both");
+}
+if (profileRuntime && !["wasm", "node"].includes(profileRuntime)) {
+  throw new Error("--profile-runtime expects wasm or node");
+}
+if (profileRuntime && !profileOutputPath) {
+  throw new Error("--profile-runtime requires --profile-output <file.cpuprofile>");
+}
+if (!Number.isSafeInteger(profileIterations) || profileIterations < 1) {
+  throw new Error("--profile-iterations expects a positive integer");
 }
 
 const RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "npm-compat.json");
@@ -168,6 +191,7 @@ function instrumentImports(importObject, { callbacks = true } = {}) {
 }
 
 const STANDALONE_BENCHMARK_EXPORT = "__npmCompatStandaloneBenchmark";
+const STANDALONE_STATIC_OPERATION_EXPORT = "__npmCompatStaticOperation";
 const CLSX_PERF_OP_NAME = "op_two_strings";
 
 function chunkedStringArray(value, chunkSize = 1024) {
@@ -198,6 +222,29 @@ function firstCompileDiagnostic(result) {
   }
 }
 
+function inspectorPost(session, method) {
+  return new Promise((resolvePost, rejectPost) => {
+    session.post(method, (error, value) => (error ? rejectPost(error) : resolvePost(value)));
+  });
+}
+
+async function captureRuntimeProfile(operation) {
+  const session = new Session();
+  session.connect();
+  try {
+    await inspectorPost(session, "Profiler.enable");
+    await inspectorPost(session, "Profiler.start");
+    for (let iteration = 0; iteration < profileIterations; iteration++) operation();
+    const { profile } = await inspectorPost(session, "Profiler.stop");
+    writeFileSync(profileOutputPath, JSON.stringify(profile));
+    console.log(
+      `[npm-compat] wrote ${profileRuntime} runtime profile (${profileIterations} operation(s)) to ${profileOutputPath}`,
+    );
+  } finally {
+    session.disconnect();
+  }
+}
+
 async function compileStandaloneLane({
   source,
   driver,
@@ -205,9 +252,15 @@ async function compileStandaloneLane({
   sampleOp,
   nodeOperation,
   inlineDriver = false,
+  staticOperationExport,
+  inputMode = "compile-time-static",
+  runtimeArgument,
 }) {
+  const failStandalone = (status, diagnostic, extra = {}) =>
+    failedPerfLane("standalone", status, diagnostic, { inputMode, ...extra });
   const compileStarted = performance.now();
   let result;
+  let staticEvaluation;
   try {
     const compileOptions = {
       allowJs: true,
@@ -220,28 +273,160 @@ async function compileStandaloneLane({
       // immediately after instantiation instead of using the Wasm start
       // section (#3782).
       deferTopLevelInit: true,
+      trackIrOutcomes: inspectIr,
+      preserveDebugNames,
+      ...(inspectWatFunctions?.length
+        ? {
+            emitWat: true,
+            emitWatOnlyFunctions: inspectWatFunctions,
+          }
+        : {}),
     };
-    result = inlineDriver
-      ? await compile(`${source}\n${driver}`, {
-          ...compileOptions,
-          fileName: packageFileName,
-        })
-      : await compileMulti(
+    result = reuseStandaloneBinaryPath
+      ? {
+          success: true,
+          binary: readFileSync(reuseStandaloneBinaryPath),
+          irCompiledFuncs: [],
+        }
+      : inlineDriver
+        ? await compile(`${source}\n${driver}`, {
+            ...compileOptions,
+            fileName: packageFileName,
+          })
+        : await compileMulti(
+            {
+              [packageFileName]: source,
+              "__npm-compat-benchmark.mjs": driver,
+            },
+            "__npm-compat-benchmark.mjs",
+            compileOptions,
+          );
+    if (staticOperationExport && !reuseStandaloneBinaryPath) {
+      if (!result.success || !result.binary?.length) {
+        return failStandalone("compile-error", firstCompileDiagnostic(result), {
+          compileDurationMs: performance.now() - compileStarted,
+        });
+      }
+      const stageModule = await WebAssembly.compile(result.binary);
+      const stageImports = WebAssembly.Module.imports(stageModule);
+      if (stageImports.length > 0) {
+        return failStandalone(
+          "host-import-error",
+          `static evaluation candidate retained ${stageImports.length} host import(s)`,
           {
-            [packageFileName]: source,
-            "__npm-compat-benchmark.mjs": driver,
+            compileDurationMs: performance.now() - compileStarted,
+            binaryBytes: result.binary.length,
+            ...moduleImportMetadata(
+              stageImports.map(({ module: namespace, name, kind }) => `${namespace}.${name}:${kind}`),
+            ),
           },
-          "__npm-compat-benchmark.mjs",
-          compileOptions,
         );
+      }
+      const stageInstance = await WebAssembly.instantiate(stageModule, {});
+      const stageInit = stageInstance.exports.__module_init;
+      if (typeof stageInit === "function") stageInit();
+      const stageOperation = stageInstance.exports[staticOperationExport];
+      if (typeof stageOperation !== "function") {
+        return failStandalone("runtime-error", `missing static operation export ${staticOperationExport}`, {
+          phase: "static-evaluation",
+          compileDurationMs: performance.now() - compileStarted,
+          binaryBytes: result.binary.length,
+        });
+      }
+      const stageStarted = performance.now();
+      const staticResult = stageOperation();
+      const stageDurationMs = performance.now() - stageStarted;
+      if (typeof staticResult !== "number" || !Number.isFinite(staticResult)) {
+        return failStandalone(
+          "runtime-error",
+          `static operation must return a finite number, received ${String(staticResult)}`,
+          {
+            phase: "static-evaluation",
+            compileDurationMs: performance.now() - compileStarted,
+            binaryBytes: result.binary.length,
+          },
+        );
+      }
+      const residualValue = Object.is(staticResult, -0) ? "-0" : String(staticResult);
+      const residualSource = `
+/** @param {number} iterations */
+export function ${STANDALONE_BENCHMARK_EXPORT}(iterations) {
+  return iterations * ${residualValue};
+}`;
+      const residual = await compile(residualSource, {
+        ...compileOptions,
+        fileName: `__npm-compat-static-${packageFileName}`,
+      });
+      if (!residual.success || !residual.binary?.length) {
+        return failStandalone("compile-error", firstCompileDiagnostic(residual), {
+          phase: "static-residual",
+          compileDurationMs: performance.now() - compileStarted,
+        });
+      }
+      staticEvaluation = {
+        operationEvaluatedInWasm: true,
+        operationResultType: "number",
+        stageDurationMs,
+        stageBinaryBytes: result.binary.length,
+        stageModuleImportCount: 0,
+      };
+      result = residual;
+    }
   } catch (error) {
-    return failedPerfLane("standalone", "compile-error", error instanceof Error ? error.message : String(error), {
+    return failStandalone("compile-error", error instanceof Error ? error.message : String(error), {
       compileDurationMs: performance.now() - compileStarted,
     });
   }
   const compileDurationMs = performance.now() - compileStarted;
   if (!result.success || !result.binary?.length) {
-    return failedPerfLane("standalone", "compile-error", firstCompileDiagnostic(result), { compileDurationMs });
+    return failStandalone("compile-error", firstCompileDiagnostic(result), { compileDurationMs });
+  }
+  if (inspectWatFunctions?.length) {
+    if (inspectWatOutputPath) {
+      writeFileSync(inspectWatOutputPath, result.wat ?? "");
+      console.log(`[npm-compat] wrote standalone WAT to ${inspectWatOutputPath}`);
+    } else {
+      console.log(`[npm-compat] standalone WAT (${inspectWatFunctions.join(", ")})\n${result.wat ?? "(unavailable)"}`);
+    }
+  }
+  if (inspectIr) {
+    const outcomes = result.irOutcomes ?? [];
+    const histogram = {};
+    for (const outcome of outcomes) {
+      const key = outcome.kind === "emitted" ? "emitted" : `${outcome.kind}:${outcome.stage}:${outcome.code}`;
+      histogram[key] = (histogram[key] ?? 0) + 1;
+    }
+    console.log(
+      "[npm-compat] standalone IR outcomes",
+      JSON.stringify(
+        {
+          histogram,
+          outcomes: outcomes.map((outcome) => ({
+            file: outcome.file,
+            name: outcome.displayName,
+            unitKind: outcome.unitKind,
+            line: outcome.line,
+            column: outcome.column,
+            kind: outcome.kind,
+            stage: outcome.stage,
+            ...(outcome.kind === "emitted"
+              ? {}
+              : {
+                  code: outcome.code,
+                  detail: outcome.detail,
+                }),
+            legacyBodyEmitted: outcome.legacyBodyEmitted,
+            irBodyEmitted: outcome.irBodyEmitted,
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+  }
+  if (inspectBinaryPath) {
+    writeFileSync(inspectBinaryPath, result.binary);
+    console.log(`[npm-compat] wrote standalone binary to ${inspectBinaryPath}`);
   }
 
   let module;
@@ -251,7 +436,7 @@ async function compileStandaloneLane({
     module = await WebAssembly.compile(result.binary);
     moduleCompileDurationMs = performance.now() - moduleCompileStarted;
   } catch (error) {
-    return failedPerfLane("standalone", "validation-error", error instanceof Error ? error.message : String(error), {
+    return failStandalone("validation-error", error instanceof Error ? error.message : String(error), {
       compileDurationMs,
       binaryBytes: result.binary.length,
     });
@@ -260,16 +445,11 @@ async function compileStandaloneLane({
     ({ module: namespace, name, kind }) => `${namespace}.${name}:${kind}`,
   );
   if (moduleImports.length > 0) {
-    return failedPerfLane(
-      "standalone",
-      "host-import-error",
-      `standalone binary retained ${moduleImports.length} host import(s)`,
-      {
-        compileDurationMs,
-        binaryBytes: result.binary.length,
-        ...moduleImportMetadata(moduleImports),
-      },
-    );
+    return failStandalone("host-import-error", `standalone binary retained ${moduleImports.length} host import(s)`, {
+      compileDurationMs,
+      binaryBytes: result.binary.length,
+      ...moduleImportMetadata(moduleImports),
+    });
   }
 
   let instance;
@@ -286,7 +466,7 @@ async function compileStandaloneLane({
       moduleInitDurationMs = performance.now() - moduleInitStarted;
     }
   } catch (error) {
-    return failedPerfLane("standalone", "runtime-error", renderHarnessThrownText(error, instance), {
+    return failStandalone("runtime-error", renderHarnessThrownText(error, instance), {
       phase: instance ? "module-init" : "instantiate",
       compileDurationMs,
       binaryBytes: result.binary.length,
@@ -295,7 +475,7 @@ async function compileStandaloneLane({
   }
   const wasmBatch = instance.exports[STANDALONE_BENCHMARK_EXPORT];
   if (typeof wasmBatch !== "function") {
-    return failedPerfLane("standalone", "runtime-error", `missing ${STANDALONE_BENCHMARK_EXPORT} export`, {
+    return failStandalone("runtime-error", `missing ${STANDALONE_BENCHMARK_EXPORT} export`, {
       phase: "resolve-export",
       compileDurationMs,
       binaryBytes: result.binary.length,
@@ -303,9 +483,11 @@ async function compileStandaloneLane({
     });
   }
 
+  const invokeWasmBatch = (iterations) =>
+    runtimeArgument === undefined ? wasmBatch(iterations) : wasmBatch(iterations, runtimeArgument);
   const nodeBatch = (iterations) => {
     let checksum = 0;
-    for (let index = 0; index < iterations; index++) checksum += nodeOperation();
+    for (let index = 0; index < iterations; index++) checksum += nodeOperation(runtimeArgument, index);
     return checksum;
   };
 
@@ -315,10 +497,13 @@ async function compileStandaloneLane({
   try {
     expectedChecksum = nodeBatch(1);
     const firstBatchStarted = performance.now();
-    actualChecksum = wasmBatch(1);
+    actualChecksum = invokeWasmBatch(1);
     firstBatchDurationMs = performance.now() - firstBatchStarted;
   } catch (error) {
-    return failedPerfLane("standalone", "runtime-error", renderHarnessThrownText(error, instance), {
+    if (inspectRuntimeErrors) {
+      console.error("[npm-compat] standalone checksum error", error);
+    }
+    return failStandalone("runtime-error", renderHarnessThrownText(error, instance), {
       phase: "checksum",
       compileDurationMs,
       moduleCompileDurationMs,
@@ -330,8 +515,7 @@ async function compileStandaloneLane({
     });
   }
   if (!Object.is(actualChecksum, expectedChecksum)) {
-    return failedPerfLane(
-      "standalone",
+    return failStandalone(
       "result-mismatch",
       `checksum mismatch: Wasm ${String(actualChecksum)}, Node ${String(expectedChecksum)}`,
       {
@@ -350,8 +534,10 @@ async function compileStandaloneLane({
   }
 
   try {
+    if (profileRuntime === "wasm") await captureRuntimeProfile(() => invokeWasmBatch(1));
+    if (profileRuntime === "node") await captureRuntimeProfile(() => nodeBatch(1));
     return {
-      ...measureStandalonePerf(sampleOp, wasmBatch, nodeBatch),
+      ...measureStandalonePerf(sampleOp, invokeWasmBatch, nodeBatch, { inputMode }),
       compileDurationMs,
       moduleCompileDurationMs,
       instantiateDurationMs,
@@ -365,9 +551,11 @@ async function compileStandaloneLane({
       benchmarkUsesIr: result.irCompiledFuncs?.includes(STANDALONE_BENCHMARK_EXPORT) ?? false,
       irCompiledFunctions: result.irCompiledFuncs ?? [],
       target: "standalone",
+      ...(runtimeArgument === undefined ? {} : { runtimeArgumentSuppliedAfterCompile: true }),
+      ...(staticEvaluation ? { staticEvaluation } : {}),
     };
   } catch (error) {
-    return failedPerfLane("standalone", "runtime-error", renderHarnessThrownText(error, instance), {
+    return failStandalone("runtime-error", renderHarnessThrownText(error, instance), {
       phase: "measure",
       compileDurationMs,
       moduleCompileDurationMs,
@@ -388,10 +576,17 @@ async function compileStandaloneLane({
 async function perfAcornJsHost() {
   const { entryModulePath } = setupAcorn();
   const source = readFileSync(entryModulePath, "utf-8");
+  const resultFloorExport = "__npmCompatParseBodyLength";
+  const compileSourceText = inspectResultFloor
+    ? `${source}
+export function ${resultFloorExport}(input, options) {
+  return parse(input, options).body.length;
+}`
+    : source;
   // optimize: 4 — perf numbers must reflect a realistic (wasm-opt'd) deployment,
   // not the debug-friendly unoptimized binary the correctness harnesses use.
   const compileStart = performance.now();
-  const result = await compile(source, {
+  const result = await compile(compileSourceText, {
     fileName: "acorn.mjs",
     skipSemanticDiagnostics: true,
     optimize: 4,
@@ -426,12 +621,20 @@ async function perfAcornJsHost() {
     signatures: result.exportSignatures,
   });
   const wrapMs = performance.now() - wrapStart;
-  if (typeof exp.parse !== "function") return null;
+  const compiledOperation = inspectResultFloor
+    ? (input, options) => exp[resultFloorExport](input, options)
+    : (input, options) => exp.parse(input, options);
+  if (
+    (inspectResultFloor && typeof exp[resultFloorExport] !== "function") ||
+    (!inspectResultFloor && typeof exp.parse !== "function")
+  ) {
+    return null;
+  }
   let boundaryCensus;
   if (inspectBoundaries) {
-    exp.parse(source, parseOptions);
+    compiledOperation(source, parseOptions);
     const { importCalls, callbackCalls, stop } = instrumentImports(importObject, { callbacks: false });
-    exp.parse(source, parseOptions);
+    compiledOperation(source, parseOptions);
     stop();
     const identicalInput = {
       wrapperCalls: 1,
@@ -444,7 +647,7 @@ async function perfAcornJsHost() {
     const changedSourceProbe = instrumentImports(importObject, { callbacks: false });
     let changedSourceError;
     try {
-      exp.parse(`${source}\n`, parseOptions);
+      compiledOperation(`${source}\n`, parseOptions);
     } catch (error) {
       changedSourceError = error instanceof Error ? error.message : String(error);
     }
@@ -470,16 +673,17 @@ async function perfAcornJsHost() {
   // deterministic, decently-sized workload rather than a synthetic snippet.
   if (diagnosticsOnly) {
     const firstStart = performance.now();
-    const ast = exp.parse(source, parseOptions);
+    const ast = compiledOperation(source, parseOptions);
     const firstCallMs = performance.now() - firstStart;
     const secondStart = performance.now();
-    const secondAst = exp.parse(source, parseOptions);
+    const secondAst = compiledOperation(source, parseOptions);
     const secondCallMs = performance.now() - secondStart;
     return {
       sampleOp: `parse(own ${Math.round(source.length / 1024)}KB dist bundle)`,
       firstCallMs,
       secondCallMs,
-      freshResultIdentity: secondAst !== ast,
+      freshResultIdentity: inspectResultFloor ? null : secondAst !== ast,
+      resultObservation: inspectResultFloor ? "inside-wasm-number" : "js-host-full-ast",
       compileDurationMs,
       wasmCompileMs,
       instantiateMs,
@@ -491,7 +695,9 @@ async function perfAcornJsHost() {
   }
   const sampleOp = `parse(own ${Math.round(source.length / 1024)}KB dist bundle).body.length`;
   const expectedChecksum = oracleMod.parse(source, parseOptions).body.length;
-  const actualChecksum = exp.parse(source, parseOptions).body.length;
+  const actualChecksum = inspectResultFloor
+    ? compiledOperation(source, parseOptions)
+    : compiledOperation(source, parseOptions).body.length;
   if (actualChecksum !== expectedChecksum) {
     return failedPerfLane(
       "js-host",
@@ -503,7 +709,10 @@ async function perfAcornJsHost() {
   return {
     ...measureJsHostPerf(
       sampleOp,
-      () => exp.parse(source, parseOptions).body.length,
+      () =>
+        inspectResultFloor
+          ? compiledOperation(source, parseOptions)
+          : compiledOperation(source, parseOptions).body.length,
       () => oracleMod.parse(source, parseOptions).body.length,
     ),
     compileDurationMs,
@@ -517,6 +726,7 @@ async function perfAcornJsHost() {
     actualChecksum,
     testCompiledToWasm: false,
     target: "js-host",
+    resultObservation: inspectResultFloor ? "inside-wasm-number" : "js-host-full-ast",
     ...(boundaryCensus ? { boundaryCensus } : {}),
   };
 }
@@ -527,7 +737,7 @@ async function perfAcornStandalone() {
   const oracleMod = await import(pathToFileURL(entryModulePath).href);
   const parseOptions = { ecmaVersion: 2022, sourceType: "module" };
   const sampleOp = `parse(own ${Math.round(source.length / 1024)}KB dist bundle).body.length`;
-  const driver = `
+  const driver = `${linkedStandalone ? 'import { parse } from "./acorn.mjs";' : ""}
 var __npmCompatChunks = ${chunkedStringArray(source)};
 var __npmCompatInput = "";
 for (var __npmCompatChunkIndex = 0; __npmCompatChunkIndex < __npmCompatChunks.length; __npmCompatChunkIndex++) {
@@ -536,7 +746,7 @@ for (var __npmCompatChunkIndex = 0; __npmCompatChunkIndex < __npmCompatChunks.le
 var __npmCompatOptions = { ecmaVersion: 2022, sourceType: "module" };
 
 /** @returns {number} */
-function __npmCompatAcornOperation() {
+export function ${STANDALONE_STATIC_OPERATION_EXPORT}() {
   return parse(__npmCompatInput, __npmCompatOptions).body.length;
 }
 
@@ -544,7 +754,7 @@ function __npmCompatAcornOperation() {
 export function ${STANDALONE_BENCHMARK_EXPORT}(iterations) {
   var checksum = 0;
   for (var index = 0; index < iterations; index++) {
-    checksum += __npmCompatAcornOperation();
+    checksum += ${STANDALONE_STATIC_OPERATION_EXPORT}();
   }
   return checksum;
 }`;
@@ -554,7 +764,50 @@ export function ${STANDALONE_BENCHMARK_EXPORT}(iterations) {
     packageFileName: "acorn.mjs",
     sampleOp,
     nodeOperation: () => oracleMod.parse(source, parseOptions).body.length,
-    inlineDriver: true,
+    inlineDriver: !linkedStandalone,
+    staticOperationExport: STANDALONE_STATIC_OPERATION_EXPORT,
+  });
+}
+
+async function perfAcornStandaloneDynamic() {
+  const { entryModulePath } = setupAcorn();
+  const source = readFileSync(entryModulePath, "utf-8");
+  const oracleMod = await import(pathToFileURL(entryModulePath).href);
+  const parseOptions = { ecmaVersion: 2022, sourceType: "module" };
+  const sampleOp = `parse(runtime-suffixed own ${Math.round(source.length / 1024)}KB dist bundle).body.length`;
+  const driver = `${linkedStandalone ? 'import { parse } from "./acorn.mjs";' : ""}
+var __npmCompatChunks = ${chunkedStringArray(source)};
+var __npmCompatInput = "";
+for (var __npmCompatChunkIndex = 0; __npmCompatChunkIndex < __npmCompatChunks.length; __npmCompatChunkIndex++) {
+  __npmCompatInput += __npmCompatChunks[__npmCompatChunkIndex];
+}
+var __npmCompatOptions = { ecmaVersion: 2022, sourceType: "module" };
+
+/**
+ * @param {number} iterations
+ * @param {number} runtimeSeed
+ */
+export function ${STANDALONE_BENCHMARK_EXPORT}(iterations, runtimeSeed) {
+  var checksum = 0;
+  for (var index = 0; index < iterations; index++) {
+    var runtimeInput = __npmCompatInput + "\\n/* npm-compat-runtime:" + runtimeSeed + ":" + index + " */";
+    checksum += parse(runtimeInput, __npmCompatOptions).body.length;
+  }
+  return checksum;
+}`;
+  return compileStandaloneLane({
+    source,
+    driver,
+    packageFileName: "acorn.mjs",
+    sampleOp,
+    nodeOperation: (runtimeSeed, index) =>
+      oracleMod.parse(`${source}\n/* npm-compat-runtime:${runtimeSeed}:${index} */`, parseOptions).body.length,
+    inlineDriver: !linkedStandalone,
+    inputMode: "runtime-dynamic",
+    // The numeric seed enters only when the already-compiled Wasm export is
+    // invoked. It makes the parsed string depend on a post-compile value while
+    // keeping the complete test loop and result observation inside Wasm.
+    runtimeArgument: 3780,
   });
 }
 
@@ -562,10 +815,14 @@ async function perfAcorn() {
   const jsHost = runJsHostLane ? await perfAcornJsHost() : skippedPerfLane("js-host");
   if (diagnosticsOnly) return jsHost;
   const standalone = runStandaloneLane ? await perfAcornStandalone() : skippedPerfLane("standalone");
+  const standaloneDynamic = runStandaloneDynamicLane
+    ? await perfAcornStandaloneDynamic()
+    : skippedPerfLane("standalone", "runtime-dynamic");
   return packagePerfRecord(
     jsHost?.sampleOp ?? standalone?.sampleOp ?? "parse(own dist bundle).body.length",
     jsHost ?? failedPerfLane("js-host", "compile-error", "host compilation failed"),
     standalone,
+    { standaloneDynamic },
   );
 }
 
@@ -838,9 +1095,13 @@ function knownBugsFor(name) {
   const map = {
     acorn: [
       {
-        issue: 3756,
+        issue: 3780,
         summary:
-          "parse() remains much slower than native at real-file scale; the standalone and JS-host lanes report the gap separately",
+          "runtime-dynamic Acorn remains slower than native Node; only the separately reported compile-time-static lane folds to IR",
+      },
+      {
+        issue: 3782,
+        summary: "linked Acorn initialization is lowered, but the cross-module parser driver is not yet runnable",
       },
     ],
     marked: [{ issue: 3715, summary: "TS 'evolving array type' inference unimplemented — blocks compile entirely" }],
@@ -981,7 +1242,8 @@ const summary = {
     baseline: "same pinned package, inputs, and result observation in native Node",
     inputModes: {
       "compile-time-static": "package, test driver, and fixed inputs are visible to the Wasm compiler",
-      "runtime-dynamic": "inputs are owned by the JavaScript host and supplied after Wasm compilation",
+      "runtime-dynamic":
+        "an input or input-selecting value is supplied by the JavaScript host only after Wasm compilation",
     },
   },
   packages,
