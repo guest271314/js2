@@ -23,6 +23,8 @@ import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } fro
 import { ensureAnyToExternHelper, isAnyValue } from "./any-helpers.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { isSyntheticStructName } from "./emit-helpers.js";
+export { buildTransferredCharAtApplyArm } from "./char-at-transfer.js";
+import { installCompiledClosureToStringArm } from "./coercion-engine.js";
 
 /**
  * Emit __call_fn_0 export (#851): call a zero-arg WasmGC closure from JS.
@@ -1368,6 +1370,10 @@ export function fillStandaloneTypeofClosureArms(ctx: CodegenContext): void {
   // closure-base-wrapper list (`closure-classifier.ts`).
   const closureI32Arms = (anyLocalIdx: number, matchValue: number): Instr[] =>
     buildClosureRefTestArms(ctx, anyLocalIdx, [{ op: "i32.const", value: matchValue }, { op: "return" }]);
+
+  // #3540: the single coercion engine owns compiled-closure stringification;
+  // this finalizer supplies the now-complete closure classifier.
+  installCompiledClosureToStringArm(ctx);
 
   // --- __typeof_function: param(0) externref → 1 if closure wrapper else 0.
   const tf = fnByName("__typeof_function");

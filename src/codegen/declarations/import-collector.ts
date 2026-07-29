@@ -512,14 +512,14 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       }
     }
   }
-  // String(expr) calls need number_toString
+  // String(expr) and native new String(expr) need number_toString for ToString.
   if (
-    ts.isCallExpression(node) &&
+    (ts.isCallExpression(node) || ((ctx.standalone || ctx.wasi) && ts.isNewExpression(node))) &&
     ts.isIdentifier(node.expression) &&
     node.expression.text === "String" &&
-    node.arguments.length >= 1
+    (node.arguments?.length ?? 0) >= 1
   ) {
-    const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
+    const argType = ctx.checker.getTypeAtLocation(node.arguments![0]!);
     if (isNumberType(argType) || !isStringType(argType)) {
       state.primitiveNeeded.add("number_toString");
     }
