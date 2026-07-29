@@ -51,6 +51,7 @@ import {
   ensureLateImport,
   flushLateImportShifts,
   isAnyValue,
+  registerEnsureExternrefToStringProvider,
 } from "./shared.js";
 import { coerceType, tryStructToString } from "./type-coercion.js";
 
@@ -91,6 +92,26 @@ export function runtimeToPrimitiveInstrs(ctx: CodegenContext, hint: "string" | "
 /** True when the active mode represents strings as a native `$AnyString` GC ref. */
 function isNativeStringMode(mode: CoercionMode): boolean {
   return mode === "standalone" || mode === "native-strings-host";
+}
+
+/**
+ * Resolve the canonical runtime provider for ToString(externref).
+ *
+ * This stays in the coercion engine so nested control-flow builders that need
+ * a raw function index do not reintroduce the sealed host-coercion vocabulary.
+ * The shared delegate exposes it to type-coercion.ts without creating the
+ * reverse static import cycle.
+ */
+function ensureExternrefToStringProviderImpl(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  hint: ToStringHint,
+): number | undefined {
+  const native = isNativeStringMode(coercionMode(ctx));
+  const importName = !native && hint === "default" ? "__extern_to_string_default" : "__extern_toString";
+  const provisionalIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  return ctx.funcMap.get(importName) ?? provisionalIdx;
 }
 
 /**
@@ -267,10 +288,7 @@ export function emitToString(
     // the dynamic-externref operand always routes through `__extern_toString`
     // (the native `+`-concat and template callers both used the string-hint
     // tail there regardless of `+` vs template), then back to a native ref.
-    const importName = !native && hint === "default" ? "__extern_to_string_default" : "__extern_toString";
-    const toStrIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
-    flushLateImportShifts(ctx, fctx);
-    const finalIdx = ctx.funcMap.get(importName) ?? toStrIdx;
+    const finalIdx = ensureExternrefToStringProviderImpl(ctx, fctx, hint);
     if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
     if (native) {
       emitNativeStringRefFromExternref(ctx, fctx);
@@ -803,3 +821,5 @@ function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionCon
   }
   emitter(ctx, fctx);
 }
+
+registerEnsureExternrefToStringProvider(ensureExternrefToStringProviderImpl);
