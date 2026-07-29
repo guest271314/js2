@@ -21,7 +21,7 @@ import { emitAsyncGenerator, isAsyncGenDriveCandidate } from "./async-frame.js";
 import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAccess } from "./closures.js"; // (#3132 / #3123 fnctor parent closure)
 import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
 import { commitClassStructLayout } from "./class-layout-registration.js";
-import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S3b) stable-regime minting
+import { mintDefinedFunc, pushProgramAbiClassCallable } from "./program-abi-class-callable-planning.js";
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { popBody, pushBody } from "./context/bodies.js";
@@ -1020,7 +1020,7 @@ export function collectClassDeclaration(
   const ctorKey = classMemberFuncKey(ctx, ctorName);
   ctx.funcMap.set(ctorKey, ctorFuncIdx);
 
-  pushDefinedFunc(ctx, ctorFuncIdx, {
+  pushProgramAbiClassCallable(ctx, ctor ?? decl, "unit", ctorFuncIdx, {
     name: ctorKey,
     typeIdx: ctorTypeIdx,
     locals: [],
@@ -1046,7 +1046,7 @@ export function collectClassDeclaration(
     const onHostFuncIdx = mintDefinedFunc(ctx);
     const onHostKey = classMemberFuncKey(ctx, onHostName);
     ctx.funcMap.set(onHostKey, onHostFuncIdx);
-    pushDefinedFunc(ctx, onHostFuncIdx, {
+    pushProgramAbiClassCallable(ctx, decl, "promise-subclass-onhost", onHostFuncIdx, {
       name: onHostKey,
       typeIdx: onHostTypeIdx,
       locals: [],
@@ -1081,7 +1081,7 @@ export function collectClassDeclaration(
     const initFuncIdx = mintDefinedFunc(ctx);
     const initKey = classMemberFuncKey(ctx, initName); // (#1983) collision-free key + display name
     ctx.funcMap.set(initKey, initFuncIdx);
-    pushDefinedFunc(ctx, initFuncIdx, {
+    pushProgramAbiClassCallable(ctx, decl, "constructor-init", initFuncIdx, {
       name: initKey,
       typeIdx: initTypeIdx,
       locals: [],
@@ -1208,7 +1208,7 @@ export function collectClassDeclaration(
       const methodKey = classMemberFuncKey(ctx, fullName);
       ctx.funcMap.set(methodKey, methodFuncIdx);
 
-      pushDefinedFunc(ctx, methodFuncIdx, {
+      pushProgramAbiClassCallable(ctx, member, "unit", methodFuncIdx, {
         name: methodKey,
         typeIdx: methodTypeIdx,
         locals: [],
@@ -1263,7 +1263,7 @@ export function collectClassDeclaration(
       const getterKey = classMemberFuncKey(ctx, getterName); // (#1983) key + display name
       ctx.funcMap.set(getterKey, getterFuncIdx);
 
-      pushDefinedFunc(ctx, getterFuncIdx, {
+      pushProgramAbiClassCallable(ctx, member, "unit", getterFuncIdx, {
         name: getterKey,
         typeIdx: getterTypeIdx,
         locals: [],
@@ -1297,7 +1297,7 @@ export function collectClassDeclaration(
       const setterKey = classMemberFuncKey(ctx, setterName); // (#1983) key + display name
       ctx.funcMap.set(setterKey, setterFuncIdx);
 
-      pushDefinedFunc(ctx, setterFuncIdx, {
+      pushProgramAbiClassCallable(ctx, member, "unit", setterFuncIdx, {
         name: setterKey,
         typeIdx: setterTypeIdx,
         locals: [],

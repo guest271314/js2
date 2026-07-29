@@ -17,6 +17,7 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   functionValueTrampoline: 1,
   classConstructorInit: 2,
   classMethodAdapter: 3,
+  classHostConstructor: 4,
   retainedModuleFunction: 6,
 } as const);
 
