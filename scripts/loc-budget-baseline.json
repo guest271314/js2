@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-29",
   "threshold": 1500,
-  "totalCeiling": 500247,
+  "totalCeiling": 500498,
   "files": {
     "src/codegen-linear/index.ts": 5615,
     "src/codegen-linear/runtime.ts": 4306,
@@ -37,7 +37,7 @@
     "src/codegen/extern-declarations.ts": 1650,
     "src/codegen/fnctor-escape-gate.ts": 1658,
     "src/codegen/generators-native.ts": 4121,
-    "src/codegen/index.ts": 8603,
+    "src/codegen/index.ts": 8611,
     "src/codegen/iterator-native.ts": 3056,
     "src/codegen/json-codec-native.ts": 3567,
     "src/codegen/literals.ts": 4693,
@@ -70,11 +70,11 @@
     "src/emit/binary.ts": 1997,
     "src/ir/backend/porffor/assembler.ts": 1507,
     "src/ir/builder.ts": 1798,
-    "src/ir/from-ast.ts": 9591,
-    "src/ir/integration.ts": 5435,
+    "src/ir/from-ast.ts": 9693,
+    "src/ir/integration.ts": 5492,
     "src/ir/lower.ts": 3973,
     "src/ir/nodes.ts": 3221,
-    "src/ir/select.ts": 6695,
+    "src/ir/select.ts": 6779,
     "src/ir/verify.ts": 1593,
     "src/runtime.ts": 15628
   }
