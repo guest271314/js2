@@ -498,7 +498,9 @@ export interface IrSelectionOptions {
    * An explicit false prevents an ambient Date snapshot from being claimed
    * even if its checker shape is otherwise exact.
    */
-  readonly supportsBackendCapability?: (capability: "host-date-snapshot" | "host-regexp-constructor") => boolean;
+  readonly supportsBackendCapability?: (
+    capability: "host-date-snapshot" | "host-regexp-constructor" | "host-object-define-property",
+  ) => boolean;
   /**
    * (#2856 async-delay slice) Exact checker-certified
    * `new Promise<number>((resolve) => { setTimeout(...); })` construction.
@@ -5937,6 +5939,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       ) {
         return shapeNo("expr-math-call-shape", expr);
       }
+      // ES5 Object.defineProperty — an exact ambient static call is a
+      // symbolic host-helper operation, not an instance method on a value
+      // named `Object`. Reject shadowed bindings and host-free targets before
+      // walking the three ordinary Phase-1 arguments.
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        expr.expression.expression.text === "Object" &&
+        expr.expression.name.text === "defineProperty" &&
+        selectorSeesAmbientBinding(expr.expression.expression) &&
+        !scope.has("Object")
+      ) {
+        if (currentSelectionOptions?.supportsBackendCapability?.("host-object-define-property") === false) {
+          return capabilityNo("call-resolution-unsupported", "expr-object-define-property-target", expr);
+        }
+        if (expr.arguments.length !== 3 || expr.arguments.some(ts.isSpreadElement)) {
+          return shapeNo("expr-object-define-property-shape", expr);
+        }
+        return expr.arguments.every((arg) => isPhase1Expr(arg, scope, localClasses));
+      }
       const builtinReceiver = expr.expression.expression;
       const checkerReceiverFamily = currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(builtinReceiver);
       const scalarReceiverFamily = currentModuleBindingResolver?.scalarExpressionFamily(builtinReceiver);
@@ -6816,6 +6837,17 @@ export function buildLocalCallGraph(
             mathPlan !== undefined &&
             selectorSupportsMathPlan(mathPlan) &&
             node.arguments.length === mathPlan.arity
+          ) {
+            for (const a of node.arguments) visit(a);
+            return;
+          }
+          if (
+            ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === "Object" &&
+            node.expression.name.text === "defineProperty" &&
+            selectorSeesAmbientBinding(node.expression.expression) &&
+            currentSelectionOptions?.supportsBackendCapability?.("host-object-define-property") !== false &&
+            node.arguments.length === 3
           ) {
             for (const a of node.arguments) visit(a);
             return;

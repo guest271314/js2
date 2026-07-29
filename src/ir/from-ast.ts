@@ -218,6 +218,15 @@ export interface IrExternClassMeta {
  * until Phase 3, so from-ast doesn't see them.
  */
 export interface IrFromAstResolver {
+  /**
+   * Resolve the canonical host ToPropertyDescriptor entry point for an
+   * ambient `Object.defineProperty(target, key, descriptor)` call.
+   *
+   * `null` means this lane cannot preserve the descriptor carrier through
+   * the IR yet (notably standalone, whose typed descriptor structs require
+   * the legacy reification step before `__obj_define_from_desc`).
+   */
+  objectDefinePropertyTarget?(): IrFuncRef | null;
   resolveString?(): ValType;
   /**
    * (#2955 number-box slice) Capability predicate: does this compile's lane
@@ -5078,6 +5087,57 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   const receiverIdentifier = ts.isIdentifier(expr.expression.expression) ? expr.expression.expression : undefined;
   const receiverIsDirectModuleBinding =
     receiverIdentifier !== undefined && cx.resolver?.isDirectModuleBinding?.(receiverIdentifier) === true;
+
+  // ES5 Object.defineProperty — route an exact ambient static call through
+  // the same full ToPropertyDescriptor helper as legacy codegen. Keeping the
+  // target symbolic means import indices remain allocator-owned, while
+  // `coerce.to_externref` preserves one representation-neutral IR shape for
+  // structural target/key/descriptor values in the host lane.
+  if (
+    receiverIdentifier?.text === "Object" &&
+    methodName === "defineProperty" &&
+    !receiverIsDirectModuleBinding &&
+    cx.scope.get("Object") === undefined &&
+    cx.resolver?.isAmbientBinding?.(receiverIdentifier) !== false
+  ) {
+    if (expr.arguments.length !== 3 || expr.arguments.some(ts.isSpreadElement)) {
+      throw new IrUnsupportedError(
+        "method-call-unsupported",
+        "build",
+        `ir/from-ast: Object.defineProperty call shape not supported (${cx.funcName})`,
+      );
+    }
+    const target = cx.resolver?.objectDefinePropertyTarget?.();
+    if (!target) {
+      throw new IrUnsupportedError(
+        "method-call-unsupported",
+        "build",
+        `ir/from-ast: Object.defineProperty provider unavailable (${cx.funcName})`,
+      );
+    }
+    const args = expr.arguments.map((arg, index) => {
+      const value = lowerExpr(arg, cx, irVal({ kind: "externref" }));
+      const type = cx.builder.typeOf(value);
+      const val = asVal(type);
+      const hostExternCarrier =
+        type.kind === "extern" ||
+        val?.kind === "externref" ||
+        (index === 1 && type.kind === "string" && cx.resolver?.stringIsExternref?.() !== false);
+      if (!hostExternCarrier) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: Object.defineProperty arg ${index} is not host-extern-backed: ${describeIrType(type)} (${cx.funcName})`,
+        );
+      }
+      return cx.builder.emitCoerceToExternref(value);
+    });
+    const result = cx.builder.emitCall(target, args, irVal({ kind: "externref" }));
+    if (result === null) {
+      throw new Error(`ir/from-ast: Object.defineProperty helper produced no result (${cx.funcName})`);
+    }
+    return result;
+  }
 
   if (
     isPristineEs5IntrinsicIsFrozenCall(
