@@ -5719,9 +5719,18 @@ function lowerStringMethodCall(
           ? cx.builder.emitUnary("i32.trunc_sat_f64_s", f64Val, irVal({ kind: "i32" }))
           : f64Val;
     } else if (expectedHost.kind === "externref") {
-      // String-style arg. Lower as IrType.string — resolver maps to
-      // externref (host) or (ref $NativeString) (native) at lower time.
-      argVal = lowerExpr(args[i]!, cx, { kind: "string" });
+      // The legacy host `string_indexOf` ABI carries its optional fromIndex
+      // as a boxed externref even though the source argument is numeric.
+      // Mirror that ABI exactly; the search string remains the ordinary
+      // string-shaped externref argument.
+      if (methodName === "indexOf" && i === 1) {
+        const numeric = lowerExpr(args[i]!, cx, irVal({ kind: "f64" }));
+        argVal = coerceToExpectedExtern(numeric, expectedHost, cx, "String.indexOf fromIndex");
+      } else {
+        // String-style arg. Lower as IrType.string — resolver maps to
+        // externref (host) or (ref $NativeString) (native) at lower time.
+        argVal = lowerExpr(args[i]!, cx, { kind: "string" });
+      }
     } else {
       throw new Error(
         `ir/from-ast: String.${methodName} arg ${i} expected ValType ${expectedHost.kind} not in slice 13c (${cx.funcName})`,
@@ -6361,14 +6370,19 @@ function lowerForInStatement(stmt: ts.ForInStatement, cx: LowerCtx): void {
  * NaN-safe ToBoolean `abs(x) > 0` — `f64.abs` folds `-0` to `0` and `NaN > 0`
  * is false, so `0`, `-0` and `NaN` are all falsy (matching JS ToBoolean and
  * the linear backend's `emitTruthyCoercion`, #1937). An i32 value is already a
- * bool and passes through. Any other value type (ref/string) is out of scope
- * for this slice and keeps the legacy fallback by throwing the same diagnostic
- * the loops used before (#1980).
+ * bool and passes through. Strings test their length, statically non-null
+ * object/class/closure values are always truthy, and nullable reference
+ * carriers use `ref.is_null`.
  *
  * MUST be called inside the `collectBodyInstrs` closure that builds the cond
  * buffer so the coercion instructions re-run each iteration.
  */
-function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for" | "do" | "if"): IrValueId {
+function coerceLoopCondToBool(
+  condValue: IrValueId,
+  conditionExpr: ts.Expression,
+  cx: LowerCtx,
+  loopKind: "while" | "for" | "do" | "if",
+): IrValueId {
   const irType = cx.builder.typeOf(condValue);
   // #2949 S5.1 — a boxed-any (dynamic) condition lowers ToBoolean via
   // `dyn.truthy` (→ `__any_unbox_bool` gc / `__is_truthy` host), the same
@@ -6388,7 +6402,30 @@ function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "whi
     const zero = cx.builder.emitConst({ kind: "f64", value: 0 }, irVal({ kind: "f64" }));
     return cx.builder.emitBinary("f64.gt", absV, zero, irVal({ kind: "i32" }));
   }
-  // ref/string/other — not yet supported; bail to legacy (#2136 scopes numeric).
+  if (irType.kind === "string") {
+    const length = cx.builder.emitStringLen(condValue, inferStringEncoding(conditionExpr, cx));
+    const zero = cx.builder.emitConst({ kind: "f64", value: 0 }, irVal({ kind: "f64" }));
+    return cx.builder.emitBinary("f64.gt", length, zero, irVal({ kind: "i32" }));
+  }
+  if (irType.kind === "object" || irType.kind === "class" || irType.kind === "closure") {
+    return cx.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
+  }
+  if (
+    irType.kind === "extern" ||
+    irType.kind === "callable" ||
+    kind === "ref_null" ||
+    kind === "externref" ||
+    kind === "ref_extern" ||
+    kind === "funcref" ||
+    kind === "eqref" ||
+    kind === "anyref"
+  ) {
+    const isNull = cx.builder.emitRefIsNull(condValue);
+    return cx.builder.emitUnary("i32.eqz", isNull, irVal({ kind: "i32" }));
+  }
+  if (kind === "ref") {
+    return cx.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
+  }
   throw new Error(`ir/from-ast: ${loopKind} condition must be bool in ${cx.funcName}`);
 }
 
@@ -6411,10 +6448,9 @@ function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
     // legacy (#1980) because the lowerer's unconditional `i32.eqz` on an f64
     // emitted invalid Wasm. Instead, coerce it to an i32 bool via ToBoolean
     // INSIDE the cond buffer (so the coercion re-runs each iteration) and use
-    // the coerced value as `condValue`. Non-numeric, non-bool conditions
-    // (ref/string) still bail — those need a different ToBoolean path (#2136
-    // scopes to numeric).
-    condResult = coerceLoopCondToBool(raw, loopCx, "while");
+    // the coerced value as `condValue`. The shared coercer also handles the
+    // proven string and reference families accepted by the selector.
+    condResult = coerceLoopCondToBool(raw, stmt.expression, loopCx, "while");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
@@ -6469,7 +6505,7 @@ function lowerDoStatement(stmt: ts.DoStatement, cx: LowerCtx): void {
   let condResult: IrValueId | null = null;
   const condInstrs = loopCx.builder.collectBodyInstrs(() => {
     const raw = lowerExpr(stmt.expression, bodyCx, irVal({ kind: "i32" }));
-    condResult = coerceLoopCondToBool(raw, bodyCx, "do");
+    condResult = coerceLoopCondToBool(raw, stmt.expression, bodyCx, "do");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: do-while cond produced no SSA value (${cx.funcName})`);
@@ -6607,7 +6643,7 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
     // #2136 — coerce a numeric-truthiness `for` cond (e.g. `for (...; k; ...)`
     // with f64 `k`) to an i32 bool via ToBoolean inside the cond buffer,
     // instead of bailing to legacy (#1980). Mirrors the while-loop arm.
-    condResult = coerceLoopCondToBool(raw, loopCx, "for");
+    condResult = coerceLoopCondToBool(raw, stmt.condition!, loopCx, "for");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: for cond produced no SSA value (${cx.funcName})`);
@@ -7118,10 +7154,8 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
  */
 function lowerIfBodyStatement(stmt: ts.IfStatement, cx: LowerCtx): void {
   const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
-  // Numeric-truthiness conds coerce via the shared NaN-safe ToBoolean
-  // (#2136); ref/string conds throw → legacy fallback, same discipline as
-  // the loop conds.
-  const cond = coerceLoopCondToBool(raw, cx, "if");
+  // Coerce through the shared ToBoolean path used by loop conditions.
+  const cond = coerceLoopCondToBool(raw, stmt.expression, cx, "if");
   const thenCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
   const thenInstrs = cx.builder.collectBodyInstrs(() => {
     lowerStmt(stmt.thenStatement, thenCx);
