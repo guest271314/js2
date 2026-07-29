@@ -86,9 +86,35 @@ function isNativeStringMode(mode: CoercionMode): boolean {
  */
 export type ToStringHint = "string" | "default";
 
+type ToStringStaticType = ts.Type | TypeFact;
+
+function isCheckerType(type: ToStringStaticType): type is ts.Type {
+  return typeof (type as ts.Type).flags === "number";
+}
+
+function isStaticStringType(type: ToStringStaticType): boolean {
+  if (isCheckerType(type)) return isStringType(type);
+  return type.kind === "string" || (type.kind === "builtin" && type.name === "String");
+}
+
+function isStaticBooleanType(type: ToStringStaticType): boolean {
+  return isCheckerType(type) ? isBooleanType(type) : type.kind === "boolean";
+}
+
+function isStaticNullType(type: ToStringStaticType): boolean {
+  return isCheckerType(type) ? (type.flags & ts.TypeFlags.Null) !== 0 : type.kind === "null";
+}
+
+function isStaticUndefinedType(type: ToStringStaticType): boolean {
+  return isCheckerType(type)
+    ? (type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0
+    : type.kind === "undefined" || type.kind === "void";
+}
+
 /**
  * Emit `ToString(operand)` for an operand that has ALREADY been compiled to the
- * top of the value stack with ValType `valType` and static TS type `tsType`.
+ * top of the value stack with ValType `valType` and static checker/oracle type
+ * fact `staticType`.
  *
  * This is the consolidated cascade the expression-based ToString copies shared:
  *   void            → "undefined"
@@ -117,7 +143,7 @@ export function emitToString(
   ctx: CodegenContext,
   fctx: FunctionContext,
   valType: ValType | null,
-  tsType: ts.Type,
+  staticType: ToStringStaticType,
   hint: ToStringHint,
 ): ValType {
   const mode = coercionMode(ctx);
@@ -131,14 +157,14 @@ export function emitToString(
 
   // ── string-typed ref passthrough (native modes only — a native string-typed
   //    substitution is already an $AnyString/NativeString ref) ──
-  if (native && (valType.kind === "ref" || valType.kind === "ref_null") && isStringType(tsType)) {
+  if (native && (valType.kind === "ref" || valType.kind === "ref_null") && isStaticStringType(staticType)) {
     return valType;
   }
 
   // ── i32 boolean → "true"/"false" ──
   // Honour the boolean brand on the ValType (#2016/#2030: i32 predicates carry
   // `boolean: true`) as well as the static TS type.
-  if (valType.kind === "i32" && (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)) {
+  if (valType.kind === "i32" && (isStaticBooleanType(staticType) || (valType as { boolean?: true }).boolean)) {
     emitBoolToString(ctx, fctx);
     return native ? nativeStringType(ctx) : { kind: "externref" };
   }
@@ -172,8 +198,8 @@ export function emitToString(
 
   // ── externref ──
   if (valType.kind === "externref") {
-    const isNull = (tsType.flags & ts.TypeFlags.Null) !== 0;
-    const isUndef = (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const isNull = isStaticNullType(staticType);
+    const isUndef = isStaticUndefinedType(staticType);
     if (isNull) {
       fctx.body.push({ op: "drop" });
       pushStringLiteral(ctx, fctx, "null");
@@ -184,7 +210,7 @@ export function emitToString(
       pushStringLiteral(ctx, fctx, "undefined");
       return native ? nativeStringType(ctx) : { kind: "externref" };
     }
-    if (isStringType(tsType)) {
+    if (isStaticStringType(staticType)) {
       // A real string externref — already concat-ready.
       return { kind: "externref" };
     }
@@ -371,6 +397,11 @@ export function ensureExternrefToNumberProvider(ctx: CodegenContext, fctx: Funct
   const unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
   flushLateImportShifts(ctx, fctx);
   return unboxIdx;
+}
+
+/** Look up the canonical ToPrimitive provider after its owning runtime is ready. */
+export function getToPrimitiveProvider(ctx: CodegenContext): number | undefined {
+  return ctx.funcMap.get("__to_primitive");
 }
 
 /**
