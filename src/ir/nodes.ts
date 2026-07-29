@@ -1275,7 +1275,8 @@ export interface IrInstrClosureCap extends IrInstrBase {
  * canonical wrapper root. The typed funcref cast performs the exact signature
  * check; `call_ref` receives that field-0 funcref, never the wrapper itself.
  *
- * Result type: `signature.returnType`.
+ * Result type: `signature.returnType`, or null for a void call in statement
+ * position.
  */
 export interface IrInstrClosureCall extends IrInstrBase {
   readonly kind: "closure.call";

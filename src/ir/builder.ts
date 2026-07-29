@@ -724,11 +724,14 @@ export class IrFunctionBuilder {
 
   /**
    * Invoke a closure value. Caller passes `resultType` (= signature.returnType)
-   * for the SSA def.
+   * for the SSA def, or null for a void call in statement position.
    */
-  emitClosureCall(callee: IrValueId, args: readonly IrValueId[], resultType: IrType): IrValueId {
-    const result = this.allocator.fresh();
-    this.valueTypes.set(result, resultType);
+  emitClosureCall(callee: IrValueId, args: readonly IrValueId[], resultType: IrType | null): IrValueId | null {
+    let result: IrValueId | null = null;
+    if (resultType !== null) {
+      result = this.allocator.fresh();
+      this.valueTypes.set(result, resultType);
+    }
     this.pushInstr({
       kind: "closure.call",
       callee,
