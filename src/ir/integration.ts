@@ -26,7 +26,12 @@ import { ts } from "../ts-api.js";
 import { makeIrHostDateSnapshotResolver } from "./host-date.js";
 import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "./backend/legality.js";
 
-import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
+import {
+  ensureAnyHelpers,
+  ensureAnyValueType,
+  ensureExternLooseEqHelper,
+  ensureExternStrictEqHelper,
+} from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
 import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
 import { getOrRegisterPromiseType, isStandalonePromiseActive } from "../codegen/async-scheduler.js";
@@ -4127,6 +4132,7 @@ function jsTagToStaticType(
 function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
   let usesDynamicOps = false;
   let usesEq = false;
+  let usesToNumber = false;
   let usesMemberGet = false;
   // (#3143) A from-ast lowering can emit a DIRECT named call to a member of the
   // `addUnionImports` family (`__box_number` / `__unbox_number` / `__box_boolean`
@@ -4152,6 +4158,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
         forEachInstrDeep(instr, (i) => {
           if (isDynamicOp(i)) usesDynamicOps = true;
           if (usesDynEq(i)) usesEq = true;
+          if (i.kind === "dyn.to_number") usesToNumber = true;
           if (usesDynMemberGet(i)) usesMemberGet = true;
           if (i.kind === "call" && i.target.binding.kind === "import" && i.target.binding.module === "env") {
             if (UNION_IMPORT_FUNC_NAMES.has(i.target.binding.field)) usesNamedUnionImport = true;
@@ -4183,6 +4190,14 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
     flushLateImportShifts(ctx, null);
   }
   if (!usesDynamicOps) return;
+  if (usesToNumber && ctx.standalone) {
+    // The canonical standalone ToNumber sequence performs
+    // ToPrimitive("number") before unboxing. Reserve that provider now so
+    // emitToNumber cannot introduce a late func-index shift while Phase 3
+    // already owns detached IR body buffers.
+    ensureLateImport(ctx, "__to_primitive", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, null);
+  }
   if (ctx.fast) {
     // gc: ensureAnyHelpers registers $AnyValue + the __any_box_*/__any_unbox_*
     // family AND the equality helpers (__any_strict_eq / __any_eq) — one call
@@ -4198,8 +4213,17 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
     // (#329/#2078), exactly like `addUnionImports` above. Both are idempotent;
     // only fired when a host module actually carries a dyn.eq.
     if (usesEq) {
-      ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
-      ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+      if (ctx.standalone || ctx.wasi) {
+        ensureExternStrictEqHelper(ctx);
+        ensureExternLooseEqHelper(ctx);
+      } else {
+        ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+        ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+        // Settle the batch before Phase 3 captures patch-slot and call-target
+        // indices. Leaving these two imports pending can shift the eventual IR
+        // replacement onto a sibling legacy slot.
+        flushLateImportShifts(ctx, null);
+      }
     }
   }
   // #3053 U1 — a `dyn.member_get` present in any IR body needs the unified
@@ -4396,7 +4420,8 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
     };
   }
 
-  // Host (non-fast): externref carrier; ops via the union-import family.
+  // Non-fast: externref carrier; host imports or standalone/WASI native
+  // providers from the union family.
   const callImport = (name: string): Instr => {
     const idx = ctx.funcMap.get(name);
     if (idx === undefined) {
@@ -4505,16 +4530,12 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       return emitCoercionToBoolean(ctx, { kind: "externref" }, []);
     },
     emitToNumber(): readonly Instr[] {
-      // #2949 S5.3 — ToNumber(externref carrier) via THE canonical
-      // `coercion-engine.emitToNumber` (D4): for the externref carrier it emits
-      // a single `__unbox_number` (`Number(v)`, §7.1.4 — string→StringToNumber,
-      // null→0, undefined→NaN, boolean→0/1). No temp-local allocation for the
-      // externref arm (unlike the gc `$AnyValue` arm), so the body-only
-      // `FunctionContext` shim is sound (same pattern as the gc `emitBox`).
-      // `addUnionImports` already ran in `preregisterDynamicSupport` (which
-      // registers `__unbox_number`), so the internal `addUnionImports` here
-      // finds it by name and adds nothing — no import shift mid-emission.
-      const shim = { body: [] } as unknown as FunctionContext;
+      // #2949 S5.P — route through the canonical coercion engine. Host mode
+      // emits the pre-registered Number(v) import; standalone first performs
+      // its native ToPrimitive("number") walk and then unboxes the result.
+      // The engine may flush a pending late-import shift even when this
+      // detached buffer allocates no locals, so it must expose savedBodies.
+      const shim = { body: [], savedBodies: [] } as unknown as FunctionContext;
       emitCoercionToNumber(ctx, shim, { kind: "externref" });
       return shim.body;
     },
@@ -4528,18 +4549,17 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       return [];
     },
     emitStrictEq(negate: boolean): readonly Instr[] {
-      // #2949 S5.2 — host STRICT `===` via the SAME `__host_eq` (JS `===`,
-      // §7.2.16) legacy host `any === any` uses (D4, byte-parity with the host
-      // runtime result). `__host_eq` is a host import in this (non-fast,
-      // JS-host) mode; standalone/wasi is the `gc` strategy, which uses the
-      // native `__any_strict_eq` instead — so there is no host-import leak into
-      // a host-free module.
-      return negate ? [callImport("__host_eq"), { op: "i32.eqz" }] : [callImport("__host_eq")];
+      // #2949 S5.P — host STRICT `===` uses the existing JS-host provider.
+      // Standalone/WASI uses the native externref classifier + AnyValue
+      // comparison helper, preserving host-free execution and object identity.
+      const helper = ctx.standalone || ctx.wasi ? "__extern_strict_eq" : "__host_eq";
+      return negate ? [callImport(helper), { op: "i32.eqz" }] : [callImport(helper)];
     },
     emitLooseEq(negate: boolean): readonly Instr[] {
-      // Host LOOSE `==` via `__host_loose_eq` (JS `==`, §7.2.15) — the coercion
-      // arms (String⇄Number, `null == undefined`) are JS's, matching legacy.
-      return negate ? [callImport("__host_loose_eq"), { op: "i32.eqz" }] : [callImport("__host_loose_eq")];
+      // Host LOOSE `==` delegates to JS. Standalone/WASI classifies both
+      // externref carriers and routes through the native `__any_eq` engine.
+      const helper = ctx.standalone || ctx.wasi ? "__extern_loose_eq" : "__host_loose_eq";
+      return negate ? [callImport(helper), { op: "i32.eqz" }] : [callImport(helper)];
     },
     emitMemberGet(): readonly Instr[] {
       // #3053 U1 / #2949 S5.4 — dynamic member read. In host mode the carrier

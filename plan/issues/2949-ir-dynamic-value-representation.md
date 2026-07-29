@@ -4,7 +4,7 @@ title: "IR dynamic value representation: JsTag-carrying `dynamic` kind in IrType
 status: ready
 sprint: current
 created: 2026-07-02
-updated: 2026-07-10
+updated: 2026-07-29
 priority: high
 horizon: xl
 feasibility: hard
@@ -18,6 +18,13 @@ related: [1852, 1926, 2138, 2135, 2855]
 origin: "2026-07-02 July Fable audit (plan/log/analysis-2026-07/00-ir-async-standalone-audit.md §1)"
 loc-budget-allow:
   - src/ir/from-ast.ts
+  - src/ir/select.ts
+  - src/ir/integration.ts
+  - src/codegen/index.ts
+  - src/codegen/any-helpers.ts
+func-budget-allow:
+  - src/codegen/index.ts::planIrOverlay
+branch: codex/2949-acorn-dynamic-ops
 ---
 
 # #2949 — the IR's type system is Wasm types, not JS types
@@ -1857,3 +1864,41 @@ element-access + `idx-1` arithmetic all exist). Build the scan flip ONLY for a
 measured non-empty flip set, with the slice-2-style claim-sweep table + full
 CI as the acceptance evidence, and lift gate 6 only after an `ir_first`-lane
 run shows zero dynamic-claim demotions.
+
+## Implementation Notes — S5.P Acorn dynamic operators (2026-07-29)
+
+The claim flip is non-empty on the exact runtime-dynamic Acorn 8.16.0 driver
+from draft PR #3796:
+
+- baseline at `fa8bfd5462192e`: **0 emitted / 43 terminal functions**;
+- this slice: **14 emitted / 43 terminal functions**;
+- post-claim ABI or lowering withdrawals: **0**;
+- remaining: 19 body shapes, 3 logical-value shapes, 2 RegExp constructor
+  shapes, 2 parameter shapes, 2 call-graph closures, and 1 constructor
+  resolution shape.
+
+The selector now admits the already-landed dynamic equality, numeric
+relational, numeric arithmetic, unary coercion, and condition producers. It
+still rejects dynamic `+`, dynamic-vs-dynamic relational comparison, and
+non-literal concrete equality operands because their complete runtime
+dispatch is not yet modeled.
+
+Planning consumes the same implicit-parameter scalar inference as direct
+declaration lowering. The projected type is also used by the IR override map,
+so a claimed helper cannot widen to `dynamic` and later fail callable ABI
+parity. This preserved the direct backend's numeric-call-site optimization and
+removed the three measured Acorn parity withdrawals.
+
+Non-fast standalone needed two runtime corrections exposed only after the
+claim became live:
+
+- dynamic ToNumber now uses the canonical standalone
+  ToPrimitive(`"number"`) + unbox route with late-import shift tracking;
+- dynamic strict/loose equality uses native externref equality helpers instead
+  of JS-host imports.
+
+Focused whole-compiler tests execute these paths in standalone and assert real
+IR emission plus zero post-claim failures. The exact #3796 driver remains the
+per-slice measurement input. Its synthesized module uses a 32,768-element
+`array.new_fixed`; V8 rejects fixed arrays above 10,000 elements, so that
+driver is a compile/outcome probe rather than the focused runtime fixture.

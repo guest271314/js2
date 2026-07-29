@@ -273,6 +273,7 @@ import {
   applyShapeInference,
   collectDeclarations,
   collectDynamicObjectReturnCarrierTypes,
+  inferImplicitAnyParamType,
   inferNumericReturnTypes,
   collectEmptyObjectWidening,
   collectGrowableObjectLiterals,
@@ -1783,6 +1784,46 @@ function recordObservedIrOutcomes(
   for (const diagnostic of reconciled.diagnostics) reportErrorNoNode(ctx, diagnostic);
 }
 
+// #2949 S5.P — declaration lowering already specializes an implicit-any
+// parameter when its call sites establish one concrete scalar ABI. Project
+// that same decision into structural selection and the IR override map so a
+// claimed function cannot widen to dynamic and then lose ABI parity after
+// the direct callable has been allocated.
+function makeIrImplicitParamTypeResolver(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+): (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | undefined {
+  return (parameter) => {
+    if (parameter.type) return undefined;
+    const declaration = parameter.parent;
+    if (!ts.isFunctionDeclaration(declaration) || !declaration.name || declaration.parent !== sourceFile) {
+      return undefined;
+    }
+    const parameterType = ctx.checker.getTypeAtLocation(parameter);
+    if (!(parameterType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))) return undefined;
+    const parameterIndex = declaration.parameters.indexOf(parameter);
+    if (parameterIndex < 0) return undefined;
+    const inferred = inferImplicitAnyParamType(ctx, declaration.name.text, parameterIndex, sourceFile, declaration);
+    if (inferred?.kind === "f64") return "f64";
+    if (inferred?.kind === "i32" && inferred.boolean === true) return "bool";
+    if (inferred?.kind === "externref" && ctx.checker.typeToString(parameterType) === "string") return "string";
+    return undefined;
+  };
+}
+
+function resolveIrOverrideParamType(
+  parameter: ts.ParameterDeclaration,
+  mapped: LatticeType | undefined,
+  ctx: CodegenContext,
+  classShapes: IrClassShapeLookup,
+  resolveImplicitParamType: ReturnType<typeof makeIrImplicitParamTypeResolver>,
+): IrType {
+  const projected = resolveImplicitParamType(parameter);
+  if (projected === "f64") return irVal({ kind: "f64" });
+  if (projected === "bool") return irVal({ kind: "i32", boolean: true });
+  return resolvePositionType(effectiveIrParamTypeNode(parameter), mapped, ctx, classShapes);
+}
+
 function planIrOverlay(
   ctx: CodegenContext,
   ast: TypedAST,
@@ -1887,6 +1928,7 @@ function planIrOverlay(
   // claim-then-demote). The carrier keying in `ensureDynMemberGet` matches
   // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
   const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
+  const resolveImplicitParamType = makeIrImplicitParamTypeResolver(ctx, ast.sourceFile);
   const identityPlan = irOverlayIdentity.planIrOverlayByIdentity(
     ast.sourceFile,
     identityContext,
@@ -1905,6 +1947,7 @@ function planIrOverlay(
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
       isRegExpExpression,
+      resolveImplicitParamType,
       projectedClassShapes: classShapes,
       resolveLocalClassExpression,
       supportsSymbolicMathHelpers: true,
@@ -2008,7 +2051,7 @@ function planIrOverlay(
       const params: IrType[] = [];
       for (let i = 0; i < declaration.parameters.length; i++) {
         const p = declaration.parameters[i]!;
-        params.push(resolvePositionType(effectiveIrParamTypeNode(p), entry?.params[i], ctx, classShapeSidecar));
+        params.push(resolveIrOverrideParamType(p, entry?.params[i], ctx, classShapeSidecar, resolveImplicitParamType));
       }
       const override = { params, returnType };
       overrideMapByUnitId.set(unitId, override);

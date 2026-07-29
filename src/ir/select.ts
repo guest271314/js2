@@ -309,6 +309,13 @@ export interface IrSelectionOptions {
    *  this list adds a small per-function overhead. */
   readonly trackFallbacks?: boolean;
   /**
+   * Authoritative direct-callable projection for an unannotated parameter
+   * whose source call sites establish a concrete scalar slot. The selector
+   * consumes that decision instead of widening the parameter to `dynamic` and
+   * withdrawing later on type parity.
+   */
+  readonly resolveImplicitParamType?: (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | undefined;
+  /**
    * Checker-backed certification for recursive call-graph components. A
    * rejected component is kept on the direct path even when optimistic
    * propagation found a scalar-looking signature. Accepted components still
@@ -1760,6 +1767,8 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
+  const projected = currentSelectionOptions?.resolveImplicitParamType?.(p);
+  if (projected !== undefined) return projected;
   // #2949 slice 2 — unannotated + lattice unknown (no evidence) or dynamic
   // (top): the position is honestly DYNAMIC. `mapped` must be present (a
   // TypeMap entry exists for every top-level FunctionDeclaration): class
@@ -1999,18 +2008,93 @@ function dynamicUsesAreMoveOnly(
         return scanExpr(e.right, dynNames.has(e.left.text));
       }
       if (expectDyn) return false; // operator results are concrete-shaped
+
+      const leftIsDyn = isDynShaped(e.left);
+      const rightIsDyn = isDynShaped(e.right);
+      const op = e.operatorToken.kind;
+
+      if (
+        op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+        op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+        op === ts.SyntaxKind.EqualsEqualsToken ||
+        op === ts.SyntaxKind.ExclamationEqualsToken
+      ) {
+        if (leftIsDyn || rightIsDyn) {
+          // #2949 S5.P — open only the concrete equality operands that the
+          // from-ast producer can box without consulting a runtime type:
+          // numeric/string/boolean literals plus null/undefined. Dynamic
+          // operands already carry the exact tag and pass through unchanged.
+          const scanEqualityOperand = (operand: ts.Expression, dynamic: boolean): boolean => {
+            if (dynamic) return scanExpr(operand, true);
+            const concrete = unwrap(operand);
+            if (
+              ts.isNumericLiteral(concrete) ||
+              ts.isStringLiteralLike(concrete) ||
+              concrete.kind === ts.SyntaxKind.TrueKeyword ||
+              concrete.kind === ts.SyntaxKind.FalseKeyword ||
+              concrete.kind === ts.SyntaxKind.NullKeyword ||
+              (ts.isIdentifier(concrete) && concrete.text === "undefined")
+            ) {
+              return scanExpr(concrete, false);
+            }
+            return false;
+          };
+          return scanEqualityOperand(e.left, leftIsDyn) && scanEqualityOperand(e.right, rightIsDyn);
+        }
+      }
+
+      if (
+        op === ts.SyntaxKind.LessThanToken ||
+        op === ts.SyntaxKind.LessThanEqualsToken ||
+        op === ts.SyntaxKind.GreaterThanToken ||
+        op === ts.SyntaxKind.GreaterThanEqualsToken
+      ) {
+        if (leftIsDyn || rightIsDyn) {
+          // #2949 S5.P — the landed relational producer is deliberately the
+          // numeric-abstract arm. Admit exactly one dynamic operand against a
+          // numeric literal; dyn-vs-dyn may require the string/string ARC arm.
+          if (leftIsDyn === rightIsDyn) return false;
+          const concrete = unwrap(leftIsDyn ? e.right : e.left);
+          if (!ts.isNumericLiteral(concrete)) return false;
+          return scanExpr(leftIsDyn ? e.left : e.right, true) && scanExpr(concrete, false);
+        }
+      }
+
+      if (
+        op === ts.SyntaxKind.MinusToken ||
+        op === ts.SyntaxKind.AsteriskToken ||
+        op === ts.SyntaxKind.SlashToken ||
+        op === ts.SyntaxKind.PercentToken
+      ) {
+        // #2949 S5.P — these operators are pure ToNumber operations. A
+        // dynamic-shaped operand uses dyn.to_number; a nested concrete
+        // expression is recursively checked and must itself produce f64.
+        return scanExpr(e.left, leftIsDyn) && scanExpr(e.right, rightIsDyn);
+      }
+
       return scanExpr(e.left, false) && scanExpr(e.right, false);
     }
     if (ts.isPrefixUnaryExpression(e) || ts.isPostfixUnaryExpression(e)) {
       if (expectDyn) return false;
       const op = e.operand;
+      if (
+        isDynShaped(op) &&
+        ts.isPrefixUnaryExpression(e) &&
+        (e.operator === ts.SyntaxKind.PlusToken ||
+          e.operator === ts.SyntaxKind.MinusToken ||
+          e.operator === ts.SyntaxKind.ExclamationToken)
+      ) {
+        return scanExpr(op, true);
+      }
       return scanExpr(op, false);
     }
     if (ts.isConditionalExpression(e)) {
       // Dyn joins in cond-expr arms need refinement widening at the join —
       // slice 3. Concrete conditional expressions pass through.
       if (expectDyn) return false;
-      return scanExpr(e.condition, false) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false);
+      return (
+        scanExpr(e.condition, isDynShaped(e.condition)) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false)
+      );
     }
     if (ts.isPropertyAccessExpression(e)) {
       // #3053 U2 / #2949 S5.P — the claim-flip. A named read off a DYNAMIC
@@ -2083,7 +2167,9 @@ function dynamicUsesAreMoveOnly(
     }
     if (ts.isIfStatement(s)) {
       return (
-        scanExpr(s.expression, false) && scanStmt(s.thenStatement) && (!s.elseStatement || scanStmt(s.elseStatement))
+        scanExpr(s.expression, isDynShaped(s.expression)) &&
+        scanStmt(s.thenStatement) &&
+        (!s.elseStatement || scanStmt(s.elseStatement))
       );
     }
     if (ts.isBlock(s)) {
@@ -2091,7 +2177,7 @@ function dynamicUsesAreMoveOnly(
       return true;
     }
     if (ts.isWhileStatement(s)) {
-      return scanExpr(s.expression, false) && scanStmt(s.statement);
+      return scanExpr(s.expression, isDynShaped(s.expression)) && scanStmt(s.statement);
     }
     // For / for-of / for-in / switch / try / throw / nested functions /
     // anything else: conservative — claimable exactly when the statement
