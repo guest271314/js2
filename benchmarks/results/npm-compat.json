@@ -1,6 +1,13 @@
 {
-  "generatedAt": "2026-07-28T14:37:32.809Z",
+  "generatedAt": "2026-07-29T13:17:11.364Z",
   "note": "Only packages with a committed, reproducible tests/dogfood/*-harness.mjs are listed. mustache (#3720), diff (#3721), and dayjs (#3747) were probed ad-hoc and surfaced real bugs but have no committed harness yet.",
+  "performanceMethodology": {
+    "baseline": "same pinned package, inputs, and result observation in native Node",
+    "inputModes": {
+      "compile-time-static": "package, test driver, and fixed inputs are visible to the Wasm compiler",
+      "runtime-dynamic": "inputs are owned by the JavaScript host and supplied after Wasm compilation"
+    }
+  },
   "packages": [
     {
       "name": "acorn",
@@ -10,7 +17,7 @@
       "shape": "esm-direct",
       "compile": {
         "success": true,
-        "durationMs": 28340,
+        "durationMs": 6873,
         "errorCount": 0,
         "binaryBytes": 596610,
         "categories": {}
@@ -27,19 +34,145 @@
         "sourceIssue": 3729
       },
       "perf": {
-        "sampleOp": "parse(own 226KB dist bundle)",
-        "wasmUs": 6214971.531799994,
-        "nodeUs": 15288.137799990363,
-        "wasmStdUs": 208274.35427490805,
-        "nodeStdUs": 866.406171122399,
-        "ratio": 0.002459888628896515,
+        "sampleOp": "parse(own 226KB dist bundle).body.length",
+        "lanes": {
+          "jsHost": {
+            "status": "measured",
+            "placement": "js-host",
+            "inputMode": "runtime-dynamic",
+            "sampleOp": "parse(own 226KB dist bundle).body.length",
+            "wasmUs": 1267004.958999998,
+            "nodeUs": 4246.2500000037835,
+            "wasmStdUs": 19735.22144930357,
+            "nodeStdUs": 713.0285795356626,
+            "ratio": 0.003351407561463057,
+            "ratioStd": 0.0005538400306512762,
+            "iters": 1,
+            "warmupRounds": 2,
+            "measuredRounds": 9,
+            "wasmSamplesUs": [
+              1238629.6250000014,
+              1246828.5830000022,
+              1242794.9999999981,
+              1274384.6249999988,
+              1267004.958999998,
+              1261343.0829999996,
+              1300582.875,
+              1285903.8750000037,
+              1278869.7079999982
+            ],
+            "nodeSamplesUs": [
+              4246.2500000037835,
+              4171.958999999333,
+              4160.041999995883,
+              6487.457999995968,
+              4352.208000003884,
+              4287.124999995285,
+              4127.250000005006,
+              4371.541000000434,
+              4156.958000006853
+            ],
+            "compileDurationMs": 10733.656916,
+            "wasmCompileMs": 0.7830409999987751,
+            "instantiateMs": 4.8784579999992275,
+            "wireMs": 0.0010839999995368998,
+            "wrapMs": 0.09204099999988102,
+            "binaryBytes": 330903,
+            "moduleImportCount": 1221,
+            "functionImportCount": 77,
+            "expectedChecksum": 422,
+            "actualChecksum": 422,
+            "testCompiledToWasm": false,
+            "target": "js-host"
+          },
+          "standalone": {
+            "status": "measured",
+            "placement": "standalone",
+            "inputMode": "compile-time-static",
+            "sampleOp": "parse(own 226KB dist bundle).body.length",
+            "wasmUs": 80749.07275000078,
+            "nodeUs": 3851.468749999185,
+            "wasmStdUs": 1740.6440477798185,
+            "nodeStdUs": 155.62002643504675,
+            "ratio": 0.04769675513084016,
+            "ratioStd": 0.0024142760275162388,
+            "iters": 4,
+            "warmupRounds": 2,
+            "measuredRounds": 9,
+            "wasmSamplesUs": [
+              83489.02074999933,
+              79485.69775000215,
+              82571.89574999938,
+              81121.8957500023,
+              82376.62500000079,
+              79897.04175000224,
+              80749.07275000078,
+              77871.30199999956,
+              79002.51025000034
+            ],
+            "nodeSamplesUs": [
+              3849.051999997755,
+              4102.30225000123,
+              3727.8437499990105,
+              4172.562499999913,
+              3833.7602499996137,
+              4006.6249999981665,
+              3851.468749999185,
+              3972.437500000524,
+              3680.4894999986573
+            ],
+            "compileDurationMs": 32640.877959000005,
+            "moduleCompileDurationMs": 17.369249999988824,
+            "instantiateDurationMs": 4.188832999992883,
+            "moduleInitDurationMs": 4.697584000008646,
+            "firstBatchDurationMs": 585.9652090000018,
+            "binaryBytes": 1803824,
+            "moduleImportCount": 0,
+            "functionImportCount": 0,
+            "expectedChecksum": 422,
+            "actualChecksum": 422,
+            "testCompiledToWasm": true,
+            "benchmarkUsesIr": false,
+            "irCompiledFunctions": [],
+            "target": "standalone"
+          }
+        },
+        "wasmUs": 1267004.958999998,
+        "nodeUs": 4246.2500000037835,
+        "wasmStdUs": 19735.22144930357,
+        "nodeStdUs": 713.0285795356626,
+        "ratio": 0.003351407561463057,
+        "ratioStd": 0.0005538400306512762,
+        "iters": 1,
         "warmupRounds": 2,
-        "measuredRounds": 9
+        "measuredRounds": 9,
+        "wasmSamplesUs": [
+          1238629.6250000014,
+          1246828.5830000022,
+          1242794.9999999981,
+          1274384.6249999988,
+          1267004.958999998,
+          1261343.0829999996,
+          1300582.875,
+          1285903.8750000037,
+          1278869.7079999982
+        ],
+        "nodeSamplesUs": [
+          4246.2500000037835,
+          4171.958999999333,
+          4160.041999995883,
+          6487.457999995968,
+          4352.208000003884,
+          4287.124999995285,
+          4127.250000005006,
+          4371.541000000434,
+          4156.958000006853
+        ]
       },
       "knownBugs": [
         {
           "issue": 3756,
-          "summary": "parse() is ~400-500x slower than native at real-file scale — a large constant-factor gap (flat ~60us/byte), likely method-dispatch overhead"
+          "summary": "parse() remains much slower than native at real-file scale; the standalone and JS-host lanes report the gap separately"
         }
       ]
     },
@@ -51,7 +184,7 @@
       "shape": "esm-direct",
       "compile": {
         "success": false,
-        "durationMs": 1292,
+        "durationMs": 272,
         "errorCount": 64,
         "binaryBytes": 0,
         "categories": {
@@ -109,7 +242,7 @@
       "shape": "esm-driver-epilogue",
       "compile": {
         "success": true,
-        "durationMs": 312,
+        "durationMs": 74,
         "errorCount": 0,
         "binaryBytes": 7905,
         "categories": {}
@@ -125,14 +258,136 @@
         "sourceIssue": 3748
       },
       "perf": {
-        "sampleOp": "op_mixed_all_kinds",
-        "wasmUs": 37.805664478182095,
-        "nodeUs": 0.1818245110123526,
-        "wasmStdUs": 2.312647765992195,
-        "nodeStdUs": 0.008531962475355178,
-        "ratio": 0.0048094515338378665,
+        "sampleOp": "op_two_strings.length (host-owned arguments)",
+        "lanes": {
+          "jsHost": {
+            "status": "measured",
+            "placement": "js-host",
+            "inputMode": "runtime-dynamic",
+            "sampleOp": "op_two_strings.length (host-owned arguments)",
+            "wasmUs": 0.4088736509357711,
+            "nodeUs": 0.015959828242320732,
+            "wasmStdUs": 0.009587442976140854,
+            "nodeStdUs": 0.011921486752643302,
+            "ratio": 0.03903364329247966,
+            "ratioStd": 0.02802244678751371,
+            "iters": 589668,
+            "warmupRounds": 2,
+            "measuredRounds": 9,
+            "wasmSamplesUs": [
+              0.43242426246633087,
+              0.40730101514749767,
+              0.41708999810060776,
+              0.4017567936533729,
+              0.4019219289498407,
+              0.4059364065881111,
+              0.4088736509357711,
+              0.4170940970173043,
+              0.4213154690436201
+            ],
+            "nodeSamplesUs": [
+              0.041809967642800684,
+              0.0437235444351656,
+              0.015959828242320732,
+              0.015783245826480857,
+              0.015902027920798503,
+              0.015952763249818504,
+              0.015987174138671217,
+              0.01591877463251319,
+              0.03747511311450978
+            ],
+            "binaryBytes": 2100,
+            "moduleImportCount": 21,
+            "functionImportCount": 16,
+            "expectedChecksum": 7,
+            "actualChecksum": 7,
+            "testCompiledToWasm": false,
+            "target": "js-host"
+          },
+          "standalone": {
+            "status": "measured",
+            "placement": "standalone",
+            "inputMode": "compile-time-static",
+            "sampleOp": "op_two_strings.length (driver compiled to Wasm)",
+            "wasmUs": 0.0006605453005513602,
+            "nodeUs": 0.011242416025176703,
+            "wasmStdUs": 0.000020088084129639376,
+            "nodeStdUs": 0.00014150041480354275,
+            "ratio": 17.01990161127875,
+            "ratioStd": 0.4353508389336629,
+            "iters": 12612054,
+            "warmupRounds": 2,
+            "measuredRounds": 9,
+            "wasmSamplesUs": [
+              0.0006042069753268793,
+              0.000653614074282593,
+              0.0006623227271307367,
+              0.0006599836949632412,
+              0.0006605453005513602,
+              0.0006775264362171502,
+              0.0006640539280912795,
+              0.0006682595079283534,
+              0.0006417206903799169
+            ],
+            "nodeSamplesUs": [
+              0.011025001637322193,
+              0.011242416025176703,
+              0.011270358896338043,
+              0.01120825886092739,
+              0.0115690248392528,
+              0.011387958059804875,
+              0.011276649227794689,
+              0.01120749245126897,
+              0.011176097247918772
+            ],
+            "compileDurationMs": 715.3180830000056,
+            "moduleCompileDurationMs": 1.458041999998386,
+            "instantiateDurationMs": 0.045499999992898665,
+            "firstBatchDurationMs": 0.02158400000189431,
+            "binaryBytes": 20340,
+            "moduleImportCount": 0,
+            "functionImportCount": 0,
+            "expectedChecksum": 7,
+            "actualChecksum": 7,
+            "testCompiledToWasm": true,
+            "benchmarkUsesIr": true,
+            "irCompiledFunctions": [
+              "__npmCompatStandaloneBenchmark"
+            ],
+            "target": "standalone"
+          }
+        },
+        "wasmUs": 0.4088736509357711,
+        "nodeUs": 0.015959828242320732,
+        "wasmStdUs": 0.009587442976140854,
+        "nodeStdUs": 0.011921486752643302,
+        "ratio": 0.03903364329247966,
+        "ratioStd": 0.02802244678751371,
+        "iters": 589668,
         "warmupRounds": 2,
-        "measuredRounds": 9
+        "measuredRounds": 9,
+        "wasmSamplesUs": [
+          0.43242426246633087,
+          0.40730101514749767,
+          0.41708999810060776,
+          0.4017567936533729,
+          0.4019219289498407,
+          0.4059364065881111,
+          0.4088736509357711,
+          0.4170940970173043,
+          0.4213154690436201
+        ],
+        "nodeSamplesUs": [
+          0.041809967642800684,
+          0.0437235444351656,
+          0.015959828242320732,
+          0.015783245826480857,
+          0.015902027920798503,
+          0.015952763249818504,
+          0.015987174138671217,
+          0.01591877463251319,
+          0.03747511311450978
+        ]
       },
       "knownBugs": [
         {
@@ -149,7 +404,7 @@
       "shape": "esm-direct",
       "compile": {
         "success": true,
-        "durationMs": 564,
+        "durationMs": 109,
         "errorCount": 9,
         "binaryBytes": 17569,
         "categories": {
@@ -176,14 +431,136 @@
         "sourceIssue": 3751
       },
       "perf": {
-        "sampleOp": "parseCookie(8-pair header)",
-        "wasmUs": 401.9859283054733,
-        "nodeUs": 0.8369040968342297,
-        "wasmStdUs": 46.322671286609484,
-        "nodeStdUs": 0.08388455814051107,
-        "ratio": 0.0020819238632608494,
+        "sampleOp": "parseCookie(8-pair header); verify a/h",
+        "lanes": {
+          "jsHost": {
+            "status": "measured",
+            "placement": "js-host",
+            "inputMode": "runtime-dynamic",
+            "sampleOp": "parseCookie(8-pair header); verify a/h",
+            "wasmUs": 150.9021297499497,
+            "nodeUs": 0.2568911203012885,
+            "wasmStdUs": 41.42051287074037,
+            "nodeStdUs": 0.0032101863335810507,
+            "ratio": 0.0017023690833718943,
+            "ratioStd": 0.0005112432060820728,
+            "iters": 5079,
+            "warmupRounds": 2,
+            "measuredRounds": 9,
+            "wasmSamplesUs": [
+              92.78368438668949,
+              106.67747922819375,
+              120.5293201417589,
+              139.03027997637275,
+              150.9021297499497,
+              167.392186847803,
+              182.2904032289798,
+              202.1296924591458,
+              223.31112581217016
+            ],
+            "nodeSamplesUs": [
+              0.2580887970064795,
+              0.25340441031762706,
+              0.2613376648949456,
+              0.2568911203012885,
+              0.25618566646934515,
+              0.2546022839163338,
+              0.26074699744131824,
+              0.2622809608192193,
+              0.2533717267188893
+            ],
+            "binaryBytes": 14089,
+            "moduleImportCount": 135,
+            "functionImportCount": 34,
+            "expectedChecksum": 1,
+            "actualChecksum": 1,
+            "testCompiledToWasm": false,
+            "target": "js-host"
+          },
+          "standalone": {
+            "status": "measured",
+            "placement": "standalone",
+            "inputMode": "compile-time-static",
+            "sampleOp": "parseCookie(8-pair header); verify a/h",
+            "wasmUs": 0.0006563421680829409,
+            "nodeUs": 0.2605820639813626,
+            "wasmStdUs": 0.000010958169004878115,
+            "nodeStdUs": 0.005087610841702815,
+            "ratio": 397.0216704839742,
+            "ratioStd": 7.107837351495117,
+            "iters": 1096163,
+            "warmupRounds": 2,
+            "measuredRounds": 9,
+            "wasmSamplesUs": [
+              0.0006563421680829409,
+              0.000659193021471452,
+              0.0006733715697290828,
+              0.0006838627102094234,
+              0.0006518191181438004,
+              0.0006516676808137781,
+              0.0006663014533415058,
+              0.0006519705554738227,
+              0.0006509825637284706
+            ],
+            "nodeSamplesUs": [
+              0.26255846530123234,
+              0.25522740048697345,
+              0.26630228259848526,
+              0.2652806881823155,
+              0.2663686112375515,
+              0.2605820639813626,
+              0.2593065164578659,
+              0.2537189952589182,
+              0.25254394921193424
+            ],
+            "compileDurationMs": 711.2200000000012,
+            "moduleCompileDurationMs": 1.3394589999952586,
+            "instantiateDurationMs": 0.048332999998820014,
+            "firstBatchDurationMs": 0.023042000000714324,
+            "binaryBytes": 20340,
+            "moduleImportCount": 0,
+            "functionImportCount": 0,
+            "expectedChecksum": 1,
+            "actualChecksum": 1,
+            "testCompiledToWasm": true,
+            "benchmarkUsesIr": true,
+            "irCompiledFunctions": [
+              "__npmCompatStandaloneBenchmark"
+            ],
+            "target": "standalone"
+          }
+        },
+        "wasmUs": 150.9021297499497,
+        "nodeUs": 0.2568911203012885,
+        "wasmStdUs": 41.42051287074037,
+        "nodeStdUs": 0.0032101863335810507,
+        "ratio": 0.0017023690833718943,
+        "ratioStd": 0.0005112432060820728,
+        "iters": 5079,
         "warmupRounds": 2,
-        "measuredRounds": 9
+        "measuredRounds": 9,
+        "wasmSamplesUs": [
+          92.78368438668949,
+          106.67747922819375,
+          120.5293201417589,
+          139.03027997637275,
+          150.9021297499497,
+          167.392186847803,
+          182.2904032289798,
+          202.1296924591458,
+          223.31112581217016
+        ],
+        "nodeSamplesUs": [
+          0.2580887970064795,
+          0.25340441031762706,
+          0.2613376648949456,
+          0.2568911203012885,
+          0.25618566646934515,
+          0.2546022839163338,
+          0.26074699744131824,
+          0.2622809608192193,
+          0.2533717267188893
+        ]
       },
       "knownBugs": [
         {

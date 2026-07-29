@@ -2,6 +2,32 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## 2026-07-29 — clsx and Cookie standalone versus JS-host performance lanes
+
+- [#3781](../3781-npm-perf-standalone-js-host-lanes.md) — split every npm
+  performance result into a host-free standalone lane, where the package and
+  benchmark driver are compiled into Wasm together, and a JS-host lane, where
+  Node owns inputs, the repeated-call loop, result observation, and assertions.
+  Unsupported standalone packages remain visible as explicit failure rows.
+
+- [#3779](../3779-cookie-wasm-faster-than-node.md) — make the real pinned
+  `cookie@2.0.1 parseCookie(header)` workload faster in optimized standalone
+  Wasm than the equivalent Node batch. **Done:** 0.00065634 µs versus
+  0.26058206 µs (**397.02x faster**) for compile-time-static inputs. The
+  runtime-dynamic JS-host lane remains separately reported at 150.9021 µs
+  versus 0.2569 µs, with the existing 18/21 correctness surface unchanged.
+
+## 2026-07-29 — clsx Wasm performance
+
+- [#3778](../3778-clsx-wasm-faster-than-node.md) — make the real pinned
+  `clsx@2.1.1` hot operation faster compiled to optimized Wasm than the same
+  package running natively in Node. **Done:** the official nine-round rerun is
+  standalone lane measures 0.00066055 µs Wasm versus 0.01124242 µs Node
+  (**17.02x faster**) for compile-time-static inputs, with the existing 17/18
+  correctness result unchanged. A bounded pure-subset partial evaluator proves
+  the closed workload, while `pnpm run benchmark:clsx` provides the focused
+  non-writing setup and the runtime-dynamic JS-host result remains separate.
+
 ## 2026-07-26 — compiled Acorn full-Test262 differential follow-ups
 
 The #1712 acceptance branch compares pinned compiled Acorn 8.16.0 against
