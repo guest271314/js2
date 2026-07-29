@@ -12,11 +12,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 4049.493053333332,
-    "jsUs": 9948.299030303036,
-    "wasmStdUs": 19.999997538578363,
-    "jsStdUs": 22.737253968460855,
-    "ratioStd": 0.012396246941839585,
+    "wasmUs": 4238.1246666666675,
+    "jsUs": 9800.98369696969,
+    "wasmStdUs": 57.84425073461694,
+    "jsStdUs": 67.1651549120118,
+    "ratioStd": 0.0364424159645216,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -33,11 +33,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 351.65671126760583,
-    "jsUs": 5620.807204225351,
-    "wasmStdUs": 0.39567370978677446,
-    "jsStdUs": 1655.9699669032134,
-    "ratioStd": 4.708018771392491,
+    "wasmUs": 317.740894514768,
+    "jsUs": 5306.382251851852,
+    "wasmStdUs": 1.592085243086612,
+    "jsStdUs": 1569.7618820904831,
+    "ratioStd": 4.948815262988475,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -54,11 +54,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 5.264502057051938,
-    "jsUs": 3.5698034361275974,
-    "wasmStdUs": 0.08906385358778261,
-    "jsStdUs": 0.11873303025465676,
-    "ratioStd": 0.020499566599957164,
+    "wasmUs": 4.9056778523489895,
+    "jsUs": 3.856346898611843,
+    "wasmStdUs": 0.0654669820610019,
+    "jsStdUs": 0.18163316550723538,
+    "ratioStd": 0.03548967839044292,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -75,11 +75,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 34.58884562841531,
-    "jsUs": 47.25881901528012,
-    "wasmStdUs": 0.7741851063372059,
-    "jsStdUs": 7.151711799459759,
-    "ratioStd": 0.2041096555242799,
+    "wasmUs": 55.498263629283535,
+    "jsUs": 48.72550497347478,
+    "wasmStdUs": 0.39217369241019084,
+    "jsStdUs": 9.67864999541061,
+    "ratioStd": 0.17216804730273857,
     "warmupRounds": 2,
     "measuredRounds": 9
   }
