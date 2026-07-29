@@ -4194,16 +4194,11 @@ function finalizeInModuleInitFlag(ctx: CodegenContext): void {
   ctx.inModuleInitGlobalIdx = flagIdx;
   for (const r of reads) (r as { index: number }).index = flagIdx;
 
-  // Wrap __module_init (when present): flag = 1 for the body, 0 on completion.
-  let initArrayIdx = -1;
-  for (let i = 0; i < ctx.mod.functions.length; i++) {
-    if (ctx.mod.functions[i]!.name === "__module_init") {
-      initArrayIdx = i;
-      break;
-    }
-  }
-  if (initArrayIdx < 0) return;
-  const initFn = ctx.mod.functions[initArrayIdx]!;
+  // Wrap the exact compiler-created initializer (when present): flag = 1 for
+  // the body, 0 on completion. Preserve the legacy multi-source first-pass
+  // choice until R5 replaces cumulative initializer emission.
+  const initFn = ctx.programAbiModuleInitCallables?.firstFunction();
+  if (!initFn) return;
   initFn.body = [
     { op: "i32.const", value: 1 },
     { op: "global.set", index: flagIdx },
@@ -4216,16 +4211,11 @@ function finalizeInModuleInitFlag(ctx: CodegenContext): void {
 function applyModuleInitGuard(ctx: CodegenContext): void {
   if (ctx.moduleInitGuardApplied) return;
 
-  // Locate __module_init.
-  let initArrayIdx = -1;
-  for (let i = 0; i < ctx.mod.functions.length; i++) {
-    if (ctx.mod.functions[i]!.name === "__module_init") {
-      initArrayIdx = i;
-      break;
-    }
-  }
-  if (initArrayIdx < 0) return; // no module init — nothing to guard
-  const initFuncIdx = ctx.numImportFuncs + initArrayIdx;
+  // Resolve the exact compiler-created initializer. Preserve the legacy
+  // multi-source first-pass choice until R5 owns graph aggregation.
+  const initFn = ctx.programAbiModuleInitCallables?.firstFunction();
+  const initFuncIdx = ctx.programAbiModuleInitCallables?.firstHandle();
+  if (!initFn || initFuncIdx === undefined) return; // no module init — nothing to guard
 
   // 1. __init_done global + self-guard prologue on __module_init.
   const doneGlobalIdx = nextModuleGlobalIdx(ctx);
@@ -4235,7 +4225,6 @@ function applyModuleInitGuard(ctx: CodegenContext): void {
     mutable: true,
     init: [{ op: "i32.const", value: 0 }],
   });
-  const initFn = ctx.mod.functions[initArrayIdx]!;
   initFn.body = [
     { op: "global.get", index: doneGlobalIdx },
     { op: "if", blockType: { kind: "empty" }, then: [{ op: "return" }] },
@@ -4248,7 +4237,7 @@ function applyModuleInitGuard(ctx: CodegenContext): void {
   //    __module_init itself). Idempotency makes repeated entry calls safe.
   for (const fn of ctx.mod.functions) {
     if (!fn.exported) continue;
-    if (fn.name === "__module_init") continue;
+    if (fn === initFn) continue;
     fn.body = [{ op: "call", funcIdx: initFuncIdx }, ...fn.body];
   }
 
@@ -4349,12 +4338,7 @@ function addWasiStartExport(ctx: CodegenContext): void {
   // No callable exported `main` → wrap `__module_init`, which carries all
   // top-level code (including any top-level call to a non-exported `main`).
   if (targetIdx === undefined) {
-    for (let i = 0; i < ctx.mod.functions.length; i++) {
-      if (ctx.mod.functions[i]!.name === "__module_init") {
-        targetIdx = ctx.numImportFuncs + i;
-        break;
-      }
-    }
+    targetIdx = ctx.programAbiModuleInitCallables?.firstHandle();
   }
 
   if (targetIdx !== undefined) {

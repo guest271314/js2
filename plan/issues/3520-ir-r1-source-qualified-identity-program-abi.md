@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c17-host-class-abi
-pr: 3770
+branch: codex/3520-c19-source-callable-abi
+pr: 3779
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -86,6 +86,7 @@ files:
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/dead-elimination.ts
+  - src/codegen/declarations.ts
   - src/codegen/func-space.ts
   - src/codegen/program-abi-class-callable-planning.ts
   - src/codegen/program-abi-callable-planning.ts
@@ -93,6 +94,8 @@ files:
   - src/codegen/program-abi-finalization.ts
   - src/codegen/program-abi-import-planning.ts
   - src/codegen/program-abi-global-planning.ts
+  - src/codegen/program-abi-module-init-planning.ts
+  - src/codegen/program-abi-source-callable-planning.ts
   - src/codegen/program-abi-planning.ts
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
@@ -144,6 +147,8 @@ files:
   - tests/issue-3520-support-callable-abi.test.ts
   - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
+  - tests/issue-3520-module-init-callable-abi.test.ts
+  - tests/issue-3520-source-callable-abi.test.ts
   - tests/issue-3520-type-class-abi.test.ts
   - tests/issue-3520-global-population-abi.test.ts
   - tests/issue-3520-callable-export-population-abi.test.ts
@@ -1939,6 +1944,146 @@ identity, not R1. Production consumers must still route through the populated
 callable/global/type/class authorities, and `LegacyAbiAdapter` must become the
 only name-keyed boundary by replacing direct `funcMap`, `structMap`,
 `moduleGlobals`, module-array, and display-name scans before R1 can close.
+
+### 2026-07-28 exact module-initializer callable continuation
+
+The stacked continuation on `codex/3520-c18-module-init-abi` removes
+display-name lookup from compiler-created module-initializer allocation,
+IR-patch resolution, startup wiring, and initialization guards:
+
+- every compiler-created initializer is allocated through a stable function
+  handle and recorded in an exact sidecar even when Program ABI telemetry is
+  disabled. IR integration resolves the preallocated body from its
+  source-qualified module-init unit instead of scanning for
+  `__module_init`;
+- the single-source retained initializer owns the exact module-init unit
+  binding and final callable slot. A same-named user function owns its separate
+  top-level-function binding and can no longer steal the IR patch, startup
+  target, or public initializer alias;
+- the sidecar follows allocator handles through IR body replacement and
+  dead-layout finalization. Startup guards compare the exact function object,
+  so a user-authored `__module_init` remains an ordinary exported/user
+  callable; and
+- the current multi-source frontend still emits cumulative initializer passes.
+  Until R5 replaces that behavior with one prepared whole-program unit, every
+  physical pass receives an explicit entry-source support identity and ordinal
+  rather than an invented source-unit owner. Existing first-pass guard/start
+  behavior and final public alias selection are preserved byte-for-byte.
+
+The three-test anti-vacuity fixture proves the same-name IR-emitted case, an
+Unsupported direct-body case, and two ordered multi-source passes at runtime.
+The exact C17 parent rejects the collision fixture because both callables
+attach to the user function; C18 assigns two exact required bindings and
+distinct final slots, preserves the user result `99`, and runs the synthetic
+initializer once to produce the expected top-level state. The focused suite
+passes **3/3**, and the combined callable-population/module-init suite passes
+**8/8**.
+
+The sharded #3520 plus #2138 migration matrix reports **272 passing / 1 known
+failing across 50 files**. The sole failure is the inherited linear
+inventory-count spy assertion already reproduced on C12-C17. The adjacent
+module-init/startup/ABI matrix adds no branch-specific failure; two optional
+test262.fyi fixtures are unavailable because that local corpus/submodule is
+not installed.
+
+For a non-collision numeric module, the exact C17 parent and C18 emit identical
+bytes in all four checked modes: host
+`cc43eff221a66ea95123b273ff2fabd3e3e8e6045d072696fdebd0d21d2bf8c0`,
+deferred host
+`722a2a8038937ed145c483b3336e8711eb20dddcc0910972bf0a214bb1ea354e`,
+standalone
+`903c9b027532c47c856c6f13fc76f68ca1a4ebee0c3a17408d918e70c1f72ea6`,
+and WASI
+`a4033b7b395844fc1cb421e26c232a671d0dd56d276230df978b966788aa5afc`.
+
+Strict TypeScript, formatting/diff, scoped lint, LOC/function budget,
+dead-export, godfile, checker-oracle, issue-spec, test-vacuity,
+verdict-oracle, done-status, and issue-index consistency gates pass. Hybrid
+readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported / 0
+Invariants across 37 terminal units**, while strict IR-only correctly remains
+not ready because all 37 legacy bodies are still emitted. The six typed
+blockers are four async/call-graph selection units and two static class-member
+builds. The fallback ratchet reports no unintended, post-claim, or
+module-level increase.
+
+The supported eight-shard equivalence gate reports **1,611 passing / 32 known
+failing / 0 new regressions**; four baseline rows now pass and the shared
+baseline remains unchanged. No local Test262 corpus run was performed, and
+neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C18 closes structural ownership and resolution for current module-initializer
+allocators, not R1 or R5. Remaining R1 production consumers still include
+direct `funcMap`, `structMap`, `moduleGlobals`, module-array, and display-name
+joins outside the module-init seam. Multi-source compile-once initialization
+and body-ownership changes remain explicitly deferred to the prepared-program
+R2-R5 cutover.
+
+### 2026-07-28 exact top-level source-callable continuation
+
+The stacked continuation on `codex/3520-c19-source-callable-abi` removes the
+production `funcMap` name join between top-level function allocation, retained
+direct bodies, IR replacement, and symbolic direct-call resolution:
+
+- each top-level function declaration now receives a stable function handle
+  and is observed atomically against its exact declaration/unit identity.
+  Compiler-injected top-level shims are accepted only when the inventory
+  classifies them under an explicit compiler-origin `synthetic-support`
+  identity;
+- IR integration resolves source artifacts and planned source-unit targets
+  through that exact registry. The only remaining name fallback at this seam
+  is restricted to low-level compatibility tests that deliberately construct
+  integration without a production identity context;
+- stable handles follow an allocator through IR object replacement and
+  dead-layout finalization. A supported IR-emitted body and an Unsupported
+  retained direct body therefore publish the same source-unit callable
+  identity rather than switching between a source owner and a generic retained
+  support owner; and
+- same-named functions in different source files retain distinct declaration
+  identities, allocator handles, required ABI bindings, and final slots even
+  when the current multi-source collision policy keeps both bodies on the
+  direct path. Legacy reverse lookup reports ambiguity instead of choosing the
+  last `funcMap` entry.
+
+The exact C18 parent publishes no source-unit binding for an Unsupported
+default-parameter function and neither source-unit binding for a same-named
+cross-file pair. C19 publishes all three exact required bindings. The focused
+anti-vacuity/runtime suite passes **3/3**; the source/module-init/total-callable
+population matrix passes **11/11**; and the IR-first, multi-module,
+preregistration, and function-artifact matrix passes **24/24**.
+
+The six-shard #3520 plus #2138 migration matrix reports **281 passing / 1
+known failing across 52 files**. The sole failure is the inherited linear
+inventory-count spy assertion reproduced throughout C12-C18. A compatibility
+test initially exposed the intentional no-identity integration harness; its
+restricted adapter fallback and the full original shard now pass **37/37**.
+
+For a supported numeric source function, the exact C18 parent and C19 emit
+identical bytes in all four checked modes: host and deferred host
+`12eff1c41f38ee28b4162f6b5ff3e05e57d6f8060ec9fd7577be0b72bafe8a85`,
+standalone
+`2e3508c8c7c6b21c7f56168d6febc639a40c23c1365d82bc5a3a05f4b7766d29`,
+and WASI
+`9e0eda0baf5d05fcdd0b6d7cb79dc6c0f73792bc05a80d9e47d126c043fc4cf4`.
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet reports no unintended, post-claim, or
+module-level increase. Strict TypeScript, formatting/diff, scoped lint,
+LOC/function budget, dead-export, godfile, checker/verdict-oracle,
+issue-spec, test-vacuity, done-status, and issue-index consistency gates pass.
+
+The supported eight-shard equivalence gate reports **1,611 passing / 32 known
+failing / 0 new regressions**; the same four baseline rows now pass and the
+shared baseline remains unchanged. No local Test262 corpus run was performed,
+and neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C19 closes exact top-level declaration callable ownership, not R1. Class
+integration still has a physical compatibility-key join, and function
+expressions, lifted/support allocation, module globals, class/type consumers,
+and remaining module-array/display-name scans must still move behind the
+structural authorities before R1 can close.
 
 ### R1a validation evidence
 

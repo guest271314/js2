@@ -19,6 +19,8 @@ import { ProgramAbiCallableRegistry } from "../program-abi-callable-planning.js"
 import { ProgramAbiExportRegistry } from "../program-abi-export-planning.js";
 import { ProgramAbiCallableProviderRegistry } from "../program-abi-provider-planning.js";
 import { ProgramAbiGlobalRegistry } from "../program-abi-global-planning.js";
+import { ProgramAbiModuleInitCallableRegistry } from "../program-abi-module-init-planning.js";
+import { ProgramAbiSourceCallableRegistry } from "../program-abi-source-callable-planning.js";
 import { ProgramAbiTypeRegistry } from "../program-abi-type-planning.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
@@ -374,6 +376,16 @@ export function createCodegenContext(
     nodeBuiltinGlobals: new Map(),
     jsxRuntime: options?.jsxRuntime,
   };
+  ctx.programAbiModuleInitCallables = new ProgramAbiModuleInitCallableRegistry(
+    ctx,
+    programAbiSession,
+    irPlanningIdentityContext,
+  );
+  ctx.programAbiSourceCallables = new ProgramAbiSourceCallableRegistry(
+    ctx,
+    programAbiSession,
+    irPlanningIdentityContext,
+  );
   if (programAbiSession) {
     ctx.programAbiCallableProviders = new ProgramAbiCallableProviderRegistry(programAbiSession, ctx);
     ctx.programAbiCallables = new ProgramAbiCallableRegistry(programAbiSession, ctx);

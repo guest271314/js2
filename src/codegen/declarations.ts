@@ -89,7 +89,9 @@ import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.j
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
-import { definedFuncAt } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { definedFuncAt, mintDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
+import { pushProgramAbiModuleInitCallable } from "./program-abi-module-init-planning.js";
+import { pushProgramAbiTopLevelCallable } from "./program-abi-source-callable-planning.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 // ── Extracted subsystems (#3268) — re-exported for external consumers ─────
@@ -1041,11 +1043,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       }
 
       const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-      const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+      const funcIdx = mintDefinedFunc(ctx);
       ctx.funcMap.set(name, funcIdx);
 
-      // Create placeholder function to be filled in second pass
-      // Only export as Wasm exports if this is the entry file
+      // Create the placeholder now; only entry-file functions become Wasm exports.
       const isExported = isEntryFile && hasExportModifier(stmt);
       const func: WasmFunction = {
         name,
@@ -1054,7 +1055,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         body: [],
         exported: isExported,
       };
-      ctx.mod.functions.push(func);
+      pushProgramAbiTopLevelCallable(ctx, stmt, funcIdx, func);
 
       if (isExported) {
         ctx.mod.exports.push({
@@ -2712,12 +2713,11 @@ export function compileDeclarations(
     // instantiation, before `setExports`) enumerates zero keys. Exporting it and
     // letting the host call it after `setExports` is symmetric with the
     // standalone/WASI `_start` model and gives the diff-test HOST lane the same
-    // fully-wired runtime the standalone lane has. The export's func index is
-    // shifted alongside every other export by the late-import shift logic.
+    // fully-wired runtime; late-import shifting keeps its function index aligned with every other export.
     const exportModuleInit = ctx.deferTopLevelInit && !ctx.wasi;
     const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
-    const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.mod.functions.push({
+    const initFuncIdx = mintDefinedFunc(ctx);
+    pushProgramAbiModuleInitCallable(ctx, sourceFile, initFuncIdx, {
       name: "__module_init",
       typeIdx: initTypeIdx,
       locals: compiledInitFctx.locals,
