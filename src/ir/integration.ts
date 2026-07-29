@@ -1666,11 +1666,14 @@ export function compileIrPathFunctions(
   const sourceArtifactFuncIdx = (unitId: IrUnitId, compatibilityName: string): number | undefined =>
     ctx.programAbiSourceCallables?.handleForUnit(unitId) ??
     (ctx.programAbiSourceCallables?.identityContext ? undefined : ctx.funcMap.get(compatibilityName));
+  const classArtifactFuncIdx = (unitId: IrUnitId, compatibilityName: string): number | undefined =>
+    ctx.programAbiClassCallables?.handleForUnit(unitId) ??
+    (ctx.programAbiClassCallables ? undefined : ctx.funcMap.get(compatibilityName));
   const legacyArtifactFuncIdx = (entry: BuiltFn): number | undefined =>
     entry.moduleInit
       ? ctx.programAbiModuleInitCallables?.handleForUnit(entry.artifactUnitId)
       : entry.classMember
-        ? ctx.funcMap.get(entry.name)
+        ? classArtifactFuncIdx(entry.artifactUnitId, entry.name)
         : sourceArtifactFuncIdx(entry.artifactUnitId, entry.name);
   const hasPreallocatedArtifactSlot = (entry: BuiltFn): boolean =>
     (originalArtifactUnitIds.has(entry.artifactUnitId) && !entry.synthesized) ||
@@ -4927,6 +4930,14 @@ class ClassRegistry {
     return shape.classId;
   }
 
+  /** Resolve exact class source allocations structurally in production. */
+  private unitFuncIdx(unitId: IrUnitId, compatibilityName: string): number | undefined {
+    return (
+      this.ctx.programAbiClassCallables?.handleForUnit(unitId) ??
+      (this.ctx.programAbiClassCallables ? undefined : this.ctx.funcMap.get(compatibilityName))
+    );
+  }
+
   private memberRef(
     classId: IrClassId,
     memberKind: IrClassMemberKind,
@@ -4955,7 +4966,7 @@ class ClassRegistry {
     }
     const terminal = matches[0];
     if (!terminal) return null;
-    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const funcIdx = this.unitFuncIdx(terminal.id, physicalName);
     if (funcIdx === undefined) {
       throw new IrInvariantError(
         "missing-function-slot",
@@ -5202,7 +5213,7 @@ class ClassRegistry {
         `ir/integration: class ${classId} projects ${matches.length} constructor units; expected exactly one`,
       );
     }
-    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const funcIdx = this.unitFuncIdx(matches[0]!.id, physicalName);
     if (funcIdx === undefined) {
       throw new IrInvariantError(
         "missing-function-slot",
@@ -5217,7 +5228,11 @@ class ClassRegistry {
 
   /** Publish the exact class-owned `<Class>_init` support function. */
   private initRef(classId: IrClassId, physicalName: string): IrFuncRef {
-    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const ref = irSupportFuncRef(classId, "class-constructor-init", physicalName);
+    const bindingId = ref.binding.kind === "support" ? ref.binding.bindingId : undefined;
+    const funcIdx =
+      (bindingId === undefined ? undefined : this.ctx.programAbiClassCallables?.handleForSupport(bindingId)) ??
+      (this.ctx.programAbiClassCallables ? undefined : this.ctx.funcMap.get(physicalName));
     const func = funcIdx === undefined ? undefined : definedFuncAt(this.ctx, funcIdx);
     if (!func || func.name !== physicalName) {
       throw new IrInvariantError(
@@ -5234,7 +5249,6 @@ class ClassRegistry {
         `ir/integration: class ${classId} / ${physicalName} has non-function type ${func.typeIdx}`,
       );
     }
-    const ref = irSupportFuncRef(classId, "class-constructor-init", physicalName);
     planProgramAbiSupportCallable(this.ctx, {
       ref,
       anchor: { kind: "class", classId },

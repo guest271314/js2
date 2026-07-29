@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c19-source-callable-abi
-pr: 3779
+branch: codex/3520-c20-class-integration-abi
+pr: 3783
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -146,6 +146,7 @@ files:
   - tests/issue-3520-program-abi-type-remap.test.ts
   - tests/issue-3520-support-callable-abi.test.ts
   - tests/issue-3520-class-support-callable-abi.test.ts
+  - tests/issue-3520-class-integration-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
   - tests/issue-3520-module-init-callable-abi.test.ts
   - tests/issue-3520-source-callable-abi.test.ts
@@ -2084,6 +2085,64 @@ integration still has a physical compatibility-key join, and function
 expressions, lifted/support allocation, module globals, class/type consumers,
 and remaining module-array/display-name scans must still move behind the
 structural authorities before R1 can close.
+
+### 2026-07-28 exact class integration callable continuation
+
+The stacked continuation on `codex/3520-c20-class-integration-abi` removes the
+production physical-name join for exact class source callables and
+class-constructor initializer support:
+
+- the class allocator registry exposes stable handles for exact constructor,
+  method/accessor, and compiler-owned `<Class>_init` observations. Resolution
+  follows the allocator object through replacement and DCE rather than
+  recovering it from `funcMap`;
+- IR class resolution and Phase-3 class body replacement use those exact
+  source-unit/support identities. A name fallback remains only for low-level
+  compatibility contexts that deliberately omit the production registry; and
+- the anti-vacuity fixture deletes every physical-name mapping for one
+  implicit constructor, instance method, and initializer support function
+  before integration. The exact C19 parent fails with a typed
+  `missing-function-slot`; C20 resolves all three objects, IR-emits both
+  `main` and the method, and retains the exact unit mappings.
+
+The focused class ABI suite passes **4/4**. The wider class optimization and
+behavior matrix passes **54/54** across constructor allocation, class-body
+replacement, instance/static dispatch, getters/setters, inheritance and
+`super`, source/support aliases, host classes, and host/native-string modes.
+This is preservation evidence for the current class lowering optimizations;
+retirement remains blocked on the program-wide optimization inventory in
+#3518, so no direct class handler is deleted by this identity-only slice.
+
+Strict TypeScript, formatting/diff, LOC budget, dead-export, godfile,
+checker/verdict-oracle, issue-spec, test-vacuity, done-status, and issue-index
+consistency gates pass. Hybrid readiness remains **READY** at **31 IR-emitted /
+6 typed Unsupported / 0 Invariants across 37 terminal units**, with all 37
+legacy bodies still emitted. The fallback ratchet remains unchanged with zero
+unintended, post-claim, or module-level increases.
+
+The six-shard #3520 plus #2138 migration matrix reports **282 passing / 1
+inherited known failing across 53 files**. The sole failure is the unchanged
+linear inventory-count spy assertion (two builds observed versus one expected).
+The supported eight-shard equivalence gate reports **1,611 passing / 32 known
+failing / 0 new regressions**; the same four baseline rows pass and the shared
+baseline remains unchanged.
+
+The exact C19 parent and C20 produce byte-identical class-program output in all
+four checked modes: host and deferred host
+`8e85294fa13c47a41f17e5c370aed18c46876994ded547d5f1a5c592e41a0dd5`,
+standalone
+`26338f2162dcb59169417085b908462be3c03233c8988be1f686a95ae43ec182`,
+and WASI
+`b1693c53c755bf26e9cdef72bb33778dafac47222224e07ce28b8e03f3302378`.
+No local Test262 run was performed, and neither
+`benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C20 closes the exact class source and constructor-init resolution seam, not R1.
+Inherited child alias validation still consumes physical compatibility keys.
+Class/type/global registries, lifted and other support allocation, function
+expressions, and remaining module-array/display-name scans must still move
+behind structural authorities before R1 can close.
 
 ### R1a validation evidence
 
