@@ -2000,6 +2000,14 @@ function planIrOverlay(
       trackFallbacks: collectFallbacks,
       jsHostExterns,
       dynMemberReadBuildable,
+      // #2952 slice 5 — for-in currently owns only the non-fast dynamic
+      // carrier, which is already externref and can feed the shared
+      // enumeration helpers without a representation conversion.
+      isDynamicForInReceiver: (receiver) => {
+        if (ctx.fast) return false;
+        const fact = ctx.oracle.typeFactOf(receiver);
+        return fact.kind === "any" || fact.kind === "unknown";
+      },
       resolveHostGlobal: makeIrHostGlobalResolver(ast.checker),
       ...(resolveHostVoidCallback ? { hostVoidCallbacks: resolveHostVoidCallback } : {}),
       ...(resolveAmbientClassCall ? { ambientClassCalls: resolveAmbientClassCall } : {}),
