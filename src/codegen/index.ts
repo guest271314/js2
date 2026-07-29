@@ -1870,6 +1870,14 @@ function makeIrImplicitParamTypeResolver(
     const inferred = inferImplicitAnyParamType(ctx, declaration.name.text, parameterIndex, sourceFile, declaration);
     if (inferred?.kind === "f64") return "f64";
     if (inferred?.kind === "i32" && inferred.boolean === true) return "bool";
+    if (
+      inferred?.kind === "ref" &&
+      ctx.nativeStrings &&
+      ctx.anyStrTypeIdx >= 0 &&
+      inferred.typeIdx === ctx.anyStrTypeIdx
+    ) {
+      return "string";
+    }
     return undefined;
   };
 }
@@ -1884,6 +1892,7 @@ function resolveIrOverrideParamType(
   const projected = resolveImplicitParamType(parameter);
   if (projected === "f64") return irVal({ kind: "f64" });
   if (projected === "bool") return irVal({ kind: "i32", boolean: true });
+  if (projected === "string") return { kind: "string" };
   return resolvePositionType(effectiveIrParamTypeNode(parameter), mapped, ctx, classShapes);
 }
 

@@ -534,7 +534,7 @@ export function planIrCompilationByIdentity(
       .map(([name]) => name),
   );
   const { recursiveTypeEvidence: _recursiveTypeEvidence, ...runtimeOptions } = options;
-  configureIrStructuralSelectorPredicates(runtimeOptions, uniqueClasses, uniqueFunctions, asyncNames);
+  configureIrStructuralSelectorPredicates(sourceFile, runtimeOptions, uniqueClasses, uniqueFunctions, asyncNames);
 
   const trackFallbacks = options.trackFallbacks === true;
   const reasons = new Map<IrUnitId, IrFallbackReason>();

@@ -24,7 +24,7 @@ loc-budget-allow:
   - src/codegen/any-helpers.ts
 func-budget-allow:
   - src/codegen/index.ts::planIrOverlay
-branch: codex/2949-acorn-dynamic-ops
+branch: codex/2949-acorn-direct-member-equality
 ---
 
 # #2949 — the IR's type system is Wasm types, not JS types
@@ -1912,6 +1912,36 @@ Dynamic member reads used directly by equality remain pre-claim fallbacks.
 Array callbacks pass their `obj` argument in a direct array carrier, while the
 current dynamic member helper expects boxed-any input; claiming that seam made
 `obj.length === n` return the wrong result.
+
+## Implementation Notes — direct-only dynamic member equality (2026-07-29)
+
+The callback-carrier restriction is now narrowed to the functions that need it.
+The selector performs a source-wide reference scan for each top-level function:
+only declaration names and direct identifier calls are accepted. Any value use,
+including passing a named function to an array HOF, keeps dynamic member
+equality on the direct path.
+
+Functions used only through their declared ABI can reuse the existing
+`dyn.member_get` plus dynamic equality lowering. This admits the exact
+runtime-dynamic Acorn `checkKeyName` helper without changing the member reader,
+boxing model, or any direct-backend file owned by draft PR #3796. The focused
+runtime test covers both Acorn key shapes and pins the named-callback refusal.
+
+The exact unchanged #3796 compile/outcome driver moves from 15 to **16 emitted
+functions out of 43**, with zero ABI/lowering withdrawals. The final parity
+step projects the direct declaration pass's inferred native-string parameter
+into both selector and IR override types; scalar projected parameters are
+accepted as boxable dynamic-equality operands. Without that shared projection,
+selection succeeded but `checkKeyName` withdrew on a string-vs-dynamic
+`typeIdx` mismatch.
+
+Validation for this slice:
+
+- exact #3796 driver: 16/43 emitted, zero post-claim withdrawals;
+- focused dynamic-member/operator/callback suites: 30/30 pass;
+- equivalence matrix: 8/8 shards, zero new regressions;
+- typecheck, fallback/adoption/oracle, LOC, function-budget, and linear-IR
+  gates pass.
 
 Focused whole-compiler tests execute these paths in standalone and assert real
 IR emission plus zero post-claim failures. The exact #3796 driver remains the

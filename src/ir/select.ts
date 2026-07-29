@@ -648,7 +648,7 @@ export function planIrCompilation(
   for (const stmt of sourceFile.statements) {
     if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body) declByName.set(stmt.name.text, stmt);
   }
-  currentDynScanDecls = declByName;
+  configureDynamicScanSource(sourceFile, declByName);
   for (const stmt of sourceFile.statements) {
     if (!ts.isFunctionDeclaration(stmt)) continue;
     // Ambient declarations and overload signatures have no executable body
@@ -1151,9 +1151,17 @@ let currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "
 
 // #3053 U2 current-run capability for dynamic member reads; sound-default true.
 let currentDynMemberReadBuildable = true;
+// #2949 S5.P follow-up — dynamic member reads used by equality require the
+// canonical boxed-any parameter ABI. A top-level function is eligible only
+// when every source reference to it is a direct identifier call; value uses
+// (notably named Array HOF callbacks) can enter through a legacy direct carrier.
+let currentDirectOnlyDynMemberEqualityFunctions: ReadonlySet<ts.FunctionDeclaration> = new Set();
+let currentSubjectAllowsDynMemberEquality = false;
+let currentDynEqualityBoxableParamNames = new Set<string>();
 
 /** @internal Configure the shared predicates for an exact structural selector run. */
 export function configureIrStructuralSelectorPredicates(
+  sourceFile: ts.SourceFile,
   options: IrSelectionOptions | undefined,
   localClassDeclarations: ReadonlyMap<string, ts.ClassDeclaration>,
   functionDeclarations: ReadonlyMap<string, ts.FunctionDeclaration>,
@@ -1161,7 +1169,7 @@ export function configureIrStructuralSelectorPredicates(
 ): void {
   currentSelectionOptions = options;
   currentLocalClassDeclarations = localClassDeclarations;
-  currentDynScanDecls = functionDeclarations;
+  configureDynamicScanSource(sourceFile, functionDeclarations);
   currentAsyncDeclNames = asyncDeclarationNames;
   currentHostGlobalResolver =
     options?.resolveHostGlobal && hostExternCapability(options.jsHostExterns === true) !== "defer"
@@ -1169,6 +1177,79 @@ export function configureIrStructuralSelectorPredicates(
       : null;
   currentModuleBindingResolver = options?.resolveModuleBinding ?? null;
   currentDynMemberReadBuildable = options?.dynMemberReadBuildable ?? true;
+}
+
+function identifierIsValueReference(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (!parent) return true;
+  if (
+    (ts.isVariableDeclaration(parent) ||
+      ts.isParameter(parent) ||
+      ts.isBindingElement(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isClassDeclaration(parent) ||
+      ts.isClassExpression(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      ts.isPropertySignature(parent) ||
+      ts.isMethodSignature(parent)) &&
+    parent.name === node
+  ) {
+    return false;
+  }
+  if (
+    (ts.isPropertyAccessExpression(parent) ||
+      ts.isPropertyAssignment(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent)) &&
+    parent.name === node
+  ) {
+    return false;
+  }
+  if (ts.isLabeledStatement(parent) && parent.label === node) return false;
+  if ((ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) && parent.label === node) return false;
+  return true;
+}
+
+function collectDirectOnlyFunctionDeclarations(
+  sourceFile: ts.SourceFile,
+  declarations: ReadonlyMap<string, ts.FunctionDeclaration>,
+): ReadonlySet<ts.FunctionDeclaration> {
+  const valueUsed = new Set<ts.FunctionDeclaration>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) {
+      const declaration = declarations.get(node.text);
+      if (declaration && node !== declaration.name && identifierIsValueReference(node)) {
+        const directCall = ts.isCallExpression(node.parent) && node.parent.expression === node;
+        if (!directCall) valueUsed.add(declaration);
+      }
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return new Set([...declarations.values()].filter((declaration) => !valueUsed.has(declaration)));
+}
+
+function configureDynamicScanSource(
+  sourceFile: ts.SourceFile,
+  declarations: ReadonlyMap<string, ts.FunctionDeclaration>,
+): void {
+  currentDynScanDecls = declarations;
+  currentDirectOnlyDynMemberEqualityFunctions = collectDirectOnlyFunctionDeclarations(sourceFile, declarations);
+}
+
+function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean): void {
+  currentSubjectIsModuleInit = false;
+  currentSubjectAllowsDynMemberEquality =
+    !isMethod && ts.isFunctionDeclaration(fn) && currentDirectOnlyDynMemberEqualityFunctions.has(fn);
+  currentDynEqualityBoxableParamNames = new Set<string>();
+}
+
+function recordDynamicParamKind(name: string, kind: ResolvedKind, dynamicNames: Set<string>): void {
+  if (kind === "dynamic") dynamicNames.add(name);
+  else if (kind === "f64" || kind === "bool" || kind === "string") currentDynEqualityBoxableParamNames.add(name);
 }
 
 /** Collect direct identifier mutations in one function body. */
@@ -1203,7 +1284,7 @@ function whyNotIrClaimable(
   localClasses: ReadonlySet<string>,
   isMethod: boolean = false,
 ): IrFallbackReason | null {
-  currentSubjectIsModuleInit = false;
+  prepareDynamicEqualitySubject(fn, isMethod);
   currentModuleMapGetAliases = new Set<ts.VariableDeclaration>();
   currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "boolean">();
   typedShapeRejectReason = null;
@@ -1390,7 +1471,7 @@ function whyNotIrClaimable(
       return "body-shape-rejected";
     }
     // #2949 slice 2 — collect dynamic-typed param names for the move-only scan.
-    if (paramResolved === "dynamic") dynNames.add(p.name.text);
+    recordDynamicParamKind(p.name.text, paramResolved, dynNames);
 
     const paramType = effectiveIrParamTypeNode(p);
     clearProjectionBinding(p.name.text);
@@ -1920,6 +2001,23 @@ function subtreeTouchesDynamic(root: ts.Node, dynNames: ReadonlySet<string>): bo
   return found;
 }
 
+function dynamicMemberEqualityOperandIsBuildable(candidate: ts.Expression): boolean {
+  const isMember = ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate);
+  return !isMember || currentSubjectAllowsDynMemberEquality;
+}
+
+function concreteDynamicEqualityOperandIsBuildable(candidate: ts.Expression): boolean {
+  return (
+    ts.isNumericLiteral(candidate) ||
+    ts.isStringLiteralLike(candidate) ||
+    candidate.kind === ts.SyntaxKind.TrueKeyword ||
+    candidate.kind === ts.SyntaxKind.FalseKeyword ||
+    candidate.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(candidate) &&
+      (candidate.text === "undefined" || currentDynEqualityBoxableParamNames.has(candidate.text)))
+  );
+}
+
 /**
  * #2949 slice 2 — verify every use of a dynamic value in `fn`'s body is a
  * MOVE the from-ast builder can lower withOUT box/unbox/tag.test (which land
@@ -2054,23 +2152,18 @@ function dynamicUsesAreMoveOnly(
               // Dynamic member reads are not yet safe at callback boundaries:
               // legacy array methods pass their `obj` argument in the direct
               // array carrier, while __dyn_member_get expects boxed-any input.
-              // Keep `obj.length === n` pre-claim until that carrier seam is
-              // unified; direct dynamic params remain claimable.
-              if (ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate)) return false;
+              // Keep value-used functions (including named HOF callbacks)
+              // pre-claim until that carrier seam is unified. A function whose
+              // source references are all direct calls receives the canonical
+              // declared ABI and can safely use the existing member producer.
+              if (!dynamicMemberEqualityOperandIsBuildable(candidate)) return false;
               return scanExpr(candidate, true);
             }
             const concrete = unwrap(operand);
-            if (
-              ts.isNumericLiteral(concrete) ||
-              ts.isStringLiteralLike(concrete) ||
-              concrete.kind === ts.SyntaxKind.TrueKeyword ||
-              concrete.kind === ts.SyntaxKind.FalseKeyword ||
-              concrete.kind === ts.SyntaxKind.NullKeyword ||
-              (ts.isIdentifier(concrete) && concrete.text === "undefined")
-            ) {
-              return scanExpr(concrete, false);
-            }
-            return false;
+            // A scalar parameter projected from the direct declaration ABI is
+            // just as boxable as a literal: from-ast has its exact f64/bool/
+            // string IrType and emits the canonical box before dyn.eq.
+            return concreteDynamicEqualityOperandIsBuildable(concrete) && scanExpr(concrete, false);
           };
           return scanEqualityOperand(e.left, leftIsDyn) && scanEqualityOperand(e.right, rightIsDyn);
         }
