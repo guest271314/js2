@@ -62,6 +62,7 @@ import { emitLazyClassObjectGet } from "./expressions/extern.js";
 import { compilePostfixUnary, compilePrefixUnary } from "./expressions/unary.js";
 
 import { compileCallExpression } from "./expressions/calls.js";
+import { isForeignEvalNode } from "./expressions/eval-source.js";
 
 import { compileClassExpression, compileNewExpression } from "./expressions/new-super.js";
 import { emitNewTargetClassId } from "./new-target.js"; // (#2023)
@@ -159,11 +160,10 @@ export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./
 
 // ── Dispatcher helpers (used only within this file) ────────────────────
 
-/**
- * Check if a call expression targets an async function/method.
- * Used to determine whether the result needs Promise.resolve() wrapping (#919).
- */
+/** Check whether a call needs Promise.resolve() wrapping (#919). */
 function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): boolean {
+  // Foreign eval calls have no checker signatures and are always synchronous.
+  if (isForeignEvalNode(expr)) return false;
   // (#2903) `.finally(...)` nodes lowered to the NATIVE §27.2.5.3 machinery
   // already return a `$Promise` — the fulfilled-wrap would double-wrap (and
   // its try/catch_all would null a rejection reason). The per-node marker is
