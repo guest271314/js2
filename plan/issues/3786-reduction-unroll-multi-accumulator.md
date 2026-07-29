@@ -1,7 +1,8 @@
 ---
 id: 3786
 title: "beat V8 on `loop.ts`: an i32-wrapping reduction is latency-bound on its accumulator chain — unroll with k independent partial sums (measured 192.1 µs, 1.92x FASTER than JS, vs 451.4 µs / 1.22x slower today)"
-status: ready
+status: done
+completed: 2026-07-29
 sprint: current
 created: 2026-07-29
 updated: 2026-07-29
@@ -15,6 +16,15 @@ language_feature: loops
 goal: performance
 depends_on: []
 related: [3739, 3741, 3758, 3777, 3785]
+# `from-ast.ts` +53: `literalCounterEntry` (the counter's compile-time entry
+# value AND the slot the init wrote it to) plus the guarded call site in
+# `lowerForStatement`. Both must live here — the helper reads `cx.scope` after
+# the init has lowered, and the call site sits between buffer collection and
+# `emitForLoop`, which is the only point where cond/body/update exist separately
+# and are already typed i32. The transform itself (211 lines) is in the new pure
+# module `src/ir/reduction-unroll.ts`, not in the god-file.
+loc-budget-allow:
+  - src/ir/from-ast.ts
 ---
 
 # #3786 — the accumulator chain is the wall, not the instruction count

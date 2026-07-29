@@ -125,8 +125,14 @@ describe("#3741 — i32 slot promotion (shape)", () => {
     const bodyA = funcBody(a.wat, "run");
     const bodyB = funcBody(b.wat, "run");
 
-    // Three i32 slots either way: the accumulator plus both counters.
-    expect([...bodyA.matchAll(/\(local \$\$slot_\w+ i32\)/g)]).toHaveLength(3);
+    // Three SOURCE-level i32 slots either way: the accumulator plus both
+    // counters. (#3786) `__ru_*` slots are excluded — the reduction unroller
+    // adds its own partial accumulators to these loops, and this assertion is
+    // about which of the PROGRAM's bindings got promoted, not about the total
+    // local count, which any later optimization is free to change.
+    const sourceSlots = (w: string) =>
+      [...w.matchAll(/\(local \$\$slot_(\w+) i32\)/g)].filter((m) => !m[1].startsWith("__ru_"));
+    expect(sourceSlots(bodyA)).toHaveLength(3);
     expect(bodyA).not.toMatch(/\(local \$\$slot_\w+ f64\)/);
     // Same instruction mix as the alpha-renamed program — the ONLY difference
     // between the two sources is the second counter's name.

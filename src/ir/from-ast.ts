@@ -6685,10 +6685,7 @@ function detectCountedLoopSafeIndex(stmt: ts.ForStatement): string | null {
  * `tryEmitUnrolledReduction` refuse `for (let j = 0; i < N; i++)`, where the
  * init's literal says nothing about the counter the condition actually tests.
  */
-function literalCounterEntry(
-  stmt: ts.ForStatement,
-  cx: LowerCtx,
-): { value: number; slotIndex: number } | null {
+function literalCounterEntry(stmt: ts.ForStatement, cx: LowerCtx): { value: number; slotIndex: number } | null {
   const init = stmt.initializer;
   if (!init || !ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return null;
   const decl = init.declarations[0];

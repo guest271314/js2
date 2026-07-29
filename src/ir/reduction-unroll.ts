@@ -92,10 +92,7 @@ interface ReducibleLoop {
  * `condValue` must be the compare's result: if the buffer computes something
  * else and merely happens to contain a compare, this is not the loop's test.
  */
-function matchCond(
-  cond: readonly IrInstr[],
-  condValue: IrValueId,
-): { counterSlot: number; bound: number } | null {
+function matchCond(cond: readonly IrInstr[], condValue: IrValueId): { counterSlot: number; bound: number } | null {
   if (cond.length !== 3) return null;
   const [read, konst, cmp] = cond;
   if (read.kind !== "slot.read") return null;
@@ -246,10 +243,7 @@ export function tryEmitUnrolledReduction(args: {
     const base = builder.emitSlotRead(loop.counterSlot);
     for (let j = 0; j < UNROLL_WIDTH; j++) {
       const addend = j === 0 ? base : builder.emitBinary("i32.add", base, i32c(j), I32);
-      builder.emitSlotWrite(
-        partials[j],
-        builder.emitBinary("i32.add", builder.emitSlotRead(partials[j]), addend, I32),
-      );
+      builder.emitSlotWrite(partials[j], builder.emitBinary("i32.add", builder.emitSlotRead(partials[j]), addend, I32));
     }
     // Advance the source counter by k so it stays the loop's real induction
     // variable, and the remainder below just continues from where this left off.
@@ -260,10 +254,7 @@ export function tryEmitUnrolledReduction(args: {
   });
 
   const unrolledUpdate = builder.collectBodyInstrs(() => {
-    builder.emitSlotWrite(
-      tripSlot,
-      builder.emitBinary("i32.add", builder.emitSlotRead(tripSlot), i32c(1), I32),
-    );
+    builder.emitSlotWrite(tripSlot, builder.emitBinary("i32.add", builder.emitSlotRead(tripSlot), i32c(1), I32));
   });
 
   builder.emitForLoop({
@@ -286,12 +277,7 @@ export function tryEmitUnrolledReduction(args: {
   for (let r = 0; r < remainder; r++) {
     builder.emitSlotWrite(
       loop.accSlot,
-      builder.emitBinary(
-        "i32.add",
-        builder.emitSlotRead(loop.accSlot),
-        builder.emitSlotRead(loop.counterSlot),
-        I32,
-      ),
+      builder.emitBinary("i32.add", builder.emitSlotRead(loop.accSlot), builder.emitSlotRead(loop.counterSlot), I32),
     );
     builder.emitSlotWrite(
       loop.counterSlot,
