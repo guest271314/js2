@@ -297,6 +297,9 @@ describe("#2856 exact Promise timer delay IR slice", () => {
     expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
     expect(result.irCompiledFuncs ?? []).not.toContain("delay");
     expect(result.irCompiledFuncs ?? []).toContain("independent");
+    if (_label === "shadowed setTimeout") {
+      expect(result.irCompiledFuncs ?? []).toContain("setTimeout");
+    }
     expect(result.irPostClaimErrors ?? []).toEqual([]);
   });
 
