@@ -37,11 +37,13 @@ import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; 
 import { getOrRegisterPromiseType, isStandalonePromiseActive } from "../codegen/async-scheduler.js";
 import {
   addGeneratorImports,
+  addForInImports,
   addIteratorImports,
   addStringImports,
   addUnionImports, // (#2949 slice 3) host-mode dynamic op imports (__box_number/__typeof_* family)
   TYPED_ARRAY_NAMES,
 } from "../codegen/index.js";
+import { ensureObjectRuntime } from "../codegen/object-runtime.js";
 import { boxToAny } from "../codegen/value-tags.js"; // (#2949 slice 3) THE canonical boxing entry point (D4)
 // (#2949 S5.1) THE canonical ToBoolean engine — one truthiness path for legacy and IR (D4).
 import {
@@ -1613,7 +1615,7 @@ export function compileIrPathFunctions(
     return finishReport();
   }
   if (!runGlobalPreparation(() => preregisterExceptionSupport(ctx, healthyForLower))) return finishReport();
-  if (!runGlobalPreparation(() => preregisterDynamicSupport(ctx, healthyForLower))) return finishReport();
+  if (!runGlobalPreparation(() => preregisterDynamicAndForInSupport(ctx, healthyForLower))) return finishReport();
   if (
     !runGlobalPreparation(() => {
       const pending = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
@@ -3023,6 +3025,24 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
     stringForOfPlan(): "char-loop" | "iter-host" {
       return ctx.nativeStrings ? "char-loop" : "iter-host";
     },
+    // #2952 slice 5 — the source-independent enumeration ABI. Host mode
+    // supplies imports; standalone/WASI supplies the #2964 native object
+    // runtime. Both variants snapshot keys and perform per-visit liveness.
+    dynamicForInPlan() {
+      return ctx.standalone || ctx.wasi
+        ? {
+            keys: "__object_keys_forin",
+            len: "__extern_length",
+            get: "__extern_get_idx",
+            has: "__extern_has",
+          }
+        : {
+            keys: "__for_in_keys",
+            len: "__for_in_len",
+            get: "__for_in_get",
+            has: "__for_in_has",
+          };
+    },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
     // (assignment.ts): symbol name of the receiver's TS type against the
@@ -3962,6 +3982,43 @@ function preregisterNativeStringHelpers(ctx: CodegenContext, fns: readonly Built
       }
     }
   }
+}
+
+/**
+ * #2952 slice 5 — register the mode-specific dynamic for-in runtime before
+ * Phase 3 resolves symbolic calls. Host imports can shift defined function
+ * indices, while the standalone object runtime appends a family of defined
+ * helpers; both operations therefore belong at this preparation boundary.
+ */
+function preregisterForInSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  let used = false;
+  for (const entry of fns) {
+    for (const block of entry.fn.blocks) {
+      for (const root of block.instrs) {
+        forEachInstrDeep(root, (instr) => {
+          if (
+            instr.kind === "call" &&
+            instr.target.binding.kind === "runtime" &&
+            (instr.target.binding.symbol === "__for_in_keys" || instr.target.binding.symbol === "__object_keys_forin")
+          ) {
+            used = true;
+          }
+        });
+      }
+    }
+    if (used) break;
+  }
+  if (!used) return;
+  if (ctx.standalone || ctx.wasi) {
+    ensureObjectRuntime(ctx);
+  } else {
+    addForInImports(ctx);
+  }
+}
+
+function preregisterDynamicAndForInSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  preregisterForInSupport(ctx, fns);
+  preregisterDynamicSupport(ctx, fns);
 }
 
 /**
