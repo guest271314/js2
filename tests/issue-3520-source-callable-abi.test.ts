@@ -1,13 +1,15 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { analyzeMultiSource, analyzeSource } from "../src/checker/index.js";
 import { generateModule, generateMultiModule } from "../src/codegen/index.js";
 import { compile, compileMulti, type CompileResult } from "../src/index.js";
-import { irUnitCallableBindingId } from "../src/ir/callable-bindings.js";
+import { irSupportGlobalRef } from "../src/ir/abi-bindings.js";
+import { irSupportFuncRef, irUnitCallableBindingId } from "../src/ir/callable-bindings.js";
 import { buildIrUnitInventory, type IrUnitInventory, type IrUnitRecord } from "../src/ir/identity.js";
 import type { ProgramAbiPlanEntry } from "../src/ir/program-abi.js";
+import { ProgramAbiSession } from "../src/codegen/program-abi-session.js";
 import { buildImports, instantiateWasm } from "../src/runtime.js";
 
 // Register the codegen expression/statement delegates used by generateModule.
@@ -213,6 +215,65 @@ describe("#3520 source callable Program ABI ownership", () => {
     expect((exports.run as (value: number) => number)(7)).toBe(22);
   });
 
+  it("owns an admitted typed-this twin as support beneath its exact function expression", async () => {
+    const source = `
+      var P = function P(n) { this.pos = n; this.acc = 0; };
+      var pp = P.prototype;
+      pp.step = function (k) {
+        this.pos = this.pos + k;
+        return this.pos;
+      };
+      var p = new P(3);
+      export function test(): number { return p.step(4); }
+    `;
+    const ast = analyzeSource(source, "source-callable-typed-this-twin.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const expression = exactUnit(inventory, "function-expression", "<anonymous-function>");
+
+    const publish = vi.spyOn(ProgramAbiSession.prototype, "publish");
+    const runtime = await compile(source, {
+      fileName: "source-callable-typed-this-twin.ts",
+      experimentalIR: true,
+      target: "standalone",
+      skipSemanticDiagnostics: true,
+    });
+    const publication = publish.mock.instances.at(-1)?.publication;
+    publish.mockRestore();
+    expect(runtime.success, runtime.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(runtime.wat).toMatch(/__typed_this/);
+    expect(publication).toBeDefined();
+
+    const bodyBindingId = irUnitCallableBindingId(expression.id);
+    const twinRef = irSupportFuncRef(expression.id, "typed-this-twin", "diagnostic-name-is-not-identity");
+    if (twinRef.binding.kind !== "support") throw new Error("missing typed-this support reference");
+    const twinBindingId = twinRef.binding.bindingId;
+    const entries = publication!.abi.entries();
+    const body = requiredCallable(entries, bodyBindingId);
+    expect(body.intent).toMatchObject({ kind: "callable", origin: "source", unitId: expression.id });
+    expect(entries.find((entry) => entry.id === twinBindingId)).toMatchObject({
+      id: twinBindingId,
+      displayName: expect.stringMatching(/__typed_this$/),
+      slotPolicy: "required",
+      slotSpace: "function",
+      intent: {
+        kind: "callable",
+        origin: "support",
+        unitId: expression.id,
+      },
+    });
+    const bodySlot = publication!.abi.resolveFinalIndex(bodyBindingId);
+    const twinSlot = publication!.abi.resolveFinalIndex(twinBindingId);
+    expect(bodySlot).toEqual(expect.objectContaining({ space: "function" }));
+    expect(twinSlot).toEqual(expect.objectContaining({ space: "function" }));
+    expect(twinSlot).not.toEqual(bodySlot);
+
+    const exports = await instantiate(runtime);
+    expect((exports.test as () => number)()).toBe(7);
+  });
+
   it("owns a retained direct host-callback body by its exact arrow unit", () => {
     const source = `
       export function install(target: EventTarget, sink: HTMLElement): void {
@@ -355,6 +416,96 @@ describe("#3520 source callable Program ABI ownership", () => {
     });
     const exports = await instantiate(runtime);
     expect((exports.run as (value: number) => number)(7)).toBe(30);
+  });
+
+  it("owns direct function-value trampolines and preserves their cache strategy", async () => {
+    const source = `
+      export function captureFree(value: number): number {
+        function increment(input: number): number { return input + 1; }
+        const first = increment;
+        const second = increment;
+        return first === second ? first(value) : -100;
+      }
+      export function capturing(value: number): number {
+        let bias = 3;
+        function addBias(input: number): number { return input + bias; }
+        const first = addBias;
+        const second = addBias;
+        return first === second ? second(value) : -100;
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-function-values.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const captureFree = exactUnit(inventory, "nested-function", "increment");
+    const capturing = exactUnit(inventory, "nested-function", "addBias");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+    const publication = generated.programAbi!;
+    const entries = publication.abi.entries();
+
+    const captureFreeTrampoline = irSupportFuncRef(
+      captureFree.id,
+      "function-value-trampoline",
+      "diagnostic-capture-free-trampoline",
+    );
+    const capturingTrampoline = irSupportFuncRef(
+      capturing.id,
+      "function-value-trampoline",
+      "diagnostic-capturing-trampoline",
+    );
+    for (const [unit, ref] of [
+      [captureFree, captureFreeTrampoline],
+      [capturing, capturingTrampoline],
+    ] as const) {
+      const entry = entries.find((candidate) => candidate.id === ref.binding.bindingId);
+      expect(entry).toMatchObject({
+        id: ref.binding.bindingId,
+        slotPolicy: "required",
+        slotSpace: "function",
+        intent: {
+          kind: "callable",
+          origin: "support",
+          unitId: unit.id,
+        },
+      });
+      expect(publication.abi.resolveFinalIndex(ref.binding.bindingId)).toEqual(
+        expect.objectContaining({ space: "function" }),
+      );
+    }
+
+    const cache = irSupportGlobalRef(captureFree.id, "function-value-cache", "diagnostic-capture-free-cache");
+    expect(entries.find((candidate) => candidate.id === cache.binding.bindingId)).toMatchObject({
+      id: cache.binding.bindingId,
+      displayName: "__fn_closure_increment",
+      slotPolicy: "required",
+      slotSpace: "global",
+      intent: {
+        kind: "global",
+        origin: "support",
+        mutable: true,
+      },
+    });
+    expect(publication.abi.resolveFinalIndex(cache.binding.bindingId)).toEqual(
+      expect.objectContaining({ space: "global" }),
+    );
+    const capturingCache = irSupportGlobalRef(capturing.id, "function-value-cache", "diagnostic-capturing-cache");
+    expect(entries.some((candidate) => candidate.id === capturingCache.binding.bindingId)).toBe(false);
+
+    const runtime = await compile(source, {
+      fileName: "source-callable-function-values.ts",
+      experimentalIR: true,
+    });
+    const exports = await instantiate(runtime);
+    expect((exports.captureFree as (value: number) => number)(7)).toBe(8);
+    expect((exports.capturing as (value: number) => number)(7)).toBe(10);
   });
 
   it("keeps eager class-order reservations on the nested declaration's exact slot", async () => {

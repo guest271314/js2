@@ -5,9 +5,9 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c27-nested-function-abi
-pr: 3797
-last_merged_pr: 3792
+branch: codex/3520-c29-function-value-abi
+pr: 3799
+last_merged_pr: 3798
 sprint: current
 created: 2026-07-21
 updated: 2026-07-29
@@ -110,6 +110,8 @@ files:
   - src/codegen/ir-overlay-outcomes.ts
   - src/codegen/ir-overlay-safety.ts
   - src/codegen/closures.ts
+  - src/codegen/closures/funcref-as-closure.ts
+  - src/codegen/closures/method-trampolines.ts
   - src/codegen/index.ts
   - src/codegen/stdlib-selfhost.ts
   - docs/ir/ir-contract.md
@@ -2497,6 +2499,82 @@ C27 closes exact retained ownership for nested function declarations, not R1.
 Typed-`this` twins and other support callables, remaining class/type consumers,
 and module-array or display-name scans must still move behind structural
 authorities before R1 can close.
+
+### 2026-07-29 typed-this twin callable ownership continuation
+
+The continuation on `codex/3520-c28-typed-this-abi`
+([PR #3798](https://github.com/loopdive/js2/pull/3798)) gives every admitted
+typed-`this` twin its own structural Program ABI owner:
+
+- the original function-expression body keeps the callable binding derived
+  from its exact source `IrUnitId`, while the optimized twin receives a
+  separate `typed-this-twin` support binding anchored beneath that same unit;
+- twin observation happens atomically with allocator publication, and final
+  ownership is selected only after DCE. A removed twin creates no required ABI
+  slot, while a retained twin is resolved from its exact `WasmFunction` object
+  rather than its generated `__typed_this` label; and
+- admission, the second optimized compilation, receiver-param specialization,
+  numeric field/return/local promotion, arity padding, direct-call
+  devirtualization, guard-shim construction, and the generic fallback body are
+  unchanged.
+
+The production fixture proves the generic body and admitted twin finalize to
+two different function slots while the standalone program still returns the
+expected value. The focused source-callable and complete typed-`this`
+optimization matrix passes **103/103 across eight files**. Strict TypeScript
+and changed-file Biome lint pass. The hybrid IR-only readiness lane remains
+**READY** at **31 emitted / 6 typed Unsupported / 0 Invariants across 37
+terminal units**, with all 37 legacy bodies still emitted.
+
+C28 closes exact ownership for the typed-`this` twin family, not R1. Other
+support callables, remaining class/type consumers, and module-array or
+display-name scans must still move behind structural authorities before R1
+can close.
+
+### 2026-07-29 direct function-value ownership continuation
+
+The continuation on `codex/3520-c29-function-value-abi` moves retained direct
+function-value wrapper artifacts behind their source unit's Program ABI owner:
+
+- capture-free direct values keep the existing lazy module-global singleton.
+  The exact trampoline and cache `GlobalDef` are now observed as one pair and
+  published under `function-value-trampoline` and `function-value-cache`
+  bindings derived from the target declaration's `IrUnitId`;
+- capturing nested declarations keep their activation-local, first-dynamic-read
+  memoization. Their shared module trampoline receives the same unit-derived
+  callable owner, while no module cache binding is invented; and
+- an already prepared C8 singleton is reused only when its callable and global
+  locators are the exact retained allocator objects. Finalization does not
+  recompute its pre-DCE signature contract. Post-inventory helpers, imports,
+  class adapters, and synthetic-name collision fallbacks remain on generic
+  compatibility planning.
+
+The implementation does not change wrapper types, trampoline bodies,
+`ref.func` enrollment, pending signature rebuilding, constructibility,
+capture boxing, TDZ flags, closure identity, direct `call_ref` selection, or
+lazy cache instructions. The focused source-callable suite passes **13/13**,
+including runtime identity and calls for both capture-free and capturing
+nested declarations. The C8 production support-callable suite passes **2/2**,
+the function-value planner suite passes **10/10**, and the #2976 closure
+identity suite passes **4/4**. The #3270 closure-split control is **6/7** on
+both this branch and the exact landed C28 base; its existing IR-fallback
+diagnostic for a bare nested-function reference is unchanged.
+
+The required expected-green migration matrix passes **98/98 across 11 files**,
+and cross-backend differential validation passes **29/29**. The full
+equivalence gate reports **1,611 passing / 32 current failures / 36 known
+baseline failures**, with zero new regressions and four baseline failures now
+passing; the baseline is intentionally unchanged. Strict TypeScript, Biome
+lint, formatting, LOC, godfile, dead-export, oracle-ratchet, and IR-adoption
+gates pass. Hybrid IR-only readiness remains **READY** at **31 emitted / 6
+typed Unsupported / 0 Invariants across 37 terminal units**, with all 37
+legacy bodies still emitted. Neither the equivalence baseline nor the
+Test262 run log is changed.
+
+C29 closes exact retained ownership for direct source function-value
+trampolines and capture-free cache globals, not R1. Other support callable
+families, remaining class/type consumers, and module-array or display-name
+scans must still move behind structural authorities before R1 can close.
 
 ### R1a validation evidence
 
