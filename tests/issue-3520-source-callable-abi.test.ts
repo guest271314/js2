@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { analyzeMultiSource, analyzeSource } from "../src/checker/index.js";
 import { generateModule, generateMultiModule } from "../src/codegen/index.js";
 import { compile, compileMulti, type CompileResult } from "../src/index.js";
+import { irSupportGlobalRef } from "../src/ir/abi-bindings.js";
 import { irSupportFuncRef, irUnitCallableBindingId } from "../src/ir/callable-bindings.js";
 import { buildIrUnitInventory, type IrUnitInventory, type IrUnitRecord } from "../src/ir/identity.js";
 import type { ProgramAbiPlanEntry } from "../src/ir/program-abi.js";
@@ -415,6 +416,96 @@ describe("#3520 source callable Program ABI ownership", () => {
     });
     const exports = await instantiate(runtime);
     expect((exports.run as (value: number) => number)(7)).toBe(30);
+  });
+
+  it("owns direct function-value trampolines and preserves their cache strategy", async () => {
+    const source = `
+      export function captureFree(value: number): number {
+        function increment(input: number): number { return input + 1; }
+        const first = increment;
+        const second = increment;
+        return first === second ? first(value) : -100;
+      }
+      export function capturing(value: number): number {
+        let bias = 3;
+        function addBias(input: number): number { return input + bias; }
+        const first = addBias;
+        const second = addBias;
+        return first === second ? second(value) : -100;
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-function-values.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const captureFree = exactUnit(inventory, "nested-function", "increment");
+    const capturing = exactUnit(inventory, "nested-function", "addBias");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+    const publication = generated.programAbi!;
+    const entries = publication.abi.entries();
+
+    const captureFreeTrampoline = irSupportFuncRef(
+      captureFree.id,
+      "function-value-trampoline",
+      "diagnostic-capture-free-trampoline",
+    );
+    const capturingTrampoline = irSupportFuncRef(
+      capturing.id,
+      "function-value-trampoline",
+      "diagnostic-capturing-trampoline",
+    );
+    for (const [unit, ref] of [
+      [captureFree, captureFreeTrampoline],
+      [capturing, capturingTrampoline],
+    ] as const) {
+      const entry = entries.find((candidate) => candidate.id === ref.binding.bindingId);
+      expect(entry).toMatchObject({
+        id: ref.binding.bindingId,
+        slotPolicy: "required",
+        slotSpace: "function",
+        intent: {
+          kind: "callable",
+          origin: "support",
+          unitId: unit.id,
+        },
+      });
+      expect(publication.abi.resolveFinalIndex(ref.binding.bindingId)).toEqual(
+        expect.objectContaining({ space: "function" }),
+      );
+    }
+
+    const cache = irSupportGlobalRef(captureFree.id, "function-value-cache", "diagnostic-capture-free-cache");
+    expect(entries.find((candidate) => candidate.id === cache.binding.bindingId)).toMatchObject({
+      id: cache.binding.bindingId,
+      displayName: "__fn_closure_increment",
+      slotPolicy: "required",
+      slotSpace: "global",
+      intent: {
+        kind: "global",
+        origin: "support",
+        mutable: true,
+      },
+    });
+    expect(publication.abi.resolveFinalIndex(cache.binding.bindingId)).toEqual(
+      expect.objectContaining({ space: "global" }),
+    );
+    const capturingCache = irSupportGlobalRef(capturing.id, "function-value-cache", "diagnostic-capturing-cache");
+    expect(entries.some((candidate) => candidate.id === capturingCache.binding.bindingId)).toBe(false);
+
+    const runtime = await compile(source, {
+      fileName: "source-callable-function-values.ts",
+      experimentalIR: true,
+    });
+    const exports = await instantiate(runtime);
+    expect((exports.captureFree as (value: number) => number)(7)).toBe(8);
+    expect((exports.capturing as (value: number) => number)(7)).toBe(10);
   });
 
   it("keeps eager class-order reservations on the nested declaration's exact slot", async () => {
