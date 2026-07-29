@@ -345,7 +345,7 @@ import {
   resolveSameShapeFieldNameCollisions,
 } from "./struct-field-exports.js"; // (#3272) extracted verbatim
 import { analyzeBooleanPropertyNames, recoverBooleanStructFieldBrands } from "./struct-field-boolean-brand.js";
-import { analyzeNumericPropertyNames } from "./numeric-property-analysis.js"; // (#3683 S4a)
+import { applyNumericPropertyAnalysis } from "./numeric-property-analysis.js"; // (#3683 S4a)
 import { collectUserMethodNames } from "./user-method-names.js"; // (#3673)
 import {
   registerWasiImports,
@@ -2997,7 +2997,8 @@ export function generateModule(
   // `ctx.booleanPropertyNames` (assigned much later) so the exclusion is exact
   // without reordering an established pass.
   if (ctx.standalone) {
-    const propertyKinds = analyzeNumericPropertyNames(
+    applyNumericPropertyAnalysis(
+      ctx,
       {
         oracle: ctx.oracle,
         fnctorReceivers: new Set(ctx.fnctorEscapeGate.receiverStruct.keys()),
@@ -3005,14 +3006,6 @@ export function generateModule(
       },
       [ast.sourceFile],
     );
-    ctx.numericPropertyNames = propertyKinds.numeric;
-    // (#3753 S1) The string half of the same walk. A field every write proves a
-    // string gets a NATIVE STRING slot instead of the boxed `externref`, which
-    // deletes the per-access `ref.test` / `ref.cast` / `__str_flatten`.
-    ctx.stringPropertyNames = propertyKinds.string;
-    // (#3753 S2) Names the fixpoint proved return a number on every path, so
-    // `this.acc + this.nextCode()` can unbox once instead of boxing both sides.
-    ctx.numericFunctionNames = propertyKinds.numericFunctions;
   }
   // (#3057) Pre-scan for a dynamic `new <ctorVar>(buffer)` construct so the
   // runtime-kind element byte codec on the generic index path (`ta[i]` / `ta[i]=v`
