@@ -91,6 +91,28 @@ describe.each<Target>(["gc", "standalone"])("#3766 String receiver coercion (%s)
       ),
     ).toBe(1);
   });
+
+  it("falls through an object-returning toString to a numeric valueOf", async () => {
+    expect(
+      await run(
+        `
+          var value = {
+            toString: function () {
+              return new Object();
+            },
+            valueOf: function () {
+              return 1;
+            }
+          };
+          var observed = String(value);
+          export function test(): number {
+            return observed === "1" ? 1 : 0;
+          }
+        `,
+        target,
+      ),
+    ).toBe(1);
+  });
 });
 
 describe("#3762 merge-queue ToPrimitive regression controls", () => {
@@ -137,6 +159,15 @@ describe("#3762 merge-queue ToPrimitive regression controls", () => {
         resolve("test262/test/built-ins/String/S15.5.2.1_A1_T13.js"),
         "built-ins/String",
       );
+      expect(result.status, String(result.error ?? result.reason ?? "")).toBe("pass");
+    },
+    60_000,
+  );
+
+  it.runIf(existsSync(resolve("test262")))(
+    "falls through an object-returning toString to a numeric valueOf",
+    async () => {
+      const result = await runTest262File(resolve("test262/test/built-ins/String/S8.12.8_A2.js"), "built-ins/String");
       expect(result.status, String(result.error ?? result.reason ?? "")).toBe("pass");
     },
     60_000,

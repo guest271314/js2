@@ -286,7 +286,7 @@ function tryStructPrimitiveToStringAsExternref(
 }
 
 /**
- * Host-mode companion to {@link tryStructPrimitiveToStringAsExternref} for
+ * Companion to {@link tryStructPrimitiveToStringAsExternref} for
  * zero-argument object-literal closures whose Wasm result is `externref`.
  *
  * `externref` is only a carrier type: it can hold either a primitive string or
@@ -297,14 +297,13 @@ function tryStructPrimitiveToStringAsExternref(
  * `toString` to `valueOf`. Only primitive results reach the coercion engine's
  * canonical externref ToString provider.
  */
-function tryStructStringHintHostDispatch(
+function tryStructStringHintExternrefDispatch(
   ctx: CodegenContext,
   fctx: FunctionContext,
   from: ValType,
   typeIdx: number,
   name: string,
 ): boolean {
-  if (ctx.nativeStrings) return false;
   const fields = ctx.structFields.get(name);
   if (!fields) return false;
 
@@ -316,7 +315,13 @@ function tryStructStringHintHostDispatch(
     (info.returnType === null ||
       info.returnType === undefined ||
       info.returnType.kind === "externref" ||
-      info.returnType.kind === "ref_extern");
+      info.returnType.kind === "ref_extern" ||
+      info.returnType.kind === "ref" ||
+      info.returnType.kind === "ref_null" ||
+      info.returnType.kind === "anyref" ||
+      info.returnType.kind === "eqref" ||
+      info.returnType.kind === "f64" ||
+      info.returnType.kind === "i32");
   const candidates = (): { closureTypeIdx: number; info: ClosureInfo }[] =>
     (ctx.valueOfClosureTypes.get(name) ?? [])
       .map((closureTypeIdx) => ({ closureTypeIdx, info: ctx.closureInfoByTypeIdx.get(closureTypeIdx) }))
@@ -357,19 +362,58 @@ function tryStructStringHintHostDispatch(
   // Register every helper before freezing any function indices below. Each
   // late import can shift defined-function indices; resolving from funcMap only
   // after the final flush keeps the nested instruction arrays relocation-safe.
-  ensureLateImport(ctx, "__extern_is_object", [{ kind: "externref" }], [{ kind: "i32" }]);
+  addUnionImports(ctx);
+  if (!ctx.nativeStrings) {
+    ensureLateImport(ctx, "__extern_is_object", [{ kind: "externref" }], [{ kind: "i32" }]);
+  }
   ensureExternrefToStringProvider(ctx, fctx, "string");
   const throwTypeError = buildThrowJsErrorInstrs(ctx, "TypeError", "Cannot convert object to primitive value", {
     flush: fctx,
   });
   flushLateImportShifts(ctx, fctx);
-  const externIsObjectIdx = ctx.funcMap.get("__extern_is_object");
+  const externIsObjectIdx = ctx.nativeStrings
+    ? ctx.funcMap.get("__typeof_object")
+    : ctx.funcMap.get("__extern_is_object");
+  const externIsFunctionIdx = ctx.nativeStrings ? ctx.funcMap.get("__typeof_function") : undefined;
   const externToStringIdx = ensureExternrefToStringProvider(ctx, fctx, "string");
-  if (externIsObjectIdx === undefined || externToStringIdx === undefined) return false;
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  if (
+    externIsObjectIdx === undefined ||
+    (ctx.nativeStrings && externIsFunctionIdx === undefined) ||
+    externToStringIdx === undefined ||
+    boxNumberIdx === undefined ||
+    boxBooleanIdx === undefined
+  ) {
+    return false;
+  }
 
   addStringConstantGlobal(ctx, "undefined");
   const undefinedString = stringConstantExternrefInstrs(ctx, "undefined");
   const structLocal = allocLocal(fctx, `__primitive_host_struct_${fctx.locals.length}`, from);
+  const resultToExternref = (info: ClosureInfo): Instr[] => {
+    const resultType = info.returnType;
+    if (resultType === null || resultType === undefined) {
+      return undefinedString.map((instr) => ({ ...instr }));
+    }
+    if (
+      resultType.kind === "ref" ||
+      resultType.kind === "ref_null" ||
+      resultType.kind === "anyref" ||
+      resultType.kind === "eqref"
+    ) {
+      return [{ op: "extern.convert_any" }];
+    }
+    if (resultType.kind === "f64") {
+      return [{ op: "call", funcIdx: boxNumberIdx }];
+    }
+    if (resultType.kind === "i32") {
+      return resultType.boolean === true
+        ? [{ op: "call", funcIdx: boxBooleanIdx }]
+        : [{ op: "f64.convert_i32_s" }, { op: "call", funcIdx: boxNumberIdx }];
+    }
+    return [];
+  };
 
   const fieldDispatch = (fieldIdx: number): Instr[] | undefined => {
     const field = fields[fieldIdx];
@@ -400,9 +444,7 @@ function tryStructStringHintHostDispatch(
         },
         { op: "ref.as_non_null" },
         { op: "call_ref", typeIdx: info.funcTypeIdx },
-        ...(info.returnType === null || info.returnType === undefined
-          ? undefinedString.map((instr) => ({ ...instr }))
-          : []),
+        ...resultToExternref(info),
       ];
     }
 
@@ -432,25 +474,27 @@ function tryStructStringHintHostDispatch(
           then: [
             { op: "local.get", index: eqLocal },
             { op: "ref.cast", typeIdx: closureTypeIdx },
-            { op: "local.tee", index: closureLocal },
+            { op: "local.set", index: closureLocal },
             { op: "local.get", index: closureLocal },
             { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 },
-            { op: "local.tee", index: funcLocal },
+            { op: "local.set", index: funcLocal },
+            { op: "local.get", index: funcLocal },
             { op: "ref.test", typeIdx: info.funcTypeIdx },
             {
               op: "if",
-              blockType: { kind: "val", type: { kind: "ref_null", typeIdx: info.funcTypeIdx } },
+              blockType: { kind: "val", type: { kind: "externref" } },
               then: [
+                { op: "local.get", index: closureLocal },
                 { op: "local.get", index: funcLocal },
-                { op: "ref.cast_null", typeIdx: info.funcTypeIdx },
+                { op: "ref.cast", typeIdx: info.funcTypeIdx },
+                { op: "call_ref", typeIdx: info.funcTypeIdx },
+                ...resultToExternref(info),
               ],
-              else: [{ op: "ref.null", typeIdx: info.funcTypeIdx }],
+              // Closure wrapper structs can canonicalize to the same runtime
+              // type. A funcref-signature miss therefore means "try the next
+              // candidate", not "manufacture null and trap".
+              else: buildDispatch(candidateIdx + 1),
             },
-            { op: "ref.as_non_null" },
-            { op: "call_ref", typeIdx: info.funcTypeIdx },
-            ...(info.returnType === null || info.returnType === undefined
-              ? undefinedString.map((instr) => ({ ...instr }))
-              : []),
           ],
           else: buildDispatch(candidateIdx + 1),
         },
@@ -474,10 +518,29 @@ function tryStructStringHintHostDispatch(
 
   const primaryResult = allocLocal(fctx, `__primitive_host_result_${fctx.locals.length}`, { kind: "externref" });
   const secondaryResult = allocLocal(fctx, `__primitive_host_result_${fctx.locals.length}`, { kind: "externref" });
-  const isObjectLike = (resultLocal: number): Instr[] => [
-    { op: "local.get", index: resultLocal },
-    { op: "call", funcIdx: externIsObjectIdx },
-  ];
+  const isObjectLike = (resultLocal: number): Instr[] =>
+    ctx.nativeStrings
+      ? [
+          // `typeof null` is "object", but ECMA Type(null) is not Object.
+          { op: "local.get", index: resultLocal },
+          { op: "ref.is_null" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 0 }],
+            else: [
+              { op: "local.get", index: resultLocal },
+              { op: "call", funcIdx: externIsObjectIdx },
+              { op: "local.get", index: resultLocal },
+              { op: "call", funcIdx: externIsFunctionIdx! },
+              { op: "i32.or" },
+            ],
+          },
+        ]
+      : [
+          { op: "local.get", index: resultLocal },
+          { op: "call", funcIdx: externIsObjectIdx },
+        ];
   const stringify = (resultLocal: number): Instr[] => [
     { op: "local.get", index: resultLocal },
     { op: "call", funcIdx: externToStringIdx },
@@ -2468,7 +2531,7 @@ export function coerceType(
       }
       if (
         toPrimitiveHint === "string" &&
-        (tryStructStringHintHostDispatch(ctx, fctx, from, typeIdx, name) ||
+        (tryStructStringHintExternrefDispatch(ctx, fctx, from, typeIdx, name) ||
           tryStructPrimitiveToStringAsExternref(ctx, fctx, from, typeIdx, name))
       ) {
         return;
@@ -3386,6 +3449,14 @@ export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, fr
   // before any `ref.cast`/helper emission below references them.
   ensureAnyToStringHelper(ctx);
   if (ctx.anyStrTypeIdx < 0) return false;
+
+  // Reuse the full OrdinaryToPrimitive dispatcher so object-returning
+  // `toString` methods fall through to `valueOf` in standalone mode too.
+  if (tryStructStringHintExternrefDispatch(ctx, fctx, from, typeIdx, name)) {
+    fctx.body.push({ op: "any.convert_extern" });
+    fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx });
+    return true;
+  }
 
   // START-safe void-returning object-literal methods need the same dispatch in
   // native-string mode as the externref target above. The helper leaves the
