@@ -24,7 +24,7 @@ loc-budget-allow:
   - src/codegen/any-helpers.ts
 func-budget-allow:
   - src/codegen/index.ts::planIrOverlay
-branch: codex/2949-acorn-implicit-array-param
+branch: codex/2949-acorn-module-var-scalars
 ---
 
 # #2949 — the IR's type system is Wasm types, not JS types
@@ -2008,3 +2008,42 @@ Validation for this slice:
 - equivalence matrix: 8/8 shards, zero new regressions;
 - typecheck, lint, fallback/adoption/oracle, LOC, function-budget, harness
   compile-budget, and linear-IR gates pass.
+
+## Implementation Notes — unique module `var` scalars (2026-07-30)
+
+Acorn's `functionFlags(async, generator)` now emits through IR. Its scope-bit
+constants are unique top-level `var` declarations rather than lexical
+bindings. The module-binding resolver now admits exactly numeric and boolean
+`var` declarations in ES modules when the checker resolves one non-merged,
+non-repeated declaration. Reads and writes reuse the existing allocator-owned
+legacy module global; scripts, repeated declarations, and non-scalar values
+remain outside this capability.
+
+The helper's implicit boolean parameters are used only as ternary conditions.
+That use is now eligible for the same direct-declaration inference projection
+used by the callable ABI. Standalone caller closure is relaxed for an
+all-boolean projected parameter set, while the existing indexed-carrier
+exemption remains unchanged. The patch-time ABI guard still owns final parity.
+
+The unchanged #3796 runtime-dynamic compile/outcome driver moves from 17 to
+**18 emitted functions out of 43**, with `functionFlags` added and zero
+post-claim withdrawals. The terminal blocker census becomes:
+
+- 14 body-shape rejections;
+- 3 parameter-type rejections;
+- 3 logical-value rejections;
+- 2 RegExp-constructor rejections;
+- 2 call-graph closures;
+- 1 constructor-resolution rejection.
+
+The slice does not touch the direct-backend files owned by draft PR #3796.
+
+Validation for this slice:
+
+- exact #3796 driver: 18/43 emitted, zero post-claim withdrawals;
+- focused module-var and prior #2949/ABI guards: 29/29 pass;
+- module-binding matrix: 53 pass, with the same 2 stale assertions reproduced
+  on current main;
+- equivalence matrix: 8/8 shards, zero new regressions;
+- typecheck, fallback/adoption/oracle, linear-IR, LOC, function-budget, and
+  harness compile-budget gates pass.
