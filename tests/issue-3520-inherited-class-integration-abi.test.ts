@@ -21,7 +21,7 @@ function classId(inventory: IrUnitInventory, name: string): IrClassId {
 }
 
 describe("#3520 production inherited class integration ABI", () => {
-  it("resolves an inherited child alias after every physical name is unavailable", () => {
+  it("resolves inherited callables and layouts after every physical name is unavailable", () => {
     const ast = analyzeSource(
       `
         class A {
@@ -117,6 +117,10 @@ describe("#3520 production inherited class integration ABI", () => {
     }
     for (const alias of exactAliases) {
       expect([...ctx.funcMap.values()]).not.toContain(alias.handle);
+    }
+    for (const className of ["A", "B", "C"]) {
+      expect(ctx.structMap.delete(className)).toBe(true);
+      expect(ctx.structFields.delete(className)).toBe(true);
     }
 
     const aShape: IrClassShape = {

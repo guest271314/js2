@@ -5280,22 +5280,25 @@ class ClassRegistry {
     // structural class ABI slice.
     if (this.ctx.classExternrefBackedSet.has(shape.className)) return null;
 
-    const structTypeIdx = this.ctx.structMap.get(shape.className);
+    const classLayout = this.ctx.programAbiTypes?.layoutForClass(classId);
+    const structTypeIdx =
+      classLayout?.typeIdx ?? (this.ctx.programAbiTypes ? undefined : this.ctx.structMap.get(shape.className));
     if (structTypeIdx === undefined) return null;
-    const legacyFields = this.ctx.structFields.get(shape.className);
-    if (!legacyFields) return null;
+    const layoutFields =
+      classLayout?.type.fields ?? (this.ctx.programAbiTypes ? undefined : this.ctx.structFields.get(shape.className));
+    if (!layoutFields) return null;
 
-    // Build a name → wasm-field-index map directly from the legacy
-    // struct field list so the IR sees the same indices the legacy
-    // path uses for `struct.get` / `struct.set`. The `__tag` prefix
-    // (at index 0 for root classes) is included in legacyFields, so a
+    // Build a name → wasm-field-index map directly from the exact allocator
+    // struct field list so the IR sees the same indices the legacy path uses
+    // for `struct.get` / `struct.set`. The `__tag` prefix (at index 0 for root
+    // classes) is included in layoutFields, so a
     // user field "x" at IR position 0 corresponds to legacy field
     // index 1 (or higher, depending on the parent chain). Slice 4
     // doesn't claim functions referencing inherited classes, so
-    // legacyFields[0] is always `__tag`; user fields start at index 1.
+    // layoutFields[0] is always `__tag`; user fields start at index 1.
     const fieldIdxByName = new Map<string, number>();
-    for (let i = 0; i < legacyFields.length; i++) {
-      fieldIdxByName.set(legacyFields[i]!.name, i);
+    for (let i = 0; i < layoutFields.length; i++) {
+      fieldIdxByName.set(layoutFields[i]!.name, i);
     }
 
     // (#1983) Route synthetic class-member names through `classMemberFuncKey`
@@ -5318,11 +5321,11 @@ class ClassRegistry {
     // synthesise `this`) emits the SAME allocation the legacy
     // `<className>_new` emits before its tail-call to `<className>_init`.
     // The field defaults + `__tag` constant mirror `class-bodies.ts`
-    // (the `newBody` loop) exactly, keyed off the SAME `legacyFields` /
+    // (the `newBody` loop) exactly, keyed off the SAME `layoutFields` /
     // `classTagMap`, so the emitted `struct.new` prefix is byte-identical.
     const tagValue = ctx.classTagMap.get(shape.className) ?? 0;
     const allocInstrs: Instr[] = [];
-    for (const field of legacyFields) {
+    for (const field of layoutFields) {
       allocInstrs.push(defaultFieldAllocInstr(field, tagValue));
     }
     allocInstrs.push({ op: "struct.new", typeIdx: structTypeIdx });
