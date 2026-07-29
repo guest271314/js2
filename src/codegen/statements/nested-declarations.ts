@@ -9,6 +9,7 @@ import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
 import { bodyReferencesOwnThis } from "../helpers/body-references-own-this.js";
 import { isStrictFunction, isSimpleParameterList } from "../helpers/is-strict-function.js";
+import { initializeFunctionPoisonPillContext } from "../function-poison-pill.js";
 import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import {
   collectReferencedIdentifiers,
@@ -616,6 +617,7 @@ export function compileNestedFunctionDeclaration(
       // read (#1702) falls back to `undefined` — behaviour-preserving.
       readsCurrentThis: stmt.body ? bodyReferencesOwnThis(stmt.body) : false,
     };
+    initializeFunctionPoisonPillContext(ctx, liftedFctx, stmt);
     for (let i = 0; i < liftedFctx.params.length; i++) {
       liftedFctx.localMap.set(liftedFctx.params[i]!.name, i);
     }
@@ -928,6 +930,7 @@ export function compileNestedFunctionDeclaration(
       // read (#1702) falls back to `undefined` — behaviour-preserving.
       readsCurrentThis: stmt.body ? bodyReferencesOwnThis(stmt.body) : false,
     };
+    initializeFunctionPoisonPillContext(ctx, liftedFctx, stmt);
     for (let i = 0; i < liftedFctx.params.length; i++) {
       liftedFctx.localMap.set(liftedFctx.params[i]!.name, i);
     }
@@ -2692,16 +2695,16 @@ export function emitArgumentsVecBody(
     });
   }
 
-  // If extras is non-null, copy extras into arr starting at offset numArgs.
-  fctx.body.push({ op: "local.get", index: extrasLocal });
-  fctx.body.push({ op: "ref.is_null" });
+  // Copy non-empty extras after the ABI-supplied formal prefix, not every declared parameter (#3420).
+  fctx.body.push({ op: "local.get", index: extrasLenLocal });
+  fctx.body.push({ op: "i32.eqz" });
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: [],
     else: [
       { op: "local.get", index: arrTmp },
-      { op: "i32.const", value: numArgs },
+      { op: "local.get", index: argcLocal },
       { op: "local.get", index: extrasLocal },
       { op: "ref.as_non_null" },
       { op: "struct.get", typeIdx: vti, fieldIdx: 1 },

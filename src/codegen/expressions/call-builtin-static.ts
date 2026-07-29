@@ -94,10 +94,12 @@ import { compileStringLiteral } from "../string-ops.js";
 import { ensureStringRawHelper } from "../string-raw.js";
 import { defaultValueInstrs, pushDefaultValue } from "../type-coercion.js";
 import { compileMathCall } from "./builtins.js";
+import { tryCompileObjectCreateStaticPrototype } from "./call-object-builtins.js";
 import { emitLazyProtoGet } from "./extern.js";
 import { buildThrowJsErrorInstrs, emitThrowTypeError, noJsHost } from "./helpers.js";
 import { emitUndefined, ensureGetUndefined, ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
+import { tryCompileEs5GetPrototypeOfEarly, tryCompileEs5GetPrototypeOfValue } from "./object-get-prototype-of.js";
 import {
   BUILTIN_CLASS_NAMES,
   compileCallExpression,
@@ -1655,27 +1657,20 @@ export function compileBuiltinStaticCall(
     return { kind: "externref" };
   }
 
-  // Handle Object.getPrototypeOf(obj) — return prototype as externref
-  // For class instances, creates a struct representing the prototype and returns
-  // it as externref via extern.convert_any. For plain objects, returns null.
   if (
     ts.isIdentifier(propAccess.expression) &&
     propAccess.expression.text === "Object" &&
-    propAccess.name.text === "getPrototypeOf" &&
-    expr.arguments.length >= 1
+    isGlobalBuiltinIdentifier(ctx, fctx, propAccess.expression) &&
+    propAccess.name.text === "getPrototypeOf"
   ) {
+    const es5Early = tryCompileEs5GetPrototypeOfEarly(ctx, fctx, expr);
+    if (es5Early) return es5Early;
     const arg0 = expr.arguments[0]!;
 
     // (#2743 a) `Object.getPrototypeOf(arguments)` is %Object.prototype%
     // (§10.4.4), NOT the array prototype the vec representation would yield.
-    // The arguments object is an ordinary Object, so its `[[Prototype]]` must
-    // be the SAME `Object.prototype` value the compiler materializes for any
-    // plain object — `Object.getPrototypeOf({}) === Object.getPrototypeOf(
-    // arguments)`. Emit the compiler's own `Object.prototype` value-read
-    // (reusing the real `Object` identifier node `propAccess.expression`), so
-    // both sides reference one identity. Host-mode only; standalone keeps the
-    // bare vec. (`arguments` is a side-effect-free identifier, so dropping it
-    // is unnecessary.)
+    // Emit the compiler's own `Object.prototype` value so ordinary objects and
+    // arguments share one identity. Host-mode only; standalone keeps the vec.
     if (!noJsHost(ctx) && ts.isIdentifier(arg0) && arg0.text === "arguments" && fctx.localMap.has("arguments")) {
       const objProtoExpr = ts.factory.createPropertyAccessExpression(
         propAccess.expression,
@@ -1792,6 +1787,9 @@ export function compileBuiltinStaticCall(
     }
 
     const argTsType = ctx.checker.getTypeAtLocation(arg0);
+
+    const es5Value = tryCompileEs5GetPrototypeOfValue(ctx, fctx, expr);
+    if (es5Value) return es5Value;
 
     // (#3013) `Object.getPrototypeOf(<array iterator>)` → the shared native
     // `%ArrayIteratorPrototype%` singleton (standalone/WASI). Every array
@@ -1927,22 +1925,8 @@ export function compileBuiltinStaticCall(
   ) {
     const arg0 = expr.arguments[0]!;
 
-    // Object.create(Foo.prototype) → struct.new with default fields (Wasm-native fast path)
-    if (ts.isPropertyAccessExpression(arg0) && ts.isIdentifier(arg0.expression) && arg0.name.text === "prototype") {
-      const protoClassName = arg0.expression.text;
-      if (ctx.classSet.has(protoClassName)) {
-        const structTypeIdx = ctx.structMap.get(protoClassName);
-        const fields = ctx.structFields.get(protoClassName);
-        if (structTypeIdx !== undefined && fields) {
-          // Push default values for all fields, then struct.new
-          for (const field of fields) {
-            pushDefaultValue(fctx, field.type, ctx);
-          }
-          fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
-          return { kind: "ref", typeIdx: structTypeIdx };
-        }
-      }
-    }
+    const staticPrototype = tryCompileObjectCreateStaticPrototype(ctx, fctx, arg0);
+    if (staticPrototype !== undefined) return staticPrototype;
 
     // Host import path: Object.create(null) and Object.create(proto[, descriptors])
     // Object.create(null) → empty object with null prototype
