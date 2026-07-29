@@ -6,6 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c29-function-value-abi
+pr: 3799
 last_merged_pr: 3798
 sprint: current
 created: 2026-07-21
