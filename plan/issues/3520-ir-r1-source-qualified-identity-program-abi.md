@@ -2391,9 +2391,16 @@ module-level increase. The supported eight-shard equivalence gate remains
 pass and the shared baseline remains unchanged.
 
 Strict TypeScript, Biome lint, formatting, diff, LOC/function budget,
-dead-export, godfile, oracle-ratchet, and adoption gates pass. No local Test262
-corpus run was performed because this continuation is stacked; the full corpus
-runs when the stack targets `main` or reaches the merge-group boundary.
+dead-export, godfile, oracle-ratchet, and adoption gates pass. The first
+merge-group Test262 run exposed two adapter boundaries in this slice: a
+top-level function declaration routed through an accessor callback could let
+the callback body steal the declaration's exact source slot, while
+literal-eval callables created after inventory freeze were incorrectly treated
+as inventoried source units. Nested publication now observes only non-function
+declarations with an exact inventory record; top-level callback adapters and
+post-inventory support callables remain on generic callable planning. The
+focused source-callable suite passes **8/8**, and the exact **19** Test262 paths
+covering the reported callable-planning failures pass **19/19** locally.
 Neither `benchmarks/results/test262-run.log` nor
 `scripts/equivalence-baseline.json` is changed.
 

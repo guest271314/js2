@@ -46,7 +46,7 @@ export function pushProgramAbiTopLevelCallable(
 /** Push and structurally observe one nested source callable atomically. */
 export function pushProgramAbiNestedCallable(
   ctx: CodegenContext,
-  declaration: Exclude<SourceCallableDeclaration, ts.FunctionDeclaration>,
+  declaration: SourceCallableDeclaration,
   funcIdx: FuncHandle,
   func: WasmFunction,
 ): void {
@@ -57,6 +57,19 @@ export function pushProgramAbiNestedCallable(
       "context-session-mismatch",
       "nested source callable was allocated without its structural registry",
     );
+  }
+  // Some legacy compatibility paths feed a top-level function declaration
+  // through the closure/callback compiler to build a separate adapter body.
+  // The declaration's original direct body already owns its source-unit ABI
+  // slot; observing the adapter as the same unit would make last-observation
+  // planning steal that slot from the direct body.
+  //
+  // Literal-eval and other compiler support paths can likewise create callable
+  // AST nodes after the whole-program inventory was frozen. Those are support
+  // bodies, not retained source-unit allocators. Keep them on generic callable
+  // planning until their own synthetic identities are introduced.
+  if (ts.isFunctionDeclaration(declaration) || !registry.identityContext?.unitIdByDeclaration.has(declaration)) {
+    return;
   }
   registry.observe(declaration, funcIdx);
 }

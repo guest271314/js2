@@ -280,4 +280,49 @@ describe("#3520 source callable Program ABI ownership", () => {
       );
     }
   });
+
+  it("does not let an accessor adapter steal a top-level function declaration's exact slot", () => {
+    const source = `
+      const target: any = {};
+      function getValue(): number { return 20; }
+      Object.defineProperties(target, { value: { get: getValue } });
+      export function read(): number { return target.value; }
+    `;
+    const ast = analyzeSource(source, "source-callable-accessor-adapter.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const getter = exactUnit(inventory, "top-level-function", "getValue");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const bindingId = irUnitCallableBindingId(getter.id);
+    const entry = requiredCallable(generated.programAbi!.abi.entries(), bindingId);
+    expect(entry.intent).toMatchObject({ kind: "callable", unitId: getter.id });
+    expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+      expect.objectContaining({ space: "function" }),
+    );
+  });
+
+  it("keeps post-inventory literal-eval accessors on support-callable planning", async () => {
+    const generated = await compile(
+      `
+        export function run(): number {
+          eval("({ value: 1, get value() {} });");
+          return 1;
+        }
+      `,
+      {
+        fileName: "source-callable-literal-eval.ts",
+        experimentalIR: true,
+      },
+    );
+    expect(generated.success, generated.errors.map((error) => error.message).join("\n")).toBe(true);
+  });
 });
