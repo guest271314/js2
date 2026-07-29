@@ -63,6 +63,16 @@ function devirtualized(out: CompileOut, className: string, method: string): bool
   return new RegExp(`__dc_${className}_${method}_\\d`).test(out.wat);
 }
 
+function namedFunctionBody(out: CompileOut, name: string): string {
+  // Include the delimiter so `__dc_P_m_1` does not accidentally select the
+  // guarded `__dc_P_m_1_g` sibling when both are present.
+  const start = out.wat.indexOf(`(func $${name} `);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const tail = out.wat.slice(start + 1);
+  const next = tail.search(/\n\s*\(func \$/);
+  return out.wat.slice(start, next < 0 ? undefined : start + 1 + next);
+}
+
 describe("#3683 S3 — direct-call devirtualization", () => {
   it("devirtualizes this.m() inside a twin and agrees with the dynamic lowering", async () => {
     const src = `var P = function P(n) { this.pos = n; };
@@ -77,6 +87,29 @@ export function test(): number { var p = new P(0); return p.twice(3); }`;
     // MUTATES the receiver, so a wrong `this` would be visible.
     expect(direct.run()).toBe(9);
     expect(dynamic.run()).toBe(9);
+  });
+
+  it("carries bare this in the typed receiver and removes the ambient receiver frame", async () => {
+    const src = `var P = function P() {};
+var pp = P.prototype;
+pp.same = function (value) { return value === this ? 1 : 0; };
+pp.go = function () { return this.same(this); };
+export function test(): number { return new P().go(); }`;
+    const direct = await build(src);
+    const framed = await build(src, {
+      JS2WASM_TWIN_RECEIVER_PARAM: "0",
+      JS2WASM_ELIDE_UNUSED_ARGC_FRAME: "0",
+    });
+    expect(direct.run()).toBe(1);
+    expect(framed.run()).toBe(1);
+
+    const directTrampoline = namedFunctionBody(direct, "__dc_P_same_1");
+    const framedTrampoline = namedFunctionBody(framed, "__dc_P_same_1");
+    // This method has neither defaults nor `arguments`, so the optimized twin
+    // needs no ambient frame writes. The control retains argc enter/leave plus
+    // save/install/restore of `__current_this`.
+    expect(directTrampoline.match(/global\.set/g) ?? []).toHaveLength(0);
+    expect(framedTrampoline.match(/global\.set/g) ?? []).toHaveLength(4);
   });
 
   it("preserves side-effect ORDER across devirtualized calls", async () => {

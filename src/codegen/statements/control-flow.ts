@@ -967,6 +967,35 @@ function homogeneousSwitchCaseClass(
   return sawCase ? cls : null;
 }
 
+/**
+ * A JavaScript local can remain checker-typed `any` even after the numeric-flow
+ * pass has proved every definition stores a number and selected an unboxed f64
+ * slot for codegen. Reuse that symbol-scoped proof for a switch discriminant.
+ *
+ * Without this bridge, `var ch = input.charCodeAt(i); switch (ch) { ... }`
+ * immediately boxes `ch`, runtime-brand-checks it, and unboxes it again merely
+ * because the checker still says `any`. The definition proof is stronger than
+ * that checker type and makes the ordinary homogeneous numeric comparison
+ * sound: the runtime value cannot be a string, object, bigint, or boolean.
+ */
+function isProvenNumericLocalSwitchDiscriminant(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression,
+): boolean {
+  if (process.env.JS2WASM_GROUNDED_NUMERIC_SWITCHES === "0") return false;
+  if (!ts.isIdentifier(expr)) return false;
+  const localIdx = fctx.localMap.get(expr.text);
+  if (localIdx !== undefined && getLocalType(fctx, localIdx)?.kind === "f64") return true;
+  const symbol = ctx.checker.getSymbolAtLocation(expr);
+  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  return (
+    declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    ctx.usageInference.scalarForDecl(declaration) === "number"
+  );
+}
+
 function isDefinitelyObjectSwitchFact(fact: TypeFact): boolean {
   switch (fact.kind) {
     case "array":
@@ -1241,11 +1270,15 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
   // boxed, per-case strict-equality comparison instead. `homogeneousClass` is
   // non-null exactly when the legacy fast path is sound.
   const homogeneousClass = homogeneousSwitchClass(ctx, stmt);
-  const strictPerCase = homogeneousClass === null;
-  const guardedNumericCases =
-    strictPerCase &&
+  const homogeneousCaseClass = homogeneousSwitchCaseClass(ctx, stmt);
+  const provenNumericDiscriminant =
+    homogeneousClass === null &&
     (ctx.standalone === true || ctx.wasi === true) &&
-    homogeneousSwitchCaseClass(ctx, stmt) === "number";
+    homogeneousCaseClass === "number" &&
+    isProvenNumericLocalSwitchDiscriminant(ctx, fctx, stmt.expression);
+  const strictPerCase = homogeneousClass === null && !provenNumericDiscriminant;
+  const guardedNumericCases =
+    strictPerCase && (ctx.standalone === true || ctx.wasi === true) && homogeneousCaseClass === "number";
   const objectIdentityPerCase =
     strictPerCase &&
     !guardedNumericCases &&

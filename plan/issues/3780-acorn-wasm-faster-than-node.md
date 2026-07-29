@@ -21,9 +21,11 @@ files:
   - plan/issues/3780-acorn-wasm-faster-than-node.md
   - plan/issues/backlog/backlog.md
   - scripts/generate-npm-compat-report.mjs
+  - src/codegen/closed-method-dispatch.ts
   - src/codegen/closures.ts
   - src/codegen/context/types.ts
   - src/codegen/declarations/param-return-inference.ts
+  - src/codegen/expressions.ts
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/index.ts
   - src/codegen/native-regex.ts
@@ -43,10 +45,12 @@ files:
   - tests/issue-3683-direct-calls.test.ts
   - tests/issue-3765-numeric-locals.test.ts
 loc-budget-allow:
+  - src/codegen/closed-method-dispatch.ts
   - src/codegen/closures.ts
   - src/codegen/context/types.ts
   - src/codegen/declarations/param-return-inference.ts
   - src/compiler.ts
+  - src/codegen/expressions.ts
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/index.ts
   - src/codegen/native-regex.ts
@@ -60,8 +64,10 @@ loc-budget-allow:
   - src/runtime.ts
 func-budget-allow:
   - scripts/generate-npm-compat-report.mjs::compileStandaloneLane
+  - src/codegen/closed-method-dispatch.ts::fillClosedMethodDispatch
   - src/codegen/closures.ts::compileArrowAsClosure
   - src/codegen/declarations/param-return-inference.ts::inferParamTypeFromCallSites
+  - src/codegen/expressions.ts::compileExpressionInner
   - src/codegen/fnctor-escape-gate.ts::analyzeProtoMethodWriteOnce
   - src/codegen/index.ts::generateMultiModule
   - src/codegen/native-regex.ts::ensureRegexSearch
@@ -289,6 +295,55 @@ has no host crossings during the parse—the remaining 14.03x gap is internal
 Wasm object/string/regexp representation and dispatch cost, not 17.67 million
 Node callbacks. Beating Node remains the open acceptance criterion; the static
 IR residual is reported separately and does not satisfy it.
+
+### Runtime-dynamic optimization round 2
+
+Four further package-independent lowerings keep the exact runtime-suffixed
+226 KB input and checksum:
+
+1. A switch whose case values are numeric and whose discriminant already has a
+   proven `f64` local/parameter slot uses that slot directly. It no longer
+   boxes, runtime-type-tests, and unboxes the same value before the existing
+   ordered numeric comparisons. The proof, not the checker-visible `any`, is
+   the admission gate.
+2. A typed-this twin now uses its typed receiver parameter for bare/non-field
+   `this` expressions as well as field accesses. Direct twin trampolines can
+   therefore omit the ambient `__current_this` save/install/restore frame when
+   the trampoline is twin-exclusive. Guarded trampolines retain the frame
+   because their legacy miss arm still observes the ambient receiver.
+3. Direct methods that have neither `arguments` (already an admission refusal)
+   nor parameter initializers cannot observe `__argc`. Their trampolines omit
+   its enter/leave writes; methods with defaults retain the old protocol.
+   Eighty paired parses measure a further 1.72% median / 1.63% mean win.
+4. The native RegExp `.test` carrier is representation-disjoint from every user
+   closed struct. Its brand arm is now the outermost `test/1` dispatch branch,
+   avoiding the generated user-method ladder on Acorn tokenizer regexps.
+   Eighty paired parses measure a further 2.58% median / 2.68% mean win.
+
+The final named-profile run measures 48,970.208 us/op in Wasm versus
+4,406.141 us/op in Node, with checksum 422, zero imports, and a 1,807,229-byte
+debug-name-preserving binary. This is 9.6% faster than the prior named run but
+still leaves Node **11.11x faster**. The regenerated ordinary artifact run
+measures 50,113.993 us/op versus 4,424.375 us/op (Node 11.33x faster) with a
+1,765,609-byte stripped binary. The largest exclusive buckets are generic
+`__extern_get` (11.89%), RegExp test/engine work attributed to
+`__call_m_test_1` (8.33%), `__closure_378__typed_this` (3.23%),
+`__closure_543` (2.63%), `ToPrimitive` (2.55%), and GC (2.38%). The full
+Acorn gate remains 3,507/3,518 official tests.
+
+Three plausible changes were measured and removed: pooled two-slot RegExp
+capture arrays regressed about 1%, restricting the generic property cache to
+plain objects was neutral, and Wasm tail calls on the typed branch regressed
+about 0.6%. No failed experiment remains in production code.
+
+The exact runtime-dynamic driver still emits zero IR functions. With
+`JS2WASM_IR_SHAPE_DIAG=1`, the migration handoff sees 43 reachable functions:
+19 body-shape refusals, 17 unresolved parameter types, three unsupported
+logical values, two dynamic RegExp constructors, one constructor-identity
+case, and one derivative call-graph-closure refusal. Because selection is
+call-graph closed, the runtime parser cannot partially enter IR until those
+producer/value/shape blockers are cleared; this direct-backend round is the
+performance baseline the IR path must preserve.
 
 ## Compile-time static outcome
 

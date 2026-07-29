@@ -867,6 +867,13 @@ export interface DirectCallTrampoline {
   readonly legacyDispatchIdx: number;
   readonly currentThisGlobalIdx: number;
   readonly argcGlobalIdx: number;
+  /**
+   * Parameter-default prologues consult `__argc` to distinguish an omitted
+   * native slot from an explicitly supplied value. Methods with no parameter
+   * initializers (and no `arguments`, already an admission requirement) do not
+   * observe that global, so their direct trampoline can omit the argc frame.
+   */
+  readonly needsArgcFrame: boolean;
 }
 
 /**
@@ -1205,6 +1212,7 @@ function reserveDirectCallTrampoline(
     padTypes: ValType[];
     results: ValType[];
     guardedReceiver: boolean;
+    needsArgcFrame: boolean;
     deps: DirectCallDeps;
   },
 ): DirectCallTrampoline {
@@ -1251,6 +1259,7 @@ function reserveDirectCallTrampoline(
     legacyDispatchIdx,
     currentThisGlobalIdx,
     argcGlobalIdx,
+    needsArgcFrame: spec.needsArgcFrame,
   };
   table.set(key, record);
   directCallStats.trampolines++;
@@ -1571,6 +1580,8 @@ export function tryEmitDirectTwinCall(
     // `unboxFromExternref`, so both arms agree on the wasm result type.
     results: callResult === null ? [] : [callResult],
     guardedReceiver,
+    needsArgcFrame:
+      process.env.JS2WASM_ELIDE_UNUSED_ARGC_FRAME === "0" || formals.some((formal) => formal.initializer !== undefined),
     deps,
   });
   // The legacy-dispatcher reservation above may have added late imports; settle
@@ -1723,13 +1734,10 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
     if (!fn) continue;
     const paramCount = t.params.length;
     const resultType = t.results[0];
-    const locals: LocalDef[] = [{ name: "__dc_prev_this", type: { kind: "externref" } }];
-    if (resultType !== undefined) locals.push({ name: "__dc_res", type: resultType });
-    const prevLocal = paramCount;
-    const resLocal = paramCount + 1;
 
     // --- the arm: a direct twin/generic call, or the legacy dispatcher ---
     const arm: Instr[] = [];
+    let onlyCallsTypedTwin = false;
     const twin = ctx.directCallTwins?.get(`${t.className}/${t.methodName}`);
     const twinIdx = twin ? ctx.funcMap.get(twin.twinName) : undefined;
     const generic = ctx.directCallGenerics?.get(`${t.className}/${t.methodName}`);
@@ -1841,6 +1849,7 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       for (const pad of t.padInstrs) arm.push(...pad.map((i) => ({ ...i })));
       arm.push({ op: "call", funcIdx: twinIdx });
       directCallStats.twinFills++;
+      onlyCallsTypedTwin = true;
     } else if (genericIdx !== undefined && genericSignatureAgrees) {
       const genericArm = buildGenericArm();
       const legacyArm = buildLegacyArm();
@@ -1916,21 +1925,57 @@ export function fillDirectCallTrampolines(ctx: CodegenContext): void {
       }
     }
 
+    // A twin now represents every use of `this` (including bare/non-field
+    // expressions) with its typed receiver parameter. An unguarded,
+    // twin-exclusive trampoline therefore needs only the argc frame used by
+    // parameter-default semantics; avoid four ambient receiver-global
+    // operations and one spill on every parser-method call. Guarded twins keep
+    // the frame for their legacy miss arm, and generic retained-closure bodies
+    // keep it because both can still read `__current_this`.
+    const elideCurrentThisFrame = onlyCallsTypedTwin && process.env.JS2WASM_TWIN_RECEIVER_PARAM !== "0";
+    const needsCleanup = !elideCurrentThisFrame || t.needsArgcFrame;
+    const locals: LocalDef[] = [];
+    let prevLocal = -1;
+    if (!elideCurrentThisFrame) {
+      prevLocal = paramCount + locals.length;
+      locals.push({ name: "__dc_prev_this", type: { kind: "externref" } });
+    }
+    const resLocal = resultType === undefined || !needsCleanup ? -1 : paramCount + locals.length;
+    if (resLocal >= 0) locals.push({ name: "__dc_res", type: resultType! });
+
     fn.locals = locals;
-    fn.body = [
-      { op: "global.get", index: t.currentThisGlobalIdx },
-      { op: "local.set", index: prevLocal },
-      { op: "local.get", index: 0 },
-      { op: "global.set", index: t.currentThisGlobalIdx },
-      { op: "i32.const", value: t.arity },
-      { op: "global.set", index: t.argcGlobalIdx },
-      ...arm,
-      ...(resultType === undefined ? [] : ([{ op: "local.set", index: resLocal }] satisfies Instr[])),
-      { op: "i32.const", value: -1 },
-      { op: "global.set", index: t.argcGlobalIdx },
-      { op: "local.get", index: prevLocal },
-      { op: "global.set", index: t.currentThisGlobalIdx },
-      ...(resultType === undefined ? [] : ([{ op: "local.get", index: resLocal }] satisfies Instr[])),
-    ];
+    fn.body = needsCleanup
+      ? [
+          ...(!elideCurrentThisFrame
+            ? ([
+                { op: "global.get", index: t.currentThisGlobalIdx },
+                { op: "local.set", index: prevLocal },
+                { op: "local.get", index: 0 },
+                { op: "global.set", index: t.currentThisGlobalIdx },
+              ] satisfies Instr[])
+            : []),
+          ...(t.needsArgcFrame
+            ? ([
+                { op: "i32.const", value: t.arity },
+                { op: "global.set", index: t.argcGlobalIdx },
+              ] satisfies Instr[])
+            : []),
+          ...arm,
+          ...(resLocal < 0 ? [] : ([{ op: "local.set", index: resLocal }] satisfies Instr[])),
+          ...(t.needsArgcFrame
+            ? ([
+                { op: "i32.const", value: -1 },
+                { op: "global.set", index: t.argcGlobalIdx },
+              ] satisfies Instr[])
+            : []),
+          ...(!elideCurrentThisFrame
+            ? ([
+                { op: "local.get", index: prevLocal },
+                { op: "global.set", index: t.currentThisGlobalIdx },
+              ] satisfies Instr[])
+            : []),
+          ...(resLocal < 0 ? [] : ([{ op: "local.get", index: resLocal }] satisfies Instr[])),
+        ]
+      : arm;
   }
 }
