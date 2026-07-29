@@ -165,6 +165,7 @@ files:
 loc-budget-allow:
   - src/codegen/context/types.ts
   - src/ir/integration.ts
+  - src/ir/builder.ts
   - src/ir/from-ast.ts
   - src/ir/nodes.ts
   - src/ir/verify.ts
