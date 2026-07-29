@@ -132,7 +132,7 @@ const FLAG_ENUMERABLE = 0x02;
 const FLAG_CONFIGURABLE = 0x04;
 // #1888 Slice 5 — accessor descriptor: when set, the entry's value is replaced
 // by the `$get`/`$set` funcref-bearing slots (fields 4/5). 0x08 is the first
-// free bit (0x10/0x20/0x40 remain free; 0x80 = TOMBSTONE).
+// extension bit (0x10 internal; 0x20/0x40 vec-overlay; 0x80 = TOMBSTONE).
 const FLAG_ACCESSOR = 0x08;
 // #1910/#1472 S2 — internal-slot marker. Set on the single reserved $PropEntry a
 // boxed primitive wrapper (`new Number`/`new String`/`new Boolean`) carries: it
@@ -141,12 +141,12 @@ const FLAG_ACCESSOR = 0x08;
 // FLAG_ENUMERABLE is not), so it never appears in Object.keys/for-in/JSON, and
 // `__to_primitive` reads it FIRST (before the OrdinaryToPrimitive valueOf/toString
 // probe) per §7.1.1.1 — standalone ships no Number.prototype.valueOf, so the slot
-// IS the recoverable internal value. 0x20/0x40 remain free.
+// IS the recoverable internal value. 0x20/0x40 are reserved by vec-overlay.ts.
 export const FLAG_INTERNAL = 0x10;
 // 0x20 = FLAG_COMPANION_VALUE (#3251, vec-overlay.ts) — on an array-overlay
 // COMPANION data entry whose [[Value]] could not be written back into the vec
 // element (kind-incompatible carrier); dynamic readers answer from the
-// companion. 0x40 remains free.
+// companion. 0x40 marks a semantically deleted dense vec index.
 const FLAG_TOMBSTONE = 0x80;
 /**
  * Reserved own-key under which a boxed primitive wrapper stores its internal
