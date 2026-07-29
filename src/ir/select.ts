@@ -2025,7 +2025,16 @@ function dynamicUsesAreMoveOnly(
           // numeric/string/boolean literals plus null/undefined. Dynamic
           // operands already carry the exact tag and pass through unchanged.
           const scanEqualityOperand = (operand: ts.Expression, dynamic: boolean): boolean => {
-            if (dynamic) return scanExpr(operand, true);
+            if (dynamic) {
+              const candidate = unwrap(operand);
+              // Dynamic member reads are not yet safe at callback boundaries:
+              // legacy array methods pass their `obj` argument in the direct
+              // array carrier, while __dyn_member_get expects boxed-any input.
+              // Keep `obj.length === n` pre-claim until that carrier seam is
+              // unified; direct dynamic params remain claimable.
+              if (ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate)) return false;
+              return scanExpr(candidate, true);
+            }
             const concrete = unwrap(operand);
             if (
               ts.isNumericLiteral(concrete) ||

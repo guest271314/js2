@@ -1784,6 +1784,58 @@ function recordObservedIrOutcomes(
   for (const diagnostic of reconciled.diagnostics) reportErrorNoNode(ctx, diagnostic);
 }
 
+const IR_IMPLICIT_PARAM_PROJECTION_BINARY_OPS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.LessThanToken,
+  ts.SyntaxKind.LessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.GreaterThanEqualsToken,
+  ts.SyntaxKind.MinusToken,
+  ts.SyntaxKind.AsteriskToken,
+  ts.SyntaxKind.SlashToken,
+  ts.SyntaxKind.PercentToken,
+]);
+
+function collectIrImplicitParamProjectionCandidates(
+  declaration: ts.FunctionDeclaration,
+): ReadonlySet<ts.ParameterDeclaration> {
+  const paramsByName = new Map<string, ts.ParameterDeclaration>();
+  for (const parameter of declaration.parameters) {
+    if (!parameter.type && ts.isIdentifier(parameter.name)) paramsByName.set(parameter.name.text, parameter);
+  }
+  const candidates = new Set<ts.ParameterDeclaration>();
+  const feedsSupportedShape = (identifier: ts.Identifier): boolean => {
+    let child: ts.Node = identifier;
+    let parent = child.parent;
+    while (ts.isParenthesizedExpression(parent)) {
+      child = parent;
+      parent = parent.parent;
+    }
+    if (ts.isBinaryExpression(parent) && IR_IMPLICIT_PARAM_PROJECTION_BINARY_OPS.has(parent.operatorToken.kind)) {
+      return parent.left === child || parent.right === child;
+    }
+    if (
+      ts.isPrefixUnaryExpression(parent) &&
+      (parent.operator === ts.SyntaxKind.PlusToken || parent.operator === ts.SyntaxKind.MinusToken)
+    ) {
+      return parent.operand === child;
+    }
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) {
+      const parameter = paramsByName.get(node.text);
+      if (parameter && feedsSupportedShape(node)) candidates.add(parameter);
+    }
+    forEachChild(node, visit);
+  };
+  if (declaration.body) forEachChild(declaration.body, visit);
+  return candidates;
+}
+
 // #2949 S5.P — declaration lowering already specializes an implicit-any
 // parameter when its call sites establish one concrete scalar ABI. Project
 // that same decision into structural selection and the IR override map so a
@@ -1793,12 +1845,19 @@ function makeIrImplicitParamTypeResolver(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
 ): (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | undefined {
+  const candidatesByDeclaration = new WeakMap<ts.FunctionDeclaration, ReadonlySet<ts.ParameterDeclaration>>();
   return (parameter) => {
     if (parameter.type) return undefined;
     const declaration = parameter.parent;
     if (!ts.isFunctionDeclaration(declaration) || !declaration.name || declaration.parent !== sourceFile) {
       return undefined;
     }
+    let candidates = candidatesByDeclaration.get(declaration);
+    if (!candidates) {
+      candidates = collectIrImplicitParamProjectionCandidates(declaration);
+      candidatesByDeclaration.set(declaration, candidates);
+    }
+    if (!candidates.has(parameter)) return undefined;
     const parameterFact = ctx.oracle.typeFactOf(parameter);
     if (parameterFact.kind !== "any" && parameterFact.kind !== "unknown") return undefined;
     const parameterIndex = declaration.parameters.indexOf(parameter);

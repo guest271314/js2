@@ -1887,7 +1887,9 @@ Planning consumes the same implicit-parameter scalar inference as direct
 declaration lowering. The projected type is also used by the IR override map,
 so a claimed helper cannot widen to `dynamic` and later fail callable ABI
 parity. This preserved the direct backend's numeric-call-site optimization and
-removed the three measured Acorn parity withdrawals.
+removed the three measured Acorn parity withdrawals. Projection is restricted
+to parameters feeding the admitted scalar operators, avoiding a whole-source
+call-site scan for unrelated harness parameters.
 
 Non-fast standalone needed two runtime corrections exposed only after the
 claim became live:
@@ -1898,6 +1900,11 @@ claim became live:
   of JS-host imports.
 - direct calls box concrete numeric arguments at explicit-`any` parameter
   boundaries, including the `Math.pow(...)` equivalence shape.
+
+Dynamic member reads used directly by equality remain pre-claim fallbacks.
+Array callbacks pass their `obj` argument in a direct array carrier, while the
+current dynamic member helper expects boxed-any input; claiming that seam made
+`obj.length === n` return the wrong result.
 
 Focused whole-compiler tests execute these paths in standalone and assert real
 IR emission plus zero post-claim failures. The exact #3796 driver remains the
