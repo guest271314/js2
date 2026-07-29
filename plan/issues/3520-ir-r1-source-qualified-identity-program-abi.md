@@ -5,8 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c25-synthetic-reservation-abi
-pr: 3791
+branch: codex/3520-c26-nested-callable-abi
+pr: 3792
 last_merged_pr: 3679
 sprint: current
 created: 2026-07-21
@@ -108,6 +108,7 @@ files:
   - src/codegen/ir-overlay-finalize.ts
   - src/codegen/ir-overlay-outcomes.ts
   - src/codegen/ir-overlay-safety.ts
+  - src/codegen/closures.ts
   - src/codegen/index.ts
   - src/codegen/stdlib-selfhost.ts
   - docs/ir/ir-contract.md
@@ -2408,6 +2409,59 @@ C25 closes the callback and Promise-delay synthesized-name reservations, not
 R1. Remaining class/type consumers, function expressions, other support
 families, and module-array or display-name scans must still move behind
 structural authorities before R1 can close.
+
+### 2026-07-29 nested source-callable ownership continuation
+
+The next stacked continuation on
+`codex/3520-c26-nested-callable-abi`
+([PR #3792](https://github.com/loopdive/js2/pull/3792)) publishes retained
+direct-codegen nested callables through their exact source-unit Program ABI
+owners:
+
+- arrows and function expressions now publish their existing optimized
+  `WasmFunction` under the callable binding derived from their exact
+  `IrUnitId`;
+- direct host callbacks and object-literal methods, getters, and setters use
+  the same structural path. The object-member AST nodes previously entered the
+  closure compiler through a compatibility cast, so the registry now validates
+  their actual `object-method`, `object-getter`, or `object-setter` inventory
+  kind; and
+- pushing the direct body and observing its structural owner is atomic. This
+  slice does not rebuild the body, change its optimization decisions, or skip
+  legacy emission.
+
+The focused nested-callable, host-callback, and Program ABI matrix passes
+**63/63**. The targeted Promise integration selection passes **8/8**. The
+committed fresh-process #3520/#2138/linear matrix reports **286 passing / 1
+inherited known failure across 55 files**; the sole failure remains the
+unchanged linear inventory-count spy assertion.
+
+Hybrid readiness remains **READY** at **31 IR-emitted / 6 typed Unsupported /
+0 Invariants across 37 terminal units**, with all 37 legacy bodies still
+emitted. The fallback ratchet reports no unintended, post-claim, or
+module-level increase. The supported eight-shard equivalence gate remains
+**1,611 passing / 32 known failing / 0 new regressions**; four baseline rows
+pass and the shared baseline remains unchanged.
+
+Strict TypeScript, Biome lint, formatting, diff, LOC/function budget,
+dead-export, godfile, oracle-ratchet, and adoption gates pass. The first
+merge-group Test262 run exposed two adapter boundaries in this slice: a
+top-level function declaration routed through an accessor callback could let
+the callback body steal the declaration's exact source slot, while
+literal-eval callables created after inventory freeze were incorrectly treated
+as inventoried source units. Nested publication now observes only non-function
+declarations with an exact inventory record; top-level callback adapters and
+post-inventory support callables remain on generic callable planning. The
+focused source-callable suite passes **8/8**, and the exact **19** Test262 paths
+covering the reported callable-planning failures pass **19/19** locally.
+Neither `benchmarks/results/test262-run.log` nor
+`scripts/equivalence-baseline.json` is changed.
+
+C26 closes exact retained ownership for arrows, function expressions, host
+callbacks, and object-literal methods/accessors, not R1. Nested function
+declarations, typed-`this` twins and other support callables, remaining
+class/type consumers, and module-array or display-name scans must still move
+behind structural authorities before R1 can close.
 
 ### R1a validation evidence
 

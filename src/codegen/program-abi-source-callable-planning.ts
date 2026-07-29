@@ -17,6 +17,14 @@ interface SourceCallableObservation {
   readonly funcIdx: FuncHandle;
 }
 
+type SourceCallableDeclaration =
+  | ts.FunctionDeclaration
+  | ts.FunctionExpression
+  | ts.ArrowFunction
+  | ts.MethodDeclaration
+  | ts.GetAccessorDeclaration
+  | ts.SetAccessorDeclaration;
+
 /** Push and structurally observe one top-level source function atomically. */
 export function pushProgramAbiTopLevelCallable(
   ctx: CodegenContext,
@@ -35,6 +43,37 @@ export function pushProgramAbiTopLevelCallable(
   registry.observe(declaration, funcIdx);
 }
 
+/** Push and structurally observe one nested source callable atomically. */
+export function pushProgramAbiNestedCallable(
+  ctx: CodegenContext,
+  declaration: SourceCallableDeclaration,
+  funcIdx: FuncHandle,
+  func: WasmFunction,
+): void {
+  pushDefinedFunc(ctx, funcIdx, func);
+  const registry = ctx.programAbiSourceCallables;
+  if (!registry) {
+    throw new ProgramAbiInvariantError(
+      "context-session-mismatch",
+      "nested source callable was allocated without its structural registry",
+    );
+  }
+  // Some legacy compatibility paths feed a top-level function declaration
+  // through the closure/callback compiler to build a separate adapter body.
+  // The declaration's original direct body already owns its source-unit ABI
+  // slot; observing the adapter as the same unit would make last-observation
+  // planning steal that slot from the direct body.
+  //
+  // Literal-eval and other compiler support paths can likewise create callable
+  // AST nodes after the whole-program inventory was frozen. Those are support
+  // bodies, not retained source-unit allocators. Keep them on generic callable
+  // planning until their own synthetic identities are introduced.
+  if (ts.isFunctionDeclaration(declaration) || !registry.identityContext?.unitIdByDeclaration.has(declaration)) {
+    return;
+  }
+  registry.observe(declaration, funcIdx);
+}
+
 function functionSignature(ctx: CodegenContext, func: WasmFunction): FuncTypeDef {
   const signature = ctx.mod.types[func.typeIdx];
   if (!signature || signature.kind !== "func") {
@@ -46,8 +85,18 @@ function functionSignature(ctx: CodegenContext, func: WasmFunction): FuncTypeDef
   return signature;
 }
 
+function expectedSourceCallableUnitKind(declaration: SourceCallableDeclaration): string | undefined {
+  if (ts.isFunctionDeclaration(declaration)) return undefined;
+  if (ts.isFunctionExpression(declaration)) return "function-expression";
+  if (ts.isArrowFunction(declaration)) return "arrow-function";
+  if (ts.isMethodDeclaration(declaration)) return "object-method";
+  if (ts.isGetAccessorDeclaration(declaration)) return "object-getter";
+  if (ts.isSetAccessorDeclaration(declaration)) return "object-setter";
+  return undefined;
+}
+
 /**
- * Exact allocator sidecar for top-level source function declarations.
+ * Exact allocator sidecar for source function declarations and expressions.
  *
  * The sidecar exists without a Program ABI session so IR integration never
  * needs to recover a source slot from funcMap. With an identity inventory,
@@ -78,7 +127,7 @@ export class ProgramAbiSourceCallableRegistry {
     }
   }
 
-  observe(declaration: ts.FunctionDeclaration, funcIdx: FuncHandle): IrUnitId | undefined {
+  observe(declaration: SourceCallableDeclaration, funcIdx: FuncHandle): IrUnitId | undefined {
     if (this.planned) {
       throw new ProgramAbiInvariantError(
         "planning-sealed",
@@ -97,8 +146,10 @@ export class ProgramAbiSourceCallableRegistry {
 
     const unitId = identityContext.unitIdByDeclaration.get(declaration);
     const unit = unitId === undefined ? undefined : identityContext.unitByUnitId.get(unitId);
-    const supportedUnit =
-      unit?.kind === "top-level-function" || (unit?.kind === "synthetic-support" && unit.syntheticRole !== undefined);
+    const expectedKind = expectedSourceCallableUnitKind(declaration);
+    const supportedUnit = expectedKind
+      ? unit?.kind === expectedKind
+      : unit?.kind === "top-level-function" || (unit?.kind === "synthetic-support" && unit.syntheticRole !== undefined);
     if (
       unitId === undefined ||
       !unit ||
@@ -107,7 +158,9 @@ export class ProgramAbiSourceCallableRegistry {
     ) {
       throw new ProgramAbiInvariantError(
         "missing-source-unit",
-        `source callable ${func.name} has no consistent exact top-level or compiler-support inventory owner`,
+        ts.isFunctionDeclaration(declaration)
+          ? `source callable ${func.name} has no consistent exact top-level or compiler-support inventory owner`
+          : `source callable ${func.name} has no consistent exact nested callable inventory owner`,
       );
     }
 

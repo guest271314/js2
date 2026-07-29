@@ -21,6 +21,14 @@ function exactUnit(inventory: IrUnitInventory, kind: string, displayName: string
   return matches[0]!;
 }
 
+function exactUnitKind(inventory: IrUnitInventory, kind: string): IrUnitRecord {
+  const matches = inventory.allUnits.filter((unit) => unit.kind === kind);
+  if (matches.length !== 1) {
+    throw new Error(`expected one ${kind}, found ${matches.length}`);
+  }
+  return matches[0]!;
+}
+
 function requiredCallable(entries: readonly ProgramAbiPlanEntry[], bindingId: string): ProgramAbiPlanEntry {
   const entry = entries.find((candidate) => candidate.id === bindingId);
   if (!entry) throw new Error(`missing callable ABI entry ${bindingId}`);
@@ -45,7 +53,7 @@ async function instantiate(result: CompileResult): Promise<Record<string, WebAss
   return instance.exports as Record<string, WebAssembly.ExportValue>;
 }
 
-describe("#3520 top-level source callable Program ABI ownership", () => {
+describe("#3520 source callable Program ABI ownership", () => {
   it("owns an Unsupported retained direct body by its exact source unit", async () => {
     const source = `export function withDefault(value: number = 1): number { return value; }`;
     const ast = analyzeSource(source, "source-callable-unsupported.ts");
@@ -162,5 +170,159 @@ describe("#3520 top-level source callable Program ABI ownership", () => {
     const exports = await instantiate(runtime);
     expect((exports.entryCaller as (value: number) => number)(7)).toBe(17);
     expect((exports.runDep as (value: number) => number)(7)).toBe(8);
+  });
+
+  it("owns retained arrow and function-expression bodies by their exact nested source units", async () => {
+    const source = `
+      export function run(value: number): number {
+        const increment = (input: number): number => input + 1;
+        const double = function named(input: number): number { return input * 2; };
+        return increment(value) + double(value);
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-nested.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const arrow = exactUnitKind(inventory, "arrow-function");
+    const expression = exactUnitKind(inventory, "function-expression");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const entries = generated.programAbi!.abi.entries();
+    for (const unit of [arrow, expression]) {
+      const bindingId = irUnitCallableBindingId(unit.id);
+      const entry = requiredCallable(entries, bindingId);
+      expect(entry.intent).toMatchObject({ kind: "callable", unitId: unit.id });
+      expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+        expect.objectContaining({ space: "function" }),
+      );
+    }
+
+    const runtime = await compile(source, {
+      fileName: "source-callable-nested.ts",
+      experimentalIR: true,
+    });
+    const exports = await instantiate(runtime);
+    expect((exports.run as (value: number) => number)(7)).toBe(22);
+  });
+
+  it("owns a retained direct host-callback body by its exact arrow unit", () => {
+    const source = `
+      export function install(target: EventTarget, sink: HTMLElement): void {
+        target.addEventListener("tick", () => { sink.textContent = "ready"; });
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-host-callback.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const arrow = exactUnitKind(inventory, "arrow-function");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const bindingId = irUnitCallableBindingId(arrow.id);
+    const entry = requiredCallable(generated.programAbi!.abi.entries(), bindingId);
+    expect(entry.intent).toMatchObject({ kind: "callable", unitId: arrow.id });
+    expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+      expect.objectContaining({ space: "function" }),
+    );
+  });
+
+  it("owns object-literal method and accessor bodies by their exact callable units", () => {
+    const source = `
+      export function make(): object {
+        return {
+          value: 1,
+          method(): number { return this.value; },
+          get current(): number { return this.value; },
+          set current(next: number) { this.value = next; },
+        };
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-object-members.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const units = [
+      exactUnitKind(inventory, "object-method"),
+      exactUnitKind(inventory, "object-getter"),
+      exactUnitKind(inventory, "object-setter"),
+    ];
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const entries = generated.programAbi!.abi.entries();
+    for (const unit of units) {
+      const bindingId = irUnitCallableBindingId(unit.id);
+      const entry = requiredCallable(entries, bindingId);
+      expect(entry.intent).toMatchObject({ kind: "callable", unitId: unit.id });
+      expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+        expect.objectContaining({ space: "function" }),
+      );
+    }
+  });
+
+  it("does not let an accessor adapter steal a top-level function declaration's exact slot", () => {
+    const source = `
+      const target: any = {};
+      function getValue(): number { return 20; }
+      Object.defineProperties(target, { value: { get: getValue } });
+      export function read(): number { return target.value; }
+    `;
+    const ast = analyzeSource(source, "source-callable-accessor-adapter.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const getter = exactUnit(inventory, "top-level-function", "getValue");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const bindingId = irUnitCallableBindingId(getter.id);
+    const entry = requiredCallable(generated.programAbi!.abi.entries(), bindingId);
+    expect(entry.intent).toMatchObject({ kind: "callable", unitId: getter.id });
+    expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+      expect.objectContaining({ space: "function" }),
+    );
+  });
+
+  it("keeps post-inventory literal-eval accessors on support-callable planning", async () => {
+    const generated = await compile(
+      `
+        export function run(): number {
+          eval("({ value: 1, get value() {} });");
+          return 1;
+        }
+      `,
+      {
+        fileName: "source-callable-literal-eval.ts",
+        experimentalIR: true,
+      },
+    );
+    expect(generated.success, generated.errors.map((error) => error.message).join("\n")).toBe(true);
   });
 });
