@@ -5,9 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c27-nested-function-abi
-pr: 3797
-last_merged_pr: 3792
+branch: codex/3520-c28-typed-this-abi
+last_merged_pr: 3797
 sprint: current
 created: 2026-07-21
 updated: 2026-07-29
@@ -2497,6 +2496,36 @@ C27 closes exact retained ownership for nested function declarations, not R1.
 Typed-`this` twins and other support callables, remaining class/type consumers,
 and module-array or display-name scans must still move behind structural
 authorities before R1 can close.
+
+### 2026-07-29 typed-this twin callable ownership continuation
+
+The continuation on `codex/3520-c28-typed-this-abi` gives every admitted
+typed-`this` twin its own structural Program ABI owner:
+
+- the original function-expression body keeps the callable binding derived
+  from its exact source `IrUnitId`, while the optimized twin receives a
+  separate `typed-this-twin` support binding anchored beneath that same unit;
+- twin observation happens atomically with allocator publication, and final
+  ownership is selected only after DCE. A removed twin creates no required ABI
+  slot, while a retained twin is resolved from its exact `WasmFunction` object
+  rather than its generated `__typed_this` label; and
+- admission, the second optimized compilation, receiver-param specialization,
+  numeric field/return/local promotion, arity padding, direct-call
+  devirtualization, guard-shim construction, and the generic fallback body are
+  unchanged.
+
+The production fixture proves the generic body and admitted twin finalize to
+two different function slots while the standalone program still returns the
+expected value. The focused source-callable and complete typed-`this`
+optimization matrix passes **103/103 across eight files**. Strict TypeScript
+and changed-file Biome lint pass. The hybrid IR-only readiness lane remains
+**READY** at **31 emitted / 6 typed Unsupported / 0 Invariants across 37
+terminal units**, with all 37 legacy bodies still emitted.
+
+C28 closes exact ownership for the typed-`this` twin family, not R1. Other
+support callables, remaining class/type consumers, and module-array or
+display-name scans must still move behind structural authorities before R1
+can close.
 
 ### R1a validation evidence
 

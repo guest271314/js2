@@ -1,14 +1,18 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import { irUnitCallableBindingId, irUnitFuncRef } from "../ir/callable-bindings.js";
-import type { IrUnitId } from "../ir/identity.js";
+import { irSupportFuncRef, irUnitCallableBindingId, irUnitFuncRef } from "../ir/callable-bindings.js";
+import type { IrBindingId, IrUnitId } from "../ir/identity.js";
 import type { IrPlanningIdentityContext } from "../ir/planning-identity.js";
 import { ProgramAbiInvariantError } from "../ir/program-abi.js";
 import type { FuncHandle, FuncTypeDef, WasmFunction } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext } from "./context/types.js";
 import { definedFuncAt, pushDefinedFunc } from "./func-space.js";
-import { planProgramAbiUnitCallable } from "./program-abi-planning.js";
+import {
+  planProgramAbiSupportCallable,
+  planProgramAbiUnitCallable,
+  PROGRAM_ABI_CALLABLE_ROLE,
+} from "./program-abi-planning.js";
 import type { ProgramAbiSession } from "./program-abi-session.js";
 
 interface SourceCallableObservation {
@@ -16,6 +20,15 @@ interface SourceCallableObservation {
   readonly displayName: string;
   readonly funcIdx: FuncHandle;
 }
+
+interface SourceSupportCallableObservation {
+  readonly bindingId: IrBindingId;
+  readonly unitId: IrUnitId;
+  readonly displayName: string;
+  readonly func: WasmFunction;
+}
+
+const TYPED_THIS_TWIN_ROLE = "typed-this-twin";
 
 type SourceCallableDeclaration =
   | ts.FunctionDeclaration
@@ -74,6 +87,25 @@ export function pushProgramAbiNestedCallable(
   registry.observe(declaration, funcIdx);
 }
 
+/** Push and structurally observe one admitted typed-`this` support twin atomically. */
+export function pushProgramAbiTypedThisTwin(
+  ctx: CodegenContext,
+  declaration: ts.FunctionExpression | ts.ArrowFunction,
+  funcIdx: FuncHandle,
+  func: WasmFunction,
+): void {
+  pushDefinedFunc(ctx, funcIdx, func);
+  if (!ts.isFunctionExpression(declaration)) {
+    throw new ProgramAbiInvariantError(
+      "missing-source-unit",
+      `typed-this twin ${func.name} does not have a function-expression source owner`,
+    );
+  }
+  const registry = ctx.programAbiSourceCallables;
+  if (!registry?.identityContext?.unitIdByDeclaration.has(declaration)) return;
+  registry.observeTypedThisTwin(declaration, funcIdx);
+}
+
 /** Push and structurally observe one nested function declaration atomically. */
 export function pushProgramAbiNestedFunctionDeclaration(
   ctx: CodegenContext,
@@ -129,6 +161,7 @@ function expectedSourceCallableUnitKind(declaration: SourceCallableDeclaration):
  */
 export class ProgramAbiSourceCallableRegistry {
   private readonly observations = new Map<IrUnitId, SourceCallableObservation[]>();
+  private readonly supports = new Map<IrBindingId, SourceSupportCallableObservation[]>();
   private planned = false;
 
   constructor(
@@ -157,6 +190,52 @@ export class ProgramAbiSourceCallableRegistry {
 
   observeNestedFunctionDeclaration(declaration: ts.FunctionDeclaration, funcIdx: FuncHandle): IrUnitId | undefined {
     return this.observeWithExpectedKind(declaration, funcIdx, "nested-function");
+  }
+
+  observeTypedThisTwin(declaration: ts.FunctionExpression, funcIdx: FuncHandle): IrBindingId | undefined {
+    if (this.planned) {
+      throw new ProgramAbiInvariantError(
+        "planning-sealed",
+        "cannot observe a typed-this twin after retained source-callable planning",
+      );
+    }
+    const func = definedFuncAt(this.ctx, funcIdx);
+    if (!func) {
+      throw new ProgramAbiInvariantError(
+        "missing-required-locator",
+        `typed-this twin has no exact defined function for handle ${funcIdx}`,
+      );
+    }
+    const identityContext = this.identityContext;
+    if (!identityContext) return undefined;
+    const unitId = identityContext.unitIdByDeclaration.get(declaration);
+    const unit = unitId === undefined ? undefined : identityContext.unitByUnitId.get(unitId);
+    if (
+      unitId === undefined ||
+      !unit ||
+      unit.kind !== "function-expression" ||
+      identityContext.declarationByUnitId.get(unitId) !== declaration
+    ) {
+      throw new ProgramAbiInvariantError(
+        "missing-source-unit",
+        `typed-this twin ${func.name} has no consistent exact function-expression inventory owner`,
+      );
+    }
+    const ref = irSupportFuncRef(unitId, TYPED_THIS_TWIN_ROLE, func.name);
+    if (ref.binding.kind !== "support") {
+      throw new ProgramAbiInvariantError(
+        "invalid-binding-reference",
+        `typed-this twin ${func.name} did not produce a support binding`,
+      );
+    }
+    const bindingId = ref.binding.bindingId;
+    const observations = this.supports.get(bindingId) ?? [];
+    const previous = observations.at(-1);
+    if (previous?.func !== func || previous.displayName !== func.name) {
+      observations.push(Object.freeze({ bindingId, unitId, displayName: func.name, func }));
+      this.supports.set(bindingId, observations);
+    }
+    return bindingId;
   }
 
   private observeWithExpectedKind(
@@ -253,6 +332,36 @@ export class ProgramAbiSourceCallableRegistry {
         throw new ProgramAbiInvariantError(
           "missing-source-unit",
           `retained source callable ${canonical.observation.displayName} was not accepted for exact unit ${unitId}`,
+        );
+      }
+    }
+
+    const live = new Set(this.ctx.mod.functions);
+    for (const [bindingId, observations] of this.supports) {
+      const canonical = observations.filter((observation) => live.has(observation.func)).at(-1);
+      if (!canonical) continue;
+      if (session.hasPlan(bindingId)) {
+        if (!session.hasLocator(bindingId, canonical.func)) {
+          throw new ProgramAbiInvariantError(
+            "duplicate-slot-locator",
+            `retained typed-this twin ${canonical.displayName} is not the exact allocator owned by ${bindingId}`,
+          );
+        }
+        continue;
+      }
+      const ref = irSupportFuncRef(canonical.unitId, TYPED_THIS_TWIN_ROLE, canonical.displayName);
+      const plannedBindingId = planProgramAbiSupportCallable(this.ctx, {
+        ref,
+        anchor: { kind: "unit", unitId: canonical.unitId },
+        role: TYPED_THIS_TWIN_ROLE,
+        roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.typedThisTwin,
+        signature: functionSignature(this.ctx, canonical.func),
+        func: canonical.func,
+      });
+      if (plannedBindingId !== bindingId) {
+        throw new ProgramAbiInvariantError(
+          "invalid-binding-reference",
+          `retained typed-this twin ${canonical.displayName} was not accepted for ${bindingId}`,
         );
       }
     }

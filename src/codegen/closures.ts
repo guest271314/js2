@@ -19,7 +19,7 @@ import { isVoidType, unwrapPromiseType, isPromiseType } from "../checker/type-ma
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { isStandalonePromiseActive } from "./async-scheduler.js"; // (#2867 Gap 1) native-$Promise carrier gate
 import { definedFuncAt, funcSignatureOf, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
-import { pushProgramAbiNestedCallable } from "./program-abi-source-callable-planning.js";
+import { pushProgramAbiNestedCallable, pushProgramAbiTypedThisTwin } from "./program-abi-source-callable-planning.js";
 import { inLiveShiftRange } from "../emit/resolve-layout.js"; // (#1916 S3b) manual import-shift must skip stable handles
 import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
 import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
@@ -2800,7 +2800,7 @@ export function compileArrowAsClosure(
         ctx.liveBodies.delete(twin.liftedFctx.body);
       } else {
         const twinFuncIdx = mintDefinedFunc(ctx);
-        pushDefinedFunc(ctx, twinFuncIdx, {
+        pushProgramAbiTypedThisTwin(ctx, arrow, twinFuncIdx, {
           name: twinName,
           typeIdx: twin.liftedFuncTypeIdx,
           locals: twin.liftedFctx.locals,
