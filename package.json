@@ -177,7 +177,7 @@
     "build:pages": "node scripts/run-pages-build.mjs",
     "deploy:registry-home": "mkdir -p .registry-home && cp website/index.html .registry-home/index.html && node ../file-registry-cli/dist/bin/main.js commit .registry-home -r users/tt/projects/ts2wasm && node ../file-registry-cli/dist/bin/main.js push .registry-home -r users/tt/projects/ts2wasm --public",
     "upload": "pnpm run build:playground && node ../file-registry-cli/dist/bin/main.js commit && node ../file-registry-cli/dist/bin/main.js push",
-    "prepare": "git config core.hooksPath .husky || true",
+    "prepare": "sh scripts/configure-git-hooks.sh || true",
     "reconcile:tasks": "node scripts/reconcile-tasklist.mjs",
     "issues:pr-status": "node scripts/poll-merged-pr-issues.mjs --once --sync-artifacts",
     "issues:pr-status:watch": "node scripts/poll-merged-pr-issues.mjs --sync-artifacts",

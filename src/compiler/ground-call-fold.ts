@@ -742,12 +742,12 @@ function emptyNullPrototypeConstructorFactory(input: ts.Expression): boolean {
   }
   const declaration = declarationStatement.declarationList.declarations[0]!;
   if (!ts.isIdentifier(declaration.name) || !declaration.initializer) return false;
-  const constructor = unwrap(declaration.initializer);
+  const constructorExpression = unwrap(declaration.initializer);
   if (
-    (!ts.isFunctionExpression(constructor) && !ts.isArrowFunction(constructor)) ||
-    constructor.parameters.length !== 0 ||
-    !ts.isBlock(constructor.body) ||
-    constructor.body.statements.length !== 0
+    (!ts.isFunctionExpression(constructorExpression) && !ts.isArrowFunction(constructorExpression)) ||
+    constructorExpression.parameters.length !== 0 ||
+    !ts.isBlock(constructorExpression.body) ||
+    constructorExpression.body.statements.length !== 0
   ) {
     return false;
   }
