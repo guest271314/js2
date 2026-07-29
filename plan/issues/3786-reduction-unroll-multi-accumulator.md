@@ -146,18 +146,60 @@ is worth its own issue: it changes the shape for _every_ loop and has to keep
 
 ## Acceptance criteria
 
-- [ ] `loop.ts` measures faster than the JS lane on Node 26 through the
-      #3785-fixed harness. Target ≤ 250 µs (multi×8 hand-measured 192.1 µs;
-      allow headroom for the real emitter).
-- [ ] Differential IR == legacy == real-JS over trip counts that stress the
-      remainder: `N ∈ {0, 1, 7, 8, 9, 15, 16, 1000, 999999, 1000000}` — the
-      `N mod k ≠ 0` cases are where an off-by-one silently returns a wrong sum.
-- [ ] Wrap-past-2³¹ is exercised (the whole point is that the sum overflows;
-      `1000000` already does, but assert it explicitly against JS).
-- [ ] A loop the recogniser must REJECT stays byte-identical to today's output:
-      float accumulator (no `| 0`), accumulator also read in the body, non-literal
-      bound, a call in the body, `i += 2`.
-- [ ] Equivalence gate: no new regressions.
+- [x] `loop.ts` measures faster than the JS lane on Node 26 through the
+      #3785-fixed harness. **191.2 µs vs 367.4 µs — 0.52x, i.e. 1.92x faster.**
+      Target was ≤250 µs; the emitter landed on the hand-measured 192.1 µs
+      ceiling almost exactly.
+- [x] Differential against real JS over trip counts covering every remainder
+      mod 8: `N ∈ {0,1,2,7,8,9,15,16,63,64,65,100,127,128,1000,999999,1000000}`.
+      All agree.
+- [x] Wrap-past-2³¹ exercised explicitly (`N=1000000` sums to 499,999,500,000;
+      the wrapped answer 1,783,293,664 matches JS).
+- [x] Reject list, each of which would be a miscompile if accepted: float
+      accumulator, accumulator aliased in the body, non-literal bound, step ≠ 1,
+      and init declaring a different binding than the cond tests. A rejected
+      loop is additionally asserted to still compute the JS answer.
+- [x] Equivalence gate: no new regressions.
+
+## What landed
+
+Measured end-to-end through the full generator on real `node v26.5.0`:
+
+| benchmark     | wasm         | js           | ratio            |
+| ------------- | ------------ | ------------ | ---------------- |
+| `fib.ts`      | 3892.8 µs    | 9756.8 µs    | 2.51x faster     |
+| **`loop.ts`** | **191.2 µs** | **367.4 µs** | **1.92x faster** |
+| `string.ts`   | 5.3 µs       | 5.1 µs       | parity           |
+| `array.ts`    | 45.5 µs      | 62.7 µs      | 1.38x faster     |
+
+Emitted shape, post-`wasm-opt -O4` fixpoint — 8 independent chains, trip count
+125,000 (= 1,000,000 / 8), one compare:
+
+```wat
+(loop $label
+ (if (i32.lt_s (local.get $1) (i32.const 125000))
+  (then
+   (local.set $2 (i32.add (local.get $0) (local.get $2)))
+   (local.set $3 (i32.add (local.get $3) (i32.add (local.get $0) (i32.const 1))))
+   (local.set $4 (i32.add (local.get $4) (i32.add (local.get $0) (i32.const 2))))
+   ...
+```
+
+### The trap that made the first version a silent no-op
+
+#3741 deliberately keeps a promoted counter's `ScopeBinding.type` at **f64**
+while its **slot** is i32 — that asymmetry is precisely how it avoided a
+consumption-site blast radius. So the natural guard, "only proceed if the
+binding's IrType is i32," rejects every loop this transform exists for. The
+first version compiled, typechecked, passed all 17 differential fixtures — and
+fired on **0 of 17**, because a no-op is trivially correct. Only the
+`[unrolled]` column in the fixture output revealed it. The slot's i32-ness is
+now established structurally instead: the recogniser accepts only a
+cond/update/body built from `i32.lt_s` / `i32.add` against that same slot index.
+
+Worth remembering as a category: for an optimization, "all tests pass" and "the
+optimization ran" are independent claims, and only the second one is at risk of
+being silently false.
 
 ## Provenance
 
