@@ -644,13 +644,13 @@ function fillVecHasOwnHelpers(ctx: CodegenContext, vecBaseIdx: number): void {
     );
   }
 
-  const propertyIsEnumerable = ctx.mod.functions.find((candidate) => candidate.name === "__propertyIsEnumerable");
+  const propertyIsEnumerableFn = ctx.mod.functions.find((candidate) => candidate.name === "__propertyIsEnumerable");
   const externGetIdx = ctx.funcMap.get("__extern_get");
   const unboxBooleanIdx = ctx.funcMap.get("__unbox_boolean");
-  if (propertyIsEnumerable && externGetIdx !== undefined && unboxBooleanIdx !== undefined) {
-    const descLocal = 2 + propertyIsEnumerable.locals.length;
-    propertyIsEnumerable.locals.push({ name: "__vec_desc", type: { kind: "externref" } });
-    propertyIsEnumerable.body.unshift(
+  if (propertyIsEnumerableFn && externGetIdx !== undefined && unboxBooleanIdx !== undefined) {
+    const descLocal = 2 + propertyIsEnumerableFn.locals.length;
+    propertyIsEnumerableFn.locals.push({ name: "__vec_desc", type: { kind: "externref" } });
+    propertyIsEnumerableFn.body.unshift(
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
       { op: "ref.test", typeIdx: vecBaseIdx },
