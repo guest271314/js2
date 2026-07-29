@@ -1155,8 +1155,10 @@ let currentDynMemberReadBuildable = true;
 // canonical boxed-any parameter ABI. A top-level function is eligible only
 // when every source reference to it is a direct identifier call; value uses
 // (notably named Array HOF callbacks) can enter through a legacy direct carrier.
+let currentDynScanSourceFile: ts.SourceFile | null = null;
 let currentDirectOnlyDynMemberEqualityFunctions: ReadonlySet<ts.FunctionDeclaration> = new Set();
-let currentSubjectAllowsDynMemberEquality = false;
+let currentDirectOnlyDynMemberEqualityFunctionsReady = false;
+let currentDynMemberEqualitySubject: ts.FunctionDeclaration | null = null;
 let currentDynEqualityBoxableParamNames = new Set<string>();
 
 /** @internal Configure the shared predicates for an exact structural selector run. */
@@ -1236,14 +1238,25 @@ function configureDynamicScanSource(
   sourceFile: ts.SourceFile,
   declarations: ReadonlyMap<string, ts.FunctionDeclaration>,
 ): void {
+  currentDynScanSourceFile = sourceFile;
   currentDynScanDecls = declarations;
-  currentDirectOnlyDynMemberEqualityFunctions = collectDirectOnlyFunctionDeclarations(sourceFile, declarations);
+  currentDirectOnlyDynMemberEqualityFunctions = new Set();
+  currentDirectOnlyDynMemberEqualityFunctionsReady = false;
+}
+
+function directOnlyDynMemberEqualityFunctions(): ReadonlySet<ts.FunctionDeclaration> {
+  if (currentDirectOnlyDynMemberEqualityFunctionsReady) return currentDirectOnlyDynMemberEqualityFunctions;
+  currentDirectOnlyDynMemberEqualityFunctions =
+    currentDynScanSourceFile === null || currentDynScanDecls === null
+      ? new Set()
+      : collectDirectOnlyFunctionDeclarations(currentDynScanSourceFile, currentDynScanDecls);
+  currentDirectOnlyDynMemberEqualityFunctionsReady = true;
+  return currentDirectOnlyDynMemberEqualityFunctions;
 }
 
 function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean): void {
   currentSubjectIsModuleInit = false;
-  currentSubjectAllowsDynMemberEquality =
-    !isMethod && ts.isFunctionDeclaration(fn) && currentDirectOnlyDynMemberEqualityFunctions.has(fn);
+  currentDynMemberEqualitySubject = !isMethod && ts.isFunctionDeclaration(fn) ? fn : null;
   currentDynEqualityBoxableParamNames = new Set<string>();
 }
 
@@ -2003,7 +2016,11 @@ function subtreeTouchesDynamic(root: ts.Node, dynNames: ReadonlySet<string>): bo
 
 function dynamicMemberEqualityOperandIsBuildable(candidate: ts.Expression): boolean {
   const isMember = ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate);
-  return !isMember || currentSubjectAllowsDynMemberEquality;
+  return (
+    !isMember ||
+    (currentDynMemberEqualitySubject !== null &&
+      directOnlyDynMemberEqualityFunctions().has(currentDynMemberEqualitySubject))
+  );
 }
 
 function concreteDynamicEqualityOperandIsBuildable(candidate: ts.Expression): boolean {
@@ -6628,6 +6645,7 @@ export function assessModuleInit(
   currentFnIsVoidReturn = true;
   currentFnIsAsync = false; // (#1373b C-1) module-init is never an async body
   currentSubjectIsModuleInit = true;
+  currentDynMemberEqualitySubject = null;
   currentIrSafeVarDeclarationLists = new Set();
   currentModuleMapGetAliases = new Set<ts.VariableDeclaration>();
   currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "boolean">();

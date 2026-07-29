@@ -1916,10 +1916,11 @@ current dynamic member helper expects boxed-any input; claiming that seam made
 ## Implementation Notes — direct-only dynamic member equality (2026-07-29)
 
 The callback-carrier restriction is now narrowed to the functions that need it.
-The selector performs a source-wide reference scan for each top-level function:
-only declaration names and direct identifier calls are accepted. Any value use,
-including passing a named function to an array HOF, keeps dynamic member
-equality on the direct path.
+When a dynamic-member equality candidate is actually encountered, the selector
+performs one cached source-wide reference scan: only declaration names and
+direct identifier calls are accepted. Any value use, including passing a named
+function to an array HOF, keeps dynamic member equality on the direct path.
+Sources without such a candidate pay no scan cost.
 
 Functions used only through their declared ABI can reuse the existing
 `dyn.member_get` plus dynamic equality lowering. This admits the exact
@@ -1942,6 +1943,12 @@ Validation for this slice:
 - equivalence matrix: 8/8 shards, zero new regressions;
 - typecheck, fallback/adoption/oracle, LOC, function-budget, and linear-IR
   gates pass.
+
+The first PR run caught an eager-scan compile-work increase in the #3437
+harness gate. Moving the proof behind the candidate arm removes that cost:
+current `origin/main` and this branch both measure 111,517 shared
+`forEachChild` calls on the deterministic harness fixture. The existing budget
+is unchanged.
 
 Focused whole-compiler tests execute these paths in standalone and assert real
 IR emission plus zero post-claim failures. The exact #3796 driver remains the
