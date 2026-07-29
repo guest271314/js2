@@ -297,6 +297,17 @@ export interface IrFromAstResolver {
    * (iter-host fallthrough, as before).
    */
   stringForOfPlan?(): "char-loop" | "iter-host";
+  /**
+   * #2952 slice 5 — mode-selected runtime symbols for dynamic for-in.
+   * Both plans share the same externref/i32 ABI and preserve the #2964
+   * snapshot ordering plus per-visit liveness semantics.
+   */
+  dynamicForInPlan?(): {
+    readonly keys: string;
+    readonly len: string;
+    readonly get: string;
+    readonly has: string;
+  } | null;
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
    * #1804 — register-or-recover the vec struct for an element ValType so
@@ -1070,6 +1081,10 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
     // closures, no nested function decls).
     if (ts.isForOfStatement(s)) {
       lowerForOfStatement(s, cx);
+      continue;
+    }
+    if (ts.isForInStatement(s)) {
+      lowerForInStatement(s, cx);
       continue;
     }
     // Slice 12 (#1280): generic structured `while (cond) body` and
@@ -6235,6 +6250,89 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
   lowerForOfIterFromExternrefValue(stmt, cx, iterableV, loopVarName, valTy?.kind === "externref");
 }
 
+/**
+ * #2952 slice 5 — lower the runtime-dynamic for-in shape through the shared
+ * #2964 enumeration ABI.
+ *
+ * Keys are snapshotted once, then each candidate is checked for liveness
+ * immediately before the user body. The loop itself reuses `for.loop`, so
+ * break/continue and early return keep the structured-control semantics
+ * already shipped by the earlier #2952 slices.
+ */
+function lowerForInStatement(stmt: ts.ForInStatement, cx: LowerCtx): void {
+  const plan = cx.resolver?.dynamicForInPlan?.();
+  if (!plan) {
+    throw new IrUnsupportedError(
+      "body-shape-rejected",
+      "build",
+      `ir/from-ast: dynamic for-in runtime is unavailable in ${cx.funcName}`,
+    );
+  }
+  const init = stmt.initializer;
+  if (!ts.isVariableDeclarationList(init) || init.declarations.length !== 1) {
+    throw new Error(`ir/from-ast: for-in init shape drift in ${cx.funcName}`);
+  }
+  const declaration = init.declarations[0]!;
+  if (!ts.isIdentifier(declaration.name) || declaration.initializer) {
+    throw new Error(`ir/from-ast: for-in head shape drift in ${cx.funcName}`);
+  }
+
+  const receiver = lowerExpr(stmt.expression, cx, irDynamic());
+  if (cx.builder.typeOf(receiver).kind !== "dynamic") {
+    throw new Error(`ir/from-ast: for-in receiver lost dynamic carrier in ${cx.funcName}`);
+  }
+
+  const externref = irVal({ kind: "externref" });
+  const i32 = irVal({ kind: "i32" });
+  const keys = cx.builder.emitCall(irRuntimeFuncRef(plan.keys), [receiver], externref);
+  if (keys === null) throw new Error(`ir/from-ast: for-in keys helper returned void in ${cx.funcName}`);
+  const length = cx.builder.emitCall(irRuntimeFuncRef(plan.len), [keys], i32);
+  if (length === null) throw new Error(`ir/from-ast: for-in length helper returned void in ${cx.funcName}`);
+
+  const counterSlot = cx.builder.declareSlot("__forin_i", { kind: "i32" });
+  const keySlot = cx.builder.declareSlot(`__forin_${declaration.name.text}`, { kind: "externref" });
+  cx.builder.emitSlotWrite(counterSlot, cx.builder.emitConst({ kind: "i32", value: 0 }, i32));
+
+  let condValue: IrValueId | null = null;
+  const cond = cx.builder.collectBodyInstrs(() => {
+    condValue = cx.builder.emitBinary("i32.lt_s", cx.builder.emitSlotRead(counterSlot), length, i32);
+  });
+  if (condValue === null) throw new Error(`ir/from-ast: for-in condition produced no value in ${cx.funcName}`);
+
+  const loopLabel = cx.pendingLoopLabel ?? cx.builder.freshLoopLabel();
+  const loopScope = conservativeLoopStringEncodingScope(stmt, cx);
+  const bodyScope = new Map(loopScope);
+  bodyScope.set(declaration.name.text, { kind: "slot", slotIndex: keySlot, type: externref });
+  const bodyCx: LowerCtx = {
+    ...cx,
+    scope: bodyScope,
+    loopLabel,
+    breakTargetLabel: loopLabel,
+    pendingLoopLabel: undefined,
+  };
+  const body = cx.builder.collectBodyInstrs(() => {
+    const key = cx.builder.emitCall(
+      irRuntimeFuncRef(plan.get),
+      [keys, cx.builder.emitSlotRead(counterSlot)],
+      externref,
+    );
+    if (key === null) throw new Error(`ir/from-ast: for-in key helper returned void in ${cx.funcName}`);
+    cx.builder.emitSlotWrite(keySlot, key);
+    const live = cx.builder.emitCall(irRuntimeFuncRef(plan.has), [receiver, key], i32);
+    if (live === null) throw new Error(`ir/from-ast: for-in liveness helper returned void in ${cx.funcName}`);
+    const liveBody = cx.builder.collectBodyInstrs(() => lowerStmt(stmt.statement, bodyCx));
+    cx.builder.emitIfStmt({ cond: live, then: liveBody, else: [] });
+  });
+
+  const update = cx.builder.collectBodyInstrs(() => {
+    const one = cx.builder.emitConst({ kind: "i32", value: 1 }, i32);
+    const next = cx.builder.emitBinary("i32.add", cx.builder.emitSlotRead(counterSlot), one, i32);
+    cx.builder.emitSlotWrite(counterSlot, next);
+  });
+  cx.builder.emitForLoop({ cond, condValue, body, update, loopLabel });
+  joinScopeStringEncodingFacts(cx.scope, [loopScope]);
+}
+
 // ---------------------------------------------------------------------------
 // Slice 12 (#1280) — generic structured loops (`while` / `for`)
 // ---------------------------------------------------------------------------
@@ -6948,6 +7046,10 @@ function lowerStmt(stmt: ts.Statement, cx: LowerCtx): void {
   }
   if (ts.isForOfStatement(stmt)) {
     lowerForOfStatement(stmt, cx);
+    return;
+  }
+  if (ts.isForInStatement(stmt)) {
+    lowerForInStatement(stmt, cx);
     return;
   }
   // Slice 12 (#1280): nested while / for loops inside a body buffer.

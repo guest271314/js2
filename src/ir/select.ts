@@ -446,6 +446,14 @@ export interface IrSelectionOptions {
    * default (undefined ⇒ true) is correct for the default-host fallback path.
    */
   readonly dynMemberReadBuildable?: boolean;
+  /**
+   * #2952 slice 5 — certify that this exact `for (head in receiver)` source
+   * expression uses the non-fast dynamic externref carrier. The callback is
+   * checker-backed in production and absent for bare selector callers, so the
+   * new loop shape is never claimed for a typed object, a fast `$AnyValue`
+   * carrier, or an unproven receiver.
+   */
+  readonly isDynamicForInReceiver?: (receiver: ts.Expression) => boolean;
   /** (#3214 A+B1) Checker-backed imports; omitted by host-free and bare selector callers. */
   readonly importedFunctions?: IrImportedFunctionResolver;
   /** (#3657) Checker-certified class-member calls to same-file primitive host stubs. */
@@ -2188,7 +2196,15 @@ function dynamicUsesAreMoveOnly(
     if (ts.isWhileStatement(s)) {
       return scanExpr(s.expression, isDynShaped(s.expression)) && scanStmt(s.statement);
     }
-    // For / for-of / for-in / switch / try / throw / nested functions /
+    if (ts.isForInStatement(s)) {
+      return (
+        currentSelectionOptions?.isDynamicForInReceiver?.(s.expression) === true &&
+        isDynShaped(s.expression) &&
+        scanExpr(s.expression, true) &&
+        scanStmt(s.statement)
+      );
+    }
+    // For / for-of / switch / try / throw / nested functions /
     // anything else: conservative — claimable exactly when the statement
     // doesn't touch a dynamic value at all.
     return !subtreeTouchesDynamic(s, dynNames);
@@ -2468,6 +2484,12 @@ function isPhase1StatementListInScope(
     // throw and the function falls back to legacy.
     if (ts.isForOfStatement(s)) {
       if (!isPhase1ForOf(s, scope, localClasses)) return shapeNo("nontail-forof", s);
+      continue;
+    }
+    // #2952 slice 5 — the narrow dynamic-receiver for-in slice. The
+    // checker-backed capability callback keeps typed/fast receivers out.
+    if (ts.isForInStatement(s)) {
+      if (!isPhase1ForInStatement(s, scope, localClasses)) return shapeNo("nontail-forin", s);
       continue;
     }
     // Slice 12 (#1280) — `while` / `for` (C-style) as non-tail
@@ -3117,6 +3139,65 @@ function isPhase1ForUpdateExpr(
 }
 
 /**
+ * #2952 slice 5 — shape-check the runtime-dynamic for-in form used by Acorn.
+ *
+ * This first IR-owned slice deliberately accepts only `for (var id in dyn)`.
+ * The production callback proves `dyn` is the non-fast externref carrier; the
+ * fast `$AnyValue` carrier and typed object/array receivers remain direct until
+ * their representation-specific receiver conversions are modeled in IR.
+ *
+ * The head name is loop-local in this structural model. Consequently a source
+ * use after the loop is rejected by the ordinary scope walk rather than
+ * incorrectly approximating JavaScript `var` hoisting.
+ */
+function isPhase1ForInStatement(
+  stmt: ts.ForInStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
+  breaks: BreakScope = NO_BREAKS,
+): boolean {
+  if (currentSelectionOptions?.isDynamicForInReceiver?.(stmt.expression) !== true) {
+    return shapeNo("forin-receiver-not-dynamic-externref", stmt.expression);
+  }
+  if (!isPhase1Expr(stmt.expression, scope, localClasses)) return shapeNo("forin-receiver", stmt.expression);
+  if (!ts.isVariableDeclarationList(stmt.initializer)) return shapeNo("forin-head-not-declaration", stmt.initializer);
+  if (stmt.initializer.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) {
+    return shapeNo("forin-head-not-var", stmt.initializer);
+  }
+  if (stmt.initializer.declarations.length !== 1) return shapeNo("forin-head-count", stmt.initializer);
+  const declaration = stmt.initializer.declarations[0]!;
+  if (!ts.isIdentifier(declaration.name) || declaration.initializer) {
+    return shapeNo("forin-head-shape", declaration);
+  }
+  const headName = declaration.name.text;
+  if (scope.has(headName)) return shapeNo("forin-head-shadow", declaration.name);
+  let headUsed = false;
+  const findHeadUse = (node: ts.Node): void => {
+    if (headUsed) return;
+    if (ts.isIdentifier(node) && node.text === headName) {
+      headUsed = true;
+      return;
+    }
+    forEachChild(node, findHeadUse);
+  };
+  findHeadUse(stmt.statement);
+  if (headUsed) return shapeNo("forin-head-value-used", stmt.statement);
+
+  const bodyScope = new Set(scope);
+  bodyScope.add(headName);
+  earlyReturnLoopDepth++;
+  try {
+    return (
+      isPhase1BodyStatement(stmt.statement, bodyScope, localClasses, /* inLoop */ true, labels, breaks) ||
+      shapeNo("forin-body", stmt.statement)
+    );
+  } finally {
+    earlyReturnLoopDepth--;
+  }
+}
+
+/**
  * Slice 6 part 2 (#1181): recogniser for body statements inside a for-of
  * loop. Narrower than `isPhase1StatementList` — no nested closures, no
  * nested function decls, no fall-through if/else patterns. Accepts:
@@ -3269,6 +3350,9 @@ function isPhase1BodyStatement(
   }
   if (ts.isForOfStatement(stmt)) {
     return isPhase1ForOf(stmt, scope, localClasses, labels, breaks);
+  }
+  if (ts.isForInStatement(stmt)) {
+    return isPhase1ForInStatement(stmt, scope, localClasses, labels, breaks);
   }
   // Slice 12 (#1280) — nested while / for inside a body buffer.
   if (ts.isWhileStatement(stmt)) {
