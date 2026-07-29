@@ -110,7 +110,7 @@ export {
   collectEmptyObjectWidening,
   collectGrowableObjectLiterals,
 } from "./declarations/object-shape-widening.js";
-export { inferNumericReturnTypes } from "./declarations/param-return-inference.js";
+export { inferImplicitAnyParamType, inferNumericReturnTypes } from "./declarations/param-return-inference.js";
 // Import-back: symbols the declaration trunk still calls internally.
 import { inferImplicitAnyParamType, resolveGenericCallSiteTypes } from "./declarations/param-return-inference.js";
 import {
