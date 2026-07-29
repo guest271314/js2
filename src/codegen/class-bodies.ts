@@ -22,6 +22,7 @@ import { genBodyReferencesThis, genBodyReferencesSuper, emitCachedFuncClosureAcc
 import { classMemberFuncKey, fnctorAncestorOfClass } from "./class-member-keys.js"; // (#1983 / #3123)
 import { commitClassStructLayout } from "./class-layout-registration.js";
 import { mintDefinedFunc, pushProgramAbiClassCallable } from "./program-abi-class-callable-planning.js";
+import { setProgramAbiInheritedClassCallableAlias } from "./program-abi-class-callable-planning.js";
 import { absoluteFuncIndex } from "../emit/resolve-layout.js"; // (#1916 S3b) resolve handles for order-stable declaredFuncRefs sort
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { popBody, pushBody } from "./context/bodies.js";
@@ -1310,7 +1311,6 @@ export function collectClassDeclaration(
   // Register inherited methods and accessors: if parent has methods/accessors
   // that child doesn't override, map ChildClass_X → ParentClass_X func index
   if (parentClassName) {
-    // Collect own accessor names for override detection
     const ownAccessorNames = new Set<string>();
     for (const member of decl.members) {
       if ((ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) && member.name) {
@@ -1346,7 +1346,7 @@ export function collectClassDeclaration(
               const childFullName = `${className}_${suffix}`;
               const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
               if (!ctx.funcMap.has(childKey)) {
-                ctx.funcMap.set(childKey, funcIdx);
+                setProgramAbiInheritedClassCallableAlias(ctx, decl, childKey, funcIdx);
               }
               // Also inherit accessor set entry
               const parentAccessorKey = `${ancestor}_${accPropName}`;
@@ -1361,7 +1361,7 @@ export function collectClassDeclaration(
             const childFullName = `${className}_${suffix}`;
             const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
             if (!ownMethodNames.has(suffix) && !ctx.funcMap.has(childKey)) {
-              ctx.funcMap.set(childKey, funcIdx);
+              setProgramAbiInheritedClassCallableAlias(ctx, decl, childKey, funcIdx);
               ctx.classMethodSet.add(childFullName);
             }
           }

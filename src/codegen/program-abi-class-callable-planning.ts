@@ -34,6 +34,12 @@ interface ProgramAbiClassSupportCallableObservation {
   readonly func: WasmFunction;
 }
 
+interface ProgramAbiInheritedClassCallableObservation {
+  readonly childClassId: IrClassId;
+  readonly canonicalUnitId: IrUnitId;
+  readonly displayName: string;
+}
+
 /** Push and structurally observe one class-owned allocation atomically. */
 export function pushProgramAbiClassCallable(
   ctx: CodegenContext,
@@ -60,6 +66,17 @@ export function pushProgramAbiClassCallable(
   } else {
     registry.observePromiseSubclassOnHostConstructor(declaration, func.name, funcIdx);
   }
+}
+
+/** Register one inherited class compatibility alias against its exact source owner. */
+export function setProgramAbiInheritedClassCallableAlias(
+  ctx: CodegenContext,
+  childDeclaration: ts.ClassDeclaration | ts.ClassExpression,
+  physicalName: string,
+  funcIdx: FuncHandle,
+): void {
+  ctx.programAbiClassCallables?.observeInheritedAlias(childDeclaration, physicalName, funcIdx);
+  ctx.funcMap.set(physicalName, funcIdx);
 }
 
 function hasStaticModifier(node: ts.Node): boolean {
@@ -116,6 +133,10 @@ function functionSignature(ctx: CodegenContext, func: WasmFunction): FuncTypeDef
 export class ProgramAbiClassCallableRegistry {
   private readonly units = new Map<IrUnitId, ProgramAbiClassUnitCallableObservation[]>();
   private readonly supports = new Map<IrBindingId, ProgramAbiClassSupportCallableObservation[]>();
+  private readonly inheritedAliases = new Map<
+    IrClassId,
+    Map<IrUnitId, ProgramAbiInheritedClassCallableObservation[]>
+  >();
   private planned = false;
 
   constructor(
@@ -199,6 +220,63 @@ export class ProgramAbiClassCallableRegistry {
       displayName,
       funcIdx,
     );
+  }
+
+  /** Observe one child-class alias of an exact inherited source callable. */
+  observeInheritedAlias(
+    childDeclaration: ts.ClassDeclaration | ts.ClassExpression,
+    displayName: string,
+    funcIdx: FuncHandle,
+  ): IrUnitId | undefined {
+    this.assertOpen(displayName);
+    const childClassId = this.identityContext.classIdByDeclaration.get(childDeclaration);
+    if (
+      childClassId === undefined ||
+      this.identityContext.declarationByClassId.get(childClassId) !== childDeclaration
+    ) {
+      throw new ProgramAbiInvariantError(
+        "unknown-inventory-class",
+        `inherited class callable ${displayName} has no exact child class owner`,
+      );
+    }
+    const func = definedFuncAt(this.ctx, funcIdx);
+    if (!func) {
+      throw new ProgramAbiInvariantError(
+        "missing-required-locator",
+        `inherited class callable ${displayName} has no exact defined function for handle ${funcIdx}`,
+      );
+    }
+    const canonicalUnitIds = [...this.units.entries()]
+      .filter(([, observations]) => observations.some((observation) => observation.func === func))
+      .map(([unitId]) => unitId);
+    if (canonicalUnitIds.length === 0) return undefined;
+    if (canonicalUnitIds.length > 1) {
+      throw new ProgramAbiInvariantError(
+        "missing-source-unit",
+        `inherited class callable ${displayName} resolves to ${canonicalUnitIds.length} exact source owners`,
+      );
+    }
+    const canonicalUnitId = canonicalUnitIds[0]!;
+    const canonical = this.identityContext.terminalByUnitId.get(canonicalUnitId);
+    if (!canonical || canonical.lexicalOwnerId === null || !canonical.kind.startsWith("class-")) {
+      throw new ProgramAbiInvariantError(
+        "missing-source-unit",
+        `inherited class callable ${displayName} has no exact canonical class unit`,
+      );
+    }
+    const aliasesByUnit = this.inheritedAliases.get(childClassId) ?? new Map();
+    const observations = aliasesByUnit.get(canonicalUnitId) ?? [];
+    const previous = observations.at(-1);
+    if (
+      previous?.childClassId !== childClassId ||
+      previous.canonicalUnitId !== canonicalUnitId ||
+      previous.displayName !== displayName
+    ) {
+      observations.push(Object.freeze({ childClassId, canonicalUnitId, displayName }));
+      aliasesByUnit.set(canonicalUnitId, observations);
+      this.inheritedAliases.set(childClassId, aliasesByUnit);
+    }
+    return canonicalUnitId;
   }
 
   private observeSupport(
@@ -316,6 +394,17 @@ export class ProgramAbiClassCallableRegistry {
       ?.filter((observation) => this.ctx.mod.functions.includes(observation.func))
       .at(-1);
     return canonical ? definedFuncHandleOf(this.ctx, canonical.func) : undefined;
+  }
+
+  /** Resolve one inherited alias to its exact canonical source unit and handle. */
+  inheritedAlias(
+    childClassId: IrClassId,
+    canonicalUnitId: IrUnitId,
+  ): { readonly canonicalUnitId: IrUnitId; readonly handle: FuncHandle } | undefined {
+    const canonical = this.inheritedAliases.get(childClassId)?.get(canonicalUnitId)?.at(-1);
+    if (!canonical) return undefined;
+    const handle = this.handleForUnit(canonical.canonicalUnitId);
+    return handle === undefined ? undefined : Object.freeze({ canonicalUnitId: canonical.canonicalUnitId, handle });
   }
 
   private assertOpen(displayName: string): void {
