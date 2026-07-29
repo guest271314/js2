@@ -26,17 +26,24 @@ import { ts } from "../ts-api.js";
 import { makeIrHostDateSnapshotResolver } from "./host-date.js";
 import { supportsIrBackendTargetCapability, type IrBackendTargetCapability } from "./backend/legality.js";
 
-import { ensureAnyHelpers, ensureAnyValueType } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
+import {
+  ensureAnyHelpers,
+  ensureAnyValueType,
+  ensureExternLooseEqHelper,
+  ensureExternStrictEqHelper,
+} from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
 import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
 import { getOrRegisterPromiseType, isStandalonePromiseActive } from "../codegen/async-scheduler.js";
 import {
   addGeneratorImports,
+  addForInImports,
   addIteratorImports,
   addStringImports,
   addUnionImports, // (#2949 slice 3) host-mode dynamic op imports (__box_number/__typeof_* family)
   TYPED_ARRAY_NAMES,
 } from "../codegen/index.js";
+import { ensureObjectRuntime } from "../codegen/object-runtime.js";
 import { boxToAny } from "../codegen/value-tags.js"; // (#2949 slice 3) THE canonical boxing entry point (D4)
 // (#2949 S5.1) THE canonical ToBoolean engine — one truthiness path for legacy and IR (D4).
 import {
@@ -153,6 +160,7 @@ import {
 import {
   forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
   irTypeEquals,
+  type IrClassMemberKind,
   type IrClassShape,
   type IrClosureSignature,
   type IrFuncRef,
@@ -184,7 +192,7 @@ import { verifyIrFunction } from "./verify.js";
 import { AllocSiteRegistry, ALLOC_NAMESPACES } from "./alloc-registry.js";
 import { analyzeEncoding } from "./analysis/encoding.js";
 import { assertAllocProvenance } from "./verify-alloc.js";
-import type { FieldDef, FuncTypeDef, Import, Instr, StructTypeDef, ValType } from "./types.js";
+import type { FieldDef, FuncTypeDef, GlobalDef, Import, Instr, StructTypeDef, ValType } from "./types.js";
 import { definedFuncAt, definedFuncHandleOf, replaceDefinedFuncAt } from "../codegen/func-space.js"; // (#1916 S2) positional read/write chokepoints
 import {
   classifyIrFailure,
@@ -620,8 +628,8 @@ export function compileIrPathFunctions(
     readonly classMember?: boolean;
     /**
      * (#3142 Slice 2) The synthetic `<module-init>` unit. Its target slot is
-     * the legacy `__module_init` function (located by NAME at Phase 3 — it
-     * is never in `ctx.funcMap`), patched in place with the same typeIdx
+     * the legacy module-initializer function (resolved from its exact source
+     * unit through the allocator registry), patched in place with the same typeIdx
      * parity guard class members use. Never allocated a fresh slot.
      */
     readonly moduleInit?: boolean;
@@ -955,7 +963,7 @@ export function compileIrPathFunctions(
   // Integration-time gates (each throws → the whole unit demotes to the
   // legacy body, which is ALWAYS still emitted — module-init is never in the
   // IR-first skip set):
-  //   - the legacy `__module_init` slot must exist (legacy may drop
+  //   - the exact legacy module-init slot must exist (legacy may drop
   //     side-effect-free statements and emit nothing — then there is nothing
   //     to patch and nothing to gain),
   //   - no static class initializers / live-func-binding seeds (legacy
@@ -969,11 +977,11 @@ export function compileIrPathFunctions(
   const moduleInitOwner = moduleInitClaim ? requireTerminalOwner(MODULE_INIT_UNIT_NAME) : undefined;
   if (moduleInitClaim && moduleInitOwner && !unsupportedHostDateOwners.has(moduleInitOwner.unitId)) {
     try {
-      if (!ctx.mod.functions.some((f) => f.name === "__module_init")) {
+      if (!ctx.programAbiModuleInitCallables?.functionForUnit(moduleInitOwner.unitId)) {
         throw new IrUnsupportedError(
           "module-init-legacy-coupling",
           "build",
-          "module-init: no legacy __module_init slot to patch (legacy collected no init statements)",
+          "module-init: no exact legacy initializer slot to patch (legacy collected no init statements)",
         );
       }
       if (ctx.staticInitExprs.length > 0) {
@@ -1607,7 +1615,7 @@ export function compileIrPathFunctions(
     return finishReport();
   }
   if (!runGlobalPreparation(() => preregisterExceptionSupport(ctx, healthyForLower))) return finishReport();
-  if (!runGlobalPreparation(() => preregisterDynamicSupport(ctx, healthyForLower))) return finishReport();
+  if (!runGlobalPreparation(() => preregisterDynamicAndForInSupport(ctx, healthyForLower))) return finishReport();
   if (
     !runGlobalPreparation(() => {
       const pending = new Map<IrUnitId, ProgramAbiDerivedUnitRecord>();
@@ -1660,13 +1668,20 @@ export function compileIrPathFunctions(
     const func = ctx.irUnitFuncMap.get(unitId);
     return func ? definedFuncHandleOf(ctx, func) : undefined;
   };
+  // Low-level compatibility tests may call integration without a production
+  // identity context. Production contexts must resolve the exact allocation.
+  const sourceArtifactFuncIdx = (unitId: IrUnitId, compatibilityName: string): number | undefined =>
+    ctx.programAbiSourceCallables?.handleForUnit(unitId) ??
+    (ctx.programAbiSourceCallables?.identityContext ? undefined : ctx.funcMap.get(compatibilityName));
+  const classArtifactFuncIdx = (unitId: IrUnitId, compatibilityName: string): number | undefined =>
+    ctx.programAbiClassCallables?.handleForUnit(unitId) ??
+    (ctx.programAbiClassCallables ? undefined : ctx.funcMap.get(compatibilityName));
   const legacyArtifactFuncIdx = (entry: BuiltFn): number | undefined =>
     entry.moduleInit
-      ? (() => {
-          const local = ctx.mod.functions.findIndex((candidate) => candidate.name === "__module_init");
-          return local >= 0 ? ctx.numImportFuncs + local : undefined;
-        })()
-      : ctx.funcMap.get(entry.name);
+      ? ctx.programAbiModuleInitCallables?.handleForUnit(entry.artifactUnitId)
+      : entry.classMember
+        ? classArtifactFuncIdx(entry.artifactUnitId, entry.name)
+        : sourceArtifactFuncIdx(entry.artifactUnitId, entry.name);
   const hasPreallocatedArtifactSlot = (entry: BuiltFn): boolean =>
     (originalArtifactUnitIds.has(entry.artifactUnitId) && !entry.synthesized) ||
     entry.classMember === true ||
@@ -1691,11 +1706,17 @@ export function compileIrPathFunctions(
     // legacy `class-bodies.ts` pass (`ctorFuncIdx` / `methodFuncIdx`).
     // Don't allocate a new slot — Phase 3 will patch the existing one.
     if (entry.classMember) continue;
-    // (#3142 Slice 2) The module-init unit patches the legacy
-    // `__module_init` slot (located by name at Phase 3) — never a fresh one.
+    // (#3142 Slice 2) The module-init unit patches its exact legacy
+    // allocator slot from the source-unit registry — never a fresh one.
     if (entry.moduleInit) continue;
     if (ctx.irUnitFuncMap.has(entry.artifactUnitId)) continue;
-    const namedIdx = ctx.funcMap.get(entry.name);
+    // Production synthesized artifacts have exact derived-unit identities and
+    // therefore always own fresh allocator objects. Reusing an empty
+    // same-labelled source slot aliases two Program ABI owners; publishing the
+    // new slot back through funcMap can likewise overwrite that source
+    // binding. Keep the old name-keyed reuse only for low-level compatibility
+    // callers that deliberately omit a Program ABI session.
+    const namedIdx = ctx.programAbiSession ? undefined : ctx.funcMap.get(entry.name);
     const named = namedIdx === undefined ? undefined : definedFuncAt(ctx, namedIdx);
     const func =
       named && named.body.length === 0 && !claimedIrFunctions.has(named)
@@ -1718,7 +1739,7 @@ export function compileIrPathFunctions(
     }
     ctx.irUnitFuncMap.set(entry.artifactUnitId, func);
     claimedIrFunctions.add(func);
-    ctx.funcMap.set(entry.name, funcIdx);
+    if (!ctx.programAbiSession) ctx.funcMap.set(entry.name, funcIdx);
     freshSlots.push({
       artifactUnitId: entry.artifactUnitId,
       funcIdx,
@@ -1887,12 +1908,12 @@ export function compileIrPathFunctions(
       existing.compatibilityNames.add(ref.name);
       return;
     }
-    const funcIdx = ctx.funcMap.get(ref.name);
+    const funcIdx = sourceArtifactFuncIdx(ref.binding.unitId, ref.name);
     if (funcIdx === undefined) {
       throw new IrInvariantError(
         "missing-function-slot",
         "resolve",
-        `ir/integration: planned unit ${ref.binding.unitId} / ${ref.name} has no registered slot`,
+        `ir/integration: planned source unit ${ref.binding.unitId} / ${ref.name} has no exact registered slot`,
       );
     }
     bindUnitCallableSlot(ref, funcIdx, ref.name);
@@ -2126,9 +2147,9 @@ export function compileIrPathFunctions(
       if (process.env.JS2WASM_TEST_INJECT_IR_PHASE_THROW === "lower-synthetic" && entry.synthesized) {
         throw new Error("injected synthetic lower failure");
       }
-      // (#3142 Slice 2) The module-init unit's slot is the legacy
-      // `__module_init` function — located by NAME (it is never in
-      // `ctx.funcMap`; the slot was pushed directly by compileDeclarations).
+      // (#3142 Slice 2) The module-init unit's slot is its exact legacy
+      // allocator function (it is never in `ctx.funcMap`; the slot was
+      // registered structurally by compileDeclarations).
       const funcIdx = artifactFuncIdx(entry);
       if (funcIdx === undefined) {
         markOwnerInvariant(
@@ -2469,22 +2490,34 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
     );
   }
   const name = declaration.name.text;
-  const globalIdx = ctx.moduleGlobals.get(name);
-  if (globalIdx === undefined) {
-    throw new IrInvariantError(
-      "unknown-global-ref",
-      "build",
-      `module-init: supported binding '${name}' is absent from the legacy module-global registry`,
-    );
-  }
-
   const globalName = `__mod_${name}`;
-  const global = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  const observed = ctx.programAbiGlobals?.moduleBinding(declaration);
+  let global: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    if (!observed || observed.displayName !== name) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `module-init: supported binding '${name}' has no exact allocator-owned module global`,
+      );
+    }
+    global = observed.value;
+  } else {
+    const globalIdx = ctx.moduleGlobals.get(name);
+    if (globalIdx === undefined) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `module-init: supported binding '${name}' is absent from the compatibility module-global registry`,
+      );
+    }
+    global = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  }
   if (!global || global.name !== globalName) {
     throw new IrInvariantError(
       "unknown-global-ref",
       "build",
-      `module-init: legacy module-global registry contains '${name}' but ${globalName} is missing`,
+      `module-init: module-global allocation for '${name}' does not resolve ${globalName}`,
     );
   }
   if (!global.mutable) {
@@ -2526,14 +2559,26 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
     );
   }
 
-  const tdzGlobalIdx = ctx.tdzGlobals.get(name);
-  const tdzGlobal = tdzGlobalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, tdzGlobalIdx)];
   const expectedTdzGlobalName = `__tdz_${name}`;
-  if (tdzGlobalIdx !== undefined && (!tdzGlobal || tdzGlobal.name !== expectedTdzGlobalName)) {
+  let tdzGlobal: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    tdzGlobal = observed?.tdz;
+    if (ctx.tdzLetConstNames.has(name) && !tdzGlobal) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `module-init: supported binding '${name}' has no exact allocator-owned TDZ global`,
+      );
+    }
+  } else {
+    const tdzGlobalIdx = ctx.tdzGlobals.get(name);
+    tdzGlobal = tdzGlobalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, tdzGlobalIdx)];
+  }
+  if (tdzGlobal && tdzGlobal.name !== expectedTdzGlobalName) {
     throw new IrInvariantError(
       "unknown-global-ref",
       "build",
-      `module-init: TDZ registry contains '${name}' but ${expectedTdzGlobalName} is missing`,
+      `module-init: TDZ allocation for '${name}' does not resolve ${expectedTdzGlobalName}`,
     );
   }
   const tdzGlobalName = tdzGlobal ? expectedTdzGlobalName : null;
@@ -2979,6 +3024,24 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
     // `nativeStrings?.()` read (absent → iter-host).
     stringForOfPlan(): "char-loop" | "iter-host" {
       return ctx.nativeStrings ? "char-loop" : "iter-host";
+    },
+    // #2952 slice 5 — the source-independent enumeration ABI. Host mode
+    // supplies imports; standalone/WASI supplies the #2964 native object
+    // runtime. Both variants snapshot keys and perform per-visit liveness.
+    dynamicForInPlan() {
+      return ctx.standalone || ctx.wasi
+        ? {
+            keys: "__object_keys_forin",
+            len: "__extern_length",
+            get: "__extern_get_idx",
+            has: "__extern_has",
+          }
+        : {
+            keys: "__for_in_keys",
+            len: "__for_in_len",
+            get: "__for_in_get",
+            has: "__for_in_has",
+          };
     },
     // (#2856 C2) TypedArray-view receiver detection for element STORES —
     // the same checker walk as the legacy `elementAccessTypedArrayName`
@@ -3922,6 +3985,43 @@ function preregisterNativeStringHelpers(ctx: CodegenContext, fns: readonly Built
 }
 
 /**
+ * #2952 slice 5 — register the mode-specific dynamic for-in runtime before
+ * Phase 3 resolves symbolic calls. Host imports can shift defined function
+ * indices, while the standalone object runtime appends a family of defined
+ * helpers; both operations therefore belong at this preparation boundary.
+ */
+function preregisterForInSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  let used = false;
+  for (const entry of fns) {
+    for (const block of entry.fn.blocks) {
+      for (const root of block.instrs) {
+        forEachInstrDeep(root, (instr) => {
+          if (
+            instr.kind === "call" &&
+            instr.target.binding.kind === "runtime" &&
+            (instr.target.binding.symbol === "__for_in_keys" || instr.target.binding.symbol === "__object_keys_forin")
+          ) {
+            used = true;
+          }
+        });
+      }
+    }
+    if (used) break;
+  }
+  if (!used) return;
+  if (ctx.standalone || ctx.wasi) {
+    ensureObjectRuntime(ctx);
+  } else {
+    addForInImports(ctx);
+  }
+}
+
+function preregisterDynamicAndForInSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
+  preregisterForInSupport(ctx, fns);
+  preregisterDynamicSupport(ctx, fns);
+}
+
+/**
  * Slice 9 (#1169h): pre-register the shared `__exn` exception tag if any
  * IR function emits `throw` or `try`. The tag itself doesn't shift
  * function indices (it lives in `ctx.mod.tags`), but pre-registering
@@ -4089,6 +4189,7 @@ function jsTagToStaticType(
 function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef[]): void {
   let usesDynamicOps = false;
   let usesEq = false;
+  let usesToNumber = false;
   let usesMemberGet = false;
   // (#3143) A from-ast lowering can emit a DIRECT named call to a member of the
   // `addUnionImports` family (`__box_number` / `__unbox_number` / `__box_boolean`
@@ -4114,6 +4215,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
         forEachInstrDeep(instr, (i) => {
           if (isDynamicOp(i)) usesDynamicOps = true;
           if (usesDynEq(i)) usesEq = true;
+          if (i.kind === "dyn.to_number") usesToNumber = true;
           if (usesDynMemberGet(i)) usesMemberGet = true;
           if (i.kind === "call" && i.target.binding.kind === "import" && i.target.binding.module === "env") {
             if (UNION_IMPORT_FUNC_NAMES.has(i.target.binding.field)) usesNamedUnionImport = true;
@@ -4145,6 +4247,14 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
     flushLateImportShifts(ctx, null);
   }
   if (!usesDynamicOps) return;
+  if (usesToNumber && ctx.standalone) {
+    // The canonical standalone ToNumber sequence performs
+    // ToPrimitive("number") before unboxing. Reserve that provider now so
+    // emitToNumber cannot introduce a late func-index shift while Phase 3
+    // already owns detached IR body buffers.
+    ensureLateImport(ctx, "__to_primitive", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, null);
+  }
   if (ctx.fast) {
     // gc: ensureAnyHelpers registers $AnyValue + the __any_box_*/__any_unbox_*
     // family AND the equality helpers (__any_strict_eq / __any_eq) — one call
@@ -4160,8 +4270,17 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
     // (#329/#2078), exactly like `addUnionImports` above. Both are idempotent;
     // only fired when a host module actually carries a dyn.eq.
     if (usesEq) {
-      ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
-      ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+      if (ctx.standalone || ctx.wasi) {
+        ensureExternStrictEqHelper(ctx);
+        ensureExternLooseEqHelper(ctx);
+      } else {
+        ensureLateImport(ctx, "__host_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+        ensureLateImport(ctx, "__host_loose_eq", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+        // Settle the batch before Phase 3 captures patch-slot and call-target
+        // indices. Leaving these two imports pending can shift the eventual IR
+        // replacement onto a sibling legacy slot.
+        flushLateImportShifts(ctx, null);
+      }
     }
   }
   // #3053 U1 — a `dyn.member_get` present in any IR body needs the unified
@@ -4358,7 +4477,8 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
     };
   }
 
-  // Host (non-fast): externref carrier; ops via the union-import family.
+  // Non-fast: externref carrier; host imports or standalone/WASI native
+  // providers from the union family.
   const callImport = (name: string): Instr => {
     const idx = ctx.funcMap.get(name);
     if (idx === undefined) {
@@ -4467,16 +4587,12 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       return emitCoercionToBoolean(ctx, { kind: "externref" }, []);
     },
     emitToNumber(): readonly Instr[] {
-      // #2949 S5.3 — ToNumber(externref carrier) via THE canonical
-      // `coercion-engine.emitToNumber` (D4): for the externref carrier it emits
-      // a single `__unbox_number` (`Number(v)`, §7.1.4 — string→StringToNumber,
-      // null→0, undefined→NaN, boolean→0/1). No temp-local allocation for the
-      // externref arm (unlike the gc `$AnyValue` arm), so the body-only
-      // `FunctionContext` shim is sound (same pattern as the gc `emitBox`).
-      // `addUnionImports` already ran in `preregisterDynamicSupport` (which
-      // registers `__unbox_number`), so the internal `addUnionImports` here
-      // finds it by name and adds nothing — no import shift mid-emission.
-      const shim = { body: [] } as unknown as FunctionContext;
+      // #2949 S5.P — route through the canonical coercion engine. Host mode
+      // emits the pre-registered Number(v) import; standalone first performs
+      // its native ToPrimitive("number") walk and then unboxes the result.
+      // The engine may flush a pending late-import shift even when this
+      // detached buffer allocates no locals, so it must expose savedBodies.
+      const shim = { body: [], savedBodies: [] } as unknown as FunctionContext;
       emitCoercionToNumber(ctx, shim, { kind: "externref" });
       return shim.body;
     },
@@ -4490,18 +4606,17 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
       return [];
     },
     emitStrictEq(negate: boolean): readonly Instr[] {
-      // #2949 S5.2 — host STRICT `===` via the SAME `__host_eq` (JS `===`,
-      // §7.2.16) legacy host `any === any` uses (D4, byte-parity with the host
-      // runtime result). `__host_eq` is a host import in this (non-fast,
-      // JS-host) mode; standalone/wasi is the `gc` strategy, which uses the
-      // native `__any_strict_eq` instead — so there is no host-import leak into
-      // a host-free module.
-      return negate ? [callImport("__host_eq"), { op: "i32.eqz" }] : [callImport("__host_eq")];
+      // #2949 S5.P — host STRICT `===` uses the existing JS-host provider.
+      // Standalone/WASI uses the native externref classifier + AnyValue
+      // comparison helper, preserving host-free execution and object identity.
+      const helper = ctx.standalone || ctx.wasi ? "__extern_strict_eq" : "__host_eq";
+      return negate ? [callImport(helper), { op: "i32.eqz" }] : [callImport(helper)];
     },
     emitLooseEq(negate: boolean): readonly Instr[] {
-      // Host LOOSE `==` via `__host_loose_eq` (JS `==`, §7.2.15) — the coercion
-      // arms (String⇄Number, `null == undefined`) are JS's, matching legacy.
-      return negate ? [callImport("__host_loose_eq"), { op: "i32.eqz" }] : [callImport("__host_loose_eq")];
+      // Host LOOSE `==` delegates to JS. Standalone/WASI classifies both
+      // externref carriers and routes through the native `__any_eq` engine.
+      const helper = ctx.standalone || ctx.wasi ? "__extern_loose_eq" : "__host_loose_eq";
+      return negate ? [callImport(helper), { op: "i32.eqz" }] : [callImport(helper)];
     },
     emitMemberGet(): readonly Instr[] {
       // #3053 U1 / #2949 S5.4 — dynamic member read. In host mode the carrier
@@ -4879,12 +4994,13 @@ function defaultFieldAllocInstr(field: FieldDef, tagValue: number): Instr {
  *   - the canonical fields list in `ctx.structFields` (with `__tag` at
  *     field 0 for root classes)
  *   - a constructor function `<className>_new` in `ctx.funcMap`
- *   - one method function `<className>_<methodName>` per instance
- *     method in `ctx.funcMap`
+ *   - one function per callable class member in `ctx.funcMap`
  *
- * `ClassRegistry.resolve` validates the shape's exact `IrClassId`, then maps
- * it to the remaining name-keyed legacy state at this backend seam. A class
- * that wasn't registered surfaces as `null` and the caller falls back.
+ * `ClassRegistry.resolve` validates the shape's exact `IrClassId`. Callable
+ * member refs retain their semantic kind and source name, bind exact source
+ * units, and publish inherited compatibility keys as structural aliases.
+ * Names remain consistency checks at the allocator seam, never identities.
+ * A class that wasn't registered surfaces as `null` and the caller falls back.
  *
  * Cached per `IrClassId`; display labels never establish class identity.
  */
@@ -4921,9 +5037,29 @@ class ClassRegistry {
     return shape.classId;
   }
 
-  private memberRef(classId: IrClassId, legacyName: string, physicalName: string): IrFuncRef | null {
+  /** Resolve exact class source allocations structurally in production. */
+  private unitFuncIdx(unitId: IrUnitId, compatibilityName: string): number | undefined {
+    return (
+      this.ctx.programAbiClassCallables?.handleForUnit(unitId) ??
+      (this.ctx.programAbiClassCallables ? undefined : this.ctx.funcMap.get(compatibilityName))
+    );
+  }
+
+  private memberRef(
+    classId: IrClassId,
+    memberKind: IrClassMemberKind,
+    legacyName: string,
+    physicalName: string,
+  ): IrFuncRef | null {
+    const terminalKind = {
+      method: "class-instance-method",
+      getter: "class-instance-getter",
+      setter: "class-instance-setter",
+      static: "class-static-method",
+    }[memberKind];
     const matches = [...(this.identityContext?.terminalByUnitId.values() ?? [])].filter(
       (terminal) =>
+        terminal.kind === terminalKind &&
         terminal.observedKind === "class-member" &&
         terminal.lexicalOwnerId === classId &&
         terminal.legacyMatchName === legacyName,
@@ -4937,7 +5073,7 @@ class ClassRegistry {
     }
     const terminal = matches[0];
     if (!terminal) return null;
-    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const funcIdx = this.unitFuncIdx(terminal.id, physicalName);
     if (funcIdx === undefined) {
       throw new IrInvariantError(
         "missing-function-slot",
@@ -4951,20 +5087,19 @@ class ClassRegistry {
   }
 
   /**
-   * Publish one inherited ordinary instance method as an explicit alias of the
-   * exact ancestor source unit that owns its allocator slot.
+   * Publish one inherited class member as an explicit alias of the exact
+   * ancestor source unit that owns its allocator slot.
    *
-   * Accessors and statics deliberately stay on the compatibility seam: the
-   * current `IrClassLowering.methodFunc(name)` handle does not retain their
-   * member kind. An exact projected ordinary method is safe because the class
-   * shape identifies the ancestor declaration, the inventory identifies its
-   * source unit, and legacy inheritance must map the child's physical key to
-   * that same allocator-owned function.
+   * The IR retains the semantic member kind separately from its compatibility
+   * spelling. The class shape identifies the ancestor declaration, the
+   * inventory identifies its source unit, and legacy inheritance must map the
+   * child's physical key to that same allocator-owned function.
    */
-  private inheritedInstanceMethodRef(
+  private inheritedMemberRef(
     shape: IrClassShape,
     classId: IrClassId,
-    methodName: string,
+    memberKind: IrClassMemberKind,
+    memberName: string,
     childPhysicalName: string,
   ): IrFuncRef | null {
     const session = this.ctx.programAbiSession;
@@ -4974,36 +5109,18 @@ class ClassRegistry {
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "resolve",
-        `ir/integration: inherited class method ${classId} / ${methodName} has no structural inventory`,
+        `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has no structural inventory`,
       );
     }
 
-    const descriptorCallName = (descriptor: IrClassShape["methods"][number]): string => {
-      if (descriptor.memberKind === "getter") return `get_${descriptor.name}`;
-      if (descriptor.memberKind === "setter") return `set_${descriptor.name}`;
-      return descriptor.name;
-    };
-    for (let cursor: IrClassShape | undefined = shape; cursor; cursor = cursor.parent) {
-      if (
-        cursor.methods.some(
-          (descriptor) =>
-            descriptorCallName(descriptor) === methodName &&
-            descriptor.memberKind !== undefined &&
-            descriptor.memberKind !== "method",
-        )
-      ) {
-        return null;
-      }
-    }
-
-    const ownOrdinary = shape.methods.filter(
-      (descriptor) => descriptor.name === methodName && (descriptor.memberKind ?? "method") === "method",
+    const ownDescriptors = shape.methods.filter(
+      (descriptor) => descriptor.name === memberName && (descriptor.memberKind ?? "method") === memberKind,
     );
-    if (ownOrdinary.length > 0) {
+    if (ownDescriptors.length > 0) {
       throw new IrInvariantError(
         "selection-preparation-mismatch",
         "resolve",
-        `ir/integration: own instance method ${classId} / ${methodName} has no exact source slot`,
+        `ir/integration: own class ${memberKind} ${classId} / ${memberName} has no exact source slot`,
       );
     }
 
@@ -5014,18 +5131,18 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${methodName} has a cyclic class shape`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has a cyclic class shape`,
         );
       }
       visited.add(ancestorClassId);
       const descriptors = ancestor.methods.filter(
-        (descriptor) => descriptor.name === methodName && (descriptor.memberKind ?? "method") === "method",
+        (descriptor) => descriptor.name === memberName && (descriptor.memberKind ?? "method") === memberKind,
       );
       if (descriptors.length > 1) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} is not structurally unique`,
+          `ir/integration: ancestor class ${memberKind} ${ancestorClassId} / ${memberName} is not structurally unique`,
         );
       }
       if (descriptors.length === 0) continue;
@@ -5038,37 +5155,49 @@ class ClassRegistry {
           `ir/integration: ancestor class ${ancestorClassId} / ${ancestor.className} has no exact declaration`,
         );
       }
-      const methodDeclarations = ancestorDeclaration.members.filter(
-        (member): member is ts.MethodDeclaration =>
-          ts.isMethodDeclaration(member) &&
-          ts.isIdentifier(member.name) &&
-          member.name.text === methodName &&
-          !member.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword),
-      );
-      if (methodDeclarations.length !== 1) {
+      const declarations = ancestorDeclaration.members.filter((member) => {
+        if (!member.name || !ts.isIdentifier(member.name) || member.name.text !== memberName) return false;
+        const isStatic =
+          (ts.canHaveModifiers(member) &&
+            ts.getModifiers(member)?.some((modifier) => modifier.kind === ts.SyntaxKind.StaticKeyword)) ??
+          false;
+        if (memberKind === "method") return ts.isMethodDeclaration(member) && !isStatic;
+        if (memberKind === "getter") return ts.isGetAccessorDeclaration(member) && !isStatic;
+        if (memberKind === "setter") return ts.isSetAccessorDeclaration(member) && !isStatic;
+        return ts.isMethodDeclaration(member) && isStatic;
+      });
+      if (declarations.length !== 1) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} has ${methodDeclarations.length} exact declarations`,
+          `ir/integration: ancestor class ${memberKind} ${ancestorClassId} / ${memberName} has ${declarations.length} exact declarations`,
         );
       }
-      const methodDeclaration = methodDeclarations[0]!;
-      const terminalId = identity.unitIdByDeclaration.get(methodDeclaration);
+      const declaration = declarations[0]!;
+      const terminalId = identity.unitIdByDeclaration.get(declaration);
       const terminal = terminalId === undefined ? undefined : identity.terminalByUnitId.get(terminalId);
-      const ancestorLegacyName = `${ancestor.className}_${methodName}`;
+      const terminalKind = {
+        method: "class-instance-method",
+        getter: "class-instance-getter",
+        setter: "class-instance-setter",
+        static: "class-static-method",
+      }[memberKind];
+      const memberSuffix =
+        memberKind === "getter" ? `get_${memberName}` : memberKind === "setter" ? `set_${memberName}` : memberName;
+      const ancestorLegacyName = `${ancestor.className}_${memberSuffix}`;
       if (
         !terminal ||
-        identity.declarationByUnitId.get(terminal.id) !== methodDeclaration ||
-        terminal.kind !== "class-instance-method" ||
+        identity.declarationByUnitId.get(terminal.id) !== declaration ||
+        terminal.kind !== terminalKind ||
         terminal.observedKind !== "class-member" ||
         terminal.lexicalOwnerId !== ancestorClassId ||
-        terminal.staticClassMember ||
+        terminal.staticClassMember !== (memberKind === "static") ||
         terminal.legacyMatchName !== ancestorLegacyName
       ) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${ancestorClassId} / ${methodName} has no consistent exact source unit`,
+          `ir/integration: ancestor class ${memberKind} ${ancestorClassId} / ${memberName} has no consistent exact source unit`,
         );
       }
       const derivedOrdinal = identity.inventory.allUnits.findIndex((unit) => unit.id === terminal.id);
@@ -5076,34 +5205,56 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} is absent from structural inventory order`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} is absent from structural inventory order`,
         );
       }
 
       const ancestorPhysicalName = classMemberFuncKey(this.ctx, ancestorLegacyName);
-      const ancestorFuncIdx = this.ctx.funcMap.get(ancestorPhysicalName);
-      const childFuncIdx = this.ctx.funcMap.get(childPhysicalName);
+      const role =
+        memberKind === "method"
+          ? `class-method-adapter:instance:${memberName}`
+          : `class-member-adapter:${memberKind}:${memberName}`;
+      const ref = irSupportFuncRef(classId, role, childPhysicalName, derivedOrdinal);
+      if (ref.binding.kind !== "support") {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} has a non-support adapter reference`,
+        );
+      }
+      const inheritedAlias = this.ctx.programAbiClassCallables?.inheritedAlias(classId, terminal.id);
+      if (inheritedAlias && inheritedAlias.canonicalUnitId !== terminal.id) {
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} aliases ${inheritedAlias.canonicalUnitId}, not exact ancestor ${terminal.id}`,
+        );
+      }
+      const ancestorFuncIdx = this.unitFuncIdx(terminal.id, ancestorPhysicalName);
+      const childFuncIdx =
+        inheritedAlias?.handle ??
+        (this.ctx.programAbiClassCallables ? undefined : this.ctx.funcMap.get(childPhysicalName));
       const ancestorFunc = ancestorFuncIdx === undefined ? undefined : definedFuncAt(this.ctx, ancestorFuncIdx);
       const childFunc = childFuncIdx === undefined ? undefined : definedFuncAt(this.ctx, childFuncIdx);
       if (ancestorFuncIdx === undefined || !ancestorFunc || ancestorFunc.name !== ancestorPhysicalName) {
         throw new IrInvariantError(
           "missing-function-slot",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} has no defined slot ${ancestorPhysicalName}`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} has no defined slot ${ancestorPhysicalName}`,
         );
       }
       if (!childFunc) {
         throw new IrInvariantError(
           "missing-function-slot",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${childPhysicalName} has no defined slot`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${childPhysicalName} has no defined slot`,
         );
       }
       if (childFuncIdx !== ancestorFuncIdx || childFunc !== ancestorFunc) {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${childPhysicalName} does not alias exact ancestor ${terminal.id} / ${ancestorPhysicalName}`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${childPhysicalName} does not alias exact ancestor ${terminal.id} / ${ancestorPhysicalName}`,
         );
       }
       const signature = this.ctx.mod.types[ancestorFunc.typeIdx];
@@ -5111,7 +5262,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "abi-type-index-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} / ${ancestorPhysicalName} has non-function type ${ancestorFunc.typeIdx}`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} / ${ancestorPhysicalName} has non-function type ${ancestorFunc.typeIdx}`,
         );
       }
 
@@ -5122,7 +5273,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: ancestor instance method ${terminal.id} has no Program ABI callable plan`,
+          `ir/integration: ancestor class ${memberKind} ${terminal.id} has no Program ABI callable plan`,
         );
       }
       const resolvedAncestorFuncIdx = session.resolveCurrentIndex(
@@ -5135,19 +5286,10 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${childPhysicalName} resolves structurally to slot ${resolvedAncestorFuncIdx}, not exact ancestor ${terminal.id}`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${childPhysicalName} resolves structurally to slot ${resolvedAncestorFuncIdx}, not exact ancestor ${terminal.id}`,
         );
       }
 
-      const role = `class-method-adapter:instance:${methodName}`;
-      const ref = irSupportFuncRef(classId, role, childPhysicalName, derivedOrdinal);
-      if (ref.binding.kind !== "support") {
-        throw new IrInvariantError(
-          "selection-preparation-mismatch",
-          "resolve",
-          `ir/integration: inherited class method ${classId} / ${methodName} has a non-support adapter reference`,
-        );
-      }
       const bindingId = planProgramAbiSupportCallableAlias(this.ctx, {
         ref,
         anchor: { kind: "class", classId },
@@ -5161,7 +5303,7 @@ class ClassRegistry {
         throw new IrInvariantError(
           "selection-preparation-mismatch",
           "resolve",
-          `ir/integration: inherited class method ${classId} / ${methodName} was not accepted as a Program ABI alias`,
+          `ir/integration: inherited class ${memberKind} ${classId} / ${memberName} was not accepted as a Program ABI alias`,
         );
       }
       return ref;
@@ -5188,7 +5330,7 @@ class ClassRegistry {
         `ir/integration: class ${classId} projects ${matches.length} constructor units; expected exactly one`,
       );
     }
-    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const funcIdx = this.unitFuncIdx(matches[0]!.id, physicalName);
     if (funcIdx === undefined) {
       throw new IrInvariantError(
         "missing-function-slot",
@@ -5203,7 +5345,11 @@ class ClassRegistry {
 
   /** Publish the exact class-owned `<Class>_init` support function. */
   private initRef(classId: IrClassId, physicalName: string): IrFuncRef {
-    const funcIdx = this.ctx.funcMap.get(physicalName);
+    const ref = irSupportFuncRef(classId, "class-constructor-init", physicalName);
+    const bindingId = ref.binding.kind === "support" ? ref.binding.bindingId : undefined;
+    const funcIdx =
+      (bindingId === undefined ? undefined : this.ctx.programAbiClassCallables?.handleForSupport(bindingId)) ??
+      (this.ctx.programAbiClassCallables ? undefined : this.ctx.funcMap.get(physicalName));
     const func = funcIdx === undefined ? undefined : definedFuncAt(this.ctx, funcIdx);
     if (!func || func.name !== physicalName) {
       throw new IrInvariantError(
@@ -5220,7 +5366,6 @@ class ClassRegistry {
         `ir/integration: class ${classId} / ${physicalName} has non-function type ${func.typeIdx}`,
       );
     }
-    const ref = irSupportFuncRef(classId, "class-constructor-init", physicalName);
     planProgramAbiSupportCallable(this.ctx, {
       ref,
       anchor: { kind: "class", classId },
@@ -5242,22 +5387,25 @@ class ClassRegistry {
     // structural class ABI slice.
     if (this.ctx.classExternrefBackedSet.has(shape.className)) return null;
 
-    const structTypeIdx = this.ctx.structMap.get(shape.className);
+    const classLayout = this.ctx.programAbiTypes?.layoutForClass(classId);
+    const structTypeIdx =
+      classLayout?.typeIdx ?? (this.ctx.programAbiTypes ? undefined : this.ctx.structMap.get(shape.className));
     if (structTypeIdx === undefined) return null;
-    const legacyFields = this.ctx.structFields.get(shape.className);
-    if (!legacyFields) return null;
+    const layoutFields =
+      classLayout?.type.fields ?? (this.ctx.programAbiTypes ? undefined : this.ctx.structFields.get(shape.className));
+    if (!layoutFields) return null;
 
-    // Build a name → wasm-field-index map directly from the legacy
-    // struct field list so the IR sees the same indices the legacy
-    // path uses for `struct.get` / `struct.set`. The `__tag` prefix
-    // (at index 0 for root classes) is included in legacyFields, so a
+    // Build a name → wasm-field-index map directly from the exact allocator
+    // struct field list so the IR sees the same indices the legacy path uses
+    // for `struct.get` / `struct.set`. The `__tag` prefix (at index 0 for root
+    // classes) is included in layoutFields, so a
     // user field "x" at IR position 0 corresponds to legacy field
     // index 1 (or higher, depending on the parent chain). Slice 4
     // doesn't claim functions referencing inherited classes, so
-    // legacyFields[0] is always `__tag`; user fields start at index 1.
+    // layoutFields[0] is always `__tag`; user fields start at index 1.
     const fieldIdxByName = new Map<string, number>();
-    for (let i = 0; i < legacyFields.length; i++) {
-      fieldIdxByName.set(legacyFields[i]!.name, i);
+    for (let i = 0; i < layoutFields.length; i++) {
+      fieldIdxByName.set(layoutFields[i]!.name, i);
     }
 
     // (#1983) Route synthetic class-member names through `classMemberFuncKey`
@@ -5280,11 +5428,11 @@ class ClassRegistry {
     // synthesise `this`) emits the SAME allocation the legacy
     // `<className>_new` emits before its tail-call to `<className>_init`.
     // The field defaults + `__tag` constant mirror `class-bodies.ts`
-    // (the `newBody` loop) exactly, keyed off the SAME `legacyFields` /
+    // (the `newBody` loop) exactly, keyed off the SAME `layoutFields` /
     // `classTagMap`, so the emitted `struct.new` prefix is byte-identical.
     const tagValue = ctx.classTagMap.get(shape.className) ?? 0;
     const allocInstrs: Instr[] = [];
-    for (const field of legacyFields) {
+    for (const field of layoutFields) {
       allocInstrs.push(defaultFieldAllocInstr(field, tagValue));
     }
     allocInstrs.push({ op: "struct.new", typeIdx: structTypeIdx });
@@ -5319,13 +5467,21 @@ class ClassRegistry {
       constructorFunc,
       initFunc,
       instanceOfTags,
-      methodFunc: (name: string): IrFuncRef => {
-        const legacyName = `${shape.className}_${name}`;
+      memberFunc: (memberKind: IrClassMemberKind, name: string): IrFuncRef => {
+        const suffix = memberKind === "getter" ? `get_${name}` : memberKind === "setter" ? `set_${name}` : name;
+        const legacyName = `${shape.className}_${suffix}`;
         const physicalName = classMemberFuncKey(ctx, legacyName);
-        return (
-          this.memberRef(classId, legacyName, physicalName) ??
-          this.inheritedInstanceMethodRef(shape, classId, name, physicalName) ??
-          irSupportFuncRef(classId, `class-method-adapter:${name}`, physicalName)
+        const exact =
+          this.memberRef(classId, memberKind, legacyName, physicalName) ??
+          this.inheritedMemberRef(shape, classId, memberKind, name, physicalName);
+        if (exact) return exact;
+        if (!ctx.programAbiSession) {
+          return irSupportFuncRef(classId, `class-member-adapter:${memberKind}:${name}`, physicalName);
+        }
+        throw new IrInvariantError(
+          "selection-preparation-mismatch",
+          "resolve",
+          `ir/integration: class ${memberKind} ${classId} / ${name} has no exact source or inherited ABI owner`,
         );
       },
       allocInstrs,

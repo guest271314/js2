@@ -17,6 +17,10 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   functionValueTrampoline: 1,
   classConstructorInit: 2,
   classMethodAdapter: 3,
+  classHostConstructor: 4,
+  moduleInit: 5,
+  retainedModuleFunction: 6,
+  typedThisTwin: 7,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({
@@ -46,7 +50,8 @@ export interface ProgramAbiUnitCallablePlan {
 
 export type ProgramAbiSupportCallableAnchor =
   | { readonly kind: "unit"; readonly unitId: IrUnitId }
-  | { readonly kind: "class"; readonly classId: IrClassId };
+  | { readonly kind: "class"; readonly classId: IrClassId }
+  | { readonly kind: "source"; readonly sourceId: IrSourceId };
 
 interface ProgramAbiSupportCallablePlanBase {
   readonly ref: IrFuncRef;
@@ -124,7 +129,7 @@ export function planProgramAbiUnitCallable(
 
 /**
  * Plan and locate one compiler-owned support callable beneath an exact
- * inventoried unit or class.
+ * inventoried unit, class, or source.
  *
  * The explicit structural anchor supplies deterministic whole-program order and
  * provenance without parsing the opaque support binding ID. The support
@@ -140,7 +145,12 @@ export function planProgramAbiSupportCallable(
   if (plan.ref.binding.kind !== "support") {
     throw new TypeError("program ABI support callable planning requires an exact support reference");
   }
-  const ownerId = plan.anchor.kind === "unit" ? plan.anchor.unitId : plan.anchor.classId;
+  const ownerId =
+    plan.anchor.kind === "unit"
+      ? plan.anchor.unitId
+      : plan.anchor.kind === "class"
+        ? plan.anchor.classId
+        : plan.anchor.sourceId;
   const expectedBindingId = createIrBindingId({
     ownerId,
     domain: "support",
@@ -162,12 +172,23 @@ export function planProgramAbiSupportCallable(
           roleOrdinal: plan.roleOrdinal,
           derivedOrdinal: plan.derivedOrdinal,
         })
-      : session.structuralOrder.forClass(plan.anchor.classId, {
-          domain: "callable",
-          roleOrdinal: plan.roleOrdinal,
-          derivedOrdinal: plan.derivedOrdinal,
-        });
-  const provenance = plan.anchor.kind === "unit" ? { unitId: plan.anchor.unitId } : { classId: plan.anchor.classId };
+      : plan.anchor.kind === "class"
+        ? session.structuralOrder.forClass(plan.anchor.classId, {
+            domain: "callable",
+            roleOrdinal: plan.roleOrdinal,
+            derivedOrdinal: plan.derivedOrdinal,
+          })
+        : session.structuralOrder.forSource(plan.anchor.sourceId, {
+            domain: "callable",
+            roleOrdinal: plan.roleOrdinal,
+            derivedOrdinal: plan.derivedOrdinal,
+          });
+  const provenance =
+    plan.anchor.kind === "unit"
+      ? { unitId: plan.anchor.unitId }
+      : plan.anchor.kind === "class"
+        ? { classId: plan.anchor.classId }
+        : { sourceId: plan.anchor.sourceId };
   session.ensurePlan({
     id: bindingId,
     structuralOrder,
@@ -207,7 +228,12 @@ export function planProgramAbiSupportCallableAlias(
   if (plan.ref.binding.kind !== "support") {
     throw new TypeError("program ABI support callable alias planning requires an exact support reference");
   }
-  const ownerId = plan.anchor.kind === "unit" ? plan.anchor.unitId : plan.anchor.classId;
+  const ownerId =
+    plan.anchor.kind === "unit"
+      ? plan.anchor.unitId
+      : plan.anchor.kind === "class"
+        ? plan.anchor.classId
+        : plan.anchor.sourceId;
   const expectedBindingId = createIrBindingId({
     ownerId,
     domain: "support",
@@ -229,12 +255,23 @@ export function planProgramAbiSupportCallableAlias(
           roleOrdinal: plan.roleOrdinal,
           derivedOrdinal: plan.derivedOrdinal,
         })
-      : session.structuralOrder.forClass(plan.anchor.classId, {
-          domain: "callable",
-          roleOrdinal: plan.roleOrdinal,
-          derivedOrdinal: plan.derivedOrdinal,
-        });
-  const provenance = plan.anchor.kind === "unit" ? { unitId: plan.anchor.unitId } : { classId: plan.anchor.classId };
+      : plan.anchor.kind === "class"
+        ? session.structuralOrder.forClass(plan.anchor.classId, {
+            domain: "callable",
+            roleOrdinal: plan.roleOrdinal,
+            derivedOrdinal: plan.derivedOrdinal,
+          })
+        : session.structuralOrder.forSource(plan.anchor.sourceId, {
+            domain: "callable",
+            roleOrdinal: plan.roleOrdinal,
+            derivedOrdinal: plan.derivedOrdinal,
+          });
+  const provenance =
+    plan.anchor.kind === "unit"
+      ? { unitId: plan.anchor.unitId }
+      : plan.anchor.kind === "class"
+        ? { classId: plan.anchor.classId }
+        : { sourceId: plan.anchor.sourceId };
   session.ensurePlan({
     id: bindingId,
     structuralOrder,

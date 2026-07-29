@@ -45,6 +45,7 @@
 import { ts, forEachChild } from "../ts-api.js";
 import type { FieldDef } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { appendFnctorInternalFields } from "./fnctor-identity-fields.js";
 import { resolveWasmType } from "./index.js";
 
 /** Classification of a `new F()` fnctor allocation site. */
@@ -1651,15 +1652,7 @@ export function deriveFnctorFields(
     }
   }
 
-  // A fixed WasmGC slot exists on every instance, so its default value alone
-  // cannot tell "never assigned" from "explicitly assigned null/zero". Append
-  // one hidden i32 presence slot for each conditional-only source property.
-  // Hidden fields come last, preserving the source-field indices/order.
-  const tracked = fields.filter((field) => onlyConditional.get(field.name) === true);
-  for (const field of tracked) {
-    field.presenceTracked = true;
-    fields.push({ name: `$has_${field.name}`, type: { kind: "i32" }, mutable: true });
-  }
+  appendFnctorInternalFields(ctx, fields, onlyConditional);
 
   return fields;
 }

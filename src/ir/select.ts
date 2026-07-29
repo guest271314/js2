@@ -55,6 +55,7 @@
 //     `localClasses` set drives that exemption.
 
 import { ts, forEachChild } from "../ts-api.js";
+import { collectIrSafeVarDeclarationLists } from "./function-local-var.js";
 import { stringBuilderForcedLegacy } from "./string-builder-shape.js";
 // (#1373b C-1) Pure-syntactic async helpers from the LEAF module (safe for
 // ir/* — async-static.ts imports only ts-api, so no codegen/index cycle).
@@ -68,6 +69,7 @@ import { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_
 export { collectModuleInitPopulation, makeModuleInitSynthetic, MODULE_INIT_UNIT_NAME } from "./module-init.js";
 
 import { binaryOpCapability, hostExternCapability, prefixOpCapability } from "./capability.js";
+import { isPristineEs5IntrinsicIsFrozenCall } from "./object-integrity.js";
 import type {
   IrDeclaredPrimitiveExpressionFamily,
   IrLegacyLocalClassExpressionResolver,
@@ -308,6 +310,13 @@ export interface IrSelectionOptions {
    *  this list adds a small per-function overhead. */
   readonly trackFallbacks?: boolean;
   /**
+   * Authoritative direct-callable projection for an unannotated parameter
+   * whose source call sites establish a concrete scalar slot. The selector
+   * consumes that decision instead of widening the parameter to `dynamic` and
+   * withdrawing later on type parity.
+   */
+  readonly resolveImplicitParamType?: (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | undefined;
+  /**
    * Checker-backed certification for recursive call-graph components. A
    * rejected component is kept on the direct path even when optimistic
    * propagation found a scalar-looking signature. Accepted components still
@@ -438,6 +447,14 @@ export interface IrSelectionOptions {
    * default (undefined ⇒ true) is correct for the default-host fallback path.
    */
   readonly dynMemberReadBuildable?: boolean;
+  /**
+   * #2952 slice 5 — certify that this exact `for (head in receiver)` source
+   * expression uses the non-fast dynamic externref carrier. The callback is
+   * checker-backed in production and absent for bare selector callers, so the
+   * new loop shape is never claimed for a typed object, a fast `$AnyValue`
+   * carrier, or an unproven receiver.
+   */
+  readonly isDynamicForInReceiver?: (receiver: ts.Expression) => boolean;
   /** (#3214 A+B1) Checker-backed imports; omitted by host-free and bare selector callers. */
   readonly importedFunctions?: IrImportedFunctionResolver;
   /** (#3657) Checker-certified class-member calls to same-file primitive host stubs. */
@@ -1079,6 +1096,12 @@ let currentFnIsAsync = false;
 // `moduleGlobal` bindings; ordinary functions intentionally keep those wider
 // module writes on legacy until their coercion semantics are modeled.
 let currentSubjectIsModuleInit = false;
+// #3783 — `var` declarations are accepted only after a whole-function
+// syntactic proof shows that their function-scoped behavior is indistinguishable
+// from the IR's existing lexical local/slot representation. Keyed by the exact
+// declaration-list node so nested statement walkers cannot accidentally widen
+// another `var` with the same text.
+let currentIrSafeVarDeclarationLists: ReadonlySet<ts.VariableDeclarationList> = new Set();
 // Current-run state shared by the deep isPhase1* recursion. The structural
 // selector configures the same predicates through the narrow hooks below.
 let currentSelectionOptions: IrSelectionOptions | undefined;
@@ -1107,6 +1130,15 @@ let currentAsyncDeclNames: ReadonlySet<string> = new Set();
  * (select↔build parity, #2138). Reset per function walk.
  */
 let forInitLeakedNames = new Set<string>();
+
+function prepareFunctionBodySelection(
+  fn: IrClaimableSubject,
+  parameterNames: ReadonlySet<string>,
+  body: ts.Block,
+): boolean {
+  currentIrSafeVarDeclarationLists = collectIrSafeVarDeclarationLists(fn, parameterNames);
+  return stringBuilderForcedLegacy(body);
+}
 
 // Current-run checker resolvers. A null host resolver means host-free/deferred.
 let currentHostGlobalResolver: ((node: ts.Identifier) => string | undefined) | null = null;
@@ -1374,7 +1406,7 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
-  if (stringBuilderForcedLegacy(body)) return "string-builder-candidate";
+  if (prepareFunctionBodySelection(fn, scope, body)) return "string-builder-candidate";
   // (#2856 C1) Reset the early-return context for this function's walk.
   earlyReturnLoopDepth = 0;
   earlyReturnBarrierDepth = 0;
@@ -1759,6 +1791,8 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
+  const projected = currentSelectionOptions?.resolveImplicitParamType?.(p);
+  if (projected !== undefined) return projected;
   // #2949 slice 2 — unannotated + lattice unknown (no evidence) or dynamic
   // (top): the position is honestly DYNAMIC. `mapped` must be present (a
   // TypeMap entry exists for every top-level FunctionDeclaration): class
@@ -1998,18 +2032,102 @@ function dynamicUsesAreMoveOnly(
         return scanExpr(e.right, dynNames.has(e.left.text));
       }
       if (expectDyn) return false; // operator results are concrete-shaped
+
+      const leftIsDyn = isDynShaped(e.left);
+      const rightIsDyn = isDynShaped(e.right);
+      const op = e.operatorToken.kind;
+
+      if (
+        op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+        op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+        op === ts.SyntaxKind.EqualsEqualsToken ||
+        op === ts.SyntaxKind.ExclamationEqualsToken
+      ) {
+        if (leftIsDyn || rightIsDyn) {
+          // #2949 S5.P — open only the concrete equality operands that the
+          // from-ast producer can box without consulting a runtime type:
+          // numeric/string/boolean literals plus null/undefined. Dynamic
+          // operands already carry the exact tag and pass through unchanged.
+          const scanEqualityOperand = (operand: ts.Expression, dynamic: boolean): boolean => {
+            if (dynamic) {
+              const candidate = unwrap(operand);
+              // Dynamic member reads are not yet safe at callback boundaries:
+              // legacy array methods pass their `obj` argument in the direct
+              // array carrier, while __dyn_member_get expects boxed-any input.
+              // Keep `obj.length === n` pre-claim until that carrier seam is
+              // unified; direct dynamic params remain claimable.
+              if (ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate)) return false;
+              return scanExpr(candidate, true);
+            }
+            const concrete = unwrap(operand);
+            if (
+              ts.isNumericLiteral(concrete) ||
+              ts.isStringLiteralLike(concrete) ||
+              concrete.kind === ts.SyntaxKind.TrueKeyword ||
+              concrete.kind === ts.SyntaxKind.FalseKeyword ||
+              concrete.kind === ts.SyntaxKind.NullKeyword ||
+              (ts.isIdentifier(concrete) && concrete.text === "undefined")
+            ) {
+              return scanExpr(concrete, false);
+            }
+            return false;
+          };
+          return scanEqualityOperand(e.left, leftIsDyn) && scanEqualityOperand(e.right, rightIsDyn);
+        }
+      }
+
+      if (
+        op === ts.SyntaxKind.LessThanToken ||
+        op === ts.SyntaxKind.LessThanEqualsToken ||
+        op === ts.SyntaxKind.GreaterThanToken ||
+        op === ts.SyntaxKind.GreaterThanEqualsToken
+      ) {
+        if (leftIsDyn || rightIsDyn) {
+          // #2949 S5.P — the landed relational producer is deliberately the
+          // numeric-abstract arm. Admit exactly one dynamic operand against a
+          // numeric literal; dyn-vs-dyn may require the string/string ARC arm.
+          if (leftIsDyn === rightIsDyn) return false;
+          const concrete = unwrap(leftIsDyn ? e.right : e.left);
+          if (!ts.isNumericLiteral(concrete)) return false;
+          return scanExpr(leftIsDyn ? e.left : e.right, true) && scanExpr(concrete, false);
+        }
+      }
+
+      if (
+        op === ts.SyntaxKind.MinusToken ||
+        op === ts.SyntaxKind.AsteriskToken ||
+        op === ts.SyntaxKind.SlashToken ||
+        op === ts.SyntaxKind.PercentToken
+      ) {
+        // #2949 S5.P — these operators are pure ToNumber operations. A
+        // dynamic-shaped operand uses dyn.to_number; a nested concrete
+        // expression is recursively checked and must itself produce f64.
+        return scanExpr(e.left, leftIsDyn) && scanExpr(e.right, rightIsDyn);
+      }
+
       return scanExpr(e.left, false) && scanExpr(e.right, false);
     }
     if (ts.isPrefixUnaryExpression(e) || ts.isPostfixUnaryExpression(e)) {
       if (expectDyn) return false;
       const op = e.operand;
+      if (
+        isDynShaped(op) &&
+        ts.isPrefixUnaryExpression(e) &&
+        (e.operator === ts.SyntaxKind.PlusToken ||
+          e.operator === ts.SyntaxKind.MinusToken ||
+          e.operator === ts.SyntaxKind.ExclamationToken)
+      ) {
+        return scanExpr(op, true);
+      }
       return scanExpr(op, false);
     }
     if (ts.isConditionalExpression(e)) {
       // Dyn joins in cond-expr arms need refinement widening at the join —
       // slice 3. Concrete conditional expressions pass through.
       if (expectDyn) return false;
-      return scanExpr(e.condition, false) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false);
+      return (
+        scanExpr(e.condition, isDynShaped(e.condition)) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false)
+      );
     }
     if (ts.isPropertyAccessExpression(e)) {
       // #3053 U2 / #2949 S5.P — the claim-flip. A named read off a DYNAMIC
@@ -2082,7 +2200,9 @@ function dynamicUsesAreMoveOnly(
     }
     if (ts.isIfStatement(s)) {
       return (
-        scanExpr(s.expression, false) && scanStmt(s.thenStatement) && (!s.elseStatement || scanStmt(s.elseStatement))
+        scanExpr(s.expression, isDynShaped(s.expression)) &&
+        scanStmt(s.thenStatement) &&
+        (!s.elseStatement || scanStmt(s.elseStatement))
       );
     }
     if (ts.isBlock(s)) {
@@ -2090,9 +2210,17 @@ function dynamicUsesAreMoveOnly(
       return true;
     }
     if (ts.isWhileStatement(s)) {
-      return scanExpr(s.expression, false) && scanStmt(s.statement);
+      return scanExpr(s.expression, isDynShaped(s.expression)) && scanStmt(s.statement);
     }
-    // For / for-of / for-in / switch / try / throw / nested functions /
+    if (ts.isForInStatement(s)) {
+      return (
+        currentSelectionOptions?.isDynamicForInReceiver?.(s.expression) === true &&
+        isDynShaped(s.expression) &&
+        scanExpr(s.expression, true) &&
+        scanStmt(s.statement)
+      );
+    }
+    // For / for-of / switch / try / throw / nested functions /
     // anything else: conservative — claimable exactly when the statement
     // doesn't touch a dynamic value at all.
     return !subtreeTouchesDynamic(s, dynNames);
@@ -2372,6 +2500,12 @@ function isPhase1StatementListInScope(
     // throw and the function falls back to legacy.
     if (ts.isForOfStatement(s)) {
       if (!isPhase1ForOf(s, scope, localClasses)) return shapeNo("nontail-forof", s);
+      continue;
+    }
+    // #2952 slice 5 — the narrow dynamic-receiver for-in slice. The
+    // checker-backed capability callback keeps typed/fast receivers out.
+    if (ts.isForInStatement(s)) {
+      if (!isPhase1ForInStatement(s, scope, localClasses)) return shapeNo("nontail-forin", s);
       continue;
     }
     // Slice 12 (#1280) — `while` / `for` (C-style) as non-tail
@@ -2901,7 +3035,8 @@ function isPhase1ForStatementInScope(
   if (stmt.initializer) {
     if (ts.isVariableDeclarationList(stmt.initializer)) {
       const flags = stmt.initializer.flags;
-      if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const))
+      const isLexical = !!(flags & (ts.NodeFlags.Let | ts.NodeFlags.Const));
+      if (!isLexical && !currentIrSafeVarDeclarationLists.has(stmt.initializer))
         return shapeNo("for-init-var-kind", stmt.initializer);
       for (const d of stmt.initializer.declarations) {
         if (!ts.isIdentifier(d.name)) return shapeNo("for-init-name", d.name);
@@ -3018,6 +3153,65 @@ function isPhase1ForUpdateExpr(
     }
   }
   return isPhase1Expr(expr, scope, localClasses);
+}
+
+/**
+ * #2952 slice 5 — shape-check the runtime-dynamic for-in form used by Acorn.
+ *
+ * This first IR-owned slice deliberately accepts only `for (var id in dyn)`.
+ * The production callback proves `dyn` is the non-fast externref carrier; the
+ * fast `$AnyValue` carrier and typed object/array receivers remain direct until
+ * their representation-specific receiver conversions are modeled in IR.
+ *
+ * The head name is loop-local in this structural model. Consequently a source
+ * use after the loop is rejected by the ordinary scope walk rather than
+ * incorrectly approximating JavaScript `var` hoisting.
+ */
+function isPhase1ForInStatement(
+  stmt: ts.ForInStatement,
+  scope: ReadonlySet<string>,
+  localClasses: ReadonlySet<string>,
+  labels: ReadonlySet<string> = NO_LABELS,
+  breaks: BreakScope = NO_BREAKS,
+): boolean {
+  if (currentSelectionOptions?.isDynamicForInReceiver?.(stmt.expression) !== true) {
+    return shapeNo("forin-receiver-not-dynamic-externref", stmt.expression);
+  }
+  if (!isPhase1Expr(stmt.expression, scope, localClasses)) return shapeNo("forin-receiver", stmt.expression);
+  if (!ts.isVariableDeclarationList(stmt.initializer)) return shapeNo("forin-head-not-declaration", stmt.initializer);
+  if (stmt.initializer.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) {
+    return shapeNo("forin-head-not-var", stmt.initializer);
+  }
+  if (stmt.initializer.declarations.length !== 1) return shapeNo("forin-head-count", stmt.initializer);
+  const declaration = stmt.initializer.declarations[0]!;
+  if (!ts.isIdentifier(declaration.name) || declaration.initializer) {
+    return shapeNo("forin-head-shape", declaration);
+  }
+  const headName = declaration.name.text;
+  if (scope.has(headName)) return shapeNo("forin-head-shadow", declaration.name);
+  let headUsed = false;
+  const findHeadUse = (node: ts.Node): void => {
+    if (headUsed) return;
+    if (ts.isIdentifier(node) && node.text === headName) {
+      headUsed = true;
+      return;
+    }
+    forEachChild(node, findHeadUse);
+  };
+  findHeadUse(stmt.statement);
+  if (headUsed) return shapeNo("forin-head-value-used", stmt.statement);
+
+  const bodyScope = new Set(scope);
+  bodyScope.add(headName);
+  earlyReturnLoopDepth++;
+  try {
+    return (
+      isPhase1BodyStatement(stmt.statement, bodyScope, localClasses, /* inLoop */ true, labels, breaks) ||
+      shapeNo("forin-body", stmt.statement)
+    );
+  } finally {
+    earlyReturnLoopDepth--;
+  }
 }
 
 /**
@@ -3173,6 +3367,9 @@ function isPhase1BodyStatement(
   }
   if (ts.isForOfStatement(stmt)) {
     return isPhase1ForOf(stmt, scope, localClasses, labels, breaks);
+  }
+  if (ts.isForInStatement(stmt)) {
+    return isPhase1ForInStatement(stmt, scope, localClasses, labels, breaks);
   }
   // Slice 12 (#1280) — nested while / for inside a body buffer.
   if (ts.isWhileStatement(stmt)) {
@@ -3396,7 +3593,10 @@ function isPhase1Tail(
 
 function isPhase1VarDecl(stmt: ts.VariableStatement, scope: Set<string>, localClasses: ReadonlySet<string>): boolean {
   const flags = stmt.declarationList.flags;
-  if (!(flags & ts.NodeFlags.Let) && !(flags & ts.NodeFlags.Const)) return shapeNo("vardecl-var-kind", stmt);
+  const isLexical = !!(flags & (ts.NodeFlags.Let | ts.NodeFlags.Const));
+  if (!isLexical && !currentIrSafeVarDeclarationLists.has(stmt.declarationList)) {
+    return shapeNo("vardecl-var-kind", stmt);
+  }
   if (stmt.modifiers && stmt.modifiers.length > 0) return shapeNo("vardecl-modifier", stmt);
   const isConst = !!(flags & ts.NodeFlags.Const);
   for (const d of stmt.declarationList.declarations) {
@@ -5564,6 +5764,11 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     if (ts.isPropertyAccessExpression(expr.expression)) {
       if (!ts.isIdentifier(expr.expression.name)) return false;
       if (
+        isPristineEs5IntrinsicIsFrozenCall(expr, (node) => selectorSeesAmbientBinding(node) && !scope.has(node.text))
+      ) {
+        return true;
+      }
+      if (
         (expr.expression.name.text === "test" || expr.expression.name.text === "exec") &&
         currentSelectionOptions?.isRegExpExpression?.(expr.expression.expression) === true &&
         currentSelectionOptions.supportsBackendCapability?.("host-regexp-constructor") === false
@@ -6070,7 +6275,7 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
     for (const el of expr.elements) {
       if (ts.isSpreadElement(el)) return shapeNo("expr-arraylit-spread", el); // out of scope
       if (ts.isOmittedExpression(el)) return shapeNo("expr-arraylit-sparse", expr); // sparse — out of scope
-      if (!isPhase1Expr(el, scope, localClasses)) return false;
+      if (!isPhase1Expr(el, scope, localClasses) || localClassNameForExpression(el, scope) !== null) return false;
       const family =
         currentSelectionOptions?.classifyPrimitiveExpression?.(el) ??
         (ts.isStringLiteral(el) || el.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral
@@ -6330,6 +6535,7 @@ export function assessModuleInit(
   currentFnIsVoidReturn = true;
   currentFnIsAsync = false; // (#1373b C-1) module-init is never an async body
   currentSubjectIsModuleInit = true;
+  currentIrSafeVarDeclarationLists = new Set();
   currentModuleMapGetAliases = new Set<ts.VariableDeclaration>();
   currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "boolean">();
   const scope = new Set<string>();

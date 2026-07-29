@@ -42,10 +42,6 @@ function parseArgs(argv) {
   return out;
 }
 
-// V8 `%GetOptimizationStatus` bit positions we care about (src/runtime/
-// runtime-test.cc). Only the ones this harness asserts on are named.
-const OPT_STATUS_BITS = { optimized: 1 << 4, maglev: 1 << 5, turbofan: 1 << 6, baseline: 1 << 15 };
-
 /**
  * Read V8's optimization status for `fn`, or `null` when unavailable.
  *
@@ -64,12 +60,54 @@ function readOptStatus(fn) {
   }
 }
 
-function describeOptStatus(status) {
+/**
+ * Derive "what does an optimized function look like on THIS V8" empirically,
+ * by optimizing a throwaway reference function the exact same way the
+ * benchmark factory does and diffing its status before/after.
+ *
+ * Hardcoding `%GetOptimizationStatus` bit positions does not survive a V8
+ * upgrade. The positions shifted by one between Node 22 and Node 26 —
+ * `kOptimized` moved 1<<4 -> 1<<3 and `kTurboFanned` 1<<6 -> 1<<5 — so a
+ * table written against Node 22 decoded Node 26's perfectly TurboFan-optimized
+ * status (41) as "maglev, not optimized" and failed a run that was in fact
+ * correctly tiered. Verified directly on both runtimes:
+ *
+ *   after %OptimizeFunctionOnNextCall   Node 22: bits 0,4,6   Node 26: bits 0,3,5
+ *   after %OptimizeMaglevOnNextCall     Node 22: n/a          Node 26: bits 0,3,4
+ *
+ * Calibrating in-process needs no table and cannot drift: the bits that
+ * appear when the reference is optimized ARE the bits that mean "optimized
+ * the way we asked for" on whatever V8 is running. Maglev is still rejected,
+ * because a Maglev-tiered function lacks the reference's TurboFan bit.
+ */
+function calibrateOptimizedMask() {
+  const reference = () => {
+    let s = 0;
+    for (let i = 0; i < 1000; i++) s = (s + i) | 0;
+    return s;
+  };
+  try {
+    const prepare = new Function("f", "%PrepareFunctionForOptimization(f);");
+    const optimize = new Function("f", "%OptimizeFunctionOnNextCall(f);");
+    prepare(reference);
+    reference();
+    const before = readOptStatus(reference);
+    optimize(reference);
+    reference();
+    const after = readOptStatus(reference);
+    if (before === null || after === null) return null;
+    // Bits gained by optimizing == this V8's "optimized" signature.
+    const gained = after & ~before;
+    return gained === 0 ? null : gained;
+  } catch {
+    return null;
+  }
+}
+
+function describeOptStatus(status, mask) {
   if (status === null) return "unavailable";
-  const on = Object.entries(OPT_STATUS_BITS)
-    .filter(([, mask]) => status & mask)
-    .map(([name]) => name);
-  return on.length ? `${status} (${on.join(",")})` : `${status} (none)`;
+  if (!mask) return `${status}`;
+  return `${status} (${(status & mask) === mask ? "matches" : "MISSING"} optimized-signature ${mask})`;
 }
 
 function calibrate(fn) {
@@ -137,13 +175,11 @@ async function main() {
 
   // `--expect-tier=optimized` (warm lane only) turns the harness's central
   // assumption into an assertion. Without it a silently-mis-tiered run still
-  // produces a plausible-looking number and publishes it — which is exactly
-  // how the landing page came to report a JS baseline ~14x slower than the
-  // same source measured optimized, with no signal that anything was wrong.
-  // Sampled BEFORE and AFTER the measured rounds: the observed failure is not
-  // "never optimized" but tier OSCILLATION during measurement (a median
-  // between tiers with ~30% variance), which a single up-front check misses.
+  // produces a plausible-looking number and publishes it, with no signal that
+  // anything is wrong. Sampled BEFORE and AFTER the measured rounds so a
+  // mid-measurement deopt is caught, not just a never-optimized start.
   const expectTier = args["expect-tier"];
+  const optimizedMask = expectTier ? calibrateOptimizedMask() : null;
   const optStatusBefore = expectTier ? readOptStatus(fn) : null;
 
   const samplesUs = [];
@@ -154,13 +190,14 @@ async function main() {
 
   const optStatusAfter = expectTier ? readOptStatus(fn) : null;
 
-  if (expectTier === "optimized" && optStatusBefore !== null) {
-    const isOpt = (s) => (s & OPT_STATUS_BITS.optimized) !== 0;
+  if (expectTier === "optimized" && optStatusBefore !== null && optimizedMask !== null) {
+    const isOpt = (s) => (s & optimizedMask) === optimizedMask;
     if (!isOpt(optStatusBefore) || !isOpt(optStatusAfter)) {
       throw new Error(
         `expected '${exportName}' to stay on V8's optimizing tier for the whole ` +
-          `measurement, but status was ${describeOptStatus(optStatusBefore)} before ` +
-          `and ${describeOptStatus(optStatusAfter)} after the measured rounds. ` +
+          `measurement, but status was ${describeOptStatus(optStatusBefore, optimizedMask)} before ` +
+          `and ${describeOptStatus(optStatusAfter, optimizedMask)} after the measured rounds ` +
+          `(reference signature calibrated in-process: ${optimizedMask}). ` +
           `The reported timings would not represent optimized-tier speed.`,
       );
     }
@@ -171,7 +208,11 @@ async function main() {
       samplesUs,
       iters,
       ...(expectTier
-        ? { optStatusBefore: describeOptStatus(optStatusBefore), optStatusAfter: describeOptStatus(optStatusAfter) }
+        ? {
+            optimizedMask,
+            optStatusBefore: describeOptStatus(optStatusBefore, optimizedMask),
+            optStatusAfter: describeOptStatus(optStatusAfter, optimizedMask),
+          }
         : {}),
     }) + "\n",
   );
