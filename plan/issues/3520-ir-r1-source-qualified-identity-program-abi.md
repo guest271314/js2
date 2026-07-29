@@ -6,6 +6,7 @@ assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
 branch: codex/3520-c27-nested-function-abi
+pr: 3797
 last_merged_pr: 3792
 sprint: current
 created: 2026-07-21
@@ -2469,6 +2470,7 @@ behind structural authorities before R1 can close.
 
 The next continuation on
 `codex/3520-c27-nested-function-abi`
+([PR #3797](https://github.com/loopdive/js2/pull/3797))
 publishes retained nested function declarations through their exact
 `nested-function` Program ABI owners:
 
