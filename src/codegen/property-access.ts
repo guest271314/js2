@@ -198,6 +198,7 @@ export {
   tryEnsureNativeProtoBrand,
 } from "./builtin-value-read.js";
 import { tryBuiltinPrototypeGetterBrandThrow } from "./builtin-prototype-brand.js";
+import { tryCompileFunctionPoisonRead } from "./function-poison-pill-access.js";
 import {
   finalizeStructAndDynamicMemberGet,
   PA_FALLTHROUGH,
@@ -2966,6 +2967,17 @@ export function compilePropertyAccess(
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
 
+  // ES5 §15.3.5.4 poison properties.
+  //
+  // Strict function objects have throwing `caller` and `arguments` accessors.
+  // A sloppy function's `caller` additionally throws while its immediate
+  // active caller is strict.  The latter uses the activation-local strictness
+  // snapshot installed by function-poison-pill.ts; it is intentionally limited
+  // to a proven self-reference, because `otherFn.caller` must reflect
+  // *otherFn*'s activation rather than the current function's caller.
+  const functionPoisonResult = tryCompileFunctionPoisonRead(ctx, fctx, expr);
+  if (functionPoisonResult !== undefined) return functionPoisonResult;
+
   // Descriptor accessors are runtime state even when shape analysis widened
   // the receiver with a same-named field. Consult them before any struct-field
   // fast path so the getter remains observable after a rejected assignment.
@@ -3392,6 +3404,77 @@ function emitPlainArrayUndefinedOobGet(
 }
 
 /**
+ * SAFE plain-array OOB read for a WasmGC reference element. The typed carrier
+ * cannot encode the standalone `$undefined` singleton, so widen the unproven
+ * read to externref: a present non-null element is converted at the boundary,
+ * while an OOB index (and a nullable in-bounds hole) returns JS `undefined`.
+ *
+ * Like the primitive sibling above, this is call-site-owned. Array-method,
+ * subview, typed-array, and proven-in-bounds reads retain their existing
+ * representation and byte path.
+ *
+ * Stack in:  [arrayref(non-null $arr), i32 index]
+ * Stack out: [externref]
+ */
+function emitReferenceArrayUndefinedOobGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  elementType: Extract<ValType, { kind: "ref" | "ref_null" }>,
+  lengthBoundInstrs?: Instr[],
+): void {
+  const idxLocal = allocLocal(fctx, `__oobr_idx_${fctx.locals.length}`, { kind: "i32" });
+  const arrLocal = allocLocal(fctx, `__oobr_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+  fctx.body.push({ op: "local.set", index: arrLocal });
+
+  // Materialise the singleton before constructing detached branch bodies so
+  // any late helper registration and function-index shift happens in-order.
+  emitUndefined(ctx, fctx);
+  const undefLocal = allocLocal(fctx, `__oobr_undef_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: undefLocal });
+
+  const valueLocal =
+    elementType.kind === "ref_null" ? allocLocal(fctx, `__oobr_value_${fctx.locals.length}`, elementType) : undefined;
+  const presentValue: Instr[] =
+    valueLocal === undefined
+      ? [
+          { op: "local.get", index: arrLocal },
+          { op: "local.get", index: idxLocal },
+          { op: "array.get", typeIdx: arrTypeIdx },
+          { op: "extern.convert_any" },
+        ]
+      : [
+          { op: "local.get", index: arrLocal },
+          { op: "local.get", index: idxLocal },
+          { op: "array.get", typeIdx: arrTypeIdx },
+          { op: "local.tee", index: valueLocal },
+          { op: "ref.is_null" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "externref" } },
+            then: [{ op: "local.get", index: undefLocal }],
+            else: [{ op: "local.get", index: valueLocal }, { op: "extern.convert_any" }],
+          },
+        ];
+
+  fctx.body.push({ op: "local.get", index: idxLocal });
+  if (lengthBoundInstrs) {
+    fctx.body.push(...lengthBoundInstrs.map((instr) => ({ ...instr })));
+  } else {
+    fctx.body.push({ op: "local.get", index: arrLocal });
+    fctx.body.push({ op: "array.len" });
+  }
+  fctx.body.push({ op: "i32.lt_u" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: presentValue,
+    else: [{ op: "local.get", index: undefLocal }],
+  });
+}
+
+/**
  * (#2798 — hybrid type-soundness audit Row 9) SAFE typed-array OOB read: push the
  * in-bounds element **boxed to a JS number externref**, or JS `undefined` when
  * the index is out of bounds (the *view length* is the bound, per the
@@ -3758,6 +3841,9 @@ export function compileElementAccess(
   if (expr.questionDotToken) {
     return compileOptionalElementAccess(ctx, fctx, expr);
   }
+
+  const functionPoisonResult = tryCompileFunctionPoisonRead(ctx, fctx, expr);
+  if (functionPoisonResult !== undefined) return functionPoisonResult;
 
   const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
   if (jsonParseElementType !== undefined) return jsonParseElementType;
@@ -4934,9 +5020,9 @@ export function compileElementAccessBody(
     // semantics; deferred). This F1 slice widens the PRIMITIVE element kinds the
     // type-aware box (#2785) can box correctly — `number[]` (f64), `boolean[]`
     // (branded i32), and `symbol[]` (branded i32, #2792) — via `f1ElementBoxType`
-    // below. Other `i32` elements (packed-number / other handle reps),
-    // object-element (`ref`) arrays, and externref (`any[]`/`string[]`) keep their
-    // typed result and are deferred (`f1BoxType === null`).
+    // below. Other `i32` elements (packed-number / other handle reps) and
+    // externref elements keep the shared-helper path; WasmGC `ref` / `ref_null`
+    // elements use the dedicated reference-array widen below.
     const isRegexMatchVec = typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index";
     const numericHint = expectedType?.kind === "f64" || expectedType?.kind === "i32";
     const taClass = classifyTypedArrayType(ctx.checker.getTypeAtLocation(expr.expression), ctx.checker);
@@ -5021,10 +5107,13 @@ export function compileElementAccessBody(
       // the number 1, regressing the standalone map tests); #2792 completes the
       // `symbol[]` arm now that a native standalone `__box_symbol` exists (a symbol
       // handle boxed as `__box_number` would surface a Number). Packed-number /
-      // other i32 / object / externref elements stay deferred (`f1BoxType ===
-      // null`) and fall through to the unchanged shared-helper read below
-      // (bounds-checked, never traps).
+      // other i32 / externref elements stay deferred (`f1BoxType === null`) and
+      // fall through to the shared-helper read below; WasmGC `ref` / `ref_null`
+      // elements use the dedicated reference-array widen immediately below.
       emitPlainArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, f1BoxType, vecLenBoundInstrs);
+      return { kind: "externref" };
+    } else if (oobUndefined && (arrDef.element.kind === "ref" || arrDef.element.kind === "ref_null")) {
+      emitReferenceArrayUndefinedOobGet(ctx, fctx, arrTypeIdx, arrDef.element, vecLenBoundInstrs);
       return { kind: "externref" };
     } else if (oobUndefinedTypedArray) {
       // (#2798 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
@@ -5126,10 +5215,14 @@ export function compileElementAccessBody(
     // element's SEMANTIC type (`f1BoxTypeArr`: `{f64}` number[] → `__box_number`,
     // `{i32, boolean}` boolean[] → `__box_boolean`, `{i32, symbol}` symbol[] →
     // `__box_symbol`). Bounds-eliminated reads above keep the unboxed fast path.
-    // Packed-number / other i32 / object / externref elements stay deferred
-    // (`f1BoxTypeArr === null`) and fall through to the unchanged shared-helper
-    // read below. See the full note at the vec-struct call site above.
+    // Packed-number / other i32 / externref elements stay deferred
+    // (`f1BoxTypeArr === null`) and fall through to the shared-helper read
+    // below; WasmGC `ref` / `ref_null` elements use the dedicated widen
+    // immediately below. See the full note at the vec-struct call site above.
     emitPlainArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element, f1BoxTypeArr);
+    return { kind: "externref" };
+  } else if (oobUndefinedArr && (typeDef.element.kind === "ref" || typeDef.element.kind === "ref_null")) {
+    emitReferenceArrayUndefinedOobGet(ctx, fctx, typeIdx, typeDef.element);
     return { kind: "externref" };
   } else if (oobUndefinedTypedArrayArr) {
     // (#2798 Row 9) Typed-array OOB → JS `undefined`, in-bounds → the element
