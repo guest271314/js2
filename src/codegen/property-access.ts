@@ -509,17 +509,12 @@ export function runtimeAccessorDescriptorKey(
   // its prototype at runtime. The whole-program fnctor analysis already
   // resolves descriptor-map keys; route those reads through the native
   // prototype sidecar before the inferred field fast path.
-  const receiverType = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(receiver));
-  const receiverTypeName =
-    ctx.fnctorEscapeGate?.receiverStruct.get(receiver) ??
-    (receiverType.kind === "ref" || receiverType.kind === "ref_null"
-      ? ctx.typeIdxToStructName.get(receiverType.typeIdx)
-      : undefined);
-  if (receiverTypeName?.startsWith("__fnctor_")) {
-    const owner = receiverTypeName.slice("__fnctor_".length);
-    if (ctx.fnctorEscapeGate?.protoMethodWriteOnce.runtimeDefined.get(owner)?.has(propName)) {
-      return bareKey;
-    }
+  const receiverTypeName = ctx.fnctorEscapeGate?.receiverStruct.get(receiver) ?? ctx.oracle.declaredNameOf(receiver);
+  const receiverOwner = receiverTypeName?.startsWith("__fnctor_")
+    ? receiverTypeName.slice("__fnctor_".length)
+    : receiverTypeName;
+  if (receiverOwner && ctx.fnctorEscapeGate?.protoMethodWriteOnce.runtimeDefined.get(receiverOwner)?.has(propName)) {
+    return bareKey;
   }
   if (
     ctx.standalone &&
@@ -542,10 +537,8 @@ export function runtimeAccessorDescriptorKey(
       ) {
         const descriptors = node.arguments[1];
         if (descriptors && ts.isIdentifier(descriptors)) {
-          const symbol = ctx.checker.getSymbolAtLocation(descriptors);
-          const declaration = symbol?.valueDeclaration;
-          const initializer =
-            declaration && ts.isVariableDeclaration(declaration) ? declaration.initializer : undefined;
+          const declaration = ctx.oracle.variableDeclarationOf(descriptors);
+          const initializer = declaration?.initializer;
           if (
             initializer &&
             ts.isObjectLiteralExpression(initializer) &&

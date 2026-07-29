@@ -162,6 +162,22 @@ if grep -q '"format:check"' package.json 2>/dev/null; then
   fi
 fi
 
+# ---------- (3c) change-scoped oracle ratchet -----------------------------
+#
+# CI rejects new direct TypeScript-checker queries under src/codegen. Run the
+# exact change-scoped ratchet locally so an oracle-boundary regression is
+# reported before the quality job. This is fast and read-only.
+
+if grep -q '"check:oracle-ratchet"' package.json 2>/dev/null; then
+  echo "Pre-push: oracle ratchet ..."
+  if ! pnpm run check:oracle-ratchet; then
+    echo ""
+    echo "Fix direct checker growth before pushing, or use --no-verify (CI will catch)."
+    exit 1
+  fi
+  echo "Pre-push: oracle ratchet OK."
+fi
+
 # ---------- (4) sync conformance numbers in docs -------------------------
 #
 # Keeps README.md / ROADMAP.md / CLAUDE.md / plan/goals/goal-graph.md in

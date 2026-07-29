@@ -952,14 +952,9 @@ function homogeneousSwitchCaseClass(
   for (const clause of stmt.caseBlock.clauses) {
     if (!ts.isCaseClause(clause)) continue;
     sawCase = true;
-    const caseType = ctx.checker.getTypeAtLocation(clause.expression);
-    const caseCls = isNumberType(caseType)
-      ? "number"
-      : isStringType(caseType)
-        ? "string"
-        : isBooleanType(caseType)
-          ? "boolean"
-          : null;
+    const caseFact = ctx.oracle.typeFactOf(clause.expression);
+    const caseCls =
+      caseFact.kind === "number" || caseFact.kind === "string" || caseFact.kind === "boolean" ? caseFact.kind : null;
     if (caseCls === null) return null;
     if (cls === null) cls = caseCls;
     else if (caseCls !== cls) return null;
@@ -987,13 +982,8 @@ function isProvenNumericLocalSwitchDiscriminant(
   if (!ts.isIdentifier(expr)) return false;
   const localIdx = fctx.localMap.get(expr.text);
   if (localIdx !== undefined && getLocalType(fctx, localIdx)?.kind === "f64") return true;
-  const symbol = ctx.checker.getSymbolAtLocation(expr);
-  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
-  return (
-    declaration !== undefined &&
-    ts.isVariableDeclaration(declaration) &&
-    ctx.usageInference.scalarForDecl(declaration) === "number"
-  );
+  const declaration = ctx.oracle.variableDeclarationOf(expr);
+  return declaration !== undefined && ctx.usageInference.scalarForDecl(declaration) === "number";
 }
 
 function isDefinitelyObjectSwitchFact(fact: TypeFact): boolean {

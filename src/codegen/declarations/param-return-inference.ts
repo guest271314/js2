@@ -122,17 +122,12 @@ export function inferParamTypeFromCallSites(
             //
             // This is not body-use guessing: UsageInference only answers
             // "number" after the grounded definition fixpoint (or its older,
-            // all-uses-apply-ToNumber proof), and `getSymbolAtLocation` keeps
-            // shadowed same-name locals distinct. Parameters and other `any`
-            // expressions remain inconclusive exactly as before.
+            // all-uses-apply-ToNumber proof), and the oracle's declaration
+            // lookup keeps shadowed same-name locals distinct. Parameters and
+            // other `any` expressions remain inconclusive exactly as before.
             if (ts.isIdentifier(arg)) {
-              const symbol = ctx.checker.getSymbolAtLocation(arg);
-              const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
-              if (
-                declaration &&
-                ts.isVariableDeclaration(declaration) &&
-                ctx.usageInference.scalarForDecl(declaration) === "number"
-              ) {
+              const declaration = ctx.oracle.variableDeclarationOf(arg);
+              if (declaration && ctx.usageInference.scalarForDecl(declaration) === "number") {
                 const wasmType: ValType = { kind: "f64" };
                 if (agreed === null) agreed = wasmType;
                 else if (agreed.kind !== wasmType.kind) conflict = true;

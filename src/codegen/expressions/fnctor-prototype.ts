@@ -85,12 +85,8 @@ export function resolveUserFnctorName(ctx: CodegenContext, expr: ts.Expression):
           receiver.name.text === "prototype" &&
           ts.isIdentifier(receiver.expression)
         ) {
-          const receiverSymbol = resolveFnctorSymbol(ctx.checker, receiver.expression);
-          if (
-            receiverSymbol &&
-            receiverSymbol.name === sym.name &&
-            receiverSymbol.valueDeclaration === sym.valueDeclaration
-          ) {
+          const receiverDeclaration = ctx.oracle.valueDeclarationOf(receiver.expression);
+          if (receiver.expression.text === sym.name && receiverDeclaration === sym.valueDeclaration) {
             found = true;
             return;
           }

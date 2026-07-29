@@ -3412,8 +3412,7 @@ export function compileObjectDefineProperties(
     ) {
       return undefined;
     }
-    const receiverSymbol = ctx.checker.getSymbolAtLocation(objArg.expression);
-    const receiverDeclaration = receiverSymbol?.valueDeclaration;
+    const receiverDeclaration = ctx.oracle.valueDeclarationOf(objArg.expression);
     const receiverIsFunction =
       !!receiverDeclaration &&
       (ts.isFunctionDeclaration(receiverDeclaration) ||
@@ -3422,8 +3421,7 @@ export function compileObjectDefineProperties(
           ts.isFunctionExpression(unwrapTransparentExpression(receiverDeclaration.initializer))));
     if (!receiverIsFunction) return undefined;
 
-    const symbol = ctx.checker.getSymbolAtLocation(descsArg);
-    const declaration = symbol?.valueDeclaration;
+    const declaration = ctx.oracle.variableDeclarationOf(descsArg);
     if (
       !declaration ||
       !ts.isVariableDeclaration(declaration) ||
@@ -3458,7 +3456,7 @@ export function compileObjectDefineProperties(
     let stable = true;
     const visit = (node: ts.Node): void => {
       if (!stable) return;
-      if (ts.isIdentifier(node) && ctx.checker.getSymbolAtLocation(node) === symbol) {
+      if (ts.isIdentifier(node) && ctx.oracle.variableDeclarationOf(node) === declaration) {
         if (node === declaration.name || node === descsArg) {
           // Declaration and the defineProperties argument itself are expected.
         } else if (
