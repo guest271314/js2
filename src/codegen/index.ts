@@ -283,6 +283,7 @@ import {
   finalizeUnifiedCollector,
   unifiedVisitNode,
 } from "./declarations.js";
+import { inferParamTypeFromCallSites } from "./declarations/param-return-inference.js";
 import {
   destructureParamArray,
   destructureParamObject,
@@ -1849,7 +1850,7 @@ function collectIrImplicitParamProjectionCandidates(
 function makeIrImplicitParamTypeResolver(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
-): (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | undefined {
+): (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | "dynamic" | undefined {
   const candidatesByDeclaration = new WeakMap<ts.FunctionDeclaration, ReadonlySet<ts.ParameterDeclaration>>();
   return (parameter) => {
     if (parameter.type) return undefined;
@@ -1867,6 +1868,8 @@ function makeIrImplicitParamTypeResolver(
     if (parameterFact.kind !== "any" && parameterFact.kind !== "unknown") return undefined;
     const parameterIndex = declaration.parameters.indexOf(parameter);
     if (parameterIndex < 0) return undefined;
+    const callSites = inferParamTypeFromCallSites(ctx, declaration.name.text, parameterIndex, sourceFile);
+    if (callSites.sawCallSite && callSites.type === null) return "dynamic";
     const inferred = inferImplicitAnyParamType(ctx, declaration.name.text, parameterIndex, sourceFile, declaration);
     if (inferred?.kind === "f64") return "f64";
     if (inferred?.kind === "i32" && inferred.boolean === true) return "bool";
@@ -1893,6 +1896,13 @@ function resolveIrOverrideParamType(
   if (projected === "f64") return irVal({ kind: "f64" });
   if (projected === "bool") return irVal({ kind: "i32", boolean: true });
   if (projected === "string") return { kind: "string" };
+  // Keep the established numeric parity-withdrawal path (#3551): lattice f64
+  // may still form the speculative IR view, and the patch-time ABI guard then
+  // withdraws the complete caller cluster if legacy kept the param dynamic.
+  // Nonnumeric mapped kinds cannot lower polymorphic equality soundly before
+  // that guard (the #3471 string failure), so those retain the direct dynamic
+  // ABI in the IR view.
+  if (projected === "dynamic" && mapped?.kind !== "f64") return irDynamic();
   return resolvePositionType(effectiveIrParamTypeNode(parameter), mapped, ctx, classShapes);
 }
 

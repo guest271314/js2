@@ -315,7 +315,9 @@ export interface IrSelectionOptions {
    * consumes that decision instead of widening the parameter to `dynamic` and
    * withdrawing later on type parity.
    */
-  readonly resolveImplicitParamType?: (parameter: ts.ParameterDeclaration) => "f64" | "bool" | "string" | undefined;
+  readonly resolveImplicitParamType?: (
+    parameter: ts.ParameterDeclaration,
+  ) => "f64" | "bool" | "string" | "dynamic" | undefined;
   /**
    * Checker-backed certification for recursive call-graph components. A
    * rejected component is kept on the direct path even when optimistic
@@ -1881,12 +1883,12 @@ function resolveParamType(p: ts.ParameterDeclaration, mapped: LatticeType | unde
       return "object";
     return null;
   }
+  const projected = currentSelectionOptions?.resolveImplicitParamType?.(p);
+  if (projected !== undefined && !(projected === "dynamic" && mapped?.kind === "f64")) return projected;
   if (mapped?.kind === "f64") return "f64";
   if (mapped?.kind === "bool") return "bool";
   if (mapped?.kind === "string") return "string";
   if (mapped?.kind === "object") return "object";
-  const projected = currentSelectionOptions?.resolveImplicitParamType?.(p);
-  if (projected !== undefined) return projected;
   // #2949 slice 2 — unannotated + lattice unknown (no evidence) or dynamic
   // (top): the position is honestly DYNAMIC. `mapped` must be present (a
   // TypeMap entry exists for every top-level FunctionDeclaration): class

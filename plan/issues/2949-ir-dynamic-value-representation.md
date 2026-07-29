@@ -1950,6 +1950,16 @@ current `origin/main` and this branch both measure 111,517 shared
 `forEachChild` calls on the deterministic harness fixture. The existing budget
 is unchanged.
 
+The required #3471 guard then exposed a second parity edge: lattice propagation
+could classify an untyped polymorphic comparator parameter as string even
+though its direct declaration ABI correctly stayed dynamic after inconclusive
+call sites. Candidate parameter projection now reports that dynamic result
+explicitly and takes precedence over nonnumeric lattice kinds in both selection
+and the IR override. Grounded Acorn string parameters still project as string,
+while `isSameValue(a, b)` retains its boxed dynamic ABI. The established
+numeric speculative view remains intact so #3551 still exercises patch-time
+parity withdrawal and caller-cascade safety.
+
 Focused whole-compiler tests execute these paths in standalone and assert real
 IR emission plus zero post-claim failures. The exact #3796 driver remains the
 per-slice measurement input. Its synthesized module uses a 32,768-element
