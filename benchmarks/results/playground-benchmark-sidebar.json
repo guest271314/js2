@@ -12,11 +12,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 4238.1246666666675,
-    "jsUs": 9800.98369696969,
-    "wasmStdUs": 57.84425073461694,
-    "jsStdUs": 67.1651549120118,
-    "ratioStd": 0.0364424159645216,
+    "wasmUs": 3912.159051282049,
+    "jsUs": 9956.783181818178,
+    "wasmStdUs": 17.14743756545346,
+    "jsStdUs": 4.960356025776226,
+    "ratioStd": 0.010955921157336283,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -33,11 +33,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 317.740894514768,
-    "jsUs": 5306.382251851852,
-    "wasmStdUs": 1.592085243086612,
-    "jsStdUs": 1569.7618820904831,
-    "ratioStd": 4.948815262988475,
+    "wasmUs": 351.6681021126762,
+    "jsUs": 5621.380960093897,
+    "wasmStdUs": 0.13373597545520113,
+    "jsStdUs": 1656.7271808721791,
+    "ratioStd": 4.71095156610929,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -54,11 +54,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 4.9056778523489895,
-    "jsUs": 3.856346898611843,
-    "wasmStdUs": 0.0654669820610019,
-    "jsStdUs": 0.18163316550723538,
-    "ratioStd": 0.03548967839044292,
+    "wasmUs": 5.258373859026365,
+    "jsUs": 3.592062422093795,
+    "wasmStdUs": 0.1132557604347276,
+    "jsStdUs": 0.09558424661014667,
+    "ratioStd": 0.01771386540675567,
     "warmupRounds": 2,
     "measuredRounds": 9
   },
@@ -75,11 +75,11 @@
       "--no-liftoff"
     ],
     "jsOptStatus": "41 (matches optimized-signature 40)",
-    "wasmUs": 55.498263629283535,
-    "jsUs": 48.72550497347478,
-    "wasmStdUs": 0.39217369241019084,
-    "jsStdUs": 9.67864999541061,
-    "ratioStd": 0.17216804730273857,
+    "wasmUs": 34.07662277493298,
+    "jsUs": 46.64548045510872,
+    "wasmStdUs": 0.7648903100651366,
+    "jsStdUs": 7.5528763108271555,
+    "ratioStd": 0.21484758667281117,
     "warmupRounds": 2,
     "measuredRounds": 9
   }
