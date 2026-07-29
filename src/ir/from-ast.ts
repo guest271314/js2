@@ -4572,6 +4572,17 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
       argVal = cx.builder.emitCallablePack(argVal, expected.signature);
       argType = cx.builder.typeOf(argVal);
     }
+    // #2949 S5.P — a concrete value passed to an `any`/dynamic parameter
+    // crosses the same explicit carrier boundary as a concrete equality
+    // operand. Reuse the canonical tag-aware boxer; ambiguous refs/i32 values
+    // still decline and demote through the existing assignability error.
+    if (expected.kind === "dynamic" && argType.kind !== "dynamic") {
+      const boxed = boxConcreteToDynamic(argVal, argType, argExpr, cx);
+      if (boxed !== null) {
+        argVal = boxed;
+        argType = cx.builder.typeOf(argVal);
+      }
+    }
     if (!irTypeArgAssignable(argType, expected)) {
       throw new Error(
         `ir/from-ast: arg ${i} of call to ${calleeName} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
@@ -4594,15 +4605,14 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
 
 /**
  * (#2856 C4) Wasm-level assignability for direct-call arguments. Exact
- * IrType equality, plus the one sound widening the vec-literal-as-argument
- * shape needs: a NON-NULL `(ref $T)` value passed where the callee's param
- * is `(ref null $T)` — a Wasm subtype, so the call validates and the callee
- * observes the identical value. (`const sorted = [1, 3, 5]` produces
- * `(ref $vec_f64)` via `vec.new_fixed`; a `number[]` param resolves as
- * `(ref null $vec_f64)`.) The reverse (ref_null → ref) stays rejected.
+ * IrType equality, plus sound widenings: a tag-refined dynamic carrier into
+ * an unrefined dynamic parameter, and the vec-literal-as-argument shape's
+ * NON-NULL `(ref $T)` value into `(ref null $T)`. The reverse directions stay
+ * rejected.
  */
 function irTypeArgAssignable(actual: IrType, expected: IrType): boolean {
   if (irTypeEquals(actual, expected)) return true;
+  if (actual.kind === "dynamic" && expected.kind === "dynamic" && expected.tag === undefined) return true;
   const a = asVal(actual);
   const e = asVal(expected);
   if (

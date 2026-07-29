@@ -1896,6 +1896,8 @@ claim became live:
   ToPrimitive(`"number"`) + unbox route with late-import shift tracking;
 - dynamic strict/loose equality uses native externref equality helpers instead
   of JS-host imports.
+- direct calls box concrete numeric arguments at explicit-`any` parameter
+  boundaries, including the `Math.pow(...)` equivalence shape.
 
 Focused whole-compiler tests execute these paths in standalone and assert real
 IR emission plus zero post-claim failures. The exact #3796 driver remains the

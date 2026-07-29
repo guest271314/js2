@@ -88,4 +88,21 @@ describe("#2949 S5.P dynamic-operator claim flip", () => {
     const { instance } = await WebAssembly.instantiate(result.binary, {});
     expect((instance.exports.parseHex as () => number)()).toBe(1114);
   });
+
+  it("boxes a concrete numeric result at an explicit-any direct-call boundary", async () => {
+    const result = await compileStandalone(`
+      function sameValue(actual: any, expected: any): number {
+        return actual === expected ? 1 : 0;
+      }
+
+      export function checkPow(): number {
+        return sameValue(Math.pow(2, 3), 8);
+      }
+    `);
+
+    expect(result.irCompiledFuncs).toEqual(expect.arrayContaining(["sameValue", "checkPow"]));
+
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports.checkPow as () => number)()).toBe(1);
+  });
 });
