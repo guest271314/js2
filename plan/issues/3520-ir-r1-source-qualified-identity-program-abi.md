@@ -5,9 +5,8 @@ status: in-progress
 assignee: ttraenkler/codex-r1
 claimed_by: codex-r1
 claimed_at: 2026-07-21T20:23:19Z
-branch: codex/3520-c26-nested-callable-abi
-pr: 3792
-last_merged_pr: 3679
+branch: codex/3520-c27-nested-function-abi
+last_merged_pr: 3792
 sprint: current
 created: 2026-07-21
 updated: 2026-07-29
@@ -88,6 +87,7 @@ files:
   - src/codegen/context/create-context.ts
   - src/codegen/dead-elimination.ts
   - src/codegen/declarations.ts
+  - src/codegen/statements/nested-declarations.ts
   - src/codegen/func-space.ts
   - src/codegen/module-global-registration.ts
   - src/codegen/program-abi-class-callable-planning.ts
@@ -163,6 +163,8 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
+  - src/codegen/declarations.ts
+  - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
   - src/ir/integration.ts
   - src/ir/builder.ts
@@ -2462,6 +2464,37 @@ callbacks, and object-literal methods/accessors, not R1. Nested function
 declarations, typed-`this` twins and other support callables, remaining
 class/type consumers, and module-array or display-name scans must still move
 behind structural authorities before R1 can close.
+
+### 2026-07-29 nested function-declaration ownership continuation
+
+The next continuation on
+`codex/3520-c27-nested-function-abi`
+publishes retained nested function declarations through their exact
+`nested-function` Program ABI owners:
+
+- capture-free, capturing, forward-sibling, and recursive reservations now
+  publish the same preallocated `WasmFunction` object under the callable
+  binding derived from the declaration's exact `IrUnitId`;
+- the eager class-order reservation in `declarations.ts` uses the same
+  structural publication path, so early registration cannot fall back to a
+  display-name or raw module-array lookup; and
+- literal-eval declarations created after inventory freeze stay on generic
+  support-callable planning. This continuation does not rebuild bodies, alter
+  hoisting or capture boxing, change optimization decisions, or skip direct
+  emission.
+
+The focused source-callable ownership suite passes **11/11**, covering the
+pre-reserved sibling, capturing, single nested, eager class-order, runtime, and
+post-inventory eval paths. A broader nested-function audit reports **137
+passing / 5 skipped** across nine files. Three runtime failures reproduce
+identically on the exact `cd9d53f20428a9` parent, while two additional rows
+require the absent local Test262 checkout; there is no new failure attributable
+to C27.
+
+C27 closes exact retained ownership for nested function declarations, not R1.
+Typed-`this` twins and other support callables, remaining class/type consumers,
+and module-array or display-name scans must still move behind structural
+authorities before R1 can close.
 
 ### R1a validation evidence
 

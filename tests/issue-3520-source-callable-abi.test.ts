@@ -310,6 +310,107 @@ describe("#3520 source callable Program ABI ownership", () => {
     );
   });
 
+  it("owns retained nested function declarations across reservation paths", async () => {
+    const source = `
+      export function run(value: number): number {
+        let bias = 3;
+        function double(input: number): number { return input * 2; }
+        function addBias(input: number): number { return input + bias; }
+        function throughSingle(input: number): number {
+          function decrement(inner: number): number { return inner - 1; }
+          return decrement(input);
+        }
+        return double(value) + addBias(value) + throughSingle(value);
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-nested-declarations.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const units = ["double", "addBias", "throughSingle", "decrement"].map((name) =>
+      exactUnit(inventory, "nested-function", name),
+    );
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const entries = generated.programAbi!.abi.entries();
+    for (const unit of units) {
+      const bindingId = irUnitCallableBindingId(unit.id);
+      const entry = requiredCallable(entries, bindingId);
+      expect(entry.intent).toMatchObject({ kind: "callable", unitId: unit.id });
+      expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+        expect.objectContaining({ space: "function" }),
+      );
+    }
+
+    const runtime = await compile(source, {
+      fileName: "source-callable-nested-declarations.ts",
+      experimentalIR: true,
+    });
+    const exports = await instantiate(runtime);
+    expect((exports.run as (value: number) => number)(7)).toBe(30);
+  });
+
+  it("keeps eager class-order reservations on the nested declaration's exact slot", async () => {
+    const source = `
+      export function run(): number {
+        function initialValue(): number { return 6; }
+        class Box {
+          value: number = initialValue();
+        }
+        return new Box().value;
+      }
+    `;
+    const ast = analyzeSource(source, "source-callable-eager-class-order.ts");
+    const inventory = buildIrUnitInventory([ast.sourceFile], {
+      entrySource: ast.sourceFile,
+      checker: ast.checker,
+    });
+    const nested = exactUnit(inventory, "nested-function", "initialValue");
+
+    const generated = generateModule(ast, {
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const hardErrors = generated.errors.filter((error) => error.severity !== "warning");
+    expect(hardErrors, hardErrors.map((error) => error.message).join("\n")).toEqual([]);
+
+    const bindingId = irUnitCallableBindingId(nested.id);
+    const entry = requiredCallable(generated.programAbi!.abi.entries(), bindingId);
+    expect(entry.intent).toMatchObject({ kind: "callable", unitId: nested.id });
+    expect(generated.programAbi!.abi.resolveFinalIndex(bindingId)).toEqual(
+      expect.objectContaining({ space: "function" }),
+    );
+
+    const runtime = await compile(source, {
+      fileName: "source-callable-eager-class-order.ts",
+      experimentalIR: true,
+    });
+    const exports = await instantiate(runtime);
+    expect((exports.run as () => number)()).toBe(6);
+  });
+
+  it("keeps post-inventory literal-eval function declarations on support-callable planning", async () => {
+    const generated = await compile(
+      `
+        export function run(): number {
+          return eval("function increment(value) { return value + 1; } increment(2);");
+        }
+      `,
+      {
+        fileName: "source-callable-literal-eval-function.ts",
+        experimentalIR: true,
+      },
+    );
+    expect(generated.success, generated.errors.map((error) => error.message).join("\n")).toBe(true);
+  });
+
   it("keeps post-inventory literal-eval accessors on support-callable planning", async () => {
     const generated = await compile(
       `

@@ -54,7 +54,8 @@ import {
   registerEmitArgumentsObject,
   registerHoistFunctionDeclarations,
 } from "../shared.js";
-import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
+import { definedFuncAt, mintDefinedFunc } from "../func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
+import { pushProgramAbiNestedFunctionDeclaration } from "../program-abi-source-callable-planning.js";
 
 /**
  * §15.7.1 ClassDefinitionEvaluation: the class name binding is added to the
@@ -655,7 +656,7 @@ export function compileNestedFunctionDeclaration(
         body: [],
         exported: false,
       };
-      pushDefinedFunc(ctx, reservedFuncIdxNC, reservedEntryNC);
+      pushProgramAbiNestedFunctionDeclaration(ctx, stmt, reservedFuncIdxNC, reservedEntryNC);
       ctx.funcMap.set(funcName, reservedFuncIdxNC);
     }
 
@@ -1021,7 +1022,7 @@ export function compileNestedFunctionDeclaration(
       body: [],
       exported: false,
     };
-    pushDefinedFunc(ctx, reservedFuncIdx, reservedEntry);
+    pushProgramAbiNestedFunctionDeclaration(ctx, stmt, reservedFuncIdx, reservedEntry);
     ctx.funcMap.set(funcName, reservedFuncIdx);
     ctx.nestedFuncCaptures.set(
       funcName,
@@ -1783,7 +1784,7 @@ export function hoistFunctionDeclarations(
         body: [],
         exported: false,
       };
-      pushDefinedFunc(ctx, reservedFuncIdx, reserved);
+      pushProgramAbiNestedFunctionDeclaration(ctx, stmt, reservedFuncIdx, reserved);
       ctx.funcMap.set(funcName, reservedFuncIdx);
       if (!ctx.preRegisteredBodyless) ctx.preRegisteredBodyless = new Set();
       ctx.preRegisteredBodyless.add(funcName);

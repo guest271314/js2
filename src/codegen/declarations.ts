@@ -91,7 +91,10 @@ import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
 import { definedFuncAt, mintDefinedFunc } from "./func-space.js"; // (#1916 S2) positional-read chokepoint
 import { pushProgramAbiModuleInitCallable } from "./program-abi-module-init-planning.js";
-import { pushProgramAbiTopLevelCallable } from "./program-abi-source-callable-planning.js";
+import {
+  pushProgramAbiNestedFunctionDeclaration,
+  pushProgramAbiTopLevelCallable,
+} from "./program-abi-source-callable-planning.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 import { registerModuleGlobal, registerModuleTdzGlobal } from "./module-global-registration.js";
 
@@ -569,7 +572,7 @@ function registerBodylessFunctionDeclaration(
   }
 
   const typeIdx = addFuncType(ctx, params, results, `${name}_type`);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const funcIdx = mintDefinedFunc(ctx);
   const func: WasmFunction = {
     name,
     typeIdx,
@@ -578,7 +581,7 @@ function registerBodylessFunctionDeclaration(
     exported: false,
   };
   ctx.funcMap.set(name, funcIdx);
-  ctx.mod.functions.push(func);
+  pushProgramAbiNestedFunctionDeclaration(ctx, stmt, funcIdx, func);
   if (!ctx.preRegisteredBodyless) ctx.preRegisteredBodyless = new Set();
   ctx.preRegisteredBodyless.add(name);
   return func;
