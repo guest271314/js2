@@ -62,7 +62,9 @@ AST-to-IR builder cannot yet bind.
 - Keep the selector effect behind
   `stableFunctionCallIntegrationBuildable`, which defaults false until the
   receiver bridge and ambient-`this` AST-to-IR lowering consume this proof.
-- Restrict the proof to the non-fast externref lane.
+- Restrict the proof to the non-fast externref lane and an exact parenthesized
+  bare-`this` receiver. Typed identifiers, type parameters, assertions, and
+  checker-derived nullability remain outside this first executable slice.
 - Treat only a module-private declaration in an external module as a complete
   source-local population. Exported/export-listed targets and global scripts
   remain unproven without a future Program-wide reference inventory.
@@ -81,9 +83,9 @@ AST-to-IR builder cannot yet bind.
 - [x] Alias, bare call, reassignment, spread, optional, arity mismatch, bare
       `.call` property, and nullable receiver references invalidate the whole
       plan.
-- [x] Assertion-derived receiver types, optional-chain segments anywhere in
-      the target/call shape, exported targets, and global-script targets do not
-      produce a plan.
+- [x] Assertion-derived, nullable, unresolved type-parameter, and non-`this`
+      receiver types; optional-chain segments anywhere in the target/call
+      shape; exported targets; and global-script targets do not produce a plan.
 - [x] Bare, written, or optional ambient `this` uses do not receive the
       selector capability.
 - [x] With the explicit test-only integration capability enabled, the exact
@@ -92,6 +94,8 @@ AST-to-IR builder cannot yet bind.
 - [x] With the capability absent/default-false, both structural selection and
       a production standalone compile keep `finishNodeAt` on direct codegen
       with no post-claim withdrawal.
+- [x] Production GC and standalone anti-vacuity compiles emit a known-positive
+      IR control while keeping `finishNodeAt` absent.
 - [x] Assignment-as-value, compound, optional, nullable, and call-produced
       store receivers remain preclaim rejections.
 - [ ] Receiver-aware direct `.call` and AST-to-IR `__current_this` integration
@@ -111,7 +115,7 @@ issue can be marked done.
 ## Evidence
 
 - Focused selector and identity proof:
-  `tests/issue-3797-ir-stable-this-call-selector.test.ts` (31/31), including
+  `tests/issue-3797-ir-stable-this-call-selector.test.ts` (33/33), including
   production compile anti-vacuity assertions for GC and standalone.
 - Exact unchanged runtime-dynamic Acorn driver: 32/43 reachable functions
   emitted, `finishNodeAt` remains a selector refusal, checksum 422, zero module

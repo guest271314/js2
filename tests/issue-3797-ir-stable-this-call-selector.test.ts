@@ -46,13 +46,13 @@ interface Fixture {
   readonly resolver: IrLegacyModuleBindingResolver;
 }
 
-function fixture(source: string, numberStorage: "f64" | "i32" = "f64"): Fixture {
+function fixture(source: string, numberStorage: "f64" | "i32" = "f64", strict = false): Fixture {
   const fileName = "/repo/issue-3797.ts";
   const options: ts.CompilerOptions = {
     allowJs: true,
     module: ts.ModuleKind.ESNext,
     noLib: true,
-    strict: false,
+    strict,
     target: ts.ScriptTarget.ES2022,
   };
   const host: ts.CompilerHost = {
@@ -89,8 +89,12 @@ function declaration(sourceFile: ts.SourceFile, name = "finishNodeAt"): ts.Funct
   return node;
 }
 
-function stablePlan(source: string, numberStorage: "f64" | "i32" = "f64"): IrStableFunctionCallPlan | undefined {
-  const graph = fixture(source, numberStorage);
+function stablePlan(
+  source: string,
+  numberStorage: "f64" | "i32" = "f64",
+  strict = false,
+): IrStableFunctionCallPlan | undefined {
+  const graph = fixture(source, numberStorage, strict);
   return graph.resolver.stableFunctionCallPlan(declaration(graph.sourceFile));
 }
 
@@ -175,6 +179,44 @@ describe("#3797 stable .call target proof", () => {
         }
         function wrapper(node: any, type: any, pos: number, loc: any): any {
           return finishNodeAt.call(this, node, type, pos, loc);
+        }
+      `),
+    ).toBeUndefined();
+  });
+
+  it("rejects a strict nullable receiver instead of trusting narrowed checker output", () => {
+    expect(
+      stablePlan(
+        `
+        function finishNodeAt(node: any, type: any, pos: number, loc: any): any {
+          if (this.options.locations) node.loc.end = loc;
+          return node;
+        }
+        export function wrapper(
+          receiver: { options: { locations: boolean } } | null,
+          node: any,
+          type: any,
+          pos: number,
+          loc: any,
+        ): any {
+          return finishNodeAt.call(receiver, node, type, pos, loc);
+        }
+      `,
+        "f64",
+        true,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rejects an unconstrained type-parameter receiver", () => {
+    expect(
+      stablePlan(`
+        function finishNodeAt(node: any, type: any, pos: number, loc: any): any {
+          if (this.options.locations) node.loc.end = loc;
+          return node;
+        }
+        export function wrapper<T>(receiver: T, node: any, type: any, pos: number, loc: any): any {
+          return finishNodeAt.call(receiver, node, type, pos, loc);
         }
       `),
     ).toBeUndefined();
@@ -276,14 +318,21 @@ describe("#3797 finishNodeAt selector preclaim", () => {
   it.each(["gc", "standalone"] as const)(
     "does not prematurely claim the target in a production %s compile",
     async (target) => {
-      const result = await compile(FINISH_NODE_AT, {
-        fileName: `issue-3797-production-gate-${target}.ts`,
-        target,
-        skipSemanticDiagnostics: true,
-        trackIrOutcomes: true,
-      });
+      const result = await compile(
+        `${FINISH_NODE_AT}
+        export function knownIrPositive(value: number): number {
+          return value + 1;
+        }`,
+        {
+          fileName: `issue-3797-production-gate-${target}.ts`,
+          target,
+          skipSemanticDiagnostics: true,
+          trackIrOutcomes: true,
+        },
+      );
       expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
       expect(result.irPostClaimErrors ?? []).toEqual([]);
+      expect(result.irCompiledFuncs ?? []).toContain("knownIrPositive");
       expect(result.irCompiledFuncs ?? []).not.toContain("finishNodeAt");
     },
   );

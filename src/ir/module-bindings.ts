@@ -1447,38 +1447,12 @@ function exactTopLevelFunctionDeclaration(
   return checker.getSymbolAtLocation(declaration.name!) === symbol ? declaration : undefined;
 }
 
-function stableCallReceiverIsAdmissible(receiver: ts.Expression, checker: ts.TypeChecker): boolean {
-  // Match the receiver-aware direct bridge: assertions are not nullability
-  // evidence. In particular, `maybe!` and `null as T` must not manufacture a
-  // live receiver for the ambient-`this` ABI.
-  let asserted = false;
-  const inspectAssertion = (node: ts.Node): void => {
-    if (asserted) return;
-    if (
-      ts.isAsExpression(node) ||
-      ts.isTypeAssertionExpression(node) ||
-      ts.isSatisfiesExpression(node) ||
-      ts.isNonNullExpression(node)
-    ) {
-      asserted = true;
-      return;
-    }
-    node.forEachChild(inspectAssertion);
-  };
-  inspectAssertion(receiver);
-  if (asserted) return false;
-  const candidate = unwrapParens(receiver);
-  if (candidate.kind === ts.SyntaxKind.ThisKeyword) return true;
-  const type = checker.getTypeAtLocation(candidate);
-  const unsupported =
-    ts.TypeFlags.Any |
-    ts.TypeFlags.Unknown |
-    ts.TypeFlags.Never |
-    ts.TypeFlags.Null |
-    ts.TypeFlags.Undefined |
-    ts.TypeFlags.Void;
-  if ((type.flags & unsupported) !== 0) return false;
-  return !type.isUnionOrIntersection() || type.types.every((member) => (member.flags & unsupported) === 0);
+function stableCallReceiverIsAdmissible(receiver: ts.Expression): boolean {
+  // The executable #3796 bridge currently proves only Acorn's exact live
+  // receiver carrier. Do not use checker nullability here: allowJs/strict:false
+  // and unresolved type parameters can erase the evidence needed to
+  // distinguish a live receiver from the unbound/null sentinel.
+  return unwrapParens(receiver).kind === ts.SyntaxKind.ThisKeyword;
 }
 
 function containsOptionalChainSegment(node: ts.Node): boolean {
@@ -1518,7 +1492,6 @@ function sourceModuleExportsSymbol(sourceFile: ts.SourceFile, symbol: ts.Symbol,
 function stableCallSiteForReference(
   reference: ts.Identifier,
   declaration: ts.FunctionDeclaration,
-  checker: ts.TypeChecker,
 ): IrStableFunctionCallSite | undefined {
   const access = reference.parent;
   if (
@@ -1542,7 +1515,7 @@ function stableCallSiteForReference(
     return undefined;
   }
   const receiver = call.arguments[0]!;
-  if (!stableCallReceiverIsAdmissible(receiver, checker)) return undefined;
+  if (!stableCallReceiverIsAdmissible(receiver)) return undefined;
   return { call, receiver, arguments: call.arguments.slice(1) };
 }
 
@@ -1671,7 +1644,7 @@ function makeStableFunctionCallPlan(
         candidate !== declaration.name &&
         checker.getSymbolAtLocation(candidate) === symbol
       ) {
-        const callSite = stableCallSiteForReference(candidate, declaration, checker);
+        const callSite = stableCallSiteForReference(candidate, declaration);
         if (!callSite) {
           stable = false;
           return;
