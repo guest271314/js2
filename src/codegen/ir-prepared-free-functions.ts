@@ -68,7 +68,7 @@ function r2SignatureMatchesAllocatedSlot(
   const result = override.returnType === null ? null : r2StableValType(ctx, override.returnType);
   if (
     params.some((type) => type === undefined) ||
-    (override.returnType !== null && result === undefined) ||
+    result === undefined ||
     signature.params.length !== params.length ||
     signature.results.length !== (override.returnType === null ? 0 : 1)
   ) {
