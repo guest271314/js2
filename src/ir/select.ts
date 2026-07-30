@@ -2308,6 +2308,21 @@ function dynamicUsesAreMoveOnly(
       }
       const expectedKind = calleeParamResolvedKind(calleeName, i, typeMap);
       const argumentIsDynamic = isDynShaped(a);
+      // Acorn stringToNumber's native parse helpers take the non-fast
+      // dynamic carrier verbatim as their first externref argument. This is
+      // an exact ABI boundary, not a dynamic-to-string unbox: fast AnyValue
+      // configurations keep `currentDynamicRuntimeBuildable` false.
+      if (
+        currentDynamicRuntimeBuildable &&
+        currentSubjectFunctionName === "stringToNumber" &&
+        argumentIsDynamic &&
+        i === 0 &&
+        ((calleeName === "parseInt" && e.arguments.length === 2) ||
+          (calleeName === "parseFloat" && e.arguments.length === 1))
+      ) {
+        if (!scanExpr(a, true)) return false;
+        continue;
+      }
       if (currentDynamicRuntimeBuildable && argumentIsDynamic && expectedKind === "f64") {
         if (!scanExpr(a, true)) return false;
         continue;
@@ -2347,8 +2362,20 @@ function dynamicUsesAreMoveOnly(
         ts.isPropertyAccessExpression(e.expression) &&
         isDynShaped(e.expression.expression)
       ) {
-        if (!currentDynMemberReadBuildable || !expectDyn || e.arguments.length > 1) return false;
+        const narrowStringReplace =
+          e.expression.name.text === "replace" &&
+          e.arguments.length === 2 &&
+          e.arguments[0]!.kind === ts.SyntaxKind.RegularExpressionLiteral &&
+          e.arguments[0]!.getText() === "/_/g" &&
+          ts.isStringLiteralLike(e.arguments[1]!) &&
+          e.arguments[1]!.text === "";
+        if (!currentDynMemberReadBuildable || !expectDyn || (e.arguments.length > 1 && !narrowStringReplace)) {
+          return false;
+        }
         if (!scanExpr(e.expression.expression, true)) return false;
+        if (narrowStringReplace) {
+          return scanExpr(e.arguments[0]!, false) && scanExpr(e.arguments[1]!, false);
+        }
         for (const argument of e.arguments) {
           if (ts.isSpreadElement(argument)) return false;
           const dynamic = isDynShaped(argument);
@@ -7251,6 +7278,20 @@ export function buildLocalCallGraph(
           } else if (localBindings.has(callee)) {
             // Slice 3: closure / nested-fn binding within this outer.
             // Intra-function call, dispatched by the IR lowerer.
+          } else if (
+            currentDynamicRuntimeBuildable &&
+            callerName === "stringToNumber" &&
+            parseNumberCallUsesDynamicCarrier(callerName, node) &&
+            ((callee === "parseFloat" && node.arguments.length === 1) ||
+              (callee === "parseInt" && node.arguments.length === 2))
+          ) {
+            // Exact built-in providers with a stable externref-first ABI.
+            // They are registered by the legacy import scan before IR
+            // planning and are neither a source call-graph edge nor an
+            // arbitrary ambient function. Still visit arguments so nested
+            // local/external calls retain their ordinary classification.
+            for (const argument of node.arguments) visit(argument);
+            return;
           } else {
             // Call to a non-local identifier (e.g. parseInt, String, Number).
             // from-ast.ts throws for unknown callees so we must exclude this
@@ -7320,6 +7361,65 @@ export function buildLocalCallGraph(
     forEachChild(fn.body, visit);
   }
   return { callers, callees, hasExternalCall };
+}
+
+function parseNumberCallUsesDynamicCarrier(callerName: string, call: ts.CallExpression): boolean {
+  const declaration = currentDynScanDecls?.get(callerName);
+  if (!declaration || call.arguments.length === 0) return false;
+  const firstArgument = unwrapPhase1Parens(call.arguments[0]!);
+  const carrier = ts.isIdentifier(firstArgument)
+    ? firstArgument
+    : ts.isCallExpression(firstArgument) &&
+        ts.isPropertyAccessExpression(firstArgument.expression) &&
+        ts.isIdentifier(firstArgument.expression.expression)
+      ? firstArgument.expression.expression
+      : undefined;
+  if (!carrier) return false;
+  const parameter = declaration.parameters.find(
+    (candidate): candidate is ts.ParameterDeclaration & { name: ts.Identifier } =>
+      ts.isIdentifier(candidate.name) && candidate.name.text === carrier.text,
+  );
+  if (!parameter) return false;
+  const explicit = effectiveIrParamTypeNode(parameter);
+  if (explicit) return explicit.kind === ts.SyntaxKind.AnyKeyword;
+  const projected = currentSelectionOptions?.resolveImplicitParamType?.(parameter);
+  if (projected !== undefined) return projected === "dynamic";
+  if (implicitParameterHasOnlyStringCallArguments(declaration, parameter)) return false;
+  return currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(parameter.name) === undefined;
+}
+
+function implicitParameterHasOnlyStringCallArguments(
+  declaration: ts.FunctionDeclaration,
+  parameter: ts.ParameterDeclaration,
+): boolean {
+  if (!declaration.name || !currentDynScanSourceFile) return false;
+  const parameterIndex = declaration.parameters.indexOf(parameter);
+  if (parameterIndex < 0) return false;
+  let sawCall = false;
+  let allString = true;
+  const visit = (node: ts.Node): void => {
+    if (!allString) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === declaration.name!.text
+    ) {
+      const argument = node.arguments[parameterIndex];
+      if (!argument || ts.isSpreadElement(argument)) {
+        allString = false;
+        return;
+      }
+      sawCall = true;
+      const classified = currentSelectionOptions?.classifyPrimitiveExpression?.(argument);
+      if (classified !== "string" && !ts.isStringLiteralLike(unwrapPhase1Parens(argument))) {
+        allString = false;
+        return;
+      }
+    }
+    forEachChild(node, visit);
+  };
+  visit(currentDynScanSourceFile);
+  return sawCall && allString;
 }
 
 /**

@@ -42,6 +42,7 @@ import {
   IR_DYN_LT_FN,
   IR_DYN_METHOD_CALL_0_FN,
   IR_DYN_METHOD_CALL_1_FN,
+  IR_DYN_STRING_REPLACE_FN,
   type IrDynamicRuntimeNeed,
 } from "../codegen/dyn-ops.js";
 import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
@@ -128,6 +129,7 @@ import {
   irCallableBindingKey,
   irImportFuncRef,
   irIntrinsicFuncRef,
+  irRuntimeFuncRef,
   irSupportFuncRef,
   irUnitCallableBindingId,
   irUnitFuncRef,
@@ -176,6 +178,7 @@ import {
 import {
   asVal,
   forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
+  irVal,
   irTypeEquals,
   type IrClassMemberKind,
   type IrClassShape,
@@ -319,6 +322,72 @@ function makeAmbientStringBindingPredicate(checker: ts.TypeChecker): (node: ts.I
   };
 }
 
+function isExactDynamicStringReplaceNumberParser(declaration: ts.FunctionDeclaration): boolean {
+  if (
+    declaration.parameters.length !== 2 ||
+    !ts.isIdentifier(declaration.parameters[0]!.name) ||
+    !ts.isIdentifier(declaration.parameters[1]!.name) ||
+    declaration.body?.statements.length !== 2
+  ) {
+    return false;
+  }
+  const stringName = declaration.parameters[0]!.name.text;
+  const legacyFlagName = declaration.parameters[1]!.name.text;
+  const guard = declaration.body.statements[0]!;
+  const tail = declaration.body.statements[1]!;
+  if (
+    !ts.isIfStatement(guard) ||
+    guard.elseStatement !== undefined ||
+    !ts.isIdentifier(guard.expression) ||
+    guard.expression.text !== legacyFlagName
+  ) {
+    return false;
+  }
+  const guardedReturn = ts.isBlock(guard.thenStatement)
+    ? guard.thenStatement.statements.length === 1 && ts.isReturnStatement(guard.thenStatement.statements[0]!)
+      ? guard.thenStatement.statements[0]
+      : undefined
+    : ts.isReturnStatement(guard.thenStatement)
+      ? guard.thenStatement
+      : undefined;
+  const parseIntCall = guardedReturn?.expression;
+  if (
+    !parseIntCall ||
+    !ts.isCallExpression(parseIntCall) ||
+    !ts.isIdentifier(parseIntCall.expression) ||
+    parseIntCall.expression.text !== "parseInt" ||
+    parseIntCall.arguments.length !== 2 ||
+    !ts.isIdentifier(parseIntCall.arguments[0]!) ||
+    parseIntCall.arguments[0]!.text !== stringName ||
+    !ts.isNumericLiteral(parseIntCall.arguments[1]!) ||
+    parseIntCall.arguments[1]!.text !== "8"
+  ) {
+    return false;
+  }
+  if (!ts.isReturnStatement(tail) || !tail.expression || !ts.isCallExpression(tail.expression)) return false;
+  const parseFloatCall = tail.expression;
+  if (
+    !ts.isIdentifier(parseFloatCall.expression) ||
+    parseFloatCall.expression.text !== "parseFloat" ||
+    parseFloatCall.arguments.length !== 1
+  ) {
+    return false;
+  }
+  const replaceCall = parseFloatCall.arguments[0]!;
+  return (
+    ts.isCallExpression(replaceCall) &&
+    ts.isPropertyAccessExpression(replaceCall.expression) &&
+    replaceCall.expression.name.text === "replace" &&
+    ts.isIdentifier(replaceCall.expression.expression) &&
+    replaceCall.expression.expression.text === stringName &&
+    replaceCall.arguments.length === 2 &&
+    replaceCall.arguments[0]!.kind === ts.SyntaxKind.RegularExpressionLiteral &&
+    replaceCall.arguments[0]!.getText() === "/_/g" &&
+    ts.isStringLiteralLike(replaceCall.arguments[1]!) &&
+    replaceCall.arguments[1]!.text === ""
+  );
+}
+
 export function compileIrPathFunctions(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
@@ -443,6 +512,33 @@ export function compileIrPathFunctions(
     if (valueType?.kind !== "ref" && valueType?.kind !== "ref_null") return false;
     return ctx.typeIdxToStructName.get(valueType.typeIdx) === "__vec_f64";
   };
+  const declarationsByName = new Map<string, ts.FunctionDeclaration>();
+  for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name) declarationsByName.set(statement.name.text, statement);
+  }
+  const effectiveOverride = (
+    name: string,
+  ): { readonly params: readonly IrType[]; readonly returnType: IrType | null } | undefined => {
+    const override = overrides?.get(name);
+    const declaration = declarationsByName.get(name);
+    const legacyFuncIdx = ctx.funcMap.get(name);
+    const legacyFunction = legacyFuncIdx === undefined ? undefined : definedFuncAt(ctx, legacyFuncIdx);
+    const legacySignature = legacyFunction === undefined ? undefined : ctx.mod.types[legacyFunction.typeIdx];
+    const legacySecondParam = legacySignature?.kind === "func" ? legacySignature.params[1] : undefined;
+    if (
+      !override ||
+      !declaration ||
+      override.params[1]?.kind !== "dynamic" ||
+      legacySecondParam?.kind !== "i32" ||
+      legacySecondParam.boolean !== true ||
+      !isExactDynamicStringReplaceNumberParser(declaration)
+    ) {
+      return override;
+    }
+    const params = [...override.params];
+    params[1] = irVal({ kind: "i32", boolean: true });
+    return { params, returnType: override.returnType };
+  };
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
@@ -552,7 +648,7 @@ export function compileIrPathFunctions(
   const calleeTypes = new Map<string, { params: readonly IrType[]; returnType: IrType | null }>();
   if (overrides) {
     for (const name of selected.funcs) {
-      const o = overrides.get(name);
+      const o = effectiveOverride(name);
       if (o) calleeTypes.set(name, { params: o.params, returnType: o.returnType });
     }
   }
@@ -567,6 +663,20 @@ export function compileIrPathFunctions(
         signature,
       });
     }
+  }
+  const externrefType = irVal({ kind: "externref" });
+  const numberType = irVal({ kind: "f64" });
+  if (selected.funcs.has("stringToNumber") && !directCallTargets.has("parseFloat") && ctx.funcMap.has("parseFloat")) {
+    directCallTargets.set("parseFloat", {
+      target: irRuntimeFuncRef("parseFloat"),
+      signature: { params: [externrefType], returnType: numberType },
+    });
+  }
+  if (selected.funcs.has("stringToNumber") && !directCallTargets.has("parseInt") && ctx.funcMap.has("parseInt")) {
+    directCallTargets.set("parseInt", {
+      target: irRuntimeFuncRef("parseInt"),
+      signature: { params: [externrefType, numberType], returnType: numberType },
+    });
   }
   const preparedDirectCalls = new Map<ts.CallExpression, IrDirectCallLoweringPlan>(loweringPlans?.directCalls);
   const directCallsFor = (
@@ -738,7 +848,7 @@ export function compileIrPathFunctions(
           `ir/integration: ${name} artifact ${ownerUnitId} does not match terminal owner ${owner.unitId}`,
         );
       }
-      const o = overrides?.get(name);
+      const o = effectiveOverride(name);
       const result = lowerFunctionAstToIr(stmt, {
         exported: hasExportModifier(stmt),
         ownerUnitId,
@@ -3149,6 +3259,9 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
     resolveDynamic() {
       return resolveDynamicCarrier(ctx);
     },
+    dynamicCarrierIsExternref() {
+      return !ctx.fast;
+    },
     // (#2955 slice 5) No raw `nativeStrings()` here anymore — from-ast's
     // interface no longer carries the mode discriminator; every mode
     // decision flows through the named capability/rep/strategy queries
@@ -4538,6 +4651,9 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
                 break;
               case IR_DYN_METHOD_CALL_1_FN:
                 dynamicRuntimeNeeds.add("method-call-1");
+                break;
+              case IR_DYN_STRING_REPLACE_FN:
+                dynamicRuntimeNeeds.add("string-replace");
                 break;
             }
           }

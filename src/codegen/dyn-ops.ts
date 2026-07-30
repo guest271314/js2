@@ -6,9 +6,17 @@ import type { Instr, ValType } from "../ir/types.js";
 import { ensureAnyFromExternHelper, ensureAnyHelpers, ensureAnyToExternHelper } from "./any-helpers.js";
 import type { CodegenContext } from "./context/types.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
-import { ensureNativeStringHelpers } from "./native-strings.js";
+import {
+  ensureNativeStringHelpers,
+  nativeStringLiteralInstrs,
+  stringConstantExternrefInstrs,
+} from "./native-strings.js";
+import { i32ArrayLiteralInstrs } from "./native-regex.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
+import { RE_FLAG_G } from "./regex/bytecode.js";
+import { compilePattern } from "./regex/compile.js";
 import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 
 export const IR_DYN_ADD_FN = "__ir_dyn_add";
@@ -18,8 +26,17 @@ export const IR_DYN_GT_FN = "__ir_dyn_gt";
 export const IR_DYN_GE_FN = "__ir_dyn_ge";
 export const IR_DYN_METHOD_CALL_0_FN = "__ir_dyn_method_call_0";
 export const IR_DYN_METHOD_CALL_1_FN = "__ir_dyn_method_call_1";
+export const IR_DYN_STRING_REPLACE_FN = "__ir_dyn_string_replace";
 
-export type IrDynamicRuntimeNeed = "add" | "lt" | "le" | "gt" | "ge" | "method-call-0" | "method-call-1";
+export type IrDynamicRuntimeNeed =
+  | "add"
+  | "lt"
+  | "le"
+  | "gt"
+  | "ge"
+  | "method-call-0"
+  | "method-call-1"
+  | "string-replace";
 
 type RelNeed = "lt" | "le" | "gt" | "ge";
 
@@ -373,6 +390,182 @@ function ensureDynamicMethodCall(ctx: CodegenContext, carrier: ValType, arity: 0
   );
 }
 
+/**
+ * Narrow two-argument dynamic dispatch for Acorn's exact
+ * `receiver.replace(/_/g, "")` call.
+ *
+ * This is intentionally not a general arity-2 helper. Standalone uses the
+ * equivalent native literal replaceAll primitive for this side-effect-free
+ * fixed pattern; host mode materialises the RegExp and preserves ordinary
+ * method receiver/argument order. The replacement stays on the canonical
+ * dynamic carrier in both modes.
+ */
+function ensureDynamicStringReplace(ctx: CodegenContext, carrier: ValType): void {
+  const externref: ValType = { kind: "externref" };
+  const standalone = ctx.standalone === true || ctx.wasi === true;
+
+  if (standalone) {
+    ensureNativeStringHelpers(ctx);
+    ensureObjectRuntime(ctx);
+    const flatten = ctx.nativeStrHelpers.get("__str_flatten");
+    const replaceAll = ctx.nativeStrHelpers.get("__str_replaceAll");
+    const arrayNew = ctx.funcMap.get("__objvec_new");
+    const arrayPush = ctx.funcMap.get("__objvec_push");
+    const methodCall = ctx.funcMap.get("__extern_method_call");
+    const regexpTypeIdx = ctx.structMap.get("__StandaloneRegExp");
+    if (
+      flatten === undefined ||
+      replaceAll === undefined ||
+      arrayNew === undefined ||
+      arrayPush === undefined ||
+      methodCall === undefined ||
+      regexpTypeIdx === undefined ||
+      ctx.anyStrTypeIdx < 0 ||
+      ctx.nativeStrTypeIdx < 0
+    ) {
+      throw new Error("dyn-ops: standalone dynamic string replace string runtime unavailable");
+    }
+    const fromExtern = ensureAnyFromExternHelper(ctx, { forceHonest: true });
+    if (fromExtern === undefined) {
+      throw new Error("dyn-ops: standalone dynamic string replace classifier unavailable");
+    }
+    const rawExtern = ensureDynamicCallBoundaryExtern(ctx);
+    const compiledRegExp = compilePattern("_", RE_FLAG_G);
+    const regexpInstrs: Instr[] = [
+      { op: "i32.const", value: compiledRegExp.flags },
+      { op: "i32.const", value: compiledRegExp.nGroups },
+      ...i32ArrayLiteralInstrs(ctx, compiledRegExp.prog),
+      ...i32ArrayLiteralInstrs(ctx, compiledRegExp.classTable),
+      ...nativeStringLiteralInstrs(ctx, "_"),
+      { op: "i32.const", value: compiledRegExp.nScratch },
+      { op: "f64.const", value: 0 },
+      { op: "struct.new", typeIdx: regexpTypeIdx },
+      { op: "extern.convert_any" },
+    ];
+    const flatRef: ValType = { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
+    addHelper(
+      ctx,
+      IR_DYN_STRING_REPLACE_FN,
+      [carrier, carrier, carrier],
+      [carrier],
+      [
+        // Classify once. Native strings take the exact underscore fast path;
+        // every other brand keeps ordinary receiver-preserving dispatch.
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: fromExtern },
+        { op: "call", funcIdx: rawExtern },
+        { op: "local.set", index: 5 },
+        { op: "local.get", index: 5 },
+        { op: "any.convert_extern" },
+        { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "val", type: externref },
+          then: [
+            { op: "local.get", index: 5 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+            { op: "call", funcIdx: flatten },
+            { op: "local.set", index: 3 },
+            { op: "local.get", index: 2 },
+            { op: "any.convert_extern" },
+            { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+            { op: "call", funcIdx: flatten },
+            { op: "local.set", index: 4 },
+            { op: "local.get", index: 3 },
+            ...nativeStringLiteralInstrs(ctx, "_"),
+            { op: "local.get", index: 4 },
+            { op: "call", funcIdx: replaceAll },
+            { op: "extern.convert_any" },
+          ],
+          else: [
+            { op: "call", funcIdx: arrayNew },
+            { op: "local.set", index: 6 },
+            { op: "local.get", index: 6 },
+            ...regexpInstrs,
+            { op: "call", funcIdx: arrayPush },
+            { op: "local.get", index: 6 },
+            { op: "local.get", index: 2 },
+            { op: "call", funcIdx: arrayPush },
+            { op: "local.get", index: 5 },
+            { op: "local.get", index: 1 },
+            { op: "call", funcIdx: fromExtern },
+            { op: "call", funcIdx: rawExtern },
+            { op: "local.get", index: 6 },
+            { op: "call", funcIdx: methodCall },
+          ],
+        },
+      ],
+      [
+        { name: "subject", type: flatRef },
+        { name: "replacement", type: flatRef },
+        { name: "receiver", type: externref },
+        { name: "args", type: externref },
+      ],
+    );
+    return;
+  }
+
+  const arrayNewName = "__js_array_new";
+  const arrayPushName = "__js_array_push";
+
+  addStringConstantGlobal(ctx, "_");
+  addStringConstantGlobal(ctx, "g");
+  ensureLateImport(ctx, arrayNewName, [], [externref]);
+  ensureLateImport(ctx, arrayPushName, [externref, externref], []);
+  ensureLateImport(ctx, "__extern_method_call", [externref, externref, externref], [externref]);
+  ensureLateImport(ctx, "RegExp_new", [externref, externref], [externref]);
+  if (ctx.fast) ensureLateImport(ctx, "__extern_get", [externref, externref], [externref]);
+  flushLateImportShifts(ctx, null);
+
+  const arrayNew = ctx.funcMap.get(arrayNewName);
+  const arrayPush = ctx.funcMap.get(arrayPushName);
+  const methodCall = ctx.funcMap.get("__extern_method_call");
+  if (arrayNew === undefined || arrayPush === undefined || methodCall === undefined) {
+    throw new Error("dyn-ops: dynamic string replace runtime unavailable");
+  }
+  const regexpNew = ctx.funcMap.get("RegExp_new");
+  if (regexpNew === undefined) {
+    throw new Error("dyn-ops: dynamic string replace RegExp constructor unavailable");
+  }
+  const regexpInstrs: Instr[] = [
+    ...stringConstantExternrefInstrs(ctx, "_"),
+    ...stringConstantExternrefInstrs(ctx, "g"),
+    { op: "call", funcIdx: regexpNew },
+  ];
+
+  if (ctx.fast) {
+    throw new Error("dyn-ops: fast host dynamic string replace is not enabled");
+  }
+
+  const argsLocal = 3;
+  addHelper(
+    ctx,
+    IR_DYN_STRING_REPLACE_FN,
+    [carrier, carrier, carrier],
+    [carrier],
+    [
+      { op: "call", funcIdx: arrayNew },
+      { op: "local.set", index: argsLocal },
+      // Argument 0: a fresh exact /_/g RegExp carrier.
+      { op: "local.get", index: argsLocal },
+      ...regexpInstrs,
+      { op: "call", funcIdx: arrayPush },
+      // Argument 1: the proven string, carried dynamically.
+      { op: "local.get", index: argsLocal },
+      { op: "local.get", index: 2 },
+      { op: "call", funcIdx: arrayPush },
+      // Preserve the member receiver as `this` and dispatch only after both
+      // arguments have been appended in source order.
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: argsLocal },
+      { op: "call", funcIdx: methodCall },
+    ],
+    [{ name: "args", type: externref }],
+  );
+}
+
 export function ensureIrDynamicRuntime(ctx: CodegenContext, needs: ReadonlySet<IrDynamicRuntimeNeed>): void {
   if (needs.size === 0) return;
   if (ctx.fast) ensureAnyHelpers(ctx);
@@ -384,4 +577,5 @@ export function ensureIrDynamicRuntime(ctx: CodegenContext, needs: ReadonlySet<I
   }
   if (needs.has("method-call-0")) ensureDynamicMethodCall(ctx, carrier, 0);
   if (needs.has("method-call-1")) ensureDynamicMethodCall(ctx, carrier, 1);
+  if (needs.has("string-replace")) ensureDynamicStringReplace(ctx, carrier);
 }

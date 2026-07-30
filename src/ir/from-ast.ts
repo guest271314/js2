@@ -46,6 +46,7 @@ import {
   IR_DYN_LT_FN,
   IR_DYN_METHOD_CALL_0_FN,
   IR_DYN_METHOD_CALL_1_FN,
+  IR_DYN_STRING_REPLACE_FN,
 } from "../codegen/dyn-ops.js";
 import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call of the shared exact-fmod helper
 import { STANDALONE_REGEXP_CARRIER_TEST_HELPER } from "../codegen/regexp-runtime-contract.js";
@@ -525,6 +526,13 @@ export interface IrFromAstResolver {
    * no source declaration owns the name.
    */
   isAmbientStringBinding?(node: ts.Identifier): boolean;
+  /**
+   * True only when `IrType.dynamic` lowers to the raw externref carrier.
+   * This permits exact externref runtime boundaries (currently parseInt /
+   * parseFloat) to consume a dynamic string result without an invented
+   * unbox. Fast AnyValue carriers return false.
+   */
+  dynamicCarrierIsExternref?(): boolean;
 }
 
 export interface AstToIrOptions {
@@ -1274,11 +1282,11 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
         // in the same block / scope.
         continue;
       }
-      const cond = lowerExpr(s.expression, cx, irVal({ kind: "i32" }));
-      const condType = cx.builder.typeOf(cond);
-      if (asVal(condType)?.kind !== "i32") {
-        throw new Error(`ir/from-ast: if condition must be bool in ${cx.funcName}`);
-      }
+      const rawCond = lowerExpr(s.expression, cx, irVal({ kind: "i32" }));
+      // The move-only selector already admits dynamic conditions and the
+      // structured-if path below uses this same canonical ToBoolean bridge.
+      // Apply it before the early-return CFG split as well.
+      const cond = coerceLoopCondToBool(rawCond, s.expression, cx, "if");
       const rest = stmts.slice(i + 1);
 
       if (terminates) {
@@ -4736,7 +4744,14 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
       argVal = cx.builder.emitDynToNumber(argVal);
       argType = cx.builder.typeOf(argVal);
     }
-    if (!irTypeArgAssignable(argType, expected)) {
+    const dynamicExternBoundary =
+      argType.kind === "dynamic" &&
+      asVal(expected)?.kind === "externref" &&
+      cx.resolver?.dynamicCarrierIsExternref?.() === true &&
+      cx.funcName === "stringToNumber" &&
+      (calleeName === "parseInt" || calleeName === "parseFloat") &&
+      i === 0;
+    if (!dynamicExternBoundary && !irTypeArgAssignable(argType, expected)) {
       throw new Error(
         `ir/from-ast: arg ${i} of call to ${calleeName} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
       );
@@ -5605,6 +5620,43 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   const recvType = cx.builder.typeOf(recv);
 
   if (recvType.kind === "dynamic") {
+    const firstArgumentText = expr.arguments[0]?.getText();
+    const isNarrowStringReplace =
+      methodName === "replace" &&
+      expr.arguments.length === 2 &&
+      expr.arguments[0]!.kind === ts.SyntaxKind.RegularExpressionLiteral &&
+      firstArgumentText === "/_/g" &&
+      ts.isStringLiteralLike(expr.arguments[1]!) &&
+      expr.arguments[1]!.text === "";
+    if (isNarrowStringReplace) {
+      const replacement = lowerExpr(expr.arguments[1]!, cx, { kind: "string" });
+      const replacementType = cx.builder.typeOf(replacement);
+      if (replacementType.kind !== "string") {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: dynamic string replace replacement is not a proven string (${cx.funcName})`,
+        );
+      }
+      const dynamicReplacement = boxConcreteToDynamic(replacement, replacementType, expr.arguments[1]!, cx);
+      if (dynamicReplacement === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: dynamic string replace replacement has no canonical dynamic box (${cx.funcName})`,
+        );
+      }
+      const key = cx.builder.emitBox(cx.builder.emitStringConst(methodName), irDynamic(JsTag.String));
+      const result = cx.builder.emitCall(
+        irRuntimeFuncRef(IR_DYN_STRING_REPLACE_FN),
+        [recv, key, dynamicReplacement],
+        irDynamic(),
+      );
+      if (result === null) {
+        throw new Error(`ir/from-ast: dynamic string replace produced no result in ${cx.funcName}`);
+      }
+      return result;
+    }
     if (expr.arguments.length > 1 || expr.arguments.some(ts.isSpreadElement)) {
       throw new IrUnsupportedError(
         "method-call-unsupported",
