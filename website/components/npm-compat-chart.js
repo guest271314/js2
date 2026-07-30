@@ -34,8 +34,8 @@ class NpmCompatChart extends HTMLElement {
     try {
       const historySrc = this.getAttribute("history-src");
       const [res, historyRes] = await Promise.all([
-        fetch(src),
-        historySrc ? fetch(historySrc).catch(() => null) : Promise.resolve(null),
+        fetch(src, { cache: "no-store" }),
+        historySrc ? fetch(historySrc, { cache: "no-store" }).catch(() => null) : Promise.resolve(null),
       ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const history = historyRes?.ok ? await historyRes.json() : { schemaVersion: 1, runs: [] };
@@ -136,14 +136,11 @@ class NpmCompatChart extends HTMLElement {
     return points.sort((left, right) => left.time - right.time);
   }
 
-  _ratioTick(exponent) {
-    if (exponent === 0) return "1×";
-    if (exponent >= 3) {
-      const value = 10 ** exponent;
-      if (value >= 1_000_000) return `${value / 1_000_000}m×`;
-      return `${value / 1000}k×`;
-    }
-    return `${10 ** exponent}×`;
+  _ratioTick(value) {
+    if (value === 0) return "0×";
+    if (value >= 1_000_000) return `${Number((value / 1_000_000).toPrecision(3))}m×`;
+    if (value >= 1000) return `${Number((value / 1000).toPrecision(3))}k×`;
+    return `${Number(value.toPrecision(3))}×`;
   }
 
   _shortDate(timestamp) {
@@ -152,12 +149,12 @@ class NpmCompatChart extends HTMLElement {
     return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
   }
 
-  _speedChart(pkg, history, target) {
+  _speedChart(pkg, history, target, includePrecompiled = false) {
     const definitions =
       target === "jsHost"
         ? [{ key: "dynamic", label: "Dynamic", color: "#8ba4ff" }]
         : [
-            { key: "static", label: "Static", color: "#4ade80" },
+            ...(includePrecompiled ? [{ key: "static", label: "Static", color: "#4ade80" }] : []),
             { key: "dynamic", label: "Dynamic", color: "#8ba4ff" },
           ];
     const historyPoints = this._historyPoints(pkg, history);
@@ -172,7 +169,9 @@ class NpmCompatChart extends HTMLElement {
     }));
     const measuredSeries = series.filter((item) => item.points.length > 0);
     if (measuredSeries.length === 0) {
-      return `<div class="chart-empty">No ${target === "jsHost" ? "JS-host" : "standalone"} speed history yet</div>`;
+      const scenario =
+        target === "jsHost" ? "JS-host dynamic" : includePrecompiled ? "standalone" : "standalone dynamic";
+      return `<div class="chart-empty">No ${scenario} speed history yet</div>`;
     }
 
     const W = 520;
@@ -181,15 +180,14 @@ class NpmCompatChart extends HTMLElement {
     const plotW = W - pad.left - pad.right;
     const plotH = H - pad.top - pad.bottom;
     const ratios = measuredSeries.flatMap((item) => item.points.map((point) => point.ratio));
-    let minExponent = Math.floor(Math.log10(Math.min(1, ...ratios)));
-    let maxExponent = Math.ceil(Math.log10(Math.max(1, ...ratios)));
-    while (maxExponent - minExponent < 2) {
-      minExponent -= 1;
-      maxExponent += 1;
-    }
-    const exponentSpan = maxExponent - minExponent;
-    const y = (ratio) =>
-      pad.top + ((maxExponent - Math.log10(Math.max(ratio, Number.MIN_VALUE))) / exponentSpan) * plotH;
+    const maxRatio = Math.max(1, ...ratios);
+    const roughStep = maxRatio / 5;
+    const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+    const normalizedStep = roughStep / magnitude;
+    const stepFactor = normalizedStep <= 1 ? 1 : normalizedStep <= 2 ? 2 : normalizedStep <= 5 ? 5 : 10;
+    const tickStep = stepFactor * magnitude;
+    const maxDomain = Math.ceil(maxRatio / tickStep) * tickStep;
+    const y = (ratio) => pad.top + ((maxDomain - Math.max(0, ratio)) / maxDomain) * plotH;
 
     const times = [...new Set(measuredSeries.flatMap((item) => item.points.map((point) => point.time)))].sort(
       (left, right) => left - right,
@@ -199,24 +197,24 @@ class NpmCompatChart extends HTMLElement {
     const x = (time) =>
       minTime === maxTime ? pad.left + plotW / 2 : pad.left + ((time - minTime) / (maxTime - minTime)) * plotW;
 
-    const tickStep = Math.max(1, Math.ceil(exponentSpan / 6));
-    const tickExponents = [];
-    for (let exponent = minExponent; exponent <= maxExponent; exponent += tickStep) tickExponents.push(exponent);
-    if (!tickExponents.includes(0)) tickExponents.push(0);
-    if (!tickExponents.includes(maxExponent)) tickExponents.push(maxExponent);
-    tickExponents.sort((left, right) => right - left);
+    const tickValues = [];
+    for (let value = 0; value <= maxDomain + tickStep / 2; value += tickStep) tickValues.push(value);
+    if (!tickValues.some((value) => Math.abs(value - 1) < 1e-9)) tickValues.push(1);
+    tickValues.sort((left, right) => right - left);
+    const baselineY = y(1);
+    const visibleTickValues = tickValues.filter((value) => value !== 0 || Math.abs(y(0) - baselineY) >= 14);
 
-    const grid = tickExponents
-      .map((exponent) => {
-        const yPos = y(10 ** exponent);
-        const baseline = exponent === 0;
+    const grid = visibleTickValues
+      .map((value) => {
+        const yPos = y(value);
+        const baseline = Math.abs(value - 1) < 1e-9;
         return `
           <line x1="${pad.left}" y1="${yPos}" x2="${W - pad.right}" y2="${yPos}"
             stroke="${baseline ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.08)"}"
             stroke-width="${baseline ? 1.5 : 1}" ${baseline ? 'stroke-dasharray="5 4"' : ""}/>
           <text x="${pad.left - 8}" y="${yPos + 4}" text-anchor="end"
             fill="${baseline ? "rgba(255,255,255,0.72)" : "rgba(255,255,255,0.35)"}"
-            font-size="10" font-family="monospace">${this._ratioTick(exponent)}</text>`;
+            font-size="10" font-family="monospace">${this._ratioTick(value)}</text>`;
       })
       .join("");
 
@@ -244,7 +242,6 @@ class NpmCompatChart extends HTMLElement {
         ? `<text x="${pad.left + plotW / 2}" y="${H - 9}" text-anchor="middle">${this._esc(firstDate)}</text>`
         : `<text x="${pad.left}" y="${H - 9}" text-anchor="start">${this._esc(firstDate)}</text>
            <text x="${W - pad.right}" y="${H - 9}" text-anchor="end">${this._esc(lastDate)}</text>`;
-    const baselineY = y(1);
     const legend = series
       .map((item) => {
         const latest = item.points.at(-1);
@@ -273,23 +270,31 @@ class NpmCompatChart extends HTMLElement {
           <g fill="rgba(255,255,255,0.35)" font-size="9" font-family="monospace">${xLabels}</g>
         </svg>
         <div class="chart-legend">${legend}</div>
-        <div class="chart-scale">log scale · ${times.length} committed run${times.length === 1 ? "" : "s"}</div>
+        <div class="chart-scale">linear scale · ${times.length} committed run${times.length === 1 ? "" : "s"}</div>
       </div>`;
   }
 
   _bindPerfControls() {
     const dashboard = this.shadowRoot.querySelector(".chart-dashboard");
     if (!dashboard) return;
-    const buttons = dashboard.querySelectorAll(".global-target-toggle button[data-target-value]");
-    buttons.forEach((button) => {
-      button.addEventListener("click", () => {
-        const value = button.getAttribute("data-target-value");
-        dashboard.dataset.target = value;
-        buttons.forEach((candidate) => {
-          candidate.setAttribute("aria-pressed", String(candidate.getAttribute("data-target-value") === value));
+    const bindToggle = (selector, attribute, datasetKey) => {
+      const buttons = dashboard.querySelectorAll(selector);
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const value = button.getAttribute(attribute);
+          dashboard.dataset[datasetKey] = value;
+          buttons.forEach((candidate) => {
+            candidate.setAttribute("aria-pressed", String(candidate.getAttribute(attribute) === value));
+          });
         });
       });
-    });
+    };
+    bindToggle(".global-target-toggle button[data-target-value]", "data-target-value", "target");
+    bindToggle(
+      ".global-precompilation-toggle button[data-precompilation-value]",
+      "data-precompilation-value",
+      "precompilation",
+    );
   }
 
   _card(pkg, history) {
@@ -329,7 +334,8 @@ class NpmCompatChart extends HTMLElement {
             ${operation ? `<span class="operation" title="${this._esc(pkg.perf.sampleOp)}">${this._esc(operation)}</span>` : ""}
           </div>
           <div class="perf-view host-chart">${this._speedChart(pkg, history, "jsHost")}</div>
-          <div class="perf-view standalone-chart">${this._speedChart(pkg, history, "standalone")}</div>
+          <div class="perf-view standalone-dynamic-chart">${this._speedChart(pkg, history, "standalone")}</div>
+          <div class="perf-view standalone-precompiled-chart">${this._speedChart(pkg, history, "standalone", true)}</div>
         </div>`;
     }
 
@@ -361,9 +367,38 @@ class NpmCompatChart extends HTMLElement {
   _render(data, history) {
     this._data = data;
     const pkgs = data.packages ?? [];
+    const groups = [
+      {
+        label: "Run",
+        packages: pkgs.filter((pkg) => pkg.compile?.success && pkg.validation?.validates),
+      },
+      {
+        label: "Fail to run",
+        packages: pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates),
+      },
+      {
+        label: "Fail to compile",
+        packages: pkgs.filter((pkg) => !pkg.compile?.success),
+      },
+    ];
     const compiling = pkgs.filter((p) => p.compile?.success).length;
     const validating = pkgs.filter((p) => p.validation?.validates).length;
     const metric = (v, l) => `<div class="metric"><span class="value">${v}</span><span class="label">${l}</span></div>`;
+    const packageGroup = (group) => {
+      const count = group.packages.length;
+      return `
+        <details class="package-group"${count ? " open" : ""}>
+          <summary>
+            <span class="group-title"><span class="group-chevron">›</span>${this._esc(group.label)}</span>
+            <span class="group-count">${count} ${count === 1 ? "package" : "packages"}</span>
+          </summary>
+          ${
+            count
+              ? `<div class="cards">${group.packages.map((pkg) => this._card(pkg, history)).join("")}</div>`
+              : `<div class="group-empty">No packages</div>`
+          }
+        </details>`;
+    };
 
     this.shadowRoot.innerHTML = `
       ${this._styles()}
@@ -373,7 +408,7 @@ class NpmCompatChart extends HTMLElement {
         ${metric(`${validating}/${pkgs.length}`, "validate")}
         ${metric(this._fmtDate(data.generatedAt) || "—", "measured")}
       </div>
-      <div class="chart-dashboard" data-target="standalone">
+      <div class="chart-dashboard" data-target="standalone" data-precompilation="off">
         <div class="benchmark-toolbar">
           <div>
             <span class="toolbar-title">Performance history</span>
@@ -385,9 +420,16 @@ class NpmCompatChart extends HTMLElement {
               <button type="button" data-target-value="host" aria-pressed="false">JS host</button>
               <button type="button" data-target-value="standalone" aria-pressed="true">Standalone</button>
             </div>
+            <div class="toolbar-option">
+              <span class="control-label">Precompilation</span>
+              <div class="toggle-group global-precompilation-toggle" aria-label="Include precompiled static-input results">
+                <button type="button" data-precompilation-value="off" aria-pressed="true">Off</button>
+                <button type="button" data-precompilation-value="on" aria-pressed="false">On</button>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="cards">${pkgs.map((p) => this._card(p, history)).join("")}</div>
+        <div class="package-groups">${groups.map(packageGroup).join("")}</div>
         ${data.note ? `<p class="note">${this._esc(data.note)}</p>` : ""}
       </div>
     `;
@@ -457,22 +499,75 @@ class NpmCompatChart extends HTMLElement {
         .toolbar-controls {
           display: flex;
           align-items: center;
+          justify-content: flex-end;
+          flex-wrap: wrap;
           gap: 14px;
+        }
+        .toolbar-option {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .control-label {
+          color: rgba(255, 255, 255, 0.35);
+          font-size: 9px;
+        }
+        .package-groups {
+          display: grid;
+          gap: 12px;
+        }
+        .package-group {
+          background: var(--bg, #060a14);
+          border: 1px solid var(--border, rgba(255,255,255,0.12));
+        }
+        .package-group summary {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 10px 12px;
+          color: rgba(255, 255, 255, 0.62);
+          cursor: pointer;
+          list-style: none;
+          text-transform: uppercase;
+          font-size: 10px;
+          font-weight: 600;
+          letter-spacing: 0.06em;
+        }
+        .package-group summary::-webkit-details-marker { display: none; }
+        .group-title {
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+        }
+        .group-chevron {
+          color: var(--text-muted, rgba(255,255,255,0.46));
+          font-size: 16px;
+          line-height: 0;
+          transition: transform 120ms ease;
+        }
+        .package-group[open] .group-chevron { transform: rotate(90deg); }
+        .group-count {
+          color: rgba(255, 255, 255, 0.3);
+          font-weight: 500;
+        }
+        .group-empty {
+          padding: 16px;
+          border-top: 1px solid var(--border, rgba(255,255,255,0.12));
+          color: rgba(255, 255, 255, 0.3);
+          font-size: 11px;
         }
         .cards {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 1px;
-          background: var(--border, rgba(255,255,255,0.12));
-          border: 1px solid var(--border, rgba(255,255,255,0.12));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+          background: var(--bg, #060a14);
+          border-top: 1px solid var(--border, rgba(255,255,255,0.12));
         }
         .card {
           background: var(--bg, #060a14);
-          padding: 18px 20px 16px;
+          box-shadow: inset -1px -1px 0 var(--border, rgba(255,255,255,0.12));
+          padding: 16px;
           min-width: 0;
-        }
-        .card:last-child:nth-child(odd) {
-          grid-column: 1 / -1;
         }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
         .card-top .name { font-size: 15px; font-weight: 600; }
@@ -500,7 +595,7 @@ class NpmCompatChart extends HTMLElement {
         .rows { display: flex; flex-direction: column; }
         .row {
           display: flex;
-          justify-content: space-between;
+          justify-content: flex-start;
           align-items: baseline;
           gap: 10px;
           font-size: 12px;
@@ -515,7 +610,10 @@ class NpmCompatChart extends HTMLElement {
           letter-spacing: 0.06em;
           white-space: nowrap;
         }
-        .row .v { text-align: right; }
+        .row .v {
+          min-width: 0;
+          text-align: left;
+        }
         .row .v a { color: var(--accent, #6c8aff); text-decoration: none; }
         .row .v a:hover { text-decoration: underline; }
         .tag {
@@ -533,8 +631,8 @@ class NpmCompatChart extends HTMLElement {
         }
         .section-title {
           display: flex;
-          justify-content: space-between;
-          gap: 16px;
+          justify-content: flex-start;
+          gap: 8px;
           margin-bottom: 8px;
           color: rgba(255, 255, 255, 0.35);
           text-transform: uppercase;
@@ -542,6 +640,7 @@ class NpmCompatChart extends HTMLElement {
           letter-spacing: 0.06em;
         }
         .section-title .operation {
+          min-width: 0;
           color: var(--text-muted, rgba(255,255,255,0.46));
           text-transform: none;
           letter-spacing: 0;
@@ -586,7 +685,8 @@ class NpmCompatChart extends HTMLElement {
         }
         .perf-view { display: none; }
         .chart-dashboard[data-target="host"] .host-chart,
-        .chart-dashboard[data-target="standalone"] .standalone-chart {
+        .chart-dashboard[data-target="standalone"][data-precompilation="off"] .standalone-dynamic-chart,
+        .chart-dashboard[data-target="standalone"][data-precompilation="on"] .standalone-precompiled-chart {
           display: block;
         }
         .speed-chart {
@@ -653,12 +753,7 @@ class NpmCompatChart extends HTMLElement {
           max-width: 900px;
         }
 
-        @media (max-width: 1100px) {
-          .cards { grid-template-columns: 1fr; }
-          .card:last-child:nth-child(odd) { grid-column: auto; }
-        }
         @media (max-width: 720px) {
-          .card { padding: 16px; }
           .section-title { flex-direction: column; gap: 3px; }
           .benchmark-toolbar {
             align-items: flex-start;
@@ -667,7 +762,7 @@ class NpmCompatChart extends HTMLElement {
           }
           .toolbar-controls {
             width: 100%;
-            justify-content: space-between;
+            justify-content: flex-start;
           }
         }
       </style>
