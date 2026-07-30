@@ -972,6 +972,41 @@ function _rethrowIfProxyOrRevoked(e: any, obj: any): void {
   if (_isRevokedProxyError(e) || _isUserProxy(obj)) throw e;
 }
 
+const _VEC_HOST_BRIDGE_EXPORTS = [
+  ["__vec_len", "__js2_vec_host_bridge_0"],
+  ["__vec_get", "__js2_vec_host_bridge_1"],
+  ["__is_vec", "__js2_vec_host_bridge_2"],
+  ["__vec_mut_supported", "__js2_vec_host_bridge_3"],
+  ["__vec_push", "__js2_vec_host_bridge_4"],
+  ["__vec_pop", "__js2_vec_host_bridge_5"],
+] as const;
+
+/**
+ * Resolve the compiler-owned vec bridge namespace without replacing a user's
+ * same-labelled public export. The compiler appends `$` until it finds a free
+ * physical name, so the helper is the final function in each contiguous run.
+ */
+function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T {
+  let view: T | undefined;
+  for (const [logicalName, physicalBase] of _VEC_HOST_BRIDGE_EXPORTS) {
+    let physicalName = physicalBase;
+    let helper: unknown;
+    while (Object.prototype.hasOwnProperty.call(exports, physicalName)) {
+      helper = exports[physicalName];
+      physicalName += "$";
+    }
+    if (typeof helper !== "function" || exports[logicalName] === helper) continue;
+    view ??= Object.create(exports) as T;
+    Object.defineProperty(view, logicalName, {
+      value: helper,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return view ?? exports;
+}
+
 // (#3673) Memoized classification for `_isWasmStruct`. The predicate is on the
 // hot path of EVERY boundary helper (`__extern_get`/`_safeGet`/`_safeSet` call
 // it several times per crossing), and the original probe-set-and-catch
@@ -15291,7 +15326,7 @@ export function buildImports(
   // Always provide setExports — needed for callbacks, native string marshaling,
   // and struct field getter discovery (__sget_*).
   result.setExports = (exports: Record<string, Function>) => {
-    wasmExports = exports;
+    wasmExports = _vecHostBridgeExportView(exports);
     // (#1712) Replay operations parked during the module START function (see
     // pendingExportsDeferred above) now that struct introspection exports
     // are reachable.
@@ -15436,7 +15471,7 @@ export function wrapExports(
   const callFn1 = rawExports.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
   // #1504: marshal by default; `marshal: false` keeps raw WasmGC handles.
   const marshal: "copy" | false = options?.marshal === false ? false : "copy";
-  const exportsForMarshal = rawExports as unknown as Record<string, Function>;
+  const exportsForMarshal = _vecHostBridgeExportView(rawExports as unknown as Record<string, Function>);
   // (#1700) Vec allocator + byte-writer for Uint8Array args. Either may be
   // undefined, in which case the wrapper falls back
   // to passing the arg through unchanged.

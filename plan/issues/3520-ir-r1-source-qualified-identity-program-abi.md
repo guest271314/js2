@@ -106,6 +106,7 @@ files:
   - src/codegen/property-access.ts
   - src/codegen/closed-method-dispatch.ts
   - src/codegen/vec-access-exports.ts
+  - src/runtime.ts
   - src/codegen/ir-first-gate.ts
   - src/codegen/ir-class-shapes.ts
   - src/codegen/ir-overlay-identity.ts
@@ -170,6 +171,7 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
+  - src/runtime.ts
   - src/codegen/declarations.ts
   - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
@@ -2595,9 +2597,20 @@ host bridges behind one entry-source-owned structural family:
   handles, so late-import shifts cannot redirect selection through a generated
   name; and
 - `funcMap` remains a compatibility publication only when the helper label is
-  unoccupied. A same-labelled non-exported source function remains a distinct
-  callable and still executes as the source target, while the array read and
-  mutation seams call the structural vec helpers.
+  unoccupied. Physical exports use the reserved
+  `__js2_vec_host_bridge_<ordinal>` namespace, with a deterministic `$` suffix
+  on collision. Free suffix gaps are filled with helper aliases through one
+  slot beyond the last occupied suffix, so the runtime can select the final
+  function in the contiguous family without mistaking a preserved user export
+  for the helper. The runtime projects those physical helpers onto an internal
+  logical-name view without changing the raw public exports. A user can export
+  all six historical helper labels and still retain those exact names and
+  bodies while runtime array reads, wrapping, and mutation use the structural
+  helpers; and
+- structural observation, body filling, and physical publication are
+  correctness-critical. Their failures now abort compilation before physical
+  bridge publication instead of returning a successful module containing
+  placeholder bodies.
 
 The exact five-entry `SINGLE_HOST_ENTRIES` census was run in fresh processes
 against `origin/main` at `e541b9d56c766c` and this continuation, using
@@ -2610,14 +2623,19 @@ measurement keeps routing and body outcomes unchanged at **37 terminal /
 30 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR
 bodies**.
 
-The focused C30 suite passes **4/4**. It proves all six source-anchored IDs,
-fixed ordinals and final slots; zero vec support publication for an array-free
-module; reserve-to-fill allocator-object identity; the same-label runtime
-collision; tracked/untracked binary equality; and stable routing/outcome
-telemetry. The adjacent callable-planning, #2083, #3272, #3637, #2927, and
-#3311 matrix passes **50/50 across six files**. The IR fallback ratchet,
-function budget, strict TypeScript, and the exact census pass without changing
-the equivalence baseline or Test262 run log.
+The focused C30 suite passes **7/7**. It proves all six source-anchored IDs,
+fixed ordinals, direct final-slot object identity, and zero vec support
+publication for an array-free module; reserve-to-fill allocator-object
+identity survives a forced late-import increase and subsequent dead-import
+compaction; all six public-label collisions preserve the user exports while a
+runtime E2E asserts push length, intermediate length/value, pop value, final
+length, and wrapped returned-array values; forced ABI observation failure
+produces a compile error with no physical exports; tracked/untracked binaries
+are equal with IR enabled; and routing/outcome telemetry remains stable. The
+adjacent callable-planning, #2083, #3272, #3637, #2927, and #3311 matrix
+passes **50/50 across six files**. The IR fallback ratchet, function budget,
+strict TypeScript, and the exact census pass without changing the equivalence
+baseline or Test262 run log.
 
 C30 closes exact retained ownership for the six core vec host bridges, not R1.
 Other support callable families and remaining module-array or display-name

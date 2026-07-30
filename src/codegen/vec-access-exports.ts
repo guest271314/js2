@@ -8,20 +8,20 @@
 // finalize passes and re-exports `reserveVecMethodHelper` for its compile-time
 // callers (calls.ts, property-access.ts, closed-method-dispatch.ts).
 
-import { ts } from "../ts-api.js";
 import type { FuncHandle, Instr, ValType, WasmFunction } from "../ir/types.js";
+import { ts } from "../ts-api.js";
+import { undefinedExternInstrs } from "./any-helpers.js"; // (#3315)
+import { ensureHoleType } from "./array-holes.js";
 import type { CodegenContext } from "./context/types.js";
+import { exportFunc } from "./emit-helpers.js";
+import { ensureGetUndefined } from "./expressions/late-imports.js";
+import { definedFuncAt, definedFuncHandleOf } from "./func-space.js";
+import { PROGRAM_ABI_CALLABLE_ROLE } from "./program-abi-planning.js";
 import { addUnionImports } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
-import { emitVecDefineWritebackExports } from "./vec-define-writeback.js";
-import { ensureGetUndefined } from "./expressions/late-imports.js";
-import { ensureHoleType } from "./array-holes.js";
-import { undefinedExternInstrs } from "./any-helpers.js"; // (#3315)
-import { UNDEF_F64_BITS } from "./value-tags.js"; // (#3315)
-import { definedFuncAt, definedFuncHandleOf } from "./func-space.js";
 import { flushLateImportShifts } from "./shared.js";
-import { exportFunc } from "./emit-helpers.js";
-import { PROGRAM_ABI_CALLABLE_ROLE } from "./program-abi-planning.js";
+import { UNDEF_F64_BITS } from "./value-tags.js"; // (#3315)
+import { emitVecDefineWritebackExports } from "./vec-define-writeback.js";
 
 export const VEC_HOST_BRIDGE_ROLE = "vec-host-bridge";
 
@@ -100,12 +100,18 @@ function vecHostBridgeDefinition(kind: VecHostBridgeKind): VecHostBridgeDefiniti
   return definition;
 }
 
+/** Reserved physical export namespace consumed by the JS runtime adapter. */
+export function vecHostBridgePhysicalExportBase(kind: VecHostBridgeKind): string {
+  return `__js2_vec_host_bridge_${vecHostBridgeDefinition(kind).ordinal}`;
+}
+
 /**
  * Reserve all six core vec host bridges as one exact allocator-owned family.
  *
  * The family is allocated in fixed ordinal order and only then published to
- * the Program ABI registry. `funcMap` remains a best-effort compatibility
- * alias: an existing same-labelled source callable is never overwritten.
+ * the Program ABI registry. Export publication is delayed until every source
+ * export is known. `funcMap` remains a best-effort compatibility alias: an
+ * existing same-labelled source callable is never overwritten.
  */
 function ensureVecHostBridgeAllocations(ctx: CodegenContext): ReadonlyMap<VecHostBridgeKind, VecHostBridgeAllocation> {
   const existing = vecHostBridgeAllocations.get(ctx);
@@ -127,10 +133,9 @@ function ensureVecHostBridgeAllocations(ctx: CodegenContext): ReadonlyMap<VecHos
       typeIdx,
       locals: [],
       body: [...definition.placeholder],
-      exported: true,
+      exported: false,
     } as WasmFunction;
     ctx.mod.functions.push(func);
-    exportFunc(ctx.mod, definition.name, funcIdx);
     if (!ctx.funcMap.has(definition.name)) ctx.funcMap.set(definition.name, funcIdx);
     allocations.set(definition.kind, Object.freeze({ definition, func }));
     observations.push({
@@ -146,6 +151,47 @@ function ensureVecHostBridgeAllocations(ctx: CodegenContext): ReadonlyMap<VecHos
   const published = new Map(allocations);
   vecHostBridgeAllocations.set(ctx, published);
   return published;
+}
+
+/**
+ * Publish collision-safe physical exports after every user export is known.
+ *
+ * The runtime always consumes the reserved physical namespace. The historical
+ * logical name remains as a compatibility alias only when it is unoccupied,
+ * so a user export keeps its requested external name.
+ */
+function publishVecHostBridgeExports(ctx: CodegenContext): void {
+  const allocations = ensureVecHostBridgeAllocations(ctx);
+  const occupied = new Set(ctx.mod.exports.map((entry) => entry.name));
+  for (const definition of VEC_HOST_BRIDGE_DEFINITIONS) {
+    const allocation = allocations.get(definition.kind);
+    const funcIdx = allocation ? definedFuncHandleOf(ctx, allocation.func) : undefined;
+    if (!allocation || funcIdx === undefined) {
+      throw new Error(`cannot publish vec host bridge ${definition.kind} without its exact allocator object`);
+    }
+    const physicalBase = vecHostBridgePhysicalExportBase(definition.kind);
+    let maxOccupiedSuffix = -1;
+    for (const name of occupied) {
+      if (!name.startsWith(physicalBase)) continue;
+      const suffix = name.slice(physicalBase.length);
+      if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
+    }
+    // Fill every free gap through one slot beyond the last occupied suffix.
+    // This preserves colliding user exports while leaving a contiguous run
+    // whose final function is always the structural helper. The runtime can
+    // therefore recover the exact helper without a name side table.
+    for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
+      const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
+      if (occupied.has(physicalName)) continue;
+      exportFunc(ctx.mod, physicalName, funcIdx);
+      occupied.add(physicalName);
+    }
+    if (!occupied.has(definition.name)) {
+      exportFunc(ctx.mod, definition.name, funcIdx);
+      occupied.add(definition.name);
+    }
+    allocation.func.exported = true;
+  }
 }
 
 /** Resolve a core vec bridge from its exact allocator object. */
@@ -270,11 +316,12 @@ export function emitVecAccessExports(ctx: CodegenContext): void {
   ) {
     return;
   }
-  try {
-    _emitVecAccessExportsInner(ctx);
-  } catch {
-    // Non-fatal: if emission fails, the iterator fallback just won't work
-  }
+  // Structural observation and body filling are correctness-critical. A
+  // failure must abort compilation; swallowing it would publish callable
+  // placeholders whose signatures are valid but whose behavior is fabricated.
+  ensureVecHostBridgeAllocations(ctx);
+  _emitVecAccessExportsInner(ctx);
+  publishVecHostBridgeExports(ctx);
 }
 
 /** Mutation-capable vec carriers, keyed by physical backing-array shape. */
@@ -329,8 +376,6 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     ensureGetUndefined(ctx);
     flushLateImportShifts(ctx, null);
   }
-  ensureVecHostBridgeAllocations(ctx);
-
   // __vec_len(externref) -> i32
   {
     // local 0 = externref param, local 1 = anyref converted
