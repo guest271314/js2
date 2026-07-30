@@ -455,8 +455,9 @@ class PerfBenchmarkChart extends HTMLElement {
         fetch(cacheBust, { cache: "no-store" }),
         imports.env,
         imports.string_constants,
+        imports.string_constants16,
       );
-      if (imports.setExports) imports.setExports(result.instance.exports);
+      imports.setInstance?.(result.instance);
       samples.push(performance.now() - t0);
     }
     samples.sort((a, b) => a - b);
@@ -547,8 +548,13 @@ class PerfBenchmarkChart extends HTMLElement {
       throw new Error(wasmOptResult?.warning || "in-page wasm-opt did not produce an optimized module");
     }
     const optimizedWasmBytes = wasmOptResult.binary;
-    const wasmResult = await runtimeHelpers.instantiateWasm(optimizedWasmBytes, imports.env, imports.string_constants);
-    if (imports.setExports) imports.setExports(wasmResult.instance.exports);
+    const wasmResult = await runtimeHelpers.instantiateWasm(
+      optimizedWasmBytes,
+      imports.env,
+      imports.string_constants,
+      imports.string_constants16,
+    );
+    imports.setInstance?.(wasmResult.instance);
     const wasmFn = wasmResult.instance.exports?.[exportName];
     if (typeof wasmFn !== "function") {
       throw new Error(`Wasm benchmark export ${exportName} not found`);

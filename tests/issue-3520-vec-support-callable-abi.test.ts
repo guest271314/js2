@@ -143,7 +143,7 @@ async function instantiate(result: CompileResult): Promise<Record<string, WebAss
     imports.string_constants,
     imports.string_constants16,
   );
-  imports.setExports?.(instance.exports as Record<string, Function>);
+  imports.setInstance?.(instance);
   return instance.exports as Record<string, WebAssembly.ExportValue>;
 }
 
@@ -426,6 +426,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
     let vecRows = 0;
     let closureRows = 0;
     let dateRows = 0;
+    let dataRows = 0;
     for (const entry of SINGLE_HOST_ENTRIES) {
       const source = readFileSync(resolve(entry), "utf8");
       const ast = analyzeSource(source, entry);
@@ -441,13 +442,15 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
       vecRows += entries.filter((candidate) => candidate.id.includes(VEC_HOST_BRIDGE_ROLE)).length;
       closureRows += entries.filter((candidate) => candidate.id.includes(":closure-host-bridge:")).length;
       dateRows += entries.filter((candidate) => candidate.id.includes(":date-civil-support:")).length;
+      dataRows += entries.filter((candidate) => candidate.id.includes(":data-struct-host-bridge:")).length;
     }
-    expect({ definedFunctions, genericRows, vecRows, closureRows, dateRows }).toEqual({
+    expect({ definedFunctions, genericRows, vecRows, closureRows, dateRows, dataRows }).toEqual({
       definedFunctions: 166,
-      genericRows: 51 - dateRows,
+      genericRows: 45,
       vecRows: 24,
       closureRows: 26,
       dateRows: 1,
+      dataRows: 5,
     });
   });
 });

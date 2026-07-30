@@ -460,13 +460,22 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
       s.u32(totalSegments);
       // Active element segments (table initializers)
       for (const elem of mod.elements) {
-        s.byte(0x00); // active, table 0, funcref
+        const explicitTable = elem.tableIdx !== 0;
+        s.byte(explicitTable ? 0x02 : 0x00); // active funcref segment, implicit or explicit table
+        if (explicitTable) {
+          if (valCtx) {
+            valCtx.where = "element-segment table";
+            vIdx("table", elem.tableIdx, valCtx.numTables);
+          }
+          s.u32(elem.tableIdx);
+        }
         if (valCtx) {
           valCtx.where = "element-segment offset";
           valCtx.maxLocals = -1; // const-expr context: no locals exist
         }
         for (const instr of elem.offset) encodeInstr(instr, s);
         s.byte(OP.end);
+        if (explicitTable) s.byte(0x00); // elemkind = funcref
         s.u32(elem.funcIndices.length);
         if (valCtx) valCtx.where = "element-segment function list";
         for (const h of elem.funcIndices) {
