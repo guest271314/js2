@@ -11,8 +11,17 @@ import {
   createDerivedIrUnitId,
   createIrBindingId,
   type IrBindingId,
+  type IrUnitId,
 } from "../src/ir/identity.js";
+import { PreparedIrProgramBuilder, type PreparedIrPreparedInput } from "../src/ir/prepare.js";
+import {
+  PreparedIrProgramInvariantError,
+  type PreparedIrProgram,
+  type PreparedIrProgramInvariantCode,
+  type PreparedIrSupportIntent,
+} from "../src/ir/program.js";
 import { ProgramAbiInvariantError, type ProgramAbiInvariantCode } from "../src/ir/program-abi.js";
+import { ProgramAbiMap } from "../src/ir/program-abi.js";
 import {
   createEmptyModule,
   type FuncTypeDef,
@@ -375,5 +384,290 @@ describe("#3521 Program ABI plan sealing", () => {
     expect("resolveFinalIndex" in sealed).toBe(false);
     expectInvariant(() => session.bindAndPublish(module), "session-publish-once");
     expectInvariant(() => session.publish(module), "session-publish-once");
+  });
+});
+
+function expectPreparedInvariant(action: () => unknown, code: PreparedIrProgramInvariantCode): void {
+  let caught: unknown;
+  try {
+    action();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(PreparedIrProgramInvariantError);
+  expect((caught as PreparedIrProgramInvariantError).code).toBe(code);
+}
+
+function preparedCoreFixture() {
+  const sourceFile = ts.createSourceFile(
+    "/repo/prepared-core.ts",
+    [
+      "export function alpha(value: number): number { return value + 1; }",
+      "function beta(value: number): number { return alpha(value) * 2; }",
+      "function legacy(value: unknown): unknown { return value; }",
+    ].join("\n"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const inventory = buildIrUnitInventory([sourceFile], { entrySource: sourceFile });
+  const units = new Map(
+    inventory.terminalUnits
+      .filter((unit) => unit.kind === "top-level-function")
+      .map((unit) => [unit.displayName, unit] as const),
+  );
+  const alpha = units.get("alpha");
+  const beta = units.get("beta");
+  const legacy = units.get("legacy");
+  if (!alpha || !beta || !legacy) throw new Error("missing prepared-core function inventory");
+  const abi = new ProgramAbiMap(inventory);
+  abi.sealPlan();
+  return { abi, alpha, beta, legacy };
+}
+
+function preparedInput(unitId: IrUnitId, marker: string): PreparedIrPreparedInput {
+  return {
+    unitId,
+    finalSignature: { params: ["f64"], results: ["f64"] },
+    backendLegality: { backend: "wasmgc", target: "gc", verified: true },
+    optimization: {
+      inlineSmall: marker === "beta" ? "applied" : "not-applicable",
+      monomorphization: marker === "alpha" ? "applied" : "not-applicable",
+      allocationProvenance: "verified",
+    },
+    ir: { marker, blocks: [{ id: 0, instructions: [] }] },
+  };
+}
+
+function validPreparedCore(): {
+  readonly program: PreparedIrProgram;
+  readonly alphaId: IrUnitId;
+  readonly betaId: IrUnitId;
+  readonly legacyId: IrUnitId;
+} {
+  const { abi, alpha, beta, legacy } = preparedCoreFixture();
+  const builder = new PreparedIrProgramBuilder(abi);
+  builder.recordPrepared(preparedInput(alpha.id, "alpha"));
+  builder.recordPrepared(preparedInput(beta.id, "beta"));
+  builder.recordUnsupported({
+    unitId: legacy.id,
+    code: "unsupported-syntax",
+    stage: "select",
+    detail: "temporary direct policy",
+  });
+  builder.addComponent({ id: "prepared-call-graph", unitIds: [alpha.id, beta.id] });
+  builder.addComponent({ id: "legacy-singleton", unitIds: [legacy.id] });
+  return { program: builder.seal(), alphaId: alpha.id, betaId: beta.id, legacyId: legacy.id };
+}
+
+describe("#3521 PreparedIrProgram structural ownership", () => {
+  it("freezes the exact inventory, component ownership, support plan, optimization evidence, and emission ledger", () => {
+    const { abi, alpha, beta, legacy } = preparedCoreFixture();
+    const builder = new PreparedIrProgramBuilder(abi);
+    builder.recordPrepared(preparedInput(alpha.id, "alpha"));
+    builder.recordPrepared(preparedInput(beta.id, "beta"));
+    builder.recordUnsupported({
+      unitId: legacy.id,
+      code: "unsupported-syntax",
+      stage: "select",
+      detail: "temporary hybrid route",
+    });
+    builder.addComponent({ id: "numeric", unitIds: [alpha.id, beta.id] });
+    builder.addComponent({ id: "direct", unitIds: [legacy.id] });
+
+    const supportIntents: readonly PreparedIrSupportIntent[] = [
+      { key: "callback:host", kind: "host-callback", ownerUnitId: alpha.id },
+      { key: "date:snapshot", kind: "runtime-entry", ownerUnitId: alpha.id, detail: "Date snapshot" },
+      { key: "promise:delay", kind: "runtime-entry", ownerUnitId: beta.id, detail: "Promise delay" },
+      { key: "literal:hello", kind: "literal", ownerUnitId: alpha.id },
+      { key: "closure:lifted:0", kind: "lifted-closure", ownerUnitId: alpha.id },
+      { key: "clone:mono:0", kind: "monomorphized-clone", ownerUnitId: alpha.id },
+    ];
+    for (const intent of supportIntents) builder.addSupportIntent(intent);
+    builder.addAllocation({ key: "literal:hello", kind: "literal", ownerUnitId: alpha.id, ordinal: 0 });
+    builder.addAllocation({ key: "helper:promise", kind: "helper", ownerUnitId: beta.id, ordinal: 0 });
+    const liftedId = createDerivedIrUnitId({ parentId: alpha.id, role: "lifted-closure", ordinal: 0 });
+    const cloneId = createDerivedIrUnitId({ parentId: alpha.id, role: "monomorphization-clone", ordinal: 0 });
+    builder.addProvenance({
+      artifactUnitId: liftedId,
+      ownerUnitId: alpha.id,
+      parentUnitId: alpha.id,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    builder.addProvenance({
+      artifactUnitId: cloneId,
+      ownerUnitId: alpha.id,
+      parentUnitId: alpha.id,
+      role: "monomorphization-clone",
+      ordinal: 0,
+    });
+
+    const program = builder.seal();
+    expect(Object.isFrozen(program)).toBe(true);
+    expect(program.units.size).toBe(3);
+    expect(program.preparedUnits.size).toBe(2);
+    expect(program.directUnits.size).toBe(1);
+    expect(program.invariantUnits.size).toBe(0);
+    expect(program.components.map((component) => [component.id, component.outcome])).toEqual([
+      ["numeric", "prepared"],
+      ["direct", "unsupported"],
+    ]);
+    expect(program.supportIntents.map((intent) => intent.key)).toEqual(supportIntents.map((intent) => intent.key));
+    expect(Object.isFrozen(program.supportIntents)).toBe(true);
+    expect((program.units as Map<IrUnitId, unknown>).set).toBeUndefined();
+    expect(program.preparedUnits.get(beta.id)?.optimization.inlineSmall).toBe("applied");
+    expect(program.preparedUnits.get(alpha.id)?.optimization.monomorphization).toBe("applied");
+    expect(program.provenance.map((record) => record.artifactUnitId)).toEqual([liftedId, cloneId]);
+
+    const emission = program.beginEmission();
+    emission.emitIr(alpha.id, { op: "ir.alpha" });
+    emission.emitIr(beta.id, { op: "ir.beta" });
+    emission.emitDirect(legacy.id, { op: "direct.legacy" });
+    const publication = emission.publish();
+    expect(publication.bodies.size).toBe(3);
+    expect(publication.ledger.get(alpha.id)).toEqual({
+      unitId: alpha.id,
+      outcome: "prepared",
+      prepareAttempts: 1,
+      directBodyEmissions: 0,
+      irBodyEmissions: 1,
+      legacyBodyEmitted: false,
+      irBodyEmitted: true,
+    });
+    expect(publication.ledger.get(legacy.id)).toEqual({
+      unitId: legacy.id,
+      outcome: "unsupported",
+      prepareAttempts: 1,
+      directBodyEmissions: 1,
+      irBodyEmissions: 0,
+      legacyBodyEmitted: true,
+      irBodyEmitted: false,
+    });
+    expectPreparedInvariant(() => program.beginEmission(), "emission-already-started");
+    expectPreparedInvariant(() => emission.emitIr(alpha.id, {}), "transaction-closed");
+  });
+
+  it("fails sealing for missing or duplicate outcomes and missing or duplicate component membership", () => {
+    const missingFixture = preparedCoreFixture();
+    const missing = new PreparedIrProgramBuilder(missingFixture.abi);
+    missing.recordPrepared(preparedInput(missingFixture.alpha.id, "alpha"));
+    missing.recordPrepared(preparedInput(missingFixture.beta.id, "beta"));
+    missing.addComponent({
+      id: "all",
+      unitIds: [missingFixture.alpha.id, missingFixture.beta.id, missingFixture.legacy.id],
+    });
+    expectPreparedInvariant(() => missing.seal(), "missing-unit");
+    expectPreparedInvariant(
+      () => missing.recordInvariant({ unitId: missingFixture.legacy.id, code: "x", stage: "build", detail: "x" }),
+      "program-seal-failed",
+    );
+
+    const duplicateFixture = preparedCoreFixture();
+    const duplicate = new PreparedIrProgramBuilder(duplicateFixture.abi);
+    duplicate.recordPrepared(preparedInput(duplicateFixture.alpha.id, "alpha"));
+    duplicate.recordPrepared(preparedInput(duplicateFixture.alpha.id, "alpha-again"));
+    duplicate.recordPrepared(preparedInput(duplicateFixture.beta.id, "beta"));
+    duplicate.recordUnsupported({ unitId: duplicateFixture.legacy.id, code: "x", stage: "select", detail: "x" });
+    duplicate.addComponent({ id: "a", unitIds: [duplicateFixture.alpha.id] });
+    duplicate.addComponent({ id: "b", unitIds: [duplicateFixture.beta.id, duplicateFixture.legacy.id] });
+    expectPreparedInvariant(() => duplicate.seal(), "duplicate-unit");
+
+    const membershipFixture = preparedCoreFixture();
+    const membership = new PreparedIrProgramBuilder(membershipFixture.abi);
+    membership.recordPrepared(preparedInput(membershipFixture.alpha.id, "alpha"));
+    membership.recordPrepared(preparedInput(membershipFixture.beta.id, "beta"));
+    membership.recordUnsupported({ unitId: membershipFixture.legacy.id, code: "x", stage: "select", detail: "x" });
+    membership.addComponent({ id: "a", unitIds: [membershipFixture.alpha.id, membershipFixture.beta.id] });
+    membership.addComponent({ id: "b", unitIds: [membershipFixture.beta.id, membershipFixture.legacy.id] });
+    expectPreparedInvariant(() => membership.seal(), "duplicate-component-unit");
+  });
+
+  it("rejects mixed terminal outcomes inside one local-call component before emission", () => {
+    const { abi, alpha, beta, legacy } = preparedCoreFixture();
+    const builder = new PreparedIrProgramBuilder(abi);
+    builder.recordPrepared(preparedInput(alpha.id, "alpha"));
+    builder.recordUnsupported({ unitId: beta.id, code: "unsafe-abi-edge", stage: "resolve", detail: "unsafe edge" });
+    builder.recordUnsupported({ unitId: legacy.id, code: "unsupported-syntax", stage: "select", detail: "legacy" });
+    builder.addComponent({ id: "unsafe-local-edge", unitIds: [alpha.id, beta.id] });
+    builder.addComponent({ id: "legacy", unitIds: [legacy.id] });
+    expectPreparedInvariant(() => builder.seal(), "mixed-component-outcome");
+  });
+
+  it("rejects unsealed ABI input and support requests after the atomic seal", () => {
+    const fixture = preparedCoreFixture();
+    const unsealed = new ProgramAbiMap(fixture.abi.inventory);
+    expectPreparedInvariant(() => new PreparedIrProgramBuilder(unsealed), "abi-not-sealed");
+
+    const { program, alphaId } = validPreparedCore();
+    expect(program.sealed).toBe(true);
+    const sealedBuilder = new PreparedIrProgramBuilder(fixture.abi);
+    sealedBuilder.recordPrepared(preparedInput(fixture.alpha.id, "alpha"));
+    sealedBuilder.recordPrepared(preparedInput(fixture.beta.id, "beta"));
+    sealedBuilder.recordUnsupported({
+      unitId: fixture.legacy.id,
+      code: "unsupported-syntax",
+      stage: "select",
+      detail: "legacy",
+    });
+    sealedBuilder.addComponent({ id: "prepared", unitIds: [fixture.alpha.id, fixture.beta.id] });
+    sealedBuilder.addComponent({ id: "direct", unitIds: [fixture.legacy.id] });
+    sealedBuilder.seal();
+    expectPreparedInvariant(
+      () => sealedBuilder.addSupportIntent({ key: "late:helper", kind: "helper", ownerUnitId: alphaId }),
+      "late-support-intent",
+    );
+  });
+
+  it("fails closed on wrong-direction, duplicate, and partial emission without publishing a body", () => {
+    const wrong = validPreparedCore();
+    const wrongTx = wrong.program.beginEmission();
+    expectPreparedInvariant(() => wrongTx.emitDirect(wrong.alphaId, { op: "wrong" }), "wrong-emitter");
+    expect(wrongTx.publication).toBeUndefined();
+    expect(wrongTx.ledger.get(wrong.alphaId)?.directBodyEmissions).toBe(0);
+    expectPreparedInvariant(() => wrongTx.emitIr(wrong.alphaId, { op: "late" }), "transaction-closed");
+
+    const duplicate = validPreparedCore();
+    const duplicateTx = duplicate.program.beginEmission();
+    duplicateTx.emitIr(duplicate.alphaId, { op: "first" });
+    expectPreparedInvariant(() => duplicateTx.emitIr(duplicate.alphaId, { op: "second" }), "duplicate-emission");
+    expect(duplicateTx.publication).toBeUndefined();
+    expect(duplicateTx.ledger.get(duplicate.alphaId)?.irBodyEmissions).toBe(1);
+
+    const failed = validPreparedCore();
+    const failedTx = failed.program.beginEmission();
+    expectPreparedInvariant(
+      () => failedTx.failEmission(failed.alphaId, "ir", "injected backend invariant"),
+      "emission-failed",
+    );
+    expect(failedTx.publication).toBeUndefined();
+    expect(failedTx.ledger.get(failed.alphaId)?.directBodyEmissions).toBe(0);
+    expect(failedTx.ledger.get(failed.alphaId)?.irBodyEmissions).toBe(0);
+
+    const partial = validPreparedCore();
+    const partialTx = partial.program.beginEmission();
+    partialTx.emitIr(partial.alphaId, { op: "only-one" });
+    expectPreparedInvariant(() => partialTx.publish(), "partial-publication");
+    expect(partialTx.publication).toBeUndefined();
+    expectPreparedInvariant(() => partialTx.emitIr(partial.betaId, { op: "too-late" }), "transaction-closed");
+  });
+
+  it("keeps terminal Invariant units on the neither-emitter route", () => {
+    const { abi, alpha, beta, legacy } = preparedCoreFixture();
+    const builder = new PreparedIrProgramBuilder(abi);
+    builder.recordInvariant({
+      unitId: alpha.id,
+      code: "selection-preparation-mismatch",
+      stage: "verify",
+      detail: "injected invariant",
+    });
+    builder.recordPrepared(preparedInput(beta.id, "beta"));
+    builder.recordUnsupported({ unitId: legacy.id, code: "unsupported-syntax", stage: "select", detail: "legacy" });
+    builder.addComponent({ id: "invariant", unitIds: [alpha.id] });
+    builder.addComponent({ id: "prepared", unitIds: [beta.id] });
+    builder.addComponent({ id: "direct", unitIds: [legacy.id] });
+    const program = builder.seal();
+    expect(program.invariantUnits.size).toBe(1);
+    expectPreparedInvariant(() => program.beginEmission(), "program-has-invariant");
   });
 });

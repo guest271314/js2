@@ -4,7 +4,7 @@ title: "IR-only R2: prepare-before-emit free-function ownership"
 status: blocked
 sprint: Backlog
 created: 2026-07-21
-updated: 2026-07-21
+updated: 2026-07-30
 priority: critical
 horizon: xl
 complexity: XL
@@ -200,6 +200,38 @@ denominator, and no successful unit may have `direct + IR != 1`.
   transitional `irFirstSkipped` / `irCompiledFuncs` telemetry from exact
   counters.
 - Retain class/module overlay code untouched for #3522/#3523.
+
+## Prepared-program-core structural slice (2026-07-30)
+
+The first R2 landing is intentionally structural. `src/ir/program.ts` and
+`src/ir/prepare.ts` define and validate the immutable prepared-program boundary
+without wiring it into `src/codegen/index.ts`:
+
+- the denominator is exactly the R1 inventory's top-level free-function
+  terminals, with every unit present once in exactly one local-call component;
+- every component freezes to one terminal `Prepared`, `Unsupported`, or
+  `Invariant` ownership kind before an emitter can start;
+- `Prepared` records own their final signature, post-pass typed IR, target
+  legality proof, inline-small/monomorphization evidence, symbolic support
+  intents, allocation reservations, and source/pass provenance;
+- a one-shot isolated emission transaction enforces `Prepared -> IR`,
+  `Unsupported -> direct`, and `Invariant -> neither`, and publishes only after
+  every eligible unit reconciles to exactly one staged body;
+- missing/duplicate units, mixed component outcomes, late support discovery,
+  unsealed ABI plans, wrong emitter direction, duplicate emission, and partial
+  publication are fatal invariants.
+
+This slice does **not** change production routing and its expected
+legacy-body reduction is therefore exactly **0**. It does not claim the issue's
+compile-once cutover acceptance criteria; the later routing slices must consume
+this boundary.
+
+Future routing work must preserve optimization parity rather than treating the
+loss of the legacy discovery pass as acceptable churn. In particular, complete
+program preparation must retain inline-small eligibility, monomorphized clone
+identity/signatures, and allocation provenance, and
+`check:ir-optimization-retirement` remains fail-closed until its committed
+parity evidence is retirement-ready.
 
 ## File ownership and locks
 
