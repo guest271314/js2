@@ -51,6 +51,35 @@ function entrySourceRecord(source = CALENDAR_SOURCE) {
   }).sources.find((candidate) => candidate.kind === "entry")!;
 }
 
+function collisionSource(kind: "bigint" | "number"): string {
+  const literal = kind === "bigint" ? "5n" : "5";
+  const delta = kind === "bigint" ? "17n" : "17";
+  return `
+    function ${DATE_CIVIL_HELPER}(days: ${kind}): ${kind} {
+      return days + ${delta};
+    }
+    export function userProbe(): ${kind} {
+      return ${DATE_CIVIL_HELPER}(${literal});
+    }
+    export function dateProbe(): number {
+      const value = new Date(0);
+      return value.getUTCFullYear() * 10000 + (value.getUTCMonth() + 1) * 100 + value.getUTCDate();
+    }
+  `;
+}
+
+async function compileCollision(
+  kind: "bigint" | "number",
+  trackIrOutcomes: boolean,
+): Promise<Awaited<ReturnType<typeof compile>>> {
+  return compile(collisionSource(kind), {
+    fileName: `issue-3520-date-civil-${kind}-collision.ts`,
+    experimentalIR: true,
+    trackIrOutcomes,
+    target: "standalone",
+  });
+}
+
 describe("#3520 C32 date civil support Program ABI ownership", () => {
   it("publishes one exact entry-source owner with no duplicate generic owner", () => {
     const ast = analyzeSource(CALENDAR_SOURCE, "issue-3520-date-civil-support.ts");
@@ -146,45 +175,47 @@ describe("#3520 C32 date civil support Program ABI ownership", () => {
     expect(module.functions[0]).toBe(helper);
   });
 
-  it("does not claim a same-named pre-existing allocator as Date support", () => {
-    const sourceFile = ts.createSourceFile(
-      "/repo/entry.ts",
-      "export function entry(): number { return 1; }",
-      ts.ScriptTarget.Latest,
-      true,
-      ts.ScriptKind.TS,
-    );
-    const inventory = buildIrUnitInventory([sourceFile], { entrySource: sourceFile });
-    const entrySource = inventory.sources.find((source) => source.kind === "entry")!;
-    const module = createEmptyModule();
-    module.types.push({ kind: "func", params: [{ kind: "i64" }], results: [{ kind: "i64" }] });
-    const occupied = {
-      name: DATE_CIVIL_HELPER,
-      typeIdx: 0,
-      locals: [],
-      body: [{ op: "local.get" as const, index: 0 }],
-      exported: false,
-    };
-    module.functions.push(occupied);
-    const session = new ProgramAbiSession(inventory, module);
-    const ctx = createCodegenContext(module, {} as ts.TypeChecker, undefined, session);
-    ctx.funcMap.set(DATE_CIVIL_HELPER, 0);
+  it.each(["bigint", "number"] as const)(
+    "preserves Date and same-named user %s functions in tracked and untracked lanes",
+    async (kind) => {
+      const untracked = await compileCollision(kind, false);
+      const tracked = await compileCollision(kind, true);
+      for (const result of [untracked, tracked]) {
+        expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+        expect(result.imports).toEqual([]);
+        expect(WebAssembly.validate(result.binary)).toBe(true);
+        const { instance } = await WebAssembly.instantiate(result.binary, {});
+        const exports = instance.exports as {
+          userProbe: () => bigint | number;
+          dateProbe: () => number;
+        };
+        expect(exports.userProbe()).toBe(kind === "bigint" ? 22n : 22);
+        expect(exports.dateProbe()).toBe(19700101);
+      }
+      expect(tracked.binary).toEqual(untracked.binary);
 
-    expect(ensureDateCivilHelper(ctx)).toBe(0);
-    const dateId = createIrBindingId({
-      ownerId: entrySource.id,
-      domain: "support",
-      role: DATE_CIVIL_SUPPORT_ROLE,
-      ordinal: DATE_CIVIL_SUPPORT_ORDINAL,
-    });
-    expect(session.getDraft(dateId)).toBeUndefined();
-    eliminateDeadLayoutAndPlanProgramAbi(ctx);
-    ctx.indexSpaceFrozen = true;
-    const entries = session.publish(module).abi.entries();
-    expect(entries.some((entry) => entry.id === dateId)).toBe(false);
-    expect(entries.filter((entry) => entry.displayName === DATE_CIVIL_HELPER)).toHaveLength(1);
-    expect(session.locatorBindingId(occupied)).toContain("retained-module-function");
-  });
+      const ast = analyzeSource(collisionSource(kind), `issue-3520-date-civil-${kind}-collision.ts`);
+      const generated = generateModule(ast, {
+        experimentalIR: true,
+        trackIrOutcomes: true,
+        standalone: true,
+      });
+      expect(
+        hardErrors(generated),
+        hardErrors(generated)
+          .map((error) => error.message)
+          .join("\n"),
+      ).toEqual([]);
+      const entries = generated.programAbi!.abi.entries();
+      const dateEntries = entries.filter((entry) => entry.id.includes(`:${DATE_CIVIL_SUPPORT_ROLE}:`));
+      expect(dateEntries).toHaveLength(1);
+      expect(dateEntries[0]).toMatchObject({
+        displayName: DATE_CIVIL_HELPER,
+        intent: { kind: "callable", origin: "support" },
+      });
+      expect(entries.filter((entry) => entry.displayName === DATE_CIVIL_HELPER)).toHaveLength(2);
+    },
+  );
 
   it("keeps tracked and untracked Date modules byte-identical", async () => {
     const options = {

@@ -7,7 +7,7 @@ import { isBooleanType, isNumberType, isStringType } from "../../checker/type-ma
 import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { resolveArrayInfo } from "../array-methods.js";
-import { definedFuncAt, definedFuncHandleOf, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
+import { definedFuncHandleOf, mintDefinedFunc, pushDefinedFunc } from "../func-space.js"; // (#1916 S3b) stable-regime minting
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
@@ -272,22 +272,22 @@ function emitPackedMmdd(out: Instr[], tmpLocal: number, yearTmp: number): void {
  * Uses Hinnant's algorithm: http://howardhinnant.github.io/date_algorithms.html#civil_from_days
  */
 export function ensureDateCivilHelper(ctx: CodegenContext): number {
-  const existing = ctx.funcMap.get("__date_civil_from_days");
-  if (existing !== undefined) {
-    const owned = dateCivilHelperByContext.get(ctx);
-    if (!owned) return existing;
-    const func = definedFuncAt(ctx, existing);
-    if (func !== owned) {
-      throw new Error("__date_civil_from_days no longer resolves to its exact allocator object");
+  const owned = dateCivilHelperByContext.get(ctx);
+  if (owned) {
+    if (definedFuncHandleOf(ctx, owned) === undefined) {
+      throw new Error("__date_civil_from_days lost its exact allocator object");
     }
-    return ownDateCivilHelper(ctx, func);
+    return ownDateCivilHelper(ctx, owned);
   }
+  const installCompatibilityAlias = !ctx.funcMap.has("__date_civil_from_days");
 
   // func (param $z i64) (result i64)
   // locals: $z(0), $era(1), $doe(2), $yoe(3), $doy(4), $mp(5), $y(6), $m(7), $d(8)
   const funcTypeIdx = addFuncType(ctx, [{ kind: "i64" }], [{ kind: "i64" }]);
   const funcIdx = mintDefinedFunc(ctx);
-  ctx.funcMap.set("__date_civil_from_days", funcIdx);
+  if (installCompatibilityAlias) {
+    ctx.funcMap.set("__date_civil_from_days", funcIdx);
+  }
 
   const body: Instr[] = [];
 
