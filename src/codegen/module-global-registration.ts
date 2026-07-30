@@ -3,6 +3,7 @@
 import type { GlobalDef, Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext } from "./context/types.js";
+import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
 
 /**
@@ -71,6 +72,24 @@ export function registerModuleGlobal(
 /** Allocate and structurally observe one retained top-level TDZ flag. */
 export function registerModuleTdzGlobal(ctx: CodegenContext, sourceFile: ts.SourceFile, name: string): void {
   if (!ctx.moduleGlobals.has(name)) return;
+  const existingGlobalIdx = ctx.tdzGlobals.get(name);
+  if (existingGlobalIdx !== undefined) {
+    const existingGlobal = ctx.mod.globals[localGlobalIdx(ctx, existingGlobalIdx)];
+    if (!existingGlobal || existingGlobal.name !== `__tdz_${name}`) {
+      throw new TypeError(`module TDZ global ${name} has no exact allocator object at index ${existingGlobalIdx}`);
+    }
+    for (const statement of sourceFile.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      const declaration = statement.declarationList.declarations.find(
+        (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === name,
+      );
+      if (declaration) {
+        ctx.programAbiGlobals?.observeModuleTdz(declaration, name, existingGlobal);
+        return;
+      }
+    }
+    return;
+  }
   const flagGlobalIdx = nextModuleGlobalIdx(ctx);
   const flagGlobal: GlobalDef = {
     name: `__tdz_${name}`,
@@ -90,5 +109,20 @@ export function registerModuleTdzGlobal(ctx: CodegenContext, sourceFile: ts.Sour
       ctx.programAbiGlobals?.observeModuleTdz(declaration, name, flagGlobal);
       return;
     }
+  }
+}
+
+/**
+ * Materialize the top-level TDZ globals that both body emitters reference.
+ * Safe to call before IR preparation and again from the direct declaration
+ * pass because allocation and structural ABI observation are idempotent.
+ */
+export function prepareModuleTdzGlobals(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+  const elidableTdzNames = computeElidableTopLevelTdzNames(ctx, sourceFile, ctx.tdzLetConstNames);
+  for (const name of elidableTdzNames) {
+    ctx.tdzLetConstNames.delete(name);
+  }
+  for (const name of ctx.tdzLetConstNames) {
+    registerModuleTdzGlobal(ctx, sourceFile, name);
   }
 }

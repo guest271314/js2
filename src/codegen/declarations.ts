@@ -84,7 +84,6 @@ import {
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
-import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
@@ -96,7 +95,7 @@ import {
   pushProgramAbiTopLevelCallable,
 } from "./program-abi-source-callable-planning.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
-import { registerModuleGlobal, registerModuleTdzGlobal } from "./module-global-registration.js";
+import { prepareModuleTdzGlobals, registerModuleGlobal } from "./module-global-registration.js";
 
 // ── Extracted subsystems (#3268) — re-exported for external consumers ─────
 export {
@@ -1949,22 +1948,23 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
  * Third pass — compile function bodies into the slots pre-allocated by
  * `collectDeclarations`.
  *
- * (#2138) `skipBodies` — IR-first compile-once inversion, ONLY passed when
- * `JS2WASM_IR_FIRST=1`: top-level FunctionDeclarations named in the set get
- * an `unreachable` placeholder body instead of a legacy compile (the IR
- * overlay overwrites the slot afterwards, so each claimed function is
- * compiled ONCE). The funcIdx/typeIdx slot itself is untouched — this is a
- * body-emission change, never an index-layout change. Skipped functions are
- * deliberately NOT registered as inlinable (callers must emit a real `call`
- * to the slot; inlining the placeholder — or a legacy body that will be
- * discarded — would defeat the inversion). Returns the names actually
- * skipped (undefined when `skipBodies` is not passed — the default path
- * allocates nothing).
+ * (#2138/#3521) `skipBodies` names top-level FunctionDeclarations whose direct
+ * body emitter must not run. Before R2, those slots received an `unreachable`
+ * placeholder for a later IR overlay. R2 passes the exact same names through
+ * `preserveSkippedBodies` after their IR bodies have already been prepared and
+ * installed, so declaration compilation leaves those bodies untouched.
+ *
+ * The funcIdx/typeIdx slot itself is untouched in both modes. Skipped
+ * functions are deliberately NOT registered as direct-front-end inlinables:
+ * the IR module pass has already made the complete optimization decision.
+ * Returns the names actually skipped (undefined when `skipBodies` is not
+ * passed).
  */
 export function compileDeclarations(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
   skipBodies?: ReadonlySet<string>,
+  preserveSkippedBodies?: ReadonlySet<string>,
 ): string[] | undefined {
   const skippedNames: string[] | undefined = skipBodies ? [] : undefined;
   // Build a map from function name → index within ctx.mod.functions
@@ -2318,18 +2318,7 @@ export function compileDeclarations(
   // Genuinely dynamic / ambiguous cases (e.g. function declarations that
   // could be called before the variable's initializer runs) are preserved
   // because `analyzeTdzAccess` conservatively returns "check" for them.
-  const elidableTdzNames = computeElidableTopLevelTdzNames(ctx, sourceFile, ctx.tdzLetConstNames);
-  for (const name of elidableTdzNames) {
-    ctx.tdzLetConstNames.delete(name);
-  }
-
-  // Create TDZ flag globals for let/const module globals.
-  // Each TDZ flag is an i32 global initialized to 0 (uninitialized).
-  // When the variable's initializer runs, the flag is set to 1.
-  // Reads of the variable check the flag and throw ReferenceError if 0.
-  for (const name of ctx.tdzLetConstNames) {
-    registerModuleTdzGlobal(ctx, sourceFile, name);
-  }
+  prepareModuleTdzGlobals(ctx, sourceFile);
 
   // Compile module-level init statements BEFORE function bodies so that
   // closureMap is populated for module-level arrow function variables.
@@ -2483,14 +2472,15 @@ export function compileDeclarations(
         const idx = funcByName.get(fnName);
         if (idx !== undefined) {
           const func = ctx.mod.functions[idx]!;
-          // (#2138) IR-first: skip legacy body emission — the IR overlay owns
-          // this slot. Emit an `unreachable` placeholder so the module stays
-          // structurally valid between the passes; `generateModule` promotes
-          // any IR failure on a skipped function to a hard compile error, so
-          // the placeholder can never ship. Do NOT register as inlinable
-          // (see the function doc comment).
+          // (#2138/#3521) Skip direct body emission. The compatibility overlay
+          // writes a temporary unreachable body; prepare-before-emit routing
+          // has already installed the final IR body and explicitly asks us to
+          // preserve it. Do NOT register either form as a direct-front-end
+          // inlinable (see the function doc comment).
           if (skipBodies?.has(fnName)) {
-            func.body = [{ op: "unreachable" }];
+            if (!preserveSkippedBodies?.has(fnName)) {
+              func.body = [{ op: "unreachable" }];
+            }
             skippedNames!.push(fnName);
             continue;
           }
