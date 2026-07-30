@@ -2597,16 +2597,17 @@ host bridges behind one entry-source-owned structural family:
   handles, so late-import shifts cannot redirect selection through a generated
   name; and
 - `funcMap` remains a compatibility publication only when the helper label is
-  unoccupied. Physical exports use the reserved
-  `__js2_vec_host_bridge_<ordinal>` namespace, with a deterministic `$` suffix
-  on collision. Free suffix gaps are filled with helper aliases through one
-  slot beyond the last occupied suffix, so the runtime can select the final
-  function in the contiguous family without mistaking a preserved user export
-  for the helper. The runtime projects those physical helpers onto an internal
-  logical-name view without changing the raw public exports. A user can export
-  all six historical helper labels and still retain those exact names and
-  bodies while runtime array reads, wrapping, and mutation use the structural
-  helpers; and
+  unoccupied. The historical logical export is also the zero-overhead runtime
+  fast path. A physical export is added only when a user already owns that
+  logical export, using the short reserved `$v<ordinal>` namespace with a
+  deterministic `$` suffix on collision. Free suffix gaps are filled with
+  helper aliases through one slot beyond the last occupied suffix, so the
+  runtime can select the final function in the contiguous family without
+  mistaking a preserved user export for the helper. The runtime projects
+  collision-only physical helpers onto an internal logical-name view without
+  changing the raw public exports. A user can export all six historical helper
+  labels and still retain those exact names and bodies while runtime array
+  reads, wrapping, and mutation use the structural helpers; and
 - structural observation, body filling, and physical publication are
   correctness-critical. Their failures now abort compilation before physical
   bridge publication instead of returning a successful module containing
@@ -2623,19 +2624,30 @@ measurement keeps routing and body outcomes unchanged at **37 terminal /
 30 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR
 bodies**.
 
+The size follow-up compares raw binaries from `origin/main` at
+`10f40b6458c6c`, PR head `11abdfd6b544`, and the collision-only alias
+implementation. Three representative helper-using modules measure
+**1,065 / 1,340 / 1,569 bytes** on main, **1,222 / 1,497 / 1,726 bytes** at
+the PR head, and **1,065 / 1,340 / 1,569 bytes** after the follow-up. The
+deterministic **+157 bytes per module** is therefore eliminated rather than
+traded for a shorter always-present duplicate namespace. Ordinary modules
+publish zero `$v<ordinal>` physical aliases; only an actual public-label
+collision pays for its affected short family.
+
 The focused C30 suite passes **7/7**. It proves all six source-anchored IDs,
 fixed ordinals, direct final-slot object identity, and zero vec support
 publication for an array-free module; reserve-to-fill allocator-object
 identity survives a forced late-import increase and subsequent dead-import
 compaction; all six public-label collisions preserve the user exports while a
 runtime E2E asserts push length, intermediate length/value, pop value, final
-length, and wrapped returned-array values; forced ABI observation failure
-produces a compile error with no physical exports; tracked/untracked binaries
-are equal with IR enabled; and routing/outcome telemetry remains stable. The
-adjacent callable-planning, #2083, #3272, #3637, #2927, and #3311 matrix
-passes **50/50 across six files**. The IR fallback ratchet, function budget,
-strict TypeScript, and the exact census pass without changing the equivalence
-baseline or Test262 run log.
+length, and wrapped returned-array values; sparse short-namespace collisions
+retain six distinct terminal structural helpers; forced ABI observation
+failure produces a compile error with no physical exports; tracked/untracked
+binaries are equal with IR enabled; and routing/outcome telemetry remains
+stable. The adjacent callable-planning, #2083, #3272, #3637, #2927, and #3311
+matrix passes **50/50 across six files**. The IR fallback ratchet, function
+budget, strict TypeScript, and the exact census pass without changing the
+equivalence baseline or Test262 run log.
 
 C30 closes exact retained ownership for the six core vec host bridges, not R1.
 Other support callable families and remaining module-array or display-name

@@ -102,7 +102,7 @@ function vecHostBridgeDefinition(kind: VecHostBridgeKind): VecHostBridgeDefiniti
 
 /** Reserved physical export namespace consumed by the JS runtime adapter. */
 export function vecHostBridgePhysicalExportBase(kind: VecHostBridgeKind): string {
-  return `__js2_vec_host_bridge_${vecHostBridgeDefinition(kind).ordinal}`;
+  return `$v${vecHostBridgeDefinition(kind).ordinal}`;
 }
 
 /**
@@ -156,9 +156,9 @@ function ensureVecHostBridgeAllocations(ctx: CodegenContext): ReadonlyMap<VecHos
 /**
  * Publish collision-safe physical exports after every user export is known.
  *
- * The runtime always consumes the reserved physical namespace. The historical
- * logical name remains as a compatibility alias only when it is unoccupied,
- * so a user export keeps its requested external name.
+ * The historical logical name is the zero-overhead fast path. A physical
+ * alias is emitted only when a user export already owns that logical name, so
+ * ordinary modules retain the pre-migration export section byte-for-byte.
  */
 function publishVecHostBridgeExports(ctx: CodegenContext): void {
   const allocations = ensureVecHostBridgeAllocations(ctx);
@@ -169,26 +169,27 @@ function publishVecHostBridgeExports(ctx: CodegenContext): void {
     if (!allocation || funcIdx === undefined) {
       throw new Error(`cannot publish vec host bridge ${definition.kind} without its exact allocator object`);
     }
-    const physicalBase = vecHostBridgePhysicalExportBase(definition.kind);
-    let maxOccupiedSuffix = -1;
-    for (const name of occupied) {
-      if (!name.startsWith(physicalBase)) continue;
-      const suffix = name.slice(physicalBase.length);
-      if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
-    }
-    // Fill every free gap through one slot beyond the last occupied suffix.
-    // This preserves colliding user exports while leaving a contiguous run
-    // whose final function is always the structural helper. The runtime can
-    // therefore recover the exact helper without a name side table.
-    for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
-      const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
-      if (occupied.has(physicalName)) continue;
-      exportFunc(ctx.mod, physicalName, funcIdx);
-      occupied.add(physicalName);
-    }
     if (!occupied.has(definition.name)) {
       exportFunc(ctx.mod, definition.name, funcIdx);
       occupied.add(definition.name);
+    } else {
+      const physicalBase = vecHostBridgePhysicalExportBase(definition.kind);
+      let maxOccupiedSuffix = -1;
+      for (const name of occupied) {
+        if (!name.startsWith(physicalBase)) continue;
+        const suffix = name.slice(physicalBase.length);
+        if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
+      }
+      // Fill every free gap through one slot beyond the last occupied suffix.
+      // This preserves colliding user exports while leaving a contiguous run
+      // whose final function is always the structural helper. The runtime can
+      // therefore recover the exact helper without a name side table.
+      for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
+        const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
+        if (occupied.has(physicalName)) continue;
+        exportFunc(ctx.mod, physicalName, funcIdx);
+        occupied.add(physicalName);
+      }
     }
     allocation.func.exported = true;
   }

@@ -38,6 +38,13 @@ const VEC_BRIDGES: readonly {
   { kind: "pop", name: "__vec_pop", ordinal: 5 },
 ];
 
+function isVecHostBridgePhysicalExport(name: string): boolean {
+  return VEC_BRIDGES.some((bridge) => {
+    const base = vecHostBridgePhysicalExportBase(bridge.kind);
+    return name.startsWith(base) && /^\$*$/.test(name.slice(base.length));
+  });
+}
+
 const ARRAY_SOURCE = `
   function __vec_get(_value: any, _index: number): number { return 99; }
   export function main(): number {
@@ -55,8 +62,8 @@ const ALL_PUBLIC_COLLISION_SOURCE = `
   export function __vec_mut_supported(): number { return 104; }
   export function __vec_push(): number { return 105; }
   export function __vec_pop(): number { return 106; }
-  export function __js2_vec_host_bridge_0(): number { return 901; }
-  export function __js2_vec_host_bridge_0$$(): number { return 902; }
+  export function $v0(): number { return 901; }
+  export function $v0$$(): number { return 902; }
 
   export function dynamicPush(values: any, value: any): any {
     return values.push(value);
@@ -142,6 +149,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
         VEC_BRIDGES.some((bridge) => bridge.name === entry.displayName),
     );
     expect(genericVecRows).toEqual([]);
+    expect(result.module.exports.filter((entry) => isVecHostBridgePhysicalExport(entry.name))).toEqual([]);
   });
 
   it("keeps the exact reserved allocator objects through final body filling", () => {
@@ -200,19 +208,28 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
       trackIrOutcomes: true,
     });
     const rawExports = await instantiate(runtime);
-    expect((rawExports.__js2_vec_host_bridge_0 as () => number)()).toBe(901);
-    expect((rawExports["__js2_vec_host_bridge_0$$"] as () => number)()).toBe(902);
+    expect((rawExports.$v0 as () => number)()).toBe(901);
+    expect((rawExports["$v0$$"] as () => number)()).toBe(902);
+    const terminalPhysicalNames = new Set<string>();
+    const physicalHelpers = new Set<WebAssembly.ExportValue>();
     for (const [index, bridge] of VEC_BRIDGES.entries()) {
       expect((rawExports[bridge.name] as () => number)()).toBe(101 + index);
       let physicalName = vecHostBridgePhysicalExportBase(bridge.kind);
       let physicalHelper: WebAssembly.ExportValue | undefined;
+      let terminalPhysicalName: string | undefined;
       while (Object.prototype.hasOwnProperty.call(rawExports, physicalName)) {
         physicalHelper = rawExports[physicalName];
+        terminalPhysicalName = physicalName;
         physicalName += "$";
       }
       expect(physicalHelper).toEqual(expect.any(Function));
       expect(physicalHelper).not.toBe(rawExports[bridge.name]);
+      expect(terminalPhysicalName).toBeDefined();
+      terminalPhysicalNames.add(terminalPhysicalName!);
+      physicalHelpers.add(physicalHelper!);
     }
+    expect(terminalPhysicalNames.size).toBe(6);
+    expect(physicalHelpers.size).toBe(6);
 
     const wrapped = wrapExports(rawExports);
     const rawValues = (rawExports.returnedValues as () => unknown)();
@@ -237,7 +254,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
       const { result } = generate(ARRAY_SOURCE, "vec-observation-failure.ts");
       expect(result.errors.filter((error) => error.severity !== "warning")).not.toEqual([]);
       expect(result.errors.map((error) => error.message).join("\n")).toMatch(/forced vec observation failure/);
-      expect(result.module.exports.filter((entry) => entry.name.startsWith("__js2_vec_host_bridge_"))).toEqual([]);
+      expect(result.module.exports.filter((entry) => isVecHostBridgePhysicalExport(entry.name))).toEqual([]);
     } finally {
       observe.mockRestore();
     }

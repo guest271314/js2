@@ -973,18 +973,18 @@ function _rethrowIfProxyOrRevoked(e: any, obj: any): void {
 }
 
 const _VEC_HOST_BRIDGE_EXPORTS = [
-  ["__vec_len", "__js2_vec_host_bridge_0"],
-  ["__vec_get", "__js2_vec_host_bridge_1"],
-  ["__is_vec", "__js2_vec_host_bridge_2"],
-  ["__vec_mut_supported", "__js2_vec_host_bridge_3"],
-  ["__vec_push", "__js2_vec_host_bridge_4"],
-  ["__vec_pop", "__js2_vec_host_bridge_5"],
+  ["__vec_len", "$v0"],
+  ["__vec_get", "$v1"],
+  ["__is_vec", "$v2"],
+  ["__vec_mut_supported", "$v3"],
+  ["__vec_push", "$v4"],
+  ["__vec_pop", "$v5"],
 ] as const;
 
 /**
- * Resolve the compiler-owned vec bridge namespace without replacing a user's
- * same-labelled public export. The compiler appends `$` until it finds a free
- * physical name, so the helper is the final function in each contiguous run.
+ * Resolve a collision-only compiler vec bridge without replacing a user's
+ * same-labelled public export. The logical export is already authoritative
+ * when no physical family exists.
  */
 function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T {
   let view: T | undefined;
