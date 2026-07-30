@@ -1,9 +1,8 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// Minimal Wasmtime embedding host for the #1764 hot-runtime benchmark. The
-// process owns a warm Engine plus compiled artifact(s). Cold samples allocate
-// a fresh Store + Instance; --reuse-instance keeps one instance alive and
-// measures steady-state calls for the auxiliary warm lanes.
+// Minimal Wasmtime embedding host for the #1764 hot-runtime benchmark cold
+// lane. The process owns a warm Engine plus compiled artifact(s), then each
+// sample allocates a fresh Store + Instance and calls the exported run once.
 
 use std::env;
 use std::error::Error;
@@ -31,7 +30,6 @@ struct Options {
     arg_text: String,
     runs: usize,
     component: bool,
-    reuse_instance: bool,
     preloads: Vec<Preload>,
 }
 
@@ -73,40 +71,18 @@ fn run() -> Result<(), Box<dyn Error>> {
         let linker = ComponentLinker::new(&engine);
         let instance_pre = linker.instantiate_pre(&component)?;
         let signature = detect_component_run_signature(&engine, &instance_pre)?;
-        if options.reuse_instance {
-            time_component_reused_runs(
-                &engine,
-                &instance_pre,
-                signature,
-                arg_i32,
-                arg_f64,
-                options.runs,
-            )?
-        } else {
-            time_component_runs(
-                &engine,
-                &instance_pre,
-                signature,
-                arg_i32,
-                arg_f64,
-                options.runs,
-            )?
-        }
+        time_component_runs(
+            &engine,
+            &instance_pre,
+            signature,
+            arg_i32,
+            arg_f64,
+            options.runs,
+        )?
     } else if options.preloads.is_empty() {
         let module = Module::from_file(&engine, Path::new(&options.artifact_path))?;
         let signature = detect_core_run_signature_direct(&engine, &module)?;
-        if options.reuse_instance {
-            time_core_reused_runs_direct(
-                &engine,
-                &module,
-                signature,
-                arg_i32,
-                arg_f64,
-                options.runs,
-            )?
-        } else {
-            time_core_runs_direct(&engine, &module, signature, arg_i32, arg_f64, options.runs)?
-        }
+        time_core_runs_direct(&engine, &module, signature, arg_i32, arg_f64, options.runs)?
     } else {
         let module = Module::from_file(&engine, Path::new(&options.artifact_path))?;
         let preloads = options
@@ -120,27 +96,15 @@ fn run() -> Result<(), Box<dyn Error>> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let signature = detect_core_run_signature_linked(&engine, &module, &preloads)?;
-        if options.reuse_instance {
-            time_core_reused_runs_linked(
-                &engine,
-                &module,
-                &preloads,
-                signature,
-                arg_i32,
-                arg_f64,
-                options.runs,
-            )?
-        } else {
-            time_core_runs_linked(
-                &engine,
-                &module,
-                &preloads,
-                signature,
-                arg_i32,
-                arg_f64,
-                options.runs,
-            )?
-        }
+        time_core_runs_linked(
+            &engine,
+            &module,
+            &preloads,
+            signature,
+            arg_i32,
+            arg_f64,
+            options.runs,
+        )?
     };
 
     let samples_json = samples
@@ -162,14 +126,12 @@ fn run() -> Result<(), Box<dyn Error>> {
 fn parse_args() -> Result<Options, Box<dyn Error>> {
     let mut args = env::args().skip(1);
     let mut component = false;
-    let mut reuse_instance = false;
     let mut preloads = Vec::new();
     let mut positional = Vec::new();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--component" => component = true,
-            "--reuse-instance" => reuse_instance = true,
             "--preload" => {
                 let value = args.next().ok_or(USAGE)?;
                 preloads.push(parse_preload(&value)?);
@@ -199,12 +161,11 @@ fn parse_args() -> Result<Options, Box<dyn Error>> {
         arg_text: positional.remove(0),
         runs,
         component,
-        reuse_instance,
         preloads,
     })
 }
 
-const USAGE: &str = "usage: wasmtime-cold-host [--component] [--reuse-instance] [--preload name=module.wasm] <artifact.wasm> <arg> <runs>";
+const USAGE: &str = "usage: wasmtime-cold-host [--component] [--preload name=module.wasm] <artifact.wasm> <arg> <runs>";
 
 fn parse_preload(value: &str) -> Result<Preload, Box<dyn Error>> {
     let (name, path) = value
@@ -369,58 +330,6 @@ fn time_core_runs_linked(
     })
 }
 
-fn time_core_reused_runs_direct(
-    engine: &Engine,
-    module: &Module,
-    signature: RunSignature,
-    arg_i32: i32,
-    arg_f64: f64,
-    runs: usize,
-) -> Result<TimedSamples, Box<dyn Error>> {
-    let mut store = Store::new(engine, ());
-    let instance = Instance::new(&mut store, module, &[])?;
-    time_core_calls(&mut store, &instance, signature, arg_i32, arg_f64, runs)
-}
-
-fn time_core_reused_runs_linked(
-    engine: &Engine,
-    module: &Module,
-    preloads: &[(String, Module)],
-    signature: RunSignature,
-    arg_i32: i32,
-    arg_f64: f64,
-    runs: usize,
-) -> Result<TimedSamples, Box<dyn Error>> {
-    let mut store = Store::new(engine, ());
-    let mut linker = wasi_linker(engine)?;
-    define_preloads(&mut linker, &mut store, preloads)?;
-    let instance = linker.instantiate(&mut store, module)?;
-    time_core_calls(&mut store, &instance, signature, arg_i32, arg_f64, runs)
-}
-
-fn time_core_calls(
-    store: &mut Store<()>,
-    instance: &Instance,
-    signature: RunSignature,
-    arg_i32: i32,
-    arg_f64: f64,
-    runs: usize,
-) -> Result<TimedSamples, Box<dyn Error>> {
-    let mut elapsed_ms = Vec::with_capacity(runs);
-    let mut outputs = Vec::with_capacity(runs);
-    for _ in 0..runs {
-        let t0 = Instant::now();
-        outputs.push(call_core_run_once(
-            signature, store, instance, arg_i32, arg_f64,
-        )?);
-        elapsed_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
-    }
-    Ok(TimedSamples {
-        elapsed_ms,
-        outputs,
-    })
-}
-
 fn time_component_runs(
     engine: &Engine,
     instance_pre: &ComponentInstancePre<()>,
@@ -435,31 +344,6 @@ fn time_component_runs(
         let t0 = Instant::now();
         let mut store = Store::new(engine, ());
         let instance = instance_pre.instantiate(&mut store)?;
-        outputs.push(call_component_run_once(
-            signature, &mut store, &instance, arg_i32, arg_f64,
-        )?);
-        elapsed_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
-    }
-    Ok(TimedSamples {
-        elapsed_ms,
-        outputs,
-    })
-}
-
-fn time_component_reused_runs(
-    engine: &Engine,
-    instance_pre: &ComponentInstancePre<()>,
-    signature: RunSignature,
-    arg_i32: i32,
-    arg_f64: f64,
-    runs: usize,
-) -> Result<TimedSamples, Box<dyn Error>> {
-    let mut store = Store::new(engine, ());
-    let instance = instance_pre.instantiate(&mut store)?;
-    let mut elapsed_ms = Vec::with_capacity(runs);
-    let mut outputs = Vec::with_capacity(runs);
-    for _ in 0..runs {
-        let t0 = Instant::now();
         outputs.push(call_component_run_once(
             signature, &mut store, &instance, arg_i32, arg_f64,
         )?);

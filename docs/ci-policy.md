@@ -393,9 +393,10 @@ joint runtime/JS-reference gate; individual compile-only microtimings remain
 informational. A missing baseline row is a regression.
 
 The Javy and StarlingMonkey warm lanes are also measured in the current run:
-the pinned Rust host reuses one compiled Store + Instance, discards warmup
-calls, and times the remaining in-process calls. They are comparison controls,
-not compiler-regression gates.
+because Javy's dynamic module is single-entry, dedicated warm wrappers batch
+several benchmark calls inside one exported `run()`. The pinned Rust host uses
+a fresh instance for each outer sample and normalizes the batch wall time to a
+per-call value. They are comparison controls, not compiler-regression gates.
 
 Before either checkout is measured, the workflow removes every current-run
 output and the compiled `loadtime/` directory while deliberately preserving

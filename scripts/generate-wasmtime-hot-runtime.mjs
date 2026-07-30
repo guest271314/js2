@@ -76,9 +76,11 @@
  * `run()` calls the benchmark body with the same `runtimeArg` used by the
  * AOT/V8 rows and stores the result in a module global.
  *
- * Warm Javy / StarlingMonkey values are measured in the same Rust embedding
- * host with one reused Store + Instance. The first WARMUP_RUNS calls are
- * discarded, then each remaining in-process call is timed independently.
+ * Javy's dynamic module is single-entry and cannot be called repeatedly on
+ * one instance. Warm auxiliary artifacts therefore batch several benchmark
+ * calls inside one exported `run()`. Each outer sample uses a fresh instance;
+ * the measured batch duration is divided by its iteration count, amortizing
+ * instance/first-call overhead without unsupported host-level re-entry.
  *
  * Requirements: Rust/Cargo for the cold Wasmtime embedding host; `wasmtime`
  * (v35+) on PATH for the warm steady-state Wasmtime lane; Node.js for the
@@ -96,11 +98,12 @@ import { compile } from "./compiler-bundle.mjs";
 import { LANDING_BENCHMARK_PROGRAMS } from "./lib/landing-benchmark-corpus.mjs";
 import { buildLandingModuleSizeRows, minifiedJavaScriptByteLength } from "./lib/landing-module-size.mjs";
 import {
+  landingAuxiliaryRuntimeSource,
   landingNodeVmFreshCompileSample,
   landingNodeWarmSample,
   landingWasmtimeFreshInstanceSamples,
-  landingWasmtimeReusedInstanceSamples,
   landingWasmtimeWarmSample,
+  normalizeBatchedRuntimeSamples,
 } from "./lib/landing-runtime-timing.mjs";
 import {
   LANDING_WASMTIME_COMPILE_OPTIONS,
@@ -173,11 +176,22 @@ const WARM_ITERS_WARMUP = 5;
 const WARM_ITERS_MEASURED = 40;
 const WARM_DRIVER_SOURCE = landingWasmtimeWarmDriverSource(WARM_ITERS_WARMUP, WARM_ITERS_MEASURED);
 
+// Keep each single-entry auxiliary batch long enough to amortize instance
+// setup but bounded on the slow interpreter lane. These counts target roughly
+// 0.5–5 seconds per outer sample using the verified cold-lane runtimes.
+const AUX_WARM_BATCH_ITERATIONS = Object.freeze({
+  fib: 2,
+  "fib-recursive": 8,
+  "array-sum": 8,
+  "string-hash": 16,
+});
+
 const WARM_LANES_PROVENANCE =
   "warm javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with " +
-  "benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, one reused " +
-  "Store + Instance, warmup calls discarded, then in-process run() calls timed. Javy uses " +
-  "dynamic-link with javy-default-plugin-v3; StarlingMonkey uses ComponentizeJS + Wizer + Weval AOT.";
+  "benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, fresh Store + " +
+  "Instance per outer sample, and a single-entry in-component batch normalized to per-call time. " +
+  "This avoids unsupported Javy module re-entry. Javy uses dynamic-link with javy-default-plugin-v3; " +
+  "StarlingMonkey uses ComponentizeJS + Wizer + Weval AOT.";
 const COLD_LANES_PROVENANCE =
   "cold javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with " +
   "benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, fresh Store + " +
@@ -372,30 +386,7 @@ function stripBenchmarkMetadata(source) {
   return source.replace(/export const benchmark[\s\S]*?};\n/, "");
 }
 
-function makeAuxRuntimeSource(sourcePath, arg) {
-  const programBody = stripBenchmarkMetadata(readFileSync(sourcePath, "utf8")).replace(
-    /\bexport\s+function\s+run\b/,
-    "function __benchRun",
-  );
-  if (!programBody.includes("function __benchRun")) {
-    throw new Error(`Unable to rewrite exported run() for auxiliary runtime wrapper: ${sourcePath}`);
-  }
-  return `${programBody}
-let __benchSink = 0;
-export function run() {
-  __benchSink = (__benchSink + (__benchRun(${arg}) | 0)) | 0;
-}
-`;
-}
-
-function buildAuxColdArtifacts({ programId, sourcePath, runtimeArg, javy, javyPluginPath, componentizeVersion }) {
-  const witPath = resolve(ARTIFACT_DIR, "aux-runtime-noarg.wit");
-  writeFileSync(witPath, AUX_WIT_SOURCE);
-
-  const wrapperPath = resolve(ARTIFACT_DIR, `${programId}.aux-runtime.js`);
-  writeFileSync(wrapperPath, makeAuxRuntimeSource(sourcePath, runtimeArg));
-
-  const starlingMonkeyPath = resolve(ARTIFACT_DIR, `${programId}.starlingmonkey.component.wasm`);
+function compileStarlingMonkeyArtifact(wrapperPath, witPath, outputPath) {
   execFileSync(
     COMPONENTIZE_JS_PATH,
     [
@@ -412,43 +403,70 @@ function buildAuxColdArtifacts({ programId, sourcePath, runtimeArg, javy, javyPl
       "fetch-event",
       "--aot",
       "-o",
-      starlingMonkeyPath,
+      outputPath,
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
+}
 
-  let javyPath = null;
-  if (javy) {
-    javyPath = resolve(ARTIFACT_DIR, `${programId}.javy.dynamic.wasm`);
-    execFileSync(
-      javy.bin,
-      [
-        "build",
-        "-C",
-        "dynamic=y",
-        "-C",
-        `plugin=${javyPluginPath}`,
-        "-C",
-        `wit=${witPath}`,
-        "-C",
-        "wit-world=bench",
-        "-C",
-        "source=omitted",
-        wrapperPath,
-        "-o",
-        javyPath,
-      ],
-      { stdio: ["ignore", "pipe", "pipe"] },
-    );
+function compileJavyArtifact(javy, javyPluginPath, wrapperPath, witPath, outputPath) {
+  execFileSync(
+    javy.bin,
+    [
+      "build",
+      "-C",
+      "dynamic=y",
+      "-C",
+      `plugin=${javyPluginPath}`,
+      "-C",
+      `wit=${witPath}`,
+      "-C",
+      "wit-world=bench",
+      "-C",
+      "source=omitted",
+      wrapperPath,
+      "-o",
+      outputPath,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+}
+
+function buildAuxiliaryArtifacts({ programId, sourcePath, runtimeArg, javy, javyPluginPath, componentizeVersion }) {
+  const warmBatchIterations = AUX_WARM_BATCH_ITERATIONS[programId];
+  if (!Number.isSafeInteger(warmBatchIterations) || warmBatchIterations <= 1) {
+    throw new Error(`Missing auxiliary warm batch size for ${programId}`);
   }
+  const witPath = resolve(ARTIFACT_DIR, "aux-runtime-noarg.wit");
+  writeFileSync(witPath, AUX_WIT_SOURCE);
+
+  const source = readFileSync(sourcePath, "utf8");
+  const coldWrapperPath = resolve(ARTIFACT_DIR, `${programId}.aux-cold.js`);
+  const warmWrapperPath = resolve(ARTIFACT_DIR, `${programId}.aux-warm.js`);
+  writeFileSync(coldWrapperPath, landingAuxiliaryRuntimeSource(source, runtimeArg));
+  writeFileSync(warmWrapperPath, landingAuxiliaryRuntimeSource(source, runtimeArg, warmBatchIterations));
+
+  const starlingMonkeyPath = resolve(ARTIFACT_DIR, `${programId}.starlingmonkey.cold.component.wasm`);
+  const starlingMonkeyWarmPath = resolve(ARTIFACT_DIR, `${programId}.starlingmonkey.warm.component.wasm`);
+  compileStarlingMonkeyArtifact(coldWrapperPath, witPath, starlingMonkeyPath);
+  compileStarlingMonkeyArtifact(warmWrapperPath, witPath, starlingMonkeyWarmPath);
+
+  const javyPath = resolve(ARTIFACT_DIR, `${programId}.javy.cold.dynamic.wasm`);
+  const javyWarmPath = resolve(ARTIFACT_DIR, `${programId}.javy.warm.dynamic.wasm`);
+  compileJavyArtifact(javy, javyPluginPath, coldWrapperPath, witPath, javyPath);
+  compileJavyArtifact(javy, javyPluginPath, warmWrapperPath, witPath, javyWarmPath);
 
   return {
     javyPath,
+    javyWarmPath,
     javyVersion: javy?.version ?? null,
     javyPluginPath,
     starlingMonkeyPath,
+    starlingMonkeyWarmPath,
+    warmBatchIterations,
     componentizeVersion,
     wrapper: "fixed-runtime-arg-no-return-wit",
+    warmWrapper: "fixed-runtime-arg-single-entry-batch-no-return-wit",
   };
 }
 
@@ -503,11 +521,6 @@ function timeNodeVmContextCompiledOnce(sourcePath, arg, runs) {
  */
 function timeWasmtimeFreshInstance(hostPath, wasmPath, arg, runs, options = {}) {
   return landingWasmtimeFreshInstanceSamples(hostPath, wasmPath, arg, runs, options).samplesMs;
-}
-
-/** Warm auxiliary lane: one Store + Instance, repeated in-process run() calls. */
-function timeWasmtimeReusedInstance(hostPath, wasmPath, arg, runs, options = {}) {
-  return landingWasmtimeReusedInstanceSamples(hostPath, wasmPath, arg, runs, options).samplesMs;
 }
 
 /**
@@ -655,8 +668,8 @@ async function main() {
     const warmCwasmPath = precompile(warmWasmPath, `${program.id}-warm`);
     process.stdout.write(`ok\n`);
 
-    process.stdout.write(`[${program.id}] auxiliary cold artifacts... `);
-    const auxArtifacts = buildAuxColdArtifacts({
+    process.stdout.write(`[${program.id}] auxiliary cold + warm artifacts... `);
+    const auxArtifacts = buildAuxiliaryArtifacts({
       programId: program.id,
       sourcePath,
       runtimeArg,
@@ -727,26 +740,33 @@ async function main() {
     const v8WarmMs = timeNodeWarmIter(sourcePath, runtimeArg, MEASURED_RUNS);
     process.stdout.write(`${median(v8WarmMs).toFixed(2)} ms\n`);
 
-    process.stdout.write(`[${program.id}] javy warm (reused instance)... `);
-    const javyWarmMs = timeWasmtimeReusedInstance(
+    process.stdout.write(`[${program.id}] javy warm (single-entry batch x${auxArtifacts.warmBatchIterations})... `);
+    const javyWarmBatchMs = timeWasmtimeFreshInstance(
       coldHostPath,
-      auxArtifacts.javyPath,
+      auxArtifacts.javyWarmPath,
       runtimeArg,
       WARMUP_RUNS + MEASURED_RUNS,
       {
         preloads: [{ name: "javy-default-plugin-v3", path: auxArtifacts.javyPluginPath }],
       },
     ).slice(WARMUP_RUNS);
+    const javyWarmMs = normalizeBatchedRuntimeSamples(javyWarmBatchMs, auxArtifacts.warmBatchIterations);
     process.stdout.write(`${median(javyWarmMs).toFixed(3)} ms\n`);
 
-    process.stdout.write(`[${program.id}] starlingmonkey warm (reused instance)... `);
-    const starlingMonkeyWarmMs = timeWasmtimeReusedInstance(
+    process.stdout.write(
+      `[${program.id}] starlingmonkey warm (single-entry batch x${auxArtifacts.warmBatchIterations})... `,
+    );
+    const starlingMonkeyWarmBatchMs = timeWasmtimeFreshInstance(
       coldHostPath,
-      auxArtifacts.starlingMonkeyPath,
+      auxArtifacts.starlingMonkeyWarmPath,
       runtimeArg,
       WARMUP_RUNS + MEASURED_RUNS,
       { component: true },
     ).slice(WARMUP_RUNS);
+    const starlingMonkeyWarmMs = normalizeBatchedRuntimeSamples(
+      starlingMonkeyWarmBatchMs,
+      auxArtifacts.warmBatchIterations,
+    );
     process.stdout.write(`${median(starlingMonkeyWarmMs).toFixed(3)} ms\n`);
 
     const toUs = (samples) => samples.map((ms) => ms * 1000);
@@ -790,11 +810,13 @@ async function main() {
         wasmSamplesUs: toUs(wasmWarmMs),
         jsSamplesUs: toUs(v8WarmMs),
         extra: {
-          javyWarmMode: "rust-wasmtime-reused-dynamic-plugin-instance",
+          auxiliaryWarmWrapper: auxArtifacts.warmWrapper,
+          auxiliaryWarmBatchIterations: auxArtifacts.warmBatchIterations,
+          javyWarmMode: "rust-wasmtime-fresh-dynamic-plugin-instance-single-entry-batch",
           javyWarmEngine: "wasmtime-cranelift-quickjs-wasm-plugin",
           javyWarmHost: "benchmarks/wasmtime-cold-host",
           javyVersion: auxArtifacts.javyVersion,
-          starlingMonkeyWarmMode: "rust-wasmtime-reused-component-instance",
+          starlingMonkeyWarmMode: "rust-wasmtime-fresh-component-instance-single-entry-batch",
           starlingMonkeyWarmEngine: "componentize-js-starlingmonkey-weval",
           starlingMonkeyWarmHost: "benchmarks/wasmtime-cold-host",
           starlingMonkeyComponentize: auxArtifacts.componentizeVersion,

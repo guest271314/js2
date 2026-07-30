@@ -8,6 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildHistory } from "../benchmarks/report.js";
 import {
+  landingAuxiliaryRuntimeSource,
+  normalizeBatchedRuntimeSamples,
+} from "../scripts/lib/landing-runtime-timing.mjs";
+import {
   BENCHMARK_ARTIFACT_FILES,
   BENCHMARK_PROVENANCE,
   compareSnapshots,
@@ -126,8 +130,10 @@ function fixtureRoot(): string {
       starlingMonkeyUs: 900,
       lanesProvenance:
         "warm javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with benchmark host",
-      javyWarmMode: "rust-wasmtime-reused-dynamic-plugin-instance",
-      starlingMonkeyWarmMode: "rust-wasmtime-reused-component-instance",
+      auxiliaryWarmWrapper: "fixed-runtime-arg-single-entry-batch-no-return-wit",
+      auxiliaryWarmBatchIterations: 8,
+      javyWarmMode: "rust-wasmtime-fresh-dynamic-plugin-instance-single-entry-batch",
+      starlingMonkeyWarmMode: "rust-wasmtime-fresh-component-instance-single-entry-batch",
     },
   ]);
   writeJson(resolve(results, "wasm-host-wasmtime-module-size-per-test.json"), [
@@ -231,11 +237,19 @@ describe("benchmark artifact lifecycle", () => {
       resolve(import.meta.dirname, "../scripts/generate-wasmtime-hot-runtime.mjs"),
       "utf8",
     );
-    const host = readFileSync(resolve(import.meta.dirname, "../benchmarks/wasmtime-cold-host/src/main.rs"), "utf8");
+    const wrapper = landingAuxiliaryRuntimeSource(
+      "export const benchmark = { runtimeArg: 4 };\nexport function run(n) { return n + 1; }\n",
+      4,
+      8,
+    );
 
-    expect(host).toContain("--reuse-instance");
-    expect(generator).toContain("javy warm (reused instance)");
-    expect(generator).toContain("starlingmonkey warm (reused instance)");
+    expect(wrapper).toContain("function __benchRun");
+    expect(wrapper).toContain("__benchIteration < 8");
+    expect(wrapper).toContain("__benchRun(4)");
+    expect(normalizeBatchedRuntimeSamples([80, 120], 8)).toEqual([10, 15]);
+    expect(generator).toContain("javy warm (single-entry batch");
+    expect(generator).toContain("starlingmonkey warm (single-entry batch");
+    expect(generator).not.toContain("landingWasmtimeReusedInstanceSamples");
     expect(generator).not.toContain("JAVY_WARM_NUMBERS_MS");
     expect(generator).not.toContain("STARLINGMONKEY_WARM_NUMBERS_MS");
   });

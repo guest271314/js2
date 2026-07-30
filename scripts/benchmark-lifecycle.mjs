@@ -288,9 +288,15 @@ function validateWasmtimeRows(rows) {
     }
     if (
       row.scenario === "warm" &&
-      (typeof row.javyWarmMode !== "string" || typeof row.starlingMonkeyWarmMode !== "string")
+      (typeof row.javyWarmMode !== "string" ||
+        !row.javyWarmMode.includes("single-entry-batch") ||
+        typeof row.starlingMonkeyWarmMode !== "string" ||
+        !row.starlingMonkeyWarmMode.includes("single-entry-batch") ||
+        !Number.isSafeInteger(row.auxiliaryWarmBatchIterations) ||
+        row.auxiliaryWarmBatchIterations <= 1 ||
+        row.auxiliaryWarmWrapper !== "fixed-runtime-arg-single-entry-batch-no-return-wit")
     ) {
-      throw new Error(`Wasmtime warm auxiliary lanes for ${row.name} are missing reused-instance methodology`);
+      throw new Error(`Wasmtime warm auxiliary lanes for ${row.name} are missing single-entry batch methodology`);
     }
   }
   for (const [name, scenarios] of scenariosByName) {
