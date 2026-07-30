@@ -60,6 +60,12 @@ class NpmCompatChart extends HTMLElement {
     return d.innerHTML;
   }
 
+  _npmUrl(pkg, code = false) {
+    const name = encodeURIComponent(String(pkg.name ?? ""));
+    const version = encodeURIComponent(String(pkg.version ?? ""));
+    return `https://www.npmjs.com/package/${name}/v/${version}${code ? "?activeTab=code" : ""}`;
+  }
+
   _fmtDate(iso) {
     if (!iso) return "";
     const d = new Date(iso);
@@ -79,6 +85,15 @@ class NpmCompatChart extends HTMLElement {
     return ratio >= 1 ? { text: `${formatted}× faster`, cls: "good" } : { text: `${formatted}× slower`, cls: "bad" };
   }
 
+  _speedFactor(ratio) {
+    if (ratio == null) return { text: "—", cls: "muted" };
+    const digits = ratio >= 100 ? 0 : ratio >= 10 ? 1 : ratio >= 1 ? 2 : ratio >= 0.1 ? 2 : ratio >= 0.01 ? 3 : 4;
+    return {
+      text: `${ratio.toLocaleString("en-US", { maximumFractionDigits: digits })}×`,
+      cls: ratio >= 1 ? "good" : "bad",
+    };
+  }
+
   _row(label, valueHtml, cls) {
     return `<div class="row"><span class="k">${this._esc(label)}</span><span class="v ${cls || ""}">${valueHtml}</span></div>`;
   }
@@ -87,7 +102,7 @@ class NpmCompatChart extends HTMLElement {
     const value = String(sampleOp ?? "");
     if (/parse\(.*226KB dist bundle/i.test(value)) return "Parse the 226 KB Acorn bundle";
     if (/op_two_strings/i.test(value)) return "Join two class names";
-    if (/parseCookie\(8-pair header\)/i.test(value)) return "Parse an 8-pair cookie header";
+    if (/parseCookie\(8-pair (runtime-generated )?header\)/i.test(value)) return "Parse an 8-pair cookie header";
     return value
       .replace(/\s*\([^)]*(host-owned arguments|driver compiled to Wasm)[^)]*\)\s*/gi, " ")
       .replace(/\.body\.length\b/g, "")
@@ -169,6 +184,19 @@ class NpmCompatChart extends HTMLElement {
     }));
     const measuredSeries = series.filter((item) => item.points.length > 0);
     if (measuredSeries.length === 0) {
+      const lanes = pkg.perf?.lanes ?? {};
+      const lane = target === "jsHost" ? lanes.jsHost : lanes.standaloneDynamic;
+      if (lane?.status && !["measured", "skipped"].includes(lane.status)) {
+        const message =
+          lane.status === "result-mismatch"
+            ? "Dynamic run returned the wrong result"
+            : lane.status === "runtime-error"
+              ? "Dynamic run trapped"
+              : lane.status === "compile-error"
+                ? "Dynamic run did not compile"
+                : "Dynamic run could not be measured";
+        return `<div class="chart-empty chart-failed">${this._esc(message)}</div>`;
+      }
       const scenario =
         target === "jsHost" ? "JS-host dynamic" : includePrecompiled ? "standalone" : "standalone dynamic";
       return `<div class="chart-empty">No ${scenario} speed history yet</div>`;
@@ -300,6 +328,22 @@ class NpmCompatChart extends HTMLElement {
   _card(pkg, history) {
     const compiles = pkg.compile?.success;
     const validates = pkg.validation?.validates;
+    const npmPackageUrl = this._npmUrl(pkg);
+    const npmCodeUrl = this._npmUrl(pkg, true);
+    const issueLink = pkg.issue
+      ? `<a class="issue" href="https://github.com/loopdive/js2/issues/${pkg.issue}" target="_blank" rel="noopener">#${pkg.issue}</a>`
+      : "";
+    const lanes = pkg.perf?.lanes ?? (pkg.perf ? { jsHost: pkg.perf } : {});
+    const speedFactor = (lane) => {
+      const value = this._speedFactor(this._laneRatio(lane));
+      return `<span class="speed-value ${value.cls}">speed ${value.text}</span>`;
+    };
+    const speed = `
+      <span class="speed-factor mono">
+        <span class="speed-host">${speedFactor(lanes.jsHost)}</span>
+        <span class="speed-standalone-dynamic">${speedFactor(lanes.standaloneDynamic)}</span>
+        <span class="speed-standalone-static">${speedFactor(lanes.standalone)}</span>
+      </span>`;
 
     const badge = (ok, label) =>
       `<span class="badge ${ok === true ? "ok" : ok === false ? "bad" : ""}">${this._esc(label)}</span>`;
@@ -354,28 +398,31 @@ class NpmCompatChart extends HTMLElement {
     return `
       <div class="card">
         <div class="card-top">
-          <span class="name">${this._esc(pkg.name)}</span>
+          <a class="name" href="${npmPackageUrl}" target="_blank" rel="noopener"
+            title="View ${this._esc(pkg.name)} ${this._esc(pkg.version)} on npm">${this._esc(pkg.name)}</a>
           <span class="ver mono">v${this._esc(pkg.version)}</span>
-          <a class="issue" href="https://github.com/loopdive/js2/issues/${pkg.issue}" target="_blank" rel="noopener">#${pkg.issue}</a>
+          ${speed}
+          ${issueLink}
         </div>
         <div class="badges">${badge(compiles, "compiles")}${badge(validates, "validates")}</div>
         <div class="rows">${tests}${perf}${bugs}</div>
-        <div class="entry mono">${this._esc(pkg.entryFile)}</div>
+        <a class="entry mono" href="${npmCodeUrl}" target="_blank" rel="noopener"
+          title="View ${this._esc(pkg.entryFile)} in ${this._esc(pkg.name)} ${this._esc(pkg.version)} on npm">${this._esc(pkg.entryFile)}</a>
       </div>`;
   }
 
   _render(data, history) {
     this._data = data;
+    const measuredDate = document.getElementById("npm-compat-measured");
+    if (measuredDate) measuredDate.textContent = this._fmtDate(data.generatedAt) || "—";
     const pkgs = data.packages ?? [];
+    const failToRun = pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates);
     const groups = [
       {
         label: "Run",
         packages: pkgs.filter((pkg) => pkg.compile?.success && pkg.validation?.validates),
       },
-      {
-        label: "Fail to run",
-        packages: pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates),
-      },
+      ...(failToRun.length ? [{ label: "Fail to run", packages: failToRun }] : []),
       {
         label: "Fail to compile",
         packages: pkgs.filter((pkg) => !pkg.compile?.success),
@@ -406,7 +453,6 @@ class NpmCompatChart extends HTMLElement {
         ${metric(pkgs.length, "packages")}
         ${metric(`${compiling}/${pkgs.length}`, "compile")}
         ${metric(`${validating}/${pkgs.length}`, "validate")}
-        ${metric(this._fmtDate(data.generatedAt) || "—", "measured")}
       </div>
       <div class="chart-dashboard" data-target="standalone" data-precompilation="off">
         <div class="benchmark-toolbar">
@@ -570,8 +616,24 @@ class NpmCompatChart extends HTMLElement {
           min-width: 0;
         }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
-        .card-top .name { font-size: 15px; font-weight: 600; }
+        .card-top .name {
+          color: inherit;
+          font-size: 15px;
+          font-weight: 600;
+          text-decoration: none;
+        }
+        .card-top .name:hover { text-decoration: underline; }
         .card-top .ver { font-size: 11px; color: var(--text-muted, rgba(255,255,255,0.46)); }
+        .speed-factor > span { display: none; }
+        .speed-value {
+          font-size: 10px;
+          white-space: nowrap;
+        }
+        .chart-dashboard[data-target="host"] .speed-host,
+        .chart-dashboard[data-target="standalone"][data-precompilation="off"] .speed-standalone-dynamic,
+        .chart-dashboard[data-target="standalone"][data-precompilation="on"] .speed-standalone-static {
+          display: inline;
+        }
         .card-top .issue {
           margin-left: auto;
           font-size: 11px;
@@ -741,11 +803,17 @@ class NpmCompatChart extends HTMLElement {
           color: rgba(255, 255, 255, 0.3);
           font-size: 10px;
         }
+        .chart-empty.chart-failed {
+          color: var(--red, #f87171);
+        }
         .entry {
+          display: inline-block;
           margin-top: 10px;
           font-size: 10px;
           color: rgba(255, 255, 255, 0.3);
+          text-decoration: none;
         }
+        .entry:hover { color: var(--text-muted, rgba(255,255,255,0.46)); text-decoration: underline; }
         .note {
           margin-top: 18px;
           font-size: 11px;

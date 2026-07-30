@@ -14,7 +14,8 @@
 // Node or Wasm owns the benchmark driver and repeated-call loop.
 //
 // Scope: only the packages with a real, committed, reproducible dogfood
-// harness (acorn, marked, clsx, cookie, eslint). mustache/diff/dayjs were probed
+// harness (acorn, marked, clsx, cookie, eslint, prettier, react).
+// mustache/diff/dayjs were probed
 // ad-hoc (see their issue files, #3720/#3721/#3747) but have no committed
 // harness yet — deliberately NOT included here rather than fabricating
 // numbers from a one-off, non-reproducible probe.
@@ -38,6 +39,8 @@ import { runHarness as runMarked } from "../tests/dogfood/marked-harness.mjs";
 import { runHarness as runClsx } from "../tests/dogfood/clsx-harness.mjs";
 import { runHarness as runCookie } from "../tests/dogfood/cookie-harness.mjs";
 import { runHarness as runEslint } from "../tests/dogfood/eslint-harness.mjs";
+import { runHarness as runPrettier } from "../tests/dogfood/prettier-harness.mjs";
+import { runHarness as runReact } from "../tests/dogfood/react-harness.mjs";
 
 import { setupAcorn } from "../tests/dogfood/setup-acorn.mjs";
 import { setupClsx } from "../tests/dogfood/setup-clsx.mjs";
@@ -56,7 +59,7 @@ import {
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint"];
+const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint", "prettier", "react"];
 const cliArgs = process.argv.slice(2);
 
 function optionValue(name) {
@@ -111,8 +114,11 @@ const runJsHostLane = selectedLane === "both" || selectedLane === "js-host";
 const runStandaloneLane =
   selectedLane === "both" || selectedLane === "standalone" || selectedLane === "standalone-static";
 const runStandaloneDynamicLane = selectedLane === "both" || selectedLane === "standalone-dynamic";
-if (perfOnly && (selectedPackages.size !== 1 || !selectedPackages.has("acorn"))) {
-  throw new Error("--perf-only currently requires --only acorn");
+if (
+  perfOnly &&
+  (selectedPackages.size !== 1 || !["acorn", "clsx", "cookie"].some((name) => selectedPackages.has(name)))
+) {
+  throw new Error("--perf-only requires exactly one of --only acorn, --only clsx, or --only cookie");
 }
 if ((diagnosticsOnly || inspectBoundaries) && !runJsHostLane) {
   throw new Error("--diagnostics-only and --inspect-boundaries require --lane js-host or --lane both");
@@ -998,13 +1004,50 @@ export function ${STANDALONE_BENCHMARK_EXPORT}(iterations) {
   });
 }
 
+async function perfClsxStandaloneDynamic() {
+  const { entryModulePath } = setupClsx();
+  const source = readFileSync(entryModulePath, "utf-8");
+  const cjsEntryPath = entryModulePath.replace(/\/clsx\.mjs$/, "/clsx.js");
+  const { createRequire } = await import("node:module");
+  const nativeClsx = createRequire(import.meta.url)(cjsEntryPath).clsx;
+  const sampleOp = `${CLSX_PERF_OP_NAME}.length (runtime-generated arguments; driver compiled to Wasm)`;
+  const driver = `
+import { clsx } from "./clsx.mjs";
+
+/**
+ * @param {number} iterations
+ * @param {number} runtimeSeed
+ */
+export function ${STANDALONE_BENCHMARK_EXPORT}(iterations, runtimeSeed) {
+  var checksum = 0;
+  for (var index = 0; index < iterations; index++) {
+    var first = "foo-" + runtimeSeed + "-" + index;
+    checksum += clsx(first, "bar").length;
+  }
+  return checksum;
+}`;
+  return compileStandaloneLane({
+    source,
+    driver,
+    packageFileName: "clsx.mjs",
+    sampleOp,
+    nodeOperation: (runtimeSeed, index) => nativeClsx(`foo-${runtimeSeed}-${index}`, "bar").length,
+    inputMode: "runtime-dynamic",
+    runtimeArgument: 3748,
+  });
+}
+
 async function perfClsx() {
   const jsHost = runJsHostLane ? await perfClsxJsHost() : skippedPerfLane("js-host");
   const standalone = runStandaloneLane ? await perfClsxStandalone() : skippedPerfLane("standalone");
+  const standaloneDynamic = runStandaloneDynamicLane
+    ? await perfClsxStandaloneDynamic()
+    : skippedPerfLane("standalone", "runtime-dynamic");
   return packagePerfRecord(
-    jsHost?.sampleOp ?? standalone?.sampleOp ?? `${CLSX_PERF_OP_NAME}.length`,
+    jsHost?.sampleOp ?? standalone?.sampleOp ?? standaloneDynamic?.sampleOp ?? `${CLSX_PERF_OP_NAME}.length`,
     jsHost ?? failedPerfLane("js-host", "compile-error", "host compilation failed"),
     standalone,
+    { standaloneDynamic },
   );
 }
 
@@ -1130,13 +1173,54 @@ export function ${STANDALONE_BENCHMARK_EXPORT}(iterations) {
   });
 }
 
+async function perfCookieStandaloneDynamic() {
+  const { entryModulePath } = setupCookie();
+  const source = readFileSync(entryModulePath, "utf-8");
+  const nativeModule = await import(pathToFileURL(entryModulePath).href);
+  const sampleOp = "parseCookie(8-pair runtime-generated header); verify a/h";
+  const driver = `
+import { parseCookie } from "./cookie.js";
+
+/**
+ * @param {number} iterations
+ * @param {number} runtimeSeed
+ */
+export function ${STANDALONE_BENCHMARK_EXPORT}(iterations, runtimeSeed) {
+  var checksum = 0;
+  for (var index = 0; index < iterations; index++) {
+    var first = "" + (runtimeSeed + index);
+    var header = "a=" + first + "; b=2; c=3; d=4; e=5; f=6; g=7; h=8";
+    var parsed = parseCookie(header);
+    checksum += parsed.a === first && parsed.h === "8" ? 1 : 0;
+  }
+  return checksum;
+}`;
+  return compileStandaloneLane({
+    source,
+    driver,
+    packageFileName: "cookie.js",
+    sampleOp,
+    nodeOperation: (runtimeSeed, index) => {
+      const first = String(runtimeSeed + index);
+      const parsed = nativeModule.parseCookie(`a=${first}; b=2; c=3; d=4; e=5; f=6; g=7; h=8`);
+      return parsed.a === first && parsed.h === "8" ? 1 : 0;
+    },
+    inputMode: "runtime-dynamic",
+    runtimeArgument: 3751,
+  });
+}
+
 async function perfCookie() {
   const jsHost = runJsHostLane ? await perfCookieJsHost() : skippedPerfLane("js-host");
   const standalone = runStandaloneLane ? await perfCookieStandalone() : skippedPerfLane("standalone");
+  const standaloneDynamic = runStandaloneDynamicLane
+    ? await perfCookieStandaloneDynamic()
+    : skippedPerfLane("standalone", "runtime-dynamic");
   return packagePerfRecord(
-    jsHost?.sampleOp ?? standalone?.sampleOp ?? "parseCookie(8-pair header); verify a/h",
+    jsHost?.sampleOp ?? standalone?.sampleOp ?? standaloneDynamic?.sampleOp ?? "parseCookie(8-pair header); verify a/h",
     jsHost ?? failedPerfLane("js-host", "compile-error", "host compilation failed"),
     standalone,
+    { standaloneDynamic },
   );
 }
 
@@ -1249,49 +1333,77 @@ if (selectedPackages.has("marked")) {
 }
 
 if (selectedPackages.has("clsx")) {
-  console.log("[npm-compat] clsx — compile/validate/diff + perf...");
-  const clsxReport = await runClsx({ quiet: true });
-  const clsxPerf = await perfClsx();
-  packages.push(
-    await buildPackageEntry({
+  if (perfOnly) {
+    console.log("[npm-compat] clsx — perf only (correctness harness skipped)...");
+    const { version, pin } = setupClsx();
+    packages.push({
       name: "clsx",
-      version: clsxReport.clsx.version,
+      version,
       issue: 3748,
-      entryFile: clsxReport.clsx.entryModule.replace(/^package\//, ""),
+      entryFile: pin.entryModule.replace(/^package\//, ""),
       shape: "esm-driver-epilogue",
-      report: clsxReport,
-      tests: {
-        kind: "differential-ops",
-        passed: clsxReport.summary.opDiff?.equal ?? null,
-        total: clsxReport.summary.opDiff?.total ?? null,
-        sourceIssue: 3748,
-      },
-      perf: clsxPerf,
-    }),
-  );
+      perf: await perfClsx(),
+      knownBugs: knownBugsFor("clsx"),
+    });
+  } else {
+    console.log("[npm-compat] clsx — compile/validate/diff + perf...");
+    const clsxReport = await runClsx({ quiet: true });
+    const clsxPerf = await perfClsx();
+    packages.push(
+      await buildPackageEntry({
+        name: "clsx",
+        version: clsxReport.clsx.version,
+        issue: 3748,
+        entryFile: clsxReport.clsx.entryModule.replace(/^package\//, ""),
+        shape: "esm-driver-epilogue",
+        report: clsxReport,
+        tests: {
+          kind: "differential-ops",
+          passed: clsxReport.summary.opDiff?.equal ?? null,
+          total: clsxReport.summary.opDiff?.total ?? null,
+          sourceIssue: 3748,
+        },
+        perf: clsxPerf,
+      }),
+    );
+  }
 }
 
 if (selectedPackages.has("cookie")) {
-  console.log("[npm-compat] cookie — compile/validate/diff + perf...");
-  const cookieReport = await runCookie({ quiet: true });
-  const cookiePerf = await perfCookie();
-  packages.push(
-    await buildPackageEntry({
+  if (perfOnly) {
+    console.log("[npm-compat] cookie — perf only (correctness harness skipped)...");
+    const { version, pin } = setupCookie();
+    packages.push({
       name: "cookie",
-      version: cookieReport.cookie.version,
+      version,
       issue: 3751,
-      entryFile: cookieReport.cookie.entryModule.replace(/^package\//, ""),
+      entryFile: pin.entryModule.replace(/^package\//, ""),
       shape: "esm-direct",
-      report: cookieReport,
-      tests: {
-        kind: "differential-ops",
-        passed: cookieReport.summary.opDiff?.equal ?? null,
-        total: cookieReport.summary.opDiff?.total ?? null,
-        sourceIssue: 3751,
-      },
-      perf: cookiePerf,
-    }),
-  );
+      perf: await perfCookie(),
+      knownBugs: knownBugsFor("cookie"),
+    });
+  } else {
+    console.log("[npm-compat] cookie — compile/validate/diff + perf...");
+    const cookieReport = await runCookie({ quiet: true });
+    const cookiePerf = await perfCookie();
+    packages.push(
+      await buildPackageEntry({
+        name: "cookie",
+        version: cookieReport.cookie.version,
+        issue: 3751,
+        entryFile: cookieReport.cookie.entryModule.replace(/^package\//, ""),
+        shape: "esm-direct",
+        report: cookieReport,
+        tests: {
+          kind: "differential-ops",
+          passed: cookieReport.summary.opDiff?.equal ?? null,
+          total: cookieReport.summary.opDiff?.total ?? null,
+          sourceIssue: 3751,
+        },
+        perf: cookiePerf,
+      }),
+    );
+  }
 }
 
 if (selectedPackages.has("eslint")) {
@@ -1305,6 +1417,40 @@ if (selectedPackages.has("eslint")) {
       entryFile: eslintReport.eslint.entryModule.replace(/^package\//, ""),
       shape: "cjs-project",
       report: eslintReport,
+      tests: null,
+      perf: null,
+    }),
+  );
+}
+
+if (selectedPackages.has("prettier")) {
+  console.log("[npm-compat] prettier — bounded package-entry compile/validate...");
+  const prettierReport = await runPrettier({ quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: "prettier",
+      version: prettierReport.prettier.version,
+      issue: null,
+      entryFile: prettierReport.prettier.entryModule.replace(/^package\//, ""),
+      shape: "esm-project",
+      report: prettierReport,
+      tests: null,
+      perf: null,
+    }),
+  );
+}
+
+if (selectedPackages.has("react")) {
+  console.log("[npm-compat] react — bounded package-entry compile/validate...");
+  const reactReport = await runReact({ quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: "react",
+      version: reactReport.react.version,
+      issue: null,
+      entryFile: reactReport.react.entryModule.replace(/^package\//, ""),
+      shape: "cjs-project",
+      report: reactReport,
       tests: null,
       perf: null,
     }),
