@@ -2032,15 +2032,34 @@ function planIrOverlay(
     let hasIndexedCarrier = false;
     let hasBooleanProjection = false;
     let allProjectionsAreBoolean = true;
+    let hasNonFastScalarProjection = false;
+    let allProjectionsAreNonFastStable = true;
     for (const parameter of declaration.parameters) {
       if (effectiveIrParamTypeNode(parameter)) continue;
       const projection = resolveImplicitParamType(parameter);
-      if (!projection) return false;
+      if (!projection) {
+        if (ctx.fast) return false;
+        // In the non-fast ABI an unresolved implicit parameter remains the
+        // generic externref carrier in both front-ends. The IR selector maps
+        // the same unknown evidence to `dynamic`, whose non-fast carrier is
+        // also externref.
+        hasNonFastScalarProjection = true;
+        continue;
+      }
       if (projection.kind === "object") hasIndexedCarrier = true;
       if (projection.kind === "bool") hasBooleanProjection = true;
       else allProjectionsAreBoolean = false;
+      if (projection.kind === "f64" || projection.kind === "dynamic") {
+        hasNonFastScalarProjection = true;
+      } else {
+        allProjectionsAreNonFastStable = false;
+      }
     }
-    return hasIndexedCarrier || (hasBooleanProjection && allProjectionsAreBoolean);
+    return (
+      hasIndexedCarrier ||
+      (hasBooleanProjection && allProjectionsAreBoolean) ||
+      (!ctx.fast && hasNonFastScalarProjection && allProjectionsAreNonFastStable)
+    );
   };
   const identityPlan = irOverlayIdentity.planIrOverlayByIdentity(
     ast.sourceFile,
@@ -2050,6 +2069,7 @@ function planIrOverlay(
       trackFallbacks: collectFallbacks,
       jsHostExterns,
       dynMemberReadBuildable,
+      dynamicRuntimeBuildable: !ctx.fast,
       // #2952 slice 5 — for-in currently owns only the non-fast dynamic
       // carrier, which is already externref and can feed the shared
       // enumeration helpers without a representation conversion.
