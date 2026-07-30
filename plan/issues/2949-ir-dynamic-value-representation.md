@@ -2047,3 +2047,42 @@ Validation for this slice:
 - equivalence matrix: 8/8 shards, zero new regressions;
 - typecheck, fallback/adoption/oracle, linear-IR, LOC, function-budget, and
   harness compile-budget gates pass.
+
+## Implementation Notes — recursive boolean results with a dynamic ABI (2026-07-30)
+
+Acorn's `isLocalVariableAccess` and `isPrivateFieldAccess` now emit through IR.
+Both are unannotated recursive predicates: their declared callable ABI remains
+dynamic, but every return expression is a boolean composition of comparisons
+and direct self-recursion.
+
+The selector proves that closed return family without changing the signature.
+The dynamic-use scan then admits only boolean `&&` / `||` operands, including a
+dynamic self-call result. AST-to-IR lowers those operands through `dyn.truthy`,
+keeps short-circuit control flow, and boxes the concrete i32 result with the
+Boolean tag at the dynamic return boundary. A mixed-value logical expression
+such as `value || 42` remains `logical-value-unsupported`.
+
+The unchanged #3796 runtime-dynamic compile/outcome driver moves from 18 to
+**20 emitted functions out of 43**, adding `isLocalVariableAccess` and
+`isPrivateFieldAccess` with zero post-claim withdrawals. The terminal blocker
+census becomes:
+
+- 14 body-shape rejections;
+- 4 parameter-type rejections;
+- 1 logical-value rejection;
+- 2 RegExp-constructor rejections;
+- 1 call-graph closure;
+- 1 constructor-resolution rejection.
+
+Draft PR #3808 independently adds grounded implicit-any numeric-local inference
+to AST-to-IR. Its `from-ast.ts` changes are line-disjoint from this slice; the
+first branch to rebase must retain both. Its closed fixed outer token-table
+representation and specialized proven `Parser.options` open-object reads are
+also IR parity requirements for retiring the direct path.
+
+Validation for this slice:
+
+- exact #3796 driver: 20/43 emitted, zero post-claim withdrawals;
+- focused recursive-boolean and prior #2949 claim-flip suites pass;
+- mixed-value logical fallback is pinned;
+- typecheck and the standard IR gates pass.
