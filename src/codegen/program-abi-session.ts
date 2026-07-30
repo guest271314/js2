@@ -614,7 +614,7 @@ function remapProgramAbiTypeDef(
           ...field,
           type: remapProgramAbiValType(field.type, targetsByOldIndex, bindingId),
         })),
-        ...(type.superTypeIdx === undefined
+        ...(type.superTypeIdx === undefined || type.superTypeIdx < 0
           ? {}
           : { superTypeIdx: remapProgramAbiTypeIndex(type.superTypeIdx, targetsByOldIndex, bindingId) }),
       };
@@ -649,7 +649,7 @@ function collectProgramAbiTypeReferences(type: TypeDef, references: Set<number>)
       return;
     case "struct":
       type.fields.forEach((field) => addValue(field.type));
-      if (type.superTypeIdx !== undefined) references.add(type.superTypeIdx);
+      if (type.superTypeIdx !== undefined && type.superTypeIdx >= 0) references.add(type.superTypeIdx);
       return;
     case "array":
       addValue(type.element);

@@ -1176,6 +1176,98 @@ describe("#3521 scoped prepared-component ABI seal", () => {
     expect(f.session.publish(f.module).abi.resolveFinalIndex(classId)).toEqual({ space: "type", index: 3 });
   });
 
+  it("preserves an open-root struct sentinel through a scoped callable/class type reorder", () => {
+    const f = fixture();
+    const previousTypes: TypeDef[] = [
+      {
+        kind: "struct",
+        name: "$OpenRoot",
+        superTypeIdx: -1,
+        fields: [{ name: "rootValue", type: { kind: "i32" }, mutable: false }],
+      },
+      {
+        kind: "struct",
+        name: "$PreparedClass",
+        superTypeIdx: 0,
+        fields: [{ name: "root", type: { kind: "ref", typeIdx: 0 }, mutable: true }],
+      },
+      {
+        kind: "func",
+        name: "$consumeOpenRoot",
+        params: [{ kind: "ref", typeIdx: 0 }],
+        results: [],
+      },
+    ];
+    f.module.types = previousTypes;
+    const callableContract: ProgramAbiCallableTypeContract = Object.freeze({
+      params: Object.freeze([{ kind: "ref" as const, typeIdx: 0 }]),
+      results: Object.freeze([]),
+    });
+    const callableId = createIrBindingId({ ownerId: f.firstUnitId, domain: "callable", role: "body" });
+    const callableKey = `unit|${f.firstUnitId}|body`;
+    const func: WasmFunction = {
+      name: "first",
+      typeIdx: 2,
+      locals: [],
+      body: [],
+      exported: false,
+    };
+    f.module.functions.push(func);
+    f.session.plan({
+      ...callableDraft(f.session, callableId, f.firstUnitId, "first", callableKey),
+      intent: {
+        kind: "callable",
+        origin: "source",
+        signature: canonicalProgramAbiCallableTypeContract(callableContract),
+        unitId: f.firstUnitId,
+      },
+    });
+    f.session.registerCallableTypeContract(callableId, callableContract);
+    f.session.registerStructuralReference(callableId, callableKey);
+    f.session.attachLocator(callableId, { kind: "defined-function", value: func });
+
+    const classId = createIrBindingId({ ownerId: f.classId, domain: "class", role: "open-root-class" });
+    const classKey = `class|${classId}`;
+    f.session.plan(classDraft(f, classId, classKey));
+    f.session.registerStructuralReference(classId, classKey);
+    const classCell = f.session.createTypeCell(previousTypes[1]!);
+    f.session.attachLocator(classId, { kind: "type-cell", cell: classCell });
+    sealFirst(f, [classId]);
+
+    const nextTypes: TypeDef[] = [
+      {
+        kind: "func",
+        name: "$consumeOpenRoot$reordered",
+        params: [{ kind: "ref", typeIdx: 2 }],
+        results: [],
+      },
+      {
+        kind: "struct",
+        name: "$PreparedClass$reordered",
+        superTypeIdx: 2,
+        fields: [{ name: "root", type: { kind: "ref", typeIdx: 2 }, mutable: true }],
+      },
+      {
+        kind: "struct",
+        name: "$OpenRoot$reordered",
+        superTypeIdx: -1,
+        fields: [{ name: "rootValue", type: { kind: "i32" }, mutable: false }],
+      },
+    ];
+    f.session.applyTypeLayoutRemap({
+      previousTypes,
+      nextTypes,
+      targetsByOldIndex: [2, 1, 0],
+    });
+    f.module.types = nextTypes;
+    func.typeIdx = 0;
+
+    const publication = f.session.publish(f.module);
+    expect(nextTypes[2]).toMatchObject({ kind: "struct", superTypeIdx: -1 });
+    expect(publication.abi.resolveFinalIndex(classId)).toEqual({ space: "type", index: 1 });
+    expect(publication.abi.resolveFinalIndex(callableId)).toEqual({ space: "function", index: 0 });
+  });
+
   it("rejects alias cycles, duplicate discovery, custom IDs, and post-seal locator removal", () => {
     const cycle = fixture();
     planCallable(cycle, cycle.firstUnitId, "body", "first");

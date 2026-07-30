@@ -308,7 +308,9 @@ rather than treating a terminal row as the whole component:
 - scoped type evidence pins the full transitive graph reachable from type and
   class cells plus callable/global reference contracts. An exact index
   permutation must preserve each reachable payload definition, including
-  fields, mutability, and supertype relationships, under the same remap;
+  fields, mutability, and supertype relationships, under the same remap.
+  `StructTypeDef.superTypeIdx === -1` remains the open-root sentinel rather
+  than being traversed or rewritten as a concrete type index;
 - semantic-preserving type reorders refresh alias contracts through their
   canonical callable/global owner. Aliases intentionally carrying no sidecar
   of their own therefore remain valid without weakening the exact graph
