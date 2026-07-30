@@ -1,9 +1,8 @@
 ---
 id: 2200
 title: "Annex B B.3.3 block-level function declaration hoisting — outer binding created/initialized incorrectly (~186 test262 fails)"
-status: in-progress
-assignee: ttraenkler/dev-1769
-sprint: 64
+status: ready
+sprint: current
 created: 2026-06-19
 updated: 2026-06-19
 phase1: done

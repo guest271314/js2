@@ -1,4 +1,5 @@
 ---
+horizon: m
 id: 3654
 title: "compileProject ESLint graph: resolve importer-scoped deps and extensionless CJS modules"
 status: ready
@@ -11,7 +12,7 @@ task_type: bugfix
 area: module-resolution
 language_feature: commonjs-module-resolution
 goal: npm-library-support
-sprint: 76
+sprint: current
 required_by: [1400, 2691]
 es_edition: n/a
 related: [81, 1044, 1279, 1400, 1559, 1560, 1575, 1791, 2691, 2700, 3653, 3655]

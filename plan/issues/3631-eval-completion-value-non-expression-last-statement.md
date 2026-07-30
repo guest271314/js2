@@ -4,7 +4,7 @@ title: "eval returns `undefined` when the last statement is not an ExpressionSta
 status: ready
 sprint: current
 goal: es5
-priority: medium
+priority: high
 horizon: m
 feasibility: medium
 ---
