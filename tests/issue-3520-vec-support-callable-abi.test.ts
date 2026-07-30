@@ -82,6 +82,47 @@ const ALL_PUBLIC_COLLISION_SOURCE = `
   }
 `;
 
+const PREFIX_ONLY_COLLISION_SOURCE = `
+  export function $v0(): number { return 201; }
+  export function $v1(): number { return 202; }
+  export function $v2(): number { return 203; }
+  export function $v3(): number { return 204; }
+  export function $v4(): number { return 205; }
+  export function $v5(): number { return 206; }
+
+  class Empty {
+    m(): number { return 1; }
+  }
+
+  export function mkInstance(): Empty {
+    return new Empty();
+  }
+
+  export function dynamicPush(values: any, value: any): any {
+    return values.push(value);
+  }
+
+  export function echo(values: any): any {
+    return values;
+  }
+
+  export function returnedValues(): number[] {
+    return [7, 8];
+  }
+`;
+
+const ARRAY_FREE_PHYSICAL_SPOOF_SOURCE = `
+  export function $v0(): number { return 701; }
+
+  class Empty {
+    m(): number { return 1; }
+  }
+
+  export function mkInstance(): Empty {
+    return new Empty();
+  }
+`;
+
 function generate(source: string, fileName: string, trackIrOutcomes = true) {
   const ast = analyzeSource(source, fileName);
   return {
@@ -242,6 +283,45 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
     expect(finalValues.length).toBe(2);
     expect(finalValues).toEqual([7, 8]);
     expect(wrapped.returnedValues()).toEqual([7, 8]);
+  });
+
+  it("terminates all six prefix-only physical families with the structural helper", async () => {
+    const runtime = await compile(PREFIX_ONLY_COLLISION_SOURCE, {
+      fileName: "vec-helper-prefix-only-collisions.ts",
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const rawExports = await instantiate(runtime);
+    for (const [index, bridge] of VEC_BRIDGES.entries()) {
+      const physicalBase = vecHostBridgePhysicalExportBase(bridge.kind);
+      expect((rawExports[physicalBase] as () => number)()).toBe(201 + index);
+      expect(rawExports[`${physicalBase}$`]).toBe(rawExports[bridge.name]);
+      expect(rawExports[`${physicalBase}$$`]).toBeUndefined();
+    }
+    expect(Object.keys(rawExports).filter(isVecHostBridgePhysicalExport)).toHaveLength(12);
+
+    const wrapped = wrapExports(rawExports);
+    const rawValues = (rawExports.returnedValues as () => unknown)();
+    expect((rawExports.dynamicPush as (values: unknown, value: number) => number)(rawValues, 3)).toBe(3);
+    expect(wrapped.echo(rawValues)).toEqual([7, 8, 3]);
+    expect(wrapped.mkInstance()).toEqual({});
+  });
+
+  it("does not project an array-free user physical prefix into a logical vec helper", async () => {
+    const runtime = await compile(ARRAY_FREE_PHYSICAL_SPOOF_SOURCE, {
+      fileName: "vec-helper-array-free-physical-spoof.ts",
+      experimentalIR: true,
+      trackIrOutcomes: true,
+    });
+    const rawExports = await instantiate(runtime);
+    expect((rawExports.$v0 as () => number)()).toBe(701);
+    for (const bridge of VEC_BRIDGES) {
+      expect(rawExports[bridge.name]).toBeUndefined();
+    }
+    expect(Object.keys(rawExports).filter(isVecHostBridgePhysicalExport)).toEqual(["$v0"]);
+
+    const wrapped = wrapExports(rawExports);
+    expect(typeof wrapped.mkInstance()).toBe("function");
   });
 
   it("aborts compilation when structural vec ABI observation fails", () => {

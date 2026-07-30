@@ -156,9 +156,10 @@ function ensureVecHostBridgeAllocations(ctx: CodegenContext): ReadonlyMap<VecHos
 /**
  * Publish collision-safe physical exports after every user export is known.
  *
- * The historical logical name is the zero-overhead fast path. A physical
- * alias is emitted only when a user export already owns that logical name, so
- * ordinary modules retain the pre-migration export section byte-for-byte.
+ * The historical logical name is the zero-overhead fast path. Physical aliases
+ * are emitted only when a user owns that logical name or already occupies the
+ * exact short family, so ordinary modules retain the pre-migration export
+ * section byte-for-byte.
  */
 function publishVecHostBridgeExports(ctx: CodegenContext): void {
   const allocations = ensureVecHostBridgeAllocations(ctx);
@@ -169,17 +170,19 @@ function publishVecHostBridgeExports(ctx: CodegenContext): void {
     if (!allocation || funcIdx === undefined) {
       throw new Error(`cannot publish vec host bridge ${definition.kind} without its exact allocator object`);
     }
-    if (!occupied.has(definition.name)) {
+    const physicalBase = vecHostBridgePhysicalExportBase(definition.kind);
+    let maxOccupiedSuffix = -1;
+    for (const name of occupied) {
+      if (!name.startsWith(physicalBase)) continue;
+      const suffix = name.slice(physicalBase.length);
+      if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
+    }
+    const logicalNameOccupied = occupied.has(definition.name);
+    if (!logicalNameOccupied) {
       exportFunc(ctx.mod, definition.name, funcIdx);
       occupied.add(definition.name);
-    } else {
-      const physicalBase = vecHostBridgePhysicalExportBase(definition.kind);
-      let maxOccupiedSuffix = -1;
-      for (const name of occupied) {
-        if (!name.startsWith(physicalBase)) continue;
-        const suffix = name.slice(physicalBase.length);
-        if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
-      }
+    }
+    if (logicalNameOccupied || maxOccupiedSuffix >= 0) {
       // Fill every free gap through one slot beyond the last occupied suffix.
       // This preserves colliding user exports while leaving a contiguous run
       // whose final function is always the structural helper. The runtime can

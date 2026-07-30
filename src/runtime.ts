@@ -989,6 +989,7 @@ const _VEC_HOST_BRIDGE_EXPORTS = [
 function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T {
   let view: T | undefined;
   for (const [logicalName, physicalBase] of _VEC_HOST_BRIDGE_EXPORTS) {
+    if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) continue;
     let physicalName = physicalBase;
     let helper: unknown;
     while (Object.prototype.hasOwnProperty.call(exports, physicalName)) {

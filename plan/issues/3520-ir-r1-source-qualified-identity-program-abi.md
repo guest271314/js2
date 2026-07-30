@@ -2599,15 +2599,16 @@ host bridges behind one entry-source-owned structural family:
 - `funcMap` remains a compatibility publication only when the helper label is
   unoccupied. The historical logical export is also the zero-overhead runtime
   fast path. A physical export is added only when a user already owns that
-  logical export, using the short reserved `$v<ordinal>` namespace with a
+  logical export or occupies its exact short `$v<ordinal>` family, using a
   deterministic `$` suffix on collision. Free suffix gaps are filled with
   helper aliases through one slot beyond the last occupied suffix, so the
   runtime can select the final function in the contiguous family without
-  mistaking a preserved user export for the helper. The runtime projects
-  collision-only physical helpers onto an internal logical-name view without
-  changing the raw public exports. A user can export all six historical helper
-  labels and still retain those exact names and bodies while runtime array
-  reads, wrapping, and mutation use the structural helpers; and
+  mistaking a preserved user export for the helper. Runtime projection first
+  requires the historical logical export, preventing an array-free user
+  `$v<ordinal>` from fabricating an internal vec helper. A user can export all
+  six historical helper labels or all six short prefixes and still retain
+  those exact names and bodies while runtime array reads, wrapping, and
+  mutation use the structural helpers; and
 - structural observation, body filling, and physical publication are
   correctness-critical. Their failures now abort compilation before physical
   bridge publication instead of returning a successful module containing
@@ -2631,23 +2632,26 @@ implementation. Three representative helper-using modules measure
 the PR head, and **1,065 / 1,340 / 1,569 bytes** after the follow-up. The
 deterministic **+157 bytes per module** is therefore eliminated rather than
 traded for a shorter always-present duplicate namespace. Ordinary modules
-publish zero `$v<ordinal>` physical aliases; only an actual public-label
-collision pays for its affected short family.
+publish zero `$v<ordinal>` physical aliases; only an actual logical-label or
+exact short-family collision pays for its affected short family.
 
-The focused C30 suite passes **7/7**. It proves all six source-anchored IDs,
+The focused C30 suite passes **9/9**. It proves all six source-anchored IDs,
 fixed ordinals, direct final-slot object identity, and zero vec support
 publication for an array-free module; reserve-to-fill allocator-object
 identity survives a forced late-import increase and subsequent dead-import
 compaction; all six public-label collisions preserve the user exports while a
 runtime E2E asserts push length, intermediate length/value, pop value, final
 length, and wrapped returned-array values; sparse short-namespace collisions
-retain six distinct terminal structural helpers; forced ABI observation
-failure produces a compile error with no physical exports; tracked/untracked
-binaries are equal with IR enabled; and routing/outcome telemetry remains
-stable. The adjacent callable-planning, #2083, #3272, #3637, #2927, and #3311
-matrix passes **50/50 across six files**. The IR fallback ratchet, function
-budget, strict TypeScript, and the exact census pass without changing the
-equivalence baseline or Test262 run log.
+retain six distinct terminal structural helpers; all-six prefix-only
+collisions terminate in the structural helpers while preserving wrapped
+`[7, 8, 3]` and fieldless-class `{}` behavior; an array-free `$v0` spoof
+creates no historical logical helper and preserves the helper-free fieldless
+fallback; forced ABI observation failure produces a compile error with no
+physical exports; tracked/untracked binaries are equal with IR enabled; and
+routing/outcome telemetry remains stable. The adjacent callable-planning,
+#2083, #3272, #3637, #2927, and #3311 matrix passes **50/50 across six files**.
+The IR fallback ratchet, function budget, strict TypeScript, and the exact
+census pass without changing the equivalence baseline or Test262 run log.
 
 C30 closes exact retained ownership for the six core vec host bridges, not R1.
 Other support callable families and remaining module-array or display-name
