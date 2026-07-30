@@ -308,6 +308,20 @@ export interface IrFromAstResolver {
    */
   stringForOfPlan?(): "char-loop" | "iter-host";
   /**
+   * #3787 — mode-selected target and numeric ABI for the exact ambient
+   * `String.fromCharCode(...)` static call.
+   *
+   * The helper is unary in both modes; from-ast preserves the variadic JS
+   * surface by invoking it once per argument and concatenating the resulting
+   * one-code-unit strings from left to right. Native helpers take i32 after
+   * an exact ToUint16 fold; the host import takes f64 and performs ToUint16
+   * in JS. `null` keeps resolver-less/unsupported backends on legacy.
+   */
+  stringFromCharCodePlan?(): {
+    readonly funcName: string;
+    readonly argumentRep: "i32" | "f64";
+  } | null;
+  /**
    * #2952 slice 5 — mode-selected runtime symbols for dynamic for-in.
    * Both plans share the same externref/i32 ABI and preserve the #2964
    * snapshot ordering plus per-visit liveness semantics.
@@ -468,6 +482,13 @@ export interface IrFromAstResolver {
   isDirectModuleBinding?(node: ts.Identifier): boolean;
   /** True when the identifier resolves to an ambient declaration-file symbol. */
   isAmbientBinding?(node: ts.Identifier): boolean;
+  /**
+   * #3787 checker identity for the global String constructor. JavaScript
+   * inputs compiled without lib declarations may leave the identifier
+   * unresolved; the production resolver treats that as the global only when
+   * no source declaration owns the name.
+   */
+  isAmbientStringBinding?(node: ts.Identifier): boolean;
 }
 
 export interface AstToIrOptions {
@@ -1089,6 +1110,21 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
         ts.isElementAccessExpression(s.expression.left)
       ) {
         lowerElementStore(s.expression.left, s.expression.right, cx);
+        continue;
+      }
+      // #3787 / #2856 — a body-level compound assignment followed by a
+      // return has the same slot semantics as the already-supported form
+      // inside loop/body buffers. Reuse the shared lowering instead of
+      // requiring the assignment to be nested in a block-owning statement.
+      if (
+        ts.isBinaryExpression(s.expression) &&
+        (s.expression.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ||
+          s.expression.operatorToken.kind === ts.SyntaxKind.MinusEqualsToken ||
+          s.expression.operatorToken.kind === ts.SyntaxKind.AsteriskEqualsToken ||
+          s.expression.operatorToken.kind === ts.SyntaxKind.SlashEqualsToken) &&
+        ts.isIdentifier(s.expression.left)
+      ) {
+        lowerCompoundAssignment(s.expression.left, s.expression.operatorToken.kind, s.expression.right, cx);
         continue;
       }
       throw new Error(`ir/from-ast: unsupported ExpressionStatement shape in ${cx.funcName}`);
@@ -5152,6 +5188,88 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       throw new Error(`ir/from-ast: Object.defineProperty helper produced no result (${cx.funcName})`);
     }
     return result;
+  }
+
+  // #3787 — exact ambient String.fromCharCode(...). Intercept before receiver
+  // lowering because the ambient `String` constructor has no Phase-1 value
+  // representation. The selector admits only numeric, non-spread arguments;
+  // keep the checks here too so direct lowerer callers cannot bypass them.
+  if (
+    receiverIdentifier?.text === "String" &&
+    methodName === "fromCharCode" &&
+    !receiverIsDirectModuleBinding &&
+    cx.scope.get("String") === undefined &&
+    (cx.resolver?.isAmbientStringBinding?.(receiverIdentifier) ??
+      cx.resolver?.isAmbientBinding?.(receiverIdentifier) !== false)
+  ) {
+    if (expr.arguments.some(ts.isSpreadElement)) {
+      throw new IrUnsupportedError(
+        "method-call-unsupported",
+        "build",
+        `ir/from-ast: String.fromCharCode spread is not supported (${cx.funcName})`,
+      );
+    }
+    const plan = cx.resolver?.stringFromCharCodePlan?.() ?? null;
+    if (plan === null) {
+      throw new IrUnsupportedError(
+        "method-call-unsupported",
+        "build",
+        `ir/from-ast: String.fromCharCode provider unavailable (${cx.funcName})`,
+      );
+    }
+
+    if (expr.arguments.length === 0) return cx.builder.emitStringConst("");
+    let result: IrValueId | null = null;
+    for (const argument of expr.arguments) {
+      const numeric = lowerExpr(argument, cx, irVal({ kind: "f64" }));
+      const numericType = asVal(cx.builder.typeOf(numeric));
+      if (numericType?.kind !== "f64" && numericType?.kind !== "i32") {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: String.fromCharCode argument is not numeric (${cx.funcName})`,
+        );
+      }
+
+      let code = numeric;
+      if (plan.argumentRep === "i32" && numericType.kind === "f64") {
+        // ECMA-262 ToUint16 in the f64 domain:
+        //   t = trunc(x)
+        //   m = t - floor(t / 65536) * 65536
+        // NaN and ±Infinity propagate to NaN, which trunc_sat maps to zero.
+        // A bare trunc_sat would saturate before the helper's low-16 mask and
+        // miscompile values outside the signed-i32 range.
+        const truncated = cx.builder.emitUnary("f64.trunc", numeric, irVal({ kind: "f64" }));
+        const quotient = cx.builder.emitBinary(
+          "f64.div",
+          truncated,
+          cx.builder.emitConst({ kind: "f64", value: 65536 }, irVal({ kind: "f64" })),
+          irVal({ kind: "f64" }),
+        );
+        const floored = cx.builder.emitUnary("f64.floor", quotient, irVal({ kind: "f64" }));
+        const wrapped = cx.builder.emitBinary(
+          "f64.sub",
+          truncated,
+          cx.builder.emitBinary(
+            "f64.mul",
+            floored,
+            cx.builder.emitConst({ kind: "f64", value: 65536 }, irVal({ kind: "f64" })),
+            irVal({ kind: "f64" }),
+          ),
+          irVal({ kind: "f64" }),
+        );
+        code = cx.builder.emitUnary("i32.trunc_sat_f64_s", wrapped, irVal({ kind: "i32" }));
+      } else if (plan.argumentRep === "f64" && numericType.kind === "i32") {
+        code = cx.builder.emitUnary("f64.convert_i32_s", numeric, irVal({ kind: "f64" }));
+      }
+
+      const part = cx.builder.emitCall(irRuntimeFuncRef(plan.funcName), [code], { kind: "string" });
+      if (part === null) {
+        throw new Error(`ir/from-ast: String.fromCharCode helper produced no result (${cx.funcName})`);
+      }
+      result = result === null ? part : cx.builder.emitStringConcat(result, part);
+    }
+    return result!;
   }
 
   if (
