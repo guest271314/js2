@@ -630,6 +630,34 @@ export interface IrRetainedFunctionMethodPlan {
   readonly receiverDeclarationOrdinal?: number;
 }
 
+/** One exact `.call(thisArg, ...args)` reference to a stable source function. */
+export interface IrStableFunctionCallSite {
+  readonly call: ts.CallExpression;
+  readonly receiver: ts.Expression;
+  readonly arguments: readonly ts.Expression[];
+}
+
+/**
+ * Checker-backed proof that a top-level FunctionDeclaration is referenced
+ * only through fixed-arity `.call(thisArg, ...args)` sites.
+ *
+ * The selector consumes this proof to expose the declaration's ambient
+ * `this` as the non-fast dynamic carrier. Lowering still owns the executable
+ * receiver bridge; this record carries only exact source identity and the
+ * complete, stable call-site population.
+ */
+export interface IrStableFunctionCallPlan {
+  readonly declaration: ts.FunctionDeclaration;
+  readonly signature: ts.Signature;
+  readonly targetName: string;
+  /** Source parameter count, excluding the leading `.call` receiver. */
+  readonly arity: number;
+  readonly callSites: readonly IrStableFunctionCallSite[];
+  /** Structural fields are present on the identity-aware production resolver. */
+  readonly targetUnitId?: IrUnitId;
+  readonly sourceId?: IrSourceId;
+}
+
 interface IrModuleBindingResolverSurface<TIdentity, TInspection> {
   (node: ts.Identifier, writeValue?: ts.Expression): TIdentity | undefined;
   /**
@@ -663,6 +691,14 @@ interface IrModuleBindingResolverSurface<TIdentity, TInspection> {
   readonly staticNumericArrayPlan: (node: ts.Expression) => IrStaticNumericArrayPlan | undefined;
   /** Exact retained function-object method call whose receiver must stay live. */
   readonly retainedFunctionMethodPlan: (call: ts.CallExpression) => IrRetainedFunctionMethodPlan | undefined;
+  /**
+   * Exact top-level function whose complete reference population is
+   * fixed-arity `.call(thisArg, ...args)`. Accepts either the declaration or
+   * one of its certified call expressions.
+   */
+  readonly stableFunctionCallPlan: (
+    node: ts.FunctionDeclaration | ts.CallExpression,
+  ) => IrStableFunctionCallPlan | undefined;
 }
 
 export interface IrLegacyModuleBindingResolver extends IrModuleBindingResolverSurface<
@@ -1389,6 +1425,212 @@ function makeRetainedFunctionMethodPlan(
   };
 }
 
+function exactTopLevelFunctionDeclaration(
+  node: ts.Identifier,
+  checker: ts.TypeChecker,
+): ts.FunctionDeclaration | undefined {
+  const symbol = checker.getSymbolAtLocation(node);
+  if (!symbol) return undefined;
+  const sourceFile = node.getSourceFile();
+  const declarations = new Set(
+    [symbol.valueDeclaration, ...(symbol.declarations ?? [])].filter(
+      (candidate): candidate is ts.FunctionDeclaration =>
+        candidate !== undefined &&
+        ts.isFunctionDeclaration(candidate) &&
+        candidate.getSourceFile() === sourceFile &&
+        candidate.parent === sourceFile &&
+        candidate.name !== undefined,
+    ),
+  );
+  if (declarations.size !== 1) return undefined;
+  const declaration = [...declarations][0]!;
+  return checker.getSymbolAtLocation(declaration.name!) === symbol ? declaration : undefined;
+}
+
+function stableCallReceiverIsAdmissible(receiver: ts.Expression, checker: ts.TypeChecker): boolean {
+  const candidate = unwrapParens(receiver);
+  if (candidate.kind === ts.SyntaxKind.ThisKeyword) return true;
+  const type = checker.getTypeAtLocation(candidate);
+  const unsupported =
+    ts.TypeFlags.Any |
+    ts.TypeFlags.Unknown |
+    ts.TypeFlags.Never |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Void;
+  if ((type.flags & unsupported) !== 0) return false;
+  return !type.isUnionOrIntersection() || type.types.every((member) => (member.flags & unsupported) === 0);
+}
+
+function stableCallSiteForReference(
+  reference: ts.Identifier,
+  declaration: ts.FunctionDeclaration,
+  checker: ts.TypeChecker,
+): IrStableFunctionCallSite | undefined {
+  const access = reference.parent;
+  if (
+    !ts.isPropertyAccessExpression(access) ||
+    access.expression !== reference ||
+    access.questionDotToken !== undefined ||
+    access.name.text !== "call"
+  ) {
+    return undefined;
+  }
+  const call = access.parent;
+  if (
+    !ts.isCallExpression(call) ||
+    call.expression !== access ||
+    call.questionDotToken !== undefined ||
+    call.typeArguments?.length ||
+    call.arguments.length !== declaration.parameters.length + 1 ||
+    call.arguments.some(ts.isSpreadElement)
+  ) {
+    return undefined;
+  }
+  const receiver = call.arguments[0]!;
+  if (!stableCallReceiverIsAdmissible(receiver, checker)) return undefined;
+  return { call, receiver, arguments: call.arguments.slice(1) };
+}
+
+function targetThisUsesOnlyDynamicMemberRoots(declaration: ts.FunctionDeclaration): boolean {
+  const body = declaration.body;
+  if (!body) return false;
+  let sawThis = false;
+  let supported = true;
+  const visit = (node: ts.Node): void => {
+    if (!supported) return;
+    if (
+      node !== body &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node) ||
+        ts.isConstructorDeclaration(node))
+    ) {
+      return;
+    }
+    if (node.kind === ts.SyntaxKind.ThisKeyword) {
+      sawThis = true;
+      const parent = node.parent;
+      const memberRootIsRead = (access: ts.Expression): boolean => {
+        const use = access.parent;
+        if (ts.isBinaryExpression(use) && use.left === access && isAssignmentOperator(use.operatorToken.kind)) {
+          return false;
+        }
+        if (
+          (ts.isPrefixUnaryExpression(use) || ts.isPostfixUnaryExpression(use)) &&
+          use.operand === access &&
+          (use.operator === ts.SyntaxKind.PlusPlusToken || use.operator === ts.SyntaxKind.MinusMinusToken)
+        ) {
+          return false;
+        }
+        return !(ts.isDeleteExpression(use) && use.expression === access);
+      };
+      if (
+        ts.isPropertyAccessExpression(parent) &&
+        parent.expression === node &&
+        parent.questionDotToken === undefined &&
+        memberRootIsRead(parent)
+      ) {
+        return;
+      }
+      if (
+        ts.isElementAccessExpression(parent) &&
+        parent.expression === node &&
+        parent.questionDotToken === undefined &&
+        memberRootIsRead(parent) &&
+        (ts.isStringLiteralLike(unwrapParens(parent.argumentExpression)) ||
+          ts.isNumericLiteral(unwrapParens(parent.argumentExpression)))
+      ) {
+        return;
+      }
+      supported = false;
+      return;
+    }
+    node.forEachChild(visit);
+  };
+  body.forEachChild(visit);
+  return sawThis && supported;
+}
+
+function makeStableFunctionCallPlan(
+  checker: ts.TypeChecker,
+  node: ts.FunctionDeclaration | ts.CallExpression,
+  cache: Map<ts.FunctionDeclaration, IrStableFunctionCallPlan | null>,
+): IrStableFunctionCallPlan | undefined {
+  const targetIdentifier = ts.isFunctionDeclaration(node)
+    ? node.name
+    : ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)
+      ? node.expression.expression
+      : undefined;
+  if (!targetIdentifier) return undefined;
+  const declaration = exactTopLevelFunctionDeclaration(targetIdentifier, checker);
+  if (
+    !declaration ||
+    !declaration.body ||
+    declaration.asteriskToken ||
+    declaration.typeParameters?.length ||
+    declaration.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ||
+    declaration.parameters.length !== 4 ||
+    declaration.parameters.some(
+      (parameter) =>
+        !ts.isIdentifier(parameter.name) ||
+        parameter.name.text === "this" ||
+        parameter.dotDotDotToken !== undefined ||
+        parameter.questionToken !== undefined ||
+        parameter.initializer !== undefined,
+    ) ||
+    !targetThisUsesOnlyDynamicMemberRoots(declaration)
+  ) {
+    return undefined;
+  }
+  const signature = checker.getSignatureFromDeclaration(declaration);
+  if (!signature || signature.getParameters().length !== declaration.parameters.length) return undefined;
+
+  let plan = cache.get(declaration);
+  if (plan === null) return undefined;
+  if (plan === undefined) {
+    const symbol = checker.getSymbolAtLocation(declaration.name!);
+    if (!symbol) {
+      cache.set(declaration, null);
+      return undefined;
+    }
+    const callSites: IrStableFunctionCallSite[] = [];
+    let stable = true;
+    const visit = (candidate: ts.Node): void => {
+      if (!stable) return;
+      if (
+        ts.isIdentifier(candidate) &&
+        candidate !== declaration.name &&
+        checker.getSymbolAtLocation(candidate) === symbol
+      ) {
+        const callSite = stableCallSiteForReference(candidate, declaration, checker);
+        if (!callSite) {
+          stable = false;
+          return;
+        }
+        callSites.push(callSite);
+      }
+      candidate.forEachChild(visit);
+    };
+    declaration.getSourceFile().forEachChild(visit);
+    plan =
+      stable && callSites.length > 0
+        ? {
+            declaration,
+            signature,
+            targetName: declaration.name!.text,
+            arity: declaration.parameters.length,
+            callSites,
+          }
+        : null;
+    cache.set(declaration, plan);
+  }
+  if (!plan) return undefined;
+  return ts.isCallExpression(node) && !plan.callSites.some((site) => site.call === node) ? undefined : plan;
+}
+
 function staticStringFromExpression(
   checker: ts.TypeChecker,
   expression: ts.Expression,
@@ -1480,6 +1722,7 @@ export function makeIrLegacyModuleBindingResolver(
   options: IrModuleBindingResolverOptions,
 ): IrLegacyModuleBindingResolver {
   const isAmbientBinding = makeIrAmbientBindingPredicate(checker);
+  const stableFunctionCallPlans = new Map<ts.FunctionDeclaration, IrStableFunctionCallPlan | null>();
   const inspectDirectBinding = (node: ts.Identifier, writeValue?: ts.Expression): IrLegacyModuleBindingInspection => {
     const declaration = directTopLevelDeclaration(node, checker);
     if (!declaration) return { kind: "not-direct" };
@@ -1651,6 +1894,14 @@ export function makeIrLegacyModuleBindingResolver(
         return undefined;
       }
     },
+    stableFunctionCallPlan(node: ts.FunctionDeclaration | ts.CallExpression): IrStableFunctionCallPlan | undefined {
+      if (options.numberStorage !== "f64") return undefined;
+      try {
+        return makeStableFunctionCallPlan(checker, node, stableFunctionCallPlans);
+      } catch {
+        return undefined;
+      }
+    },
   });
 }
 
@@ -1801,6 +2052,21 @@ export function makeIrModuleBindingResolver(
         receiverDeclarationOrdinal: receiverLocation.declarationOrdinal,
       };
     },
+    stableFunctionCallPlan(node: ts.FunctionDeclaration | ts.CallExpression): IrStableFunctionCallPlan | undefined {
+      ownerAt(node);
+      const plan = legacy.stableFunctionCallPlan(node);
+      if (!plan) return undefined;
+      for (const site of plan.callSites) ownerAt(site.call);
+      const targetUnitId = identityContext.unitIdByDeclaration.get(plan.declaration);
+      if (targetUnitId === undefined || identityContext.declarationByUnitId.get(targetUnitId) !== plan.declaration) {
+        return planningInvariant(
+          "missing-unit-declaration",
+          `stable .call target ${plan.targetName} has no exact function-declaration identity`,
+        );
+      }
+      const sourceId = requireIrPlanningSourceId(identityContext, plan.declaration.getSourceFile());
+      return { ...plan, targetUnitId, sourceId };
+    },
   });
 }
 
@@ -1851,5 +2117,16 @@ export function projectIrModuleBindingResolverToLegacy(
     staticRegExpTestPlan: (node: ts.Expression) => resolver.staticRegExpTestPlan(node),
     staticNumericArrayPlan: (node: ts.Expression) => resolver.staticNumericArrayPlan(node),
     retainedFunctionMethodPlan: (call: ts.CallExpression) => resolver.retainedFunctionMethodPlan(call),
+    stableFunctionCallPlan: (node: ts.FunctionDeclaration | ts.CallExpression) => {
+      const plan = resolver.stableFunctionCallPlan(node);
+      if (!plan) return undefined;
+      return {
+        declaration: plan.declaration,
+        signature: plan.signature,
+        targetName: plan.targetName,
+        arity: plan.arity,
+        callSites: plan.callSites,
+      };
+    },
   });
 }
