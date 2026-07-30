@@ -30,6 +30,7 @@ import {
   PROGRAM_ABI_CALLABLE_ROLE,
   resolveProgramAbiSupportCallableHandle,
 } from "./program-abi-planning.js";
+import { DATA_STRUCT_HOST_BRIDGE_ORDINAL, publishDataStructHostBridge } from "./data-struct-host-bridge.js";
 
 const CLOSURE_HOST_BRIDGE_ROLE = "closure-host-bridge";
 const CLOSURE_HOST_BRIDGE_MANIFEST_NAME = "__\0js2_closure_host_bridge";
@@ -1522,8 +1523,6 @@ export function emitIsDataStructExport(ctx: CodegenContext): void {
   if (dataTypeIdxs.length === 0) return;
 
   const isDataTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_data_struct_type");
-  const funcIdx = ctx.numImportFuncs + mod.functions.length;
-
   const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
   for (const dataType of dataTypeIdxs) {
     body.push({ op: "local.get", index: 1 });
@@ -1536,18 +1535,17 @@ export function emitIsDataStructExport(ctx: CodegenContext): void {
   }
   body.push({ op: "i32.const", value: 0 });
 
-  mod.functions.push({
-    name: "__is_data_struct",
-    typeIdx: isDataTypeIdx,
-    locals: [{ name: "__any", type: { kind: "anyref" } }],
-    body,
-    exported: true,
-  } as WasmFunction);
-
-  mod.exports.push({
-    name: "__is_data_struct",
-    desc: { kind: "func", index: funcIdx },
-  });
+  publishDataStructHostBridge(
+    ctx,
+    {
+      name: "__is_data_struct",
+      typeIdx: isDataTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as WasmFunction,
+    DATA_STRUCT_HOST_BRIDGE_ORDINAL.isDataStruct,
+  );
 }
 
 /**

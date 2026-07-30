@@ -174,7 +174,8 @@ export function emitWat(mod: WasmModule, opts?: { onlyFunctions?: Set<string> })
   for (const elem of mod.elements) {
     const offsetStr = elem.offset.map((i) => formatInstr(i, 0)).join(" ");
     const funcStr = elem.funcIndices.map(resolveFuncIdx).join(" ");
-    lines.push(`${indent(1)}(elem (offset ${offsetStr}) func ${funcStr})`);
+    const tableStr = elem.tableIdx === 0 ? "" : ` (table ${elem.tableIdx})`;
+    lines.push(`${indent(1)}(elem${tableStr} (offset ${offsetStr}) func ${funcStr})`);
   }
 
   // Declarative element segment for ref.func targets

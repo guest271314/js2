@@ -249,6 +249,7 @@ describe("#3520 C32 date civil support Program ABI ownership", () => {
     let genericRows = 0;
     let dateRows = 0;
     let vecRows = 0;
+    let dataRows = 0;
     let terminalUnits = 0;
     let emitted = 0;
     let unsupported = 0;
@@ -270,6 +271,7 @@ describe("#3520 C32 date civil support Program ABI ownership", () => {
       genericRows += entries.filter((candidate) => candidate.id.includes("retained-module-function")).length;
       dateRows += entries.filter((candidate) => candidate.id.includes(`:${DATE_CIVIL_SUPPORT_ROLE}:`)).length;
       vecRows += entries.filter((candidate) => candidate.id.includes(":vec-host-bridge:")).length;
+      dataRows += entries.filter((candidate) => candidate.id.includes(":data-struct-host-bridge:")).length;
       for (const outcome of result.irOutcomes ?? []) {
         terminalUnits++;
         if (outcome.kind === "emitted") emitted++;
@@ -281,10 +283,11 @@ describe("#3520 C32 date civil support Program ABI ownership", () => {
     }
 
     expect({ definedFunctions, dateRows }).toEqual({ definedFunctions: 166, dateRows: 1 });
-    // C30 is an independent ownership slice. Composed with its 24 vec rows,
-    // C31+C32 retain 50 generic rows; without C30 this stack retains 74.
+    // C30 and C33 are independent ownership slices. C33 moves five data rows
+    // one-for-one from whichever generic total the vec stack contributes.
     expect([0, 24]).toContain(vecRows);
-    expect(genericRows).toBe(74 - vecRows);
+    expect(dataRows).toBe(5);
+    expect(genericRows).toBe(74 - vecRows - dataRows);
     expect({ terminalUnits, emitted, unsupported, invariants, legacyBodies, irBodies }).toEqual({
       terminalUnits: 37,
       emitted: 30,

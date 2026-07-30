@@ -26,6 +26,7 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   vecHostBridge: 8,
   closureHostBridge: 9,
   dateCivilSupport: 10,
+  dataStructHostBridge: 11,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({
