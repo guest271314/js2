@@ -63,10 +63,16 @@ has receiver-correct semantics.
 ## Scope
 
 - Admit only an exact checker-resolved, body-bearing, non-generator,
-  non-async `FunctionDeclaration` whose own body reads `this`.
+  non-async, unique top-level `FunctionDeclaration` whose own body reads
+  `this`, and require the Program ABI source-callable registry to prove that
+  exact declaration owns the resolved `FuncHandle`.
 - Handle `.call` only. Keep `.apply`, closures, aliases, explicit TypeScript
-  `this` parameters, rest parameters, and unstable declarations on their
-  existing paths.
+  `this` parameters, rest parameters, reassigned live function bindings,
+  nested/same-name shadows, and unstable declarations on their existing paths.
+- Require exact source arity and no spread. Under- and over-application remain
+  on the legacy path. Repair that legacy over-application path so it compiles
+  only formal operands and preserves extras through the established
+  `arguments`/extras ABI (or evaluates and drops them when unobserved).
 - Admit Acorn's bare-`this` receiver and other receiver expressions whose
   checker type excludes null, undefined, and void.
 - Reserve one exact-target trampoline with ABI
@@ -84,8 +90,8 @@ has receiver-correct semantics.
 - [x] Nested and re-entrant calls restore the outer receiver.
 - [x] A throwing target restores the outer receiver before rethrow.
 - [x] Acorn's locations/ranges `finishNodeAt` shape executes by value.
-- [x] Nullish, `.apply`, alias, closure, and this-free negative shapes do not
-      reserve the trampoline.
+- [x] Nullish, `.apply`, alias, closure, this-free, reassigned, nested-shadow,
+      and over-arity negative shapes do not reserve the trampoline.
 - [x] IR-first enabled/disabled runs are behaviorally identical.
 - [x] Focused and adjacent tests, typecheck, formatting, LOC/function budgets,
       IR fallback ratchet, and equivalence gate pass.
@@ -95,9 +101,10 @@ has receiver-correct semantics.
 - Focused #3796 suite: 6/6 passing. It executes the four-argument
   receiver-first order, `arguments.length`, nested/re-entrant restoration,
   exceptional restoration, the locations+ranges Acorn shape, negative
-  admission, and IR-first `0`/`1` parity.
+  admission (including anti-vacuity runtime checks for reassigned,
+  same-name-shadowed, and over-arity targets), and IR-first `0`/`1` parity.
 - Every focused standalone module has zero Wasm imports.
-- Adjacent `.call`/ambient-`this` suites: 60 passing. The sole adjacent failure,
+- Adjacent `.call`/ambient-`this` suites: 59 passing. The sole adjacent failure,
   #2069's string-constants import-object setup, reproduces unchanged on the
   detached `origin/main` control.
 - Typecheck, Biome lint, Prettier, issue integrity, LOC/function budgets,

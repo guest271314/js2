@@ -6577,7 +6577,7 @@ function compileCallExpression(
         // receivers, and unstable symbols keep their existing lowerings.
         const namedThisCall =
           isCall && !closureInfo && funcIdx !== undefined && expr.arguments.length > 0
-            ? resolveNamedThisCallTarget(ctx, fctx, innerExpr, funcIdx, expr.arguments[0]!)
+            ? resolveNamedThisCallTarget(ctx, fctx, innerExpr, funcIdx, expr.arguments[0]!, expr.arguments.slice(1))
             : undefined;
 
         // (#2193 PR-B) `m.call(thisArg, …args)` where `m` is a `$NativeProto`
@@ -6681,8 +6681,24 @@ function compileCallExpression(
             } else {
               // Regular function call
               const paramTypes = getFuncParamTypes(ctx, funcIdx!);
-              for (let i = 0; i < remainingArgs.length; i++) {
+              const paramCount = paramTypes?.length ?? remainingArgs.length;
+              const formalArgCount = Math.min(remainingArgs.length, paramCount);
+              for (let i = 0; i < formalArgCount; i++) {
                 compileExpression(ctx, fctx, remainingArgs[i]!, paramTypes?.[i]);
+              }
+              // `.call` over-application must not leave extra operands under
+              // the exact Wasm call. Preserve side effects, and when the target
+              // reads `arguments`, marshal the overflow through the same
+              // extras-argv ABI as a direct identifier call.
+              if (remainingArgs.length > paramCount) {
+                if (ctx.funcUsesArguments.has(funcName)) {
+                  emitSetExtrasArgv(ctx, fctx, remainingArgs as ts.Expression[], paramCount);
+                } else {
+                  for (let i = paramCount; i < remainingArgs.length; i++) {
+                    const extraType = compileExpression(ctx, fctx, remainingArgs[i]!);
+                    if (extraType !== null) fctx.body.push({ op: "drop" });
+                  }
+                }
               }
 
               // Supply defaults for missing optional params

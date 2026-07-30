@@ -80,7 +80,27 @@ function resolveDeclaration(ctx: CodegenContext, callee: ts.Identifier): ts.Func
       decl.asteriskToken === undefined &&
       !decl.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword),
   );
-  return bodies.length === 1 ? bodies[0] : undefined;
+  const declaration = bodies.length === 1 ? bodies[0] : undefined;
+  // This slice only has an exact allocator identity for unique source-file
+  // declarations. Nested declarations can shadow a top-level function with
+  // the same funcMap key; name equality is not declaration identity.
+  if (!declaration || declaration.parent !== declaration.getSourceFile()) return undefined;
+  return declaration;
+}
+
+function declarationOwnsHandle(
+  ctx: CodegenContext,
+  declaration: ts.FunctionDeclaration,
+  targetFuncIdx: FuncHandle,
+): boolean {
+  const registry = ctx.programAbiSourceCallables;
+  const identity = registry?.identityContext;
+  const unitId = identity?.unitIdByDeclaration.get(declaration);
+  return (
+    unitId !== undefined &&
+    identity?.declarationByUnitId.get(unitId) === declaration &&
+    registry?.handleForUnit(unitId) === targetFuncIdx
+  );
 }
 
 function callTarget(targetFuncIdx: FuncHandle, paramCount: number): Instr[] {
@@ -184,11 +204,16 @@ export function resolveNamedThisCallTarget(
   callee: ts.Identifier,
   targetFuncIdx: FuncHandle,
   receiver: ts.Expression,
+  userArguments: readonly ts.Expression[],
 ): NamedThisCallTarget | undefined {
   const declaration = resolveDeclaration(ctx, callee);
   if (
     !declaration?.body ||
+    ctx.liveFuncBindingGlobals?.has(callee.text) === true ||
+    !declarationOwnsHandle(ctx, declaration, targetFuncIdx) ||
     declaration.parameters.some((parameter) => parameter.dotDotDotToken !== undefined) ||
+    userArguments.length !== declaration.parameters.length ||
+    userArguments.some((argument) => ts.isSpreadElement(argument)) ||
     (declaration.parameters[0] &&
       ts.isIdentifier(declaration.parameters[0].name) &&
       declaration.parameters[0].name.text === "this") ||

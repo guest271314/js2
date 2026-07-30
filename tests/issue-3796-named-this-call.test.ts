@@ -122,23 +122,70 @@ describe("#3796 receiver-correct stable named FunctionDeclaration.call", () => {
     expect(result.wat).toContain("$__named_this_call_wrapper_");
   });
 
-  it("keeps nullish, apply, aliases, closures, and this-free targets off the trampoline", async () => {
+  it("keeps unstable identity, over-arity, and unsupported call shapes off the trampoline", async () => {
     const source = `
       function readsThis(value) { return this.value + value; }
       function ignoresThis(value) { return value; }
       var alias = readsThis;
       var closure = function closure(value) { return this.value + value; };
+      function mutableTarget(value) {
+        if (value < 0) return this.value;
+        return value + 1;
+      }
+      function shadowedTarget(value) {
+        return this.value + 1000;
+      }
+      var extraOrder = 0;
+      function extraArgument() {
+        extraOrder = 5;
+        return 7;
+      }
+      function overArityTarget(value) {
+        if (value < 0) return this.value;
+        return arguments.length * 1000 + arguments[1] * 10 + value + extraOrder;
+      }
       export function nullReceiver() { return readsThis.call(null, 1); }
       export function applyReceiver() { return readsThis.apply({ value: 2 }, [1]); }
       export function aliasReceiver() { return alias.call({ value: 3 }, 1); }
       export function closureReceiver() { return closure.call({ value: 4 }, 1); }
       export function ignoredReceiver() { return ignoresThis.call({ value: 5 }, 1); }
+      export function reassignedBeforeWrite() {
+        var result = mutableTarget.call({ value: 99 }, 41);
+        mutableTarget = function replacement(value) { return value + 100; };
+        return result;
+      }
+      export function nestedDeclaration() {
+        function nestedTarget(value) {
+          if (value < 0) return this.value;
+          return value + 1;
+        }
+        return nestedTarget.call({ value: 99 }, 41);
+      }
+      export function sameNameShadow() {
+        function shadowedTarget(value) {
+          if (value < 0) return this.value;
+          return value + 1;
+        }
+        shadowedTarget.call({ value: 99 }, 41);
+        return 42;
+      }
+      export function overArity() {
+        return overArityTarget.call({ value: 99 }, 41, extraArgument());
+      }
     `;
-    const { result } = await compileStandalone(source, "issue-3796-negatives.mjs");
+    const { result, instance } = await compileStandalone(source, "issue-3796-negatives.mjs");
 
     expect(result.wat).not.toContain("$__named_this_call_readsThis_");
     expect(result.wat).not.toContain("$__named_this_call_ignoresThis_");
     expect(result.wat).not.toContain("$__named_this_call_closure_");
+    expect(result.wat).not.toContain("$__named_this_call_mutableTarget_");
+    expect(result.wat).not.toContain("$__named_this_call_nestedTarget_");
+    expect(result.wat).not.toContain("$__named_this_call_shadowedTarget_");
+    expect(result.wat).not.toContain("$__named_this_call_overArityTarget_");
+    expect((instance.exports.reassignedBeforeWrite as () => number)()).toBe(42);
+    expect((instance.exports.nestedDeclaration as () => number)()).toBe(42);
+    expect((instance.exports.sameNameShadow as () => number)()).toBe(42);
+    expect((instance.exports.overArity as () => number)()).toBe(2116);
   });
 
   it("has the same runtime behavior with IR-first enabled and disabled", async () => {
