@@ -4318,6 +4318,18 @@ function _safeGet(
     const exports = callbackState?.getExports();
     const getter = exports?.[`__sget_${String(key)}`];
     if (typeof getter === "function") return getter(obj);
+    // A tuple field uses the compiler-owned `_0`, `_1`, … names while JS
+    // element access supplies the ordinary numeric key `0`, `1`, … . This
+    // path is reached when an unproven outer-array read widens a tuple ref to
+    // externref so OOB can carry `undefined` (for example
+    // `Object.entries(obj)[0][0]`). Prove the receiver's concrete tuple field
+    // before consulting the collision-shared getter; otherwise an unrelated
+    // struct would read a zero-value shape miss as a real element.
+    const tupleField = `_${String(key)}`;
+    const tupleGetter = exports?.[`__sget_${tupleField}`];
+    if (typeof tupleGetter === "function" && _structHasOwnFieldName(obj, tupleField, exports)) {
+      return tupleGetter(obj);
+    }
   }
   // (#2706 / #1830) A genuine integer-index key (`o[5]`) on a WasmGC struct is
   // NOT a well-known-symbol ID. `runtime.ts` only runs in host mode, where the
