@@ -31,6 +31,8 @@ loc-budget-allow:
   - src/ir/nodes.ts
   - src/ir/select.ts
   - src/ir/verify.ts
+coercion-sites-allow:
+  - src/codegen/dyn-ops.ts
 func-budget-allow:
   - src/codegen/index.ts::planIrOverlay
   - src/ir/from-ast.ts::lowerBinary
