@@ -80,7 +80,12 @@ async function measureEntry(entry, runtimeHelpers, manifestUrl) {
     entry.stringPool ?? [],
   );
   const wasmBytes = new Uint8Array(await (await fetch(wasmUrl, { cache: "no-store" })).arrayBuffer());
-  const wasmResult = await runtimeHelpers.instantiateWasm(wasmBytes, imports.env, imports.string_constants);
+  const wasmResult = await runtimeHelpers.instantiateWasm(
+    wasmBytes,
+    imports.env,
+    imports.string_constants,
+    imports.string_constants16,
+  );
   imports.setInstance?.(wasmResult.instance);
   const wasmFn = wasmResult.instance.exports?.[exportName];
   if (typeof wasmFn !== "function") {

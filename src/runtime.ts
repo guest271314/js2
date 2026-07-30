@@ -1001,6 +1001,11 @@ const _CLOSURE_HOST_BRIDGE_EXPORTS = [
   ["__closure_has_rest", "$cg"],
 ] as const;
 
+const _DATA_STRUCT_HOST_BRIDGE_EXPORTS = [
+  ["__is_data_struct", "$d0"],
+  ["__struct_field_names", "$d1"],
+] as const;
+
 const _CLOSURE_HOST_BRIDGE_MANIFEST = ["__\0js2_closure_host_bridge", "$cm"] as const;
 const _CLOSURE_HOST_BRIDGE_MARKER = ["__\0js2_closure_host_bridge_marker", "$ct"] as const;
 const _CLOSURE_HOST_BRIDGE_BINDINGS = ["__\0js2_closure_host_bridge_bindings", "$cu"] as const;
@@ -1008,12 +1013,23 @@ const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK = 0xfff00000;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x0001ffff;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_RESERVED_MASK = 0x000e0000;
+const _DATA_STRUCT_HOST_BRIDGE_MANIFEST = ["__\0js2_data_struct_host_bridge", "$dm"] as const;
+const _DATA_STRUCT_HOST_BRIDGE_MARKER = ["__\0js2_data_struct_host_bridge_marker", "$dt"] as const;
+const _DATA_STRUCT_HOST_BRIDGE_BINDINGS = ["__\0js2_data_struct_host_bridge_bindings", "$du"] as const;
+const _DATA_STRUCT_HOST_BRIDGE_TOKEN = ["__\0js2_data_struct_host_bridge_token", "$dv"] as const;
+const _DATA_STRUCT_HOST_BRIDGE_TOKEN_VALUE = "\0js2_data_struct_host_bridge_token";
+const _DATA_STRUCT_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a300000;
+const _DATA_STRUCT_HOST_BRIDGE_MANIFEST_MAGIC_MASK = 0xfff00000;
+const _DATA_STRUCT_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x00000003;
+const _DATA_STRUCT_HOST_BRIDGE_MANIFEST_RESERVED_MASK = 0x000ffffc;
 const _immutableI32GlobalVerdict = new WeakSet<WebAssembly.Global>();
 let _immutableI32GlobalProbeModule: WebAssembly.Module | undefined;
 const _emptyFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
 const _bindingFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
+const _dataBindingFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
 let _emptyFuncrefTableProbeModule: WebAssembly.Module | undefined;
 let _bindingFuncrefTableProbeModule: WebAssembly.Module | undefined;
+let _dataBindingFuncrefTableProbeModule: WebAssembly.Module | undefined;
 const _reflectApply = Reflect.apply;
 const _objectHasOwnProperty = Object.prototype.hasOwnProperty;
 const _instanceExportsGetter = Object.getOwnPropertyDescriptor(WebAssembly.Instance.prototype, "exports")?.get;
@@ -1073,19 +1089,32 @@ function _isImmutableI32Global(value: unknown): value is WebAssembly.Global {
 }
 
 /** Prove a Table's exact funcref limits through Wasm import validation. */
-function _isExactFuncrefTable(value: unknown, size: 0 | 17): value is WebAssembly.Table {
-  if (!(value instanceof WebAssembly.Table) || value.length !== size) return false;
-  const verdict = size === 0 ? _emptyFuncrefTableVerdict : _bindingFuncrefTableVerdict;
-  if (verdict.has(value)) return true;
+function _isExactFuncrefTable(value: unknown, size: 0 | 2 | 17): value is WebAssembly.Table {
   try {
+    if (!(value instanceof WebAssembly.Table) || value.length !== size) return false;
+    const verdict =
+      size === 0
+        ? _emptyFuncrefTableVerdict
+        : size === 2
+          ? _dataBindingFuncrefTableVerdict
+          : _bindingFuncrefTableVerdict;
+    if (verdict.has(value)) return true;
     const bytes =
       size === 0
         ? [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 0, 0]
-        : [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 17, 17];
-    let probe = size === 0 ? _emptyFuncrefTableProbeModule : _bindingFuncrefTableProbeModule;
+        : size === 2
+          ? [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 2, 2]
+          : [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 17, 17];
+    let probe =
+      size === 0
+        ? _emptyFuncrefTableProbeModule
+        : size === 2
+          ? _dataBindingFuncrefTableProbeModule
+          : _bindingFuncrefTableProbeModule;
     if (!probe) {
       probe = new WebAssembly.Module(Uint8Array.from(bytes));
       if (size === 0) _emptyFuncrefTableProbeModule = probe;
+      else if (size === 2) _dataBindingFuncrefTableProbeModule = probe;
       else _bindingFuncrefTableProbeModule = probe;
     }
     new WebAssembly.Instance(probe, { e: { t: value } });
@@ -1100,6 +1129,20 @@ interface ClosureHostBridgeMetadata {
   bits: number;
   bindings: WebAssembly.Table;
 }
+
+interface DataStructHostBridgeMetadata {
+  bits: number;
+  marker: WebAssembly.Table;
+  manifest: WebAssembly.Global;
+  bindings: WebAssembly.Table;
+  token: WebAssembly.Global;
+}
+
+interface DataStructHostBridgeAuthority extends DataStructHostBridgeMetadata {
+  helpers: readonly (Function | undefined)[];
+}
+
+const _dataStructHostBridgeAuthorityByManifest = new WeakMap<WebAssembly.Global, DataStructHostBridgeAuthority>();
 
 /** Read and authenticate compiler-authored closure-helper metadata. */
 function _closureHostBridgeMetadata(exports: Record<string, any>): ClosureHostBridgeMetadata | undefined {
@@ -1133,14 +1176,122 @@ function _closureHostBridgeMetadata(exports: Record<string, any>): ClosureHostBr
 }
 
 /**
- * Compose vec and closure bridge projections from the same raw export object.
+ * Read and authenticate compiler-authored data-struct helper metadata.
  *
- * Vec keeps its collision-only logical-name gate. Closure availability comes
- * only from the compiler-authored manifest; user-controlled helper-like names
- * never establish ownership. All overrides land in one prototype view so the
- * two bridge families cannot hide each other's raw own properties.
+ * The exported binding table is necessarily mutable. Its shape and current
+ * contents therefore cannot authenticate callable identity by themselves.
+ * Establish authority only from the frozen `WebAssembly.Instance.exports`
+ * object, then pin the exact marker/global/table and callable identities in
+ * runtime-owned state. A later caller-supplied projection may use the same
+ * immutable manifest as its lookup key, but cannot redirect either callable by
+ * mutating or replacing the exported table.
  */
-function _hostBridgeExportView<T extends Record<string, any>>(exports: T): T {
+function _dataStructHostBridgeMetadata(
+  exports: Record<string, any>,
+  expectedAuthority?: DataStructHostBridgeAuthority,
+  expectedToken?: WebAssembly.Global,
+  mayEstablishAuthority = false,
+  mayConsumeGlobalAuthority = false,
+): DataStructHostBridgeAuthority | undefined {
+  const [markerLogicalName, markerPhysicalBase] = _DATA_STRUCT_HOST_BRIDGE_MARKER;
+  if (!_hasOwn(exports, markerLogicalName)) return undefined;
+  const marker = _terminalHostBridgeAlias(exports, markerPhysicalBase);
+  if (!_isExactFuncrefTable(marker, 0)) return undefined;
+
+  const [logicalName, physicalBase] = _DATA_STRUCT_HOST_BRIDGE_MANIFEST;
+  if (!_hasOwn(exports, logicalName)) return undefined;
+  const manifest = _terminalHostBridgeAlias(exports, physicalBase);
+  if (!_isImmutableI32Global(manifest) || typeof manifest.value !== "number") return undefined;
+  const value = manifest.value | 0;
+  if ((value & _DATA_STRUCT_HOST_BRIDGE_MANIFEST_MAGIC_MASK) !== _DATA_STRUCT_HOST_BRIDGE_MANIFEST_MAGIC) {
+    return undefined;
+  }
+  if ((value & _DATA_STRUCT_HOST_BRIDGE_MANIFEST_RESERVED_MASK) !== 0) return undefined;
+  const bits = value & _DATA_STRUCT_HOST_BRIDGE_MANIFEST_BITS_MASK;
+
+  const [bindingsLogicalName, bindingsPhysicalBase] = _DATA_STRUCT_HOST_BRIDGE_BINDINGS;
+  if (!_hasOwn(exports, bindingsLogicalName)) return undefined;
+  const bindings = _terminalHostBridgeAlias(exports, bindingsPhysicalBase);
+  if (!_isExactFuncrefTable(bindings, 2)) return undefined;
+  try {
+    for (let bit = 0; bit < _DATA_STRUCT_HOST_BRIDGE_EXPORTS.length; bit++) {
+      const binding = bindings.get(bit);
+      if ((bits & (1 << bit)) !== 0 ? typeof binding !== "function" : binding !== null) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+
+  const [tokenLogicalName, tokenPhysicalBase] = _DATA_STRUCT_HOST_BRIDGE_TOKEN;
+  if (!_hasOwn(exports, tokenLogicalName)) return undefined;
+  const token = _terminalHostBridgeAlias(exports, tokenPhysicalBase);
+  if (!(token instanceof WebAssembly.Global)) return undefined;
+  if (expectedToken !== undefined && token !== expectedToken) return undefined;
+
+  const helpers: (Function | undefined)[] = [];
+  for (let bit = 0; bit < _DATA_STRUCT_HOST_BRIDGE_EXPORTS.length; bit++) {
+    const [, physicalBase] = _DATA_STRUCT_HOST_BRIDGE_EXPORTS[bit]!;
+    const helper = _terminalHostBridgeAlias(exports, physicalBase);
+    if ((bits & (1 << bit)) !== 0) {
+      if (typeof helper !== "function" || helper !== bindings.get(bit)) return undefined;
+      helpers.push(helper);
+    } else {
+      helpers.push(undefined);
+    }
+  }
+
+  const authority =
+    expectedAuthority ??
+    (mayConsumeGlobalAuthority ? _dataStructHostBridgeAuthorityByManifest.get(manifest) : undefined);
+  if (authority !== undefined) {
+    if (
+      authority.bits !== bits ||
+      authority.marker !== marker ||
+      authority.manifest !== manifest ||
+      authority.bindings !== bindings ||
+      authority.token !== token
+    ) {
+      return undefined;
+    }
+    for (let bit = 0; bit < helpers.length; bit++) {
+      if (authority.helpers[bit] !== helpers[bit] || authority.helpers[bit] !== bindings.get(bit)) return undefined;
+    }
+    return authority;
+  }
+
+  // Only a branded instance path may establish first authority. Raw records
+  // can contain genuine donor functions and immutable globals, so their shape
+  // is not evidence of origin.
+  if (!mayEstablishAuthority) return undefined;
+  const established = Object.freeze({
+    bits,
+    marker,
+    manifest,
+    bindings,
+    token,
+    helpers: Object.freeze(helpers),
+  });
+  _dataStructHostBridgeAuthorityByManifest.set(manifest, established);
+  return established;
+}
+
+/**
+ * Compose vec, closure, and data-struct projections from one raw export object.
+ *
+ * Vec keeps its collision-only logical-name gate. Closure and data-struct
+ * availability come only from their compiler-authored manifests;
+ * user-controlled helper-like names never establish ownership. All overrides
+ * land in one prototype view so no bridge family hides another's raw own
+ * properties.
+ */
+function _hostBridgeExportView<T extends Record<string, any>>(
+  exports: T,
+  expectedDataStructAuthority?: DataStructHostBridgeAuthority,
+  expectedDataStructToken?: WebAssembly.Global,
+  establishDataStructAuthority?: (authority: DataStructHostBridgeAuthority) => void,
+  mayEstablishDataStructAuthority = false,
+  mayConsumeGlobalDataStructAuthority = false,
+): T {
   const overrides = new Map<string, unknown>();
   for (const [logicalName, physicalBase] of _VEC_HOST_BRIDGE_EXPORTS) {
     if (!_hasOwn(exports, logicalName)) continue;
@@ -1157,6 +1308,26 @@ function _hostBridgeExportView<T extends Record<string, any>>(exports: T): T {
     if (closureMetadata !== undefined && (closureMetadata.bits & (1 << bit)) !== 0) {
       helper = _terminalHostBridgeAlias(exports, physicalBase);
       if (typeof helper !== "function" || helper !== closureMetadata.bindings.get(bit)) helper = undefined;
+    }
+    if (exports[logicalName] === helper) continue;
+    overrides.set(logicalName, helper);
+  }
+
+  const dataStructMetadata = _dataStructHostBridgeMetadata(
+    exports,
+    expectedDataStructAuthority,
+    expectedDataStructToken,
+    mayEstablishDataStructAuthority,
+    mayConsumeGlobalDataStructAuthority,
+  );
+  if (dataStructMetadata !== undefined) establishDataStructAuthority?.(dataStructMetadata);
+  for (let bit = 0; bit < _DATA_STRUCT_HOST_BRIDGE_EXPORTS.length; bit++) {
+    const [logicalName, physicalBase] = _DATA_STRUCT_HOST_BRIDGE_EXPORTS[bit]!;
+    if (!_hasOwn(exports, logicalName)) continue;
+    let helper: unknown;
+    if (dataStructMetadata !== undefined && (dataStructMetadata.bits & (1 << bit)) !== 0) {
+      helper = _terminalHostBridgeAlias(exports, physicalBase);
+      if (typeof helper !== "function" || helper !== dataStructMetadata.bindings.get(bit)) helper = undefined;
     }
     if (exports[logicalName] === helper) continue;
     overrides.set(logicalName, helper);
@@ -15397,6 +15568,7 @@ export function buildImports(
 
   const env: Record<string, Function> = {};
   let wasmExports: Record<string, Function> | undefined;
+  let dataStructHostBridgeAuthority: DataStructHostBridgeAuthority | undefined;
   // (#1712) Operations that NEED exports (e.g. Object.defineProperties with a
   // WasmGC-struct descriptor map — its keys/fields are only readable via the
   // __struct_field_names / __sget_* exports) but run during the module START
@@ -15499,10 +15671,15 @@ export function buildImports(
     // programs (an unused import namespace is ignored by V8).
     string_constants16: buildStringConstants16(stringPool),
   };
-  // Always provide setExports — needed for callbacks, native string marshaling,
-  // and struct field getter discovery (__sget_*).
-  result.setExports = (exports: Record<string, Function>) => {
-    wasmExports = _hostBridgeExportView(exports);
+  const dataStructHostBridgeToken = result.string_constants[_DATA_STRUCT_HOST_BRIDGE_TOKEN_VALUE];
+  const installExports = (exports: Record<string, Function>, mayEstablishDataStructAuthority: boolean): void => {
+    wasmExports = _hostBridgeExportView(
+      exports,
+      dataStructHostBridgeAuthority,
+      dataStructHostBridgeToken,
+      mayEstablishDataStructAuthority ? (authority) => (dataStructHostBridgeAuthority ??= authority) : undefined,
+      mayEstablishDataStructAuthority,
+    );
     // (#1712) Replay operations parked during the module START function (see
     // pendingExportsDeferred above) now that struct introspection exports
     // are reachable.
@@ -15511,12 +15688,18 @@ export function buildImports(
       fn();
     }
   };
+  // Always provide setExports — needed for callbacks, native string marshaling,
+  // and struct field getter discovery (__sget_*). Raw records cannot establish
+  // first data-struct authority.
+  result.setExports = (exports: Record<string, Function>) => {
+    installExports(exports, false);
+  };
   result.setInstance = (instance: WebAssembly.Instance) => {
     const exports = _brandedInstanceExports(instance);
     if (exports === undefined) {
       throw new TypeError("setInstance: expected a genuine WebAssembly.Instance");
     }
-    result.setExports!(exports as Record<string, Function>);
+    installExports(exports as Record<string, Function>, true);
   };
   result.startImportCounting = () => {
     importCounts = new Uint32Array(envImportNames.length);
@@ -15655,8 +15838,16 @@ export function wrapExports(
 ): Record<string, any> {
   // #1504: marshal by default; `marshal: false` keeps raw WasmGC handles.
   const marshal: "copy" | false = options?.marshal === false ? false : "copy";
-  const rawExports = _brandedInstanceExports(instanceOrExports) ?? (instanceOrExports as WebAssembly.Exports);
-  const exportsForMarshal = _hostBridgeExportView(rawExports as unknown as Record<string, Function>);
+  const brandedExports = _brandedInstanceExports(instanceOrExports);
+  const rawExports = brandedExports ?? (instanceOrExports as WebAssembly.Exports);
+  const exportsForMarshal = _hostBridgeExportView(
+    rawExports as unknown as Record<string, Function>,
+    undefined,
+    undefined,
+    undefined,
+    brandedExports !== undefined,
+    true,
+  );
   const callFn0 = exportsForMarshal.__call_fn_0 as ((closure: any) => any) | undefined;
   const callFn1 = exportsForMarshal.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
   // (#1700) Vec allocator + byte-writer for Uint8Array args. Either may be
@@ -15788,7 +15979,12 @@ export async function instantiateWasm(
   const sc = stringConstants ?? {};
   const sc16 = stringConstants16 ?? {};
   const bytes = binary as BufferSource;
-  if (JS_STRINGS_NATIVE_BUILTIN) {
+  // The data-struct bridge re-exports the exact imported Global as its
+  // per-buildImports association capability. Native imported-string
+  // constants are engine-created and therefore cannot preserve that object
+  // identity; keep this narrow family on the explicit polyfill import path.
+  const preserveDataStructAssociation = sc[_DATA_STRUCT_HOST_BRIDGE_TOKEN_VALUE] !== undefined;
+  if (JS_STRINGS_NATIVE_BUILTIN && !preserveDataStructAssociation) {
     try {
       const { instance } = await (WebAssembly.instantiate as Function)(
         bytes,
@@ -15823,9 +16019,10 @@ export async function instantiateWasmStreaming(
   const sc16 = stringConstants16 ?? {};
   const response = source instanceof Response ? source : source instanceof Promise ? await source : await fetch(source);
   const byteFallback = response.clone();
+  const preserveDataStructAssociation = sc[_DATA_STRUCT_HOST_BRIDGE_TOKEN_VALUE] !== undefined;
 
   if (typeof WebAssembly.instantiateStreaming === "function") {
-    if (JS_STRINGS_NATIVE_BUILTIN) {
+    if (JS_STRINGS_NATIVE_BUILTIN && !preserveDataStructAssociation) {
       try {
         const { instance } = await (WebAssembly.instantiateStreaming as Function)(
           response,

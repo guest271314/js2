@@ -263,6 +263,7 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     let closureRows = 0;
     let vecRows = 0;
     let dateRows = 0;
+    let dataRows = 0;
     let terminalUnits = 0;
     let emitted = 0;
     let unsupported = 0;
@@ -285,6 +286,7 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
       closureRows += entries.filter((candidate) => candidate.id.includes(":closure-host-bridge:")).length;
       vecRows += entries.filter((candidate) => candidate.id.includes(":vec-host-bridge:")).length;
       dateRows += entries.filter((candidate) => candidate.id.includes(":date-civil-support:")).length;
+      dataRows += entries.filter((candidate) => candidate.id.includes(":data-struct-host-bridge:")).length;
       for (const outcome of result.irOutcomes ?? []) {
         terminalUnits++;
         if (outcome.kind === "emitted") emitted++;
@@ -296,11 +298,12 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     }
 
     expect({ definedFunctions, closureRows }).toEqual({ definedFunctions: 166, closureRows: 26 });
-    // C30 and C32 are independent structural-ownership slices. As each lands,
-    // its rows move one-for-one out of the generic retained-function bucket.
+    // C30, C32, and C33 are independent structural-ownership slices. Each
+    // moves its rows one-for-one out of the generic retained-function bucket.
     expect([0, 24]).toContain(vecRows);
     expect([0, 1]).toContain(dateRows);
-    expect(genericRows).toBe(75 - vecRows - dateRows);
+    expect(dataRows).toBe(5);
+    expect(genericRows).toBe(75 - vecRows - dateRows - dataRows);
     expect({ terminalUnits, emitted, unsupported, invariants, legacyBodies, irBodies }).toEqual({
       terminalUnits: 37,
       emitted: 30,

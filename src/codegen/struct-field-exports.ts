@@ -15,6 +15,7 @@ import { addFuncType } from "./registry/types.js";
 import { addStringConstantGlobal, addUnionImports } from "./registry/imports.js";
 import { isSyntheticStructName } from "./emit-helpers.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
+import { DATA_STRUCT_HOST_BRIDGE_ORDINAL, publishDataStructHostBridge } from "./data-struct-host-bridge.js";
 
 /**
  * Emit exported getter/setter helper functions so the JS runtime can read
@@ -974,19 +975,17 @@ function emitStructFieldNamesExport(
   const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
   if (shapeEntries.length > 0) locals.push({ name: "__shapeId", type: { kind: "i32" } });
 
-  const funcIdx = ctx.numImportFuncs + mod.functions.length;
-  mod.functions.push({
-    name: "__struct_field_names",
-    typeIdx: getterExternTypeIdx,
-    locals,
-    body,
-    exported: true,
-  } as WasmFunction);
-
-  mod.exports.push({
-    name: "__struct_field_names",
-    desc: { kind: "func", index: funcIdx },
-  });
+  publishDataStructHostBridge(
+    ctx,
+    {
+      name: "__struct_field_names",
+      typeIdx: getterExternTypeIdx,
+      locals,
+      body,
+      exported: true,
+    } as WasmFunction,
+    DATA_STRUCT_HOST_BRIDGE_ORDINAL.structFieldNames,
+  );
 }
 
 /** (#3032 W6) Sentinel-canonicalizing arm config for the `value` getter. */

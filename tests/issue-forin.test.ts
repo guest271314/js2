@@ -11,8 +11,8 @@ async function run(src: string): Promise<any> {
   const { instance } = await instantiateWasm(
     result.binary,
     imports.env,
-    imports["wasm:js-string"],
     imports.string_constants,
+    imports.string_constants16,
   );
   imports.setInstance?.(instance);
   return (instance.exports as any).test();

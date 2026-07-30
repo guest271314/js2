@@ -455,6 +455,7 @@ class PerfBenchmarkChart extends HTMLElement {
         fetch(cacheBust, { cache: "no-store" }),
         imports.env,
         imports.string_constants,
+        imports.string_constants16,
       );
       imports.setInstance?.(result.instance);
       samples.push(performance.now() - t0);
@@ -547,7 +548,12 @@ class PerfBenchmarkChart extends HTMLElement {
       throw new Error(wasmOptResult?.warning || "in-page wasm-opt did not produce an optimized module");
     }
     const optimizedWasmBytes = wasmOptResult.binary;
-    const wasmResult = await runtimeHelpers.instantiateWasm(optimizedWasmBytes, imports.env, imports.string_constants);
+    const wasmResult = await runtimeHelpers.instantiateWasm(
+      optimizedWasmBytes,
+      imports.env,
+      imports.string_constants,
+      imports.string_constants16,
+    );
     imports.setInstance?.(wasmResult.instance);
     const wasmFn = wasmResult.instance.exports?.[exportName];
     if (typeof wasmFn !== "function") {
