@@ -23,7 +23,7 @@ import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringImports, addUnionImports } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
-import { emitAnyEqFromExternTemps } from "./coercion-engine.js";
+import { emitAnyEqFromExternTemps, emitHostEqualityFromStack } from "./coercion-engine.js";
 import {
   compileBooleanBinaryOp,
   compileI32BinaryOp,
@@ -1065,24 +1065,7 @@ export function compileTypedBinaryDispatch(
     }
 
     if (!noJsHost && (leftIsDynamicForIn || rightIsDynamicForIn)) {
-      if (rightType.kind !== "externref") {
-        coerceType(ctx, fctx, rightType, { kind: "externref" });
-      }
-      if (leftType.kind !== "externref") {
-        const tmpR = allocTempLocal(fctx, { kind: "externref" });
-        fctx.body.push({ op: "local.set", index: tmpR });
-        coerceType(ctx, fctx, leftType, { kind: "externref" });
-        fctx.body.push({ op: "local.get", index: tmpR });
-        releaseTempLocal(fctx, tmpR);
-      }
-      const hostFn = isStrict ? "__host_eq" : "__host_loose_eq";
-      const hostIdx = ensureLateImport(ctx, hostFn, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
-      flushLateImportShifts(ctx, fctx);
-      const finalHostIdx = ctx.funcMap.get(hostFn) ?? hostIdx;
-      if (finalHostIdx === undefined) throw new Error(`Missing import after ensureLateImport: ${hostFn}`);
-      fctx.body.push({ op: "call", funcIdx: finalHostIdx });
-      if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
-      return { kind: "i32" };
+      return emitHostEqualityFromStack(ctx, fctx, leftType, rightType, isStrict, isNeqOp);
     }
 
     // Wrapper object semantics (#1111): `new Number(n)`, `new String(s)`,

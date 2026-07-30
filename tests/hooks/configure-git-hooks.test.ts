@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -43,5 +43,11 @@ describe("worktree-local Git hook installation", () => {
     execFileSync("/bin/sh", [INSTALLER, fixtureRoot]);
 
     expect(git(fixtureRoot, "config", "--get", "core.hooksPath")).toBe(".husky");
+  });
+
+  it("keeps the oracle ratchet in the pre-commit hook", () => {
+    const hook = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
+
+    expect(hook).toContain("pnpm run check:oracle-ratchet");
   });
 });

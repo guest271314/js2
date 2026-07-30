@@ -7783,8 +7783,8 @@ export function ensureLetConstBindingPatternTdzFlags(
  */
 function varBindingIsForInIdentifierTarget(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
   if (!ts.isIdentifier(decl.name)) return false;
-  const bindingSymbol = ctx.checker.getSymbolAtLocation(decl.name);
-  if (!bindingSymbol) return false;
+  const bindingDeclaration = ctx.oracle.variableDeclarationOf(decl.name);
+  if (!bindingDeclaration) return false;
 
   let root: ts.Node = decl.getSourceFile();
   for (let node: ts.Node | undefined = decl.parent; node; node = node.parent) {
@@ -7801,7 +7801,7 @@ function varBindingIsForInIdentifierTarget(ctx: CodegenContext, decl: ts.Variabl
     if (ts.isForInStatement(node)) {
       let target: ts.Expression | ts.VariableDeclarationList = node.initializer;
       while (ts.isParenthesizedExpression(target)) target = target.expression;
-      if (ts.isIdentifier(target) && ctx.checker.getSymbolAtLocation(target) === bindingSymbol) {
+      if (ts.isIdentifier(target) && ctx.oracle.variableDeclarationOf(target) === bindingDeclaration) {
         found = true;
         return;
       }
