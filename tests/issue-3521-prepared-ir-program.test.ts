@@ -16,6 +16,7 @@ import {
 import { PreparedIrProgramBuilder, type PreparedIrIrCandidateInput } from "../src/ir/prepare.js";
 import {
   createPreparedIrCandidateProgram,
+  preparedIrReadonlyMap,
   PreparedIrEmissionTransaction,
   PreparedIrProgramInvariantError,
   type PreparedIrProgram,
@@ -744,6 +745,55 @@ describe("#3521 PreparedIrProgram structural ownership", () => {
     expect(factoryProgram.allocationCandidates[0]?.key).toBe("mutable:allocation");
     expect(factoryProgram.provenanceCandidates[0]?.ordinal).toBe(1);
     expect(factoryProgram.abi.entries).toEqual(program.abi.entries);
+  });
+
+  it("recursively owns exported readonly-map wrappers and rejects cycles through them", () => {
+    const { program, alphaId } = validPreparedCore();
+    const alpha = program.irCandidates.get(alphaId)!;
+    const nested = { slot: 1 };
+    const wrapped = preparedIrReadonlyMap([["alpha", nested] as const]);
+    const units = new Map(program.units);
+    units.set(alphaId, {
+      ...alpha,
+      irCandidate: { wrapped },
+    });
+    const ownedProgram = createPreparedIrCandidateProgram({
+      abiEntries: program.abi.entries,
+      units,
+      componentCandidates: program.componentCandidates,
+      supportIntentCandidates: program.supportIntentCandidates,
+      allocationCandidates: program.allocationCandidates,
+      provenanceCandidates: program.provenanceCandidates,
+    });
+    nested.slot = 99;
+    const ownedWrapped = (
+      ownedProgram.irCandidates.get(alphaId)?.irCandidate as {
+        wrapped: ReadonlyMap<string, { slot: number }>;
+      }
+    ).wrapped;
+    expect(ownedWrapped.get("alpha")?.slot).toBe(1);
+    expect(ownedWrapped).not.toBe(wrapped);
+
+    const cycleTarget: { wrapped?: ReadonlyMap<string, unknown> } = {};
+    const cyclicWrapper = preparedIrReadonlyMap([["cycle", cycleTarget] as const]);
+    cycleTarget.wrapped = cyclicWrapper;
+    const cyclicUnits = new Map(program.units);
+    cyclicUnits.set(alphaId, {
+      ...alpha,
+      irCandidate: { wrapped: cyclicWrapper },
+    });
+    expectPreparedInvariant(
+      () =>
+        createPreparedIrCandidateProgram({
+          abiEntries: program.abi.entries,
+          units: cyclicUnits,
+          componentCandidates: program.componentCandidates,
+          supportIntentCandidates: program.supportIntentCandidates,
+          allocationCandidates: program.allocationCandidates,
+          provenanceCandidates: program.provenanceCandidates,
+        }),
+      "invalid-prepared-data",
+    );
   });
 
   it("fails closed on inconsistent direct-factory unit identity and unknown grouping units", () => {

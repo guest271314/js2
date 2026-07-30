@@ -289,9 +289,16 @@ function invalidPreparedData(detail: string): never {
 function immutableCopy(value: unknown, ancestors = new Set<object>()): unknown {
   if (typeof value === "function") invalidPreparedData("prepared data cannot contain executable functions");
   if (value === null || typeof value !== "object") return value;
-  if (value instanceof FrozenMap || value instanceof FrozenSet) return value;
   if (ancestors.has(value)) invalidPreparedData("prepared data must be acyclic");
   const nextAncestors = new Set(ancestors).add(value);
+  if (value instanceof FrozenMap) {
+    return preparedIrReadonlyMap(
+      [...value].map(([key, item]) => [immutableCopy(key, nextAncestors), immutableCopy(item, nextAncestors)] as const),
+    );
+  }
+  if (value instanceof FrozenSet) {
+    return new FrozenSet([...value].map((item) => immutableCopy(item, nextAncestors)));
+  }
   if (Array.isArray(value)) return Object.freeze(value.map((item) => immutableCopy(item, nextAncestors)));
   if (value instanceof Map) {
     return preparedIrReadonlyMap(
