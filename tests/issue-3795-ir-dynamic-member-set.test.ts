@@ -149,6 +149,7 @@ describe("#3795 IR dynamic local widening and strict member set", () => {
           trackIrOutcomes: true,
         });
       } finally {
+        // biome-ignore lint/performance/noDelete: restore the test-only environment state exactly
         if (previousForce === undefined) delete process.env.JS2WASM_FORCE_DYN_MEMBER_SET;
         else process.env.JS2WASM_FORCE_DYN_MEMBER_SET = previousForce;
       }
@@ -211,6 +212,7 @@ describe("#3795 IR dynamic local widening and strict member set", () => {
         trackIrOutcomes: true,
       });
     } finally {
+      // biome-ignore lint/performance/noDelete: restore the test-only environment state exactly
       if (previousForce === undefined) delete process.env.JS2WASM_FORCE_DYN_MEMBER_SET;
       else process.env.JS2WASM_FORCE_DYN_MEMBER_SET = previousForce;
     }
@@ -311,6 +313,7 @@ export function run(): number {
     for (const irFirst of [false, true]) {
       const previous = process.env.JS2WASM_IR_FIRST;
       if (irFirst) process.env.JS2WASM_IR_FIRST = "1";
+      // biome-ignore lint/performance/noDelete: exercise the default policy without leaving a string sentinel
       else delete process.env.JS2WASM_IR_FIRST;
       let result: Awaited<ReturnType<typeof compile>>;
       try {
@@ -321,6 +324,7 @@ export function run(): number {
           trackIrOutcomes: true,
         });
       } finally {
+        // biome-ignore lint/performance/noDelete: restore the test-only environment state exactly
         if (previous === undefined) delete process.env.JS2WASM_IR_FIRST;
         else process.env.JS2WASM_IR_FIRST = previous;
       }
