@@ -2736,15 +2736,18 @@ export function emitBoundFunctionCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
+  calleeAlreadyOnStack = false,
 ): InnerResult | null {
   const externRef: ValType = { kind: "externref" };
 
   // 1. Compile callee → externref, stash in a local.
-  const calleeType = compileExpression(ctx, fctx, expr.expression, externRef);
-  if (calleeType === null) {
-    fctx.body.push({ op: "ref.null.extern" });
-  } else if (calleeType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" });
+  if (!calleeAlreadyOnStack) {
+    const calleeType = compileExpression(ctx, fctx, expr.expression, externRef);
+    if (calleeType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (calleeType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" });
+    }
   }
   const calleeLocal = allocLocal(fctx, `__bfn_callee_${fctx.locals.length}`, externRef);
   fctx.body.push({ op: "local.set", index: calleeLocal });

@@ -61,6 +61,22 @@ import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint", "prettier", "react"];
+// Committed npm API snapshot keeps report generation deterministic and offline.
+// Refresh these together from:
+// https://api.npmjs.org/downloads/point/last-week/{package}
+const NPM_DOWNLOADS_SNAPSHOT = {
+  start: "2026-07-23",
+  end: "2026-07-29",
+  packages: {
+    acorn: 240_886_853,
+    cookie: 173_435_452,
+    react: 162_687_688,
+    eslint: 152_308_132,
+    prettier: 117_242_232,
+    clsx: 104_930_549,
+    marked: 60_496_071,
+  },
+};
 const cliArgs = process.argv.slice(2);
 
 function optionValue(name) {
@@ -1484,9 +1500,24 @@ if (selectedPackages.has("react")) {
   );
 }
 
+for (const pkg of packages) {
+  pkg.weeklyDownloads = NPM_DOWNLOADS_SNAPSHOT.packages[pkg.name] ?? null;
+}
+packages.sort(
+  (left, right) =>
+    (right.weeklyDownloads ?? Number.NEGATIVE_INFINITY) - (left.weeklyDownloads ?? Number.NEGATIVE_INFINITY) ||
+    left.name.localeCompare(right.name),
+);
+
 const summary = {
   generatedAt: new Date().toISOString(),
   note: "Only packages with a committed, reproducible tests/dogfood/*-harness.mjs are listed. mustache (#3720), diff (#3721), and dayjs (#3747) were probed ad-hoc and surfaced real bugs but have no committed harness yet.",
+  popularity: {
+    metric: "weekly npm downloads",
+    start: NPM_DOWNLOADS_SNAPSHOT.start,
+    end: NPM_DOWNLOADS_SNAPSHOT.end,
+    source: "https://api.npmjs.org/downloads/point/last-week/{package}",
+  },
   performanceMethodology: {
     baseline: "same pinned package, inputs, and result observation in native Node",
     inputModes: {

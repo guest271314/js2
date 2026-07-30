@@ -37,6 +37,7 @@ import type { TypeFact } from "../checker/oracle.js";
 import { ts } from "../ts-api.js";
 import { ensureAnyFromExternHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import { boxToAny } from "./value-tags.js";
+import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
@@ -656,6 +657,45 @@ export function emitLooseEq(
   negate: boolean,
 ): ValType | null {
   return emitAnyEquality(ctx, fctx, expr, "__any_eq", negate);
+}
+
+/**
+ * Emit host strict/loose equality for two values already present on the stack.
+ * Typed binary dispatch reaches this seam after compiling both operands, so it
+ * cannot use emitStrictEq/emitLooseEq without evaluating them twice.
+ */
+export function emitHostEqualityFromStack(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  leftType: ValType,
+  rightType: ValType,
+  strict: boolean,
+  negate: boolean,
+): ValType {
+  if (rightType.kind !== "externref") {
+    coerceType(ctx, fctx, rightType, { kind: "externref" });
+  }
+  if (leftType.kind !== "externref") {
+    const tmpRight = allocTempLocal(fctx, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: tmpRight });
+    coerceType(ctx, fctx, leftType, { kind: "externref" });
+    fctx.body.push({ op: "local.get", index: tmpRight });
+    releaseTempLocal(fctx, tmpRight);
+  }
+
+  const hostFn = strict ? "__host_eq" : "__host_loose_eq";
+  const provisionalIdx = ensureLateImport(
+    ctx,
+    hostFn,
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  const finalIdx = ctx.funcMap.get(hostFn) ?? provisionalIdx;
+  if (finalIdx === undefined) throw new Error(`Missing import after ensureLateImport: ${hostFn}`);
+  fctx.body.push({ op: "call", funcIdx: finalIdx });
+  if (negate) fctx.body.push({ op: "i32.eqz" });
+  return { kind: "i32" };
 }
 
 /**

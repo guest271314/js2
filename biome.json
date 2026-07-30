@@ -14,7 +14,11 @@
       "tests/dogfood/.marked/**",
       "tests/dogfood/.acorn-test-suite/**",
       "tests/dogfood/.clsx/**",
-      "tests/dogfood/.cookie/**"
+      "tests/dogfood/.cookie/**",
+      "tests/dogfood/.eslint/**",
+      "tests/dogfood/.prettier/**",
+      "tests/dogfood/.react/**",
+      "tests/dogfood/.react-upstream-suite/**"
     ]
   },
   "linter": {

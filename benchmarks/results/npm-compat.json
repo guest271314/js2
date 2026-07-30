@@ -1,6 +1,12 @@
 {
   "generatedAt": "2026-07-30T12:46:59.971Z",
   "note": "Only packages with a committed, reproducible tests/dogfood/*-harness.mjs are listed. mustache (#3720), diff (#3721), and dayjs (#3747) were probed ad-hoc and surfaced real bugs but have no committed harness yet.",
+  "popularity": {
+    "metric": "weekly npm downloads",
+    "start": "2026-07-23",
+    "end": "2026-07-29",
+    "source": "https://api.npmjs.org/downloads/point/last-week/{package}"
+  },
   "performanceMethodology": {
     "baseline": "same pinned package, inputs, and result observation in native Node",
     "inputModes": {
@@ -11,6 +17,7 @@
   "packages": [
     {
       "name": "acorn",
+      "weeklyDownloads": 240886853,
       "version": "8.16.0",
       "issue": 1710,
       "entryFile": "dist/acorn.mjs",
@@ -275,6 +282,7 @@
     },
     {
       "name": "marked",
+      "weeklyDownloads": 60496071,
       "version": "18.0.2",
       "issue": 3716,
       "entryFile": "lib/marked.esm.js",
@@ -333,6 +341,7 @@
     },
     {
       "name": "clsx",
+      "weeklyDownloads": 104930549,
       "version": "2.1.1",
       "issue": 3748,
       "entryFile": "dist/clsx.mjs",
@@ -546,6 +555,7 @@
     },
     {
       "name": "cookie",
+      "weeklyDownloads": 173435452,
       "version": "2.0.1",
       "issue": 3751,
       "entryFile": "dist/index.js",
@@ -733,6 +743,7 @@
     },
     {
       "name": "eslint",
+      "weeklyDownloads": 152308132,
       "version": "10.0.3",
       "issue": 1400,
       "entryFile": "lib/api.js",
@@ -786,6 +797,7 @@
     },
     {
       "name": "prettier",
+      "weeklyDownloads": 117242232,
       "version": "3.8.1",
       "issue": null,
       "entryFile": "standalone.mjs",
@@ -819,6 +831,7 @@
     },
     {
       "name": "react",
+      "weeklyDownloads": 162687688,
       "version": "19.2.6",
       "issue": null,
       "entryFile": "index.js",
@@ -838,9 +851,9 @@
       },
       "tests": {
         "kind": "upstream-api-vectors",
-        "passed": 0,
+        "passed": 5,
         "total": 5,
-        "passRatePct": 0
+        "passRatePct": 100
       },
       "perf": null,
       "knownBugs": []

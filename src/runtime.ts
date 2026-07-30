@@ -1771,7 +1771,13 @@ function _wrapWasmClosureUnknownArity(
         // `ref.test (ref objStruct)` then fails and the body's `this.<field>` traps.
         // Mirrors the known-arity bridge in `_wrapWasmClosure` (#1712 / #1320).
         const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
-        return marshalNew(methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded));
+        const receiver = _isWasmStruct(rawThis) ? rawThis : this;
+        const argcCallFn = exports[`__\0js2_call_fn_method_argc_${dispatchArity}`];
+        return marshalNew(
+          typeof argcCallFn === "function"
+            ? argcCallFn(args.length, receiver, closure, ...padded)
+            : methodCallFn(receiver, closure, ...padded),
+        );
       }
     }
     // Free-function / extracted-method (`const f = o.m; f()`) path: dispatch by the
@@ -6348,61 +6354,16 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         // dummy undefined arg returns a non-iterator, breaking native
         // Set.prototype.union/difference/symmetricDifference which expect
         // `keys()` to return a real iterator.
-        const callFn0 = exports["__call_fn_0"];
-        const callFn1 = exports["__call_fn_1"];
-        const callFn2 = exports["__call_fn_2"];
-        if (typeof callFn0 === "function" || typeof callFn1 === "function" || typeof callFn2 === "function") {
-          // (#2015) Method-`this` threading. When this closure field is invoked
-          // as a METHOD (`o.m()` on an any/externref receiver routes through
-          // `__extern_method_call` → `fn.apply(wrappedObj, …)`), the bridge's
-          // `this` is the host-mirror proxy for the receiver struct. Dispatch
-          // through `__call_fn_method_N` so the compiled method body's
-          // `this.<field>` observes the receiver via the `__current_this` global
-          // (#1636-S1) / the object-method trampoline's receiver slot. Unwrap
-          // the proxy to the raw struct first (mirrors `_wrapWasmClosure`).
-          // A bare/undefined/globalThis `this` (extraction call `const f = o.m;
-          // f()`) keeps the plain `__call_fn_N` path so the spec-mandated
-          // unbound-`this` semantics are preserved unchanged.
-          const mcall0 = exports["__call_fn_method_0"];
-          const mcall1 = exports["__call_fn_method_1"];
-          const mcall2 = exports["__call_fn_method_2"];
-          const genericBridge = function closureBridge(this: any, ...args: any[]) {
-            // (#3051 Slice 3) Host-side [[Construct]] of a compiled closure
-            // (V8's `Construct(C_species, «rx, flags»)` in @@split) — a raw
-            // wasm-struct return must be marshalled to its host mirror so the
-            // native protocol can drive the constructed splitter's
-            // exec/lastIndex. Only the `new` path marshals; plain calls keep
-            // their raw returns (marshalling generic call exits regressed ~85
-            // dstr files — see #3123/#2835).
-            const viaNew = new.target !== undefined;
-            const dispatch = (): any => {
-              const hasRecv = this !== undefined && this !== null && this !== globalThis;
-              const rawThis = hasRecv && typeof this === "object" ? _unwrapForHost(this) : this;
-              const recv = _isWasmStruct(rawThis) ? rawThis : undefined;
-              if (recv !== undefined) {
-                if (args.length === 0 && typeof mcall0 === "function") return mcall0(recv, val);
-                if (args.length === 1 && typeof mcall1 === "function") return mcall1(recv, val, args[0]);
-                if (args.length >= 2 && typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
-                if (typeof mcall1 === "function") return mcall1(recv, val, args[0]);
-                if (typeof mcall0 === "function") return mcall0(recv, val);
-                if (typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
-              }
-              if (args.length === 0 && typeof callFn0 === "function") return callFn0(val);
-              if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, args[0]);
-              if (args.length >= 2 && typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
-              // Fallback: try the highest-arity dispatcher available, padding
-              // missing args with undefined or dropping extras.
-              if (typeof callFn1 === "function") return callFn1(val, args[0]);
-              if (typeof callFn0 === "function") return callFn0(val);
-              if (typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
-              return undefined;
-            };
-            const ret = dispatch();
-            if (viaNew && ret != null && typeof ret === "object" && _isWasmStruct(ret)) {
-              return _wrapForHost(ret, exports);
-            }
-            return ret;
-          };
+        const genericBridge = _wrapWasmClosureUnknownArity(val, { getExports: () => exports });
+        if (genericBridge !== null) {
+          // Reuse the authoritative dynamic wrapper instead of maintaining a
+          // proxy-specific 0..2 dispatcher. Besides preserving method `this`
+          // and [[Construct]] marshalling, it reads the closure's real declared
+          // arity and selects a dispatcher large enough for under-applied calls
+          // (`exports.createElement(type, config)` where createElement declares
+          // a third `children` formal). The old local bridge selected
+          // `__call_fn_method_2`, which cannot match an arity-3 closure and
+          // silently returned null.
           // (#3051 Slice 3) See the named-arm exec wrap above.
           return key === "exec" ? _wrapExecReturnForHost(genericBridge, { getExports: () => exports }) : genericBridge;
         }

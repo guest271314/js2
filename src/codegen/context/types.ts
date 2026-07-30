@@ -520,6 +520,12 @@ export interface FunctionContext {
   locals: LocalDef[];
   /** All local names → index (params first, then locals) */
   localMap: Map<string, number>;
+  /**
+   * Function-scoped `var` bindings that are also bare `for...in` assignment
+   * targets. Their slots must remain externref because the loop writes string
+   * keys even when a later declaration initializer is numerically typed.
+   */
+  forInIdentifierVars?: Set<string>;
   /** Return type */
   returnType: ValType | null; // null = void
   /** Accumulated body instructions */
