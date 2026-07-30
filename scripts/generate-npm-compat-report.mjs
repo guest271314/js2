@@ -14,7 +14,7 @@
 // Node or Wasm owns the benchmark driver and repeated-call loop.
 //
 // Scope: only the packages with a real, committed, reproducible dogfood
-// harness (acorn, marked, clsx, cookie). mustache/diff/dayjs were probed
+// harness (acorn, marked, clsx, cookie, eslint). mustache/diff/dayjs were probed
 // ad-hoc (see their issue files, #3720/#3721/#3747) but have no committed
 // harness yet — deliberately NOT included here rather than fabricating
 // numbers from a one-off, non-reproducible probe.
@@ -36,6 +36,7 @@ import { runHarness as runAcornOfficialSuite } from "../tests/dogfood/acorn-offi
 import { runHarness as runMarked } from "../tests/dogfood/marked-harness.mjs";
 import { runHarness as runClsx } from "../tests/dogfood/clsx-harness.mjs";
 import { runHarness as runCookie } from "../tests/dogfood/cookie-harness.mjs";
+import { runHarness as runEslint } from "../tests/dogfood/eslint-harness.mjs";
 
 import { setupAcorn } from "../tests/dogfood/setup-acorn.mjs";
 import { setupClsx } from "../tests/dogfood/setup-clsx.mjs";
@@ -52,7 +53,7 @@ import {
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie"];
+const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint"];
 const cliArgs = process.argv.slice(2);
 
 function optionValue(name) {
@@ -1112,6 +1113,13 @@ function knownBugsFor(name) {
         summary: "a property assigned dynamically inside a loop/switch onto an object is silently dropped",
       },
     ],
+    eslint: [
+      {
+        issue: 3672,
+        summary:
+          "the real multi-file Linter graph is still beyond the bounded mainline compile/runtime integration frontier",
+      },
+    ],
   };
   return map[name] ?? [];
 }
@@ -1231,6 +1239,23 @@ if (selectedPackages.has("cookie")) {
         sourceIssue: 3751,
       },
       perf: cookiePerf,
+    }),
+  );
+}
+
+if (selectedPackages.has("eslint")) {
+  console.log("[npm-compat] eslint — bounded package-entry compile/validate...");
+  const eslintReport = await runEslint({ quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: "eslint",
+      version: eslintReport.eslint.version,
+      issue: 1400,
+      entryFile: eslintReport.eslint.entryModule.replace(/^package\//, ""),
+      shape: "cjs-project",
+      report: eslintReport,
+      tests: null,
+      perf: null,
     }),
   );
 }

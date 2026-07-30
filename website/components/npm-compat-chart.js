@@ -165,7 +165,8 @@ class NpmCompatChart extends HTMLElement {
     // load-bearing, so it is the row's own label, never blurred into one number.
     let tests;
     if (!pkg.tests) {
-      tests = this._row("tests", `<span class="muted">n/a — compile blocked</span>`);
+      const reason = compiles ? "runtime not verified" : "compile blocked";
+      tests = this._row("tests", `<span class="muted">n/a — ${reason}</span>`);
     } else {
       const { kind, passed, total, passRatePct } = pkg.tests;
       const pct = passRatePct != null ? passRatePct : total ? ((passed / total) * 100).toFixed(1) : null;
@@ -300,6 +301,9 @@ class NpmCompatChart extends HTMLElement {
           background: var(--bg, #060a14);
           padding: 18px 20px 16px;
           min-width: 0;
+        }
+        .card:last-child:nth-child(odd) {
+          grid-column: 1 / -1;
         }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
         .card-top .name { font-size: 15px; font-weight: 600; }
@@ -475,6 +479,7 @@ class NpmCompatChart extends HTMLElement {
 
         @media (max-width: 1100px) {
           .cards { grid-template-columns: 1fr; }
+          .card:last-child:nth-child(odd) { grid-column: auto; }
         }
         @media (max-width: 720px) {
           .card { padding: 16px; }
