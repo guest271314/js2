@@ -2424,6 +2424,7 @@ export function lowerIrFunctionBody<S, Slot>(
         const opTy = typeOf(instr.value);
         const alreadyExternref =
           (opTy.kind === "val" && opTy.val.kind === "externref") ||
+          opTy.kind === "extern" ||
           opTy.kind === "callable" ||
           (opTy.kind === "string" && resolver.resolveString?.()?.kind === "externref");
         if (!alreadyExternref) {

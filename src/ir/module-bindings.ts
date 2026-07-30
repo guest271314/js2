@@ -644,6 +644,7 @@ function directTopLevelDeclaration(node: ts.Identifier, checker: ts.TypeChecker)
   if (!symbol) return undefined;
   const sourceFile = node.getSourceFile();
   const candidates = [symbol.valueDeclaration, ...(symbol.declarations ?? [])];
+  const directDeclarations = new Set<ts.VariableDeclaration>();
   for (const candidate of candidates) {
     if (!candidate || !ts.isVariableDeclaration(candidate)) continue;
     if (candidate.getSourceFile() !== sourceFile) continue;
@@ -652,12 +653,28 @@ function directTopLevelDeclaration(node: ts.Identifier, checker: ts.TypeChecker)
     if (!ts.isVariableDeclarationList(list)) continue;
     const statement = list.parent;
     if (!ts.isVariableStatement(statement) || statement.parent !== sourceFile) continue;
-    // Capability C is intentionally lexical-binding-only. Module `var`
-    // hoisting has wider aliasing rules and stays on the legacy path.
-    if (!(list.flags & ts.NodeFlags.Let) && !(list.flags & ts.NodeFlags.Const)) continue;
-    return candidate;
+    directDeclarations.add(candidate);
   }
-  return undefined;
+  if (directDeclarations.size !== 1) return undefined;
+  const declaration = [...directDeclarations][0]!;
+  const list = declaration.parent as ts.VariableDeclarationList;
+  if (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) return declaration;
+
+  // #2949 Acorn follow-up — a unique top-level `var` in an ES module has one
+  // checker identity and one legacy `__mod_*` slot, so scalar reads/writes can
+  // share that slot with IR just like `let`. Reject scripts and merged/repeated
+  // declarations: their hoisting/global-alias rules are wider than this exact
+  // source-owned capability.
+  if (!ts.isExternalModule(sourceFile)) return undefined;
+  const declaredType = checker.getTypeAtLocation(declaration.name);
+  if ((declaredType.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike)) === 0) return undefined;
+  const sameSourceDeclarations = new Set(
+    candidates.filter(
+      (candidate): candidate is ts.Declaration =>
+        candidate !== undefined && candidate.getSourceFile() === sourceFile && !ts.isExportSpecifier(candidate),
+    ),
+  );
+  return sameSourceDeclarations.size === 1 && sameSourceDeclarations.has(declaration) ? declaration : undefined;
 }
 
 function localVariableDeclaration(node: ts.Identifier, checker: ts.TypeChecker): ts.VariableDeclaration | undefined {
@@ -1135,12 +1152,13 @@ export function makeIrLegacyModuleBindingResolver(
     ) {
       return { kind: "unsupported", declaration };
     }
-    const mutable = (list.flags & ts.NodeFlags.Let) !== 0;
+    const isModuleVar = (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0;
+    const mutable = isModuleVar || (list.flags & ts.NodeFlags.Let) !== 0;
     if (writeValue !== undefined && !mutable) return { kind: "unsupported", declaration };
 
     const declaredType = checker.getTypeAtLocation(declaration.name);
     let valueKind = scalarKind(declaredType, options);
-    if (!valueKind && options.allowHostExterns) {
+    if (!valueKind && !isModuleVar && options.allowHostExterns) {
       const className = externClassNameForType(declaredType, checker, options);
       if (className) {
         valueKind = { kind: "extern", className };
