@@ -2,9 +2,9 @@
 id: 3716
 title: "Add marked as a second pinned-tarball dogfood package (differential HTML-output testing, alongside acorn)"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 priority: medium
 horizon: m

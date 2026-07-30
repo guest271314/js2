@@ -4,9 +4,9 @@ title: "Standalone: a Test262Error instance's .constructor reads undefined, so a
 status: done
 completed: 2026-07-25
 assignee: ttraenkler/opus-sa-assertfail
-sprint: current
+sprint: 77
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-30
 priority: high
 horizon: m
 feasibility: hard

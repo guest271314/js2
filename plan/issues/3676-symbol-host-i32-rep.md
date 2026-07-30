@@ -2,9 +2,9 @@
 id: 3676
 title: "JS-host Symbol.for / well-known-symbol value reads return externref, not the canonical i32 symbol id — React 19 emits a valid module that cannot instantiate"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-30
 completed: 2026-07-26
 assignee: ttraenkler/opus-dev
 priority: high

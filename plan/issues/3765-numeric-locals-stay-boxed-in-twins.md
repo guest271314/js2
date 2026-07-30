@@ -2,9 +2,9 @@
 id: 3765
 title: "perf: a provably-numeric LOCAL still boxes inside a typed twin — 3 of the 4 per-character calls in the tokenizer's hot body"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: high
 horizon: m

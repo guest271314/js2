@@ -2,9 +2,9 @@
 id: 3617
 title: "Standalone: a plain fnctor instance's .constructor reads undefined (standalone counterpart of #3486)"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-25
-updated: 2026-07-28
+updated: 2026-07-30
 priority: medium
 horizon: l
 feasibility: hard

@@ -3,7 +3,7 @@ id: 3787
 title: "IR ambient String.fromCharCode lowering"
 status: done
 completed: 2026-07-30
-sprint: current
+sprint: 77
 created: 2026-07-30
 updated: 2026-07-30
 priority: high

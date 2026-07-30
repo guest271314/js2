@@ -2,9 +2,9 @@
 id: 3751
 title: "cookie dogfood harness — fourth single-bundle npm package, surfaces a real dynamic-property-write-dropped bug (#3750)"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: medium
 horizon: m

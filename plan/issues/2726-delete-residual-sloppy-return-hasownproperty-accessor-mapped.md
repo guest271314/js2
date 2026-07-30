@@ -3,7 +3,7 @@ id: 2726
 title: "delete residual: sloppy return-value semantics, hasOwnProperty-after-delete, accessor descriptor configurability, mapped-arguments delete"
 status: done
 completed: 2026-07-26
-sprint: current
+sprint: 77
 goal: es5
 feasibility: medium
 depends_on: []
@@ -18,7 +18,7 @@ loc-budget-allow:
   - src/codegen/typeof-delete.ts
   - src/ir/select.ts
 created: 2026-06-26
-updated: 2026-07-28
+updated: 2026-07-30
 ---
 
 > **Strict-rerun residual (2026-07-28, codex-2726).** The authoritative

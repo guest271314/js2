@@ -2,9 +2,9 @@
 id: 3763
 title: "String.prototype.indexOf host path conflates an undefined search argument with null"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: medium
 horizon: s

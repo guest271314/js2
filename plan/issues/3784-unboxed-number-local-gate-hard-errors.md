@@ -3,9 +3,9 @@ id: 3784
 title: "#2782/#2790's no-box number-local gate threw a PLAIN Error, so its documented demote-to-legacy became a HARD compile error — latent until #3783 claimed function-local `var`s, then ordinary untyped JS stopped compiling on every target"
 status: done
 completed: 2026-07-29
-sprint: current
+sprint: 77
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-30
 priority: high
 horizon: s
 feasibility: medium

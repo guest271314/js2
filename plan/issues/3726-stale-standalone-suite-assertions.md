@@ -2,9 +2,9 @@
 id: 3726
 title: "Standalone suites red on main: assertions pinned to superseded mechanisms and a snapshot of a ratcheting metric"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 priority: medium
 horizon: s

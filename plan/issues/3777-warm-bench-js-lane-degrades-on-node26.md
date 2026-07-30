@@ -3,9 +3,9 @@ id: 3777
 title: "warm-chart JS lane runs ~15x slower through the benchmark harness than the same source at top level — Node 26 only, and it degrades DURING the measured rounds"
 status: done
 completed: 2026-07-29
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-29
+updated: 2026-07-30
 priority: high
 horizon: m
 feasibility: medium

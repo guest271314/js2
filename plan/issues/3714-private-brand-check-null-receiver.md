@@ -2,9 +2,9 @@
 id: 3714
 title: "Private brand check (#x in obj) on a null receiver does not throw a catchable TypeError"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 priority: low
 horizon: s

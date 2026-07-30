@@ -2,9 +2,9 @@
 id: 3722
 title: "Fix: await-as-label early-error false positive on `cond ? await x() : y` ternaries"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 priority: medium
 horizon: s

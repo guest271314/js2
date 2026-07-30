@@ -2,9 +2,9 @@
 id: 3743
 title: "CompileOptions.emitWatOnlyFunctions — targeted WAT debug dumps for huge compileProject graphs"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: low
 horizon: s

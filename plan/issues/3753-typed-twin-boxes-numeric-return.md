@@ -23,9 +23,9 @@ func-budget-allow:
   - src/codegen/index.ts::generateModule
 status: done
 completed: 2026-07-28
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 priority: high
 horizon: l
 feasibility: medium

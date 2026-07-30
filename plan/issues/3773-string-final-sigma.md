@@ -3,7 +3,7 @@ id: 3773
 title: "Standalone String lowercasing omits Unicode Final_Sigma context"
 status: done
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: medium
 feasibility: medium
@@ -13,7 +13,7 @@ area: codegen, strings
 es_edition: 5
 language_feature: string-prototype-lowercase
 goal: es5
-sprint: current
+sprint: 77
 assignee: ttraenkler/codex-es5-string-final-sigma
 related: [40, 1604, 2191]
 func-budget-allow:

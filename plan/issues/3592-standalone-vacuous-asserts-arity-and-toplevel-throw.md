@@ -2,7 +2,7 @@
 id: 3592
 title: "Silent wrong answers: top-level `throw` dropped in every non-WASI lane; under-applied calls through `__apply_closure` never happen (standalone)"
 status: done
-sprint: current
+sprint: 77
 priority: high
 horizon: m
 feasibility: hard

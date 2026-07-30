@@ -3,9 +3,9 @@ id: 3786
 title: "beat V8 on `loop.ts`: an i32-wrapping reduction is latency-bound on its accumulator chain — unroll with k independent partial sums (measured 192.1 µs, 1.92x FASTER than JS, vs 451.4 µs / 1.22x slower today)"
 status: done
 completed: 2026-07-29
-sprint: current
+sprint: 77
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-30
 priority: high
 horizon: l
 feasibility: medium

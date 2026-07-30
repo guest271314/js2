@@ -367,3 +367,36 @@ resulting `main` before execution pauses.
   `@loopdive/js2@0.65.0`, JSR latest at `0.65.0`, and a fresh
   `npx js2wasm@0.65.0 --version` returning `0.65.0`.
 - No Test262 run logs or equivalence baselines were changed by the release.
+
+## 2026-07-30 23:55 — sprint 77 frozen (late), de-inflation reflected, worktree-prune incident
+
+- **Sprint 77 frozen with `--force`** at `88e12f2`: 79 issues re-tagged
+  `sprint: current` → `sprint: 77`, 242 rolled forward, `plan/issues/sprints/77.md`
+  written. Range `sprint-77/begin` (bb5b414, 2026-07-24) .. 2026-07-30 —
+  1,541 commits, 671 merged PRs.
+- **Frozen late, and the record says so.** No freeze ran at the budget rollover
+  (the token-budget source is still unwired, #2751), so `freeze-sprint.mjs` was
+  invoked after the fact. It re-tags by current frontmatter, not by date, so the
+  window spans the intended tail *plus* the following days.
+- **Host count fell 30,364 → 29,856 and that is the win, not a regression.**
+  `ORACLE_VERSION` moved 10 → 12 inside the window (`69493a7`, the declared
+  re-baseline for the #3603 host de-inflation). The oracle bump *is* the
+  verdict-logic change, so both sides of the comparison classify rows
+  differently — the counts are different quantities, not a delta. Standalone
+  highwater 22,626 (official 22,394 / 43,106).
+- **#3658 resolved.** The landing-page summary sync had frozen at
+  `15:43Z / 30390-43098` while reporting SUCCESS five times; it is committing
+  every few hours again (verified through 2026-07-30 20:44). The *hardening* —
+  fail loudly when new baseline data yields no commit — is still open.
+- **Incident: `git worktree prune` run from inside the container deleted the
+  host session's live worktree registrations.** The repo is shared — the host
+  sees it at `/Volumes/Archiv Mini/...` with worktrees under `/private/tmp/js2-*`,
+  invisible from `/workspace`, therefore reported `prunable`. One `.git`, one
+  registry. It caught active work (`js2-3836-repair` advanced
+  `b96b016 → 0fc0989` between two commands). Committed work survived in the
+  shared object store; registrations did not. Recovery is host-side
+  `git worktree repair`. Rule recorded: `prunable` here means "not visible from
+  where I'm standing", never "stale", and worktree cleanup is host-side work.
+- `/workspace` was 1,279 commits behind and is now level with `origin/main`.
+  The 13 dirty files reverted to get there were each verified: every local-only
+  line already existed on `main` in evolved form. Nothing unique lost.

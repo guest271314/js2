@@ -3,7 +3,7 @@ id: 3638
 title: "Reflective `.call`/`.apply` on an INSTANCE-read builtin method casts unconditionally — uncatchable illegal_cast trap (standalone)"
 status: done
 assignee: ttraenkler/opus-loop-c
-sprint: current
+sprint: 77
 priority: high
 horizon: m
 feasibility: hard

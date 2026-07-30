@@ -2,7 +2,7 @@
 id: 3521a
 title: "R2: expose structural dependency identities during Program ABI planning"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-30
 updated: 2026-07-30
 priority: critical

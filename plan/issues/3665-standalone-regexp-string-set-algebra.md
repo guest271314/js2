@@ -3,9 +3,9 @@ id: 3665
 title: "Standalone RegExp: Unicode properties of strings and finite v-set algebra"
 status: done
 assignee: ttraenkler/codex-regexp-completion
-sprint: current
+sprint: 77
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-30
 priority: high
 horizon: l
 feasibility: hard

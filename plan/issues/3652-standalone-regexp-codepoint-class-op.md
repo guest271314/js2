@@ -3,9 +3,9 @@ id: 3652
 title: "Standalone RegExp: compact code-point class opcode for property-escape residual"
 status: done
 assignee: ttraenkler/codex-regexp-completion
-sprint: current
+sprint: 77
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-30
 completed: 2026-07-26
 priority: high
 horizon: l

@@ -3,7 +3,7 @@ id: 3626
 title: "ES5 conformance census — root-caused work plan for the es5 goal (+ edition-classifier fix)"
 status: done
 completed: 2026-07-25
-sprint: current
+sprint: 77
 goal: es5
 priority: high
 horizon: m

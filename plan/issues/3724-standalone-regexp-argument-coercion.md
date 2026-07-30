@@ -6,9 +6,9 @@ loc-budget-allow:
   # standalone RegExp lowering itself, so the ~74 net lines land in this file.
   - src/codegen/regexp-standalone.ts
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: high
 horizon: s

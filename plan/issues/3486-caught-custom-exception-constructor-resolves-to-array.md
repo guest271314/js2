@@ -4,9 +4,9 @@ title: "Host: caught custom-exception instance's .constructor resolves to Array,
 status: done
 completed: 2026-07-25
 assignee: ttraenkler/opus-3486
-sprint: current
+sprint: 77
 created: 2026-07-20
-updated: 2026-07-25
+updated: 2026-07-30
 priority: high
 horizon: l
 feasibility: hard

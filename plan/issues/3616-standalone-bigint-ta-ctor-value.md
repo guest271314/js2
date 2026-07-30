@@ -4,7 +4,7 @@ title: "standalone: BigInt64Array / BigUint64Array are null in VALUE position â€
 status: done
 assignee: ttraenkler/opus-typeerror-lane
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-30
 completed: 2026-07-25
 priority: high
 feasibility: medium
@@ -15,7 +15,7 @@ es_edition: multi
 language_feature: typedarray
 goal: standalone
 umbrella: 2860
-sprint: current
+sprint: 77
 horizon: m
 related: [2401, 838, 3054, 3087, 3177, 1349]
 origin: "opus-typeerror-lane triage of the post-#3592 standalone type_error family (3,038 rows), 2026-07-25"
