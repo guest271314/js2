@@ -119,7 +119,10 @@
       </div>
     </header>
 
-    <npm-compat-chart src="./benchmarks/results/npm-compat.json"></npm-compat-chart>
+    <npm-compat-chart
+      src="./benchmarks/results/npm-compat.json"
+      history-src="./benchmarks/results/npm-compat-history.json"
+    ></npm-compat-chart>
 
     <footer>
       <div>
@@ -137,7 +140,11 @@
       </div>
       <div>
         <h2>Performance</h2>
-        Compiled Wasm (
+        The per-package chart plots relative speed over committed benchmark runs on a logarithmic scale. The horizontal
+        <strong>Node 1×</strong>
+        line is the native baseline; points above it are faster and points below it are slower. Static and dynamic input
+        scenarios remain separate series, and the global JS-host/standalone control changes harness placement for every
+        package without combining those scenarios. Compiled Wasm (
         <code>-O4</code>
         ) reports input knowledge and harness placement separately. In
         <strong>JS host</strong>

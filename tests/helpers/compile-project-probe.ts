@@ -15,10 +15,21 @@ if (!entry || !rawOptions) {
 
 const options = JSON.parse(rawOptions) as CompileOptions;
 const result = await compileProject(entry, options);
+let valid = false;
+let validationError: string | null = null;
+if (result.success) {
+  try {
+    new WebAssembly.Module(result.binary);
+    valid = true;
+  } catch (error) {
+    validationError = error instanceof Error ? error.message : String(error);
+  }
+}
 const report = {
   success: result.success,
   binaryByteLength: result.success ? result.binary.byteLength : 0,
-  valid: result.success ? WebAssembly.validate(result.binary) : false,
+  valid,
+  validationError,
   errors: result.errors.map((error) => ({ message: error.message })),
 };
 
