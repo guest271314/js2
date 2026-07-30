@@ -15,6 +15,7 @@
   "codegen/dataview-native.ts": 5,
   "codegen/date-reflective-setters.ts": 3,
   "codegen/declarations/import-collector.ts": 23,
+  "codegen/dyn-ops.ts": 1,
   "codegen/expressions/call-identifier.ts": 8,
   "codegen/expressions/call-namespace-static.ts": 1,
   "codegen/expressions/call-receiver-method.ts": 11,
