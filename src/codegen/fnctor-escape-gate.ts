@@ -991,7 +991,14 @@ function inferReturnStruct(
   const ret = singleReturnExpr(fn);
   let result: string | undefined;
   if (ret) {
-    const r = unwrapExpr(ret);
+    let r = unwrapExpr(ret);
+    // An assignment expression evaluates to its RHS. Constructor factories
+    // commonly publish and return in one step (`return table[key] = new T()`),
+    // so preserve the concrete carrier through that generic value-producing
+    // form instead of losing it to the checker's `any`.
+    while (ts.isBinaryExpression(r) && r.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      r = unwrapExpr(r.right);
+    }
     if (ts.isNewExpression(r)) {
       let ctorSym = resolveFnctorSymbol(checker, r.expression);
       // #2681/#2686 — `return new this()` in a fnctor static method resolves to
@@ -1032,6 +1039,7 @@ function buildReceiverStructMap(
   const declarations: ts.VariableDeclaration[] = [];
   const assignments: ts.BinaryExpression[] = [];
   const calls: ts.CallExpression[] = [];
+  const propertyAccesses: ts.PropertyAccessExpression[] = [];
 
   const indexFlowSites = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name)) {
@@ -1045,6 +1053,7 @@ function buildReceiverStructMap(
       assignments.push(node);
     }
     if (ts.isCallExpression(node)) calls.push(node);
+    if (ts.isPropertyAccessExpression(node)) propertyAccesses.push(node);
     forEachChild(node, indexFlowSites);
   };
   indexFlowSites(sourceFile);
@@ -1067,6 +1076,29 @@ function buildReceiverStructMap(
         ctorSym = resolveEnclosingFnctorOwner(checker, expr)?.sym;
       }
       return ctorSym ? `__fnctor_${ctorSym.name}` : undefined;
+    }
+    if (ts.isPropertyAccessExpression(expr)) {
+      // A fixed object-literal table can carry constructor instances even when
+      // the checker exposes only their anonymous structural shape. Recover the
+      // initializer's concrete fnctor identity so a nested access such as
+      //
+      //   table.close.updateContext = fn
+      //
+      // pins the receiver to $__fnctor_TokenType instead of casting the value
+      // to the checker's incompatible anonymous struct. The table read itself
+      // remains representation-agnostic (externref); the member dispatcher
+      // keeps its generic terminal for non-fnctor values.
+      const memberSymbol = checker.getSymbolAtLocation(expr.name) ?? checker.getSymbolAtLocation(expr);
+      for (const memberDecl of memberSymbol?.getDeclarations() ?? []) {
+        if (ts.isPropertyAssignment(memberDecl)) {
+          const inferred = inferExprStruct(memberDecl.initializer);
+          if (inferred !== undefined) return inferred;
+        }
+        if (ts.isShorthandPropertyAssignment(memberDecl)) {
+          const inferred = inferExprStruct(memberDecl.name);
+          if (inferred !== undefined) return inferred;
+        }
+      }
     }
     // Acorn creates the Program node with
     // `options.program || this.startNode()`. The left side is either absent or
@@ -1138,6 +1170,10 @@ function buildReceiverStructMap(
 
   for (const [sym, struct] of structBySymbol) {
     for (const use of usesBySymbol.get(sym) ?? []) map.set(use, struct);
+  }
+  for (const access of propertyAccesses) {
+    const struct = inferExprStruct(access);
+    if (struct !== undefined) map.set(access, struct);
   }
   return map;
 }
@@ -1427,7 +1463,12 @@ export function deriveFnctorFields(
         : lhsWasm.kind === "externref"
           ? rhsWasm
           : lhsWasm;
-    fields.push({ name: fieldName, type: fieldType, mutable: true });
+    fields.push({
+      name: fieldName,
+      type: fieldType,
+      mutable: true,
+      ...(carrierIsDynamicObjectCall ? { dynamicObjectCarrier: true as const } : {}),
+    });
     onlyConditional.set(fieldName, conditional);
   }
   // Walk an assignment EXPRESSION, collecting EVERY `this.<field>` LHS in a

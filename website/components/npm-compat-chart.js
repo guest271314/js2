@@ -67,18 +67,91 @@ class NpmCompatChart extends HTMLElement {
     const ms = us / 1000;
     if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
     if (ms >= 1) return `${ms.toFixed(1)}ms`;
+    if (us < 0.1) return `${(us * 1000).toFixed(1)}ns`;
+    if (us < 1) return `${us.toFixed(2)}µs`;
     return `${us.toFixed(1)}µs`;
   }
 
   // ratio = nodeUs / wasmUs. >1 => wasm faster. <1 => node faster.
   _perfLabel(ratio) {
     if (ratio == null) return { text: "—", cls: "" };
-    if (ratio >= 1) return { text: `${ratio.toFixed(2)}× faster`, cls: "good" };
-    return { text: `${(1 / ratio).toFixed(0)}× slower`, cls: "bad" };
+    const factor = ratio >= 1 ? ratio : 1 / ratio;
+    const digits = factor >= 100 ? 0 : factor >= 10 ? 1 : 2;
+    const formatted = factor.toLocaleString("en-US", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: digits,
+    });
+    return ratio >= 1 ? { text: `${formatted}× faster`, cls: "good" } : { text: `${formatted}× slower`, cls: "bad" };
   }
 
   _row(label, valueHtml, cls) {
     return `<div class="row"><span class="k">${this._esc(label)}</span><span class="v ${cls || ""}">${valueHtml}</span></div>`;
+  }
+
+  _operationLabel(sampleOp) {
+    const value = String(sampleOp ?? "");
+    if (/parse\(.*226KB dist bundle/i.test(value)) return "Parse the 226 KB Acorn bundle";
+    if (/op_two_strings/i.test(value)) return "Join two class names";
+    if (/parseCookie\(8-pair header\)/i.test(value)) return "Parse an 8-pair cookie header";
+    return value
+      .replace(/\s*\([^)]*(host-owned arguments|driver compiled to Wasm)[^)]*\)\s*/gi, " ")
+      .replace(/\.body\.length\b/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  _lane(lane, label) {
+    if (!lane) {
+      return `
+        <div class="lane unavailable">
+          <span class="lane-name">${this._esc(label)}</span>
+          <span class="lane-result muted">Not measured</span>
+        </div>`;
+    }
+    if (lane.status && lane.status !== "measured") {
+      const detail = lane.diagnostic ?? lane.reason ?? lane.status;
+      return `
+        <div class="lane unavailable">
+          <span class="lane-name">${this._esc(label)}</span>
+          <span class="lane-result muted">${this._esc(detail)}</span>
+        </div>`;
+    }
+    const result = this._perfLabel(lane.ratio);
+    return `
+      <div class="lane">
+        <div class="lane-top">
+          <span class="lane-name">${this._esc(label)}</span>
+          <strong class="lane-result ${result.cls}">${result.text}</strong>
+        </div>
+        <div class="lane-times mono">
+          <span>${this._fmtMs(lane.wasmUs)} Wasm</span>
+          <span>${this._fmtMs(lane.nodeUs)} Node</span>
+        </div>
+      </div>`;
+  }
+
+  _bindPerfControls() {
+    this.shadowRoot.querySelectorAll(".perf-block").forEach((perf) => {
+      const setPressed = (attribute, value) => {
+        perf.querySelectorAll(`button[${attribute}]`).forEach((button) => {
+          button.setAttribute("aria-pressed", String(button.getAttribute(attribute) === value));
+        });
+      };
+      perf.querySelectorAll("button[data-input-value]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const value = button.getAttribute("data-input-value");
+          perf.dataset.input = value;
+          setPressed("data-input-value", value);
+        });
+      });
+      perf.querySelectorAll("button[data-target-value]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const value = button.getAttribute("data-target-value");
+          perf.dataset.target = value;
+          setPressed("data-target-value", value);
+        });
+      });
+    });
   }
 
   _card(pkg) {
@@ -103,37 +176,34 @@ class NpmCompatChart extends HTMLElement {
       );
     }
 
-    // Perf — standalone and JS-host placement are different measurements.
+    // Perf — compact lane names; full methodology lives below the dashboard.
     let perf;
     if (!pkg.perf) {
       perf = this._row("perf vs node", `<span class="muted">not measured</span>`);
     } else {
       const lanes = pkg.perf.lanes ?? { jsHost: pkg.perf };
-      const renderLane = (key, label) => {
-        const lane = lanes[key];
-        if (!lane) return "";
-        const inputLabel =
-          lane.inputMode === "compile-time-static"
-            ? "static at compile time"
-            : lane.inputMode === "runtime-dynamic"
-              ? "dynamic after compile"
-              : "";
-        const rowLabel = inputLabel ? `${label} · ${inputLabel}` : label;
-        if (lane.status && lane.status !== "measured") {
-          const detail = lane.diagnostic ?? lane.reason ?? lane.status;
-          return this._row(`perf · ${rowLabel}`, `<span class="muted">${this._esc(detail)}</span>`);
-        }
-        const result = this._perfLabel(lane.ratio);
-        return this._row(
-          `perf · ${rowLabel}`,
-          `<span class="${result.cls}">${result.text}</span> <span class="muted mono">${this._fmtMs(lane.wasmUs)} vs ${this._fmtMs(lane.nodeUs)}</span>`,
-        );
-      };
-      perf =
-        renderLane("jsHost", "JS host") +
-        renderLane("standalone", "standalone") +
-        renderLane("standaloneDynamic", "standalone") +
-        `<div class="row sub"><span class="k"></span><span class="v muted">${this._esc(pkg.perf.sampleOp)}</span></div>`;
+      const operation = this._operationLabel(pkg.perf.sampleOp);
+      perf = `
+        <div class="perf-block" data-input="dynamic" data-target="host">
+          <div class="section-title">
+            <span>Performance vs Node</span>
+            ${operation ? `<span class="operation" title="${this._esc(pkg.perf.sampleOp)}">${this._esc(operation)}</span>` : ""}
+          </div>
+          <div class="benchmark-controls">
+            <div class="toggle-group" aria-label="Input kind">
+              <button type="button" data-input-value="dynamic" aria-pressed="true">Dynamic</button>
+              <button type="button" data-input-value="static" aria-pressed="false">Static</button>
+            </div>
+            <div class="toggle-group target-toggle" aria-label="Wasm runtime">
+              <button type="button" data-target-value="host" aria-pressed="true">JS host</button>
+              <button type="button" data-target-value="standalone" aria-pressed="false">Standalone</button>
+            </div>
+          </div>
+          <div class="perf-view dynamic-host">${this._lane(lanes.jsHost, "JS host")}</div>
+          <div class="perf-view dynamic-standalone">${this._lane(lanes.standaloneDynamic, "Standalone")}</div>
+          <div class="perf-view static-standalone">${this._lane(lanes.standalone, "Standalone")}</div>
+          <p class="static-note">Compiler-visible input · standalone Wasm</p>
+        </div>`;
     }
 
     const bugs = (pkg.knownBugs ?? []).length
@@ -178,6 +248,7 @@ class NpmCompatChart extends HTMLElement {
       <div class="cards">${pkgs.map((p) => this._card(p)).join("")}</div>
       ${data.note ? `<p class="note">${this._esc(data.note)}</p>` : ""}
     `;
+    this._bindPerfControls();
   }
 
   _styles() {
@@ -220,12 +291,16 @@ class NpmCompatChart extends HTMLElement {
 
         .cards {
           display: grid;
-          grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+          grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 1px;
           background: var(--border, rgba(255,255,255,0.12));
           border: 1px solid var(--border, rgba(255,255,255,0.12));
         }
-        .card { background: var(--bg, #060a14); padding: 14px 16px 12px; }
+        .card {
+          background: var(--bg, #060a14);
+          padding: 18px 20px 16px;
+          min-width: 0;
+        }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
         .card-top .name { font-size: 15px; font-weight: 600; }
         .card-top .ver { font-size: 11px; color: var(--text-muted, rgba(255,255,255,0.46)); }
@@ -260,7 +335,6 @@ class NpmCompatChart extends HTMLElement {
           border-bottom: 1px solid rgba(255, 255, 255, 0.06);
         }
         .row:last-child { border-bottom: none; }
-        .row.sub { padding-top: 0; margin-top: -4px; border-bottom: none; font-size: 11px; }
         .row .k {
           color: rgba(255, 255, 255, 0.35);
           text-transform: uppercase;
@@ -280,6 +354,113 @@ class NpmCompatChart extends HTMLElement {
           padding: 1px 4px;
           margin-left: 2px;
         }
+        .perf-block {
+          padding: 12px 0 10px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .section-title {
+          display: flex;
+          justify-content: space-between;
+          gap: 16px;
+          margin-bottom: 8px;
+          color: rgba(255, 255, 255, 0.35);
+          text-transform: uppercase;
+          font-size: 10px;
+          letter-spacing: 0.06em;
+        }
+        .section-title .operation {
+          color: var(--text-muted, rgba(255,255,255,0.46));
+          text-transform: none;
+          letter-spacing: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .benchmark-controls {
+          display: flex;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 8px;
+        }
+        .toggle-group {
+          display: inline-flex;
+          padding: 2px;
+          background: rgba(255, 255, 255, 0.035);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .toggle-group button {
+          appearance: none;
+          border: 0;
+          padding: 4px 8px;
+          background: transparent;
+          color: rgba(255, 255, 255, 0.4);
+          font: inherit;
+          font-size: 9px;
+          line-height: 1;
+          cursor: pointer;
+        }
+        .toggle-group button:hover {
+          color: var(--text, #fff);
+        }
+        .toggle-group button[aria-pressed="true"] {
+          background: rgba(255, 255, 255, 0.1);
+          color: var(--text, #fff);
+        }
+        .perf-view,
+        .static-note {
+          display: none;
+        }
+        .perf-block[data-input="dynamic"][data-target="host"] .dynamic-host,
+        .perf-block[data-input="dynamic"][data-target="standalone"] .dynamic-standalone,
+        .perf-block[data-input="static"] .static-standalone {
+          display: block;
+        }
+        .perf-block[data-input="static"] .target-toggle {
+          visibility: hidden;
+        }
+        .perf-block[data-input="static"] .static-note {
+          display: block;
+        }
+        .static-note {
+          margin: 6px 0 0;
+          color: rgba(255, 255, 255, 0.3);
+          font-size: 9px;
+        }
+        .lane {
+          min-width: 0;
+          padding: 9px 10px 8px;
+          background: rgba(255, 255, 255, 0.035);
+          border: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .lane.unavailable {
+          display: flex;
+          flex-direction: column;
+          gap: 5px;
+        }
+        .lane-top {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 8px;
+        }
+        .lane-name {
+          color: var(--text-muted, rgba(255,255,255,0.46));
+          font-size: 10px;
+          white-space: nowrap;
+        }
+        .lane-result {
+          font-size: 12px;
+          white-space: nowrap;
+        }
+        .lane-times {
+          display: flex;
+          justify-content: space-between;
+          gap: 8px;
+          margin-top: 5px;
+          color: rgba(255, 255, 255, 0.35);
+          font-size: 9px;
+          white-space: nowrap;
+        }
         .entry {
           margin-top: 10px;
           font-size: 10px;
@@ -290,6 +471,16 @@ class NpmCompatChart extends HTMLElement {
           font-size: 11px;
           color: var(--text-muted, rgba(255,255,255,0.46));
           max-width: 900px;
+        }
+
+        @media (max-width: 1100px) {
+          .cards { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 720px) {
+          .card { padding: 16px; }
+          .lane-times { justify-content: flex-start; }
+          .section-title { flex-direction: column; gap: 3px; }
+          .benchmark-controls { flex-wrap: wrap; }
         }
       </style>
     `;

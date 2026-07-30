@@ -137,7 +137,7 @@ describe("#3765 — a provably-numeric local gets an f64 slot", () => {
   });
 
   it("carries a grounded numeric-local proof into an untyped helper parameter", async () => {
-    const { wat, binary } = await build(`
+    const result = await build(`
       function isAscii(c) { return c >= 0 && c <= 127; }
       function scan(input) {
         var c = input.charCodeAt(0);
@@ -145,6 +145,9 @@ describe("#3765 — a provably-numeric local gets an f64 slot", () => {
       }
       export function main() { return scan("A"); }
     `);
+    const { wat, binary } = result;
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irCompiledFuncs).toContain("scan");
     const inlineParam = wat!.match(/\(func \$isAscii \(param f64\)/);
     const sharedType = wat!.match(/\(func \$isAscii \(type (\d+)\)/);
     const sharedTypeIsF64 =
