@@ -48,6 +48,7 @@ import {
   IR_DYN_METHOD_CALL_1_FN,
 } from "../codegen/dyn-ops.js";
 import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call of the shared exact-fmod helper
+import { STANDALONE_REGEXP_CARRIER_TEST_HELPER } from "../codegen/regexp-runtime-contract.js";
 // (#1373b C-1) Leaf-module async helpers (no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
 import { evaluateConstantCondition } from "../codegen/statements/control-flow.js";
@@ -493,6 +494,19 @@ export interface IrFromAstResolver {
    * module declarations return undefined.
    */
   resolveModuleBinding?(node: ts.Identifier, writeValue?: ts.Expression): ModuleBindingGlobal | undefined;
+  /**
+   * #3791 — exact standalone native RegExp `.test` bridge. The receiver is
+   * the real legacy module-global carrier; the helper is an in-module defined
+   * function with the canonical receiver-first externref ABI.
+   */
+  standaloneRegExpTestPlan?(
+    receiver: ts.Expression,
+  ): { readonly receiverGlobal: IrGlobalRef; readonly funcName: string } | null;
+  /** #3791 exact stable module numeric vec at a direct-call boundary. */
+  staticNumericArrayRead?(
+    expression: ts.Expression,
+    expected: IrType,
+  ): { readonly globalRef: IrGlobalRef; readonly type: IrType } | null;
   /** True for any checker-owned top-level lexical, including unsupported reps. */
   isDirectModuleBinding?(node: ts.Identifier): boolean;
   /** True when the identifier resolves to an ambient declaration-file symbol. */
@@ -4678,7 +4692,11 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
   for (let i = 0; i < expandedArgExprs.length; i++) {
     const argExpr = expandedArgExprs[i]!;
     const expected = calleeSig.params[i]!;
-    let argVal = lowerExpr(argExpr, cx, expected);
+    const staticNumericArray = cx.resolver?.staticNumericArrayRead?.(argExpr, expected) ?? null;
+    let argVal =
+      staticNumericArray === null
+        ? lowerExpr(argExpr, cx, expected)
+        : cx.builder.emitGlobalGet(staticNumericArray.globalRef, staticNumericArray.type);
     let argType = cx.builder.typeOf(argVal);
     // #3214 B0 — source-function callable params use externref, while closure
     // literals remain compiler-owned root-carrier refs. Cross that boundary
@@ -5191,6 +5209,39 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   const receiverIdentifier = ts.isIdentifier(expr.expression.expression) ? expr.expression.expression : undefined;
   const receiverIsDirectModuleBinding =
     receiverIdentifier !== undefined && cx.resolver?.isDirectModuleBinding?.(receiverIdentifier) === true;
+
+  // #3791 — standalone native RegExp `.test` on one exact, stable top-level
+  // carrier. Keep the real legacy module global as the receiver (no duplicate
+  // construction/cache), externalize the native subject string, then call the
+  // established `$NativeRegExp`-first carrier helper. The selector admits
+  // only this one-argument form and the resolver repeats the source proof.
+  if (methodName === "test" && expr.arguments.length === 1 && !ts.isSpreadElement(expr.arguments[0]!)) {
+    const plan = cx.resolver?.standaloneRegExpTestPlan?.(expr.expression.expression) ?? null;
+    if (plan !== null) {
+      if (plan.funcName !== STANDALONE_REGEXP_CARRIER_TEST_HELPER) {
+        throw new Error(`ir/from-ast: unexpected standalone RegExp test helper ${plan.funcName}`);
+      }
+      const receiver = cx.builder.emitGlobalGet(plan.receiverGlobal, irVal({ kind: "externref" }));
+      const subject = lowerExpr(expr.arguments[0]!, cx, { kind: "string" });
+      if (cx.builder.typeOf(subject).kind !== "string") {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: standalone RegExp.test subject is not a proven string (${cx.funcName})`,
+        );
+      }
+      const subjectExtern = cx.builder.emitCoerceToExternref(subject);
+      const result = cx.builder.emitCall(
+        irRuntimeFuncRef(plan.funcName),
+        [receiver, subjectExtern],
+        irVal({ kind: "i32", boolean: true }),
+      );
+      if (result === null) {
+        throw new Error(`ir/from-ast: standalone RegExp.test helper returned void (${cx.funcName})`);
+      }
+      return result;
+    }
+  }
 
   // ES5 Object.defineProperty — route an exact ambient static call through
   // the same full ToPropertyDescriptor helper as legacy codegen. Keeping the
