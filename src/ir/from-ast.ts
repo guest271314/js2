@@ -230,6 +230,12 @@ export interface IrFromAstResolver {
   objectDefinePropertyTarget?(): IrFuncRef | null;
   resolveString?(): ValType;
   /**
+   * Resolve the backend's canonical boxed-any carrier for a dynamic value.
+   * This must match `IrLowerResolver.resolveDynamic()` so a mutable slot and
+   * the function parameter that seeds it have the same Wasm representation.
+   */
+  resolveDynamic?(): ValType;
+  /**
    * (#2955 number-box slice) Capability predicate: does this compile's lane
    * own the `__box_number` / `__unbox_number` host imports (the f64⇄externref
    * boxing pair legacy registers via `addUnionImports`)? The two from-ast
@@ -814,8 +820,10 @@ export function lowerFunctionAstToIr(
   // Parameters enter the function as SSA values, but a parameter that is
   // reassigned must subsequently read through mutable storage just like a
   // reassigned `let`. Seed one slot from the incoming SSA value before any
-  // user-body instruction. Selection admits only scalar/string mutable
-  // parameters, so every accepted type has an exact slot representation.
+  // user-body instruction. Selection admits scalar/string parameters plus
+  // dynamic parameters whose concrete assignments can be boxed into the
+  // backend's canonical carrier, so every accepted type has an exact slot
+  // representation.
   for (const param of pendingMutableParams) {
     const valType = asVal(param.type);
     if (valType) {
@@ -833,6 +841,20 @@ export function lowerFunctionAstToIr(
           kind: "slot",
           slotIndex,
           type: irVal(stringValType),
+          asType: param.type,
+        });
+        continue;
+      }
+    }
+    if (param.type.kind === "dynamic") {
+      const dynamicValType = options.resolver?.resolveDynamic?.();
+      if (dynamicValType) {
+        const slotIndex = builder.declareSlot(param.name, dynamicValType);
+        builder.emitSlotWrite(slotIndex, param.value);
+        scope.set(param.name, {
+          kind: "slot",
+          slotIndex,
+          type: irVal(dynamicValType),
           asType: param.type,
         });
         continue;
@@ -7680,9 +7702,19 @@ function lowerIdentifierAssignment(id: ts.Identifier, rhs: ts.Expression, cx: Lo
   // underlying ValType, which `asType` agrees with at the Wasm
   // level (the asType invariant guarantees this).
   const logicalType = binding.asType ?? binding.type;
-  const newValue = lowerExpr(rhs, cx, logicalType);
-  const newType = cx.builder.typeOf(newValue);
-  if (!irTypeEquals(newType, logicalType)) {
+  let newValue = lowerExpr(rhs, cx, logicalType);
+  let newType = cx.builder.typeOf(newValue);
+  if (logicalType.kind === "dynamic" && newType.kind !== "dynamic") {
+    const boxed = boxConcreteToDynamic(newValue, newType, rhs, cx);
+    if (boxed !== null) {
+      newValue = boxed;
+      newType = cx.builder.typeOf(newValue);
+    }
+  }
+  const assignmentTypeMatches =
+    irTypeEquals(newType, logicalType) ||
+    (newType.kind === "dynamic" && logicalType.kind === "dynamic" && logicalType.tag === undefined);
+  if (!assignmentTypeMatches) {
     throw new Error(
       `ir/from-ast: assignment to "${id.text}" (${describeIrType(logicalType)}) got ${describeIrType(newType)} in ${cx.funcName}`,
     );
@@ -8966,7 +8998,8 @@ function typeOfValue(v: IrValueId, cx: LowerCtx): IrType {
  */
 /**
  * (#2856 C3) Lower a STRICT undefined-compare — `<expr> !== undefined` /
- * `<expr> === undefined` (`undefined` as a free identifier, not shadowed).
+ * `<expr> === undefined` (`undefined` as a free identifier, not shadowed),
+ * plus the exact side-effect-free `void 0` spelling emitted by Acorn.
  * Returns null when the expression isn't that shape (caller proceeds with
  * the normal lowering).
  *
@@ -8992,10 +9025,11 @@ function tryLowerUndefinedCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, 
   const isStrictEq = op === ts.SyntaxKind.EqualsEqualsEqualsToken;
   const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
   if (!isStrictEq && !isStrictNeq) return null;
-  const isUndefIdent = (e: ts.Expression): boolean =>
-    ts.isIdentifier(e) && e.text === "undefined" && !cx.scope.has("undefined");
-  const leftU = isUndefIdent(expr.left);
-  const rightU = isUndefIdent(expr.right);
+  const isUndefinedValue = (e: ts.Expression): boolean =>
+    (ts.isIdentifier(e) && e.text === "undefined" && !cx.scope.has("undefined")) ||
+    (ts.isVoidExpression(e) && ts.isNumericLiteral(e.expression) && Number(e.expression.text) === 0);
+  const leftU = isUndefinedValue(expr.left);
+  const rightU = isUndefinedValue(expr.right);
   if (!leftU && !rightU) return null;
   if (leftU && rightU) {
     // `undefined === undefined` → true / `!==` → false.
