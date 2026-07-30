@@ -14,7 +14,7 @@
 // Node or Wasm owns the benchmark driver and repeated-call loop.
 //
 // Scope: only the packages with a real, committed, reproducible dogfood
-// harness (acorn, marked, clsx, cookie). mustache/diff/dayjs were probed
+// harness (acorn, marked, clsx, cookie, eslint). mustache/diff/dayjs were probed
 // ad-hoc (see their issue files, #3720/#3721/#3747) but have no committed
 // harness yet — deliberately NOT included here rather than fabricating
 // numbers from a one-off, non-reproducible probe.
@@ -22,7 +22,8 @@
 // Invoke: `pnpm run generate:npm-compat` (writes benchmarks/results/npm-compat.json
 // and copies it to website/public/benchmarks/results/).
 
-import { copyFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -36,6 +37,7 @@ import { runHarness as runAcornOfficialSuite } from "../tests/dogfood/acorn-offi
 import { runHarness as runMarked } from "../tests/dogfood/marked-harness.mjs";
 import { runHarness as runClsx } from "../tests/dogfood/clsx-harness.mjs";
 import { runHarness as runCookie } from "../tests/dogfood/cookie-harness.mjs";
+import { runHarness as runEslint } from "../tests/dogfood/eslint-harness.mjs";
 
 import { setupAcorn } from "../tests/dogfood/setup-acorn.mjs";
 import { setupClsx } from "../tests/dogfood/setup-clsx.mjs";
@@ -45,6 +47,8 @@ import {
   failedPerfLane,
   measureJsHostPerf,
   measureStandalonePerf,
+  mergeNpmPerfHistory,
+  npmPerfHistoryPoint,
   npmPerfRows,
   packagePerfRecord,
   skippedPerfLane,
@@ -52,7 +56,7 @@ import {
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie"];
+const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint"];
 const cliArgs = process.argv.slice(2);
 
 function optionValue(name) {
@@ -131,6 +135,54 @@ const PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", 
 // `jsUs` is the native-Node time — the component's baseline tick.
 const PERF_RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "npm-compat-perf.json");
 const PERF_PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "npm-compat-perf.json");
+const HISTORY_RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "npm-compat-history.json");
+const HISTORY_PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "npm-compat-history.json");
+
+function readHistoryArtifact() {
+  if (!existsSync(HISTORY_RESULTS_PATH)) return { schemaVersion: 1, runs: [] };
+  return JSON.parse(readFileSync(HISTORY_RESULTS_PATH, "utf-8"));
+}
+
+function committedHistoryPoints() {
+  try {
+    const revisions = execFileSync(
+      "git",
+      ["log", "--format=%H", "--reverse", "--", "benchmarks/results/npm-compat.json"],
+      {
+        cwd: ROOT,
+        encoding: "utf-8",
+      },
+    )
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean);
+    return revisions.map((revision) => {
+      const report = JSON.parse(
+        execFileSync("git", ["show", `${revision}:benchmarks/results/npm-compat.json`], {
+          cwd: ROOT,
+          encoding: "utf-8",
+          maxBuffer: 16 * 1024 * 1024,
+        }),
+      );
+      return npmPerfHistoryPoint(report.packages ?? [], report.generatedAt, revision);
+    });
+  } catch (error) {
+    console.warn(
+      `[npm-compat] could not backfill committed performance history: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return [];
+  }
+}
+
+function currentRevision() {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+  } catch {
+    return null;
+  }
+}
 
 function instrumentImports(importObject, { callbacks = true } = {}) {
   const importCalls = new Map();
@@ -1112,6 +1164,13 @@ function knownBugsFor(name) {
         summary: "a property assigned dynamically inside a loop/switch onto an object is silently dropped",
       },
     ],
+    eslint: [
+      {
+        issue: 3672,
+        summary:
+          "the real multi-file Linter graph is still beyond the bounded mainline compile/runtime integration frontier",
+      },
+    ],
   };
   return map[name] ?? [];
 }
@@ -1235,6 +1294,23 @@ if (selectedPackages.has("cookie")) {
   );
 }
 
+if (selectedPackages.has("eslint")) {
+  console.log("[npm-compat] eslint — bounded package-entry compile/validate...");
+  const eslintReport = await runEslint({ quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: "eslint",
+      version: eslintReport.eslint.version,
+      issue: 1400,
+      entryFile: eslintReport.eslint.entryModule.replace(/^package\//, ""),
+      shape: "cjs-project",
+      report: eslintReport,
+      tests: null,
+      perf: null,
+    }),
+  );
+}
+
 const summary = {
   generatedAt: new Date().toISOString(),
   note: "Only packages with a committed, reproducible tests/dogfood/*-harness.mjs are listed. mustache (#3720), diff (#3721), and dayjs (#3747) were probed ad-hoc and surfaced real bugs but have no committed harness yet.",
@@ -1253,6 +1329,10 @@ const summary = {
 // skipped placements remain visible in the package JSON/cards and are never
 // converted to misleading zero-duration bars.
 const perfRows = npmPerfRows(packages);
+const perfHistory = mergeNpmPerfHistory(readHistoryArtifact(), [
+  ...committedHistoryPoints(),
+  npmPerfHistoryPoint(packages, summary.generatedAt, currentRevision()),
+]);
 
 if (writeArtifacts) {
   mkdirSync(dirname(RESULTS_PATH), { recursive: true });
@@ -1265,7 +1345,11 @@ if (writeArtifacts) {
   copyFileSync(PERF_RESULTS_PATH, PERF_PUBLIC_PATH);
   console.log(`[npm-compat] wrote ${PERF_RESULTS_PATH}`);
   console.log(`[npm-compat] wrote ${PERF_PUBLIC_PATH}`);
+  writeFileSync(HISTORY_RESULTS_PATH, JSON.stringify(perfHistory, null, 2) + "\n");
+  copyFileSync(HISTORY_RESULTS_PATH, HISTORY_PUBLIC_PATH);
+  console.log(`[npm-compat] wrote ${HISTORY_RESULTS_PATH}`);
+  console.log(`[npm-compat] wrote ${HISTORY_PUBLIC_PATH}`);
 } else {
   console.log("[npm-compat] skipped aggregate artifact writes");
-  console.log(JSON.stringify({ ...summary, perfRows }, null, 2));
+  console.log(JSON.stringify({ ...summary, perfRows, perfHistory }, null, 2));
 }

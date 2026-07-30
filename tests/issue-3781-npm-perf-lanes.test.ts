@@ -5,6 +5,8 @@ import {
   failedPerfLane,
   measureJsHostPerf,
   measureStandalonePerf,
+  mergeNpmPerfHistory,
+  npmPerfHistoryPoint,
   npmPerfRows,
   packagePerfRecord,
 } from "../scripts/lib/npm-compat-perf.mjs";
@@ -145,5 +147,62 @@ describe("#3781 npm performance harness placement", () => {
       harnessPlacement: "standalone",
       inputMode: "runtime-dynamic",
     });
+  });
+
+  it("records static and dynamic history as separate scenarios", () => {
+    const measured = (ratio: number, placement: string, inputMode: string) => ({
+      status: "measured",
+      placement,
+      inputMode,
+      ratio,
+      wasmUs: 1 / ratio,
+      nodeUs: 1,
+    });
+    const point = npmPerfHistoryPoint(
+      [
+        {
+          name: "pkg",
+          perf: {
+            lanes: {
+              jsHost: measured(0.5, "js-host", "runtime-dynamic"),
+              standalone: measured(20, "standalone", "compile-time-static"),
+              standaloneDynamic: measured(0.8, "standalone", "runtime-dynamic"),
+            },
+          },
+        },
+      ],
+      "2026-07-30T00:00:00.000Z",
+      "abc123",
+    );
+
+    expect(point).toEqual({
+      generatedAt: "2026-07-30T00:00:00.000Z",
+      sourceRevision: "abc123",
+      packages: {
+        pkg: {
+          jsHost: { dynamic: 0.5 },
+          standalone: { static: 20, dynamic: 0.8 },
+        },
+      },
+    });
+  });
+
+  it("keeps legacy JS-host reports and replaces repeated revisions", () => {
+    const legacy = npmPerfHistoryPoint(
+      [{ name: "pkg", perf: { ratio: 0.25, wasmUs: 4, nodeUs: 1 } }],
+      "2026-07-28T00:00:00.000Z",
+      "same-revision",
+    );
+    const refreshed = npmPerfHistoryPoint(
+      [{ name: "pkg", perf: { ratio: 0.5, wasmUs: 2, nodeUs: 1 } }],
+      "2026-07-30T00:00:00.000Z",
+      "same-revision",
+    );
+    const duplicateTimestamp = { ...refreshed, sourceRevision: "later-wrapper-commit" };
+    const history = mergeNpmPerfHistory({ schemaVersion: 1, runs: [legacy] }, [refreshed, duplicateTimestamp]);
+
+    expect(history.runs).toHaveLength(1);
+    expect(history.runs[0].packages.pkg.jsHost.dynamic).toBe(0.5);
+    expect(history.runs[0].sourceRevision).toBe("later-wrapper-commit");
   });
 });

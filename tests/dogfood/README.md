@@ -9,7 +9,7 @@ Distinct from the broader `compileProject`-based `npm-library-support` goal
 specifically target a **single pre-bundled dist file**, so there's no
 multi-file module-resolution graph in the way of isolating compiler bugs.
 
-Four packages so far, plus one deeper conformance check on acorn:
+Five packages so far, plus one deeper conformance check on acorn:
 
 | package | issue | entry file | oracle diff |
 | --- | --- | --- | --- |
@@ -18,6 +18,7 @@ Four packages so far, plus one deeper conformance check on acorn:
 | **acorn official suite** | #3729 | `dist/acorn.mjs` | acorn's own real `test/tests*.js` (~3,500 cases) |
 | **clsx** (className joiner) | #3748 | `dist/clsx.mjs` | per-op string equality (see below — driver epilogue, not a raw export call) |
 | **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js` | per-op JSON-normalized equality (direct export calls, no epilogue) |
+| **eslint** (JavaScript linter) | #1400 | `lib/api.js` | bounded full-package compile/validate; runtime diff pending |
 
 ## acorn (#1710)
 
@@ -122,6 +123,34 @@ see #3715 for the minimal repro and scope. Once that lands, re-run
 
 This harness does **not** fix any compiler bug — pure tooling, same as
 acorn's scope note above.
+
+## eslint (#1400)
+
+ESLint uses the same committed npm-tarball integrity contract, but its public
+entry is a multi-file CommonJS graph rather than a self-contained dist bundle.
+`setup-eslint.mjs` verifies every published ESLint file in the installed
+devDependency against `fixtures/eslint-10.0.3.tgz` byte-for-byte, then compiles
+the verified installed `lib/api.js` path so pnpm can resolve dependencies from
+ESLint's real importer context.
+
+The compile runs in a bounded child process because the unresolved #3672 scale
+frontier must become structured red data, not hang or exhaust the page
+generator:
+
+```bash
+pnpm run dogfood:eslint
+npx tsx tests/dogfood/eslint-harness.mjs --json
+DOGFOOD_ESLINT=1 pnpm test -- tests/dogfood/eslint.test.ts
+```
+
+`DOGFOOD_ESLINT_TIMEOUT_MS` can override the default 180-second compile budget
+for focused diagnostics. A timeout remains a failed compile result. It is never
+relabelled as validation or runtime success.
+
+The harness currently reports compile/validate separately and leaves the test
+count unavailable until the real `Linter.verify()` proof in #1400 is complete.
+This is intentional: the npm-compat page includes unfinished packages such as
+marked, and ESLint should be equally visible without overstating support.
 
 ## acorn official suite (#3729)
 
