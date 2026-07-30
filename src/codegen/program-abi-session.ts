@@ -7,6 +7,7 @@ import {
   ProgramAbiInvariantError,
   ProgramAbiMap,
   type ProgramAbiDerivedUnitRecord,
+  type ProgramAbiFinalIndex,
   type ProgramAbiPlanEntry,
   type ProgramAbiSlotSpace,
 } from "../ir/program-abi.js";
@@ -409,6 +410,17 @@ export interface PublishedProgramAbi {
   readonly legacy: LegacyAbiAdapter;
 }
 
+/**
+ * Read-only evidence that the session's structural intentions were validated
+ * and sealed. Final-index mutation remains private to ProgramAbiSession.
+ */
+export interface SealedProgramAbiPlan {
+  readonly planningSealed: true;
+  entries(): readonly ProgramAbiPlanEntry[];
+  get(id: IrBindingId): ProgramAbiPlanEntry | undefined;
+  canonicalId(id: IrBindingId): IrBindingId;
+}
+
 type SessionState = "planning" | "sealing" | "sealed" | "binding" | "published" | "failed";
 
 function validOrdinal(value: number): boolean {
@@ -559,6 +571,25 @@ function compareDrafts(
   );
 }
 
+function createSealedProgramAbiPlanView(
+  abi: ProgramAbiMap,
+  currentEntries: () => readonly ProgramAbiPlanEntry[],
+): SealedProgramAbiPlan {
+  const canonicalIds = new Map(abi.entries().map((entry) => [entry.id, abi.canonicalId(entry.id)] as const));
+  return Object.freeze({
+    planningSealed: true as const,
+    entries: currentEntries,
+    get: (id: IrBindingId) => currentEntries().find((entry) => entry.id === id),
+    canonicalId: (id: IrBindingId) => {
+      const canonicalId = canonicalIds.get(id);
+      if (canonicalId === undefined) {
+        throw new ProgramAbiInvariantError("unknown-binding", `binding ${id} was not planned`);
+      }
+      return canonicalId;
+    },
+  });
+}
+
 /**
  * Compilation-owned mutable staging area for ProgramAbiMap.
  *
@@ -581,7 +612,8 @@ export class ProgramAbiSession {
   private readonly callableTypeContracts = new Map<IrBindingId, ProgramAbiCallableTypeContract>();
   private readonly globalTypeContracts = new Map<IrBindingId, ProgramAbiGlobalTypeContract>();
   private state: SessionState = "planning";
-  private sealedAbi: ProgramAbiMap | undefined;
+  private sealedDrafts: readonly ProgramAbiDraft[] | undefined;
+  private sealedPlanView: SealedProgramAbiPlan | undefined;
   private publishedValue: PublishedProgramAbi | undefined;
   readonly structuralOrder: ProgramAbiStructuralOrder;
 
@@ -1084,9 +1116,9 @@ export class ProgramAbiSession {
    * locators may still follow body replacement or layout compaction before
    * final binding.
    */
-  sealPlan(module: WasmModule = this.module): ProgramAbiMap {
+  sealPlan(module: WasmModule = this.module): SealedProgramAbiPlan {
     this.assertModule(module);
-    if (this.state === "sealed" || this.state === "published") return this.sealedAbi!;
+    if (this.state === "sealed" || this.state === "published") return this.sealedPlanView!;
     if (this.state !== "planning") {
       throw new ProgramAbiInvariantError(
         "session-closed",
@@ -1095,26 +1127,23 @@ export class ProgramAbiSession {
     }
     this.state = "sealing";
     try {
-      const abi = new ProgramAbiMap(this.inventory, [...this.derivedUnits.values()]);
       const drafts = [...this.drafts.values()].sort((a, b) => compareDrafts(this.sourceOrderById, a, b));
-      const denseOrderBySource = new Map<IrSourceId, number>();
-      for (const queuedDraft of drafts) {
-        const draft = this.materializeTypeContract(queuedDraft, module);
-        const { structuralOrder, ...planned } = draft;
-        const declarationOrder = denseOrderBySource.get(structuralOrder.sourceId) ?? 0;
-        denseOrderBySource.set(structuralOrder.sourceId, declarationOrder + 1);
-        abi.plan({
-          ...planned,
-          order: {
-            sourceOrder: this.sourceOrderById.get(structuralOrder.sourceId)!,
-            declarationOrder,
-          },
-        } as ProgramAbiPlanEntry);
+      const abi = this.buildSealedAbi(drafts, module);
+      for (const entry of abi.entries()) {
+        if (entry.slotPolicy === "required" && !this.locators.has(entry.id)) {
+          throw new ProgramAbiInvariantError(
+            "missing-required-locator",
+            `required ABI binding ${entry.id} has no allocator locator at the planning seal`,
+          );
+        }
       }
-      abi.sealPlan();
-      this.sealedAbi = abi;
+      this.sealedDrafts = Object.freeze([...drafts]);
+      const view = createSealedProgramAbiPlanView(abi, () =>
+        this.buildSealedAbi(this.sealedDrafts!, this.module).entries(),
+      );
+      this.sealedPlanView = view;
       this.state = "sealed";
-      return abi;
+      return view;
     } catch (error) {
       this.state = "failed";
       throw error;
@@ -1135,22 +1164,13 @@ export class ProgramAbiSession {
     }
     this.state = "binding";
     try {
-      const abi = this.sealedAbi!;
+      const abi = this.buildSealedAbi(this.sealedDrafts!, module);
+      const pendingBindings: Array<{
+        readonly id: IrBindingId;
+        readonly finalIndex: ProgramAbiFinalIndex;
+      }> = [];
+      const pendingOwners = new Map<string, IrBindingId>();
       for (const entry of abi.entries()) {
-        const draft = this.drafts.get(entry.id);
-        if (!draft) {
-          throw new ProgramAbiInvariantError(
-            "unknown-binding",
-            `sealed ABI binding ${entry.id} no longer has its session draft`,
-          );
-        }
-        const finalizedDraft = this.materializeTypeContract(draft, module);
-        if (!intentsEqual(entry.intent, finalizedDraft.intent)) {
-          throw new ProgramAbiInvariantError(
-            "type-remap-mismatch",
-            `ABI binding ${entry.id} changed its sealed type contract before final binding`,
-          );
-        }
         if (entry.slotPolicy !== "required") continue;
         const locator = this.locators.get(entry.id);
         if (!locator) {
@@ -1159,11 +1179,22 @@ export class ProgramAbiSession {
             `required ABI binding ${entry.id} has no allocator locator`,
           );
         }
-        abi.bindFinalIndex(entry.id, {
+        const finalIndex: ProgramAbiFinalIndex = Object.freeze({
           space: entry.slotSpace,
           index: this.resolveLocator(module, entry.id, locator),
         });
+        const key = `${finalIndex.space}:${finalIndex.index}`;
+        const previousOwner = pendingOwners.get(key);
+        if (previousOwner !== undefined) {
+          throw new ProgramAbiInvariantError(
+            "final-index-collision",
+            `bindings ${previousOwner} and ${entry.id} cannot share non-alias index ${key}`,
+          );
+        }
+        pendingOwners.set(key, entry.id);
+        pendingBindings.push(Object.freeze({ id: entry.id, finalIndex }));
       }
+      for (const binding of pendingBindings) abi.bindFinalIndex(binding.id, binding.finalIndex);
       abi.finishBinding();
       const publication = Object.freeze({
         abi,
@@ -1195,6 +1226,26 @@ export class ProgramAbiSession {
     }
     this.sealPlan(module);
     return this.bindAndPublish(module);
+  }
+
+  private buildSealedAbi(drafts: readonly ProgramAbiDraft[], module: WasmModule): ProgramAbiMap {
+    const abi = new ProgramAbiMap(this.inventory, [...this.derivedUnits.values()]);
+    const denseOrderBySource = new Map<IrSourceId, number>();
+    for (const queuedDraft of drafts) {
+      const draft = this.materializeTypeContract(queuedDraft, module);
+      const { structuralOrder, ...planned } = draft;
+      const declarationOrder = denseOrderBySource.get(structuralOrder.sourceId) ?? 0;
+      denseOrderBySource.set(structuralOrder.sourceId, declarationOrder + 1);
+      abi.plan({
+        ...planned,
+        order: {
+          sourceOrder: this.sourceOrderById.get(structuralOrder.sourceId)!,
+          declarationOrder,
+        },
+      } as ProgramAbiPlanEntry);
+    }
+    abi.sealPlan();
+    return abi;
   }
 
   private materializeTypeContract(draft: ProgramAbiDraft, module: WasmModule): ProgramAbiDraft {

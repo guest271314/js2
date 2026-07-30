@@ -30,6 +30,7 @@ files:
   - src/ir/from-ast.ts
   - src/ir/lower.ts
   - src/ir/backend/legality.ts
+  - src/codegen/program-abi-session.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/declarations.ts
@@ -37,6 +38,8 @@ files:
   - src/index.ts
   - src/compiler.ts
   - tests/issue-3521-prepared-ir-program.test.ts
+loc-budget-allow:
+  - src/codegen/program-abi-session.ts
 ---
 
 # #3521 — IR-only R2: prepare-before-emit free-function ownership
@@ -321,10 +324,17 @@ unchanged.
 After sealing, new ABI drafts, derived units, contracts, locators, and
 structural-reference registrations are rejected. Exact function/global
 locator replacement, type-layout remapping, provisional index resolution, and
-final binding remain available until publication. Focused coverage proves
-late-plan rejection, post-seal function replacement, late-import index shifts,
-post-seal type-cell DCE remapping, exact final-index binding on the originally
-sealed `ProgramAbiMap`, and one-shot publication.
+final binding remain available until publication. `sealPlan()` exposes only a
+frozen read-only view; the bind-capable `ProgramAbiMap` is rebuilt privately
+from frozen structural intentions and the current post-DCE type sidecars.
+Final locators, indices, and collisions are validated into a temporary set
+before any index is committed or a publication becomes observable.
+
+Focused coverage proves late-plan and missing-locator rejection, post-seal
+function replacement, callable/global/type-cell DCE remapping, late-import
+index shifts, capability-safe sealed views, atomic failure on a later missing
+locator, exact final-index binding, post-publication closure, and one-shot
+publication.
 
 This is a prerequisite seam only. Prepared free-function ownership, terminal
 component outcomes, support-intent collection, and direct/IR emission
