@@ -225,3 +225,68 @@ export function npmPerfRows(packages) {
   }
   return rows;
 }
+
+function measuredRatio(lane) {
+  if (!lane || (lane.status && lane.status !== "measured")) return null;
+  const ratio = Number(lane.ratio ?? Number(lane.nodeUs) / Number(lane.wasmUs));
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
+}
+
+/**
+ * Reduce one full npm-compat report to the relative-speed values needed by
+ * the per-package history charts. Older reports predate `perf.lanes`; their
+ * top-level perf record was the JS-host/runtime-dynamic lane.
+ */
+export function npmPerfHistoryPoint(packages, generatedAt, sourceRevision = null) {
+  const snapshots = {};
+  for (const pkg of packages) {
+    const perf = pkg?.perf;
+    if (!perf) continue;
+    const lanes = perf.lanes ?? { jsHost: perf };
+    const jsHostDynamic = measuredRatio(lanes.jsHost);
+    const standaloneStatic = measuredRatio(lanes.standalone);
+    const standaloneDynamic = measuredRatio(lanes.standaloneDynamic);
+    if (jsHostDynamic === null && standaloneStatic === null && standaloneDynamic === null) continue;
+
+    snapshots[pkg.name] = {
+      jsHost: {
+        ...(jsHostDynamic === null ? {} : { dynamic: jsHostDynamic }),
+      },
+      standalone: {
+        ...(standaloneStatic === null ? {} : { static: standaloneStatic }),
+        ...(standaloneDynamic === null ? {} : { dynamic: standaloneDynamic }),
+      },
+    };
+  }
+
+  return {
+    generatedAt,
+    ...(sourceRevision ? { sourceRevision } : {}),
+    packages: snapshots,
+  };
+}
+
+/**
+ * Merge committed and freshly measured history without duplicating a source
+ * revision or an unchanged report timestamp. Keeping the artifact keyed by
+ * provenance makes repeated local generation idempotent while still
+ * preserving every distinct committed measurement.
+ */
+export function mergeNpmPerfHistory(history, points) {
+  const existing = Array.isArray(history) ? history : (history?.runs ?? []);
+  const merged = [];
+  for (const point of [...existing, ...points]) {
+    if (!point?.generatedAt || !point?.packages) continue;
+    const duplicateIndex = merged.findIndex(
+      (candidate) =>
+        candidate.generatedAt === point.generatedAt ||
+        (candidate.sourceRevision && point.sourceRevision && candidate.sourceRevision === point.sourceRevision),
+    );
+    if (duplicateIndex >= 0) merged[duplicateIndex] = point;
+    else merged.push(point);
+  }
+  return {
+    schemaVersion: 1,
+    runs: merged.sort((left, right) => new Date(left.generatedAt).getTime() - new Date(right.generatedAt).getTime()),
+  };
+}

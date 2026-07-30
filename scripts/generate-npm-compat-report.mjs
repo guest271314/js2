@@ -22,7 +22,8 @@
 // Invoke: `pnpm run generate:npm-compat` (writes benchmarks/results/npm-compat.json
 // and copies it to website/public/benchmarks/results/).
 
-import { copyFileSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -46,6 +47,8 @@ import {
   failedPerfLane,
   measureJsHostPerf,
   measureStandalonePerf,
+  mergeNpmPerfHistory,
+  npmPerfHistoryPoint,
   npmPerfRows,
   packagePerfRecord,
   skippedPerfLane,
@@ -132,6 +135,54 @@ const PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", 
 // `jsUs` is the native-Node time — the component's baseline tick.
 const PERF_RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "npm-compat-perf.json");
 const PERF_PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "npm-compat-perf.json");
+const HISTORY_RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "npm-compat-history.json");
+const HISTORY_PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "npm-compat-history.json");
+
+function readHistoryArtifact() {
+  if (!existsSync(HISTORY_RESULTS_PATH)) return { schemaVersion: 1, runs: [] };
+  return JSON.parse(readFileSync(HISTORY_RESULTS_PATH, "utf-8"));
+}
+
+function committedHistoryPoints() {
+  try {
+    const revisions = execFileSync(
+      "git",
+      ["log", "--format=%H", "--reverse", "--", "benchmarks/results/npm-compat.json"],
+      {
+        cwd: ROOT,
+        encoding: "utf-8",
+      },
+    )
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean);
+    return revisions.map((revision) => {
+      const report = JSON.parse(
+        execFileSync("git", ["show", `${revision}:benchmarks/results/npm-compat.json`], {
+          cwd: ROOT,
+          encoding: "utf-8",
+          maxBuffer: 16 * 1024 * 1024,
+        }),
+      );
+      return npmPerfHistoryPoint(report.packages ?? [], report.generatedAt, revision);
+    });
+  } catch (error) {
+    console.warn(
+      `[npm-compat] could not backfill committed performance history: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return [];
+  }
+}
+
+function currentRevision() {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf-8" }).trim();
+  } catch {
+    return null;
+  }
+}
 
 function instrumentImports(importObject, { callbacks = true } = {}) {
   const importCalls = new Map();
@@ -1278,6 +1329,10 @@ const summary = {
 // skipped placements remain visible in the package JSON/cards and are never
 // converted to misleading zero-duration bars.
 const perfRows = npmPerfRows(packages);
+const perfHistory = mergeNpmPerfHistory(readHistoryArtifact(), [
+  ...committedHistoryPoints(),
+  npmPerfHistoryPoint(packages, summary.generatedAt, currentRevision()),
+]);
 
 if (writeArtifacts) {
   mkdirSync(dirname(RESULTS_PATH), { recursive: true });
@@ -1290,7 +1345,11 @@ if (writeArtifacts) {
   copyFileSync(PERF_RESULTS_PATH, PERF_PUBLIC_PATH);
   console.log(`[npm-compat] wrote ${PERF_RESULTS_PATH}`);
   console.log(`[npm-compat] wrote ${PERF_PUBLIC_PATH}`);
+  writeFileSync(HISTORY_RESULTS_PATH, JSON.stringify(perfHistory, null, 2) + "\n");
+  copyFileSync(HISTORY_RESULTS_PATH, HISTORY_PUBLIC_PATH);
+  console.log(`[npm-compat] wrote ${HISTORY_RESULTS_PATH}`);
+  console.log(`[npm-compat] wrote ${HISTORY_PUBLIC_PATH}`);
 } else {
   console.log("[npm-compat] skipped aggregate artifact writes");
-  console.log(JSON.stringify({ ...summary, perfRows }, null, 2));
+  console.log(JSON.stringify({ ...summary, perfRows, perfHistory }, null, 2));
 }
