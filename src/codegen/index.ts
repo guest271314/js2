@@ -1712,6 +1712,7 @@ function prepareHostDateSnapshotPreflight(
       backend: "wasmgc",
       target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
       allowHostImports: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
+      fast: ctx.fast,
     },
     "host-date-snapshot",
   );
@@ -1978,6 +1979,7 @@ function planIrOverlay(
         backend: "wasmgc",
         target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
         allowHostImports: jsHostExterns,
+        fast: ctx.fast,
       },
       capability,
     );
@@ -2028,6 +2030,13 @@ function planIrOverlay(
   // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
   const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
   const resolveImplicitParamType = makeIrImplicitParamTypeResolver(ctx, ast.sourceFile);
+  const implicitParamUsesNumericVecAbi = (parameter: ts.ParameterDeclaration): boolean => {
+    const projection = resolveImplicitParamType(parameter);
+    if (projection?.kind !== "object") return false;
+    const valueType = asVal(projection.type);
+    if (valueType?.kind !== "ref" && valueType?.kind !== "ref_null") return false;
+    return ctx.typeIdxToStructName.get(valueType.typeIdx) === "__vec_f64";
+  };
   const legacyCallerAbiIsProjected = (declaration: ts.FunctionDeclaration): boolean => {
     let hasIndexedCarrier = false;
     let hasBooleanProjection = false;
@@ -2089,6 +2098,7 @@ function planIrOverlay(
       isArrayExpression,
       isRegExpExpression,
       resolveImplicitParamType: (parameter) => resolveImplicitParamType(parameter)?.kind,
+      implicitParamUsesNumericVecAbi,
       legacyCallerAbiIsProjected,
       projectedClassShapes: classShapes,
       resolveLocalClassExpression,

@@ -319,6 +319,12 @@ export interface IrSelectionOptions {
     parameter: ts.ParameterDeclaration,
   ) => "f64" | "bool" | "string" | "object" | "dynamic" | undefined;
   /**
+   * Exact legacy callable-ABI proof for an unannotated parameter projected as
+   * the ordinary non-fast numeric vec. General object/any evidence is not
+   * sufficient for the module numeric-array direct-call bridge.
+   */
+  readonly implicitParamUsesNumericVecAbi?: (parameter: ts.ParameterDeclaration) => boolean;
+  /**
    * Standalone/WASI normally close claims over local callers. A production
    * planner may exempt a callee when its direct callable and IR overlay share
    * one fully certified ABI, making a legacy caller's pre-emitted call safe.
@@ -502,7 +508,12 @@ export interface IrSelectionOptions {
    * even if its checker shape is otherwise exact.
    */
   readonly supportsBackendCapability?: (
-    capability: "host-date-snapshot" | "host-regexp-constructor" | "host-object-define-property",
+    capability:
+      | "host-date-snapshot"
+      | "host-regexp-constructor"
+      | "host-object-define-property"
+      | "standalone-native-regexp-test-carrier"
+      | "legacy-numeric-array-global",
   ) => boolean;
   /**
    * #3787 exact global String-constructor identity. This is separate from the
@@ -5757,6 +5768,42 @@ function knownCallableArity(expression: ts.Expression, scope: ReadonlySet<string
   return undefined;
 }
 
+function isNumericArrayTypeNode(node: ts.TypeNode): boolean {
+  if (ts.isTypeOperatorNode(node) && node.operator === ts.SyntaxKind.ReadonlyKeyword) {
+    return isNumericArrayTypeNode(node.type);
+  }
+  if (ts.isArrayTypeNode(node)) return node.elementType.kind === ts.SyntaxKind.NumberKeyword;
+  return (
+    ts.isTypeReferenceNode(node) &&
+    ts.isIdentifier(node.typeName) &&
+    (node.typeName.text === "Array" || node.typeName.text === "ReadonlyArray") &&
+    node.typeArguments?.length === 1 &&
+    node.typeArguments[0]!.kind === ts.SyntaxKind.NumberKeyword
+  );
+}
+
+function directCallParamUsesNumericVecAbi(
+  call: ts.CallExpression,
+  argumentIndex: number,
+  scope: ReadonlySet<string>,
+): boolean {
+  if (!ts.isIdentifier(call.expression)) return false;
+  if (
+    scope.has(call.expression.text) ||
+    currentNestedFunctionNames.has(call.expression.text) ||
+    currentLexicalValueBindingNames.has(call.expression.text)
+  ) {
+    return false;
+  }
+  const declaration = currentDynScanDecls?.get(call.expression.text);
+  const parameter = declaration?.parameters[argumentIndex];
+  if (!parameter || !ts.isIdentifier(parameter.name)) return false;
+  const type = effectiveIrParamTypeNode(parameter);
+  return type
+    ? isNumericArrayTypeNode(type)
+    : currentSelectionOptions?.implicitParamUsesNumericVecAbi?.(parameter) === true;
+}
+
 type ObviousSelectorValueFamily = "number" | "boolean" | "string" | "reference" | "nullish";
 
 function obviousSelectorValueFamily(
@@ -6198,7 +6245,8 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         // bindings, non-string subjects, and all other shapes keep the
         // established target-capability refusal.
         const nativePlan =
-          expr.expression.name.text === "test"
+          expr.expression.name.text === "test" &&
+          currentSelectionOptions?.supportsBackendCapability?.("standalone-native-regexp-test-carrier") === true
             ? currentModuleBindingResolver?.staticRegExpTestPlan(expr.expression.expression)
             : undefined;
         if (
@@ -6493,7 +6541,8 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         }
       }
     }
-    for (const arg of expr.arguments) {
+    for (let argumentIndex = 0; argumentIndex < expr.arguments.length; argumentIndex++) {
+      const arg = expr.arguments[argumentIndex]!;
       // Slice 8a (#1169g): accept `f(...source)` where the spread source
       // is an ArrayLiteralExpression with no nested spread. The lowerer
       // expands this at compile time into individual call arguments
@@ -6508,7 +6557,13 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       // #3791 follow-up dependency — an exact stable top-level numeric array
       // may cross only a direct-call boundary. The callee's planned vec ABI
       // remains authoritative; the builder rechecks its real global ValType.
-      if (currentModuleBindingResolver?.staticNumericArrayPlan(arg) !== undefined) continue;
+      if (
+        currentSelectionOptions?.supportsBackendCapability?.("legacy-numeric-array-global") === true &&
+        directCallParamUsesNumericVecAbi(expr, argumentIndex, scope) &&
+        currentModuleBindingResolver?.staticNumericArrayPlan(arg) !== undefined
+      ) {
+        continue;
+      }
       if (!isPhase1Expr(arg, scope, localClasses)) return false;
     }
     return true;

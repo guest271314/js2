@@ -25,7 +25,9 @@ function isRegExpIdentifierPart(code: number): boolean {
 
 export function run(): number {
   if (!isIdentifierStart(0xaa) || isIdentifierStart(0x41)) return 0;
+  if (isIdentifierStart(0xd7)) return 0;
   if (!isIdentifierChar(0x0301) || isIdentifierChar(0x41)) return 0;
+  if (isIdentifierChar(0x0370)) return 0;
   if (!isRegExpIdentifierStart(0x24)) return 0;
   if (!isRegExpIdentifierPart(0x5f)) return 0;
   return 1;
@@ -82,6 +84,7 @@ describe("#3791 standalone native RegExp.test IR bridge", () => {
         fileName: "issue-3791-ir-native-regexp-test-fallbacks.ts",
         target: "standalone",
         trackIrOutcomes: true,
+        skipSemanticDiagnostics: true,
       },
     );
 
@@ -91,12 +94,41 @@ describe("#3791 standalone native RegExp.test IR bridge", () => {
     expect(result.irCompiledFuncs ?? []).not.toContain("statefulTest");
     const { instance } = await WebAssembly.instantiate(result.binary, {});
     expect((instance.exports.run as () => number)()).toBe(1);
+
+    const destructuringWrites = await compile(
+      `
+      var forOfDestructured = new RegExp("a");
+      for ([forOfDestructured] of [[new RegExp("d")]]) break;
+      var objectRest = new RegExp("a");
+      ({ ...objectRest } = { replacement: new RegExp("e") });
+      function forOfDestructuredTest(value: string): boolean {
+        return forOfDestructured.test(value);
+      }
+      function objectRestTest(value: string): boolean {
+        return objectRest.test(value);
+      }
+      export function run(): number {
+        return 1;
+      }
+      `,
+      {
+        fileName: "issue-3791-ir-native-regexp-test-destructuring-writes.ts",
+        target: "standalone",
+        trackIrOutcomes: true,
+        skipSemanticDiagnostics: true,
+      },
+    );
+    expect(destructuringWrites.success, destructuringWrites.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(destructuringWrites.irPostClaimErrors ?? []).toEqual([]);
+    expect(destructuringWrites.irCompiledFuncs ?? []).not.toContain("forOfDestructuredTest");
+    expect(destructuringWrites.irCompiledFuncs ?? []).not.toContain("objectRestTest");
   });
 
   it("projects only exact stable numeric-array globals at direct-call boundaries", async () => {
     const stable = await compile(
       `
       var stableSet = [3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584, 4181];
+      var secondStableSet = [2, 7, 11, 19];
 
       function includesValue(value, set) {
         var position = 0;
@@ -111,11 +143,14 @@ describe("#3791 standalone native RegExp.test IR bridge", () => {
       function usesStable(value) {
         return includesValue(value, stableSet);
       }
+      function usesSecondStable(value) {
+        return includesValue(value, secondStableSet);
+      }
       function groundAbi(value: any, set: number[]): boolean {
         return includesValue(value, set);
       }
       export function run() {
-        return usesStable(5) && groundAbi(5, stableSet) ? 1 : 0;
+        return usesStable(5) && usesSecondStable(2) && groundAbi(5, stableSet) ? 1 : 0;
       }
       `,
       {
@@ -131,6 +166,7 @@ describe("#3791 standalone native RegExp.test IR bridge", () => {
     expect(stable.success, stable.errors.map((error) => error.message).join("\n")).toBe(true);
     expect(stable.irPostClaimErrors ?? []).toEqual([]);
     expect(stable.irCompiledFuncs ?? []).toContain("usesStable");
+    expect(stable.irCompiledFuncs ?? []).toContain("usesSecondStable");
     const { instance } = await WebAssembly.instantiate(stable.binary, {});
     expect((instance.exports.run as () => number)()).toBe(1);
 
@@ -164,5 +200,149 @@ describe("#3791 standalone native RegExp.test IR bridge", () => {
     expect(fallback.success, fallback.errors.map((error) => error.message).join("\n")).toBe(true);
     expect(fallback.irCompiledFuncs ?? []).not.toContain("usesReassigned");
     expect(fallback.irCompiledFuncs ?? []).not.toContain("usesAlias");
+  });
+
+  it("rejects a numeric-array global when the direct callee parameter is any", async () => {
+    const result = await compile(
+      `
+      var values = [1];
+      function takesAny(value: any): number {
+        return value[0];
+      }
+      function read(): number {
+        return takesAny(values);
+      }
+      export function run(): number {
+        return read();
+      }
+      `,
+      {
+        fileName: "issue-3791-numeric-array-any-param.ts",
+        target: "standalone",
+        trackIrOutcomes: true,
+      },
+    );
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.irCompiledFuncs ?? []).not.toContain("read");
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports.run as () => number)()).toBe(1);
+  });
+
+  it.each([
+    ["standalone fast", { target: "standalone" as const, fast: true }],
+    ["gc fast", { target: "gc" as const, fast: true }],
+  ])("keeps numeric-array globals on direct codegen for %s", async (_label, mode) => {
+    const result = await compile(
+      `
+      var values = [1];
+      function first(input: number[]): number {
+        return input.slice(0)[0];
+      }
+      function read(): number {
+        return first(values);
+      }
+      export function run(): number {
+        return read();
+      }
+      `,
+      {
+        ...mode,
+        fileName: "issue-3791-fast-numeric-array.ts",
+        trackIrOutcomes: true,
+      },
+    );
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.irCompiledFuncs ?? []).not.toContain("read");
+    const module = await WebAssembly.compile(result.binary);
+    if (mode.target === "standalone") {
+      const instance = await WebAssembly.instantiate(module, {});
+      expect((instance.exports.run as () => number)()).toBe(1);
+    }
+  });
+
+  it("admits the native RegExp carrier only for standalone, not WASI", async () => {
+    const wasi = await compile(SOURCE, {
+      fileName: "issue-3791-ir-native-regexp-test-wasi.ts",
+      target: "wasi",
+      trackIrOutcomes: true,
+    });
+
+    expect(wasi.success, wasi.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(wasi.irPostClaimErrors ?? []).toEqual([]);
+    expect(wasi.irCompiledFuncs ?? []).not.toContain("isIdentifierStart");
+    expect(wasi.irCompiledFuncs ?? []).not.toContain("isIdentifierChar");
+    expect(wasi.irCompiledFuncs ?? []).not.toContain("isRegExpIdentifierStart");
+    expect(wasi.irCompiledFuncs ?? []).not.toContain("isRegExpIdentifierPart");
+  });
+
+  it("keeps lexical module arrays on the TDZ-aware legacy path", async () => {
+    const source = `
+      var observed = readBeforeInit();
+      const late = [1];
+      function first(input: number[]): number {
+        return input[0];
+      }
+      function readBeforeInit(): number {
+        return first(late);
+      }
+      export function run(): number {
+        return observed;
+      }
+    `;
+    const [legacy, ir] = await Promise.all([
+      compile(source, {
+        fileName: "issue-3791-numeric-array-tdz-legacy.ts",
+        target: "standalone",
+        experimentalIR: false,
+      }),
+      compile(source, {
+        fileName: "issue-3791-numeric-array-tdz-ir.ts",
+        target: "standalone",
+        experimentalIR: true,
+        trackIrOutcomes: true,
+      }),
+    ]);
+
+    expect(legacy.success, legacy.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(ir.success, ir.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(ir.irPostClaimErrors ?? []).toEqual([]);
+    expect(ir.irCompiledFuncs ?? []).not.toContain("readBeforeInit");
+    await expect(WebAssembly.instantiate(legacy.binary, {})).rejects.toBeDefined();
+    await expect(WebAssembly.instantiate(ir.binary, {})).rejects.toBeDefined();
+
+    const regexpSource = `
+      var observed = readRegExpBeforeInit();
+      const lateRegExp = new RegExp("a");
+      function readRegExpBeforeInit(): number {
+        return lateRegExp.test("a") ? 1 : 0;
+      }
+      export function run(): number {
+        return observed;
+      }
+    `;
+    const [legacyRegExp, irRegExp] = await Promise.all([
+      compile(regexpSource, {
+        fileName: "issue-3791-regexp-tdz-legacy.ts",
+        target: "standalone",
+        experimentalIR: false,
+      }),
+      compile(regexpSource, {
+        fileName: "issue-3791-regexp-tdz-ir.ts",
+        target: "standalone",
+        experimentalIR: true,
+        trackIrOutcomes: true,
+      }),
+    ]);
+
+    expect(legacyRegExp.success, legacyRegExp.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(irRegExp.success, irRegExp.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(irRegExp.irPostClaimErrors ?? []).toEqual([]);
+    expect(irRegExp.irCompiledFuncs ?? []).not.toContain("readRegExpBeforeInit");
+    await expect(WebAssembly.instantiate(legacyRegExp.binary, {})).rejects.toBeDefined();
+    await expect(WebAssembly.instantiate(irRegExp.binary, {})).rejects.toBeDefined();
   });
 });

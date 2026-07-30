@@ -19,20 +19,25 @@ related: [2949, 3507, 3780]
 assignee: ttraenkler/codex-ir-regexp
 branch: codex/3791-ir-native-regexp-test
 files:
+  - src/codegen/index.ts
   - src/codegen/regexp-runtime-contract.ts
   - src/codegen/regexp-standalone.ts
+  - src/ir/backend/legality.ts
   - src/ir/from-ast.ts
   - src/ir/integration.ts
   - src/ir/module-bindings.ts
   - src/ir/select.ts
   - tests/issue-3791-ir-native-regexp-test.test.ts
 loc-budget-allow:
+  - src/codegen/index.ts
   - src/ir/from-ast.ts
   - src/ir/integration.ts
   - src/ir/module-bindings.ts
   - src/ir/select.ts
 func-budget-allow:
+  - src/codegen/index.ts::planIrOverlay
   - src/ir/from-ast.ts::lowerMethodCall
+  - src/ir/integration.ts::compileIrPathFunctions
   - src/ir/integration.ts::makeFromAstResolver
   - src/ir/select.ts::isPhase1Expr
 ---
@@ -59,6 +64,8 @@ the existing brand semantics.
   top-level RegExp initialized from compile-time strings.
 - Exclude reassigned bindings and global/sticky carriers whose shared
   `lastIndex` state would require wider IR modeling.
+- Restrict bridged globals to `var` declarations until the IR read carries
+  the module lexical TDZ guard.
 - Load the real legacy-allocated externref module global and call the existing
   in-module `__regexp_test_carrier` helper.
 - Preserve native-string representation by externalizing the subject at the
@@ -67,6 +74,9 @@ the existing brand semantics.
   exact direct-call vec arguments. Reject reassigned and alias-initialized
   bindings, and require the allocator-owned global ValType to match the
   callee's planned vec ABI.
+- Require a selector-visible numeric-vec callee ABI and keep this bridge off
+  in fast-array configurations. Target or ABI mismatches remain ordinary
+  pre-claim fallbacks.
 - Do not touch the direct-backend Acorn performance files.
 
 ## Baseline and newly exposed dependency
@@ -99,8 +109,11 @@ represents that dependency without making module arrays general IR values.
       and all four identifier helpers.
 - [x] Focused fallback coverage keeps reassigned and global/sticky RegExp
       carriers on direct codegen.
+- [x] Destructuring assignment, for-of destructuring, object-rest assignment,
+      lexical TDZ, WASI, and fast-array configurations stay on direct codegen.
 - [x] Focused coverage admits only an exact stable numeric-array module global
-      at a direct-call vec boundary and rejects reassigned/alias initializers.
+      at a proven numeric-vec direct-call boundary and rejects any-parameter,
+      reassigned, and alias-initialized shapes.
 - [x] Exact Acorn measurement reaches 27/43 with checksum 422, zero imports,
       and zero withdrawals.
 - [x] Typecheck, IR fallback ratchet, formatting, function budget, and focused

@@ -333,6 +333,7 @@ export function compileIrPathFunctions(
         backend: "wasmgc",
         target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
         allowHostImports: jsHostExterns,
+        fast: ctx.fast,
       },
       capability,
     );
@@ -431,6 +432,16 @@ export function compileIrPathFunctions(
   const isArrayExpression = makeIrArrayExpressionPredicate(ctx.checker);
   const isRegExpExpression = makeIrRegExpExpressionPredicate(ctx.checker);
   const isAmbientStringBinding = makeAmbientStringBindingPredicate(ctx.checker);
+  const implicitParamUsesNumericVecAbi = (parameter: ts.ParameterDeclaration): boolean => {
+    if (parameter.type || !overrides) return false;
+    const declaration = parameter.parent;
+    if (!ts.isFunctionDeclaration(declaration) || !declaration.name) return false;
+    const index = declaration.parameters.indexOf(parameter);
+    const expected = index < 0 ? undefined : overrides.get(declaration.name.text)?.params[index];
+    const valueType = expected ? asVal(expected) : null;
+    if (valueType?.kind !== "ref" && valueType?.kind !== "ref_null") return false;
+    return ctx.typeIdxToStructName.get(valueType.typeIdx) === "__vec_f64";
+  };
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
@@ -443,6 +454,7 @@ export function compileIrPathFunctions(
       isArrayExpression,
       isRegExpExpression,
       isAmbientStringBinding,
+      implicitParamUsesNumericVecAbi,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
@@ -3005,9 +3017,19 @@ function resolveStaticNumericArrayGlobal(
 
 function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
   const isAmbientStringBinding = makeAmbientStringBindingPredicate(ctx.checker);
+  const supportsBackendCapability = (capability: IrBackendTargetCapability): boolean =>
+    supportsIrBackendTargetCapability(
+      {
+        backend: "wasmgc",
+        target: ctx.wasi ? "wasi" : ctx.standalone ? "standalone" : "gc",
+        allowHostImports: !(ctx.standalone || ctx.wasi || ctx.strictNoHostImports),
+        fast: ctx.fast,
+      },
+      capability,
+    );
   return {
     standaloneRegExpTestPlan(receiver: ts.Expression) {
-      if (!ctx.standalone || ctx.wasi || !moduleBindingResolver) return null;
+      if (!supportsBackendCapability("standalone-native-regexp-test-carrier") || !moduleBindingResolver) return null;
       const plan = moduleBindingResolver.staticRegExpTestPlan(receiver);
       if (!plan) return null;
       ensureStandaloneRegExpCarrierTestHelper(ctx);
@@ -3017,7 +3039,14 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
       };
     },
     staticNumericArrayRead(expression: ts.Expression, expected: IrType) {
-      if (!moduleBindingResolver) return null;
+      const expectedValue = asVal(expected);
+      if (
+        !supportsBackendCapability("legacy-numeric-array-global") ||
+        !moduleBindingResolver ||
+        (expectedValue?.kind !== "ref" && expectedValue?.kind !== "ref_null")
+      ) {
+        return null;
+      }
       const plan = moduleBindingResolver.staticNumericArrayPlan(expression);
       return plan ? resolveStaticNumericArrayGlobal(ctx, plan, expected) : null;
     },

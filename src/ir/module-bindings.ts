@@ -1197,7 +1197,8 @@ function identifierIsWritten(node: ts.Identifier): boolean {
     (ts.isObjectLiteralExpression(parent) && parent.properties.includes(target as ts.ObjectLiteralElementLike)) ||
     (ts.isPropertyAssignment(parent) && parent.initializer === target) ||
     (ts.isShorthandPropertyAssignment(parent) && parent.name === target) ||
-    (ts.isSpreadElement(parent) && parent.expression === target)
+    (ts.isSpreadElement(parent) && parent.expression === target) ||
+    (ts.isSpreadAssignment(parent) && parent.expression === target)
   ) {
     target = parent;
     parent = target.parent;
@@ -1211,7 +1212,14 @@ function identifierIsWritten(node: ts.Identifier): boolean {
   ) {
     return true;
   }
-  return (ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === node;
+  return (ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === target;
+}
+
+function isVarModuleDeclaration(declaration: ts.VariableDeclaration): boolean {
+  return (
+    ts.isVariableDeclarationList(declaration.parent) &&
+    (declaration.parent.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0
+  );
 }
 
 function sourceBindingIsStable(checker: ts.TypeChecker, declaration: ts.VariableDeclaration): boolean {
@@ -1287,7 +1295,11 @@ function staticRegExpInitializer(
 function makeStaticRegExpTestPlan(checker: ts.TypeChecker, node: ts.Expression): IrStaticRegExpTestPlan | undefined {
   if (!ts.isIdentifier(node)) return undefined;
   const declaration = exactTopLevelVariableDeclaration(node, checker);
-  if (!declaration?.initializer || !sourceBindingIsStable(checker, declaration)) {
+  if (
+    !declaration?.initializer ||
+    !isVarModuleDeclaration(declaration) ||
+    !sourceBindingIsStable(checker, declaration)
+  ) {
     return undefined;
   }
   const initializer = staticRegExpInitializer(checker, declaration.initializer);
@@ -1302,6 +1314,7 @@ function makeStaticNumericArrayPlan(
   const declaration = exactTopLevelVariableDeclaration(node, checker);
   if (
     !declaration?.initializer ||
+    !isVarModuleDeclaration(declaration) ||
     !ts.isArrayLiteralExpression(unwrapParens(declaration.initializer)) ||
     !sourceBindingIsStable(checker, declaration)
   ) {
