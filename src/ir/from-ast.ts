@@ -2470,11 +2470,11 @@ function lowerBitwiseAsI32(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   return cx.builder.emitBinary(binop, lhs, rhs, IR_I32);
 }
 
-/**
- * Invariant W — store `rhs` into an i32-promoted slot.
- */
+/** Invariant W — store `rhs` into an i32-promoted slot. */
 function writePromotedI32Slot(slotIndex: number, rhs: ts.Expression, cx: LowerCtx): void {
-  if (!isCanonI32Lowerable(rhs, promotedI32Probe(cx))) {
+  const promoted = promotedI32Probe(cx);
+  const exactI32 = (id: ts.Identifier): boolean => promoted(id) || cx.i32PureNames.has(id.text);
+  if (!isCanonI32Lowerable(rhs, exactI32)) {
     throw new IrUnsupportedError(
       "operand-coercion-unsupported",
       "build",

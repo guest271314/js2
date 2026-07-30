@@ -467,14 +467,26 @@ export function planI32Slots(
   }
 
   // (4) Producibility fixpoint: shrink until every surviving candidate's writes
-  // are all lowerable to an exact i32 *using only the surviving candidates*.
-  // The identifier probe resolves a use site to its GOVERNING declaration, so
-  // a same-named sibling binding never leaks its promotion into another scope.
+  // are all lowerable to an exact i32. Besides the surviving promoted slots,
+  // admit names from Q-CANON itself: immutable intermediates such as
+  //
+  //     const next = (a + b) | 0;
+  //     b = next;
+  //
+  // are provably int32-valued even though they do not need mutable slot
+  // storage. `lowerAsI32` can consume those through `i32PureNames`; excluding
+  // them here caused the whole Fibonacci cycle (`a`, `b`) to be demoted to
+  // f64. `collectI32CoercedLocals` already rejects duplicate/shadowed names, so
+  // the name-based half of this probe cannot leak across sibling bindings.
+  //
+  // The promoted-slot half still resolves a use site to its GOVERNING
+  // declaration, so a same-named sibling binding never leaks its promotion
+  // into another scope.
   const promotedAt: IsPromotedI32 = (id: ts.Identifier): boolean => {
     for (const c of candidates.values()) {
       if (c.name === id.text && nodeContains(c.scope, id)) return true;
     }
-    return false;
+    return canonNames.has(id.text);
   };
   for (;;) {
     let changed = false;

@@ -54,6 +54,10 @@ export class IrFunctionBuilder {
   private readonly params: IrParam[] = [];
   private readonly finished: IrBlock[] = [];
   private readonly valueTypes = new Map<IrValueId, IrType>();
+  // Exact i32 values widened to f64. SSA values are immutable, so a later
+  // truncation of the widened result can always recover the original i32 even
+  // when unrelated instructions were emitted between the two conversions.
+  private readonly exactI32Widenings = new Map<IrValueId, IrValueId>();
   private current: OpenBlock | null = null;
   // Block IDs are assigned from a monotonic counter rather than from
   // `finished.length`, so forward references (br_if with a not-yet-opened
@@ -230,26 +234,15 @@ export class IrFunctionBuilder {
     // index, `arr[i]` — would pay `convert` + `trunc_sat` where it used to pay
     // just `trunc_sat`, i.e. the promotion would PESSIMIZE indexed loops.
     //
-    // Guard: only when the `convert` is the immediately-preceding instruction
-    // in the CURRENT sink. That makes same-buffer dominance trivially true and
-    // makes an aliasing second consumer impossible in practice (there has been
-    // no chance to hand the value to anyone else yet).
     if (op === "i32.trunc_sat_f64_s") {
-      const sink = this.bodyBuffer ?? this.currentBlockInstrsOrNull();
-      const last = sink !== null && sink.length > 0 ? sink[sink.length - 1] : undefined;
-      if (last !== undefined && last.kind === "unary" && last.op === "f64.convert_i32_s" && last.result === rand) {
-        return last.rand;
-      }
+      const exactI32 = this.exactI32Widenings.get(rand);
+      if (exactI32 !== undefined) return exactI32;
     }
     const result = this.allocator.fresh();
     this.valueTypes.set(result, resultType);
     this.pushInstr({ kind: "unary", op, rand, result, resultType });
+    if (op === "f64.convert_i32_s") this.exactI32Widenings.set(result, rand);
     return result;
-  }
-
-  /** The instruction list a `pushInstr` would append to, or null if no block. */
-  private currentBlockInstrsOrNull(): IrInstr[] | null {
-    return this.current === null ? null : this.current.instrs;
   }
 
   emitSelect(condition: IrValueId, whenTrue: IrValueId, whenFalse: IrValueId, resultType: IrType): IrValueId {
