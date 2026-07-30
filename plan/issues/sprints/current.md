@@ -7,6 +7,38 @@ updated: 2026-07-21
 
 # Current budget window — FOCUS: complete the IR-only migration
 
+## Stakeholder directive (2026-07-31) — ES5 · Acorn perf · ESLint · React
+
+Supersedes the 2026-07-21 IR-only ordering **for new pulls**. The IR migration
+continues as the substrate it always was; these four are what the window is
+judged on:
+
+1. **ES5 compatibility** — close the descriptor/coercion/enumeration residual.
+   `#3776 #3661 #3662 #3420 #3475 #3663 #3768 #3631` plus the reclaimed
+   `#2200 #2668 #2670 #2742 #2747 #2552`.
+2. **Acorn performance** — compiled Acorn is still ~400–500× native at real-file
+   scale (#3756). `#3756 #3675 #3782 #3780 #3686 #3685 #3684 #3683 #3730`.
+3. **ESLint** — continue PR #3687 (`codex/1400-eslint-e2e`, currently DIRTY +
+   held, and it *records* a known regression: the full graph no longer compiles
+   after the merge). Six criticals were stranded on the closed `sprint: 76` and
+   are pulled forward: `#3653 #3654 #3655 #3656 #3657 #3672`.
+4. **React** — `#3801`, new: run React's OWN upstream unit tests against
+   compiled React. Self-authored vectors share our blind spots.
+
+### Reclaimed stalled work
+
+`#2200 #2552 #2668 #2670 #2742 #2747` sat `in-progress` on closed sprints (64/67
+/Backlog) with no open PR and their agents long gone — stalled claims, not live
+work. Reset to `ready` and pulled into this window so they can actually be
+claimed. See the sprint 77 retro for why stalled claims accumulate.
+
+### Standing rule for this window
+
+Report `passed / attempted / total` with all three denominators. A suite we
+control drifts toward vacuity; prove a harness can go red before quoting any
+number from it (#3592, #2093).
+
+
 > **Stakeholder directive (2026-07-21).** Drive the IR migration through an
 > IR-only default and retire direct codegen. This supersedes the June 30
 > ordering for new pulls. Standalone correctness remains a protected parallel

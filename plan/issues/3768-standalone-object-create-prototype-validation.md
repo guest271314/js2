@@ -5,7 +5,7 @@ status: ready
 sprint: current
 created: 2026-07-28
 updated: 2026-07-28
-priority: medium
+priority: high
 horizon: s
 complexity: S
 feasibility: high
