@@ -838,9 +838,9 @@
       },
       "tests": {
         "kind": "upstream-api-vectors",
-        "passed": 0,
+        "passed": 5,
         "total": 5,
-        "passRatePct": 0
+        "passRatePct": 100
       },
       "perf": null,
       "knownBugs": []

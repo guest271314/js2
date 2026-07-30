@@ -549,12 +549,18 @@ export function compileTypedBinaryDispatch(
   if ((leftType.kind === "externref" || rightType.kind === "externref") && (isEqOp || isNeqOp)) {
     const isStrict = op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
     const isStrictNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
-    const leftIsString = isStringType(leftTsType);
-    const rightIsString = isStringType(rightTsType);
-    const leftIsNumber = isNumberType(leftTsType);
-    const rightIsNumber = isNumberType(rightTsType);
-    const leftIsBool = isBooleanType(leftTsType);
-    const rightIsBool = isBooleanType(rightTsType);
+    // A function-scoped var used as a bare for-in target is dynamically a
+    // property-key string during the loop even when a later initializer makes
+    // TypeScript report `number` at every use. Do not constant-fold equality
+    // from that stale static type; compare the actual boxed value.
+    const leftIsDynamicForIn = ts.isIdentifier(expr.left) && fctx.forInIdentifierVars?.has(expr.left.text) === true;
+    const rightIsDynamicForIn = ts.isIdentifier(expr.right) && fctx.forInIdentifierVars?.has(expr.right.text) === true;
+    const leftIsString = !leftIsDynamicForIn && isStringType(leftTsType);
+    const rightIsString = !rightIsDynamicForIn && isStringType(rightTsType);
+    const leftIsNumber = !leftIsDynamicForIn && isNumberType(leftTsType);
+    const rightIsNumber = !rightIsDynamicForIn && isNumberType(rightTsType);
+    const leftIsBool = !leftIsDynamicForIn && isBooleanType(leftTsType);
+    const rightIsBool = !rightIsDynamicForIn && isBooleanType(rightTsType);
 
     // #1776: standalone / WASI (no-JS-host) dynamic equality.
     //
@@ -1055,6 +1061,27 @@ export function compileTypedBinaryDispatch(
       if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
       releaseTempLocal(fctx, rTmp);
       releaseTempLocal(fctx, lTmp);
+      return { kind: "i32" };
+    }
+
+    if (!noJsHost && (leftIsDynamicForIn || rightIsDynamicForIn)) {
+      if (rightType.kind !== "externref") {
+        coerceType(ctx, fctx, rightType, { kind: "externref" });
+      }
+      if (leftType.kind !== "externref") {
+        const tmpR = allocTempLocal(fctx, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: tmpR });
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+        fctx.body.push({ op: "local.get", index: tmpR });
+        releaseTempLocal(fctx, tmpR);
+      }
+      const hostFn = isStrict ? "__host_eq" : "__host_loose_eq";
+      const hostIdx = ensureLateImport(ctx, hostFn, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+      flushLateImportShifts(ctx, fctx);
+      const finalHostIdx = ctx.funcMap.get(hostFn) ?? hostIdx;
+      if (finalHostIdx === undefined) throw new Error(`Missing import after ensureLateImport: ${hostFn}`);
+      fctx.body.push({ op: "call", funcIdx: finalHostIdx });
+      if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
       return { kind: "i32" };
     }
 

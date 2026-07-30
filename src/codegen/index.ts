@@ -7767,6 +7767,51 @@ export function ensureLetConstBindingPatternTdzFlags(
   }
 }
 
+/**
+ * A bare `for (name in value)` assignment always writes a property key string
+ * into `name`. Because `var` declarations are function-scoped, that write may
+ * precede a later declaration whose initializer makes the checker infer a
+ * numeric slot:
+ *
+ *   for (propName in config) { ... }
+ *   var propName = arguments.length - 2;
+ *
+ * React's cloneElement has exactly this shape. Allocating `propName` as f64
+ * coerces every enumerated key to NaN before the loop body can read it. Keep
+ * the hoisted binding dynamic whenever the same symbol is a for-in target so
+ * it can represent both the string keys and later values.
+ */
+function varBindingIsForInIdentifierTarget(ctx: CodegenContext, decl: ts.VariableDeclaration): boolean {
+  if (!ts.isIdentifier(decl.name)) return false;
+  const bindingSymbol = ctx.checker.getSymbolAtLocation(decl.name);
+  if (!bindingSymbol) return false;
+
+  let root: ts.Node = decl.getSourceFile();
+  for (let node: ts.Node | undefined = decl.parent; node; node = node.parent) {
+    if (ts.isFunctionLike(node)) {
+      root = (node as ts.Node & { body?: ts.Node }).body ?? node;
+      break;
+    }
+  }
+
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (node !== root && ts.isFunctionLike(node)) return;
+    if (ts.isForInStatement(node)) {
+      let target: ts.Expression | ts.VariableDeclarationList = node.initializer;
+      while (ts.isParenthesizedExpression(target)) target = target.expression;
+      if (ts.isIdentifier(target) && ctx.checker.getSymbolAtLocation(target) === bindingSymbol) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return found;
+}
+
 /** Hoist a single variable declaration (handles both simple identifiers and binding patterns). */
 function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.VariableDeclaration): void {
   if (ts.isIdentifier(decl.name)) {
@@ -7833,9 +7878,16 @@ function hoistVarDecl(ctx: CodegenContext, fctx: FunctionContext, decl: ts.Varia
     }
     // (#684) Usage-narrowed f64 override for a boxed-`any` var — computed
     // separately so the entry-init below can seed NaN (see next comment).
-    const usageF64 = initForcesExternref ? null : usageInferredLocalType(ctx, decl);
+    const forInTargetForcesExternref = varBindingIsForInIdentifierTarget(ctx, decl);
+    if (forInTargetForcesExternref) {
+      (fctx.forInIdentifierVars ??= new Set()).add(name);
+    }
+    const usageF64 = initForcesExternref || forInTargetForcesExternref ? null : usageInferredLocalType(ctx, decl);
     const wasmType: ValType =
-      initForcesExternref || isNullablePrimitiveType(varType) || varBindingNeedsExternrefForUndefined(decl, ctx)
+      initForcesExternref ||
+      forInTargetForcesExternref ||
+      isNullablePrimitiveType(varType) ||
+      varBindingNeedsExternrefForUndefined(decl, ctx)
         ? { kind: "externref" as const }
         : (usageF64 ?? resolveWasmType(ctx, varType));
     if (initForcesExternref) ctx.externrefAccessorVars.add(name);

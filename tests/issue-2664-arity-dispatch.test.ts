@@ -33,6 +33,26 @@ async function run(src: string): Promise<any> {
 }
 
 describe("#2664 — under-applied dynamic method dispatch (arity mismatch)", () => {
+  it("dispatches a 3-formal CommonJS export called with 2 args and preserves arguments.length", async () => {
+    // React's production bundle assigns createElement to an open CommonJS
+    // exports object. That object crosses the host mirror, whose old local
+    // closureBridge only knew arities 0..2. Calling the 3-formal function with
+    // two args therefore selected __call_fn_method_2, matched no closure, and
+    // returned null. The widened transport must still report the source argc.
+    const exp = await run(`
+      // @ts-nocheck
+      var exports = {};
+      exports.create = function(type, config, children) {
+        return { type: type, argc: arguments.length };
+      };
+      export function probe() {
+        var result = exports.create("div", null);
+        return result.type === "div" && result.argc === 2 ? 1 : 0;
+      }
+    `);
+    expect(exp.probe()).toBe(1);
+  });
+
   it("a 2-param method invoked via this.m() with 0 args RUNS (not null)", async () => {
     // The acorn shape: `this.parseExpression()` — a 2-param method called with 0
     // args through a dynamic (any-receiver) dispatch. Before the fix the bridge
