@@ -6190,6 +6190,26 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         currentSelectionOptions?.isRegExpExpression?.(expr.expression.expression) === true &&
         currentSelectionOptions.supportsBackendCapability?.("host-regexp-constructor") === false
       ) {
+        // #3791 — host-free `.test` is claimable only for an exact stable
+        // top-level static RegExp whose real legacy externref carrier can be
+        // loaded and passed to the in-module native helper. This deliberately
+        // bypasses the generic receiver walk: the binding is not a general IR
+        // module value, and `.exec`, g/y stateful carriers, reassigned
+        // bindings, non-string subjects, and all other shapes keep the
+        // established target-capability refusal.
+        const nativePlan =
+          expr.expression.name.text === "test"
+            ? currentModuleBindingResolver?.staticRegExpTestPlan(expr.expression.expression)
+            : undefined;
+        if (
+          nativePlan !== undefined &&
+          expr.arguments.length === 1 &&
+          !ts.isSpreadElement(expr.arguments[0]!) &&
+          (expressionIsProvenString(expr.arguments[0]!) ||
+            currentSelectionOptions?.classifyPrimitiveExpression?.(expr.arguments[0]!) === "string")
+        ) {
+          return isPhase1Expr(expr.arguments[0]!, scope, localClasses);
+        }
         return capabilityNo("regexp-constructor-unsupported", "expr-regexp-method-target", expr);
       }
       // (#1371) Whitelist `Math.<unary>(arg)` for a small set of f64-mapped
@@ -6485,6 +6505,10 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         if (!isStaticSpreadSource(arg.expression, scope, localClasses)) return false;
         continue;
       }
+      // #3791 follow-up dependency — an exact stable top-level numeric array
+      // may cross only a direct-call boundary. The callee's planned vec ABI
+      // remains authoritative; the builder rechecks its real global ValType.
+      if (currentModuleBindingResolver?.staticNumericArrayPlan(arg) !== undefined) continue;
       if (!isPhase1Expr(arg, scope, localClasses)) return false;
     }
     return true;

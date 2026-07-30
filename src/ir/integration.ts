@@ -69,6 +69,8 @@ import {
   nativeStringLiteralInstrs,
   type StringEncoding,
 } from "../codegen/native-strings.js";
+import { STANDALONE_REGEXP_CARRIER_TEST_HELPER } from "../codegen/regexp-runtime-contract.js";
+import { ensureStandaloneRegExpCarrierTestHelper } from "../codegen/regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../codegen/registry/imports.js";
 import {
   planProgramAbiSupportCallableAlias,
@@ -156,6 +158,8 @@ import {
   type IrLegacyModuleBindingResolver,
   type IrModuleBindingIdentity,
   type IrModuleBindingResolver,
+  type IrStaticNumericArrayPlan,
+  type IrStaticRegExpTestPlan,
 } from "./module-bindings.js";
 import {
   lowerIrFunctionToWasm,
@@ -169,6 +173,7 @@ import {
   type IrUnionLowering,
 } from "./lower.js";
 import {
+  asVal,
   forEachInstrDeep, // (#2949 slice 3) deep instr walk for preregisterDynamicSupport
   irTypeEquals,
   type IrClassMemberKind,
@@ -2887,9 +2892,135 @@ function resolveDynamicCarrier(ctx: CodegenContext): ValType {
   return { kind: "externref" };
 }
 
+function resolveStandaloneRegExpTestGlobal(ctx: CodegenContext, plan: IrStaticRegExpTestPlan): IrGlobalRef {
+  if (
+    plan.globalBindingId === undefined ||
+    plan.sourceId === undefined ||
+    plan.declarationOrdinal === undefined ||
+    !ts.isIdentifier(plan.declaration.name)
+  ) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "build",
+      "standalone RegExp test plan has no exact structural module-global identity",
+    );
+  }
+  const name = plan.declaration.name.text;
+  const globalName = `__mod_${name}`;
+  const observed = ctx.programAbiGlobals?.moduleBinding(plan.declaration);
+  let global: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    if (!observed || observed.displayName !== name) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `standalone RegExp carrier '${name}' has no allocator-owned module global`,
+      );
+    }
+    global = observed.value;
+  } else {
+    const globalIdx = ctx.moduleGlobals.get(name);
+    global = globalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  }
+  if (!global || global.name !== globalName || global.type.kind !== "externref") {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `standalone RegExp carrier ${globalName} is not the legacy externref module slot`,
+    );
+  }
+  const ref = irSourceGlobalRef(plan.globalBindingId, globalName);
+  planProgramAbiGlobal(ctx, {
+    ref,
+    anchor: { kind: "source", sourceId: plan.sourceId },
+    roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
+    derivedOrdinal: plan.declarationOrdinal,
+    global,
+  });
+  return ref;
+}
+
+function sameExactValType(left: ValType, right: ValType): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "ref" || left.kind === "ref_null") {
+    return right.kind === left.kind && left.typeIdx === right.typeIdx;
+  }
+  return true;
+}
+
+function resolveStaticNumericArrayGlobal(
+  ctx: CodegenContext,
+  plan: IrStaticNumericArrayPlan,
+  expected: IrType,
+): { readonly globalRef: IrGlobalRef; readonly type: IrType } {
+  const expectedVal = asVal(expected);
+  if (
+    plan.globalBindingId === undefined ||
+    plan.sourceId === undefined ||
+    plan.declarationOrdinal === undefined ||
+    !ts.isIdentifier(plan.declaration.name) ||
+    expectedVal === null ||
+    (expectedVal.kind !== "ref" && expectedVal.kind !== "ref_null")
+  ) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "build",
+      "static numeric array direct-call plan has no exact ref-typed structural identity",
+    );
+  }
+  const name = plan.declaration.name.text;
+  const globalName = `__mod_${name}`;
+  const observed = ctx.programAbiGlobals?.moduleBinding(plan.declaration);
+  let global: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    if (!observed || observed.displayName !== name) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `static numeric array '${name}' has no allocator-owned module global`,
+      );
+    }
+    global = observed.value;
+  } else {
+    const globalIdx = ctx.moduleGlobals.get(name);
+    global = globalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  }
+  if (!global || global.name !== globalName || !sameExactValType(global.type, expectedVal)) {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `static numeric array ${globalName} does not match the direct callee's vec ABI`,
+    );
+  }
+  const globalRef = irSourceGlobalRef(plan.globalBindingId, globalName);
+  planProgramAbiGlobal(ctx, {
+    ref: globalRef,
+    anchor: { kind: "source", sourceId: plan.sourceId },
+    roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
+    derivedOrdinal: plan.declarationOrdinal,
+    global,
+  });
+  return { globalRef, type: expected };
+}
+
 function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
   const isAmbientStringBinding = makeAmbientStringBindingPredicate(ctx.checker);
   return {
+    standaloneRegExpTestPlan(receiver: ts.Expression) {
+      if (!ctx.standalone || ctx.wasi || !moduleBindingResolver) return null;
+      const plan = moduleBindingResolver.staticRegExpTestPlan(receiver);
+      if (!plan) return null;
+      ensureStandaloneRegExpCarrierTestHelper(ctx);
+      return {
+        receiverGlobal: resolveStandaloneRegExpTestGlobal(ctx, plan),
+        funcName: STANDALONE_REGEXP_CARRIER_TEST_HELPER,
+      };
+    },
+    staticNumericArrayRead(expression: ts.Expression, expected: IrType) {
+      if (!moduleBindingResolver) return null;
+      const plan = moduleBindingResolver.staticNumericArrayPlan(expression);
+      return plan ? resolveStaticNumericArrayGlobal(ctx, plan, expected) : null;
+    },
     objectDefinePropertyTarget() {
       if (ctx.standalone || ctx.wasi || ctx.strictNoHostImports) return null;
       return irImportFuncRef("env", "__defineProperty_desc");

@@ -82,6 +82,7 @@ import { compileStringLiteral } from "./string-ops.js";
 import { nativeStringRepr } from "./builtin-scaffold.js";
 import { mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { addFuncType } from "./registry/types.js";
+import { STANDALONE_REGEXP_CARRIER_TEST_HELPER } from "./regexp-runtime-contract.js";
 
 export const STANDALONE_REGEXP_ABI_VERSION = 1;
 
@@ -171,7 +172,6 @@ export function hasStandaloneRegExpEngine(state: StandaloneRegExpEngineState): b
 }
 
 const STANDALONE_REGEXP_STRUCT_NAME = "__StandaloneRegExp";
-export const STANDALONE_REGEXP_CARRIER_TEST_HELPER = "__regexp_test_carrier";
 // g/i/y from Phase 2a, m/s from 2c, d/u/v from 2d (#1911 — `d` does not
 // change MATCHING semantics; the `.indices` result surface is #1914's lane;
 // u/v code-point atoms resolve via compile-time host enumeration, Slice B).
