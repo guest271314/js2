@@ -240,6 +240,94 @@ identity/signatures, and allocation provenance, and
 `check:ir-optimization-retirement` remains fail-closed until its committed
 parity evidence is retirement-ready.
 
+## Scoped prepared-component ABI prerequisite (2026-07-30)
+
+The next file-disjoint prerequisite adds a scoped seal to
+`ProgramAbiSession`; it does not activate production routing. A one-shot
+component transaction starts from exact terminal `IrUnitId`s, automatically
+closes over source and pass-derived callables plus existing aliases/exports,
+and accepts only explicitly discovered external/support binding IDs.
+
+Successful scope sealing proves, before unrelated direct-body planning:
+
+- source/derived callable and support identities are complete;
+- callable/global structured type contracts match their planned signatures;
+- required slots have an observed structural reservation and an exact
+  allocator locator already present in the module;
+- later derived units, aliases, exports, unit-owned support, type-contract
+  additions, or locator replacement cannot extend or mutate the sealed
+  component.
+
+The whole `ProgramAbiSession` intentionally remains in planning state, so
+unrelated direct bindings and support can still be registered. Whole-program
+seal and final publication rebuild each scoped ABI, compare every materialized
+contract while ignoring only whole-program dense-order renumbering, and fail
+closed on missing/drifted identities, contracts, reservations, or locators.
+Explicit type-layout remaps advance the scoped structured contracts through the
+same validated remap rather than hiding an unreported mutation.
+
+Focused evidence in
+`tests/issue-3521-scoped-prepared-abi-seal.test.ts` covers a non-empty source
+callable plus monomorphized clone, alias, export, and support closure; continued
+unrelated planning; missing locator/reservation rejection; prepared-owned late
+support/derived rejection; signature drift at publication; exact final
+reconciliation; and transaction abort/retry without partial scope publication.
+
+Adversarial review further pins the boundary:
+
+- every registered lifted/monomorphized executable beneath a prepared terminal
+  must already own exactly one source-callable reservation, structured
+  contract, structural reference, and locator;
+- explicitly requested bindings are limited to canonical external/support
+  dependencies, cannot import another terminal's source callable/global, and
+  cannot overlap a previously sealed component;
+- type/class cells retain an immutable canonical layout contract. Direct cell
+  remaps and in-place layout mutation fail, while the complete validated
+  `applyTypeLayoutRemap` event advances the pinned layout and callable/global
+  structured contracts together only when each replacement is canonically
+  equal to the prior layout under that exact index remap;
+- imported callable/global locators are re-read for exact host module/name,
+  callable signature, global storage type, and mutability during
+  reconciliation, so mutating the same import object cannot bypass the seal;
+- malformed/custom binding IDs, alias cycles, duplicate dependency discovery,
+  and removal of a pinned allocator object all reject before publication.
+
+The follow-up ownership hardening uses the complete structural inventory
+rather than treating a terminal row as the whole component:
+
+- every inventoried nested function, function expression, arrow, object
+  method/accessor, and class-member/support unit whose terminal ownership
+  resolves to a prepared root is part of that root's sealed unit denominator;
+  any existing callable is closed into the scope, while later callable or
+  support planning for those units fails closed;
+- every binding in the final alias/export/support closure retains the terminal
+  owner resolved from its canonical encoded owner. Class owners resolve
+  transitively through `IrClassRecord.lexicalOwnerId`, so a binding beneath a
+  different terminal cannot be auto-claimed through an alias/export edge or
+  explicitly requested as support;
+- scoped type evidence pins the full transitive graph reachable from type and
+  class cells plus callable/global reference contracts. An exact index
+  permutation must preserve each reachable payload definition, including
+  fields, mutability, and supertype relationships, under the same remap.
+  `StructTypeDef.superTypeIdx === -1` remains the open-root sentinel rather
+  than being traversed or rewritten as a concrete type index;
+- semantic-preserving type reorders refresh alias contracts through their
+  canonical callable/global owner. Aliases intentionally carrying no sidecar
+  of their own therefore remain valid without weakening the exact graph
+  comparison.
+
+Focused coverage includes all inventoried nested callable kinds in the R2
+component, late nested planning rejection, cross-component nested-unit and
+nested-class dependency rejection, disjoint nested-class scopes,
+foreign-owned alias/export closure rejection, referenced payload-shape swap
+rejection, and non-vacuous callable/global inherited-alias reorder success.
+
+This prerequisite changes neither `compileDeclarations` nor
+`compileIrPathFunctions`. Production adoption and legacy-body reduction remain
+exactly **0**, and all inline-small, monomorphization, allocation-provenance,
+and retirement-parity obligations remain assigned to the later prepare/emit
+wiring slice.
+
 ## File ownership and locks
 
 Lock `src/codegen/index.ts`, `src/codegen/declarations.ts`,

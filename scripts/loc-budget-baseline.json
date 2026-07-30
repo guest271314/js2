@@ -1,7 +1,7 @@
 {
   "generated": "2026-07-30",
   "threshold": 1500,
-  "totalCeiling": 507184,
+  "totalCeiling": 510407,
   "files": {
     "src/codegen-linear/index.ts": 5615,
     "src/codegen-linear/runtime.ts": 4306,
@@ -14,6 +14,7 @@
     "src/codegen/binary-ops.ts": 3310,
     "src/codegen/class-bodies.ts": 3211,
     "src/codegen/closed-method-dispatch.ts": 1712,
+    "src/codegen/closure-exports.ts": 1643,
     "src/codegen/closures.ts": 3391,
     "src/codegen/context/types.ts": 3230,
     "src/codegen/dataview-native.ts": 5892,
@@ -22,7 +23,7 @@
     "src/codegen/destructuring-params.ts": 2388,
     "src/codegen/expressions.ts": 1642,
     "src/codegen/expressions/assignment.ts": 4967,
-    "src/codegen/expressions/builtins.ts": 3893,
+    "src/codegen/expressions/builtins.ts": 3939,
     "src/codegen/expressions/call-builtin-static.ts": 3635,
     "src/codegen/expressions/call-identifier.ts": 2228,
     "src/codegen/expressions/call-namespace-static.ts": 2440,
@@ -49,7 +50,7 @@
     "src/codegen/object-runtime-descriptors.ts": 2814,
     "src/codegen/object-runtime.ts": 8381,
     "src/codegen/parse-number-native.ts": 1852,
-    "src/codegen/program-abi-session.ts": 1550,
+    "src/codegen/program-abi-session.ts": 2813,
     "src/codegen/property-access-dispatch.ts": 4019,
     "src/codegen/property-access.ts": 5484,
     "src/codegen/regexp-standalone.ts": 4261,
@@ -70,14 +71,14 @@
     "src/compiler/early-errors/node-checks.ts": 1876,
     "src/emit/binary.ts": 1997,
     "src/ir/backend/porffor/assembler.ts": 1507,
-    "src/ir/builder.ts": 1798,
-    "src/ir/from-ast.ts": 10289,
-    "src/ir/integration.ts": 5816,
+    "src/ir/builder.ts": 1791,
+    "src/ir/from-ast.ts": 10341,
+    "src/ir/integration.ts": 5932,
     "src/ir/lower.ts": 3974,
     "src/ir/module-bindings.ts": 1855,
     "src/ir/nodes.ts": 3221,
-    "src/ir/select.ts": 7422,
+    "src/ir/select.ts": 7522,
     "src/ir/verify.ts": 1593,
-    "src/runtime.ts": 15680
+    "src/runtime.ts": 15824
   }
 }
