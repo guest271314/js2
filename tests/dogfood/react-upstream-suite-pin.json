@@ -1,0 +1,10 @@
+{
+  "repo": "https://github.com/facebook/react.git",
+  "tag": "v19.2.6",
+  "commit": "eaf3e95ca92be7a23d3c9cc8ffd6f199a40be401",
+  "testFiles": [
+    "packages/react/src/__tests__/ReactCreateElement-test.js",
+    "packages/react/src/__tests__/ReactElementClone-test.js"
+  ],
+  "_note": "The published react@19.2.6 tarball deliberately excludes React's source tests. This pin acquires the matching upstream tag, verifies its immutable commit, and supplies source-attributed public-API vectors. The full upstream Jest suite requires React's private build and test infrastructure, so it is not misrepresented as directly runnable against the published Wasm module."
+}
