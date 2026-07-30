@@ -208,18 +208,25 @@ The first R2 landing is intentionally structural. `src/ir/program.ts` and
 without wiring it into `src/codegen/index.ts`:
 
 - the denominator is exactly the R1 inventory's top-level free-function
-  terminals, with every unit present once in exactly one local-call component;
-- every component freezes to one terminal `Prepared`, `Unsupported`, or
-  `Invariant` ownership kind before an emitter can start;
-- `Prepared` records own their final signature, post-pass typed IR, target
-  legality proof, inline-small/monomorphization evidence, symbolic support
-  intents, allocation reservations, and source/pass provenance;
-- a one-shot isolated emission transaction enforces `Prepared -> IR`,
-  `Unsupported -> direct`, and `Invariant -> neither`, and publishes only after
-  every eligible unit reconciles to exactly one staged body;
-- missing/duplicate units, mixed component outcomes, late support discovery,
-  unsealed ABI plans, wrong emitter direction, duplicate emission, and partial
-  publication are fatal invariants.
+  terminals, with every unit represented once;
+- asserted IR/direct/invariant routes, signatures, exports, legality,
+  inline-small/monomorphization results, symbolic support, allocation, and
+  provenance are retained only as explicitly **unvalidated candidates**;
+- caller-supplied component groupings are likewise non-authoritative hints.
+  This slice does not infer the call graph, use those groupings to claim atomic
+  ownership, or reject a mixed grouping as though it were a proven component;
+- a capability-only, one-shot isolated transaction exercises candidate-route
+  accounting and publishes only an explicitly unvalidated candidate snapshot;
+- every input is defensively copied, functions/accessors and other executable
+  or mutable non-data objects are rejected recursively, and any staging,
+  freezing, direction, duplication, or partial-publication error atomically
+  aborts the transaction without retry.
+
+The later production-routing slice must derive call/ABI components and
+Prepared evidence from the actual post-pass IR, symbolic references,
+`ProgramAbiMap`, backend legality results, allocation registry, and provenance
+registry. Only that reconciliation may promote a candidate to terminal
+`Prepared`, `Unsupported`, or `Invariant` ownership and feed a real emitter.
 
 This slice does **not** change production routing and its expected
 legacy-body reduction is therefore exactly **0**. It does not claim the issue's

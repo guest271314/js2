@@ -1,80 +1,95 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
-import type { IrBindingId, IrUnitId, IrTerminalUnitRecord } from "./identity.js";
+import type { IrBindingId, IrTerminalUnitRecord, IrUnitId } from "./identity.js";
 import {
-  createValidatedPreparedIrProgram,
+  createPreparedIrCandidateProgram,
   freezePreparedIrValue,
   preparedIrReadonlyMap,
   PreparedIrProgramInvariantError,
-  type PreparedIrAllocationRecord,
-  type PreparedIrBackendLegalityProof,
-  type PreparedIrComponent,
-  type PreparedIrInvariantUnit,
-  type PreparedIrOptimizationEvidence,
-  type PreparedIrPreparedUnit,
+  type PreparedIrAllocationCandidate,
+  type PreparedIrAssertedBackendLegality,
+  type PreparedIrAssertedOptimizationEvidence,
+  type PreparedIrDirectCandidate,
+  type PreparedIrInvariantCandidate,
+  type PreparedIrIrCandidate,
   type PreparedIrProgram,
-  type PreparedIrProvenanceRecord,
-  type PreparedIrSupportIntent,
-  type PreparedIrUnitOutcome,
-  type PreparedIrUnsupportedUnit,
+  type PreparedIrProvenanceCandidate,
+  type PreparedIrSupportIntentCandidate,
+  type PreparedIrUnitCandidate,
 } from "./program.js";
 import type { ProgramAbiCallableSignature } from "./program-abi.js";
 import { ProgramAbiMap } from "./program-abi.js";
 
-export interface PreparedIrPreparedInput {
+export interface PreparedIrIrCandidateInput {
   readonly unitId: IrUnitId;
-  readonly finalSignature: ProgramAbiCallableSignature;
-  readonly exportIntents?: readonly IrBindingId[];
-  readonly backendLegality: PreparedIrBackendLegalityProof;
-  readonly optimization: PreparedIrOptimizationEvidence;
-  readonly ir: unknown;
+  readonly assertedSignature: ProgramAbiCallableSignature;
+  readonly assertedExportIntents?: readonly IrBindingId[];
+  readonly assertedBackendLegality: PreparedIrAssertedBackendLegality;
+  readonly assertedOptimization: PreparedIrAssertedOptimizationEvidence;
+  readonly irCandidate: unknown;
 }
 
-export interface PreparedIrFailureInput {
+export interface PreparedIrFailureCandidateInput {
   readonly unitId: IrUnitId;
   readonly code: string;
   readonly stage: string;
   readonly detail: string;
 }
 
-export interface PreparedIrComponentInput {
+export interface PreparedIrComponentCandidateInput {
   readonly id: string;
   readonly unitIds: readonly IrUnitId[];
 }
 
 type BuilderState = "open" | "sealing" | "sealed" | "failed";
 
-function freezeSignature(signature: ProgramAbiCallableSignature): ProgramAbiCallableSignature {
+function location(unit: IrTerminalUnitRecord) {
+  return Object.freeze({
+    sourceId: unit.sourceId,
+    line: unit.line,
+    column: unit.column,
+    declarationStart: unit.declarationStart,
+    declarationEnd: unit.declarationEnd,
+  });
+}
+
+function ownSignature(signature: ProgramAbiCallableSignature): ProgramAbiCallableSignature {
   return Object.freeze({
     params: Object.freeze([...signature.params]),
     results: Object.freeze([...signature.results]),
   });
 }
 
-function freezePrepared(input: PreparedIrPreparedInput, unit: IrTerminalUnitRecord): PreparedIrPreparedUnit {
+function ownIrCandidate(input: PreparedIrIrCandidateInput, unit: IrTerminalUnitRecord): PreparedIrIrCandidate {
   return Object.freeze({
-    kind: "prepared" as const,
+    kind: "ir-candidate" as const,
+    route: "ir" as const,
+    evidenceStatus: "unvalidated-candidate" as const,
     unitId: input.unitId,
-    location: Object.freeze({
-      sourceId: unit.sourceId,
-      line: unit.line,
-      column: unit.column,
-      declarationStart: unit.declarationStart,
-      declarationEnd: unit.declarationEnd,
-    }),
-    finalSignature: freezeSignature(input.finalSignature),
-    exportIntents: Object.freeze([...(input.exportIntents ?? [])]),
-    backendLegality: Object.freeze({ ...input.backendLegality }),
-    optimization: Object.freeze({ ...input.optimization }),
-    ir: freezePreparedIrValue(input.ir),
+    location: location(unit),
+    assertedSignature: ownSignature(input.assertedSignature),
+    assertedExportIntents: Object.freeze([...(input.assertedExportIntents ?? [])]),
+    assertedBackendLegality: Object.freeze({ ...input.assertedBackendLegality }),
+    assertedOptimization: Object.freeze({ ...input.assertedOptimization }),
+    irCandidate: freezePreparedIrValue(input.irCandidate),
   });
 }
 
-function freezeFailure(
-  kind: "unsupported" | "invariant",
-  input: PreparedIrFailureInput,
-): PreparedIrUnsupportedUnit | PreparedIrInvariantUnit {
-  return Object.freeze({ kind, ...input });
+function ownFailureCandidate(
+  kind: "direct-candidate" | "invariant-candidate",
+  input: PreparedIrFailureCandidateInput,
+  unit: IrTerminalUnitRecord,
+): PreparedIrDirectCandidate | PreparedIrInvariantCandidate {
+  return Object.freeze({
+    kind,
+    route: kind === "direct-candidate" ? ("direct" as const) : ("neither" as const),
+    evidenceStatus: "unvalidated-candidate" as const,
+    unitId: input.unitId,
+    location: location(unit),
+    code: input.code,
+    stage: input.stage,
+    detail: input.detail,
+  }) as PreparedIrDirectCandidate | PreparedIrInvariantCandidate;
 }
 
 function duplicateIds(ids: readonly IrUnitId[]): IrUnitId[] {
@@ -88,17 +103,18 @@ function duplicateIds(ids: readonly IrUnitId[]): IrUnitId[] {
 }
 
 /**
- * Mutable preparation transaction. seal() validates the complete denominator
- * and publishes one immutable PreparedIrProgram snapshot or fails closed.
+ * Structural candidate collector only. seal() proves denominator/lifecycle
+ * integrity, not production Prepared status. Production wiring must derive and
+ * reconcile IR edges, signatures, support, allocation, and provenance.
  */
 export class PreparedIrProgramBuilder {
   readonly #abi: ProgramAbiMap;
   readonly #freeUnits: ReadonlyMap<IrUnitId, IrTerminalUnitRecord>;
-  readonly #outcomes: PreparedIrUnitOutcome[] = [];
-  readonly #components: PreparedIrComponentInput[] = [];
-  readonly #supportIntents: PreparedIrSupportIntent[] = [];
-  readonly #allocations: PreparedIrAllocationRecord[] = [];
-  readonly #provenance: PreparedIrProvenanceRecord[] = [];
+  readonly #candidates: PreparedIrUnitCandidate[] = [];
+  readonly #componentCandidates: PreparedIrComponentCandidateInput[] = [];
+  readonly #supportIntentCandidates: Omit<PreparedIrSupportIntentCandidate, "evidenceStatus">[] = [];
+  readonly #allocationCandidates: Omit<PreparedIrAllocationCandidate, "evidenceStatus">[] = [];
+  readonly #provenanceCandidates: Omit<PreparedIrProvenanceCandidate, "evidenceStatus">[] = [];
   #state: BuilderState = "open";
   #program?: PreparedIrProgram;
 
@@ -117,63 +133,60 @@ export class PreparedIrProgramBuilder {
     );
   }
 
-  recordPrepared(input: PreparedIrPreparedInput): void {
-    this.#assertOpen();
-    const unit = this.#requireFreeUnit(input.unitId);
-    if (
-      input.backendLegality.verified !== true ||
-      input.optimization.allocationProvenance !== "verified" ||
-      !Array.isArray(input.finalSignature.params) ||
-      !Array.isArray(input.finalSignature.results)
-    ) {
-      throw new PreparedIrProgramInvariantError(
-        "invalid-prepared-evidence",
-        `Prepared unit ${input.unitId} lacks final legality/optimization/signature evidence`,
-      );
-    }
-    this.#outcomes.push(freezePrepared(input, unit));
+  recordIrCandidate(input: PreparedIrIrCandidateInput): void {
+    this.#mutate(() => {
+      const unit = this.#requireFreeUnit(input.unitId);
+      if (
+        input.assertedBackendLegality.verified !== true ||
+        input.assertedOptimization.allocationProvenance !== "verified" ||
+        !Array.isArray(input.assertedSignature.params) ||
+        !Array.isArray(input.assertedSignature.results)
+      ) {
+        throw new PreparedIrProgramInvariantError(
+          "invalid-prepared-data",
+          `IR candidate ${input.unitId} lacks structurally valid asserted evidence`,
+        );
+      }
+      this.#candidates.push(ownIrCandidate(input, unit));
+    });
   }
 
-  recordUnsupported(input: PreparedIrFailureInput): void {
-    this.#assertOpen();
-    this.#requireFreeUnit(input.unitId);
-    this.#outcomes.push(freezeFailure("unsupported", input));
+  recordDirectCandidate(input: PreparedIrFailureCandidateInput): void {
+    this.#mutate(() => {
+      const unit = this.#requireFreeUnit(input.unitId);
+      this.#candidates.push(ownFailureCandidate("direct-candidate", input, unit) as PreparedIrDirectCandidate);
+    });
   }
 
-  recordInvariant(input: PreparedIrFailureInput): void {
-    this.#assertOpen();
-    this.#requireFreeUnit(input.unitId);
-    this.#outcomes.push(freezeFailure("invariant", input));
+  recordInvariantCandidate(input: PreparedIrFailureCandidateInput): void {
+    this.#mutate(() => {
+      const unit = this.#requireFreeUnit(input.unitId);
+      this.#candidates.push(ownFailureCandidate("invariant-candidate", input, unit) as PreparedIrInvariantCandidate);
+    });
   }
 
-  addComponent(input: PreparedIrComponentInput): void {
-    this.#assertOpen();
-    this.#components.push(
-      Object.freeze({
-        id: input.id,
-        unitIds: Object.freeze([...input.unitIds]),
-      }),
-    );
+  addComponentCandidate(input: PreparedIrComponentCandidateInput): void {
+    this.#mutate(() => {
+      this.#componentCandidates.push(Object.freeze({ id: input.id, unitIds: Object.freeze([...input.unitIds]) }));
+    });
   }
 
-  addSupportIntent(input: PreparedIrSupportIntent): void {
+  addSupportIntentCandidate(input: Omit<PreparedIrSupportIntentCandidate, "evidenceStatus">): void {
     if (this.#state !== "open") {
       throw new PreparedIrProgramInvariantError(
         "late-support-intent",
-        `support intent ${input.key} was requested after preparation sealed`,
+        `support intent candidate ${input.key} was requested after preparation sealed`,
       );
     }
-    this.#supportIntents.push(Object.freeze({ ...input }));
+    this.#mutate(() => this.#supportIntentCandidates.push(Object.freeze({ ...input })));
   }
 
-  addAllocation(input: PreparedIrAllocationRecord): void {
-    this.#assertOpen();
-    this.#allocations.push(Object.freeze({ ...input }));
+  addAllocationCandidate(input: Omit<PreparedIrAllocationCandidate, "evidenceStatus">): void {
+    this.#mutate(() => this.#allocationCandidates.push(Object.freeze({ ...input })));
   }
 
-  addProvenance(input: PreparedIrProvenanceRecord): void {
-    this.#assertOpen();
-    this.#provenance.push(Object.freeze({ ...input }));
+  addProvenanceCandidate(input: Omit<PreparedIrProvenanceCandidate, "evidenceStatus">): void {
+    this.#mutate(() => this.#provenanceCandidates.push(Object.freeze({ ...input })));
   }
 
   seal(): PreparedIrProgram {
@@ -181,30 +194,17 @@ export class PreparedIrProgramBuilder {
     this.#assertOpen();
     this.#state = "sealing";
     try {
-      const outcomeMap = this.#validateOutcomes();
-      const components = this.#validateComponents(outcomeMap);
-      this.#validateSupportIntents();
-      this.#validatePreparedOwnership(outcomeMap);
-
-      const prepared = [...outcomeMap].filter(
-        (entry): entry is [IrUnitId, PreparedIrPreparedUnit] => entry[1].kind === "prepared",
-      );
-      const direct = [...outcomeMap].filter(
-        (entry): entry is [IrUnitId, PreparedIrUnsupportedUnit] => entry[1].kind === "unsupported",
-      );
-      const invariant = [...outcomeMap].filter(
-        (entry): entry is [IrUnitId, PreparedIrInvariantUnit] => entry[1].kind === "invariant",
-      );
-      this.#program = createValidatedPreparedIrProgram({
+      const units = this.#validateUnitCandidates();
+      this.#validateComponentCandidates();
+      this.#validateSupportCandidates();
+      this.#validateIrOwnedCandidates(units);
+      this.#program = createPreparedIrCandidateProgram({
         abiEntries: this.#abi.entries(),
-        units: preparedIrReadonlyMap(outcomeMap),
-        preparedUnits: preparedIrReadonlyMap(prepared),
-        directUnits: preparedIrReadonlyMap(direct),
-        invariantUnits: preparedIrReadonlyMap(invariant),
-        components,
-        supportIntents: Object.freeze([...this.#supportIntents]),
-        allocations: Object.freeze([...this.#allocations]),
-        provenance: Object.freeze([...this.#provenance]),
+        units,
+        componentCandidates: this.#componentCandidates,
+        supportIntentCandidates: this.#supportIntentCandidates,
+        allocationCandidates: this.#allocationCandidates,
+        provenanceCandidates: this.#provenanceCandidates,
       });
       this.#state = "sealed";
       return this.#program;
@@ -214,120 +214,102 @@ export class PreparedIrProgramBuilder {
     }
   }
 
-  #validateOutcomes(): Map<IrUnitId, PreparedIrUnitOutcome> {
-    const duplicateOutcomes = duplicateIds(this.#outcomes.map((outcome) => outcome.unitId));
-    if (duplicateOutcomes.length > 0) {
+  #validateUnitCandidates(): ReadonlyMap<IrUnitId, PreparedIrUnitCandidate> {
+    const duplicateCandidates = duplicateIds(this.#candidates.map((candidate) => candidate.unitId));
+    if (duplicateCandidates.length > 0) {
       throw new PreparedIrProgramInvariantError(
         "duplicate-unit",
-        `free-function outcomes duplicated: ${duplicateOutcomes.join(", ")}`,
+        `free-function candidates duplicated: ${duplicateCandidates.join(", ")}`,
       );
     }
-    const outcomes = new Map(this.#outcomes.map((outcome) => [outcome.unitId, outcome] as const));
-    const unknown = [...outcomes.keys()].filter((unitId) => !this.#freeUnits.has(unitId));
-    if (unknown.length > 0) {
-      throw new PreparedIrProgramInvariantError("unknown-unit", `outcomes include non-R2 units: ${unknown.join(", ")}`);
-    }
-    const missing = [...this.#freeUnits.keys()].filter((unitId) => !outcomes.has(unitId));
+    const candidates = new Map(this.#candidates.map((candidate) => [candidate.unitId, candidate] as const));
+    const missing = [...this.#freeUnits.keys()].filter((unitId) => !candidates.has(unitId));
     if (missing.length > 0) {
       throw new PreparedIrProgramInvariantError(
         "missing-unit",
-        `free-function outcomes missing: ${missing.join(", ")}`,
+        `free-function candidates missing: ${missing.join(", ")}`,
       );
     }
-    return outcomes;
+    return candidates;
   }
 
-  #validateComponents(outcomes: ReadonlyMap<IrUnitId, PreparedIrUnitOutcome>): readonly PreparedIrComponent[] {
-    const componentIds = this.#components.map((component) => component.id);
-    if (new Set(componentIds).size !== componentIds.length) {
-      throw new PreparedIrProgramInvariantError("duplicate-component", "component IDs must be unique");
-    }
-    const allMembers = this.#components.flatMap((component) => [...component.unitIds]);
-    const duplicateMembers = duplicateIds(allMembers);
-    if (duplicateMembers.length > 0) {
+  #validateComponentCandidates(): void {
+    const ids = this.#componentCandidates.map((component) => component.id);
+    if (new Set(ids).size !== ids.length) {
       throw new PreparedIrProgramInvariantError(
-        "duplicate-component-unit",
-        `free functions belong to multiple components: ${duplicateMembers.join(", ")}`,
+        "duplicate-component-candidate",
+        "component candidate IDs must be unique",
       );
     }
-    const unknownMembers = allMembers.filter((unitId) => !this.#freeUnits.has(unitId));
-    if (unknownMembers.length > 0) {
-      throw new PreparedIrProgramInvariantError(
-        "unknown-unit",
-        `components include non-R2 units: ${unknownMembers.join(", ")}`,
-      );
+    for (const component of this.#componentCandidates) {
+      if (component.unitIds.length === 0) {
+        throw new PreparedIrProgramInvariantError(
+          "empty-component-candidate",
+          `component candidate ${component.id} is empty`,
+        );
+      }
+      const unknown = component.unitIds.filter((unitId) => !this.#freeUnits.has(unitId));
+      if (unknown.length > 0) {
+        throw new PreparedIrProgramInvariantError(
+          "unknown-unit",
+          `component candidate ${component.id} includes non-R2 units: ${unknown.join(", ")}`,
+        );
+      }
     }
-    const missingMembers = [...this.#freeUnits.keys()].filter((unitId) => !allMembers.includes(unitId));
-    if (missingMembers.length > 0) {
-      throw new PreparedIrProgramInvariantError(
-        "missing-component-unit",
-        `free functions lack component ownership: ${missingMembers.join(", ")}`,
-      );
-    }
-    return Object.freeze(
-      this.#components.map((component) => {
-        if (component.unitIds.length === 0) {
-          throw new PreparedIrProgramInvariantError("empty-component", `component ${component.id} is empty`);
-        }
-        const kinds = new Set(component.unitIds.map((unitId) => outcomes.get(unitId)!.kind));
-        if (kinds.size !== 1) {
-          throw new PreparedIrProgramInvariantError(
-            "mixed-component-outcome",
-            `component ${component.id} mixes terminal outcomes: ${[...kinds].join(", ")}`,
-          );
-        }
-        return Object.freeze({
-          id: component.id,
-          unitIds: Object.freeze([...component.unitIds]),
-          outcome: [...kinds][0]!,
-        });
-      }),
-    );
   }
 
-  #validateSupportIntents(): void {
-    const keys = this.#supportIntents.map((intent) => intent.key);
+  #validateSupportCandidates(): void {
+    const keys = this.#supportIntentCandidates.map((candidate) => candidate.key);
     if (new Set(keys).size !== keys.length) {
-      throw new PreparedIrProgramInvariantError("duplicate-support-intent", "support intent keys must be unique");
+      throw new PreparedIrProgramInvariantError(
+        "duplicate-support-intent-candidate",
+        "support intent candidate keys must be unique",
+      );
     }
-    for (const intent of this.#supportIntents) {
-      if (intent.ownerUnitId && !this.#freeUnits.has(intent.ownerUnitId)) {
+    for (const candidate of this.#supportIntentCandidates) {
+      if (candidate.ownerUnitId && !this.#freeUnits.has(candidate.ownerUnitId)) {
         throw new PreparedIrProgramInvariantError(
           "unknown-support-owner",
-          `support intent ${intent.key} has unknown owner ${intent.ownerUnitId}`,
+          `support intent candidate ${candidate.key} has unknown owner ${candidate.ownerUnitId}`,
         );
       }
-      if (intent.bindingId && !this.#abi.get(intent.bindingId)) {
+      if (candidate.bindingId && !this.#abi.get(candidate.bindingId)) {
         throw new PreparedIrProgramInvariantError(
           "unknown-support-binding",
-          `support intent ${intent.key} references unplanned binding ${intent.bindingId}`,
+          `support intent candidate ${candidate.key} references unplanned binding ${candidate.bindingId}`,
         );
       }
     }
   }
 
-  #validatePreparedOwnership(outcomes: ReadonlyMap<IrUnitId, PreparedIrUnitOutcome>): void {
-    const allocationKeys = this.#allocations.map((record) => record.key);
+  #validateIrOwnedCandidates(units: ReadonlyMap<IrUnitId, PreparedIrUnitCandidate>): void {
+    const allocationKeys = this.#allocationCandidates.map((candidate) => candidate.key);
     if (new Set(allocationKeys).size !== allocationKeys.length) {
-      throw new PreparedIrProgramInvariantError("duplicate-allocation", "allocation keys must be unique");
+      throw new PreparedIrProgramInvariantError(
+        "duplicate-allocation-candidate",
+        "allocation candidate keys must be unique",
+      );
     }
-    for (const record of this.#allocations) {
-      if (outcomes.get(record.ownerUnitId)?.kind !== "prepared") {
+    for (const candidate of this.#allocationCandidates) {
+      if (units.get(candidate.ownerUnitId)?.kind !== "ir-candidate") {
         throw new PreparedIrProgramInvariantError(
-          "allocation-not-prepared-owned",
-          `allocation ${record.key} is owned by non-Prepared unit ${record.ownerUnitId}`,
+          "allocation-not-ir-candidate-owned",
+          `allocation candidate ${candidate.key} is owned by non-IR candidate ${candidate.ownerUnitId}`,
         );
       }
     }
-    const artifactIds = this.#provenance.map((record) => record.artifactUnitId);
-    if (new Set(artifactIds).size !== artifactIds.length) {
-      throw new PreparedIrProgramInvariantError("duplicate-provenance", "artifact provenance must be unique");
+    const artifacts = this.#provenanceCandidates.map((candidate) => candidate.artifactUnitId);
+    if (new Set(artifacts).size !== artifacts.length) {
+      throw new PreparedIrProgramInvariantError(
+        "duplicate-provenance-candidate",
+        "provenance candidate artifacts must be unique",
+      );
     }
-    for (const record of this.#provenance) {
-      if (outcomes.get(record.ownerUnitId)?.kind !== "prepared") {
+    for (const candidate of this.#provenanceCandidates) {
+      if (units.get(candidate.ownerUnitId)?.kind !== "ir-candidate") {
         throw new PreparedIrProgramInvariantError(
-          "provenance-not-prepared-owned",
-          `artifact ${record.artifactUnitId} is owned by non-Prepared unit ${record.ownerUnitId}`,
+          "provenance-not-ir-candidate-owned",
+          `provenance candidate ${candidate.artifactUnitId} is owned by non-IR candidate ${candidate.ownerUnitId}`,
         );
       }
     }
@@ -342,6 +324,16 @@ export class PreparedIrProgramBuilder {
       );
     }
     return unit;
+  }
+
+  #mutate(operation: () => void): void {
+    this.#assertOpen();
+    try {
+      operation();
+    } catch (error) {
+      this.#state = "failed";
+      throw error;
+    }
   }
 
   #assertOpen(): void {

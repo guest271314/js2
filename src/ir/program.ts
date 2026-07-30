@@ -4,8 +4,8 @@ import type { IrBackendKind } from "./backend/legality.js";
 import type { IrBindingId, IrSourceId, IrUnitId } from "./identity.js";
 import type { ProgramAbiCallableSignature, ProgramAbiPlanEntry } from "./program-abi.js";
 
-export type PreparedIrOutcomeKind = "prepared" | "unsupported" | "invariant";
-export type PreparedIrEmitter = "direct" | "ir";
+export type PreparedIrCandidateRoute = "ir" | "direct" | "neither";
+export type PreparedIrEmitter = Exclude<PreparedIrCandidateRoute, "neither">;
 
 export type PreparedIrProgramInvariantCode =
   | "abi-not-sealed"
@@ -14,21 +14,19 @@ export type PreparedIrProgramInvariantCode =
   | "duplicate-unit"
   | "missing-unit"
   | "unknown-unit"
-  | "duplicate-component"
-  | "empty-component"
-  | "duplicate-component-unit"
-  | "missing-component-unit"
-  | "mixed-component-outcome"
-  | "duplicate-support-intent"
+  | "duplicate-component-candidate"
+  | "empty-component-candidate"
+  | "duplicate-support-intent-candidate"
   | "late-support-intent"
   | "unknown-support-owner"
   | "unknown-support-binding"
-  | "duplicate-allocation"
-  | "allocation-not-prepared-owned"
-  | "duplicate-provenance"
-  | "provenance-not-prepared-owned"
-  | "invalid-prepared-evidence"
-  | "program-has-invariant"
+  | "duplicate-allocation-candidate"
+  | "allocation-not-ir-candidate-owned"
+  | "duplicate-provenance-candidate"
+  | "provenance-not-ir-candidate-owned"
+  | "invalid-prepared-data"
+  | "program-has-invariant-candidate"
+  | "invalid-transaction-capability"
   | "emission-already-started"
   | "transaction-closed"
   | "wrong-emitter"
@@ -55,52 +53,62 @@ export interface PreparedIrSourceLocation {
   readonly declarationEnd: number;
 }
 
-export interface PreparedIrOptimizationEvidence {
+export interface PreparedIrAssertedOptimizationEvidence {
   readonly inlineSmall: "applied" | "not-applicable";
   readonly monomorphization: "applied" | "not-applicable";
   readonly allocationProvenance: "verified";
 }
 
-export interface PreparedIrBackendLegalityProof {
+export interface PreparedIrAssertedBackendLegality {
   readonly backend: IrBackendKind;
   readonly target: "gc" | "linear" | "standalone" | "wasi";
   readonly verified: true;
 }
 
-export interface PreparedIrPreparedUnit {
-  readonly kind: "prepared";
+interface PreparedIrCandidateBase {
   readonly unitId: IrUnitId;
   readonly location: PreparedIrSourceLocation;
-  readonly finalSignature: ProgramAbiCallableSignature;
-  readonly exportIntents: readonly IrBindingId[];
-  readonly backendLegality: PreparedIrBackendLegalityProof;
-  readonly optimization: PreparedIrOptimizationEvidence;
-  /** Frozen post-pass typed IR. The structural slice deliberately does not emit it. */
-  readonly ir: unknown;
+  /** This structural slice does not make the record production-authoritative. */
+  readonly evidenceStatus: "unvalidated-candidate";
 }
 
-export interface PreparedIrUnsupportedUnit {
-  readonly kind: "unsupported";
-  readonly unitId: IrUnitId;
+export interface PreparedIrIrCandidate extends PreparedIrCandidateBase {
+  readonly kind: "ir-candidate";
+  readonly route: "ir";
+  readonly assertedSignature: ProgramAbiCallableSignature;
+  readonly assertedExportIntents: readonly IrBindingId[];
+  readonly assertedBackendLegality: PreparedIrAssertedBackendLegality;
+  readonly assertedOptimization: PreparedIrAssertedOptimizationEvidence;
+  readonly irCandidate: unknown;
+}
+
+export interface PreparedIrDirectCandidate extends PreparedIrCandidateBase {
+  readonly kind: "direct-candidate";
+  readonly route: "direct";
   readonly code: string;
   readonly stage: string;
   readonly detail: string;
 }
 
-export interface PreparedIrInvariantUnit {
-  readonly kind: "invariant";
-  readonly unitId: IrUnitId;
+export interface PreparedIrInvariantCandidate extends PreparedIrCandidateBase {
+  readonly kind: "invariant-candidate";
+  readonly route: "neither";
   readonly code: string;
   readonly stage: string;
   readonly detail: string;
 }
 
-export type PreparedIrUnitOutcome = PreparedIrPreparedUnit | PreparedIrUnsupportedUnit | PreparedIrInvariantUnit;
+export type PreparedIrUnitCandidate = PreparedIrIrCandidate | PreparedIrDirectCandidate | PreparedIrInvariantCandidate;
 
-export interface PreparedIrComponent {
+/**
+ * Caller-supplied grouping hint only. Production wiring must rebuild and
+ * reconcile components from authoritative IR call/ABI edges.
+ */
+export interface PreparedIrComponentCandidate {
   readonly id: string;
   readonly unitIds: readonly IrUnitId[];
-  readonly outcome: PreparedIrOutcomeKind;
+  readonly candidateRoutes: readonly PreparedIrCandidateRoute[];
+  readonly evidenceStatus: "unvalidated-component-candidate";
 }
 
 export type PreparedIrSupportIntentKind =
@@ -115,35 +123,38 @@ export type PreparedIrSupportIntentKind =
   | "export"
   | "monomorphized-clone";
 
-/** A symbolic request resolved during preparation, before either body emitter runs. */
-export interface PreparedIrSupportIntent {
+/** Unvalidated symbolic discovery retained for later production reconciliation. */
+export interface PreparedIrSupportIntentCandidate {
   readonly key: string;
   readonly kind: PreparedIrSupportIntentKind;
   readonly ownerUnitId?: IrUnitId;
   readonly bindingId?: IrBindingId;
   readonly detail?: string;
+  readonly evidenceStatus: "unvalidated-candidate";
 }
 
 export type PreparedIrAllocationKind = "function" | "global" | "type" | "literal" | "helper";
 
-/** Allocation reservation owned only by a Prepared unit; no concrete Wasm index is allocated here. */
-export interface PreparedIrAllocationRecord {
+/** Unvalidated allocation request; this slice neither reserves nor allocates a concrete index. */
+export interface PreparedIrAllocationCandidate {
   readonly key: string;
   readonly kind: PreparedIrAllocationKind;
   readonly ownerUnitId: IrUnitId;
   readonly bindingId?: IrBindingId;
   readonly ordinal: number;
+  readonly evidenceStatus: "unvalidated-candidate";
 }
 
 export type PreparedIrProvenanceRole = "source" | "lifted-closure" | "monomorphization-clone";
 
-/** Exact source/pass provenance for a Prepared-owned source or derived IR artifact. */
-export interface PreparedIrProvenanceRecord {
+/** Unvalidated source/pass provenance assertion retained for later reconciliation. */
+export interface PreparedIrProvenanceCandidate {
   readonly artifactUnitId: IrUnitId;
   readonly ownerUnitId: IrUnitId;
   readonly role: PreparedIrProvenanceRole;
   readonly parentUnitId?: IrUnitId;
   readonly ordinal: number;
+  readonly evidenceStatus: "unvalidated-candidate";
 }
 
 export interface PreparedIrAbiSnapshot {
@@ -154,7 +165,7 @@ export interface PreparedIrAbiSnapshot {
 
 export interface PreparedIrEmissionLedgerEntry {
   readonly unitId: IrUnitId;
-  readonly outcome: PreparedIrOutcomeKind;
+  readonly candidateRoute: PreparedIrCandidateRoute;
   readonly prepareAttempts: 1;
   readonly directBodyEmissions: number;
   readonly irBodyEmissions: number;
@@ -168,22 +179,25 @@ export interface PreparedIrStagedBody {
   readonly body: unknown;
 }
 
-export interface PreparedIrPublication {
+/** Structural candidate publication only; never a production ownership proof. */
+export interface PreparedIrCandidatePublication {
+  readonly evidenceStatus: "unvalidated-candidate-publication";
   readonly bodies: ReadonlyMap<IrUnitId, PreparedIrStagedBody>;
   readonly ledger: ReadonlyMap<IrUnitId, PreparedIrEmissionLedgerEntry>;
 }
 
 export interface PreparedIrProgram {
   readonly abi: PreparedIrAbiSnapshot;
-  /** Exact R2 denominator: all and only inventoried top-level free functions. */
-  readonly units: ReadonlyMap<IrUnitId, PreparedIrUnitOutcome>;
-  readonly preparedUnits: ReadonlyMap<IrUnitId, PreparedIrPreparedUnit>;
-  readonly directUnits: ReadonlyMap<IrUnitId, PreparedIrUnsupportedUnit>;
-  readonly invariantUnits: ReadonlyMap<IrUnitId, PreparedIrInvariantUnit>;
-  readonly components: readonly PreparedIrComponent[];
-  readonly supportIntents: readonly PreparedIrSupportIntent[];
-  readonly allocations: readonly PreparedIrAllocationRecord[];
-  readonly provenance: readonly PreparedIrProvenanceRecord[];
+  /** Exact authoritative R2 denominator; every value remains an unvalidated candidate. */
+  readonly units: ReadonlyMap<IrUnitId, PreparedIrUnitCandidate>;
+  readonly irCandidates: ReadonlyMap<IrUnitId, PreparedIrIrCandidate>;
+  readonly directCandidates: ReadonlyMap<IrUnitId, PreparedIrDirectCandidate>;
+  readonly invariantCandidates: ReadonlyMap<IrUnitId, PreparedIrInvariantCandidate>;
+  readonly componentCandidates: readonly PreparedIrComponentCandidate[];
+  readonly supportIntentCandidates: readonly PreparedIrSupportIntentCandidate[];
+  readonly allocationCandidates: readonly PreparedIrAllocationCandidate[];
+  readonly provenanceCandidates: readonly PreparedIrProvenanceCandidate[];
+  readonly reconciliation: "pending-production-wiring";
   readonly sealed: true;
   beginEmission(): PreparedIrEmissionTransaction;
 }
@@ -225,15 +239,52 @@ class FrozenMap<K, V> implements ReadonlyMap<K, V> {
   }
 }
 
+class FrozenSet<T> implements ReadonlySet<T> {
+  readonly #set: Set<T>;
+
+  constructor(values: Iterable<T>) {
+    this.#set = new Set(values);
+    Object.freeze(this);
+  }
+
+  get size(): number {
+    return this.#set.size;
+  }
+  has(value: T): boolean {
+    return this.#set.has(value);
+  }
+  forEach(callbackfn: (value: T, value2: T, set: ReadonlySet<T>) => void, thisArg?: unknown): void {
+    for (const value of this.#set) callbackfn.call(thisArg, value, value, this);
+  }
+  entries(): SetIterator<[T, T]> {
+    return this.#set.entries();
+  }
+  keys(): SetIterator<T> {
+    return this.#set.keys();
+  }
+  values(): SetIterator<T> {
+    return this.#set.values();
+  }
+  [Symbol.iterator](): SetIterator<T> {
+    return this.#set[Symbol.iterator]();
+  }
+  get [Symbol.toStringTag](): string {
+    return "FrozenSet";
+  }
+}
+
 export function preparedIrReadonlyMap<K, V>(entries: Iterable<readonly [K, V]>): ReadonlyMap<K, V> {
   return new FrozenMap(entries);
 }
 
+function invalidPreparedData(detail: string): never {
+  throw new PreparedIrProgramInvariantError("invalid-prepared-data", detail);
+}
+
 function immutableCopy(value: unknown, ancestors = new Set<object>()): unknown {
+  if (typeof value === "function") invalidPreparedData("prepared data cannot contain executable functions");
   if (value === null || typeof value !== "object") return value;
-  if (ancestors.has(value)) {
-    throw new PreparedIrProgramInvariantError("invalid-prepared-evidence", "prepared evidence must be acyclic");
-  }
+  if (ancestors.has(value)) invalidPreparedData("prepared data must be acyclic");
   const nextAncestors = new Set(ancestors).add(value);
   if (Array.isArray(value)) return Object.freeze(value.map((item) => immutableCopy(item, nextAncestors)));
   if (value instanceof Map) {
@@ -242,18 +293,24 @@ function immutableCopy(value: unknown, ancestors = new Set<object>()): unknown {
     );
   }
   if (value instanceof Set) {
-    return Object.freeze([...value].map((item) => immutableCopy(item, nextAncestors)));
+    return new FrozenSet([...value].map((item) => immutableCopy(item, nextAncestors)));
   }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
-    throw new PreparedIrProgramInvariantError(
-      "invalid-prepared-evidence",
-      `prepared evidence contains unsupported mutable ${prototype?.constructor?.name ?? "object"}`,
-    );
+    invalidPreparedData(`prepared data contains unsupported mutable ${prototype?.constructor?.name ?? "object"}`);
   }
-  const copy: Record<PropertyKey, unknown> = {};
+  const copy = Object.create(null) as Record<PropertyKey, unknown>;
   for (const key of Reflect.ownKeys(value)) {
-    copy[key] = immutableCopy((value as Record<PropertyKey, unknown>)[key], nextAncestors);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) {
+      invalidPreparedData(`prepared data property ${String(key)} must be a non-executable data property`);
+    }
+    Object.defineProperty(copy, key, {
+      value: immutableCopy(descriptor.value, nextAncestors),
+      enumerable: descriptor.enumerable,
+      configurable: false,
+      writable: false,
+    });
   }
   return Object.freeze(copy);
 }
@@ -264,31 +321,44 @@ export function freezePreparedIrValue(value: unknown): unknown {
 
 interface MutableLedgerEntry {
   readonly unitId: IrUnitId;
-  readonly outcome: PreparedIrOutcomeKind;
+  readonly candidateRoute: PreparedIrCandidateRoute;
   directBodyEmissions: number;
   irBodyEmissions: number;
 }
+
+const EMISSION_TRANSACTION_CAPABILITY = Symbol("PreparedIrProgram.beginEmission");
 
 export class PreparedIrEmissionTransaction {
   readonly #program: PreparedIrProgram;
   readonly #staged = new Map<IrUnitId, PreparedIrStagedBody>();
   readonly #ledger = new Map<IrUnitId, MutableLedgerEntry>();
   #state: "open" | "published" | "aborted" = "open";
-  #publication?: PreparedIrPublication;
+  #publication?: PreparedIrCandidatePublication;
 
-  constructor(program: PreparedIrProgram) {
+  private constructor(program: PreparedIrProgram, capability: symbol) {
+    if (capability !== EMISSION_TRANSACTION_CAPABILITY) {
+      throw new PreparedIrProgramInvariantError(
+        "invalid-transaction-capability",
+        "emission transactions can only be created by PreparedIrProgram.beginEmission()",
+      );
+    }
     this.#program = program;
-    for (const [unitId, outcome] of program.units) {
+    for (const [unitId, candidate] of program.units) {
       this.#ledger.set(unitId, {
         unitId,
-        outcome: outcome.kind,
+        candidateRoute: candidate.route,
         directBodyEmissions: 0,
         irBodyEmissions: 0,
       });
     }
   }
 
-  get publication(): PreparedIrPublication | undefined {
+  /** @internal Runtime capability remains module-private. */
+  static open(program: PreparedIrProgram, capability: symbol): PreparedIrEmissionTransaction {
+    return new PreparedIrEmissionTransaction(program, capability);
+  }
+
+  get publication(): PreparedIrCandidatePublication | undefined {
     return this.#publication;
   }
 
@@ -306,61 +376,70 @@ export class PreparedIrEmissionTransaction {
 
   failEmission(unitId: IrUnitId, emitter: PreparedIrEmitter, detail: string): never {
     this.#assertOpen();
-    this.#assertDirection(unitId, emitter);
-    this.#state = "aborted";
-    throw new PreparedIrProgramInvariantError("emission-failed", `${emitter} emission for ${unitId} failed: ${detail}`);
+    try {
+      this.#assertDirection(unitId, emitter);
+      throw new PreparedIrProgramInvariantError(
+        "emission-failed",
+        `${emitter} emission for ${unitId} failed: ${detail}`,
+      );
+    } catch (error) {
+      return this.#abort(error);
+    }
   }
 
-  publish(): PreparedIrPublication {
+  publish(): PreparedIrCandidatePublication {
     this.#assertOpen();
-    const missing = [...this.#program.units].filter(([unitId, outcome]) => {
-      if (outcome.kind === "invariant") return false;
-      return !this.#staged.has(unitId);
-    });
-    if (missing.length > 0) {
-      this.#state = "aborted";
-      throw new PreparedIrProgramInvariantError(
-        "partial-publication",
-        `cannot publish ${this.#staged.size}/${this.#program.preparedUnits.size + this.#program.directUnits.size} bodies; missing ${missing
-          .map(([unitId]) => unitId)
-          .join(", ")}`,
+    try {
+      const missing = [...this.#program.units].filter(
+        ([unitId, candidate]) => candidate.route !== "neither" && !this.#staged.has(unitId),
       );
+      if (missing.length > 0) {
+        throw new PreparedIrProgramInvariantError(
+          "partial-publication",
+          `cannot publish ${this.#staged.size}/${this.#program.irCandidates.size + this.#program.directCandidates.size} candidate bodies; missing ${missing
+            .map(([unitId]) => unitId)
+            .join(", ")}`,
+        );
+      }
+      const publication = Object.freeze({
+        evidenceStatus: "unvalidated-candidate-publication" as const,
+        bodies: preparedIrReadonlyMap(this.#staged),
+        ledger: this.#ledgerSnapshot(),
+      });
+      this.#publication = publication;
+      this.#state = "published";
+      return publication;
+    } catch (error) {
+      return this.#abort(error);
     }
-    const publication = Object.freeze({
-      bodies: preparedIrReadonlyMap(this.#staged),
-      ledger: this.#ledgerSnapshot(),
-    });
-    this.#publication = publication;
-    this.#state = "published";
-    return publication;
   }
 
   #stage(unitId: IrUnitId, emitter: PreparedIrEmitter, body: unknown): void {
     this.#assertOpen();
-    this.#assertDirection(unitId, emitter);
-    if (this.#staged.has(unitId)) {
-      this.#state = "aborted";
-      throw new PreparedIrProgramInvariantError("duplicate-emission", `${unitId} was emitted more than once`);
+    try {
+      this.#assertDirection(unitId, emitter);
+      if (this.#staged.has(unitId)) {
+        throw new PreparedIrProgramInvariantError("duplicate-emission", `${unitId} was emitted more than once`);
+      }
+      const staged = Object.freeze({ unitId, emitter, body: freezePreparedIrValue(body) });
+      const ledger = this.#ledger.get(unitId)!;
+      if (emitter === "ir") ledger.irBodyEmissions = 1;
+      else ledger.directBodyEmissions = 1;
+      this.#staged.set(unitId, staged);
+    } catch (error) {
+      this.#abort(error);
     }
-    const frozenBody = freezePreparedIrValue(body);
-    const ledger = this.#ledger.get(unitId)!;
-    if (emitter === "ir") ledger.irBodyEmissions = 1;
-    else ledger.directBodyEmissions = 1;
-    this.#staged.set(unitId, Object.freeze({ unitId, emitter, body: frozenBody }));
   }
 
   #assertDirection(unitId: IrUnitId, emitter: PreparedIrEmitter): void {
-    const outcome = this.#program.units.get(unitId);
-    if (!outcome) {
-      this.#state = "aborted";
+    const candidate = this.#program.units.get(unitId);
+    if (!candidate) {
       throw new PreparedIrProgramInvariantError("unknown-emission-unit", `${unitId} is outside the prepared program`);
     }
-    const expected = outcome.kind === "prepared" ? "ir" : outcome.kind === "unsupported" ? "direct" : "neither";
-    if (emitter !== expected) {
-      this.#state = "aborted";
+    if (emitter !== candidate.route) {
       throw new PreparedIrProgramInvariantError(
         "wrong-emitter",
-        `${unitId} is ${outcome.kind}; expected ${expected} emission, received ${emitter}`,
+        `${unitId} has ${candidate.kind}; expected ${candidate.route} emission, received ${emitter}`,
       );
     }
   }
@@ -371,66 +450,150 @@ export class PreparedIrEmissionTransaction {
     }
   }
 
+  #abort(error: unknown): never {
+    this.#state = "aborted";
+    throw error;
+  }
+
   #ledgerSnapshot(): ReadonlyMap<IrUnitId, PreparedIrEmissionLedgerEntry> {
     return preparedIrReadonlyMap(
-      [...this.#ledger].map(([unitId, entry]) => {
-        const frozen = Object.freeze({
+      [...this.#ledger].map(([unitId, entry]) => [
+        unitId,
+        Object.freeze({
           ...entry,
           prepareAttempts: 1 as const,
           legacyBodyEmitted: entry.directBodyEmissions === 1,
           irBodyEmitted: entry.irBodyEmissions === 1,
-        });
-        return [unitId, frozen] as const;
-      }),
+        }),
+      ]),
     );
   }
 }
 
-export interface ValidatedPreparedIrProgram {
+Object.freeze(PreparedIrEmissionTransaction.prototype);
+Object.freeze(PreparedIrEmissionTransaction);
+
+export interface PreparedIrCandidateProgramInput {
   readonly abiEntries: readonly ProgramAbiPlanEntry[];
-  readonly units: ReadonlyMap<IrUnitId, PreparedIrUnitOutcome>;
-  readonly preparedUnits: ReadonlyMap<IrUnitId, PreparedIrPreparedUnit>;
-  readonly directUnits: ReadonlyMap<IrUnitId, PreparedIrUnsupportedUnit>;
-  readonly invariantUnits: ReadonlyMap<IrUnitId, PreparedIrInvariantUnit>;
-  readonly components: readonly PreparedIrComponent[];
-  readonly supportIntents: readonly PreparedIrSupportIntent[];
-  readonly allocations: readonly PreparedIrAllocationRecord[];
-  readonly provenance: readonly PreparedIrProvenanceRecord[];
+  readonly units: ReadonlyMap<IrUnitId, PreparedIrUnitCandidate>;
+  readonly componentCandidates: readonly { readonly id: string; readonly unitIds: readonly IrUnitId[] }[];
+  readonly supportIntentCandidates: readonly Omit<PreparedIrSupportIntentCandidate, "evidenceStatus">[];
+  readonly allocationCandidates: readonly Omit<PreparedIrAllocationCandidate, "evidenceStatus">[];
+  readonly provenanceCandidates: readonly Omit<PreparedIrProvenanceCandidate, "evidenceStatus">[];
 }
 
-/** @internal The validating builder in prepare.ts is the only supported caller. */
-export function createValidatedPreparedIrProgram(input: ValidatedPreparedIrProgram): PreparedIrProgram {
-  const entries = Object.freeze([...input.abiEntries]);
+function ownCandidate<T>(value: T): T {
+  return freezePreparedIrValue(value) as T;
+}
+
+function expectedCandidateRoute(candidate: PreparedIrUnitCandidate): PreparedIrCandidateRoute {
+  switch (candidate.kind) {
+    case "ir-candidate":
+      return "ir";
+    case "direct-candidate":
+      return "direct";
+    case "invariant-candidate":
+      return "neither";
+  }
+}
+
+/**
+ * @internal Defensively owns every input. prepare.ts is the supported caller;
+ * the output remains explicitly pending production reconciliation.
+ */
+export function createPreparedIrCandidateProgram(input: PreparedIrCandidateProgramInput): PreparedIrProgram {
+  const entries = Object.freeze(input.abiEntries.map((entry) => ownCandidate(entry)));
   const entryMap = new Map(entries.map((entry) => [entry.id, entry]));
   const abi: PreparedIrAbiSnapshot = Object.freeze({
     planningSealed: true as const,
     entries,
     get: (id: IrBindingId) => entryMap.get(id),
   });
+  const units = preparedIrReadonlyMap(
+    [...input.units].map(([unitId, candidate]) => {
+      const ownedCandidate = ownCandidate(candidate);
+      if (
+        ownedCandidate.unitId !== unitId ||
+        ownedCandidate.route !== expectedCandidateRoute(ownedCandidate) ||
+        ownedCandidate.evidenceStatus !== "unvalidated-candidate"
+      ) {
+        throw new PreparedIrProgramInvariantError(
+          "invalid-prepared-data",
+          `candidate ${unitId} has inconsistent identity, kind, route, or evidence status`,
+        );
+      }
+      return [unitId, ownedCandidate] as const;
+    }),
+  );
+  const irCandidates = preparedIrReadonlyMap(
+    [...units].filter((entry): entry is [IrUnitId, PreparedIrIrCandidate] => entry[1].kind === "ir-candidate"),
+  );
+  const directCandidates = preparedIrReadonlyMap(
+    [...units].filter((entry): entry is [IrUnitId, PreparedIrDirectCandidate] => entry[1].kind === "direct-candidate"),
+  );
+  const invariantCandidates = preparedIrReadonlyMap(
+    [...units].filter(
+      (entry): entry is [IrUnitId, PreparedIrInvariantCandidate] => entry[1].kind === "invariant-candidate",
+    ),
+  );
+  const componentCandidates = Object.freeze(
+    input.componentCandidates.map((component) => {
+      const unitIds = Object.freeze([...component.unitIds]);
+      const unknownUnitIds = unitIds.filter((unitId) => !units.has(unitId));
+      if (unknownUnitIds.length > 0) {
+        throw new PreparedIrProgramInvariantError(
+          "unknown-unit",
+          `component candidate ${component.id} includes unknown units: ${unknownUnitIds.join(", ")}`,
+        );
+      }
+      return Object.freeze({
+        id: component.id,
+        unitIds,
+        candidateRoutes: Object.freeze([...new Set(unitIds.map((unitId) => units.get(unitId)!.route))]),
+        evidenceStatus: "unvalidated-component-candidate" as const,
+      }) as PreparedIrComponentCandidate;
+    }),
+  );
+  const supportIntentCandidates = Object.freeze(
+    input.supportIntentCandidates.map((candidate) =>
+      ownCandidate({ ...candidate, evidenceStatus: "unvalidated-candidate" as const }),
+    ),
+  );
+  const allocationCandidates = Object.freeze(
+    input.allocationCandidates.map((candidate) =>
+      ownCandidate({ ...candidate, evidenceStatus: "unvalidated-candidate" as const }),
+    ),
+  );
+  const provenanceCandidates = Object.freeze(
+    input.provenanceCandidates.map((candidate) =>
+      ownCandidate({ ...candidate, evidenceStatus: "unvalidated-candidate" as const }),
+    ),
+  );
   let emissionStarted = false;
   const program: PreparedIrProgram = Object.freeze({
     abi,
-    units: input.units,
-    preparedUnits: input.preparedUnits,
-    directUnits: input.directUnits,
-    invariantUnits: input.invariantUnits,
-    components: Object.freeze([...input.components]),
-    supportIntents: Object.freeze([...input.supportIntents]),
-    allocations: Object.freeze([...input.allocations]),
-    provenance: Object.freeze([...input.provenance]),
+    units,
+    irCandidates,
+    directCandidates,
+    invariantCandidates,
+    componentCandidates,
+    supportIntentCandidates,
+    allocationCandidates,
+    provenanceCandidates,
+    reconciliation: "pending-production-wiring" as const,
     sealed: true as const,
     beginEmission(): PreparedIrEmissionTransaction {
-      if (program.invariantUnits.size > 0) {
+      if (program.invariantCandidates.size > 0) {
         throw new PreparedIrProgramInvariantError(
-          "program-has-invariant",
-          `prepared program contains ${program.invariantUnits.size} invariant outcome(s)`,
+          "program-has-invariant-candidate",
+          `prepared program contains ${program.invariantCandidates.size} invariant candidate(s)`,
         );
       }
       if (emissionStarted) {
         throw new PreparedIrProgramInvariantError("emission-already-started", "prepared program emission is one-shot");
       }
       emissionStarted = true;
-      return new PreparedIrEmissionTransaction(program);
+      return PreparedIrEmissionTransaction.open(program, EMISSION_TRANSACTION_CAPABILITY);
     },
   });
   return program;
