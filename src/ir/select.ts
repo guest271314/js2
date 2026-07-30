@@ -1700,7 +1700,7 @@ function whyNotIrClaimable(
   // yield machinery has no dynamic arm yet.
   // -------------------------------------------------------------------------
   if (dynNames.size > 0 && isGenerator) return "param-type-not-resolvable";
-  if (dynNames.size > 0 || isDynamicReturn) {
+  if (dynNames.size > 0 || isDynamicReturn || containsRetainedFunctionMethodCall(body)) {
     if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap)) {
       return dynNames.size > 0 ? "param-type-not-resolvable" : "return-type-not-resolvable";
     }
@@ -2188,6 +2188,30 @@ function concreteDynamicAssignmentOperandIsBuildable(candidate: ts.Expression): 
 }
 
 /**
+ * True when the current body contains a #3793 retained method call.
+ *
+ * Such calls always use the boxed-dynamic closed-dispatch ABI, so they must
+ * run through {@link dynamicUsesAreMoveOnly} even when the enclosing
+ * declaration has no dynamic parameter/result. The scan then proves both the
+ * result position and every argument bridge before the selector claims the
+ * function.
+ */
+function containsRetainedFunctionMethodCall(body: ts.Block): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (node !== body && isFunctionLike(node)) return;
+    if (ts.isCallExpression(node) && currentModuleBindingResolver?.retainedFunctionMethodPlan(node) !== undefined) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(body, visit);
+  return found;
+}
+
+/**
  * #2949 slice 2 — verify every use of a dynamic value in `fn`'s body is a
  * MOVE the from-ast builder can lower withOUT box/unbox/tag.test (which land
  * in slice 3). Allowed sinks for a dynamic value:
@@ -2238,6 +2262,13 @@ function dynamicUsesAreMoveOnly(
     if (ts.isIdentifier(e)) return dynNames.has(e.text);
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
       return calleeReturnIsDynamic(e.expression.text, typeMap);
+    }
+    if (
+      ts.isCallExpression(e) &&
+      ts.isPropertyAccessExpression(e.expression) &&
+      currentModuleBindingResolver?.retainedFunctionMethodPlan(e) !== undefined
+    ) {
+      return true;
     }
     if (
       currentDynamicRuntimeBuildable &&
@@ -2297,6 +2328,20 @@ function dynamicUsesAreMoveOnly(
       return dynNames.has(e.text) === expectDyn;
     }
     if (ts.isCallExpression(e)) {
+      const retainedMethod = currentModuleBindingResolver?.retainedFunctionMethodPlan(e);
+      if (retainedMethod !== undefined) {
+        if (!expectDyn || e.arguments.length !== retainedMethod.arity) return false;
+        for (const argument of e.arguments) {
+          if (ts.isSpreadElement(argument)) return false;
+          const dynamic = isDynShaped(argument);
+          if (dynamic) {
+            if (!scanExpr(argument, true)) return false;
+          } else if (!scanExpr(argument, false)) {
+            return false;
+          }
+        }
+        return true;
+      }
       if (
         currentDynamicRuntimeBuildable &&
         ts.isPropertyAccessExpression(e.expression) &&
@@ -6231,6 +6276,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         isPristineEs5IntrinsicIsFrozenCall(expr, (node) => selectorSeesAmbientBinding(node) && !scope.has(node.text))
       ) {
         return true;
+      }
+      // #3793 — exact retained function-object wrappers such as Acorn's
+      // `parse(...) { return Parser.parse(...) }`. The checker resolver proves
+      // the stable `var Parser = function Parser(...) {}` carrier and its one
+      // direct top-level `Parser.parse = function parse(...) {}` assignment.
+      // This is a live method call, never a bare call to the assigned body:
+      // lowering uses the existing closed dispatcher so `new this(...)`,
+      // retained closure identity, and later property reads stay unchanged.
+      if (
+        currentSelectionOptions?.supportsBackendCapability?.("standalone-native-regexp-test-carrier") === true &&
+        currentSelectionOptions.supportsBackendCapability?.("legacy-numeric-array-global") === true
+      ) {
+        const retainedMethod = currentModuleBindingResolver?.retainedFunctionMethodPlan(expr);
+        if (retainedMethod !== undefined) {
+          for (const arg of expr.arguments) {
+            if (ts.isSpreadElement(arg) || !isPhase1Expr(arg, scope, localClasses)) return false;
+          }
+          return true;
+        }
       }
       if (
         (expr.expression.name.text === "test" || expr.expression.name.text === "exec") &&

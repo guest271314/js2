@@ -158,6 +158,7 @@ import {
   type IrLegacyModuleBindingResolver,
   type IrModuleBindingIdentity,
   type IrModuleBindingResolver,
+  type IrRetainedFunctionMethodPlan,
   type IrStaticNumericArrayPlan,
   type IrStaticRegExpTestPlan,
 } from "./module-bindings.js";
@@ -2952,6 +2953,86 @@ function resolveStandaloneRegExpTestGlobal(ctx: CodegenContext, plan: IrStaticRe
   return ref;
 }
 
+function resolveRetainedFunctionMethod(
+  ctx: CodegenContext,
+  plan: IrRetainedFunctionMethodPlan,
+): { readonly receiverGlobal: IrGlobalRef; readonly funcName: string } {
+  if (
+    plan.receiverUnitId === undefined ||
+    plan.methodUnitId === undefined ||
+    plan.receiverGlobalBindingId === undefined ||
+    plan.receiverSourceId === undefined ||
+    plan.receiverDeclarationOrdinal === undefined ||
+    !ts.isIdentifier(plan.receiverDeclaration.name) ||
+    plan.receiverDeclaration.name.text !== plan.receiverName
+  ) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "build",
+      "retained function method plan has no exact structural function-expression identity",
+    );
+  }
+
+  const globalName = `__mod_${plan.receiverName}`;
+  const observed = ctx.programAbiGlobals?.moduleBinding(plan.receiverDeclaration);
+  let receiverGlobalDef: GlobalDef | undefined;
+  if (ctx.programAbiGlobals) {
+    if (!observed || observed.displayName !== plan.receiverName) {
+      throw new IrInvariantError(
+        "unknown-global-ref",
+        "build",
+        `retained function receiver ${plan.receiverName} has no allocator-owned module global`,
+      );
+    }
+    receiverGlobalDef = observed.value;
+  } else {
+    const globalIdx = ctx.moduleGlobals.get(plan.receiverName);
+    receiverGlobalDef = globalIdx === undefined ? undefined : ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  }
+  if (
+    !receiverGlobalDef ||
+    receiverGlobalDef.name !== globalName ||
+    receiverGlobalDef.type.kind !== "externref" ||
+    !receiverGlobalDef.mutable
+  ) {
+    throw new IrInvariantError(
+      "unknown-global-ref",
+      "build",
+      `retained function receiver ${plan.receiverName} is not the legacy externref module slot`,
+    );
+  }
+  const receiverGlobal = irSourceGlobalRef(plan.receiverGlobalBindingId, globalName);
+  planProgramAbiGlobal(ctx, {
+    ref: receiverGlobal,
+    anchor: { kind: "source", sourceId: plan.receiverSourceId },
+    roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
+    derivedOrdinal: plan.receiverDeclarationOrdinal,
+    global: receiverGlobalDef,
+  });
+
+  const funcName = `__call_m_${plan.methodName}_${plan.arity}`;
+  const dispatcherIdx = ctx.funcMap.get(funcName);
+  const dispatcher = dispatcherIdx === undefined ? undefined : definedFuncAt(ctx, dispatcherIdx);
+  const signature = dispatcher ? ctx.mod.types[dispatcher.typeIdx] : undefined;
+  if (
+    !dispatcher ||
+    dispatcher.name !== funcName ||
+    !signature ||
+    signature.kind !== "func" ||
+    signature.params.length !== plan.arity + 1 ||
+    signature.params.some((param) => param.kind !== "externref") ||
+    signature.results.length !== 1 ||
+    signature.results[0]?.kind !== "externref"
+  ) {
+    throw new IrInvariantError(
+      "abi-type-index-mismatch",
+      "build",
+      `retained ${plan.receiverName}.${plan.methodName} dispatcher does not have the exact receiver-first externref ABI`,
+    );
+  }
+  return { receiverGlobal, funcName };
+}
+
 function sameExactValType(left: ValType, right: ValType): boolean {
   if (left.kind !== right.kind) return false;
   if (left.kind === "ref" || left.kind === "ref_null") {
@@ -3028,6 +3109,17 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
       capability,
     );
   return {
+    retainedFunctionMethodPlan(call: ts.CallExpression) {
+      if (
+        !supportsBackendCapability("standalone-native-regexp-test-carrier") ||
+        !supportsBackendCapability("legacy-numeric-array-global") ||
+        !moduleBindingResolver
+      ) {
+        return null;
+      }
+      const plan = moduleBindingResolver.retainedFunctionMethodPlan(call);
+      return plan ? resolveRetainedFunctionMethod(ctx, plan) : null;
+    },
     standaloneRegExpTestPlan(receiver: ts.Expression) {
       if (!supportsBackendCapability("standalone-native-regexp-test-carrier") || !moduleBindingResolver) return null;
       const plan = moduleBindingResolver.staticRegExpTestPlan(receiver);

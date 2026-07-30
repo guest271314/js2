@@ -608,6 +608,28 @@ export interface IrStaticNumericArrayPlan {
   readonly declarationOrdinal?: number;
 }
 
+/**
+ * Exact retained function-object receiver plus one directly assigned method.
+ *
+ * This is intentionally not a direct-call plan: lowering must still perform a
+ * live receiver-preserving method dispatch so `Parser.parse` observes
+ * `this === Parser` and later property writes remain visible.
+ */
+export interface IrRetainedFunctionMethodPlan {
+  readonly receiverDeclaration: ts.VariableDeclaration;
+  readonly receiverTarget: ts.FunctionExpression;
+  readonly methodTarget: ts.FunctionExpression;
+  readonly receiverName: string;
+  readonly methodName: string;
+  readonly arity: number;
+  /** Structural fields are present on the identity-aware production resolver. */
+  readonly receiverUnitId?: IrUnitId;
+  readonly methodUnitId?: IrUnitId;
+  readonly receiverGlobalBindingId?: IrBindingId;
+  readonly receiverSourceId?: IrSourceId;
+  readonly receiverDeclarationOrdinal?: number;
+}
+
 interface IrModuleBindingResolverSurface<TIdentity, TInspection> {
   (node: ts.Identifier, writeValue?: ts.Expression): TIdentity | undefined;
   /**
@@ -639,6 +661,8 @@ interface IrModuleBindingResolverSurface<TIdentity, TInspection> {
   readonly staticRegExpTestPlan: (node: ts.Expression) => IrStaticRegExpTestPlan | undefined;
   /** Exact stable top-level numeric array used at a direct-call vec boundary. */
   readonly staticNumericArrayPlan: (node: ts.Expression) => IrStaticNumericArrayPlan | undefined;
+  /** Exact retained function-object method call whose receiver must stay live. */
+  readonly retainedFunctionMethodPlan: (call: ts.CallExpression) => IrRetainedFunctionMethodPlan | undefined;
 }
 
 export interface IrLegacyModuleBindingResolver extends IrModuleBindingResolverSurface<
@@ -1239,6 +1263,132 @@ function sourceBindingIsStable(checker: ts.TypeChecker, declaration: ts.Variable
   return stable;
 }
 
+function matchingRetainedMethodAssignment(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  receiverSymbol: ts.Symbol,
+  methodName: string,
+): ts.BinaryExpression | undefined {
+  const writes: ts.BinaryExpression[] = [];
+  let unsupportedWrite = false;
+  const visit = (node: ts.Node): void => {
+    if (unsupportedWrite) return;
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.name.text === methodName &&
+      checker.getSymbolAtLocation(node.expression) === receiverSymbol
+    ) {
+      const parent = node.parent;
+      if (
+        ts.isBinaryExpression(parent) &&
+        parent.left === node &&
+        parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      ) {
+        writes.push(parent);
+      } else if (
+        (ts.isBinaryExpression(parent) && parent.left === node && isAssignmentOperator(parent.operatorToken.kind)) ||
+        ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
+          (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken)) ||
+        (ts.isDeleteExpression(parent) && parent.expression === node)
+      ) {
+        unsupportedWrite = true;
+        return;
+      }
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  if (unsupportedWrite || writes.length !== 1) return undefined;
+  const assignment = writes[0]!;
+  return ts.isExpressionStatement(assignment.parent) && assignment.parent.parent === sourceFile
+    ? assignment
+    : undefined;
+}
+
+/**
+ * Prove that a retained-call argument can cross the receiver-first dynamic
+ * dispatcher bridge without a build-time representation guess.
+ *
+ * Dynamic values pass through, numbers and strings have canonical boxes, and
+ * reference values use the established externalization path. Boolean values
+ * deliberately remain excluded: their i32 carrier is ambiguous at this seam
+ * unless the lowerer also receives an exact boolean-brand proof.
+ */
+function retainedMethodArgumentIsBridgeable(checker: ts.TypeChecker, argument: ts.Expression): boolean {
+  const type = checker.getTypeAtLocation(unwrapParens(argument));
+  if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return true;
+  if ((type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.StringLike)) !== 0) return true;
+  if ((type.flags & (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) !== 0) return true;
+  return false;
+}
+
+function makeRetainedFunctionMethodPlan(
+  checker: ts.TypeChecker,
+  call: ts.CallExpression,
+): IrRetainedFunctionMethodPlan | undefined {
+  if (
+    call.questionDotToken ||
+    call.typeArguments?.length ||
+    !ts.isPropertyAccessExpression(call.expression) ||
+    !ts.isIdentifier(call.expression.expression) ||
+    !ts.isIdentifier(call.expression.name) ||
+    call.arguments.some(ts.isSpreadElement)
+  ) {
+    return undefined;
+  }
+  if (call.arguments.some((argument) => !retainedMethodArgumentIsBridgeable(checker, argument))) {
+    return undefined;
+  }
+  const receiver = call.expression.expression;
+  const receiverDeclaration = exactTopLevelVariableDeclaration(receiver, checker);
+  const receiverTarget = receiverDeclaration?.initializer ? unwrapParens(receiverDeclaration.initializer) : undefined;
+  if (
+    !receiverDeclaration ||
+    !receiverTarget ||
+    !ts.isFunctionExpression(receiverTarget) ||
+    !isVarModuleDeclaration(receiverDeclaration) ||
+    !sourceBindingIsStable(checker, receiverDeclaration)
+  ) {
+    return undefined;
+  }
+  const receiverSymbol = checker.getSymbolAtLocation(receiver);
+  if (!receiverSymbol || checker.getSymbolAtLocation(receiverDeclaration.name) !== receiverSymbol) return undefined;
+  const methodName = call.expression.name.text;
+  const assignment = matchingRetainedMethodAssignment(
+    checker,
+    receiverDeclaration.getSourceFile(),
+    receiverSymbol,
+    methodName,
+  );
+  const methodTarget = assignment ? unwrapParens(assignment.right) : undefined;
+  if (
+    !methodTarget ||
+    !ts.isFunctionExpression(methodTarget) ||
+    methodTarget.asteriskToken ||
+    methodTarget.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ||
+    methodTarget.typeParameters?.length ||
+    call.arguments.length !== methodTarget.parameters.length ||
+    methodTarget.parameters.some(
+      (parameter) =>
+        !ts.isIdentifier(parameter.name) ||
+        parameter.dotDotDotToken !== undefined ||
+        parameter.questionToken !== undefined ||
+        parameter.initializer !== undefined,
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    receiverDeclaration,
+    receiverTarget,
+    methodTarget,
+    receiverName: receiver.text,
+    methodName,
+    arity: call.arguments.length,
+  };
+}
+
 function staticStringFromExpression(
   checker: ts.TypeChecker,
   expression: ts.Expression,
@@ -1494,6 +1644,13 @@ export function makeIrLegacyModuleBindingResolver(
         return undefined;
       }
     },
+    retainedFunctionMethodPlan(call: ts.CallExpression): IrRetainedFunctionMethodPlan | undefined {
+      try {
+        return makeRetainedFunctionMethodPlan(checker, call);
+      } catch {
+        return undefined;
+      }
+    },
   });
 }
 
@@ -1617,6 +1774,33 @@ export function makeIrModuleBindingResolver(
       const plan = legacy.staticNumericArrayPlan(node);
       return plan ? { ...plan, ...bindingLocation(plan.declaration) } : undefined;
     },
+    retainedFunctionMethodPlan(call: ts.CallExpression): IrRetainedFunctionMethodPlan | undefined {
+      ownerAt(call);
+      const plan = legacy.retainedFunctionMethodPlan(call);
+      if (!plan) return undefined;
+      const receiverUnitId = identityContext.unitIdByDeclaration.get(plan.receiverTarget);
+      const methodUnitId = identityContext.unitIdByDeclaration.get(plan.methodTarget);
+      if (
+        receiverUnitId === undefined ||
+        methodUnitId === undefined ||
+        identityContext.declarationByUnitId.get(receiverUnitId) !== plan.receiverTarget ||
+        identityContext.declarationByUnitId.get(methodUnitId) !== plan.methodTarget
+      ) {
+        return planningInvariant(
+          "missing-unit-declaration",
+          `retained ${plan.receiverName}.${plan.methodName} call has no exact function-expression identity`,
+        );
+      }
+      const receiverLocation = bindingLocation(plan.receiverDeclaration);
+      return {
+        ...plan,
+        receiverUnitId,
+        methodUnitId,
+        receiverGlobalBindingId: receiverLocation.globalBindingId,
+        receiverSourceId: receiverLocation.sourceId,
+        receiverDeclarationOrdinal: receiverLocation.declarationOrdinal,
+      };
+    },
   });
 }
 
@@ -1666,5 +1850,6 @@ export function projectIrModuleBindingResolverToLegacy(
     bindingValueMatches: (node: ts.Identifier, value: ts.Expression) => resolver.bindingValueMatches(node, value),
     staticRegExpTestPlan: (node: ts.Expression) => resolver.staticRegExpTestPlan(node),
     staticNumericArrayPlan: (node: ts.Expression) => resolver.staticNumericArrayPlan(node),
+    retainedFunctionMethodPlan: (call: ts.CallExpression) => resolver.retainedFunctionMethodPlan(call),
   });
 }
