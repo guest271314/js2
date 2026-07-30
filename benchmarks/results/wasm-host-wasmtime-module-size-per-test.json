@@ -2,7 +2,7 @@
   {
     "name": "AOT compiled",
     "path": "fib",
-    "value": 21611,
+    "value": 21595,
     "label": "21.6 kB",
     "jsUs": 98
   },
@@ -65,7 +65,7 @@
   {
     "name": "AOT compiled",
     "path": "string-hash",
-    "value": 22265,
+    "value": 22258,
     "label": "22.3 kB",
     "jsUs": 238
   },
