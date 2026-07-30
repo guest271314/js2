@@ -1396,14 +1396,38 @@ export class IrFunctionBuilder {
     });
   }
 
+  /** Update the logical i32 length of an already-allocated vector. */
+  emitVecSetLength(vec: IrValueId, lengthI32: IrValueId): void {
+    this.pushInstr({
+      kind: "vec.set_length",
+      vec,
+      length: lengthI32,
+      result: null,
+      resultType: null,
+    });
+  }
+
   /** Construct a fixed vec whose result uses the resolver's `vecRefType`, so
    * downstream `vec.get`/`.length`/`for-of` reads retain the same identity. */
-  emitVecNewFixed(elements: readonly IrValueId[], elementType: IrType, vecRefType: IrType): IrValueId {
+  emitVecNewFixed(
+    elements: readonly IrValueId[],
+    elementType: IrType,
+    vecRefType: IrType,
+    capacity = elements.length,
+  ): IrValueId {
     const result = this.allocator.fresh();
     const resultType = vecRefType;
     this.valueTypes.set(result, resultType);
     const alloc = this.allocId("array", resultType);
-    this.pushInstr({ kind: "vec.new_fixed", elements: [...elements], elementType, result, resultType, alloc });
+    this.pushInstr({
+      kind: "vec.new_fixed",
+      elements: [...elements],
+      elementType,
+      capacity,
+      result,
+      resultType,
+      alloc,
+    });
     return result;
   }
 

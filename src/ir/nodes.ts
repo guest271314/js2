@@ -1595,17 +1595,24 @@ export interface IrInstrVecSet extends IrInstrBase {
   readonly newValue: IrValueId;
 }
 
+/** Update the logical length of an already-allocated vector. */
+export interface IrInstrVecSetLength extends IrInstrBase {
+  readonly kind: "vec.set_length";
+  readonly vec: IrValueId;
+  readonly length: IrValueId;
+}
+
 /**
  * #1804 — Construct a vec from a fixed, statically-known set of element SSA
  * values. All `elements` share the IrType `elementType` (the from-ast lowerer
  * coerces each element to this type before emitting). `resultType` is the vec
  * ref IrType (a `ref` to the registered vec struct for `elementType`).
  *
- * Lowering (WasmGC): push e0…eN, `array.new_fixed $arr N`, stash the data ref
- * in a scratch local, push `i32.const N` (length, field 0), re-load the data
- * ref (field 1), `struct.new $vec`. The backend emitter owns the exact op
- * sequence (see `emitVecNewFixed`) so the linear backend can realize the same
- * node over its `[header][len][cap][elements…]` layout.
+ * Lowering (WasmGC): push e0…eN and construct a backing array whose capacity
+ * defaults to N; an empty vector may reserve a greater proven capacity while
+ * retaining logical length zero. The backend emitter owns the exact sequence
+ * so the linear backend can realize the same `[header][len][cap][elements…]`
+ * intent.
  *
  * Empty literals (`[]`) carry `elements: []`; the `elementType` is supplied by
  * the from-ast layer from the declared/inferred array type (it cannot be
@@ -1615,6 +1622,8 @@ export interface IrInstrVecNewFixed extends IrInstrBase {
   readonly kind: "vec.new_fixed";
   readonly elements: readonly IrValueId[];
   readonly elementType: IrType;
+  /** Backing capacity when greater than the initial logical length. */
+  readonly capacity?: number;
 }
 
 /**
@@ -2525,6 +2534,7 @@ export type IrInstr =
   | IrInstrVecLen
   | IrInstrVecGet
   | IrInstrVecSet
+  | IrInstrVecSetLength
   | IrInstrVecNewFixed
   | IrInstrForOfVec
   | IrInstrCoerceToExternref
@@ -2839,6 +2849,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "vec.len":
     case "vec.get":
     case "vec.set":
+    case "vec.set_length":
     case "vec.new_fixed":
     case "coerce.to_externref":
     case "iter.new":
@@ -3003,6 +3014,7 @@ export function mapNestedBuffers(
     case "vec.len":
     case "vec.get":
     case "vec.set":
+    case "vec.set_length":
     case "vec.new_fixed":
     case "coerce.to_externref":
     case "iter.new":
@@ -3129,6 +3141,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec, instr.index];
     case "vec.set":
       return [instr.vec, instr.index, instr.newValue];
+    case "vec.set_length":
+      return [instr.vec, instr.length];
     case "vec.new_fixed":
       return instr.elements;
     case "forof.vec":

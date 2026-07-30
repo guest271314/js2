@@ -2146,6 +2146,16 @@ export function lowerIrFunctionBody<S, Slot>(
         emitter.emitElemSet(vec, ensureVecElementScratch(vec.elementValType), out);
         return;
       }
+      case "vec.set_length": {
+        const vecT = asVal(typeOf(instr.vec));
+        if (!vecT) throw new Error(`ir/lower: vec.set_length vec must be a val IrType (${func.name})`);
+        const vec = resolver.resolveVec?.(vecT);
+        if (!vec) throw new Error(`ir/lower: resolver cannot lower vec for vec.set_length (${func.name})`);
+        emitValue(instr.vec, out);
+        emitValue(instr.length, out);
+        emitter.emitVecSetLength(vec, out);
+        return;
+      }
       case "vec.new_fixed": {
         // #1804 — build a fixed-length vec from its element SSA values.
         const elemVT = asVal(instr.elementType);
@@ -2161,7 +2171,7 @@ export function lowerIrFunctionBody<S, Slot>(
         // field order.
         for (const el of instr.elements) emitValue(el, out);
         const dataScratch = ensureVecDataScratch(vec.arrayTypeIdx);
-        emitter.emitVecNewFixed(vec, instr.elements.length, dataScratch, out);
+        emitter.emitVecNewFixed(vec, instr.elements.length, instr.capacity ?? instr.elements.length, dataScratch, out);
         return;
       }
       // Slice 7a/7b (#1169f): generator ops.
@@ -3468,6 +3478,8 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec, instr.index];
     case "vec.set":
       return [instr.vec, instr.index, instr.newValue];
+    case "vec.set_length":
+      return [instr.vec, instr.length];
     case "vec.new_fixed":
       return instr.elements; // #1804
     case "forof.vec":

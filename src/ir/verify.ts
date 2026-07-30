@@ -1051,6 +1051,8 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.vec, instr.index];
     case "vec.set":
       return [instr.vec, instr.index, instr.newValue];
+    case "vec.set_length":
+      return [instr.vec, instr.length];
     case "vec.new_fixed":
       // #1804 — every element is an SSA use (like object.new's values).
       return instr.elements;
@@ -1563,6 +1565,28 @@ function verifyInstrTypeRules(func: IrFunction, typeOf: ReadonlyMap<IrValueId, I
         if (indexKind !== null && indexKind !== "i32") {
           errors.push({
             message: `${instr.kind} index must be i32, got ${indexKind}`,
+            func: func.name,
+            block: blockId,
+          });
+        }
+        break;
+      }
+      case "vec.set_length": {
+        const lengthKind = valKindOf(typeOf, instr.length);
+        if (lengthKind !== null && lengthKind !== "i32") {
+          errors.push({
+            message: `vec.set_length length must be i32, got ${lengthKind}`,
+            func: func.name,
+            block: blockId,
+          });
+        }
+        break;
+      }
+      case "vec.new_fixed": {
+        const capacity = instr.capacity ?? instr.elements.length;
+        if (!Number.isSafeInteger(capacity) || capacity < instr.elements.length) {
+          errors.push({
+            message: `vec.new_fixed capacity ${capacity} is smaller than logical length ${instr.elements.length}`,
             func: func.name,
             block: blockId,
           });

@@ -123,8 +123,11 @@ export class StubEmitter implements BackendEmitter<StubSink> {
   emitElemSet(_layout: StubVecLayout, _scratch: number, out: StubSink): void {
     out.push("elem.set");
   }
-  emitVecNewFixed(_layout: StubVecLayout, count: number, _scratch: number, out: StubSink): void {
-    out.push(`vec.new_fixed:${count}`);
+  emitVecSetLength(_layout: StubVecLayout, out: StubSink): void {
+    out.push("vec.set_length");
+  }
+  emitVecNewFixed(_layout: StubVecLayout, count: number, capacity: number, _scratch: number, out: StubSink): void {
+    out.push(`vec.new_fixed:${count}:${capacity}`);
   }
   emitConst(instr: Extract<IrInstr, { kind: "const" }>, _funcName: string, out: StubSink): void {
     out.push(`const:${instr.value.kind}`);
