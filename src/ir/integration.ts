@@ -2752,6 +2752,7 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
   planProgramAbiGlobal(ctx, {
     ref: globalRef,
     anchor: { kind: "source", sourceId: identity.sourceId },
+    storageOwnerUnitId: identity.storageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: identity.declarationOrdinal,
     global,
@@ -2760,6 +2761,7 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
     planProgramAbiGlobal(ctx, {
       ref: tdzGlobalRef,
       anchor: { kind: "source", sourceId: identity.sourceId },
+      storageOwnerUnitId: identity.storageOwnerUnitId,
       roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleTdz,
       derivedOrdinal: identity.declarationOrdinal,
       global: tdzGlobal,
@@ -3018,6 +3020,7 @@ function resolveDynamicCarrier(ctx: CodegenContext): ValType {
 function resolveStandaloneRegExpTestGlobal(ctx: CodegenContext, plan: IrStaticRegExpTestPlan): IrGlobalRef {
   if (
     plan.globalBindingId === undefined ||
+    plan.storageOwnerUnitId === undefined ||
     plan.sourceId === undefined ||
     plan.declarationOrdinal === undefined ||
     !ts.isIdentifier(plan.declaration.name)
@@ -3056,6 +3059,7 @@ function resolveStandaloneRegExpTestGlobal(ctx: CodegenContext, plan: IrStaticRe
   planProgramAbiGlobal(ctx, {
     ref,
     anchor: { kind: "source", sourceId: plan.sourceId },
+    storageOwnerUnitId: plan.storageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: plan.declarationOrdinal,
     global,
@@ -3071,6 +3075,7 @@ function resolveRetainedFunctionMethod(
     plan.receiverUnitId === undefined ||
     plan.methodUnitId === undefined ||
     plan.receiverGlobalBindingId === undefined ||
+    plan.receiverStorageOwnerUnitId === undefined ||
     plan.receiverSourceId === undefined ||
     plan.receiverDeclarationOrdinal === undefined ||
     !ts.isIdentifier(plan.receiverDeclaration.name) ||
@@ -3115,6 +3120,7 @@ function resolveRetainedFunctionMethod(
   planProgramAbiGlobal(ctx, {
     ref: receiverGlobal,
     anchor: { kind: "source", sourceId: plan.receiverSourceId },
+    storageOwnerUnitId: plan.receiverStorageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: plan.receiverDeclarationOrdinal,
     global: receiverGlobalDef,
@@ -3159,6 +3165,7 @@ function resolveStaticNumericArrayGlobal(
   const expectedVal = asVal(expected);
   if (
     plan.globalBindingId === undefined ||
+    plan.storageOwnerUnitId === undefined ||
     plan.sourceId === undefined ||
     plan.declarationOrdinal === undefined ||
     !ts.isIdentifier(plan.declaration.name) ||
@@ -3199,6 +3206,7 @@ function resolveStaticNumericArrayGlobal(
   planProgramAbiGlobal(ctx, {
     ref: globalRef,
     anchor: { kind: "source", sourceId: plan.sourceId },
+    storageOwnerUnitId: plan.storageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: plan.declarationOrdinal,
     global,

@@ -49,6 +49,10 @@ export type ProgramAbiIntent =
       readonly origin: "source" | "import" | "runtime" | "support";
       readonly valueType: string;
       readonly mutable: boolean;
+      /** Exact source that structurally owns a source-global binding ID. */
+      readonly sourceId?: IrSourceId;
+      /** Terminal unit that owns initialization/storage lifetime for this global. */
+      readonly unitId?: IrUnitId;
     }
   | {
       readonly kind: "type";

@@ -43,6 +43,8 @@ export type ProgramAbiGlobalAnchor =
 export interface ProgramAbiGlobalPlan {
   readonly ref: IrGlobalRef;
   readonly anchor: ProgramAbiGlobalAnchor;
+  /** Exact terminal owner of source storage when the binding ID is source-owned. */
+  readonly storageOwnerUnitId?: IrUnitId;
   readonly roleOrdinal: number;
   readonly derivedOrdinal?: number;
   readonly global: GlobalDef;
@@ -441,6 +443,12 @@ export function planProgramAbiGlobal(ctx: CodegenContext, plan: ProgramAbiGlobal
   if (!session) return;
   const { binding } = plan.ref;
   const origin = binding.kind === "source" ? "source" : binding.kind;
+  if (origin === "source" && (plan.anchor.kind !== "source" || plan.storageOwnerUnitId === undefined)) {
+    throw new ProgramAbiInvariantError(
+      "invalid-callable-provenance",
+      `source global ${plan.ref.name} requires exact source and storage-terminal provenance`,
+    );
+  }
   const structuralReferenceKey = irGlobalBindingKey(binding);
   const suborder = {
     domain: "global" as const,
@@ -463,6 +471,12 @@ export function planProgramAbiGlobal(ctx: CodegenContext, plan: ProgramAbiGlobal
       origin,
       valueType: canonicalProgramAbiValType(plan.global.type),
       mutable: plan.global.mutable,
+      ...(origin === "source" && plan.anchor.kind === "source"
+        ? {
+            sourceId: plan.anchor.sourceId,
+            unitId: plan.storageOwnerUnitId,
+          }
+        : {}),
     },
   });
   session.registerGlobalTypeContract(binding.bindingId, plan.global.type, plan.global.mutable);

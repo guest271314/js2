@@ -556,6 +556,8 @@ export interface IrLegacyModuleBindingIdentity {
 /** Exact binding evidence for one AST use site and its terminal owner. */
 export interface IrModuleBindingIdentity extends IrLegacyModuleBindingIdentity {
   readonly ownerUnitId: IrUnitId;
+  /** Module-init terminal that owns the declaration's persistent storage. */
+  readonly storageOwnerUnitId: IrUnitId;
   /** Stable across every use site of the exact source declaration. */
   readonly globalBindingId: IrBindingId;
   /** Separate storage identity for the declaration's TDZ state. */
@@ -597,6 +599,7 @@ export interface IrStaticRegExpTestPlan {
   readonly flags: string;
   /** Structural fields are present on the identity-aware production resolver. */
   readonly globalBindingId?: IrBindingId;
+  readonly storageOwnerUnitId?: IrUnitId;
   readonly sourceId?: IrSourceId;
   readonly declarationOrdinal?: number;
 }
@@ -604,6 +607,7 @@ export interface IrStaticRegExpTestPlan {
 export interface IrStaticNumericArrayPlan {
   readonly declaration: ts.VariableDeclaration;
   readonly globalBindingId?: IrBindingId;
+  readonly storageOwnerUnitId?: IrUnitId;
   readonly sourceId?: IrSourceId;
   readonly declarationOrdinal?: number;
 }
@@ -626,6 +630,7 @@ export interface IrRetainedFunctionMethodPlan {
   readonly receiverUnitId?: IrUnitId;
   readonly methodUnitId?: IrUnitId;
   readonly receiverGlobalBindingId?: IrBindingId;
+  readonly receiverStorageOwnerUnitId?: IrUnitId;
   readonly receiverSourceId?: IrSourceId;
   readonly receiverDeclarationOrdinal?: number;
 }
@@ -1964,7 +1969,10 @@ export function makeIrModuleBindingResolver(
   const ownerAt = (node: ts.Node): IrUnitId => requireIrPlanningOwnerUnitId(identityContext, node);
   const bindingLocation = (
     declaration: ts.VariableDeclaration,
-  ): Pick<IrModuleBindingIdentity, "globalBindingId" | "tdzBindingId" | "sourceId" | "declarationOrdinal"> => {
+  ): Pick<
+    IrModuleBindingIdentity,
+    "globalBindingId" | "tdzBindingId" | "storageOwnerUnitId" | "sourceId" | "declarationOrdinal"
+  > => {
     const sourceFile = declaration.getSourceFile();
     const sourceId = requireIrPlanningSourceId(identityContext, sourceFile);
     if (identityContext.sourceFileBySourceId.get(sourceId) !== sourceFile) {
@@ -1995,14 +2003,17 @@ export function makeIrModuleBindingResolver(
     return {
       globalBindingId: irModuleGlobalBindingId(sourceId, declarationOrdinal),
       tdzBindingId: irModuleTdzGlobalBindingId(sourceId, declarationOrdinal),
+      storageOwnerUnitId: requireIrPlanningOwnerUnitId(identityContext, declaration),
       sourceId,
       declarationOrdinal,
     };
   };
   const bindingIdentity = (
     identity: IrLegacyModuleBindingIdentity,
-  ): Pick<IrModuleBindingIdentity, "globalBindingId" | "tdzBindingId" | "sourceId" | "declarationOrdinal"> =>
-    bindingLocation(identity.declaration);
+  ): Pick<
+    IrModuleBindingIdentity,
+    "globalBindingId" | "tdzBindingId" | "storageOwnerUnitId" | "sourceId" | "declarationOrdinal"
+  > => bindingLocation(identity.declaration);
   const inspectDirectBinding = (node: ts.Identifier, writeValue?: ts.Expression): IrModuleBindingInspection => {
     const ownerUnitId = ownerAt(node);
     const inspected = legacy.inspectDirectBinding(node, writeValue);
@@ -2087,6 +2098,7 @@ export function makeIrModuleBindingResolver(
         receiverUnitId,
         methodUnitId,
         receiverGlobalBindingId: receiverLocation.globalBindingId,
+        receiverStorageOwnerUnitId: receiverLocation.storageOwnerUnitId,
         receiverSourceId: receiverLocation.sourceId,
         receiverDeclarationOrdinal: receiverLocation.declarationOrdinal,
       };
