@@ -1048,7 +1048,6 @@ function emitDynMemberSetPrivateNameSelfTest(ctx: CodegenContext): void {
   const freezeIdx = ctx.funcMap.get("__object_freeze");
   const hasOwnIdx = ctx.funcMap.get("__object_hasOwn") ?? ctx.funcMap.get("__hasOwnProperty");
   const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
-  const strictEqIdx = ctx.funcMap.get(ctx.standalone || ctx.wasi ? "__extern_strict_eq" : "__host_eq");
   const requiredStrings = [
     "name",
     "key",
@@ -1075,7 +1074,6 @@ function emitDynMemberSetPrivateNameSelfTest(ctx: CodegenContext): void {
     freezeIdx === undefined ||
     hasOwnIdx === undefined ||
     boxBooleanIdx === undefined ||
-    strictEqIdx === undefined ||
     requiredStrings.some((value) => !ctx.stringGlobalMap.has(value))
   ) {
     return;
@@ -1166,7 +1164,19 @@ function emitDynMemberSetPrivateNameSelfTest(ctx: CodegenContext): void {
   const expectTrue = (mapLocal: number, kind: string, isStatic: boolean, name = "x"): Instr[] =>
     addBit(conflict(mapLocal, kind, isStatic, name));
   const expectStored = (mapLocal: number, name: string, value: string): Instr[] =>
-    addBit([{ op: "local.get", index: mapLocal }, ...key(name), call(getIdx), ...key(value), call(strictEqIdx)]);
+    addBit([
+      ...newNullProto(),
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 2 },
+      ...key(value),
+      ...bool(true),
+      call(setIdx),
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: mapLocal },
+      ...key(name),
+      call(getIdx),
+      call(hasOwnIdx),
+    ]);
 
   addDriverExport(
     ctx,
@@ -1175,6 +1185,7 @@ function emitDynMemberSetPrivateNameSelfTest(ctx: CodegenContext): void {
     [
       { name: "map", type: externref },
       { name: "checksum", type: i32 },
+      { name: "expectedValues", type: externref },
     ],
     [
       { op: "i32.const", value: 0 },
