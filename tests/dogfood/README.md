@@ -1,24 +1,24 @@
 # Dogfood harnesses — pinned real-package differential testing
 
 Committed, reproducible harnesses that compile a real, pinned npm package
-with js2wasm, validate the resulting Wasm, run it, and differentially diff
-its output against the SAME package running natively under Node (zero
-version skew — any divergence is a compiler bug, never an oracle mismatch).
-Distinct from the broader `compileProject`-based `npm-library-support` goal
-(lodash, axios, react, hono, eslint, prettier, ...): these harnesses
-specifically target a **single pre-bundled dist file**, so there's no
-multi-file module-resolution graph in the way of isolating compiler bugs.
+with js2wasm and validate the resulting Wasm. Packages with a callable API
+harness also run it and differentially compare its output with the SAME
+package running natively under Node (zero version skew — any divergence is a
+compiler bug, never an oracle mismatch). Runtime results remain explicitly
+unavailable for package entries that do not yet have that API-level proof.
 
-Five packages so far, plus one deeper conformance check on acorn:
+Seven packages so far, plus one deeper conformance check on acorn:
 
-| package | issue | entry file | oracle diff |
-| --- | --- | --- | --- |
-| **acorn** (JS parser) | #1710 | `dist/acorn.mjs` | structural AST diff (`ast-diff.mjs`) |
-| **marked** (Markdown→HTML) | #3716 | `lib/marked.esm.js` | plain string equality (HTML output) |
-| **acorn official suite** | #3729 | `dist/acorn.mjs` | acorn's own real `test/tests*.js` (~3,500 cases) |
-| **clsx** (className joiner) | #3748 | `dist/clsx.mjs` | per-op string equality (see below — driver epilogue, not a raw export call) |
-| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js` | per-op JSON-normalized equality (direct export calls, no epilogue) |
-| **eslint** (JavaScript linter) | #1400 | `lib/api.js` | bounded full-package compile/validate; runtime diff pending |
+| package                                 | issue | entry file          | oracle diff                                                                 |
+| --------------------------------------- | ----- | ------------------- | --------------------------------------------------------------------------- |
+| **acorn** (JS parser)                   | #1710 | `dist/acorn.mjs`    | structural AST diff (`ast-diff.mjs`)                                        |
+| **marked** (Markdown→HTML)              | #3716 | `lib/marked.esm.js` | plain string equality (HTML output)                                         |
+| **acorn official suite**                | #3729 | `dist/acorn.mjs`    | acorn's own real `test/tests*.js` (~3,500 cases)                            |
+| **clsx** (className joiner)             | #3748 | `dist/clsx.mjs`     | per-op string equality (see below — driver epilogue, not a raw export call) |
+| **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js`     | per-op JSON-normalized equality (direct export calls, no epilogue)          |
+| **eslint** (JavaScript linter)          | #1400 | `lib/api.js`        | bounded full-package compile/validate; runtime diff pending                 |
+| **prettier** (code formatter)           | —     | `standalone.mjs`    | bounded package-entry compile/validate; runtime diff pending                |
+| **react** (UI library)                  | —     | `index.js`          | bounded package-entry compile/validate; runtime diff pending                |
 
 ## acorn (#1710)
 
@@ -151,6 +151,25 @@ The harness currently reports compile/validate separately and leaves the test
 count unavailable until the real `Linter.verify()` proof in #1400 is complete.
 This is intentional: the npm-compat page includes unfinished packages such as
 marked, and ESLint should be equally visible without overstating support.
+
+## prettier and react
+
+Prettier and React use the same committed-tarball integrity contract and
+bounded package-entry harness. The generic
+`package-entry-harness.mjs` helper verifies and extracts each exact npm
+tarball, runs `compileProject` in a child process, validates any emitted Wasm,
+and records runtime verification as unavailable until a real package API
+differential test exists.
+
+```bash
+pnpm run dogfood:prettier
+pnpm run dogfood:react
+DOGFOOD_PRETTIER=1 pnpm test -- tests/dogfood/prettier.test.ts
+DOGFOOD_REACT=1 pnpm test -- tests/dogfood/react.test.ts
+```
+
+The current Prettier entry exposes a compile blocker. React's package entry
+compiles to valid Wasm, but that alone is not reported as runtime correctness.
 
 ## acorn official suite (#3729)
 

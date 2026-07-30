@@ -14,7 +14,8 @@
 // Node or Wasm owns the benchmark driver and repeated-call loop.
 //
 // Scope: only the packages with a real, committed, reproducible dogfood
-// harness (acorn, marked, clsx, cookie, eslint). mustache/diff/dayjs were probed
+// harness (acorn, marked, clsx, cookie, eslint, prettier, react).
+// mustache/diff/dayjs were probed
 // ad-hoc (see their issue files, #3720/#3721/#3747) but have no committed
 // harness yet — deliberately NOT included here rather than fabricating
 // numbers from a one-off, non-reproducible probe.
@@ -38,6 +39,8 @@ import { runHarness as runMarked } from "../tests/dogfood/marked-harness.mjs";
 import { runHarness as runClsx } from "../tests/dogfood/clsx-harness.mjs";
 import { runHarness as runCookie } from "../tests/dogfood/cookie-harness.mjs";
 import { runHarness as runEslint } from "../tests/dogfood/eslint-harness.mjs";
+import { runHarness as runPrettier } from "../tests/dogfood/prettier-harness.mjs";
+import { runHarness as runReact } from "../tests/dogfood/react-harness.mjs";
 
 import { setupAcorn } from "../tests/dogfood/setup-acorn.mjs";
 import { setupClsx } from "../tests/dogfood/setup-clsx.mjs";
@@ -56,7 +59,7 @@ import {
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint"];
+const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint", "prettier", "react"];
 const cliArgs = process.argv.slice(2);
 
 function optionValue(name) {
@@ -1414,6 +1417,40 @@ if (selectedPackages.has("eslint")) {
       entryFile: eslintReport.eslint.entryModule.replace(/^package\//, ""),
       shape: "cjs-project",
       report: eslintReport,
+      tests: null,
+      perf: null,
+    }),
+  );
+}
+
+if (selectedPackages.has("prettier")) {
+  console.log("[npm-compat] prettier — bounded package-entry compile/validate...");
+  const prettierReport = await runPrettier({ quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: "prettier",
+      version: prettierReport.prettier.version,
+      issue: null,
+      entryFile: prettierReport.prettier.entryModule.replace(/^package\//, ""),
+      shape: "esm-project",
+      report: prettierReport,
+      tests: null,
+      perf: null,
+    }),
+  );
+}
+
+if (selectedPackages.has("react")) {
+  console.log("[npm-compat] react — bounded package-entry compile/validate...");
+  const reactReport = await runReact({ quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: "react",
+      version: reactReport.react.version,
+      issue: null,
+      entryFile: reactReport.react.entryModule.replace(/^package\//, ""),
+      shape: "cjs-project",
+      report: reactReport,
       tests: null,
       perf: null,
     }),

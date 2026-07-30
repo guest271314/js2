@@ -77,6 +77,8 @@ tests/dogfood/.acorn-test-suite/
 tests/dogfood/.cookie/
 tests/dogfood/.clsx/
 tests/dogfood/.eslint/
+tests/dogfood/.prettier/
+tests/dogfood/.react/
 tests/dogfood/report/
 /check-*.ts
 /check-*.mts

@@ -85,6 +85,15 @@ class NpmCompatChart extends HTMLElement {
     return ratio >= 1 ? { text: `${formatted}× faster`, cls: "good" } : { text: `${formatted}× slower`, cls: "bad" };
   }
 
+  _speedFactor(ratio) {
+    if (ratio == null) return { text: "—", cls: "muted" };
+    const digits = ratio >= 100 ? 0 : ratio >= 10 ? 1 : ratio >= 1 ? 2 : ratio >= 0.1 ? 2 : ratio >= 0.01 ? 3 : 4;
+    return {
+      text: `${ratio.toLocaleString("en-US", { maximumFractionDigits: digits })}×`,
+      cls: ratio >= 1 ? "good" : "bad",
+    };
+  }
+
   _row(label, valueHtml, cls) {
     return `<div class="row"><span class="k">${this._esc(label)}</span><span class="v ${cls || ""}">${valueHtml}</span></div>`;
   }
@@ -321,6 +330,20 @@ class NpmCompatChart extends HTMLElement {
     const validates = pkg.validation?.validates;
     const npmPackageUrl = this._npmUrl(pkg);
     const npmCodeUrl = this._npmUrl(pkg, true);
+    const issueLink = pkg.issue
+      ? `<a class="issue" href="https://github.com/loopdive/js2/issues/${pkg.issue}" target="_blank" rel="noopener">#${pkg.issue}</a>`
+      : "";
+    const lanes = pkg.perf?.lanes ?? (pkg.perf ? { jsHost: pkg.perf } : {});
+    const speedFactor = (lane) => {
+      const value = this._speedFactor(this._laneRatio(lane));
+      return `<span class="speed-value ${value.cls}">speed ${value.text}</span>`;
+    };
+    const speed = `
+      <span class="speed-factor mono">
+        <span class="speed-host">${speedFactor(lanes.jsHost)}</span>
+        <span class="speed-standalone-dynamic">${speedFactor(lanes.standaloneDynamic)}</span>
+        <span class="speed-standalone-static">${speedFactor(lanes.standalone)}</span>
+      </span>`;
 
     const badge = (ok, label) =>
       `<span class="badge ${ok === true ? "ok" : ok === false ? "bad" : ""}">${this._esc(label)}</span>`;
@@ -378,7 +401,8 @@ class NpmCompatChart extends HTMLElement {
           <a class="name" href="${npmPackageUrl}" target="_blank" rel="noopener"
             title="View ${this._esc(pkg.name)} ${this._esc(pkg.version)} on npm">${this._esc(pkg.name)}</a>
           <span class="ver mono">v${this._esc(pkg.version)}</span>
-          <a class="issue" href="https://github.com/loopdive/js2/issues/${pkg.issue}" target="_blank" rel="noopener">#${pkg.issue}</a>
+          ${speed}
+          ${issueLink}
         </div>
         <div class="badges">${badge(compiles, "compiles")}${badge(validates, "validates")}</div>
         <div class="rows">${tests}${perf}${bugs}</div>
@@ -389,6 +413,8 @@ class NpmCompatChart extends HTMLElement {
 
   _render(data, history) {
     this._data = data;
+    const measuredDate = document.getElementById("npm-compat-measured");
+    if (measuredDate) measuredDate.textContent = this._fmtDate(data.generatedAt) || "—";
     const pkgs = data.packages ?? [];
     const failToRun = pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates);
     const groups = [
@@ -427,7 +453,6 @@ class NpmCompatChart extends HTMLElement {
         ${metric(pkgs.length, "packages")}
         ${metric(`${compiling}/${pkgs.length}`, "compile")}
         ${metric(`${validating}/${pkgs.length}`, "validate")}
-        ${metric(this._fmtDate(data.generatedAt) || "—", "measured")}
       </div>
       <div class="chart-dashboard" data-target="standalone" data-precompilation="off">
         <div class="benchmark-toolbar">
@@ -599,6 +624,16 @@ class NpmCompatChart extends HTMLElement {
         }
         .card-top .name:hover { text-decoration: underline; }
         .card-top .ver { font-size: 11px; color: var(--text-muted, rgba(255,255,255,0.46)); }
+        .speed-factor > span { display: none; }
+        .speed-value {
+          font-size: 10px;
+          white-space: nowrap;
+        }
+        .chart-dashboard[data-target="host"] .speed-host,
+        .chart-dashboard[data-target="standalone"][data-precompilation="off"] .speed-standalone-dynamic,
+        .chart-dashboard[data-target="standalone"][data-precompilation="on"] .speed-standalone-static {
+          display: inline;
+        }
         .card-top .issue {
           margin-left: auto;
           font-size: 11px;
