@@ -49,7 +49,7 @@ jobs:
         with:
           ref: ${{ steps.refs.outputs.candidate_sha }}
           path: candidate
-          fetch-depth: 1
+          fetch-depth: 0
           submodules: false
           persist-credentials: false
 
@@ -62,6 +62,51 @@ jobs:
           fetch-depth: 1
           submodules: false
           persist-credentials: false
+
+      - name: Detect auxiliary benchmark changes
+        id: auxiliary
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${{ steps.refs.outputs.candidate_sha }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            comparison_sha="${{ steps.refs.outputs.baseline_sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            comparison_sha="${{ github.event.before }}"
+          else
+            comparison_sha=""
+          fi
+
+          auxiliary_mode="measure"
+          if [ -n "$comparison_sha" ] &&
+             [ "$comparison_sha" != "0000000000000000000000000000000000000000" ] &&
+             git -C candidate cat-file -e "${comparison_sha}^{commit}"
+          then
+            changed="$(
+              git -C candidate diff --name-only "$comparison_sha" "$candidate_sha" -- \
+                .github/workflows/benchmark-refresh.yml \
+                benchmarks/wasmtime-cold-host \
+                package.json \
+                pnpm-lock.yaml \
+                scripts/generate-wasmtime-hot-runtime.mjs \
+                scripts/lib/landing-benchmark-corpus.mjs \
+                scripts/lib/landing-module-size.mjs \
+                scripts/lib/landing-runtime-timing.mjs \
+                scripts/lib/landing-wasmtime-runtime.mjs \
+                website/public/benchmarks/competitive/programs
+            )"
+            if [ -z "$changed" ]; then
+              auxiliary_mode="inherit"
+            else
+              echo "Auxiliary benchmark inputs changed:"
+              echo "$changed"
+            fi
+          fi
+
+          echo "mode=$auxiliary_mode" >> "$GITHUB_OUTPUT"
+          echo "BENCHMARK_AUXILIARY_MODE=$auxiliary_mode" >> "$GITHUB_ENV"
+          echo "BENCHMARK_AUXILIARY_SOURCE_SHA=$comparison_sha" >> "$GITHUB_ENV"
+          echo "Auxiliary benchmark mode: $auxiliary_mode"
 
       - name: Setup pinned Node
         uses: actions/setup-node@v6
@@ -130,6 +175,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$BENCHMARK_AUXILIARY_MODE" = "inherit" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              auxiliary_source="$GITHUB_WORKSPACE/baseline"
+            else
+              auxiliary_source="$GITHUB_WORKSPACE/candidate"
+            fi
+            auxiliary_baseline="$RUNNER_TEMP/benchmark-auxiliary-baseline"
+            mkdir -p "$auxiliary_baseline"
+            cp \
+              "$auxiliary_source/benchmarks/results/wasm-host-wasmtime-hot-runtime.json" \
+              "$auxiliary_baseline/runtime.json"
+            cp \
+              "$auxiliary_source/benchmarks/results/wasm-host-wasmtime-module-size-per-test.json" \
+              "$auxiliary_baseline/module-size.json"
+            auxiliary_source_sha="$(
+              node -e \
+                'const fs = require("node:fs"); const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); if (!/^[0-9a-f]{40}$/.test(manifest.sourceSha || "")) process.exit(1); process.stdout.write(manifest.sourceSha);' \
+                "$auxiliary_source/benchmarks/results/benchmark-manifest.json"
+            )"
+            echo "BENCHMARK_AUXILIARY_SOURCE_SHA=$auxiliary_source_sha" >> "$GITHUB_ENV"
+            echo "BENCHMARK_AUXILIARY_RUNTIME_BASELINE=$auxiliary_baseline/runtime.json" >> "$GITHUB_ENV"
+            echo "BENCHMARK_AUXILIARY_SIZE_BASELINE=$auxiliary_baseline/module-size.json" >> "$GITHUB_ENV"
+          fi
+
           clear_current_outputs() {
             local results="$1/benchmarks/results"
             rm -f \

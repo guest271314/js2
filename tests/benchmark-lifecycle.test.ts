@@ -118,6 +118,7 @@ function fixtureRoot(): string {
       jsUs: 200,
       javyUs: 1_100,
       starlingMonkeyUs: 950,
+      auxiliaryMeasurement: "measured-current-run",
       lanesProvenance:
         "cold javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with benchmark host",
     },
@@ -128,6 +129,7 @@ function fixtureRoot(): string {
       jsUs: 200,
       javyUs: 1_000,
       starlingMonkeyUs: 900,
+      auxiliaryMeasurement: "measured-current-run",
       lanesProvenance:
         "warm javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with benchmark host",
       auxiliaryWarmWrapper: "fixed-runtime-arg-single-entry-batch-no-return-wit",
@@ -195,7 +197,9 @@ describe("benchmark artifact lifecycle", () => {
     expect(manifest.generatedAt).toBe("2026-07-29T12:00:00.000Z");
     expect(manifest.toolVersions).toEqual(TOOL_VERSIONS);
     expect(manifest.provenance).toEqual(BENCHMARK_PROVENANCE);
-    expect(manifest.provenance.carriedForwardMeasurements).toEqual([]);
+    expect(manifest.provenance.carriedForwardMeasurements).toContainEqual(
+      expect.stringContaining("Javy and StarlingMonkey"),
+    );
     expect(manifest.provenance.unsupportedArtifacts.map((row: { path: string }) => row.path)).toEqual([
       "benchmarks/results/wasm-host-wasmtime-module-size.json",
     ]);
@@ -232,7 +236,7 @@ describe("benchmark artifact lifecycle", () => {
     expect(() => validateSnapshot(snapshot)).toThrow(/integrity mismatch/);
   });
 
-  it("measures every displayed auxiliary runtime lane instead of carrying warm constants forward", () => {
+  it("measures auxiliary lanes when selected and supports explicit unchanged-input carry mode", () => {
     const generator = readFileSync(
       resolve(import.meta.dirname, "../scripts/generate-wasmtime-hot-runtime.mjs"),
       "utf8",
@@ -249,6 +253,8 @@ describe("benchmark artifact lifecycle", () => {
     expect(normalizeBatchedRuntimeSamples([80, 120], 8)).toEqual([10, 15]);
     expect(generator).toContain("javy warm (single-entry batch");
     expect(generator).toContain("starlingmonkey warm (single-entry batch");
+    expect(generator).toContain('AUXILIARY_MODE === "measure"');
+    expect(generator).toContain("Carrying forward unchanged Javy and StarlingMonkey controls");
     expect(generator).not.toContain("landingWasmtimeReusedInstanceSamples");
     expect(generator).not.toContain("JAVY_WARM_NUMBERS_MS");
     expect(generator).not.toContain("STARLINGMONKEY_WARM_NUMBERS_MS");
@@ -367,7 +373,7 @@ describe("benchmark artifact lifecycle", () => {
     expect(report.notes).toContainEqual(expect.stringContaining("compile-only benchmarks/bench"));
   });
 
-  it("uses paired JS controls and keeps freshly measured auxiliary runtimes as controls", () => {
+  it("uses paired JS controls and keeps change-scoped auxiliary runtimes as controls", () => {
     const baseline = packageFixture(fixtureRoot());
     const candidateRoot = fixtureRoot();
     mutateJson(resolve(candidateRoot, "benchmarks/results/playground-benchmark-sidebar.json"), (document) => {
@@ -381,7 +387,33 @@ describe("benchmark artifact lifecycle", () => {
 
     const report = compareSnapshots(baseline, packageFixture(candidateRoot));
     expect(report.regressions).toHaveLength(0);
-    expect(report.informational).toContainEqual(expect.stringContaining("freshly measured Javy"));
+    expect(report.informational).toContainEqual(expect.stringContaining("change-scoped comparison controls"));
+  });
+
+  it("accepts honestly carried auxiliary controls and rejects missing source provenance", () => {
+    const root = fixtureRoot();
+    mutateJson(resolve(root, "benchmarks/results/wasm-host-wasmtime-hot-runtime.json"), (document) => {
+      for (const row of document) {
+        row.auxiliaryMeasurement = "carried-forward-unchanged-inputs";
+        row.auxiliarySourceSha = SOURCE_SHA;
+        row.lanesProvenance = `javyUs/starlingMonkeyUs carried forward. Source: ${SOURCE_SHA}.`;
+      }
+    });
+    const snapshot = packageFixture(root);
+    expect(validateSnapshot(snapshot).sourceSha).toBe(SOURCE_SHA);
+    const carried = JSON.parse(
+      readFileSync(resolve(snapshot, "benchmarks/results/wasm-host-wasmtime-hot-runtime.json"), "utf8"),
+    );
+    expect(carried[0]).toMatchObject({ javyUs: 1_100, starlingMonkeyUs: 950 });
+    expect(carried[1]).toMatchObject({ javyUs: 1_000, starlingMonkeyUs: 900 });
+
+    const invalidRoot = fixtureRoot();
+    mutateJson(resolve(invalidRoot, "benchmarks/results/wasm-host-wasmtime-hot-runtime.json"), (document) => {
+      document[0].auxiliarySourceSha = "not-a-sha";
+      document[0].auxiliaryMeasurement = "carried-forward-unchanged-inputs";
+      document[0].lanesProvenance = "javyUs/starlingMonkeyUs carried forward.";
+    });
+    expect(() => packageFixture(invalidRoot)).toThrow(/missing carry provenance/);
   });
 
   it("reports candidate omissions and returns the documented compare exit code", () => {
@@ -427,5 +459,9 @@ describe("benchmark artifact lifecycle", () => {
       expect(cleanup).toContain(artifact);
     }
     expect(cleanup).not.toContain('"$results/history.json"');
+    expect(workflow).toContain("- name: Detect auxiliary benchmark changes");
+    expect(workflow).toContain('auxiliary_mode="inherit"');
+    expect(workflow).toContain("BENCHMARK_AUXILIARY_RUNTIME_BASELINE");
+    expect(workflow).toContain("website/public/benchmarks/competitive/programs");
   });
 });

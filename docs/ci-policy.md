@@ -384,25 +384,30 @@ verdict.
 The refreshed set includes the representative internal strategy suite
 (`latest.json`), playground warm and no-JIT charts, size and loadtime
 artifacts (including the complete `loadtime/` asset directory), and the
-freshly measured js2 Wasmtime hot-runtime rows and per-program AOT, Javy, and
-StarlingMonkey module sizes. Runtime regressions fail only when both the
+freshly measured js2 Wasmtime/V8 hot-runtime rows and per-program AOT sizes.
+Runtime regressions fail only when both the
 JS-relative ratio and the absolute Wasm/strategy time cross the configured
 substantial-regression thresholds. Deterministic sizes use a percentage
 threshold plus an absolute-byte floor. End-to-end loadtime uses a wider 40%
 joint runtime/JS-reference gate; individual compile-only microtimings remain
 informational. A missing baseline row is a regression.
 
-The Javy and StarlingMonkey warm lanes are also measured in the current run:
-because Javy's dynamic module is single-entry, dedicated warm wrappers batch
-several benchmark calls inside one exported `run()`. The pinned Rust host uses
-a fresh instance for each outer sample and normalizes the batch wall time to a
-per-call value. They are comparison controls, not compiler-regression gates.
+Javy and StarlingMonkey are change-scoped comparison controls, not
+compiler-regression gates. The workflow remeasures their cold/warm runtimes
+and module sizes only when their benchmark corpus, auxiliary generator or
+host setup, componentizer dependency, or pinned workflow versions change.
+Otherwise their last accepted landing-page values are carried forward
+unchanged with the source commit recorded in every runtime row. When measured,
+Javy's single-entry dynamic module uses dedicated warm wrappers that batch
+several calls inside one exported `run()`; the pinned Rust host uses a fresh
+instance for each outer sample and normalizes the batch wall time per call.
 
-Before either checkout is measured, the workflow removes every current-run
-output and the compiled `loadtime/` directory while deliberately preserving
-`history.json`. Generators must recreate the complete set; a skipped or
-partial generator therefore fails packaging instead of promoting a stale
-file inherited from checkout.
+Before either checkout is measured, the workflow copies any deliberately
+carried auxiliary controls into an isolated runner-temporary baseline, then
+removes every current-run output and the compiled `loadtime/` directory while
+preserving `history.json`. Generators must recreate the complete set; only the
+explicitly change-scoped auxiliary fields may be inherited, and missing or
+invalid carry provenance fails packaging.
 
 One limitation remains: the legacy, non-displayed
 `wasm-host-wasmtime-module-size.json` summary has no generator and is not

@@ -83,16 +83,20 @@ export const BENCHMARK_PROVENANCE = Object.freeze({
       id: "wasmtime-hot-runtime",
       generator: "scripts/generate-wasmtime-hot-runtime.mjs",
       artifacts: ["benchmarks/results/wasm-host-wasmtime-hot-runtime.json"],
-      freshness: "current-run AOT, V8, Javy, and StarlingMonkey runtime measurements",
+      freshness:
+        "current-run AOT and V8 measurements; Javy and StarlingMonkey are measured only when their inputs change and otherwise retain the last accepted values with source provenance",
     },
     {
       id: "wasmtime-module-size",
       generator: "scripts/generate-wasmtime-hot-runtime.mjs",
       artifacts: ["benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"],
-      freshness: "current-run AOT, Javy, StarlingMonkey, and minified JavaScript byte sizes",
+      freshness:
+        "current-run AOT and minified JavaScript sizes; Javy and StarlingMonkey sizes refresh only when their inputs change",
     },
   ],
-  carriedForwardMeasurements: [],
+  carriedForwardMeasurements: [
+    "Javy and StarlingMonkey runtime and module-size controls when their corpus, setup, dependencies, and pinned versions are unchanged",
+  ],
   unsupportedArtifacts: [
     {
       path: "benchmarks/results/wasm-host-wasmtime-module-size.json",
@@ -280,11 +284,24 @@ function validateWasmtimeRows(rows) {
       row.starlingMonkeyUs,
       `benchmarks/results/wasm-host-wasmtime-hot-runtime.json[${index}].starlingMonkeyUs`,
     );
-    if (
-      typeof row.lanesProvenance !== "string" ||
-      !row.lanesProvenance.includes("measured by scripts/generate-wasmtime-hot-runtime.mjs")
-    ) {
-      throw new Error(`Wasmtime auxiliary lanes for ${row.name}:${row.scenario} are missing current-run provenance`);
+    if (row.auxiliaryMeasurement === "measured-current-run") {
+      if (
+        typeof row.lanesProvenance !== "string" ||
+        !row.lanesProvenance.includes("measured by scripts/generate-wasmtime-hot-runtime.mjs")
+      ) {
+        throw new Error(`Wasmtime auxiliary lanes for ${row.name}:${row.scenario} are missing measurement provenance`);
+      }
+    } else if (row.auxiliaryMeasurement === "carried-forward-unchanged-inputs") {
+      if (
+        typeof row.auxiliarySourceSha !== "string" ||
+        !/^[0-9a-f]{40}$/.test(row.auxiliarySourceSha) ||
+        typeof row.lanesProvenance !== "string" ||
+        !row.lanesProvenance.includes("carried forward")
+      ) {
+        throw new Error(`Wasmtime auxiliary lanes for ${row.name}:${row.scenario} are missing carry provenance`);
+      }
+    } else {
+      throw new Error(`Wasmtime auxiliary lanes for ${row.name}:${row.scenario} have an invalid measurement mode`);
     }
     if (
       row.scenario === "warm" &&
@@ -949,7 +966,7 @@ export function compareSnapshots(baselineRoot, candidateRoot) {
       ...toolchainNotes(baselineManifest, candidateManifest),
     ],
     informational: [
-      "Wasmtime regression decisions gate the primary AOT lane; freshly measured Javy and StarlingMonkey lanes are comparison controls.",
+      "Wasmtime regression decisions gate the primary AOT lane; Javy and StarlingMonkey lanes are change-scoped comparison controls.",
       "End-to-end loadtime is jointly gated against its JS control; compile-only microtimings remain informational.",
       "The legacy non-displayed wasm-host-wasmtime-module-size summary is unsupported and excluded from snapshots.",
     ],
