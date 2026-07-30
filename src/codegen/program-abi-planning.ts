@@ -25,6 +25,7 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   typedThisTwin: 7,
   vecHostBridge: 8,
   closureHostBridge: 9,
+  dateCivilSupport: 10,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({

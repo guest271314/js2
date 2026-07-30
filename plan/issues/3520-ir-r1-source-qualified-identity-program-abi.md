@@ -175,6 +175,7 @@ files:
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
   - src/codegen/closure-exports.ts
+  - src/codegen/expressions/builtins.ts
   - src/codegen/declarations.ts
   - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
@@ -2725,6 +2726,39 @@ C31 closes exact retained ownership for this bounded closure host-dispatch
 family, not R1. Higher-arity method dispatchers, other support callable
 families, remaining class/type consumers, and module-array or display-name
 scans still need structural owners before R1 can close.
+
+### 2026-07-30 date civil support callable ownership continuation
+
+The C32 continuation on `codex/3520-c32-date-civil-support` gives
+`__date_civil_from_days` one canonical entry-source `date-civil-support`
+binding at derived ordinal 0 and callable role ordinal 10. The exact allocator
+object remains behind its stable function handle; tracked and untracked
+binaries are byte-identical, and late-import/DCE locator resolution moves
+0 → 1 → 0 without rebuilding the helper. A same-named source function cannot
+occupy the Date role or redirect Date lowering: C32 always mints the exact
+helper independently and installs the `funcMap` compatibility alias only when
+the logical name is free.
+
+Across `SINGLE_HOST_ENTRIES`, C31+C32 contain **166** defined functions,
+**74** generic rows, **26** closure rows, and **1** Date row. Composed with
+C30, the census is **50 generic + 24 vec + 26 closure + 1 Date**, the intended
+one-for-one **51 → 50** generic move for C32. Routing remains **37 terminal /
+30 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**,
+so terminal adoption gain is zero.
+
+The focused C32 suite passes **7/7**, including matching `bigint → bigint` and
+mismatched `number → number` source-name collisions in both tracked and
+untracked standalone lanes. Both the Date calendar result and user function
+result are preserved, both binaries validate, and each tracked binary matches
+its untracked counterpart. The suite also preserves leap-day output
+`20240229`, exact structural/final-slot ownership, and census parity. The
+adjacent negative-year suite passes **42/42** and the calendar-residual suite
+passes **28/28**. The sole `date-native` `Date.now()` harness failure reproduces
+on the exact C31 parent because `env.__date_now` is not supplied.
+
+C32 closes exact retained ownership for this one civil-date support helper, not
+R1. Other Date helpers and remaining support callable families still need
+structural owners.
 
 ### R1a validation evidence
 

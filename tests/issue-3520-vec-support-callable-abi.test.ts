@@ -399,7 +399,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
     }
   });
 
-  it("keeps tracked output and IR routing stable while the five-entry census moves only the 24 vec rows", async () => {
+  it("keeps tracked output and IR routing stable across the composed five-entry census", async () => {
     const untracked = await compile(ARRAY_SOURCE, {
       fileName: "vec-tracking-parity.ts",
       experimentalIR: true,
@@ -425,6 +425,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
     let genericRows = 0;
     let vecRows = 0;
     let closureRows = 0;
+    let dateRows = 0;
     for (const entry of SINGLE_HOST_ENTRIES) {
       const source = readFileSync(resolve(entry), "utf8");
       const ast = analyzeSource(source, entry);
@@ -439,12 +440,14 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
       genericRows += entries.filter((candidate) => candidate.id.includes("retained-module-function")).length;
       vecRows += entries.filter((candidate) => candidate.id.includes(VEC_HOST_BRIDGE_ROLE)).length;
       closureRows += entries.filter((candidate) => candidate.id.includes(":closure-host-bridge:")).length;
+      dateRows += entries.filter((candidate) => candidate.id.includes(":date-civil-support:")).length;
     }
-    expect({ definedFunctions, genericRows, vecRows, closureRows }).toEqual({
+    expect({ definedFunctions, genericRows, vecRows, closureRows, dateRows }).toEqual({
       definedFunctions: 166,
-      genericRows: 51,
+      genericRows: 51 - dateRows,
       vecRows: 24,
       closureRows: 26,
+      dateRows: 1,
     });
   });
 });
