@@ -399,6 +399,27 @@ function planImportedDependencies(f: Fixture) {
 }
 
 describe("#3521 scoped prepared-component ABI seal", () => {
+  it("reverse-resolves planned structural references without numeric slot discovery", () => {
+    const f = fixture();
+    const sharedKey = "import|3:env|11:shared_call";
+    const firstId = createIrBindingId({
+      ownerId: f.sourceId,
+      domain: "callable",
+      role: "shared-call-first",
+    });
+    const secondId = createIrBindingId({
+      ownerId: f.sourceId,
+      domain: "callable",
+      role: "shared-call-second",
+    });
+    f.session.plan(importedCallableDraft(f, secondId, sharedKey, 2));
+    f.session.plan(importedCallableDraft(f, firstId, sharedKey, 1));
+
+    expect(f.session.bindingIdsForStructuralReference(sharedKey)).toEqual([firstId, secondId]);
+    expect(f.session.bindingIdsForStructuralReference("import|3:env|7:missing")).toEqual([]);
+    expect(f.session.bindingIdsForStructuralReference("")).toEqual([]);
+  });
+
   it("pins callable, derived, alias, export, and support closure while unrelated direct planning remains legal", () => {
     const f = fixture();
     const first = planCallable(f, f.firstUnitId, "body", "first");

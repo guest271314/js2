@@ -959,6 +959,24 @@ export class ProgramAbiSession {
     return this.drafts.get(id);
   }
 
+  /**
+   * Resolve the exact planned ABI identities for one symbolic IR reference.
+   *
+   * Dependency discovery runs before the whole-program ABI is published, so
+   * it cannot search final numeric slots. The structural reference stored on
+   * each draft is already the canonical identity contract; return every match
+   * in structural plan order so callers can fail closed on ambiguity.
+   */
+  bindingIdsForStructuralReference(key: string): readonly IrBindingId[] {
+    if (typeof key !== "string" || key.length === 0) return Object.freeze([]);
+    return Object.freeze(
+      [...this.drafts.values()]
+        .filter((draft) => draft.structuralReferenceKey === key)
+        .sort((left, right) => compareDrafts(this.sourceOrderById, left, right))
+        .map((draft) => draft.id),
+    );
+  }
+
   hasKnownUnit(id: IrUnitId): boolean {
     return this.derivedUnits.has(id) || this.inventoryUnitIds.has(id);
   }
