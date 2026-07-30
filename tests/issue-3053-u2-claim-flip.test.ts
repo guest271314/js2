@@ -98,7 +98,6 @@ describe("#3053 U2 — selector opens dynamic member/element reads (the claim-fl
     ["alias of a member read `const y = o.x; return y`", `export function f(o) { const y = o.x; return y; }`, "f"],
     ["chained read `return o.a.b`", `export function f(o) { return o.a.b; }`, "f"],
     ["member read into a dyn-param call", `function g(v) { return v; }\nexport function f(o) { return g(o.x); }`, "f"],
-    ["member read into dynamic addition", `export function f(o) { return o.x + 1; }`, "f"],
   ];
   for (const [label, src, fn] of claims) {
     it(`CLAIMS: ${label}`, () => {
@@ -117,6 +116,9 @@ describe("#3053 U2 — precision: member reads outside the producer contract sti
     // Dynamic arithmetic in the index (`i-1`) has no dynamic-arith producer —
     // must NOT claim (would demote).
     ["dynamic-arithmetic index `o[i-1]`", `export function f(o, i) { return o[i - 1]; }`],
+    // A member read whose result flows to a CONCRETE position (arithmetic) needs
+    // an unbox the move-only surface doesn't provide.
+    ["member read into arithmetic `o.x + 1`", `export function f(o) { return o.x + 1; }`],
     // Bare `o.x;` in statement position with a concrete return keeps rejecting a
     // non-move dyn use (result neither moved nor dropped-as-call).
     ["member read as a bare statement value", `export function f(o) { o.x; return 1; }`],

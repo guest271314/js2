@@ -13,6 +13,18 @@ function addStrings(left: any, right: any): number {
   return result === "loopdive" ? 1 : 0;
 }
 
+function consumeNumber(value: number): number {
+  return value;
+}
+
+function dynamicToNumberCall(value: any): number {
+  return consumeNumber(value);
+}
+
+export function memberAddition(holder: any): number {
+  return +(holder.value + 1);
+}
+
 function readAddedString(left: any, right: any): number {
   return +(left + right).charCodeAt(1);
 }
@@ -89,6 +101,10 @@ export function runStringAddition(): number {
   return addStrings("loop", "dive");
 }
 
+export function runDynamicToNumberCall(): number {
+  return dynamicToNumberCall("42");
+}
+
 export function runAddedStringMethod(): number {
   return readAddedString("A", "Z");
 }
@@ -156,6 +172,8 @@ export function runConditionalAddition(): number {
 const COMMON_FEATURE_FUNCTIONS = [
   "addNumbers",
   "addStrings",
+  "consumeNumber",
+  "dynamicToNumberCall",
   "readAddedString",
   "numericRelations",
   "stringRelations",
@@ -179,7 +197,7 @@ async function compileTarget(target: "gc" | "standalone") {
   expect(result.irPostClaimErrors ?? []).toEqual([]);
   const expectedFunctions =
     target === "gc"
-      ? [...COMMON_FEATURE_FUNCTIONS, "callWithoutArgument", "callWithArgument"]
+      ? [...COMMON_FEATURE_FUNCTIONS, "memberAddition", "callWithoutArgument", "callWithArgument"]
       : COMMON_FEATURE_FUNCTIONS;
   expect(result.irCompiledFuncs, JSON.stringify(result.irOutcomes, null, 2)).toEqual(
     expect.arrayContaining(expectedFunctions),
@@ -198,6 +216,7 @@ describe("#3790 IR dynamic string operations and loop coercion", () => {
       const expectedNoArgumentExports: Record<string, number> = {
         runNumberAddition: 42,
         runStringAddition: 1,
+        runDynamicToNumberCall: 42,
         runAddedStringMethod: 90,
         runNumericRelations: 1,
         runStringRelations: 1,
@@ -211,6 +230,7 @@ describe("#3790 IR dynamic string operations and loop coercion", () => {
         runConditionalAddition: 1,
       };
       if (target === "gc") {
+        expect(exports.memberAddition({ value: 41 })).toBe(42);
         expect(
           exports.callWithoutArgument({
             read() {

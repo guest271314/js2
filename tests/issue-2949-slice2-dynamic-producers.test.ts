@@ -144,6 +144,12 @@ describe("#2949 slice 2 — non-move dynamic uses keep their rejection buckets",
       `export function f(x) { if (x === 1) { return x; } else { return 0; } }`,
       "param-type-not-resolvable",
     ],
+    [
+      "dyn arg into a concrete (annotated) param",
+      `function g(n: number): number { return n; }
+       export function f(x) { return g(x); }`,
+      "param-type-not-resolvable",
+    ],
     ["calling the dyn value itself", `export function f(x) { return x(); }`, "param-type-not-resolvable"],
   ];
   for (const [label, src, reason] of rejected) {
@@ -157,14 +163,6 @@ describe("#2949 slice 2 — non-move dynamic uses keep their rejection buckets",
   it("destructured dynamic param stays rejected (needs dynamic property access)", () => {
     const { claimed } = selectionFor(`export function f({ a }) { return a; }`);
     expect(claimed.has("f")).toBe(false);
-  });
-
-  it("dynamic arguments may cross a proven numeric direct-call boundary", () => {
-    const { claimed } = selectionFor(`
-      function g(n: number): number { return n; }
-      export function f(x) { return g(x); }
-    `);
-    expect(claimed.has("f")).toBe(true);
   });
 });
 
