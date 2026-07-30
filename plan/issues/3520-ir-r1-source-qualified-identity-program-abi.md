@@ -103,6 +103,10 @@ files:
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/program-abi-type-planning.ts
+  - src/codegen/property-access.ts
+  - src/codegen/closed-method-dispatch.ts
+  - src/codegen/vec-access-exports.ts
+  - src/runtime.ts
   - src/codegen/ir-first-gate.ts
   - src/codegen/ir-class-shapes.ts
   - src/codegen/ir-overlay-identity.ts
@@ -152,6 +156,7 @@ files:
   - tests/issue-3520-program-abi-callable-planning.test.ts
   - tests/issue-3520-program-abi-type-remap.test.ts
   - tests/issue-3520-support-callable-abi.test.ts
+  - tests/issue-3520-vec-support-callable-abi.test.ts
   - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-3520-class-integration-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
@@ -166,6 +171,7 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
+  - src/runtime.ts
   - src/codegen/declarations.ts
   - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
@@ -2575,6 +2581,81 @@ C29 closes exact retained ownership for direct source function-value
 trampolines and capture-free cache globals, not R1. Other support callable
 families, remaining class/type consumers, and module-array or display-name
 scans must still move behind structural authorities before R1 can close.
+
+### 2026-07-30 vec host-bridge callable ownership continuation
+
+The continuation on `codex/3520-c30-vec-host-bridge` moves the six core vec
+host bridges behind one entry-source-owned structural family:
+
+- `__vec_len`, `__vec_get`, `__is_vec`, `__vec_mut_supported`, `__vec_push`,
+  and `__vec_pop` publish `vec-host-bridge` support bindings at fixed ordinals
+  0 through 5 beneath the canonical entry source. Their callable ordering role
+  is the next reserved role after `typedThisTwin`;
+- reservation allocates all six helpers as one batch and observes the exact
+  `WasmFunction` objects only after every allocation succeeds. Final body
+  filling and compile-time calls resolve those objects through their current
+  handles, so late-import shifts cannot redirect selection through a generated
+  name; and
+- `funcMap` remains a compatibility publication only when the helper label is
+  unoccupied. The historical logical export is also the zero-overhead runtime
+  fast path. A physical export is added only when a user already owns that
+  logical export or occupies its exact short `$v<ordinal>` family, using a
+  deterministic `$` suffix on collision. Free suffix gaps are filled with
+  helper aliases through one slot beyond the last occupied suffix, so the
+  runtime can select the final function in the contiguous family without
+  mistaking a preserved user export for the helper. Runtime projection first
+  requires the historical logical export, preventing an array-free user
+  `$v<ordinal>` from fabricating an internal vec helper. A user can export all
+  six historical helper labels or all six short prefixes and still retain
+  those exact names and bodies while runtime array reads, wrapping, and
+  mutation use the structural helpers; and
+- structural observation, body filling, and physical publication are
+  correctness-critical. Their failures now abort compilation before physical
+  bridge publication instead of returning a successful module containing
+  placeholder bodies.
+
+The exact five-entry `SINGLE_HOST_ENTRIES` census was run in fresh processes
+against `origin/main` at `e541b9d56c766c` and this continuation, using
+`readFileSync(entry) -> analyzeSource(source, entry) ->
+generateModule(ast, { experimentalIR: true, trackIrOutcomes: true })`.
+Defined functions remain **166 → 166**. Generic
+`retained-module-function` rows move **101 → 77**, exactly matching the
+**24** vec bridge rows present across four of the five entries. The same
+measurement keeps routing and body outcomes unchanged at **37 terminal /
+30 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR
+bodies**.
+
+The size follow-up compares raw binaries from `origin/main` at
+`10f40b6458c6c`, PR head `11abdfd6b544`, and the collision-only alias
+implementation. Three representative helper-using modules measure
+**1,065 / 1,340 / 1,569 bytes** on main, **1,222 / 1,497 / 1,726 bytes** at
+the PR head, and **1,065 / 1,340 / 1,569 bytes** after the follow-up. The
+deterministic **+157 bytes per module** is therefore eliminated rather than
+traded for a shorter always-present duplicate namespace. Ordinary modules
+publish zero `$v<ordinal>` physical aliases; only an actual logical-label or
+exact short-family collision pays for its affected short family.
+
+The focused C30 suite passes **9/9**. It proves all six source-anchored IDs,
+fixed ordinals, direct final-slot object identity, and zero vec support
+publication for an array-free module; reserve-to-fill allocator-object
+identity survives a forced late-import increase and subsequent dead-import
+compaction; all six public-label collisions preserve the user exports while a
+runtime E2E asserts push length, intermediate length/value, pop value, final
+length, and wrapped returned-array values; sparse short-namespace collisions
+retain six distinct terminal structural helpers; all-six prefix-only
+collisions terminate in the structural helpers while preserving wrapped
+`[7, 8, 3]` and fieldless-class `{}` behavior; an array-free `$v0` spoof
+creates no historical logical helper and preserves the helper-free fieldless
+fallback; forced ABI observation failure produces a compile error with no
+physical exports; tracked/untracked binaries are equal with IR enabled; and
+routing/outcome telemetry remains stable. The adjacent callable-planning,
+#2083, #3272, #3637, #2927, and #3311 matrix passes **50/50 across six files**.
+The IR fallback ratchet, function budget, strict TypeScript, and the exact
+census pass without changing the equivalence baseline or Test262 run log.
+
+C30 closes exact retained ownership for the six core vec host bridges, not R1.
+Other support callable families and remaining module-array or display-name
+consumers must still move behind structural authorities before R1 can close.
 
 ### R1a validation evidence
 
