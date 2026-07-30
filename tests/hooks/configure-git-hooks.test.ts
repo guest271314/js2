@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -43,5 +43,16 @@ describe("worktree-local Git hook installation", () => {
     execFileSync("/bin/sh", [INSTALLER, fixtureRoot]);
 
     expect(git(fixtureRoot, "config", "--get", "core.hooksPath")).toBe(".husky");
+  });
+
+  it("installs and retains the repository growth ratchets", () => {
+    const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    const preCommit = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
+
+    expect(packageJson.scripts.prepare).toBe("sh scripts/configure-git-hooks.sh . || true");
+    expect(preCommit).toContain("pnpm run check:loc-budget");
+    expect(preCommit).toContain("pnpm run check:func-budget");
   });
 });
