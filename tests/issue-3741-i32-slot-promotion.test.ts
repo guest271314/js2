@@ -141,6 +141,31 @@ describe("#3741 — i32 slot promotion (shape)", () => {
     expect(mix(bodyA)).toBe(mix(bodyB));
     expect(bodyA).not.toContain("f64.add");
   });
+
+  it("keeps Fibonacci loop-carried state in i32 through an immutable next value", async () => {
+    const r = await compile(
+      `/** @param {number} n @returns {number} */
+       export function run(n) {
+         let a = 0;
+         let b = 1;
+         for (let i = 0; i < n; i++) {
+           const next = (a + b) | 0;
+           a = b;
+           b = next;
+         }
+         return a | 0;
+       }`,
+      { emitWat: true, fileName: "fib.js", target: "wasi", nativeStrings: true },
+    );
+    expect(r.success).toBe(true);
+    expect(r.irCompiledFuncs).toContain("run");
+    const body = funcBody(r.wat, "run");
+
+    expect(body).toMatch(/\(local \$\$slot_a i32\)/);
+    expect(body).toMatch(/\(local \$\$slot_b i32\)/);
+    expect(body).toContain("i32.add");
+    expect(body).not.toContain("i32.trunc_sat_f64_s");
+  });
 });
 
 interface Case {
