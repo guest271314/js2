@@ -273,6 +273,11 @@ class FrozenSet<T> implements ReadonlySet<T> {
   }
 }
 
+Object.freeze(FrozenMap.prototype);
+Object.freeze(FrozenMap);
+Object.freeze(FrozenSet.prototype);
+Object.freeze(FrozenSet);
+
 export function preparedIrReadonlyMap<K, V>(entries: Iterable<readonly [K, V]>): ReadonlyMap<K, V> {
   return new FrozenMap(entries);
 }
@@ -284,6 +289,7 @@ function invalidPreparedData(detail: string): never {
 function immutableCopy(value: unknown, ancestors = new Set<object>()): unknown {
   if (typeof value === "function") invalidPreparedData("prepared data cannot contain executable functions");
   if (value === null || typeof value !== "object") return value;
+  if (value instanceof FrozenMap || value instanceof FrozenSet) return value;
   if (ancestors.has(value)) invalidPreparedData("prepared data must be acyclic");
   const nextAncestors = new Set(ancestors).add(value);
   if (Array.isArray(value)) return Object.freeze(value.map((item) => immutableCopy(item, nextAncestors)));
@@ -494,6 +500,10 @@ function expectedCandidateRoute(candidate: PreparedIrUnitCandidate): PreparedIrC
       return "direct";
     case "invariant-candidate":
       return "neither";
+    default:
+      return invalidPreparedData(
+        `candidate has unknown kind ${String((candidate as unknown as { kind?: unknown }).kind)}`,
+      );
   }
 }
 
@@ -502,7 +512,8 @@ function expectedCandidateRoute(candidate: PreparedIrUnitCandidate): PreparedIrC
  * the output remains explicitly pending production reconciliation.
  */
 export function createPreparedIrCandidateProgram(input: PreparedIrCandidateProgramInput): PreparedIrProgram {
-  const entries = Object.freeze(input.abiEntries.map((entry) => ownCandidate(entry)));
+  const ownedInput = ownCandidate(input);
+  const entries = Object.freeze(ownedInput.abiEntries.map((entry) => ownCandidate(entry)));
   const entryMap = new Map(entries.map((entry) => [entry.id, entry]));
   const abi: PreparedIrAbiSnapshot = Object.freeze({
     planningSealed: true as const,
@@ -510,7 +521,7 @@ export function createPreparedIrCandidateProgram(input: PreparedIrCandidateProgr
     get: (id: IrBindingId) => entryMap.get(id),
   });
   const units = preparedIrReadonlyMap(
-    [...input.units].map(([unitId, candidate]) => {
+    [...ownedInput.units].map(([unitId, candidate]) => {
       const ownedCandidate = ownCandidate(candidate);
       if (
         ownedCandidate.unitId !== unitId ||
@@ -537,7 +548,7 @@ export function createPreparedIrCandidateProgram(input: PreparedIrCandidateProgr
     ),
   );
   const componentCandidates = Object.freeze(
-    input.componentCandidates.map((component) => {
+    ownedInput.componentCandidates.map((component) => {
       const unitIds = Object.freeze([...component.unitIds]);
       const unknownUnitIds = unitIds.filter((unitId) => !units.has(unitId));
       if (unknownUnitIds.length > 0) {
@@ -555,18 +566,39 @@ export function createPreparedIrCandidateProgram(input: PreparedIrCandidateProgr
     }),
   );
   const supportIntentCandidates = Object.freeze(
-    input.supportIntentCandidates.map((candidate) =>
-      ownCandidate({ ...candidate, evidenceStatus: "unvalidated-candidate" as const }),
+    ownedInput.supportIntentCandidates.map((candidate) =>
+      ownCandidate({
+        key: candidate.key,
+        kind: candidate.kind,
+        ownerUnitId: candidate.ownerUnitId,
+        bindingId: candidate.bindingId,
+        detail: candidate.detail,
+        evidenceStatus: "unvalidated-candidate" as const,
+      }),
     ),
   );
   const allocationCandidates = Object.freeze(
-    input.allocationCandidates.map((candidate) =>
-      ownCandidate({ ...candidate, evidenceStatus: "unvalidated-candidate" as const }),
+    ownedInput.allocationCandidates.map((candidate) =>
+      ownCandidate({
+        key: candidate.key,
+        kind: candidate.kind,
+        ownerUnitId: candidate.ownerUnitId,
+        bindingId: candidate.bindingId,
+        ordinal: candidate.ordinal,
+        evidenceStatus: "unvalidated-candidate" as const,
+      }),
     ),
   );
   const provenanceCandidates = Object.freeze(
-    input.provenanceCandidates.map((candidate) =>
-      ownCandidate({ ...candidate, evidenceStatus: "unvalidated-candidate" as const }),
+    ownedInput.provenanceCandidates.map((candidate) =>
+      ownCandidate({
+        artifactUnitId: candidate.artifactUnitId,
+        ownerUnitId: candidate.ownerUnitId,
+        role: candidate.role,
+        parentUnitId: candidate.parentUnitId,
+        ordinal: candidate.ordinal,
+        evidenceStatus: "unvalidated-candidate" as const,
+      }),
     ),
   );
   let emissionStarted = false;

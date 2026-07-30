@@ -662,20 +662,32 @@ describe("#3521 PreparedIrProgram structural ownership", () => {
     const { abi, alpha, beta, legacy } = preparedCoreFixture();
     const params = ["f64"];
     const blocks = [{ id: 0, instructions: [] as string[] }];
+    const lookup = new Map([["alpha", { slot: 1 }]]);
+    const labels = new Set(["prepared"]);
     const builder = new PreparedIrProgramBuilder(abi);
     builder.recordIrCandidate({
       ...preparedInput(alpha.id, "alpha"),
       assertedSignature: { params, results: ["f64"] },
-      irCandidate: { blocks },
+      irCandidate: { blocks, lookup, labels },
     });
     params[0] = "externref";
     blocks[0]!.id = 99;
     blocks[0]!.instructions.push("mutated");
+    lookup.get("alpha")!.slot = 99;
+    lookup.set("late", { slot: 2 });
+    labels.add("late");
     builder.recordIrCandidate(preparedInput(beta.id, "beta"));
     builder.recordDirectCandidate({ unitId: legacy.id, code: "x", stage: "select", detail: "x" });
     const program = builder.seal();
     expect(program.irCandidates.get(alpha.id)?.assertedSignature.params).toEqual(["f64"]);
-    expect(program.irCandidates.get(alpha.id)?.irCandidate).toEqual({ blocks: [{ id: 0, instructions: [] }] });
+    const ownedBuilderCandidate = program.irCandidates.get(alpha.id)?.irCandidate as {
+      blocks: readonly { id: number; instructions: readonly string[] }[];
+      lookup: ReadonlyMap<string, { slot: number }>;
+      labels: ReadonlySet<string>;
+    };
+    expect(ownedBuilderCandidate.blocks).toEqual([{ id: 0, instructions: [] }]);
+    expect([...ownedBuilderCandidate.lookup]).toEqual([["alpha", { slot: 1 }]]);
+    expect([...ownedBuilderCandidate.labels]).toEqual(["prepared"]);
 
     const originalAlpha = program.irCandidates.get(alpha.id)!;
     const factoryParams = ["f64"];
@@ -741,6 +753,27 @@ describe("#3521 PreparedIrProgram structural ownership", () => {
       () =>
         createPreparedIrCandidateProgram({
           abiEntries: program.abi.entries,
+          units: new Map([
+            [
+              alphaId,
+              {
+                ...alpha,
+                kind: "unknown-kind",
+                route: undefined,
+              } as never,
+            ],
+          ]),
+          componentCandidates: [],
+          supportIntentCandidates: [],
+          allocationCandidates: [],
+          provenanceCandidates: [],
+        }),
+      "invalid-prepared-data",
+    );
+    expectPreparedInvariant(
+      () =>
+        createPreparedIrCandidateProgram({
+          abiEntries: program.abi.entries,
           units: new Map([[alphaId, { ...alpha, unitId: "forged-unit" as IrUnitId }]]),
           componentCandidates: [],
           supportIntentCandidates: [],
@@ -775,6 +808,51 @@ describe("#3521 PreparedIrProgram structural ownership", () => {
       "invalid-prepared-data",
     );
     expectPreparedInvariant(() => builder.recordIrCandidate(preparedInput(beta.id, "beta")), "program-seal-failed");
+  });
+
+  it("rejects accessors before executing them in builder and direct-factory inputs", () => {
+    const { abi, alpha } = preparedCoreFixture();
+    const builder = new PreparedIrProgramBuilder(abi);
+    let unitGetterCalls = 0;
+    const accessorCandidate = { ...preparedInput(alpha.id, "alpha") };
+    Object.defineProperty(accessorCandidate, "unitId", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        unitGetterCalls++;
+        return alpha.id;
+      },
+    });
+    expectPreparedInvariant(
+      () => builder.recordIrCandidate(accessorCandidate as PreparedIrIrCandidateInput),
+      "invalid-prepared-data",
+    );
+    expect(unitGetterCalls).toBe(0);
+
+    const { program } = validPreparedCore();
+    let supportGetterCalls = 0;
+    const accessorSupport = { kind: "helper" as const };
+    Object.defineProperty(accessorSupport, "key", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        supportGetterCalls++;
+        return "forged:getter";
+      },
+    });
+    expectPreparedInvariant(
+      () =>
+        createPreparedIrCandidateProgram({
+          abiEntries: program.abi.entries,
+          units: program.units,
+          componentCandidates: [],
+          supportIntentCandidates: [accessorSupport as never],
+          allocationCandidates: [],
+          provenanceCandidates: [],
+        }),
+      "invalid-prepared-data",
+    );
+    expect(supportGetterCalls).toBe(0);
   });
 
   it("aborts atomically on staging exceptions and nested functions, with no retry or publication", () => {

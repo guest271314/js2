@@ -135,39 +135,47 @@ export class PreparedIrProgramBuilder {
 
   recordIrCandidate(input: PreparedIrIrCandidateInput): void {
     this.#mutate(() => {
-      const unit = this.#requireFreeUnit(input.unitId);
+      const ownedInput = freezePreparedIrValue(input) as PreparedIrIrCandidateInput;
+      const unit = this.#requireFreeUnit(ownedInput.unitId);
       if (
-        input.assertedBackendLegality.verified !== true ||
-        input.assertedOptimization.allocationProvenance !== "verified" ||
-        !Array.isArray(input.assertedSignature.params) ||
-        !Array.isArray(input.assertedSignature.results)
+        ownedInput.assertedBackendLegality.verified !== true ||
+        ownedInput.assertedOptimization.allocationProvenance !== "verified" ||
+        !Array.isArray(ownedInput.assertedSignature.params) ||
+        !Array.isArray(ownedInput.assertedSignature.results)
       ) {
         throw new PreparedIrProgramInvariantError(
           "invalid-prepared-data",
-          `IR candidate ${input.unitId} lacks structurally valid asserted evidence`,
+          `IR candidate ${ownedInput.unitId} lacks structurally valid asserted evidence`,
         );
       }
-      this.#candidates.push(ownIrCandidate(input, unit));
+      this.#candidates.push(ownIrCandidate(ownedInput, unit));
     });
   }
 
   recordDirectCandidate(input: PreparedIrFailureCandidateInput): void {
     this.#mutate(() => {
-      const unit = this.#requireFreeUnit(input.unitId);
-      this.#candidates.push(ownFailureCandidate("direct-candidate", input, unit) as PreparedIrDirectCandidate);
+      const ownedInput = freezePreparedIrValue(input) as PreparedIrFailureCandidateInput;
+      const unit = this.#requireFreeUnit(ownedInput.unitId);
+      this.#candidates.push(ownFailureCandidate("direct-candidate", ownedInput, unit) as PreparedIrDirectCandidate);
     });
   }
 
   recordInvariantCandidate(input: PreparedIrFailureCandidateInput): void {
     this.#mutate(() => {
-      const unit = this.#requireFreeUnit(input.unitId);
-      this.#candidates.push(ownFailureCandidate("invariant-candidate", input, unit) as PreparedIrInvariantCandidate);
+      const ownedInput = freezePreparedIrValue(input) as PreparedIrFailureCandidateInput;
+      const unit = this.#requireFreeUnit(ownedInput.unitId);
+      this.#candidates.push(
+        ownFailureCandidate("invariant-candidate", ownedInput, unit) as PreparedIrInvariantCandidate,
+      );
     });
   }
 
   addComponentCandidate(input: PreparedIrComponentCandidateInput): void {
     this.#mutate(() => {
-      this.#componentCandidates.push(Object.freeze({ id: input.id, unitIds: Object.freeze([...input.unitIds]) }));
+      const ownedInput = freezePreparedIrValue(input) as PreparedIrComponentCandidateInput;
+      this.#componentCandidates.push(
+        Object.freeze({ id: ownedInput.id, unitIds: Object.freeze([...ownedInput.unitIds]) }),
+      );
     });
   }
 
@@ -175,18 +183,27 @@ export class PreparedIrProgramBuilder {
     if (this.#state !== "open") {
       throw new PreparedIrProgramInvariantError(
         "late-support-intent",
-        `support intent candidate ${input.key} was requested after preparation sealed`,
+        "support intent candidate was requested after preparation sealed",
       );
     }
-    this.#mutate(() => this.#supportIntentCandidates.push(Object.freeze({ ...input })));
+    this.#mutate(() => {
+      const ownedInput = freezePreparedIrValue(input) as Omit<PreparedIrSupportIntentCandidate, "evidenceStatus">;
+      this.#supportIntentCandidates.push(ownedInput);
+    });
   }
 
   addAllocationCandidate(input: Omit<PreparedIrAllocationCandidate, "evidenceStatus">): void {
-    this.#mutate(() => this.#allocationCandidates.push(Object.freeze({ ...input })));
+    this.#mutate(() => {
+      const ownedInput = freezePreparedIrValue(input) as Omit<PreparedIrAllocationCandidate, "evidenceStatus">;
+      this.#allocationCandidates.push(ownedInput);
+    });
   }
 
   addProvenanceCandidate(input: Omit<PreparedIrProvenanceCandidate, "evidenceStatus">): void {
-    this.#mutate(() => this.#provenanceCandidates.push(Object.freeze({ ...input })));
+    this.#mutate(() => {
+      const ownedInput = freezePreparedIrValue(input) as Omit<PreparedIrProvenanceCandidate, "evidenceStatus">;
+      this.#provenanceCandidates.push(ownedInput);
+    });
   }
 
   seal(): PreparedIrProgram {
