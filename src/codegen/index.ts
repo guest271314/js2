@@ -81,6 +81,7 @@ import {
   makeIrModuleBindingResolver,
   makeIrPrimitiveExpressionClassifier,
   makeIrRegExpExpressionPredicate,
+  type IrModuleBindingResolver,
 } from "../ir/module-bindings.js"; // (#2856 Capability C)
 import { asyncEngineWouldActivate } from "./async-activation.js"; // (#1373b C-1)
 import { unwrapPromiseTypeNode } from "./async-static.js"; // (#1373b C-1)
@@ -1861,6 +1862,7 @@ interface IrImplicitParamProjection {
 function makeIrImplicitParamTypeResolver(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
+  moduleBindingResolver?: IrModuleBindingResolver,
 ): (parameter: ts.ParameterDeclaration) => IrImplicitParamProjection | undefined {
   const candidatesByDeclaration = new WeakMap<ts.FunctionDeclaration, ReadonlySet<ts.ParameterDeclaration>>();
   return (parameter) => {
@@ -1872,6 +1874,26 @@ function makeIrImplicitParamTypeResolver(
     let candidates = candidatesByDeclaration.get(declaration);
     if (!candidates) {
       candidates = collectIrImplicitParamProjectionCandidates(declaration);
+      const onlyStatement = declaration.body?.statements.length === 1 ? declaration.body.statements[0] : undefined;
+      const returned = onlyStatement && ts.isReturnStatement(onlyStatement) ? onlyStatement.expression : undefined;
+      const returnedCall = returned && ts.isCallExpression(returned) ? returned : undefined;
+      const retainedPlan = returnedCall ? moduleBindingResolver?.retainedFunctionMethodPlan(returnedCall) : undefined;
+      if (retainedPlan && returnedCall) {
+        const projected = new Set(candidates);
+        for (let index = 0; index < declaration.parameters.length; index++) {
+          const argument = returnedCall.arguments[index];
+          const candidate = declaration.parameters[index]!;
+          if (
+            argument &&
+            ts.isIdentifier(argument) &&
+            ts.isIdentifier(candidate.name) &&
+            ctx.checker.getSymbolAtLocation(argument) === ctx.checker.getSymbolAtLocation(candidate.name)
+          ) {
+            projected.add(candidate);
+          }
+        }
+        candidates = projected;
+      }
       candidatesByDeclaration.set(declaration, candidates);
     }
     if (!candidates.has(parameter)) return undefined;
@@ -2029,7 +2051,7 @@ function planIrOverlay(
   // claim-then-demote). The carrier keying in `ensureDynMemberGet` matches
   // (`ctx.fast`), so every claimed config emits a valid, carrier-aligned body.
   const dynMemberReadBuildable = !(ctx.fast && !ctx.standalone && !ctx.wasi);
-  const resolveImplicitParamType = makeIrImplicitParamTypeResolver(ctx, ast.sourceFile);
+  const resolveImplicitParamType = makeIrImplicitParamTypeResolver(ctx, ast.sourceFile, resolveModuleBinding);
   const implicitParamUsesNumericVecAbi = (parameter: ts.ParameterDeclaration): boolean => {
     const projection = resolveImplicitParamType(parameter);
     if (projection?.kind !== "object") return false;
@@ -2038,6 +2060,18 @@ function planIrOverlay(
     return ctx.typeIdxToStructName.get(valueType.typeIdx) === "__vec_f64";
   };
   const legacyCallerAbiIsProjected = (declaration: ts.FunctionDeclaration): boolean => {
+    const onlyStatement = declaration.body?.statements.length === 1 ? declaration.body.statements[0] : undefined;
+    const returned = onlyStatement && ts.isReturnStatement(onlyStatement) ? onlyStatement.expression : undefined;
+    if (
+      returned &&
+      ts.isCallExpression(returned) &&
+      resolveModuleBinding?.retainedFunctionMethodPlan(returned) !== undefined
+    ) {
+      // #3793 — the exact retained wrapper uses the existing receiver-first
+      // externref dispatcher and the implicit-param resolver above projects
+      // every wrapper argument from the same direct declaration ABI.
+      return true;
+    }
     let hasIndexedCarrier = false;
     let hasBooleanProjection = false;
     let allProjectionsAreBoolean = true;

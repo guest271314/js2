@@ -502,6 +502,13 @@ export interface IrFromAstResolver {
   standaloneRegExpTestPlan?(
     receiver: ts.Expression,
   ): { readonly receiverGlobal: IrGlobalRef; readonly funcName: string } | null;
+  /**
+   * #3793 — existing retained function-object module carrier plus its live
+   * receiver-preserving closed method dispatcher.
+   */
+  retainedFunctionMethodPlan?(
+    call: ts.CallExpression,
+  ): { readonly receiverGlobal: IrGlobalRef; readonly funcName: string } | null;
   /** #3791 exact stable module numeric vec at a direct-call boundary. */
   staticNumericArrayRead?(
     expression: ts.Expression,
@@ -5209,6 +5216,44 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
   const receiverIdentifier = ts.isIdentifier(expr.expression.expression) ? expr.expression.expression : undefined;
   const receiverIsDirectModuleBinding =
     receiverIdentifier !== undefined && cx.resolver?.isDirectModuleBinding?.(receiverIdentifier) === true;
+
+  // #3793 — Acorn's public wrappers call static properties on the retained
+  // `Parser` function object. Load the exact existing module carrier and
+  // route through the already-reserved closed method dispatcher. That keeps
+  // the receiver live (`Parser.parse` uses `new this(...)`) and deliberately
+  // does not turn the assigned FunctionExpression into a bare direct call.
+  const retainedMethod = cx.resolver?.retainedFunctionMethodPlan?.(expr) ?? null;
+  if (retainedMethod !== null) {
+    const receiver = cx.builder.emitGlobalGet(retainedMethod.receiverGlobal, irVal({ kind: "externref" }));
+    const args: IrValueId[] = [receiver];
+    for (const argument of expr.arguments) {
+      if (ts.isSpreadElement(argument)) {
+        throw new IrUnsupportedError(
+          "method-call-unsupported",
+          "build",
+          `ir/from-ast: retained function method spread is unsupported (${cx.funcName})`,
+        );
+      }
+      const value = lowerExpr(argument, cx, irDynamic());
+      const type = cx.builder.typeOf(value);
+      const scalar = asVal(type);
+      const carrier =
+        scalar?.kind === "f64" || scalar?.kind === "i32" ? boxConcreteToDynamic(value, type, argument, cx) : value;
+      if (carrier === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: retained function method scalar argument has no dynamic box (${cx.funcName})`,
+        );
+      }
+      args.push(cx.builder.typeOf(carrier).kind === "dynamic" ? carrier : cx.builder.emitCoerceToExternref(carrier));
+    }
+    const result = cx.builder.emitCall(irRuntimeFuncRef(retainedMethod.funcName), args, irDynamic());
+    if (result === null) {
+      throw new Error(`ir/from-ast: retained function method returned void (${cx.funcName})`);
+    }
+    return result;
+  }
 
   // #3791 — standalone native RegExp `.test` on one exact, stable top-level
   // carrier. Keep the real legacy module global as the receiver (no duplicate

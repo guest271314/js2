@@ -2240,6 +2240,13 @@ function dynamicUsesAreMoveOnly(
       return calleeReturnIsDynamic(e.expression.text, typeMap);
     }
     if (
+      ts.isCallExpression(e) &&
+      ts.isPropertyAccessExpression(e.expression) &&
+      currentModuleBindingResolver?.retainedFunctionMethodPlan(e) !== undefined
+    ) {
+      return true;
+    }
+    if (
       currentDynamicRuntimeBuildable &&
       ts.isCallExpression(e) &&
       ts.isPropertyAccessExpression(e.expression) &&
@@ -2297,6 +2304,20 @@ function dynamicUsesAreMoveOnly(
       return dynNames.has(e.text) === expectDyn;
     }
     if (ts.isCallExpression(e)) {
+      const retainedMethod = currentModuleBindingResolver?.retainedFunctionMethodPlan(e);
+      if (retainedMethod !== undefined) {
+        if (!expectDyn || e.arguments.length !== retainedMethod.arity) return false;
+        for (const argument of e.arguments) {
+          if (ts.isSpreadElement(argument)) return false;
+          const dynamic = isDynShaped(argument);
+          if (dynamic) {
+            if (!scanExpr(argument, true)) return false;
+          } else if (!scanExpr(argument, false)) {
+            return false;
+          }
+        }
+        return true;
+      }
       if (
         currentDynamicRuntimeBuildable &&
         ts.isPropertyAccessExpression(e.expression) &&
@@ -6231,6 +6252,25 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         isPristineEs5IntrinsicIsFrozenCall(expr, (node) => selectorSeesAmbientBinding(node) && !scope.has(node.text))
       ) {
         return true;
+      }
+      // #3793 — exact retained function-object wrappers such as Acorn's
+      // `parse(...) { return Parser.parse(...) }`. The checker resolver proves
+      // the stable `var Parser = function Parser(...) {}` carrier and its one
+      // direct top-level `Parser.parse = function parse(...) {}` assignment.
+      // This is a live method call, never a bare call to the assigned body:
+      // lowering uses the existing closed dispatcher so `new this(...)`,
+      // retained closure identity, and later property reads stay unchanged.
+      if (
+        currentSelectionOptions?.supportsBackendCapability?.("standalone-native-regexp-test-carrier") === true &&
+        currentSelectionOptions.supportsBackendCapability?.("legacy-numeric-array-global") === true
+      ) {
+        const retainedMethod = currentModuleBindingResolver?.retainedFunctionMethodPlan(expr);
+        if (retainedMethod !== undefined) {
+          for (const arg of expr.arguments) {
+            if (ts.isSpreadElement(arg) || !isPhase1Expr(arg, scope, localClasses)) return false;
+          }
+          return true;
+        }
       }
       if (
         (expr.expression.name.text === "test" || expr.expression.name.text === "exec") &&
