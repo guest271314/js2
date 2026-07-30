@@ -169,8 +169,19 @@ function resultPath(root, name) {
 }
 
 function commandVersion(command, args, cwd) {
+  const env = { ...process.env };
+  if (command === "git") {
+    // Git exports repository-scoped variables while running hooks. Let each
+    // child discover the repository from its own cwd instead of inheriting the
+    // caller's checkout, especially for synthetic fixture roots.
+    delete env.GIT_DIR;
+    delete env.GIT_WORK_TREE;
+    delete env.GIT_INDEX_FILE;
+    delete env.GIT_COMMON_DIR;
+  }
   const result = spawnSync(command, args, {
     cwd,
+    env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -1022,9 +1033,9 @@ export function compareSnapshots(baselineRoot, candidateRoot) {
       ...toolchainNotes(baselineManifest, candidateManifest),
     ],
     informational: [
-      "Wasmtime regression decisions gate the primary AOT lane; Javy and StarlingMonkey are post-merge, change-scoped comparison controls.",
-      "Internal and loadtime runtime regressions gate only when each calibrated sample spans at least 1ms.",
-      "End-to-end loadtime is jointly gated against its JS control; compile-only microtimings remain informational.",
+      "Wasmtime regressions are reported for the primary AOT lane; Javy and StarlingMonkey are post-merge, change-scoped comparison controls.",
+      "Internal and loadtime runtime regressions are classified as substantial only when each calibrated sample spans at least 1ms.",
+      "End-to-end loadtime is jointly compared with its JS control; compile-only microtimings remain informational.",
       "The legacy non-displayed wasm-host-wasmtime-module-size summary is unsupported and excluded from snapshots.",
     ],
   };

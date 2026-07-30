@@ -3,6 +3,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -300,6 +301,20 @@ describe("benchmark artifact lifecycle", () => {
     ).toThrow(/not a Git checkout/);
   });
 
+  it("does not leak a Git hook's repository environment into synthetic fixture roots", () => {
+    const previousGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = execFileSync("git", ["rev-parse", "--absolute-git-dir"], {
+      cwd: resolve(import.meta.dirname, ".."),
+      encoding: "utf8",
+    }).trim();
+    try {
+      expect(() => packageFixture(fixtureRoot())).not.toThrow();
+    } finally {
+      if (previousGitDir === undefined) Reflect.deleteProperty(process.env, "GIT_DIR");
+      else process.env.GIT_DIR = previousGitDir;
+    }
+  });
+
   it("requires every displayed module-size lane for each program", () => {
     const incomplete = fixtureRoot();
     mutateJson(resolve(incomplete, "benchmarks/results/wasm-host-wasmtime-module-size-per-test.json"), (document) =>
@@ -519,6 +534,11 @@ describe("benchmark artifact lifecycle", () => {
     expect(workflow).toContain("- name: Detect benchmark timing methodology migration");
     expect(workflow).toContain("steps.timing_methodology.outputs.changed != 'true'");
     expect(workflow).toContain("- name: Record timing methodology migration");
+    const comparison = workflow.slice(
+      workflow.indexOf("- name: Compare same-run PR base and candidate"),
+      workflow.indexOf("- name: Record timing methodology migration"),
+    );
+    expect(comparison).toContain("continue-on-error: true");
     const promotion = workflow.slice(workflow.indexOf("promote-benchmarks:"));
     expect(promotion).toContain("- name: Checkout trusted measured main revision");
     expect(promotion).toContain("ref: ${{ needs.measure-and-gate.outputs.source_sha }}");
