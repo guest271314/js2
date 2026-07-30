@@ -461,14 +461,14 @@ class NpmCompatChart extends HTMLElement {
         }
         .cards {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          gap: 1px;
-          background: var(--border, rgba(255,255,255,0.12));
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+          background: var(--bg, #060a14);
           border: 1px solid var(--border, rgba(255,255,255,0.12));
         }
         .card {
           background: var(--bg, #060a14);
-          padding: 18px 20px 16px;
+          box-shadow: inset -1px -1px 0 var(--border, rgba(255,255,255,0.12));
+          padding: 16px;
           min-width: 0;
         }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
@@ -497,7 +497,7 @@ class NpmCompatChart extends HTMLElement {
         .rows { display: flex; flex-direction: column; }
         .row {
           display: flex;
-          justify-content: space-between;
+          justify-content: flex-start;
           align-items: baseline;
           gap: 10px;
           font-size: 12px;
@@ -512,7 +512,10 @@ class NpmCompatChart extends HTMLElement {
           letter-spacing: 0.06em;
           white-space: nowrap;
         }
-        .row .v { text-align: right; }
+        .row .v {
+          min-width: 0;
+          text-align: left;
+        }
         .row .v a { color: var(--accent, #6c8aff); text-decoration: none; }
         .row .v a:hover { text-decoration: underline; }
         .tag {
@@ -530,8 +533,8 @@ class NpmCompatChart extends HTMLElement {
         }
         .section-title {
           display: flex;
-          justify-content: space-between;
-          gap: 16px;
+          justify-content: flex-start;
+          gap: 8px;
           margin-bottom: 8px;
           color: rgba(255, 255, 255, 0.35);
           text-transform: uppercase;
@@ -539,6 +542,7 @@ class NpmCompatChart extends HTMLElement {
           letter-spacing: 0.06em;
         }
         .section-title .operation {
+          min-width: 0;
           color: var(--text-muted, rgba(255,255,255,0.46));
           text-transform: none;
           letter-spacing: 0;
@@ -650,12 +654,7 @@ class NpmCompatChart extends HTMLElement {
           max-width: 900px;
         }
 
-        @media (max-width: 1000px) {
-          .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        }
         @media (max-width: 720px) {
-          .cards { grid-template-columns: 1fr; }
-          .card { padding: 16px; }
           .section-title { flex-direction: column; gap: 3px; }
           .benchmark-toolbar {
             align-items: flex-start;
