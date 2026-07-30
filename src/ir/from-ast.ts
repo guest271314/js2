@@ -2470,17 +2470,10 @@ function lowerBitwiseAsI32(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   return cx.builder.emitBinary(binop, lhs, rhs, IR_I32);
 }
 
-/**
- * Invariant W — store `rhs` into an i32-promoted slot.
- */
+/** Invariant W — store `rhs` into an i32-promoted slot. */
 function writePromotedI32Slot(slotIndex: number, rhs: ts.Expression, cx: LowerCtx): void {
-  // A write may flow through an immutable Q-CANON intermediate that keeps
-  // ordinary f64/SSA storage (for example Fibonacci's
-  // `const next = (a + b) | 0; b = next`). The slot planner admits exactly
-  // those names via the same function-wide proof in `i32PureNames`; include
-  // them in the live check so planning and emission agree. This remains the
-  // strict Q-CANON predicate — arithmetic compositions are not admitted here.
-  const exactI32 = (id: ts.Identifier): boolean => promotedI32Probe(cx)(id) || cx.i32PureNames.has(id.text);
+  const promoted = promotedI32Probe(cx);
+  const exactI32 = (id: ts.Identifier): boolean => promoted(id) || cx.i32PureNames.has(id.text);
   if (!isCanonI32Lowerable(rhs, exactI32)) {
     throw new IrUnsupportedError(
       "operand-coercion-unsupported",
