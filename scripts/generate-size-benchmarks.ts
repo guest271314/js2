@@ -21,6 +21,7 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import * as ts from "typescript";
 import { compile, compileMulti, optimizeBinaryAsync } from "./compiler-bundle.mjs";
+import { calibrateBenchmarkBatchSize, timeBenchmarkBatch } from "../benchmarks/timing.js";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const HELPERS_PATH = path.resolve(ROOT, "website", "playground", "examples", "benchmarks", "helpers.ts");
@@ -352,17 +353,18 @@ function parseModule(jsSource: string): void {
   new Function(scriptCompatible);
 }
 
-/** Measure time in ms for a synchronous operation (median over N iterations). */
-function timeSync(fn: () => void, iterations = 20): number {
+/** Measure per-call time in ms using scheduler-sized batches. */
+function timeSync(fn: () => void, iterations = 20): { medianMs: number; batchSize: number } {
+  const batchSize = calibrateBenchmarkBatchSize(fn);
+  timeBenchmarkBatch(fn, batchSize);
   const timings: number[] = [];
   for (let i = 0; i < iterations; i++) {
-    const t0 = performance.now();
-    fn();
-    timings.push(performance.now() - t0);
+    timings.push(timeBenchmarkBatch(fn, batchSize) / batchSize);
   }
   timings.sort((a, b) => a - b);
   const mid = timings.length >> 1;
-  return timings.length % 2 ? timings[mid]! : (timings[mid - 1]! + timings[mid]!) / 2;
+  const medianMs = timings.length % 2 ? timings[mid]! : (timings[mid - 1]! + timings[mid]!) / 2;
+  return { medianMs, batchSize };
 }
 
 interface SizeEntry {
@@ -377,8 +379,11 @@ interface SizeEntry {
   hostJsGzip: number;
   wasmTotalGzip: number;
   jsParseMs: number;
+  jsParseBatchSize: number;
   wasmCompileMs: number;
+  wasmCompileBatchSize: number;
   hostJsParseMs: number;
+  hostJsParseBatchSize: number;
   wasmTotalMs: number;
 }
 
@@ -452,22 +457,25 @@ async function measureSizes(name: string, label: string, jsSrc: string, tsSrc: s
 
   // JS parse time: new Function(transpiled body)
   const transpiledJs = transpileToJs(tsSrc);
-  const jsParseMs = timeSync(() => {
+  const jsParse = timeSync(() => {
     new Function(transpiledJs);
   });
 
   // Wasm compile time: new WebAssembly.Module(binary) (synchronous)
   const binaryBuffer = Buffer.from(wasmBinary);
-  const wasmCompileMs = timeSync(() => {
+  const wasmCompile = timeSync(() => {
     new WebAssembly.Module(binaryBuffer);
   });
 
   // Host JS parse time (strip export keywords for new Function compatibility)
-  const hostJsParseMs = hostJs
+  const hostJsParse = hostJs
     ? timeSync(() => {
         parseModule(hostJs);
       })
-    : 0;
+    : { medianMs: 0, batchSize: 1 };
+  const jsParseMs = jsParse.medianMs;
+  const wasmCompileMs = wasmCompile.medianMs;
+  const hostJsParseMs = hostJsParse.medianMs;
   const wasmTotalMs = wasmCompileMs + hostJsParseMs;
 
   return {
@@ -482,8 +490,11 @@ async function measureSizes(name: string, label: string, jsSrc: string, tsSrc: s
     hostJsGzip,
     wasmTotalGzip,
     jsParseMs: Math.round(jsParseMs * 1e4) / 1e4,
+    jsParseBatchSize: jsParse.batchSize,
     wasmCompileMs: Math.round(wasmCompileMs * 1e4) / 1e4,
+    wasmCompileBatchSize: wasmCompile.batchSize,
     hostJsParseMs: Math.round(hostJsParseMs * 1e4) / 1e4,
+    hostJsParseBatchSize: hostJsParse.batchSize,
     wasmTotalMs: Math.round(wasmTotalMs * 1e4) / 1e4,
   };
 }
@@ -526,22 +537,25 @@ async function measureMultiSizes(name: string, label: string, entryPath: string)
 
   // JS parse time: transpile entry + helpers
   const transpiledJs = transpileToJs(fullJsSrc);
-  const jsParseMs = timeSync(() => {
+  const jsParse = timeSync(() => {
     new Function(transpiledJs);
   });
 
   // Wasm compile time
   const binaryBuffer = Buffer.from(wasmBinary);
-  const wasmCompileMs = timeSync(() => {
+  const wasmCompile = timeSync(() => {
     new WebAssembly.Module(binaryBuffer);
   });
 
   // Host JS parse time (strip export keywords for new Function compatibility)
-  const hostJsParseMs = hostJs
+  const hostJsParse = hostJs
     ? timeSync(() => {
         parseModule(hostJs);
       })
-    : 0;
+    : { medianMs: 0, batchSize: 1 };
+  const jsParseMs = jsParse.medianMs;
+  const wasmCompileMs = wasmCompile.medianMs;
+  const hostJsParseMs = hostJsParse.medianMs;
   const wasmTotalMs = wasmCompileMs + hostJsParseMs;
 
   emitLoadtimeArtifacts(name, label, entryPath, fullJsSrc, wasmBinary, result.imports, result.stringPool);
@@ -558,8 +572,11 @@ async function measureMultiSizes(name: string, label: string, entryPath: string)
     hostJsGzip,
     wasmTotalGzip,
     jsParseMs: Math.round(jsParseMs * 1e4) / 1e4,
+    jsParseBatchSize: jsParse.batchSize,
     wasmCompileMs: Math.round(wasmCompileMs * 1e4) / 1e4,
+    wasmCompileBatchSize: wasmCompile.batchSize,
     hostJsParseMs: Math.round(hostJsParseMs * 1e4) / 1e4,
+    hostJsParseBatchSize: hostJsParse.batchSize,
     wasmTotalMs: Math.round(wasmTotalMs * 1e4) / 1e4,
   };
 }

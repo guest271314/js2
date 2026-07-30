@@ -12,6 +12,7 @@
  */
 
 import { compile, buildImports, instantiateWasm } from "../src/index.js";
+import { calibrateBenchmarkBatchSize, timeBenchmarkBatch } from "./timing.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -23,6 +24,7 @@ export interface BenchmarkResult {
   name: string;
   strategy: Strategy;
   iterations: number;
+  batchSize: number;
   totalMs: number;
   avgMs: number;
   medianMs: number;
@@ -183,7 +185,24 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
     return null;
   }
 
-  // Timed runs.
+  // Linear-memory benchmarks may use a bump allocator whose state persists
+  // between calls, so retain their historical single-call samples. Other
+  // strategies are safe to batch: the harness already invokes each function
+  // repeatedly and observes timing rather than individual return values.
+  let batchSize = 1;
+  try {
+    if (strategy !== "linear-memory") {
+      batchSize = calibrateBenchmarkBatchSize(fn);
+      timeBenchmarkBatch(fn, batchSize); // warm the calibrated loop before retaining samples
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`\n    [${strategy} skipped (runtime, calibration): ${msg.split("\n")[0]}]\n`);
+    return null;
+  }
+
+  // Timed runs. Each entry is normalized to one benchmark call, preserving the
+  // existing result units while avoiding sub-millisecond timer quantization.
   //
   // Guard the same way as warmup (#1868): a strategy can pass warmup yet trap
   // mid-loop — e.g. the linear-memory backend's bump allocator exhausts memory
@@ -195,9 +214,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
   // mid-run trap to a skipped strategy, matching warmup's behaviour.
   try {
     for (let i = 0; i < iterations; i++) {
-      const t0 = performance.now();
-      fn();
-      timings.push(performance.now() - t0);
+      timings.push(timeBenchmarkBatch(fn, batchSize) / batchSize);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -212,6 +229,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
     name: def.name,
     strategy,
     iterations,
+    batchSize,
     totalMs,
     avgMs: totalMs / iterations,
     medianMs: median(timings),
