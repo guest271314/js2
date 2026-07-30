@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>js2wasm — Real npm Package Compatibility</title>
+    <title>js2wasm — npm package compatibility</title>
     <meta
       name="description"
       content="Which real, pinned npm packages compile with js2wasm, how many of their tests pass, and how the compiled Wasm performs head-to-head against the same package running natively under Node."
@@ -63,9 +63,17 @@
         border-bottom: 1px solid var(--border);
       }
       header h1 {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
         font-size: 20px;
         font-weight: 600;
         letter-spacing: -0.02em;
+      }
+      header h1 img {
+        width: 38px;
+        height: auto;
+        display: block;
       }
       header .meta {
         font-size: 12px;
@@ -110,7 +118,10 @@
     ></site-nav>
 
     <header>
-      <h1>Real npm Package Compatibility</h1>
+      <h1>
+        <img src="./npm-logo-white.svg" alt="npm" />
+        package compatibility
+      </h1>
       <div class="meta">
         Compiled from pinned, published npm tarballs ·
         <a href="https://github.com/loopdive/js2/tree/main/tests/dogfood" target="_blank" rel="noopener">

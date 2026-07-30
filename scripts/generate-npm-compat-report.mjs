@@ -87,7 +87,6 @@ const NPM_DOWNLOADS_SNAPSHOT = {
     "styled-components": 11_029_759,
     stylelint: 10_427_988,
     lit: 6_829_692,
-    crypto: 1_479_290,
     uuid: 275_892_096,
     typescript: 250_686_863,
     lodash: 164_859_858,
