@@ -1,3 +1,7 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   LEDGER_END,
@@ -121,5 +125,39 @@ describe("#3792 IR optimization retirement ledger gate", () => {
     expect(errors).toContain("without complete executable IR ownership");
     expect(errors).toContain("without accepted semantic evidence");
     expect(errors).toContain("without accepted performance evidence");
+  });
+
+  it("accepts --require-ready when every row is retirement-ready", () => {
+    const dir = mkdtempSync(join(tmpdir(), "js2-ir-retirement-ready-"));
+    const path = join(dir, "ledger.md");
+    writeFileSync(path, ledger(row()));
+    try {
+      const output = execFileSync(
+        process.execPath,
+        ["scripts/check-ir-optimization-retirement.mjs", "--require-ready", path],
+        {
+          encoding: "utf8",
+        },
+      );
+      expect(output).toContain("1 retirement-ready");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --require-ready while any row is not retirement-ready", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        "scripts/check-ir-optimization-retirement.mjs",
+        "--",
+        "--require-ready",
+        "plan/log/ir-optimization-retirement-ledger.md",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("11/11 rows are not ready");
+    expect(result.stderr).toContain("IR-OPT-NUMERIC-SWITCH-PROOF");
   });
 });

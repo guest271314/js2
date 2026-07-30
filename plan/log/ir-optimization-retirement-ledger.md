@@ -15,6 +15,16 @@ output-shape, and performance evidence. A performance check may be
 `not-applicable` only when its reference explains why the decision is not a
 performance optimization.
 
+`pnpm run check:issues` runs normal consistency validation on every required
+issue check during hybrid operation. It does not require rows to be ready.
+After #3518 R9, #3090's deletion work must additionally run:
+
+```sh
+pnpm run check:ir-optimization-retirement -- --require-ready
+```
+
+That stricter mode fails unless every row is `retirementReady: true`.
+
 Schema:
 
 - `id`, `family`: stable identity and grouping.

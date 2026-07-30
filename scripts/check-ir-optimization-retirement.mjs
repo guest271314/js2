@@ -162,10 +162,18 @@ export function validateLedgerText(text) {
   return { rows: parsed.rows, errors };
 }
 
-export function checkLedgerFile(path) {
+export function checkLedgerFile(path, options = {}) {
   const result = validateLedgerText(readFileSync(path, "utf8"));
   if (result.errors.length > 0) {
     throw new Error(result.errors.map((error) => `- ${error}`).join("\n"));
+  }
+  const notReady = result.rows.filter((row) => !row.retirementReady);
+  if (options.requireReady === true && notReady.length > 0) {
+    throw new Error(
+      `retirement readiness required, but ${notReady.length}/${result.rows.length} rows are not ready:\n${notReady
+        .map((row) => `- ${row.id}`)
+        .join("\n")}`,
+    );
   }
   return {
     rows: result.rows.length,
@@ -179,10 +187,17 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
+  const args = process.argv.slice(2).filter((arg) => arg !== "--");
+  const unknownOptions = args.filter((arg) => arg.startsWith("--") && arg !== "--require-ready");
+  if (unknownOptions.length > 0) {
+    console.error(`Unknown option(s): ${unknownOptions.join(", ")}`);
+    process.exitCode = 1;
+  }
   const path =
-    process.argv[2] ?? fileURLToPath(new URL("../plan/log/ir-optimization-retirement-ledger.md", import.meta.url));
+    args.find((arg) => !arg.startsWith("--")) ??
+    fileURLToPath(new URL("../plan/log/ir-optimization-retirement-ledger.md", import.meta.url));
   try {
-    const summary = checkLedgerFile(path);
+    const summary = checkLedgerFile(path, { requireReady: args.includes("--require-ready") });
     console.log(
       `IR optimization retirement ledger: ${summary.rows} rows, ${summary.complete} IR-owned, ${summary.retirementReady} retirement-ready`,
     );
