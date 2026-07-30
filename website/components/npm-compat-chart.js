@@ -420,7 +420,11 @@ class NpmCompatChart extends HTMLElement {
     this._data = data;
     const measuredDate = document.getElementById("npm-compat-measured");
     if (measuredDate) measuredDate.textContent = this._fmtDate(data.generatedAt) || "—";
-    const pkgs = data.packages ?? [];
+    const pkgs = [...(data.packages ?? [])].sort(
+      (left, right) =>
+        (right.weeklyDownloads ?? Number.NEGATIVE_INFINITY) - (left.weeklyDownloads ?? Number.NEGATIVE_INFINITY) ||
+        left.name.localeCompare(right.name),
+    );
     const failToRun = pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates);
     const groups = [
       {
