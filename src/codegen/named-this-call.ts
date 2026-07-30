@@ -15,6 +15,7 @@
  * instead, so this narrow fast path does not redefine the legacy nullish case.
  */
 import { ts } from "../ts-api.js";
+import type { TypeFact } from "../checker/oracle.js";
 import type { FuncHandle, Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
@@ -47,16 +48,23 @@ function unwrap(expr: ts.Expression): ts.Expression {
   return current;
 }
 
-function checkerProvesNonNullish(type: ts.Type): boolean {
-  if (type.isUnion()) return type.types.length > 0 && type.types.every(checkerProvesNonNullish);
-  const refused =
-    ts.TypeFlags.Any |
-    ts.TypeFlags.Unknown |
-    ts.TypeFlags.Never |
-    ts.TypeFlags.Null |
-    ts.TypeFlags.Undefined |
-    ts.TypeFlags.Void;
-  return (type.flags & refused) === 0;
+function oracleProvesNonNullish(fact: TypeFact): boolean {
+  if (fact.kind === "union") {
+    return (
+      !fact.nullable &&
+      !fact.undefinable &&
+      fact.parts.length > 0 &&
+      fact.parts.every((part) => oracleProvesNonNullish(part))
+    );
+  }
+  return (
+    fact.kind !== "any" &&
+    fact.kind !== "unknown" &&
+    fact.kind !== "unresolvable" &&
+    fact.kind !== "null" &&
+    fact.kind !== "undefined" &&
+    fact.kind !== "void"
+  );
 }
 
 function receiverIsAdmitted(ctx: CodegenContext, fctx: FunctionContext, receiver: ts.Expression): boolean {
@@ -66,25 +74,28 @@ function receiverIsAdmitted(ctx: CodegenContext, fctx: FunctionContext, receiver
   // dispatch. The trampoline still runtime-splits a null value to the legacy
   // unbound call, so a detached/nullish reach does not enter the fast arm.
   if (inner.kind === ts.SyntaxKind.ThisKeyword) return fctx.readsCurrentThis === true;
-  return checkerProvesNonNullish(ctx.checker.getTypeAtLocation(inner));
+  return oracleProvesNonNullish(ctx.oracle.typeFactOf(inner));
 }
 
 function resolveDeclaration(ctx: CodegenContext, callee: ts.Identifier): ts.FunctionDeclaration | undefined {
-  const symbol = ctx.checker.getSymbolAtLocation(callee);
-  if (!symbol || (symbol.flags & ts.SymbolFlags.Alias) !== 0) return undefined;
-  const bodies = (symbol.declarations ?? []).filter(
-    (decl): decl is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(decl) &&
-      decl.body !== undefined &&
-      decl.name?.text === callee.text &&
-      decl.asteriskToken === undefined &&
-      !decl.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword),
-  );
-  const declaration = bodies.length === 1 ? bodies[0] : undefined;
+  const declaration = ctx.oracle.valueDeclarationOf(callee);
   // This slice only has an exact allocator identity for unique source-file
-  // declarations. Nested declarations can shadow a top-level function with
-  // the same funcMap key; name equality is not declaration identity.
-  if (!declaration || declaration.parent !== declaration.getSourceFile()) return undefined;
+  // declarations. Requiring the declaration in the callee's source file also
+  // refuses imported aliases without exposing checker Symbols outside Oracle.
+  // Nested declarations can shadow a top-level function with the same funcMap
+  // key; name equality is not declaration identity.
+  if (
+    !declaration ||
+    !ts.isFunctionDeclaration(declaration) ||
+    declaration.body === undefined ||
+    declaration.name?.text !== callee.text ||
+    declaration.asteriskToken !== undefined ||
+    declaration.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) === true ||
+    declaration.parent !== declaration.getSourceFile() ||
+    declaration.getSourceFile() !== callee.getSourceFile()
+  ) {
+    return undefined;
+  }
   return declaration;
 }
 
