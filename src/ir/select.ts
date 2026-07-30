@@ -7281,6 +7281,7 @@ export function buildLocalCallGraph(
           } else if (
             currentDynamicRuntimeBuildable &&
             callerName === "stringToNumber" &&
+            parseNumberCallUsesDynamicCarrier(callerName, node) &&
             ((callee === "parseFloat" && node.arguments.length === 1) ||
               (callee === "parseInt" && node.arguments.length === 2))
           ) {
@@ -7360,6 +7361,65 @@ export function buildLocalCallGraph(
     forEachChild(fn.body, visit);
   }
   return { callers, callees, hasExternalCall };
+}
+
+function parseNumberCallUsesDynamicCarrier(callerName: string, call: ts.CallExpression): boolean {
+  const declaration = currentDynScanDecls?.get(callerName);
+  if (!declaration || call.arguments.length === 0) return false;
+  const firstArgument = unwrapPhase1Parens(call.arguments[0]!);
+  const carrier = ts.isIdentifier(firstArgument)
+    ? firstArgument
+    : ts.isCallExpression(firstArgument) &&
+        ts.isPropertyAccessExpression(firstArgument.expression) &&
+        ts.isIdentifier(firstArgument.expression.expression)
+      ? firstArgument.expression.expression
+      : undefined;
+  if (!carrier) return false;
+  const parameter = declaration.parameters.find(
+    (candidate): candidate is ts.ParameterDeclaration & { name: ts.Identifier } =>
+      ts.isIdentifier(candidate.name) && candidate.name.text === carrier.text,
+  );
+  if (!parameter) return false;
+  const explicit = effectiveIrParamTypeNode(parameter);
+  if (explicit) return explicit.kind === ts.SyntaxKind.AnyKeyword;
+  const projected = currentSelectionOptions?.resolveImplicitParamType?.(parameter);
+  if (projected !== undefined) return projected === "dynamic";
+  if (implicitParameterHasOnlyStringCallArguments(declaration, parameter)) return false;
+  return currentSelectionOptions?.classifyDeclaredPrimitiveExpression?.(parameter.name) === undefined;
+}
+
+function implicitParameterHasOnlyStringCallArguments(
+  declaration: ts.FunctionDeclaration,
+  parameter: ts.ParameterDeclaration,
+): boolean {
+  if (!declaration.name || !currentDynScanSourceFile) return false;
+  const parameterIndex = declaration.parameters.indexOf(parameter);
+  if (parameterIndex < 0) return false;
+  let sawCall = false;
+  let allString = true;
+  const visit = (node: ts.Node): void => {
+    if (!allString) return;
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === declaration.name!.text
+    ) {
+      const argument = node.arguments[parameterIndex];
+      if (!argument || ts.isSpreadElement(argument)) {
+        allString = false;
+        return;
+      }
+      sawCall = true;
+      const classified = currentSelectionOptions?.classifyPrimitiveExpression?.(argument);
+      if (classified !== "string" && !ts.isStringLiteralLike(unwrapPhase1Parens(argument))) {
+        allString = false;
+        return;
+      }
+    }
+    forEachChild(node, visit);
+  };
+  visit(currentDynScanSourceFile);
+  return sawCall && allString;
 }
 
 /**

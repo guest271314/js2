@@ -41,6 +41,8 @@ func-budget-allow:
   - src/ir/integration.ts::preregisterDynamicSupport
   - src/ir/select.ts::dynamicUsesAreMoveOnly
   - src/ir/select.ts::buildLocalCallGraph
+  - src/ir/select.ts::parseNumberCallUsesDynamicCarrier
+  - src/ir/select.ts::implicitParameterHasOnlyStringCallArguments
 ---
 
 # #3794 — dispatch Acorn's dynamic RegExp/string replacement through IR
@@ -80,6 +82,8 @@ failures.
       path and the legacy-octal `parseInt` branch.
 - [x] Focused negatives reject unsupported arity, spread, replacement, and
       RegExp shapes before claim with zero post-claim withdrawals.
+- [x] Custom dynamic receivers retain ordinary `replace` method dispatch, and
+      inferred string parse carriers reject before claim.
 - [x] The exact Acorn driver emits 31 of 43 reachable functions through IR,
       including `stringToNumber`.
 - [x] All prior 30 Acorn IR names remain emitted.
@@ -99,5 +103,9 @@ failures.
   retains receiver-preserving method dispatch.
 - Unsupported arity, spread, dynamic replacement, RegExp reference, different
   pattern, and non-empty replacement shapes remain on direct codegen.
+- The standalone helper brand-tests its receiver before the native string fast
+  path; custom objects fall through to the receiver-preserving method bridge.
+  Inferred string first parameters are rejected before the parse-helper ABI
+  can be planned.
 - Focused proof: `tests/issue-3794-ir-dynamic-replace.test.ts`.
   Adjacent coverage: #3790 and #3791 focused suites.

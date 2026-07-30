@@ -94,4 +94,65 @@ export function run(): number {
       expect(result.irCompiledFuncs ?? [], name).not.toContain(name);
     }
   });
+
+  it("preserves custom replace dispatch for generic dynamic receivers", async () => {
+    const source = `
+export function genericReplace(value: any): number {
+  return +value.replace(/_/g, "");
+}
+
+export function makeString(): any {
+  return "4_1";
+}
+
+export function makeCustom(): any {
+  return {
+    replace() {
+      return "41";
+    },
+  };
+}
+`;
+    const result = await compile(source, {
+      fileName: "issue-3794-ir-dynamic-replace-custom.ts",
+      target: "standalone",
+      trackIrOutcomes: true,
+    });
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.irCompiledFuncs, JSON.stringify(result.irOutcomes, null, 2)).toContain("genericReplace");
+
+    const { instance } = await WebAssembly.instantiate(result.binary, result.importObject);
+    const genericReplace = instance.exports.genericReplace as (value: unknown) => number;
+    const nativeString = (instance.exports.makeString as () => unknown)();
+    const custom = (instance.exports.makeCustom as () => unknown)();
+    expect(genericReplace(nativeString)).toBe(41);
+    expect(genericReplace(custom)).toBe(41);
+  });
+
+  it("rejects inferred string parse carriers before claim", async () => {
+    const source = `
+function stringToNumber(str, isLegacyOctalNumericLiteral) {
+  if (isLegacyOctalNumericLiteral) {
+    return parseInt(str, 8);
+  }
+  return parseFloat(str.replace(/_/g, ""));
+}
+
+export function run(): number {
+  return stringToNumber("1_2.5", false);
+}
+`;
+    const result = await compile(source, {
+      fileName: "issue-3794-ir-dynamic-replace-inferred-string.ts",
+      target: "standalone",
+      skipSemanticDiagnostics: true,
+      trackIrOutcomes: true,
+    });
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.irCompiledFuncs ?? []).not.toContain("stringToNumber");
+  });
 });
