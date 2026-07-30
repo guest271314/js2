@@ -76,29 +76,30 @@
  * `run()` calls the benchmark body with the same `runtimeArg` used by the
  * AOT/V8 rows and stores the result in a module global.
  *
- * The warm Javy / StarlingMonkey values remain carried forward from the labs
- * steady-state harness (`benchmarks/compare-runtimes.ts` +
- * `benchmarks/competitive/`) until the public generator grows equivalent
- * warm in-component loops for those runtimes.
+ * Warm Javy / StarlingMonkey values are measured in the same Rust embedding
+ * host with one reused Store + Instance. The first WARMUP_RUNS calls are
+ * discarded, then each remaining in-process call is timed independently.
  *
  * Requirements: Rust/Cargo for the cold Wasmtime embedding host; `wasmtime`
  * (v35+) on PATH for the warm steady-state Wasmtime lane; Node.js for the
  * JS/V8 lanes and compiler bundle; @bytecodealliance/componentize-js for the
- * StarlingMonkey cold lane; optional `JAVY_BIN=/path/to/javy` or `javy` on
- * PATH for the Javy cold lane; competitive programs under
+ * StarlingMonkey cold lane; `JAVY_BIN=/path/to/javy` or `javy` on PATH for
+ * the Javy cold lane and displayed module-size artifact; competitive programs under
  * `website/public/benchmarks/competitive/programs/*.js`.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Script, createContext } from "node:vm";
 import { compile } from "./compiler-bundle.mjs";
 import { LANDING_BENCHMARK_PROGRAMS } from "./lib/landing-benchmark-corpus.mjs";
+import { buildLandingModuleSizeRows, minifiedJavaScriptByteLength } from "./lib/landing-module-size.mjs";
 import {
   landingNodeVmFreshCompileSample,
   landingNodeWarmSample,
   landingWasmtimeFreshInstanceSamples,
+  landingWasmtimeReusedInstanceSamples,
   landingWasmtimeWarmSample,
 } from "./lib/landing-runtime-timing.mjs";
 import {
@@ -125,6 +126,15 @@ const WASMTIME_COLD_HOST_BIN = resolve(
 
 const RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "wasm-host-wasmtime-hot-runtime.json");
 const PUBLIC_PATH = resolve(ROOT, "website", "public", "benchmarks", "results", "wasm-host-wasmtime-hot-runtime.json");
+const MODULE_SIZE_RESULTS_PATH = resolve(ROOT, "benchmarks", "results", "wasm-host-wasmtime-module-size-per-test.json");
+const MODULE_SIZE_PUBLIC_PATH = resolve(
+  ROOT,
+  "website",
+  "public",
+  "benchmarks",
+  "results",
+  "wasm-host-wasmtime-module-size-per-test.json",
+);
 
 // The shared manifest deliberately excludes object-ops: it is not landing
 // scope, and the existing Wasmtime compatibility path cannot compile its
@@ -163,27 +173,11 @@ const WARM_ITERS_WARMUP = 5;
 const WARM_ITERS_MEASURED = 40;
 const WARM_DRIVER_SOURCE = landingWasmtimeWarmDriverSource(WARM_ITERS_WARMUP, WARM_ITERS_MEASURED);
 
-// Javy + StarlingMonkey verified warm numbers (2026-04-27 wasmtime 44.0.0,
-// aarch64-linux) — see labs benchmarks/compare-runtimes.ts.
-// Map: `warm` → README "Compute-only ms" (steady-state per call).
-// Programs not present in either table fall back to 0 (omitted from chart).
-const JAVY_WARM_NUMBERS_MS = {
-  fib: 1193.2,
-  "fib-recursive": 87.9,
-  "array-sum": 112.9,
-  "string-hash": 36.0,
-};
-const STARLINGMONKEY_WARM_NUMBERS_MS = {
-  fib: 1024.3,
-  "fib-recursive": 156.7,
-  "array-sum": 125.5,
-  "string-hash": 14.2,
-};
 const WARM_LANES_PROVENANCE =
-  "warm javyUs/starlingMonkeyUs from verified 2026-04-27 wasmtime 44.0.0 aarch64-linux " +
-  "labs measurements (compare-runtimes.ts). Javy = dynamic-link " +
-  "with javy-default-plugin-v3 preload. StarlingMonkey = ComponentizeJS 0.20.0 + " +
-  "Wizer + Weval AOT.";
+  "warm javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with " +
+  "benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, one reused " +
+  "Store + Instance, warmup calls discarded, then in-process run() calls timed. Javy uses " +
+  "dynamic-link with javy-default-plugin-v3; StarlingMonkey uses ComponentizeJS + Wizer + Weval AOT.";
 const COLD_LANES_PROVENANCE =
   "cold javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with " +
   "benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, fresh Store + " +
@@ -511,6 +505,11 @@ function timeWasmtimeFreshInstance(hostPath, wasmPath, arg, runs, options = {}) 
   return landingWasmtimeFreshInstanceSamples(hostPath, wasmPath, arg, runs, options).samplesMs;
 }
 
+/** Warm auxiliary lane: one Store + Instance, repeated in-process run() calls. */
+function timeWasmtimeReusedInstance(hostPath, wasmPath, arg, runs, options = {}) {
+  return landingWasmtimeReusedInstanceSamples(hostPath, wasmPath, arg, runs, options).samplesMs;
+}
+
 /**
  * #1760: in-process warm wasm lane. Spawns one `wasmtime run --invoke warm`
  * process per outer sample. Inside each process the appended `warm` export
@@ -582,29 +581,49 @@ function buildRow({
   };
   addAuxSamples(row, "javy", javySamplesUs);
   addAuxSamples(row, "starlingMonkey", starlingMonkeySamplesUs);
-  if (scenario === "warm") {
-    const javyMs = JAVY_WARM_NUMBERS_MS[programId];
-    if (typeof javyMs === "number" && javyMs > 0) {
-      row.javyUs = javyMs * 1000;
-    }
-    const smMs = STARLINGMONKEY_WARM_NUMBERS_MS[programId];
-    if (typeof smMs === "number" && smMs > 0) {
-      row.starlingMonkeyUs = smMs * 1000;
-    }
-  }
   if (row.javyUs || row.starlingMonkeyUs) {
     row.lanesProvenance = scenario === "cold" ? COLD_LANES_PROVENANCE : WARM_LANES_PROVENANCE;
   }
   return row;
 }
 
-function writeOutput(rows) {
-  mkdirSync(dirname(RESULTS_PATH), { recursive: true });
-  writeFileSync(RESULTS_PATH, JSON.stringify(rows, null, 2) + "\n");
-  mkdirSync(dirname(PUBLIC_PATH), { recursive: true });
-  copyFileSync(RESULTS_PATH, PUBLIC_PATH);
-  console.log(`Updated ${RESULTS_PATH}`);
-  console.log(`Updated ${PUBLIC_PATH}`);
+async function buildModuleSizeRows(programId, sourcePath, wasmPath, auxArtifacts) {
+  if (!auxArtifacts.javyPath) {
+    throw new Error(`Javy is required to generate the displayed module-size rows for ${programId}`);
+  }
+  const source = stripBenchmarkMetadata(readFileSync(sourcePath, "utf8"));
+  const jsBytes = await minifiedJavaScriptByteLength(source);
+  return buildLandingModuleSizeRows({
+    programId,
+    jsBytes,
+    aotBytes: statSync(wasmPath).size,
+    interpreterBytes: statSync(auxArtifacts.javyPath).size,
+    engineBytes: statSync(auxArtifacts.starlingMonkeyPath).size,
+  });
+}
+
+function writeOutputs(runtimeRows, moduleSizeRows) {
+  const runtimeJson = JSON.stringify(runtimeRows, null, 2) + "\n";
+  const moduleSizeJson = JSON.stringify(moduleSizeRows, null, 2) + "\n";
+  const outputs = [
+    [RESULTS_PATH, runtimeJson],
+    [PUBLIC_PATH, runtimeJson],
+    [MODULE_SIZE_RESULTS_PATH, moduleSizeJson],
+    [MODULE_SIZE_PUBLIC_PATH, moduleSizeJson],
+  ];
+  const temporaryPaths = [];
+  try {
+    for (const [path, contents] of outputs) {
+      mkdirSync(dirname(path), { recursive: true });
+      const temporaryPath = `${path}.tmp-${process.pid}`;
+      writeFileSync(temporaryPath, contents);
+      temporaryPaths.push([temporaryPath, path]);
+    }
+    for (const [temporaryPath, path] of temporaryPaths) renameSync(temporaryPath, path);
+  } finally {
+    for (const [temporaryPath] of temporaryPaths) rmSync(temporaryPath, { force: true });
+  }
+  for (const [path] of outputs) console.log(`Updated ${path}`);
 }
 
 async function main() {
@@ -617,12 +636,14 @@ async function main() {
   const componentizeVersion = ensureComponentizeJs();
   console.log(`Using ${componentizeVersion}`);
   const javy = resolveJavy();
-  const javyPluginPath = javy ? ensureJavyPlugin(javy) : null;
-  if (javy) {
-    console.log(`Using ${javy.version}`);
+  if (!javy) {
+    throw new Error("Javy is required to refresh the displayed module-size benchmark; install javy or set JAVY_BIN.");
   }
+  const javyPluginPath = ensureJavyPlugin(javy);
+  console.log(`Using ${javy.version}`);
 
   const rows = [];
+  const moduleSizeRows = [];
 
   for (const program of LANDING_BENCHMARK_PROGRAMS) {
     process.stdout.write(`\n[${program.id}] compiling... `);
@@ -644,6 +665,7 @@ async function main() {
       componentizeVersion,
     });
     process.stdout.write(`ok\n`);
+    moduleSizeRows.push(...(await buildModuleSizeRows(program.id, sourcePath, wasmPath, auxArtifacts)));
 
     // Cold path (#1764): warm engine / fresh context-or-instance per request,
     // no OS-process startup in the measured samples.
@@ -705,6 +727,28 @@ async function main() {
     const v8WarmMs = timeNodeWarmIter(sourcePath, runtimeArg, MEASURED_RUNS);
     process.stdout.write(`${median(v8WarmMs).toFixed(2)} ms\n`);
 
+    process.stdout.write(`[${program.id}] javy warm (reused instance)... `);
+    const javyWarmMs = timeWasmtimeReusedInstance(
+      coldHostPath,
+      auxArtifacts.javyPath,
+      runtimeArg,
+      WARMUP_RUNS + MEASURED_RUNS,
+      {
+        preloads: [{ name: "javy-default-plugin-v3", path: auxArtifacts.javyPluginPath }],
+      },
+    ).slice(WARMUP_RUNS);
+    process.stdout.write(`${median(javyWarmMs).toFixed(3)} ms\n`);
+
+    process.stdout.write(`[${program.id}] starlingmonkey warm (reused instance)... `);
+    const starlingMonkeyWarmMs = timeWasmtimeReusedInstance(
+      coldHostPath,
+      auxArtifacts.starlingMonkeyPath,
+      runtimeArg,
+      WARMUP_RUNS + MEASURED_RUNS,
+      { component: true },
+    ).slice(WARMUP_RUNS);
+    process.stdout.write(`${median(starlingMonkeyWarmMs).toFixed(3)} ms\n`);
+
     const toUs = (samples) => samples.map((ms) => ms * 1000);
 
     rows.push(
@@ -745,11 +789,23 @@ async function main() {
         scenario: "warm",
         wasmSamplesUs: toUs(wasmWarmMs),
         jsSamplesUs: toUs(v8WarmMs),
+        extra: {
+          javyWarmMode: "rust-wasmtime-reused-dynamic-plugin-instance",
+          javyWarmEngine: "wasmtime-cranelift-quickjs-wasm-plugin",
+          javyWarmHost: "benchmarks/wasmtime-cold-host",
+          javyVersion: auxArtifacts.javyVersion,
+          starlingMonkeyWarmMode: "rust-wasmtime-reused-component-instance",
+          starlingMonkeyWarmEngine: "componentize-js-starlingmonkey-weval",
+          starlingMonkeyWarmHost: "benchmarks/wasmtime-cold-host",
+          starlingMonkeyComponentize: auxArtifacts.componentizeVersion,
+        },
+        javySamplesUs: toUs(javyWarmMs),
+        starlingMonkeySamplesUs: toUs(starlingMonkeyWarmMs),
       }),
     );
   }
 
-  writeOutput(rows);
+  writeOutputs(rows, moduleSizeRows);
 
   try {
     rmSync(ARTIFACT_DIR, { recursive: true, force: true });

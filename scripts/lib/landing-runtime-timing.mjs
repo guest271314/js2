@@ -49,8 +49,18 @@ export function landingNodeWarmSample(childPath, sourcePath, arg) {
 
 /** Existing #1764 warm-engine / fresh-store+instance Wasmtime methodology. */
 export function landingWasmtimeFreshInstanceSamples(hostPath, wasmPath, arg, runs, options = {}) {
+  return landingWasmtimeHostSamples(hostPath, wasmPath, arg, runs, options);
+}
+
+/** Warm-engine / reused-store+instance methodology for auxiliary steady-state lanes. */
+export function landingWasmtimeReusedInstanceSamples(hostPath, wasmPath, arg, runs, options = {}) {
+  return landingWasmtimeHostSamples(hostPath, wasmPath, arg, runs, { ...options, reuseInstance: true });
+}
+
+function landingWasmtimeHostSamples(hostPath, wasmPath, arg, runs, options) {
   const args = [];
   if (options.component) args.push("--component");
+  if (options.reuseInstance) args.push("--reuse-instance");
   for (const preload of options.preloads ?? []) args.push("--preload", `${preload.name}=${preload.path}`);
   args.push(wasmPath, String(arg), String(runs));
   const command = [hostPath, ...args];
@@ -60,7 +70,7 @@ export function landingWasmtimeFreshInstanceSamples(hostPath, wasmPath, arg, run
     maxBuffer: 16 * 1024 * 1024,
   });
   if (result.status !== 0) {
-    throw new Error(`Wasmtime cold host failed (exit ${result.status}): ${(result.stderr ?? "").slice(0, 800)}`);
+    throw new Error(`Wasmtime benchmark host failed (exit ${result.status}): ${(result.stderr ?? "").slice(0, 800)}`);
   }
   const parsed = parseLandingWasmtimeColdHostOutput(result.stdout, runs);
   return { ...parsed, command };

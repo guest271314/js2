@@ -421,6 +421,7 @@ writeJson(join(PLAYGROUND_APP_DATA_DIR, "test262-file-results.json"), test262Dat
 // public/benchmarks/results/ for any files curated there.
 const TOP_BENCH_RESULTS = join(PAGES_DIST, "benchmarks", "results");
 for (const fileName of [
+  "benchmark-manifest.json",
   "playground-benchmark-sidebar.json",
   "playground-benchmark-sidebar-no-jit.json",
   "loadtime-benchmarks.json",
@@ -434,8 +435,13 @@ for (const fileName of [
     copyFile(source, join(PLAYGROUND_BENCHMARKS_RESULTS_DIR, fileName));
   }
 }
-if (existsSync(join(PUBLIC_BENCH, "loadtime"))) {
-  copyDirectory(join(PUBLIC_BENCH, "loadtime"), join(PLAYGROUND_BENCHMARKS_RESULTS_DIR, "loadtime"));
+const loadtimeSource = resolvePreferredFileOrNull(
+  join(BENCHMARKS_RESULTS_DIR, "loadtime"),
+  join(PUBLIC_BENCH, "loadtime"),
+);
+if (loadtimeSource) {
+  copyDirectory(loadtimeSource, join(TOP_BENCH_RESULTS, "loadtime"));
+  copyDirectory(loadtimeSource, join(PLAYGROUND_BENCHMARKS_RESULTS_DIR, "loadtime"));
 }
 if (test262RunsIndexSource) {
   copyFile(test262RunsIndexSource, join(PLAYGROUND_BENCHMARKS_RESULTS_DIR, "runs", "index.json"));
