@@ -1,5 +1,5 @@
 ---
-id: 3798
+id: 3799
 title: "Restore WASI warm array and string benchmark fast paths"
 status: done
 completed: 2026-07-30
@@ -28,7 +28,7 @@ func-budget-allow:
   - src/ir/select.ts::whyNotIrClaimable
 ---
 
-# #3798 — Restore WASI warm array and string benchmark fast paths
+# #3799 — Restore WASI warm array and string benchmark fast paths
 
 ## Problem
 

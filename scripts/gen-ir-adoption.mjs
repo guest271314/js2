@@ -300,7 +300,7 @@ const BUCKETS = {
   ],
   "array-presize-legacy": [
     "deferred",
-    "Counted `.push` loops stay on the direct front-end until typed IR owns an equivalent allocation-site capacity proof (#3798)",
+    "Counted `.push` loops stay on the direct front-end until typed IR owns an equivalent allocation-site capacity proof (#3799)",
   ],
   "async-function": ["deferred", "Async bodies — CPS lowering tracked separately (#1373/#1796)"],
   "async-generator": ["deferred", "Out of scope long-term"],
