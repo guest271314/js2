@@ -60,6 +60,12 @@ class NpmCompatChart extends HTMLElement {
     return d.innerHTML;
   }
 
+  _npmUrl(pkg, code = false) {
+    const name = encodeURIComponent(String(pkg.name ?? ""));
+    const version = encodeURIComponent(String(pkg.version ?? ""));
+    return `https://www.npmjs.com/package/${name}/v/${version}${code ? "?activeTab=code" : ""}`;
+  }
+
   _fmtDate(iso) {
     if (!iso) return "";
     const d = new Date(iso);
@@ -313,6 +319,8 @@ class NpmCompatChart extends HTMLElement {
   _card(pkg, history) {
     const compiles = pkg.compile?.success;
     const validates = pkg.validation?.validates;
+    const npmPackageUrl = this._npmUrl(pkg);
+    const npmCodeUrl = this._npmUrl(pkg, true);
 
     const badge = (ok, label) =>
       `<span class="badge ${ok === true ? "ok" : ok === false ? "bad" : ""}">${this._esc(label)}</span>`;
@@ -367,13 +375,15 @@ class NpmCompatChart extends HTMLElement {
     return `
       <div class="card">
         <div class="card-top">
-          <span class="name">${this._esc(pkg.name)}</span>
+          <a class="name" href="${npmPackageUrl}" target="_blank" rel="noopener"
+            title="View ${this._esc(pkg.name)} ${this._esc(pkg.version)} on npm">${this._esc(pkg.name)}</a>
           <span class="ver mono">v${this._esc(pkg.version)}</span>
           <a class="issue" href="https://github.com/loopdive/js2/issues/${pkg.issue}" target="_blank" rel="noopener">#${pkg.issue}</a>
         </div>
         <div class="badges">${badge(compiles, "compiles")}${badge(validates, "validates")}</div>
         <div class="rows">${tests}${perf}${bugs}</div>
-        <div class="entry mono">${this._esc(pkg.entryFile)}</div>
+        <a class="entry mono" href="${npmCodeUrl}" target="_blank" rel="noopener"
+          title="View ${this._esc(pkg.entryFile)} in ${this._esc(pkg.name)} ${this._esc(pkg.version)} on npm">${this._esc(pkg.entryFile)}</a>
       </div>`;
   }
 
@@ -581,7 +591,13 @@ class NpmCompatChart extends HTMLElement {
           min-width: 0;
         }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
-        .card-top .name { font-size: 15px; font-weight: 600; }
+        .card-top .name {
+          color: inherit;
+          font-size: 15px;
+          font-weight: 600;
+          text-decoration: none;
+        }
+        .card-top .name:hover { text-decoration: underline; }
         .card-top .ver { font-size: 11px; color: var(--text-muted, rgba(255,255,255,0.46)); }
         .card-top .issue {
           margin-left: auto;
@@ -756,10 +772,13 @@ class NpmCompatChart extends HTMLElement {
           color: var(--red, #f87171);
         }
         .entry {
+          display: inline-block;
           margin-top: 10px;
           font-size: 10px;
           color: rgba(255, 255, 255, 0.3);
+          text-decoration: none;
         }
+        .entry:hover { color: var(--text-muted, rgba(255,255,255,0.46)); text-decoration: underline; }
         .note {
           margin-top: 18px;
           font-size: 11px;
