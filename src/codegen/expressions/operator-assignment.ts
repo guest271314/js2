@@ -1202,10 +1202,28 @@ function tryCompileSingleCharBuilderAppend(
       if (flattenIdx !== undefined) {
         const strTypeIdx = ctx.nativeStrTypeIdx;
         const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-        // flat = __str_flatten(receiver) → ref $NativeString, stash in a temp.
+        // A const initialized directly from a string literal is already a
+        // flat $NativeString for its entire lifetime. Avoid calling the
+        // generic flatten helper for every append in a hot loop (the landing
+        // string-hash shape reads the same alphabet twice per iteration).
+        const receiverDeclaration = ts.isIdentifier(receiver) ? ctx.oracle.variableDeclarationOf(receiver) : undefined;
+        const receiverIsConstLiteral =
+          receiverDeclaration !== undefined &&
+          ts.isVariableDeclaration(receiverDeclaration) &&
+          receiverDeclaration.initializer !== undefined &&
+          (ts.isStringLiteral(receiverDeclaration.initializer) ||
+            ts.isNoSubstitutionTemplateLiteral(receiverDeclaration.initializer)) &&
+          ts.isVariableDeclarationList(receiverDeclaration.parent) &&
+          (ts.getCombinedNodeFlags(receiverDeclaration.parent) & ts.NodeFlags.Const) !== 0;
+
+        // flat = receiver (proven flat) or __str_flatten(receiver), then stash.
         const recvVal = compileExpression(ctx, fctx, receiver);
         if (recvVal !== null) {
-          fctx.body.push({ op: "call", funcIdx: flattenIdx });
+          if (receiverIsConstLiteral) {
+            fctx.body.push({ op: "ref.cast", typeIdx: strTypeIdx });
+          } else {
+            fctx.body.push({ op: "call", funcIdx: flattenIdx });
+          }
           const flatTmp = allocLocal(fctx, `__sb_charAt_flat_${fctx.locals.length}`, {
             kind: "ref_null",
             typeIdx: strTypeIdx,

@@ -298,6 +298,10 @@ const BUCKETS = {
     "deferred",
     "Kill-switch only (`JS2WASM_IR_STRING_BUILDER=0`): builder loops are IR-claimed by default via the owned-append fast path (#3740/#3744)",
   ],
+  "array-presize-legacy": [
+    "deferred",
+    "Counted `.push` loops stay on the direct front-end until typed IR owns an equivalent allocation-site capacity proof (#3799)",
+  ],
   "async-function": ["deferred", "Async bodies — CPS lowering tracked separately (#1373/#1796)"],
   "async-generator": ["deferred", "Out of scope long-term"],
   "deferred-feature": ["deferred", "`eval` / `Proxy` / `with` — wont-fix"],

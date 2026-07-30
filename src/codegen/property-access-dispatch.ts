@@ -3015,6 +3015,17 @@ export function tryStringLengthIteratorAndExternClassReads(
   // is a native-string ref (e.g. a for-of var from a string-yielding generator):
   // the static type lost the string info, but at the VALUE level it IS a string.
   if ((isStringType(objType) || receiverIsNativeStringValType(ctx, fctx, expr.expression)) && propName === "length") {
+    // A detected string-builder binding is represented by synthetic
+    // (buffer,length,capacity,materialized) locals. Its logical length is
+    // already available directly; materializing a temporary NativeString on
+    // every loop condition obscures this scalar from Wasmtime/Cranelift.
+    if (ts.isIdentifier(expr.expression)) {
+      const builder = fctx.stringBuilders?.get(expr.expression.text);
+      if (builder !== undefined) {
+        fctx.body.push({ op: "local.get", index: builder.lenLocalIdx });
+        return { kind: "i32" };
+      }
+    }
     const recvType = compileExpression(ctx, fctx, expr.expression);
     if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
       // The receiver must be a `$AnyString` ref before reading its `len`
