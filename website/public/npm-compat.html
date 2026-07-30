@@ -140,29 +140,11 @@
       </div>
       <div>
         <h2>Performance</h2>
-        The per-package chart plots relative speed over committed benchmark runs on a linear scale. The horizontal
+        Charts show Wasm speed relative to the same pinned package in Node on a linear scale; the
         <strong>Node 1×</strong>
-        line is the native baseline; points above it are faster and points below it are slower. Static and dynamic input
-        scenarios remain separate series, and the global JS-host/standalone control changes harness placement for every
-        package without combining those scenarios. Compiled Wasm (
-        <code>-O4</code>
-        ) reports input knowledge and harness placement separately. In
-        <strong>JS host</strong>
-        , inputs are
-        <strong>runtime dynamic</strong>
-        from the compiler's perspective: Node owns them, the repeated-call loop, result observation, and assertion. In
-        <strong>standalone</strong>
-        , fixed inputs are
-        <strong>static at compile time</strong>
-        because the same package operation and test driver are compiled together with
-        <code>target: "standalone"</code>
-        . A generic optimizer may therefore evaluate closed work during compilation and emit only a result-preserving
-        residual; the row still records and verifies the result. This static timing describes the residual executable,
-        not the cost of performing the package operation on a new runtime input. The dynamic row is the runtime
-        performance comparison. Where a standalone dynamic row is available, a runtime value enters only after
-        compilation while the test loop and result observation remain inside Wasm. The outer timing call is divided by
-        the number of package operations. All are calibrated medians of 9 rounds after warmup against the same native
-        package, and the input modes are never combined.
+        line is the baseline. The global control switches between JS-host and standalone runs. Precompilation adds
+        compile-time-static inputs, which may be optimized away; with it off, inputs arrive after compilation. Static
+        and dynamic results stay separate. Values are medians of 9 warmed-up rounds.
       </div>
       <div>
         <h2>Divergences</h2>
