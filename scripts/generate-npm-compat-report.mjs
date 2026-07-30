@@ -13,8 +13,7 @@
 // under Node. The explicit JS-host and standalone lanes distinguish whether
 // Node or Wasm owns the benchmark driver and repeated-call loop.
 //
-// Scope: only the packages with a real, committed, reproducible dogfood
-// harness (acorn, marked, clsx, cookie, eslint, prettier, react).
+// Scope: only packages with a real, committed, reproducible dogfood harness.
 // mustache/diff/dayjs were probed
 // ad-hoc (see their issue files, #3720/#3721/#3747) but have no committed
 // harness yet — deliberately NOT included here rather than fabricating
@@ -42,6 +41,8 @@ import { runHarness as runEslint } from "../tests/dogfood/eslint-harness.mjs";
 import { runHarness as runPrettier } from "../tests/dogfood/prettier-harness.mjs";
 import { runHarness as runReact } from "../tests/dogfood/react-harness.mjs";
 import { runHarness as runReactUpstreamSuite } from "../tests/dogfood/react-upstream-suite.mjs";
+import { NPM_COMPAT_CATALOG, NPM_COMPAT_CATALOG_NAMES } from "../tests/dogfood/npm-compat-catalog.mjs";
+import { runNpmCompatCatalogHarness } from "../tests/dogfood/npm-compat-catalog-harness.mjs";
 
 import { setupAcorn } from "../tests/dogfood/setup-acorn.mjs";
 import { setupClsx } from "../tests/dogfood/setup-clsx.mjs";
@@ -60,7 +61,7 @@ import {
 import { renderHarnessThrownText } from "./lib/wasm-exn-render.mjs";
 
 const ROOT = resolve(import.meta.dirname, "..");
-const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint", "prettier", "react"];
+const PACKAGE_NAMES = ["acorn", "marked", "clsx", "cookie", "eslint", "prettier", "react", ...NPM_COMPAT_CATALOG_NAMES];
 // Committed npm API snapshot keeps report generation deterministic and offline.
 // Refresh these together from:
 // https://api.npmjs.org/downloads/point/last-week/{package}
@@ -73,8 +74,24 @@ const NPM_DOWNLOADS_SNAPSHOT = {
     react: 162_687_688,
     eslint: 152_308_132,
     prettier: 117_242_232,
+    tailwindcss: 117_155_768,
+    axios: 112_353_408,
     clsx: 104_930_549,
     marked: 60_496_071,
+    webpack: 55_617_769,
+    hono: 53_123_258,
+    jest: 46_631_732,
+    redux: 40_344_956,
+    moment: 34_294_671,
+    three: 12_487_515,
+    "styled-components": 11_029_759,
+    stylelint: 10_427_988,
+    lit: 6_829_692,
+    crypto: 1_479_290,
+    uuid: 275_892_096,
+    typescript: 250_686_863,
+    lodash: 164_859_858,
+    "react-dom": 139_740_993,
   },
 };
 const cliArgs = process.argv.slice(2);
@@ -1500,6 +1517,28 @@ if (selectedPackages.has("react")) {
   );
 }
 
+for (const entry of NPM_COMPAT_CATALOG) {
+  if (!selectedPackages.has(entry.name)) continue;
+  console.log(`[npm-compat] ${entry.name} — bounded published package-entry compile/validate...`);
+  const report = await runNpmCompatCatalogHarness(entry.name, { quiet: true });
+  packages.push(
+    await buildPackageEntry({
+      name: entry.name,
+      version: entry.version,
+      issue: entry.issue ?? null,
+      entryFile: entry.entryModule.replace(/^package\//, ""),
+      shape: entry.shape,
+      report,
+      tests: {
+        kind: "upstream-suite",
+        status: "not-integrated",
+        reason: "not shipped in npm tarball; adapter pending",
+      },
+      perf: null,
+    }),
+  );
+}
+
 for (const pkg of packages) {
   pkg.weeklyDownloads = NPM_DOWNLOADS_SNAPSHOT.packages[pkg.name] ?? null;
 }
@@ -1511,7 +1550,7 @@ packages.sort(
 
 const summary = {
   generatedAt: new Date().toISOString(),
-  note: "Only packages with a committed, reproducible tests/dogfood/*-harness.mjs are listed. mustache (#3720), diff (#3721), and dayjs (#3747) were probed ad-hoc and surfaced real bugs but have no committed harness yet.",
+  note: "Only packages with a committed, reproducible tests/dogfood harness are listed. Original upstream tests are preferred; when npm omits them, the card says so instead of substituting harness-authored tests.",
   popularity: {
     metric: "weekly npm downloads",
     start: NPM_DOWNLOADS_SNAPSHOT.start,

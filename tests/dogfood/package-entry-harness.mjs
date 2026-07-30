@@ -32,33 +32,36 @@ export function createPackageEntryHarness({
 }) {
   return async function runHarness({ quiet = false } = {}) {
     const log = quiet ? () => {} : (...values) => console.log(...values);
-    const { entryModulePath, version, pin } = setup();
+    const { entryModulePath, entryExists = true, version, pin } = setup();
     const started = performance.now();
     log(`[dogfood] ${name}@${version} — compileProject(${pin.entryModule}) with ${timeoutMs}ms budget`);
 
-    const child = spawnSync(
-      process.execPath,
-      [
-        "--max-old-space-size=2048",
-        "--import",
-        "tsx",
-        COMPILE_PROJECT_PROBE,
-        entryModulePath,
-        JSON.stringify(compileOptions),
-      ],
-      {
-        cwd: join(HERE, "../.."),
-        encoding: "utf-8",
-        maxBuffer: 64 * 1024 * 1024,
-        timeout: timeoutMs,
-        killSignal: "SIGTERM",
-      },
-    );
+    const child = entryExists
+      ? spawnSync(
+          process.execPath,
+          [
+            "--max-old-space-size=2048",
+            "--import",
+            "tsx",
+            COMPILE_PROJECT_PROBE,
+            entryModulePath,
+            JSON.stringify(compileOptions),
+          ],
+          {
+            cwd: join(HERE, "../.."),
+            encoding: "utf-8",
+            maxBuffer: 64 * 1024 * 1024,
+            timeout: timeoutMs,
+            killSignal: "SIGTERM",
+          },
+        )
+      : null;
     const durationMs = Math.round(performance.now() - started);
-    const timedOut = child.error?.code === "ETIMEDOUT";
-    const probe = timedOut ? null : parseProbe(child.stdout ?? "");
-    const processError =
-      !timedOut && !probe
+    const timedOut = child?.error?.code === "ETIMEDOUT";
+    const probe = !child || timedOut ? null : parseProbe(child.stdout ?? "");
+    const processError = !entryExists
+      ? `published tarball does not contain its declared entry ${pin.entryModule}`
+      : !timedOut && !probe
         ? (child.error?.message ??
           child.stderr?.trim() ??
           `compile probe exited ${child.status ?? "without a status"}${child.signal ? ` (${child.signal})` : ""}`)

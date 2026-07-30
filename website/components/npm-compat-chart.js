@@ -355,18 +355,27 @@ class NpmCompatChart extends HTMLElement {
       const reason = compiles ? "runtime not verified" : "compile blocked";
       tests = this._row("tests", `<span class="muted">n/a — ${reason}</span>`);
     } else {
-      const { kind, passed, total, passRatePct } = pkg.tests;
-      const pct = passRatePct != null ? passRatePct : total ? ((passed / total) * 100).toFixed(1) : null;
+      const { kind, passed, total, passRatePct, status, reason } = pkg.tests;
       const label =
         kind === "official-suite"
           ? "own test suite"
-          : kind === "upstream-api-vectors"
-            ? "upstream API vectors"
-            : "differential ops";
-      tests = this._row(
-        "tests",
-        `<span class="mono">${passed}/${total}</span>${pct != null ? ` <span class="muted">${pct}%</span>` : ""} <span class="tag">${this._esc(label)}</span>`,
-      );
+          : kind === "upstream-suite"
+            ? "upstream suite"
+            : kind === "upstream-api-vectors"
+              ? "upstream API vectors"
+              : "differential ops";
+      if (status && status !== "measured") {
+        tests = this._row(
+          "tests",
+          `<span class="muted">n/a — ${this._esc(reason ?? status)}</span> <span class="tag">${this._esc(label)}</span>`,
+        );
+      } else {
+        const pct = passRatePct != null ? passRatePct : total ? ((passed / total) * 100).toFixed(1) : null;
+        tests = this._row(
+          "tests",
+          `<span class="mono">${passed}/${total}</span>${pct != null ? ` <span class="muted">${pct}%</span>` : ""} <span class="tag">${this._esc(label)}</span>`,
+        );
+      }
     }
 
     // Perf — historical ratios stay split by input knowledge and placement;
@@ -614,7 +623,7 @@ class NpmCompatChart extends HTMLElement {
         }
         .cards {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+          grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
           background: var(--bg, #060a14);
           border-top: 1px solid var(--border, rgba(255,255,255,0.12));
         }
