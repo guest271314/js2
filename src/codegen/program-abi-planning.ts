@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import { irGlobalBindingKey } from "../ir/abi-bindings.js";
-import { irCallableBindingKey, irUnitCallableBindingId } from "../ir/callable-bindings.js";
+import { irCallableBindingKey, irSupportFuncRef, irUnitCallableBindingId } from "../ir/callable-bindings.js";
 import { createIrBindingId, type IrBindingId, type IrClassId, type IrSourceId, type IrUnitId } from "../ir/identity.js";
 import type { IrFuncRef, IrGlobalRef } from "../ir/nodes.js";
-import type { FuncTypeDef, GlobalDef, WasmFunction } from "../ir/types.js";
+import { ProgramAbiInvariantError } from "../ir/program-abi.js";
+import type { FuncHandle, FuncTypeDef, GlobalDef, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
+import { definedFuncHandleOf } from "./func-space.js";
 import {
   canonicalProgramAbiCallableTypeContract,
   canonicalProgramAbiValType,
@@ -22,6 +24,7 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   retainedModuleFunction: 6,
   typedThisTwin: 7,
   vecHostBridge: 8,
+  closureHostBridge: 9,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({
@@ -76,6 +79,98 @@ export interface ProgramAbiFunctionValuePlan {
   readonly trampoline: IrFuncRef;
   readonly cacheGlobal: IrGlobalRef;
   readonly target: IrFuncRef;
+}
+
+export interface ProgramAbiEntrySourceSupportCallablePlan {
+  readonly role: string;
+  readonly roleOrdinal: number;
+  readonly derivedOrdinal: number;
+  readonly displayName: string;
+  readonly func: WasmFunction;
+}
+
+function canonicalEntrySourceId(ctx: CodegenContext): IrSourceId {
+  const session = ctx.programAbiSession;
+  if (!session) {
+    throw new ProgramAbiInvariantError(
+      "unknown-order-anchor",
+      "entry-source support callable planning requires an active Program ABI session",
+    );
+  }
+  const entries = session.inventory.sources.filter((source) => source.kind === "entry");
+  if (entries.length !== 1) {
+    throw new ProgramAbiInvariantError(
+      "unknown-order-anchor",
+      `entry-source support callable planning requires exactly one canonical entry source, found ${entries.length}`,
+    );
+  }
+  return entries[0]!.id;
+}
+
+/**
+ * Give one already-allocated compiler support function an exact entry-source
+ * owner before the retained-callable sweep can classify it generically.
+ *
+ * The allocator object, not its diagnostic label or current numeric index,
+ * owns the slot. Callers can therefore resolve the same binding after late
+ * imports or dead-slot compaction through
+ * {@link resolveProgramAbiSupportCallableHandle}.
+ */
+export function planProgramAbiEntrySourceSupportCallable(
+  ctx: CodegenContext,
+  plan: ProgramAbiEntrySourceSupportCallablePlan,
+): IrFuncRef | undefined {
+  const session = ctx.programAbiSession;
+  if (!session) return undefined;
+  const sourceId = canonicalEntrySourceId(ctx);
+  const signature = ctx.mod.types[plan.func.typeIdx];
+  if (!signature || signature.kind !== "func") {
+    throw new ProgramAbiInvariantError(
+      "type-remap-mismatch",
+      `entry-source support callable ${plan.displayName} references non-function or missing type ${plan.func.typeIdx}`,
+    );
+  }
+  const ref = irSupportFuncRef(sourceId, plan.role, plan.displayName, plan.derivedOrdinal);
+  const bindingId = planProgramAbiSupportCallable(ctx, {
+    ref,
+    anchor: { kind: "source", sourceId },
+    role: plan.role,
+    roleOrdinal: plan.roleOrdinal,
+    derivedOrdinal: plan.derivedOrdinal,
+    signature,
+    func: plan.func,
+  });
+  if (bindingId !== ref.binding.bindingId) {
+    throw new ProgramAbiInvariantError(
+      "invalid-binding-reference",
+      `entry-source support callable ${plan.displayName} was not accepted for ${ref.binding.bindingId}`,
+    );
+  }
+  return ref;
+}
+
+/**
+ * Resolve an exact planned support allocator to its current function handle.
+ *
+ * This consults the Program ABI locator while tracking is active and validates
+ * that the locator still owns the supplied function object. The untracked
+ * compilation path falls back to the same allocator-object lookup so enabling
+ * outcome tracking cannot change emitted bytes.
+ */
+export function resolveProgramAbiSupportCallableHandle(
+  ctx: CodegenContext,
+  ref: IrFuncRef | undefined,
+  func: WasmFunction,
+): FuncHandle | undefined {
+  const session = ctx.programAbiSession;
+  if (!session || !ref) return definedFuncHandleOf(ctx, func);
+  if (ref.binding.kind !== "support" || !session.hasLocator(ref.binding.bindingId, func)) {
+    throw new ProgramAbiInvariantError(
+      "missing-required-locator",
+      `support callable ${ref.name} is not owned by its exact Program ABI allocator object`,
+    );
+  }
+  return session.resolveCurrentIndex(ref.binding.bindingId, "function", irCallableBindingKey(ref.binding));
 }
 
 /**

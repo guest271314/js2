@@ -2657,6 +2657,52 @@ C30 closes exact retained ownership for the six core vec host bridges, not R1.
 Other support callable families and remaining module-array or display-name
 consumers must still move behind structural authorities before R1 can close.
 
+### 2026-07-30 closure host-bridge callable ownership continuation
+
+The C31 continuation on `codex/3520-c31-closure-host-bridge` moves the bounded
+host-visible closure dispatcher family behind one entry-source-owned structural
+role:
+
+- direct `__call_fn_0` through `__call_fn_4` use fixed
+  `closure-host-bridge` ordinals 0 through 4, method
+  `__call_fn_method_0` through `__call_fn_method_5` use ordinals 5 through 10,
+  `__closure_arity` uses 11, and `__is_closure` uses 12. The optional
+  `__closure_has_rest` classifier uses ordinal 13 only in modules that actually
+  emit it. Higher method dispatchers remain on generic retained ownership in
+  this bounded slice;
+- each existing helper body is first materialized as one exact
+  `WasmFunction`, then planned under the canonical entry source and published
+  at the current Program ABI-resolved handle. The public labels, exported
+  signatures, dispatcher bodies, method-receiver save/restore behavior,
+  `funcMap` compatibility entries, closure classifier semantics, and #2083
+  closure-free gating remain unchanged; and
+- tracked and untracked compilation use the same allocator-object lookup.
+  Tracking adds only structural ownership metadata and does not allocate,
+  relabel, or rebuild a helper.
+
+The exact five-entry `SINGLE_HOST_ENTRIES` census was run with one fresh process
+per entry against `origin/main` at `9d2289ac6ef3a9` plus C31. It reports **166**
+defined functions, **75** generic `retained-module-function` rows, and exactly
+**26** `closure-host-bridge` rows across the two emitting entries. This is the
+one-for-one **101 → 75** generic-row move from current main. When combined with
+C30's independently measured 24 vec rows, the same total becomes the intended
+**77 → 51** generic move with **24** `vec-host-bridge` and **26**
+`closure-host-bridge` rows. Routing and body outcomes remain **37 terminal / 30
+emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**.
+
+The focused C31 suite passes **7/7**. It proves every fixed ID and public label,
+the absence of a second generic callable owner, exact final-slot object
+resolution across a forced late import and dead-slot compaction, zero bridge
+rows for a closure-free module, tracked/untracked byte equality, direct closure
+identity/call behavior, method receiver identity, conditional rest
+classification, and the five-entry census. The adjacent #2083 and closure
+dispatch/runtime matrix passes **36/36 across six files** in addition to C31.
+
+C31 closes exact retained ownership for this bounded closure host-dispatch
+family, not R1. Higher-arity method dispatchers, other support callable
+families, remaining class/type consumers, and module-array or display-name
+scans still need structural owners before R1 can close.
+
 ### R1a validation evidence
 
 - Representative inventory denominator: **1 source / 2 classes / 12 allUnits /
