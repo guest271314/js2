@@ -490,6 +490,9 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     const externrefForge = clone();
     const availabilityBits = manifestValue & 0x0001ffff;
     for (let bit = 0; bit < CLOSURE_PHYSICAL_BASES.length; bit++) {
+      externrefBindings.set(bit, null);
+    }
+    for (let bit = 0; bit < CLOSURE_PHYSICAL_BASES.length; bit++) {
       if ((availabilityBits & (1 << bit)) === 0) continue;
       const forgedHelper = bit === 15 ? () => 1 : () => undefined;
       externrefBindings.set(bit, forgedHelper);
