@@ -87,7 +87,7 @@ class NpmCompatChart extends HTMLElement {
     const value = String(sampleOp ?? "");
     if (/parse\(.*226KB dist bundle/i.test(value)) return "Parse the 226 KB Acorn bundle";
     if (/op_two_strings/i.test(value)) return "Join two class names";
-    if (/parseCookie\(8-pair header\)/i.test(value)) return "Parse an 8-pair cookie header";
+    if (/parseCookie\(8-pair (runtime-generated )?header\)/i.test(value)) return "Parse an 8-pair cookie header";
     return value
       .replace(/\s*\([^)]*(host-owned arguments|driver compiled to Wasm)[^)]*\)\s*/gi, " ")
       .replace(/\.body\.length\b/g, "")
@@ -169,6 +169,19 @@ class NpmCompatChart extends HTMLElement {
     }));
     const measuredSeries = series.filter((item) => item.points.length > 0);
     if (measuredSeries.length === 0) {
+      const lanes = pkg.perf?.lanes ?? {};
+      const lane = target === "jsHost" ? lanes.jsHost : lanes.standaloneDynamic;
+      if (lane?.status && !["measured", "skipped"].includes(lane.status)) {
+        const message =
+          lane.status === "result-mismatch"
+            ? "Dynamic run returned the wrong result"
+            : lane.status === "runtime-error"
+              ? "Dynamic run trapped"
+              : lane.status === "compile-error"
+                ? "Dynamic run did not compile"
+                : "Dynamic run could not be measured";
+        return `<div class="chart-empty chart-failed">${this._esc(message)}</div>`;
+      }
       const scenario =
         target === "jsHost" ? "JS-host dynamic" : includePrecompiled ? "standalone" : "standalone dynamic";
       return `<div class="chart-empty">No ${scenario} speed history yet</div>`;
@@ -367,15 +380,13 @@ class NpmCompatChart extends HTMLElement {
   _render(data, history) {
     this._data = data;
     const pkgs = data.packages ?? [];
+    const failToRun = pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates);
     const groups = [
       {
         label: "Run",
         packages: pkgs.filter((pkg) => pkg.compile?.success && pkg.validation?.validates),
       },
-      {
-        label: "Fail to run",
-        packages: pkgs.filter((pkg) => pkg.compile?.success && !pkg.validation?.validates),
-      },
+      ...(failToRun.length ? [{ label: "Fail to run", packages: failToRun }] : []),
       {
         label: "Fail to compile",
         packages: pkgs.filter((pkg) => !pkg.compile?.success),
@@ -740,6 +751,9 @@ class NpmCompatChart extends HTMLElement {
           background: rgba(255, 255, 255, 0.025);
           color: rgba(255, 255, 255, 0.3);
           font-size: 10px;
+        }
+        .chart-empty.chart-failed {
+          color: var(--red, #f87171);
         }
         .entry {
           margin-top: 10px;
