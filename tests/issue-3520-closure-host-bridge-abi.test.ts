@@ -42,6 +42,26 @@ const REQUIRED_BRIDGES = Object.freeze([
   { name: "__is_closure", ordinal: 12 },
 ] as const);
 
+const CLOSURE_PHYSICAL_BASES = [
+  "$c0",
+  "$c1",
+  "$c2",
+  "$c3",
+  "$c4",
+  "$c5",
+  "$c6",
+  "$c7",
+  "$c8",
+  "$c9",
+  "$ca",
+  "$cb",
+  "$cc",
+  "$cd",
+  "$ce",
+  "$cf",
+  "$cg",
+] as const;
+
 const ZERO_ARITY_SOURCE = `
   declare function hostTick(value: number): number;
   const zero = function (): number { return 17; };
@@ -465,6 +485,25 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     const f64Manifest = clone();
     f64Manifest["$cm$"] = new WebAssembly.Global({ value: "f64", mutable: false }, manifestValue);
     assertBoxedObject(f64Manifest);
+
+    const externrefBindings = new WebAssembly.Table({ element: "externref", initial: 17, maximum: 17 });
+    const externrefForge = clone();
+    const availabilityBits = manifestValue & 0x0001ffff;
+    for (let bit = 0; bit < CLOSURE_PHYSICAL_BASES.length; bit++) {
+      if ((availabilityBits & (1 << bit)) === 0) continue;
+      const forgedHelper = bit === 15 ? () => 1 : () => undefined;
+      externrefBindings.set(bit, forgedHelper);
+      let physicalName = CLOSURE_PHYSICAL_BASES[bit]!;
+      let terminalName: string | undefined;
+      while (Object.prototype.hasOwnProperty.call(externrefForge, physicalName)) {
+        terminalName = physicalName;
+        physicalName += "$";
+      }
+      expect(terminalName).toBeDefined();
+      externrefForge[terminalName!] = forgedHelper;
+    }
+    externrefForge["$cu$"] = externrefBindings;
+    assertBoxedObject(externrefForge);
   });
 
   it("owns closure_has_rest at ordinal 13 only when that helper is emitted", async () => {

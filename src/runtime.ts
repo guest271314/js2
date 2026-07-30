@@ -1010,6 +1010,10 @@ const _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x0001ffff;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_RESERVED_MASK = 0x000e0000;
 const _immutableI32GlobalVerdict = new WeakSet<WebAssembly.Global>();
 let _immutableI32GlobalProbeModule: WebAssembly.Module | undefined;
+const _emptyFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
+const _bindingFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
+let _emptyFuncrefTableProbeModule: WebAssembly.Module | undefined;
+let _bindingFuncrefTableProbeModule: WebAssembly.Module | undefined;
 
 /**
  * Resolve the terminal compiler alias in one collision-safe physical family.
@@ -1040,6 +1044,30 @@ function _isImmutableI32Global(value: unknown): value is WebAssembly.Global {
   }
 }
 
+/** Prove a Table's exact funcref limits through Wasm import validation. */
+function _isExactFuncrefTable(value: unknown, size: 0 | 17): value is WebAssembly.Table {
+  if (!(value instanceof WebAssembly.Table) || value.length !== size) return false;
+  const verdict = size === 0 ? _emptyFuncrefTableVerdict : _bindingFuncrefTableVerdict;
+  if (verdict.has(value)) return true;
+  try {
+    const bytes =
+      size === 0
+        ? [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 0, 0]
+        : [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 17, 17];
+    let probe = size === 0 ? _emptyFuncrefTableProbeModule : _bindingFuncrefTableProbeModule;
+    if (!probe) {
+      probe = new WebAssembly.Module(Uint8Array.from(bytes));
+      if (size === 0) _emptyFuncrefTableProbeModule = probe;
+      else _bindingFuncrefTableProbeModule = probe;
+    }
+    new WebAssembly.Instance(probe, { e: { t: value } });
+    verdict.add(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface ClosureHostBridgeMetadata {
   bits: number;
   bindings: WebAssembly.Table;
@@ -1050,7 +1078,7 @@ function _closureHostBridgeMetadata(exports: Record<string, any>): ClosureHostBr
   const [markerLogicalName, markerPhysicalBase] = _CLOSURE_HOST_BRIDGE_MARKER;
   if (!Object.prototype.hasOwnProperty.call(exports, markerLogicalName)) return undefined;
   const marker = _terminalHostBridgeAlias(exports, markerPhysicalBase);
-  if (!(marker instanceof WebAssembly.Table) || marker.length !== 0) return undefined;
+  if (!_isExactFuncrefTable(marker, 0)) return undefined;
 
   const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_MANIFEST;
   if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) return undefined;
@@ -1064,9 +1092,7 @@ function _closureHostBridgeMetadata(exports: Record<string, any>): ClosureHostBr
   const [bindingsLogicalName, bindingsPhysicalBase] = _CLOSURE_HOST_BRIDGE_BINDINGS;
   if (!Object.prototype.hasOwnProperty.call(exports, bindingsLogicalName)) return undefined;
   const bindings = _terminalHostBridgeAlias(exports, bindingsPhysicalBase);
-  if (!(bindings instanceof WebAssembly.Table) || bindings.length !== _CLOSURE_HOST_BRIDGE_EXPORTS.length) {
-    return undefined;
-  }
+  if (!_isExactFuncrefTable(bindings, 17)) return undefined;
   try {
     for (let bit = 0; bit < _CLOSURE_HOST_BRIDGE_EXPORTS.length; bit++) {
       const binding = bindings.get(bit);

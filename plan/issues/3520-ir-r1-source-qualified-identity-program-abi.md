@@ -2686,10 +2686,11 @@ role:
   emitted. A collision-safe empty Wasm table authenticates that metadata as
   compiler-owned rather than a user name/value convention, while a 17-slot
   funcref table binds every set bit to the exact compiler helper object. The JS
-  runtime proves the manifest is an immutable i32 through Wasm import
-  validation, rejects reserved bits and malformed tables, never falls back to
-  a user logical export, and composes closure and vec projections from the same
-  raw export object into one internal view; and
+  runtime proves the manifest is an immutable i32 and both tables have exact
+  `funcref` element types and `0..0` / `17..17` limits through Wasm import
+  validation. It rejects reserved bits, externref or malformed tables, never
+  falls back to a user logical export, and composes closure and vec projections
+  from the same raw export object into one internal view; and
 - tracked and untracked compilation use the same allocator-object lookup.
   Tracking adds only structural ownership metadata and does not allocate,
   relabel, or rebuild a helper.
@@ -2714,9 +2715,11 @@ A closure-free forged `__is_closure` + `__call_fn_0` + `$cf` family remains
 public but cannot fabricate runtime closure discovery, so a fieldless class
 instance still crosses `wrapExports` as an object. Missing compiler aliases,
 non-empty markers, mutable-i32 or f64 manifests, and reserved availability bits
-also fail closed for a real compiled boxed class. The adjacent #2083 and
-vec/closure dispatch-runtime matrix passes **95/95 across thirteen files**,
-including the focused C30 and C31 structural-ownership suites.
+also fail closed for a real compiled boxed class. An externref table containing
+matching JS helper functions is rejected even when its length, availability,
+and terminal aliases otherwise match. The adjacent #2083 and vec/closure
+dispatch-runtime matrix passes **95/95 across thirteen files**, including the
+focused C30 and C31 structural-ownership suites.
 
 C31 closes exact retained ownership for this bounded closure host-dispatch
 family, not R1. Higher-arity method dispatchers, other support callable
