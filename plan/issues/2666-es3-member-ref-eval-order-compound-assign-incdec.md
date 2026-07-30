@@ -1,7 +1,8 @@
 ---
 id: 2666
 title: "≤ES3: member-reference base[prop] evaluation order in compound-assignment and prefix/postfix ++/-- (ToPropertyKey once, left-before-right)"
-status: in-progress
+status: done
+completed: 2026-07-28
 assignee: ttraenkler/codex-es5-2666
 created: 2026-06-25
 updated: 2026-07-28

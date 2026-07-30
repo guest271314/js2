@@ -1,7 +1,8 @@
 ---
 id: 3543
 title: "standalone: heterogeneous inner-tuple (anytuple) nested reads broken — numbers read back NaN, strings trap 'dereferencing a null pointer' (5 red tests on main)"
-status: in-review
+status: done
+completed: 2026-07-25
 created: 2026-07-23
 updated: 2026-07-26
 priority: medium

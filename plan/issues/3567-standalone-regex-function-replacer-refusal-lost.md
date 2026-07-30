@@ -1,7 +1,8 @@
 ---
 id: 3567
 title: "standalone: regex function-replacer refusal silently LOST — compiles a broken binary instead of refusing (#1539 guard red)"
-status: in-review
+status: done
+completed: 2026-07-26
 sprint: current
 created: 2026-07-24
 updated: 2026-07-26

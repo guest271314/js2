@@ -1,7 +1,8 @@
 ---
 id: 3017
 title: "Function .caller/.arguments poison-pill throw + free-variable capture in Function/eval shim child module"
-status: in-progress
+status: done
+completed: 2026-07-28
 sprint: Backlog
 created: 2026-07-03
 updated: 2026-07-28
