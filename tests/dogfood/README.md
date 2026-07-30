@@ -7,7 +7,24 @@ package running natively under Node (zero version skew — any divergence is a
 compiler bug, never an oracle mismatch). Runtime results remain explicitly
 unavailable for package entries that do not yet have that API-level proof.
 
-Seven packages so far, plus one deeper conformance check on acorn:
+The npm-compat catalog adds another sixteen packages through one data-driven,
+bounded package-entry harness:
+
+`hono`, `lodash`, `axios`, `react-dom`, `webpack`, `uuid`, `typescript`,
+`redux`, `jest`, `styled-components`, `moment`, `crypto`, `stylelint`,
+`three`, `lit`, and `tailwindcss`.
+
+Every catalog entry pins the canonical npm tarball sha1/integrity and the exact
+published entry file. The package's locked dependency graph is installed so a
+compile failure is not manufactured by omitting declared dependencies. None of
+these sixteen npm tarballs ships its upstream unit-test sources. Their cards
+therefore say “upstream suite — not shipped; adapter pending”; they do not
+substitute harness-authored smoke vectors or imply that validation is a test
+pass. Matching upstream source suites can be pinned and adapted package by
+package, following the existing Acorn/React precedent.
+
+The original package-specific harnesses, plus the deeper Acorn conformance
+check, are:
 
 | package                                 | issue | entry file          | oracle diff                                                                 |
 | --------------------------------------- | ----- | ------------------- | --------------------------------------------------------------------------- |

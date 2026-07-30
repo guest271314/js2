@@ -11,8 +11,16 @@ export function loadPinnedPackagePin(here, pinFile) {
   return JSON.parse(readFileSync(join(here, pinFile), "utf-8"));
 }
 
-export function setupPinnedPackage({ here, name, pinFile, extractionDirectory, force = false }) {
-  const pin = loadPinnedPackagePin(here, pinFile);
+export function setupPinnedPackage({
+  here,
+  name,
+  pinFile,
+  pin: suppliedPin,
+  extractionDirectory,
+  force = false,
+  allowMissingEntry = false,
+}) {
+  const pin = suppliedPin ?? loadPinnedPackagePin(here, pinFile);
   const tarballPath = resolve(here, pin.tarball);
   if (!existsSync(tarballPath)) {
     throw new Error(`[dogfood] pinned ${name} tarball missing at ${tarballPath}`);
@@ -34,9 +42,9 @@ export function setupPinnedPackage({ here, name, pinFile, extractionDirectory, f
     mkdirSync(root, { recursive: true });
     execFileSync("tar", ["-xzf", tarballPath, "-C", root], { stdio: "pipe" });
   }
-  if (!existsSync(entryModulePath)) {
+  if (!existsSync(entryModulePath) && !allowMissingEntry) {
     throw new Error(`[dogfood] extraction did not produce ${pin.entryModule} under ${root}`);
   }
 
-  return { root, entryModulePath, version: pin.version, pin };
+  return { root, entryModulePath, entryExists: existsSync(entryModulePath), version: pin.version, pin };
 }
