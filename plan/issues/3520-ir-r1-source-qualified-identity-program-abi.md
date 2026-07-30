@@ -2683,11 +2683,13 @@ role:
   or its reserved `$cN` physical prefix, codegen preserves every user export
   and publishes the exact helper at the terminal free physical suffix. One
   immutable compiler-authored i32 manifest records exactly which helpers were
-  emitted, and a collision-safe empty Wasm table authenticates that metadata as
-  compiler-owned rather than a user name/value convention. The JS runtime uses
-  that metadata, never user-controlled name cardinality, and composes closure
-  and vec projections from the same raw export object into one internal view;
-  and
+  emitted. A collision-safe empty Wasm table authenticates that metadata as
+  compiler-owned rather than a user name/value convention, while a 17-slot
+  funcref table binds every set bit to the exact compiler helper object. The JS
+  runtime proves the manifest is an immutable i32 through Wasm import
+  validation, rejects reserved bits and malformed tables, never falls back to
+  a user logical export, and composes closure and vec projections from the same
+  raw export object into one internal view; and
 - tracked and untracked compilation use the same allocator-object lookup.
   Tracking adds only structural ownership metadata and does not allocate,
   relabel, or rebuild a helper.
@@ -2700,7 +2702,7 @@ closure manifest adds no callable and does not change the structural row
 counts. Routing and body outcomes remain **37 terminal / 30 emitted / 7
 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**.
 
-The focused C31 suite passes **10/10**. It proves every fixed ID and public label,
+The focused C31 suite passes **11/11**. It proves every fixed ID and public label,
 the absence of a second generic callable owner, exact final-slot object
 resolution across a forced late import and dead-slot compaction, zero bridge
 rows for a closure-free module, tracked/untracked byte equality, direct closure
@@ -2710,8 +2712,10 @@ five-entry census. Simultaneous vec and closure logical/physical/manifest
 collisions resolve through both `buildImports().setExports` and `wrapExports`.
 A closure-free forged `__is_closure` + `__call_fn_0` + `$cf` family remains
 public but cannot fabricate runtime closure discovery, so a fieldless class
-instance still crosses `wrapExports` as an object. The adjacent #2083 and
-vec/closure dispatch-runtime matrix passes **94/94 across thirteen files**,
+instance still crosses `wrapExports` as an object. Missing compiler aliases,
+non-empty markers, mutable-i32 or f64 manifests, and reserved availability bits
+also fail closed for a real compiled boxed class. The adjacent #2083 and
+vec/closure dispatch-runtime matrix passes **95/95 across thirteen files**,
 including the focused C30 and C31 structural-ownership suites.
 
 C31 closes exact retained ownership for this bounded closure host-dispatch

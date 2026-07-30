@@ -1003,9 +1003,13 @@ const _CLOSURE_HOST_BRIDGE_EXPORTS = [
 
 const _CLOSURE_HOST_BRIDGE_MANIFEST = ["__\0js2_closure_host_bridge", "$cm"] as const;
 const _CLOSURE_HOST_BRIDGE_MARKER = ["__\0js2_closure_host_bridge_marker", "$ct"] as const;
+const _CLOSURE_HOST_BRIDGE_BINDINGS = ["__\0js2_closure_host_bridge_bindings", "$cu"] as const;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK = 0xfff00000;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x0001ffff;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_RESERVED_MASK = 0x000e0000;
+const _immutableI32GlobalVerdict = new WeakSet<WebAssembly.Global>();
+let _immutableI32GlobalProbeModule: WebAssembly.Module | undefined;
 
 /**
  * Resolve the terminal compiler alias in one collision-safe physical family.
@@ -1020,20 +1024,58 @@ function _terminalHostBridgeAlias(exports: Record<string, any>, physicalBase: st
   return helper;
 }
 
-/** Read compiler-authored closure-helper availability from its i32 manifest. */
-function _closureHostBridgeManifestBits(exports: Record<string, any>): number | undefined {
+/** Prove a Global's exact type and mutability through Wasm import validation. */
+function _isImmutableI32Global(value: unknown): value is WebAssembly.Global {
+  if (!(value instanceof WebAssembly.Global)) return false;
+  if (_immutableI32GlobalVerdict.has(value)) return true;
+  try {
+    _immutableI32GlobalProbeModule ??= new WebAssembly.Module(
+      Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 2, 8, 1, 1, 101, 1, 103, 3, 127, 0]),
+    );
+    new WebAssembly.Instance(_immutableI32GlobalProbeModule, { e: { g: value } });
+    _immutableI32GlobalVerdict.add(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface ClosureHostBridgeMetadata {
+  bits: number;
+  bindings: WebAssembly.Table;
+}
+
+/** Read and authenticate compiler-authored closure-helper metadata. */
+function _closureHostBridgeMetadata(exports: Record<string, any>): ClosureHostBridgeMetadata | undefined {
   const [markerLogicalName, markerPhysicalBase] = _CLOSURE_HOST_BRIDGE_MARKER;
   if (!Object.prototype.hasOwnProperty.call(exports, markerLogicalName)) return undefined;
   const marker = _terminalHostBridgeAlias(exports, markerPhysicalBase);
-  if (!(marker instanceof WebAssembly.Table)) return undefined;
+  if (!(marker instanceof WebAssembly.Table) || marker.length !== 0) return undefined;
 
   const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_MANIFEST;
   if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) return undefined;
   const manifest = _terminalHostBridgeAlias(exports, physicalBase);
-  if (!(manifest instanceof WebAssembly.Global) || typeof manifest.value !== "number") return undefined;
+  if (!_isImmutableI32Global(manifest) || typeof manifest.value !== "number") return undefined;
   const value = manifest.value | 0;
   if ((value & _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK) !== _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC) return undefined;
-  return value & _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK;
+  if ((value & _CLOSURE_HOST_BRIDGE_MANIFEST_RESERVED_MASK) !== 0) return undefined;
+  const bits = value & _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK;
+
+  const [bindingsLogicalName, bindingsPhysicalBase] = _CLOSURE_HOST_BRIDGE_BINDINGS;
+  if (!Object.prototype.hasOwnProperty.call(exports, bindingsLogicalName)) return undefined;
+  const bindings = _terminalHostBridgeAlias(exports, bindingsPhysicalBase);
+  if (!(bindings instanceof WebAssembly.Table) || bindings.length !== _CLOSURE_HOST_BRIDGE_EXPORTS.length) {
+    return undefined;
+  }
+  try {
+    for (let bit = 0; bit < _CLOSURE_HOST_BRIDGE_EXPORTS.length; bit++) {
+      const binding = bindings.get(bit);
+      if ((bits & (1 << bit)) !== 0 ? typeof binding !== "function" : binding !== null) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return { bits, bindings };
 }
 
 /**
@@ -1053,14 +1095,14 @@ function _hostBridgeExportView<T extends Record<string, any>>(exports: T): T {
     overrides.set(logicalName, helper);
   }
 
-  const closureBits = _closureHostBridgeManifestBits(exports);
+  const closureMetadata = _closureHostBridgeMetadata(exports);
   for (let bit = 0; bit < _CLOSURE_HOST_BRIDGE_EXPORTS.length; bit++) {
     const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_EXPORTS[bit]!;
     if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) continue;
     let helper: unknown;
-    if (closureBits !== undefined && (closureBits & (1 << bit)) !== 0) {
+    if (closureMetadata !== undefined && (closureMetadata.bits & (1 << bit)) !== 0) {
       helper = _terminalHostBridgeAlias(exports, physicalBase);
-      if (typeof helper !== "function") helper = exports[logicalName];
+      if (typeof helper !== "function" || helper !== closureMetadata.bindings.get(bit)) helper = undefined;
     }
     if (exports[logicalName] === helper) continue;
     overrides.set(logicalName, helper);

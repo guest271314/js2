@@ -414,6 +414,59 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     expect(instance).not.toBeTypeOf("function");
   });
 
+  it("fails closed for malformed marker, manifest, binding, and physical helper metadata", async () => {
+    const source = `
+      export function __is_closure(_value: any): number { return 1; }
+      export function $cf(): number { return 901; }
+      export function $cm(): number { return 902; }
+      export function $ct(): number { return 903; }
+      export function $cu(): number { return 904; }
+      const identity = function (value: number): number { return value; };
+      class Boxed {
+        value: number = 7;
+        ping(): number { return 1; }
+      }
+      export function getIdentity(): any { return identity; }
+      export function makeBoxed(): Boxed { return new Boxed(); }
+    `;
+    const { exports } = await instantiate(source);
+    expect(exports["$cf$"]).toBeTypeOf("function");
+    expect(exports["$cm$"]).toBeInstanceOf(WebAssembly.Global);
+    expect(exports["$ct$"]).toBeInstanceOf(WebAssembly.Table);
+    expect(exports["$cu$"]).toBeInstanceOf(WebAssembly.Table);
+    expect(wrapExports(exports as WebAssembly.Exports).makeBoxed()).toMatchObject({ value: 7 });
+
+    const clone = (): Record<string, unknown> => Object.assign(Object.create(null), exports);
+    const assertBoxedObject = (tampered: Record<string, unknown>): void => {
+      const value = wrapExports(tampered as WebAssembly.Exports).makeBoxed();
+      expect(value).toMatchObject({ value: 7 });
+      expect(value).not.toBeTypeOf("function");
+    };
+
+    const missingClassifier = Object.assign(
+      Object.create(null),
+      Object.fromEntries(Object.entries(exports).filter(([name]) => name !== "$cf$")),
+    ) as Record<string, unknown>;
+    assertBoxedObject(missingClassifier);
+
+    const nonEmptyMarker = clone();
+    nonEmptyMarker["$ct$"] = new WebAssembly.Table({ element: "anyfunc", initial: 1, maximum: 1 });
+    assertBoxedObject(nonEmptyMarker);
+
+    const manifestValue = (exports["$cm$"] as WebAssembly.Global).value as number;
+    const mutableManifest = clone();
+    mutableManifest["$cm$"] = new WebAssembly.Global({ value: "i32", mutable: true }, manifestValue);
+    assertBoxedObject(mutableManifest);
+
+    const reservedBitManifest = clone();
+    reservedBitManifest["$cm$"] = new WebAssembly.Global({ value: "i32", mutable: false }, manifestValue | (1 << 17));
+    assertBoxedObject(reservedBitManifest);
+
+    const f64Manifest = clone();
+    f64Manifest["$cm$"] = new WebAssembly.Global({ value: "f64", mutable: false }, manifestValue);
+    assertBoxedObject(f64Manifest);
+  });
+
   it("owns closure_has_rest at ordinal 13 only when that helper is emitted", async () => {
     const source = `
       const rest = function (...values: any[]): number { return values.length; };

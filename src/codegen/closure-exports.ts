@@ -36,8 +36,11 @@ const CLOSURE_HOST_BRIDGE_MANIFEST_NAME = "__\0js2_closure_host_bridge";
 const CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE = "$cm";
 const CLOSURE_HOST_BRIDGE_MARKER_NAME = "__\0js2_closure_host_bridge_marker";
 const CLOSURE_HOST_BRIDGE_MARKER_PHYSICAL_BASE = "$ct";
+const CLOSURE_HOST_BRIDGE_BINDINGS_NAME = "__\0js2_closure_host_bridge_bindings";
+const CLOSURE_HOST_BRIDGE_BINDINGS_PHYSICAL_BASE = "$cu";
 const CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
 const publishedClosureHostBridgeBits = new WeakMap<CodegenContext, number>();
+const publishedClosureHostBridgeFuncs = new WeakMap<CodegenContext, Map<number, WasmFunction>>();
 const publishedClosureHostBridgeManifests = new WeakSet<CodegenContext>();
 
 const CLOSURE_HOST_BRIDGE_ORDINAL = Object.freeze({
@@ -58,7 +61,7 @@ const CLOSURE_HOST_BRIDGE_ORDINAL = Object.freeze({
 } as const);
 
 /**
- * Reserved collision-only export family for closure helpers.
+ * Reserved physical export family for closure helpers.
  *
  * Keep the physical family independent from the Program ABI ordinals: method
  * dispatchers 6..8 remain runtime-visible but are intentionally outside the
@@ -84,10 +87,11 @@ function closureHostBridgeDefinition(logicalName: string): { physicalBase: strin
 /**
  * Publish one closure host helper from its exact allocator object.
  *
- * The historical logical label remains the byte-compatible fast path. When a
- * user already owns that label or the reserved short family, preserve every
- * user export and fill the physical family through one free terminal alias.
- * The runtime recovers that terminal alias without replacing the public name.
+ * The historical logical label remains the public fast path. Every compiler
+ * helper also owns the terminal alias in its reserved short family; when a user
+ * already owns that label or prefix, preserve each user export and append the
+ * exact helper. The runtime authenticates that alias without replacing public
+ * names.
  */
 function publishClosureHostBridge(ctx: CodegenContext, func: WasmFunction, derivedOrdinal: number | undefined): number {
   ctx.mod.functions.push(func);
@@ -122,28 +126,33 @@ function publishClosureHostBridge(ctx: CodegenContext, func: WasmFunction, deriv
     });
     occupied.add(func.name);
   }
-  if (logicalNameOccupied || maxOccupiedSuffix >= 0) {
-    for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
-      const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
-      if (occupied.has(physicalName)) continue;
-      ctx.mod.exports.push({
-        name: physicalName,
-        desc: { kind: "func", index: funcIdx },
-      });
-      occupied.add(physicalName);
-    }
+  for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
+    const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
+    if (occupied.has(physicalName)) continue;
+    ctx.mod.exports.push({
+      name: physicalName,
+      desc: { kind: "func", index: funcIdx },
+    });
+    occupied.add(physicalName);
   }
   publishedClosureHostBridgeBits.set(ctx, (publishedClosureHostBridgeBits.get(ctx) ?? 0) | (1 << definition.bit));
+  let publishedFuncs = publishedClosureHostBridgeFuncs.get(ctx);
+  if (!publishedFuncs) {
+    publishedFuncs = new Map();
+    publishedClosureHostBridgeFuncs.set(ctx, publishedFuncs);
+  }
+  publishedFuncs.set(definition.bit, func);
   return funcIdx;
 }
 
 /**
  * Publish one immutable compiler-authored availability manifest.
  *
- * The bitset distinguishes compiler helpers from user-controlled names. Its
- * physical family is always present and collision-safe; the logical name uses
- * a reserved NUL-containing internal label that ordinary TypeScript exports
- * cannot declare accidentally.
+ * The bitset distinguishes compiler helpers from user-controlled names. An
+ * empty marker table authenticates the metadata, and a fixed funcref table
+ * binds each availability bit to the exact helper object. Every physical family
+ * is collision-safe; the logical names use reserved NUL-containing labels that
+ * ordinary TypeScript exports cannot declare accidentally.
  */
 function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
   if (publishedClosureHostBridgeManifests.has(ctx)) return;
@@ -151,8 +160,20 @@ function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
   if ((bits & (1 << 15)) === 0) return;
   publishedClosureHostBridgeManifests.add(ctx);
 
-  const tableIdx = ctx.mod.imports.filter((entry) => entry.desc.kind === "table").length + ctx.mod.tables.length;
+  const bindingsTableIdx =
+    ctx.mod.imports.filter((entry) => entry.desc.kind === "table").length + ctx.mod.tables.length;
+  ctx.mod.tables.push({ elementType: "funcref", min: 17, max: 17 });
+  const markerTableIdx = bindingsTableIdx + 1;
   ctx.mod.tables.push({ elementType: "funcref", min: 0, max: 0 });
+  for (const [bit, func] of publishedClosureHostBridgeFuncs.get(ctx) ?? []) {
+    const funcOffset = ctx.mod.functions.indexOf(func);
+    if (funcOffset < 0) throw new Error(`closure host bridge manifest lost helper bit ${bit}`);
+    ctx.mod.elements.push({
+      tableIdx: bindingsTableIdx,
+      offset: [{ op: "i32.const", value: bit }],
+      funcIndices: [ctx.numImportFuncs + funcOffset],
+    });
+  }
   const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
   ctx.mod.globals.push({
     name: CLOSURE_HOST_BRIDGE_MANIFEST_NAME,
@@ -187,7 +208,11 @@ function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
 
   publishManifestExport(CLOSURE_HOST_BRIDGE_MARKER_NAME, CLOSURE_HOST_BRIDGE_MARKER_PHYSICAL_BASE, {
     kind: "table",
-    index: tableIdx,
+    index: markerTableIdx,
+  });
+  publishManifestExport(CLOSURE_HOST_BRIDGE_BINDINGS_NAME, CLOSURE_HOST_BRIDGE_BINDINGS_PHYSICAL_BASE, {
+    kind: "table",
+    index: bindingsTableIdx,
   });
   publishManifestExport(CLOSURE_HOST_BRIDGE_MANIFEST_NAME, CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE, {
     kind: "global",
