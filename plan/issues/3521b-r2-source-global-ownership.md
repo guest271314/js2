@@ -1,5 +1,5 @@
 ---
-id: 3521-r2-source-global-ownership
+id: 3521b
 title: "R2: carry exact source-global storage ownership"
 status: done
 sprint: current
@@ -13,7 +13,7 @@ area: ir, codegen, compiler
 goal: ir-full-coverage
 lane: ir-retirement-r2
 parent: 3521
-related: [3518, 3520, 3521, 3521-r2-structural-reference-adapter]
+related: [3518, 3520, 3521, 3521a]
 files:
   - src/codegen/program-abi-planning.ts
   - src/codegen/program-abi-session.ts

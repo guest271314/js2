@@ -1,5 +1,5 @@
 ---
-id: 3521-r2-structural-reference-adapter
+id: 3521a
 title: "R2: expose structural dependency identities during Program ABI planning"
 status: done
 sprint: current
