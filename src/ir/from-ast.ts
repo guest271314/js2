@@ -3806,7 +3806,7 @@ function denseFillPlanForLiteral(expr: ts.ArrayLiteralExpression): DenseFillPlan
   const statements = block.statements;
   const statementIndex = statements.indexOf(declarationStatement);
   const loop = statements[statementIndex + 1];
-  if (!ts.isForStatement(loop)) return null;
+  if (statementIndex < 0 || !loop || !ts.isForStatement(loop)) return null;
 
   const initializer = loop.initializer;
   if (!initializer || !ts.isVariableDeclarationList(initializer) || initializer.declarations.length !== 1) return null;
@@ -3865,7 +3865,14 @@ function denseFillPlanForLoop(loop: ts.ForStatement): DenseFillPlan | null {
   if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return null;
   const loopIndex = parent.statements.indexOf(loop);
   const previous = parent.statements[loopIndex - 1];
-  if (!ts.isVariableStatement(previous) || previous.declarationList.declarations.length !== 1) return null;
+  if (
+    loopIndex < 1 ||
+    !previous ||
+    !ts.isVariableStatement(previous) ||
+    previous.declarationList.declarations.length !== 1
+  ) {
+    return null;
+  }
   const initializer = previous.declarationList.declarations[0].initializer;
   return initializer && ts.isArrayLiteralExpression(initializer) ? denseFillPlanForLiteral(initializer) : null;
 }
