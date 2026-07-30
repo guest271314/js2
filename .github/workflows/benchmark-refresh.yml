@@ -306,6 +306,9 @@ jobs:
             --source-sha "$BENCHMARK_SOURCE_SHA"
 
       - name: Compare same-run PR base and candidate
+        # Performance data is advisory. Keep the comparison, artifact, and
+        # step-level failure visible without blocking the PR or merge queue.
+        continue-on-error: true
         if: |
           github.event_name == 'pull_request' &&
           steps.base_measurement.outputs.bootstrap != 'true' &&
