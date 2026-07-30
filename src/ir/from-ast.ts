@@ -127,6 +127,7 @@ import {
   isI32PureExprIR,
   isIrBitwiseOperatorToken,
 } from "./i32-pure-bitwise.js";
+import { tryEmitUnrolledReduction } from "./reduction-unroll.js";
 import { IrUnsupportedError } from "./outcomes.js";
 import { isPristineEs5IntrinsicIsFrozenCall } from "./object-integrity.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
@@ -6684,6 +6685,35 @@ function detectCountedLoopSafeIndex(stmt: ts.ForStatement): string | null {
   return arrayVar + ":" + indexVar;
 }
 
+/**
+ * (#3786) The compile-time entry value of a `for` counter, plus the slot the
+ * init wrote it to — or `null` when the initializer is not a single
+ * integer-literal `let`/`var` bound to a slot.
+ *
+ * Must run AFTER the init has been lowered, so the declared name is in scope and
+ * its slot index is known. Reporting the slot (not just the value) is what lets
+ * `tryEmitUnrolledReduction` refuse `for (let j = 0; i < N; i++)`, where the
+ * init's literal says nothing about the counter the condition actually tests.
+ */
+function literalCounterEntry(stmt: ts.ForStatement, cx: LowerCtx): { value: number; slotIndex: number } | null {
+  const init = stmt.initializer;
+  if (!init || !ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return null;
+  const decl = init.declarations[0];
+  if (!ts.isIdentifier(decl.name) || !decl.initializer) return null;
+  if (!ts.isNumericLiteral(decl.initializer)) return null;
+  const value = Number(decl.initializer.text);
+  if (!Number.isSafeInteger(value)) return null;
+  const binding = cx.scope.get(decl.name.text);
+  if (!binding || binding.kind !== "slot") return null;
+  // Deliberately NOT checking `binding.type` for i32: #3741 gives a promoted
+  // counter a native i32 SLOT while keeping the binding's IrType at f64 (that is
+  // how it avoids a consumption-site blast radius), so an i32 check here rejects
+  // every loop this transform exists for. The slot's i32-ness is established
+  // structurally instead — the recogniser only accepts a cond/update/body built
+  // from `i32.lt_s` / `i32.add` against this same slot index.
+  return { value, slotIndex: binding.slotIndex };
+}
+
 function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   if (!stmt.condition) {
     throw new Error(`ir/from-ast: for without cond not in slice 12 (${cx.funcName})`);
@@ -6753,6 +6783,26 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
         lowerForUpdateExpr(stmt.incrementor!, { ...loopCx, scope: new Map(bodyCx.scope) });
       })
     : [];
+
+  // (#3786) Reduction unroll: an i32-wrapping accumulator loop is latency-bound
+  // on its accumulator chain, so splitting it across k independent partial sums
+  // is worth ~2.3x. Attempted only on the fully-collected buffers (where every
+  // value is already typed i32) and fails closed on any shape it does not match
+  // exactly, in which case the loop lowers unchanged below.
+  const counterEntry = literalCounterEntry(stmt, innerCx);
+  if (
+    tryEmitUnrolledReduction({
+      builder: loopCx.builder,
+      cond: condInstrs,
+      condValue: condResult,
+      body: bodyInstrs,
+      update: updateInstrs,
+      counterEntry,
+    })
+  ) {
+    joinScopeStringEncodingFacts(cx.scope, [loopCx.scope]);
+    return;
+  }
 
   loopCx.builder.emitForLoop({
     cond: condInstrs,
