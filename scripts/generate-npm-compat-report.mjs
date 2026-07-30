@@ -41,6 +41,7 @@ import { runHarness as runCookie } from "../tests/dogfood/cookie-harness.mjs";
 import { runHarness as runEslint } from "../tests/dogfood/eslint-harness.mjs";
 import { runHarness as runPrettier } from "../tests/dogfood/prettier-harness.mjs";
 import { runHarness as runReact } from "../tests/dogfood/react-harness.mjs";
+import { runHarness as runReactUpstreamSuite } from "../tests/dogfood/react-upstream-suite.mjs";
 
 import { setupAcorn } from "../tests/dogfood/setup-acorn.mjs";
 import { setupClsx } from "../tests/dogfood/setup-clsx.mjs";
@@ -1441,8 +1442,9 @@ if (selectedPackages.has("prettier")) {
 }
 
 if (selectedPackages.has("react")) {
-  console.log("[npm-compat] react — bounded package-entry compile/validate...");
+  console.log("[npm-compat] react — package entry + upstream public-API vectors...");
   const reactReport = await runReact({ quiet: true });
+  const reactSuite = await runReactUpstreamSuite({ quiet: true });
   packages.push(
     await buildPackageEntry({
       name: "react",
@@ -1451,7 +1453,12 @@ if (selectedPackages.has("react")) {
       entryFile: reactReport.react.entryModule.replace(/^package\//, ""),
       shape: "cjs-project",
       report: reactReport,
-      tests: null,
+      tests: {
+        kind: "upstream-api-vectors",
+        passed: reactSuite.results?.passed ?? null,
+        total: reactSuite.results?.total ?? null,
+        passRatePct: reactSuite.summary?.passRatePct ?? null,
+      },
       perf: null,
     }),
   );

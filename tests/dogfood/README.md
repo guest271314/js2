@@ -18,7 +18,7 @@ Seven packages so far, plus one deeper conformance check on acorn:
 | **cookie** (RFC-6265 parser/serializer) | #3751 | `dist/index.js`     | per-op JSON-normalized equality (direct export calls, no epilogue)          |
 | **eslint** (JavaScript linter)          | #1400 | `lib/api.js`        | bounded full-package compile/validate; runtime diff pending                 |
 | **prettier** (code formatter)           | —     | `standalone.mjs`    | bounded package-entry compile/validate; runtime diff pending                |
-| **react** (UI library)                  | —     | `index.js`          | bounded package-entry compile/validate; runtime diff pending                |
+| **react** (UI library)                  | —     | `index.js`          | pinned source-attributed public-API vectors                                 |
 
 ## acorn (#1710)
 
@@ -47,7 +47,7 @@ The structured surface report is written to
    Acquisition decision is pinned in `acorn-pin.json` per the project-lead
    decision (2026-05-29): pinned `npm pack`, not a vendored source copy.
 2. **Compile** — feeds `dist/acorn.mjs` through `compile(src, { fileName:
-   "acorn.mjs" })` and records `success`, binary size, and categorized
+"acorn.mjs" })` and records `success`, binary size, and categorized
    diagnostics. The TS "Property does not exist" JS-noise (acorn is plain JS
    run through the TS checker) is collapsed into one non-blocking
    `ts-property-noise` bucket.
@@ -164,12 +164,21 @@ differential test exists.
 ```bash
 pnpm run dogfood:prettier
 pnpm run dogfood:react
+pnpm run dogfood:react-upstream-suite
 DOGFOOD_PRETTIER=1 pnpm test -- tests/dogfood/prettier.test.ts
-DOGFOOD_REACT=1 pnpm test -- tests/dogfood/react.test.ts
+DOGFOOD_REACT_UPSTREAM=1 pnpm exec vitest run tests/dogfood/react-upstream-suite.test.ts
 ```
 
 The current Prettier entry exposes a compile blocker. React's package entry
 compiles to valid Wasm, but that alone is not reported as runtime correctness.
+React's npm tarball omits its unit-test sources, so `react-upstream-suite.mjs`
+clones React's matching pinned tag and verifies the immutable commit before it
+runs five public-API vectors traced to React's own create-element and
+clone-element tests. This is deliberately not labelled as React's full Jest
+suite: that suite depends on React's private build and test infrastructure.
+At the current compiler frontier the driver compiles and validates, but all
+five vectors trap in Wasm; the npm-compat card reports that 0/5 result rather
+than treating validation as API correctness.
 
 ## acorn official suite (#3729)
 
@@ -280,7 +289,7 @@ Report: `tests/dogfood/report/clsx-surface.json` (gitignored). Pin:
 **Current state (2026-07-28): 17 / 18 ops match.** The one divergence —
 `clsx([{a:true,b:false},{c:true}])` throwing `dereferencing a null
 pointer` — is a real bug, reduced to a minimal repro fully independent of
-clsx (an array literal containing object literals of *different* shapes
+clsx (an array literal containing object literals of _different_ shapes
 crashes `for...in`; same-shaped siblings or a single object are fine) and
 filed as **#3749**, not fixed here. Like the other vitest wrappers, this
 one gates on a real regression floor (`equal >= 17` at `total === 18`) —

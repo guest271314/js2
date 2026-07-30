@@ -357,7 +357,12 @@ class NpmCompatChart extends HTMLElement {
     } else {
       const { kind, passed, total, passRatePct } = pkg.tests;
       const pct = passRatePct != null ? passRatePct : total ? ((passed / total) * 100).toFixed(1) : null;
-      const label = kind === "official-suite" ? "own test suite" : "differential ops";
+      const label =
+        kind === "official-suite"
+          ? "own test suite"
+          : kind === "upstream-api-vectors"
+            ? "upstream API vectors"
+            : "differential ops";
       tests = this._row(
         "tests",
         `<span class="mono">${passed}/${total}</span>${pct != null ? ` <span class="muted">${pct}%</span>` : ""} <span class="tag">${this._esc(label)}</span>`,
