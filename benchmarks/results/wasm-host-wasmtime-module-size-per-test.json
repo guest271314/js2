@@ -16,7 +16,7 @@
   {
     "name": "Engine",
     "path": "fib",
-    "value": 14792122,
+    "value": 14792138,
     "label": "14.8 MB",
     "jsUs": 98
   },
@@ -58,7 +58,7 @@
   {
     "name": "Engine",
     "path": "array-sum",
-    "value": 14793940,
+    "value": 14793917,
     "label": "14.8 MB",
     "jsUs": 143
   },
@@ -79,7 +79,7 @@
   {
     "name": "Engine",
     "path": "string-hash",
-    "value": 14797546,
+    "value": 14797544,
     "label": "14.8 MB",
     "jsUs": 238
   }
