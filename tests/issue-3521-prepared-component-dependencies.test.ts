@@ -34,6 +34,7 @@ interface Fixture {
   readonly first: IrTerminalUnitRecord;
   readonly second: IrTerminalUnitRecord;
   readonly nestedClassId: IrClassId;
+  readonly nestedMethod: { readonly id: IrUnitId; readonly displayName: string };
 }
 
 function fixture(): Fixture {
@@ -57,13 +58,17 @@ function fixture(): Fixture {
     (unit) => unit.kind === "top-level-function" && unit.displayName === "second",
   );
   const nestedClass = inventory.classes.find((record) => record.displayName === "LocalBox");
-  if (!first || !second || !nestedClass) throw new Error("invalid prepared-component fixture");
+  const nestedMethod = inventory.allUnits.find(
+    (unit) => unit.kind === "class-instance-method" && unit.lexicalOwnerId === nestedClass?.id,
+  );
+  if (!first || !second || !nestedClass || !nestedMethod) throw new Error("invalid prepared-component fixture");
   return {
     inventory,
     sourceId: inventory.sources[0]!.id,
     first,
     second,
     nestedClassId: nestedClass.id,
+    nestedMethod,
   };
 }
 
@@ -260,6 +265,57 @@ describe("#3521 post-pass prepared-component dependency evidence", () => {
         referencedClassId: shape.classId,
       }),
     ]);
+  });
+
+  it("closes a class member through its exact symbolic callable target", () => {
+    const f = fixture();
+    const target = irUnitFuncRef({ unitId: f.nestedMethod.id, name: "LocalBox_run" });
+    const shape: IrClassShape = {
+      classId: f.nestedClassId,
+      className: "LocalBox",
+      fields: [],
+      methods: [{ name: "run", params: [], returnType: null, target }],
+      constructorParams: [],
+    };
+    const alloc: IrInstr = {
+      kind: "class.alloc",
+      result: asValueId(0),
+      resultType: { kind: "class", shape },
+      shape,
+    };
+    const call: IrInstr = {
+      kind: "class.call",
+      result: null,
+      resultType: null,
+      receiver: asValueId(0),
+      memberKind: "method",
+      methodName: "run",
+      target,
+      args: [],
+    };
+    const typeRef = irClassTypeRef(shape.classId, shape.className);
+    const classEntry: PreparedComponentAbiEntry = {
+      id: typeRef.binding.bindingId,
+      structuralReferenceKey: irTypeBindingKey(typeRef.binding),
+      slotPolicy: "required",
+      intent: { kind: "class", classId: shape.classId, layoutKey: "LocalBox{}" },
+    };
+    const report = derivePreparedComponentDependencies({
+      module: { functions: [irFunction(f.first, [alloc, call]), irFunction(f.nestedMethod)] },
+      terminalUnitIds: new Set([f.first.id]),
+      inventory: f.inventory,
+      abi: abiLookup([sourceCallableEntry(f.first.id), sourceCallableEntry(f.nestedMethod.id), classEntry]),
+    });
+    const component = report.components[0]!;
+
+    expect(component.status).toBe("complete");
+    expect(component.unitDependencies).toEqual([
+      expect.objectContaining({
+        referencedUnitId: f.nestedMethod.id,
+        terminalOwnerUnitId: f.first.id,
+      }),
+    ]);
+    expect(component.failures).toEqual([]);
   });
 
   it("accepts a planned compiler-support callable as an external component dependency", () => {

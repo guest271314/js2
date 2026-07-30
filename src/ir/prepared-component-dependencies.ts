@@ -775,14 +775,28 @@ function collectFunctionEvidence(
           nested.kind === "class.new"
         ) {
           const shape = explicitClassShapes(nested, valueTypes)[0];
-          addFailure(evidence, {
-            code: "class-member-callable-unavailable",
-            ownerUnitId: terminalOwnerUnitId,
-            ...(shape ? { referencedClassId: shape.classId } : {}),
-            detail:
-              `${nested.kind} carries a class/member descriptor but no exact symbolic callable reference; ` +
-              "dependency ownership cannot be inferred from compatibility names",
-          });
+          const target = nested.target;
+          if (!target) {
+            addFailure(evidence, {
+              code: "class-member-callable-unavailable",
+              ownerUnitId: terminalOwnerUnitId,
+              ...(shape ? { referencedClassId: shape.classId } : {}),
+              detail:
+                `${nested.kind} carries a class/member descriptor but no exact symbolic callable reference; ` +
+                "dependency ownership cannot be inferred from compatibility names",
+            });
+          } else if (target.binding.kind === "unit") {
+            recordUnitReference(
+              evidence,
+              target.binding.unitId,
+              functionsByUnitId,
+              input.terminalUnitIds,
+              input.abi,
+              ownership,
+            );
+          } else {
+            recordExternalCallable(evidence, target, input.abi, ownership);
+          }
         }
       });
     }
@@ -855,10 +869,10 @@ function freezeComponent(
  *
  * Exact unit references close the terminal component as an undirected
  * ownership graph. Every directly encoded global/support/class-layout
- * identity is reconciled against Program ABI evidence. The proof deliberately
- * blocks source globals and class-member calls: the current IR nodes retain
- * their binding/layout identity but do not carry a terminal-owned storage or
- * callable reference, so accepting them would require a name-based guess.
+ * identity is reconciled against Program ABI evidence. Source globals remain
+ * blocked until their terminal storage owner is explicit. Class call sites
+ * close over exact callable targets when present; compatibility nodes without
+ * one remain blocked rather than guessing from a member name.
  */
 export function derivePreparedComponentDependencies(
   input: DerivePreparedComponentDependenciesInput,

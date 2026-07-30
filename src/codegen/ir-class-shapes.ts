@@ -1,8 +1,9 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import { ts } from "../ts-api.js";
-import type { IrClassId, IrSourceId } from "../ir/identity.js";
-import type { IrClassShape } from "../ir/nodes.js";
+import { irUnitFuncRef } from "../ir/callable-bindings.js";
+import type { IrClassId, IrSourceId, IrUnitKind } from "../ir/identity.js";
+import type { IrClassShape, IrFuncRef } from "../ir/nodes.js";
 import {
   IrPlanningIdentityInvariantError,
   requireIrPlanningSourceId,
@@ -27,6 +28,24 @@ export interface IrClassShapeLookup {
 /** Exact registry plus the deliberately lossy adapter for name-keyed legacy APIs. */
 export interface IrClassShapeSidecar extends IrClassShapeLookup {
   readonly legacyProjection: ReadonlyMap<string, IrClassShape>;
+}
+
+/** Project one exact class-owned source callable into a symbolic IR target. */
+export function projectIrClassCallableTarget(
+  context: IrPlanningIdentityContext,
+  classId: IrClassId,
+  declaration: ts.Node,
+  expectedKind: IrUnitKind,
+  compatibilityName: string,
+): IrFuncRef | undefined {
+  const unitId = context.unitIdByDeclaration.get(declaration);
+  const unit = unitId === undefined ? undefined : context.unitByUnitId.get(unitId);
+  return unit &&
+    unit.kind === expectedKind &&
+    unit.lexicalOwnerId === classId &&
+    context.declarationByUnitId.get(unit.id) === declaration
+    ? irUnitFuncRef({ unitId: unit.id, name: compatibilityName })
+    : undefined;
 }
 
 function invariant(code: "source-record-mismatch" | "class-record-mismatch", detail: string): never {

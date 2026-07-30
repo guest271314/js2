@@ -27,7 +27,15 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction, WasmModule } from "../ir/types.js";
 import { createEmptyModule } from "../ir/types.js";
 import { compileIrPathFunctions, type IrIntegrationError, type IrIntegrationReport } from "../ir/integration.js";
-import { asVal, irDynamic, isDynamic, irVal, type IrFuncRef, type IrType } from "../ir/nodes.js";
+import {
+  asVal,
+  irDynamic,
+  isDynamic,
+  irVal,
+  type IrClassMethodDescriptor,
+  type IrFuncRef,
+  type IrType,
+} from "../ir/nodes.js";
 import type { LatticeType } from "../ir/propagate.js";
 import {
   classifyIrFailure,
@@ -60,6 +68,7 @@ import {
   buildIrUnitInventory,
   type BuildIrUnitInventoryOptions,
   type IrClassId,
+  type IrUnitKind,
   type IrUnitId,
 } from "../ir/identity.js";
 import {
@@ -113,6 +122,7 @@ import {
 import {
   collectIrClassShapeDeclarations,
   createIrClassShapeSidecar,
+  projectIrClassCallableTarget,
   resolveIrClassShapeFromType,
   resolveIrClassShapeFromTypeReference,
   resolveIrParentClassId,
@@ -428,6 +438,23 @@ export {
   nativeStringType,
   nativeStringTypeNullable,
 };
+function projectClassCallableTarget(
+  ctx: CodegenContext,
+  identityContext: IrPlanningIdentityContext,
+  classId: IrClassId,
+  declaration: ts.Node,
+  expectedKind: IrUnitKind,
+  legacyName: string,
+): IrFuncRef | undefined {
+  return projectIrClassCallableTarget(
+    identityContext,
+    classId,
+    declaration,
+    expectedKind,
+    classMemberFuncKey(ctx, legacyName),
+  );
+}
+
 /**
  * Report a codegen error with source location extracted from an AST node.
  * Pushes the error into ctx.errors so it can be propagated to the caller.
@@ -1161,6 +1188,8 @@ function buildIrClassShapes(
     }
     if (!ctx.classSet.has(className)) continue;
     if (!ctx.structFields.has(className)) continue;
+    const callableTarget = (declaration: ts.Node, kind: IrUnitKind, suffix: string): IrFuncRef | undefined =>
+      projectClassCallableTarget(ctx, identityContext, classId, declaration, kind, `${className}_${suffix}`);
 
     // Constructor params — re-derived from AST so types come through
     // the same `tsTypeToFieldIr`-style projection. Reject if any param
@@ -1184,6 +1213,11 @@ function buildIrClassShapes(
       }
     }
     if (!ctorOk) continue;
+    const constructorTarget = callableTarget(
+      ctor ?? stmt,
+      ctor ? "class-constructor" : "class-implicit-constructor",
+      "new",
+    );
 
     // Fields — read from the legacy `structFields` (which fixes the
     // authoritative field set: names, count, and the backend ValType each
@@ -1277,12 +1311,7 @@ function buildIrClassShapes(
     fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 
     // Methods — instance methods only, re-derived from the AST.
-    const methods: {
-      name: string;
-      params: IrType[];
-      returnType: IrType | null;
-      memberKind?: "method" | "getter" | "setter" | "static";
-    }[] = [];
+    const methods: IrClassMethodDescriptor[] = [];
     let methodsOk = true;
     for (const member of stmt.members) {
       if (!ts.isMethodDeclaration(member) || !member.name) continue;
@@ -1320,7 +1349,8 @@ function buildIrClassShapes(
           returnType = ir;
         }
       }
-      methods.push({ name: methodName, params, returnType });
+      const target = callableTarget(member, "class-instance-method", methodName);
+      methods.push({ name: methodName, params, returnType, ...(target ? { target } : {}) });
     }
     if (!methodsOk) continue;
 
@@ -1344,14 +1374,28 @@ function buildIrClassShapes(
         if (isVoidType(retTs)) continue; // void getter — degenerate, skip
         const ir = tsTypeToClassPositionIr(ctx, retTs, lookup);
         if (!ir) continue;
-        methods.push({ name: memberName, params: [], returnType: ir, memberKind: "getter" });
+        const target = callableTarget(member, "class-instance-getter", `get_${memberName}`);
+        methods.push({
+          name: memberName,
+          params: [],
+          returnType: ir,
+          memberKind: "getter",
+          ...(target ? { target } : {}),
+        });
       } else if (ts.isSetAccessorDeclaration(member) && !hasStaticModifier(member)) {
         if (member.parameters.length !== 1) continue;
         const p = member.parameters[0]!;
         if (!ts.isIdentifier(p.name) || p.dotDotDotToken || p.questionToken || p.initializer) continue;
         const ir = tsTypeToClassPositionIr(ctx, ctx.checker.getTypeAtLocation(p), lookup);
         if (!ir) continue;
-        methods.push({ name: memberName, params: [ir], returnType: null, memberKind: "setter" });
+        const target = callableTarget(member, "class-instance-setter", `set_${memberName}`);
+        methods.push({
+          name: memberName,
+          params: [ir],
+          returnType: null,
+          memberKind: "setter",
+          ...(target ? { target } : {}),
+        });
       } else if (
         ts.isMethodDeclaration(member) &&
         hasStaticModifier(member) &&
@@ -1389,7 +1433,14 @@ function buildIrClassShapes(
         // body. Project the static only when no instance member takes the
         // name (from-ast then demotes the ambiguous call cleanly).
         if (methods.some((m) => m.name === memberName && (m.memberKind ?? "method") === "method")) continue;
-        methods.push({ name: memberName, params, returnType, memberKind: "static" });
+        const target = callableTarget(member, "class-static-method", memberName);
+        methods.push({
+          name: memberName,
+          params,
+          returnType,
+          memberKind: "static",
+          ...(target ? { target } : {}),
+        });
       }
     }
 
@@ -1399,6 +1450,7 @@ function buildIrClassShapes(
       fields,
       methods,
       constructorParams,
+      ...(constructorTarget ? { constructorTarget } : {}),
       // #3000-E: present only for a single-level subclass of a local user class.
       ...(parentShape ? { parent: parentShape } : {}),
     };
