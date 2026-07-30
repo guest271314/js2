@@ -502,6 +502,12 @@ export interface IrSelectionOptions {
     capability: "host-date-snapshot" | "host-regexp-constructor" | "host-object-define-property",
   ) => boolean;
   /**
+   * #3787 exact global String-constructor identity. This is separate from the
+   * declaration-file-only ambient predicate because allowJs programs can be
+   * compiled without lib declarations, leaving a genuine global unresolved.
+   */
+  readonly isAmbientStringBinding?: (node: ts.Identifier) => boolean;
+  /**
    * (#2856 async-delay slice) Exact checker-certified
    * `new Promise<number>((resolve) => { setTimeout(...); })` construction.
    * Omitted by bare-selector and host-free/M0 callers, so generic arrow/new
@@ -1185,6 +1191,11 @@ let currentDirectOnlyDynMemberEqualityFunctions: ReadonlySet<ts.FunctionDeclarat
 let currentDirectOnlyDynMemberEqualityFunctionsReady = false;
 let currentDynMemberEqualitySubject: ts.FunctionDeclaration | null = null;
 let currentDynEqualityBoxableParamNames = new Set<string>();
+// Grounded parameter families from the propagation map. The checker sees an
+// unannotated allowJs parameter as `any`, but the IR ABI may already have
+// proved it f64 from every call edge. Coercion-sensitive builtin selectors
+// need that exact proof instead of consulting checker syntax alone.
+let currentNumericParamNames = new Set<string>();
 
 /** @internal Configure the shared predicates for an exact structural selector run. */
 export function configureIrStructuralSelectorPredicates(
@@ -1283,6 +1294,7 @@ function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean
   currentSubjectIsModuleInit = false;
   currentDynMemberEqualitySubject = !isMethod && ts.isFunctionDeclaration(fn) ? fn : null;
   currentDynEqualityBoxableParamNames = new Set<string>();
+  currentNumericParamNames = new Set<string>();
   currentSubjectFunctionName = !isMethod && ts.isFunctionDeclaration(fn) && fn.name !== undefined ? fn.name.text : null;
   currentSubjectReturnsBoolean =
     currentSubjectFunctionName !== null &&
@@ -1292,7 +1304,10 @@ function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean
 
 function recordDynamicParamKind(name: string, kind: ResolvedKind, dynamicNames: Set<string>): void {
   if (kind === "dynamic") dynamicNames.add(name);
-  else if (kind === "f64" || kind === "bool" || kind === "string") currentDynEqualityBoxableParamNames.add(name);
+  else if (kind === "f64" || kind === "bool" || kind === "string") {
+    currentDynEqualityBoxableParamNames.add(name);
+    if (kind === "f64") currentNumericParamNames.add(name);
+  }
 }
 
 /**
@@ -2613,6 +2628,31 @@ function isPhase1StatementListInScope(
           return shapeNo("nontail-elemstore-idx", lhs.argumentExpression);
         if (!isPhase1Expr(s.expression.right, scope, localClasses))
           return shapeNo("nontail-elemstore-rhs", s.expression.right);
+        continue;
+      }
+      // #3787 / #2856 — top-level-in-body compound assignment. The body
+      // statement dispatcher already admitted and lowered this exact slot
+      // shape; mirror it here for `<early return>; x -= n; return ...`.
+      if (
+        ts.isBinaryExpression(s.expression) &&
+        (s.expression.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ||
+          s.expression.operatorToken.kind === ts.SyntaxKind.MinusEqualsToken ||
+          s.expression.operatorToken.kind === ts.SyntaxKind.AsteriskEqualsToken ||
+          s.expression.operatorToken.kind === ts.SyntaxKind.SlashEqualsToken) &&
+        ts.isIdentifier(s.expression.left)
+      ) {
+        if (isUnrepresentableModuleBinding(s.expression.left)) {
+          return shapeNo("nontail-module-storage-unrepresentable", s.expression);
+        }
+        if (currentModuleBindingResolver?.(s.expression.left) && !currentSubjectIsModuleInit) {
+          return shapeNo("nontail-module-compound", s.expression);
+        }
+        if (!scope.has(s.expression.left.text)) return shapeNo("nontail-compound-scope", s.expression.left);
+        if (projectionBindingMutationIsUnsupported(s.expression.left.text, s.expression)) return false;
+        if (!isPhase1Expr(s.expression.right, scope, localClasses)) {
+          return shapeNo("nontail-compound-rhs", s.expression.right);
+        }
+        clearProjectionBinding(s.expression.left.text);
         continue;
       }
       // (#2856) Catch-all for ExpressionStatements outside the accepted set:
@@ -4725,6 +4765,7 @@ function expressionIsProvenNumber(expr: ts.Expression, seen = new Set<ts.Variabl
   const candidate = unwrapPhase1Parens(expr);
   if (ts.isNumericLiteral(candidate)) return true;
   if (ts.isIdentifier(candidate)) {
+    if (currentNumericParamNames.has(candidate.text)) return true;
     // The module-binding resolver has already proved the shared slot and all
     // of its writes numeric. Do not re-audit the declaration initializer as a
     // local alias: host-produced numeric initializers such as
@@ -4787,6 +4828,13 @@ function selectorSeesAmbientBinding(node: ts.Identifier): boolean {
   return (
     currentSelectionOptions?.isAmbientBinding?.(node) === true ||
     currentModuleBindingResolver?.isAmbientBinding(node) === true
+  );
+}
+
+function selectorSeesAmbientStringBinding(node: ts.Identifier): boolean {
+  return (
+    currentSelectionOptions?.isAmbientStringBinding?.(node) === true ||
+    (currentSelectionOptions?.isAmbientStringBinding === undefined && selectorSeesAmbientBinding(node))
   );
 }
 
@@ -6014,6 +6062,22 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       ) {
         return shapeNo("expr-math-call-shape", expr);
       }
+      // #3787 — exact ambient String.fromCharCode(...). Each argument is
+      // lowered independently through the mode-selected unary helper, then
+      // concatenated left-to-right. The numeric proof is required because
+      // this first IR slice does not implement the builtin's general ToNumber
+      // coercion. Zero arguments are valid and produce the empty string.
+      if (
+        ts.isIdentifier(expr.expression.expression) &&
+        expr.expression.expression.text === "String" &&
+        expr.expression.name.text === "fromCharCode" &&
+        selectorSeesAmbientStringBinding(expr.expression.expression) &&
+        !scope.has("String")
+      ) {
+        return expr.arguments.every(
+          (arg) => !ts.isSpreadElement(arg) && expressionIsProvenNumber(arg) && isPhase1Expr(arg, scope, localClasses),
+        );
+      }
       // ES5 Object.defineProperty — an exact ambient static call is a
       // symbolic host-helper operation, not an instance method on a value
       // named `Object`. Reject shadowed bindings and host-free targets before
@@ -6923,6 +6987,16 @@ export function buildLocalCallGraph(
             selectorSeesAmbientBinding(node.expression.expression) &&
             currentSelectionOptions?.supportsBackendCapability?.("host-object-define-property") !== false &&
             node.arguments.length === 3
+          ) {
+            for (const a of node.arguments) visit(a);
+            return;
+          }
+          if (
+            ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === "String" &&
+            node.expression.name.text === "fromCharCode" &&
+            selectorSeesAmbientStringBinding(node.expression.expression) &&
+            node.arguments.every((argument) => !ts.isSpreadElement(argument))
           ) {
             for (const a of node.arguments) visit(a);
             return;
