@@ -119,3 +119,13 @@ Every per-edition percentage carries this artifact to some degree. A test's
 bucket reflects **the vintage of its metadata**, not the edition that specified
 the feature. Treat per-edition rates as "tests whose metadata sorts here", never
 as "share of edition N implemented".
+
+## Permanent repro (#2093)
+
+Landed with PR #3627, which added the regression test alongside the fix:
+
+- `tests/generate-editions-feature-rows.test.ts` — asserts the edition-bucket
+  rows distinguish "measured absent" from "not measured", so a bucket can no
+  longer report absence-of-evidence as evidence-of-absence.
+
+Fix: `scripts/generate-editions.ts`.
