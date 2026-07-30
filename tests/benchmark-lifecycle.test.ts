@@ -254,6 +254,15 @@ describe("benchmark artifact lifecycle", () => {
     expect(generator).not.toContain("STARLINGMONKEY_WARM_NUMBERS_MS");
   });
 
+  it("keeps recursive Fibonacci numerically typed for strict IR compilation", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "../website/public/benchmarks/competitive/programs/fib-recursive.js"),
+      "utf8",
+    );
+
+    expect(source).toContain("/** @param {number} n @returns {number} */\nfunction fib(n)");
+  });
+
   it("rejects missing, stale, and unsafe compiled loadtime asset sets", () => {
     const missing = fixtureRoot();
     mutateJson(resolve(missing, "benchmarks/results/loadtime-benchmarks.json"), (document) => {
