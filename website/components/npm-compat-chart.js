@@ -360,7 +360,12 @@ class NpmCompatChart extends HTMLElement {
 
   _render(data, history) {
     this._data = data;
-    const pkgs = data.packages ?? [];
+    const compatibilityRank = (pkg) => {
+      if (pkg.compile?.success && pkg.validation?.validates) return 0;
+      if (pkg.compile?.success) return 1;
+      return 2;
+    };
+    const pkgs = [...(data.packages ?? [])].sort((a, b) => compatibilityRank(a) - compatibilityRank(b));
     const compiling = pkgs.filter((p) => p.compile?.success).length;
     const validating = pkgs.filter((p) => p.validation?.validates).length;
     const metric = (v, l) => `<div class="metric"><span class="value">${v}</span><span class="label">${l}</span></div>`;
