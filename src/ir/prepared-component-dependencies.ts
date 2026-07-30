@@ -225,6 +225,9 @@ function terminalOwnerForIntent(intent: ProgramAbiIntent, ownership: OwnershipIn
     if (intent.unitId) return ownership.unitTerminalOwner.get(intent.unitId) ?? null;
     if (intent.classId) return ownership.classTerminalOwner.get(intent.classId) ?? null;
   }
+  if (intent.kind === "global" && intent.unitId) {
+    return ownership.unitTerminalOwner.get(intent.unitId) ?? null;
+  }
   if (intent.kind === "class") return ownership.classTerminalOwner.get(intent.classId) ?? null;
   return null;
 }
@@ -616,6 +619,7 @@ function recordGlobalReference(
   ref: IrGlobalRef,
   abi: PreparedComponentAbiLookup,
   ownership: OwnershipIndex,
+  terminalUnitIds: ReadonlySet<IrUnitId>,
 ): void {
   const key = irGlobalBindingKey(ref.binding);
   const expectedOrigin = ref.binding.kind;
@@ -628,12 +632,19 @@ function recordGlobalReference(
       (expectedOrigin === "source" || expectedOrigin === "support" ? intent.origin === expectedOrigin : true),
   });
   if (entry && ref.binding.kind === "source") {
-    addFailure(evidence, {
-      code: "source-global-outside-component",
-      ownerUnitId: evidence.terminalOwnerUnitId,
-      bindingId: ref.binding.bindingId,
-      detail: `source global ${key} has no terminal owner in the current Program ABI contract`,
-    });
+    const storageTerminalOwner = terminalOwnerForIntent(entry.canonical.intent, ownership);
+    if (storageTerminalOwner === null || !terminalUnitIds.has(storageTerminalOwner)) {
+      addFailure(evidence, {
+        code: "source-global-outside-component",
+        ownerUnitId: evidence.terminalOwnerUnitId,
+        ...(storageTerminalOwner === null ? {} : { referencedUnitId: storageTerminalOwner }),
+        bindingId: ref.binding.bindingId,
+        detail:
+          storageTerminalOwner === null
+            ? `source global ${key} has no exact terminal storage owner in the Program ABI contract`
+            : `source global ${key} belongs to non-candidate storage terminal ${storageTerminalOwner}`,
+      });
+    }
   }
 }
 
@@ -765,7 +776,7 @@ function collectFunctionEvidence(
             recordExternalCallable(evidence, nested.liftedFunc, input.abi, ownership);
           }
         } else if (nested.kind === "global.get" || nested.kind === "global.set") {
-          recordGlobalReference(evidence, nested.target, input.abi, ownership);
+          recordGlobalReference(evidence, nested.target, input.abi, ownership, input.terminalUnitIds);
         }
         if (
           nested.kind === "class.call" ||
@@ -916,6 +927,15 @@ export function derivePreparedComponentDependencies(
   for (const item of evidence) {
     for (const dependency of item.unitDependencies.values()) {
       union.connect(item.terminalOwnerUnitId, dependency.terminalOwnerUnitId);
+    }
+    for (const dependency of item.abiDependencies.values()) {
+      if (
+        dependency.kind === "source-global" &&
+        dependency.terminalOwnerUnitId !== null &&
+        input.terminalUnitIds.has(dependency.terminalOwnerUnitId)
+      ) {
+        union.connect(item.terminalOwnerUnitId, dependency.terminalOwnerUnitId);
+      }
     }
   }
   const terminalsByRoot = new Map<IrUnitId, IrUnitId[]>();

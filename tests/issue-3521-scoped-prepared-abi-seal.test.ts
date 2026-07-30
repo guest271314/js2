@@ -296,6 +296,45 @@ function importedGlobalDraft(f: Fixture, id: IrBindingId, referenceKey: string):
   };
 }
 
+function planSourceGlobal(
+  f: Fixture,
+  role: string,
+  storageOwnerUnitId: IrUnitId,
+): { readonly id: IrBindingId; readonly global: GlobalDef } {
+  const id = createIrBindingId({ ownerId: f.sourceId, domain: "global", role });
+  const referenceKey = `source-global|${f.sourceId}|${role}`;
+  const global: GlobalDef = {
+    name: role,
+    type: { kind: "f64" },
+    mutable: true,
+    init: [{ op: "f64.const", value: 0 }],
+  };
+  f.module.globals.push(global);
+  f.session.plan({
+    id,
+    structuralOrder: f.session.structuralOrder.forSource(f.sourceId, {
+      domain: "global",
+      roleOrdinal: 7,
+    }),
+    displayName: role,
+    structuralReferenceKey: referenceKey,
+    slotPolicy: "required",
+    slotSpace: "global",
+    intent: {
+      kind: "global",
+      origin: "source",
+      valueType: canonicalProgramAbiValType(global.type),
+      mutable: true,
+      sourceId: f.sourceId,
+      unitId: storageOwnerUnitId,
+    },
+  });
+  f.session.registerGlobalTypeContract(id, global.type, true);
+  f.session.registerStructuralReference(id, referenceKey);
+  f.session.attachLocator(id, { kind: "defined-global", value: global });
+  return { id, global };
+}
+
 function typeDraft(f: Fixture, id: IrBindingId, referenceKey: string): ProgramAbiDraft {
   return {
     id,
@@ -687,6 +726,31 @@ describe("#3521 scoped prepared-component ABI seal", () => {
     const conflicting = overlap.session.beginPreparedComponentScope("import-overlap", [overlap.secondUnitId]);
     conflicting.includeBinding(importedId);
     expectInvariant(() => conflicting.seal(), "duplicate-session-draft");
+  });
+
+  it("closes source globals through exact storage terminals and rejects foreign storage", () => {
+    const owned = fixture();
+    planCallable(owned, owned.firstUnitId, "body", "first");
+    const firstGlobal = planSourceGlobal(owned, "first-storage", owned.firstUnitId);
+
+    const scoped = sealFirst(owned);
+    expect(scoped.bindingIds).toContain(firstGlobal.id);
+    expect(scoped.get(firstGlobal.id)?.intent).toEqual(
+      expect.objectContaining({
+        kind: "global",
+        origin: "source",
+        sourceId: owned.sourceId,
+        unitId: owned.firstUnitId,
+      }),
+    );
+
+    const foreign = fixture();
+    planCallable(foreign, foreign.firstUnitId, "body", "first");
+    planCallable(foreign, foreign.secondUnitId, "body", "second");
+    const secondGlobal = planSourceGlobal(foreign, "second-storage", foreign.secondUnitId);
+    const wrongScope = foreign.session.beginPreparedComponentScope("foreign-source-global", [foreign.firstUnitId]);
+    wrongScope.includeBinding(secondGlobal.id);
+    expectInvariant(() => wrongScope.seal(), "invalid-callable-provenance");
   });
 
   it("rejects missing reservations and locators atomically, then permits a corrected scope", () => {

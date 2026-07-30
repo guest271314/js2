@@ -33,6 +33,7 @@ interface Fixture {
   readonly sourceId: IrSourceId;
   readonly first: IrTerminalUnitRecord;
   readonly second: IrTerminalUnitRecord;
+  readonly moduleInit: IrTerminalUnitRecord;
   readonly nestedClassId: IrClassId;
   readonly nestedMethod: { readonly id: IrUnitId; readonly displayName: string };
 }
@@ -41,6 +42,7 @@ function fixture(): Fixture {
   const source = ts.createSourceFile(
     "/repo/prepared-component.ts",
     `
+      const shared = 0;
       function first(): void {
         class LocalBox { run(): void {} }
       }
@@ -57,16 +59,20 @@ function fixture(): Fixture {
   const second = inventory.terminalUnits.find(
     (unit) => unit.kind === "top-level-function" && unit.displayName === "second",
   );
+  const moduleInit = inventory.terminalUnits.find((unit) => unit.kind === "module-init");
   const nestedClass = inventory.classes.find((record) => record.displayName === "LocalBox");
   const nestedMethod = inventory.allUnits.find(
     (unit) => unit.kind === "class-instance-method" && unit.lexicalOwnerId === nestedClass?.id,
   );
-  if (!first || !second || !nestedClass || !nestedMethod) throw new Error("invalid prepared-component fixture");
+  if (!first || !second || !moduleInit || !nestedClass || !nestedMethod) {
+    throw new Error("invalid prepared-component fixture");
+  }
   return {
     inventory,
     sourceId: inventory.sources[0]!.id,
     first,
     second,
+    moduleInit,
     nestedClassId: nestedClass.id,
     nestedMethod,
   };
@@ -192,6 +198,8 @@ describe("#3521 post-pass prepared-component dependency evidence", () => {
         origin: "source",
         valueType: '{"kind":"f64"}',
         mutable: true,
+        sourceId: f.sourceId,
+        unitId: f.moduleInit.id,
       },
     };
     const report = derivePreparedComponentDependencies({
@@ -206,10 +214,16 @@ describe("#3521 post-pass prepared-component dependency evidence", () => {
       expect.objectContaining({
         kind: "source-global",
         bindingId: globalRef.binding.bindingId,
+        terminalOwnerUnitId: f.moduleInit.id,
       }),
     ]);
     expect(component.status).toBe("blocked");
-    expect(component.failures.map((failure) => failure.code)).toContain("source-global-outside-component");
+    expect(component.failures).toContainEqual(
+      expect.objectContaining({
+        code: "source-global-outside-component",
+        referencedUnitId: f.moduleInit.id,
+      }),
+    );
   });
 
   it("maps a nested class layout exactly and blocks a class member without a symbolic callable", () => {
