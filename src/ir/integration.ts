@@ -2868,12 +2868,23 @@ function externResultClassName(
   }
 }
 
+function resolveDynamicCarrier(ctx: CodegenContext): ValType {
+  if (ctx.fast) {
+    ensureAnyValueType(ctx);
+    return { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
+  }
+  return { kind: "externref" };
+}
+
 function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
   const isAmbientStringBinding = makeAmbientStringBindingPredicate(ctx.checker);
   return {
     objectDefinePropertyTarget() {
       if (ctx.standalone || ctx.wasi || ctx.strictNoHostImports) return null;
       return irImportFuncRef("env", "__defineProperty_desc");
+    },
+    resolveDynamic() {
+      return resolveDynamicCarrier(ctx);
     },
     // (#2955 slice 5) No raw `nativeStrings()` here anymore — from-ast's
     // interface no longer carries the mode discriminator; every mode
@@ -3522,11 +3533,7 @@ function makeResolver(
     // registration legacy performs at its own first `any` use.
     // -------------------------------------------------------------------
     resolveDynamic(): ValType {
-      if (ctx.fast) {
-        ensureAnyValueType(ctx);
-        return { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
-      }
-      return { kind: "externref" };
+      return resolveDynamicCarrier(ctx);
     },
     // (#2949 slice 3) Op-emission handle for dynamic box/unbox/tag.test —
     // memoized so all arms of one lowering run share a single handle. The

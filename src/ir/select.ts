@@ -1191,6 +1191,7 @@ let currentDirectOnlyDynMemberEqualityFunctions: ReadonlySet<ts.FunctionDeclarat
 let currentDirectOnlyDynMemberEqualityFunctionsReady = false;
 let currentDynMemberEqualitySubject: ts.FunctionDeclaration | null = null;
 let currentDynEqualityBoxableParamNames = new Set<string>();
+let currentMutableParamSlotNames = new Set<string>();
 // Grounded parameter families from the propagation map. The checker sees an
 // unannotated allowJs parameter as `any`, but the IR ABI may already have
 // proved it f64 from every call edge. Coercion-sensitive builtin selectors
@@ -1294,6 +1295,7 @@ function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean
   currentSubjectIsModuleInit = false;
   currentDynMemberEqualitySubject = !isMethod && ts.isFunctionDeclaration(fn) ? fn : null;
   currentDynEqualityBoxableParamNames = new Set<string>();
+  currentMutableParamSlotNames = new Set<string>();
   currentNumericParamNames = new Set<string>();
   currentSubjectFunctionName = !isMethod && ts.isFunctionDeclaration(fn) && fn.name !== undefined ? fn.name.text : null;
   currentSubjectReturnsBoolean =
@@ -1572,11 +1574,13 @@ function whyNotIrClaimable(
       directMutationNames.has(p.name.text) &&
       paramResolved !== "f64" &&
       paramResolved !== "bool" &&
-      paramResolved !== "string"
+      paramResolved !== "string" &&
+      paramResolved !== "dynamic"
     ) {
       shapeNo("param-mutation-no-slot-representation", p);
       return "body-shape-rejected";
     }
+    if (directMutationNames.has(p.name.text)) currentMutableParamSlotNames.add(p.name.text);
     // #2949 slice 2 — collect dynamic-typed param names for the move-only scan.
     recordDynamicParamKind(p.name.text, paramResolved, dynNames);
 
@@ -2117,15 +2121,48 @@ function dynamicMemberEqualityOperandIsBuildable(candidate: ts.Expression): bool
   );
 }
 
-function concreteDynamicEqualityOperandIsBuildable(candidate: ts.Expression): boolean {
+function concreteDynamicEqualityOperandIsBuildable(candidate: ts.Expression, allowVoidZero = false): boolean {
   return (
     ts.isNumericLiteral(candidate) ||
     ts.isStringLiteralLike(candidate) ||
     candidate.kind === ts.SyntaxKind.TrueKeyword ||
     candidate.kind === ts.SyntaxKind.FalseKeyword ||
     candidate.kind === ts.SyntaxKind.NullKeyword ||
+    (allowVoidZero &&
+      ts.isVoidExpression(candidate) &&
+      ts.isNumericLiteral(candidate.expression) &&
+      Number(candidate.expression.text) === 0) ||
     (ts.isIdentifier(candidate) &&
       (candidate.text === "undefined" || currentDynEqualityBoxableParamNames.has(candidate.text)))
+  );
+}
+
+function concreteDynamicAssignmentOperandIsBuildable(candidate: ts.Expression): boolean {
+  if (expressionIsProvenNumber(candidate)) return true;
+  if (currentSelectionOptions?.classifyPrimitiveExpression?.(candidate) === "string") return true;
+  if (candidate.kind === ts.SyntaxKind.TrueKeyword || candidate.kind === ts.SyntaxKind.FalseKeyword) return true;
+  if (ts.isPrefixUnaryExpression(candidate) && candidate.operator === ts.SyntaxKind.ExclamationToken) return true;
+  if (ts.isBinaryExpression(candidate)) {
+    const op = candidate.operatorToken.kind;
+    return (
+      op === ts.SyntaxKind.LessThanToken ||
+      op === ts.SyntaxKind.LessThanEqualsToken ||
+      op === ts.SyntaxKind.GreaterThanToken ||
+      op === ts.SyntaxKind.GreaterThanEqualsToken ||
+      op === ts.SyntaxKind.EqualsEqualsToken ||
+      op === ts.SyntaxKind.ExclamationEqualsToken ||
+      op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+      op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+      op === ts.SyntaxKind.InstanceOfKeyword ||
+      op === ts.SyntaxKind.InKeyword ||
+      op === ts.SyntaxKind.AmpersandAmpersandToken ||
+      op === ts.SyntaxKind.BarBarToken
+    );
+  }
+  return (
+    ts.isConditionalExpression(candidate) &&
+    concreteDynamicAssignmentOperandIsBuildable(candidate.whenTrue) &&
+    concreteDynamicAssignmentOperandIsBuildable(candidate.whenFalse)
   );
 }
 
@@ -2247,7 +2284,10 @@ function dynamicUsesAreMoveOnly(
       // Plain assignment re-binds; scan the RHS against the LHS's dyn-ness.
       if (e.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(e.left)) {
         if (expectDyn) return false; // assignment-as-value in a dyn position — slice 3
-        return scanExpr(e.right, dynNames.has(e.left.text));
+        if (!dynNames.has(e.left.text)) return scanExpr(e.right, false);
+        if (isDynShaped(e.right)) return scanExpr(e.right, true);
+        const concrete = unwrap(e.right);
+        return concreteDynamicAssignmentOperandIsBuildable(concrete) && scanExpr(concrete, false);
       }
       if (expectDyn) return false; // operator results are concrete-shaped
 
@@ -2279,7 +2319,9 @@ function dynamicUsesAreMoveOnly(
             // A scalar parameter projected from the direct declaration ABI is
             // just as boxable as a literal: from-ast has its exact f64/bool/
             // string IrType and emits the canonical box before dyn.eq.
-            return concreteDynamicEqualityOperandIsBuildable(concrete) && scanExpr(concrete, false);
+            const strict =
+              op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken;
+            return concreteDynamicEqualityOperandIsBuildable(concrete, strict) && scanExpr(concrete, false);
           };
           return scanEqualityOperand(e.left, leftIsDyn) && scanEqualityOperand(e.right, rightIsDyn);
         }
@@ -2588,6 +2630,13 @@ function isPhase1StatementListInScope(
           if (!isPhase1Expr(s.expression.right, scope, localClasses)) {
             return shapeNo("nontail-module-assign-rhs", s.expression.right);
           }
+          continue;
+        }
+        if (currentMutableParamSlotNames.has(s.expression.left.text)) {
+          if (!isPhase1Expr(s.expression.right, scope, localClasses)) {
+            return shapeNo("nontail-param-assign-rhs", s.expression.right);
+          }
+          clearProjectionBinding(s.expression.left.text);
           continue;
         }
       }
@@ -4087,10 +4136,13 @@ function isPhase1NestedFunc(
     return capabilityNo("call-resolution-unsupported", "nested-function-self-reference", fn);
   }
   const projectionBindings = enterProjectionBindingScope(fn.parameters);
+  const outerMutableParamSlotNames = currentMutableParamSlotNames;
+  currentMutableParamSlotNames = new Set();
   let bodyAccepted = false;
   try {
     bodyAccepted = isPhase1StatementList(fn.body.statements, closureScope, localClasses);
   } finally {
+    currentMutableParamSlotNames = outerMutableParamSlotNames;
     restoreProjectionBindings(projectionBindings);
   }
   if (!bodyAccepted) return false;
@@ -4129,6 +4181,8 @@ function isPhase1ClosureLiteral(
   }
 
   const projectionBindings = enterProjectionBindingScope(expr.parameters);
+  const outerMutableParamSlotNames = currentMutableParamSlotNames;
+  currentMutableParamSlotNames = new Set();
 
   // ArrowFunction with concise body: must be a Phase-1 expression.
   // ArrowFunction / FunctionExpression with block body: Phase-1 tail
@@ -4140,6 +4194,7 @@ function isPhase1ClosureLiteral(
     if (!ts.isBlock(expr.body)) return shapeNo("closure-body-kind", expr.body);
     return isPhase1StatementList(expr.body.statements, inner, localClasses) || shapeNo("closure-body", expr.body);
   } finally {
+    currentMutableParamSlotNames = outerMutableParamSlotNames;
     restoreProjectionBindings(projectionBindings);
   }
 }
