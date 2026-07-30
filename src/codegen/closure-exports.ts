@@ -32,6 +32,11 @@ import {
 } from "./program-abi-planning.js";
 
 const CLOSURE_HOST_BRIDGE_ROLE = "closure-host-bridge";
+const CLOSURE_HOST_BRIDGE_MANIFEST_NAME = "__\0js2_closure_host_bridge";
+const CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE = "$cm";
+const CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
+const publishedClosureHostBridgeBits = new WeakMap<CodegenContext, number>();
+const publishedClosureHostBridgeManifests = new WeakSet<CodegenContext>();
 
 const CLOSURE_HOST_BRIDGE_ORDINAL = Object.freeze({
   directCall0: 0,
@@ -51,11 +56,36 @@ const CLOSURE_HOST_BRIDGE_ORDINAL = Object.freeze({
 } as const);
 
 /**
+ * Reserved collision-only export family for closure helpers.
+ *
+ * Keep the physical family independent from the Program ABI ordinals: method
+ * dispatchers 6..8 remain runtime-visible but are intentionally outside the
+ * bounded C31 structural-ownership slice.
+ */
+function closureHostBridgeDefinition(logicalName: string): { physicalBase: string; bit: number } {
+  const direct = /^__call_fn_([0-4])$/.exec(logicalName);
+  if (direct) {
+    const bit = Number(direct[1]);
+    return { physicalBase: `$c${bit.toString(36)}`, bit };
+  }
+  const method = /^__call_fn_method_([0-8])$/.exec(logicalName);
+  if (method) {
+    const bit = 5 + Number(method[1]);
+    return { physicalBase: `$c${bit.toString(36)}`, bit };
+  }
+  if (logicalName === "__closure_arity") return { physicalBase: "$ce", bit: 14 };
+  if (logicalName === "__is_closure") return { physicalBase: "$cf", bit: 15 };
+  if (logicalName === "__closure_has_rest") return { physicalBase: "$cg", bit: 16 };
+  throw new Error(`unknown closure host bridge ${logicalName}`);
+}
+
+/**
  * Publish one closure host helper from its exact allocator object.
  *
- * The public export label remains byte-compatible. Program ABI tracking only
- * replaces the generic retained-module owner; it does not allocate another
- * function, rewrite the body, or change the host/runtime-visible namespace.
+ * The historical logical label remains the byte-compatible fast path. When a
+ * user already owns that label or the reserved short family, preserve every
+ * user export and fill the physical family through one free terminal alias.
+ * The runtime recovers that terminal alias without replacing the public name.
  */
 function publishClosureHostBridge(ctx: CodegenContext, func: WasmFunction, derivedOrdinal: number | undefined): number {
   ctx.mod.functions.push(func);
@@ -73,11 +103,86 @@ function publishClosureHostBridge(ctx: CodegenContext, func: WasmFunction, deriv
   if (funcIdx === undefined) {
     throw new Error(`closure host bridge ${func.name} lost its exact allocator object`);
   }
-  ctx.mod.exports.push({
-    name: func.name,
-    desc: { kind: "func", index: funcIdx },
-  });
+  const definition = closureHostBridgeDefinition(func.name);
+  const occupied = new Set(ctx.mod.exports.map((entry) => entry.name));
+  const physicalBase = definition.physicalBase;
+  let maxOccupiedSuffix = -1;
+  for (const name of occupied) {
+    if (!name.startsWith(physicalBase)) continue;
+    const suffix = name.slice(physicalBase.length);
+    if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
+  }
+  const logicalNameOccupied = occupied.has(func.name);
+  if (!logicalNameOccupied) {
+    ctx.mod.exports.push({
+      name: func.name,
+      desc: { kind: "func", index: funcIdx },
+    });
+    occupied.add(func.name);
+  }
+  if (logicalNameOccupied || maxOccupiedSuffix >= 0) {
+    for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
+      const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
+      if (occupied.has(physicalName)) continue;
+      ctx.mod.exports.push({
+        name: physicalName,
+        desc: { kind: "func", index: funcIdx },
+      });
+      occupied.add(physicalName);
+    }
+  }
+  publishedClosureHostBridgeBits.set(
+    ctx,
+    (publishedClosureHostBridgeBits.get(ctx) ?? 0) | (1 << definition.bit),
+  );
   return funcIdx;
+}
+
+/**
+ * Publish one immutable compiler-authored availability manifest.
+ *
+ * The bitset distinguishes compiler helpers from user-controlled names. Its
+ * physical family is always present and collision-safe; the logical name uses
+ * a reserved NUL-containing internal label that ordinary TypeScript exports
+ * cannot declare accidentally.
+ */
+export function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
+  if (publishedClosureHostBridgeManifests.has(ctx)) return;
+  const bits = publishedClosureHostBridgeBits.get(ctx) ?? 0;
+  if ((bits & (1 << 15)) === 0) return;
+  publishedClosureHostBridgeManifests.add(ctx);
+
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name: CLOSURE_HOST_BRIDGE_MANIFEST_NAME,
+    type: { kind: "i32" },
+    mutable: false,
+    init: [{ op: "i32.const", value: CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC | bits }],
+  });
+
+  const occupied = new Set(ctx.mod.exports.map((entry) => entry.name));
+  if (!occupied.has(CLOSURE_HOST_BRIDGE_MANIFEST_NAME)) {
+    ctx.mod.exports.push({
+      name: CLOSURE_HOST_BRIDGE_MANIFEST_NAME,
+      desc: { kind: "global", index: globalIdx },
+    });
+    occupied.add(CLOSURE_HOST_BRIDGE_MANIFEST_NAME);
+  }
+  let maxOccupiedSuffix = -1;
+  for (const name of occupied) {
+    if (!name.startsWith(CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE)) continue;
+    const suffix = name.slice(CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE.length);
+    if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
+  }
+  for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
+    const physicalName = `${CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE}${"$".repeat(suffixLength)}`;
+    if (occupied.has(physicalName)) continue;
+    ctx.mod.exports.push({
+      name: physicalName,
+      desc: { kind: "global", index: globalIdx },
+    });
+    occupied.add(physicalName);
+  }
 }
 
 function directClosureHostBridgeOrdinal(arity: number): number | undefined {

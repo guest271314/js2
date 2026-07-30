@@ -131,6 +131,13 @@ export function planProgramAbiEntrySourceSupportCallable(
     );
   }
   const ref = irSupportFuncRef(sourceId, plan.role, plan.displayName, plan.derivedOrdinal);
+  if (ref.binding.kind !== "support") {
+    throw new ProgramAbiInvariantError(
+      "invalid-binding-reference",
+      `entry-source support callable ${plan.displayName} did not produce a support binding`,
+    );
+  }
+  const expectedBindingId = ref.binding.bindingId;
   const bindingId = planProgramAbiSupportCallable(ctx, {
     ref,
     anchor: { kind: "source", sourceId },
@@ -140,10 +147,10 @@ export function planProgramAbiEntrySourceSupportCallable(
     signature,
     func: plan.func,
   });
-  if (bindingId !== ref.binding.bindingId) {
+  if (bindingId !== expectedBindingId) {
     throw new ProgramAbiInvariantError(
       "invalid-binding-reference",
-      `entry-source support callable ${plan.displayName} was not accepted for ${ref.binding.bindingId}`,
+      `entry-source support callable ${plan.displayName} was not accepted for ${expectedBindingId}`,
     );
   }
   return ref;

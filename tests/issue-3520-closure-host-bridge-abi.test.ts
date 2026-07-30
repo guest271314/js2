@@ -18,7 +18,7 @@ import { ProgramAbiSession } from "../src/codegen/program-abi-session.js";
 import { buildIrUnitInventory, createIrBindingId } from "../src/ir/identity.js";
 import { createEmptyModule, type FuncTypeDef, type Import, type WasmFunction } from "../src/ir/types.js";
 import { compile } from "../src/index.js";
-import { buildImports } from "../src/runtime.js";
+import { buildImports, wrapExports } from "../src/runtime.js";
 import { ts } from "../src/ts-api.js";
 
 // Register the expression/statement delegates used by generateModule.
@@ -47,6 +47,14 @@ const ZERO_ARITY_SOURCE = `
   const zero = function (): number { return 17; };
   export function getZero(): any { return zero; }
   export function invoke(): number { return hostTick(zero()); }
+`;
+
+const COLLIDING_CLOSURE_SOURCE = `
+  export function __call_fn_1(_closure: any, _value: any): number { return 701; }
+  export function $c1(): number { return 702; }
+  export function $cf(): number { return 703; }
+  const addTwo = function (value: number): number { return value + 2; };
+  export function getAddTwo(): any { return addTwo; }
 `;
 
 function trackedModule(source = ZERO_ARITY_SOURCE) {
@@ -301,6 +309,66 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     expect((exports.__call_fn_method_0 as (self: unknown, fn: unknown) => unknown)(hostReceiver, receiver)).toBe(
       hostReceiver,
     );
+  });
+
+  it("preserves user logical and physical names while runtime dispatch finds the exact closure helper", async () => {
+    const tracked = trackedModule(COLLIDING_CLOSURE_SOURCE);
+    expect(
+      hardErrors(tracked),
+      hardErrors(tracked)
+        .map((error) => error.message)
+        .join("\n"),
+    ).toEqual([]);
+    const exportsByName = new Map(tracked.module.exports.map((entry) => [entry.name, entry]));
+    expect(exportsByName.get("__call_fn_1")?.desc.index).not.toBe(exportsByName.get("$c1$")?.desc.index);
+    expect(exportsByName.get("$c1")?.desc.index).not.toBe(exportsByName.get("$c1$")?.desc.index);
+    expect(exportsByName.get("$cf")?.desc.index).not.toBe(exportsByName.get("$cf$")?.desc.index);
+
+    const entrySource = entrySourceRecord(COLLIDING_CLOSURE_SOURCE);
+    const directOneId = createIrBindingId({
+      ownerId: entrySource.id,
+      domain: "support",
+      role: CLOSURE_HOST_BRIDGE_ROLE,
+      ordinal: 1,
+    });
+    expect(tracked.programAbi!.abi.resolveFinalIndex(directOneId)).toEqual({
+      space: "function",
+      index: exportsByName.get("$c1$")?.desc.index,
+    });
+
+    const { exports } = await instantiate(COLLIDING_CLOSURE_SOURCE);
+    expect((exports.__call_fn_1 as (_closure: unknown, _value: unknown) => number)(null, null)).toBe(701);
+    expect((exports.$c1 as () => number)()).toBe(702);
+    expect((exports.$cf as () => number)()).toBe(703);
+    const closure = (exports.getAddTwo as () => unknown)();
+    expect((exports["$c1$"] as (fn: unknown, value: unknown) => unknown)(closure, 40)).toBe(42);
+    expect((exports["$cf$"] as (value: unknown) => number)(closure)).toBe(1);
+
+    const wrapped = wrapExports(exports as WebAssembly.Exports);
+    const addTwo = wrapped.getAddTwo();
+    expect(addTwo).toBeTypeOf("function");
+    expect(addTwo(40)).toBe(42);
+  });
+
+  it("does not discover closure helpers from closure-free user logical or physical-prefix exports", async () => {
+    const source = `
+      export function __is_closure(_value: any): number { return 1; }
+      export function $cf(): number { return 704; }
+      class Empty { ping(): number { return 1; } }
+      export function makeEmpty(): Empty { return new Empty(); }
+    `;
+    const tracked = trackedModule(source);
+    expect(tracked.programAbi!.abi.entries().filter((entry) => entry.id.includes(":closure-host-bridge:"))).toEqual([]);
+
+    const { exports } = await instantiate(source);
+    expect((exports.__is_closure as (value: unknown) => number)(null)).toBe(1);
+    expect((exports.$cf as () => number)()).toBe(704);
+    expect(exports["$cf$"]).toBeUndefined();
+
+    const wrapped = wrapExports(exports as WebAssembly.Exports);
+    const instance = wrapped.makeEmpty();
+    expect(instance).toEqual({});
+    expect(instance).not.toBeTypeOf("function");
   });
 
   it("owns closure_has_rest at ordinal 13 only when that helper is emitted", async () => {

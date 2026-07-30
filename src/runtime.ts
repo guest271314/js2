@@ -981,23 +981,88 @@ const _VEC_HOST_BRIDGE_EXPORTS = [
   ["__vec_pop", "$v5"],
 ] as const;
 
+const _CLOSURE_HOST_BRIDGE_EXPORTS = [
+  ["__call_fn_0", "$c0"],
+  ["__call_fn_1", "$c1"],
+  ["__call_fn_2", "$c2"],
+  ["__call_fn_3", "$c3"],
+  ["__call_fn_4", "$c4"],
+  ["__call_fn_method_0", "$c5"],
+  ["__call_fn_method_1", "$c6"],
+  ["__call_fn_method_2", "$c7"],
+  ["__call_fn_method_3", "$c8"],
+  ["__call_fn_method_4", "$c9"],
+  ["__call_fn_method_5", "$ca"],
+  ["__call_fn_method_6", "$cb"],
+  ["__call_fn_method_7", "$cc"],
+  ["__call_fn_method_8", "$cd"],
+  ["__closure_arity", "$ce"],
+  ["__is_closure", "$cf"],
+  ["__closure_has_rest", "$cg"],
+] as const;
+
+const _CLOSURE_HOST_BRIDGE_MANIFEST = ["__\0js2_closure_host_bridge", "$cm"] as const;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK = 0xfff00000;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x0001ffff;
+
 /**
- * Resolve a collision-only compiler vec bridge without replacing a user's
- * same-labelled public export. The logical export is already authoritative
- * when no physical family exists.
+ * Resolve the terminal compiler alias in one collision-safe physical family.
  */
-function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T {
-  let view: T | undefined;
+function _terminalHostBridgeAlias(exports: Record<string, any>, physicalBase: string): unknown {
+  let physicalName = physicalBase;
+  let helper: unknown;
+  while (Object.prototype.hasOwnProperty.call(exports, physicalName)) {
+    helper = exports[physicalName];
+    physicalName += "$";
+  }
+  return helper;
+}
+
+/** Read compiler-authored closure-helper availability from its i32 manifest. */
+function _closureHostBridgeManifestBits(exports: Record<string, any>): number | undefined {
+  const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_MANIFEST;
+  if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) return undefined;
+  const manifest = _terminalHostBridgeAlias(exports, physicalBase);
+  if (!(manifest instanceof WebAssembly.Global) || typeof manifest.value !== "number") return undefined;
+  const value = manifest.value | 0;
+  if ((value & _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK) !== _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC) return undefined;
+  return value & _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK;
+}
+
+/**
+ * Compose vec and closure bridge projections from the same raw export object.
+ *
+ * Vec keeps its collision-only logical-name gate. Closure availability comes
+ * only from the compiler-authored manifest; user-controlled helper-like names
+ * never establish ownership. All overrides land in one prototype view so the
+ * two bridge families cannot hide each other's raw own properties.
+ */
+function _hostBridgeExportView<T extends Record<string, any>>(exports: T): T {
+  const overrides = new Map<string, unknown>();
   for (const [logicalName, physicalBase] of _VEC_HOST_BRIDGE_EXPORTS) {
     if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) continue;
-    let physicalName = physicalBase;
-    let helper: unknown;
-    while (Object.prototype.hasOwnProperty.call(exports, physicalName)) {
-      helper = exports[physicalName];
-      physicalName += "$";
-    }
+    const helper = _terminalHostBridgeAlias(exports, physicalBase);
     if (typeof helper !== "function" || exports[logicalName] === helper) continue;
-    view ??= Object.create(exports) as T;
+    overrides.set(logicalName, helper);
+  }
+
+  const closureBits = _closureHostBridgeManifestBits(exports);
+  for (let bit = 0; bit < _CLOSURE_HOST_BRIDGE_EXPORTS.length; bit++) {
+    const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_EXPORTS[bit]!;
+    if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) continue;
+    let helper: unknown;
+    if (closureBits !== undefined && (closureBits & (1 << bit)) !== 0) {
+      helper = _terminalHostBridgeAlias(exports, physicalBase);
+      if (typeof helper !== "function") helper = exports[logicalName];
+    }
+    if (exports[logicalName] === helper) continue;
+    overrides.set(logicalName, helper);
+  }
+
+  if (overrides.size === 0) return exports;
+  const view = Object.create(exports) as T;
+  for (const [logicalName, helper] of overrides) {
     Object.defineProperty(view, logicalName, {
       value: helper,
       enumerable: false,
@@ -1005,7 +1070,7 @@ function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T 
       writable: false,
     });
   }
-  return view ?? exports;
+  return view;
 }
 
 // (#3673) Memoized classification for `_isWasmStruct`. The predicate is on the
@@ -15327,7 +15392,7 @@ export function buildImports(
   // Always provide setExports — needed for callbacks, native string marshaling,
   // and struct field getter discovery (__sget_*).
   result.setExports = (exports: Record<string, Function>) => {
-    wasmExports = _vecHostBridgeExportView(exports);
+    wasmExports = _hostBridgeExportView(exports);
     // (#1712) Replay operations parked during the module START function (see
     // pendingExportsDeferred above) now that struct introspection exports
     // are reachable.
@@ -15468,11 +15533,11 @@ export function wrapExports(
     signatures?: Record<string, WrapExportsSignature>;
   },
 ): Record<string, any> {
-  const callFn0 = rawExports.__call_fn_0 as ((closure: any) => any) | undefined;
-  const callFn1 = rawExports.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
   // #1504: marshal by default; `marshal: false` keeps raw WasmGC handles.
   const marshal: "copy" | false = options?.marshal === false ? false : "copy";
-  const exportsForMarshal = _vecHostBridgeExportView(rawExports as unknown as Record<string, Function>);
+  const exportsForMarshal = _hostBridgeExportView(rawExports as unknown as Record<string, Function>);
+  const callFn0 = exportsForMarshal.__call_fn_0 as ((closure: any) => any) | undefined;
+  const callFn1 = exportsForMarshal.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
   // (#1700) Vec allocator + byte-writer for Uint8Array args. Either may be
   // undefined, in which case the wrapper falls back
   // to passing the arg through unchanged.
@@ -15521,6 +15586,11 @@ export function wrapExports(
   const hasVecLen = typeof exportsForMarshal.__vec_len === "function";
   const looksMarshalable = (val: any): boolean => {
     if (val == null || typeof val !== "object") return false;
+    // No positively discovered compiler closure family means this module
+    // cannot return a compiled closure. Do not let a user `__is_closure`
+    // label or the historical old-module fallback turn class instances into
+    // callable wrappers.
+    if (typeof isClosureFn !== "function") return true;
     if (typeof isClosureFn === "function") {
       try {
         if (isClosureFn(val) === 1) return false;

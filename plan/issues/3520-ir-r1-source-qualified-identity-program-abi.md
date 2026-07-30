@@ -100,6 +100,7 @@ files:
   - src/codegen/program-abi-module-init-planning.ts
   - src/codegen/program-abi-source-callable-planning.ts
   - src/codegen/program-abi-planning.ts
+  - src/codegen/closure-exports.ts
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/program-abi-type-planning.ts
@@ -117,6 +118,7 @@ files:
   - src/codegen/closures/funcref-as-closure.ts
   - src/codegen/closures/method-trampolines.ts
   - src/codegen/index.ts
+  - src/runtime.ts
   - src/codegen/stdlib-selfhost.ts
   - docs/ir/ir-contract.md
   - docs/ir/ir-module.schema.json
@@ -160,6 +162,7 @@ files:
   - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-3520-class-integration-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
+  - tests/issue-3520-closure-host-bridge-abi.test.ts
   - tests/issue-3520-module-init-callable-abi.test.ts
   - tests/issue-3520-source-callable-abi.test.ts
   - tests/issue-3520-type-class-abi.test.ts
@@ -171,7 +174,7 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
-  - src/runtime.ts
+  - src/codegen/closure-exports.ts
   - src/codegen/declarations.ts
   - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
@@ -181,6 +184,7 @@ loc-budget-allow:
   - src/ir/nodes.ts
   - src/ir/verify.ts
   - src/ir/backend/porffor/assembler.ts
+  - src/runtime.ts
 # R1 must resolve exact checker declarations to the one authoritative identity
 # inventory. TypeOracle deliberately does not expose ts.Symbol/ts.Type objects,
 # so these two structural joins remain reviewed raw-checker boundaries until
@@ -2675,7 +2679,10 @@ role:
   at the current Program ABI-resolved handle. The public labels, exported
   signatures, dispatcher bodies, method-receiver save/restore behavior,
   `funcMap` compatibility entries, closure classifier semantics, and #2083
-  closure-free gating remain unchanged; and
+  closure-free gating remain unchanged. When a user owns a logical helper name
+  or its reserved `$cN` physical prefix, codegen preserves every user export
+  and publishes the exact helper at the terminal free physical suffix. The JS
+  runtime projects that helper only into its internal export view; and
 - tracked and untracked compilation use the same allocator-object lookup.
   Tracking adds only structural ownership metadata and does not allocate,
   relabel, or rebuild a helper.
@@ -2690,13 +2697,18 @@ C30's independently measured 24 vec rows, the same total becomes the intended
 `closure-host-bridge` rows. Routing and body outcomes remain **37 terminal / 30
 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**.
 
-The focused C31 suite passes **7/7**. It proves every fixed ID and public label,
+The focused C31 suite passes **9/9**. It proves every fixed ID and public label,
 the absence of a second generic callable owner, exact final-slot object
 resolution across a forced late import and dead-slot compaction, zero bridge
 rows for a closure-free module, tracked/untracked byte equality, direct closure
 identity/call behavior, method receiver identity, conditional rest
-classification, and the five-entry census. The adjacent #2083 and closure
-dispatch/runtime matrix passes **36/36 across six files** in addition to C31.
+classification, collision-safe logical and physical export ownership, and the
+five-entry census. A closure-free user `__is_closure` plus `$cf` prefix remains
+public but cannot fabricate runtime closure discovery, so a fieldless class
+instance still crosses `wrapExports` as an object. The adjacent #2083 and
+closure dispatch/runtime matrix passes **81/82 across twelve files** in
+addition to C31; the one #1308 boolean result expectation also fails unchanged
+on the independent C30 worktree and is not introduced by C31.
 
 C31 closes exact retained ownership for this bounded closure host-dispatch
 family, not R1. Higher-arity method dispatchers, other support callable
