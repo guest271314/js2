@@ -34,8 +34,8 @@ class NpmCompatChart extends HTMLElement {
     try {
       const historySrc = this.getAttribute("history-src");
       const [res, historyRes] = await Promise.all([
-        fetch(src),
-        historySrc ? fetch(historySrc).catch(() => null) : Promise.resolve(null),
+        fetch(src, { cache: "no-store" }),
+        historySrc ? fetch(historySrc, { cache: "no-store" }).catch(() => null) : Promise.resolve(null),
       ]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const history = historyRes?.ok ? await historyRes.json() : { schemaVersion: 1, runs: [] };
@@ -461,7 +461,7 @@ class NpmCompatChart extends HTMLElement {
         }
         .cards {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 1px;
           background: var(--border, rgba(255,255,255,0.12));
           border: 1px solid var(--border, rgba(255,255,255,0.12));
@@ -470,9 +470,6 @@ class NpmCompatChart extends HTMLElement {
           background: var(--bg, #060a14);
           padding: 18px 20px 16px;
           min-width: 0;
-        }
-        .card:last-child:nth-child(odd) {
-          grid-column: 1 / -1;
         }
         .card-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
         .card-top .name { font-size: 15px; font-weight: 600; }
@@ -653,11 +650,11 @@ class NpmCompatChart extends HTMLElement {
           max-width: 900px;
         }
 
-        @media (max-width: 1100px) {
-          .cards { grid-template-columns: 1fr; }
-          .card:last-child:nth-child(odd) { grid-column: auto; }
+        @media (max-width: 1000px) {
+          .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 720px) {
+          .cards { grid-template-columns: 1fr; }
           .card { padding: 16px; }
           .section-title { flex-direction: column; gap: 3px; }
           .benchmark-toolbar {
