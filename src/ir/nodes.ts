@@ -197,6 +197,12 @@ export interface IrClassMethodDescriptor {
   readonly params: readonly IrType[];
   readonly returnType: IrType | null;
   /**
+   * Exact source callable selected by this descriptor. Production class-shape
+   * projection always supplies it; optionality keeps compatibility fixtures
+   * fail-closed until they adopt structural identity.
+   */
+  readonly target?: IrFuncRef;
+  /**
    * (#3144) Member kind discriminator. Absent/`"method"` = instance method
    * (the pre-#3144 population — every existing consumer that reads
    * `shape.methods` expects instance methods, so lookups MUST filter on this
@@ -240,6 +246,8 @@ export interface IrClassShape {
   readonly fields: readonly IrClassFieldDescriptor[];
   readonly methods: readonly IrClassMethodDescriptor[];
   readonly constructorParams: readonly IrType[];
+  /** Exact source unit backing `<Class>_new`. */
+  readonly constructorTarget?: IrFuncRef;
   /**
    * #3000-E: the immediate parent class shape for a subclass declared via
    * `class Sub extends Parent`. Present only when `Parent` is a locally-declared
@@ -1368,6 +1376,7 @@ export interface IrInstrRefCellSet extends IrInstrBase {
 export interface IrInstrClassNew extends IrInstrBase {
   readonly kind: "class.new";
   readonly shape: IrClassShape;
+  readonly target?: IrFuncRef;
   readonly args: readonly IrValueId[];
 }
 
@@ -1446,6 +1455,7 @@ export interface IrInstrClassSet extends IrInstrBase {
 export interface IrInstrClassCall extends IrInstrBase {
   readonly kind: "class.call";
   readonly receiver: IrValueId;
+  readonly target?: IrFuncRef;
   readonly memberKind: Exclude<IrClassMemberKind, "static">;
   readonly methodName: string;
   readonly args: readonly IrValueId[];
@@ -1468,6 +1478,7 @@ export interface IrInstrClassCall extends IrInstrBase {
 export interface IrInstrClassSuperInit extends IrInstrBase {
   readonly kind: "class.super_init";
   readonly parentShape: IrClassShape;
+  readonly target?: IrFuncRef;
   readonly self: IrValueId;
   readonly args: readonly IrValueId[];
 }
@@ -1486,6 +1497,7 @@ export interface IrInstrClassSuperCall extends IrInstrBase {
   readonly kind: "class.super_call";
   readonly parentShape: IrClassShape;
   readonly receiver: IrValueId;
+  readonly target?: IrFuncRef;
   readonly methodName: string;
   readonly args: readonly IrValueId[];
 }
@@ -1523,6 +1535,7 @@ export interface IrInstrClassInstanceOf extends IrInstrBase {
 export interface IrInstrClassStaticCall extends IrInstrBase {
   readonly kind: "class.static_call";
   readonly shape: IrClassShape;
+  readonly target?: IrFuncRef;
   readonly methodName: string;
   readonly args: readonly IrValueId[];
 }

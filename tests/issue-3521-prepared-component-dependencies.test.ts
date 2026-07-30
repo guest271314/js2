@@ -33,13 +33,16 @@ interface Fixture {
   readonly sourceId: IrSourceId;
   readonly first: IrTerminalUnitRecord;
   readonly second: IrTerminalUnitRecord;
+  readonly moduleInit: IrTerminalUnitRecord;
   readonly nestedClassId: IrClassId;
+  readonly nestedMethod: { readonly id: IrUnitId; readonly displayName: string };
 }
 
 function fixture(): Fixture {
   const source = ts.createSourceFile(
     "/repo/prepared-component.ts",
     `
+      const shared = 0;
       function first(): void {
         class LocalBox { run(): void {} }
       }
@@ -56,14 +59,22 @@ function fixture(): Fixture {
   const second = inventory.terminalUnits.find(
     (unit) => unit.kind === "top-level-function" && unit.displayName === "second",
   );
+  const moduleInit = inventory.terminalUnits.find((unit) => unit.kind === "module-init");
   const nestedClass = inventory.classes.find((record) => record.displayName === "LocalBox");
-  if (!first || !second || !nestedClass) throw new Error("invalid prepared-component fixture");
+  const nestedMethod = inventory.allUnits.find(
+    (unit) => unit.kind === "class-instance-method" && unit.lexicalOwnerId === nestedClass?.id,
+  );
+  if (!first || !second || !moduleInit || !nestedClass || !nestedMethod) {
+    throw new Error("invalid prepared-component fixture");
+  }
   return {
     inventory,
     sourceId: inventory.sources[0]!.id,
     first,
     second,
+    moduleInit,
     nestedClassId: nestedClass.id,
+    nestedMethod,
   };
 }
 
@@ -187,6 +198,8 @@ describe("#3521 post-pass prepared-component dependency evidence", () => {
         origin: "source",
         valueType: '{"kind":"f64"}',
         mutable: true,
+        sourceId: f.sourceId,
+        unitId: f.moduleInit.id,
       },
     };
     const report = derivePreparedComponentDependencies({
@@ -201,10 +214,16 @@ describe("#3521 post-pass prepared-component dependency evidence", () => {
       expect.objectContaining({
         kind: "source-global",
         bindingId: globalRef.binding.bindingId,
+        terminalOwnerUnitId: f.moduleInit.id,
       }),
     ]);
     expect(component.status).toBe("blocked");
-    expect(component.failures.map((failure) => failure.code)).toContain("source-global-outside-component");
+    expect(component.failures).toContainEqual(
+      expect.objectContaining({
+        code: "source-global-outside-component",
+        referencedUnitId: f.moduleInit.id,
+      }),
+    );
   });
 
   it("maps a nested class layout exactly and blocks a class member without a symbolic callable", () => {
@@ -260,6 +279,57 @@ describe("#3521 post-pass prepared-component dependency evidence", () => {
         referencedClassId: shape.classId,
       }),
     ]);
+  });
+
+  it("closes a class member through its exact symbolic callable target", () => {
+    const f = fixture();
+    const target = irUnitFuncRef({ unitId: f.nestedMethod.id, name: "LocalBox_run" });
+    const shape: IrClassShape = {
+      classId: f.nestedClassId,
+      className: "LocalBox",
+      fields: [],
+      methods: [{ name: "run", params: [], returnType: null, target }],
+      constructorParams: [],
+    };
+    const alloc: IrInstr = {
+      kind: "class.alloc",
+      result: asValueId(0),
+      resultType: { kind: "class", shape },
+      shape,
+    };
+    const call: IrInstr = {
+      kind: "class.call",
+      result: null,
+      resultType: null,
+      receiver: asValueId(0),
+      memberKind: "method",
+      methodName: "run",
+      target,
+      args: [],
+    };
+    const typeRef = irClassTypeRef(shape.classId, shape.className);
+    const classEntry: PreparedComponentAbiEntry = {
+      id: typeRef.binding.bindingId,
+      structuralReferenceKey: irTypeBindingKey(typeRef.binding),
+      slotPolicy: "required",
+      intent: { kind: "class", classId: shape.classId, layoutKey: "LocalBox{}" },
+    };
+    const report = derivePreparedComponentDependencies({
+      module: { functions: [irFunction(f.first, [alloc, call]), irFunction(f.nestedMethod)] },
+      terminalUnitIds: new Set([f.first.id]),
+      inventory: f.inventory,
+      abi: abiLookup([sourceCallableEntry(f.first.id), sourceCallableEntry(f.nestedMethod.id), classEntry]),
+    });
+    const component = report.components[0]!;
+
+    expect(component.status).toBe("complete");
+    expect(component.unitDependencies).toEqual([
+      expect.objectContaining({
+        referencedUnitId: f.nestedMethod.id,
+        terminalOwnerUnitId: f.first.id,
+      }),
+    ]);
+    expect(component.failures).toEqual([]);
   });
 
   it("accepts a planned compiler-support callable as an external component dependency", () => {
