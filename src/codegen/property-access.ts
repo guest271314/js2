@@ -3004,6 +3004,92 @@ function tryStandaloneGrowableDynamicGet(
   return { kind: "externref" };
 }
 
+/**
+ * Read `<proven fnctor>.<dynamic-object-field>.<prop>` through the canonical
+ * standalone `$Object` lookup directly.
+ *
+ * The generic member-read finalizer cannot see the value provenance of the
+ * intermediate externref, so it emits a call-site closed-struct candidate
+ * ladder before reaching `__extern_get`. Fields such as acorn's
+ * `Parser.options` are initialized by a function proven to return an open
+ * `$Object`; `__extern_get` already contains the complete native-struct
+ * fallback and, importantly, its per-(receiver,key) cache runs before that
+ * ladder. Calling it directly therefore removes duplicate dispatch without
+ * narrowing semantics if the mutable field is later replaced.
+ */
+function tryKnownFnctorDynamicObjectCarrierGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+  propName: string,
+): ValType | undefined {
+  // Narrow rollback switch used by the Acorn exact A/B benchmark.
+  if (process.env.JS2WASM_TYPED_OPEN_CARRIER_READS === "0") return undefined;
+  if (!ctx.standalone) return undefined;
+  if (!ts.isPropertyAccessExpression(expr.expression)) return undefined;
+  const carrierRead = expr.expression;
+  const carrierOwner =
+    carrierRead.expression.kind === ts.SyntaxKind.ThisKeyword
+      ? (fctx.typedThisStructName ?? resolveReceiverStruct(ctx, fctx, carrierRead.expression))
+      : resolveReceiverStruct(ctx, fctx, carrierRead.expression);
+  let carrierField = carrierOwner
+    ? ctx.structFields.get(carrierOwner)?.find((field) => field.name === carrierRead.name.text)
+    : undefined;
+  // Constructor-parameter flow can lose its concrete fnctor owner even though
+  // the field provenance remains unique module-wide (Acorn's
+  // `Node(parser).parser.options`). Calling the canonical getter is semantics-
+  // preserving for every receiver representation; the name-level proof merely
+  // keeps this performance shortcut scoped to fields that really carry an open
+  // object somewhere in the program.
+  if (carrierField?.dynamicObjectCarrier !== true) {
+    const matching = [...ctx.structFields.values()]
+      .flat()
+      .filter((field) => field.name === carrierRead.name.text && field.dynamicObjectCarrier === true);
+    if (matching.length === 1) carrierField = matching[0];
+  }
+  if (carrierField?.dynamicObjectCarrier !== true || carrierField.type.kind !== "externref") return undefined;
+  if (
+    propName === "length" ||
+    propName === "constructor" ||
+    propName === "__proto__" ||
+    propName === "prototype" ||
+    propName === "name"
+  ) {
+    return undefined;
+  }
+  if (ctx.oracle.signatureOf(expr) !== undefined) return undefined;
+
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  if (getIdx === undefined) return undefined;
+  addStringConstantGlobal(ctx, propName);
+  flushLateImportShifts(ctx, fctx);
+  const recvType = compileExpression(ctx, fctx, carrierRead);
+  if (!recvType) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (recvType.kind !== "externref") {
+    coerceType(ctx, fctx, recvType, { kind: "externref" });
+  }
+  const recvTmp = allocTempLocal(fctx, { kind: "externref" });
+  fctx.body.push({ op: "local.tee", index: recvTmp });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: typeErrorThrowInstrs(ctx, expr),
+    else: [],
+  });
+  fctx.body.push({ op: "local.get", index: recvTmp });
+  releaseTempLocal(fctx, recvTmp);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+  fctx.body.push({ op: "call", funcIdx: getIdx });
+  return { kind: "externref" };
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3067,6 +3153,11 @@ export function compilePropertyAccess(
 
   {
     const __r = tryStandaloneGrowableDynamicGet(ctx, fctx, expr, propName);
+    if (__r !== undefined) return __r;
+  }
+
+  {
+    const __r = tryKnownFnctorDynamicObjectCarrierGet(ctx, fctx, expr, propName);
     if (__r !== undefined) return __r;
   }
 

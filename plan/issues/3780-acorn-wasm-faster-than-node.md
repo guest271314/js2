@@ -17,6 +17,7 @@ assignee: "ttraenkler/codex"
 depends_on: [3779]
 related: [1710, 1712, 3756]
 files:
+  - .husky/pre-push
   - package.json
   - plan/issues/3780-acorn-wasm-faster-than-node.md
   - plan/issues/backlog/backlog.md
@@ -29,6 +30,8 @@ files:
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/index.ts
   - src/codegen/native-regex.ts
+  - src/codegen/declarations/declared-nested-write.ts
+  - src/codegen/declarations/object-shape-widening.ts
   - src/codegen/object-ops.ts
   - src/codegen/property-access.ts
   - src/codegen/property-access-dispatch.ts
@@ -37,6 +40,9 @@ files:
   - src/codegen/typed-this.ts
   - src/compiler.ts
   - src/compiler/ground-call-fold.ts
+  - src/ir/types.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
   - src/index.ts
   - src/optimize.ts
   - src/runtime.ts
@@ -44,6 +50,7 @@ files:
   - tests/issue-2063-switch-strict-equality.test.ts
   - tests/issue-3683-direct-calls.test.ts
   - tests/issue-3765-numeric-locals.test.ts
+  - tests/issue-1712-exactfield-lane-guard.test.ts
 loc-budget-allow:
   - src/codegen/closed-method-dispatch.ts
   - src/codegen/closures.ts
@@ -54,6 +61,7 @@ loc-budget-allow:
   - src/codegen/fnctor-escape-gate.ts
   - src/codegen/index.ts
   - src/codegen/native-regex.ts
+  - src/codegen/declarations/object-shape-widening.ts
   - src/codegen/object-ops.ts
   - src/codegen/property-access.ts
   - src/codegen/regexp-standalone.ts
@@ -62,6 +70,14 @@ loc-budget-allow:
   - src/index.ts
   - src/optimize.ts
   - src/runtime.ts
+  - src/ir/from-ast.ts
+  - src/ir/integration.ts
+oracle-ratchet-allow:
+  - src/codegen/declarations/param-return-inference.ts
+  - src/codegen/expressions/fnctor-prototype.ts
+  - src/codegen/object-ops.ts
+  - src/codegen/property-access.ts
+  - src/codegen/statements/control-flow.ts
 func-budget-allow:
   - scripts/generate-npm-compat-report.mjs::compileStandaloneLane
   - src/codegen/closed-method-dispatch.ts::fillClosedMethodDispatch
@@ -78,6 +94,8 @@ func-budget-allow:
   - src/codegen/typed-this.ts::recordDirectCallGeneric
   - src/codegen/typed-this.ts::tryEmitDirectTwinCall
   - src/compiler/ground-call-fold.ts::foldGroundCallsInMultiFiles
+  - src/ir/from-ast.ts::lowerFunctionAstToIr
+  - src/ir/integration.ts::compileIrPathFunctions
 origin: "user request to repeat the measured clsx and cookie optimization process for Acorn and beat native Node"
 ---
 
@@ -344,6 +362,53 @@ case, and one derivative call-graph-closure refusal. Because selection is
 call-graph closed, the runtime parser cannot partially enter IR until those
 producer/value/shape blockers are cleared; this direct-backend round is the
 performance baseline the IR path must preserve.
+
+### Runtime-dynamic optimization round 3
+
+Binary inspection showed that the remaining property cost was not one uniform
+`__extern_get` problem. Two redundant representation decisions dominated:
+
+1. Acorn's fixed `types$1` token table was opened merely because code later
+   writes declared fields on the `TokenType` instances stored inside it. The
+   root table does not grow. The compiler now follows assignment-returning
+   constructor factories and keeps the outer literal closed when the nested
+   write targets a field declared by that constructor (or by a nested literal).
+   The descriptor-table case remains open when the nested field is genuinely
+   new. With `JS2WASM_KEEP_CLOSED_NESTED_TABLES=0` restoring the old policy, the
+   paired medians are 53,619.507 us old versus 48,703.292 us enabled
+   (**9.17% faster**) and the binary is 64,792 bytes smaller.
+2. `Parser.options` is intentionally an open `$Object` populated by `getOptions`
+   through computed keys. Hot reads such as `this.options.ecmaVersion` and
+   `parser.options.locations` nevertheless emitted a closed-struct candidate
+   ladder at the call site before reaching the canonical dynamic getter. Fnctor
+   field metadata now preserves the open-object provenance and routes those
+   nested reads directly to `__extern_get`. This does not replace or bypass the
+   generic property cache; it reaches that cache earlier and retains its native
+   struct, prototype, accessor, null, and mutable-field fallbacks. With
+   `JS2WASM_TYPED_OPEN_CARRIER_READS=0` restoring the old call-site ladder, the
+   final paired medians are 50,532.278 us old versus 48,213.417 us enabled
+   (**4.59% faster**) and the binary is 10,659 bytes smaller.
+
+The optimized half of the final paired run returns checksum 422, has zero
+imports, and measures 48,213.417 us/op versus 4,752.673 us/op in Node. Node
+remains **10.14x faster**; the stripped Wasm binary is 1,690,158 bytes. After
+rebasing onto the current IR-adoption stack, the regenerated full npm-compat
+artifact measures 46,687.179 us/op versus 4,832.476 us/op (Node **9.66x
+faster**) with a 1,677,262-byte binary and the same checksum. An intermediate
+debug-named profile after the first open-carrier stage attributes 8.70%
+exclusively to `__extern_get`, 6.00% to RegExp test/engine work, 4.12% to GC,
+2.94% to `ToPrimitive`, and 2.55% to `Node` construction. The selected
+`Node_new` WAT confirmed four repeated `parser.options.locations/ranges`
+type-ladder sequences per constructed AST node; the second change removes their
+outer options-object ladders.
+
+Correctness remains 3,507/3,518 on Acorn 8.16.0's pinned official suite. The
+benchmark still compiles the test loop into Wasm, supplies the source selector
+after compilation, performs every parse, and crosses no host boundary. Its
+top-level benchmark/parser driver remains direct (`benchmarkUsesIr: false`),
+while 15 reachable character/RegExp helpers are now IR-emitted. These
+representation wins apply to the direct parser path and remain parity
+requirements as the rest of that call graph migrates to IR.
 
 ## Compile-time static outcome
 
