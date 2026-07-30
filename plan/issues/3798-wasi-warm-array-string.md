@@ -47,6 +47,9 @@ read the builder length in the hash-loop condition.
 - Certify the exact numeric ABI used by the fused array fill-and-reduce shape.
 - Fuse the non-escaping temporary array into its i32 reduction, with sized
   allocation and direct stores retained for observable dense fills.
+- Keep counted `.push` loops on the legacy pre-sized path until IR owns the same
+  capacity proof, and record that deferred selector outcome in the IR-only
+  readiness baseline.
 - Preserve nested bitwise values in native i32 form.
 - Bypass flattening for `charAt` on const string-literal bindings.
 - Read detected string-builder lengths directly from their synthetic i32 local.
@@ -58,8 +61,7 @@ read the builder length in the hash-loop condition.
 Same-machine Wasmtime/V8 A/B, using
 `scripts/generate-wasmtime-hot-runtime.mjs`:
 
-| Benchmark | Main Wasmtime warm | Fixed Wasmtime warm | V8 warm |
-| --- | ---: | ---: | ---: |
-| Array fill + sum | 21.63 ms | 0.51 ms | 5.03 ms |
-| String build + hash | 0.58 ms | 0.16 ms | 0.34 ms |
-
+| Benchmark           | Main Wasmtime warm | Fixed Wasmtime warm | V8 warm |
+| ------------------- | -----------------: | ------------------: | ------: |
+| Array fill + sum    |           21.63 ms |             0.51 ms | 5.03 ms |
+| String build + hash |            0.58 ms |             0.16 ms | 0.34 ms |
