@@ -2,7 +2,7 @@
 id: 3668
 title: Harness-path flip instrument — measure whether a candidate fix flips real test262 tests
 status: done
-sprint: current
+sprint: 77
 priority: high
 horizon: m
 assignee: ttraenkler/opus-loop-g

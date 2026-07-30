@@ -2,7 +2,7 @@
 id: 3669
 title: Property slot monomorphism — a slot seeded with a number/boolean corrupts on some later writes
 status: done
-sprint: current
+sprint: 77
 priority: high
 horizon: l
 feasibility: hard

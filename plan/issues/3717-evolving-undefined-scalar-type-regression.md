@@ -2,9 +2,9 @@
 id: 3717
 title: "acorn-harness.mjs was the only acorn dogfood script not passing skipSemanticDiagnostics — hard-failed on legitimate strict-mode TS noise, not a compiler bug"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 priority: high
 horizon: s

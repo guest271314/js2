@@ -3,7 +3,7 @@ id: 3620
 title: "Standalone: a class generator method with an ARRAY binding-pattern parameter that has a DEFAULT traps `illegal cast` (~91-test uncatchable-trap bucket)"
 status: done
 assignee: ttraenkler/opus-3620
-sprint: current
+sprint: 77
 priority: high
 horizon: m
 feasibility: hard

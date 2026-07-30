@@ -3,7 +3,7 @@ id: 3599
 title: "expose FyiSourceExecutor reuse for external test262 integrations + fix its worker-path resolution when published"
 status: done
 completed: 2026-07-25
-sprint: current
+sprint: 77
 priority: high
 horizon: s
 goal: test262-conformance

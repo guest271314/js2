@@ -2,9 +2,9 @@
 id: 3649
 title: "`regressions-allow` is read only in rebase mode, so it is inert on ordinary PRs — a well-formed declaration is theatre, not a machine check"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-30
 completed: 2026-07-26
 priority: high
 horizon: m

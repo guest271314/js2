@@ -3,9 +3,9 @@ id: 3596
 title: "#3189 trap ratchet has no per-PR valve for a genuine fail→fail reclassification"
 status: done
 completed: 2026-07-24
-sprint: current
+sprint: 77
 created: 2026-07-24
-updated: 2026-07-24
+updated: 2026-07-30
 priority: high
 horizon: m
 feasibility: medium

@@ -2,9 +2,9 @@
 id: 3748
 title: "clsx dogfood harness — third single-bundle npm package, surfaces a real heterogeneous-object-array for...in bug (#3749)"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: medium
 horizon: m

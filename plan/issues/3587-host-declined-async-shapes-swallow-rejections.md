@@ -4,9 +4,9 @@ title: "Host lane: async shapes the host-drive engine declines (try/catch across
 status: done
 completed: 2026-07-25
 assignee: ttraenkler/fable-3587
-sprint: current
+sprint: 77
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-30
 priority: critical
 horizon: l
 feasibility: hard

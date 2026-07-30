@@ -3,9 +3,9 @@ id: 3598
 title: "check:issue-ids should detect collisions against OPEN PRs, not only main — the gap that silently parks PRs"
 status: done
 completed: 2026-07-25
-sprint: current
+sprint: 77
 created: 2026-07-24
-updated: 2026-07-25
+updated: 2026-07-30
 priority: high
 horizon: s
 feasibility: medium

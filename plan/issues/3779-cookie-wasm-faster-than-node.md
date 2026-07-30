@@ -2,9 +2,9 @@
 id: 3779
 title: "Compile cookie parse hot path to Wasm faster than native Node"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-30
 completed: 2026-07-29
 priority: high
 horizon: l

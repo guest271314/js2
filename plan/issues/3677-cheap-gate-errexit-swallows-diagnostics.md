@@ -2,7 +2,7 @@
 id: 3677
 title: cheap gate aborts at `wait` under `bash -e` — every failure is diagnostic-free and lint hard-fails against its own declared intent
 status: done
-sprint: current
+sprint: 77
 priority: high
 horizon: s
 feasibility: easy

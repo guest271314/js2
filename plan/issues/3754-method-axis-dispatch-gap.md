@@ -9,9 +9,9 @@ loc-budget-allow:
   - src/codegen/typed-this.ts
   - src/codegen/closures.ts
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: high
 horizon: l

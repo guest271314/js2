@@ -2,9 +2,9 @@
 id: 3739
 title: "ToInt32's float-based modulo-reduction (f64.div/f64.floor) never tiers up in V8 — landing-page loop.ts benchmark showed ~37x wasm-vs-js slowdown"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: high
 horizon: m

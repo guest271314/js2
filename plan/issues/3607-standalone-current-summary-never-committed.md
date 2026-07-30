@@ -3,7 +3,7 @@ id: 3607
 title: "promote-baseline writes benchmarks/results/test262-standalone-current.json but never stages it — no correct in-repo source for the CURRENT standalone rate"
 status: done
 completed: 2026-07-25
-sprint: current
+sprint: 77
 priority: medium
 horizon: s
 goal: ci-infrastructure

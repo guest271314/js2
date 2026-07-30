@@ -2,7 +2,7 @@
 id: 3613
 title: "Unit-test the test262 machinery: a harness truth table, a standing vacuity detector, a vacuous-verifier guard, and one shared thrown-payload renderer"
 status: done
-sprint: current
+sprint: 77
 priority: high
 horizon: l
 feasibility: hard

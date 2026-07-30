@@ -5,7 +5,7 @@ status: done
 completed: 2026-07-28
 assignee: ttraenkler/codex-es5-bind-iscallable
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 priority: high
 feasibility: easy
 task_type: bug
@@ -13,7 +13,7 @@ area: codegen
 es_edition: ES5
 language_feature: function-bind
 goal: test262-conformance
-sprint: current
+sprint: 77
 loc-budget-allow:
   - src/codegen/expressions/calls.ts
 ---

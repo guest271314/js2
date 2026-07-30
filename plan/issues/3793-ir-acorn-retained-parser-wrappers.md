@@ -2,7 +2,7 @@
 id: 3793
 title: "IR retained Acorn parser wrapper projection"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-30
 updated: 2026-07-30
 priority: high

@@ -3,7 +3,7 @@ id: 2900
 title: "≤ES3 (edition bucket): module indirect default-export binding update returns wrong value"
 status: done
 priority: high
-sprint: current
+sprint: 77
 created: 2026-06-30
 completed: 2026-07-25
 feasibility: hard

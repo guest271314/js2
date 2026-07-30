@@ -3,7 +3,7 @@ id: 3778
 title: "Compile clsx hot path to Wasm faster than native Node"
 status: done
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-30
 completed: 2026-07-29
 priority: high
 feasibility: hard
@@ -12,7 +12,7 @@ task_type: performance
 area: codegen, runtime, tooling
 language_feature: dynamic-values, arrays, objects, variadic-functions
 goal: performance
-sprint: current
+sprint: 77
 horizon: l
 assignee: "ttraenkler/codex"
 related: [3673, 3748, 3749, 3757]

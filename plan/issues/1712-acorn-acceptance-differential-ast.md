@@ -4,7 +4,7 @@ title: "acceptance: compiled acorn parses a representative .js with AST structur
 status: done
 assignee: ttraenkler/codex-acorn
 created: 2026-05-29
-updated: 2026-07-26
+updated: 2026-07-30
 completed: 2026-07-26
 loc-budget-allow:
   - src/codegen/regexp-standalone.ts
@@ -53,7 +53,7 @@ task_type: test
 area: test-infrastructure, codegen
 language_feature: multi
 goal: self-hosting-dogfood
-sprint: current
+sprint: 77
 model: fable
 depends_on: [1710, 1711]
 es_edition: multi

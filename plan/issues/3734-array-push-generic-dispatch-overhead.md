@@ -3,9 +3,9 @@ id: 3734
 title: "array.ts landing-page benchmark: IR compiles .push() to a non-inlined helper call while legacy fully inlines it — same IR-vs-legacy gap as #3739/#3741, not a generic-dispatch problem"
 status: done
 completed: 2026-07-28
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 priority: high
 horizon: l
 feasibility: hard

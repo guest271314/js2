@@ -3,9 +3,9 @@ id: 3785
 title: "#3777 root cause: V8 tiers up the harness's own `timeIt` wrapper and INLINES the benchmark into it, so the hot loop runs as the wrapper's mid-tier code — 15x on Node 26, while the subject reports `optimized` throughout"
 status: done
 completed: 2026-07-29
-sprint: current
+sprint: 77
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-30
 priority: high
 horizon: m
 feasibility: medium

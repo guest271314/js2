@@ -3,7 +3,7 @@ id: 3597
 title: "auto-park bot is step-blind — infra failures park PRs indistinguishably from real regressions"
 status: done
 completed: 2026-07-25
-sprint: current
+sprint: 77
 priority: high
 horizon: s
 goal: ci-infrastructure

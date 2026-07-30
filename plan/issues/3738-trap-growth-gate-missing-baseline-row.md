@@ -2,9 +2,9 @@
 id: 3738
 title: "check-baseline-trap-growth.ts never passed missingBaselineRowsAreUnknown, so a test absent from the prior snapshot reads as fabricated trap growth"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: high
 horizon: s

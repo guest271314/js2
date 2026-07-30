@@ -2,9 +2,9 @@
 id: 3729
 title: "Run acorn's OWN real test suite (not just fixtures) against compiled acorn — 99.7% pass"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-28
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
 priority: high
 horizon: m

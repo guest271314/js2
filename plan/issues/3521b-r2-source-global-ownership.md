@@ -2,7 +2,7 @@
 id: 3521b
 title: "R2: carry exact source-global storage ownership"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-30
 updated: 2026-07-30
 priority: critical

@@ -10,9 +10,9 @@ func-budget-allow:
   # kind is not a producer-invariant violation.
   - src/ir/from-ast.ts::lowerBinary
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 priority: high
 horizon: s

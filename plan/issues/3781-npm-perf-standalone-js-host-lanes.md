@@ -2,9 +2,9 @@
 id: 3781
 title: "Report npm package performance in standalone and JS-host harness lanes"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-30
 priority: high
 horizon: s
 feasibility: medium

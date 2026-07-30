@@ -2,9 +2,9 @@
 id: 3690
 title: "Integrate npm package testing corpus patterns from vercel-labs/scriptc into the differential corpus"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 completed: 2026-07-27
 assignee: claude
 priority: medium

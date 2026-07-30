@@ -3,9 +3,9 @@ id: 3595
 title: "ci: trap ratchet must treat a compile_error baseline as baseline-unknown (it never instantiated, so it never had the chance to trap)"
 status: done
 completed: 2026-07-25
-sprint: current
+sprint: 77
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-30
 priority: high
 horizon: m
 feasibility: medium

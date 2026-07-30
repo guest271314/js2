@@ -9,6 +9,7 @@
 - **BEFORE EVERY git add/commit**: `pwd && git branch --show-current`. Never `git add -A`.
 - **Commit AUTHOR must be the user** (`Thomas Tränkler <git@thomas.traenkler.com>`) + Claude co-author, never a role name — [commit-author-is-user-not-agent-role](feedback_commit_author_is_user_not_agent_role.md)
 - **NEVER delete worktrees without checking diffs**; never work agent branches from `/workspace`; never kill tests without asking.
+- **NEVER `git worktree prune` from the container** — repo is shared with a HOST session (`/Volumes/Archiv Mini/...`, worktrees at `/private/tmp/js2-*`); they read `prunable` from `/workspace` and pruning kills the host's LIVE registrations. `prunable` = "not visible from here", never "stale". Cleanup is HOST-side — [never-git-worktree-prune-inside-container](reference_never_git_worktree_prune_inside_container.md)
 - **NEVER comment on/close/reopen external GitHub issues without consent; NEVER `gh issue create`** — [no-github-issue-comments](feedback_no_github_issue_comments.md)
 - **NEVER force-push/rewrite public `main`** (append-only; revert forward) — [public-main-append-only](feedback_public_main_append_only.md)
 - **NEVER merge external-contributor PR without recorded CLA accept** — [cla-gate](feedback_cla_gate.md)
@@ -26,7 +27,7 @@ Team setup/budget/spawn/comms: **`plan/method/team-setup.md`**. Agent defs: **`.
 
 ### User & project state
 
-- [20260726-session-handoff-open-valve](project_20260726_session_handoff_open_valve.md)
+- [project_20260730_session_handoff_sprint77_frozen.md](project_20260730_session_handoff_sprint77_frozen.md) — **sprint 77 FROZEN (late)**; #3658 resolved; **HOST-side `git worktree repair` needed**; 283 orphan worktrees ~47GB
 - [next-session](project_next_session.md) · [role](user_role.md) · [team-setup](project_team_setup.md)
 - [test262-lane-parity-program](project_test262_lane_parity_program.md) · [acorn-dogfood-regression-20260723](project_acorn_dogfood_regression_20260723.md)
 - [bigint-i64-brand-gate](project_bigint_i64_brand_gate.md) · [linear-backend-no-console-log](project_linear_backend_no_console_log.md) · [proxy-no-ts-type-brand](project_proxy_no_ts_type_brand.md) · [1917-coercion-engine-byte-diff-gate](project_1917_coercion_engine_byte_diff_gate.md) · [2106-undefined-singleton-s1-atomic](project_2106_undefined_singleton_s1_atomic.md)

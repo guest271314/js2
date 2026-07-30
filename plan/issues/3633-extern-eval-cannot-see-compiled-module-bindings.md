@@ -4,9 +4,9 @@ title: "__extern_eval evaluates in a scope containing none of the compiled modul
 status: done
 assignee: ttraenkler/codex-es5-eval-bindings
 created: 2026-07-25
-updated: 2026-07-28
+updated: 2026-07-30
 completed: 2026-07-28
-sprint: current
+sprint: 77
 goal: es5
 priority: high
 horizon: l

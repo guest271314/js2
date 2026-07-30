@@ -2,9 +2,9 @@
 id: 3637
 title: "`typeof __vec_len(x) === \"number\"` is a vacuous vec discriminator — exhaustive audit of the surviving sites"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-30
 completed: 2026-07-25
 priority: high
 horizon: l

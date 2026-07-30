@@ -2,7 +2,7 @@
 id: 3615
 title: "Silent wrong answer: a top-level bare property read is dropped from `__module_init`, so the accessor never runs — a vacuous pass"
 status: done
-sprint: current
+sprint: 77
 priority: high
 horizon: m
 feasibility: hard

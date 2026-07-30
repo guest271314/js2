@@ -3,13 +3,13 @@ id: 2802
 title: "nested `any`-vec mutation hits a host Array mirror instead of the WasmGC vec"
 status: done
 assignee: ttraenkler/codex-acorn
-sprint: current
+sprint: 77
 priority: high
 horizon: m
 feasibility: hard
 reasoning_effort: high
 created: 2026-06-28
-updated: 2026-07-26
+updated: 2026-07-30
 completed: 2026-07-26
 task_type: bugfix
 area: codegen

@@ -3,7 +3,7 @@ id: 3788
 title: "the landing page always publishes benchmark numbers from BEFORE the current push's refresh — deploy-pages races benchmark-refresh, and `[skip ci]` stops the refresh commit from ever deploying"
 status: done
 completed: 2026-07-30
-sprint: current
+sprint: 77
 created: 2026-07-30
 updated: 2026-07-30
 priority: high

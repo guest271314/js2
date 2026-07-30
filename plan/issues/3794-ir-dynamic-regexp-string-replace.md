@@ -2,7 +2,7 @@
 id: 3794
 title: "IR dynamic RegExp/string replace dispatch"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-30
 updated: 2026-07-30
 priority: high

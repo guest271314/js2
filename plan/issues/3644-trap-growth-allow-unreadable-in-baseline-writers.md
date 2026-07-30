@@ -2,9 +2,9 @@
 id: 3644
 title: "`trap-growth-allow` is honored on the PR but unreadable in the baseline writers — one landed allowance wedges promotion permanently, forcing the blanket emergency valve"
 status: done
-sprint: current
+sprint: 77
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-30
 completed: 2026-07-26
 priority: high
 horizon: m
