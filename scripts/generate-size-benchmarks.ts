@@ -21,7 +21,7 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import * as ts from "typescript";
 import { compile, compileMulti, optimizeBinaryAsync } from "./compiler-bundle.mjs";
-import { calibrateBenchmarkBatchSize, timeBenchmarkBatch } from "../benchmarks/timing.js";
+import { calibrateBenchmarkBatchSize, timeBenchmarkBatch } from "../benchmarks/timing.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const HELPERS_PATH = path.resolve(ROOT, "website", "playground", "examples", "benchmarks", "helpers.ts");
