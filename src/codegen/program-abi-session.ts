@@ -409,7 +409,7 @@ export interface PublishedProgramAbi {
   readonly legacy: LegacyAbiAdapter;
 }
 
-type SessionState = "open" | "publishing" | "published" | "failed";
+type SessionState = "planning" | "sealing" | "sealed" | "binding" | "published" | "failed";
 
 function validOrdinal(value: number): boolean {
   return Number.isSafeInteger(value) && value >= 0;
@@ -580,7 +580,8 @@ export class ProgramAbiSession {
   private readonly typeCellsByObject = new Map<TypeDef, MutableProgramAbiTypeCell>();
   private readonly callableTypeContracts = new Map<IrBindingId, ProgramAbiCallableTypeContract>();
   private readonly globalTypeContracts = new Map<IrBindingId, ProgramAbiGlobalTypeContract>();
-  private state: SessionState = "open";
+  private state: SessionState = "planning";
+  private sealedAbi: ProgramAbiMap | undefined;
   private publishedValue: PublishedProgramAbi | undefined;
   readonly structuralOrder: ProgramAbiStructuralOrder;
 
@@ -628,7 +629,7 @@ export class ProgramAbiSession {
    * equivalent at the structural contract level.
    */
   ensurePlan(draft: ProgramAbiDraft): void {
-    this.assertOpen(`ensure plan ${draft.id}`);
+    this.assertPlanning(`ensure plan ${draft.id}`);
     const existing = this.drafts.get(draft.id);
     if (!existing) {
       this.plan(draft);
@@ -653,12 +654,12 @@ export class ProgramAbiSession {
   }
 
   registerStructuralReference(id: IrBindingId, key: string): void {
-    this.assertOpen(`register structural reference for ${id}`);
+    this.assertPlanning(`register structural reference for ${id}`);
     this.assertStructuralReference(id, key, true);
   }
 
   plan(draft: ProgramAbiDraft): void {
-    this.assertOpen(`plan ${draft.id}`);
+    this.assertPlanning(`plan ${draft.id}`);
     if (this.drafts.has(draft.id)) {
       throw new ProgramAbiInvariantError("duplicate-session-draft", `ABI draft ${draft.id} was planned more than once`);
     }
@@ -703,7 +704,7 @@ export class ProgramAbiSession {
   }
 
   registerDerivedUnit(record: ProgramAbiDerivedUnitRecord): void {
-    this.assertOpen(`register derived unit ${record.id}`);
+    this.assertPlanning(`register derived unit ${record.id}`);
     if (this.derivedUnits.has(record.id)) {
       throw new ProgramAbiInvariantError(
         "duplicate-derived-unit",
@@ -726,7 +727,7 @@ export class ProgramAbiSession {
     id: IrBindingId,
     signature: Pick<FuncTypeDef, "params" | "results"> | ProgramAbiCallableTypeContract,
   ): void {
-    this.assertOpen(`register callable type contract for ${id}`);
+    this.assertPlanning(`register callable type contract for ${id}`);
     const draft = this.drafts.get(id);
     if (!draft || draft.intent.kind !== "callable") {
       throw new ProgramAbiInvariantError(
@@ -761,7 +762,7 @@ export class ProgramAbiSession {
 
   /** Retain one structured global storage contract through type compaction. */
   registerGlobalTypeContract(id: IrBindingId, type: ValType, mutable: boolean): void {
-    this.assertOpen(`register global type contract for ${id}`);
+    this.assertPlanning(`register global type contract for ${id}`);
     const draft = this.drafts.get(id);
     if (
       !draft ||
@@ -791,7 +792,7 @@ export class ProgramAbiSession {
   }
 
   createTypeCell(type: TypeDef): ProgramAbiTypeCell {
-    this.assertOpen("create a type cell");
+    this.assertPlanning("create a type cell");
     if (this.typeCellsByObject.has(type)) {
       throw new ProgramAbiInvariantError(
         "duplicate-type-cell",
@@ -813,7 +814,7 @@ export class ProgramAbiSession {
    * publish then rejects a required slot rather than guessing by type name.
    */
   remapTypeCell(cell: ProgramAbiTypeCell, replacement: TypeDef | null): void {
-    this.assertOpen("remap a type cell");
+    this.assertLayoutMutable("remap a type cell");
     if (!this.typeCells.has(cell)) {
       throw new ProgramAbiInvariantError("foreign-type-cell", "type cell belongs to another ABI session");
     }
@@ -836,7 +837,7 @@ export class ProgramAbiSession {
    * remap reports reject instead of silently attaching to another cell.
    */
   remapTypeObjects(remaps: Iterable<readonly [TypeDef, TypeDef | null]>): void {
-    this.assertOpen("remap type objects");
+    this.assertLayoutMutable("remap type objects");
     const pending = [...remaps];
     const previousObjects = new Set<TypeDef>();
     const replacementOwners = new Map<TypeDef, MutableProgramAbiTypeCell>();
@@ -891,7 +892,7 @@ export class ProgramAbiSession {
    * validated and remapped before any session-owned state changes.
    */
   applyTypeLayoutRemap(layout: ProgramAbiTypeLayoutRemap): void {
-    this.assertOpen("apply a type layout remap");
+    this.assertLayoutMutable("apply a type layout remap");
     const { previousTypes, nextTypes, targetsByOldIndex } = layout;
     if (this.module.types !== previousTypes || targetsByOldIndex.length !== previousTypes.length) {
       throw new ProgramAbiInvariantError(
@@ -979,7 +980,7 @@ export class ProgramAbiSession {
   }
 
   attachLocator(id: IrBindingId, locator: ProgramAbiSlotLocator): void {
-    this.assertOpen(`attach slot locator for ${id}`);
+    this.assertPlanning(`attach slot locator for ${id}`);
     const draft = this.drafts.get(id);
     if (!draft) {
       throw new ProgramAbiInvariantError("unknown-locator-binding", `slot locator targets unplanned ABI draft ${id}`);
@@ -1040,7 +1041,7 @@ export class ProgramAbiSession {
     module: WasmModule = this.module,
   ): number {
     this.assertModule(module);
-    this.assertStructuralReference(id, structuralReferenceKey, this.state === "open");
+    this.assertStructuralReference(id, structuralReferenceKey, this.state === "planning");
     if (this.state === "published") {
       const finalIndex = this.publishedValue!.abi.resolveFinalIndex(id);
       if (!finalIndex || finalIndex.space !== expectedSpace) {
@@ -1051,7 +1052,7 @@ export class ProgramAbiSession {
       }
       return finalIndex.index;
     }
-    this.assertOpen(`resolve current slot for ${id}`);
+    this.assertLayoutMutable(`resolve current slot for ${id}`);
     const canonical = this.canonicalDraft(id);
     if (canonical.slotPolicy !== "required" || canonical.slotSpace !== expectedSpace) {
       throw new ProgramAbiInvariantError(
@@ -1076,20 +1077,23 @@ export class ProgramAbiSession {
   }
 
   /**
-   * Build, seal, bind, and complete the ABI exactly once.
+   * Materialize and seal the deterministic ABI intention map without binding
+   * any concrete ModuleAssembler indices.
    *
-   * A failed publish closes the session too: callers must fix the producer and
-   * rebuild the compilation instead of mutating a partially observed plan.
+   * Planning producers are closed after this boundary. Exact allocator
+   * locators may still follow body replacement or layout compaction before
+   * final binding.
    */
-  publish(module: WasmModule): PublishedProgramAbi {
+  sealPlan(module: WasmModule = this.module): ProgramAbiMap {
     this.assertModule(module);
-    if (this.state !== "open") {
+    if (this.state === "sealed" || this.state === "published") return this.sealedAbi!;
+    if (this.state !== "planning") {
       throw new ProgramAbiInvariantError(
-        "session-publish-once",
-        `ProgramAbiSession publish was already attempted (${this.state})`,
+        "session-closed",
+        `ProgramAbiSession planning cannot be sealed from state ${this.state}`,
       );
     }
-    this.state = "publishing";
+    this.state = "sealing";
     try {
       const abi = new ProgramAbiMap(this.inventory, [...this.derivedUnits.values()]);
       const drafts = [...this.drafts.values()].sort((a, b) => compareDrafts(this.sourceOrderById, a, b));
@@ -1108,8 +1112,45 @@ export class ProgramAbiSession {
         } as ProgramAbiPlanEntry);
       }
       abi.sealPlan();
+      this.sealedAbi = abi;
+      this.state = "sealed";
+      return abi;
+    } catch (error) {
+      this.state = "failed";
+      throw error;
+    }
+  }
 
+  /**
+   * Resolve the sealed plan against the module's final exact object layout,
+   * bind every required index, and publish the compatibility view once.
+   */
+  bindAndPublish(module: WasmModule = this.module): PublishedProgramAbi {
+    this.assertModule(module);
+    if (this.state !== "sealed") {
+      throw new ProgramAbiInvariantError(
+        this.state === "planning" ? "planning-not-sealed" : "session-publish-once",
+        `ProgramAbiSession final binding requires a sealed unpublished plan (${this.state})`,
+      );
+    }
+    this.state = "binding";
+    try {
+      const abi = this.sealedAbi!;
       for (const entry of abi.entries()) {
+        const draft = this.drafts.get(entry.id);
+        if (!draft) {
+          throw new ProgramAbiInvariantError(
+            "unknown-binding",
+            `sealed ABI binding ${entry.id} no longer has its session draft`,
+          );
+        }
+        const finalizedDraft = this.materializeTypeContract(draft, module);
+        if (!intentsEqual(entry.intent, finalizedDraft.intent)) {
+          throw new ProgramAbiInvariantError(
+            "type-remap-mismatch",
+            `ABI binding ${entry.id} changed its sealed type contract before final binding`,
+          );
+        }
         if (entry.slotPolicy !== "required") continue;
         const locator = this.locators.get(entry.id);
         if (!locator) {
@@ -1135,6 +1176,25 @@ export class ProgramAbiSession {
       this.state = "failed";
       throw error;
     }
+  }
+
+  /**
+   * Compatibility wrapper that seals planning and publishes final bindings in
+   * one call.
+   *
+   * A failed seal or publication closes the session: callers must fix the
+   * producer and rebuild instead of mutating a partially observed plan.
+   */
+  publish(module: WasmModule): PublishedProgramAbi {
+    this.assertModule(module);
+    if (this.state !== "planning" && this.state !== "sealed") {
+      throw new ProgramAbiInvariantError(
+        "session-publish-once",
+        `ProgramAbiSession publish was already attempted (${this.state})`,
+      );
+    }
+    this.sealPlan(module);
+    return this.bindAndPublish(module);
   }
 
   private materializeTypeContract(draft: ProgramAbiDraft, module: WasmModule): ProgramAbiDraft {
@@ -1264,11 +1324,20 @@ export class ProgramAbiSession {
     }
   }
 
-  private assertOpen(action: string): void {
-    if (this.state !== "open") {
+  private assertPlanning(action: string): void {
+    if (this.state !== "planning") {
       throw new ProgramAbiInvariantError(
         "session-closed",
         `cannot ${action} after ProgramAbiSession left planning state (${this.state})`,
+      );
+    }
+  }
+
+  private assertLayoutMutable(action: string): void {
+    if (this.state !== "planning" && this.state !== "sealed") {
+      throw new ProgramAbiInvariantError(
+        "session-closed",
+        `cannot ${action} after ProgramAbiSession left the layout phase (${this.state})`,
       );
     }
   }
@@ -1328,7 +1397,7 @@ export class ProgramAbiSession {
     previous: T,
     replacement: T,
   ): void {
-    this.assertOpen(`replace slot locator for ${id}`);
+    this.assertLayoutMutable(`replace slot locator for ${id}`);
     const draft = this.drafts.get(id);
     if (!draft) {
       throw new ProgramAbiInvariantError("unknown-locator-binding", `slot locator targets unplanned ABI draft ${id}`);

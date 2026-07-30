@@ -309,3 +309,23 @@ The PR report must include inventory and outcome denominators, a per-unit
 direct/IR emission table, the old-allowlist vs Prepared delta, all post-Prepared
 failure injections, and proof that no in-scope placeholder or compile-twice
 unit shipped. “IR emitted” without `directBodyEmissions: 0` is not acceptance.
+
+## 2026-07-30 Program ABI session-seal prerequisite
+
+The bounded `3521:program-abi-session-seal` slice separates
+`ProgramAbiSession` into an explicit deterministic `sealPlan()` boundary and a
+later `bindAndPublish()` boundary. The existing `publish()` API remains a
+behavior-preserving wrapper over both phases, so production routing is
+unchanged.
+
+After sealing, new ABI drafts, derived units, contracts, locators, and
+structural-reference registrations are rejected. Exact function/global
+locator replacement, type-layout remapping, provisional index resolution, and
+final binding remain available until publication. Focused coverage proves
+late-plan rejection, post-seal function replacement, late-import index shifts,
+post-seal type-cell DCE remapping, exact final-index binding on the originally
+sealed `ProgramAbiMap`, and one-shot publication.
+
+This is a prerequisite seam only. Prepared free-function ownership, terminal
+component outcomes, support-intent collection, and direct/IR emission
+accounting remain for the main R2 implementation.
