@@ -1306,6 +1306,23 @@ function matchingRetainedMethodAssignment(
     : undefined;
 }
 
+/**
+ * Prove that a retained-call argument can cross the receiver-first dynamic
+ * dispatcher bridge without a build-time representation guess.
+ *
+ * Dynamic values pass through, numbers and strings have canonical boxes, and
+ * reference values use the established externalization path. Boolean values
+ * deliberately remain excluded: their i32 carrier is ambiguous at this seam
+ * unless the lowerer also receives an exact boolean-brand proof.
+ */
+function retainedMethodArgumentIsBridgeable(checker: ts.TypeChecker, argument: ts.Expression): boolean {
+  const type = checker.getTypeAtLocation(unwrapParens(argument));
+  if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return true;
+  if ((type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.StringLike)) !== 0) return true;
+  if ((type.flags & (ts.TypeFlags.Object | ts.TypeFlags.NonPrimitive)) !== 0) return true;
+  return false;
+}
+
 function makeRetainedFunctionMethodPlan(
   checker: ts.TypeChecker,
   call: ts.CallExpression,
@@ -1318,6 +1335,9 @@ function makeRetainedFunctionMethodPlan(
     !ts.isIdentifier(call.expression.name) ||
     call.arguments.some(ts.isSpreadElement)
   ) {
+    return undefined;
+  }
+  if (call.arguments.some((argument) => !retainedMethodArgumentIsBridgeable(checker, argument))) {
     return undefined;
   }
   const receiver = call.expression.expression;

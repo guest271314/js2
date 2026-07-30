@@ -81,6 +81,8 @@ general conversion of function values or closures.
       and execute with their required receiver.
 - [x] Negative tests keep reassigned, aliased, generic, and receiver-ambiguous
       retained targets on direct codegen.
+- [x] Concrete-result dispatcher calls and arguments without a proven bridge
+      are rejected before claim, with zero post-claim withdrawals.
 - [x] The unchanged exact Acorn driver reports its measured emitted-name
       count, checksum 422, zero imports, and zero post-claim withdrawals.
 - [x] All 27 previously emitted Acorn names remain emitted.
@@ -94,6 +96,10 @@ general conversion of function values or closures.
   `parseExpressionAt`, and `tokenizer`; none of the previous 27 withdrew.
 - Runtime remains checksum 422 with zero Wasm imports and zero post-claim
   withdrawals.
+- Adversarial ABI coverage keeps typed string-result wrappers on direct
+  codegen because the closed dispatcher still returns boxed dynamic, and
+  rejects boolean-parameter wrappers before claim because their unbranded i32
+  argument has no proven box at this bridge.
 - A same-host paired measurement recorded 49.415 ms/op for this slice versus
   49.954 ms/op for its #3791 parent (about 1.1% faster). The migration win is
   the three additional IR bodies; the runtime delta is small enough to treat as

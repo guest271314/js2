@@ -99,4 +99,50 @@ describe("#3793 retained function-object parser wrappers", () => {
     }
     expect((instance.exports.run as () => number)()).toBe(11);
   });
+
+  it("keeps a typed string-result wrapper on direct codegen without a post-claim withdrawal", async () => {
+    const { result, instance } = await compileStandalone(
+      `
+      var Factory = function Factory() {};
+      Factory.method = function method(value: string): string {
+        return value;
+      };
+
+      function wrapper(value: string): string {
+        return Factory.method(value);
+      }
+
+      export function run() {
+        return wrapper("abc").length;
+      }
+      `,
+      "issue-3793-retained-parser-wrapper-string-result.ts",
+    );
+
+    expect(result.irCompiledFuncs ?? [], JSON.stringify(result.irOutcomes, null, 2)).not.toContain("wrapper");
+    expect((instance.exports.run as () => number)()).toBe(3);
+  });
+
+  it("rejects an unboxable boolean wrapper argument before the IR claim", async () => {
+    const { result, instance } = await compileStandalone(
+      `
+      var Factory = function Factory() {};
+      Factory.method = function method(value: boolean): any {
+        return value ? 7 : 3;
+      };
+
+      function wrapper(value: boolean): any {
+        return Factory.method(value);
+      }
+
+      export function run(): number {
+        return wrapper(true);
+      }
+      `,
+      "issue-3793-retained-parser-wrapper-boolean-argument.ts",
+    );
+
+    expect(result.irCompiledFuncs ?? [], JSON.stringify(result.irOutcomes, null, 2)).not.toContain("wrapper");
+    expect((instance.exports.run as () => number)()).toBe(7);
+  });
 });

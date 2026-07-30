@@ -1700,7 +1700,7 @@ function whyNotIrClaimable(
   // yield machinery has no dynamic arm yet.
   // -------------------------------------------------------------------------
   if (dynNames.size > 0 && isGenerator) return "param-type-not-resolvable";
-  if (dynNames.size > 0 || isDynamicReturn) {
+  if (dynNames.size > 0 || isDynamicReturn || containsRetainedFunctionMethodCall(body)) {
     if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap)) {
       return dynNames.size > 0 ? "param-type-not-resolvable" : "return-type-not-resolvable";
     }
@@ -2185,6 +2185,30 @@ function concreteDynamicAssignmentOperandIsBuildable(candidate: ts.Expression): 
     concreteDynamicAssignmentOperandIsBuildable(candidate.whenTrue) &&
     concreteDynamicAssignmentOperandIsBuildable(candidate.whenFalse)
   );
+}
+
+/**
+ * True when the current body contains a #3793 retained method call.
+ *
+ * Such calls always use the boxed-dynamic closed-dispatch ABI, so they must
+ * run through {@link dynamicUsesAreMoveOnly} even when the enclosing
+ * declaration has no dynamic parameter/result. The scan then proves both the
+ * result position and every argument bridge before the selector claims the
+ * function.
+ */
+function containsRetainedFunctionMethodCall(body: ts.Block): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (node !== body && isFunctionLike(node)) return;
+    if (ts.isCallExpression(node) && currentModuleBindingResolver?.retainedFunctionMethodPlan(node) !== undefined) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(body, visit);
+  return found;
 }
 
 /**
