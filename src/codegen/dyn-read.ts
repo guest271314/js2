@@ -54,6 +54,7 @@ import { ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { allocLocal } from "./context/locals.js";
 import { collectClosureBaseWrapperTypeIdxs as closureBaseWrapperTypeIdxs } from "./closure-classifier.js"; // (#2175 V2-S1) shared list
 import { buildThrowJsErrorInstrs } from "./js-errors.js";
+import { boxToAny } from "./value-tags.js";
 
 // `$AnyValue` tag constants (mirror any-helpers.ts box helpers).
 const TAG_NULL = 0;
@@ -995,23 +996,23 @@ function emitDynMemberSetNullishSelfTest(ctx: CodegenContext): void {
   const call = (funcIdx: number): Instr => ({ op: "call", funcIdx });
 
   if (ctx.fast) {
-    const boxNullIdx = ctx.funcMap.get("__any_box_null");
-    const boxUndefinedIdx = ctx.funcMap.get("__any_box_undefined");
     const honestIdx = ctx.funcMap.get("__any_from_extern_honest");
-    if (boxNullIdx === undefined || boxUndefinedIdx === undefined || honestIdx === undefined) return;
-    const carrier = (boxIdx: number): Instr[] => [call(boxIdx)];
+    if (honestIdx === undefined || !undefinedSingletonActive(ctx)) return;
+    const carrier = (jsType: "null" | "undefined"): Instr[] | undefined => {
+      const body: Instr[] = [{ op: "ref.null.extern" }];
+      const emitted = boxToAny(ctx, { body } as FunctionContext, { kind: "externref" }, jsType);
+      return emitted ? body : undefined;
+    };
+    const nullCarrier = carrier("null");
+    const undefinedCarrier = carrier("undefined");
+    if (nullCarrier === undefined || undefinedCarrier === undefined) return;
     const keyCarrier = (value: string): Instr[] => [...key(value), call(honestIdx)];
-    const getBody = (boxIdx: number): Instr[] => [...carrier(boxIdx), ...keyCarrier("x"), call(getIdx), { op: "drop" }];
-    const setBody = (boxIdx: number): Instr[] => [
-      ...carrier(boxIdx),
-      ...keyCarrier("x"),
-      ...keyCarrier("true"),
-      call(setIdx),
-    ];
-    addDriverExport(ctx, "__dms_null_get", [], [], getBody(boxNullIdx));
-    addDriverExport(ctx, "__dms_undefined_get", [], [], getBody(boxUndefinedIdx));
-    addDriverExport(ctx, "__dms_null_set", [], [], setBody(boxNullIdx));
-    addDriverExport(ctx, "__dms_undefined_set", [], [], setBody(boxUndefinedIdx));
+    const getBody = (recv: Instr[]): Instr[] => [...recv, ...keyCarrier("x"), call(getIdx), { op: "drop" }];
+    const setBody = (recv: Instr[]): Instr[] => [...recv, ...keyCarrier("x"), ...keyCarrier("true"), call(setIdx)];
+    addDriverExport(ctx, "__dms_null_get", [], [], getBody(nullCarrier));
+    addDriverExport(ctx, "__dms_undefined_get", [], [], getBody(undefinedCarrier));
+    addDriverExport(ctx, "__dms_null_set", [], [], setBody(nullCarrier));
+    addDriverExport(ctx, "__dms_undefined_set", [], [], setBody(undefinedCarrier));
     return;
   }
 
