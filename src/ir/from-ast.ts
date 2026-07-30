@@ -38,6 +38,15 @@
 import { ts, forEachChild } from "../ts-api.js";
 
 import { TsCheckerOracle } from "../checker/oracle.js";
+import {
+  IR_DYN_ADD_FN,
+  IR_DYN_GE_FN,
+  IR_DYN_GT_FN,
+  IR_DYN_LE_FN,
+  IR_DYN_LT_FN,
+  IR_DYN_METHOD_CALL_0_FN,
+  IR_DYN_METHOD_CALL_1_FN,
+} from "../codegen/dyn-ops.js";
 import { FMOD_FN } from "../codegen/fmod.js"; // #2945 — `%` lowers to a call of the shared exact-fmod helper
 // (#1373b C-1) Leaf-module async helpers (no codegen/index cycle).
 import { staticPromiseResolveSettledExpr, unwrapPromiseTypeNode } from "../codegen/async-static.js";
@@ -2829,6 +2838,20 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
           continue;
         }
       }
+      if (inferred.kind === "dynamic") {
+        const dynamicValType = cx.resolver?.resolveDynamic?.();
+        if (dynamicValType) {
+          const slotIndex = cx.builder.declareSlot(name, dynamicValType);
+          cx.builder.emitSlotWrite(slotIndex, value);
+          cx.scope.set(name, {
+            kind: "slot",
+            slotIndex,
+            type: irVal(dynamicValType),
+            asType: inferred,
+          });
+          continue;
+        }
+      }
       // Fall through only for representations without a concrete ValType.
       // A later assignment then remains an invariant: the mutation pre-pass
       // promised that every mutable binding with a slot representation was
@@ -4680,6 +4703,14 @@ function lowerCall(expr: ts.CallExpression, cx: LowerCtx, statementPosition = fa
         argType = cx.builder.typeOf(argVal);
       }
     }
+    // A dynamic value flowing into a proven numeric local ABI observes the
+    // ordinary JavaScript ToNumber boundary. This keeps generic parser loops
+    // dynamic at their public edge while allowing numeric helpers to retain
+    // their grounded f64 signature.
+    if (argType.kind === "dynamic" && asVal(expected)?.kind === "f64") {
+      argVal = cx.builder.emitDynToNumber(argVal);
+      argType = cx.builder.typeOf(argVal);
+    }
     if (!irTypeArgAssignable(argType, expected)) {
       throw new Error(
         `ir/from-ast: arg ${i} of call to ${calleeName} is ${describeIrType(argType)}, expected ${describeIrType(expected)} in ${cx.funcName}`,
@@ -5476,6 +5507,37 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
 
   const recv = lowerExpr(expr.expression.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
+
+  if (recvType.kind === "dynamic") {
+    if (expr.arguments.length > 1 || expr.arguments.some(ts.isSpreadElement)) {
+      throw new IrUnsupportedError(
+        "method-call-unsupported",
+        "build",
+        `ir/from-ast: dynamic method .${methodName}(...) supports at most one non-spread argument (${cx.funcName})`,
+      );
+    }
+    const key = cx.builder.emitBox(cx.builder.emitStringConst(methodName), irDynamic(JsTag.String));
+    const dynamicArgs: IrValueId[] = [recv, key];
+    for (const argument of expr.arguments) {
+      const value = lowerExpr(argument, cx, irDynamic());
+      const valueType = cx.builder.typeOf(value);
+      const dynamicValue = valueType.kind === "dynamic" ? value : boxConcreteToDynamic(value, valueType, argument, cx);
+      if (dynamicValue === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: dynamic method argument cannot be boxed (${cx.funcName})`,
+        );
+      }
+      dynamicArgs.push(dynamicValue);
+    }
+    const target = expr.arguments.length === 0 ? IR_DYN_METHOD_CALL_0_FN : IR_DYN_METHOD_CALL_1_FN;
+    const result = cx.builder.emitCall(irRuntimeFuncRef(target), dynamicArgs, irDynamic());
+    if (result === null) {
+      throw new Error(`ir/from-ast: dynamic method .${methodName}(...) produced no result in ${cx.funcName}`);
+    }
+    return result;
+  }
 
   // (#2856) `<number>.toString()` (no radix) on an f64 receiver → the
   // `number_toString` `(f64) -> externref` host import, pre-registered by the
@@ -7866,6 +7928,28 @@ function lowerIncrementDecrement(id: ts.Identifier, op: ts.SyntaxKind, cx: Lower
     cx.builder.emitSlotWrite(binding.slotIndex, next);
     return;
   }
+  const logicalType = binding.kind === "slot" ? (binding.asType ?? binding.type) : binding.type;
+  if (logicalType.kind === "dynamic") {
+    const current =
+      binding.kind === "moduleGlobal"
+        ? cx.builder.emitGlobalGet(binding.globalRef, logicalType)
+        : cx.builder.emitSlotReadAs(binding.slotIndex, logicalType);
+    const numeric = cx.builder.emitDynToNumber(current);
+    const one = cx.builder.emitConst({ kind: "f64", value: 1 }, irVal({ kind: "f64" }));
+    const updated = cx.builder.emitBinary(
+      op === ts.SyntaxKind.PlusPlusToken ? "f64.add" : "f64.sub",
+      numeric,
+      one,
+      irVal({ kind: "f64" }),
+    );
+    const boxed = cx.builder.emitBox(updated, irDynamic(JsTag.NumberF64));
+    if (binding.kind === "moduleGlobal") {
+      cx.builder.emitGlobalSet(binding.globalRef, boxed);
+    } else {
+      cx.builder.emitSlotWrite(binding.slotIndex, boxed);
+    }
+    return;
+  }
   const slotValType = asVal(binding.type);
   // The IR's binop set only includes f64 arithmetic — i32 add/sub
   // would need additional binop variants. For now, restrict to f64
@@ -8372,6 +8456,37 @@ function peelParensExpr(e: ts.Expression): ts.Expression {
   return inner;
 }
 
+function expressionProducesDynamic(expr: ts.Expression, cx: LowerCtx): boolean {
+  const candidate = peelParensExpr(expr);
+  if (ts.isIdentifier(candidate)) {
+    const binding = cx.scope.get(candidate.text);
+    if (!binding) return false;
+    if (binding.kind === "local" || binding.kind === "moduleGlobal") return binding.type.kind === "dynamic";
+    if (binding.kind === "slot") return (binding.asType ?? binding.type).kind === "dynamic";
+    return false;
+  }
+  if (ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate)) {
+    return expressionProducesDynamic(candidate.expression, cx);
+  }
+  if (ts.isCallExpression(candidate)) {
+    if (ts.isIdentifier(candidate.expression)) {
+      return cx.calleeTypes?.get(candidate.expression.text)?.returnType?.kind === "dynamic";
+    }
+    return (
+      ts.isPropertyAccessExpression(candidate.expression) &&
+      expressionProducesDynamic(candidate.expression.expression, cx)
+    );
+  }
+  if (ts.isConditionalExpression(candidate)) {
+    return expressionProducesDynamic(candidate.whenTrue, cx) && expressionProducesDynamic(candidate.whenFalse, cx);
+  }
+  return (
+    ts.isBinaryExpression(candidate) &&
+    candidate.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+    (expressionProducesDynamic(candidate.left, cx) || expressionProducesDynamic(candidate.right, cx))
+  );
+}
+
 /**
  * (#3758) Emit `e` — the caller MUST have already verified
  * `isI32PureExprIR(e, cx.i32PureNames)` — as a genuine i32-typed IrValueId.
@@ -8494,7 +8609,11 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // unchanged (#2780's no-checker arm). The same operand proof
   // (`proveAdditiveOperand` / `classifyPrimitiveProof`) is the reusable
   // infrastructure rows 3 / 5 adopt.
-  if (op === ts.SyntaxKind.PlusToken) {
+  if (
+    op === ts.SyntaxKind.PlusToken &&
+    !expressionProducesDynamic(expr.left, cx) &&
+    !expressionProducesDynamic(expr.right, cx)
+  ) {
     const lProof = proveAdditiveOperand(expr.left, cx);
     const rProof = proveAdditiveOperand(expr.right, cx);
     if (lProof !== "no-checker" && rProof !== "no-checker") {
@@ -8550,6 +8669,15 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrV
   // selector scan admits dynamic-eq bodies; today the move-only gate rejects
   // them, so this arm is byte-inert.
   if (lt.kind === "dynamic" || rt.kind === "dynamic") {
+    if (op === ts.SyntaxKind.PlusToken) {
+      const dynL = lt.kind === "dynamic" ? lhs : boxConcreteToDynamic(lhs, lt, expr.left, cx);
+      const dynR = rt.kind === "dynamic" ? rhs : boxConcreteToDynamic(rhs, rt, expr.right, cx);
+      if (dynL !== null && dynR !== null) {
+        const added = cx.builder.emitCall(irRuntimeFuncRef(IR_DYN_ADD_FN), [dynL, dynR], irDynamic());
+        if (added === null) throw new Error(`ir/from-ast: dynamic '+' produced no result in ${cx.funcName}`);
+        return added;
+      }
+    }
     const dynEq = tryLowerDynamicEq(expr, op, lhs, rhs, lt, rt, cx);
     if (dynEq !== null) return dynEq;
     // #2949 S5.3 — dynamic relational: `<`/`>`/`<=`/`>=` where either operand
@@ -9303,21 +9431,33 @@ function tryLowerDynamicRelational(
   cx: LowerCtx,
 ): IrValueId | null {
   let binop: IrBinop;
+  let runtimeName: string;
   switch (op) {
     case ts.SyntaxKind.LessThanToken:
       binop = "f64.lt";
+      runtimeName = IR_DYN_LT_FN;
       break;
     case ts.SyntaxKind.LessThanEqualsToken:
       binop = "f64.le";
+      runtimeName = IR_DYN_LE_FN;
       break;
     case ts.SyntaxKind.GreaterThanToken:
       binop = "f64.gt";
+      runtimeName = IR_DYN_GT_FN;
       break;
     case ts.SyntaxKind.GreaterThanEqualsToken:
       binop = "f64.ge";
+      runtimeName = IR_DYN_GE_FN;
       break;
     default:
       return null;
+  }
+  if (lt.kind === "dynamic" && rt.kind === "dynamic") {
+    const result = cx.builder.emitCall(irRuntimeFuncRef(runtimeName), [lhs, rhs], irVal({ kind: "i32" }));
+    if (result === null) {
+      throw new Error(`ir/from-ast: dynamic relational helper ${runtimeName} produced no result in ${cx.funcName}`);
+    }
+    return result;
   }
   const lf = relOperandToF64(lhs, lt, cx);
   if (lf === null) return null;

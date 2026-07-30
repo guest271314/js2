@@ -33,6 +33,17 @@ import {
   ensureExternStrictEqHelper,
 } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
 import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
+import {
+  ensureIrDynamicRuntime,
+  IR_DYN_ADD_FN,
+  IR_DYN_GE_FN,
+  IR_DYN_GT_FN,
+  IR_DYN_LE_FN,
+  IR_DYN_LT_FN,
+  IR_DYN_METHOD_CALL_0_FN,
+  IR_DYN_METHOD_CALL_1_FN,
+  type IrDynamicRuntimeNeed,
+} from "../codegen/dyn-ops.js";
 import { ensureLateImport, flushLateImportShifts } from "../codegen/shared.js"; // (#2949 S5.2) host __host_eq / __host_loose_eq registration; (#3143) flush the __extern_is_undefined batch pre-Phase-3
 import { getOrRegisterPromiseType, isStandalonePromiseActive } from "../codegen/async-scheduler.js";
 import {
@@ -3554,28 +3565,15 @@ function makeResolver(
     },
     emitStringConst(value: string, alloc?: import("./nodes.js").AllocSiteId): readonly Instr[] {
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
-        // #1588 PR-B part 2: when --utf8-storage is on, read the encoding
-        // annotation off the string.const's alloc site and let
-        // nativeStringLiteralInstrs pick i8 (Utf8String) vs i16 (NativeString).
-        // When off, or the annotation is absent/wtf16, this is the i16 path —
-        // byte-identical to before.
-        if (ctx.utf8Storage && alloc !== undefined && ctx.allocRegistry) {
-          const enc = ctx.allocRegistry.read<StringEncoding>(alloc, ALLOC_NAMESPACES.encoding);
-          return nativeStringLiteralInstrs(ctx, value, enc);
-        }
-        // Native strings: inline `array.new_fixed` of WTF-16 code units +
-        // `struct.new $NativeString(len, off, data)` — same shape as
-        // `compileNativeStringLiteral` in the legacy path.
-        const ops: Instr[] = [
-          { op: "i32.const", value: value.length },
-          { op: "i32.const", value: 0 },
-        ];
-        for (let i = 0; i < value.length; i++) {
-          ops.push({ op: "i32.const", value: value.charCodeAt(i) });
-        }
-        ops.push({ op: "array.new_fixed", typeIdx: ctx.nativeStrDataTypeIdx, length: value.length });
-        ops.push({ op: "struct.new", typeIdx: ctx.nativeStrTypeIdx });
-        return ops;
+        // Match direct codegen's interned native-literal representation. Besides
+        // avoiding per-execution allocation, shared identity is a prerequisite
+        // for the native method/property fast paths. The optional encoding fact
+        // retains the existing Utf8String selection.
+        const encoding =
+          ctx.utf8Storage && alloc !== undefined && ctx.allocRegistry
+            ? ctx.allocRegistry.read<StringEncoding>(alloc, ALLOC_NAMESPACES.encoding)
+            : undefined;
+        return nativeStringLiteralInstrs(ctx, value, encoding);
       }
       // Host strings: pre-registration in `preregisterStringSupport` already
       // ensured the string global exists. Look up the (now-final) index.
@@ -4253,6 +4251,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   // that legacy registers on demand via `ensureLateImport` — another
   // dual-compile side effect IR-first skips. Detect + register the same way.
   let usesExternIsUndefined = false;
+  const dynamicRuntimeNeeds = new Set<IrDynamicRuntimeNeed>();
   for (const entry of fns) {
     for (const block of entry.fn.blocks) {
       for (const instr of block.instrs) {
@@ -4264,6 +4263,31 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
           if (i.kind === "call" && i.target.binding.kind === "import" && i.target.binding.module === "env") {
             if (UNION_IMPORT_FUNC_NAMES.has(i.target.binding.field)) usesNamedUnionImport = true;
             else if (i.target.binding.field === "__extern_is_undefined") usesExternIsUndefined = true;
+          }
+          if (i.kind === "call" && i.target.binding.kind === "runtime") {
+            switch (i.target.binding.symbol) {
+              case IR_DYN_ADD_FN:
+                dynamicRuntimeNeeds.add("add");
+                break;
+              case IR_DYN_LT_FN:
+                dynamicRuntimeNeeds.add("lt");
+                break;
+              case IR_DYN_LE_FN:
+                dynamicRuntimeNeeds.add("le");
+                break;
+              case IR_DYN_GT_FN:
+                dynamicRuntimeNeeds.add("gt");
+                break;
+              case IR_DYN_GE_FN:
+                dynamicRuntimeNeeds.add("ge");
+                break;
+              case IR_DYN_METHOD_CALL_0_FN:
+                dynamicRuntimeNeeds.add("method-call-0");
+                break;
+              case IR_DYN_METHOD_CALL_1_FN:
+                dynamicRuntimeNeeds.add("method-call-1");
+                break;
+            }
           }
         });
       }
@@ -4289,6 +4313,10 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
     // `addUnionImports` above already self-flushes; this covers the bare
     // extern-is-undefined path (no union import present).
     flushLateImportShifts(ctx, null);
+  }
+  if (dynamicRuntimeNeeds.size > 0) {
+    addUnionImports(ctx);
+    ensureIrDynamicRuntime(ctx, dynamicRuntimeNeeds);
   }
   if (!usesDynamicOps) return;
   if (usesToNumber && ctx.standalone) {

@@ -324,6 +324,9 @@ export interface IrSelectionOptions {
    * one fully certified ABI, making a legacy caller's pre-emitted call safe.
    */
   readonly legacyCallerAbiIsProjected?: (declaration: ts.FunctionDeclaration) => boolean;
+  /** Whether this backend configuration has the runtime bridges required by
+   * dynamic arithmetic, named method calls, and mutable dynamic counters. */
+  readonly dynamicRuntimeBuildable?: boolean;
   /**
    * Checker-backed certification for recursive call-graph components. A
    * rejected component is kept on the direct path even when optimistic
@@ -649,6 +652,7 @@ export function planIrCompilation(
   // this run (default true = the sound default-host / fallback path). Read by
   // `dynamicUsesAreMoveOnly` to gate the dynamic member/element-access claim.
   currentDynMemberReadBuildable = options?.dynMemberReadBuildable ?? true;
+  currentDynamicRuntimeBuildable = options?.dynamicRuntimeBuildable ?? true;
   const fallbackReasons = new Map<string, IrFallbackReason>();
   // (#2856 Step-1) Parallel to `fallbackReasons`: the opt-in reject-arm detail
   // for `body-shape-rejected` entries (populated only when JS2WASM_IR_SHAPE_DIAG=1).
@@ -1182,6 +1186,7 @@ let currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "
 
 // #3053 U2 current-run capability for dynamic member reads; sound-default true.
 let currentDynMemberReadBuildable = true;
+let currentDynamicRuntimeBuildable = true;
 // #2949 S5.P follow-up — dynamic member reads used by equality require the
 // canonical boxed-any parameter ABI. A top-level function is eligible only
 // when every source reference to it is a direct identifier call; value uses
@@ -1216,6 +1221,7 @@ export function configureIrStructuralSelectorPredicates(
       : null;
   currentModuleBindingResolver = options?.resolveModuleBinding ?? null;
   currentDynMemberReadBuildable = options?.dynMemberReadBuildable ?? true;
+  currentDynamicRuntimeBuildable = options?.dynamicRuntimeBuildable ?? true;
 }
 
 function identifierIsValueReference(node: ts.Identifier): boolean {
@@ -2057,12 +2063,16 @@ let currentDynScanDecls: ReadonlyMap<string, ts.FunctionDeclaration> | null = nu
 /** Resolve whether param `argIdx` of local function `calleeName` is dynamic
  *  (same `resolveParamType` verdict the callee's own claim check uses, so the
  *  caller-side scan and the callee's signature can never drift). */
-function calleeParamIsDynamic(calleeName: string, argIdx: number, typeMap: TypeMap | undefined): boolean {
+function calleeParamResolvedKind(calleeName: string, argIdx: number, typeMap: TypeMap | undefined): ResolvedKind {
   const decl = currentDynScanDecls?.get(calleeName);
-  if (!decl) return false;
+  if (!decl) return null;
   const p = decl.parameters[argIdx];
-  if (!p || !ts.isIdentifier(p.name)) return false;
-  return resolveParamType(p, typeMap?.get(calleeName)?.params[argIdx]) === "dynamic";
+  if (!p || !ts.isIdentifier(p.name)) return null;
+  return resolveParamType(p, typeMap?.get(calleeName)?.params[argIdx]);
+}
+
+function calleeParamIsDynamic(calleeName: string, argIdx: number, typeMap: TypeMap | undefined): boolean {
+  return calleeParamResolvedKind(calleeName, argIdx, typeMap) === "dynamic";
 }
 
 function calleeHasAnyDynamicParam(calleeName: string, typeMap: TypeMap | undefined): boolean {
@@ -2218,6 +2228,25 @@ function dynamicUsesAreMoveOnly(
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
       return calleeReturnIsDynamic(e.expression.text, typeMap);
     }
+    if (
+      currentDynamicRuntimeBuildable &&
+      ts.isCallExpression(e) &&
+      ts.isPropertyAccessExpression(e.expression) &&
+      isDynShaped(e.expression.expression)
+    ) {
+      return true;
+    }
+    if (
+      currentDynamicRuntimeBuildable &&
+      ts.isBinaryExpression(e) &&
+      e.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+      (isDynShaped(e.left) || isDynShaped(e.right))
+    ) {
+      return true;
+    }
+    if (ts.isConditionalExpression(e) && isDynShaped(e.whenTrue) && isDynShaped(e.whenFalse)) {
+      return true;
+    }
     if (ts.isPropertyAccessExpression(e)) return isDynShaped(e.expression);
     if (ts.isElementAccessExpression(e)) return isDynShaped(e.expression);
     return false;
@@ -2235,7 +2264,13 @@ function dynamicUsesAreMoveOnly(
         if (subtreeTouchesDynamic(a, dynNames)) return false;
         continue;
       }
-      if (!scanExpr(a, calleeParamIsDynamic(calleeName, i, typeMap))) return false;
+      const expectedKind = calleeParamResolvedKind(calleeName, i, typeMap);
+      const argumentIsDynamic = isDynShaped(a);
+      if (currentDynamicRuntimeBuildable && argumentIsDynamic && expectedKind === "f64") {
+        if (!scanExpr(a, true)) return false;
+        continue;
+      }
+      if (!scanExpr(a, expectedKind === "dynamic")) return false;
     }
     return true;
   };
@@ -2251,6 +2286,21 @@ function dynamicUsesAreMoveOnly(
       return dynNames.has(e.text) === expectDyn;
     }
     if (ts.isCallExpression(e)) {
+      if (
+        currentDynamicRuntimeBuildable &&
+        ts.isPropertyAccessExpression(e.expression) &&
+        isDynShaped(e.expression.expression)
+      ) {
+        if (!currentDynMemberReadBuildable || !expectDyn || e.arguments.length > 1) return false;
+        if (!scanExpr(e.expression.expression, true)) return false;
+        for (const argument of e.arguments) {
+          if (ts.isSpreadElement(argument)) return false;
+          const dynamic = isDynShaped(argument);
+          if (!dynamic && !concreteDynamicAssignmentOperandIsBuildable(unwrap(argument))) return false;
+          if (!scanExpr(argument, dynamic)) return false;
+        }
+        return true;
+      }
       // Direct call to a (possibly) top-level function. A dyn-NAMED callee
       // (`x()` where x is dynamic) is calling a dynamic value — slice 3.
       if (ts.isIdentifier(e.expression)) {
@@ -2288,6 +2338,16 @@ function dynamicUsesAreMoveOnly(
         if (isDynShaped(e.right)) return scanExpr(e.right, true);
         const concrete = unwrap(e.right);
         return concreteDynamicAssignmentOperandIsBuildable(concrete) && scanExpr(concrete, false);
+      }
+      if (op === ts.SyntaxKind.PlusToken && (leftIsDyn || rightIsDyn)) {
+        if (!currentDynamicRuntimeBuildable) return false;
+        if (!expectDyn) return false;
+        const scanAddOperand = (operand: ts.Expression, dynamic: boolean): boolean => {
+          if (dynamic) return scanExpr(operand, true);
+          const concrete = unwrap(operand);
+          return concreteDynamicAssignmentOperandIsBuildable(concrete) && scanExpr(concrete, false);
+        };
+        return scanAddOperand(e.left, leftIsDyn) && scanAddOperand(e.right, rightIsDyn);
       }
       if (expectDyn) return false; // operator results are concrete-shaped
 
@@ -2340,7 +2400,9 @@ function dynamicUsesAreMoveOnly(
           // string/string ARC arm. A concrete f64 counterpart makes the ARC
           // numeric by construction, so locals such as Acorn's `pos > code`
           // are as safe as numeric literals.
-          if (leftIsDyn === rightIsDyn) return false;
+          if (leftIsDyn && rightIsDyn) {
+            return currentDynamicRuntimeBuildable && scanExpr(e.left, true) && scanExpr(e.right, true);
+          }
           const concrete = unwrap(leftIsDyn ? e.right : e.left);
           if (!expressionIsProvenNumber(concrete)) return false;
           return scanExpr(leftIsDyn ? e.left : e.right, true) && scanExpr(concrete, false);
@@ -2373,12 +2435,29 @@ function dynamicUsesAreMoveOnly(
       ) {
         return scanExpr(op, true);
       }
+      if (
+        isDynShaped(op) &&
+        (e.operator === ts.SyntaxKind.PlusPlusToken || e.operator === ts.SyntaxKind.MinusMinusToken)
+      ) {
+        return currentDynamicRuntimeBuildable && scanExpr(op, true);
+      }
       return scanExpr(op, false);
     }
     if (ts.isConditionalExpression(e)) {
-      // Dyn joins in cond-expr arms need refinement widening at the join —
-      // slice 3. Concrete conditional expressions pass through.
-      if (expectDyn) return false;
+      const trueIsDynamic = isDynShaped(e.whenTrue);
+      const falseIsDynamic = isDynShaped(e.whenFalse);
+      if (expectDyn) {
+        // The builder already accepts equal dynamic branch types. Keep mixed
+        // dynamic/concrete joins out until the join can box the concrete arm.
+        return (
+          trueIsDynamic &&
+          falseIsDynamic &&
+          scanExpr(e.condition, isDynShaped(e.condition)) &&
+          scanExpr(e.whenTrue, true) &&
+          scanExpr(e.whenFalse, true)
+        );
+      }
+      if (trueIsDynamic || falseIsDynamic) return false;
       return (
         scanExpr(e.condition, isDynShaped(e.condition)) && scanExpr(e.whenTrue, false) && scanExpr(e.whenFalse, false)
       );
@@ -2441,7 +2520,14 @@ function dynamicUsesAreMoveOnly(
     }
     if (ts.isReturnStatement(s)) {
       if (!s.expression) return true;
-      return scanExpr(s.expression, returnIsDynamic);
+      if (!returnIsDynamic) return scanExpr(s.expression, false);
+      if (isDynShaped(s.expression)) return scanExpr(s.expression, true);
+      const concrete = unwrap(s.expression);
+      // `coerceReturnValue` boxes only after the expression has lowered.
+      // A mixed concrete ternary cannot form its join before that boundary;
+      // keep it on direct codegen until branch-local boxing is represented.
+      if (ts.isConditionalExpression(concrete)) return false;
+      return concreteDynamicAssignmentOperandIsBuildable(concrete) && scanExpr(concrete, false);
     }
     if (ts.isExpressionStatement(s)) {
       const e = unwrap(s.expression);
@@ -2467,7 +2553,22 @@ function dynamicUsesAreMoveOnly(
       return scanExpr(s.expression, isDynShaped(s.expression)) && scanStmt(s.statement);
     }
     if (ts.isForStatement(s)) {
-      if (s.initializer && subtreeTouchesDynamic(s.initializer, dynNames)) return false;
+      if (s.initializer) {
+        if (ts.isVariableDeclarationList(s.initializer)) {
+          for (const decl of s.initializer.declarations) {
+            if (!decl.initializer) continue;
+            if (!ts.isIdentifier(decl.name)) {
+              if (subtreeTouchesDynamic(decl, dynNames)) return false;
+              continue;
+            }
+            const initializerIsDynamic = isDynShaped(decl.initializer);
+            if (!scanExpr(decl.initializer, initializerIsDynamic)) return false;
+            if (initializerIsDynamic) dynNames.add(decl.name.text);
+          }
+        } else if (!scanExpr(s.initializer, false)) {
+          return false;
+        }
+      }
       if (s.condition && !scanExpr(s.condition, isDynShaped(s.condition))) return false;
       if (s.incrementor && !scanExpr(s.incrementor, false)) return false;
       return scanStmt(s.statement);
