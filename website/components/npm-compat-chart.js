@@ -278,17 +278,15 @@ class NpmCompatChart extends HTMLElement {
   }
 
   _bindPerfControls() {
-    this.shadowRoot.querySelectorAll(".perf-block").forEach((perf) => {
-      const setPressed = (attribute, value) => {
-        perf.querySelectorAll(`button[${attribute}]`).forEach((button) => {
-          button.setAttribute("aria-pressed", String(button.getAttribute(attribute) === value));
-        });
-      };
-      perf.querySelectorAll("button[data-target-value]").forEach((button) => {
-        button.addEventListener("click", () => {
-          const value = button.getAttribute("data-target-value");
-          perf.dataset.target = value;
-          setPressed("data-target-value", value);
+    const dashboard = this.shadowRoot.querySelector(".chart-dashboard");
+    if (!dashboard) return;
+    const buttons = dashboard.querySelectorAll(".global-target-toggle button[data-target-value]");
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const value = button.getAttribute("data-target-value");
+        dashboard.dataset.target = value;
+        buttons.forEach((candidate) => {
+          candidate.setAttribute("aria-pressed", String(candidate.getAttribute("data-target-value") === value));
         });
       });
     });
@@ -325,17 +323,10 @@ class NpmCompatChart extends HTMLElement {
     } else {
       const operation = this._operationLabel(pkg.perf.sampleOp);
       perf = `
-        <div class="perf-block" data-target="standalone">
+        <div class="perf-block">
           <div class="section-title">
             <span>Relative speed over time</span>
             ${operation ? `<span class="operation" title="${this._esc(pkg.perf.sampleOp)}">${this._esc(operation)}</span>` : ""}
-          </div>
-          <div class="benchmark-controls">
-            <div class="toggle-group target-toggle" aria-label="Wasm runtime">
-              <button type="button" data-target-value="host" aria-pressed="false">JS host</button>
-              <button type="button" data-target-value="standalone" aria-pressed="true">Standalone</button>
-            </div>
-            <span class="baseline-key"><span></span>Node baseline</span>
           </div>
           <div class="perf-view host-chart">${this._speedChart(pkg, history, "jsHost")}</div>
           <div class="perf-view standalone-chart">${this._speedChart(pkg, history, "standalone")}</div>
@@ -382,8 +373,23 @@ class NpmCompatChart extends HTMLElement {
         ${metric(`${validating}/${pkgs.length}`, "validate")}
         ${metric(this._fmtDate(data.generatedAt) || "—", "measured")}
       </div>
-      <div class="cards">${pkgs.map((p) => this._card(p, history)).join("")}</div>
-      ${data.note ? `<p class="note">${this._esc(data.note)}</p>` : ""}
+      <div class="chart-dashboard" data-target="standalone">
+        <div class="benchmark-toolbar">
+          <div>
+            <span class="toolbar-title">Performance history</span>
+            <span class="toolbar-detail">Controls every package chart</span>
+          </div>
+          <div class="toolbar-controls">
+            <span class="baseline-key"><span></span>Node baseline</span>
+            <div class="toggle-group global-target-toggle" aria-label="Wasm runtime for all package charts">
+              <button type="button" data-target-value="host" aria-pressed="false">JS host</button>
+              <button type="button" data-target-value="standalone" aria-pressed="true">Standalone</button>
+            </div>
+          </div>
+        </div>
+        <div class="cards">${pkgs.map((p) => this._card(p, history)).join("")}</div>
+        ${data.note ? `<p class="note">${this._esc(data.note)}</p>` : ""}
+      </div>
     `;
     this._bindPerfControls();
   }
@@ -426,6 +432,33 @@ class NpmCompatChart extends HTMLElement {
           letter-spacing: 0.08em;
         }
 
+        .benchmark-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          padding: 10px 12px;
+          border: 1px solid var(--border, rgba(255,255,255,0.12));
+          border-bottom: 0;
+          background: rgba(255, 255, 255, 0.025);
+        }
+        .toolbar-title {
+          color: rgba(255, 255, 255, 0.62);
+          font-size: 10px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.06em;
+        }
+        .toolbar-detail {
+          margin-left: 8px;
+          color: rgba(255, 255, 255, 0.28);
+          font-size: 9px;
+        }
+        .toolbar-controls {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+        }
         .cards {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -516,13 +549,6 @@ class NpmCompatChart extends HTMLElement {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .benchmark-controls {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-          margin-bottom: 8px;
-        }
         .toggle-group {
           display: inline-flex;
           padding: 2px;
@@ -559,8 +585,8 @@ class NpmCompatChart extends HTMLElement {
           border-top: 1px dashed rgba(255, 255, 255, 0.55);
         }
         .perf-view { display: none; }
-        .perf-block[data-target="host"] .host-chart,
-        .perf-block[data-target="standalone"] .standalone-chart {
+        .chart-dashboard[data-target="host"] .host-chart,
+        .chart-dashboard[data-target="standalone"] .standalone-chart {
           display: block;
         }
         .speed-chart {
@@ -634,8 +660,15 @@ class NpmCompatChart extends HTMLElement {
         @media (max-width: 720px) {
           .card { padding: 16px; }
           .section-title { flex-direction: column; gap: 3px; }
-          .benchmark-controls { flex-wrap: wrap; }
-          .baseline-key { margin-left: auto; }
+          .benchmark-toolbar {
+            align-items: flex-start;
+            flex-direction: column;
+            gap: 8px;
+          }
+          .toolbar-controls {
+            width: 100%;
+            justify-content: space-between;
+          }
         }
       </style>
     `;
