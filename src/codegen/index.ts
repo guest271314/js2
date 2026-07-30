@@ -1887,7 +1887,7 @@ function makeIrImplicitParamTypeResolver(
             argument &&
             ts.isIdentifier(argument) &&
             ts.isIdentifier(candidate.name) &&
-            ctx.checker.getSymbolAtLocation(argument) === ctx.checker.getSymbolAtLocation(candidate.name)
+            ctx.oracle.valueDeclarationOf(argument) === ctx.oracle.valueDeclarationOf(candidate.name)
           ) {
             projected.add(candidate);
           }
