@@ -230,6 +230,35 @@ describe("#3791 standalone native RegExp.test IR bridge", () => {
     expect((instance.exports.run as () => number)()).toBe(1);
   });
 
+  it("accounts for preceding static-spread elements before proving the vec parameter", async () => {
+    const result = await compile(
+      `
+      var values = [9];
+      function target(head: number, set: number[], tail: any): number {
+        return 1;
+      }
+      function read(): number {
+        return target(...[1, [2]], values);
+      }
+      export function run(): number {
+        return read();
+      }
+      `,
+      {
+        fileName: "issue-3791-numeric-array-spread-offset.ts",
+        target: "standalone",
+        trackIrOutcomes: true,
+      },
+    );
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irPostClaimErrors ?? []).toEqual([]);
+    expect(result.irCompiledFuncs ?? []).not.toContain("read");
+    expect(result.irOutcomes?.find((outcome) => outcome.displayName === "read")).toEqual(
+      expect.objectContaining({ kind: "unsupported", stage: "select" }),
+    );
+  });
+
   it.each([
     ["standalone fast", { target: "standalone" as const, fast: true }],
     ["gc fast", { target: "gc" as const, fast: true }],

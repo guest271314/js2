@@ -5784,7 +5784,7 @@ function isNumericArrayTypeNode(node: ts.TypeNode): boolean {
 
 function directCallParamUsesNumericVecAbi(
   call: ts.CallExpression,
-  argumentIndex: number,
+  parameterIndex: number,
   scope: ReadonlySet<string>,
 ): boolean {
   if (!ts.isIdentifier(call.expression)) return false;
@@ -5796,7 +5796,7 @@ function directCallParamUsesNumericVecAbi(
     return false;
   }
   const declaration = currentDynScanDecls?.get(call.expression.text);
-  const parameter = declaration?.parameters[argumentIndex];
+  const parameter = declaration?.parameters[parameterIndex];
   if (!parameter || !ts.isIdentifier(parameter.name)) return false;
   const type = effectiveIrParamTypeNode(parameter);
   return type
@@ -6541,8 +6541,8 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
         }
       }
     }
-    for (let argumentIndex = 0; argumentIndex < expr.arguments.length; argumentIndex++) {
-      const arg = expr.arguments[argumentIndex]!;
+    let parameterIndex = 0;
+    for (const arg of expr.arguments) {
       // Slice 8a (#1169g): accept `f(...source)` where the spread source
       // is an ArrayLiteralExpression with no nested spread. The lowerer
       // expands this at compile time into individual call arguments
@@ -6551,15 +6551,20 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       // type) are deferred — they'd require runtime arity expansion
       // which the IR doesn't model in slice 8a.
       if (ts.isSpreadElement(arg)) {
-        if (!isStaticSpreadSource(arg.expression, scope, localClasses)) return false;
+        const spreadSource = arg.expression;
+        if (!ts.isArrayLiteralExpression(spreadSource) || !isStaticSpreadSource(spreadSource, scope, localClasses)) {
+          return false;
+        }
+        parameterIndex += spreadSource.elements.length;
         continue;
       }
+      const currentParameterIndex = parameterIndex++;
       // #3791 follow-up dependency — an exact stable top-level numeric array
       // may cross only a direct-call boundary. The callee's planned vec ABI
       // remains authoritative; the builder rechecks its real global ValType.
       if (
         currentSelectionOptions?.supportsBackendCapability?.("legacy-numeric-array-global") === true &&
-        directCallParamUsesNumericVecAbi(expr, argumentIndex, scope) &&
+        directCallParamUsesNumericVecAbi(expr, currentParameterIndex, scope) &&
         currentModuleBindingResolver?.staticNumericArrayPlan(arg) !== undefined
       ) {
         continue;
