@@ -46,6 +46,7 @@ files:
 loc-budget-allow:
   - src/codegen/program-abi-session.ts
   - src/codegen/index.ts
+  - src/ir/integration.ts
 ---
 
 # #3521 — IR-only R2: prepare-before-emit free-function ownership
