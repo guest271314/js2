@@ -7,6 +7,7 @@ import { asVal, type IrClassShape, type IrType } from "../ir/nodes.js";
 import { IrInvariantError } from "../ir/outcomes.js";
 import type { IrLegacyUnitProjection } from "../ir/planning-identity.js";
 import type { IrSelection } from "../ir/select.js";
+import type { ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext } from "./context/types.js";
 import { collectLocalCallEdgesByIdentity } from "./ir-first-gate.js";
@@ -30,6 +31,53 @@ function r2StableSignatureType(type: IrType | null): boolean {
   if (type === null || type.kind === "string") return true;
   const val = asVal(type);
   return val?.kind === "f64" || val?.kind === "i32";
+}
+
+function sameValType(left: ValType, right: ValType): boolean {
+  if (left.kind !== right.kind) return false;
+  if ((left.kind === "ref" || left.kind === "ref_null") && (right.kind === "ref" || right.kind === "ref_null")) {
+    return left.typeIdx === right.typeIdx;
+  }
+  return true;
+}
+
+function r2StableValType(ctx: CodegenContext, type: IrType): ValType | undefined {
+  if (type.kind === "string") {
+    if (!ctx.nativeStrings) return { kind: "externref" };
+    return ctx.anyStrTypeIdx >= 0 ? { kind: "ref", typeIdx: ctx.anyStrTypeIdx } : undefined;
+  }
+  const val = asVal(type);
+  return val?.kind === "f64" || val?.kind === "i32" ? val : undefined;
+}
+
+/**
+ * Preparation may replace an empty declaration slot before direct emission,
+ * but it must not change that slot's already allocated callable ABI. The
+ * Program ABI registry observes the allocation contract, and later direct
+ * callers/exports can already depend on it even when the body is still empty.
+ */
+function r2SignatureMatchesAllocatedSlot(
+  ctx: CodegenContext,
+  unitId: IrUnitId,
+  override: { readonly params: readonly IrType[]; readonly returnType: IrType | null },
+): boolean {
+  const func = ctx.programAbiSourceCallables?.functionForUnit(unitId);
+  const signature = func === undefined ? undefined : ctx.mod.types[func.typeIdx];
+  if (!signature || signature.kind !== "func") return false;
+  const params = override.params.map((type) => r2StableValType(ctx, type));
+  const result = override.returnType === null ? null : r2StableValType(ctx, override.returnType);
+  if (
+    params.some((type) => type === undefined) ||
+    (override.returnType !== null && result === undefined) ||
+    signature.params.length !== params.length ||
+    signature.results.length !== (override.returnType === null ? 0 : 1)
+  ) {
+    return false;
+  }
+  return (
+    signature.params.every((type, index) => sameValType(type, params[index]!)) &&
+    (result === null || sameValType(signature.results[0]!, result))
+  );
 }
 
 /**
@@ -77,7 +125,8 @@ export function selectR2PreparedFreeFunctions(input: {
       isAsync ||
       claim.declaration.asteriskToken ||
       !override.params.every(r2StableSignatureType) ||
-      !r2StableSignatureType(override.returnType)
+      !r2StableSignatureType(override.returnType) ||
+      !r2SignatureMatchesAllocatedSlot(input.ctx, unitId, override)
     ) {
       continue;
     }

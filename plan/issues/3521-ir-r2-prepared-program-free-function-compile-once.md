@@ -382,8 +382,12 @@ The fail-closed routing slice now activates only when the complete selected
 population consists of one or more closed scalar/string top-level call
 components, with no selected class member/module init or pending ambient-call,
 callback, Date, Promise, fast-mode, async/generator, reference-shaped callable
-contract, or unresolved cross-component dependency. Programs outside that
-boundary retain the established post-direct overlay and compile-once allowlist.
+contract, allocated-slot signature mismatch, or unresolved cross-component
+dependency. Exact comparison against the already allocated source-callable
+slot prevents preparation from replacing an empty body with a different
+callable ABI; those components retain the established post-direct parity
+withdrawal and direct fallback. Programs outside that boundary retain the
+established post-direct overlay and compile-once allowlist.
 A separate fast-mode guard prevents source `number` positions whose direct ABI
 grounds to i32 from being skipped against an early f64 IR signature, while
 retaining annotation-proven boolean compile-once owners.

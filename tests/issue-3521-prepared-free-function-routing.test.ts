@@ -139,6 +139,35 @@ describe("#3521 prepare-before-emit free-function routing", () => {
     expect((await instantiate(result)).positive!(1)).toBe(1);
   });
 
+  it("keeps an implicit-any component with an allocated ABI mismatch on the post-direct overlay", async () => {
+    const result = await compile(
+      `
+      function sameValue(left, right) { return left === right; }
+      function compare(left, right) { return sameValue(left, right); }
+      export function run(): number { return compare(1, 1) ? 42 : 0; }
+      `,
+      {
+        fileName: "prepared-allocated-abi-mismatch.ts",
+        experimentalIR: true,
+        trackIrOutcomes: true,
+      },
+    );
+
+    expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(result.irFirstSkipped ?? []).not.toContain("sameValue");
+    expect(result.irFirstSkipped ?? []).not.toContain("compare");
+    expect(outcome(result, "sameValue")).toMatchObject({
+      kind: "unsupported",
+      code: "abi-signature-parity",
+      legacyBodyEmitted: true,
+      irBodyEmitted: false,
+    });
+    expect(outcome(result, "compare")).toMatchObject({
+      legacyBodyEmitted: true,
+    });
+    expect((await instantiate(result)).run!()).toBe(42);
+  });
+
   it("preserves the existing sync-pass-through async compile-once population", async () => {
     const result = await compile(`export async function answer(): Promise<number> { return 42; }`, {
       fileName: "prepared-async-pass-through.ts",
