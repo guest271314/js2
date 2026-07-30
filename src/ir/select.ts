@@ -396,6 +396,13 @@ export interface IrSelectionOptions {
    * write-side representation before the selector claims the function.
    */
   readonly resolveModuleBinding?: IrModuleBindingResolver | IrLegacyModuleBindingResolver;
+  /**
+   * (#3797) True only after receiver-aware named `.call` lowering and ambient
+   * `__current_this` AST-to-IR binding consume the exact
+   * `stableFunctionCallPlan`. Default false: the resolver may expose proof for
+   * diagnostics/tests, but proof alone must not change production selection.
+   */
+  readonly stableFunctionCallIntegrationBuildable?: boolean;
   /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
    *  strictNoHostImports). Gates the host-extern capability. */
   readonly jsHostExterns?: boolean;
@@ -1430,7 +1437,9 @@ function whyNotIrClaimable(
   currentNestedFunctionNames = fn.body ? collectDirectNestedFunctionNames(fn.body) : new Set<string>();
   currentLexicalValueBindingNames = new Set<string>();
   currentStableFunctionCallSubject =
-    !isMethod && ts.isFunctionDeclaration(fn)
+    currentSelectionOptions?.stableFunctionCallIntegrationBuildable === true &&
+    !isMethod &&
+    ts.isFunctionDeclaration(fn)
       ? (currentModuleBindingResolver?.stableFunctionCallPlan(fn) ?? null)
       : null;
   // (#2856 Step-1) Clear any stale reject detail from a prior subject; the body

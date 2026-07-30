@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { compile } from "../src/index.js";
 import {
   makeIrModuleBindingResolver,
   type IrLegacyModuleBindingResolver,
@@ -93,7 +94,10 @@ function stablePlan(source: string, numberStorage: "f64" | "i32" = "f64"): IrSta
   return graph.resolver.stableFunctionCallPlan(declaration(graph.sourceFile));
 }
 
-function selectionFor(source: string): { readonly funcs: ReadonlySet<string>; readonly reason?: string } {
+function selectionFor(
+  source: string,
+  stableFunctionCallIntegrationBuildable = false,
+): { readonly funcs: ReadonlySet<string>; readonly reason?: string } {
   const graph = fixture(source);
   const selection = planIrCompilation(
     graph.sourceFile,
@@ -102,6 +106,7 @@ function selectionFor(source: string): { readonly funcs: ReadonlySet<string>; re
       trackFallbacks: true,
       dynamicRuntimeBuildable: true,
       dynMemberReadBuildable: true,
+      stableFunctionCallIntegrationBuildable,
       resolveModuleBinding: graph.resolver,
     },
     buildTypeMap(graph.sourceFile, graph.checker),
@@ -151,6 +156,30 @@ describe("#3797 stable .call target proof", () => {
     }
   });
 
+  it("rejects an exported target because source-local scanning is not whole-program proof", () => {
+    expect(
+      stablePlan(FINISH_NODE_AT.replace("function finishNodeAt(", "export function finishNodeAt(")),
+    ).toBeUndefined();
+  });
+
+  it("rejects a target exported through an export list", () => {
+    expect(stablePlan(`${FINISH_NODE_AT}\nexport { finishNodeAt };`)).toBeUndefined();
+  });
+
+  it("rejects a global-script target whose reference population can extend across files", () => {
+    expect(
+      stablePlan(`
+        function finishNodeAt(node: any, type: any, pos: number, loc: any): any {
+          if (this.options.locations) node.loc.end = loc;
+          return node;
+        }
+        function wrapper(node: any, type: any, pos: number, loc: any): any {
+          return finishNodeAt.call(this, node, type, pos, loc);
+        }
+      `),
+    ).toBeUndefined();
+  });
+
   it.each([
     ["alias", `const alias = finishNodeAt;`],
     ["bare call", `finishNodeAt(node, type, pos, loc);`],
@@ -160,6 +189,19 @@ describe("#3797 stable .call target proof", () => {
     ["arity mismatch", `finishNodeAt.call(this, node, type, pos);`],
     ["bare call property", `const invoke = finishNodeAt.call;`],
     ["nullable receiver", `finishNodeAt.call(null, node, type, pos, loc);`],
+    ["asserted-null receiver", `finishNodeAt.call(null as unknown as {}, node, type, pos, loc);`],
+    [
+      "nested asserted-null receiver",
+      `const receiver: { parser: {} } | null = null; finishNodeAt.call((receiver as { parser: {} }).parser, node, type, pos, loc);`,
+    ],
+    [
+      "non-null-asserted receiver",
+      `const receiver: { options: {} } | null = null; finishNodeAt.call(receiver!, node, type, pos, loc);`,
+    ],
+    [
+      "optional-chain receiver segment",
+      `const receiver: { parser?: {} } = {}; finishNodeAt.call(receiver?.parser, node, type, pos, loc);`,
+    ],
   ])("rejects %s references from the complete source population", (_label, reference) => {
     expect(
       stablePlan(`
@@ -179,6 +221,7 @@ describe("#3797 stable .call target proof", () => {
     ["bare this value", `const receiver = this;`],
     ["ambient-this write", `this.options = node;`],
     ["optional ambient-this read", `if (this?.options) node.type = type;`],
+    ["nested optional ambient-this read", `if (this.options?.locations) node.type = type;`],
   ])("rejects %s outside admitted dynamic member-read roots", (_label, bodyUse) => {
     expect(
       stablePlan(`
@@ -195,8 +238,14 @@ describe("#3797 stable .call target proof", () => {
 });
 
 describe("#3797 finishNodeAt selector preclaim", () => {
-  it("admits the exact named and nested element stores without counting an integrated 33rd function", () => {
+  it("keeps the proof inert when the executable integration capability is absent", () => {
     const selected = selectionFor(FINISH_NODE_AT);
+    expect(selected.funcs.has("finishNodeAt")).toBe(false);
+    expect(selected.reason).toBeDefined();
+  });
+
+  it("admits the exact named and nested element stores without counting an integrated 33rd function", () => {
+    const selected = selectionFor(FINISH_NODE_AT, true);
     expect(selected.funcs.has("finishNodeAt"), selected.reason).toBe(true);
   });
 
@@ -207,7 +256,8 @@ describe("#3797 finishNodeAt selector preclaim", () => {
     ["nullable receiver", `node.type = type; return node;`, `node: any | null`],
     ["unsupported receiver", `makeNode().type = type; return node;`],
   ])("rejects %s before claim", (_label, statement, firstParameter = "node: any") => {
-    const selected = selectionFor(`
+    const selected = selectionFor(
+      `
       function makeNode(): any { return {}; }
       function finishNodeAt(${firstParameter}, type: any, pos: number, loc: any): any {
         if (this.options.locations) node.loc.end = loc;
@@ -216,8 +266,25 @@ describe("#3797 finishNodeAt selector preclaim", () => {
       export function wrapper(node: any, type: any, pos: number, loc: any): any {
         return finishNodeAt.call(this, node, type, pos, loc);
       }
-    `);
+    `,
+      true,
+    );
     expect(selected.funcs.has("finishNodeAt")).toBe(false);
     expect(selected.reason).toBeDefined();
   });
+
+  it.each(["gc", "standalone"] as const)(
+    "does not prematurely claim the target in a production %s compile",
+    async (target) => {
+      const result = await compile(FINISH_NODE_AT, {
+        fileName: `issue-3797-production-gate-${target}.ts`,
+        target,
+        skipSemanticDiagnostics: true,
+        trackIrOutcomes: true,
+      });
+      expect(result.success, result.errors.map((error) => error.message).join("\n")).toBe(true);
+      expect(result.irPostClaimErrors ?? []).toEqual([]);
+      expect(result.irCompiledFuncs ?? []).not.toContain("finishNodeAt");
+    },
+  );
 });

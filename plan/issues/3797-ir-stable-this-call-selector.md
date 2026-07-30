@@ -59,7 +59,13 @@ AST-to-IR builder cannot yet bind.
   only of fixed five-argument `.call(thisArg, a, b, c, d)` sites.
 - Carry exact declaration, checker signature, call expression, receiver, user
   arguments, complete call-site population, and structural unit identity.
+- Keep the selector effect behind
+  `stableFunctionCallIntegrationBuildable`, which defaults false until the
+  receiver bridge and ambient-`this` AST-to-IR lowering consume this proof.
 - Restrict the proof to the non-fast externref lane.
+- Treat only a module-private declaration in an external module as a complete
+  source-local population. Exported/export-listed targets and global scripts
+  remain unproven without a future Program-wide reference inventory.
 - Expose ambient `this` only when every use starts an admitted, non-optional
   dynamic member read.
 - Preclaim statement-position dynamic named and element stores rooted in an
@@ -75,10 +81,17 @@ AST-to-IR builder cannot yet bind.
 - [x] Alias, bare call, reassignment, spread, optional, arity mismatch, bare
       `.call` property, and nullable receiver references invalidate the whole
       plan.
+- [x] Assertion-derived receiver types, optional-chain segments anywhere in
+      the target/call shape, exported targets, and global-script targets do not
+      produce a plan.
 - [x] Bare, written, or optional ambient `this` uses do not receive the
       selector capability.
-- [x] The exact `node.type`, `node.end`, `node.loc.end`, and `node.range[1]`
-      statement stores pass selector preclaim on the non-fast lane.
+- [x] With the explicit test-only integration capability enabled, the exact
+      `node.type`, `node.end`, `node.loc.end`, and `node.range[1]` statement
+      stores pass selector preclaim on the non-fast lane.
+- [x] With the capability absent/default-false, both structural selection and
+      a production standalone compile keep `finishNodeAt` on direct codegen
+      with no post-claim withdrawal.
 - [x] Assignment-as-value, compound, optional, nullable, and call-produced
       store receivers remain preclaim rejections.
 - [ ] Receiver-aware direct `.call` and AST-to-IR `__current_this` integration
@@ -92,12 +105,17 @@ AST-to-IR builder cannot yet bind.
 This slice owns selection evidence only. It does not bind `__current_this`,
 lower the `.call` site, change direct codegen, or report 33/43. Those executable
 pieces must consume the exact plan and preserve receiver restoration on normal
-and exceptional exits before this issue can be marked done.
+and exceptional exits before the integration capability can be enabled or this
+issue can be marked done.
 
 ## Evidence
 
 - Focused selector and identity proof:
-  `tests/issue-3797-ir-stable-this-call-selector.test.ts` (20/20).
+  `tests/issue-3797-ir-stable-this-call-selector.test.ts` (31/31), including
+  production compile anti-vacuity assertions for GC and standalone.
+- Exact unchanged runtime-dynamic Acorn driver: 32/43 reachable functions
+  emitted, `finishNodeAt` remains a selector refusal, checksum 422, zero module
+  and function imports, and zero post-claim withdrawals.
 - Adjacent #3794, #3795, and direct-member-equality suites pass.
 - Three failures in the wider #2949/#3053 selector sample reproduce unchanged
   at the exact `b1304d81e2722e0d4ee975518e2478f2c7c5ef9f` stack base.

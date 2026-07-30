@@ -1448,6 +1448,25 @@ function exactTopLevelFunctionDeclaration(
 }
 
 function stableCallReceiverIsAdmissible(receiver: ts.Expression, checker: ts.TypeChecker): boolean {
+  // Match the receiver-aware direct bridge: assertions are not nullability
+  // evidence. In particular, `maybe!` and `null as T` must not manufacture a
+  // live receiver for the ambient-`this` ABI.
+  let asserted = false;
+  const inspectAssertion = (node: ts.Node): void => {
+    if (asserted) return;
+    if (
+      ts.isAsExpression(node) ||
+      ts.isTypeAssertionExpression(node) ||
+      ts.isSatisfiesExpression(node) ||
+      ts.isNonNullExpression(node)
+    ) {
+      asserted = true;
+      return;
+    }
+    node.forEachChild(inspectAssertion);
+  };
+  inspectAssertion(receiver);
+  if (asserted) return false;
   const candidate = unwrapParens(receiver);
   if (candidate.kind === ts.SyntaxKind.ThisKeyword) return true;
   const type = checker.getTypeAtLocation(candidate);
@@ -1460,6 +1479,40 @@ function stableCallReceiverIsAdmissible(receiver: ts.Expression, checker: ts.Typ
     ts.TypeFlags.Void;
   if ((type.flags & unsupported) !== 0) return false;
   return !type.isUnionOrIntersection() || type.types.every((member) => (member.flags & unsupported) === 0);
+}
+
+function containsOptionalChainSegment(node: ts.Node): boolean {
+  let found = false;
+  const visit = (candidate: ts.Node): void => {
+    if (found) return;
+    if (
+      (ts.isPropertyAccessExpression(candidate) ||
+        ts.isElementAccessExpression(candidate) ||
+        ts.isCallExpression(candidate)) &&
+      candidate.questionDotToken !== undefined
+    ) {
+      found = true;
+      return;
+    }
+    candidate.forEachChild(visit);
+  };
+  visit(node);
+  return found;
+}
+
+function sourceModuleExportsSymbol(sourceFile: ts.SourceFile, symbol: ts.Symbol, checker: ts.TypeChecker): boolean {
+  const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
+  if (!moduleSymbol) return true;
+  try {
+    return checker.getExportsOfModule(moduleSymbol).some((exported) => {
+      const target = (exported.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(exported) : exported;
+      return target === symbol;
+    });
+  } catch {
+    // Export identity is part of the closed-world proof. A checker failure
+    // cannot safely be interpreted as "module-private".
+    return true;
+  }
 }
 
 function stableCallSiteForReference(
@@ -1483,7 +1536,8 @@ function stableCallSiteForReference(
     call.questionDotToken !== undefined ||
     call.typeArguments?.length ||
     call.arguments.length !== declaration.parameters.length + 1 ||
-    call.arguments.some(ts.isSpreadElement)
+    call.arguments.some(ts.isSpreadElement) ||
+    containsOptionalChainSegment(call)
   ) {
     return undefined;
   }
@@ -1494,7 +1548,7 @@ function stableCallSiteForReference(
 
 function targetThisUsesOnlyDynamicMemberRoots(declaration: ts.FunctionDeclaration): boolean {
   const body = declaration.body;
-  if (!body) return false;
+  if (!body || containsOptionalChainSegment(body)) return false;
   let sawThis = false;
   let supported = true;
   const visit = (node: ts.Node): void => {
@@ -1566,8 +1620,20 @@ function makeStableFunctionCallPlan(
       : undefined;
   if (!targetIdentifier) return undefined;
   const declaration = exactTopLevelFunctionDeclaration(targetIdentifier, checker);
+  const sourceFile = declaration?.getSourceFile();
+  const declarationSymbol = declaration?.name ? checker.getSymbolAtLocation(declaration.name) : undefined;
   if (
     !declaration ||
+    !sourceFile ||
+    !declarationSymbol ||
+    // A source-local scan is whole-program proof only for a module-private
+    // declaration. Global scripts and exported declarations can acquire
+    // references from other files that are absent from this traversal.
+    !ts.isExternalModule(sourceFile) ||
+    declaration.modifiers?.some(
+      (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword || modifier.kind === ts.SyntaxKind.DefaultKeyword,
+    ) ||
+    sourceModuleExportsSymbol(sourceFile, declarationSymbol, checker) ||
     !declaration.body ||
     declaration.asteriskToken ||
     declaration.typeParameters?.length ||
