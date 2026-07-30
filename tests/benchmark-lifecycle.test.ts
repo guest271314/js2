@@ -466,7 +466,11 @@ describe("benchmark artifact lifecycle", () => {
     expect(workflow).toContain('auxiliary_mode="measure"');
     expect(workflow).toContain('elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then');
     expect(workflow).toContain("- name: Install and verify pinned Javy");
-    expect(workflow).toContain("if: steps.auxiliary.outputs.mode == 'measure'");
+    expect(workflow).toContain(
+      "if: steps.auxiliary.outputs.mode == 'measure' || steps.auxiliary.outputs.legacy_manifest_javy == 'true'",
+    );
+    expect(workflow).toContain("legacy_manifest_javy");
+    expect(workflow).toContain("not-used (auxiliary measurements inherited)");
     expect(workflow).toContain("BENCHMARK_AUXILIARY_RUNTIME_BASELINE");
     expect(workflow).toContain("website/public/benchmarks/competitive/programs");
   });
