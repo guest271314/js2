@@ -127,6 +127,7 @@ import {
   isI32PureExprIR,
   isIrBitwiseOperatorToken,
 } from "./i32-pure-bitwise.js";
+import { tryEmitUnrolledReduction } from "./reduction-unroll.js";
 import { IrUnsupportedError } from "./outcomes.js";
 import { isPristineEs5IntrinsicIsFrozenCall } from "./object-integrity.js";
 import { effectiveIrParamTypeNode, effectiveIrReturnTypeNode, IR_MATH_METHOD_TABLE } from "./select.js";
@@ -1363,7 +1364,7 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       throw new Error(`ir/from-ast: Phase 1 return must have an expression in ${cx.funcName}`);
     }
     const v = lowerExpr(stmt.expression, cx, cx.returnType);
-    const vCoerced = coerceReturnValue(v, cx);
+    const vCoerced = coerceReturnValue(v, cx, stmt.expression);
     cx.builder.terminate({ kind: "return", values: [vCoerced] });
     return;
   }
@@ -6175,8 +6176,17 @@ function coerceYieldValueToExternref(value: IrValueId, cx: LowerCtx): IrValueId 
  * All other cases (matching kinds, already-externref values, non-externref
  * declared results) pass through unchanged.
  */
-function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
+function coerceReturnValue(value: IrValueId, cx: LowerCtx, sourceExpression?: ts.Expression): IrValueId {
   const declared = cx.returnType;
+  if (declared?.kind === "dynamic") {
+    const actual = cx.builder.typeOf(value);
+    if (actual.kind === "dynamic") return value;
+    if (sourceExpression) {
+      const boxed = boxConcreteToDynamic(value, actual, sourceExpression, cx);
+      if (boxed !== null) return boxed;
+    }
+    throw new Error(`ir/from-ast: concrete return needs a dynamic box in ${cx.funcName}`);
+  }
   // (#2856 C3) externref value into a NUMBER (f64) declared result —
   // `return hit;` where `hit = cache.get(n)` is the externref Map_get
   // result. Unbox through `__unbox_number`, exactly what legacy emits for
@@ -6674,6 +6684,35 @@ function detectCountedLoopSafeIndex(stmt: ts.ForStatement): string | null {
   return arrayVar + ":" + indexVar;
 }
 
+/**
+ * (#3786) The compile-time entry value of a `for` counter, plus the slot the
+ * init wrote it to — or `null` when the initializer is not a single
+ * integer-literal `let`/`var` bound to a slot.
+ *
+ * Must run AFTER the init has been lowered, so the declared name is in scope and
+ * its slot index is known. Reporting the slot (not just the value) is what lets
+ * `tryEmitUnrolledReduction` refuse `for (let j = 0; i < N; i++)`, where the
+ * init's literal says nothing about the counter the condition actually tests.
+ */
+function literalCounterEntry(stmt: ts.ForStatement, cx: LowerCtx): { value: number; slotIndex: number } | null {
+  const init = stmt.initializer;
+  if (!init || !ts.isVariableDeclarationList(init) || init.declarations.length !== 1) return null;
+  const decl = init.declarations[0];
+  if (!ts.isIdentifier(decl.name) || !decl.initializer) return null;
+  if (!ts.isNumericLiteral(decl.initializer)) return null;
+  const value = Number(decl.initializer.text);
+  if (!Number.isSafeInteger(value)) return null;
+  const binding = cx.scope.get(decl.name.text);
+  if (!binding || binding.kind !== "slot") return null;
+  // Deliberately NOT checking `binding.type` for i32: #3741 gives a promoted
+  // counter a native i32 SLOT while keeping the binding's IrType at f64 (that is
+  // how it avoids a consumption-site blast radius), so an i32 check here rejects
+  // every loop this transform exists for. The slot's i32-ness is established
+  // structurally instead — the recogniser only accepts a cond/update/body built
+  // from `i32.lt_s` / `i32.add` against this same slot index.
+  return { value, slotIndex: binding.slotIndex };
+}
+
 function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   if (!stmt.condition) {
     throw new Error(`ir/from-ast: for without cond not in slice 12 (${cx.funcName})`);
@@ -6743,6 +6782,26 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
         lowerForUpdateExpr(stmt.incrementor!, { ...loopCx, scope: new Map(bodyCx.scope) });
       })
     : [];
+
+  // (#3786) Reduction unroll: an i32-wrapping accumulator loop is latency-bound
+  // on its accumulator chain, so splitting it across k independent partial sums
+  // is worth ~2.3x. Attempted only on the fully-collected buffers (where every
+  // value is already typed i32) and fails closed on any shape it does not match
+  // exactly, in which case the loop lowers unchanged below.
+  const counterEntry = literalCounterEntry(stmt, innerCx);
+  if (
+    tryEmitUnrolledReduction({
+      builder: loopCx.builder,
+      cond: condInstrs,
+      condValue: condResult,
+      body: bodyInstrs,
+      update: updateInstrs,
+      counterEntry,
+    })
+  ) {
+    joinScopeStringEncodingFacts(cx.scope, [loopCx.scope]);
+    return;
+  }
 
   loopCx.builder.emitForLoop({
     cond: condInstrs,
@@ -7427,7 +7486,7 @@ function lowerEarlyReturn(stmt: ts.ReturnStatement, cx: LowerCtx): void {
     throw new Error(`ir/from-ast: early bare return in non-void function in ${cx.funcName}`);
   }
   const v = lowerExpr(stmt.expression, cx, cx.returnType);
-  cx.builder.emitEarlyReturn(coerceReturnValue(v, cx));
+  cx.builder.emitEarlyReturn(coerceReturnValue(v, cx, stmt.expression));
 }
 
 /**
@@ -8694,9 +8753,11 @@ function lowerLogicalAndOr(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Low
   const isAnd = op === ts.SyntaxKind.AmpersandAmpersandToken;
   const opName = isAnd ? "&&" : "||";
 
-  const lhs = lowerExpr(expr.left, cx, irVal({ kind: "i32" }));
-  const lhsType = cx.builder.typeOf(lhs);
-  if (asVal(lhsType)?.kind !== "i32") {
+  const rawLhs = lowerExpr(expr.left, cx, irVal({ kind: "i32" }));
+  const lhsType = cx.builder.typeOf(rawLhs);
+  const lhs =
+    lhsType.kind === "dynamic" ? cx.builder.emitDynTruthy(rawLhs) : asVal(lhsType)?.kind === "i32" ? rawLhs : null;
+  if (lhs === null) {
     throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
   }
 
@@ -8708,7 +8769,15 @@ function lowerLogicalAndOr(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Low
   const rhsCx: LowerCtx = { ...cx, scope: new Map(skippedScope) };
   let rhs!: IrValueId;
   const rhsBody = cx.builder.collectBodyInstrs(() => {
-    rhs = lowerExpr(expr.right, rhsCx, resultType);
+    const rawRhs = lowerExpr(expr.right, rhsCx, resultType);
+    const rhsType = cx.builder.typeOf(rawRhs);
+    if (rhsType.kind === "dynamic") {
+      rhs = cx.builder.emitDynTruthy(rawRhs);
+    } else if (asVal(rhsType)?.kind === "i32") {
+      rhs = rawRhs;
+    } else {
+      throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
+    }
   });
   if (asVal(cx.builder.typeOf(rhs))?.kind !== "i32") {
     throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
@@ -9006,9 +9075,10 @@ function boxConcreteToDynamic(v: IrValueId, t: IrType, operand: ts.Expression, c
   }
   const tv = asVal(t);
   if (!tv) return null;
-  // Boolean literal (`true`/`false`) → tag-4 box; without the refinement the i32
-  // would box as a NUMBER and `dyn === true` would fail against a boxed boolean.
-  if (operand.kind === ts.SyntaxKind.TrueKeyword || operand.kind === ts.SyntaxKind.FalseKeyword) {
+  // Proven boolean i32 → tag-4 box; without the refinement the i32 would box
+  // as a NUMBER and recursive boolean helpers would lose their value family at
+  // the dynamic return boundary.
+  if (tv.kind === "i32" && expressionIsDefinitelyBoolean(operand)) {
     return cx.builder.emitBox(v, irDynamic(JsTag.Boolean));
   }
   // Numeric literal or an f64-typed value → number box (f64 hosts only the
@@ -9020,6 +9090,33 @@ function boxConcreteToDynamic(v: IrValueId, t: IrType, operand: ts.Expression, c
   // here — demote rather than risk a wrong tag. S5.P can refine with the
   // checker (isProvablyBoolean) when it opens the scan.
   return null;
+}
+
+function expressionIsDefinitelyBoolean(expression: ts.Expression): boolean {
+  const candidate = peelParensExpr(expression);
+  if (candidate.kind === ts.SyntaxKind.TrueKeyword || candidate.kind === ts.SyntaxKind.FalseKeyword) return true;
+  if (ts.isPrefixUnaryExpression(candidate) && candidate.operator === ts.SyntaxKind.ExclamationToken) return true;
+  if (ts.isBinaryExpression(candidate)) {
+    const op = candidate.operatorToken.kind;
+    return (
+      op === ts.SyntaxKind.LessThanToken ||
+      op === ts.SyntaxKind.LessThanEqualsToken ||
+      op === ts.SyntaxKind.GreaterThanToken ||
+      op === ts.SyntaxKind.GreaterThanEqualsToken ||
+      op === ts.SyntaxKind.EqualsEqualsToken ||
+      op === ts.SyntaxKind.ExclamationEqualsToken ||
+      op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+      op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+      op === ts.SyntaxKind.InstanceOfKeyword ||
+      op === ts.SyntaxKind.InKeyword ||
+      op === ts.SyntaxKind.AmpersandAmpersandToken ||
+      op === ts.SyntaxKind.BarBarToken
+    );
+  }
+  if (ts.isConditionalExpression(candidate)) {
+    return expressionIsDefinitelyBoolean(candidate.whenTrue) && expressionIsDefinitelyBoolean(candidate.whenFalse);
+  }
+  return false;
 }
 
 /**
