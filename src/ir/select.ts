@@ -78,6 +78,7 @@ import type {
   IrLocalClassExpressionResolver,
   IrModuleBindingResolver,
   IrPrimitiveExpressionFamily,
+  IrStableFunctionCallPlan,
 } from "./module-bindings.js";
 import type { LatticeType, TypeMap } from "./propagate.js";
 import type { RecursiveTypeEvidence } from "./type-evidence.js";
@@ -395,6 +396,13 @@ export interface IrSelectionOptions {
    * write-side representation before the selector claims the function.
    */
   readonly resolveModuleBinding?: IrModuleBindingResolver | IrLegacyModuleBindingResolver;
+  /**
+   * (#3797) True only after receiver-aware named `.call` lowering and ambient
+   * `__current_this` AST-to-IR binding consume the exact
+   * `stableFunctionCallPlan`. Default false: the resolver may expose proof for
+   * diagnostics/tests, but proof alone must not change production selection.
+   */
+  readonly stableFunctionCallIntegrationBuildable?: boolean;
   /** (#2856) True iff the compile targets a JS host (NOT standalone / wasi /
    *  strictNoHostImports). Gates the host-extern capability. */
   readonly jsHostExterns?: boolean;
@@ -1209,6 +1217,8 @@ let currentDirectOnlyDynMemberEqualityFunctionsReady = false;
 let currentDynMemberEqualitySubject: ts.FunctionDeclaration | null = null;
 let currentDynEqualityBoxableParamNames = new Set<string>();
 let currentMutableParamSlotNames = new Set<string>();
+let currentStableFunctionCallSubject: IrStableFunctionCallPlan | null = null;
+let currentStableDynamicRootNames = new Set<string>();
 // Grounded parameter families from the propagation map. The checker sees an
 // unannotated allowJs parameter as `any`, but the IR ABI may already have
 // proved it f64 from every call edge. Coercion-sensitive builtin selectors
@@ -1314,6 +1324,8 @@ function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean
   currentDynMemberEqualitySubject = !isMethod && ts.isFunctionDeclaration(fn) ? fn : null;
   currentDynEqualityBoxableParamNames = new Set<string>();
   currentMutableParamSlotNames = new Set<string>();
+  currentStableFunctionCallSubject = null;
+  currentStableDynamicRootNames = new Set<string>();
   currentNumericParamNames = new Set<string>();
   currentSubjectFunctionName = !isMethod && ts.isFunctionDeclaration(fn) && fn.name !== undefined ? fn.name.text : null;
   currentSubjectReturnsBoolean =
@@ -1424,6 +1436,12 @@ function whyNotIrClaimable(
   currentCallableReturnClasses = new Map<string, string>();
   currentNestedFunctionNames = fn.body ? collectDirectNestedFunctionNames(fn.body) : new Set<string>();
   currentLexicalValueBindingNames = new Set<string>();
+  currentStableFunctionCallSubject =
+    currentSelectionOptions?.stableFunctionCallIntegrationBuildable === true &&
+    !isMethod &&
+    ts.isFunctionDeclaration(fn)
+      ? (currentModuleBindingResolver?.stableFunctionCallPlan(fn) ?? null)
+      : null;
   // (#2856 Step-1) Clear any stale reject detail from a prior subject; the body
   // walk below repopulates it via `shapeNo` when SHAPE_DIAG_ON.
   if (SHAPE_DIAG_ON) shapeRejectDetail = null;
@@ -1544,7 +1562,7 @@ function whyNotIrClaimable(
   // Method bodies and constructor bodies see `this` as an implicit local;
   // mark it so a `return this;` / `this.field` reference passes the
   // identifier-in-scope check at Phase-1 expression position.
-  if (isMethod) scope.add("this");
+  if (isMethod || currentStableFunctionCallSubject !== null) scope.add("this");
   for (let i = 0; i < fn.parameters.length; i++) {
     const p = fn.parameters[i]!;
     // #1372 — binding-pattern params: `function f({ x, y }: Point): …` /
@@ -1601,6 +1619,9 @@ function whyNotIrClaimable(
     if (directMutationNames.has(p.name.text)) currentMutableParamSlotNames.add(p.name.text);
     // #2949 slice 2 — collect dynamic-typed param names for the move-only scan.
     recordDynamicParamKind(p.name.text, paramResolved, dynNames);
+    if (currentStableFunctionCallSubject !== null && paramResolved === "dynamic") {
+      currentStableDynamicRootNames.add(p.name.text);
+    }
 
     const paramType = effectiveIrParamTypeNode(p);
     clearProjectionBinding(p.name.text);
@@ -1701,7 +1722,12 @@ function whyNotIrClaimable(
   // yield machinery has no dynamic arm yet.
   // -------------------------------------------------------------------------
   if (dynNames.size > 0 && isGenerator) return "param-type-not-resolvable";
-  if (dynNames.size > 0 || isDynamicReturn || containsRetainedFunctionMethodCall(body)) {
+  if (
+    dynNames.size > 0 ||
+    isDynamicReturn ||
+    currentStableFunctionCallSubject !== null ||
+    containsRetainedFunctionMethodCall(body)
+  ) {
     const dynamicStringLocals = collectDynamicStringLocalWidening(fn, new Set(dynNames));
     if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap, dynamicStringLocals)) {
       return dynNames.size > 0 ? "param-type-not-resolvable" : "return-type-not-resolvable";
@@ -2116,6 +2142,10 @@ function subtreeTouchesDynamic(root: ts.Node, dynNames: ReadonlySet<string>): bo
   let found = false;
   const visit = (n: ts.Node): void => {
     if (found) return;
+    if (n.kind === ts.SyntaxKind.ThisKeyword && currentStableFunctionCallSubject !== null) {
+      found = true;
+      return;
+    }
     if (ts.isIdentifier(n) && dynNames.has(n.text)) {
       found = true;
       return;
@@ -2262,6 +2292,7 @@ function dynamicUsesAreMoveOnly(
    */
   const isDynShaped = (e: ts.Expression): boolean => {
     e = unwrap(e);
+    if (e.kind === ts.SyntaxKind.ThisKeyword) return currentStableFunctionCallSubject !== null;
     if (ts.isIdentifier(e)) return dynNames.has(e.text);
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression) && !dynNames.has(e.expression.text)) {
       return calleeReturnIsDynamic(e.expression.text, typeMap);
@@ -2342,6 +2373,9 @@ function dynamicUsesAreMoveOnly(
    */
   const scanExpr = (expr: ts.Expression, expectDyn: boolean): boolean => {
     const e = unwrap(expr);
+    if (e.kind === ts.SyntaxKind.ThisKeyword) {
+      return currentStableFunctionCallSubject !== null && expectDyn;
+    }
     if (ts.isIdentifier(e)) {
       return dynNames.has(e.text) === expectDyn;
     }
@@ -2411,6 +2445,38 @@ function dynamicUsesAreMoveOnly(
       const leftIsDyn = isDynShaped(e.left);
       const rightIsDyn = isDynShaped(e.right);
       const op = e.operatorToken.kind;
+      // #3797 — statement-position stores used by Acorn's stable
+      // `finishNodeAt.call(thisArg, node, type, pos, loc)` target. The
+      // checker-backed stable-call plan is the authority for exposing ambient
+      // `this`; the dynamic scan remains the authority for receiver/key/value
+      // representations. Keep value-producing assignments, optional stores,
+      // compound/update forms, and non-dynamic receivers outside the claim.
+      if (
+        op === ts.SyntaxKind.EqualsToken &&
+        !expectDyn &&
+        currentStableFunctionCallSubject !== null &&
+        ts.isExpressionStatement(e.parent) &&
+        e.parent.expression === e &&
+        (ts.isPropertyAccessExpression(e.left) || ts.isElementAccessExpression(e.left)) &&
+        e.left.questionDotToken === undefined &&
+        stableDynamicStoreReceiverHasAdmittedRoot(e.left.expression) &&
+        isDynShaped(e.left.expression)
+      ) {
+        if (!currentDynamicRuntimeBuildable || !scanExpr(e.left.expression, true)) return false;
+        if (ts.isElementAccessExpression(e.left)) {
+          const key = unwrap(e.left.argumentExpression);
+          if (ts.isStringLiteralLike(key) || ts.isNumericLiteral(key)) {
+            // Literal keys are boxed by the dynamic member-set producer.
+          } else if (ts.isIdentifier(key) && dynNames.has(key.text)) {
+            if (!scanExpr(key, true)) return false;
+          } else {
+            return false;
+          }
+        }
+        if (rightIsDyn) return scanExpr(e.right, true);
+        const concrete = unwrap(e.right);
+        return concreteDynamicAssignmentOperandIsBuildable(concrete) && scanExpr(concrete, false);
+      }
       // #3795 — strict statement-position dynamic element write. Keep the
       // preclaim opening coupled to the exact Acorn family: direct dynamic
       // parameter receiver, dynamic alias key, and either the proven widened
@@ -2731,6 +2797,28 @@ function thenArmTerminates(stmt: ts.Statement): boolean {
   return false;
 }
 
+function stableDynamicStoreReceiverHasAdmittedRoot(receiver: ts.Expression): boolean {
+  let candidate = unwrapPhase1Parens(receiver);
+  while (ts.isPropertyAccessExpression(candidate) || ts.isElementAccessExpression(candidate)) {
+    if (candidate.questionDotToken !== undefined) return false;
+    if (ts.isElementAccessExpression(candidate)) {
+      const key = unwrapPhase1Parens(candidate.argumentExpression);
+      if (
+        !ts.isStringLiteralLike(key) &&
+        !ts.isNumericLiteral(key) &&
+        !(ts.isIdentifier(key) && currentStableDynamicRootNames.has(key.text))
+      ) {
+        return false;
+      }
+    }
+    candidate = unwrapPhase1Parens(candidate.expression);
+  }
+  return (
+    (candidate.kind === ts.SyntaxKind.ThisKeyword && currentStableFunctionCallSubject !== null) ||
+    (ts.isIdentifier(candidate) && currentStableDynamicRootNames.has(candidate.text))
+  );
+}
+
 function isPhase1StatementList(
   stmts: ReadonlyArray<ts.Statement>,
   scope: Set<string>,
@@ -2852,6 +2940,9 @@ function isPhase1StatementListInScope(
         s.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
         ts.isPropertyAccessExpression(s.expression.left)
       ) {
+        if (s.expression.left.questionDotToken !== undefined) {
+          return shapeNo("nontail-assign-optional", s.expression.left);
+        }
         // LHS: <expr>.<id> — receiver expr must be Phase-1, prop must be an
         // Identifier or (#3000) a PrivateIdentifier (`this.#x = v`).
         if (!ts.isIdentifier(s.expression.left.name) && !ts.isPrivateIdentifier(s.expression.left.name))
@@ -2877,7 +2968,13 @@ function isPhase1StatementListInScope(
         ts.isElementAccessExpression(s.expression.left)
       ) {
         const lhs = s.expression.left;
-        if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) {
+        if (lhs.questionDotToken !== undefined) {
+          return shapeNo("nontail-elemstore-optional", lhs);
+        }
+        if (
+          (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) &&
+          !stableDynamicStoreReceiverHasAdmittedRoot(lhs.expression)
+        ) {
           return shapeNo("nontail-elemstore-recv", lhs.expression);
         }
         if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses))
@@ -3794,6 +3891,9 @@ function isPhase1BodyStatement(
           return true;
         }
         if (ts.isPropertyAccessExpression(stmt.expression.left)) {
+          if (stmt.expression.left.questionDotToken !== undefined) {
+            return shapeNo("body-assign-optional", stmt.expression.left);
+          }
           // #3000 — allow `this.#x = v` (PrivateIdentifier) in method / ctor
           // bodies, in addition to plain-Identifier field writes.
           if (!ts.isIdentifier(stmt.expression.left.name) && !ts.isPrivateIdentifier(stmt.expression.left.name))
@@ -3812,7 +3912,13 @@ function isPhase1BodyStatement(
         // receivers demote cleanly).
         if (ts.isElementAccessExpression(stmt.expression.left)) {
           const lhs = stmt.expression.left;
-          if (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) {
+          if (lhs.questionDotToken !== undefined) {
+            return shapeNo("body-elemstore-optional", lhs);
+          }
+          if (
+            (!ts.isIdentifier(lhs.expression) || !scope.has(lhs.expression.text)) &&
+            !stableDynamicStoreReceiverHasAdmittedRoot(lhs.expression)
+          ) {
             return shapeNo("body-elemstore-recv", lhs.expression);
           }
           if (!isPhase1Expr(lhs.argumentExpression, scope, localClasses)) return false;
@@ -7186,6 +7292,8 @@ export function assessModuleInit(
   currentFnIsAsync = false; // (#1373b C-1) module-init is never an async body
   currentSubjectIsModuleInit = true;
   currentDynMemberEqualitySubject = null;
+  currentStableFunctionCallSubject = null;
+  currentStableDynamicRootNames = new Set<string>();
   currentIrSafeVarDeclarationLists = new Set();
   currentModuleMapGetAliases = new Set<ts.VariableDeclaration>();
   currentModuleScalarAliasFamilies = new Map<ts.VariableDeclaration, "f64" | "boolean">();
