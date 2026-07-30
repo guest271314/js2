@@ -60,6 +60,7 @@ import {
   typedArrayPackedSignedness,
   typedArrayVecStorage,
 } from "./index.js";
+import { resolveVecHostBridgeHelper } from "./vec-access-exports.js";
 import { emitJsonStringifyValue } from "./json-codec-native.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
@@ -4421,14 +4422,13 @@ export function compileElementAccessBody(
       const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
       fctx.body.push({ op: "local.set", index: recvLocal });
       // (#3007) index → f64 → idxLocal, compiled BEFORE the fast-path funcIdxs are
-      // captured. A computed index (`a[a.length - 1]`) lowers its own dynamic
-      // reads, which can register late imports and shift every DEFINED-function
+      // captured. A computed index lowers reads that can register late imports and shift every DEFINED-function
       // index — including `__vec_get`. The pre-#3007 order captured `__vec_get`
       // BEFORE this compile, so the index's imports left it stale; the desynced
       // `then` arm emitted an invalid instruction stream (`f64.convert_i32_s` on
       // the externref receiver → "expected i32, found externref", invalid Wasm).
-      // Resolving the imports and `__vec_get` AFTER the index compile (single
-      // flush) keeps every funcIdx live through emission. For a non-import-adding
+      // Resolving imports and `__vec_get` AFTER the index compile (single flush)
+      // keeps every funcIdx live through emission. For a non-import-adding
       // index (e.g. a literal) the import order is identical, so valid output is
       // byte-for-byte unchanged.
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
@@ -4442,7 +4442,7 @@ export function compileElementAccessBody(
       );
       const boxNumIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
-      const vgIdx = ctx.funcMap.get("__vec_get") ?? reserveVecMethodHelper(ctx, "get");
+      const vgIdx = resolveVecHostBridgeHelper(ctx, "get") ?? reserveVecMethodHelper(ctx, "get");
       if (vgIdx !== undefined && extGetIdx !== undefined && boxNumIdx !== undefined) {
         // isVec = OR of ref.test over the registered vec carriers.
         const anyTmp = allocLocal(fctx, `__nve_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
@@ -4535,8 +4535,8 @@ export function compileElementAccessBody(
         [{ kind: "externref" }],
       );
       flushLateImportShifts(ctx, fctx);
-      const vgIdx = ctx.funcMap.get("__vec_get") ?? reserveVecMethodHelper(ctx, "get");
-      const vlIdx = ctx.funcMap.get("__vec_len") ?? reserveVecMethodHelper(ctx, "len");
+      const vgIdx = resolveVecHostBridgeHelper(ctx, "get") ?? reserveVecMethodHelper(ctx, "get");
+      const vlIdx = resolveVecHostBridgeHelper(ctx, "len") ?? reserveVecMethodHelper(ctx, "len");
       if (unboxIdx !== undefined && extGetIdx !== undefined && vgIdx !== undefined && vlIdx !== undefined) {
         const idxF64 = allocLocal(fctx, `__dyn_idxf_${fctx.locals.length}`, { kind: "f64" });
         const idxI32 = allocLocal(fctx, `__dyn_idxi_${fctx.locals.length}`, { kind: "i32" });

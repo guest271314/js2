@@ -54,6 +54,7 @@ import { ensureArgcGlobal } from "./statements/nested-declarations.js"; // (#367
 import { CLOSURE_ARITY_FIELD_IDX, getFuncRefWrapperRootTypeIdx } from "./closures/funcref-wrapper-types.js"; // (#3673 round 13) under-application gate
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2 read chokepoint / S3b stable-regime minting)
 import { buildFnctorArrayHofTargetTest } from "./fnctor-array-prototype.js";
+import { resolveVecHostBridgeHelper } from "./vec-access-exports.js";
 
 /**
  * (#2583) The callback-free, argument-taking array search/predicate methods
@@ -202,11 +203,10 @@ export function reserveClosedMethodDispatch(ctx: CodegenContext, methodName: str
   // (#2927) For the in-place array MUTATION methods (`push`/`pop`), register the
   // native `$__vec_base` brand-arm deps NOW so the fill only READS funcMap
   // (#1719): the `$__vec_base` supertype and `__box_number` (push returns an i32
-  // length that the arm boxes). The carrier-generic `__vec_push` / `__vec_pop`
-  // helper is reserved by the CALL SITE (`calls.ts`, which already imports
+  // length that the arm boxes). The carrier-generic helper is reserved by the
+  // CALL SITE (`calls.ts`, which already imports
   // `reserveVecMethodHelper` from `../index.js` — importing it here would form an
-  // eval-time circular-import cycle: `index.ts` imports this module for
-  // `fillClosedMethodDispatch`). Standalone/wasi only.
+  // eval-time circular-import cycle). Standalone/wasi only.
   if ((ctx.standalone || ctx.wasi) && VEC_MUTATE_METHODS.has(methodName) && isVecMutateForm(methodName, arity)) {
     getOrRegisterVecBaseType(ctx);
     addUnionImportsViaRegistry(ctx); // __box_number for the push new-length result
@@ -994,8 +994,8 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
     // never fires standalone). Route to the carrier-generic `__vec_push` /
     // `__vec_pop` helpers (reserved at reserve-time; body filled in the finalize
     // vec-export pass).
-    const vecPushIdx = ctx.funcMap.get("__vec_push");
-    const vecPopIdx = ctx.funcMap.get("__vec_pop");
+    const vecPushIdx = resolveVecHostBridgeHelper(ctx, "push");
+    const vecPopIdx = resolveVecHostBridgeHelper(ctx, "pop");
     const wantVecMutArm =
       (ctx.standalone || ctx.wasi) &&
       VEC_MUTATE_METHODS.has(methodName) &&

@@ -103,6 +103,9 @@ files:
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/program-abi-type-planning.ts
+  - src/codegen/property-access.ts
+  - src/codegen/closed-method-dispatch.ts
+  - src/codegen/vec-access-exports.ts
   - src/codegen/ir-first-gate.ts
   - src/codegen/ir-class-shapes.ts
   - src/codegen/ir-overlay-identity.ts
@@ -152,6 +155,7 @@ files:
   - tests/issue-3520-program-abi-callable-planning.test.ts
   - tests/issue-3520-program-abi-type-remap.test.ts
   - tests/issue-3520-support-callable-abi.test.ts
+  - tests/issue-3520-vec-support-callable-abi.test.ts
   - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-3520-class-integration-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
@@ -2575,6 +2579,49 @@ C29 closes exact retained ownership for direct source function-value
 trampolines and capture-free cache globals, not R1. Other support callable
 families, remaining class/type consumers, and module-array or display-name
 scans must still move behind structural authorities before R1 can close.
+
+### 2026-07-30 vec host-bridge callable ownership continuation
+
+The continuation on `codex/3520-c30-vec-host-bridge` moves the six core vec
+host bridges behind one entry-source-owned structural family:
+
+- `__vec_len`, `__vec_get`, `__is_vec`, `__vec_mut_supported`, `__vec_push`,
+  and `__vec_pop` publish `vec-host-bridge` support bindings at fixed ordinals
+  0 through 5 beneath the canonical entry source. Their callable ordering role
+  is the next reserved role after `typedThisTwin`;
+- reservation allocates all six helpers as one batch and observes the exact
+  `WasmFunction` objects only after every allocation succeeds. Final body
+  filling and compile-time calls resolve those objects through their current
+  handles, so late-import shifts cannot redirect selection through a generated
+  name; and
+- `funcMap` remains a compatibility publication only when the helper label is
+  unoccupied. A same-labelled non-exported source function remains a distinct
+  callable and still executes as the source target, while the array read and
+  mutation seams call the structural vec helpers.
+
+The exact five-entry `SINGLE_HOST_ENTRIES` census was run in fresh processes
+against `origin/main` at `e541b9d56c766c` and this continuation, using
+`readFileSync(entry) -> analyzeSource(source, entry) ->
+generateModule(ast, { experimentalIR: true, trackIrOutcomes: true })`.
+Defined functions remain **166 → 166**. Generic
+`retained-module-function` rows move **101 → 77**, exactly matching the
+**24** vec bridge rows present across four of the five entries. The same
+measurement keeps routing and body outcomes unchanged at **37 terminal /
+30 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR
+bodies**.
+
+The focused C30 suite passes **4/4**. It proves all six source-anchored IDs,
+fixed ordinals and final slots; zero vec support publication for an array-free
+module; reserve-to-fill allocator-object identity; the same-label runtime
+collision; tracked/untracked binary equality; and stable routing/outcome
+telemetry. The adjacent callable-planning, #2083, #3272, #3637, #2927, and
+#3311 matrix passes **50/50 across six files**. The IR fallback ratchet,
+function budget, strict TypeScript, and the exact census pass without changing
+the equivalence baseline or Test262 run log.
+
+C30 closes exact retained ownership for the six core vec host bridges, not R1.
+Other support callable families and remaining module-array or display-name
+consumers must still move behind structural authorities before R1 can close.
 
 ### R1a validation evidence
 

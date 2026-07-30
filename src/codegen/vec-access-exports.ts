@@ -9,7 +9,7 @@
 // callers (calls.ts, property-access.ts, closed-method-dispatch.ts).
 
 import { ts } from "../ts-api.js";
-import type { Instr, ValType } from "../ir/types.js";
+import type { FuncHandle, Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addUnionImports } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
@@ -18,9 +18,164 @@ import { ensureGetUndefined } from "./expressions/late-imports.js";
 import { ensureHoleType } from "./array-holes.js";
 import { undefinedExternInstrs } from "./any-helpers.js"; // (#3315)
 import { UNDEF_F64_BITS } from "./value-tags.js"; // (#3315)
-import { definedFuncAt } from "./func-space.js";
+import { definedFuncAt, definedFuncHandleOf } from "./func-space.js";
 import { flushLateImportShifts } from "./shared.js";
 import { exportFunc } from "./emit-helpers.js";
+import { PROGRAM_ABI_CALLABLE_ROLE } from "./program-abi-planning.js";
+
+export const VEC_HOST_BRIDGE_ROLE = "vec-host-bridge";
+
+export type VecHostBridgeKind = "len" | "get" | "is-vec" | "mut-supported" | "push" | "pop";
+
+interface VecHostBridgeDefinition {
+  readonly kind: VecHostBridgeKind;
+  readonly name: string;
+  readonly ordinal: number;
+  readonly params: readonly ValType[];
+  readonly results: readonly ValType[];
+  readonly placeholder: readonly Instr[];
+}
+
+interface VecHostBridgeAllocation {
+  readonly definition: VecHostBridgeDefinition;
+  readonly func: WasmFunction;
+}
+
+const VEC_HOST_BRIDGE_DEFINITIONS: readonly VecHostBridgeDefinition[] = Object.freeze([
+  Object.freeze({
+    kind: "len",
+    name: "__vec_len",
+    ordinal: 0,
+    params: Object.freeze([{ kind: "externref" } as ValType]),
+    results: Object.freeze([{ kind: "i32" } as ValType]),
+    placeholder: Object.freeze([{ op: "i32.const", value: 0 } as Instr]),
+  }),
+  Object.freeze({
+    kind: "get",
+    name: "__vec_get",
+    ordinal: 1,
+    params: Object.freeze([{ kind: "externref" } as ValType, { kind: "i32" } as ValType]),
+    results: Object.freeze([{ kind: "externref" } as ValType]),
+    placeholder: Object.freeze([{ op: "ref.null.extern" } as Instr]),
+  }),
+  Object.freeze({
+    kind: "is-vec",
+    name: "__is_vec",
+    ordinal: 2,
+    params: Object.freeze([{ kind: "externref" } as ValType]),
+    results: Object.freeze([{ kind: "i32" } as ValType]),
+    placeholder: Object.freeze([{ op: "i32.const", value: 0 } as Instr]),
+  }),
+  Object.freeze({
+    kind: "mut-supported",
+    name: "__vec_mut_supported",
+    ordinal: 3,
+    params: Object.freeze([{ kind: "externref" } as ValType]),
+    results: Object.freeze([{ kind: "i32" } as ValType]),
+    placeholder: Object.freeze([{ op: "i32.const", value: 0 } as Instr]),
+  }),
+  Object.freeze({
+    kind: "push",
+    name: "__vec_push",
+    ordinal: 4,
+    params: Object.freeze([{ kind: "externref" } as ValType, { kind: "externref" } as ValType]),
+    results: Object.freeze([{ kind: "i32" } as ValType]),
+    placeholder: Object.freeze([{ op: "i32.const", value: 0 } as Instr]),
+  }),
+  Object.freeze({
+    kind: "pop",
+    name: "__vec_pop",
+    ordinal: 5,
+    params: Object.freeze([{ kind: "externref" } as ValType]),
+    results: Object.freeze([{ kind: "externref" } as ValType]),
+    placeholder: Object.freeze([{ op: "ref.null.extern" } as Instr]),
+  }),
+]);
+
+const vecHostBridgeAllocations = new WeakMap<CodegenContext, ReadonlyMap<VecHostBridgeKind, VecHostBridgeAllocation>>();
+
+function vecHostBridgeDefinition(kind: VecHostBridgeKind): VecHostBridgeDefinition {
+  const definition = VEC_HOST_BRIDGE_DEFINITIONS.find((candidate) => candidate.kind === kind);
+  if (!definition) throw new Error(`unknown vec host bridge kind ${kind}`);
+  return definition;
+}
+
+/**
+ * Reserve all six core vec host bridges as one exact allocator-owned family.
+ *
+ * The family is allocated in fixed ordinal order and only then published to
+ * the Program ABI registry. `funcMap` remains a best-effort compatibility
+ * alias: an existing same-labelled source callable is never overwritten.
+ */
+function ensureVecHostBridgeAllocations(ctx: CodegenContext): ReadonlyMap<VecHostBridgeKind, VecHostBridgeAllocation> {
+  const existing = vecHostBridgeAllocations.get(ctx);
+  if (existing) return existing;
+
+  const allocations = new Map<VecHostBridgeKind, VecHostBridgeAllocation>();
+  const observations: {
+    role: string;
+    roleOrdinal: number;
+    derivedOrdinal: number;
+    displayName: string;
+    funcIdx: FuncHandle;
+  }[] = [];
+  for (const definition of VEC_HOST_BRIDGE_DEFINITIONS) {
+    const typeIdx = addFuncType(ctx, [...definition.params], [...definition.results], `$${definition.name}_type`);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const func = {
+      name: definition.name,
+      typeIdx,
+      locals: [],
+      body: [...definition.placeholder],
+      exported: true,
+    } as WasmFunction;
+    ctx.mod.functions.push(func);
+    exportFunc(ctx.mod, definition.name, funcIdx);
+    if (!ctx.funcMap.has(definition.name)) ctx.funcMap.set(definition.name, funcIdx);
+    allocations.set(definition.kind, Object.freeze({ definition, func }));
+    observations.push({
+      role: VEC_HOST_BRIDGE_ROLE,
+      roleOrdinal: PROGRAM_ABI_CALLABLE_ROLE.vecHostBridge,
+      derivedOrdinal: definition.ordinal,
+      displayName: definition.name,
+      funcIdx,
+    });
+  }
+
+  ctx.programAbiCallables?.observeEntrySourceSupports(observations);
+  const published = new Map(allocations);
+  vecHostBridgeAllocations.set(ctx, published);
+  return published;
+}
+
+/** Resolve a core vec bridge from its exact allocator object. */
+export function resolveVecHostBridgeHelper(ctx: CodegenContext, kind: VecHostBridgeKind): FuncHandle | undefined {
+  const definition = vecHostBridgeDefinition(kind);
+  const programAbiHandle = ctx.programAbiCallables?.handleForEntrySourceSupport(
+    VEC_HOST_BRIDGE_ROLE,
+    definition.ordinal,
+  );
+  if (programAbiHandle !== undefined) return programAbiHandle;
+  const allocation = vecHostBridgeAllocations.get(ctx)?.get(kind);
+  return allocation ? definedFuncHandleOf(ctx, allocation.func) : undefined;
+}
+
+function requireVecHostBridgeAllocation(ctx: CodegenContext, kind: VecHostBridgeKind): VecHostBridgeAllocation {
+  const allocation = ensureVecHostBridgeAllocations(ctx).get(kind);
+  if (!allocation) throw new Error(`missing vec host bridge allocation ${kind}`);
+  return allocation;
+}
+
+function fillVecHostBridge(
+  ctx: CodegenContext,
+  kind: VecHostBridgeKind,
+  locals: { name: string; type: ValType }[],
+  body: Instr[],
+): void {
+  const allocation = requireVecHostBridgeAllocation(ctx, kind);
+  allocation.func.locals = locals;
+  allocation.func.body = body;
+}
 
 /**
  * (#3311) The native-string vec carrier. `string[]` under nativeStrings /
@@ -61,25 +216,9 @@ export function nativeStrVecElemTypeIdx(ctx: CodegenContext, vecTypeIdx: number)
  * place (fill-or-build in `_emitVecAccessExportsInner`). Idempotent.
  */
 export function reserveVecMethodHelper(ctx: CodegenContext, kind: "push" | "pop" | "get" | "len"): number {
-  const name =
-    kind === "push" ? "__vec_push" : kind === "pop" ? "__vec_pop" : kind === "len" ? "__vec_len" : "__vec_get";
-  const existing = ctx.funcMap.get(name);
-  if (existing !== undefined) return existing;
-  const typeIdx =
-    kind === "push"
-      ? addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "$__vec_push_type")
-      : kind === "pop"
-        ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type")
-        : kind === "len"
-          ? addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type")
-          : addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }], "$__vec_get_type");
-  const idx = ctx.numImportFuncs + ctx.mod.functions.length;
-  // Placeholder body must match the declared result type.
-  const placeholder: Instr[] =
-    kind === "push" || kind === "len" ? [{ op: "i32.const", value: 0 }] : [{ op: "ref.null.extern" }];
-  ctx.mod.functions.push({ name, typeIdx, locals: [], body: placeholder, exported: true } as any);
-  exportFunc(ctx.mod, name, idx);
-  ctx.funcMap.set(name, idx);
+  ensureVecHostBridgeAllocations(ctx);
+  const idx = resolveVecHostBridgeHelper(ctx, kind);
+  if (idx === undefined) throw new Error(`reserved vec host bridge ${kind} lost its exact allocator object`);
   // Mark that the finalize vec-export pass must run (so the placeholder gets filled
   // even in a module that otherwise wouldn't emit vec helpers).
   ctx.usesVecValue = true;
@@ -190,10 +329,9 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     ensureGetUndefined(ctx);
     flushLateImportShifts(ctx, null);
   }
+  ensureVecHostBridgeAllocations(ctx);
 
   // __vec_len(externref) -> i32
-  const lenTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type");
-  const lenFuncIdx = ctx.numImportFuncs + mod.functions.length;
   {
     // local 0 = externref param, local 1 = anyref converted
     const body: Instr[] = [];
@@ -228,42 +366,10 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     }
     body.push(...current);
 
-    // (#2773) FILL-or-build. The dynamic-index native-vec element read
-    // (property-access.ts) reserves a `__vec_len` placeholder before this
-    // finalize pass (so it can bake the length-guard call at compile time); fill
-    // it in place if reserved, else push a fresh definition.
-    const reservedLen = ctx.funcMap.get("__vec_len");
-    if (reservedLen !== undefined) {
-      const fn = definedFuncAt(ctx, reservedLen)! as {
-        locals: { name: string; type: ValType }[];
-        body: Instr[];
-      };
-      fn.locals = [{ name: "__any", type: { kind: "anyref" } as ValType }];
-      fn.body = body;
-    } else {
-      mod.functions.push({
-        name: "__vec_len",
-        typeIdx: lenTypeIdx,
-        locals: [{ name: "__any", type: { kind: "anyref" } }],
-        body,
-        exported: true,
-      } as any);
-      mod.exports.push({
-        name: "__vec_len",
-        desc: { kind: "func", index: lenFuncIdx },
-      });
-      ctx.funcMap.set("__vec_len", lenFuncIdx);
-    }
+    fillVecHostBridge(ctx, "len", [{ name: "__any", type: { kind: "anyref" } }], body);
   }
 
   // __vec_get(externref, i32) -> externref
-  const getTypeIdx = addFuncType(
-    ctx,
-    [{ kind: "externref" }, { kind: "i32" }],
-    [{ kind: "externref" }],
-    "$__vec_get_type",
-  );
-  const getFuncIdx = ctx.numImportFuncs + mod.functions.length;
   {
     // local 0 = externref param (vec), local 1 = i32 param (index), local 2 = anyref
     const body: Instr[] = [];
@@ -476,28 +582,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     if (usedF64Scratch) {
       getLocals.push({ name: "__f64_scratch", type: { kind: "f64" } as ValType });
     }
-    // (#2784 S3) FILL-or-build (see __vec_push). The native-vec element-read guard
-    // (property-access.ts) reserves a `__vec_get` placeholder before this finalize
-    // pass; fill it in place if reserved.
-    const reservedGet = ctx.funcMap.get("__vec_get");
-    if (reservedGet !== undefined) {
-      const fn = definedFuncAt(ctx, reservedGet)! as { locals: typeof getLocals; body: Instr[] };
-      fn.locals = getLocals;
-      fn.body = body;
-    } else {
-      mod.functions.push({
-        name: "__vec_get",
-        typeIdx: getTypeIdx,
-        locals: getLocals,
-        body,
-        exported: true,
-      } as any);
-      mod.exports.push({
-        name: "__vec_get",
-        desc: { kind: "func", index: getFuncIdx },
-      });
-      ctx.funcMap.set("__vec_get", getFuncIdx);
-    }
+    fillVecHostBridge(ctx, "get", getLocals, body);
   }
 
   // (#1712) Generic host-side vec MUTATORS. Compiled acorn mutates instance
@@ -522,8 +607,6 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   // closure capture struct — the runtime's callable-wrapping paths consult
   // this export to veto bridging a vec into a JS function.
   {
-    const isVecTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__is_vec_type");
-    const isVecFuncIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
     let current: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
     for (let i = vecEntries.length - 1; i >= 0; i--) {
@@ -540,20 +623,11 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ];
     }
     body.push(...current);
-    mod.functions.push({
-      name: "__is_vec",
-      typeIdx: isVecTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
-      body,
-      exported: true,
-    } as any);
-    exportFunc(mod, "__is_vec", isVecFuncIdx);
+    fillVecHostBridge(ctx, "is-vec", [{ name: "__any", type: { kind: "anyref" } }], body);
   }
 
   // __vec_mut_supported(externref) -> i32 (1 = push/pop cover this vec's elem kind)
   {
-    const supTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_mut_supported_type");
-    const supFuncIdx = ctx.numImportFuncs + mod.functions.length;
     const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
     let current: Instr[] = [{ op: "i32.const", value: 0 }, { op: "return" }];
     for (let i = mutEntries.length - 1; i >= 0; i--) {
@@ -570,25 +644,11 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ];
     }
     body.push(...current);
-    mod.functions.push({
-      name: "__vec_mut_supported",
-      typeIdx: supTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
-      body,
-      exported: true,
-    } as any);
-    exportFunc(mod, "__vec_mut_supported", supFuncIdx);
+    fillVecHostBridge(ctx, "mut-supported", [{ name: "__any", type: { kind: "anyref" } }], body);
   }
 
   // __vec_push(externref vec, externref value) -> i32 (new length, or -1 unsupported)
   {
-    const pushTypeIdx = addFuncType(
-      ctx,
-      [{ kind: "externref" }, { kind: "externref" }],
-      [{ kind: "i32" }],
-      "$__vec_push_type",
-    );
-    const pushFuncIdx = ctx.numImportFuncs + mod.functions.length;
     // locals: 2 = anyref converted; per-arm typed locals appended below
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
     const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 2 }];
@@ -710,34 +770,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ];
     }
     body.push(...current);
-    // (#2784 S3) FILL-or-build. The native-vec method dispatch (calls.ts) compiles
-    // BEFORE this finalize pass, so it RESERVES a `__vec_push` placeholder up front
-    // (`reserveVecMethodHelper`) and bakes that funcIdx. If reserved, fill the
-    // placeholder's body in place (index/export already set at reserve); else build
-    // fresh and register in funcMap (shift-tracked) so a same-pass lookup resolves.
-    const reservedPush = ctx.funcMap.get("__vec_push");
-    if (reservedPush !== undefined) {
-      const fn = definedFuncAt(ctx, reservedPush)! as { locals: typeof locals; body: Instr[] };
-      fn.locals = locals;
-      fn.body = body;
-    } else {
-      mod.functions.push({
-        name: "__vec_push",
-        typeIdx: pushTypeIdx,
-        locals,
-        body,
-        exported: true,
-      } as any);
-      exportFunc(mod, "__vec_push", pushFuncIdx);
-      ctx.funcMap.set("__vec_push", pushFuncIdx);
-    }
+    fillVecHostBridge(ctx, "push", locals, body);
   }
 
   // __vec_pop(externref) -> externref (boxed last element; null.extern when
   // empty or unsupported — callers gate on __vec_mut_supported to tell apart)
   {
-    const popTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type");
-    const popFuncIdx = ctx.numImportFuncs + mod.functions.length;
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
     const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
     let current: Instr[] = [{ op: "ref.null.extern" }, { op: "return" }];
@@ -815,23 +853,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       ];
     }
     body.push(...current);
-    // (#2784 S3) FILL-or-build (see __vec_push above).
-    const reservedPop = ctx.funcMap.get("__vec_pop");
-    if (reservedPop !== undefined) {
-      const fn = definedFuncAt(ctx, reservedPop)! as { locals: typeof locals; body: Instr[] };
-      fn.locals = locals;
-      fn.body = body;
-    } else {
-      mod.functions.push({
-        name: "__vec_pop",
-        typeIdx: popTypeIdx,
-        locals,
-        body,
-        exported: true,
-      } as any);
-      exportFunc(mod, "__vec_pop", popFuncIdx);
-      ctx.funcMap.set("__vec_pop", popFuncIdx);
-    }
+    fillVecHostBridge(ctx, "pop", locals, body);
   }
 
   // (#3116) __vec_set_elem / __vec_set_len — array-exotic [[DefineOwnProperty]]

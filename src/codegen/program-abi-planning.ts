@@ -21,6 +21,7 @@ export const PROGRAM_ABI_CALLABLE_ROLE = Object.freeze({
   moduleInit: 5,
   retainedModuleFunction: 6,
   typedThisTwin: 7,
+  vecHostBridge: 8,
 } as const);
 
 export const PROGRAM_ABI_GLOBAL_ROLE = Object.freeze({
