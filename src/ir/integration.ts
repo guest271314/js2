@@ -4747,6 +4747,17 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
     ensureDynMemberGet(ctx);
   }
   if (usesMemberSet) {
+    if (ctx.standalone || ctx.wasi) {
+      ensureObjectRuntime(ctx);
+    } else {
+      ensureLateImport(
+        ctx,
+        "__extern_set_strict",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [],
+      );
+      flushLateImportShifts(ctx, null);
+    }
     ensureDynMemberSet(ctx);
   }
 }

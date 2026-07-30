@@ -1,8 +1,8 @@
 ---
 id: 3521
 title: "IR-only R2: prepare-before-emit free-function ownership"
-status: blocked
-sprint: Backlog
+status: in-progress
+sprint: current
 created: 2026-07-21
 updated: 2026-07-30
 priority: critical
@@ -31,6 +31,10 @@ files:
   - src/ir/lower.ts
   - src/ir/backend/legality.ts
   - src/codegen/program-abi-session.ts
+  - src/codegen/ir-overlay-preparation.ts
+  - src/codegen/ir-overlay-safety.ts
+  - src/codegen/ir-prepared-free-functions.ts
+  - src/codegen/module-global-registration.ts
   - src/codegen/context/types.ts
   - src/codegen/context/create-context.ts
   - src/codegen/declarations.ts
@@ -38,8 +42,10 @@ files:
   - src/index.ts
   - src/compiler.ts
   - tests/issue-3521-prepared-ir-program.test.ts
+  - tests/issue-3521-prepared-free-function-routing.test.ts
 loc-budget-allow:
   - src/codegen/program-abi-session.ts
+  - src/codegen/index.ts
 ---
 
 # #3521 — IR-only R2: prepare-before-emit free-function ownership
@@ -327,6 +333,77 @@ This prerequisite changes neither `compileDeclarations` nor
 exactly **0**, and all inline-small, monomorphization, allocation-provenance,
 and retirement-parity obligations remain assigned to the later prepare/emit
 wiring slice.
+
+## Production free-function routing slice (2026-07-30)
+
+The current R2 wiring replaces the primitive numeric/boolean skip allowlist in
+the default single-source pipeline. After declaration slots and TDZ globals
+exist, the compiler finalizes support preflight, builds and optimizes all
+retained top-level free-function IR, lowers it, and installs the successful
+bodies before `compileDeclarations` starts body emission.
+
+Routing is derived only from exact terminal `IrUnitId` evidence:
+
+- `patched` owners preserve their installed IR body and skip direct emission;
+- typed `Unsupported` owners are not skipped and direct-compile once;
+- `Invariant` owners remain IR-owned, receive no direct retry, and fail the
+  compile through the existing outcome audit.
+
+Class/member and module-init owners remain on their post-direct overlay until
+#3522/#3523. Their disjoint report is merged with the prepared free-function
+report before the shared exact reconciliation and telemetry path, so each
+terminal row is audited once.
+
+The routing helpers now live in `ir-prepared-free-functions.ts`; final-context
+support preflight moved out of the `index.ts` driver into
+`ir-overlay-preparation.ts`. `prepareModuleTdzGlobals` is idempotent and runs
+before IR preparation as well as for compatibility callers. Dynamic member-set
+support is registered before IR build, eliminating the former dependency on a
+direct-body side effect.
+
+Anti-vacuity coverage proves:
+
+- a string-method body rejected by the retired primitive allowlist is
+  IR-owned, records `legacyBodyEmitted: false`, and executes correctly;
+- a selector-rejected default-parameter owner direct-compiles once;
+- a prepared body remains valid when that later direct owner adds a host
+  import and shifts the imported-function prefix;
+- an injected build invariant fails without either direct or IR success.
+
+Focused evidence is 82/82 across the new routing tests plus #3521 core, #3143,
+#3203, and #3795. IR fallback, optimization-retirement, LOC, and function
+budgets pass. A first broad prepare-before-emit attempt reduced legacy body
+emission from 37 to 16, but full equivalence exposed twelve final-ABI
+regressions because those functions still depended on direct-body discovery.
+That unsafe breadth was removed.
+
+The fail-closed routing slice now activates only when the complete selected
+population consists of one or more closed scalar/string top-level call
+components, with no selected class member/module init or pending ambient-call,
+callback, Date, Promise, fast-mode, async/generator, reference-shaped callable
+contract, or unresolved cross-component dependency. Programs outside that
+boundary retain the established post-direct overlay and compile-once allowlist.
+A separate fast-mode guard prevents source `number` positions whose direct ABI
+grounds to i32 from being skipped against an early f64 IR signature, while
+retaining annotation-proven boolean compile-once owners.
+
+The committed single-host readiness lane contains class/module/async ownership
+and therefore deliberately remains at **37 legacy body emissions**, with the
+same 31/37 IR-emitted terminals, six typed Unsupported units, zero invariants,
+and READY hybrid policy. Anti-vacuity is instead carried by the focused
+string-method fixture, which moves one owner outside the old allowlist from
+compile-twice to IR-only emission. This deliberately smaller cutover preserves
+the existing final-ABI discovery behavior while later R2 work moves that
+discovery and post-pass symbolic dependency sealing into explicit preparation.
+
+The required 110-test matrix is 106 passing. All four failures reproduce
+unchanged on the exact parent: three stale end-to-end `inline-small` harness
+expectations/import setups and the #3214 imported-overload inventory-owner
+failure. No optimization test regressed under R2.
+
+Remaining R2 work before closing this issue is the full required gate matrix,
+explicit component/counter reconciliation evidence, and removal of the
+compatibility placeholder branch once #3522/#3523 no longer consume it.
 
 ## File ownership and locks
 
