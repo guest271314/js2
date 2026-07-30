@@ -1726,6 +1726,7 @@ export function lowerIrFunctionBody<S, Slot>(
         emitValue(instr.recv, out);
         emitValue(instr.key, out);
         emitValue(instr.value, out);
+        // pushraw-ok(#3795): backend-provided dynamic store sequence is rejected by non-Wasm backend legality
         for (const op of dyn.emitMemberSet()) emitter.pushRaw(out, op);
         return;
       }
