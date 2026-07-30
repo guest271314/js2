@@ -121,19 +121,6 @@
 
     <npm-compat-chart src="./benchmarks/results/npm-compat.json"></npm-compat-chart>
 
-    <!-- Each package can contribute two explicitly labelled rows: JS-host keeps
-         runtime-dynamic inputs and the test driver in Node, while standalone
-         exposes compile-time-static inputs by compiling package + driver into
-         host-free Wasm. Both use native Node running the SAME observed
-         operation as baseline. -->
-    <perf-benchmark-chart
-      src="./benchmarks/results/npm-compat-perf.json"
-      mode="perf"
-      baseline-label="Node"
-      title="Standalone and JS-host Wasm vs native Node"
-      legend="Input knowledge and harness placement are separate: runtime-dynamic values arrive after compilation, while compile-time-static inputs are compiler-visible; JS-host loops run in Node, while standalone loops run inside host-free Wasm. Every row consumes the result and uses the same native Node operation as the tick."
-    ></perf-benchmark-chart>
-
     <footer>
       <div>
         <h2>What is measured</h2>
@@ -180,6 +167,5 @@
 
     <script type="module" src="./components/site-nav.js"></script>
     <script type="module" src="./components/npm-compat-chart.js"></script>
-    <script type="module" src="./components/perf-benchmark-chart.js"></script>
   </body>
 </html>
