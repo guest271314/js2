@@ -981,23 +981,162 @@ const _VEC_HOST_BRIDGE_EXPORTS = [
   ["__vec_pop", "$v5"],
 ] as const;
 
+const _CLOSURE_HOST_BRIDGE_EXPORTS = [
+  ["__call_fn_0", "$c0"],
+  ["__call_fn_1", "$c1"],
+  ["__call_fn_2", "$c2"],
+  ["__call_fn_3", "$c3"],
+  ["__call_fn_4", "$c4"],
+  ["__call_fn_method_0", "$c5"],
+  ["__call_fn_method_1", "$c6"],
+  ["__call_fn_method_2", "$c7"],
+  ["__call_fn_method_3", "$c8"],
+  ["__call_fn_method_4", "$c9"],
+  ["__call_fn_method_5", "$ca"],
+  ["__call_fn_method_6", "$cb"],
+  ["__call_fn_method_7", "$cc"],
+  ["__call_fn_method_8", "$cd"],
+  ["__closure_arity", "$ce"],
+  ["__is_closure", "$cf"],
+  ["__closure_has_rest", "$cg"],
+] as const;
+
+const _CLOSURE_HOST_BRIDGE_MANIFEST = ["__\0js2_closure_host_bridge", "$cm"] as const;
+const _CLOSURE_HOST_BRIDGE_MARKER = ["__\0js2_closure_host_bridge_marker", "$ct"] as const;
+const _CLOSURE_HOST_BRIDGE_BINDINGS = ["__\0js2_closure_host_bridge_bindings", "$cu"] as const;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK = 0xfff00000;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x0001ffff;
+const _CLOSURE_HOST_BRIDGE_MANIFEST_RESERVED_MASK = 0x000e0000;
+const _immutableI32GlobalVerdict = new WeakSet<WebAssembly.Global>();
+let _immutableI32GlobalProbeModule: WebAssembly.Module | undefined;
+const _emptyFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
+const _bindingFuncrefTableVerdict = new WeakSet<WebAssembly.Table>();
+let _emptyFuncrefTableProbeModule: WebAssembly.Module | undefined;
+let _bindingFuncrefTableProbeModule: WebAssembly.Module | undefined;
+
 /**
- * Resolve a collision-only compiler vec bridge without replacing a user's
- * same-labelled public export. The logical export is already authoritative
- * when no physical family exists.
+ * Resolve the terminal compiler alias in one collision-safe physical family.
  */
-function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T {
-  let view: T | undefined;
+function _terminalHostBridgeAlias(exports: Record<string, any>, physicalBase: string): unknown {
+  let physicalName = physicalBase;
+  let helper: unknown;
+  while (Object.prototype.hasOwnProperty.call(exports, physicalName)) {
+    helper = exports[physicalName];
+    physicalName += "$";
+  }
+  return helper;
+}
+
+/** Prove a Global's exact type and mutability through Wasm import validation. */
+function _isImmutableI32Global(value: unknown): value is WebAssembly.Global {
+  if (!(value instanceof WebAssembly.Global)) return false;
+  if (_immutableI32GlobalVerdict.has(value)) return true;
+  try {
+    _immutableI32GlobalProbeModule ??= new WebAssembly.Module(
+      Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 2, 8, 1, 1, 101, 1, 103, 3, 127, 0]),
+    );
+    new WebAssembly.Instance(_immutableI32GlobalProbeModule, { e: { g: value } });
+    _immutableI32GlobalVerdict.add(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Prove a Table's exact funcref limits through Wasm import validation. */
+function _isExactFuncrefTable(value: unknown, size: 0 | 17): value is WebAssembly.Table {
+  if (!(value instanceof WebAssembly.Table) || value.length !== size) return false;
+  const verdict = size === 0 ? _emptyFuncrefTableVerdict : _bindingFuncrefTableVerdict;
+  if (verdict.has(value)) return true;
+  try {
+    const bytes =
+      size === 0
+        ? [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 0, 0]
+        : [0, 97, 115, 109, 1, 0, 0, 0, 2, 10, 1, 1, 101, 1, 116, 1, 112, 1, 17, 17];
+    let probe = size === 0 ? _emptyFuncrefTableProbeModule : _bindingFuncrefTableProbeModule;
+    if (!probe) {
+      probe = new WebAssembly.Module(Uint8Array.from(bytes));
+      if (size === 0) _emptyFuncrefTableProbeModule = probe;
+      else _bindingFuncrefTableProbeModule = probe;
+    }
+    new WebAssembly.Instance(probe, { e: { t: value } });
+    verdict.add(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface ClosureHostBridgeMetadata {
+  bits: number;
+  bindings: WebAssembly.Table;
+}
+
+/** Read and authenticate compiler-authored closure-helper metadata. */
+function _closureHostBridgeMetadata(exports: Record<string, any>): ClosureHostBridgeMetadata | undefined {
+  const [markerLogicalName, markerPhysicalBase] = _CLOSURE_HOST_BRIDGE_MARKER;
+  if (!Object.prototype.hasOwnProperty.call(exports, markerLogicalName)) return undefined;
+  const marker = _terminalHostBridgeAlias(exports, markerPhysicalBase);
+  if (!_isExactFuncrefTable(marker, 0)) return undefined;
+
+  const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_MANIFEST;
+  if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) return undefined;
+  const manifest = _terminalHostBridgeAlias(exports, physicalBase);
+  if (!_isImmutableI32Global(manifest) || typeof manifest.value !== "number") return undefined;
+  const value = manifest.value | 0;
+  if ((value & _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK) !== _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC) return undefined;
+  if ((value & _CLOSURE_HOST_BRIDGE_MANIFEST_RESERVED_MASK) !== 0) return undefined;
+  const bits = value & _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK;
+
+  const [bindingsLogicalName, bindingsPhysicalBase] = _CLOSURE_HOST_BRIDGE_BINDINGS;
+  if (!Object.prototype.hasOwnProperty.call(exports, bindingsLogicalName)) return undefined;
+  const bindings = _terminalHostBridgeAlias(exports, bindingsPhysicalBase);
+  if (!_isExactFuncrefTable(bindings, 17)) return undefined;
+  try {
+    for (let bit = 0; bit < _CLOSURE_HOST_BRIDGE_EXPORTS.length; bit++) {
+      const binding = bindings.get(bit);
+      if ((bits & (1 << bit)) !== 0 ? typeof binding !== "function" : binding !== null) return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+  return { bits, bindings };
+}
+
+/**
+ * Compose vec and closure bridge projections from the same raw export object.
+ *
+ * Vec keeps its collision-only logical-name gate. Closure availability comes
+ * only from the compiler-authored manifest; user-controlled helper-like names
+ * never establish ownership. All overrides land in one prototype view so the
+ * two bridge families cannot hide each other's raw own properties.
+ */
+function _hostBridgeExportView<T extends Record<string, any>>(exports: T): T {
+  const overrides = new Map<string, unknown>();
   for (const [logicalName, physicalBase] of _VEC_HOST_BRIDGE_EXPORTS) {
     if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) continue;
-    let physicalName = physicalBase;
-    let helper: unknown;
-    while (Object.prototype.hasOwnProperty.call(exports, physicalName)) {
-      helper = exports[physicalName];
-      physicalName += "$";
-    }
+    const helper = _terminalHostBridgeAlias(exports, physicalBase);
     if (typeof helper !== "function" || exports[logicalName] === helper) continue;
-    view ??= Object.create(exports) as T;
+    overrides.set(logicalName, helper);
+  }
+
+  const closureMetadata = _closureHostBridgeMetadata(exports);
+  for (let bit = 0; bit < _CLOSURE_HOST_BRIDGE_EXPORTS.length; bit++) {
+    const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_EXPORTS[bit]!;
+    if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) continue;
+    let helper: unknown;
+    if (closureMetadata !== undefined && (closureMetadata.bits & (1 << bit)) !== 0) {
+      helper = _terminalHostBridgeAlias(exports, physicalBase);
+      if (typeof helper !== "function" || helper !== closureMetadata.bindings.get(bit)) helper = undefined;
+    }
+    if (exports[logicalName] === helper) continue;
+    overrides.set(logicalName, helper);
+  }
+
+  if (overrides.size === 0) return exports;
+  const view = Object.create(exports) as T;
+  for (const [logicalName, helper] of overrides) {
     Object.defineProperty(view, logicalName, {
       value: helper,
       enumerable: false,
@@ -1005,7 +1144,7 @@ function _vecHostBridgeExportView<T extends Record<string, any>>(exports: T): T 
       writable: false,
     });
   }
-  return view ?? exports;
+  return view;
 }
 
 // (#3673) Memoized classification for `_isWasmStruct`. The predicate is on the
@@ -15327,7 +15466,7 @@ export function buildImports(
   // Always provide setExports — needed for callbacks, native string marshaling,
   // and struct field getter discovery (__sget_*).
   result.setExports = (exports: Record<string, Function>) => {
-    wasmExports = _vecHostBridgeExportView(exports);
+    wasmExports = _hostBridgeExportView(exports);
     // (#1712) Replay operations parked during the module START function (see
     // pendingExportsDeferred above) now that struct introspection exports
     // are reachable.
@@ -15468,11 +15607,11 @@ export function wrapExports(
     signatures?: Record<string, WrapExportsSignature>;
   },
 ): Record<string, any> {
-  const callFn0 = rawExports.__call_fn_0 as ((closure: any) => any) | undefined;
-  const callFn1 = rawExports.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
   // #1504: marshal by default; `marshal: false` keeps raw WasmGC handles.
   const marshal: "copy" | false = options?.marshal === false ? false : "copy";
-  const exportsForMarshal = _vecHostBridgeExportView(rawExports as unknown as Record<string, Function>);
+  const exportsForMarshal = _hostBridgeExportView(rawExports as unknown as Record<string, Function>);
+  const callFn0 = exportsForMarshal.__call_fn_0 as ((closure: any) => any) | undefined;
+  const callFn1 = exportsForMarshal.__call_fn_1 as ((closure: any, arg: any) => any) | undefined;
   // (#1700) Vec allocator + byte-writer for Uint8Array args. Either may be
   // undefined, in which case the wrapper falls back
   // to passing the arg through unchanged.
@@ -15521,6 +15660,11 @@ export function wrapExports(
   const hasVecLen = typeof exportsForMarshal.__vec_len === "function";
   const looksMarshalable = (val: any): boolean => {
     if (val == null || typeof val !== "object") return false;
+    // No positively discovered compiler closure family means this module
+    // cannot return a compiled closure. Do not let a user `__is_closure`
+    // label or the historical old-module fallback turn class instances into
+    // callable wrappers.
+    if (typeof isClosureFn !== "function") return true;
     if (typeof isClosureFn === "function") {
       try {
         if (isClosureFn(val) === 1) return false;

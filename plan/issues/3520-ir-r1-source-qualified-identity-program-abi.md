@@ -100,6 +100,7 @@ files:
   - src/codegen/program-abi-module-init-planning.ts
   - src/codegen/program-abi-source-callable-planning.ts
   - src/codegen/program-abi-planning.ts
+  - src/codegen/closure-exports.ts
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/program-abi-type-planning.ts
@@ -117,6 +118,7 @@ files:
   - src/codegen/closures/funcref-as-closure.ts
   - src/codegen/closures/method-trampolines.ts
   - src/codegen/index.ts
+  - src/runtime.ts
   - src/codegen/stdlib-selfhost.ts
   - docs/ir/ir-contract.md
   - docs/ir/ir-module.schema.json
@@ -160,6 +162,7 @@ files:
   - tests/issue-3520-class-support-callable-abi.test.ts
   - tests/issue-3520-class-integration-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
+  - tests/issue-3520-closure-host-bridge-abi.test.ts
   - tests/issue-3520-module-init-callable-abi.test.ts
   - tests/issue-3520-source-callable-abi.test.ts
   - tests/issue-3520-type-class-abi.test.ts
@@ -171,7 +174,7 @@ files:
   - tests/issue-2856-calendar-residuals.test.ts
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
-  - src/runtime.ts
+  - src/codegen/closure-exports.ts
   - src/codegen/declarations.ts
   - src/codegen/statements/nested-declarations.ts
   - src/codegen/context/types.ts
@@ -181,6 +184,7 @@ loc-budget-allow:
   - src/ir/nodes.ts
   - src/ir/verify.ts
   - src/ir/backend/porffor/assembler.ts
+  - src/runtime.ts
 # R1 must resolve exact checker declarations to the one authoritative identity
 # inventory. TypeOracle deliberately does not expose ts.Symbol/ts.Type objects,
 # so these two structural joins remain reviewed raw-checker boundaries until
@@ -2656,6 +2660,71 @@ census pass without changing the equivalence baseline or Test262 run log.
 C30 closes exact retained ownership for the six core vec host bridges, not R1.
 Other support callable families and remaining module-array or display-name
 consumers must still move behind structural authorities before R1 can close.
+
+### 2026-07-30 closure host-bridge callable ownership continuation
+
+The C31 continuation on `codex/3520-c31-closure-host-bridge` moves the bounded
+host-visible closure dispatcher family behind one entry-source-owned structural
+role:
+
+- direct `__call_fn_0` through `__call_fn_4` use fixed
+  `closure-host-bridge` ordinals 0 through 4, method
+  `__call_fn_method_0` through `__call_fn_method_5` use ordinals 5 through 10,
+  `__closure_arity` uses 11, and `__is_closure` uses 12. The optional
+  `__closure_has_rest` classifier uses ordinal 13 only in modules that actually
+  emit it. Higher method dispatchers remain on generic retained ownership in
+  this bounded slice;
+- each existing helper body is first materialized as one exact
+  `WasmFunction`, then planned under the canonical entry source and published
+  at the current Program ABI-resolved handle. The public labels, exported
+  signatures, dispatcher bodies, method-receiver save/restore behavior,
+  `funcMap` compatibility entries, closure classifier semantics, and #2083
+  closure-free gating remain unchanged. When a user owns a logical helper name
+  or its reserved `$cN` physical prefix, codegen preserves every user export
+  and publishes the exact helper at the terminal free physical suffix. One
+  immutable compiler-authored i32 manifest records exactly which helpers were
+  emitted. A collision-safe empty Wasm table authenticates that metadata as
+  compiler-owned rather than a user name/value convention, while a 17-slot
+  funcref table binds every set bit to the exact compiler helper object. The JS
+  runtime proves the manifest is an immutable i32 and both tables have exact
+  `funcref` element types and `0..0` / `17..17` limits through Wasm import
+  validation. It rejects reserved bits, externref or malformed tables, never
+  falls back to a user logical export, and composes closure and vec projections
+  from the same raw export object into one internal view; and
+- tracked and untracked compilation use the same allocator-object lookup.
+  Tracking adds only structural ownership metadata and does not allocate,
+  relabel, or rebuild a helper.
+
+The exact five-entry `SINGLE_HOST_ENTRIES` census was run against C30 main at
+`c462d0216e3925` plus C31. It reports **166** defined functions, **51** generic
+`retained-module-function` rows, exactly **24** `vec-host-bridge` rows, and
+exactly **26** `closure-host-bridge` rows across the emitting entries. The
+closure manifest adds no callable and does not change the structural row
+counts. Routing and body outcomes remain **37 terminal / 30 emitted / 7
+Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**.
+
+The focused C31 suite passes **11/11**. It proves every fixed ID and public label,
+the absence of a second generic callable owner, exact final-slot object
+resolution across a forced late import and dead-slot compaction, zero bridge
+rows for a closure-free module, tracked/untracked byte equality, direct closure
+identity/call behavior, method receiver identity, conditional rest
+classification, collision-safe logical and physical export ownership, and the
+five-entry census. Simultaneous vec and closure logical/physical/manifest
+collisions resolve through both `buildImports().setExports` and `wrapExports`.
+A closure-free forged `__is_closure` + `__call_fn_0` + `$cf` family remains
+public but cannot fabricate runtime closure discovery, so a fieldless class
+instance still crosses `wrapExports` as an object. Missing compiler aliases,
+non-empty markers, mutable-i32 or f64 manifests, and reserved availability bits
+also fail closed for a real compiled boxed class. An externref table containing
+matching JS helper functions is rejected even when its length, availability,
+and terminal aliases otherwise match. The adjacent #2083 and vec/closure
+dispatch-runtime matrix passes **95/95 across thirteen files**, including the
+focused C30 and C31 structural-ownership suites.
+
+C31 closes exact retained ownership for this bounded closure host-dispatch
+family, not R1. Higher-arity method dispatchers, other support callable
+families, remaining class/type consumers, and module-array or display-name
+scans still need structural owners before R1 can close.
 
 ### R1a validation evidence
 
