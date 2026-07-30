@@ -240,6 +240,45 @@ identity/signatures, and allocation provenance, and
 `check:ir-optimization-retirement` remains fail-closed until its committed
 parity evidence is retirement-ready.
 
+## Scoped prepared-component ABI prerequisite (2026-07-30)
+
+The next file-disjoint prerequisite adds a scoped seal to
+`ProgramAbiSession`; it does not activate production routing. A one-shot
+component transaction starts from exact terminal `IrUnitId`s, automatically
+closes over source and pass-derived callables plus existing aliases/exports,
+and accepts only explicitly discovered external/support binding IDs.
+
+Successful scope sealing proves, before unrelated direct-body planning:
+
+- source/derived callable and support identities are complete;
+- callable/global structured type contracts match their planned signatures;
+- required slots have an observed structural reservation and an exact
+  allocator locator already present in the module;
+- later derived units, aliases, exports, unit-owned support, type-contract
+  additions, or locator replacement cannot extend or mutate the sealed
+  component.
+
+The whole `ProgramAbiSession` intentionally remains in planning state, so
+unrelated direct bindings and support can still be registered. Whole-program
+seal and final publication rebuild each scoped ABI, compare every materialized
+contract while ignoring only whole-program dense-order renumbering, and fail
+closed on missing/drifted identities, contracts, reservations, or locators.
+Explicit type-layout remaps advance the scoped structured contracts through the
+same validated remap rather than hiding an unreported mutation.
+
+Focused evidence in
+`tests/issue-3521-scoped-prepared-abi-seal.test.ts` covers a non-empty source
+callable plus monomorphized clone, alias, export, and support closure; continued
+unrelated planning; missing locator/reservation rejection; prepared-owned late
+support/derived rejection; signature drift at publication; exact final
+reconciliation; and transaction abort/retry without partial scope publication.
+
+This prerequisite changes neither `compileDeclarations` nor
+`compileIrPathFunctions`. Production adoption and legacy-body reduction remain
+exactly **0**, and all inline-small, monomorphization, allocation-provenance,
+and retirement-parity obligations remain assigned to the later prepare/emit
+wiring slice.
+
 ## File ownership and locks
 
 Lock `src/codegen/index.ts`, `src/codegen/declarations.ts`,
