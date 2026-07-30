@@ -4,7 +4,9 @@
 
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
+import { canonicalCountedPushPlanForLiteral } from "../src/ir/array-element-lowering.js";
 import { buildImports } from "../src/runtime.js";
+import { ts } from "../src/ts-api.js";
 
 async function compileAndRun(source: string, exportName: string, args: number[] = []): Promise<number> {
   const r = await compile(source, { fileName: "test.ts" });
@@ -14,6 +16,24 @@ async function compileAndRun(source: string, exportName: string, args: number[] 
   const fn = (instance.exports as any)[exportName] as (...a: number[]) => number;
   if (typeof fn !== "function") throw new Error(`missing export ${exportName}`);
   return fn(...args);
+}
+
+function countedPushCapacity(source: string): number | null {
+  const fileName = "counted-push-symbols.ts";
+  const options: ts.CompilerOptions = { noLib: true, noResolve: true, target: ts.ScriptTarget.ES2022 };
+  const sourceFile = ts.createSourceFile(fileName, source, ts.ScriptTarget.ES2022, true);
+  const host = ts.createCompilerHost(options, true);
+  host.getSourceFile = (name) => (name === fileName ? sourceFile : undefined);
+  host.readFile = (name) => (name === fileName ? source : undefined);
+  host.fileExists = (name) => name === fileName;
+  const checker = ts.createProgram([fileName], options, host).getTypeChecker();
+  let literal: ts.ArrayLiteralExpression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (!literal && ts.isArrayLiteralExpression(node)) literal = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return literal ? (canonicalCountedPushPlanForLiteral(literal, checker)?.capacity ?? null) : null;
 }
 
 describe("#1198 pre-size dense arrays — matching patterns", () => {
@@ -243,8 +263,72 @@ describe("#1198 pre-size dense arrays — non-matching patterns (must fall back 
       }
     `;
     // 1+2+3+4+5 = 15
-    const r = await compileAndRun(src, "f");
-    expect(r).toBe(15);
+    const compiled = await compile(src, {
+      fileName: "counted-push.ts",
+      emitWat: true,
+      trackIrOutcomes: true,
+    });
+    expect(compiled.success, compiled.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(compiled.irCompiledFuncs ?? [], JSON.stringify(compiled.irOutcomes, null, 2)).toContain("f");
+    const functionStart = compiled.wat?.indexOf("(func $f ") ?? -1;
+    const functionEnd = compiled.wat?.indexOf("\n  (func ", functionStart + 1) ?? -1;
+    const functionWat = compiled.wat?.slice(functionStart, functionEnd) ?? "";
+    expect(functionStart).toBeGreaterThanOrEqual(0);
+    expect(functionEnd).toBeGreaterThan(functionStart);
+    expect(functionWat).toMatch(/i32\.const 5\s+array\.new_default/);
+    expect(functionWat).toContain("array.set");
+    expect(functionWat).toContain("struct.set");
+    expect(functionWat).not.toMatch(/\bcall\b/);
+    expect(functionWat).not.toContain("array.copy");
+
+    const imports = buildImports(compiled.imports, undefined, compiled.stringPool);
+    const { instance } = await WebAssembly.instantiate(compiled.binary, imports as any);
+    expect((instance.exports.f as () => number)()).toBe(15);
+  });
+
+  it("does not specialize a push value that observes the array", async () => {
+    const src = `
+      export function f(): number {
+        const a: number[] = [];
+        for (let i = 0; i < 5; i++) a.push(a.length);
+        return a.length;
+      }
+    `;
+    const compiled = await compile(src, {
+      fileName: "counted-push-alias.ts",
+      emitWat: true,
+      trackIrOutcomes: true,
+    });
+    expect(compiled.success, compiled.errors.map((error) => error.message).join("\n")).toBe(true);
+    expect(compiled.irCompiledFuncs ?? [], JSON.stringify(compiled.irOutcomes, null, 2)).toContain("f");
+    const functionStart = compiled.wat?.indexOf("(func $f ") ?? -1;
+    const functionEnd = compiled.wat?.indexOf("\n  (func ", functionStart + 1) ?? -1;
+    const functionWat = compiled.wat?.slice(functionStart, functionEnd) ?? "";
+    expect(functionWat).toContain("array.new_fixed");
+    expect(functionWat).toMatch(/\bcall\b/);
+
+    const imports = buildImports(compiled.imports, undefined, compiled.stringPool);
+    const { instance } = await WebAssembly.instantiate(compiled.binary, imports as any);
+    expect((instance.exports.f as () => number)()).toBe(5);
+  });
+
+  it("requires binding identity when the loop variable shadows the array", () => {
+    expect(
+      countedPushCapacity(`
+        function f(): void {
+          const a: number[] = [];
+          for (let a = 0; a < 5; a++) a.push(a);
+        }
+      `),
+    ).toBeNull();
+    expect(
+      countedPushCapacity(`
+        function f(): void {
+          const a: number[] = [];
+          for (let i = 0; i < 5; i++) a.push(i);
+        }
+      `),
+    ).toBe(5);
   });
 
   it("body has multiple statements (reject — only single ExprStmt allowed)", async () => {

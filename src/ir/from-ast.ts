@@ -108,6 +108,7 @@ import {
   inferEmptyArrayElementTypes,
 } from "./array-element-inference.js";
 import {
+  canonicalCountedPushPlanForLiteral,
   emitForwardingAwareLinearVecLen,
   emitSafeNarrowedI32VecGet,
   emitSafeVecGet,
@@ -3920,6 +3921,10 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
     const vecValueType =
       cx.resolver?.resolveVecValueTypeForElement?.(elemVT) ??
       ({ kind: "ref", typeIdx: vec.vecStructTypeIdx } as ValType);
+    const countedPush = canonicalCountedPushPlanForLiteral(expr, cx.checker);
+    if (countedPush) {
+      return cx.builder.emitVecNewFixed([], hintElemIr, irVal(vecValueType), countedPush.capacity);
+    }
     const denseFill = denseFillPlanForLiteral(expr);
     if (denseFill && vecValueType.kind !== "i32") {
       const bound = lowerExpr(denseFill.bound, cx, irVal({ kind: "f64" }));

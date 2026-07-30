@@ -681,6 +681,12 @@ function renameInstrOperands(inst: IrInstr, rename: ReadonlyMap<IrValueId, IrVal
       if (v === inst.vec && idx === inst.index && newValue === inst.newValue) return inst;
       return { ...inst, vec: v, index: idx, newValue };
     }
+    case "vec.set_length": {
+      const vec = mapId(rename, inst.vec);
+      const length = mapId(rename, inst.length);
+      if (vec === inst.vec && length === inst.length) return inst;
+      return { ...inst, vec, length };
+    }
     case "vec.new_fixed": {
       // #1804 — rewrite each element operand (mirrors object.new).
       let changed = false;

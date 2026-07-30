@@ -800,6 +800,8 @@ function collectUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec, instr.index];
     case "vec.set":
       return [instr.vec, instr.index, instr.newValue];
+    case "vec.set_length":
+      return [instr.vec, instr.length];
     case "vec.new_fixed":
       return [...instr.elements]; // #1804
     case "forof.vec": {

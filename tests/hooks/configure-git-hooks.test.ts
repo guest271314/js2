@@ -45,6 +45,17 @@ describe("worktree-local Git hook installation", () => {
     expect(git(fixtureRoot, "config", "--get", "core.hooksPath")).toBe(".husky");
   });
 
+  it("installs and retains the repository growth ratchets", () => {
+    const packageJson = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    const preCommit = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
+
+    expect(packageJson.scripts.prepare).toBe("sh scripts/configure-git-hooks.sh");
+    expect(preCommit).toContain("pnpm run check:loc-budget");
+    expect(preCommit).toContain("pnpm run check:func-budget");
+  });
+
   it("keeps the oracle ratchet in the pre-commit hook", () => {
     const hook = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
 

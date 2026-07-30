@@ -440,6 +440,7 @@ function implicitSupportRequirement(instr: IrInstr): string | null {
     case "vec.len":
     case "vec.get":
     case "vec.set":
+    case "vec.set_length":
     case "vec.new_fixed":
     case "forof.vec":
       return `${instr.kind} resolves vec layout/helper support without an explicit symbolic ref`;

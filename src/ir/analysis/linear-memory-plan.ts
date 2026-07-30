@@ -738,7 +738,9 @@ function allocationSize(instr: IrInstr, layout: LinearLayoutPlan): LinearSizePla
   if (layout.kind === "vector" && instr.kind === "vec.new_fixed") {
     return {
       kind: "constant",
-      bytes: layout.elementsOffset + Math.max(instr.elements.length, layout.minimumCapacity) * layout.elementStride,
+      bytes:
+        layout.elementsOffset +
+        Math.max(instr.capacity ?? instr.elements.length, layout.minimumCapacity) * layout.elementStride,
     };
   }
   if (layout.kind === "string" && instr.kind === "string.const") {

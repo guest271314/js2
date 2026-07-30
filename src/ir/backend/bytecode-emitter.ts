@@ -718,6 +718,9 @@ export class BytecodeEmitter implements BackendEmitter<BytecodeSink> {
   emitElemSet(): void {
     throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }
+  emitVecSetLength(): void {
+    throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
+  }
   emitVecNewFixed(): void {
     throw new Error("BytecodeEmitter: vec primitives not in the #1584 numeric subset — see §2a struct/object family.");
   }

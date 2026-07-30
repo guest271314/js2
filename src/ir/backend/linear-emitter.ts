@@ -255,12 +255,27 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     });
   }
 
+  emitVecSetLength(layout: LinearVecLowering, out: Instr[]): void {
+    const linear = asLinearVec(layout);
+    out.push({
+      op: "i32.store",
+      align: 2,
+      offset: linear.linearMemory.layout.lengthOffset,
+    });
+  }
+
   // #1804 / #2956 L2 — fixed number-array construction. `lower.ts` has already
   // pushed e0...eN. Allocate the canonical linear array, then consume values
   // from the top of the stack and store each at its original index through the
   // value-first helper. This preserves source order without changing the shared
   // BackendEmitter contract or requiring one scratch local per element.
-  emitVecNewFixed(layout: LinearVecLowering, count: number, dataScratchLocal: number, out: Instr[]): void {
+  emitVecNewFixed(
+    layout: LinearVecLowering,
+    count: number,
+    capacity: number,
+    dataScratchLocal: number,
+    out: Instr[],
+  ): void {
     if (!layout) {
       throw new Error("LinearEmitter: emitVecNewFixed requires a linear vec layout");
     }
@@ -278,7 +293,7 @@ export class LinearEmitter implements BackendEmitter<Instr[]> {
     this.vecScratchLocals.add(dataScratchLocal);
 
     // Stack before: e0 ... eN. Stack after local.set: e0 ... eN, with ptr saved.
-    out.push({ op: "i32.const", value: Math.max(count, linear.linearMemory.layout.minimumCapacity) });
+    out.push({ op: "i32.const", value: Math.max(capacity, linear.linearMemory.layout.minimumCapacity) });
     out.push({ op: "call", funcIdx: vecNewFuncIdx });
     out.push({ op: "local.set", index: dataScratchLocal });
 

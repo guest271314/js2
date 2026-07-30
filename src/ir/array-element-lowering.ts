@@ -35,6 +35,7 @@ interface ArrayElementResolver {
 export interface ArrayElementLoweringHost {
   readonly builder: IrFunctionBuilder;
   readonly resolver?: ArrayElementResolver;
+  readonly checker?: ts.TypeChecker;
   readonly funcName: string;
   readonly emptyArrayInference: EmptyArrayElementInference;
   readonly i32PureNames: I32PureNames;
@@ -42,6 +43,223 @@ export interface ArrayElementLoweringHost {
 }
 
 const IR_F64: IrType = irVal({ kind: "f64" });
+const PURE_PUSH_BINARY_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.LessThanToken,
+  ts.SyntaxKind.LessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.GreaterThanEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.PlusToken,
+  ts.SyntaxKind.MinusToken,
+  ts.SyntaxKind.AsteriskToken,
+  ts.SyntaxKind.SlashToken,
+  ts.SyntaxKind.PercentToken,
+  ts.SyntaxKind.AsteriskAsteriskToken,
+  ts.SyntaxKind.AmpersandToken,
+  ts.SyntaxKind.BarToken,
+  ts.SyntaxKind.CaretToken,
+  ts.SyntaxKind.LessThanLessThanToken,
+  ts.SyntaxKind.GreaterThanGreaterThanToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken,
+]);
+
+export interface CanonicalCountedPushPlan {
+  readonly arrayLiteral: ts.ArrayLiteralExpression;
+  readonly pushCall: ts.CallExpression;
+  readonly capacity: number;
+}
+
+function unwrapPureExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+/**
+ * Conservative side-effect/alias proof for the counted-push value. Identifier
+ * reads and scalar operators are admitted; calls, member reads, mutation, and
+ * any reference to the array under construction are rejected.
+ */
+function isPureNonAliasingPushValue(
+  expression: ts.Expression,
+  arrayName: string,
+  checker: ts.TypeChecker | undefined,
+): boolean {
+  const candidate = unwrapPureExpression(expression);
+  if (
+    ts.isNumericLiteral(candidate) ||
+    candidate.kind === ts.SyntaxKind.TrueKeyword ||
+    candidate.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    return true;
+  }
+  if (ts.isIdentifier(candidate)) {
+    if (candidate.text === arrayName || !checker) return false;
+    const type = checker.getTypeAtLocation(candidate);
+    return (type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike)) !== 0;
+  }
+  if (ts.isPrefixUnaryExpression(candidate)) {
+    if (
+      candidate.operator !== ts.SyntaxKind.PlusToken &&
+      candidate.operator !== ts.SyntaxKind.MinusToken &&
+      candidate.operator !== ts.SyntaxKind.ExclamationToken &&
+      candidate.operator !== ts.SyntaxKind.TildeToken
+    ) {
+      return false;
+    }
+    return isPureNonAliasingPushValue(candidate.operand, arrayName, checker);
+  }
+  if (ts.isBinaryExpression(candidate)) {
+    if (!PURE_PUSH_BINARY_OPERATORS.has(candidate.operatorToken.kind)) return false;
+    return (
+      isPureNonAliasingPushValue(candidate.left, arrayName, checker) &&
+      isPureNonAliasingPushValue(candidate.right, arrayName, checker)
+    );
+  }
+  if (ts.isConditionalExpression(candidate)) {
+    return (
+      isPureNonAliasingPushValue(candidate.condition, arrayName, checker) &&
+      isPureNonAliasingPushValue(candidate.whenTrue, arrayName, checker) &&
+      isPureNonAliasingPushValue(candidate.whenFalse, arrayName, checker)
+    );
+  }
+  return false;
+}
+
+function countedPushPlan(
+  declaration: ts.VariableDeclaration,
+  loop: ts.ForStatement,
+  checker: ts.TypeChecker | undefined,
+): CanonicalCountedPushPlan | null {
+  if (!checker) return null;
+  const declarationList = declaration.parent;
+  if (
+    !ts.isVariableDeclarationList(declarationList) ||
+    (declarationList.flags & ts.NodeFlags.Const) === 0 ||
+    declarationList.declarations.length !== 1 ||
+    !ts.isIdentifier(declaration.name) ||
+    !declaration.initializer ||
+    !ts.isArrayLiteralExpression(declaration.initializer) ||
+    declaration.initializer.elements.length !== 0
+  ) {
+    return null;
+  }
+  const arrayName = declaration.name.text;
+  const arraySymbol = checker.getSymbolAtLocation(declaration.name);
+  if (!arraySymbol) return null;
+
+  const initializer = loop.initializer;
+  if (!initializer || !ts.isVariableDeclarationList(initializer) || initializer.declarations.length !== 1) return null;
+  const indexDeclaration = initializer.declarations[0]!;
+  if (
+    !ts.isIdentifier(indexDeclaration.name) ||
+    !indexDeclaration.initializer ||
+    !ts.isNumericLiteral(indexDeclaration.initializer) ||
+    indexDeclaration.initializer.text !== "0"
+  ) {
+    return null;
+  }
+  const indexName = indexDeclaration.name.text;
+  const indexSymbol = checker.getSymbolAtLocation(indexDeclaration.name);
+  if (!indexSymbol) return null;
+
+  const condition = loop.condition;
+  if (
+    !condition ||
+    !ts.isBinaryExpression(condition) ||
+    condition.operatorToken.kind !== ts.SyntaxKind.LessThanToken ||
+    !ts.isIdentifier(condition.left) ||
+    condition.left.text !== indexName ||
+    checker.getSymbolAtLocation(condition.left) !== indexSymbol ||
+    !ts.isNumericLiteral(condition.right)
+  ) {
+    return null;
+  }
+  const capacity = Number(condition.right.text);
+  if (!Number.isSafeInteger(capacity) || capacity <= 0 || capacity > 1_000_000) return null;
+
+  const incrementor = loop.incrementor;
+  if (
+    !incrementor ||
+    (!ts.isPrefixUnaryExpression(incrementor) && !ts.isPostfixUnaryExpression(incrementor)) ||
+    incrementor.operator !== ts.SyntaxKind.PlusPlusToken ||
+    !ts.isIdentifier(incrementor.operand) ||
+    incrementor.operand.text !== indexName ||
+    checker.getSymbolAtLocation(incrementor.operand) !== indexSymbol
+  ) {
+    return null;
+  }
+
+  const statements = ts.isBlock(loop.statement) ? loop.statement.statements : [loop.statement];
+  if (statements.length !== 1 || !ts.isExpressionStatement(statements[0])) return null;
+  const expression = statements[0].expression;
+  if (
+    !ts.isCallExpression(expression) ||
+    expression.arguments.length !== 1 ||
+    ts.isSpreadElement(expression.arguments[0]!) ||
+    !ts.isPropertyAccessExpression(expression.expression) ||
+    expression.expression.name.text !== "push" ||
+    !ts.isIdentifier(expression.expression.expression) ||
+    expression.expression.expression.text !== arrayName ||
+    checker.getSymbolAtLocation(expression.expression.expression) !== arraySymbol ||
+    !isPureNonAliasingPushValue(expression.arguments[0]!, arrayName, checker)
+  ) {
+    return null;
+  }
+
+  return { arrayLiteral: declaration.initializer, pushCall: expression, capacity };
+}
+
+/** Recover the exact adjacent allocation/loop proof from the empty literal. */
+export function canonicalCountedPushPlanForLiteral(
+  literal: ts.ArrayLiteralExpression,
+  checker?: ts.TypeChecker,
+): CanonicalCountedPushPlan | null {
+  const declaration = literal.parent;
+  if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== literal) return null;
+  const declarationList = declaration.parent;
+  if (!ts.isVariableDeclarationList(declarationList)) return null;
+  const statement = declarationList.parent;
+  if (!ts.isVariableStatement(statement) || !ts.isBlock(statement.parent)) return null;
+  const statements = statement.parent.statements;
+  const index = statements.indexOf(statement);
+  if (index < 0 || index + 1 >= statements.length) return null;
+  const loop = statements[index + 1]!;
+  return ts.isForStatement(loop) ? countedPushPlan(declaration, loop, checker) : null;
+}
+
+/** Recover the same proof from the push call lowered inside the loop body. */
+export function canonicalCountedPushPlanForCall(
+  call: ts.CallExpression,
+  checker?: ts.TypeChecker,
+): CanonicalCountedPushPlan | null {
+  const statement = call.parent;
+  if (!ts.isExpressionStatement(statement) || statement.expression !== call) return null;
+  const loopBody = statement.parent;
+  const loop = ts.isForStatement(loopBody)
+    ? loopBody
+    : ts.isBlock(loopBody) && loopBody.statements.length === 1 && ts.isForStatement(loopBody.parent)
+      ? loopBody.parent
+      : null;
+  if (!loop || !ts.isBlock(loop.parent)) return null;
+  const statements = loop.parent.statements;
+  const index = statements.indexOf(loop);
+  if (index <= 0) return null;
+  const previous = statements[index - 1]!;
+  if (!ts.isVariableStatement(previous) || previous.declarationList.declarations.length !== 1) return null;
+  const plan = countedPushPlan(previous.declarationList.declarations[0]!, loop, checker);
+  return plan?.pushCall === call ? plan : null;
+}
 
 /** Pre-lowering exact-int32 proof built from the i32 slot plan. */
 export function plannedExactInt32Proof(
@@ -162,6 +380,7 @@ export function tryLowerVecPush(
       ? emitForwardingAwareLinearVecLen(recv, host)
       : host.builder.emitVecLen(recv);
   const lenI32 = host.builder.emitUnary("i32.trunc_sat_f64_s", lenF64, irVal({ kind: "i32" }));
+  const countedPush = canonicalCountedPushPlanForCall(expr, host.checker);
   let value: IrValueId;
   if (narrowedI32) {
     value = ops.lowerNarrowedElement(expr.arguments[0]!);
@@ -180,7 +399,14 @@ export function tryLowerVecPush(
     }
   }
 
-  host.builder.emitCall(irIntrinsicFuncRef(`__vec_elem_set_${vec.vecStructTypeIdx}`), [recv, lenI32, value], null);
+  if (countedPush) {
+    host.builder.emitVecSet(recv, lenI32, value);
+    const one = host.builder.emitConst({ kind: "i32", value: 1 }, irVal({ kind: "i32" }));
+    const nextLength = host.builder.emitBinary("i32.add", lenI32, one, irVal({ kind: "i32" }));
+    host.builder.emitVecSetLength(recv, nextLength);
+  } else {
+    host.builder.emitCall(irIntrinsicFuncRef(`__vec_elem_set_${vec.vecStructTypeIdx}`), [recv, lenI32, value], null);
+  }
   if (statementPosition) return null;
   const one = host.builder.emitConst({ kind: "f64", value: 1 }, IR_F64);
   return host.builder.emitBinary("f64.add", lenF64, one, IR_F64);

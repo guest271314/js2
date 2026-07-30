@@ -1032,12 +1032,23 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
       value: value!,
     });
   }
-  emitVecNewFixed(layout: VecLayout, count: number, _scratch: number, out: PorfforSink): void {
+  emitVecSetLength(layout: VecLayout, out: PorfforSink): void {
+    const planned = asPlannedVec(layout).linearMemory.layout;
+    const [pointer, length] = out.sequence(out.popMany(2, "vec.set_length"));
+    out.append({
+      kind: "store",
+      ctype: "u32",
+      pointer: pointer!,
+      offset: planned.lengthOffset,
+      value: length!,
+    });
+  }
+  emitVecNewFixed(layout: VecLayout, count: number, capacity: number, _scratch: number, out: PorfforSink): void {
     const linear = asPlannedVec(layout).linearMemory;
     const allocation = requireArenaAllocation(linear.allocation, "vec.new_fixed");
     const elements = out.sequence(out.popMany(count, "vec.new_fixed elements"));
     const [pointer] = out.sequence([allocateExpr(allocation.size.bytes, allocation.id as number)]);
-    const capacity = Math.max(count, linear.layout.minimumCapacity);
+    const storedCapacity = Math.max(capacity, linear.layout.minimumCapacity);
     out.append({
       kind: "store",
       ctype: "u32",
@@ -1050,7 +1061,7 @@ export class PorfforEmitter implements BackendEmitter<PorfforSink> {
       ctype: "u32",
       pointer: pointer!,
       offset: linear.layout.capacityOffset,
-      value: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: capacity },
+      value: { kind: "const", type: "u32", effects: PORFFOR_FX.none, value: storedCapacity },
     });
     elements.forEach((value, index) => {
       out.append({
