@@ -461,6 +461,12 @@ describe("benchmark artifact lifecycle", () => {
     expect(cleanup).not.toContain('"$results/history.json"');
     expect(workflow).toContain("- name: Detect auxiliary benchmark changes");
     expect(workflow).toContain('auxiliary_mode="inherit"');
+    expect(workflow).toContain('if [ "${{ github.event_name }}" != "pull_request" ] &&');
+    expect(workflow).toContain('[ "${{ github.ref }}" = "refs/heads/main" ] &&');
+    expect(workflow).toContain('auxiliary_mode="measure"');
+    expect(workflow).toContain('elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then');
+    expect(workflow).toContain("- name: Install and verify pinned Javy");
+    expect(workflow).toContain("if: steps.auxiliary.outputs.mode == 'measure'");
     expect(workflow).toContain("BENCHMARK_AUXILIARY_RUNTIME_BASELINE");
     expect(workflow).toContain("website/public/benchmarks/competitive/programs");
   });
