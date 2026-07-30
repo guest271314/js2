@@ -282,6 +282,26 @@ export interface IrTypeOverrideMap {
   get(name: string): { readonly params: readonly IrType[]; readonly returnType: IrType | null } | undefined;
 }
 
+function makeAmbientStringBindingPredicate(checker: ts.TypeChecker): (node: ts.Identifier) => boolean {
+  return (node) => {
+    try {
+      const symbol = checker.getSymbolAtLocation(node);
+      // allowJs programs can omit lib declarations entirely. An unresolved
+      // `String` is the global constructor; every source-owned shadow has a
+      // source declaration and is rejected by the branch below.
+      if (!symbol) return true;
+      const declarations = [symbol.valueDeclaration, ...(symbol.declarations ?? [])].filter(
+        (declaration): declaration is ts.Declaration => declaration !== undefined,
+      );
+      return (
+        declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+      );
+    } catch {
+      return false;
+    }
+  };
+}
+
 export function compileIrPathFunctions(
   ctx: CodegenContext,
   sourceFile: ts.SourceFile,
@@ -394,6 +414,7 @@ export function compileIrPathFunctions(
   const classifyDeclaredPrimitiveExpression = makeIrDeclaredPrimitiveExpressionClassifier(ctx.checker);
   const isArrayExpression = makeIrArrayExpressionPredicate(ctx.checker);
   const isRegExpExpression = makeIrRegExpExpressionPredicate(ctx.checker);
+  const isAmbientStringBinding = makeAmbientStringBindingPredicate(ctx.checker);
   const selected =
     selection ??
     planIrCompilation(sourceFile, {
@@ -405,6 +426,7 @@ export function compileIrPathFunctions(
       classifyDeclaredPrimitiveExpression,
       isArrayExpression,
       isRegExpExpression,
+      isAmbientStringBinding,
       supportsSymbolicMathHelpers: true,
       supportsLiteralStringReplace: true,
       supportsHostStringArrayLiterals: jsHostExterns && !ctx.nativeStrings,
@@ -2847,6 +2869,7 @@ function externResultClassName(
 }
 
 function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModuleBindingResolver): IrFromAstResolver {
+  const isAmbientStringBinding = makeAmbientStringBindingPredicate(ctx.checker);
   return {
     objectDefinePropertyTarget() {
       if (ctx.standalone || ctx.wasi || ctx.strictNoHostImports) return null;
@@ -2918,6 +2941,11 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
         indexArgRep: (native ? "i32" : "f64") as "i32" | "f64",
         padOmitted: (native ? "native-slice-len" : "host") as "native-slice-len" | "host",
       };
+    },
+    stringFromCharCodePlan() {
+      return ctx.nativeStrings
+        ? { funcName: "__str_fromCharCode", argumentRep: "i32" as const }
+        : { funcName: "String_fromCharCode", argumentRep: "f64" as const };
     },
     resolveString(): ValType {
       if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
@@ -3077,6 +3105,7 @@ function makeFromAstResolver(ctx: CodegenContext, moduleBindingResolver?: IrModu
     isAmbientBinding(node: ts.Identifier): boolean {
       return moduleBindingResolver?.isAmbientBinding(node) === true;
     },
+    isAmbientStringBinding,
     // (#2856) Variant selection for `console.<m>(arg)` — the SAME checker
     // predicates as the legacy `collectConsoleImports` registration scan
     // (string → bool → number → externref, in that order), so the import
