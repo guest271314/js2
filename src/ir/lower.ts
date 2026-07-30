@@ -1705,6 +1705,30 @@ export function lowerIrFunctionBody<S, Slot>(
         for (const op of dyn.emitMemberGet()) emitter.pushRaw(out, op);
         return;
       }
+      case "dyn.member_set": {
+        const recvT = typeOf(instr.recv);
+        const keyT = typeOf(instr.key);
+        const valueT = typeOf(instr.value);
+        if (recvT.kind !== "dynamic" || keyT.kind !== "dynamic" || valueT.kind !== "dynamic") {
+          throw new Error(
+            `ir/lower: dyn.member_set operands must be dynamic, got ${recvT.kind}/${keyT.kind}/${valueT.kind} (${func.name})`,
+          );
+        }
+        const dyn = resolver.resolveDynamicLowering?.();
+        if (!dyn) {
+          throw new Error(
+            `ir/lower: resolver cannot lower dyn.member_set (resolveDynamicLowering missing/null) (${func.name})`,
+          );
+        }
+        // JS assignment evaluation order: receiver, key, RHS. The SSA
+        // scheduler anchors this side-effecting instruction; operands are
+        // emitted in the same order immediately before the strict helper call.
+        emitValue(instr.recv, out);
+        emitValue(instr.key, out);
+        emitValue(instr.value, out);
+        for (const op of dyn.emitMemberSet()) emitter.pushRaw(out, op);
+        return;
+      }
       case "string.const": {
         emitter.emitStringConst(instr.value, instr.alloc, out);
         return;
@@ -3401,6 +3425,8 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.lhs, instr.rhs];
     case "dyn.member_get":
       return [instr.recv, instr.key];
+    case "dyn.member_set":
+      return [instr.recv, instr.key, instr.value];
     case "string.const":
       return [];
     case "string.concat":

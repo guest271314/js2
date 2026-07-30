@@ -56,6 +56,7 @@
 
 import { ts, forEachChild } from "../ts-api.js";
 import { collectIrSafeVarDeclarationLists } from "./function-local-var.js";
+import { collectDynamicStringLocalWidening } from "./dynamic-local-widening.js";
 import { stringBuilderForcedLegacy } from "./string-builder-shape.js";
 // (#1373b C-1) Pure-syntactic async helpers from the LEAF module (safe for
 // ir/* — async-static.ts imports only ts-api, so no codegen/index cycle).
@@ -1701,7 +1702,8 @@ function whyNotIrClaimable(
   // -------------------------------------------------------------------------
   if (dynNames.size > 0 && isGenerator) return "param-type-not-resolvable";
   if (dynNames.size > 0 || isDynamicReturn || containsRetainedFunctionMethodCall(body)) {
-    if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap)) {
+    const dynamicStringLocals = collectDynamicStringLocalWidening(fn, new Set(dynNames));
+    if (!dynamicUsesAreMoveOnly(fn, dynNames, isDynamicReturn, typeMap, dynamicStringLocals)) {
       return dynNames.size > 0 ? "param-type-not-resolvable" : "return-type-not-resolvable";
     }
   }
@@ -2238,6 +2240,7 @@ function dynamicUsesAreMoveOnly(
   dynNames: Set<string>,
   returnIsDynamic: boolean,
   typeMap: TypeMap | undefined,
+  dynamicStringLocals: ReadonlySet<string> = new Set(),
 ): boolean {
   const body = fn.body;
   if (!body) return false;
@@ -2408,6 +2411,26 @@ function dynamicUsesAreMoveOnly(
       const leftIsDyn = isDynShaped(e.left);
       const rightIsDyn = isDynShaped(e.right);
       const op = e.operatorToken.kind;
+      // #3795 — strict statement-position dynamic element write. Keep the
+      // preclaim opening coupled to the exact Acorn family: direct dynamic
+      // parameter receiver, dynamic alias key, and either the proven widened
+      // string local or its literal conflict marker as RHS. Assignment-as-value
+      // and arbitrary dynamic writes remain rejected.
+      if (
+        op === ts.SyntaxKind.EqualsToken &&
+        !expectDyn &&
+        ts.isElementAccessExpression(e.left) &&
+        ts.isIdentifier(e.left.expression) &&
+        dynNames.has(e.left.expression.text) &&
+        ts.isIdentifier(e.left.argumentExpression) &&
+        dynNames.has(e.left.argumentExpression.text) &&
+        ((ts.isIdentifier(e.right) && dynamicStringLocals.has(e.right.text)) ||
+          (ts.isStringLiteralLike(e.right) && e.right.text === "true"))
+      ) {
+        if (!currentDynamicRuntimeBuildable) return false;
+        if (!scanExpr(e.left.expression, true) || !scanExpr(e.left.argumentExpression, true)) return false;
+        return ts.isIdentifier(e.right) ? scanExpr(e.right, true) : scanExpr(e.right, false);
+      }
       if (
         currentSubjectReturnsBoolean &&
         (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken)
@@ -2597,7 +2620,7 @@ function dynamicUsesAreMoveOnly(
         }
         const initIsDyn = isDynShaped(d.initializer);
         if (!scanExpr(d.initializer, initIsDyn)) return false;
-        if (initIsDyn) dynNames.add(d.name.text);
+        if (initIsDyn || dynamicStringLocals.has(d.name.text)) dynNames.add(d.name.text);
       }
       return true;
     }

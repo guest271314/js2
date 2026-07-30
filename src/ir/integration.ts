@@ -32,7 +32,7 @@ import {
   ensureExternLooseEqHelper,
   ensureExternStrictEqHelper,
 } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
-import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
+import { ensureDynMemberGet, ensureDynMemberSet } from "../codegen/dyn-read.js"; // (#3053 U1) / (#3795)
 import {
   ensureIrDynamicRuntime,
   IR_DYN_ADD_FN,
@@ -4521,7 +4521,7 @@ function isDynamicOp(instr: IrInstr): boolean {
   // built on the canonical any-helper family (`__any_from_extern_honest` /
   // `__any_to_extern` / `__box_*`), so it requires the dynamic backing too.
   // The helper itself is registered separately below (`ensureDynMemberGet`).
-  if (instr.kind === "dyn.member_get") return true;
+  if (instr.kind === "dyn.member_get" || instr.kind === "dyn.member_set") return true;
   return false;
 }
 
@@ -4535,6 +4535,10 @@ function isDynamicOp(instr: IrInstr): boolean {
  */
 function usesDynMemberGet(instr: IrInstr): boolean {
   return instr.kind === "dyn.member_get";
+}
+
+function usesDynMemberSet(instr: IrInstr): boolean {
+  return instr.kind === "dyn.member_set";
 }
 
 /**
@@ -4598,6 +4602,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   let usesEq = false;
   let usesToNumber = false;
   let usesMemberGet = false;
+  let usesMemberSet = false;
   // (#3143) A from-ast lowering can emit a DIRECT named call to a member of the
   // `addUnionImports` family (`__box_number` / `__unbox_number` / `__box_boolean`
   // / …) rather than a `box`/`unbox` IR instruction — e.g. `coerceToExpectedExtern`
@@ -4625,6 +4630,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
           if (usesDynEq(i)) usesEq = true;
           if (i.kind === "dyn.to_number") usesToNumber = true;
           if (usesDynMemberGet(i)) usesMemberGet = true;
+          if (usesDynMemberSet(i)) usesMemberSet = true;
           if (i.kind === "call" && i.target.binding.kind === "import" && i.target.binding.module === "env") {
             if (UNION_IMPORT_FUNC_NAMES.has(i.target.binding.field)) usesNamedUnionImport = true;
             else if (i.target.binding.field === "__extern_is_undefined") usesExternIsUndefined = true;
@@ -4739,6 +4745,9 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   if (usesMemberGet) {
     ctx.usesDynMemberGet = true;
     ensureDynMemberGet(ctx);
+  }
+  if (usesMemberSet) {
+    ensureDynMemberSet(ctx);
   }
 }
 
@@ -4914,6 +4923,9 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
         ctx.usesDynMemberGet = true;
         return [callHelper("__dyn_member_get")];
       },
+      emitMemberSet(): readonly Instr[] {
+        return [callHelper("__dyn_member_set")];
+      },
     };
   }
 
@@ -5070,6 +5082,9 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
     emitElementGet(): readonly Instr[] {
       ctx.usesDynMemberGet = true;
       return [callImport("__dyn_member_get")];
+    },
+    emitMemberSet(): readonly Instr[] {
+      return [callImport("__dyn_member_set")];
     },
   };
 }

@@ -600,6 +600,26 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * Emit the void, strict statement-position write dual of
+   * {@link emitDynMemberGet}. Receiver, key, and value must already use the
+   * canonical dynamic carrier; conversion is explicit at the AST producer.
+   */
+  emitDynMemberSet(recv: IrValueId, key: IrValueId, value: IrValueId): void {
+    for (const [label, v] of [
+      ["recv", recv],
+      ["key", key],
+      ["value", value],
+    ] as const) {
+      if (this.typeOf(v).kind !== "dynamic") {
+        throw new Error(
+          `IrFunctionBuilder: emitDynMemberSet ${label} operand ${v} is not dynamic — the dynamic member write accepts only boxed-any carriers (#3795) (func ${this.id.name})`,
+        );
+      }
+    }
+    this.pushInstr({ kind: "dyn.member_set", recv, key, value, result: null, resultType: null });
+  }
+
   // --- object ops (#1169b) ------------------------------------------------
 
   /**

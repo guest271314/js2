@@ -171,6 +171,9 @@ export function effectsOf(instr: IrInstr, cache: Map<IrInstr, IrEffects> = new M
     // (`__extern_get` runs accessors), so a dynamic member read is call-like:
     // it may read AND write arbitrary heap state. Conservative like extern.prop.
     case "dyn.member_get":
+    // #3795 — strict dynamic [[Set]] may invoke accessors/proxy-like runtime
+    // hooks and always mutates observable heap state.
+    case "dyn.member_set":
     case "iter.new":
     case "iter.next":
     case "iter.done":
@@ -477,6 +480,10 @@ export function isSideEffecting(i: IrInstr): boolean {
     // slot.read is pure (load a Wasm local) but always-keep to avoid
     // breaking the for-of body's load/use pattern.
     i.kind === "slot.write" ||
+    // #3795: strict dynamic [[Set]] is void-result but its three carrier
+    // operands must seed DCE liveness. The generic null-result keep rule
+    // preserves only the instruction itself, not the definitions it uses.
+    i.kind === "dyn.member_set" ||
     i.kind === "forof.vec" ||
     // Slice 6 part 3 (#1182): host-iterator protocol ops mutate iterator
     // state (advance pointer, dispose). DCE must not eliminate them
