@@ -34,6 +34,8 @@ import {
 const CLOSURE_HOST_BRIDGE_ROLE = "closure-host-bridge";
 const CLOSURE_HOST_BRIDGE_MANIFEST_NAME = "__\0js2_closure_host_bridge";
 const CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE = "$cm";
+const CLOSURE_HOST_BRIDGE_MARKER_NAME = "__\0js2_closure_host_bridge_marker";
+const CLOSURE_HOST_BRIDGE_MARKER_PHYSICAL_BASE = "$ct";
 const CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
 const publishedClosureHostBridgeBits = new WeakMap<CodegenContext, number>();
 const publishedClosureHostBridgeManifests = new WeakSet<CodegenContext>();
@@ -131,10 +133,7 @@ function publishClosureHostBridge(ctx: CodegenContext, func: WasmFunction, deriv
       occupied.add(physicalName);
     }
   }
-  publishedClosureHostBridgeBits.set(
-    ctx,
-    (publishedClosureHostBridgeBits.get(ctx) ?? 0) | (1 << definition.bit),
-  );
+  publishedClosureHostBridgeBits.set(ctx, (publishedClosureHostBridgeBits.get(ctx) ?? 0) | (1 << definition.bit));
   return funcIdx;
 }
 
@@ -146,12 +145,14 @@ function publishClosureHostBridge(ctx: CodegenContext, func: WasmFunction, deriv
  * a reserved NUL-containing internal label that ordinary TypeScript exports
  * cannot declare accidentally.
  */
-export function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
+function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
   if (publishedClosureHostBridgeManifests.has(ctx)) return;
   const bits = publishedClosureHostBridgeBits.get(ctx) ?? 0;
   if ((bits & (1 << 15)) === 0) return;
   publishedClosureHostBridgeManifests.add(ctx);
 
+  const tableIdx = ctx.mod.imports.filter((entry) => entry.desc.kind === "table").length + ctx.mod.tables.length;
+  ctx.mod.tables.push({ elementType: "funcref", min: 0, max: 0 });
   const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
   ctx.mod.globals.push({
     name: CLOSURE_HOST_BRIDGE_MANIFEST_NAME,
@@ -160,29 +161,38 @@ export function emitClosureHostBridgeManifest(ctx: CodegenContext): void {
     init: [{ op: "i32.const", value: CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC | bits }],
   });
 
-  const occupied = new Set(ctx.mod.exports.map((entry) => entry.name));
-  if (!occupied.has(CLOSURE_HOST_BRIDGE_MANIFEST_NAME)) {
-    ctx.mod.exports.push({
-      name: CLOSURE_HOST_BRIDGE_MANIFEST_NAME,
-      desc: { kind: "global", index: globalIdx },
-    });
-    occupied.add(CLOSURE_HOST_BRIDGE_MANIFEST_NAME);
-  }
-  let maxOccupiedSuffix = -1;
-  for (const name of occupied) {
-    if (!name.startsWith(CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE)) continue;
-    const suffix = name.slice(CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE.length);
-    if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
-  }
-  for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
-    const physicalName = `${CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE}${"$".repeat(suffixLength)}`;
-    if (occupied.has(physicalName)) continue;
-    ctx.mod.exports.push({
-      name: physicalName,
-      desc: { kind: "global", index: globalIdx },
-    });
-    occupied.add(physicalName);
-  }
+  const publishManifestExport = (
+    logicalName: string,
+    physicalBase: string,
+    desc: { kind: "table" | "global"; index: number },
+  ): void => {
+    const occupied = new Set(ctx.mod.exports.map((entry) => entry.name));
+    if (!occupied.has(logicalName)) {
+      ctx.mod.exports.push({ name: logicalName, desc });
+      occupied.add(logicalName);
+    }
+    let maxOccupiedSuffix = -1;
+    for (const name of occupied) {
+      if (!name.startsWith(physicalBase)) continue;
+      const suffix = name.slice(physicalBase.length);
+      if (/^\$*$/.test(suffix)) maxOccupiedSuffix = Math.max(maxOccupiedSuffix, suffix.length);
+    }
+    for (let suffixLength = 0; suffixLength <= maxOccupiedSuffix + 1; suffixLength++) {
+      const physicalName = `${physicalBase}${"$".repeat(suffixLength)}`;
+      if (occupied.has(physicalName)) continue;
+      ctx.mod.exports.push({ name: physicalName, desc });
+      occupied.add(physicalName);
+    }
+  };
+
+  publishManifestExport(CLOSURE_HOST_BRIDGE_MARKER_NAME, CLOSURE_HOST_BRIDGE_MARKER_PHYSICAL_BASE, {
+    kind: "table",
+    index: tableIdx,
+  });
+  publishManifestExport(CLOSURE_HOST_BRIDGE_MANIFEST_NAME, CLOSURE_HOST_BRIDGE_MANIFEST_PHYSICAL_BASE, {
+    kind: "global",
+    index: globalIdx,
+  });
 }
 
 function directClosureHostBridgeOrdinal(arity: number): number | undefined {
@@ -1380,7 +1390,10 @@ export function emitClosureHasRestExport(ctx: CodegenContext): void {
   const restTypes = [...ctx.closureInfoByTypeIdx]
     .filter(([, info]) => info.hasRestParam === true)
     .map(([typeIdx]) => typeIdx);
-  if (restTypes.length === 0) return;
+  if (restTypes.length === 0) {
+    emitClosureHostBridgeManifest(ctx);
+    return;
+  }
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$closure_has_rest_type");
   const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
@@ -1408,6 +1421,7 @@ export function emitClosureHasRestExport(ctx: CodegenContext): void {
     } as WasmFunction,
     CLOSURE_HOST_BRIDGE_ORDINAL.closureHasRest,
   );
+  emitClosureHostBridgeManifest(ctx);
 }
 
 /**

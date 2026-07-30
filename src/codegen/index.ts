@@ -338,7 +338,6 @@ import {
   emitIsClosureExport,
   emitClosureArityExport,
   emitClosureHasRestExport,
-  emitClosureHostBridgeManifest,
   emitIsDataStructExport,
   fillStandaloneTypeofClosureArms,
 } from "./closure-exports.js"; // (#3272) extracted verbatim
@@ -4179,7 +4178,6 @@ export function generateModule(
     // #2742: classify accessor-returned rest closures before the JS runtime
     // exposes them through a dispatcher that cannot materialize their rest vec.
     emitClosureHasRestExport(ctx);
-    emitClosureHostBridgeManifest(ctx);
 
     // #2794: emit __is_data_struct(externref) -> i32 — POSITIVE data-vs-closure
     // discriminator so `_wrapForHost` only bridges genuine closures and never
@@ -6165,7 +6163,6 @@ export function generateMultiModule(
 
     // #2742: accessor-returned rest-closure discriminator (see primary path).
     emitClosureHasRestExport(ctx);
-    emitClosureHostBridgeManifest(ctx);
 
     // #2794: POSITIVE data-vs-closure discriminator (see generateModule path).
     emitIsDataStructExport(ctx);

@@ -1002,6 +1002,7 @@ const _CLOSURE_HOST_BRIDGE_EXPORTS = [
 ] as const;
 
 const _CLOSURE_HOST_BRIDGE_MANIFEST = ["__\0js2_closure_host_bridge", "$cm"] as const;
+const _CLOSURE_HOST_BRIDGE_MARKER = ["__\0js2_closure_host_bridge_marker", "$ct"] as const;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC = 0x5a200000;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_MAGIC_MASK = 0xfff00000;
 const _CLOSURE_HOST_BRIDGE_MANIFEST_BITS_MASK = 0x0001ffff;
@@ -1021,6 +1022,11 @@ function _terminalHostBridgeAlias(exports: Record<string, any>, physicalBase: st
 
 /** Read compiler-authored closure-helper availability from its i32 manifest. */
 function _closureHostBridgeManifestBits(exports: Record<string, any>): number | undefined {
+  const [markerLogicalName, markerPhysicalBase] = _CLOSURE_HOST_BRIDGE_MARKER;
+  if (!Object.prototype.hasOwnProperty.call(exports, markerLogicalName)) return undefined;
+  const marker = _terminalHostBridgeAlias(exports, markerPhysicalBase);
+  if (!(marker instanceof WebAssembly.Table)) return undefined;
+
   const [logicalName, physicalBase] = _CLOSURE_HOST_BRIDGE_MANIFEST;
   if (!Object.prototype.hasOwnProperty.call(exports, logicalName)) return undefined;
   const manifest = _terminalHostBridgeAlias(exports, physicalBase);

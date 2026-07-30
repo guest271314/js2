@@ -350,9 +350,49 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
     expect(addTwo(40)).toBe(42);
   });
 
-  it("does not discover closure helpers from closure-free user logical or physical-prefix exports", async () => {
+  it("composes vec and closure collision projections for setExports and wrapExports", async () => {
+    const source = `
+      export function __vec_len(_value: any): number { return 801; }
+      export function $v0(_value: any): number { return 802; }
+      export function __vec_get(_value: any, _index: number): number { return 803; }
+      export function $v1(_value: any, _index: number): number { return 804; }
+      export function __call_fn_1(_closure: any, _value: any): number { return 805; }
+      export function $c1(): number { return 806; }
+      export function __is_closure(_value: any): number { return 1; }
+      export function $cf(): number { return 807; }
+      export function $cm(): number { return 808; }
+      export function $ct(): number { return 809; }
+      const addTwo = function (value: number): number { return value + 2; };
+      export function getAddTwo(): any { return addTwo; }
+      export function getArray(): number[] { return [3, 4]; }
+      export function runPromise(): Promise<number> {
+        return Promise.resolve(40).then(addTwo);
+      }
+    `;
+    const { exports } = await instantiate(source);
+
+    expect((exports.__vec_len as (value: unknown) => number)(null)).toBe(801);
+    expect((exports.$v0 as (value: unknown) => number)(null)).toBe(802);
+    expect((exports.__call_fn_1 as (fn: unknown, value: unknown) => number)(null, null)).toBe(805);
+    expect((exports.$c1 as () => number)()).toBe(806);
+    expect((exports.__is_closure as (value: unknown) => number)(null)).toBe(1);
+    expect((exports.$cf as () => number)()).toBe(807);
+    expect((exports.$cm as () => number)()).toBe(808);
+    expect((exports.$ct as () => number)()).toBe(809);
+    expect(exports["$cm$"]).toBeInstanceOf(WebAssembly.Global);
+    expect(exports["$ct$"]).toBeInstanceOf(WebAssembly.Table);
+
+    await expect((exports.runPromise as () => Promise<number>)()).resolves.toBe(42);
+
+    const wrapped = wrapExports(exports as WebAssembly.Exports);
+    expect(wrapped.getAddTwo()(40)).toBe(42);
+    expect(wrapped.getArray()).toEqual([3, 4]);
+  });
+
+  it("does not discover closure helpers from a forged closure-free name family", async () => {
     const source = `
       export function __is_closure(_value: any): number { return 1; }
+      export function __call_fn_0(_value: any): number { return 709; }
       export function $cf(): number { return 704; }
       class Empty { ping(): number { return 1; } }
       export function makeEmpty(): Empty { return new Empty(); }
@@ -362,8 +402,11 @@ describe("#3520 C31 closure host bridge Program ABI ownership", () => {
 
     const { exports } = await instantiate(source);
     expect((exports.__is_closure as (value: unknown) => number)(null)).toBe(1);
+    expect((exports.__call_fn_0 as (value: unknown) => number)(null)).toBe(709);
     expect((exports.$cf as () => number)()).toBe(704);
     expect(exports["$cf$"]).toBeUndefined();
+    expect(exports["__\0js2_closure_host_bridge"]).toBeUndefined();
+    expect(exports["__\0js2_closure_host_bridge_marker"]).toBeUndefined();
 
     const wrapped = wrapExports(exports as WebAssembly.Exports);
     const instance = wrapped.makeEmpty();

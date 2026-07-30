@@ -2681,34 +2681,38 @@ role:
   `funcMap` compatibility entries, closure classifier semantics, and #2083
   closure-free gating remain unchanged. When a user owns a logical helper name
   or its reserved `$cN` physical prefix, codegen preserves every user export
-  and publishes the exact helper at the terminal free physical suffix. The JS
-  runtime projects that helper only into its internal export view; and
+  and publishes the exact helper at the terminal free physical suffix. One
+  immutable compiler-authored i32 manifest records exactly which helpers were
+  emitted, and a collision-safe empty Wasm table authenticates that metadata as
+  compiler-owned rather than a user name/value convention. The JS runtime uses
+  that metadata, never user-controlled name cardinality, and composes closure
+  and vec projections from the same raw export object into one internal view;
+  and
 - tracked and untracked compilation use the same allocator-object lookup.
   Tracking adds only structural ownership metadata and does not allocate,
   relabel, or rebuild a helper.
 
-The exact five-entry `SINGLE_HOST_ENTRIES` census was run with one fresh process
-per entry against `origin/main` at `9d2289ac6ef3a9` plus C31. It reports **166**
-defined functions, **75** generic `retained-module-function` rows, and exactly
-**26** `closure-host-bridge` rows across the two emitting entries. This is the
-one-for-one **101 → 75** generic-row move from current main. When combined with
-C30's independently measured 24 vec rows, the same total becomes the intended
-**77 → 51** generic move with **24** `vec-host-bridge` and **26**
-`closure-host-bridge` rows. Routing and body outcomes remain **37 terminal / 30
-emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**.
+The exact five-entry `SINGLE_HOST_ENTRIES` census was run against C30 main at
+`c462d0216e3925` plus C31. It reports **166** defined functions, **51** generic
+`retained-module-function` rows, exactly **24** `vec-host-bridge` rows, and
+exactly **26** `closure-host-bridge` rows across the emitting entries. The
+closure manifest adds no callable and does not change the structural row
+counts. Routing and body outcomes remain **37 terminal / 30 emitted / 7
+Unsupported / 0 Invariants / 37 legacy bodies / 30 IR bodies**.
 
-The focused C31 suite passes **9/9**. It proves every fixed ID and public label,
+The focused C31 suite passes **10/10**. It proves every fixed ID and public label,
 the absence of a second generic callable owner, exact final-slot object
 resolution across a forced late import and dead-slot compaction, zero bridge
 rows for a closure-free module, tracked/untracked byte equality, direct closure
 identity/call behavior, method receiver identity, conditional rest
 classification, collision-safe logical and physical export ownership, and the
-five-entry census. A closure-free user `__is_closure` plus `$cf` prefix remains
+five-entry census. Simultaneous vec and closure logical/physical/manifest
+collisions resolve through both `buildImports().setExports` and `wrapExports`.
+A closure-free forged `__is_closure` + `__call_fn_0` + `$cf` family remains
 public but cannot fabricate runtime closure discovery, so a fieldless class
 instance still crosses `wrapExports` as an object. The adjacent #2083 and
-closure dispatch/runtime matrix passes **81/82 across twelve files** in
-addition to C31; the one #1308 boolean result expectation also fails unchanged
-on the independent C30 worktree and is not introduced by C31.
+vec/closure dispatch-runtime matrix passes **94/94 across thirteen files**,
+including the focused C30 and C31 structural-ownership suites.
 
 C31 closes exact retained ownership for this bounded closure host-dispatch
 family, not R1. Higher-arity method dispatchers, other support callable

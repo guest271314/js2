@@ -321,7 +321,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
     expect(Object.keys(rawExports).filter(isVecHostBridgePhysicalExport)).toEqual(["$v0"]);
 
     const wrapped = wrapExports(rawExports);
-    expect(typeof wrapped.mkInstance()).toBe("function");
+    expect(wrapped.mkInstance()).toEqual({});
   });
 
   it("aborts compilation when structural vec ABI observation fails", () => {
@@ -424,6 +424,7 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
     let definedFunctions = 0;
     let genericRows = 0;
     let vecRows = 0;
+    let closureRows = 0;
     for (const entry of SINGLE_HOST_ENTRIES) {
       const source = readFileSync(resolve(entry), "utf8");
       const ast = analyzeSource(source, entry);
@@ -437,11 +438,13 @@ describe("#3520 vec host-bridge Program ABI ownership", () => {
       const entries = result.programAbi!.abi.entries();
       genericRows += entries.filter((candidate) => candidate.id.includes("retained-module-function")).length;
       vecRows += entries.filter((candidate) => candidate.id.includes(VEC_HOST_BRIDGE_ROLE)).length;
+      closureRows += entries.filter((candidate) => candidate.id.includes(":closure-host-bridge:")).length;
     }
-    expect({ definedFunctions, genericRows, vecRows }).toEqual({
+    expect({ definedFunctions, genericRows, vecRows, closureRows }).toEqual({
       definedFunctions: 166,
-      genericRows: 77,
+      genericRows: 51,
       vecRows: 24,
+      closureRows: 26,
     });
   });
 });
