@@ -53,6 +53,24 @@ describe("#2664 — under-applied dynamic method dispatch (arity mismatch)", () 
     expect(exp.probe()).toBe(1);
   });
 
+  it("calls an immediately bound object-field closure through its host callable", async () => {
+    // In JS-host mode `fn.bind(...)` returns a real host bound-function
+    // externref. A chained invocation must not ref.test that value as a Wasm
+    // closure struct and dereference the resulting null.
+    const exp = await run(`
+      // @ts-nocheck
+      function F() {
+        this.af = _ => this;
+      }
+      export function probe() {
+        var f = new F();
+        f.af.bind({})();
+        return 1;
+      }
+    `);
+    expect(exp.probe()).toBe(1);
+  });
+
   it("a 2-param method invoked via this.m() with 0 args RUNS (not null)", async () => {
     // The acorn shape: `this.parseExpression()` — a 2-param method called with 0
     // args through a dynamic (any-receiver) dispatch. Before the fix the bridge

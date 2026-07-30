@@ -18,9 +18,12 @@ loc-budget-allow:
   - src/codegen/expressions/identifiers.ts
   - src/codegen/property-access.ts
   - src/codegen/binary-ops-typed-dispatch.ts
+  - src/codegen/expressions/call-tail-dispatch.ts
+  - src/codegen/expressions/calls.ts
 func-budget-allow:
   - src/codegen/closure-exports.ts::emitClosureMethodCallExportN
   - src/codegen/binary-ops-typed-dispatch.ts::compileTypedBinaryDispatch
+  - src/codegen/expressions/call-tail-dispatch.ts::compileTailDispatch
   - src/codegen/statements/variables.ts::compileVariableStatement
   - src/codegen/expressions/identifiers.ts::compileIdentifierCore
 ---
