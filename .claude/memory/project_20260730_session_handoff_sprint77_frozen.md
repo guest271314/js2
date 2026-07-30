@@ -1,6 +1,6 @@
 ---
 name: project_20260730_session_handoff_sprint77_frozen
-description: "HANDOFF 2026-07-30 — sprint 77 frozen (late) via --force; report-page bug #3658 RESOLVED; worktree-prune incident needs HOST-side repair; 283 orphan worktrees ~47GB pending"
+description: "HANDOFF 2026-07-30 — sprint 77 frozen (late) in OPEN PR #3848, NOT yet on main; #3658 RESOLVED; worktree-prune incident needs HOST-side repair; 283 orphan worktrees ~47GB pending approval"
 metadata:
   node_type: memory
   type: project
@@ -23,7 +23,12 @@ version: one shared `.git` ⇒ one registry; host worktrees live at
 `/private/tmp/js2-*`, invisible from `/workspace`, so they read `prunable`.
 **`prunable` here means "not visible from where I'm standing", never "stale".**
 
-## Sprint 77 — FROZEN (late, and the record says so)
+## Sprint 77 — FROZEN IN AN OPEN PR (#3848), **not yet on `main`** (late freeze)
+
+⚠️ The freeze lives in **PR #3848**, awaiting the merge queue. Until that merges,
+`main` still has all 321 issues as `sprint: current` and no `sprints/77.md`.
+Do not read "frozen" as "landed" — that exact blur is what produces the
+merged-but-open drift documented below.
 
 `freeze-sprint.mjs --force` at `88e12f2`: **79 issues** re-tagged → `sprint: 77`,
 **242 rolled forward**, `plan/issues/sprints/77.md` written, plus
