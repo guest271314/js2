@@ -273,6 +273,25 @@ unrelated planning; missing locator/reservation rejection; prepared-owned late
 support/derived rejection; signature drift at publication; exact final
 reconciliation; and transaction abort/retry without partial scope publication.
 
+Adversarial review further pins the boundary:
+
+- every registered lifted/monomorphized executable beneath a prepared terminal
+  must already own exactly one source-callable reservation, structured
+  contract, structural reference, and locator;
+- explicitly requested bindings are limited to canonical external/support
+  dependencies, cannot import another terminal's source callable/global, and
+  cannot overlap a previously sealed component;
+- type/class cells retain an immutable canonical layout contract. Direct cell
+  remaps and in-place layout mutation fail, while the complete validated
+  `applyTypeLayoutRemap` event advances the pinned layout and callable/global
+  structured contracts together only when each replacement is canonically
+  equal to the prior layout under that exact index remap;
+- imported callable/global locators are re-read for exact host module/name,
+  callable signature, global storage type, and mutability during
+  reconciliation, so mutating the same import object cannot bypass the seal;
+- malformed/custom binding IDs, alias cycles, duplicate dependency discovery,
+  and removal of a pinned allocator object all reject before publication.
+
 This prerequisite changes neither `compileDeclarations` nor
 `compileIrPathFunctions`. Production adoption and legacy-body reduction remain
 exactly **0**, and all inline-small, monomorphization, allocation-provenance,

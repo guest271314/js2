@@ -12,6 +12,7 @@ import {
   createDerivedIrUnitId,
   createIrBindingId,
   type IrBindingId,
+  type IrClassId,
   type IrSourceId,
   type IrUnitId,
 } from "../src/ir/identity.js";
@@ -20,7 +21,14 @@ import {
   type ProgramAbiDerivedUnitRecord,
   type ProgramAbiInvariantCode,
 } from "../src/ir/program-abi.js";
-import { createEmptyModule, type WasmFunction, type WasmModule } from "../src/ir/types.js";
+import {
+  createEmptyModule,
+  type GlobalDef,
+  type Import,
+  type TypeDef,
+  type WasmFunction,
+  type WasmModule,
+} from "../src/ir/types.js";
 import { ts } from "../src/ts-api.js";
 
 const VOID_SIGNATURE = Object.freeze({
@@ -32,6 +40,7 @@ interface Fixture {
   readonly sourceId: IrSourceId;
   readonly firstUnitId: IrUnitId;
   readonly secondUnitId: IrUnitId;
+  readonly classId: IrClassId;
   readonly module: WasmModule;
   readonly session: ProgramAbiSession;
 }
@@ -45,7 +54,7 @@ interface PlannedCallable {
 function fixture(): Fixture {
   const sourceFile = ts.createSourceFile(
     "/repo/scoped-prepared-abi.ts",
-    "export function first(): void {} function second(): void {}",
+    "export function first(): void {} function second(): void {} class Box {}",
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS,
@@ -57,13 +66,15 @@ function fixture(): Fixture {
   const second = inventory.terminalUnits.find(
     (unit) => unit.kind === "top-level-function" && unit.displayName === "second",
   );
-  if (!first || !second) throw new Error("invalid scoped ABI fixture");
+  const classRecord = inventory.classes.find((candidate) => candidate.displayName === "Box");
+  if (!first || !second || !classRecord) throw new Error("invalid scoped ABI fixture");
   const module = createEmptyModule();
   module.types.push({ kind: "func", name: "$void", params: [], results: [] });
   return {
     sourceId: inventory.sources[0]!.id,
     firstUnitId: first.id,
     secondUnitId: second.id,
+    classId: classRecord.id,
     module,
     session: new ProgramAbiSession(inventory, module),
   };
@@ -126,12 +137,12 @@ function supportDraft(session: ProgramAbiSession, id: IrBindingId, unitId: IrUni
   };
 }
 
-function aliasDraft(f: Fixture, id: IrBindingId, targetId: IrBindingId): ProgramAbiDraft {
+function aliasDraft(f: Fixture, id: IrBindingId, targetId: IrBindingId, roleOrdinal = 0): ProgramAbiDraft {
   return {
     id,
     structuralOrder: f.session.structuralOrder.forSource(f.sourceId, {
       domain: "callable",
-      roleOrdinal: 0,
+      roleOrdinal,
     }),
     displayName: "first-alias",
     slotPolicy: "alias",
@@ -162,6 +173,75 @@ function exportDraft(f: Fixture, id: IrBindingId, targetId: IrBindingId): Progra
   };
 }
 
+function importedCallableDraft(f: Fixture, id: IrBindingId, referenceKey: string, roleOrdinal = 1): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forSource(f.sourceId, {
+      domain: "callable",
+      roleOrdinal,
+    }),
+    displayName: "hostCall",
+    structuralReferenceKey: referenceKey,
+    slotPolicy: "required",
+    slotSpace: "function",
+    intent: {
+      kind: "callable",
+      origin: "import",
+      signature: VOID_SIGNATURE,
+    },
+  };
+}
+
+function importedGlobalDraft(f: Fixture, id: IrBindingId, referenceKey: string): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forSource(f.sourceId, {
+      domain: "global",
+      roleOrdinal: 0,
+    }),
+    displayName: "hostGlobal",
+    structuralReferenceKey: referenceKey,
+    slotPolicy: "required",
+    slotSpace: "global",
+    intent: {
+      kind: "global",
+      origin: "import",
+      valueType: JSON.stringify({ kind: "i32" }),
+      mutable: true,
+    },
+  };
+}
+
+function typeDraft(f: Fixture, id: IrBindingId, referenceKey: string): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forSource(f.sourceId, {
+      domain: "type",
+      roleOrdinal: 0,
+    }),
+    displayName: "$PreparedType",
+    structuralReferenceKey: referenceKey,
+    slotPolicy: "required",
+    slotSpace: "type",
+    intent: { kind: "type", shapeKey: "pending" },
+  };
+}
+
+function classDraft(f: Fixture, id: IrBindingId, referenceKey: string): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forClass(f.classId, {
+      domain: "class",
+      roleOrdinal: 0,
+    }),
+    displayName: "$PreparedClass",
+    structuralReferenceKey: referenceKey,
+    slotPolicy: "required",
+    slotSpace: "type",
+    intent: { kind: "class", classId: f.classId, layoutKey: "pending" },
+  };
+}
+
 function expectInvariant(action: () => unknown, code: ProgramAbiInvariantCode): ProgramAbiInvariantError {
   let caught: unknown;
   try {
@@ -178,6 +258,60 @@ function sealFirst(f: Fixture, dependencies: readonly IrBindingId[] = []): Seale
   const transaction = f.session.beginPreparedComponentScope("first-component", [f.firstUnitId]);
   for (const id of dependencies) transaction.includeBinding(id);
   return transaction.seal();
+}
+
+function planPreparedLayouts(f: Fixture) {
+  const typeValue: TypeDef = {
+    kind: "struct",
+    name: "$PreparedType",
+    fields: [{ name: "value", type: { kind: "i32" }, mutable: false }],
+  };
+  const classValue: TypeDef = {
+    kind: "struct",
+    name: "$PreparedClass",
+    fields: [{ name: "field", type: { kind: "i32" }, mutable: true }],
+  };
+  f.module.types.push(typeValue, classValue);
+  const typeId = createIrBindingId({ ownerId: f.sourceId, domain: "type", role: "prepared-type" });
+  const classId = createIrBindingId({ ownerId: f.classId, domain: "class", role: "prepared-class" });
+  const typeKey = `type|${typeId}`;
+  const classKey = `class|${classId}`;
+  f.session.plan(typeDraft(f, typeId, typeKey));
+  f.session.plan(classDraft(f, classId, classKey));
+  f.session.registerStructuralReference(typeId, typeKey);
+  f.session.registerStructuralReference(classId, classKey);
+  const typeCell = f.session.createTypeCell(typeValue);
+  const classCell = f.session.createTypeCell(classValue);
+  f.session.attachLocator(typeId, { kind: "type-cell", cell: typeCell });
+  f.session.attachLocator(classId, { kind: "type-cell", cell: classCell });
+  return { typeId, classId, typeValue, classValue, typeCell, classCell };
+}
+
+function planImportedDependencies(f: Fixture) {
+  const callableId = createIrBindingId({ ownerId: f.sourceId, domain: "callable", role: "host-call" });
+  const globalId = createIrBindingId({ ownerId: f.sourceId, domain: "global", role: "host-global" });
+  const callableKey = "import|3:env|9:host_call";
+  const globalKey = "import-global|3:env|11:host_global";
+  const callable: Import = {
+    module: "env",
+    name: "host_call",
+    desc: { kind: "func", typeIdx: 0 },
+  };
+  const global: Import = {
+    module: "env",
+    name: "host_global",
+    desc: { kind: "global", type: { kind: "i32" }, mutable: true },
+  };
+  f.module.imports.push(callable, global);
+  f.session.plan(importedCallableDraft(f, callableId, callableKey));
+  f.session.plan(importedGlobalDraft(f, globalId, globalKey));
+  f.session.registerCallableTypeContract(callableId, VOID_SIGNATURE);
+  f.session.registerGlobalTypeContract(globalId, { kind: "i32" }, true);
+  f.session.registerStructuralReference(callableId, callableKey);
+  f.session.registerStructuralReference(globalId, globalKey);
+  f.session.attachLocator(callableId, { kind: "import-function", value: callable });
+  f.session.attachLocator(globalId, { kind: "import-global", value: global });
+  return { callableId, globalId, callable, global };
 }
 
 describe("#3521 scoped prepared-component ABI seal", () => {
@@ -228,6 +362,95 @@ describe("#3521 scoped prepared-component ABI seal", () => {
     expect(publication.abi.resolveFinalIndex(clone.id)).toEqual({ space: "function", index: 1 });
     expect(publication.abi.resolveFinalIndex(second.id)).toEqual({ space: "function", index: 2 });
     expect(scoped.entries().map((entry) => entry.id)).toEqual(scoped.bindingIds);
+  });
+
+  it("rejects a registered executable derived unit without its exact callable reservation", () => {
+    const f = fixture();
+    planCallable(f, f.firstUnitId, "body", "first");
+    const liftedUnitId = createDerivedIrUnitId({
+      parentId: f.firstUnitId,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+    f.session.registerDerivedUnit({
+      id: liftedUnitId,
+      parentId: f.firstUnitId,
+      terminalOwnerId: f.firstUnitId,
+      sourceId: f.sourceId,
+      role: "lifted-closure",
+      ordinal: 0,
+    });
+
+    const incomplete = f.session.beginPreparedComponentScope("incomplete-derived", [f.firstUnitId]);
+    expectInvariant(() => incomplete.seal(), "missing-source-unit");
+
+    const lifted = planCallable(f, liftedUnitId, "body", "first$lifted0");
+    const corrected = f.session.beginPreparedComponentScope("complete-derived", [f.firstUnitId]).seal();
+    expect(corrected.bindingIds).toContain(lifted.id);
+    expect(f.session.publish(f.module).abi.resolveFinalIndex(lifted.id)).toEqual({
+      space: "function",
+      index: 1,
+    });
+  });
+
+  it("allows disjoint scopes but rejects source-callable requests and shared binding ownership", () => {
+    const disjoint = fixture();
+    planCallable(disjoint, disjoint.firstUnitId, "body", "first");
+    planCallable(disjoint, disjoint.secondUnitId, "body", "second");
+    const firstSupport = createIrBindingId({
+      ownerId: disjoint.firstUnitId,
+      domain: "support",
+      role: "first-only",
+    });
+    const secondSupport = createIrBindingId({
+      ownerId: disjoint.secondUnitId,
+      domain: "support",
+      role: "second-only",
+    });
+    disjoint.session.plan(supportDraft(disjoint.session, firstSupport, disjoint.firstUnitId));
+    disjoint.session.plan(supportDraft(disjoint.session, secondSupport, disjoint.secondUnitId));
+    const firstScope = disjoint.session.beginPreparedComponentScope("first", [disjoint.firstUnitId]);
+    firstScope.includeBinding(firstSupport);
+    firstScope.seal();
+    const secondScope = disjoint.session.beginPreparedComponentScope("second", [disjoint.secondUnitId]);
+    secondScope.includeBinding(secondSupport);
+    secondScope.seal();
+    expect(disjoint.session.publish(disjoint.module).abi.entries()).toHaveLength(4);
+
+    const sourceRequest = fixture();
+    planCallable(sourceRequest, sourceRequest.firstUnitId, "body", "first");
+    const other = planCallable(sourceRequest, sourceRequest.secondUnitId, "body", "second");
+    const rejectedSource = sourceRequest.session.beginPreparedComponentScope("source-request", [
+      sourceRequest.firstUnitId,
+    ]);
+    rejectedSource.includeBinding(other.id);
+    expectInvariant(() => rejectedSource.seal(), "invalid-callable-provenance");
+
+    const overlap = fixture();
+    planCallable(overlap, overlap.firstUnitId, "body", "first");
+    planCallable(overlap, overlap.secondUnitId, "body", "second");
+    const importedId = createIrBindingId({
+      ownerId: overlap.sourceId,
+      domain: "callable",
+      role: "shared-import",
+    });
+    const importKey = "import|3:env|6:shared";
+    const imported: Import = {
+      module: "env",
+      name: "shared",
+      desc: { kind: "func", typeIdx: 0 },
+    };
+    overlap.module.imports.push(imported);
+    overlap.session.plan(importedCallableDraft(overlap, importedId, importKey));
+    overlap.session.registerCallableTypeContract(importedId, VOID_SIGNATURE);
+    overlap.session.registerStructuralReference(importedId, importKey);
+    overlap.session.attachLocator(importedId, { kind: "import-function", value: imported });
+    const owner = overlap.session.beginPreparedComponentScope("import-owner", [overlap.firstUnitId]);
+    owner.includeBinding(importedId);
+    owner.seal();
+    const conflicting = overlap.session.beginPreparedComponentScope("import-overlap", [overlap.secondUnitId]);
+    conflicting.includeBinding(importedId);
+    expectInvariant(() => conflicting.seal(), "duplicate-session-draft");
   });
 
   it("rejects missing reservations and locators atomically, then permits a corrected scope", () => {
@@ -338,6 +561,45 @@ describe("#3521 scoped prepared-component ABI seal", () => {
     });
   });
 
+  it("pins imported host module/name, callable signature, and global mutability from exact locators", () => {
+    const linkage = fixture();
+    planCallable(linkage, linkage.firstUnitId, "body", "first");
+    const linked = planImportedDependencies(linkage);
+    sealFirst(linkage, [linked.callableId, linked.globalId]);
+    linked.callable.module = "forged";
+    expectInvariant(() => linkage.session.publish(linkage.module), "binding-reference-mismatch");
+
+    const signature = fixture();
+    planCallable(signature, signature.firstUnitId, "body", "first");
+    const typed = planImportedDependencies(signature);
+    sealFirst(signature, [typed.callableId, typed.globalId]);
+    signature.module.types.push({
+      kind: "func",
+      name: "$forged",
+      params: [{ kind: "i32" }],
+      results: [],
+    });
+    if (typed.callable.desc.kind !== "func") throw new Error("invalid callable import fixture");
+    typed.callable.desc.typeIdx = 1;
+    expectInvariant(() => signature.session.publish(signature.module), "type-remap-mismatch");
+
+    const mutability = fixture();
+    planCallable(mutability, mutability.firstUnitId, "body", "first");
+    const global = planImportedDependencies(mutability);
+    sealFirst(mutability, [global.callableId, global.globalId]);
+    if (global.global.desc.kind !== "global") throw new Error("invalid global import fixture");
+    global.global.name = "forged_global";
+    expectInvariant(() => mutability.session.publish(mutability.module), "binding-reference-mismatch");
+
+    const storage = fixture();
+    planCallable(storage, storage.firstUnitId, "body", "first");
+    const stored = planImportedDependencies(storage);
+    sealFirst(storage, [stored.callableId, stored.globalId]);
+    if (stored.global.desc.kind !== "global") throw new Error("invalid global import fixture");
+    stored.global.desc.mutable = false;
+    expectInvariant(() => storage.session.publish(storage.module), "type-remap-mismatch");
+  });
+
   it("fails closed when the reserved callable contract drifts before final reconciliation", () => {
     const f = fixture();
     const first = planCallable(f, f.firstUnitId, "body", "first");
@@ -410,6 +672,139 @@ describe("#3521 scoped prepared-component ABI seal", () => {
       space: "function",
       index: 0,
     });
+  });
+
+  it("pins type/class layouts structurally and advances them only through exact DCE layout remaps", () => {
+    const drift = fixture();
+    planCallable(drift, drift.firstUnitId, "body", "first");
+    const driftLayouts = planPreparedLayouts(drift);
+    sealFirst(drift, [driftLayouts.typeId, driftLayouts.classId]);
+    expectInvariant(
+      () =>
+        drift.session.remapTypeCell(driftLayouts.typeCell, {
+          kind: "struct",
+          name: "$Forged",
+          fields: [],
+        }),
+      "type-remap-mismatch",
+    );
+    if (driftLayouts.classValue.kind !== "struct") throw new Error("invalid class layout fixture");
+    driftLayouts.classValue.fields.push({
+      name: "late",
+      type: { kind: "i32" },
+      mutable: false,
+    });
+    expectInvariant(() => drift.session.publish(drift.module), "type-remap-mismatch");
+
+    const forgedRemap = fixture();
+    planCallable(forgedRemap, forgedRemap.firstUnitId, "body", "first");
+    const forgedLayouts = planPreparedLayouts(forgedRemap);
+    sealFirst(forgedRemap, [forgedLayouts.typeId, forgedLayouts.classId]);
+    const forgedPrevious = forgedRemap.module.types;
+    const forgedNext: TypeDef[] = [
+      forgedPrevious[0]!,
+      { kind: "struct", name: "$ForgedClass", fields: [] },
+      forgedPrevious[1]!,
+    ];
+    expectInvariant(
+      () =>
+        forgedRemap.session.applyTypeLayoutRemap({
+          previousTypes: forgedPrevious,
+          nextTypes: forgedNext,
+          targetsByOldIndex: [0, 2, 1],
+        }),
+      "type-remap-mismatch",
+    );
+    expect(forgedRemap.session.publish(forgedRemap.module).abi.resolveFinalIndex(forgedLayouts.classId)).toEqual({
+      space: "type",
+      index: 2,
+    });
+
+    const remapped = fixture();
+    planCallable(remapped, remapped.firstUnitId, "body", "first");
+    const exactLayouts = planPreparedLayouts(remapped);
+    sealFirst(remapped, [exactLayouts.typeId, exactLayouts.classId]);
+    const previousTypes = remapped.module.types;
+    if (exactLayouts.typeValue.kind !== "struct" || exactLayouts.classValue.kind !== "struct") {
+      throw new Error("invalid exact layout fixture");
+    }
+    const nextClass: TypeDef = {
+      ...exactLayouts.classValue,
+      name: "$PreparedClass$remapped",
+      fields: exactLayouts.classValue.fields.map((field) => ({ ...field, type: { ...field.type } })),
+    };
+    const nextType: TypeDef = {
+      ...exactLayouts.typeValue,
+      name: "$PreparedType$remapped",
+      fields: exactLayouts.typeValue.fields.map((field) => ({ ...field, type: { ...field.type } })),
+    };
+    const nextTypes = [previousTypes[0]!, nextClass, nextType];
+    remapped.session.applyTypeLayoutRemap({
+      previousTypes,
+      nextTypes,
+      targetsByOldIndex: [0, 2, 1],
+    });
+    remapped.module.types = nextTypes;
+    const publication = remapped.session.publish(remapped.module);
+    expect(publication.abi.resolveFinalIndex(exactLayouts.typeId)).toEqual({
+      space: "type",
+      index: 2,
+    });
+    expect(publication.abi.resolveFinalIndex(exactLayouts.classId)).toEqual({
+      space: "type",
+      index: 1,
+    });
+  });
+
+  it("rejects alias cycles, duplicate discovery, custom IDs, and post-seal locator removal", () => {
+    const cycle = fixture();
+    planCallable(cycle, cycle.firstUnitId, "body", "first");
+    const aliasA = createIrBindingId({ ownerId: cycle.sourceId, domain: "callable", role: "cycle-a" });
+    const aliasB = createIrBindingId({ ownerId: cycle.sourceId, domain: "callable", role: "cycle-b" });
+    cycle.session.plan(aliasDraft(cycle, aliasA, aliasB, 0));
+    cycle.session.plan(aliasDraft(cycle, aliasB, aliasA, 1));
+    const cyclic = cycle.session.beginPreparedComponentScope("alias-cycle", [cycle.firstUnitId]);
+    cyclic.includeBinding(aliasA);
+    expectInvariant(() => cyclic.seal(), "alias-cycle");
+
+    const duplicate = fixture();
+    planCallable(duplicate, duplicate.firstUnitId, "body", "first");
+    const supportId = createIrBindingId({
+      ownerId: duplicate.firstUnitId,
+      domain: "support",
+      role: "duplicate",
+    });
+    duplicate.session.plan(supportDraft(duplicate.session, supportId, duplicate.firstUnitId));
+    const duplicateDiscovery = duplicate.session.beginPreparedComponentScope("duplicate", [duplicate.firstUnitId]);
+    duplicateDiscovery.includeBinding(supportId);
+    expectInvariant(() => duplicateDiscovery.includeBinding(supportId), "duplicate-session-draft");
+    duplicateDiscovery.abort();
+
+    const custom = fixture();
+    const customId = "custom-callable-id" as IrBindingId;
+    const customKey = `unit|${custom.firstUnitId}|body`;
+    const customFunc: WasmFunction = {
+      name: "first",
+      typeIdx: 0,
+      locals: [],
+      body: [],
+      exported: false,
+    };
+    custom.module.functions.push(customFunc);
+    custom.session.plan(callableDraft(custom.session, customId, custom.firstUnitId, "first", customKey));
+    custom.session.registerCallableTypeContract(customId, VOID_SIGNATURE);
+    custom.session.registerStructuralReference(customId, customKey);
+    custom.session.attachLocator(customId, { kind: "defined-function", value: customFunc });
+    expectInvariant(
+      () => custom.session.beginPreparedComponentScope("custom-id", [custom.firstUnitId]).seal(),
+      "invalid-binding-reference",
+    );
+
+    const removed = fixture();
+    planCallable(removed, removed.firstUnitId, "body", "first");
+    sealFirst(removed);
+    removed.module.functions.splice(0, 1);
+    expectInvariant(() => removed.session.publish(removed.module), "eliminated-required-locator");
   });
 
   it("aborts discovery without publishing a partial scope or closing unrelated planning", () => {
