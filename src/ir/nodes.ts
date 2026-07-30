@@ -1086,6 +1086,24 @@ export interface IrInstrDynMemberGet extends IrInstrBase {
   readonly key: IrValueId;
 }
 
+/**
+ * `dyn.member_set{recv, key, value}` — a strict, statement-position dynamic
+ * member write `recv[key] = value` over the canonical boxed-any carrier
+ * (#3795). All three operands are already dynamic carriers; lowering preserves
+ * their source evaluation order and delegates the actual `[[Set]]` to the
+ * existing strict object-runtime setter. This instruction is deliberately
+ * void: assignment-as-value remains outside the IR slice.
+ */
+export interface IrInstrDynMemberSet extends IrInstrBase {
+  readonly kind: "dyn.member_set";
+  /** The receiver carrier (`dynamic`). */
+  readonly recv: IrValueId;
+  /** The property key carrier (`dynamic`). */
+  readonly key: IrValueId;
+  /** The assigned value carrier (`dynamic`). */
+  readonly value: IrValueId;
+}
+
 // ---------------------------------------------------------------------------
 // String operations (#1169a — IR Phase 4 Slice 1)
 // ---------------------------------------------------------------------------
@@ -2496,6 +2514,7 @@ export type IrInstr =
   | IrInstrDynToNumber
   | IrInstrDynEq
   | IrInstrDynMemberGet
+  | IrInstrDynMemberSet
   | IrInstrStringConst
   | IrInstrStringConcat
   | IrInstrStringEq
@@ -2810,6 +2829,7 @@ export function forEachNestedBuffer(instr: IrInstr, fn: (buffer: readonly IrInst
     case "dyn.to_number":
     case "dyn.eq":
     case "dyn.member_get":
+    case "dyn.member_set":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -2974,6 +2994,7 @@ export function mapNestedBuffers(
     case "dyn.to_number":
     case "dyn.eq":
     case "dyn.member_get":
+    case "dyn.member_set":
     case "string.const":
     case "string.concat":
     case "string.eq":
@@ -3082,6 +3103,8 @@ export function directUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.lhs, instr.rhs];
     case "dyn.member_get":
       return [instr.recv, instr.key];
+    case "dyn.member_set":
+      return [instr.recv, instr.key, instr.value];
     case "string.len":
       return [instr.value];
     case "string.char_at":

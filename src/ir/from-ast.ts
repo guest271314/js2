@@ -79,6 +79,7 @@ import {
   sameIrCallableBinding,
 } from "./callable-bindings.js";
 import { collectOuterWrites } from "./closure-captures.js";
+import { collectDynamicStringLocalWidening } from "./dynamic-local-widening.js";
 import {
   requireMatchingModuleBindingOwner,
   requireMatchingLoweringPlanOwner,
@@ -818,6 +819,10 @@ export function lowerFunctionAstToIr(
     options.allocRegistry,
   );
   const mutatedLets = collectMutatedLetNames(fn);
+  const dynamicStringLocals = collectDynamicStringLocalWidening(
+    fn,
+    new Set(params.filter((param) => param.type.kind === "dynamic").map((param) => param.name)),
+  );
 
   // Single scope map for both params and let/const locals. Phase 1 forbids
   // shadowing (enforced by the selector) so there is no nesting to track.
@@ -979,6 +984,7 @@ export function lowerFunctionAstToIr(
     liftedUnitProvenance,
     liftedCounter,
     mutatedLets,
+    dynamicStringLocals,
     i32PureNames,
     i32Slots,
     ownedStringAppendSymbols,
@@ -1722,6 +1728,13 @@ interface LowerCtx {
    * `lowerFunctionAstToIr` via `collectMutatedLetNames`.
    */
   readonly mutatedLets: ReadonlySet<string>;
+  /**
+   * #3795 — direct-body mutable string-literal locals whose every later
+   * write is a statement-position dynamic string concat. Selection and
+   * lowering share the immutable proof so the local can use the canonical
+   * dynamic carrier without widening arbitrary mutable strings.
+   */
+  readonly dynamicStringLocals: ReadonlySet<string>;
   /**
    * (#3758) Names proven, by the SAME analyses legacy's own #1120/#1236
    * i32-local promotion uses (`collectI32CoercedLocals`, `detectI32LoopVar`),
@@ -2736,20 +2749,36 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // the slot) would double-evaluate any side effect in `let s = f() | 0`.
     // Every other hint source wins: an explicit annotation, an empty-array
     // inference and a module binding each pin the representation.
+    const widenDynamic = cx.dynamicStringLocals.has(name);
     const promoteI32Slot =
       annotated === undefined &&
       inferredEmptyArrayHint === undefined &&
       moduleBinding === undefined &&
+      !widenDynamic &&
       !isConst &&
       cx.mutatedLets.has(name) &&
       cx.i32Slots?.has(d) === true &&
       d.initializer !== undefined &&
       isCanonI32Lowerable(d.initializer, promotedI32Probe(cx));
     const hint: IrType =
-      annotated ?? inferredEmptyArrayHint ?? moduleBinding?.type ?? (promoteI32Slot ? IR_I32 : irVal({ kind: "f64" }));
-    const value = promoteI32Slot
+      annotated ??
+      inferredEmptyArrayHint ??
+      moduleBinding?.type ??
+      (widenDynamic ? irDynamic() : promoteI32Slot ? IR_I32 : irVal({ kind: "f64" }));
+    let value = promoteI32Slot
       ? lowerAsI32(d.initializer as ts.Expression, cx, "canon")
       : lowerExpr(d.initializer, cx, hint);
+    if (widenDynamic && cx.builder.typeOf(value).kind !== "dynamic") {
+      const boxed = boxConcreteToDynamic(value, cx.builder.typeOf(value), d.initializer, cx);
+      if (boxed === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: proven dynamic local '${name}' initializer has no dynamic string carrier (${cx.funcName})`,
+        );
+      }
+      value = boxed;
+    }
     const inferred = cx.builder.typeOf(value);
     const stringEncoding = inferred.kind === "string" ? inferStringEncoding(d.initializer, cx) : undefined;
     if (annotated) {
@@ -2876,7 +2905,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
             kind: "slot",
             slotIndex,
             type: irVal(dynamicValType),
-            asType: inferred,
+            asType: widenDynamic ? irDynamic() : inferred,
           });
           continue;
         }
@@ -4194,6 +4223,39 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   }
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
+  if (recvType.kind === "dynamic") {
+    const key = lowerExpr(lhs.argumentExpression, cx, irDynamic());
+    if (cx.builder.typeOf(key).kind !== "dynamic") {
+      throw new IrUnsupportedError(
+        "element-store-unsupported",
+        "build",
+        `ir/from-ast: dynamic member-store key is not dynamic (${cx.funcName})`,
+      );
+    }
+    let value = lowerExpr(rhs, cx, irDynamic());
+    const valueType = cx.builder.typeOf(value);
+    if (valueType.kind !== "dynamic") {
+      const candidate = peelParensExpr(rhs);
+      if (!ts.isStringLiteralLike(candidate) || candidate.text !== "true") {
+        throw new IrUnsupportedError(
+          "element-store-unsupported",
+          "build",
+          `ir/from-ast: concrete dynamic member-store value is outside the #3795 conflict marker (${cx.funcName})`,
+        );
+      }
+      const boxed = boxConcreteToDynamic(value, valueType, rhs, cx);
+      if (boxed === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: dynamic member-store conflict marker has no dynamic carrier (${cx.funcName})`,
+        );
+      }
+      value = boxed;
+    }
+    cx.builder.emitDynMemberSet(recv, key, value);
+    return;
+  }
   const recvVal = asVal(recvType);
   // (#2956 L2) Linear vec receivers are scalar i32 arena pointers, not GC
   // refs — admit them via the same resolver probe the read paths use
@@ -9956,6 +10018,7 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    dynamicStringLocals: new Set(),
     // (#3758) nested functions get their own independent i32-pure-names set,
     // same reasoning as mutatedLets above.
     i32PureNames: computeI32PureNames(fn),
@@ -10055,6 +10118,7 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    dynamicStringLocals: new Set(),
     // (#3758) same independent-per-closure reasoning as mutatedLets above;
     // computeI32PureNames itself no-ops on a non-block (concise) body.
     i32PureNames: computeI32PureNames(expr),

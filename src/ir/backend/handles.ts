@@ -424,6 +424,14 @@ export interface IrDynamicLowering {
    * `ctx.usesDynMemberGet` latch.
    */
   emitElementGet(): readonly Instr[];
+  /**
+   * Three carriers on the stack (`recv`, `key`, then `value`) → void: strict
+   * statement-position dynamic member assignment (#3795). Both backends call
+   * the canonical `__dyn_member_set` helper, which preserves receiver/key/value
+   * evaluation order and delegates to the existing strict object-runtime
+   * setter. Assignment-as-value is intentionally not represented.
+   */
+  emitMemberSet(): readonly Instr[];
 }
 
 /**
