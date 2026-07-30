@@ -3,6 +3,8 @@
 Work is wound down after the R2 production-routing slice. No agents remain
 active, and no further implementation slice was started. `origin/main` at
 `5c44e1921605e04d6f399fc52f2009903077be45` contains the completed slice.
+This handover is published in
+[#3846](https://github.com/loopdive/js2/pull/3846).
 
 ## Resume from these trackers
 
