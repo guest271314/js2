@@ -50,8 +50,8 @@ describe("struct proxy wrappers", () => {
     const d = exports.getData();
     expect((exports as any).__sget_name(d)).toBe("test");
     expect((exports as any).__sget_value(d)).toBe(42);
-    // boolean is stored as i32 (0/1)
-    expect((exports as any).__sget_flag(d)).toBe(1);
+    // Boolean field getters preserve the JS boolean at the host boundary.
+    expect((exports as any).__sget_flag(d)).toBe(true);
   });
 
   it("__struct_field_names returns null for non-struct values", async () => {
