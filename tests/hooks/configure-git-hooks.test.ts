@@ -50,4 +50,10 @@ describe("worktree-local Git hook installation", () => {
 
     expect(hook).toContain("pnpm run check:oracle-ratchet");
   });
+
+  it("runs the CI changed-root-test gate before committing", () => {
+    const hook = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
+
+    expect(hook).toContain("pnpm run test:changed-root");
+  });
 });

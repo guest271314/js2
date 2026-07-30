@@ -1,4 +1,5 @@
 npx lint-staged &&
+  pnpm run test:changed-root &&
   pnpm run check:oracle-ratchet &&
   pnpm run check:loc-budget &&
   pnpm run check:func-budget

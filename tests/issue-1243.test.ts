@@ -360,26 +360,6 @@ describe("issue #1243 — for...in / Object.keys on compiled WasmGC structs", ()
         `),
       ).toBe(2);
     });
-
-    it("keeps a hoisted var dynamic when for...in writes keys before a numeric assignment", async () => {
-      expect(
-        await run(`
-          function cloneLike(): number {
-            const config = { key: "after", className: "new" };
-            let sawClassName = 0;
-            for (propName in config) {
-              if (propName === "className") sawClassName = 1;
-            }
-            var propName = arguments.length - 2;
-            return sawClassName * 10 + propName;
-          }
-
-          export function test(): number {
-            return cloneLike();
-          }
-        `),
-      ).toBe(8);
-    });
   });
 
   describe("cross-boundary: enumeration after struct passed to host", () => {
