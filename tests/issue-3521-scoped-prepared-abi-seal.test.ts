@@ -6,7 +6,11 @@ import {
   type ProgramAbiDraft,
   type SealedPreparedProgramAbiScope,
 } from "../src/codegen/program-abi-session.js";
-import { canonicalProgramAbiCallableTypeContract } from "../src/codegen/program-abi-signatures.js";
+import {
+  canonicalProgramAbiCallableTypeContract,
+  canonicalProgramAbiValType,
+  type ProgramAbiCallableTypeContract,
+} from "../src/codegen/program-abi-signatures.js";
 import {
   buildIrUnitInventory,
   createDerivedIrUnitId,
@@ -15,6 +19,7 @@ import {
   type IrClassId,
   type IrSourceId,
   type IrUnitId,
+  type IrUnitInventory,
 } from "../src/ir/identity.js";
 import {
   ProgramAbiInvariantError,
@@ -37,10 +42,13 @@ const VOID_SIGNATURE = Object.freeze({
 });
 
 interface Fixture {
+  readonly inventory: IrUnitInventory;
   readonly sourceId: IrSourceId;
   readonly firstUnitId: IrUnitId;
   readonly secondUnitId: IrUnitId;
   readonly classId: IrClassId;
+  readonly firstNestedClassId: IrClassId;
+  readonly secondNestedClassId: IrClassId;
   readonly module: WasmModule;
   readonly session: ProgramAbiSession;
 }
@@ -54,7 +62,20 @@ interface PlannedCallable {
 function fixture(): Fixture {
   const sourceFile = ts.createSourceFile(
     "/repo/scoped-prepared-abi.ts",
-    "export function first(): void {} function second(): void {} class Box {}",
+    `
+      export function first(): void {
+        function firstNested(): void {}
+        const firstExpression = function (): void {};
+        const firstArrow = (): void => {};
+        const firstObject = { run(): void {} };
+        class FirstNestedClass { run(): void {} }
+      }
+      function second(): void {
+        function secondNested(): void {}
+        class SecondNestedClass { run(): void {} }
+      }
+      class Box {}
+    `,
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS,
@@ -67,14 +88,21 @@ function fixture(): Fixture {
     (unit) => unit.kind === "top-level-function" && unit.displayName === "second",
   );
   const classRecord = inventory.classes.find((candidate) => candidate.displayName === "Box");
-  if (!first || !second || !classRecord) throw new Error("invalid scoped ABI fixture");
+  const firstNestedClass = inventory.classes.find((candidate) => candidate.displayName === "FirstNestedClass");
+  const secondNestedClass = inventory.classes.find((candidate) => candidate.displayName === "SecondNestedClass");
+  if (!first || !second || !classRecord || !firstNestedClass || !secondNestedClass) {
+    throw new Error("invalid scoped ABI fixture");
+  }
   const module = createEmptyModule();
   module.types.push({ kind: "func", name: "$void", params: [], results: [] });
   return {
+    inventory,
     sourceId: inventory.sources[0]!.id,
     firstUnitId: first.id,
     secondUnitId: second.id,
     classId: classRecord.id,
+    firstNestedClassId: firstNestedClass.id,
+    secondNestedClassId: secondNestedClass.id,
     module,
     session: new ProgramAbiSession(inventory, module),
   };
@@ -151,6 +179,62 @@ function aliasDraft(f: Fixture, id: IrBindingId, targetId: IrBindingId, roleOrdi
       kind: "callable",
       origin: "import",
       signature: VOID_SIGNATURE,
+    },
+  };
+}
+
+function ownedAliasDraft(
+  f: Fixture,
+  id: IrBindingId,
+  targetId: IrBindingId,
+  ownerUnitId: IrUnitId,
+  signature: ProgramAbiCallableTypeContract = VOID_SIGNATURE,
+): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forUnit(ownerUnitId, {
+      domain: "callable",
+      roleOrdinal: 9,
+    }),
+    displayName: "owned-alias",
+    slotPolicy: "alias",
+    aliasOf: targetId,
+    intent: {
+      kind: "callable",
+      origin: "import",
+      signature: canonicalProgramAbiCallableTypeContract(signature),
+    },
+  };
+}
+
+function classSupportDraft(f: Fixture, id: IrBindingId, classId: IrClassId, roleOrdinal = 0): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forClass(classId, {
+      domain: "support",
+      roleOrdinal,
+    }),
+    displayName: "class-support",
+    slotPolicy: "none",
+    intent: { kind: "support", role: "class-support" },
+  };
+}
+
+function globalAliasDraft(f: Fixture, id: IrBindingId, targetId: IrBindingId, valueType: string): ProgramAbiDraft {
+  return {
+    id,
+    structuralOrder: f.session.structuralOrder.forSource(f.sourceId, {
+      domain: "global",
+      roleOrdinal: 8,
+    }),
+    displayName: "global-alias",
+    slotPolicy: "alias",
+    aliasOf: targetId,
+    intent: {
+      kind: "global",
+      origin: "import",
+      valueType,
+      mutable: true,
     },
   };
 }
@@ -391,6 +475,137 @@ describe("#3521 scoped prepared-component ABI seal", () => {
       space: "function",
       index: 1,
     });
+  });
+
+  it("owns inventoried nested functions, expressions, arrows, and object methods through their terminal root", () => {
+    const f = fixture();
+    planCallable(f, f.firstUnitId, "body", "first");
+    planCallable(f, f.secondUnitId, "body", "second");
+    const nestedUnits = f.inventory.allUnits.filter(
+      (unit) =>
+        unit.terminalOwnerId === f.firstUnitId &&
+        (unit.kind === "nested-function" ||
+          unit.kind === "function-expression" ||
+          unit.kind === "arrow-function" ||
+          unit.kind === "object-method"),
+    );
+    expect(nestedUnits.map((unit) => unit.kind).sort()).toEqual([
+      "arrow-function",
+      "function-expression",
+      "nested-function",
+      "object-method",
+    ]);
+    const nestedCallables = nestedUnits.map((unit) => planCallable(f, unit.id, "body", unit.displayName));
+
+    const scoped = sealFirst(f);
+    expect(new Set(scoped.bindingIds)).toEqual(
+      new Set([
+        createIrBindingId({ ownerId: f.firstUnitId, domain: "callable", role: "body" }),
+        ...nestedCallables.map((entry) => entry.id),
+      ]),
+    );
+
+    const lateSupportId = createIrBindingId({
+      ownerId: nestedUnits[0]!.id,
+      domain: "support",
+      role: "late-nested-support",
+    });
+    expectInvariant(
+      () => f.session.plan(supportDraft(f.session, lateSupportId, nestedUnits[0]!.id, 7)),
+      "planning-sealed",
+    );
+    const lateCallableId = createIrBindingId({
+      ownerId: nestedUnits[1]!.id,
+      domain: "callable",
+      role: "late-nested-callable",
+    });
+    expectInvariant(
+      () => f.session.plan(callableDraft(f.session, lateCallableId, nestedUnits[1]!.id, "lateNested", "late|nested")),
+      "planning-sealed",
+    );
+
+    const crossRequest = fixture();
+    planCallable(crossRequest, crossRequest.firstUnitId, "body", "first");
+    planCallable(crossRequest, crossRequest.secondUnitId, "body", "second");
+    const firstNested = crossRequest.inventory.allUnits.find(
+      (unit) => unit.kind === "nested-function" && unit.terminalOwnerId === crossRequest.firstUnitId,
+    )!;
+    const nestedSupportId = createIrBindingId({
+      ownerId: firstNested.id,
+      domain: "support",
+      role: "nested-only",
+    });
+    crossRequest.session.plan(supportDraft(crossRequest.session, nestedSupportId, firstNested.id, 6));
+    const wrongComponent = crossRequest.session.beginPreparedComponentScope("second-cross-request", [
+      crossRequest.secondUnitId,
+    ]);
+    wrongComponent.includeBinding(nestedSupportId);
+    expectInvariant(() => wrongComponent.seal(), "invalid-callable-provenance");
+  });
+
+  it("retains structural binding and nested-class ownership across closure and disjoint scopes", () => {
+    const closure = fixture();
+    const first = planCallable(closure, closure.firstUnitId, "body", "first");
+    planCallable(closure, closure.secondUnitId, "body", "second");
+    const foreignAliasId = createIrBindingId({
+      ownerId: closure.secondUnitId,
+      domain: "callable",
+      role: "foreign-alias",
+    });
+    closure.session.plan(ownedAliasDraft(closure, foreignAliasId, first.id, closure.secondUnitId));
+    expectInvariant(() => sealFirst(closure), "invalid-callable-provenance");
+
+    const exportClosure = fixture();
+    const exportFirst = planCallable(exportClosure, exportClosure.firstUnitId, "body", "first");
+    planCallable(exportClosure, exportClosure.secondUnitId, "body", "second");
+    const foreignExportId = createIrBindingId({
+      ownerId: exportClosure.secondUnitId,
+      domain: "export",
+      role: "foreign-export",
+    });
+    exportClosure.session.plan({
+      ...exportDraft(exportClosure, foreignExportId, exportFirst.id),
+      displayName: "foreign-export",
+    });
+    expectInvariant(() => sealFirst(exportClosure), "invalid-callable-provenance");
+
+    const classRequest = fixture();
+    planCallable(classRequest, classRequest.firstUnitId, "body", "first");
+    planCallable(classRequest, classRequest.secondUnitId, "body", "second");
+    const secondClassSupportId = createIrBindingId({
+      ownerId: classRequest.secondNestedClassId,
+      domain: "support",
+      role: "second-class-support",
+    });
+    classRequest.session.plan(classSupportDraft(classRequest, secondClassSupportId, classRequest.secondNestedClassId));
+    const wrongClassOwner = classRequest.session.beginPreparedComponentScope("first-class-request", [
+      classRequest.firstUnitId,
+    ]);
+    wrongClassOwner.includeBinding(secondClassSupportId);
+    expectInvariant(() => wrongClassOwner.seal(), "invalid-callable-provenance");
+
+    const disjoint = fixture();
+    planCallable(disjoint, disjoint.firstUnitId, "body", "first");
+    planCallable(disjoint, disjoint.secondUnitId, "body", "second");
+    const firstClassSupportId = createIrBindingId({
+      ownerId: disjoint.firstNestedClassId,
+      domain: "support",
+      role: "first-class-support",
+    });
+    const secondDisjointClassSupportId = createIrBindingId({
+      ownerId: disjoint.secondNestedClassId,
+      domain: "support",
+      role: "second-class-support",
+    });
+    disjoint.session.plan(classSupportDraft(disjoint, firstClassSupportId, disjoint.firstNestedClassId));
+    disjoint.session.plan(classSupportDraft(disjoint, secondDisjointClassSupportId, disjoint.secondNestedClassId));
+    const firstScope = disjoint.session.beginPreparedComponentScope("first-class", [disjoint.firstUnitId]);
+    firstScope.includeBinding(firstClassSupportId);
+    firstScope.seal();
+    const secondScope = disjoint.session.beginPreparedComponentScope("second-class", [disjoint.secondUnitId]);
+    secondScope.includeBinding(secondDisjointClassSupportId);
+    secondScope.seal();
+    expect(disjoint.session.publish(disjoint.module).abi.entries()).toHaveLength(4);
   });
 
   it("allows disjoint scopes but rejects source-callable requests and shared binding ownership", () => {
@@ -674,6 +889,107 @@ describe("#3521 scoped prepared-component ABI seal", () => {
     });
   });
 
+  it("refreshes callable and global aliases that inherit canonical contracts during a valid reorder", () => {
+    const f = fixture();
+    const previousTypes: TypeDef[] = [
+      {
+        kind: "struct",
+        name: "$Payload",
+        fields: [{ name: "value", type: { kind: "i32" }, mutable: false }],
+      },
+      {
+        kind: "func",
+        name: "$consume",
+        params: [{ kind: "ref", typeIdx: 0 }],
+        results: [],
+      },
+    ];
+    f.module.types = previousTypes;
+    const callableContract: ProgramAbiCallableTypeContract = Object.freeze({
+      params: Object.freeze([{ kind: "ref" as const, typeIdx: 0 }]),
+      results: Object.freeze([]),
+    });
+    const callableId = createIrBindingId({ ownerId: f.firstUnitId, domain: "callable", role: "body" });
+    const callableKey = `unit|${f.firstUnitId}|body`;
+    const func: WasmFunction = {
+      name: "first",
+      typeIdx: 1,
+      locals: [],
+      body: [],
+      exported: false,
+    };
+    f.module.functions.push(func);
+    f.session.plan({
+      ...callableDraft(f.session, callableId, f.firstUnitId, "first", callableKey),
+      intent: {
+        kind: "callable",
+        origin: "source",
+        signature: canonicalProgramAbiCallableTypeContract(callableContract),
+        unitId: f.firstUnitId,
+      },
+    });
+    f.session.registerCallableTypeContract(callableId, callableContract);
+    f.session.registerStructuralReference(callableId, callableKey);
+    f.session.attachLocator(callableId, { kind: "defined-function", value: func });
+
+    const callableAliasId = createIrBindingId({
+      ownerId: f.firstUnitId,
+      domain: "callable",
+      role: "inherited-callable-contract",
+    });
+    f.session.plan(ownedAliasDraft(f, callableAliasId, callableId, f.firstUnitId, callableContract));
+
+    const globalType = { kind: "ref" as const, typeIdx: 0 };
+    const globalValueType = canonicalProgramAbiValType(globalType);
+    const globalId = createIrBindingId({ ownerId: f.sourceId, domain: "global", role: "canonical-global" });
+    const globalKey = "import-global|3:env|13:payload_global";
+    const global: Import = {
+      module: "env",
+      name: "payload_global",
+      desc: { kind: "global", type: globalType, mutable: true },
+    };
+    f.module.imports.push(global);
+    f.session.plan({
+      ...importedGlobalDraft(f, globalId, globalKey),
+      intent: { kind: "global", origin: "import", valueType: globalValueType, mutable: true },
+    });
+    f.session.registerGlobalTypeContract(globalId, globalType, true);
+    f.session.registerStructuralReference(globalId, globalKey);
+    f.session.attachLocator(globalId, { kind: "import-global", value: global });
+    const globalAliasId = createIrBindingId({
+      ownerId: f.sourceId,
+      domain: "global",
+      role: "inherited-global-contract",
+    });
+    f.session.plan(globalAliasDraft(f, globalAliasId, globalId, globalValueType));
+
+    const scoped = sealFirst(f, [globalId]);
+    expect(scoped.bindingIds).toEqual(expect.arrayContaining([callableId, callableAliasId, globalId, globalAliasId]));
+
+    const nextTypes: TypeDef[] = [
+      {
+        kind: "func",
+        name: "$consume$reordered",
+        params: [{ kind: "ref", typeIdx: 1 }],
+        results: [],
+      },
+      {
+        kind: "struct",
+        name: "$Payload$reordered",
+        fields: [{ name: "value", type: { kind: "i32" }, mutable: false }],
+      },
+    ];
+    f.session.applyTypeLayoutRemap({ previousTypes, nextTypes, targetsByOldIndex: [1, 0] });
+    f.module.types = nextTypes;
+    func.typeIdx = 0;
+    if (global.desc.kind !== "global") throw new Error("invalid global alias fixture");
+    global.desc.type = { kind: "ref", typeIdx: 1 };
+
+    const publication = f.session.publish(f.module);
+    expect(publication.abi.canonicalId(callableAliasId)).toBe(callableId);
+    expect(publication.abi.canonicalId(globalAliasId)).toBe(globalId);
+  });
+
   it("pins type/class layouts structurally and advances them only through exact DCE layout remaps", () => {
     const drift = fixture();
     planCallable(drift, drift.firstUnitId, "body", "first");
@@ -754,6 +1070,110 @@ describe("#3521 scoped prepared-component ABI seal", () => {
       space: "type",
       index: 1,
     });
+  });
+
+  it("rejects payload-shape swaps reachable from class fields and callable parameters", () => {
+    const f = fixture();
+    const previousTypes: TypeDef[] = [
+      {
+        kind: "struct",
+        name: "$Base",
+        fields: [{ name: "base", type: { kind: "i32" }, mutable: false }],
+      },
+      {
+        kind: "struct",
+        name: "$ClassPayload",
+        superTypeIdx: 0,
+        fields: [{ name: "classValue", type: { kind: "i32" }, mutable: false }],
+      },
+      {
+        kind: "struct",
+        name: "$CallablePayload",
+        fields: [{ name: "callValue", type: { kind: "f64" }, mutable: true }],
+      },
+      {
+        kind: "struct",
+        name: "$PreparedClass",
+        fields: [{ name: "payload", type: { kind: "ref", typeIdx: 1 }, mutable: true }],
+      },
+      {
+        kind: "func",
+        name: "$consume",
+        params: [{ kind: "ref", typeIdx: 2 }],
+        results: [],
+      },
+    ];
+    f.module.types = previousTypes;
+    const callableContract: ProgramAbiCallableTypeContract = Object.freeze({
+      params: Object.freeze([{ kind: "ref" as const, typeIdx: 2 }]),
+      results: Object.freeze([]),
+    });
+    const callableId = createIrBindingId({ ownerId: f.firstUnitId, domain: "callable", role: "body" });
+    const callableKey = `unit|${f.firstUnitId}|body`;
+    const func: WasmFunction = {
+      name: "first",
+      typeIdx: 4,
+      locals: [],
+      body: [],
+      exported: false,
+    };
+    f.module.functions.push(func);
+    f.session.plan({
+      ...callableDraft(f.session, callableId, f.firstUnitId, "first", callableKey),
+      intent: {
+        kind: "callable",
+        origin: "source",
+        signature: canonicalProgramAbiCallableTypeContract(callableContract),
+        unitId: f.firstUnitId,
+      },
+    });
+    f.session.registerCallableTypeContract(callableId, callableContract);
+    f.session.registerStructuralReference(callableId, callableKey);
+    f.session.attachLocator(callableId, { kind: "defined-function", value: func });
+
+    const classId = createIrBindingId({ ownerId: f.classId, domain: "class", role: "prepared-class" });
+    const classKey = `class|${classId}`;
+    f.session.plan(classDraft(f, classId, classKey));
+    f.session.registerStructuralReference(classId, classKey);
+    const classCell = f.session.createTypeCell(previousTypes[3]!);
+    f.session.attachLocator(classId, { kind: "type-cell", cell: classCell });
+    sealFirst(f, [classId]);
+
+    const maliciousPermutation: TypeDef[] = [
+      previousTypes[0]!,
+      {
+        kind: "struct",
+        name: "$ClassPayload$wrong-target",
+        superTypeIdx: 0,
+        fields: [{ name: "classValue", type: { kind: "i32" }, mutable: false }],
+      },
+      {
+        kind: "struct",
+        name: "$CallablePayload$wrong-target",
+        fields: [{ name: "callValue", type: { kind: "f64" }, mutable: true }],
+      },
+      {
+        kind: "struct",
+        name: "$PreparedClass$permuted",
+        fields: [{ name: "payload", type: { kind: "ref", typeIdx: 2 }, mutable: true }],
+      },
+      {
+        kind: "func",
+        name: "$consume$permuted",
+        params: [{ kind: "ref", typeIdx: 1 }],
+        results: [],
+      },
+    ];
+    expectInvariant(
+      () =>
+        f.session.applyTypeLayoutRemap({
+          previousTypes,
+          nextTypes: maliciousPermutation,
+          targetsByOldIndex: [0, 2, 1, 3, 4],
+        }),
+      "type-remap-mismatch",
+    );
+    expect(f.session.publish(f.module).abi.resolveFinalIndex(classId)).toEqual({ space: "type", index: 3 });
   });
 
   it("rejects alias cycles, duplicate discovery, custom IDs, and post-seal locator removal", () => {

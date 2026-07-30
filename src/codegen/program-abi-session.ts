@@ -513,15 +513,18 @@ interface PreparedProgramAbiScopeRecord {
   readonly scopeId: string;
   readonly terminalUnitIds: readonly IrUnitId[];
   readonly unitIds: ReadonlySet<IrUnitId>;
+  readonly classIds: ReadonlySet<IrClassId>;
   readonly derivedUnits: readonly ProgramAbiDerivedUnitRecord[];
   readonly requestedBindingIds: ReadonlySet<IrBindingId>;
   readonly bindingIds: ReadonlySet<IrBindingId>;
+  readonly bindingTerminalOwnerIds: ReadonlyMap<IrBindingId, IrUnitId | null>;
   readonly drafts: ReadonlyMap<IrBindingId, ProgramAbiDraft>;
   readonly locators: ReadonlyMap<IrBindingId, PreparedProgramAbiLocatorSnapshot>;
   readonly structuralReferences: ReadonlyMap<IrBindingId, string>;
   readonly callableTypeContracts: Map<IrBindingId, ProgramAbiCallableTypeContract>;
   readonly globalTypeContracts: Map<IrBindingId, ProgramAbiGlobalTypeContract>;
   readonly typeLayouts: Map<IrBindingId, string>;
+  readonly reachableTypeLayouts: Map<number, string>;
   readonly view: SealedPreparedProgramAbiScope;
 }
 
@@ -635,6 +638,32 @@ function remapProgramAbiTypeDef(
   }
 }
 
+function collectProgramAbiTypeReferences(type: TypeDef, references: Set<number>): void {
+  const addValue = (value: ValType): void => {
+    if (value.kind === "ref" || value.kind === "ref_null") references.add(value.typeIdx);
+  };
+  switch (type.kind) {
+    case "func":
+      type.params.forEach(addValue);
+      type.results.forEach(addValue);
+      return;
+    case "struct":
+      type.fields.forEach((field) => addValue(field.type));
+      if (type.superTypeIdx !== undefined) references.add(type.superTypeIdx);
+      return;
+    case "array":
+      addValue(type.element);
+      return;
+    case "rec":
+      type.types.forEach((nested) => collectProgramAbiTypeReferences(nested, references));
+      return;
+    case "sub":
+      if (type.superType !== null) references.add(type.superType);
+      collectProgramAbiTypeReferences(type.type, references);
+      return;
+  }
+}
+
 function locatorObject(locator: ProgramAbiSlotLocator): object {
   return locator.kind === "type-cell" ? locator.cell : locator.value;
 }
@@ -735,14 +764,14 @@ function planEntriesEqualIgnoringDenseOrder(a: ProgramAbiPlanEntry, b: ProgramAb
   );
 }
 
-function bindingOwnerIsUnit(id: IrBindingId, unitId: IrUnitId): boolean {
+function bindingOwnerIs(id: IrBindingId, ownerId: IrUnitId | IrClassId): boolean {
   const prefix = "ir-binding:v1:";
   if (!id.startsWith(prefix)) return false;
   const domainEnd = id.indexOf(":", prefix.length);
   if (domainEnd < 0) return false;
   const ownerEnd = id.indexOf(":", domainEnd + 1);
   if (ownerEnd < 0) return false;
-  return id.slice(domainEnd + 1, ownerEnd) === encodeURIComponent(unitId);
+  return id.slice(domainEnd + 1, ownerEnd) === encodeURIComponent(ownerId);
 }
 
 function readonlySet<T>(values: Iterable<T>): ReadonlySet<T> {
@@ -820,6 +849,7 @@ export class ProgramAbiSession {
   private readonly globalTypeContracts = new Map<IrBindingId, ProgramAbiGlobalTypeContract>();
   private readonly preparedScopes = new Map<string, PreparedProgramAbiScopeRecord>();
   private readonly preparedScopeByUnitId = new Map<IrUnitId, string>();
+  private readonly preparedScopeByClassId = new Map<IrClassId, string>();
   private readonly preparedScopeByBindingId = new Map<IrBindingId, string>();
   private readonly openPreparedScopeIds = new Set<string>();
   private applyingPreparedTypeLayoutRemap = false;
@@ -1336,11 +1366,13 @@ export class ProgramAbiSession {
     for (const [id, contract] of remappedGlobalContracts) this.globalTypeContracts.set(id, contract);
     for (const scope of this.preparedScopes.values()) {
       for (const id of scope.callableTypeContracts.keys()) {
-        const contract = this.callableTypeContracts.get(id);
+        const draft = this.drafts.get(id);
+        const contract = draft === undefined ? undefined : this.callableTypeContractFor(draft);
         if (contract) scope.callableTypeContracts.set(id, cloneProgramAbiCallableTypeContract(contract));
       }
       for (const id of scope.globalTypeContracts.keys()) {
-        const contract = this.globalTypeContracts.get(id);
+        const draft = this.drafts.get(id);
+        const contract = draft === undefined ? undefined : this.globalTypeContractFor(draft);
         if (contract) {
           scope.globalTypeContracts.set(
             id,
@@ -1353,6 +1385,21 @@ export class ProgramAbiSession {
         if (locator?.kind === "type-cell" && locator.cell.current !== null) {
           scope.typeLayouts.set(id, canonicalProgramAbiTypeDef(locator.cell.current));
         }
+      }
+      const remappedReachableLayouts = new Map<number, string>();
+      for (const oldIndex of scope.reachableTypeLayouts.keys()) {
+        const target = targetsByOldIndex[oldIndex];
+        if (target === null || target === undefined || !nextTypes[target]) {
+          throw new ProgramAbiInvariantError(
+            "type-remap-mismatch",
+            `prepared type graph for scope ${scope.scopeId} was eliminated after validation`,
+          );
+        }
+        remappedReachableLayouts.set(target, canonicalProgramAbiTypeDef(nextTypes[target]!));
+      }
+      scope.reachableTypeLayouts.clear();
+      for (const [index, layoutValue] of remappedReachableLayouts) {
+        scope.reachableTypeLayouts.set(index, layoutValue);
       }
     }
   }
@@ -1614,9 +1661,28 @@ export class ProgramAbiSession {
       this.assertPreparedDependencyRequest(scopeId, new Set(terminalUnitIds), draft);
     }
 
-    const derivedUnits = this.collectPreparedDerivedUnits(new Set(terminalUnitIds));
-    const unitIds = new Set<IrUnitId>(terminalUnitIds);
-    for (const record of derivedUnits) unitIds.add(record.id);
+    const terminalUnitIdSet = new Set(terminalUnitIds);
+    const unitIds = this.collectPreparedUnitIds(terminalUnitIdSet);
+    const classIds = this.collectPreparedClassIds(terminalUnitIdSet);
+    for (const unitId of unitIds) {
+      const previous = this.preparedScopeByUnitId.get(unitId);
+      if (previous !== undefined) {
+        throw new ProgramAbiInvariantError(
+          "duplicate-session-draft",
+          `prepared ABI unit ${unitId} overlaps sealed scope ${previous}`,
+        );
+      }
+    }
+    for (const classId of classIds) {
+      const previous = this.preparedScopeByClassId.get(classId);
+      if (previous !== undefined) {
+        throw new ProgramAbiInvariantError(
+          "duplicate-session-draft",
+          `prepared ABI class ${classId} overlaps sealed scope ${previous}`,
+        );
+      }
+    }
+    const derivedUnits = this.collectPreparedDerivedUnits(unitIds);
     const bindingIds = this.collectPreparedBindingClosure(unitIds, requestedBindingIds);
     for (const unitId of unitIds) {
       const callableReservations = [...bindingIds].filter((id) => {
@@ -1629,16 +1695,29 @@ export class ProgramAbiSession {
           draft.slotSpace === "function"
         );
       });
-      if (callableReservations.length !== 1) {
+      const inventoryUnit = this.inventory.allUnits.find((unit) => unit.id === unitId);
+      const requiresCallable = inventoryUnit?.terminal === true || this.derivedUnits.has(unitId);
+      if (callableReservations.length > 1 || (requiresCallable && callableReservations.length !== 1)) {
         throw new ProgramAbiInvariantError(
           callableReservations.length === 0 ? "missing-source-unit" : "duplicate-session-draft",
-          `prepared ABI scope ${scopeId} requires exactly one callable reservation for executable unit ${unitId}; found ${callableReservations.length}`,
+          `prepared ABI scope ${scopeId} ${
+            requiresCallable ? "requires exactly one" : "allows at most one existing"
+          } callable reservation for executable unit ${unitId}; found ${callableReservations.length}`,
         );
       }
     }
+    const bindingTerminalOwnerIds = new Map<IrBindingId, IrUnitId | null>();
     for (const id of bindingIds) {
       const draft = this.drafts.get(id)!;
-      this.assertCanonicalPreparedBindingId(draft);
+      const ownerId = this.assertCanonicalPreparedBindingId(draft);
+      const ownerTerminalId = this.terminalOwnerForStructuralOwner(ownerId);
+      bindingTerminalOwnerIds.set(id, ownerTerminalId);
+      if (ownerTerminalId !== null && !terminalUnitIdSet.has(ownerTerminalId)) {
+        throw new ProgramAbiInvariantError(
+          "invalid-callable-provenance",
+          `prepared ABI scope ${scopeId} reaches binding ${id} structurally owned by terminal ${ownerTerminalId}`,
+        );
+      }
       if (
         draft.intent.kind === "callable" &&
         draft.intent.origin === "source" &&
@@ -1734,6 +1813,12 @@ export class ProgramAbiSession {
       );
       structuralReferences.set(draft.id, structuralReference);
     }
+    const reachableTypeLayouts = this.collectPreparedReachableTypeLayouts(
+      this.module,
+      typeLayouts.keys(),
+      callableTypeContracts,
+      globalTypeContracts,
+    );
 
     const exactTerminalUnitIds = Object.freeze([...terminalUnitIds]);
     const exactDerivedUnits = Object.freeze(derivedUnits.map((record) => Object.freeze({ ...record })));
@@ -1772,15 +1857,18 @@ export class ProgramAbiSession {
       scopeId,
       terminalUnitIds: exactTerminalUnitIds,
       unitIds: readonlySet(unitIds),
+      classIds: readonlySet(classIds),
       derivedUnits: exactDerivedUnits,
       requestedBindingIds: readonlySet(requestedBindingIds),
       bindingIds: readonlySet(exactBindingIds),
+      bindingTerminalOwnerIds: readonlyMap(bindingTerminalOwnerIds),
       drafts: readonlyMap(drafts.map((draft) => [draft.id, cloneDraft(draft)] as const)),
       locators: readonlyMap(locatorSnapshots),
       structuralReferences: readonlyMap(structuralReferences),
       callableTypeContracts,
       globalTypeContracts,
       typeLayouts,
+      reachableTypeLayouts,
       view,
     };
     recordHolder.value = record;
@@ -1789,13 +1877,18 @@ export class ProgramAbiSession {
     // every identity, contract, reservation, and locator is known-good.
     this.preparedScopes.set(scopeId, record);
     for (const unitId of unitIds) this.preparedScopeByUnitId.set(unitId, scopeId);
+    for (const classId of classIds) this.preparedScopeByClassId.set(classId, scopeId);
     for (const bindingId of exactBindingIds) this.preparedScopeByBindingId.set(bindingId, scopeId);
     return view;
   }
 
-  private collectPreparedDerivedUnits(terminalUnitIds: ReadonlySet<IrUnitId>): readonly ProgramAbiDerivedUnitRecord[] {
-    const included = new Set<IrUnitId>(terminalUnitIds);
-    const records: ProgramAbiDerivedUnitRecord[] = [];
+  private collectPreparedUnitIds(terminalUnitIds: ReadonlySet<IrUnitId>): Set<IrUnitId> {
+    const included = new Set<IrUnitId>();
+    for (const unit of this.inventory.allUnits) {
+      const terminalOwnerId = this.terminalOwnerForKnownUnit(unit.id);
+      if (terminalOwnerId !== null && terminalUnitIds.has(terminalOwnerId)) included.add(unit.id);
+    }
+    for (const terminalUnitId of terminalUnitIds) included.add(terminalUnitId);
     for (let changed = true; changed; ) {
       changed = false;
       for (const record of this.derivedUnits.values()) {
@@ -1807,10 +1900,24 @@ export class ProgramAbiSession {
           continue;
         }
         included.add(record.id);
-        records.push(record);
         changed = true;
       }
     }
+    return included;
+  }
+
+  private collectPreparedClassIds(terminalUnitIds: ReadonlySet<IrUnitId>): Set<IrClassId> {
+    const included = new Set<IrClassId>();
+    for (const classRecord of this.inventory.classes) {
+      const terminalOwnerId = this.terminalOwnerForKnownClass(classRecord.id);
+      if (terminalOwnerId !== null && terminalUnitIds.has(terminalOwnerId)) included.add(classRecord.id);
+    }
+    return included;
+  }
+
+  private collectPreparedDerivedUnits(unitIds: ReadonlySet<IrUnitId>): readonly ProgramAbiDerivedUnitRecord[] {
+    const records: ProgramAbiDerivedUnitRecord[] = [];
+    for (const record of this.derivedUnits.values()) if (unitIds.has(record.id)) records.push(record);
     return Object.freeze(
       records.sort((left, right) => {
         const leftDraft = [...this.drafts.values()].find(
@@ -1882,7 +1989,7 @@ export class ProgramAbiSession {
         );
       }
     }
-    const ownerTerminalId = this.terminalOwnerForKnownUnit(ownerId as IrUnitId);
+    const ownerTerminalId = this.terminalOwnerForStructuralOwner(ownerId);
     if (ownerTerminalId !== null && !terminalUnitIds.has(ownerTerminalId)) {
       throw new ProgramAbiInvariantError(
         "invalid-callable-provenance",
@@ -1962,10 +2069,39 @@ export class ProgramAbiSession {
     return ownerId as IrSourceId | IrUnitId | IrClassId;
   }
 
-  private terminalOwnerForKnownUnit(id: IrUnitId): IrUnitId | null {
+  private terminalOwnerForKnownUnit(id: IrUnitId, visited = new Set<IrUnitId>()): IrUnitId | null {
+    if (visited.has(id)) {
+      throw new ProgramAbiInvariantError("invalid-callable-provenance", `unit ownership cycle includes ${id}`);
+    }
+    visited.add(id);
     const inventoryUnit = this.inventory.allUnits.find((unit) => unit.id === id);
-    if (inventoryUnit) return inventoryUnit.terminalOwnerId;
-    return this.derivedUnits.get(id)?.terminalOwnerId ?? null;
+    const directOwner = inventoryUnit?.terminalOwnerId ?? this.derivedUnits.get(id)?.terminalOwnerId ?? null;
+    if (directOwner === null || directOwner === id) return directOwner;
+    const ownerRecord =
+      this.inventory.allUnits.find((unit) => unit.id === directOwner) ?? this.derivedUnits.get(directOwner);
+    if (!ownerRecord) return directOwner;
+    return this.terminalOwnerForKnownUnit(directOwner, visited);
+  }
+
+  private terminalOwnerForKnownClass(id: IrClassId, visited = new Set<IrClassId>()): IrUnitId | null {
+    if (visited.has(id)) {
+      throw new ProgramAbiInvariantError("invalid-callable-provenance", `class ownership cycle includes ${id}`);
+    }
+    visited.add(id);
+    const record = this.inventory.classes.find((candidate) => candidate.id === id);
+    if (!record || record.lexicalOwnerId === null) return null;
+    if (this.inventoryClassIds.has(record.lexicalOwnerId as IrClassId)) {
+      return this.terminalOwnerForKnownClass(record.lexicalOwnerId as IrClassId, visited);
+    }
+    return this.terminalOwnerForKnownUnit(record.lexicalOwnerId as IrUnitId);
+  }
+
+  private terminalOwnerForStructuralOwner(ownerId: IrSourceId | IrUnitId | IrClassId): IrUnitId | null {
+    if (this.inventorySourceIds.has(ownerId as IrSourceId)) return null;
+    if (this.inventoryClassIds.has(ownerId as IrClassId)) {
+      return this.terminalOwnerForKnownClass(ownerId as IrClassId);
+    }
+    return this.terminalOwnerForKnownUnit(ownerId as IrUnitId);
   }
 
   private preparedHostLinkage(locator: ProgramAbiSlotLocator): string | undefined {
@@ -2022,7 +2158,75 @@ export class ProgramAbiSession {
           );
         }
       }
+      const currentReachableLayouts = this.collectPreparedReachableTypeLayouts(
+        this.module,
+        scope.typeLayouts.keys(),
+        scope.callableTypeContracts,
+        scope.globalTypeContracts,
+      );
+      if (
+        currentReachableLayouts.size !== scope.reachableTypeLayouts.size ||
+        [...scope.reachableTypeLayouts].some(([index, layout]) => currentReachableLayouts.get(index) !== layout)
+      ) {
+        throw new ProgramAbiInvariantError(
+          "type-remap-mismatch",
+          `prepared type graph for scope ${scope.scopeId} drifted before exact layout remapping`,
+        );
+      }
     }
+  }
+
+  private collectPreparedReachableTypeLayouts(
+    module: WasmModule,
+    typeBindingIds: Iterable<IrBindingId>,
+    callableContracts: ReadonlyMap<IrBindingId, ProgramAbiCallableTypeContract>,
+    globalContracts: ReadonlyMap<IrBindingId, ProgramAbiGlobalTypeContract>,
+  ): Map<number, string> {
+    const roots = new Set<number>();
+    const addValue = (value: ValType): void => {
+      if (value.kind === "ref" || value.kind === "ref_null") roots.add(value.typeIdx);
+    };
+    for (const id of typeBindingIds) {
+      const locator = this.locators.get(id);
+      if (locator?.kind !== "type-cell" || locator.cell.current === null) {
+        throw new ProgramAbiInvariantError(
+          "type-remap-mismatch",
+          `prepared type/class layout ${id} has no live cell while pinning its type graph`,
+        );
+      }
+      const index = module.types.indexOf(locator.cell.current);
+      if (index < 0 || module.types.lastIndexOf(locator.cell.current) !== index) {
+        throw new ProgramAbiInvariantError(
+          "type-remap-mismatch",
+          `prepared type/class layout ${id} is not uniquely present while pinning its type graph`,
+        );
+      }
+      roots.add(index);
+    }
+    for (const contract of callableContracts.values()) {
+      contract.params.forEach(addValue);
+      contract.results.forEach(addValue);
+    }
+    for (const contract of globalContracts.values()) addValue(contract.type);
+
+    const layouts = new Map<number, string>();
+    const pending = [...roots];
+    while (pending.length > 0) {
+      const index = pending.pop()!;
+      if (layouts.has(index)) continue;
+      if (!Number.isSafeInteger(index) || index < 0 || index >= module.types.length) {
+        throw new ProgramAbiInvariantError(
+          "type-remap-mismatch",
+          `prepared type graph references index ${index} outside the module type layout`,
+        );
+      }
+      const type = module.types[index]!;
+      layouts.set(index, canonicalProgramAbiTypeDef(type));
+      const references = new Set<number>();
+      collectProgramAbiTypeReferences(type, references);
+      for (const reference of references) if (!layouts.has(reference)) pending.push(reference);
+    }
+    return layouts;
   }
 
   private assertPreparedTypeLayoutRemap(
@@ -2031,36 +2235,29 @@ export class ProgramAbiSession {
     targetsByOldIndex: readonly (number | null)[],
   ): void {
     for (const scope of this.preparedScopes.values()) {
-      for (const [id] of scope.typeLayouts) {
-        const locator = this.locators.get(id);
-        if (locator?.kind !== "type-cell" || locator.cell.current === null) {
+      for (const [oldIndex, pinnedLayout] of scope.reachableTypeLayouts) {
+        const oldType = previousTypes[oldIndex];
+        if (!oldType || canonicalProgramAbiTypeDef(oldType) !== pinnedLayout) {
           throw new ProgramAbiInvariantError(
             "type-remap-mismatch",
-            `prepared type/class layout ${id} has no live cell for exact remapping`,
-          );
-        }
-        const oldIndex = previousTypes.indexOf(locator.cell.current);
-        if (oldIndex < 0 || previousTypes.lastIndexOf(locator.cell.current) !== oldIndex) {
-          throw new ProgramAbiInvariantError(
-            "type-remap-mismatch",
-            `prepared type/class layout ${id} is not uniquely present in the old layout`,
+            `prepared type graph for scope ${scope.scopeId} changed at old index ${oldIndex}`,
           );
         }
         const target = targetsByOldIndex[oldIndex];
         if (target === null || target === undefined || !nextTypes[target]) {
           throw new ProgramAbiInvariantError(
             "type-remap-mismatch",
-            `prepared type/class layout ${id} was eliminated by an exact layout remap`,
+            `prepared type graph for scope ${scope.scopeId} eliminated old index ${oldIndex}`,
           );
         }
         const expectedLayout = canonicalProgramAbiTypeDef(
-          remapProgramAbiTypeDef(locator.cell.current, targetsByOldIndex, id),
+          remapProgramAbiTypeDef(oldType, targetsByOldIndex, scope.bindingIds.values().next().value!),
         );
         const actualLayout = canonicalProgramAbiTypeDef(nextTypes[target]);
         if (actualLayout !== expectedLayout) {
           throw new ProgramAbiInvariantError(
             "type-remap-mismatch",
-            `prepared type/class layout ${id} changed shape during an exact layout remap`,
+            `prepared type graph for scope ${scope.scopeId} changed reachable shape during an exact layout remap`,
           );
         }
       }
@@ -2074,6 +2271,14 @@ export class ProgramAbiSession {
       const unitOwner = this.preparedScopeByUnitId.get(draft.intent.unitId);
       if (unitOwner !== undefined) return unitOwner;
     }
+    if (draft.intent.kind === "callable" && draft.intent.classId) {
+      const classOwner = this.preparedScopeByClassId.get(draft.intent.classId);
+      if (classOwner !== undefined) return classOwner;
+    }
+    if (draft.intent.kind === "class") {
+      const classOwner = this.preparedScopeByClassId.get(draft.intent.classId);
+      if (classOwner !== undefined) return classOwner;
+    }
     if (draft.slotPolicy === "alias") {
       const aliasOwner = this.preparedScopeByBindingId.get(draft.aliasOf);
       if (aliasOwner !== undefined) return aliasOwner;
@@ -2083,7 +2288,10 @@ export class ProgramAbiSession {
       if (exportOwner !== undefined) return exportOwner;
     }
     for (const [unitId, scopeId] of this.preparedScopeByUnitId) {
-      if (bindingOwnerIsUnit(draft.id, unitId)) return scopeId;
+      if (bindingOwnerIs(draft.id, unitId)) return scopeId;
+    }
+    for (const [classId, scopeId] of this.preparedScopeByClassId) {
+      if (bindingOwnerIs(draft.id, classId)) return scopeId;
     }
     return undefined;
   }
@@ -2097,7 +2305,22 @@ export class ProgramAbiSession {
   }
 
   private assertPreparedScopeCurrent(record: PreparedProgramAbiScopeRecord, module: WasmModule): void {
-    const derivedUnits = this.collectPreparedDerivedUnits(new Set(record.terminalUnitIds));
+    const terminalUnitIds = new Set(record.terminalUnitIds);
+    const unitIds = this.collectPreparedUnitIds(terminalUnitIds);
+    if (unitIds.size !== record.unitIds.size || [...record.unitIds].some((id) => !unitIds.has(id))) {
+      throw new ProgramAbiInvariantError(
+        "session-draft-mismatch",
+        `source-unit ownership closure drifted after prepared ABI scope ${record.scopeId} sealed`,
+      );
+    }
+    const classIds = this.collectPreparedClassIds(terminalUnitIds);
+    if (classIds.size !== record.classIds.size || [...record.classIds].some((id) => !classIds.has(id))) {
+      throw new ProgramAbiInvariantError(
+        "session-draft-mismatch",
+        `class ownership closure drifted after prepared ABI scope ${record.scopeId} sealed`,
+      );
+    }
+    const derivedUnits = this.collectPreparedDerivedUnits(unitIds);
     if (
       derivedUnits.length !== record.derivedUnits.length ||
       derivedUnits.some((current, index) => {
@@ -2133,6 +2356,13 @@ export class ProgramAbiSession {
         throw new ProgramAbiInvariantError(
           "session-draft-mismatch",
           `ABI draft ${id} drifted after prepared scope ${record.scopeId} sealed`,
+        );
+      }
+      const currentOwnerId = this.assertCanonicalPreparedBindingId(currentDraft);
+      if (this.terminalOwnerForStructuralOwner(currentOwnerId) !== record.bindingTerminalOwnerIds.get(id)) {
+        throw new ProgramAbiInvariantError(
+          "invalid-callable-provenance",
+          `ABI draft ${id} structural owner drifted after prepared scope ${record.scopeId} sealed`,
         );
       }
       const expectedLocator = record.locators.get(id);
@@ -2217,6 +2447,21 @@ export class ProgramAbiSession {
           );
         }
       }
+    }
+    const currentReachableLayouts = this.collectPreparedReachableTypeLayouts(
+      module,
+      record.typeLayouts.keys(),
+      record.callableTypeContracts,
+      record.globalTypeContracts,
+    );
+    if (
+      currentReachableLayouts.size !== record.reachableTypeLayouts.size ||
+      [...record.reachableTypeLayouts].some(([index, layout]) => currentReachableLayouts.get(index) !== layout)
+    ) {
+      throw new ProgramAbiInvariantError(
+        "type-remap-mismatch",
+        `reachable type graph drifted after prepared ABI scope ${record.scopeId} sealed`,
+      );
     }
   }
 

@@ -292,6 +292,34 @@ Adversarial review further pins the boundary:
 - malformed/custom binding IDs, alias cycles, duplicate dependency discovery,
   and removal of a pinned allocator object all reject before publication.
 
+The follow-up ownership hardening uses the complete structural inventory
+rather than treating a terminal row as the whole component:
+
+- every inventoried nested function, function expression, arrow, object
+  method/accessor, and class-member/support unit whose terminal ownership
+  resolves to a prepared root is part of that root's sealed unit denominator;
+  any existing callable is closed into the scope, while later callable or
+  support planning for those units fails closed;
+- every binding in the final alias/export/support closure retains the terminal
+  owner resolved from its canonical encoded owner. Class owners resolve
+  transitively through `IrClassRecord.lexicalOwnerId`, so a binding beneath a
+  different terminal cannot be auto-claimed through an alias/export edge or
+  explicitly requested as support;
+- scoped type evidence pins the full transitive graph reachable from type and
+  class cells plus callable/global reference contracts. An exact index
+  permutation must preserve each reachable payload definition, including
+  fields, mutability, and supertype relationships, under the same remap;
+- semantic-preserving type reorders refresh alias contracts through their
+  canonical callable/global owner. Aliases intentionally carrying no sidecar
+  of their own therefore remain valid without weakening the exact graph
+  comparison.
+
+Focused coverage includes all inventoried nested callable kinds in the R2
+component, late nested planning rejection, cross-component nested-unit and
+nested-class dependency rejection, disjoint nested-class scopes,
+foreign-owned alias/export closure rejection, referenced payload-shape swap
+rejection, and non-vacuous callable/global inherited-alias reorder success.
+
 This prerequisite changes neither `compileDeclarations` nor
 `compileIrPathFunctions`. Production adoption and legacy-body reduction remain
 exactly **0**, and all inline-small, monomorphization, allocation-provenance,
