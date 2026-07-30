@@ -1126,6 +1126,12 @@ let currentIrSafeVarDeclarationLists: ReadonlySet<ts.VariableDeclarationList> = 
 let currentSelectionOptions: IrSelectionOptions | undefined;
 let currentLocalClassDeclarations: ReadonlyMap<string, ts.ClassDeclaration> = new Map();
 let currentClaimClassName: string | null = null;
+// #2949 Acorn follow-up — the current top-level function's return expressions
+// may be provably boolean even while its unannotated JS callable ABI remains
+// dynamic. This proof types direct self-recursion inside `&&` / `||` without
+// changing the legacy-visible signature.
+let currentSubjectFunctionName: string | null = null;
+let currentSubjectReturnsBoolean = false;
 let currentClassBindings = new Map<string, string>();
 let currentCallableArities = new Map<string, number>();
 let currentCallableReturnClasses = new Map<string, string>();
@@ -1277,11 +1283,65 @@ function prepareDynamicEqualitySubject(fn: IrClaimableSubject, isMethod: boolean
   currentSubjectIsModuleInit = false;
   currentDynMemberEqualitySubject = !isMethod && ts.isFunctionDeclaration(fn) ? fn : null;
   currentDynEqualityBoxableParamNames = new Set<string>();
+  currentSubjectFunctionName = !isMethod && ts.isFunctionDeclaration(fn) && fn.name !== undefined ? fn.name.text : null;
+  currentSubjectReturnsBoolean =
+    currentSubjectFunctionName !== null &&
+    fn.body !== undefined &&
+    functionReturnsOnlyBooleanExpressions(fn.body, currentSubjectFunctionName);
 }
 
 function recordDynamicParamKind(name: string, kind: ResolvedKind, dynamicNames: Set<string>): void {
   if (kind === "dynamic") dynamicNames.add(name);
   else if (kind === "f64" || kind === "bool" || kind === "string") currentDynEqualityBoxableParamNames.add(name);
+}
+
+/**
+ * Prove a function's return expressions boolean under the coinductive
+ * assumption that direct self-recursion returns the same family. The callable
+ * ABI stays dynamic; this proof only permits boolean use inside the body and a
+ * tag-correct box at the return boundary.
+ */
+function functionReturnsOnlyBooleanExpressions(body: ts.Block, selfName: string): boolean {
+  let sawReturn = false;
+  let accepted = true;
+  const visit = (node: ts.Node): void => {
+    if (!accepted) return;
+    if (node !== body && isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) {
+      sawReturn = true;
+      if (!node.expression || !expressionIsBooleanWithSelfRecursion(node.expression, selfName)) accepted = false;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(body, visit);
+  return sawReturn && accepted;
+}
+
+function expressionIsBooleanWithSelfRecursion(expression: ts.Expression, selfName: string): boolean {
+  const candidate = unwrapProjectionExpression(expression);
+  if (candidate.kind === ts.SyntaxKind.TrueKeyword || candidate.kind === ts.SyntaxKind.FalseKeyword) return true;
+  if (ts.isPrefixUnaryExpression(candidate) && candidate.operator === ts.SyntaxKind.ExclamationToken) return true;
+  if (ts.isBinaryExpression(candidate)) {
+    const op = candidate.operatorToken.kind;
+    if (isComparisonResultOperator(op)) return true;
+    if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+      return (
+        expressionIsBooleanWithSelfRecursion(candidate.left, selfName) &&
+        expressionIsBooleanWithSelfRecursion(candidate.right, selfName)
+      );
+    }
+    return false;
+  }
+  if (ts.isConditionalExpression(candidate)) {
+    return (
+      expressionIsBooleanWithSelfRecursion(candidate.whenTrue, selfName) &&
+      expressionIsBooleanWithSelfRecursion(candidate.whenFalse, selfName)
+    );
+  }
+  return (
+    ts.isCallExpression(candidate) && ts.isIdentifier(candidate.expression) && candidate.expression.text === selfName
+  );
 }
 
 /** Collect direct identifier mutations in one function body. */
@@ -2160,16 +2220,21 @@ function dynamicUsesAreMoveOnly(
       return true;
     }
     if (ts.isBinaryExpression(e)) {
+      const leftIsDyn = isDynShaped(e.left);
+      const rightIsDyn = isDynShaped(e.right);
+      const op = e.operatorToken.kind;
+      if (
+        currentSubjectReturnsBoolean &&
+        (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken)
+      ) {
+        return scanExpr(e.left, leftIsDyn) && scanExpr(e.right, rightIsDyn);
+      }
       // Plain assignment re-binds; scan the RHS against the LHS's dyn-ness.
       if (e.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(e.left)) {
         if (expectDyn) return false; // assignment-as-value in a dyn position — slice 3
         return scanExpr(e.right, dynNames.has(e.left.text));
       }
       if (expectDyn) return false; // operator results are concrete-shaped
-
-      const leftIsDyn = isDynShaped(e.left);
-      const rightIsDyn = isDynShaped(e.right);
-      const op = e.operatorToken.kind;
 
       if (
         op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
@@ -5537,6 +5602,16 @@ function declaredExpressionHasExactFamily(
   expected: "boolean" | "string",
   scope: ReadonlySet<string>,
 ): boolean {
+  const candidate = unwrapProjectionExpression(expression);
+  if (
+    expected === "boolean" &&
+    currentSubjectReturnsBoolean &&
+    currentSubjectFunctionName !== null &&
+    !scope.has(currentSubjectFunctionName) &&
+    expressionIsBooleanWithSelfRecursion(candidate, currentSubjectFunctionName)
+  ) {
+    return true;
+  }
   const classifier = currentSelectionOptions?.classifyDeclaredPrimitiveExpression;
   const classified = classifier?.(expression);
   if (classified !== undefined) return classified === expected;
