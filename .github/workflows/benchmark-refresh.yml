@@ -63,6 +63,27 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - name: Detect benchmark timing methodology migration
+        if: github.event_name == 'pull_request'
+        id: timing_methodology
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="false"
+          for path in \
+            benchmarks/harness.ts \
+            benchmarks/timing.ts \
+            scripts/generate-size-benchmarks.ts
+          do
+            if ! cmp -s "baseline/$path" "candidate/$path"; then
+              changed="true"
+            fi
+          done
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = "true" ]; then
+            echo "::notice title=Benchmark timing migration::Both revisions will be measured and packaged, but their runtime values use different timing methodology. This workflow-changing PR requires review; same-method runtime gating resumes after merge."
+          fi
+
       - name: Detect auxiliary benchmark changes
         id: auxiliary
         shell: bash
@@ -285,7 +306,10 @@ jobs:
             --source-sha "$BENCHMARK_SOURCE_SHA"
 
       - name: Compare same-run PR base and candidate
-        if: github.event_name == 'pull_request' && steps.base_measurement.outputs.bootstrap != 'true'
+        if: |
+          github.event_name == 'pull_request' &&
+          steps.base_measurement.outputs.bootstrap != 'true' &&
+          steps.timing_methodology.outputs.changed != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -294,6 +318,13 @@ jobs:
             --baseline "$GITHUB_WORKSPACE/baseline-snapshot" \
             --candidate "$GITHUB_WORKSPACE/candidate-snapshot" \
             | tee benchmark-reports/performance-regressions.txt
+
+      - name: Record timing methodology migration
+        if: github.event_name == 'pull_request' && steps.timing_methodology.outputs.changed == 'true'
+        run: |
+          mkdir -p benchmark-reports
+          echo "Runtime comparison is informational for this timing-methodology migration; both snapshots validated successfully." \
+            > benchmark-reports/performance-regressions.txt
 
       - name: Run trusted bootstrap sidebar gate
         if: github.event_name == 'pull_request' && steps.base_measurement.outputs.bootstrap == 'true'
@@ -343,10 +374,16 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout trusted main
+      - name: Checkout trusted measured main revision
         uses: actions/checkout@v5
         with:
-          ref: main
+          # Validate with the exact lifecycle schema that packaged the
+          # artifact. A later main push may change that schema while this run
+          # is measuring; checking out moving main made the older, still-valid
+          # artifact fail provenance validation (#3817). The promotion step
+          # below separately verifies that main still equals SOURCE_SHA before
+          # configuring write credentials, so stale runs remain no-ops.
+          ref: ${{ needs.measure-and-gate.outputs.source_sha }}
           path: promote
           fetch-depth: 1
           persist-credentials: false

@@ -16,7 +16,7 @@ import {
 import { dirname, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const BENCHMARK_MANIFEST_VERSION = 1;
+export const BENCHMARK_MANIFEST_VERSION = 2;
 
 export const BENCHMARK_ARTIFACT_FILES = Object.freeze([
   "benchmarks/results/latest.json",
@@ -36,11 +36,13 @@ export const BENCHMARK_REGRESSION_POLICY = Object.freeze({
   runtime: {
     wasmSlowdownFraction: 0.2,
     jsRelativeRatioDropFraction: 0.25,
+    minimumInternalSampleMs: 1,
   },
   loadtime: {
     gating: true,
     wasmSlowdownFraction: 0.4,
     jsRelativeRatioDropFraction: 0.4,
+    minimumSampleMs: 1,
   },
   size: {
     growthFraction: 0.12,
@@ -50,6 +52,8 @@ export const BENCHMARK_REGRESSION_POLICY = Object.freeze({
 
 export const BENCHMARK_PROVENANCE = Object.freeze({
   scope: "outputs reproduced by the current canonical benchmark generators",
+  timingMethodology:
+    "sub-millisecond internal, JavaScript parse, host parse, and Wasm compile operations use calibrated batches normalized to per-call time",
   artifactSets: [
     {
       id: "internal-suite",
@@ -709,13 +713,16 @@ function comparePairedRuntime({
   keyOf,
   wasmValueOf = (row) => row.wasmUs,
   jsValueOf = (row) => row.jsUs,
+  sampleSpanOf,
   policy = BENCHMARK_REGRESSION_POLICY.runtime,
 }) {
   const select = (rows, side) =>
     keyedRows(rows, `${label} ${side}`, keyOf, (row) => {
       const wasm = finitePositiveOrNull(wasmValueOf(row));
       const js = finitePositiveOrNull(jsValueOf(row));
-      return wasm && js ? { wasm, js, ratio: js / wasm } : null;
+      if (!wasm || !js) return null;
+      const sampleSpan = sampleSpanOf?.(row, wasm, js);
+      return { wasm, js, ratio: js / wasm, sampleSpan };
     });
   const baseline = select(baselineRows, "baseline");
   const candidate = select(candidateRows, "candidate");
@@ -729,6 +736,16 @@ function comparePairedRuntime({
     }
     const ratioDrop = (before.ratio - after.ratio) / before.ratio;
     const wasmSlowdown = (after.wasm - before.wasm) / before.wasm;
+    if (
+      policy.minimumSampleMs &&
+      ((before.sampleSpan?.wasm ?? Number.POSITIVE_INFINITY) < policy.minimumSampleMs ||
+        (before.sampleSpan?.js ?? Number.POSITIVE_INFINITY) < policy.minimumSampleMs ||
+        (after.sampleSpan?.wasm ?? Number.POSITIVE_INFINITY) < policy.minimumSampleMs ||
+        (after.sampleSpan?.js ?? Number.POSITIVE_INFINITY) < policy.minimumSampleMs)
+    ) {
+      notes.push(`${label} ${key}: sample span below ${policy.minimumSampleMs}ms; informational`);
+      continue;
+    }
     if (ratioDrop > policy.jsRelativeRatioDropFraction && wasmSlowdown > policy.wasmSlowdownFraction) {
       regressions.push(
         `${label} ${key}: JS-relative ratio fell ${(ratioDrop * 100).toFixed(1)}% and Wasm slowed ${(wasmSlowdown * 100).toFixed(1)}%`,
@@ -753,7 +770,11 @@ function compareInternalSuite(baselineRows, candidateRows) {
         const median = finitePositiveOrNull(row.medianMs);
         if (!median) return;
         if (!byBenchmark.has(row.name)) byBenchmark.set(row.name, new Map());
-        byBenchmark.get(row.name).set(row.strategy, median);
+        const batchSize = Number.isSafeInteger(row.batchSize) && row.batchSize > 0 ? row.batchSize : 1;
+        byBenchmark.get(row.name).set(row.strategy, {
+          median,
+          sampleMs: median * batchSize,
+        });
       },
     );
     return byBenchmark;
@@ -766,10 +787,10 @@ function compareInternalSuite(baselineRows, candidateRows) {
     const beforeJs = strategies.get("js");
     const candidateStrategies = candidate.get(name);
     const afterJs = candidateStrategies?.get("js");
-    for (const [strategy, before] of strategies) {
+    for (const [strategy, beforeResult] of strategies) {
       if (strategy === "js") continue;
-      const after = candidateStrategies?.get(strategy);
-      if (!after) {
+      const afterResult = candidateStrategies?.get(strategy);
+      if (!afterResult) {
         regressions.push(`internal ${name}:${strategy}: missing candidate row`);
         continue;
       }
@@ -777,8 +798,22 @@ function compareInternalSuite(baselineRows, candidateRows) {
         regressions.push(`internal ${name}:${strategy}: missing paired JS reference`);
         continue;
       }
-      const beforeRatio = beforeJs / before;
-      const afterRatio = afterJs / after;
+      const minimumSampleMs = BENCHMARK_REGRESSION_POLICY.runtime.minimumInternalSampleMs;
+      if (
+        beforeJs.sampleMs < minimumSampleMs ||
+        afterJs.sampleMs < minimumSampleMs ||
+        beforeResult.sampleMs < minimumSampleMs ||
+        afterResult.sampleMs < minimumSampleMs
+      ) {
+        notes.push(
+          `internal ${name}:${strategy}: sample span below ${minimumSampleMs}ms; runtime comparison is informational`,
+        );
+        continue;
+      }
+      const before = beforeResult.median;
+      const after = afterResult.median;
+      const beforeRatio = beforeJs.median / before;
+      const afterRatio = afterJs.median / after;
       const ratioDrop = (beforeRatio - afterRatio) / beforeRatio;
       const slowdown = (after - before) / before;
       if (
@@ -861,6 +896,11 @@ function compareLoadtimeMeasurements(baselineDocument, candidateDocument) {
       key,
       wasmTotalMs: row.wasmTotalMs,
       jsParseMs: row.jsParseMs,
+      jsParseBatchSize: row.jsParseBatchSize,
+      wasmCompileMs: row.wasmCompileMs,
+      wasmCompileBatchSize: row.wasmCompileBatchSize,
+      hostJsParseMs: row.hostJsParseMs,
+      hostJsParseBatchSize: row.hostJsParseBatchSize,
     }));
   return comparePairedRuntime({
     label: "loadtime",
@@ -869,6 +909,19 @@ function compareLoadtimeMeasurements(baselineDocument, candidateDocument) {
     keyOf: (row) => row.key,
     wasmValueOf: (row) => row.wasmTotalMs,
     jsValueOf: (row) => row.jsParseMs,
+    sampleSpanOf: (row, wasm, js) => {
+      const jsBatch = Number.isSafeInteger(row.jsParseBatchSize) && row.jsParseBatchSize > 0 ? row.jsParseBatchSize : 1;
+      const wasmBatch =
+        Number.isSafeInteger(row.wasmCompileBatchSize) && row.wasmCompileBatchSize > 0 ? row.wasmCompileBatchSize : 1;
+      const hostBatch =
+        Number.isSafeInteger(row.hostJsParseBatchSize) && row.hostJsParseBatchSize > 0 ? row.hostJsParseBatchSize : 1;
+      const wasmCompile = finitePositiveOrNull(row.wasmCompileMs);
+      const hostParse = finitePositiveOrNull(row.hostJsParseMs);
+      return {
+        js: js * jsBatch,
+        wasm: Math.min(wasmCompile ? wasmCompile * wasmBatch : wasm, hostParse ? hostParse * hostBatch : Infinity),
+      };
+    },
     policy: BENCHMARK_REGRESSION_POLICY.loadtime,
   });
 }
@@ -970,6 +1023,7 @@ export function compareSnapshots(baselineRoot, candidateRoot) {
     ],
     informational: [
       "Wasmtime regression decisions gate the primary AOT lane; Javy and StarlingMonkey are post-merge, change-scoped comparison controls.",
+      "Internal and loadtime runtime regressions gate only when each calibrated sample spans at least 1ms.",
       "End-to-end loadtime is jointly gated against its JS control; compile-only microtimings remain informational.",
       "The legacy non-displayed wasm-host-wasmtime-module-size summary is unsupported and excluded from snapshots.",
     ],

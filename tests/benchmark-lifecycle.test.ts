@@ -194,6 +194,7 @@ describe("benchmark artifact lifecycle", () => {
     const manifest = validateSnapshot(snapshot, SOURCE_SHA);
 
     expect(manifest.sourceSha).toBe(SOURCE_SHA);
+    expect(manifest.schemaVersion).toBe(2);
     expect(manifest.generatedAt).toBe("2026-07-29T12:00:00.000Z");
     expect(manifest.toolVersions).toEqual(TOOL_VERSIONS);
     expect(manifest.provenance).toEqual(BENCHMARK_PROVENANCE);
@@ -390,6 +391,48 @@ describe("benchmark artifact lifecycle", () => {
     expect(report.informational).toContainEqual(expect.stringContaining("change-scoped comparison controls"));
   });
 
+  it("keeps unbatched sub-millisecond internal timings informational", () => {
+    const baselineRoot = fixtureRoot();
+    mutateJson(resolve(baselineRoot, "benchmarks/results/latest.json"), (document) => {
+      document[0].medianMs = 0.01;
+      document[1].medianMs = 0.01;
+    });
+    const candidateRoot = fixtureRoot();
+    mutateJson(resolve(candidateRoot, "benchmarks/results/latest.json"), (document) => {
+      document[0].medianMs = 0.01;
+      document[1].medianMs = 0.02;
+    });
+
+    const report = compareSnapshots(packageFixture(baselineRoot), packageFixture(candidateRoot));
+    expect(report.regressions).toHaveLength(0);
+    expect(report.notes).toContainEqual(expect.stringContaining("sample span below 1ms"));
+  });
+
+  it("keeps unbatched sub-millisecond loadtime timings informational", () => {
+    const baselineRoot = fixtureRoot();
+    mutateJson(resolve(baselineRoot, "benchmarks/results/size-benchmarks.json"), (document) => {
+      Object.assign(document.benchmarks[0], {
+        jsParseMs: 0.01,
+        wasmCompileMs: 0.01,
+        hostJsParseMs: 0.01,
+        wasmTotalMs: 0.02,
+      });
+    });
+    const candidateRoot = fixtureRoot();
+    mutateJson(resolve(candidateRoot, "benchmarks/results/size-benchmarks.json"), (document) => {
+      Object.assign(document.benchmarks[0], {
+        jsParseMs: 0.01,
+        wasmCompileMs: 0.02,
+        hostJsParseMs: 0.02,
+        wasmTotalMs: 0.04,
+      });
+    });
+
+    const report = compareSnapshots(packageFixture(baselineRoot), packageFixture(candidateRoot));
+    expect(report.regressions.filter((row: string) => row.startsWith("loadtime "))).toHaveLength(0);
+    expect(report.notes).toContainEqual(expect.stringContaining("loadtime benchmarks/bench: sample span below 1ms"));
+  });
+
   it("accepts honestly carried auxiliary controls and rejects missing source provenance", () => {
     const root = fixtureRoot();
     mutateJson(resolve(root, "benchmarks/results/wasm-host-wasmtime-hot-runtime.json"), (document) => {
@@ -473,5 +516,12 @@ describe("benchmark artifact lifecycle", () => {
     expect(workflow).toContain("not-used (auxiliary measurements inherited)");
     expect(workflow).toContain("BENCHMARK_AUXILIARY_RUNTIME_BASELINE");
     expect(workflow).toContain("website/public/benchmarks/competitive/programs");
+    expect(workflow).toContain("- name: Detect benchmark timing methodology migration");
+    expect(workflow).toContain("steps.timing_methodology.outputs.changed != 'true'");
+    expect(workflow).toContain("- name: Record timing methodology migration");
+    const promotion = workflow.slice(workflow.indexOf("promote-benchmarks:"));
+    expect(promotion).toContain("- name: Checkout trusted measured main revision");
+    expect(promotion).toContain("ref: ${{ needs.measure-and-gate.outputs.source_sha }}");
+    expect(promotion).not.toContain("ref: main");
   });
 });
