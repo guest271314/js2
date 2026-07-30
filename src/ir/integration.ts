@@ -32,7 +32,7 @@ import {
   ensureExternLooseEqHelper,
   ensureExternStrictEqHelper,
 } from "../codegen/any-helpers.js"; // (#2949) boxed-any carrier for IrType.dynamic
-import { ensureDynMemberGet } from "../codegen/dyn-read.js"; // (#3053 U1) unified dynamic-reader carrier primitive __dyn_member_get
+import { ensureDynMemberGet, ensureDynMemberSet } from "../codegen/dyn-read.js"; // (#3053 U1) / (#3795)
 import {
   ensureIrDynamicRuntime,
   IR_DYN_ADD_FN,
@@ -63,7 +63,12 @@ import {
   emitToNumber as emitCoercionToNumber,
 } from "../codegen/coercion-engine.js";
 import { JsTag, jsTagUnboxKind } from "./js-tag.js";
-import { ensureVecElemSet, VEC_ELEM_SET_PREFIX } from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand element-store helper
+import {
+  ensureVecElemSet,
+  ensureVecNewSized,
+  VEC_ELEM_SET_PREFIX,
+  VEC_NEW_SIZED_PREFIX,
+} from "../codegen/vec-elem-set.js"; // (#2856 C2) on-demand vec helpers
 import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import {
   ensureNativeStringHelpers,
@@ -2752,6 +2757,7 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
   planProgramAbiGlobal(ctx, {
     ref: globalRef,
     anchor: { kind: "source", sourceId: identity.sourceId },
+    storageOwnerUnitId: identity.storageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: identity.declarationOrdinal,
     global,
@@ -2760,6 +2766,7 @@ function resolveModuleBindingGlobal(ctx: CodegenContext, identity: IrModuleBindi
     planProgramAbiGlobal(ctx, {
       ref: tdzGlobalRef,
       anchor: { kind: "source", sourceId: identity.sourceId },
+      storageOwnerUnitId: identity.storageOwnerUnitId,
       roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleTdz,
       derivedOrdinal: identity.declarationOrdinal,
       global: tdzGlobal,
@@ -3018,6 +3025,7 @@ function resolveDynamicCarrier(ctx: CodegenContext): ValType {
 function resolveStandaloneRegExpTestGlobal(ctx: CodegenContext, plan: IrStaticRegExpTestPlan): IrGlobalRef {
   if (
     plan.globalBindingId === undefined ||
+    plan.storageOwnerUnitId === undefined ||
     plan.sourceId === undefined ||
     plan.declarationOrdinal === undefined ||
     !ts.isIdentifier(plan.declaration.name)
@@ -3056,6 +3064,7 @@ function resolveStandaloneRegExpTestGlobal(ctx: CodegenContext, plan: IrStaticRe
   planProgramAbiGlobal(ctx, {
     ref,
     anchor: { kind: "source", sourceId: plan.sourceId },
+    storageOwnerUnitId: plan.storageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: plan.declarationOrdinal,
     global,
@@ -3071,6 +3080,7 @@ function resolveRetainedFunctionMethod(
     plan.receiverUnitId === undefined ||
     plan.methodUnitId === undefined ||
     plan.receiverGlobalBindingId === undefined ||
+    plan.receiverStorageOwnerUnitId === undefined ||
     plan.receiverSourceId === undefined ||
     plan.receiverDeclarationOrdinal === undefined ||
     !ts.isIdentifier(plan.receiverDeclaration.name) ||
@@ -3115,6 +3125,7 @@ function resolveRetainedFunctionMethod(
   planProgramAbiGlobal(ctx, {
     ref: receiverGlobal,
     anchor: { kind: "source", sourceId: plan.receiverSourceId },
+    storageOwnerUnitId: plan.receiverStorageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: plan.receiverDeclarationOrdinal,
     global: receiverGlobalDef,
@@ -3159,6 +3170,7 @@ function resolveStaticNumericArrayGlobal(
   const expectedVal = asVal(expected);
   if (
     plan.globalBindingId === undefined ||
+    plan.storageOwnerUnitId === undefined ||
     plan.sourceId === undefined ||
     plan.declarationOrdinal === undefined ||
     !ts.isIdentifier(plan.declaration.name) ||
@@ -3199,6 +3211,7 @@ function resolveStaticNumericArrayGlobal(
   planProgramAbiGlobal(ctx, {
     ref: globalRef,
     anchor: { kind: "source", sourceId: plan.sourceId },
+    storageOwnerUnitId: plan.storageOwnerUnitId,
     roleOrdinal: PROGRAM_ABI_GLOBAL_ROLE.moduleValue,
     derivedOrdinal: plan.declarationOrdinal,
     global,
@@ -3699,6 +3712,14 @@ function makeResolver(
       if (ref.binding.kind === "intrinsic" && ref.binding.symbol.startsWith(VEC_ELEM_SET_PREFIX)) {
         const vecTypeIdx = Number(ref.binding.symbol.slice(VEC_ELEM_SET_PREFIX.length));
         const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecElemSet(ctx, vecTypeIdx) : null;
+        if (helperIdx === null) {
+          throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
+        }
+        return bindCallableProvider(ref, helperIdx);
+      }
+      if (ref.binding.kind === "intrinsic" && ref.binding.symbol.startsWith(VEC_NEW_SIZED_PREFIX)) {
+        const vecTypeIdx = Number(ref.binding.symbol.slice(VEC_NEW_SIZED_PREFIX.length));
+        const helperIdx = Number.isInteger(vecTypeIdx) ? ensureVecNewSized(ctx, vecTypeIdx) : null;
         if (helperIdx === null) {
           throw new Error(`ir/integration: cannot materialize ${ref.name} (not a recognisable vec struct)`);
         }
@@ -4521,7 +4542,7 @@ function isDynamicOp(instr: IrInstr): boolean {
   // built on the canonical any-helper family (`__any_from_extern_honest` /
   // `__any_to_extern` / `__box_*`), so it requires the dynamic backing too.
   // The helper itself is registered separately below (`ensureDynMemberGet`).
-  if (instr.kind === "dyn.member_get") return true;
+  if (instr.kind === "dyn.member_get" || instr.kind === "dyn.member_set") return true;
   return false;
 }
 
@@ -4535,6 +4556,10 @@ function isDynamicOp(instr: IrInstr): boolean {
  */
 function usesDynMemberGet(instr: IrInstr): boolean {
   return instr.kind === "dyn.member_get";
+}
+
+function usesDynMemberSet(instr: IrInstr): boolean {
+  return instr.kind === "dyn.member_set";
 }
 
 /**
@@ -4598,6 +4623,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   let usesEq = false;
   let usesToNumber = false;
   let usesMemberGet = false;
+  let usesMemberSet = false;
   // (#3143) A from-ast lowering can emit a DIRECT named call to a member of the
   // `addUnionImports` family (`__box_number` / `__unbox_number` / `__box_boolean`
   // / …) rather than a `box`/`unbox` IR instruction — e.g. `coerceToExpectedExtern`
@@ -4625,6 +4651,7 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
           if (usesDynEq(i)) usesEq = true;
           if (i.kind === "dyn.to_number") usesToNumber = true;
           if (usesDynMemberGet(i)) usesMemberGet = true;
+          if (usesDynMemberSet(i)) usesMemberSet = true;
           if (i.kind === "call" && i.target.binding.kind === "import" && i.target.binding.module === "env") {
             if (UNION_IMPORT_FUNC_NAMES.has(i.target.binding.field)) usesNamedUnionImport = true;
             else if (i.target.binding.field === "__extern_is_undefined") usesExternIsUndefined = true;
@@ -4739,6 +4766,20 @@ function preregisterDynamicSupport(ctx: CodegenContext, fns: readonly BuiltFnRef
   if (usesMemberGet) {
     ctx.usesDynMemberGet = true;
     ensureDynMemberGet(ctx);
+  }
+  if (usesMemberSet) {
+    if (ctx.standalone || ctx.wasi) {
+      ensureObjectRuntime(ctx);
+    } else {
+      ensureLateImport(
+        ctx,
+        "__extern_set_strict",
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [],
+      );
+      flushLateImportShifts(ctx, null);
+    }
+    ensureDynMemberSet(ctx);
   }
 }
 
@@ -4914,6 +4955,9 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
         ctx.usesDynMemberGet = true;
         return [callHelper("__dyn_member_get")];
       },
+      emitMemberSet(): readonly Instr[] {
+        return [callHelper("__dyn_member_set")];
+      },
     };
   }
 
@@ -5070,6 +5114,9 @@ export function makeDynamicLowering(ctx: CodegenContext): IrDynamicLowering | nu
     emitElementGet(): readonly Instr[] {
       ctx.usesDynMemberGet = true;
       return [callImport("__dyn_member_get")];
+    },
+    emitMemberSet(): readonly Instr[] {
+      return [callImport("__dyn_member_set")];
     },
   };
 }

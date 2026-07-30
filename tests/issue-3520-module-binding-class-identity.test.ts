@@ -207,6 +207,9 @@ describe("#3520 module-binding and local-class identity", () => {
     expect(moduleBinding.ownerUnitId).toBe(graph.context.moduleInitUnitIdBySourceFile.get(sourceFile));
     expect(functionBinding.ownerUnitId).toBe(unitId(graph.context, read));
     expect(memberBinding.ownerUnitId).toBe(unitId(graph.context, boxRead));
+    expect(moduleBinding.storageOwnerUnitId).toBe(moduleBinding.ownerUnitId);
+    expect(functionBinding.storageOwnerUnitId).toBe(moduleBinding.ownerUnitId);
+    expect(memberBinding.storageOwnerUnitId).toBe(moduleBinding.ownerUnitId);
     expect(functionBinding.ownerUnitId).not.toBe(moduleBinding.ownerUnitId);
     expect(memberBinding.ownerUnitId).not.toBe(functionBinding.ownerUnitId);
     expect(functionBinding.globalBindingId).toBe(moduleBinding.globalBindingId);

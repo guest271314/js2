@@ -440,31 +440,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           git fetch --no-tags --depth=200 origin main 2>/dev/null || true
-          BASE=$(git merge-base origin/main HEAD 2>/dev/null || echo "")
-          if [ -z "$BASE" ]; then echo "No merge base resolvable — skipping."; exit 0; fi
-          # test262-chunk* entry points are shard-matrix constructs, while
-          # test262-vitest is the monolithic full-corpus local fallback. Both
-          # belong to the dedicated Test262 workflows rather than this per-PR
-          # root-test gate — the latter exhausts the intentionally bounded
-          # 512 MB Vitest fork before completing the corpus.
-          CHANGED=$(git diff --name-only --diff-filter=AM "$BASE" HEAD -- tests/ \
-            | grep -E '^tests/[^/]+\.test\.ts$' \
-            | grep -vE '^tests/(linear-|c-abi\.|simd|test262-(chunk|vitest))' || true)
-          if [ -z "$CHANGED" ]; then echo "No root test files changed."; exit 0; fi
-          N=$(echo "$CHANGED" | wc -l)
-          if [ "$N" -gt 20 ]; then
-            echo "::warning::$N root test files changed (>20, likely a mass edit) — skipping the per-PR gate; the post-merge issue-tests detector covers them."
-            exit 0
-          fi
-          echo "Running $N changed root test file(s):"
-          echo "$CHANGED"
-          # Invoke each file in a fresh Vitest process. Test262 integration
-          # files intentionally retain large compiler/worker graphs, so one
-          # shared 512 MB fork accumulates their heaps and defeats the
-          # file-level isolation used by the harness parity regressions.
-          for test_file in $CHANGED; do
-            pnpm exec vitest run "$test_file" --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
-          done
+          pnpm run test:changed-root
 
       - name: Required guard suite (#3552)
         # Untouched root test files do NOT run at PR time — the #3008

@@ -321,6 +321,7 @@ import {
   sourceParamCountFromExpanded,
   wasmParamIndexForSourceParam,
 } from "../linear-uint8-signatures.js";
+import { resolveNamedThisCallTarget } from "../named-this-call.js";
 
 // Registry extracted to its own leaf module (#1793; LOC ratchet #3102) —
 // re-exported here so existing importers keep resolving via calls.js.
@@ -2735,15 +2736,18 @@ export function emitBoundFunctionCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
+  calleeAlreadyOnStack = false,
 ): InnerResult | null {
   const externRef: ValType = { kind: "externref" };
 
   // 1. Compile callee → externref, stash in a local.
-  const calleeType = compileExpression(ctx, fctx, expr.expression, externRef);
-  if (calleeType === null) {
-    fctx.body.push({ op: "ref.null.extern" });
-  } else if (calleeType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" });
+  if (!calleeAlreadyOnStack) {
+    const calleeType = compileExpression(ctx, fctx, expr.expression, externRef);
+    if (calleeType === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    } else if (calleeType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" });
+    }
   }
   const calleeLocal = allocLocal(fctx, `__bfn_callee_${fctx.locals.length}`, externRef);
   fctx.body.push({ op: "local.set", index: calleeLocal });
@@ -6568,6 +6572,17 @@ function compileCallExpression(
           closureInfo = resolveClosureInfoFromLocal(ctx, fctx, funcName);
         }
 
+        // (#3796) A stable named FunctionDeclaration whose own body reads
+        // `this` needs the `.call` receiver installed in `__current_this`.
+        // Resolve/reserve this before emitting operands so helper publication
+        // cannot happen while values are conceptually live on the Wasm stack.
+        // `.apply`, closures, imports, explicit-this declarations, nullable
+        // receivers, and unstable symbols keep their existing lowerings.
+        const namedThisCall =
+          isCall && !closureInfo && funcIdx !== undefined && expr.arguments.length > 0
+            ? resolveNamedThisCallTarget(ctx, fctx, innerExpr, funcIdx, expr.arguments[0]!, expr.arguments.slice(1))
+            : undefined;
+
         // (#2193 PR-B) `m.call(thisArg, …args)` where `m` is a `$NativeProto`
         // member closure (e.g. `Array.prototype.slice`). Its FIRST user param is
         // the receiver (`this`), NOT an ordinary arg — so unlike a plain
@@ -6606,10 +6621,17 @@ function compileCallExpression(
         }
 
         if (closureInfo || funcIdx !== undefined) {
-          // Evaluate and drop thisArg (first argument) if present
+          // Evaluate thisArg first. The receiver-correct named trampoline owns
+          // it as leading externref param; every other existing path keeps the
+          // legacy evaluate-and-drop behavior.
           if (expr.arguments.length > 0) {
-            const thisType = compileExpression(ctx, fctx, expr.arguments[0]!);
-            if (thisType) {
+            const thisType = compileExpression(
+              ctx,
+              fctx,
+              expr.arguments[0]!,
+              namedThisCall ? { kind: "externref" } : undefined,
+            );
+            if (thisType && !namedThisCall) {
               fctx.body.push({ op: "drop" });
             }
           }
@@ -6662,8 +6684,24 @@ function compileCallExpression(
             } else {
               // Regular function call
               const paramTypes = getFuncParamTypes(ctx, funcIdx!);
-              for (let i = 0; i < remainingArgs.length; i++) {
+              const paramCount = paramTypes?.length ?? remainingArgs.length;
+              const formalArgCount = Math.min(remainingArgs.length, paramCount);
+              for (let i = 0; i < formalArgCount; i++) {
                 compileExpression(ctx, fctx, remainingArgs[i]!, paramTypes?.[i]);
+              }
+              // `.call` over-application must not leave extra operands under
+              // the exact Wasm call. Preserve side effects, and when the target
+              // reads `arguments`, marshal the overflow through the same
+              // extras-argv ABI as a direct identifier call.
+              if (remainingArgs.length > paramCount) {
+                if (ctx.funcUsesArguments.has(funcName)) {
+                  emitSetExtrasArgv(ctx, fctx, remainingArgs as ts.Expression[], paramCount);
+                } else {
+                  for (let i = paramCount; i < remainingArgs.length; i++) {
+                    const extraType = compileExpression(ctx, fctx, remainingArgs[i]!);
+                    if (extraType !== null) fctx.body.push({ op: "drop" });
+                  }
+                }
               }
 
               // Supply defaults for missing optional params
@@ -6698,7 +6736,7 @@ function compileCallExpression(
               getFuncParamTypes(ctx, funcIdx!)?.length ?? remainingArgs.length,
             );
             const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx!;
-            fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
+            fctx.body.push({ op: "call", funcIdx: namedThisCall?.trampolineFuncIdx ?? finalFuncIdx });
 
             // Use actual Wasm return type — TS checker reports `any` for .call()/.apply()
             // which resolves to externref, but the actual function may return f64/i32/ref.

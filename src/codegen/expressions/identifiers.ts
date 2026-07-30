@@ -662,7 +662,11 @@ function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: t
     // runtime `undefined` to NaN before `=== undefined` / any-param uses can
     // observe it. Return the raw externref; numeric consumers coerce at
     // their own use site (ToNumber(undefined) = NaN matches JS).
-    if (declaredType.kind === "externref" && !fctx.undefWidenedLocals?.has(name)) {
+    if (
+      declaredType.kind === "externref" &&
+      !fctx.undefWidenedLocals?.has(name) &&
+      !fctx.forInIdentifierVars?.has(name)
+    ) {
       const narrowedType = ctx.checker.getTypeAtLocation(id);
       const narrowed = narrowTypeToUnbox(ctx, fctx, narrowedType);
       if (narrowed) return narrowed;

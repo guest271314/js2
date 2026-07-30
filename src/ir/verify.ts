@@ -755,6 +755,31 @@ function verifyInstrStructure(
       });
     }
   }
+  // #3795 — the statement-position write dual consumes three canonical
+  // dynamic carriers and produces no SSA result.
+  if (instr.kind === "dyn.member_set") {
+    for (const [label, operand] of [
+      ["recv", instr.recv],
+      ["key", instr.key],
+      ["value", instr.value],
+    ] as const) {
+      const operandIr = operandIrType(func, block, operand, localDefs);
+      if (operandIr && operandIr.kind !== "dynamic") {
+        errors.push({
+          message: `dyn.member_set ${label} must be a dynamic IrType, got ${operandIr.kind} (#3795)`,
+          func: func.name,
+          block: block.id as number,
+        });
+      }
+    }
+    if (instr.result !== null || instr.resultType !== null) {
+      errors.push({
+        message: "dyn.member_set must be void (#3795)",
+        func: func.name,
+        block: block.id as number,
+      });
+    }
+  }
 }
 
 function verifyBlock(
@@ -988,6 +1013,8 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.lhs, instr.rhs];
     case "dyn.member_get":
       return [instr.recv, instr.key];
+    case "dyn.member_set":
+      return [instr.recv, instr.key, instr.value];
     case "string.const":
       return [];
     case "string.concat":

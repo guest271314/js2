@@ -38,6 +38,7 @@ import {
   IrValueIdAllocator,
 } from "./nodes.js";
 import type { AllocSiteRegistry } from "./alloc-registry.js";
+import { irSupportFuncRef } from "./callable-bindings.js";
 import type { Instr, ValType } from "./types.js";
 import { JsTag, jsTagUnboxKind } from "./js-tag.js";
 import type { IrStringConcatMode, IrStringEncoding } from "./string-runtime.js";
@@ -600,6 +601,26 @@ export class IrFunctionBuilder {
     return result;
   }
 
+  /**
+   * Emit the void, strict statement-position write dual of
+   * {@link emitDynMemberGet}. Receiver, key, and value must already use the
+   * canonical dynamic carrier; conversion is explicit at the AST producer.
+   */
+  emitDynMemberSet(recv: IrValueId, key: IrValueId, value: IrValueId): void {
+    for (const [label, v] of [
+      ["recv", recv],
+      ["key", key],
+      ["value", value],
+    ] as const) {
+      if (this.typeOf(v).kind !== "dynamic") {
+        throw new Error(
+          `IrFunctionBuilder: emitDynMemberSet ${label} operand ${v} is not dynamic — the dynamic member write accepts only boxed-any carriers (#3795) (func ${this.id.name})`,
+        );
+      }
+    }
+    this.pushInstr({ kind: "dyn.member_set", recv, key, value, result: null, resultType: null });
+  }
+
   // --- object ops (#1169b) ------------------------------------------------
 
   /**
@@ -821,6 +842,7 @@ export class IrFunctionBuilder {
     this.pushInstr({
       kind: "class.new",
       shape,
+      ...(shape.constructorTarget ? { target: shape.constructorTarget } : {}),
       args: [...args],
       result,
       resultType,
@@ -896,6 +918,7 @@ export class IrFunctionBuilder {
     memberKind: Exclude<IrClassMemberKind, "static">,
     args: readonly IrValueId[],
     resultType: IrType | null,
+    target?: IrFuncRef,
   ): IrValueId | null {
     let result: IrValueId | null = null;
     if (resultType !== null) {
@@ -907,6 +930,7 @@ export class IrFunctionBuilder {
       receiver,
       memberKind,
       methodName,
+      ...(target ? { target } : {}),
       args: [...args],
       result,
       resultType,
@@ -924,6 +948,7 @@ export class IrFunctionBuilder {
     this.pushInstr({
       kind: "class.super_init",
       parentShape,
+      target: irSupportFuncRef(parentShape.classId, "class-constructor-init", `${parentShape.className}_init`),
       self,
       args: [...args],
       result: null,
@@ -943,6 +968,7 @@ export class IrFunctionBuilder {
     methodName: string,
     args: readonly IrValueId[],
     resultType: IrType | null,
+    target?: IrFuncRef,
   ): IrValueId | null {
     let result: IrValueId | null = null;
     if (resultType !== null) {
@@ -954,6 +980,7 @@ export class IrFunctionBuilder {
       parentShape,
       receiver,
       methodName,
+      ...(target ? { target } : {}),
       args: [...args],
       result,
       resultType,
@@ -990,6 +1017,7 @@ export class IrFunctionBuilder {
     methodName: string,
     args: readonly IrValueId[],
     resultType: IrType | null,
+    target?: IrFuncRef,
   ): IrValueId | null {
     let result: IrValueId | null = null;
     if (resultType !== null) {
@@ -1000,6 +1028,7 @@ export class IrFunctionBuilder {
       kind: "class.static_call",
       shape,
       methodName,
+      ...(target ? { target } : {}),
       args: [...args],
       result,
       resultType,

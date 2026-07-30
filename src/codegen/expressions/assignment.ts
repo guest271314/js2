@@ -4328,7 +4328,7 @@ function compileElementAssignment(
       arrType.kind === "externref" &&
       ctx.standalone &&
       ctx.moduleUsesDynTaView &&
-      isNumericIndexExpression(ctx, target.argumentExpression)
+      isNumericIndexExpression(ctx, target.argumentExpression, fctx)
     ) {
       const dynR = emitTaDynViewElementSet(ctx, fctx, target.argumentExpression, value, (e, h) =>
         compileExpression(ctx, fctx, e, h),

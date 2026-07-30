@@ -98,26 +98,144 @@ function loopBodyOnlyAppends(loopBody: ts.Node, name: string): boolean {
 }
 
 /**
- * Scan `root` (a function body) for an adjacent `let s = ""` / loop pair
- * where the loop only ever appends to `s`. Does not recurse into nested
- * function scopes — those make their own, independent IR-claim decision.
- */
-/**
- * (#3740 / #3744) Kill-switch gate called by `whyNotIrClaimable`
- * (`src/ir/select.ts`). Builder loops are claimed by IR BY DEFAULT: IR has its
- * own fast path for this shape (`__str_concat_owned`, wired through
- * `string.concat`'s `owned-append` mode in `ir/integration.ts`) that produces
- * correct, meaningfully faster results than IR's old default (verified — no
- * more O(N) cons/flatten allocation per append). `JS2WASM_IR_STRING_BUILDER=0`
- * forces this shape back to legacy (kill switch, same convention as e.g.
- * `JS2WASM_UNION_ANYREP=0`) — legacy remains strictly faster for benchmarks
- * whose index arithmetic ALSO uses bitwise ops on untyped `number`s (e.g.
- * `(i * 13) & 31`): legacy promotes such loop-local arithmetic to native i32
- * (see #1948's loop-var-promotion note), IR does not yet (#3745), and that gap
- * is unrelated to string-building.
+ * (#3740 / #3744) Legacy-routing gate called by `whyNotIrClaimable`.
+ *
+ * General builder loops are claimed by IR by default through its
+ * `__str_concat_owned` fast path. `JS2WASM_IR_STRING_BUILDER=0` remains the
+ * kill switch for that ownership. Constant-count, literal-fragment loops are
+ * always deferred because legacy additionally folds all iterations into one
+ * `repeat(N)` plus one concat (#1004), which IR does not yet implement.
  */
 export function stringBuilderForcedLegacy(body: ts.Node): boolean {
-  return process.env.JS2WASM_IR_STRING_BUILDER === "0" && containsStringBuilderLoopShape(body);
+  return (
+    (process.env.JS2WASM_IR_STRING_BUILDER === "0" && containsStringBuilderLoopShape(body)) ||
+    containsCountedLiteralStringAppend(body)
+  );
+}
+
+/**
+ * Detect the constant-count, literal-fragment append loop handled by legacy
+ * codegen's #1004 aggregation:
+ *
+ *   let s = <string literal>;
+ *   for (let i = A; i < B; i++) s = s + <string literal>;
+ *
+ * IR currently emits every iteration as a wasm:js-string `concat` call. The
+ * legacy path proves this narrow shape and replaces it with one `repeat(N)`
+ * plus one concat, so the selector should preserve that production
+ * optimization until IR owns an equivalent transform.
+ */
+function containsCountedLiteralStringAppend(root: ts.Node): boolean {
+  let found = false;
+
+  const unwrap = (expr: ts.Expression): ts.Expression => {
+    let current = expr;
+    while (ts.isParenthesizedExpression(current)) current = current.expression;
+    return current;
+  };
+
+  const appendTarget = (stmt: ts.Statement): { accum: string; fragment: ts.Expression } | null => {
+    const only = ts.isBlock(stmt) && stmt.statements.length === 1 ? stmt.statements[0]! : stmt;
+    if (!ts.isExpressionStatement(only) || !ts.isBinaryExpression(only.expression)) return null;
+    const expr = only.expression;
+    if (expr.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken && ts.isIdentifier(expr.left)) {
+      return { accum: expr.left.text, fragment: expr.right };
+    }
+    if (expr.operatorToken.kind !== ts.SyntaxKind.EqualsToken || !ts.isIdentifier(expr.left)) return null;
+    const rhs = unwrap(expr.right);
+    if (
+      !ts.isBinaryExpression(rhs) ||
+      rhs.operatorToken.kind !== ts.SyntaxKind.PlusToken ||
+      !ts.isIdentifier(rhs.left) ||
+      rhs.left.text !== expr.left.text
+    ) {
+      return null;
+    }
+    return { accum: expr.left.text, fragment: rhs.right };
+  };
+
+  const isUnitIncrement = (expr: ts.Expression | undefined, counter: string): boolean => {
+    if (!expr) return false;
+    if (ts.isPrefixUnaryExpression(expr) || ts.isPostfixUnaryExpression(expr)) {
+      return (
+        expr.operator === ts.SyntaxKind.PlusPlusToken && ts.isIdentifier(expr.operand) && expr.operand.text === counter
+      );
+    }
+    return (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
+      ts.isIdentifier(expr.left) &&
+      expr.left.text === counter &&
+      ts.isNumericLiteral(expr.right) &&
+      Number(expr.right.text) === 1
+    );
+  };
+
+  const matches = (seedStmt: ts.Statement, loopStmt: ts.Statement): boolean => {
+    if (!ts.isVariableStatement(seedStmt) || seedStmt.declarationList.declarations.length !== 1) return false;
+    const seed = seedStmt.declarationList.declarations[0]!;
+    if (
+      !ts.isIdentifier(seed.name) ||
+      !seed.initializer ||
+      !(ts.isStringLiteral(seed.initializer) || ts.isNoSubstitutionTemplateLiteral(seed.initializer))
+    ) {
+      return false;
+    }
+    if (
+      !ts.isForStatement(loopStmt) ||
+      !loopStmt.initializer ||
+      !ts.isVariableDeclarationList(loopStmt.initializer) ||
+      loopStmt.initializer.declarations.length !== 1 ||
+      !loopStmt.condition
+    ) {
+      return false;
+    }
+    const counterDecl = loopStmt.initializer.declarations[0]!;
+    if (
+      !ts.isIdentifier(counterDecl.name) ||
+      !counterDecl.initializer ||
+      !ts.isNumericLiteral(counterDecl.initializer)
+    ) {
+      return false;
+    }
+    const counter = counterDecl.name.text;
+    if (
+      !ts.isBinaryExpression(loopStmt.condition) ||
+      (loopStmt.condition.operatorToken.kind !== ts.SyntaxKind.LessThanToken &&
+        loopStmt.condition.operatorToken.kind !== ts.SyntaxKind.LessThanEqualsToken) ||
+      !ts.isIdentifier(loopStmt.condition.left) ||
+      loopStmt.condition.left.text !== counter ||
+      !ts.isNumericLiteral(loopStmt.condition.right) ||
+      !isUnitIncrement(loopStmt.incrementor, counter)
+    ) {
+      return false;
+    }
+    const append = appendTarget(loopStmt.statement);
+    return (
+      append !== null &&
+      append.accum === seed.name.text &&
+      append.accum !== counter &&
+      (ts.isStringLiteral(append.fragment) || ts.isNoSubstitutionTemplateLiteral(append.fragment))
+    );
+  };
+
+  const walk = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isModuleBlock(node)) {
+      for (let i = 0; i + 1 < node.statements.length; i++) {
+        if (matches(node.statements[i]!, node.statements[i + 1]!)) {
+          found = true;
+          return;
+        }
+      }
+    }
+    forEachChild(node, (child) => {
+      if (found || isFunctionScopeBoundary(child)) return;
+      walk(child);
+    });
+  };
+  walk(root);
+  return found;
 }
 
 export function containsStringBuilderLoopShape(root: ts.Node): boolean {

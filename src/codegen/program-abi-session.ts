@@ -707,7 +707,13 @@ function intentsEqual(a: ProgramAbiDraft["intent"], b: ProgramAbiDraft["intent"]
     );
   }
   if (a.kind === "global" && b.kind === "global") {
-    return a.origin === b.origin && a.valueType === b.valueType && a.mutable === b.mutable;
+    return (
+      a.origin === b.origin &&
+      a.valueType === b.valueType &&
+      a.mutable === b.mutable &&
+      a.sourceId === b.sourceId &&
+      a.unitId === b.unitId
+    );
   }
   if (a.kind === "type" && b.kind === "type") return a.shapeKey === b.shapeKey;
   if (a.kind === "export" && b.kind === "export") {
@@ -957,6 +963,24 @@ export class ProgramAbiSession {
 
   getDraft(id: IrBindingId): ProgramAbiDraft | undefined {
     return this.drafts.get(id);
+  }
+
+  /**
+   * Resolve the exact planned ABI identities for one symbolic IR reference.
+   *
+   * Dependency discovery runs before the whole-program ABI is published, so
+   * it cannot search final numeric slots. The structural reference stored on
+   * each draft is already the canonical identity contract; return every match
+   * in structural plan order so callers can fail closed on ambiguity.
+   */
+  bindingIdsForStructuralReference(key: string): readonly IrBindingId[] {
+    if (typeof key !== "string" || key.length === 0) return Object.freeze([]);
+    return Object.freeze(
+      [...this.drafts.values()]
+        .filter((draft) => draft.structuralReferenceKey === key)
+        .sort((left, right) => compareDrafts(this.sourceOrderById, left, right))
+        .map((draft) => draft.id),
+    );
   }
 
   hasKnownUnit(id: IrUnitId): boolean {
@@ -1710,7 +1734,7 @@ export class ProgramAbiSession {
     for (const id of bindingIds) {
       const draft = this.drafts.get(id)!;
       const ownerId = this.assertCanonicalPreparedBindingId(draft);
-      const ownerTerminalId = this.terminalOwnerForStructuralOwner(ownerId);
+      const ownerTerminalId = this.terminalOwnerForPreparedDraft(draft, ownerId);
       bindingTerminalOwnerIds.set(id, ownerTerminalId);
       if (ownerTerminalId !== null && !terminalUnitIdSet.has(ownerTerminalId)) {
         throw new ProgramAbiInvariantError(
@@ -1729,10 +1753,14 @@ export class ProgramAbiSession {
           `prepared ABI scope ${scopeId} reaches source callable ${id} owned by another component`,
         );
       }
-      if (draft.intent.kind === "global" && draft.intent.origin === "source") {
+      if (
+        draft.intent.kind === "global" &&
+        draft.intent.origin === "source" &&
+        (draft.intent.unitId === undefined || !unitIds.has(draft.intent.unitId))
+      ) {
         throw new ProgramAbiInvariantError(
           "invalid-callable-provenance",
-          `prepared ABI scope ${scopeId} reaches source global ${id} through a requested dependency`,
+          `prepared ABI scope ${scopeId} reaches source global ${id} owned by another component`,
         );
       }
       const previousScope = this.preparedScopeByBindingId.get(id);
@@ -1938,7 +1966,11 @@ export class ProgramAbiSession {
   ): Set<IrBindingId> {
     const included = new Set<IrBindingId>(requestedBindingIds);
     for (const draft of this.drafts.values()) {
-      if (draft.intent.kind === "callable" && draft.intent.unitId && unitIds.has(draft.intent.unitId)) {
+      if (
+        (draft.intent.kind === "callable" || (draft.intent.kind === "global" && draft.intent.origin === "source")) &&
+        draft.intent.unitId &&
+        unitIds.has(draft.intent.unitId)
+      ) {
         included.add(draft.id);
       }
     }
@@ -1970,11 +2002,7 @@ export class ProgramAbiSession {
     draft: ProgramAbiDraft,
   ): void {
     const ownerId = this.assertCanonicalPreparedBindingId(draft);
-    if (
-      draft.intent.kind === "export" ||
-      (draft.intent.kind === "callable" && draft.intent.origin === "source") ||
-      (draft.intent.kind === "global" && draft.intent.origin === "source")
-    ) {
+    if (draft.intent.kind === "export" || (draft.intent.kind === "callable" && draft.intent.origin === "source")) {
       throw new ProgramAbiInvariantError(
         "invalid-callable-provenance",
         `prepared ABI scope ${scopeId} may request only external/support dependencies, not ${draft.intent.kind} binding ${draft.id}`,
@@ -1986,6 +2014,18 @@ export class ProgramAbiSession {
         throw new ProgramAbiInvariantError(
           "invalid-callable-provenance",
           `prepared ABI scope ${scopeId} requested callable ${draft.id} from terminal ${terminalOwnerId}`,
+        );
+      }
+    }
+    if (draft.intent.kind === "global" && draft.intent.origin === "source") {
+      const terminalOwnerId =
+        draft.intent.unitId === undefined ? null : this.terminalOwnerForKnownUnit(draft.intent.unitId);
+      if (terminalOwnerId === null || !terminalUnitIds.has(terminalOwnerId)) {
+        throw new ProgramAbiInvariantError(
+          "invalid-callable-provenance",
+          `prepared ABI scope ${scopeId} requested source global ${draft.id} from ${
+            terminalOwnerId === null ? "no terminal owner" : `terminal ${terminalOwnerId}`
+          }`,
         );
       }
     }
@@ -2057,14 +2097,36 @@ export class ProgramAbiSession {
     const provenanceOwner =
       draft.intent.kind === "callable"
         ? (draft.intent.unitId ?? draft.intent.classId ?? draft.intent.sourceId)
-        : draft.intent.kind === "class"
-          ? draft.intent.classId
-          : undefined;
+        : draft.intent.kind === "global" && draft.intent.origin === "source"
+          ? draft.intent.sourceId
+          : draft.intent.kind === "class"
+            ? draft.intent.classId
+            : undefined;
     if (provenanceOwner !== undefined && provenanceOwner !== ownerId) {
       throw new ProgramAbiInvariantError(
         "invalid-binding-reference",
-        `prepared ABI draft ${draft.id} owner disagrees with its callable/class provenance`,
+        `prepared ABI draft ${draft.id} owner disagrees with its intent provenance`,
       );
+    }
+    if (draft.intent.kind === "global" && draft.intent.origin === "source") {
+      const sourceId = draft.intent.sourceId;
+      const storageOwnerUnitId = draft.intent.unitId;
+      const storageOwner =
+        storageOwnerUnitId === undefined
+          ? undefined
+          : (this.inventory.allUnits.find((unit) => unit.id === storageOwnerUnitId) ??
+            this.derivedUnits.get(storageOwnerUnitId));
+      if (
+        sourceId === undefined ||
+        storageOwnerUnitId === undefined ||
+        storageOwner === undefined ||
+        storageOwner.sourceId !== sourceId
+      ) {
+        throw new ProgramAbiInvariantError(
+          "invalid-binding-reference",
+          `prepared ABI source global ${draft.id} has no exact same-source storage owner`,
+        );
+      }
     }
     return ownerId as IrSourceId | IrUnitId | IrClassId;
   }
@@ -2102,6 +2164,16 @@ export class ProgramAbiSession {
       return this.terminalOwnerForKnownClass(ownerId as IrClassId);
     }
     return this.terminalOwnerForKnownUnit(ownerId as IrUnitId);
+  }
+
+  private terminalOwnerForPreparedDraft(
+    draft: ProgramAbiDraft,
+    structuralOwnerId: IrSourceId | IrUnitId | IrClassId,
+  ): IrUnitId | null {
+    if (draft.intent.kind === "global" && draft.intent.origin === "source" && draft.intent.unitId !== undefined) {
+      return this.terminalOwnerForKnownUnit(draft.intent.unitId);
+    }
+    return this.terminalOwnerForStructuralOwner(structuralOwnerId);
   }
 
   private preparedHostLinkage(locator: ProgramAbiSlotLocator): string | undefined {
@@ -2359,7 +2431,7 @@ export class ProgramAbiSession {
         );
       }
       const currentOwnerId = this.assertCanonicalPreparedBindingId(currentDraft);
-      if (this.terminalOwnerForStructuralOwner(currentOwnerId) !== record.bindingTerminalOwnerIds.get(id)) {
+      if (this.terminalOwnerForPreparedDraft(currentDraft, currentOwnerId) !== record.bindingTerminalOwnerIds.get(id)) {
         throw new ProgramAbiInvariantError(
           "invalid-callable-provenance",
           `ABI draft ${id} structural owner drifted after prepared scope ${record.scopeId} sealed`,

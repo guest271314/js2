@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 
 import type { IrUnitId } from "../ir/identity.js";
+import type { IrIntegrationReport } from "../ir/integration-report.js";
 import { asVal, type IrType } from "../ir/nodes.js";
 import { IrInvariantError } from "../ir/outcomes.js";
 import {
@@ -118,6 +119,73 @@ export function correlateIrSkippedFunctionNames(
   return {
     unitIds: new Set(completed.keys()),
     legacyNames: Object.freeze([...returnedLegacyNames]),
+  };
+}
+
+/**
+ * Derive exact free-function body ownership from prepare-before-direct terminal
+ * evidence. Public compiled-name lists are deliberately insufficient here:
+ * every terminal row must correlate to the authoritative claim index.
+ */
+export function preparedIrFunctionRouting(
+  report: IrIntegrationReport,
+  claimsByUnitId: ReadonlyMap<IrUnitId, IrExactFunctionClaim>,
+): {
+  readonly irOwnedUnitIds: ReadonlySet<IrUnitId>;
+  readonly preparedUnitIds: ReadonlySet<IrUnitId>;
+} {
+  if (!report.terminalEvidence) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "patch",
+      "prepared free-function report has no exact terminal evidence",
+    );
+  }
+  const irOwned = new Set<IrUnitId>();
+  const prepared = new Set<IrUnitId>();
+  for (const evidence of report.terminalEvidence) {
+    const claim = claimsByUnitId.get(evidence.unitId);
+    if (!claim || claim.legacyName !== evidence.legacyName) {
+      throw new IrInvariantError(
+        "selection-preparation-mismatch",
+        "patch",
+        `prepared free-function evidence ${evidence.unitId} / ${evidence.legacyName} has no exact claim`,
+      );
+    }
+    if (evidence.kind === "patched") {
+      irOwned.add(evidence.unitId);
+      prepared.add(evidence.unitId);
+    } else if (evidence.error.outcome.kind === "invariant") {
+      // A failed invariant is terminal IR ownership: compilation must fail
+      // without giving the direct emitter a retry. The declaration pass will
+      // install only its non-shipping structural placeholder.
+      irOwned.add(evidence.unitId);
+    }
+  }
+  return { irOwnedUnitIds: irOwned, preparedUnitIds: prepared };
+}
+
+/** Combine disjoint preparation/emission reports without losing exact rows. */
+export function mergeIrIntegrationReports(
+  first: IrIntegrationReport,
+  second: IrIntegrationReport,
+): IrIntegrationReport {
+  if (!first.terminalEvidence || !second.terminalEvidence) {
+    throw new IrInvariantError(
+      "selection-preparation-mismatch",
+      "patch",
+      "split IR integration reports must both retain exact terminal evidence",
+    );
+  }
+  return {
+    compiled: [...first.compiled, ...second.compiled],
+    errors: [...first.errors, ...second.errors],
+    terminalEvidence: [...first.terminalEvidence, ...second.terminalEvidence],
+    terminalCompiledOwners: [...(first.terminalCompiledOwners ?? []), ...(second.terminalCompiledOwners ?? [])],
+    syntheticCompiledArtifacts: [
+      ...(first.syntheticCompiledArtifacts ?? []),
+      ...(second.syntheticCompiledArtifacts ?? []),
+    ],
   };
 }
 

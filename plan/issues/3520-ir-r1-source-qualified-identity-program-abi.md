@@ -10,7 +10,7 @@ pr: 3799
 last_merged_pr: 3798
 sprint: current
 created: 2026-07-21
-updated: 2026-07-29
+updated: 2026-07-30
 priority: critical
 horizon: l
 complexity: L
@@ -101,6 +101,8 @@ files:
   - src/codegen/program-abi-source-callable-planning.ts
   - src/codegen/program-abi-planning.ts
   - src/codegen/closure-exports.ts
+  - src/codegen/data-struct-host-bridge.ts
+  - src/codegen/struct-field-exports.ts
   - src/codegen/program-abi-signatures.ts
   - src/codegen/program-abi-session.ts
   - src/codegen/program-abi-type-planning.ts
@@ -118,6 +120,9 @@ files:
   - src/codegen/closures/funcref-as-closure.ts
   - src/codegen/closures/method-trampolines.ts
   - src/codegen/index.ts
+  - src/emit/binary.ts
+  - src/emit/object.ts
+  - src/emit/wat.ts
   - src/runtime.ts
   - src/codegen/stdlib-selfhost.ts
   - docs/ir/ir-contract.md
@@ -163,6 +168,7 @@ files:
   - tests/issue-3520-class-integration-callable-abi.test.ts
   - tests/issue-3520-class-method-alias-abi.test.ts
   - tests/issue-3520-closure-host-bridge-abi.test.ts
+  - tests/issue-3520-data-struct-host-bridge-abi.test.ts
   - tests/issue-3520-module-init-callable-abi.test.ts
   - tests/issue-3520-source-callable-abi.test.ts
   - tests/issue-3520-type-class-abi.test.ts
@@ -175,6 +181,9 @@ files:
   - tests/issue-1899-funcidx-authority.test.ts
 loc-budget-allow:
   - src/codegen/closure-exports.ts
+  - src/codegen/data-struct-host-bridge.ts
+  - src/codegen/struct-field-exports.ts
+  - src/codegen/index.ts
   - src/codegen/expressions/builtins.ts
   - src/codegen/declarations.ts
   - src/codegen/statements/nested-declarations.ts
@@ -186,6 +195,9 @@ loc-budget-allow:
   - src/ir/verify.ts
   - src/ir/backend/porffor/assembler.ts
   - src/runtime.ts
+  - src/emit/binary.ts
+  - src/emit/object.ts
+  - src/emit/wat.ts
 # R1 must resolve exact checker declarations to the one authoritative identity
 # inventory. TypeOracle deliberately does not expose ts.Symbol/ts.Type objects,
 # so these two structural joins remain reviewed raw-checker boundaries until
@@ -200,6 +212,7 @@ oracle-ratchet-allow:
 func-budget-allow:
   - src/ir/integration.ts::compileIrPathFunctions
   - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
   - src/ir/backend/linear-integration.ts::makeLinearIrResolver
   - src/ir/integration.ts::makeResolver
   - src/codegen/context/create-context.ts::createCodegenContext
@@ -2760,6 +2773,56 @@ C32 closes exact retained ownership for this one civil-date support helper, not
 R1. Other Date helpers and remaining support callable families still need
 structural owners.
 
+### 2026-07-30 data-struct host-bridge callable ownership continuation
+
+The C33 continuation on `codex/3520-c33-data-struct-host-bridge` moves the two
+host-visible data-struct classifiers behind one canonical entry-source
+`data-struct-host-bridge` role at callable role ordinal 11:
+
+- `__is_data_struct` owns derived ordinal 0 and
+  `__struct_field_names` owns derived ordinal 1. Each existing body is
+  materialized once, attached to its exact allocator object, and published only
+  after late imports and helper allocation have settled. The historical
+  logical labels remain public. Reserved `$d0` / `$d1` physical families always
+  terminate at the compiler helper while preserving same-named source exports
+  and every occupied shorter suffix;
+- an immutable i32 availability manifest, exact empty funcref marker, and exact
+  two-slot funcref binding table authenticate the family. The runtime proves
+  the global and table types through Wasm import validation, requires every set
+  bit to match the terminal physical function by identity, requires every
+  unset binding slot to be null, rejects reserved bits and externref-table
+  forgeries, and never falls back to a logical user export. Vec, closure, and
+  data projections share one internal prototype view while the raw/public
+  export object remains unchanged; and
+- active element encoding now honors the existing `Element.tableIdx` field.
+  Table zero retains its compact legacy encoding; later tables use the explicit
+  active-funcref form. This is required when C31's closure binding table and
+  C33's data binding table coexist, and prevents either family from
+  initializing the other's table.
+
+Across `SINGLE_HOST_ENTRIES`, C30+C31+C32+C33 retain **166** defined functions
+and move exactly five rows from generic ownership: **45** generic + **5**
+data-struct + **24** vec + **26** closure + **1** Date. Routing remains **37
+terminal / 30 emitted / 7 Unsupported / 0 Invariants / 37 legacy bodies / 30
+IR bodies**, so the continuation changes ownership only.
+
+The focused C33 suite passes **13/13**. It covers both exact IDs and final
+allocator objects, late-import/dead-slot re-resolution, zero-data and
+private-only-class availability, tracked/untracked byte equality, exact census
+composition, data-versus-closure classification and field order, simultaneous
+vec/closure/data logical and physical collisions through both
+`buildImports().setInstance` and `wrapExports`, the per-import immutable Global
+association, donor-instance poisoning and recovery, raw legacy compatibility,
+Proxy-table fail-closed recovery, host-only token import with zero standalone
+imports, exact metadata types and
+terminal identities, and fail-closed deletion, non-empty/externref marker,
+mutable/f64/reserved manifest, swapped funcref binding, and explicitly
+null-initialized externref binding-table forgeries.
+
+C33 closes exact retained ownership for these two data-struct host helpers, not
+R1. Per-field accessors and other support callable families remain on their
+existing ownership paths.
+
 ### R1a validation evidence
 
 - Representative inventory denominator: **1 source / 2 classes / 12 allUnits /
@@ -2936,3 +2999,48 @@ The PR report must include the source/unit/class/binding denominators, a
 collision matrix, deterministic-order proof, old-vs-new telemetry diff, and
 the byte-identity result for the non-collision corpus. A passing runtime sample
 without distinct ABI IDs/slots is vacuous and does not close R1.
+
+## Branded instance API prerequisite
+
+The C33 data-struct bridge is split behind a behavior-neutral host wiring
+prerequisite. `buildImports().setInstance(instance)` validates the
+`WebAssembly.Instance` internal slot through captured intrinsics, then performs
+the same export wiring as the retained `setExports(instance.exports)` API.
+Canonical Test262, benchmark, fuzz, npm-compat, generated runner-bundle,
+dogfood, equivalence, stress, and website harnesses use the branded path.
+The remaining shared instance-owning test helpers do the same, and pass the
+instance rather than its exports record to `wrapExports`. The npm callback
+counter keeps one documented raw overlay only after branded wiring has
+established the trusted helper identities. `setExports` remains supported for
+legacy callback, closure, vec, and string families.
+
+The brand and export-view ownership checks capture both `Reflect.apply` and
+`Object.prototype.hasOwnProperty` at module initialization. Regression coverage
+poisons `Function.prototype.call` during raw compatibility wiring and replaces
+`Reflect.apply` after import; neither mutation can bypass the instance brand or
+redirect the metadata ownership checks.
+
+## C33 authority repair
+
+C33 is the second, independently reviewable layer on the branded API. Each
+host data-struct module re-exports the exact immutable string-constant Global
+created by its `buildImports` result. `setInstance` requires that object
+identity before it may establish data-struct authority, so a genuine instance
+created with another `buildImports` cannot poison the target and the associated
+instance can recover afterward. Native-string targets retain zero host imports.
+Because engine-created imported-string Globals cannot preserve the association
+object's identity, `instantiateWasm` and its streaming variant use the explicit
+string-constant import path only when this reserved token is present.
+Standalone output remains import-free.
+
+The runtime pins the token, manifest, tables, and helper identities. Raw
+`setExports` remains usable by legacy bridge families but cannot establish
+first data authority. Proxy table shape reads and callable-slot reads are
+guarded fail-closed.
+
+The playground and generated load-time benchmark runtimes retain the complete
+`buildImports` result through instantiation. Both pass the exact
+`string_constants` and `string_constants16` maps into the instantiator and wire
+callbacks through `setInstance`. Consumer execution coverage pins the authority
+census at raw `0`, mismatched-token `0`, and canonical branded `2`, then invokes
+a compiled callback after the same association is established.

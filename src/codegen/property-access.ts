@@ -4173,7 +4173,7 @@ export function compileElementAccess(
     const recvWrapTsType = ctx.checker.getTypeAtLocation(expr.expression);
     if (
       (isStringWrapperType(recvWrapTsType) || ctx.oracle.staticJsTypeOf(expr.expression) === "string") &&
-      isNumericIndexExpression(ctx, expr.argumentExpression)
+      isNumericIndexExpression(ctx, expr.argumentExpression, fctx)
     ) {
       ensureObjectRuntime(ctx);
       ensureNativeStringHelpers(ctx);
@@ -4213,7 +4213,7 @@ export function compileElementAccess(
   if (
     ctx.nativeStrings &&
     ctx.anyStrTypeIdx >= 0 &&
-    !isNumericIndexExpression(ctx, expr.argumentExpression) &&
+    !isNumericIndexExpression(ctx, expr.argumentExpression, fctx) &&
     // (#1930) Query the receiver's static string-ness via the TypeOracle, not
     // the raw checker. `isStringType` matched BOTH a primitive string and the
     // `String` wrapper object; the oracle equivalents are
@@ -4307,13 +4307,17 @@ export function compileElementAccess(
  * property key, which `__extern_get` must keep handling). False on any checker
  * error.
  */
-export function isNumericIndexExpression(ctx: CodegenContext, index: ts.Expression): boolean {
+export function isNumericIndexExpression(ctx: CodegenContext, index: ts.Expression, fctx?: FunctionContext): boolean {
   // Strip parens / `as` wrappers so `a[(i)]` / `a[i as number]` still match.
   let inner: ts.Expression = index;
   while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
     inner = inner.expression;
   }
   if (ts.isNumericLiteral(inner)) return true;
+  // The checker may infer a function-scoped var from a later numeric
+  // initializer even though a preceding for-in writes property-key strings
+  // into it. Its actual boxed slot is authoritative at computed access sites.
+  if (ts.isIdentifier(inner) && fctx?.forInIdentifierVars?.has(inner.text)) return false;
   let t: ts.Type;
   try {
     t = ctx.checker.getTypeAtLocation(inner);
@@ -4416,7 +4420,7 @@ export function compileElementAccessBody(
     // `__extern_get(recv, boxed-idx)`. Host/gc only (standalone's `__extern_get_idx`
     // already ref.tests `$ObjVec`); numeric index only (a string key is a genuine
     // property, never a vec index).
-    if (!ctx.standalone && ctx.vecTypeMap.size > 0 && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+    if (!ctx.standalone && ctx.vecTypeMap.size > 0 && isNumericIndexExpression(ctx, expr.argumentExpression, fctx)) {
       // recv externref is on the stack → recvLocal (allocated FIRST so the local
       // numbering of recv / idx / anyTmp is unchanged from before #3007).
       const recvLocal = allocLocal(fctx, `__nve_recv_${fctx.locals.length}`, { kind: "externref" });
@@ -4752,7 +4756,7 @@ export function compileElementAccessBody(
     // numeric read. Hence this is scoped to `ctx.standalone` only (NOT wasi);
     // wasi and host mode keep the existing `__extern_get` path. A non-numeric
     // (string/symbol/computed) key always stays on `__extern_get`.
-    if (ctx.standalone && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+    if (ctx.standalone && isNumericIndexExpression(ctx, expr.argumentExpression, fctx)) {
       // (#3057) A boxed `$__ta_dyn_view` (dynamic `new <ctorVar>(rab)`) reaches this
       // arm as an `any`/externref receiver with a numeric index. Its element kind is
       // a RUNTIME field, so `__extern_get_idx` can't byte-decode it (reads returned

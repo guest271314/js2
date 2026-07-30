@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-30T13:17:24.582Z",
+  "timestamp": "2026-07-30T19:48:48.033Z",
   "benchmarks": [
     {
       "name": "fib",
@@ -757,6 +757,33 @@
           "intent": {
             "type": "builtin",
             "name": "__concat_4"
+          }
+        },
+        {
+          "module": "env",
+          "name": "__js_array_new",
+          "kind": "func",
+          "intent": {
+            "type": "builtin",
+            "name": "__js_array_new"
+          }
+        },
+        {
+          "module": "env",
+          "name": "__js_array_push",
+          "kind": "func",
+          "intent": {
+            "type": "builtin",
+            "name": "__js_array_push"
+          }
+        },
+        {
+          "module": "env",
+          "name": "__extern_method_call",
+          "kind": "func",
+          "intent": {
+            "type": "builtin",
+            "name": "__extern_method_call"
           }
         },
         {

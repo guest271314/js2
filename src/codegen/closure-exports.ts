@@ -30,6 +30,7 @@ import {
   PROGRAM_ABI_CALLABLE_ROLE,
   resolveProgramAbiSupportCallableHandle,
 } from "./program-abi-planning.js";
+import { DATA_STRUCT_HOST_BRIDGE_ORDINAL, publishDataStructHostBridge } from "./data-struct-host-bridge.js";
 
 const CLOSURE_HOST_BRIDGE_ROLE = "closure-host-bridge";
 const CLOSURE_HOST_BRIDGE_MANIFEST_NAME = "__\0js2_closure_host_bridge";
@@ -858,37 +859,33 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
     // emitClosureCallExportN). User args are at locals [2..arity+1]; formal i is
     // at local i+2, extras are args[closureArity..arity) at locals
     // [closureArity+2 .. arity+2).
-    const setupInstrs: Instr[] =
-      ctx.standalone || ctx.wasi
-        ? [
-            // `__apply_closure` presets the ACTUAL count before choosing a padded
-            // dispatcher. Preserve min(actual, formals); ordinary direct/host calls
-            // enter with the -1 sentinel and retain the historical formal count.
-            { op: "global.get", index: argcGlobalIdx },
-            { op: "i32.const", value: 0 },
-            { op: "i32.ge_s" },
-            {
-              op: "if",
-              blockType: { kind: "val", type: { kind: "i32" } },
-              then: [
-                { op: "global.get", index: argcGlobalIdx },
-                { op: "i32.const", value: entry.closureArity },
-                { op: "i32.lt_s" },
-                {
-                  op: "if",
-                  blockType: { kind: "val", type: { kind: "i32" } },
-                  then: [{ op: "global.get", index: argcGlobalIdx }],
-                  else: [{ op: "i32.const", value: entry.closureArity }],
-                },
-              ],
-              else: [{ op: "i32.const", value: entry.closureArity }],
-            },
-            { op: "global.set", index: argcGlobalIdx },
-          ]
-        : [
-            { op: "i32.const", value: entry.closureArity },
-            { op: "global.set", index: argcGlobalIdx },
-          ];
+    // Dynamic callers may widen an under-applied call to the closure's declared
+    // arity so this dispatcher can match it. They seed __argc with the ACTUAL
+    // call-site count first; preserve min(actual, formals) in every target mode.
+    // Callers without an exact count leave the -1 sentinel and retain the
+    // historical declared-arity fallback.
+    const setupInstrs: Instr[] = [
+      { op: "global.get", index: argcGlobalIdx },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "global.get", index: argcGlobalIdx },
+          { op: "i32.const", value: entry.closureArity },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "global.get", index: argcGlobalIdx }],
+            else: [{ op: "i32.const", value: entry.closureArity }],
+          },
+        ],
+        else: [{ op: "i32.const", value: entry.closureArity }],
+      },
+      { op: "global.set", index: argcGlobalIdx },
+    ];
     if (arity > entry.closureArity) {
       const extrasCount = arity - entry.closureArity;
       setupInstrs.push({ op: "i32.const", value: extrasCount });
@@ -1076,6 +1073,44 @@ export function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number)
   // and `call` it to drive a captured `Array.prototype[@@iterator]` override.
   // No-op for existing JS-host callers (they dispatch by export name).
   ctx.funcMap.set(exportName, funcIdx);
+
+  // A JS caller may supply fewer arguments than the closure declares. The
+  // host wrapper widens to this dispatcher arity so the closure remains
+  // selectable, but `arguments.length` must still observe the original call.
+  // Keep that count in a compiler-reserved wrapper export: one host→Wasm call
+  // seeds __argc, invokes the ordinary method dispatcher, and clears the
+  // protocol slot before returning. A NUL-containing export name cannot
+  // collide with a source-level JavaScript identifier.
+  const argcExportName = `__\0js2_call_fn_method_argc_${arity}`;
+  const argcParams: ValType[] = [{ kind: "i32" }];
+  for (let i = 0; i < arity + 2; i++) argcParams.push({ kind: "externref" });
+  const argcTypeIdx = addFuncType(ctx, argcParams, [{ kind: "externref" }], `$${argcExportName}_type`);
+  const argcFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const argcBody: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "global.set", index: argcGlobalIdx },
+  ];
+  for (let i = 0; i < arity + 2; i++) {
+    argcBody.push({ op: "local.get", index: i + 1 });
+  }
+  argcBody.push(
+    { op: "call", funcIdx },
+    { op: "local.set", index: arity + 3 },
+    { op: "i32.const", value: -1 },
+    { op: "global.set", index: argcGlobalIdx },
+    { op: "local.get", index: arity + 3 },
+  );
+  ctx.mod.functions.push({
+    name: argcExportName,
+    typeIdx: argcTypeIdx,
+    locals: [{ name: "__result", type: { kind: "externref" } }],
+    body: argcBody,
+    exported: true,
+  } as WasmFunction);
+  ctx.mod.exports.push({
+    name: argcExportName,
+    desc: { kind: "func", index: argcFuncIdx },
+  });
 }
 
 /**
@@ -1488,8 +1523,6 @@ export function emitIsDataStructExport(ctx: CodegenContext): void {
   if (dataTypeIdxs.length === 0) return;
 
   const isDataTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$is_data_struct_type");
-  const funcIdx = ctx.numImportFuncs + mod.functions.length;
-
   const body: Instr[] = [{ op: "local.get", index: 0 }, { op: "any.convert_extern" }, { op: "local.set", index: 1 }];
   for (const dataType of dataTypeIdxs) {
     body.push({ op: "local.get", index: 1 });
@@ -1502,18 +1535,17 @@ export function emitIsDataStructExport(ctx: CodegenContext): void {
   }
   body.push({ op: "i32.const", value: 0 });
 
-  mod.functions.push({
-    name: "__is_data_struct",
-    typeIdx: isDataTypeIdx,
-    locals: [{ name: "__any", type: { kind: "anyref" } }],
-    body,
-    exported: true,
-  } as WasmFunction);
-
-  mod.exports.push({
-    name: "__is_data_struct",
-    desc: { kind: "func", index: funcIdx },
-  });
+  publishDataStructHostBridge(
+    ctx,
+    {
+      name: "__is_data_struct",
+      typeIdx: isDataTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as WasmFunction,
+    DATA_STRUCT_HOST_BRIDGE_ORDINAL.isDataStruct,
+  );
 }
 
 /**

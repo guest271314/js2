@@ -79,6 +79,7 @@ import {
   sameIrCallableBinding,
 } from "./callable-bindings.js";
 import { collectOuterWrites } from "./closure-captures.js";
+import { collectDynamicStringLocalWidening } from "./dynamic-local-widening.js";
 import {
   requireMatchingModuleBindingOwner,
   requireMatchingLoweringPlanOwner,
@@ -174,6 +175,8 @@ import {
   type IrValueId,
 } from "./nodes.js";
 import type { ValType } from "./types.js";
+
+const VEC_NEW_SIZED_PREFIX = "__vec_new_sized_";
 
 function unsupportedVoidCallExpression(detail: string): never {
   throw new IrUnsupportedError("void-call-expression", "build", detail);
@@ -819,6 +822,10 @@ export function lowerFunctionAstToIr(
     options.allocRegistry,
   );
   const mutatedLets = collectMutatedLetNames(fn);
+  const dynamicStringLocals = collectDynamicStringLocalWidening(
+    fn,
+    new Set(params.filter((param) => param.type.kind === "dynamic").map((param) => param.name)),
+  );
 
   // Single scope map for both params and let/const locals. Phase 1 forbids
   // shadowing (enforced by the selector) so there is no nesting to track.
@@ -980,6 +987,7 @@ export function lowerFunctionAstToIr(
     liftedUnitProvenance,
     liftedCounter,
     mutatedLets,
+    dynamicStringLocals,
     i32PureNames,
     i32Slots,
     ownedStringAppendSymbols,
@@ -1100,9 +1108,198 @@ function thenArmTerminates(stmt: ts.Statement): boolean {
   return false;
 }
 
+interface DenseArrayReductionPlan {
+  readonly accumulatorDeclaration: ts.VariableStatement;
+  readonly fillLoop: ts.ForStatement;
+  readonly fillValue: ts.Expression;
+  readonly accumulatorName: string;
+  readonly returnStatement: ts.ReturnStatement;
+}
+
+function referencesIdentifier(expr: ts.Expression, name: string): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isIdentifier(node) && node.text === name) {
+      found = true;
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  visit(expr);
+  return found;
+}
+
+/**
+ * Eliminate a local dense array that is filled and then consumed exactly once
+ * by an i32 sum reduction. The array never escapes and both loops are pure, so
+ * accumulating the generated value in the fill loop preserves iteration order
+ * while avoiding a large, immediately-dead WasmGC allocation.
+ */
+function denseArrayReductionPlan(stmts: readonly ts.Statement[]): DenseArrayReductionPlan | null {
+  if (stmts.length !== 5) return null;
+  const [arrayStatement, fillStatement, accumulatorStatement, reductionStatement, returnStatement] = stmts;
+  if (
+    !arrayStatement ||
+    !fillStatement ||
+    !accumulatorStatement ||
+    !reductionStatement ||
+    !returnStatement ||
+    !ts.isVariableStatement(arrayStatement) ||
+    !ts.isForStatement(fillStatement) ||
+    !ts.isVariableStatement(accumulatorStatement) ||
+    !ts.isForStatement(reductionStatement) ||
+    !ts.isReturnStatement(returnStatement)
+  ) {
+    return null;
+  }
+
+  const arrayDeclaration = arrayStatement.declarationList.declarations[0];
+  if (
+    arrayStatement.declarationList.declarations.length !== 1 ||
+    !arrayDeclaration ||
+    !arrayDeclaration.initializer ||
+    !ts.isArrayLiteralExpression(arrayDeclaration.initializer)
+  ) {
+    return null;
+  }
+  const fillPlan = denseFillPlanForLiteral(arrayDeclaration.initializer);
+  if (!fillPlan || fillPlan.loop !== fillStatement) return null;
+  const fillBody = ts.isBlock(fillStatement.statement)
+    ? fillStatement.statement.statements[0]
+    : fillStatement.statement;
+  if (!fillBody || !ts.isExpressionStatement(fillBody) || !ts.isBinaryExpression(fillBody.expression)) return null;
+  const fillValue = fillBody.expression.right;
+  if (!isNestedBitwiseResult(fillValue)) return null;
+
+  const accumulatorDeclaration = accumulatorStatement.declarationList.declarations[0];
+  if (
+    accumulatorStatement.declarationList.declarations.length !== 1 ||
+    !accumulatorDeclaration ||
+    !ts.isIdentifier(accumulatorDeclaration.name) ||
+    !accumulatorDeclaration.initializer ||
+    !ts.isNumericLiteral(accumulatorDeclaration.initializer) ||
+    Number(accumulatorDeclaration.initializer.text) !== 0
+  ) {
+    return null;
+  }
+  const accumulatorName = accumulatorDeclaration.name.text;
+  if (referencesIdentifier(fillValue, accumulatorName)) return null;
+
+  const reductionInit = reductionStatement.initializer;
+  if (
+    !reductionInit ||
+    !ts.isVariableDeclarationList(reductionInit) ||
+    reductionInit.declarations.length !== 1 ||
+    !reductionInit.declarations[0]?.initializer ||
+    !ts.isIdentifier(reductionInit.declarations[0].name) ||
+    !ts.isNumericLiteral(reductionInit.declarations[0].initializer) ||
+    Number(reductionInit.declarations[0].initializer.text) !== 0
+  ) {
+    return null;
+  }
+  const reductionIndex = reductionInit.declarations[0].name.text;
+  const reductionCondition = reductionStatement.condition;
+  const reductionIncrement = reductionStatement.incrementor;
+  if (
+    !reductionCondition ||
+    !ts.isBinaryExpression(reductionCondition) ||
+    reductionCondition.operatorToken.kind !== ts.SyntaxKind.LessThanToken ||
+    !ts.isIdentifier(reductionCondition.left) ||
+    reductionCondition.left.text !== reductionIndex ||
+    !ts.isPropertyAccessExpression(reductionCondition.right) ||
+    !ts.isIdentifier(reductionCondition.right.expression) ||
+    reductionCondition.right.expression.text !== fillPlan.arrayName ||
+    reductionCondition.right.name.text !== "length" ||
+    !reductionIncrement ||
+    (!ts.isPrefixUnaryExpression(reductionIncrement) && !ts.isPostfixUnaryExpression(reductionIncrement)) ||
+    reductionIncrement.operator !== ts.SyntaxKind.PlusPlusToken ||
+    !ts.isIdentifier(reductionIncrement.operand) ||
+    reductionIncrement.operand.text !== reductionIndex
+  ) {
+    return null;
+  }
+
+  const reductionBody = ts.isBlock(reductionStatement.statement)
+    ? reductionStatement.statement.statements[0]
+    : reductionStatement.statement;
+  if (!reductionBody || !ts.isExpressionStatement(reductionBody) || !ts.isBinaryExpression(reductionBody.expression)) {
+    return null;
+  }
+  const assignment = reductionBody.expression;
+  const reduced = peelExpr(assignment.right);
+  if (
+    assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+    !ts.isIdentifier(assignment.left) ||
+    assignment.left.text !== accumulatorName ||
+    !ts.isBinaryExpression(reduced) ||
+    reduced.operatorToken.kind !== ts.SyntaxKind.BarToken ||
+    i32LiteralValue(reduced.right) !== 0
+  ) {
+    return null;
+  }
+  const addition = peelExpr(reduced.left);
+  if (
+    !ts.isBinaryExpression(addition) ||
+    addition.operatorToken.kind !== ts.SyntaxKind.PlusToken ||
+    !ts.isIdentifier(addition.left) ||
+    addition.left.text !== accumulatorName ||
+    !ts.isElementAccessExpression(addition.right) ||
+    !ts.isIdentifier(addition.right.expression) ||
+    addition.right.expression.text !== fillPlan.arrayName ||
+    !ts.isIdentifier(addition.right.argumentExpression) ||
+    addition.right.argumentExpression.text !== reductionIndex
+  ) {
+    return null;
+  }
+
+  const returned = returnStatement.expression ? peelExpr(returnStatement.expression) : null;
+  const returnIsAccumulator =
+    returned !== null &&
+    (ts.isIdentifier(returned)
+      ? returned.text === accumulatorName
+      : ts.isBinaryExpression(returned) &&
+        returned.operatorToken.kind === ts.SyntaxKind.BarToken &&
+        ts.isIdentifier(returned.left) &&
+        returned.left.text === accumulatorName &&
+        i32LiteralValue(returned.right) === 0);
+  if (!returnIsAccumulator) return null;
+
+  return {
+    accumulatorDeclaration: accumulatorStatement,
+    fillLoop: fillStatement,
+    fillValue,
+    accumulatorName,
+    returnStatement,
+  };
+}
+
 function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void {
   if (stmts.length < 1) {
     throw new Error(`ir/from-ast: empty statement list in ${cx.funcName}`);
+  }
+  const denseReduction = denseArrayReductionPlan(stmts);
+  if (denseReduction) {
+    lowerVarDecl(denseReduction.accumulatorDeclaration, cx);
+    lowerForStatement(denseReduction.fillLoop, cx, (bodyCx) => {
+      const accumulator = bodyCx.scope.get(denseReduction.accumulatorName);
+      if (!accumulator || accumulator.kind !== "slot") {
+        throw new Error(`ir/from-ast: fused dense reduction accumulator must use slot storage (${cx.funcName})`);
+      }
+      const value = lowerAsI32(denseReduction.fillValue, bodyCx, "wrap");
+      const accumulatorRead = bodyCx.builder.emitSlotRead(accumulator.slotIndex);
+      const accumulatorI32 =
+        accumulator.i32Storage === true
+          ? accumulatorRead
+          : bodyCx.builder.emitUnary("i32.trunc_sat_f64_s", accumulatorRead, IR_I32);
+      const sum = bodyCx.builder.emitBinary("i32.add", accumulatorI32, value, IR_I32);
+      bodyCx.builder.emitSlotWrite(
+        accumulator.slotIndex,
+        accumulator.i32Storage === true ? sum : bodyCx.builder.emitUnary("f64.convert_i32_s", sum, IR_F64),
+      );
+    });
+    lowerTail(denseReduction.returnStatement, cx);
+    return;
   }
   for (let i = 0; i < stmts.length - 1; i++) {
     const s = stmts[i]!;
@@ -1724,6 +1921,13 @@ interface LowerCtx {
    */
   readonly mutatedLets: ReadonlySet<string>;
   /**
+   * #3795 — direct-body mutable string-literal locals whose every later
+   * write is a statement-position dynamic string concat. Selection and
+   * lowering share the immutable proof so the local can use the canonical
+   * dynamic carrier without widening arbitrary mutable strings.
+   */
+  readonly dynamicStringLocals: ReadonlySet<string>;
+  /**
    * (#3758) Names proven, by the SAME analyses legacy's own #1120/#1236
    * i32-local promotion uses (`collectI32CoercedLocals`, `detectI32LoopVar`),
    * to always hold a clean int32 value when read. Consulted ONLY by
@@ -2342,6 +2546,18 @@ function isFusedI32Lowerable(e: ts.Expression, cx: LowerCtx): boolean {
   return isWrapI32Lowerable(e, promotedI32Probe(cx)) || isI32PureExprIR(e, cx.i32PureNames);
 }
 
+/**
+ * A nested bitwise result is already the exact 32-bit pattern the enclosing
+ * bitwise operator's ToInt32 conversion consumes. This deliberately includes
+ * `>>>`: its JavaScript NUMBER result may be above INT32_MAX, so it is not a
+ * generally signed-i32-valued expression, but converting that uint32 result
+ * back through ToInt32 preserves the same 32 bits.
+ */
+function isNestedBitwiseResult(e: ts.Expression): boolean {
+  const inner = peelExpr(e);
+  return ts.isBinaryExpression(inner) && isIrBitwiseOperatorToken(inner.operatorToken.kind);
+}
+
 /** Invariant R — read a promoted slot and widen to the f64 every consumer expects. */
 function readPromotedI32Slot(slotIndex: number, cx: LowerCtx): IrValueId {
   return cx.builder.emitUnary("f64.convert_i32_s", cx.builder.emitSlotRead(slotIndex), IR_F64);
@@ -2355,7 +2571,7 @@ function readPromotedI32Slot(slotIndex: number, cx: LowerCtx): IrValueId {
  * `lower.ts` applies its usual `emitJsToInt32`.
  */
 function lowerBitwiseOperand(e: ts.Expression, parent: ts.BinaryExpression | null, cx: LowerCtx): IrValueId {
-  if (isFusedI32Lowerable(e, cx)) return lowerAsI32(e, cx, "wrap");
+  if (isFusedI32Lowerable(e, cx) || isNestedBitwiseResult(e)) return lowerAsI32(e, cx, "wrap");
   const v = lowerExpr(e, cx, IR_F64);
   // Taking the fused path means we bypassed `lowerBinary`'s operand-shape
   // gates (string / dynamic / packed). Reproduce its verdict EXACTLY for a
@@ -2409,7 +2625,9 @@ function lowerAsI32(expr: ts.Expression, cx: LowerCtx, mode: "canon" | "wrap"): 
 
   if (ts.isBinaryExpression(inner)) {
     const k = inner.operatorToken.kind;
-    if (isBitwiseToken(k)) return lowerBitwiseAsI32(inner, cx);
+    // In wrap-only contexts a `>>>` result is consumed as its raw 32-bit
+    // pattern, so it can use the same native emitter as signed bitwise ops.
+    if (jsBitwiseBinop(k) !== null) return lowerBitwiseAsI32(inner, cx);
     if (
       mode === "wrap" &&
       (k === ts.SyntaxKind.PlusToken || k === ts.SyntaxKind.MinusToken) &&
@@ -2446,8 +2664,10 @@ function lowerAsI32(expr: ts.Expression, cx: LowerCtx, mode: "canon" | "wrap"): 
 
 /**
  * Lower a bitwise binary expression, narrowing its IR result type to i32.
- * `>>>` is excluded by `isBitwiseToken` (its uint32 VALUE can exceed 2^31-1,
- * so an i32-narrowed result would be a different number).
+ * Callers only request an i32 result where the value is consumed as a 32-bit
+ * pattern. That includes nested `>>>`: its standalone JavaScript value remains
+ * unsigned f64, but an enclosing bitwise operation immediately applies
+ * ToInt32 and consumes exactly these bits.
  */
 function lowerBitwiseAsI32(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   const k = expr.operatorToken.kind;
@@ -2737,20 +2957,36 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
     // the slot) would double-evaluate any side effect in `let s = f() | 0`.
     // Every other hint source wins: an explicit annotation, an empty-array
     // inference and a module binding each pin the representation.
+    const widenDynamic = cx.dynamicStringLocals.has(name);
     const promoteI32Slot =
       annotated === undefined &&
       inferredEmptyArrayHint === undefined &&
       moduleBinding === undefined &&
+      !widenDynamic &&
       !isConst &&
       cx.mutatedLets.has(name) &&
       cx.i32Slots?.has(d) === true &&
       d.initializer !== undefined &&
       isCanonI32Lowerable(d.initializer, promotedI32Probe(cx));
     const hint: IrType =
-      annotated ?? inferredEmptyArrayHint ?? moduleBinding?.type ?? (promoteI32Slot ? IR_I32 : irVal({ kind: "f64" }));
-    const value = promoteI32Slot
+      annotated ??
+      inferredEmptyArrayHint ??
+      moduleBinding?.type ??
+      (widenDynamic ? irDynamic() : promoteI32Slot ? IR_I32 : irVal({ kind: "f64" }));
+    let value = promoteI32Slot
       ? lowerAsI32(d.initializer as ts.Expression, cx, "canon")
       : lowerExpr(d.initializer, cx, hint);
+    if (widenDynamic && cx.builder.typeOf(value).kind !== "dynamic") {
+      const boxed = boxConcreteToDynamic(value, cx.builder.typeOf(value), d.initializer, cx);
+      if (boxed === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: proven dynamic local '${name}' initializer has no dynamic string carrier (${cx.funcName})`,
+        );
+      }
+      value = boxed;
+    }
     const inferred = cx.builder.typeOf(value);
     const stringEncoding = inferred.kind === "string" ? inferStringEncoding(d.initializer, cx) : undefined;
     if (annotated) {
@@ -2877,7 +3113,7 @@ function lowerVarDecl(stmt: ts.VariableStatement, cx: LowerCtx): void {
             kind: "slot",
             slotIndex,
             type: irVal(dynamicValType),
-            asType: inferred,
+            asType: widenDynamic ? irDynamic() : inferred,
           });
           continue;
         }
@@ -3520,6 +3756,128 @@ function arrayLiteralWideningEscapes(expr: ts.ArrayLiteralExpression, cx: LowerC
   return false;
 }
 
+function isPureDenseFillRhs(expr: ts.Expression, arrayName: string): boolean {
+  if (ts.isParenthesizedExpression(expr)) return isPureDenseFillRhs(expr.expression, arrayName);
+  if (
+    ts.isNumericLiteral(expr) ||
+    ts.isStringLiteral(expr) ||
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    expr.kind === ts.SyntaxKind.FalseKeyword ||
+    expr.kind === ts.SyntaxKind.NullKeyword
+  ) {
+    return true;
+  }
+  if (ts.isIdentifier(expr)) return expr.text !== arrayName;
+  if (ts.isPrefixUnaryExpression(expr)) {
+    return (
+      (expr.operator === ts.SyntaxKind.PlusToken ||
+        expr.operator === ts.SyntaxKind.MinusToken ||
+        expr.operator === ts.SyntaxKind.TildeToken ||
+        expr.operator === ts.SyntaxKind.ExclamationToken) &&
+      isPureDenseFillRhs(expr.operand, arrayName)
+    );
+  }
+  if (!ts.isBinaryExpression(expr)) return false;
+  const operator = expr.operatorToken.kind;
+  if (operator >= ts.SyntaxKind.FirstAssignment && operator <= ts.SyntaxKind.LastAssignment) return false;
+  if (operator === ts.SyntaxKind.CommaToken) return false;
+  return isPureDenseFillRhs(expr.left, arrayName) && isPureDenseFillRhs(expr.right, arrayName);
+}
+
+interface DenseFillPlan {
+  readonly arrayName: string;
+  readonly indexName: string;
+  readonly bound: ts.Expression;
+  readonly loop: ts.ForStatement;
+}
+
+function denseFillPlanForLiteral(expr: ts.ArrayLiteralExpression): DenseFillPlan | null {
+  const declaration = expr.parent;
+  if (!ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return null;
+  const declarationList = declaration.parent;
+  const declarationStatement = declarationList.parent;
+  const block = declarationStatement.parent;
+  if (
+    !ts.isVariableDeclarationList(declarationList) ||
+    !ts.isVariableStatement(declarationStatement) ||
+    (!ts.isBlock(block) && !ts.isSourceFile(block))
+  ) {
+    return null;
+  }
+  const statements = block.statements;
+  const statementIndex = statements.indexOf(declarationStatement);
+  const loop = statements[statementIndex + 1];
+  if (statementIndex < 0 || !loop || !ts.isForStatement(loop)) return null;
+
+  const initializer = loop.initializer;
+  if (!initializer || !ts.isVariableDeclarationList(initializer) || initializer.declarations.length !== 1) return null;
+  const indexDeclaration = initializer.declarations[0];
+  if (
+    !ts.isIdentifier(indexDeclaration.name) ||
+    !indexDeclaration.initializer ||
+    !ts.isNumericLiteral(indexDeclaration.initializer) ||
+    Number(indexDeclaration.initializer.text) !== 0
+  ) {
+    return null;
+  }
+  const indexName = indexDeclaration.name.text;
+  const condition = loop.condition;
+  if (
+    !condition ||
+    !ts.isBinaryExpression(condition) ||
+    condition.operatorToken.kind !== ts.SyntaxKind.LessThanToken ||
+    !ts.isIdentifier(condition.left) ||
+    condition.left.text !== indexName ||
+    (!ts.isIdentifier(condition.right) && !ts.isNumericLiteral(condition.right))
+  ) {
+    return null;
+  }
+  const incrementor = loop.incrementor;
+  if (
+    !incrementor ||
+    (!ts.isPrefixUnaryExpression(incrementor) && !ts.isPostfixUnaryExpression(incrementor)) ||
+    incrementor.operator !== ts.SyntaxKind.PlusPlusToken ||
+    !ts.isIdentifier(incrementor.operand) ||
+    incrementor.operand.text !== indexName
+  ) {
+    return null;
+  }
+  const loopStatements = ts.isBlock(loop.statement) ? loop.statement.statements : [loop.statement];
+  if (loopStatements.length !== 1 || !ts.isExpressionStatement(loopStatements[0])) return null;
+  const assignment = loopStatements[0].expression;
+  const arrayName = declaration.name.text;
+  if (
+    !ts.isBinaryExpression(assignment) ||
+    assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+    !ts.isElementAccessExpression(assignment.left) ||
+    !ts.isIdentifier(assignment.left.expression) ||
+    assignment.left.expression.text !== arrayName ||
+    !ts.isIdentifier(assignment.left.argumentExpression) ||
+    assignment.left.argumentExpression.text !== indexName ||
+    !isPureDenseFillRhs(assignment.right, arrayName)
+  ) {
+    return null;
+  }
+  return { arrayName, indexName, bound: condition.right, loop };
+}
+
+function denseFillPlanForLoop(loop: ts.ForStatement): DenseFillPlan | null {
+  const parent = loop.parent;
+  if (!ts.isBlock(parent) && !ts.isSourceFile(parent)) return null;
+  const loopIndex = parent.statements.indexOf(loop);
+  const previous = parent.statements[loopIndex - 1];
+  if (
+    loopIndex < 1 ||
+    !previous ||
+    !ts.isVariableStatement(previous) ||
+    previous.declarationList.declarations.length !== 1
+  ) {
+    return null;
+  }
+  const initializer = previous.declarationList.declarations[0].initializer;
+  return initializer && ts.isArrayLiteralExpression(initializer) ? denseFillPlanForLiteral(initializer) : null;
+}
+
 /**
  * #1804 — lower a fixed-length, non-spread, non-sparse, same-typed array
  * literal to a `vec.new_fixed` IR node. Out of scope (clean fallback to
@@ -3564,7 +3922,23 @@ function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: 
       cx.resolver?.resolveVecValueTypeForElement?.(elemVT) ??
       ({ kind: "ref", typeIdx: vec.vecStructTypeIdx } as ValType);
     const countedPush = canonicalCountedPushPlanForLiteral(expr, cx.checker);
-    return cx.builder.emitVecNewFixed([], hintElemIr, irVal(vecValueType), countedPush?.capacity ?? 0);
+    if (countedPush) {
+      return cx.builder.emitVecNewFixed([], hintElemIr, irVal(vecValueType), countedPush.capacity);
+    }
+    const denseFill = denseFillPlanForLiteral(expr);
+    if (denseFill && vecValueType.kind !== "i32") {
+      const bound = lowerExpr(denseFill.bound, cx, irVal({ kind: "f64" }));
+      const allocated = cx.builder.emitCall(
+        irIntrinsicFuncRef(`${VEC_NEW_SIZED_PREFIX}${vec.vecStructTypeIdx}`),
+        [bound],
+        irVal(vecValueType),
+      );
+      if (allocated === null) {
+        throw new Error(`ir/from-ast: sized vec allocation produced no result (${cx.funcName})`);
+      }
+      return allocated;
+    }
+    return cx.builder.emitVecNewFixed([], hintElemIr, irVal(vecValueType));
   }
 
   // #2780 (hybrid Row 6) — widening-escape proof, the PRIMARY HI gate (run
@@ -3978,7 +4352,7 @@ function lowerPropertyAccess(expr: ts.PropertyAccessExpression, cx: LowerCtx): I
       // right prefix).
       const getter = findClassMember(recvType.shape, propName, "getter");
       if (getter && getter.returnType !== null) {
-        const r = cx.builder.emitClassCall(recv, propName, "getter", [], getter.returnType);
+        const r = cx.builder.emitClassCall(recv, propName, "getter", [], getter.returnType, getter.target);
         if (r === null) {
           throw new Error(
             `ir/from-ast: getter ${recvType.shape.className}.${propName} produced no value (${cx.funcName})`,
@@ -4196,6 +4570,39 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   }
   const recv = lowerExpr(lhs.expression, cx, irVal({ kind: "f64" }));
   const recvType = cx.builder.typeOf(recv);
+  if (recvType.kind === "dynamic") {
+    const key = lowerExpr(lhs.argumentExpression, cx, irDynamic());
+    if (cx.builder.typeOf(key).kind !== "dynamic") {
+      throw new IrUnsupportedError(
+        "element-store-unsupported",
+        "build",
+        `ir/from-ast: dynamic member-store key is not dynamic (${cx.funcName})`,
+      );
+    }
+    let value = lowerExpr(rhs, cx, irDynamic());
+    const valueType = cx.builder.typeOf(value);
+    if (valueType.kind !== "dynamic") {
+      const candidate = peelParensExpr(rhs);
+      if (!ts.isStringLiteralLike(candidate) || candidate.text !== "true") {
+        throw new IrUnsupportedError(
+          "element-store-unsupported",
+          "build",
+          `ir/from-ast: concrete dynamic member-store value is outside the #3795 conflict marker (${cx.funcName})`,
+        );
+      }
+      const boxed = boxConcreteToDynamic(value, valueType, rhs, cx);
+      if (boxed === null) {
+        throw new IrUnsupportedError(
+          "operand-coercion-unsupported",
+          "build",
+          `ir/from-ast: dynamic member-store conflict marker has no dynamic carrier (${cx.funcName})`,
+        );
+      }
+      value = boxed;
+    }
+    cx.builder.emitDynMemberSet(recv, key, value);
+    return;
+  }
   const recvVal = asVal(recvType);
   // (#2956 L2) Linear vec receivers are scalar i32 arena pointers, not GC
   // refs — admit them via the same resolver probe the read paths use
@@ -4239,6 +4646,10 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   // source semantics wrap).
   if (narrowedI32) {
     const narrowVal = lowerNarrowedI32Element(rhs, cx);
+    if (isProvenInBoundsIr(lhs, cx)) {
+      cx.builder.emitVecSet(recv, idxI32, narrowVal);
+      return;
+    }
     cx.builder.emitCall(irIntrinsicFuncRef(`__vec_elem_set_${vec.vecStructTypeIdx}`), [recv, idxI32, narrowVal], null);
     return;
   }
@@ -4259,6 +4670,10 @@ function lowerElementStore(lhs: ts.ElementAccessExpression, rhs: ts.Expression, 
   // The helper name embeds the vec STRUCT typeIdx; the lower-time resolver
   // intercepts the prefix and materializes the helper on demand (name-based
   // resolution — funcIdx-shift safe by construction).
+  if (isProvenInBoundsIr(lhs, cx)) {
+    cx.builder.emitVecSet(recv, idxI32, val);
+    return;
+  }
   cx.builder.emitCall(irIntrinsicFuncRef(`__vec_elem_set_${vec.vecStructTypeIdx}`), [recv, idxI32, val], null);
 }
 
@@ -5483,7 +5898,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
         `ir/from-ast: void super.${methodName}() used in expression position (${cx.funcName})`,
       );
     }
-    return cx.builder.emitClassSuperCall(parentShape, self, methodName, args, method.returnType);
+    return cx.builder.emitClassSuperCall(parentShape, self, methodName, args, method.returnType, method.target);
   }
 
   // (#2856) console.<m>(arg) — host console variant call. Intercepted BEFORE
@@ -5615,7 +6030,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
         `ir/from-ast: void static method ${className}.${methodName} used in expression position (${cx.funcName})`,
       );
     }
-    return cx.builder.emitClassStaticCall(shape, methodName, args, method.returnType);
+    return cx.builder.emitClassStaticCall(shape, methodName, args, method.returnType, method.target);
   }
 
   const recv = lowerExpr(expr.expression.expression, cx, irVal({ kind: "f64" }));
@@ -5900,7 +6315,7 @@ function lowerMethodCall(expr: ts.CallExpression, cx: LowerCtx, statementPositio
       `ir/from-ast: void method ${recvType.shape.className}.${methodName} used in expression position (${cx.funcName})`,
     );
   }
-  const r = cx.builder.emitClassCall(recv, methodName, "method", args, method.returnType);
+  const r = cx.builder.emitClassCall(recv, methodName, "method", args, method.returnType, method.target);
   if (method.returnType !== null && r === null) {
     // Defensive — emitClassCall returns null only when resultType is null.
     throw new Error(`ir/from-ast: class.call produced no result in ${cx.funcName}`);
@@ -6281,7 +6696,7 @@ function lowerPropertyAssignment(expr: ts.BinaryExpression, cx: LowerCtx): void 
             `ir/from-ast: assignment to setter ${recvType.shape.className}.${fieldName} (${describeIrType(setter.params[0]!)}) got ${describeIrType(newValueType)} (${cx.funcName})`,
           );
         }
-        cx.builder.emitClassCall(recv, fieldName, "setter", [newValue], null);
+        cx.builder.emitClassCall(recv, fieldName, "setter", [newValue], null, setter.target);
         return;
       }
       throw new Error(`ir/from-ast: class ${recvType.shape.className} has no field "${fieldName}" in ${cx.funcName}`);
@@ -7075,7 +7490,7 @@ function literalCounterEntry(stmt: ts.ForStatement, cx: LowerCtx): { value: numb
   return { value, slotIndex: binding.slotIndex };
 }
 
-function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
+function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx, bodyOverride?: (bodyCx: LowerCtx) => void): void {
   if (!stmt.condition) {
     throw new Error(`ir/from-ast: for without cond not in slice 12 (${cx.funcName})`);
   }
@@ -7122,20 +7537,31 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   // keeps the fast unchecked `vec.get`. Thread the proven pair onto a body-scoped
   // cx (immutable copy → no leak to siblings; nested loops accumulate outward).
   const provenPair = detectCountedLoopSafeIndex(stmt);
+  const denseFill = denseFillPlanForLoop(stmt);
+  const denseFillPair = denseFill ? `${denseFill.arrayName}:${denseFill.indexName}` : null;
   // #2952 slice 2 — the loop's label; the body cx carries it as the
   // innermost break/continue target (a continue jumps to the update).
   const bodyScope = new Map(loopCx.scope);
-  const bodyCx: LowerCtx = provenPair
+  const safePairs =
+    provenPair || denseFillPair
+      ? new Set([
+          ...(loopCx.safeIndexedArrays ?? []),
+          ...(provenPair ? [provenPair] : []),
+          ...(denseFillPair ? [denseFillPair] : []),
+        ])
+      : null;
+  const bodyCx: LowerCtx = safePairs
     ? {
         ...loopCx,
         scope: bodyScope,
-        safeIndexedArrays: new Set([...(loopCx.safeIndexedArrays ?? []), provenPair]),
+        safeIndexedArrays: safePairs,
         loopLabel,
         breakTargetLabel: loopLabel,
       }
     : { ...loopCx, scope: bodyScope, loopLabel, breakTargetLabel: loopLabel };
   const bodyInstrs = loopCx.builder.collectBodyInstrs(() => {
-    lowerStmt(stmt.statement, bodyCx);
+    if (bodyOverride) bodyOverride(bodyCx);
+    else lowerStmt(stmt.statement, bodyCx);
   });
 
   // 4. Update — collect into a buffer (or empty if absent).
@@ -9958,6 +10384,7 @@ function liftNestedFunction(
     // mutated-let scope (collected per-body when slice 6 extends to
     // closures). Empty here keeps the slice-3 nested-fn behavior intact.
     mutatedLets: collectMutatedLetNames(fn),
+    dynamicStringLocals: new Set(),
     // (#3758) nested functions get their own independent i32-pure-names set,
     // same reasoning as mutatedLets above.
     i32PureNames: computeI32PureNames(fn),
@@ -10057,6 +10484,7 @@ function liftClosureBody(
       ts.isBlock(expr.body) && (ts.isFunctionExpression(expr) || ts.isArrowFunction(expr))
         ? collectMutatedLetNamesFromBlock(expr.body)
         : new Set<string>(),
+    dynamicStringLocals: new Set(),
     // (#3758) same independent-per-closure reasoning as mutatedLets above;
     // computeI32PureNames itself no-ops on a non-block (concise) body.
     i32PureNames: computeI32PureNames(expr),

@@ -51,8 +51,20 @@ describe("worktree-local Git hook installation", () => {
     };
     const preCommit = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
 
-    expect(packageJson.scripts.prepare).toBe("sh scripts/configure-git-hooks.sh . || true");
+    expect(packageJson.scripts.prepare).toBe("sh scripts/configure-git-hooks.sh");
     expect(preCommit).toContain("pnpm run check:loc-budget");
     expect(preCommit).toContain("pnpm run check:func-budget");
+  });
+
+  it("keeps the oracle ratchet in the pre-commit hook", () => {
+    const hook = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
+
+    expect(hook).toContain("pnpm run check:oracle-ratchet");
+  });
+
+  it("runs the CI changed-root-test gate before committing", () => {
+    const hook = readFileSync(join(REPO_ROOT, ".husky", "pre-commit"), "utf8");
+
+    expect(hook).toContain("pnpm run test:changed-root");
   });
 });
