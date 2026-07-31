@@ -7,6 +7,29 @@ created: 2026-07-26
 updated: 2026-07-31
 assignee: ttraenkler/dev-core-semantics
 priority: high
+loc-budget-allow:
+  # Slice A registers the bounded STRICT drain `__array_from_iter_n_strict`.
+  # In `src/runtime.ts` that is one extra `resolveImport` arm plus the comment
+  # recording WHY it is a separate import rather than a strictness flag on
+  # `__array_from_iter_n` (that import is shared with `__array_from_mapped` and
+  # `__iterator_rest`, both of which must KEEP the array-like fallback — the
+  # exact trap this note exists to stop the next reader falling into).
+  # In `src/codegen/destructuring-params.ts` it is a one-line name selection
+  # plus the comment recording the measured pre-fix answer and the
+  # standalone/WASI carve-out (#2904: emitting the strict name there would leak
+  # an `env::` import and break zero-import instantiation). No new branch
+  # structure in either file; splitting `resolveImport` is #3399's job.
+  - src/runtime.ts
+  - src/codegen/destructuring-params.ts
+func-budget-allow:
+  # Same two additions as `loc-budget-allow`, seen at function granularity.
+  # `resolveImport` is the host-import factory — a new import arm has nowhere
+  # else to live until #3399 splits it. `destructureParamArray` gains a one-line
+  # drain-name selection plus the standalone/WASI carve-out comment; its
+  # externref fallback must stay in one piece because the late-import /
+  # funcIdx-shift bookkeeping around it is order-sensitive (#3010).
+  - src/runtime.ts::resolveImport
+  - src/codegen/destructuring-params.ts::destructureParamArray
 horizon: m
 feasibility: medium
 task_type: bug
