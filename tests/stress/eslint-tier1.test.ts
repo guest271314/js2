@@ -33,36 +33,32 @@
 //     invalid Wasm in `FileReport_addRuleMessage` (array.set type
 //     mismatch).
 
-import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
 import { compileProject } from "../../src/index.js";
 import { buildImports } from "../../src/runtime.js";
 import { ESLINT_DEV_DEPENDENCY_SKIP, requireEslintFile, resolveEslintFile } from "../helpers/eslint.js";
+import { type CompileProjectProbeReport, runCompileProjectProbe } from "../helpers/eslint-graph-probe.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const execFileAsync = promisify(execFile);
 // Tier 1 entry files live in `.tmp/` (gitignored). Each test writes its own
 // fresh entry to avoid stale-cache surprises across vitest worker pools.
 const TMP_DIR = resolve(__dirname, "../../.tmp/eslint-tier1");
 const ESLINT_LINTER = resolveEslintFile("lib/linter/linter.js");
-const COMPILE_PROJECT_PROBE = resolve(__dirname, "../helpers/compile-project-probe.ts");
-const COMPILE_PROJECT_PROBE_MARKER = "__JS2_COMPILE_PROJECT_PROBE__";
 
-interface CompileProjectProbe {
-  success: boolean;
-  binaryByteLength: number;
-  valid: boolean;
-  errors: Array<{ message: string }>;
-}
+// #3672 — the package-entry graph runs under the same enforced budget as the
+// direct `linter.js` probe in `tests/issue-3672.test.ts`. Enforcing rather than
+// recording matters here: an out-of-memory abort or a hung child must surface
+// as a named probe failure, never as "the compiler produced no diagnostics".
+const TIER1_HEAP_LIMIT_MB = 2048;
+const TIER1_WALL_CLOCK_BUDGET_MS = 120_000;
 
-let tier1EntryCompile: Promise<CompileProjectProbe> | null = null;
+let tier1EntryCompile: Promise<CompileProjectProbeReport> | null = null;
 
 function writeEntry(name: string, src: string): string {
   mkdirSync(TMP_DIR, { recursive: true });
@@ -71,7 +67,7 @@ function writeEntry(name: string, src: string): string {
   return p;
 }
 
-function compileTier1Entry(): Promise<CompileProjectProbe> {
+function compileTier1Entry(): Promise<CompileProjectProbeReport> {
   if (tier1EntryCompile === null) {
     const entry = writeEntry(
       "tier1-entry.ts",
@@ -91,27 +87,18 @@ export function test(): number {
     // The package graph currently takes over Vitest's worker-heartbeat budget
     // to compile synchronously, so keep the worker responsive by compiling in
     // a child process and returning a small structured frontier report.
-    tier1EntryCompile = execFileAsync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        COMPILE_PROJECT_PROBE,
-        entry,
-        JSON.stringify({ allowJs: true, target: "gc", platform: "node" }),
-      ],
-      {
-        cwd: resolve(__dirname, "../.."),
-        encoding: "utf8",
-        maxBuffer: 64 * 1024 * 1024,
-      },
-    ).then(({ stdout }) => {
-      const marker = stdout.lastIndexOf(COMPILE_PROJECT_PROBE_MARKER);
-      if (marker === -1) {
-        throw new Error(`compileProject probe emitted no structured report:\n${stdout}`);
-      }
-      return JSON.parse(stdout.slice(marker + COMPILE_PROJECT_PROBE_MARKER.length).trim()) as CompileProjectProbe;
-    });
+    //
+    // #3672 — the child now runs under an enforced heap and wall-clock budget.
+    // Previously an out-of-memory abort (SIGABRT, empty stdout) and a hung
+    // child were both indistinguishable from "no useful output"; the shared
+    // supervisor rejects with a typed `EslintGraphProbeFailure` naming which
+    // budget broke, so a breach can never be read as a compiler diagnostic.
+    tier1EntryCompile = runCompileProjectProbe({
+      entry,
+      options: { allowJs: true, target: "gc", platform: "node" },
+      heapLimitMb: TIER1_HEAP_LIMIT_MB,
+      timeoutMs: TIER1_WALL_CLOCK_BUDGET_MS,
+    }).then((outcome) => outcome.report);
   }
   return tier1EntryCompile;
 }
@@ -121,17 +108,39 @@ describe.skipIf(ESLINT_LINTER === null)(
   () => {
     /**
      * Tier 1a — run the real package-entry graph in the Node-host JS lane.
-     * #3654 restores the resolver layer, but the expanded graph does not yet
-     * complete inside this test's compile budget (#3672). The independent
-     * dynamic object-destructuring invariant was removed by #3656.
+     *
+     * #3672 un-skipped this rung. It had been `it.skip` on the belief that the
+     * graph "does not complete inside this test's compile budget"; re-measured
+     * on 2026-07-31 against `origin/main` that is false — the package entry
+     * completes in **10.8 s at 628 MB peak RSS** under a 2048 MB cap and emits
+     * a structured report. Every rung of this file being skipped meant there
+     * was *zero* automated signal on ESLint compilation, which is worse than a
+     * red rung.
+     *
+     * Measured frontier: exactly two diagnostics, one of which is the hard
+     * codegen abort for `LazyLoadingRuleMap extends Map` (reduced to a six-line
+     * fixture in `tests/issue-3672.test.ts`). Resolution is otherwise complete
+     * — #3654 landed and there is not a single `Cannot find module` left on
+     * this entry. #3656's dynamic-destructuring invariant is gone too.
      */
-    it.skip('Tier 1a — package entry reaches the #3672 frontier for `import { Linter } from "eslint"`', async () => {
+    it('Tier 1a — package entry reaches the #3672 frontier for `import { Linter } from "eslint"`', async () => {
       const r = await compileTier1Entry();
       const diagnostics = r.errors.map((error) => error.message).join("\n");
       expect(r.success).toBe(false);
       expect(r.binaryByteLength).toBe(0);
       expect(diagnostics).not.toContain("Cannot find module");
       expect(diagnostics).not.toContain("object destructuring source must be IrType.object or IrType.class");
+
+      // Pin the frontier: one hard codegen abort, and it is the builtin-subclass
+      // inherited-alias defect. When that is fixed this rung goes red on
+      // purpose — advance the ladder, do not relax the assertion.
+      const codegenErrors = r.errors.filter((error) => error.message.startsWith("Codegen error:"));
+      expect(
+        codegenErrors.map((error) => error.message),
+        "the ESLint package-entry frontier moved — advance this rung",
+      ).toHaveLength(1);
+      expect(codegenErrors[0]?.message).toContain("inherited class callable");
+      expect(codegenErrors[0]?.message).toContain("has no exact defined function for handle");
     }, 180_000);
 
     /**

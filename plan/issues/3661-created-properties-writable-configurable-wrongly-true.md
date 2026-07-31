@@ -4,7 +4,7 @@ title: "Created properties report writable/configurable TRUE when the spec requi
 status: ready
 sprint: current
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-31
 priority: high
 horizon: m
 complexity: M
@@ -16,7 +16,7 @@ es_edition: es5
 goal: es5
 related: [3647, 3662, 3663, 739, 3603]
 origin: "2026-07-26 lead measurement of the #3603 host de-inflation regression set (merge_group run 30179758665), decomposed per failed assertion."
-assignee: ttraenkler/opus-loop-d
+assignee: ttraenkler/dev-es5-descriptors
 # (#3102 ratchet) The freeze/seal slice adds `_clampFrozenDescriptor` — a small
 # read-side clamp that must live beside `_readOwnDescriptor` in runtime.ts,
 # whose return sites it wraps. There is no descriptor-MOP subsystem module to
@@ -149,6 +149,90 @@ reverting (exactly 3 tests go red, sentinel + guards stay green).
 
 **This is 6 % of the cluster and must not be quoted as its mechanism.** The
 remaining ~94 % is the enforcement question above, still open.
+
+## MEASURED 2026-07-31 (dev-es5-descriptors) — the discriminator is the VALUE CARRIER + script/module mode, not strictness and not creation defaults
+
+Probes in `.tmp/probe-3661{b..f}.mjs`, all certified non-vacuous (999 sentinel
+surfaced; positive control `writable: true` accepts its write; ≥2 distinct
+expected values; **fresh receiver per case**). V8 reference computed per case at
+runtime, never hardcoded.
+
+### 1. Re-measured the real population (authoritative harness, not a probe shape)
+
+Ran 24 `built-ins/Object/defineProperty/*` files that use `propertyHelper` +
+`writable: false` through `runTest262File` (the same path CI uses):
+**16 pass / 8 fail (denominator 24).** Every one of the 8 failures is an
+**Array receiver** — `length` or index `'0'`. **All plain-object files pass.**
+So this bucket is Array-shaped; a plain-object repro is NOT the population.
+
+### 2. "Creation defaults" (mechanism 1) is ruled out — now including the case the earlier probe never covered
+
+The earlier ruling-out was sound but its evidence was narrower than stated: it
+always passed `writable: false` **explicitly**, while the failing population
+files (`15.2.3.6-4-201/190/204/214`) **OMIT** the attribute, which §6.2.5.6
+CompletePropertyDescriptor must default to `false`. That untested combination
+was the obvious hole. **Measured it: there is no defect there.** Encoded
+`100*w + 10*c + e`, wasm == V8 on all of: plain/Array × index/named ×
+omit-all/omit-writable/explicit (9/9 match). `gOPD` read-back is correct.
+
+### 3. What IS broken: [[Set]]/[[Delete]] rejection, and it fails in OPPOSITE directions per carrier
+
+| case | V8 (sloppy) | wasm | defect |
+| --- | --- | --- | --- |
+| plain object, write to non-writable | silent no-op | **value LANDS** | under-enforcement |
+| Array (index or named), write to non-writable | silent no-op | **throws TypeError** | over-enforcement |
+| plain object, `delete` of non-configurable | silent `false` | **throws TypeError** | over-enforcement |
+
+Bookkeeping is right in every case (after a rejected write the value is
+unchanged; after a rejected delete the property is still present) — so this is
+**not** a storage or read-back defect. It is the rejection path only.
+
+### 4. Strictness is NOT the axis — the earlier "next axis to test" is refuted
+
+The predicted reconciling axis was "`isWritable` does a NON-STRICT write". It is
+**wrong**: adding `"use strict"` changes **neither** result. Named writes land
+in both modes; computed writes throw in both modes. The compiler selects
+`__extern_set_strict` vs `__extern_set` for **named** writes
+(`member-set-dispatch.ts:90`) but **hardcodes the strict setter on the dynamic /
+computed paths** (`dyn-read.ts:831,1046,1507`), so a sloppy computed write can
+never be silent.
+
+### 5. The carrier — reproducible, and the sharpest clue for the next agent
+
+The same source-level write changes behaviour depending on **downstream code**:
+
+```ts
+const o: any = {};
+Object.defineProperty(o, "p", { value: 1, writable: false, ... });
+o.p = 42;
+return o.p;                                    // → 42   (write LANDED)
+// …but append a trailing gOPD call and the SAME write throws instead:
+return Object.getOwnPropertyDescriptor(o, "p").value;   // → TypeError
+```
+
+Adding the `gOPD` forces the object to materialise to the host, which switches
+the write from the struct/vec field lane to the host lane. **No carrier
+implements the spec's sloppy contract** (silent no-op, value retained).
+
+**Root cause statement:** rejection semantics for a non-writable data property
+are chosen by *value carrier*, not by the spec — the struct lane materialises
+the rejected value, the host lane throws unconditionally.
+
+### ⚠️ Correction to the record, and a warning for the next agent
+
+`runtime.ts:4823-4832`'s sloppy catch is **NOT** the site: patching it to
+silently return on a non-writable descriptor changed **nothing** in any probe —
+the failing named write never reaches that catch. That edit was reverted rather
+than shipped unexercised. **Do not re-attempt it.** Name the site from a `wat`
+dump of the failing write before editing source.
+
+### Not yet done
+
+No fix landed for the remaining ~94 %. The three defects in §3 are separable;
+the Array over-enforcement is the one the measured population actually hits.
+**Scope caution:** this is the same `[[Set]]` surface as **#3475** (writes
+wrongly *dropped* — the opposite direction), which is claimed by
+`ttraenkler/senior-dev`. Coordinate before editing that path.
 
 ## Where it lives
 

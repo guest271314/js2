@@ -1,7 +1,8 @@
 ---
 id: 3762
 title: "ES5 String.prototype.replace searchValue/replaceValue coercion order"
-status: in-progress
+status: done
+completed: 2026-07-28
 created: 2026-07-28
 priority: high
 task_type: bugfix

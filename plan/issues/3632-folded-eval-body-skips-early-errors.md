@@ -1,7 +1,8 @@
 ---
 id: 3632
 title: "folded eval body skips Script early errors — strict-mode reserved words and stray break/continue silently compile"
-status: ready
+status: done
+completed: 2026-07-28
 sprint: current
 goal: es5
 priority: medium

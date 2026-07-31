@@ -1,7 +1,8 @@
 ---
 id: 3791
 title: "IR standalone native RegExp test bridge"
-status: in-progress
+status: done
+completed: 2026-07-30
 sprint: current
 created: 2026-07-30
 updated: 2026-07-30

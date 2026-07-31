@@ -1,7 +1,8 @@
 ---
 id: 3673
 title: "Compiled Acorn self-parse is 1,300–1,500× slower than node-acorn"
-status: in-progress
+status: done
+completed: 2026-07-27
 assignee: claude/acorn-performance
 created: 2026-07-26
 updated: 2026-07-27

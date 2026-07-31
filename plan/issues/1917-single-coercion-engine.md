@@ -1,7 +1,8 @@
 ---
 id: 1917
 title: "One coercion engine — four divergent coercion matrices disagree about lossiness"
-status: in-progress
+status: done
+completed: 2026-07-24
 assignee: ttraenkler/sdev-1917
 sprint: current
 model: opus
