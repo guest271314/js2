@@ -161,6 +161,62 @@ node scripts/claim-issue.mjs --verify-id <id> [--by <agent>]
 
 Call it immediately before writing `plan/issues/<id>-<slug>.md`, and after any renumber.
 
+### BLOCKING requirement — THE ID SCAN MUST FAIL LOUD
+
+State it as a property, not as a banned API. The narrow version ("don't use the contents
+API") invites the next implementer to swap endpoints and keep the swallow.
+
+> **A scan that cannot report its own failure is a placebo, not a verifier.** An id
+> universe that is silently a _floor_ rather than the truth must never be reported as a
+> clean result — it converts a collision CI would have caught into one that looks
+> pre-cleared, while the tool reports that it checked. Strictly worse than no verifier.
+
+Two independent routes into that state were found on 2026-07-31, which is why this is a
+property and not a rule about one call:
+
+1. **Truncation.** `gh api "repos/…/contents/plan/issues?ref=main"` caps at **1000**
+   entries and says nothing; `plan/issues/` holds ~3,364. It returned **zero** `39xx`
+   files. Caught only by a **positive control** — the same call returned zero `38xx` files
+   while `3880`/`3884`/`3886` demonstrably exist on `main`. Use the tree API, which
+   reports its own completeness:
+
+   ```bash
+   gh api "repos/loopdive/js2/git/trees/main:plan/issues" --jq '{n: (.tree|length), truncated}'
+   # -> { "n": 3364, "truncated": false }
+   ```
+
+   **Assert BOTH halves: `truncated == false` AND a floored row count.** A bare
+   `truncated == false` passes happily on an empty tree from a bad ref — truncation is one
+   way to under-report, an empty or short read is another, and both present identically as
+   "no ids taken".
+
+2. **Swallowed failure.** `claim-issue.mjs` never used the contents API — it reads main
+   with `ls-tree`. But `idsFromMain()` returns an **empty set** when that read fails, so a
+   failed main scan reports _every id free_. Same shape, different route, and the more
+   dangerous of the two: with main contributing nothing, `contiguousMax()` is computed from
+   open PRs ∪ reservations alone and can hand out a drastically low, long-taken id.
+
+Same family as `pr_scan: "degraded"` in #3880 — and note that #3880 fixed this property for
+the **assignment ref** (tri-state reads, `die` on a failed read) while leaving the **main
+scan** on the old swallow. Fixing one read path is not fixing the property.
+
+### A live case that needs no scan at all
+
+**PR #3903 adds a `3916-standalone-gen-rest-pattern-spill` issue file while `main` already
+carries `3916-array-from-nonvec-source-map-closure-illegal-cast`** — two different issues,
+one id, found 2026-07-31.
+
+(Written without the `plan/issues/…md` path prefix on purpose: the #1616 link gate resolves
+any such string against **`main`**, and the incoming file is only in an open PR — so citing
+it accurately by full path fails `quality`. That is a third flavour of the same trap, after
+a glob that matches nothing and a glob inside the warning about globs. See the
+`pre-commit-checklist` note.)
+
+Note what makes this the strongest argument for the guard rail: **the incumbent is already
+on `main`.** No open-PR scan, no reservation ref, no network race — a single
+`git ls-tree origin/main plan/issues/` at write time catches it. It is the cheapest case
+there is, and it still got through, because nothing checks at write time.
+
 **Also re-check the earlier cases against the corrected diagnosis.** Cases 1-5 were all
 attributed to a faulty scan. Case 6 shows that attribution can be wrong, and cases 2 (the
 self-collision — "3589 twice", which smells like the same reserve-then-write-something-else
