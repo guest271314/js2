@@ -1,6 +1,6 @@
 ---
 id: 3875
-title: "Standalone: built-in prototypes have no reflectable own-property surface (Array.prototype is the exception)"
+title: "Standalone: reflection routes disagree on built-in prototype properties — hasOwnProperty false and getOwnPropertyNames short while getOwnPropertyDescriptor is spec-exact"
 status: ready
 created: 2026-07-31
 priority: high
@@ -11,10 +11,10 @@ goal: standalone-mode
 es_edition: 5
 sprint: current
 horizon: m
-related: [3254, 2908, 1781]
+related: [3254, 2908, 1781, 3647]
 ---
 
-# #3875 — in standalone, built-in prototypes are functionally present but not modeled as objects with own properties
+# #3875 — three reflection routes, three different answers for the same property
 
 ## How it was found (the control property is the whole story)
 
@@ -44,19 +44,67 @@ three accessors.
 | CONTROL `({a:1}).hasOwnProperty('zz')` | false | false |
 | functional `" x ".trim()`, `/a/.exec("a")`, `[1].push(2)` | work | **all work** |
 
-Both controls are correct, so **`hasOwnProperty` itself is fine**. Every method
-works **functionally**. `getOwnPropertyDescriptor` returns `undefined` where host
-returns a real descriptor.
+Both controls are correct, so **`hasOwnProperty` itself is not broken in general**
+— it is correct on user objects. Every method works **functionally**.
 
-**Standalone's built-in prototypes are functionally present but carry no
-own-property surface to reflect over.**
+## ⚠️ CORRECTED — the fix direction is the OPPOSITE of the first reading
 
-## The actionable part
+An independent verification (decoding `10*hasOwnProperty + (gOPD !== undefined)`,
+standalone reads **`1`**, not `0`) inverted the original claim:
 
-**`Array.prototype` IS reflectable.** So this is not "standalone cannot do this" —
-one built-in prototype already registers its own properties and the others do not.
-**Find how `Array.prototype` does it and generalize that**, rather than inventing a
-mechanism. That likely makes this far cheaper than the symptom count suggests.
+| route | built-in prototype, standalone |
+|---|---|
+| `getOwnPropertyDescriptor` | **returns a REAL descriptor — spec-exact, identical to host** ✓ |
+| `hasOwnProperty` | **returns `false`** ✗ |
+| `getOwnPropertyNames` | **6 keys vs host's 40, omits `push`** ✗ |
+
+**This is NOT "built-in prototypes have no reflection surface."** It is **multiple
+reflection routes contradicting each other on the same property** — the same shape
+as the **#3647** `propertyIsEnumerable`-vs-`gOPD` trap.
+
+**Consequence for implementation: a fix aimed at `getOwnPropertyDescriptor` would
+land on a route that already works and flip nothing.** The broken routes are
+`hasOwnProperty` and `getOwnPropertyNames`.
+
+Anyone bucketing rows by "gOPD returns undefined" will get a signal that **does not
+reproduce** — classify on `hasOwnProperty` instead.
+
+## ⚠️ This is TWO separable defects — and only one has a working reference
+
+The first framing here said "`Array.prototype` works, so replicate it." That was
+built on a **single data point** (`push`) and is **half wrong**. Probed properly,
+both lanes, same file:
+
+```
+host:       push/pop/slice/map/indexOf/join = all true | length=false | bogus=false
+            desc.push = value:function, enum:false, writ:true, conf:true
+            getOwnPropertyNames(Array.prototype).length = 40, includes push = TRUE
+
+standalone: push/pop/slice/map/indexOf/join = all true | length=false | bogus=false
+            desc.push = value:function, enum:false, writ:true, conf:true   <- IDENTICAL to host
+            getOwnPropertyNames(Array.prototype).length = 6,  includes push = FALSE
+```
+
+**What survives:** not a `push` fluke — six methods reflect, negative cases
+(`length`, a bogus key) are correctly false, and the descriptor is **spec-exact and
+identical to host**. The lookup mechanism genuinely exists and is genuinely correct.
+
+**What breaks the story:** `getOwnPropertyNames(Array.prototype)` returns **6** vs
+host's **40**, and **omits `push`** — the very property whose full descriptor it had
+just returned correctly. **The two reflection paths disagree with each other inside
+the one built-in that supposedly works.**
+
+### Defect 1 — lookup (`hasOwnProperty` / `getOwnPropertyDescriptor`)
+
+Correct for `Array.prototype`, **absent** for RegExp / String / Object / Number /
+Boolean prototypes. **Bounded** — "replicate the Array registration" is a fair
+routing call here, and the reference implementation is real.
+
+### Defect 2 — own-key enumeration (`getOwnPropertyNames` and friends)
+
+**Broken even for `Array.prototype`.** No in-repo reference exists. **Copying Array
+wholesale would propagate this bug rather than fix it.** Unscoped; needs its own
+sizing before anyone commits to it.
 
 ## Sizing — deliberately UNMEASURED
 
@@ -93,9 +141,10 @@ Structural, unrelated to reflection, not yet filed.
 
 ## Acceptance
 
-- `X.prototype.hasOwnProperty(m)` and `Object.getOwnPropertyDescriptor(X.prototype, m)`
-  agree between lanes for `RegExp`, `String`, `Object`, `Number`, `Boolean` — as they
-  already do for `Array`.
+- `hasOwnProperty`, `getOwnPropertyDescriptor` and `getOwnPropertyNames` **agree with
+  each other** on built-in prototype properties, and match host, for `RegExp`,
+  `String`, `Object`, `Number`, `Boolean` **and `Array`**.
+- Do NOT "fix" `getOwnPropertyDescriptor` — it is already correct.
 - Functional behaviour unchanged (methods already work; do not regress them).
 - Twin-control per-row measurement of what actually flips, with all three
   denominators.
