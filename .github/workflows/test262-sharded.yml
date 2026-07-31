@@ -1687,9 +1687,11 @@ jobs:
             echo "::warning::#1081/#3467 base resolution errored (non-fatal); keeping latest-main baseline."
 
       # #1956 — exact predecessor-group baseline for merge_group runs. The
-      # queue builds groups incrementally: this group's head is a merge
-      # commit whose FIRST PARENT is the predecessor group's head (or the
-      # main tip when this PR is the queue head). If a recent merge_group run
+      # queue builds groups incrementally, so the commit this group was built
+      # ON is the predecessor group's head (or the main tip when this PR is
+      # the queue head) — `github.event.merge_group.base_sha`, which equals
+      # HEAD^1 only for a single-entry group (see #3914 note in the step body).
+      # If a recent merge_group run
       # published `test262-group-<HEAD^1>` (see merge-report), diffing
       # against it isolates ONLY this PR's delta — no cross-PR drift and no
       # ALLGREEN masking inside multi-entry queue windows, which is the
@@ -1705,12 +1707,35 @@ jobs:
         if: env.HOST_RAN == 'true' && github.event_name == 'merge_group'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -uo pipefail
-          PRED=$(git rev-parse HEAD^1 2>/dev/null || echo "")
+          # #3914 — prefer the event's own `base_sha` over `HEAD^1`.
+          #
+          # For a SINGLE-entry group these are the same commit, so this is a
+          # no-op on today's serial queue. They diverge the moment the queue
+          # batches (`min_entries_to_merge > 1`): the queue stacks one merge
+          # commit per entry, so for a 3-PR group HEAD^1 is the SECOND PR's
+          # merge commit *inside this same group* — a commit that never
+          # published a `test262-group-<sha>` artifact, because only the group
+          # HEAD publishes one. The lookup would miss every time and silently
+          # fall back to the latest-main baseline, i.e. exactly the cross-PR
+          # drift path (a)-resolution exists to avoid.
+          #
+          # `base_sha` is the predecessor GROUP's head regardless of how many
+          # entries this group holds, so it keeps the diff exact. Note this
+          # isolates the whole BATCH's delta, not one PR's — batching trades
+          # per-PR attribution for throughput by design; auto-park parks every
+          # member of a failed group so attribution happens by re-enqueueing
+          # them singly.
+          PRED="${MG_BASE_SHA:-}"
+          if [ -z "$PRED" ]; then
+            PRED=$(git rev-parse HEAD^1 2>/dev/null || echo "")
+            [ -n "$PRED" ] && echo "::notice::merge_group.base_sha unset — falling back to HEAD^1 ($PRED)."
+          fi
           if [ -z "$PRED" ]; then
             echo "pred_path=none" >> "$GITHUB_OUTPUT"
-            echo "No first parent resolvable — keeping baseline from (b)/(c)."
+            echo "No predecessor resolvable (base_sha unset, no first parent) — keeping baseline from (b)/(c)."
             exit 0
           fi
           ART_NAME="test262-group-${PRED}"
