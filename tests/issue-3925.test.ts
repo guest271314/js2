@@ -1,5 +1,5 @@
 /**
- * #3916 — a REST element inside a generator's binding-pattern parameter
+ * #3925 — a REST element inside a generator's binding-pattern parameter
  * (`*m([a, ...r])`, `*m({a, ...r})`) must route to the native standalone
  * lowering instead of the eager host-buffer path.
  *
@@ -9,7 +9,7 @@
  * checks are (a) the import set of a bare standalone compile and (b)
  * instantiating with NO import object. Both are asserted below.
  *
- * A HOST-FREE MODULE IS NOT ENOUGH, EITHER. The pre-#3916 `walk` skipped rest
+ * A HOST-FREE MODULE IS NOT ENOUGH, EITHER. The pre-#3925 `walk` skipped rest
  * elements without descending, so merely lifting the bail would leave the rest
  * name (and every name bound under a nested rest pattern) with no spill field:
  * the resume function never rehydrates it and reads the local's inert default.
@@ -74,7 +74,7 @@ async function expectRejected(src: string): Promise<void> {
   expect(ok, "expected this rest shape to be rejected").toBe(false);
 }
 
-describe("#3916 rest-in-binding-pattern generator params route native in standalone", () => {
+describe("#3925 rest-in-binding-pattern generator params route native in standalone", () => {
   // ── ARRAY REST ─────────────────────────────────────────────────────────
   it("ary-ptrn-rest-id — [...x], x.length", async () => {
     expect(
@@ -124,7 +124,7 @@ describe("#3916 rest-in-binding-pattern generator params route native in standal
   });
 
   // ── NESTED PATTERNS UNDER THE REST ─────────────────────────────────────
-  // These bind names the pre-#3916 `walk` never even visited.
+  // These bind names the pre-#3925 `walk` never even visited.
   it("ary-ptrn-rest-ary-elem — [...[x, y, z]]", async () => {
     expect(
       await runHostFree(

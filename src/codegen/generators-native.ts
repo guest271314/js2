@@ -1329,7 +1329,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // bail to host so the candidate gate and registration agree (no
   // undefined-funcidx module).
   //
-  // (#3916) REST elements (`[a, ...r]` / `{a, ...r}`) are admitted, under a
+  // (#3925) REST elements (`[a, ...r]` / `{a, ...r}`) are admitted, under a
   // DIFFERENT typing rule than the non-rest elements below. A non-rest element's
   // factory local is allocated by `ensureBindingLocals` from
   // `resolveBindingElementType` and the emit site does not re-type it, so the
@@ -1344,7 +1344,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // binding spills at the WASM-BOUNDARY rep, `externref`: AST-only, and
   // reachable from every lane because `compileNativeGeneratorFunction` already
   // coerces the factory local into the spill type. Same lesson as the #3620
-  // note on the `param_*` fields below. Full argument: plan/issues/3916-*.md.
+  // note on the `param_*` fields below. Full argument: plan/issues/3925-*.md.
   //
   // Whole-param defaults (`[x] = []`) ARE admitted now: the emit site's
   // param-default machinery evaluates the initializer into the param local at
@@ -1365,7 +1365,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       for (const el of p.elements) {
         if (ts.isOmittedExpression(el)) continue;
         if (el.dotDotDotToken) {
-          // (#3916) An IDENTIFIER rest takes the boundary-rep rule below. A
+          // (#3925) An IDENTIFIER rest takes the boundary-rep rule below. A
           // nested pattern under it (`[...[a, b]]`, `[...{length}]`) binds its
           // OWN names via the ordinary `ensureBindingLocals` path, so it is
           // walked like any sub-pattern and keeps the checker rule. The pre-fix
