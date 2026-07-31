@@ -14,6 +14,8 @@ import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 import { addStringConstantGlobal, addUnionImports } from "./registry/imports.js";
 import { isSyntheticStructName } from "./emit-helpers.js";
+import type { PresenceSlot } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
+import { presenceSlotOf, presenceTestInstrs } from "./fnctor-presence-bits.js";
 import { UNDEF_F64_BITS } from "./value-tags.js";
 import { DATA_STRUCT_HOST_BRIDGE_ORDINAL, publishDataStructHostBridge } from "./data-struct-host-bridge.js";
 
@@ -60,20 +62,17 @@ export function emitStructFieldPresenceGetters(ctx: CodegenContext): void {
 
   const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$shas_type");
   for (const fieldName of trackedNames) {
-    const entries: { structTypeIdx: number; presenceFieldIdx?: number }[] = [];
+    const entries: { structTypeIdx: number; presenceSlot?: PresenceSlot }[] = [];
     for (const [structName, fields] of ctx.structFields) {
       if (isSyntheticStructName(structName)) continue;
       const structTypeIdx = ctx.structMap.get(structName);
       if (structTypeIdx === undefined) continue;
       const fieldIdx = fields.findIndex((field) => field?.name === fieldName);
       if (fieldIdx < 0) continue;
-      const field = fields[fieldIdx]!;
-      const presenceFieldIdx = field.presenceTracked
-        ? fields.findIndex((candidate) => candidate?.name === `$has_${fieldName}`)
-        : -1;
+      const presenceSlot = presenceSlotOf(fields, fieldName);
       entries.push({
         structTypeIdx,
-        ...(presenceFieldIdx >= 0 ? { presenceFieldIdx } : {}),
+        ...(presenceSlot ? { presenceSlot } : {}),
       });
     }
     if (entries.length === 0) continue;
@@ -82,11 +81,11 @@ export function emitStructFieldPresenceGetters(ctx: CodegenContext): void {
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i]!;
       const then: Instr[] =
-        entry.presenceFieldIdx !== undefined
+        entry.presenceSlot !== undefined
           ? [
               { op: "local.get", index: 1 },
               { op: "ref.cast", typeIdx: entry.structTypeIdx },
-              { op: "struct.get", typeIdx: entry.structTypeIdx, fieldIdx: entry.presenceFieldIdx },
+              ...presenceTestInstrs(entry.structTypeIdx, entry.presenceSlot),
             ]
           : [{ op: "i32.const", value: 1 }];
       dispatch = [
