@@ -20,8 +20,8 @@ genuinely ran (the `eslint` devDependency is present), so this is not a vacuous
 pass.
 
 Both issue files still say `status: ready`. **Not flipped here on purpose** —
-PR #3687 already edits `plan/issues/3656-*.md` and `plan/issues/3657-*.md`, so a
-competing flip conflicts. The tech lead is reconciling them separately.
+PR #3687 already edits both of those issue files, so a competing flip conflicts.
+The tech lead is reconciling them separately.
 
 The pre-dispatch gate returns **STOP on #3657** (it flags `2668-*` as an active
 overlap that references it). Moot given the work is merged, but honour it if
@@ -112,7 +112,8 @@ measured frontier.
   and its isolating control. 5 passed / 5 attempted / 0 skipped.
 - `tests/stress/eslint-tier1.test.ts` — Tier 1a un-skipped, child routed through
   the shared supervisor.
-- `plan/issues/3672-*.md` — full measurement record, `status: done`.
+- `plan/issues/3672-eslint-linter-resolved-graph-codegen-timeout.md` — full
+  measurement record, `status: done`.
 
 No `src/` change. `src/compile-profile.ts` deliberately **not** written — #3687
 already introduces it and `--cpu-prof` answered the question without it.
