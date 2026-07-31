@@ -2,9 +2,11 @@
 id: 3877
 slug: assigned-string-proto-method-this-coercion
 title: "Standalone: assigned String.prototype method on a non-string `this` returns null"
-status: ready
+status: wont-fix
+duplicate_of: 2742
 created: 2026-07-31
 updated: 2026-07-31
+completed: 2026-07-31
 priority: high
 horizon: l
 feasibility: medium
@@ -15,8 +17,35 @@ language_feature: this-coercion
 goal: standalone-mode
 sprint: current
 es_edition: es5
-related: [1781, 3254]
+related: [1781, 2742, 3254]
 ---
+
+> **DUPLICATE of #2742 — closed 2026-07-31. All measured content moved there.**
+>
+> #2742 ("String.prototype methods: ToString(this) generic-receiver coercion,
+> RequireObjectCoercible, and function `.length` own property") states this exact
+> defect and predates this issue by three days. Its `func-budget-allow` already
+> names `src/codegen/string-ops.ts::compileNativeStringMethodCall` — the same
+> code.
+>
+> **Why this was NOT kept as an "assigned-method sub-case".** The tempting split
+> is `obj.m = String.prototype.m; obj.m()` versus `String.prototype.m.call(obj)`.
+> The measurement rejects it: the per-method call helpers are **structurally
+> identical** between working and failing members (`call 120` member-lookup then
+> `call 171` invoke, same shape, opposite outcomes). Assigned-method vs `.call()`
+> is a **test-shape** distinction, not a defect axis — keeping a separate issue
+> would enshrine a split this issue's own evidence rejects.
+>
+> **How this duplicate came to exist**, recorded because the gap is reusable:
+> `pre-dispatch-gate.mjs` was run on a **freshly allocated id**, which can find
+> nothing _by construction_. It protects against id collision; it does **not**
+> protect against filing a new issue for a symptom family that already has one.
+> The rule — _search existing issues for the SYMPTOM before allocating an id, not
+> the id after allocating it_ — is filed on #3879 with this as the worked example.
+>
+> Not deleted: the id is spent, and a dangling reference is worse than a
+> tombstone. **#3887 / #3888 are unaffected** — "TypeError never raised" is a
+> different family from ToString coercion.
 
 # #3877 — `obj.m = String.prototype.m; obj.m()` on a non-string `this`
 

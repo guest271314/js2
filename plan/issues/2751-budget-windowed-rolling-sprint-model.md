@@ -157,3 +157,43 @@ best-fit claimable tasks. Rules realised:
 - Sibling to #2750 (process-doc consolidation); the CLAUDE.md edits here should be
   done in the same human-reviewable, one-small-PR-at-a-time spirit.
 - This issue dogfoods the model: it is itself tagged `sprint: current`.
+
+## Residual (2026-07-31): `--pick`'s "best-fit claimable tasks" are not claimable
+
+Filed here rather than under a new id — this is `--pick`'s own issue, and the
+acceptance box _"`horizon:` is a documented, validated field; `budget-status.mjs
+--pick` …"_ above is still open.
+
+`--pick` ranks by `priority` + `horizon` but does **not** filter on claim status,
+`task_type`, or `model`. It therefore recommends work the pre-dispatch gate then
+refuses. Measured — every one of the five XL entries it offered a **developer**:
+
+| id    | gate verdict | reason                                                           |
+| ----- | ------------ | ---------------------------------------------------------------- |
+| #2773 | —            | `[EPIC][ARCH]` + `model: fable` — out of a developer's lane      |
+| #2865 | **STOP**     | claimed by `ttraenkler/fable-2865`                               |
+| #2949 | **STOP**     | claimed by `ttraenkler/codex-ir-array-param` + 3 active overlaps |
+| #3029 | CAUTION      | `task_type: architecture`, `model: fable` — out of lane          |
+| #3030 | **STOP**     | active claimed overlap (#3520) + `task_type: architecture`       |
+
+**5 of 5 unusable.** This has a real cost: it misdirected a dispatch to #2949,
+which was already claimed by another lane.
+
+**The queue is healthy — this is a picker problem, not a dry queue.** Filtering
+`sprint: current` + `status: ready` and excluding `model: fable`,
+`task_type: architecture|epic`, and `[ARCH]`/`[EPIC]`/`[PO]`/`[SENIOR-DEV]`
+subject tags leaves **136** developer-claimable issues. "The picker recommends
+unclaimable work" reads very differently from "there is nothing to do", and only
+the first is true.
+
+**Suggested fix**, in order of value:
+
+1. Exclude issues with a live claim on the `issue-assignments` ref (`--pick`
+   already does network work; one `git show` of the claim ref covers it).
+2. Take a `--role` argument (default `developer`) and exclude
+   `model: fable`, `task_type: architecture|epic`, and foreign role tags.
+3. Failing both, print the gate verdict beside each suggestion so the caller sees
+   `STOP` before claiming.
+
+Until then, **always run `pre-dispatch-gate.mjs <id>` on a `--pick` suggestion
+before claiming it** — the picker's confidence is not evidence.
