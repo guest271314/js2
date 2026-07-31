@@ -18,7 +18,6 @@ const EXPECTED_NAMES = [
   "jest",
   "styled-components",
   "moment",
-  "crypto",
   "stylelint",
   "three",
   "lit",

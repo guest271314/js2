@@ -10,7 +10,7 @@ reasoning_effort: max
 task_type: perf
 area: codegen
 goal: value-rep
-sprint: Backlog
+sprint: current
 related: [3673, 1946, 1947, 1584]
 loc-budget-allow:
   - src/codegen/fnctor-escape-gate.ts
