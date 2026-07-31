@@ -1,10 +1,12 @@
 ---
 id: 3647
 title: "Object.prototype.propertyIsEnumerable returns true for a non-enumerable class prototype method, contradicting getOwnPropertyDescriptor().enumerable === false"
-status: ready
+status: done
+completed: 2026-07-31
+assignee: ttraenkler/dev-enumerable
 sprint: current
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-31
 priority: high
 horizon: m
 feasibility: medium
@@ -14,31 +16,198 @@ language_feature: property-reflection
 goal: core-semantics
 related: [3603, 3646, 2984, 3479]
 origin: "cohort tracker for failures exposed by #3603 S1 host de-inflation (PR #3635)"
+# (#3647) The defect IS in `_wrapForHost`'s getOwnPropertyDescriptor trap, which
+# lives in the runtime god-file — the proxy trap is the ECMAScript
+# `[[GetOwnProperty]]` the engine calls, so there is nowhere else this bit can
+# be corrected. The change is one expression plus the comment recording why the
+# two obvious `propertyIsEnumerable` sites are NOT on this path, which is the
+# thing that cost the previous attempt its cycle.
+loc-budget-allow:
+  - src/runtime.ts
+func-budget-allow:
+  - src/runtime.ts::_wrapForHost
 ---
 
 # #3647 — `propertyIsEnumerable` contradicts `getOwnPropertyDescriptor().enumerable`
 
-> ## ⚠ Claim status: the `issue-assignments` record is STALE — this issue is UNCLAIMED and AVAILABLE
+## RESOLVED 2026-07-31 — root cause was in the host proxy, not in any `propertyIsEnumerable` code
+
+**Fix:** one expression in `_wrapForHost`'s `getOwnPropertyDescriptor` trap
+(`src/runtime.ts`, the generic tail of the trap). Tests: `tests/issue-3647.test.ts`.
+
+### The dispatch question the previous diagnosis left open, answered
+
+`C.prototype` **is a WasmGC struct** on host (`_isWasmStruct` → true), and the
+borrowed call reaches **neither** of the two localized dispatch sites. Measured
+with a positive-controlled instrument (a log at the top of `resolveImport`
+fired on the first import — `structuredClone` — proving the channel worked,
+while **no import whose intent mentions `numerable` was ever resolved**):
+
+```
+[INSTR] __proto_method_call Object.propertyIsEnumerable args=["m"] isStruct=true wrapped=true ret=true
+```
+
+`Object.prototype.propertyIsEnumerable.call(C.prototype,"m")` is dispatched by
+**`__proto_method_call`**, which `_wrapForHost`-wraps the receiver in the
+live-mirror **Proxy** and invokes the **engine's own**
+`Object.prototype.propertyIsEnumerable`. §20.1.3.4 therefore reads
+`[[GetOwnProperty]]` — the proxy's `getOwnPropertyDescriptor` trap — and that
+trap hardcoded `enumerable: true` for every key without a sidecar flags entry,
+class prototype members included.
+
+`_readOwnDescriptor` arm 2a (#1364a) had returned `enumerable: false` for those
+same names all along, and the trap's **static**-method arm already deferred to
+it (#3479). Only the **prototype**-method case fell through. That asymmetry _is_
+the filed self-inconsistency.
+
+### Correction to the previous diagnosis (please don't inherit the bad inference)
+
+The earlier note reasoned that because reordering
+`_wasmStructPropertyIsEnumerable`'s `if (sc && prop in sc) return 1`
+short-circuit didn't move the probe, "the receiver is evidently not taking that
+branch". The observation was right; the inference was too narrow. **The function
+is not on this path at all** — nor are `Object_propertyIsEnumerable`
+(`runtime.ts:12628`) or `__propertyIsEnumerable` (`:12759`). No edit to any of
+them could ever have moved this probe. The sidecar short-circuit remains a real
+latent bug worth its own issue and its own evidence.
+
+### Measured (fix in place)
+
+Harness: `runTest262File`, both lanes, controls that must hold under any spec
+version (`pIE(plain own)===true`, `pIE(absent)===false`). Base-4 probe codes:
+
+| shape                                       | host before | host after | standalone before | standalone after |
+| ------------------------------------------- | ----------- | ---------- | ----------------- | ---------------- |
+| inline `Object.prototype.pIE.call(C.p,"m")` | **true** ✗  | false ✓    | false ✓           | false ✓          |
+| variable-extracted `f.call(C.p,"m")`        | **true** ✗  | false ✓    | false ✓           | false ✓          |
+| uncurried `call.bind(...)` (propertyHelper) | **true** ✗  | false ✓    | false ✓           | false ✓          |
+| direct `C.prototype.pIE("m")`               | false ✓     | false ✓    | false ✓           | false ✓          |
+
+Whole-probe codes: host `1365 → 2457` (all 6 observations correct);
+standalone `2473 → 2473` and `2729 → 2729` — **byte-identical, structurally
+untouched**, which was the standing requirement.
+
+### Real-corpus attribution, decomposed (NOT a promised pass delta)
+
+12 baseline rows carrying `descriptor should not be enumerable`, host lane:
+**0/12 → 2/12 pass.** The honest decomposition of the other 10:
+
+- **4 class/elements rows moved PAST the enumerable assertion** onto a _later,
+  different_ one (`obj['a'] descriptor value should be undefined`,
+  `obj['b'] descriptor should be writable`). See "UNMASKED defect" below — this
+  is a finding with its own identity, not a shortfall of this fix.
+- **6 rows unmoved**: `Object/defineProperties/15.2.3.7-6-a-*`,
+  `Object/defineProperty/15.2.3.6-4-*`, `arguments-object/mapped/*`,
+  `Array/prop-desc.js`. These are `defineProperty`/mapped-arguments/global
+  receivers travelling the `scFlags` sidecar path this change does not touch.
+
+The full signature spans **957 baseline rows** (47,837 host records, baseline
+`20260731-061403`). That is a **ceiling, not an expectation**: the sample says
+class-prototype-method rows are addressed, while the `defineProperty` and
+mapped-`arguments` families need separate work. Each row must still pass
+everything else it asserts.
+
+### Regression guard
+
+60 baseline-**passing** rows sampled across `class/`, `Object/assign`,
+`Object/keys`, `Object/entries|values`, `getOwnPropertyDescriptor|Names`,
+object-spread and for-in: **59/60 pass**. The single failure
+(`built-ins/Object/keys/name.js`) was attributed by **kill-switch removal** —
+it fails identically with the fix reverted on stock `origin/main`, so it is
+pre-existing baseline drift, not a regression from this change.
+
+`tests/issue-3647.test.ts` (19 rows) was kill-switched: **10 fail with the fix
+reverted**, and the 9 that stay green are exactly the controls, the
+already-correct direct form, the over-fire guards and the standalone rows.
+
+**Full `tests/equivalence/` suite (213 files, 1,646 rows), run on BOTH trees.**
+With the fix and with `src/runtime.ts` reverted to `origin/main`: `12 failed |
+201 passed` files, `32 failed | 1611 passed | 3 todo` rows — identical. Then the
+12 failing files were re-run with the fix restored and the failing **test-name
+sets diffed**: `IDENTICAL FAILURE SETS`. So the attribution is at set level, not
+merely matching counts (matching counts alone could mask a swap). **Zero of the
+32 is attributable to this change**; they are pre-existing on `origin/main`
+(mostly `standalone`/`standalone-O` coercion rows failing `unreachable`).
+
+### UNMASKED defect — class FIELD descriptors on the instance (needs an id)
+
+Fixing `m` lets `verifyProperty` proceed to keys it previously never reached,
+which **exposes** a second, independent defect. In
+`class/elements/same-line-gen-computed-names.js` the sequence is
+
+```js
+verifyProperty(C.prototype, "m", { enumerable: false, configurable: true, writable: true }); // now passes
+verifyProperty(c, "b", { value: 42, enumerable: true, writable: true, configurable: true }); // now REACHED, fails
+```
+
+with `obj['b'] descriptor should be writable`, and in the `literal-names`
+variant `obj['a'] descriptor value should be undefined`. `b`/`a` are class
+**fields** read off the **instance**, not the prototype — a different receiver,
+a different code path, and nothing this change touches. It was invisible while
+`m` aborted the test first.
+
+This is the #3468 F1 pattern again: an honest fix **exposes** the next cohort
+rather than banking it. Recorded here with its own identity so it is not read
+as "the fix only got 2 of 12", and so the next implementer starts from the
+instance-field descriptor path, not from `propertyIsEnumerable`.
+
+### Adjacent findings — routed, deliberately NOT folded in
+
+- Standalone `hasOwnProperty` false for an existing class method → **#3875**.
+
+- **#3646 — `gOPD(C.prototype,"m")` trapping with `illegal cast in
+  __module_init`: NOT REPRODUCED in this work's harness.** This is a *harness
+  difference to state*, not a contradiction to resolve by picking a winner. Two
+  agents, two apparatus, one saw a trap and one did not — so both observations
+  are recorded with their apparatus attached:
+  - #3646/the earlier probe: bare `compile()` + `buildImports` → trap.
+  - **This work**: `runTest262File` (both lanes) for the corpus rows, and
+    `compile()` + `buildImports` **plus `setInstance` + `__module_init`** for
+    `tests/issue-3647.test.ts` → **no trap**; the gOPD-agreement row passes on
+    host. The `setInstance` wiring is a real behavioural difference (without it
+    the runtime has no exports record and `_wrapForHost` sees an empty field
+    set), so it is a plausible source of the divergence and worth checking
+    first on #3646.
+
+- **NEW, standalone-only defect → filed as #3895.** (`--allocate` looked like it
+  had failed twice — a Node crash dump, then a >600 s timeout — but the second
+  invocation had in fact reserved the id in the background. Verified by reading
+  `origin/issue-assignments:3895.json` (`status: reserved`), **not** by trusting
+  an exit code. No id was burned.) Summary, with the detail in
+  `plan/issues/3895-standalone-variable-extracted-borrowed-propertyisenumerable.md`:
+
+  > **Standalone: the variable-extracted borrowed `propertyIsEnumerable`
+  > returns `false` for a plainly enumerable own property.**
+  > `var f = Object.prototype.propertyIsEnumerable; f.call({a:1}, "a")` yields
+  > **false** in standalone; spec requires `true`. Measured via
+  > `runTest262File`, standalone lane, probe code `2473` (see probe3 table
+  > above) — the **inline** `Object.prototype.propertyIsEnumerable.call(o,"a")`
+  > and the **uncurried** `call.bind` forms both answer `true` correctly on the
+  > same run, so this is specific to the variable-extracted shape.
+  > **Root cause (located):** the borrowed-call synthesis in
+  > `src/codegen/expressions/calls.ts` (the `ctx.standalone && …` arm, ~:6962)
+  > matches only an *inline* member chain. With the method extracted to a
+  > variable the receiver never reaches `compilePropertyIntrospection`, so the
+  > call lands on the wasm-native `__propertyIsEnumerable`
+  > (`src/codegen/object-runtime.ts:3081`), whose first act is
+  > `ref.test $Object` — a closed compiler struct like `{a:1}` fails that test
+  > and the helper returns `0`. Host is unaffected (it routes through
+  > `__proto_method_call`).
+  > **Not a regression from this PR** — the same code was measured before the
+  > change (probe3 standalone `2473` both before and after).
+> **Claim banner (from the handoff commit) — now RESOLVED, kept for the record.**
+> The `issue-assignments` entry had gone stale at `ttraenkler/dev-es5-coercion`
+> because the release tooling could not execute (**#3880** — five failures on
+> 2026-07-31 across `claim`, `--allocate` and `--release`), and the predecessor
+> correctly declined to hand-edit a shared ref. The issue was subsequently
+> force-claimed by `ttraenkler/dev-enumerable` **after the predecessor confirmed
+> stand-down in writing**, and the record now reads that assignee on branch
+> `issue-3647-property-is-enumerable`. Nothing here is available to take.
 >
-> The record reads `assignee: ttraenkler/dev-es5-coercion`, `status: in-progress`.
-> The work was handed off deliberately; the release tooling could not execute it
-> (**#3880** — five failures on 2026-07-31 across `claim`, `--allocate` and
-> `--release`). The record was **not** hand-edited: rewriting a shared ref other
-> lanes read trades a bookkeeping problem for a corruption risk.
->
-> **Take this issue freely.** Diagnosis is complete and nothing is half-implemented
-> — see the re-measurement below and the "next step is one fact" note.
->
-> ## ⚠ THE DEFECT IS HOST-LANE ONLY — standalone already answers `false` correctly
->
-> Read this before writing a fix. A change that "corrects" `propertyIsEnumerable`
-> globally would **regress the lane that is already right**. Verified both lanes,
-> controls passing:
->
-> ```
-> host:        pIE=true   <- the defect
-> standalone:  pIE=false  <- already correct, do not touch
-> ```
+> **The "HOST-LANE ONLY — do not touch standalone" warning was correct and was
+> honoured**: the shipped fix touches only the host-side `_wrapForHost` proxy
+> trap, and the standalone probe codes are byte-identical before and after
+> (`2473 → 2473`, `2729 → 2729`).
 
 > **Cohort tracker.** One of the two failure cohorts EXPOSED (not caused) by
 > #3603 S1's host-lane de-inflation. Per the #3468 F1 landing recipe, every

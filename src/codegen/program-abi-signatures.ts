@@ -50,6 +50,10 @@ function canonicalProgramAbiField(field: FieldDef): object {
     mutable: field.mutable,
     ...(field.jsBoolean === true ? { jsBoolean: true as const } : {}),
     ...(field.presenceTracked === true ? { presenceTracked: true as const } : {}),
+    // (#3780) The presence BIT is part of the physical layout — two modules
+    // that agree on which fields are tracked but disagree on bit assignment do
+    // not share an ABI.
+    ...(field.presenceBit === undefined ? {} : { presenceBit: field.presenceBit }),
   };
 }
 

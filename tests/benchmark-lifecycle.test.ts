@@ -18,6 +18,7 @@ import {
   compareSnapshots,
   packageSnapshot,
   runCli,
+  validateInternalSuite,
   validateSnapshot,
 } from "../scripts/benchmark-lifecycle.mjs";
 
@@ -543,5 +544,56 @@ describe("benchmark artifact lifecycle", () => {
     expect(promotion).toContain("- name: Checkout trusted measured main revision");
     expect(promotion).toContain("ref: ${{ needs.measure-and-gate.outputs.source_sha }}");
     expect(promotion).not.toContain("ref: main");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3904 prerequisite — failed-strategy rows are legal in latest.json
+// ---------------------------------------------------------------------------
+//
+// `benchmark-refresh.yml` validates a PR's candidate snapshot with the
+// BASELINE's copy of `benchmark-lifecycle.mjs`, so a PR cannot weaken its own
+// gate. That means an artifact FORMAT change cannot go green in the same PR
+// that teaches the validator about it — the validator has to land on `main`
+// first. These tests pin the tolerant behaviour so the harness change can
+// follow safely.
+
+describe("validateInternalSuite — failed strategy rows (#3904 prerequisite)", () => {
+  const ok = [
+    { name: "string/split", strategy: "js", medianMs: 0.25 },
+    { name: "string/split", strategy: "gc-native", medianMs: 0.87 },
+  ];
+
+  it("accepts a well-formed suite with no failed rows", () => {
+    expect(() => validateInternalSuite(ok)).not.toThrow();
+  });
+
+  it("accepts a failed row carrying zero timings and an error message", () => {
+    const rows = [
+      ...ok,
+      {
+        name: "string/split",
+        strategy: "linear-memory",
+        medianMs: 0,
+        status: "failed",
+        error: "memory access out of bounds",
+      },
+    ];
+    expect(() => validateInternalSuite(rows)).not.toThrow();
+  });
+
+  it("still rejects a zero median on a row that does NOT declare failure", () => {
+    const rows = [...ok, { name: "string/split", strategy: "linear-memory", medianMs: 0 }];
+    expect(() => validateInternalSuite(rows)).toThrow(/medianMs must be a positive number/);
+  });
+
+  it("requires a failed row to explain itself", () => {
+    const rows = [...ok, { name: "string/split", strategy: "linear-memory", medianMs: 0, status: "failed" }];
+    expect(() => validateInternalSuite(rows)).toThrow(/error must be a non-empty message/);
+  });
+
+  it("refuses a failed JS reference row — the baseline must always measure", () => {
+    const rows = [{ name: "string/split", strategy: "js", medianMs: 0, status: "failed", error: "boom" }];
+    expect(() => validateInternalSuite(rows)).toThrow(/JS baseline must always measure/);
   });
 });

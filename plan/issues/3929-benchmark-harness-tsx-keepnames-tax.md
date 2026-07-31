@@ -1,5 +1,5 @@
 ---
-id: 3915
+id: 3929
 title: "perf-bench: the harness runs under `npx tsx`, whose --keep-names transform taxes closure allocation ~30-118× — the published host-call column is overstated 2.3-3.6×"
 status: ready
 created: 2026-07-31
@@ -17,7 +17,7 @@ es_edition: n/a
 related: [3898, 3903, 1949]
 ---
 
-# #3915 — the benchmark harness measures its own loader's closure tax
+# #3929 — the benchmark harness measures its own loader's closure tax
 
 ## Status: open — **independently reproduced three times**
 
