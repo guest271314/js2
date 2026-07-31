@@ -12,9 +12,10 @@ func-budget-allow:
   # S1's whole-program receiver-flow walk is one traversal with a per-node-kind
   # switch; splitting it per kind would scatter the flow state it threads.
   - src/codegen/receiver-flow-analysis.ts::analyzeReceiverFlow
-status: ready
+status: suspended
+assignee: ttraenkler/dev-acorn-codegen
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-31
 priority: high
 horizon: xl
 feasibility: hard
@@ -367,6 +368,218 @@ S4 is closed as a **null result**. Not landed, deliberately: there is no
 version of "hoist the guard" that beats the guard, because the guard is not
 what costs. Reopen only with a measurement showing a workload where the
 branch itself (not the cast) is the cost.
+
+## Suspended Work (2026-07-31)
+
+Suspended by a priority switch to standalone ES5, **not** by a blocker. No
+compiler source was changed — everything below is measurement and analysis, all
+of it already committed.
+
+- **Worktree**: `/workspace/.claude/worktrees/agent-a6d23a0529f6d6f17`
+- **Branch**: `issue-3685-receiver-proof-widening` (pushed to `fork` =
+  `ttraenkler/js2`, PR loopdive/js2#3868); `origin/main` merged in.
+  **That branch also carries the #2908 / #3686 / #3688 work and will be deleted
+  when the PR merges — do NOT plan to resume from it.** Resume from `main` once
+  #3868 lands; this note travels with the issue FILE, not with the branch, and
+  the branch contains no compiler source changes to recover.
+- **Claim**: `ttraenkler/dev-acorn-codegen` — released at suspension. Verify
+  with `git show origin/issue-assignments:3685.json` before re-claiming; the
+  release path has a known ref-lock race with no retry.
+
+**Done**: the coverage audit, the receiver histogram and the caller attribution
+below; the profile decomposition and the optimizer negative in #3686. **Not
+done**: any codegen change; any wall-clock A/B (the box ran at load 7-14 on 10
+cores for the whole session, which invalidates timing at this effect size).
+
+**Resume in this order** — the first step is a measurement, not code, and it
+decides whether this issue continues at all:
+
+1. **Instrument the proven-but-not-inlined path.** Add a decline-reason counter
+   to the carve-out branches of `tryEmitProvenReceiverFieldGet`
+   (`src/codegen/typed-this.ts` ~L1320-1460: `RESERVED_PROPS`,
+   `classAccessorSet`, presence-tracked, call-signature receiver, and
+   name-not-a-declared-field). One acorn compile then explains the **156**
+   proven receivers that produced no inlined read (244 verdicts vs
+   `provenFieldStats.gets=88`).
+   - dominated by *not-a-declared-field* ⇒ this issue closes; file the
+     object-literal shape work separately;
+   - a carve-out is over-broad ⇒ landable fix here, and the two hot twins
+     (`__closure_571__typed_this`, `__closure_347__typed_this`, together
+     **28.5 %** of the `__extern_get` bucket) are what pays for it.
+2. **Settle whether `types$1` already has a struct.** `src/codegen/object-ops.ts`
+   (~L1642-1666) resolves an object-literal initializer to a struct name by
+   field-name matching. If a ~50-property module-level literal gets one, the
+   40 % `types$1` residue may be one flow rule in
+   `receiver-flow-analysis.ts`, not a new analysis.
+3. Only then measure, with #3673's interleaved duplicate-baseline control arm,
+   **on an idle box**.
+
+### Which layer does this belong on? (IR vs backend — my judgement)
+
+Asked explicitly, because this issue sits on the boundary. **It splits, and the
+split is clean — the seam is already where it should be:**
+
+- **The PROOF belongs in the IR front end.** `receiver-flow-analysis.ts` asks
+  "does this expression always denote an instance of class `F`?" That is a
+  question about *meaning*, answered from the AST with no checker queries and no
+  `ValType` anywhere in its result type (`ReceiverVerdict` is a class NAME plus
+  a proof source). It would be identical for a linear-memory backend, which is
+  the operative test from `docs/architecture/codegen-axes.md`. Same for
+  `numeric-property-analysis.ts` (which property names are always written
+  numerically) and the write-once prototype verdicts. Today all three live under
+  `src/codegen/` for historical reasons, not architectural ones.
+- **The LOWERING belongs in the backend, where it already is.** `struct.get` at
+  field index `i` off a `ref.cast $__fnctor_F`, the `ref.test` guard, the
+  trampoline ABI, the f64-vs-externref slot decision — every one is a WasmGC
+  representation choice with a different linear-memory answer. `typed-this.ts`
+  is correctly backend code.
+
+So the migration this issue would want is **not** "move #3685 into the IR"; it
+is *move the three analyses* into the front end and have the backend consume
+their verdicts. That is a refactor with no behavioural change, and it is worth
+doing only when a second backend actually wants the verdicts — the linear lane
+is the obvious consumer, since a proven receiver is exactly as useful for a
+struct offset in linear memory as for a `struct.get`. **Do not fold that
+refactor into a perf slice**; it would make an already hard-to-measure change
+impossible to attribute.
+
+One caveat for whoever does move them: the analyses are currently *seeded* from
+backend state — the S2 approved-class set is read from `ctx.structMap`'s
+`__fnctor_*` keys (see the "two false starts" note above, where seeding it from
+`gate.methods.keys()` silently excluded data-only classes). A front-end version
+needs its own class registry rather than borrowing the backend's.
+
+**Reproduce the measurements**: probes are in `.tmp/cw/` in the worktree
+(`acorn-compile-raw.mjs` compiles standalone acorn with an in-module `__bench`
+export at `optimize: 0`; `profile-parse.mjs`, `analyze-prof2.mjs`,
+`attrib-helper.mjs`, `cross-metrics.mjs`). `.tmp/` is gitignored, so re-create
+them from this description if the worktree is gone.
+
+## Coverage audit 2026-07-31 — #3683's twin machinery is saturated; THIS issue's
+## S2 inline path is NOT, and the gap is unmeasured
+
+S1-S3 landed and S4 was falsified, so the question this audit answers is: **on
+real acorn, how much is left?** The honest answer has two halves, and an earlier
+draft of this section wrongly collapsed them into "saturated" — corrected here
+before it could mis-dispatch anyone.
+
+**Half 1 — #3683's twin emission and direct calls ARE saturated.** Those
+counters are quoted below and they are unambiguous.
+
+**Half 2 — this issue's own S2 inline path is not, and I did not measure why.**
+`declinedTwin=0` is #3683's *twin-emission* counter; it says nothing about
+#3685. #3685's counter is `provenFieldStats.gets`, which printed **88** against
+**244 proven receiver verdicts** (184 `Node` + 60 `Parser`). So **156 proven
+receivers produced no inlined read** — they were proven and then dropped by one
+of the carve-outs (`RESERVED_PROPS`, `classAccessorSet`, presence-tracked
+fields, call-signature receivers, or "the name is not a declared field of the
+struct"). **Which carve-out, and in what proportion, is UNMEASURED.** Some of it
+is certainly legitimate — `node.body` / `node.declarations` are expando
+properties, not declared `$__fnctor_Node` fields — but the split is not known
+and must not be assumed.
+
+Corroborating that the S2 path still has reachable work: **28.5 % of
+`__extern_get`'s self time is called from inside typed twins**
+(`__closure_571__typed_this` 14.4 % + `__closure_347__typed_this` 14.1 %; see
+the caller table below) — ≈2.8 % of total parse time. Inside a twin `this.X` is
+already inlined, so every one of those is a **non-`this` receiver read**, which
+is exactly the shape S2 exists to take. If S2 were saturated, those calls would
+not be happening.
+
+**The one measurement that discriminates**, for whoever continues: add a
+decline-reason counter to the proven-but-not-inlined branches of
+`tryEmitProvenReceiverFieldGet` (`src/codegen/typed-this.ts` ~L1320-1460) and
+run one instrumented acorn compile.
+- Dominated by *not-a-declared-field* ⇒ the object-literal/expando story below
+  is right and this issue closes.
+- A carve-out is over-broad ⇒ that is a landable #3685 fix, and the two hot
+  twins above are the target that pays for it.
+
+**Instrumented compile of real acorn 8.16.0** (standalone, whole 226 KB package
+plus a bench driver, `JS2WASM_TYPED_THIS_DEBUG=1 JS2WASM_DIRECT_CALLS_DEBUG=1`):
+
+```
+[typed-this]   twins=488 declinedTwin=0 get=1366 set=98 compound=18 incdec=98
+[direct-calls] sites=3980 trampolines=547 twinFills=518 genericFills=29 legacyFills=0
+[direct-calls] declined: no-write-once-verdict=208 named-fn-expr=16 uses-arguments=8
+```
+
+- **`declinedTwin=0`** — every candidate prototype method got a typed twin.
+- **518 of 547 trampolines fill to a twin**, 29 degrade, **0** fall back to
+  legacy.
+- Field-inline declines are essentially empty: the `[typed-this] declined
+  fields` histogram is 24 `ok:` entries (admitted) and exactly two real
+  declines, `nofield:inAsync=6` and `nofield:inTemplateElement=6` — option
+  flags that are not struct fields at all.
+
+**Where the residual `__extern_get` actually comes from.** Attributing
+`__extern_get`'s own self time to its CALLER in the profile (9.69 % of total
+across 11,071 samples; see #3686 for the harness):
+
+| caller | share of `__extern_get` | absolute |
+| --- | ---: | ---: |
+| `__extern_method_call` | 18.7 % | 1.82 % |
+| `__fnctor_Node_new` | 15.2 % | 1.47 % |
+| `__closure_571__typed_this` | 14.4 % | 1.40 % |
+| `__closure_347__typed_this` | 14.1 % | 1.36 % |
+| `__closure_339` (no twin) | 8.5 % | 0.82 % |
+| `finishNodeAt` | 6.3 % | 0.61 % |
+| `getOptions` | 2.2 % | 0.22 % |
+
+Note the top entry is a *helper* (`__extern_method_call` doing its own
+name lookup), not a source-level `x.f` read — so ~19 % of the bucket is not a
+receiver-proof target at all.
+
+**And the shapes that decline.** `tryEmitProvenReceiverFieldGet` was asked for a
+verdict **3,444** times over the acorn compile: **3,200 unproven (92.9 %)**, 184
+→ `Node`, 60 → `Parser`, with only 88 reads actually inlined. Histogramming the
+3,200 unproven receivers by source text:
+
+| receiver | sites | what it is |
+| --- | ---: | --- |
+| `types$1` | **1,287 (40 %)** | acorn's **token-type table** — a module-level `var` bound to an object literal |
+| `state` | 434 (14 %) | the RegExp validator's `RegExpValidationState` parameter |
+| `node` | 255 | `Node` instances the flow analysis did not reach |
+| `prop`, `expr`, `refDestructuringErrors`, `ref`, `list`, `element`, … | ≤136 each | assorted parser locals |
+
+**The finding that matters: the single largest unproven receiver is not a class
+instance.** `types$1` is `var types$1 = { num: new TokenType(…), name: …, eof:
+…, semi: … }` — a plain **object literal**, read 348 times in acorn's source on
+its hottest comparisons (`this.type === types$1.eof`, `this.eat(types$1.semi)`).
+This issue's analysis proves "is this an instance of exactly one approved
+**fnctor** class"; an object literal has no fnctor class, so no amount of
+widening the *flow* rules reaches it. Same for `parser.options.<x>` (15.2 % of
+the bucket, via `__fnctor_Node_new`): `parser` **is** already proven, but
+`options` is an `externref` slot holding an object literal, so the second hop
+has no shape either.
+
+**What the residue needs — and an explicitly OPEN question about how much of it
+is new.** The mechanism required is *shape* proof for non-fnctor objects: "this
+receiver is always the module-level object literal `L`, whose property set is
+fixed", plus a struct to `struct.get` from. It composes with the existing
+guarded emitter (`ref.test` → `struct.get` : fall back to `__extern_get`), which
+makes escape/mutation soundness a non-issue — `types$1` *is* exported (`export {
+types$1 as tokTypes }`, plus `tokTypes: types$1` in the public surface), but a
+failed `ref.test` simply takes the dynamic arm.
+
+**Do NOT assume this is a from-scratch capability.** `src/codegen/object-ops.ts`
+(~L1642-1666) already resolves a variable whose initializer is an object literal
+to a struct name — first via `resolveStructName(ctx, initType)`, and on `ts.Type`
+identity mismatch by **matching the literal's property names against
+`ctx.structFields`**. So the compiler does mint structs for object literals and
+can already map a binding to one. Whether `types$1` (a ~50-property module-level
+literal) gets such a struct today is **not measured**; if it does, this may be
+one flow rule in `receiver-flow-analysis.ts` rather than a new analysis. Settle
+that before scoping the work either way.
+
+Sizing for whoever picks that up: 40 % of unproven receiver *sites*, on the
+hottest comparison in a tokenizer, and the two profiles agree the whole
+`__extern_get` bucket is 8-10 % of standalone parse time — so the ceiling for
+the `types$1` half is low single digits, **and it must be measured with the
+duplicate-baseline control arm before anyone believes it.** No wall-clock A/B
+was run for this audit: the box was at load 7-14 on 10 cores throughout, which
+invalidates timings at this effect size. Every number above is a static tally or
+a profile share, both of which survive contention.
 
 ## Pre-existing bug from S3 — FIXED, split out as #3719
 
