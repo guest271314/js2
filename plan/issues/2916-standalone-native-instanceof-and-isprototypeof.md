@@ -2,7 +2,7 @@
 id: 2916
 title: "[SUBSTRATE][ARCH] Standalone native instanceof operator + isPrototypeOf residual (~31 leaky-PASS conversions)"
 status: ready
-updated: 2026-07-17
+updated: 2026-07-31
 sprint: current
 created: 2026-07-01
 priority: medium
