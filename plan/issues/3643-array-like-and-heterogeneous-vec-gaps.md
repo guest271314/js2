@@ -1,13 +1,18 @@
 ---
 id: 3643
 title: "Three measured host-lane gaps: array destructuring never throws, `Array.from` ignores array-like `length`, and a heterogeneous vec null-derefs in slice/flat"
-status: in-progress
+status: done
 sprint: current
 created: 2026-07-26
 updated: 2026-07-31
+completed: 2026-07-31
 assignee: ttraenkler/dev-core-semantics
 priority: high
 loc-budget-allow:
+  # UNION of both slices' grants — deliberately not `--theirs`. A grant only
+  # resolves from a file the change-set itself touches, so dropping either
+  # slice's entries here would pass locally and fail the CI `quality` ratchet.
+  #
   # Slice A registers the bounded STRICT drain `__array_from_iter_n_strict`.
   # In `src/runtime.ts` that is one extra `resolveImport` arm plus the comment
   # recording WHY it is a separate import rather than a strictness flag on
@@ -17,19 +22,34 @@ loc-budget-allow:
   # In `src/codegen/destructuring-params.ts` it is a one-line name selection
   # plus the comment recording the measured pre-fix answer and the
   # standalone/WASI carve-out (#2904: emitting the strict name there would leak
-  # an `env::` import and break zero-import instantiation). No new branch
-  # structure in either file; splitting `resolveImport` is #3399's job.
+  # an `env::` import and break zero-import instantiation).
+  #
+  # Slice B adds `_arrayFromNonIterableSource` — the §23.1.2.1 step-6
+  # non-iterable array-like arm for `Array.from` — plus the comment recording
+  # the measured pre-fix answer and WHY the fix reuses `_wrapForHost` (the
+  # proxy that already makes `slice.call(arrayLike)` correct on the identical
+  # receiver) instead of re-implementing the spec step.
+  #
+  # No new branch structure in either file; splitting `resolveImport` is
+  # #3399's job, not these slices'.
   - src/runtime.ts
   - src/codegen/destructuring-params.ts
 func-budget-allow:
-  # Same two additions as `loc-budget-allow`, seen at function granularity.
-  # `resolveImport` is the host-import factory — a new import arm has nowhere
-  # else to live until #3399 splits it. `destructureParamArray` gains a one-line
-  # drain-name selection plus the standalone/WASI carve-out comment; its
-  # externref fallback must stay in one piece because the late-import /
-  # funcIdx-shift bookkeeping around it is order-sensitive (#3010).
+  # The same union at function granularity. `resolveImport` is the host-import
+  # factory — a new import arm has nowhere else to live until #3399 splits it,
+  # and both slices add one. `destructureParamArray` gains a one-line drain-name
+  # selection plus the standalone/WASI carve-out comment; its externref fallback
+  # must stay in one piece because the late-import / funcIdx-shift bookkeeping
+  # around it is order-sensitive (#3010). Slice B's helper
+  # `_arrayFromNonIterableSource` is a NEW top-level function, not more weight
+  # in the factory.
   - src/runtime.ts::resolveImport
   - src/codegen/destructuring-params.ts::destructureParamArray
+trap-growth-allow:
+  count: 1
+  reason: "fail -> fail flavour change, NOT a new regression. The baseline (test262-current.jsonl, oracle_version 12, honest lane) records array-like-has-length-but-no-indexes-with-values.js as status:fail with 'The newly created array's length ... Expected SameValue(«0», «5») to be true' — it failed at line 26, the FIRST assertion, because Array.from ignored the array-like length. Confirmed by checking origin/main's src/runtime.ts into this branch and reproducing the identical error at the identical line, rather than inferring the prior state from the gate's 'Newly trapping' wording. Slice B makes that first assertion pass, so execution now reaches line 33, Array.from({length}).map(...), and hits a PRE-EXISTING illegal_cast trap that Slice B neither introduces nor touches. Isolated by probe: Array.from('ab').map(f) and Array.from({length:5}).map(f) both trap on origin/main untouched by this PR, and in the latter case Array.from returns [] there so the callback is invoked ZERO times — the trap does not require the closure to run. Array.from(['a','b']).map(f), Array.from([1,2]).map(f) and [undefined,undefined].map(f) all pass, so it is neither the element type nor undefined elements: it is .map(<compiled closure>) on the host JS array that Array.from returns for any non-vec source. Filed as its own bug with the full probe table in #3916; fixing it is a codegen/representation change (the T[] return type is lowered as a WasmGC vec while the runtime returns an externref host array) well outside this slice's scope. Category: illegal_cast 76 -> 77 (+1), the single file named below."
+  tests:
+    - test/built-ins/Array/from/array-like-has-length-but-no-indexes-with-values.js
 horizon: m
 feasibility: medium
 task_type: bug
@@ -37,7 +57,7 @@ area: runtime
 language_feature: destructuring, array-methods, iteration-protocol
 es_edition: multi
 goal: core-semantics
-related: [3637, 2836, 3486]
+related: [3637, 2836, 3486, 3916]
 origin: "Measured while auditing #3637. Each item was A/B'd against #3637's merge base and is byte-identical there, so none is caused by #3637 — they are separate, pre-existing gaps that the audit surfaced."
 ---
 
@@ -186,6 +206,26 @@ the spec's TypeError.
 (row 5) and `slice.call` already does the array-like walk correctly (row 4), so
 only `Array.from`'s non-iterable fallback is missing for a WasmGC receiver.
 
+**FIXED — 2026-07-31.** This diagnosis held up exactly. `slice.call` was correct
+because it routes the receiver through `_wrapForHost` (the live-mirror proxy
+over a WasmGC struct); `__array_from` did not, so native `Array.from` read
+`length` off an opaque object as `undefined` and answered `[]`. The fix
+(`_arrayFromNonIterableSource`) routes a non-vec, non-iterable struct through
+that same proxy, so the spec's own step 6 runs rather than being
+re-implemented.
+
+Three further rows failed the same way on `origin/main` and were never listed
+here — all fixed by the same change: `Array.from(arrayLike, mapFn)` (answered
+`[]`), `length` coercion (`{length: "2"}`), and sparse indices
+(`{length: 3, 1: "b"}`). Plus the parity row: `Array.from` and
+`Array.prototype.slice.call` now agree on the identical receiver.
+
+**Residual, NOT fixed and A/B-verified pre-existing:** an object carrying BOTH a
+`length` and a callable `@@iterator` still answers `[]` — it failed identically
+on unmodified `origin/main`, so it is a separate gap in the
+`@@iterator`-on-a-struct path, not collateral. Recorded so a later sweep does
+not read Slice B as covering it.
+
 ### Slice C — heterogeneous vec null-derefs in `slice` / `flat`
 
 | source                        | got                                      | host          |
@@ -212,12 +252,28 @@ misattribute them.
 
 ## Acceptance criteria
 
-- [ ] Slice A: `var [p] = {a:1}`, `var [p,q] = {...}` and `function f([p]){}`
+- [x] Slice A: `var [p] = {a:1}`, `var [p,q] = {...}` and `function f([p]){}`
       called with a non-iterable all throw `TypeError`; iterable RHS unaffected.
-- [ ] Slice B: `Array.from` on a WasmGC array-like honours `length` and indexed
-      reads, matching `slice.call`'s existing behaviour.
-- [ ] Slice C: `[{x:1}, 2].flat()` and `[o, 1].slice(0)` return the host answer
-      instead of trapping; the all-struct / all-number / `concat` controls above
-      stay green.
-- [ ] Each slice's test asserts the **observable value** and is verified to fail
-      before the fix.
+      Also `var [...r]`, `var [p,...r]`, an array-LIKE RHS, and `= 5` / `= true`
+      — four rows the original filing did not list. Residual: the empty pattern
+      `var [] = {a:1}` (see Correction 1).
+- [x] Slice B: `Array.from` on a WasmGC array-like honours `length` and indexed
+      reads, matching `slice.call`'s existing behaviour — the two now agree on
+      the identical receiver. Also `mapFn` over an array-like, `length`
+      coercion, and sparse indices. Residual: an object carrying BOTH `length`
+      and a callable `@@iterator` (A/B-verified pre-existing).
+- [ ] **Slice C — MOVED OUT of this issue, not abandoned.** Re-measurement
+      showed it is not a `slice`/`flat` defect and that the `concat` control in
+      the table above is invalid (it varied element ORDER, the discriminating
+      variable). Root cause is first-element-wins element typing in
+      `compileArrayLiteral` / the tuple lowering, failing identically in BOTH
+      lanes — the value-rep substrate family (#2190c, #2773), larger than this
+      issue's `horizon: m`. **The `## Correction 2` section above is a complete,
+      self-contained spec** — measured table, root cause, both-lane A/B, and the
+      invalid-control finding — so nothing is lost by closing #3643. Routed to
+      the tech lead for an id and lane assignment; `claim-issue.mjs --allocate`
+      failed three times (ref contention) and an id was deliberately NOT
+      hand-picked.
+- [x] Each landed slice's test asserts the **observable value** and is verified
+      to fail before the fix (kill-switch: Slice A 6 red / 8 controls green;
+      Slice B 5 red / 2 controls green).
