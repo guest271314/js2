@@ -69,13 +69,33 @@ Forcing the general case into the IR would mean building a **static mirror of
 runtime descriptor state**, which is the failure mode `definePropertyReceiverKeys`'
 comment exists to prevent.
 
-## Ceiling (NOT a projection)
+## Ceiling — **~19 confirmed / ~41 ceiling**, NOT 91
 
-33 `language/expressions/compound-assignment` + 9 `language/expressions/assignment`
-+ an unmeasured share of 230 `Object/defineProperty` / `Object/create` /
-`Object/defineProperties` rows, within the standalone ES5 gap (1,015 of 8,087).
+The `Expected a TypeError to be thrown` cluster is **91 rows, but it is not one
+family**. Sub-split by source shape, not by normalized message:
+
+| by source shape | rows |
+|---|---:|
+| literal `writable:false` — **confirmed this issue** | **19** |
+| `freeze`/`seal`/`preventExtensions` (#3420 area, already fixed) | 11 |
+| unclassified by regex | 61 |
+
+By area, the assignment-shaped rows are `compound-assignment` 33 +
+`language/expressions/assignment` 8 ≈ **41 ceiling**. The rest belong elsewhere:
+3 `String/prototype` and 5 `Function/prototype` + 3 `Boolean/prototype` are the
+not-a-constructor / `RequireObjectCoercible` shape (a different lane), and 20
+`defineProperties` + 13 `defineProperty` are descriptor **record/read** fidelity
+(#2668), not enforcement.
+
+**Use ~19 confirmed / ~41 ceiling. Do not quote 91.**
+
 **Leaking/failing ≠ flipping** — A/B against a real standalone run before quoting a
 delta, as #3420 did (9/13 → 13/13).
+
+> **Method note, learned three times over on this issue:** message-normalized
+> clusters **over-merge**. Only source inspection splits them. Every sizing on this
+> lane that was revised was revised *downward*, and every revision came from
+> someone checking the sources rather than the error strings.
 
 ## This is an OUTLIER, not a pattern — hypothesis tested and disconfirmed
 
