@@ -6529,13 +6529,31 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // source) — must SKIP a non-enumerable own key. Hardcoding
       // `enumerable: true` here leaked non-enumerable sidecar props into spread
       // results (`spread-obj-skip-non-enumerable`, #2714). Declared struct
-      // fields and class methods carry no sidecar flags entry and stay
-      // enumerable data props, matching their spec semantics.
+      // fields carry no sidecar flags entry and stay enumerable data props,
+      // matching their spec semantics.
+      //
+      // (#3647) Registered class-PROTOTYPE members are the exception — the
+      // sentence above used to lump them in with declared struct fields. A
+      // MethodDefinition (§14.6 DefineMethod; likewise §14.4/§14.5 generator,
+      // async and get/set members) is created `enumerable: false`, which
+      // `_readOwnDescriptor` arm 2a (#1364a) has always reported and the
+      // static-method arm above already defers to (#3479); only the prototype
+      // case fell through here and hardcoded `true`. That is observable because
+      // `Object.prototype.propertyIsEnumerable.call(C.prototype,"m")` reaches
+      // NO `__propertyIsEnumerable` import on host — `__proto_method_call` runs
+      // the ENGINE's method against this proxy, so §20.1.3.4 reads
+      // `[[GetOwnProperty]]`, i.e. this trap. Only the `enumerable` bit is
+      // corrected: `value` keeps `safeGetField` because arm 2a returns a method
+      // BRIDGE value, which would also move accessor members' `value`.
+      // `hasInFields` (not a raw `includes`) keeps `delete C.prototype.m`
+      // (#1364b) working; an explicit `defineProperty(…,{enumerable:true})`
+      // still wins via the sidecar flags entry below.
+      const isRegisteredProtoMember = protoMethods !== undefined && hasInFields;
       const scFlags = _wasmPropDescs.get(obj)?.get(_normalizeDescKey(key));
       const desc: PropertyDescriptor = {
         value: val,
         writable: true,
-        enumerable: scFlags === undefined ? true : !!(scFlags & _SC_ENUMERABLE),
+        enumerable: scFlags === undefined ? !isRegisteredProtoMember : !!(scFlags & _SC_ENUMERABLE),
         configurable: true,
       };
       // Mirror onto target so V8's Proxy invariant checker is happy
@@ -10158,7 +10176,12 @@ assert._isSameValue = isSameValue;
           }
           return Object.entries(obj);
         };
-      if (name === "__array_from_iter" || name === "__array_from_iter_n" || name === "__array_from_iter_strict") {
+      if (
+        name === "__array_from_iter" ||
+        name === "__array_from_iter_n" ||
+        name === "__array_from_iter_strict" ||
+        name === "__array_from_iter_n_strict"
+      ) {
         // Cache the original Array.prototype[Symbol.iterator] so we can
         // detect when user code (e.g. test262 iter-get-err-array-prototype)
         // has overridden it. When overridden, we must invoke the protocol
@@ -10346,6 +10369,20 @@ assert._isSameValue = isSameValue;
         }
         if (name === "__array_from_iter") return (obj: any): any => _arrayFromIter(obj, Infinity);
         if (name === "__array_from_iter_strict") return (obj: any): any => _arrayFromIter(obj, Infinity, true);
+        // (#3643 Slice A) Bounded STRICT drain — the array-binding-pattern
+        // counterpart of `__array_from_iter_strict`. §8.6.2 `BindingPattern :
+        // ArrayBindingPattern` performs GetIterator (§7.4.2) on the RHS, which
+        // throws TypeError for a non-iterable. The non-strict `__array_from_iter_n`
+        // instead falls through to `_drainIterable`'s `Array.from(obj)` array-like
+        // fallback, which answers `[]` for `{a:1}` — so `var [p] = {a:1}` silently
+        // bound `undefined` instead of throwing. Array SPREAD already used the
+        // strict unbounded drain (`[...{b:1}]` threw correctly); destructuring is
+        // the arm that was never wired to it. Kept as a SEPARATE import rather than
+        // a strictness flag on `__array_from_iter_n` because that import is shared
+        // with `__array_from_mapped` (`Array.from(arrayLike, mapFn)`) and
+        // `__iterator_rest`, both of which MUST keep the array-like fallback.
+        if (name === "__array_from_iter_n_strict")
+          return (obj: any, n: number): any => _arrayFromIter(obj, n < 0 ? Infinity : n >>> 0, true);
         return (obj: any, n: number): any => _arrayFromIter(obj, n < 0 ? Infinity : n >>> 0);
       }
       if (name === "__extern_slice")
