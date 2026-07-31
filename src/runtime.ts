@@ -10198,7 +10198,12 @@ assert._isSameValue = isSameValue;
           }
           return Object.entries(obj);
         };
-      if (name === "__array_from_iter" || name === "__array_from_iter_n" || name === "__array_from_iter_strict") {
+      if (
+        name === "__array_from_iter" ||
+        name === "__array_from_iter_n" ||
+        name === "__array_from_iter_strict" ||
+        name === "__array_from_iter_n_strict"
+      ) {
         // Cache the original Array.prototype[Symbol.iterator] so we can
         // detect when user code (e.g. test262 iter-get-err-array-prototype)
         // has overridden it. When overridden, we must invoke the protocol
@@ -10386,6 +10391,20 @@ assert._isSameValue = isSameValue;
         }
         if (name === "__array_from_iter") return (obj: any): any => _arrayFromIter(obj, Infinity);
         if (name === "__array_from_iter_strict") return (obj: any): any => _arrayFromIter(obj, Infinity, true);
+        // (#3643 Slice A) Bounded STRICT drain — the array-binding-pattern
+        // counterpart of `__array_from_iter_strict`. §8.6.2 `BindingPattern :
+        // ArrayBindingPattern` performs GetIterator (§7.4.2) on the RHS, which
+        // throws TypeError for a non-iterable. The non-strict `__array_from_iter_n`
+        // instead falls through to `_drainIterable`'s `Array.from(obj)` array-like
+        // fallback, which answers `[]` for `{a:1}` — so `var [p] = {a:1}` silently
+        // bound `undefined` instead of throwing. Array SPREAD already used the
+        // strict unbounded drain (`[...{b:1}]` threw correctly); destructuring is
+        // the arm that was never wired to it. Kept as a SEPARATE import rather than
+        // a strictness flag on `__array_from_iter_n` because that import is shared
+        // with `__array_from_mapped` (`Array.from(arrayLike, mapFn)`) and
+        // `__iterator_rest`, both of which MUST keep the array-like fallback.
+        if (name === "__array_from_iter_n_strict")
+          return (obj: any, n: number): any => _arrayFromIter(obj, n < 0 ? Infinity : n >>> 0, true);
         return (obj: any, n: number): any => _arrayFromIter(obj, n < 0 ? Infinity : n >>> 0);
       }
       if (name === "__extern_slice")
