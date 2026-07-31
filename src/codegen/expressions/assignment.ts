@@ -4242,7 +4242,15 @@ function emitSetterCallWithDummy(
  */
 export function isNonWritableDataProperty(ctx: CodegenContext, receiver: ts.Expression, propName: string): boolean {
   if (!ts.isIdentifier(receiver)) return false;
-  const flags = ctx.definedPropertyFlags.get(`${integrityVarKey(ctx, receiver)}:${propName}`);
+  const key = `${integrityVarKey(ctx, receiver)}:${propName}`;
+
+  // (#3872) Externref-receiver defines (standalone's native `$Object` lowering)
+  // record here instead of in `definedPropertyFlags` — see the note in
+  // `object-ops.ts`. Writing them into that map perturbed
+  // `getOwnPropertyDescriptor` and cost −67 pass on the merged state.
+  if (ctx.nonWritableExternKeys.has(key)) return true;
+
+  const flags = ctx.definedPropertyFlags.get(key);
   if (flags === undefined) return false;
   // Accessor properties route to the setter — [[Writable]] does not apply.
   if (flags & PROP_FLAG_ACCESSOR) return false;

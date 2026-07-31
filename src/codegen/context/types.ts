@@ -3158,6 +3158,15 @@ export interface CodegenContext {
   tdzLetConstNames: Set<string>;
   /** Compile-time property descriptor flags */
   definedPropertyFlags: Map<string, number>;
+  /**
+   * (#3872) `<integrityVarKey>:<propName>` keys defined non-writable via
+   * `Object.defineProperty` on an EXTERNREF receiver. Deliberately SEPARATE
+   * from `definedPropertyFlags`, which has four readers (notably
+   * `builtin-static-gopd.ts`, where a present entry OVERRIDES the shape table);
+   * folding these in perturbed `getOwnPropertyDescriptor`. Consulted only by
+   * `isNonWritableDataProperty`. See #3872 for the full account.
+   */
+  nonWritableExternKeys: Set<string>;
   /** Properties whose descriptor/value lives in the runtime sidecar. */
   sidecarDefinedPropertyKeys: Set<string>;
   /**

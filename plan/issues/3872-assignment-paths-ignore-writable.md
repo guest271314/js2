@@ -27,10 +27,17 @@ related: [3420, 2668, 2744, 3776]
 # The mirror record belongs in object-ops.ts's externref arm, immediately beside
 # the struct arm that already records it — it is the same bookkeeping for the
 # other lowering path, and the two must stay adjacent to stay in sync.
+# The merged-state fix (−67 pass) replaces a write into the shared
+# `definedPropertyFlags` map with a dedicated `nonWritableExternKeys` set.
+# Introducing a context field necessarily costs lines in BOTH the interface
+# (`context/types.ts`) and its single initialiser
+# (`context/create-context.ts::createCodegenContext`, +1 line). That is the
+# price of the narrower blast radius and is the point of the change.
 loc-budget-allow:
   - src/codegen/expressions/assignment.ts
   - src/codegen/expressions/operator-assignment.ts
   - src/codegen/object-ops.ts
+  - src/codegen/context/types.ts
 func-budget-allow:
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
   # The computed-form consult (`o[k] = v`) lands here. Granted explicitly on THIS
@@ -42,6 +49,7 @@ func-budget-allow:
   - src/codegen/expressions/operator-assignment.ts::compilePropertyCompoundAssignment
   - src/codegen/expressions/operator-assignment.ts::compileElementCompoundAssignment
   - src/codegen/object-ops.ts::compileObjectDefineProperty
+  - src/codegen/context/create-context.ts::createCodegenContext
 ---
 
 # #3872 — the strict-mode TypeError is missing; the two lanes fail differently

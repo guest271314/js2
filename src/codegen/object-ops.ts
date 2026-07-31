@@ -2388,44 +2388,39 @@ export function compileObjectDefineProperty(
     fctx.body.push({ op: "local.get", index: objLocal });
     return objType;
   } else if (valueExpr) {
-    // (#3872) Record the compile-time descriptor mirror on the EXTERNREF path too.
+    // (#3872) Record a NON-WRITABLE define on the EXTERNREF path.
     //
-    // `definedPropertyFlags` was written ONLY in the `useStruct` branch above,
+    // `definedPropertyFlags` is written only in the `useStruct` branch above,
     // which needs a registered struct field. Standalone compiles
     // `const o: any = {}` to a native `$Object`, so `fieldIdx < 0`, `useStruct`
-    // is false, and the mirror stayed EMPTY — which is why the #3872
-    // write-consult fired on host and never on standalone (instrumented: host
+    // is false, and nothing was recorded — which is why the #3872 write-consult
+    // fired on host and never on standalone (instrumented: host
     // `{"o@41:p": 14}` vs standalone `[]`).
     //
-    // Safe against the redefine-validation hazard: the struct branch reads this
-    // map as `trackedExistingFlags` to detect a redefine, but the two branches
-    // are mutually exclusive per call, so a define can never observe its OWN
-    // record. Across calls, seeing a prior define IS a genuine redefine — which
-    // is what that check is for. Recording at the `defineProperty` chokepoint
-    // instead WOULD be unsafe, for exactly the reason the
-    // `definePropertyReceiverKeys` comment gives.
+    // This deliberately records into a DEDICATED set, not into
+    // `definedPropertyFlags`. An earlier revision wrote the full descriptor into
+    // that map and caused a merged-state regression of −67 pass that every
+    // PR-level check passed: `builtin-static-gopd.ts` treats a present entry as
+    // an OVERRIDE of the shape table (`if (dpf !== undefined) flags = dpf & 0x0f`),
+    // so recording here changed what `getOwnPropertyDescriptor` reports for
+    // EVERY externref-receiver define — and reported `enumerable:false,
+    // configurable:false` for a REDEFINE, where omitted attributes must mean
+    // "keep existing" rather than "default to false".
     //
-    // Recorded ONLY when the descriptor states `writable` EXPLICITLY. With it
-    // omitted, `applyDescriptorFlags` leaves the bit clear, which is right for a
-    // brand-new property (omitted attributes default to false) but WRONG for a
-    // redefine of an existing writable one — the struct branch distinguishes
-    // those via `isKnownExistingField`/`PROP_FLAGS_DEFAULT_DATA` and the
-    // externref path has no equivalent. Rather than guess, only record when the
-    // descriptor says so; every corpus row for this issue specifies
-    // `writable:false` explicitly, so the narrower rule costs no coverage.
-    if (propName !== undefined && ts.isIdentifier(objArg) && descWritable !== undefined) {
-      const key = `${integrityVarKey(ctx, objArg)}:${propName}`;
-      ctx.definedPropertyFlags.set(
-        key,
-        applyDescriptorFlags(
-          ctx.definedPropertyFlags.get(key),
-          descWritable,
-          descEnumerable,
-          descConfigurable,
-          !!(getNode || setNode),
-          true,
-        ),
-      );
+    // The lesson, since the original reasoning looked sound: it is not enough to
+    // check that the writer can't observe its own record. Enumerate every READER
+    // of a shared mutable structure before writing to it. `definedPropertyFlags`
+    // has four (`builtin-static-gopd.ts`, `property-access.ts`, and the
+    // program-order snapshot/restore in `declarations.ts` / `index.ts`); only one
+    // had been considered.
+    //
+    // Recorded only when the descriptor states `writable` EXPLICITLY — with it
+    // omitted the intent is ambiguous between a fresh define (defaults false)
+    // and a redefine (keep existing), and the externref arm has no
+    // `isKnownExistingField` to tell them apart. Every corpus row for this issue
+    // states `writable:false` explicitly, so the narrower rule costs no coverage.
+    if (propName !== undefined && ts.isIdentifier(objArg) && descWritable === false && !getNode && !setNode) {
+      ctx.nonWritableExternKeys.add(`${integrityVarKey(ctx, objArg)}:${propName}`);
     }
     // Externref path: Object.defineProperty(obj, prop, { value: v }) → __defineProperty_value
     return emitExternDefinePropertyValue(
