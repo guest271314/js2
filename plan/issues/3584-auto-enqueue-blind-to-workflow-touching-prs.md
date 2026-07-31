@@ -245,6 +245,32 @@ classifier most had to avoid — a PR whose checks are merely slow — does not 
 **What the test covers is classification, not enqueue-succeeds.** That is #3906's
 experiment.
 
+### The way this fix could silently never fire — checked, and it does not
+
+`blockedDiagnosis()` short-circuits unless `mergeStateStatus === "BLOCKED"`, and the
+live smoke test above *forced* that value. In production the app token supplies it —
+and the app emits `UNKNOWN` a lot. Its own 11:51:26Z run read
+
+```
+- #3892 skip (UNKNOWN)   - #3891 skip (UNKNOWN)
+- #3883 skip (UNKNOWN)   - #3877 skip (UNKNOWN)
+```
+
+while a PAT saw `BEHIND` / `UNSTABLE` / `DIRTY` / `BEHIND` for the same four. If the
+target population read `UNKNOWN` at sweep time, no warning would fire and no label
+would land — **indistinguishable from "no stalls today."**
+
+**Checked against the real population, two runs ~49 minutes apart.** The app token
+reported #3567 as `BLOCKED` in run `30126231181` @21:01:21Z *and* in run
+`30129070114` @21:50:37Z. The stalling PR reads `BLOCKED`, stably, so the trigger
+matches.
+
+**Do not extend the classifier to `UNKNOWN`.** `UNKNOWN` is GitHub still computing
+mergeability (see `reference_autoenqueue_grace0_races_mergestate_recompute`);
+firing on it manufactures exactly the slow-checks false positive the two guards
+exist to prevent. The `UNKNOWN` frequency is recorded here as a known limitation,
+not as something to widen the classifier for.
+
 ### Options A and B — declined, with reasons
 
 - **A (grant the app `workflows: write`) — declined, not escalated as a
