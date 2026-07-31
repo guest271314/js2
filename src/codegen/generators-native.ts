@@ -1329,11 +1329,23 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
   // bail to host so the candidate gate and registration agree (no
   // undefined-funcidx module).
   //
-  // Still bailed (follow-up slices, #3386 residual):
-  //  • rest ELEMENTS (`[a, ...r]` / `{a, ...r}`) — the emit-site destructure
-  //    binds them, but the rest local's type (a fresh `__vec_externref` /
-  //    rest `$Object`) is minted inside the destructure helpers, not via
-  //    `resolveBindingElementType`, so the spill typing is not yet reconciled.
+  // (#3916) REST elements (`[a, ...r]` / `{a, ...r}`) are admitted, under a
+  // DIFFERENT typing rule than the non-rest elements below. A non-rest element's
+  // factory local is allocated by `ensureBindingLocals` from
+  // `resolveBindingElementType` and the emit site does not re-type it, so the
+  // checker rule is faithful there. A REST local is minted by the destructure
+  // lane instead and then REALLOCATED over that guess (destructuring-params.ts,
+  // the #971 realloc) — `$__vec_externref` / `$__vec_f64` / a rest `$Object`,
+  // decided by the EMIT SITE's resolved param type, which this builder cannot
+  // see (`isNativeGeneratorCandidate` calls it with no param types and must
+  // agree with `analyzeNativeGenerator`, or the emit bakes an undefined
+  // funcidx) and cannot read back afterwards (a `.next()` site can emit the
+  // resume fn before the generator's own emit site destructures). So a rest
+  // binding spills at the WASM-BOUNDARY rep, `externref`: AST-only, and
+  // reachable from every lane because `compileNativeGeneratorFunction` already
+  // coerces the factory local into the spill type. Same lesson as the #3620
+  // note on the `param_*` fields below. Full argument: plan/issues/3916-*.md.
+  //
   // Whole-param defaults (`[x] = []`) ARE admitted now: the emit site's
   // param-default machinery evaluates the initializer into the param local at
   // call time (before the destructure + factory pack), exactly as for ordinary
@@ -1348,12 +1360,20 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
     const pat = param.name;
     if (!ts.isArrayBindingPattern(pat) && !ts.isObjectBindingPattern(pat)) return null;
     const elements: ts.BindingElement[] = [];
-    let hasRest = false;
+    const restNames: string[] = [];
     const walk = (p: ts.BindingPattern): void => {
       for (const el of p.elements) {
         if (ts.isOmittedExpression(el)) continue;
         if (el.dotDotDotToken) {
-          hasRest = true;
+          // (#3916) An IDENTIFIER rest takes the boundary-rep rule below. A
+          // nested pattern under it (`[...[a, b]]`, `[...{length}]`) binds its
+          // OWN names via the ordinary `ensureBindingLocals` path, so it is
+          // walked like any sub-pattern and keeps the checker rule. The pre-fix
+          // walk `continue`d here WITHOUT descending — lifting the bail alone
+          // would leave those names unspilled: host-free, valid, and silently
+          // reading the inert default.
+          if (ts.isIdentifier(el.name)) restNames.push(el.name.text);
+          else walk(el.name);
           continue;
         }
         if (ts.isIdentifier(el.name)) elements.push(el);
@@ -1361,7 +1381,10 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): Nat
       }
     };
     walk(pat);
-    if (hasRest) return null;
+    for (const name of restNames) {
+      patternParamSpillTypes.set(name, { kind: "externref" });
+      addSpill(name);
+    }
     for (const el of elements) {
       const id = el.name as ts.Identifier;
       // (#3386) FUNCTION-VALUED element defaults (`[g = function(){}]`,
