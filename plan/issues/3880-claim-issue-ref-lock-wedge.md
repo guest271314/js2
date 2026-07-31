@@ -65,7 +65,18 @@ the false "nothing to release", and the false "UNASSIGNED".
 ## Fifth occurrence — first on `--release`, and the strongest single argument for priority
 
 2026-07-31, one agent handing #2916 back to the queue. **Three release attempts,
-zero effect** — `2916.json` still read `status: in-progress` afterwards.
+all reported as failures.**
+
+> **CORRECTION, measured later the same day.** This section originally said
+> "zero effect — `2916.json` still read `status: in-progress` afterwards". That
+> is **false**. The record has read `status: "released"`, `released_at:
+2026-07-31T08:55:03Z` ever since: **one of the three "failed" attempts had in
+> fact written it.** What made it _look_ unreleased was the dispatch gate, which
+> tested `assignee` alone and so reported a `released` record as CLAIMED (see the
+> `isHeld` section). The original sentence is left visible rather than deleted
+> because the mistake is the point: an agent inferred "no effect" from three
+> error messages, without reading the record back, and then documented the ref as
+> unfixable. See "#2916 is the fully-traced instance" below.
 
 | #   | attempt                                                                                                | outcome                                                                                                                                           |
 | --- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
