@@ -67,6 +67,30 @@ was about: a stale artifact that quietly stopped matching reality.
    (that list points at `benchmarks/suites/*.ts`, so it should be unaffected —
    verify).
 
+## ⚠️ Grep trap — read before deleting
+
+`grep -rn "benchmarks/dom.ts"` returns hits that are **NOT** these files. All
+of them point at `examples/benchmarks/dom.ts`, a genuinely separate file in the
+**playground** tree (`website/playground/examples/benchmarks/dom.ts`, which
+exists alongside `array.ts`, `fib.ts`, `loop.ts`, `string.ts`, `style.ts`).
+Verified 2026-07-31:
+
+```
+scripts/generate-size-benchmarks.ts:391  path: "examples/benchmarks/dom.ts"
+scripts/check-ir-fallbacks.ts:93         "website/playground/examples/benchmarks/dom.ts"
+website/playground/main.ts:1987          path: "examples/benchmarks/dom.ts"
+website/playground/main.ts:2018          path === "examples/benchmarks/dom.ts" || ...
+```
+
+**None of these reference `benchmarks/dom.ts` at the repo root.** A naive grep
+makes the root duplicates look referenced when they are not — which either
+scares someone off a safe deletion, or leads them to "fix" the playground path
+instead, breaking the size-benchmark and IR-fallback tooling.
+
+The check that actually matters is the import graph, not the path string:
+`benchmarks/run.ts:13-16` imports only `./suites/*.js`, and nothing imports the
+root copies.
+
 ## Acceptance criteria
 
 1. The four root-level duplicates are gone.
