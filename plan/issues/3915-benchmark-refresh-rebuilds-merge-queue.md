@@ -1,10 +1,11 @@
 ---
 id: 3915
 title: "benchmark-refresh pushes to main discard in-flight merge_group validations"
-status: ready
+status: done
+completed: 2026-08-01
 sprint: current
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 priority: high
 horizon: m
 feasibility: medium
@@ -200,16 +201,152 @@ groups ⇒ fewer collision windows per PR) without removing the mechanism.
 
 ## Acceptance criteria
 
-- [ ] A `benchmark-refresh` push can no longer discard an in-flight `merge_group` validation
-      (by any of the three options).
+- [x] A `benchmark-refresh` push can no longer discard an in-flight `merge_group` validation
+      (by any of the three options). — **option 1**, see Resolution below.
 - [ ] Re-measure the rebuild rate over a comparable window; benchmark-refresh-attributable
       rebuilds reach **0**, with legitimate PR-merge rebuilds unaffected.
-- [ ] `docs/ci-policy.md` records traps 1–2: `[skip ci]` does not prevent a queue rebuild, and
-      the `gh-readonly-queue/main/pr-N-<sha>` SHA is the base, not the head.
+      **Deliberately left unchecked** — this cannot be measured until the fix has been on
+      `main` for a full comparable window. The pre-fix resample below is the baseline to
+      diff against; sample a ≥5 h window with ≥15 distinct PRs and repeat the attribution
+      in "Reproduction / evidence". Do not check this box off the strength of the argument.
+- [x] `docs/ci-policy.md` records traps 1–2: `[skip ci]` does not prevent a queue rebuild, and
+      the `gh-readonly-queue/main/pr-N-<sha>` SHA is the base, not the head. — new section
+      _"Pushing to `main` from a workflow — the rebuild tax (#3915)"_.
 - [ ] Traps 3–4 are routed to the regression-gate owner (separate change): the regressions
       report should enumerate every regressed path, not just the trap-gate one, and
       `Newly trapping:` should state the baseline status (`pass → trap` vs `fail → trap`) so the
       applicable valve is unambiguous.
+
+## Resolution (2026-08-01) — option 1, gated at the class
+
+### The loop still holds; verified on data disjoint from the filing sample
+
+Independent resample, **2026-07-31 17:55Z–23:11Z** (25 `Test262 Sharded` `merge_group` runs,
+**20 distinct PRs**):
+
+| PR    | groups | superseded by                              |
+| ----- | ------ | ------------------------------------------ |
+| #3913 | 2      | `12add728` benchmark-refresh               |
+| #3915 | 2      | `9eef01c1` benchmark-refresh               |
+| #3918 | 2      | `782c805c` benchmark-refresh               |
+| #3920 | 2      | `f47c3864` benchmark-refresh               |
+| #3929 | 2      | `ee3b3f36` benchmark-refresh               |
+| #3924 | 2      | `def6d524` **Merge PR #3920 — legitimate** |
+
+**6 of 20 PRs (30%) needed more than one merge group. 5 of 6 rebuilds bot-caused, 1
+legitimate.** Same shape as the filed 7:1, on a different window. Over the two days to
+2026-07-31 `main` took **48** `chore(ci): refresh landing benchmark artifacts` commits.
+
+### The decisive evidence was already in the repo: a natural experiment
+
+**#1951 had already solved this class — for two of the four bots that push `main`.** Its
+header comment in `baseline-summary-sync.yml` states this exact mechanism verbatim
+("any push to main (even `[skip ci]`) makes GitHub rebuild every queued merge group"), and
+`test262-sharded.yml`'s `promote-baseline` carries the matching inline deferral.
+
+So the repo was already running the experiment:
+
+| pusher                                              | gated?      | pushes / 2 days | rebuilds attributed (5.3 h window) |
+| --------------------------------------------------- | ----------- | --------------- | ---------------------------------- |
+| `benchmark-refresh.yml`                             | **no**      | **48**          | **5**                              |
+| `test262-sharded.yml` + `baseline-summary-sync.yml` | yes (#1951) | 7               | **0**                              |
+| `refresh-baseline.yml`                              | **no**      | 0 (8 h cron)    | 0                                  |
+
+That is a measurement of **the fix**, not of the problem, on the same repo and the same
+mechanism — stronger than any further measurement of the bug. Hence option 1.
+
+### Why NOT option 3 (move the artifacts off `main`)
+
+Two independent reasons, either sufficient:
+
+1. **It does not cover the class.** `refresh-baseline.yml` also pushes `main` un-gated
+   (its audit commit). Moving the _benchmark_ artifacts to another repo leaves that push,
+   and any future one, doing exactly the same damage. The reported instance is not the class.
+2. **It reworks a provenance chain two consumers depend on.** `benchmark-manifest.json`'s
+   `sourceSha` is validated by `benchmark-lifecycle.mjs validate` before write credentials
+   are configured, and the PR gate's `inherit` auxiliary path copies
+   `wasm-host-wasmtime-*.json` out of the _checked-out base tree_. Both would need a fetch
+   seam and a new trust story. Larger change, strictly less coverage.
+
+Option 2 (batching) is dominated by option 1: same failure mode at a lower rate.
+
+### What shipped
+
+- **`scripts/main-push-queue-gate.mjs`** — one shared gate.
+  **defer ⟸ queue _positively_ busy AND artifact _positively_ fresh**; everything else
+  proceeds. `--stale-after-hours` (6 h) bounds how long a never-draining queue can hold an
+  artifact back, at ≤4 rebuilds/day instead of ~24. `--fallback` lets a pusher whose file set
+  is re-landed by another _already-gated_ path skip the floor instead of inventing one.
+- **`benchmark-refresh.yml`** `promote-benchmarks` — gated, freshness from
+  `benchmark-manifest.json.generatedAt`.
+- **`refresh-baseline.yml`** — gated too, closing the class. Its main-repo commit is an
+  _audit copy_; the authoritative baselines-repo push is untouched, and the hourly gated
+  `baseline-summary-sync.yml` re-lands the same file set, so `--fallback` applies. An
+  EMERGENCY (forced) run never defers.
+- `test262-sharded.yml`'s inline #1951 gate is **deliberately left alone** — it works, and
+  `promote-baseline` is the most load-bearing promote path in the repo.
+
+### What this costs, stated plainly
+
+Deferral is not free, and the costs are all in artifact **freshness**, never in correctness:
+
+- **Landing-page benchmark numbers can lag by up to ~6 h during a continuously busy
+  queue** (the floor), versus minutes today. On an idle or intermittently-draining queue
+  nothing changes — the very next push promotes.
+- **`history.json` gains fewer data points.** ~24 samples/day was over-sampling a
+  measurement whose run-to-run noise exceeds most real deltas; this is arguably an
+  improvement, but it is a change and it is not free.
+- **A deferred run's measurement is discarded**, exactly as it already is when
+  `main` advances mid-measure (the existing `remote_sha != SOURCE_SHA` no-op).
+- The **PR benchmark gate is unaffected**: since the base and candidate are measured on
+  the same runner in one job, it never reads the committed artifact for its verdict. Only
+  the `bootstrap` path and the `inherit` auxiliary carry-forward read committed files, and
+  both are provenance-stamped with the SHA they came from.
+
+Set against ~24 discarded `merge_group` validations/day, each ~12 min of wall time and
+~102 runners of compute on a queue #3914 documents as runner-saturated.
+
+### Three traps caught while building the fix
+
+1. **`git log -1 --format=%ct -- <path>` returns EMPTY, not an error, under
+   `fetch-depth: 1`** — and every promote job here is shallow. Empty parses as "unknown
+   age" ⇒ fail-open ⇒ **the staleness floor silently disables itself forever while the gate
+   still reports success**. Freshness is therefore read from a timestamp carried _inside_
+   the artifact, which a shallow checkout cannot launder into "fresh".
+2. **The step shell is `bash -e {0}`.** A bare `node gate.mjs` followed by `RC=$?` **aborts
+   the step** on the DEFER exit code, before `RC` is ever read — the deferral would surface
+   as a red run instead of a skipped push. Only `... || RC=$?` survives; verified by running
+   both idioms under `bash -e`.
+3. **Fail-open here is correct and looks like a rule violation.** The standing rule
+   ("a detector must be able to say I don't know") exists because a _verifier_ that cannot
+   see must not fall to the reassuring side. This is a _deferral_ and the asymmetry is
+   reversed: unknown ⇒ push costs at most one discarded validation, once; unknown ⇒ defer
+   can freeze the artifact **indefinitely** on a flaky API, silently, because a skipped push
+   is indistinguishable from a no-op one. The rule's intent is kept where it matters — the
+   gate still _reports_ blindness (`::warning::` + `queue=UNKNOWN` in the verdict).
+
+### Testing
+
+`tests/issue-3915-main-push-queue-gate.test.ts` (35 assertions), in three layers:
+
+- the pure decision table, every branch including both "cannot see" ones;
+- the silent-empty readers (`""`/`"null"`/blank `gh` output ⇒ UNKNOWN, never `0`);
+- **the wiring** — the gate step's `run:` body is executed **verbatim** under `bash -e` with a
+  stub `node` supplying the exit code, asserting the `$GITHUB_OUTPUT` value; plus that the
+  `if:` guard sits on the step that actually contains `git push deploykey HEAD:main`.
+
+Each layer was **positive-controlled by breaking it**: removing the `if:` guard, flipping
+queue-UNKNOWN to `defer`, and reverting to the unsafe `RC=$?` idiom each fail the exact
+corresponding test and nothing else.
+
+### Follow-up
+
+**#3950** — nothing prevents the _next_ workflow from pushing `main` un-gated. The rule is
+prose plus a hardcoded four-workflow list. Filed separately rather than bundled: a textual
+workflow scanner has to accept two gate shapes and classify every `git push` in the tree,
+which is its own design problem. (Detecting by _capability_ — a job referencing
+`MAIN_DEPLOY_KEY`, the only credential that can push `main` past ruleset GH013 — looks
+better than detecting by syntax.)
 
 ## Reproduction / evidence
 
