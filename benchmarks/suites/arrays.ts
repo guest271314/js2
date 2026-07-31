@@ -104,13 +104,20 @@ export function run(): number {
   {
     name: "array/sort-i32",
     iterations: 20,
+    // (#3902) The Wasm source used to call bare `arr.sort()` while the JS
+    // baseline called `arr.sort((a, b) => a - b)`. Those are DIFFERENT
+    // algorithms: the spec default comparator is ToString/lexicographic
+    // (§23.1.3.30), so the Wasm lane was stringifying 10,000 numbers and
+    // ordering them as "1","10","100","2" while JS did a plain numeric sort.
+    // The published 1,586× gap was therefore partly a measurement artifact.
+    // Both lanes now use the same numeric comparator.
     source: `
 export function run(): number {
   const arr: number[] = [];
   for (let i = 0; i < 10000; i = i + 1) {
     arr.push((i * 37 + 13) % 10000);
   }
-  arr.sort();
+  arr.sort((a: number, b: number): number => a - b);
   return arr[0];
 }`,
     js: sortI32,
@@ -228,6 +235,10 @@ export function run(): number {
   return sum;
 }`,
     js: findElement,
-    skip: ["gc-native"], // find with undefined check may not work in fast mode
+    // (#3902) The `skip: ["gc-native"], // find with undefined check may not
+    // work in fast mode` guard that lived here was a guess, never a finding.
+    // Removing it and running the lane: it works, and it is the fastest lane of
+    // the three. The bar it suppressed was the host-call one at ~2× slower than
+    // JS, which made `array/find` read as a loss.
   },
 ];
