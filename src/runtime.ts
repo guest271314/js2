@@ -2553,6 +2553,46 @@ function _drainClosureIterableToArray(obj: any, exports: Record<string, Function
   return _stepClosureIterator(iterator, exports, { cap: 1_000_000, nullOnMalformedNext: true });
 }
 
+/**
+ * (#3643 Slice B) Make a NON-iterable WasmGC struct readable as an array-like
+ * by native `Array.from` / `Array.fromAsync`.
+ *
+ * §23.1.2.1 step 6: when the source has no `@@iterator`, `Array.from` uses
+ * LengthOfArrayLike + indexed reads. WasmGC structs are opaque to JS, so those
+ * reads answered `undefined` and produced `[]` — measured:
+ * `Array.from({length: 2, 0: "a", 1: "b"})` → `[]` (host `["a","b"]`), while
+ * `Array.prototype.slice.call` on the IDENTICAL receiver was already correct,
+ * because it goes through `_wrapForHost`. This routes the non-iterable struct
+ * through that same proxy so the spec's own step 6 runs, rather than
+ * re-implementing it.
+ *
+ * Deliberately narrow — it only fires when ALL of these hold, so no currently
+ * working path changes shape:
+ *   - the value is an opaque WasmGC struct (plain JS objects/arrays untouched),
+ *   - it is NOT a vec (`_materializeIterable` already turned those into real
+ *     arrays before this point),
+ *   - it has no callable `@@iterator` (a wasm-closure `@@iterator` is drained
+ *     by `_drainWasmClosureIterable` before this is reached; a native one is
+ *     left to the iterable path).
+ */
+function _arrayFromNonIterableSource(
+  v: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (v == null || typeof v !== "object" || !_isWasmStruct(v)) return v;
+  const exports = callbackState?.getExports();
+  if (!exports) return v;
+  try {
+    if (_isWasmVec(v, exports)) return v;
+    const symIter = _safeGet(v, Symbol.iterator, callbackState) ?? _safeGet(v, "@@iterator", callbackState);
+    if (symIter != null) return v;
+    return _wrapForHost(v, exports);
+  } catch {
+    // Any probe failure leaves the value exactly as before this change.
+    return v;
+  }
+}
+
 function _materializeIterable(
   iter: any,
   callbackState?: { getExports: () => Record<string, Function> | undefined },
@@ -12554,12 +12594,23 @@ assert._isSameValue = isSameValue;
             const fn = _isWasmStruct(mapFn) ? (_wrapWasmClosure(mapFn, 2, callbackState) ?? mapFn) : mapFn;
             return typeof fn === "function" ? drained.map((v, i) => fn(v, i)) : drained;
           }
-          if (mapFn == null) return Array.from(iter);
+          // (#3643 Slice B) §23.1.2.1 step 6: when the source is NOT iterable,
+          // `Array.from` falls back to LengthOfArrayLike + indexed reads. A
+          // WasmGC struct array-like (`{length: 2, 0: "a", 1: "b"}`) is opaque
+          // to JS, so native `Array.from` read `length` as `undefined` and
+          // answered `[]` — silently dropping every element. `_wrapForHost` is
+          // the proven live-mirror proxy that already makes
+          // `Array.prototype.slice.call(arrayLike)` work on the identical
+          // receiver; routing the non-iterable struct through it lets native
+          // `Array.from` perform the spec's own array-like walk rather than
+          // re-implementing step 6 here.
+          const src = _arrayFromNonIterableSource(iter, callbackState);
+          if (mapFn == null) return Array.from(src);
           if (_isWasmStruct(mapFn)) {
             const wrapped = _wrapWasmClosure(mapFn, 2, callbackState);
-            if (wrapped) return Array.from(iter, wrapped);
+            if (wrapped) return Array.from(src, wrapped);
           }
-          return Array.from(iter, mapFn);
+          return Array.from(src, mapFn);
         };
       // Array.fromAsync(items, mapFn?, thisArg?) — ES2024 §23.1.2.2 (#1517).
       //
