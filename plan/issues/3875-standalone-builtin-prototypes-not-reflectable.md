@@ -1,7 +1,7 @@
 ---
 id: 3875
 title: "Standalone: reflection routes disagree on built-in prototype properties — hasOwnProperty false and getOwnPropertyNames short while getOwnPropertyDescriptor is spec-exact"
-status: ready
+status: blocked
 created: 2026-07-31
 priority: high
 feasibility: medium
@@ -15,6 +15,50 @@ related: [3254, 2908, 1781, 3647]
 ---
 
 # #3875 — three reflection routes, three different answers for the same property
+
+## 🛑 BLOCKED — DO NOT IMPLEMENT OR SIZE. The measurements disagree with each other.
+
+**Three agents produced three mutually inconsistent pictures of this one mechanism.
+The disagreement is almost certainly methodological, not about the compiler.**
+
+The suspected cause: one agent measured through **`runTest262File`** (which
+assembles test262 frontmatter and pulls in `propertyHelper.js`); another measured
+through bare **`compile()`**. If the harness path polyfills or injects
+`hasOwnProperty`, then **the harness is masking the very defect being chased**, and
+a "positive control" through it was measuring the polyfill rather than the compiler.
+
+The clearest symptom of the conflict:
+
+| `Array.prototype.hasOwnProperty('push')` in standalone | result |
+|---|---|
+| via `runTest262File` | **true** — "Array is the exception, replicate it" |
+| via raw `compile()` | **0** — same as every other built-in; **no reference to copy** |
+
+Both cannot be right. The entire "bounded fix — replicate the Array registration"
+routing rests on the first, and it has been **retracted** by the agent who relayed
+it.
+
+**Worse, one host control is provably broken:** `({a:1}).hasOwnProperty('a')`
+returned **false on host** in the raw-`compile()` harness — plainly wrong, so every
+*host* reading from that run is untrustworthy. (Its *standalone* controls pass — own
+key 1, bogus key 0 — so the standalone column there is sound.) That failing host
+control is likely a **separate real host-lane `hasOwnProperty` bug** and deserves
+its own investigation.
+
+### Required before this issue is actionable
+
+1. **Reconcile `runTest262File` vs raw `compile()` on ONE property** (suggest
+   `Array.prototype.hasOwnProperty('push')`). Determine whether the test262 harness
+   injects/polyfills `hasOwnProperty`.
+2. Re-establish which routes are actually broken **using whichever harness is shown
+   to reflect the compiler**, not the polyfill.
+3. Only then size, and only then route.
+
+**Everything below was measured before that discrepancy was known. Treat every
+specific claim in it as provisional.** The one finding that survived all four
+revisions is that `getOwnPropertyNames` returns a constant **6** in standalone for
+Array/RegExp/String where host returns **40/15/52** — reproduced independently in
+both harnesses.
 
 ## How it was found (the control property is the whole story)
 
