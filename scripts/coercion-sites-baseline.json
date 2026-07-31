@@ -1,6 +1,6 @@
 {
   "codegen/any-eq-helpers.ts": 4,
-  "codegen/array-methods.ts": 19,
+  "codegen/array-methods.ts": 20,
   "codegen/array-prototype-borrow.ts": 4,
   "codegen/array-to-primitive.ts": 5,
   "codegen/async-scheduler.ts": 3,
