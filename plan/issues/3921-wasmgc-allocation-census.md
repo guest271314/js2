@@ -178,6 +178,38 @@ correctness step for this issue, and until it is closed the byte column must
 not be quoted as measurement. The *counts* are exact — each is a counter
 incremented at the allocation site.
 
+## Follow-up measured 2026-07-31 — scalar replacement is NOT available
+
+The cheapest possible fix for the 310,485 `$AnyValue` boxes would have been the
+optimizer: most boxes are created, crossed and unboxed inside one expression,
+which is exactly what Binaryen's `Heap2Local` promotes to locals. Tested before
+proposing any codegen work, on the shipped 1,673,257 B standalone acorn binary:
+
+| config | ArrayNew | StructNew |
+| --- | ---: | ---: |
+| shipped `-O3` | 731 | 3,759 |
+| `+ --heap2local` | 731 | 3,759 |
+| `+ --closed-world --heap2local` | 731 | 3,759 |
+| `+ --closed-world --gufa --heap2local` | 731 | 3,759 |
+
+**Zero allocation sites promoted, under every configuration.** `Heap2Local`
+works by replacing a `struct.new` whose result provably does not escape; an
+unchanged site count means nothing was provable. So either `-O3` already
+extracted everything available, or — more likely given `$AnyValue`'s shape — the
+boxes genuinely do escape into generic calls that the optimizer cannot see
+through.
+
+**Consequence: the `$AnyValue` fix must be "do not create the box" in codegen,
+not "let the optimizer remove it".** That moves it out of tooling and into the
+same representation family as #3685/#3927. It also means the remaining cheap
+options are interning (constants only) and finding the producer that mints them
+— it is worth reading the top producer's WAT to check whether its consumers
+ever read more than one field of the 5-field union before assuming they need it.
+
+Caveat: a static site count is not a dynamic allocation count. What this
+measurement establishes is that no site was promoted, which is the precondition
+for any dynamic win — not the size of a win that did not happen.
+
 ## Scope
 
 - [x] Emitter-side census pass, env-gated and off by default (PR #3920).
