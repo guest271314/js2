@@ -183,10 +183,17 @@ function caseConvert(): number {
 }
 
 function substringExtract(): number {
+  // (#3898 follow-up) Accumulate the substring's CONTENT, not its .length.
+  // `.length` is derivable from the arguments alone, so Binaryen -O4 proved the
+  // result unused and strength-reduced the whole call away: the gc-native lane
+  // emitted ZERO struct.new/array ops in the loop and clocked 2.394 ns/op,
+  // which the plausibility guard correctly rejected. Reading a character forces
+  // the slice to actually exist.
   const s = "abcdefghijklmnopqrstuvwxyz";
   let sum = 0;
   for (let i = 0; i < 10000; i++) {
-    sum = sum + s.substring(i % 5, 20 + (i % 6)).length;
+    const t = s.substring(i % 5, 20 + (i % 6));
+    sum = sum + t.charCodeAt(i % 7) + t.charCodeAt(t.length - 1);
   }
   return sum;
 }
@@ -340,13 +347,22 @@ ${variantTable(CASE_VARIANTS)}
     name: "string/substring",
     iterations: 100,
     opsPerCall: 10000,
-    minNsPerOp: 3,
+    // Floor is 1 ns, not 3: our `__str_substring` is an O(1) slice view
+    // (`NativeString` is {len, off, data} — #3901 confirmed it copies zero
+    // characters), and Binaryen then SCALAR-REPLACES the view entirely when only
+    // a couple of characters are read, so no struct.new survives in the loop.
+    // The lane still does real work — verified 2 `array.get` per iteration plus
+    // the offset arithmetic — it is just legitimately cheap. A 3 ns floor
+    // assumed substring must copy ~15 characters, which is true of the JS
+    // baseline but not of this implementation.
+    minNsPerOp: 1,
     source: `
 export function run(): number {
   const s = "abcdefghijklmnopqrstuvwxyz";
   let sum = 0;
   for (let i = 0; i < 10000; i = i + 1) {
-    sum = sum + s.substring(i % 5, 20 + (i % 6)).length;
+    const t = s.substring(i % 5, 20 + (i % 6));
+    sum = sum + t.charCodeAt(i % 7) + t.charCodeAt(t.length - 1);
   }
   return sum;
 }`,
