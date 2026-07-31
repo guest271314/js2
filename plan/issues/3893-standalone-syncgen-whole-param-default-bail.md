@@ -1,6 +1,6 @@
 ---
 id: 3893
-title: "Standalone: one selection bail (`param.initializer`) routes every whole-param-default generator onto the host eager-buffer path — ≥603 leaky compile_errors"
+title: "Standalone: one selection bail (`param.initializer`) routes whole-param-default generator FUNCTION EXPRESSIONS onto the host eager-buffer path (~98 rows of the 603-row symptom family)"
 status: done
 completed: 2026-07-31
 sprint: current
@@ -78,8 +78,9 @@ Measured on the standalone baseline (48,088 records, all dated 2026-07-31
 | non-`dflt` residue — bail **NOT yet attributed**      | **1,304** |               68.4 % |
 
 The residue is `class/dstr` (384) and `class/elements` (354) plus a long tail.
-**Those need their own bail attribution before anyone sizes them** — this issue
-claims the 603 and nothing more.
+**Those need their own bail attribution before anyone sizes them.** The 603 is
+the size of the whole-param-default **symptom**; the share this fix actually
+moves is smaller — see SCOPE below.
 
 **Ceiling ≠ yield.** All 603 are `compile_error` today; they never ran. Removing
 the leak buys host-free **instantiation**, after which each test still has to
@@ -97,10 +98,16 @@ reachable. Host-`fail` rows have no such demonstration, and moving a row from
 | whole `iterator_protocol` class |   1,907 |   1,094 (57.4 %) |         806 |
 | **this slice (`dflt`, 603)**    | **603** | **523 (86.7 %)** |      **78** |
 
-**523 known-achievable is the number to plan against** — the highest achievable
-ratio measured in this harvest (for contrast, #2046's 1,484 standalone rows
-carry **2** host-`pass`). It is still not a promise: each row must also pass
-everything else it asserts once instantiation succeeds.
+**523 known-achievable is the number to plan against for the whole
+whole-param-default SYMPTOM** — the highest achievable ratio measured in this
+harvest (for contrast, #2046's 1,484 standalone rows carry **2** host-`pass`).
+It is still not a promise: each row must also pass everything else it asserts
+once instantiation succeeds.
+
+> **This fix does not claim the 523.** See "SCOPE" below — the predicate it
+> touches is reached only by function EXPRESSIONS, so the demonstrated share is
+> the ~98 `generators/dstr` rows. The 603/523 figures size the symptom family,
+> which spans three declaration shapes with three different gates.
 
 ### Denominator reconciliation — 603 vs 497
 
@@ -119,10 +126,12 @@ is built on. **This issue quotes 603 / 523.**
 
 ## Acceptance criteria
 
-- [x] A generator fn-expr / method with a whole-param default
+- [x] A generator **function expression** with a whole-param default
       (`function*({x:y} = {x:23})`) routes native in the standalone lane and
       emits **zero** `env::__gen_*` / `env::__create_generator` /
-      `env::__get_caught_exception` imports.
+      `env::__get_caught_exception` imports. (Object-literal and class methods
+      take a different gate and are explicitly **out of scope** — measured, see
+      SCOPE.)
 - [x] The default's evaluation stays a **call-time** observable (§27.5
       EvaluateGeneratorBody + §10.2.11 FunctionDeclarationInstantiation): it must
       NOT run at generator-object creation. #3032 is the precedent for exactly
@@ -157,25 +166,65 @@ in the standalone lane, instantiated with **no imports**:
 - **ordering**: with a side-effecting default `mk()`, after `g()` and before any
   `next()`, `calls === 1` and `bodyRan === 0`; the body runs only on `next()` ✓
 
-**Real test262, standalone lane, `runTest262File`** (baseline had all four
-subjects as `compile_error`):
+Adjacent suites green: 8 files / 61 tests (`generators`, `generator-iife`,
+`generator-method-destructuring`, `generator-yield-contexts`,
+`issue-1665-standalone-generator-forof`, `issue-2864-d4-catch-across-yield`,
+`issue-2571-native-method-generators`, `issue-2581-objlit-method-generators`).
 
-| file (`generators/dstr/`)                                        | after                                                                                            |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `dflt-obj-ptrn-prop-id.js`                                       | pass                                                                                             |
-| `dflt-obj-ptrn-id-init-fn-name-fn.js`                            | pass                                                                                             |
-| `dflt-ary-ptrn-elem-id-init-fn-name-arrow.js`                    | pass                                                                                             |
-| `dflt-obj-ptrn-rest-getter.js`                                   | **fail** — advanced `compile_error` → honest `fail` (object-rest getter count), NOT a regression |
-| CONTROL `obj-ptrn-prop-id.js` (baseline pass)                    | pass ✓                                                                                           |
-| CONTROL `ary-ptrn-elem-id-init-fn-name-arrow.js` (baseline pass) | pass ✓                                                                                           |
+## RETRACTED: a `runTest262File` result that was vacuous
 
-**3 of 4 flip to pass; the fourth becomes an honest fail.** That is the
-`leaking ≠ flipping` reality made concrete — do not read 603 (or 523) as a pass
-delta. Adjacent suites green: 8 files / 61 tests
-(`generators`, `generator-iife`, `generator-method-destructuring`,
-`generator-yield-contexts`, `issue-1665-standalone-generator-forof`,
-`issue-2864-d4-catch-across-yield`, `issue-2571-native-method-generators`,
-`issue-2581-objlit-method-generators`).
+An earlier revision of this issue claimed _"3 of 4 test262 files flip to pass."_
+**That was wrong and is retracted.** A/B on the two branches — pre-fix
+(`issue-3628-es3-editions`) vs post-fix (`issue-3893-gen-param-default`), same
+six files — produced **byte-identical output**: 3 pass and 1 fail on _both_
+sides. They already passed.
+
+Root cause of the bad claim: **`runTest262File(..., "standalone")` does not
+enforce host-import-freedom.** It supplies the host imports, so a leaking module
+still runs and still scores `pass`. Its status therefore **cannot** detect this
+defect — a green reading is guaranteed regardless of the fix, which is the
+definition of a probe that could not have returned the other answer.
+
+The valid instruments are the two that actually gate on imports:
+
+1. the **bare standalone compile + import-set scan** (below), and
+2. `tests/issue-3893.test.ts`, which instantiates with **no import object** —
+   the only reason it fails pre-fix.
+
+The baseline's `compile_error` rows come from the CI worker, which _does_ apply
+the host-free gate; that is why the population is real even though
+`runTest262File` cannot see it.
+
+## SCOPE: function expressions only — measured, not assumed
+
+`isNativeGeneratorExpressionShape` is consulted **only** for
+`ts.isFunctionExpression(decl)` (`generators-native.ts`, in
+`isNativeGeneratorCandidate`). Class and object-literal generators are
+`MethodDeclaration`s and take a different gate, so this fix cannot move them.
+Verified by import-set A/B across the same two branches:
+
+| shape                                   |   pre-fix | post-fix                              |
+| --------------------------------------- | --------: | ------------------------------------- |
+| `function*({x} = {…})` (fn-expr)        | **leaks** | **native** ← this fix                 |
+| `{ *m({x} = {…}) }` (objlit method)     |     leaks | leaks (unchanged)                     |
+| `class { *m({x} = {…}) }`               |    native | native (never leaked for this reason) |
+| `class { *#m(…) }` (private, ± default) |     leaks | leaks (a different defect)            |
+
+So the `dflt` population splits by shape, and **only the fn-expr share is
+claimable here**:
+
+| path family                       |   rows | this fix?                                               |
+| --------------------------------- | -----: | ------------------------------------------------------- |
+| `generators/dstr` (fn-expr)       | **98** | **yes — demonstrated**                                  |
+| `class/dstr` + `class/elements`   |    388 | no — `MethodDeclaration`; private-gen is its own defect |
+| `object/*`                        |    102 | no — still leaks post-fix                               |
+| other (async-generator, function) |     15 | not enumerated                                          |
+
+**The claimable number is ~98 of 603, not 603 or 523.** The 603/523 figures
+above describe the whole whole-param-default _population_; they are the sizing
+of the SYMPTOM, not of this fix. The 388 class-path rows are being attributed
+separately (sync private generator methods, `class-bodies.ts`), and the 102
+object-path rows have no owner yet.
 
 ## Notes / coordination
 
