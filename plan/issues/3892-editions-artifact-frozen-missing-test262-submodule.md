@@ -1,5 +1,5 @@
 ---
-id: 3889
+id: 3892
 title: "Landing-page edition buckets frozen since 2026-07-25 — baseline-summary-sync has no test262 submodule, so generate-editions dies and the failure is swallowed"
 status: ready
 sprint: current
@@ -18,7 +18,7 @@ related: [3628, 3639, 3626, 1951]
 origin: "2026-07-31, #3628 close-out: the ≤ES3 bucket measured 273/273 but the committed artifact still published 230/273 (84%). Chasing why produced a root cause, not a stale file."
 ---
 
-# #3889 — edition buckets frozen: `generate-editions` fails silently in `baseline-summary-sync`
+# #3892 — edition buckets frozen: `generate-editions` fails silently in `baseline-summary-sync`
 
 ## Symptom
 
