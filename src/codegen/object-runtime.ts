@@ -102,6 +102,8 @@ import { emitSelfHostedFunc } from "./stdlib-selfhost.js"; // (#3160) self-hoste
 import { SELF_HOSTED_OBJECT_RUNTIME } from "../stdlib/object-runtime.js"; // (#3160) TS-source builtins
 import { buildObjectDescriptorHelpers } from "./object-runtime-descriptors.js";
 import { exposedClosedStructFieldName, isOpenDescriptorShape } from "./property-descriptor-shape.js";
+import type { PresenceSlot } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
+import { presenceSlotOf, presenceTestInstrs } from "./fnctor-presence-bits.js";
 import { buildObjectEnumerationHelpers } from "./object-runtime-enumeration.js"; // (#3274 wave-B) enumeration/array-like/object-static helper builders
 import { buildObjectPrototypeHelpers } from "./object-runtime-prototype.js"; // (#3274 wave-B) prototype-chain helper builders
 import * as fnctorArray from "./fnctor-array-prototype.js";
@@ -6291,7 +6293,7 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
 
   type Entry = {
     typeIdx: number;
-    presenceFieldIdx?: number;
+    presenceSlot?: PresenceSlot;
     shapeFieldIdx?: number;
     shapeId?: number;
   };
@@ -6304,10 +6306,8 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
     const shapeId = ctx.shapeIdByStructName.get(structName);
     for (const field of fields) {
       if (!field?.name || field.name.startsWith("$") || field.name.startsWith("__")) continue;
-      const presenceFieldIdx = field.presenceTracked
-        ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
-        : -1;
-      if (presenceFieldIdx >= 0) {
+      const presenceSlot = presenceSlotOf(fields, field.name);
+      if (presenceSlot) {
         const typeDef = ctx.mod.types[typeIdx];
         const physicalFields =
           typeDef?.kind === "struct"
@@ -6315,9 +6315,9 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
             : typeDef?.kind === "sub" && typeDef.type.kind === "struct"
               ? typeDef.type.fields
               : [];
-        if (presenceFieldIdx >= physicalFields.length) {
+        if (presenceSlot.wordFieldIdx >= physicalFields.length) {
           throw new Error(
-            `closed-struct-has-own presence mismatch: ${structName}.${field.name} index ${presenceFieldIdx}, physical ${physicalFields.length}`,
+            `closed-struct-has-own presence mismatch: ${structName}.${field.name} word ${presenceSlot.wordFieldIdx}, physical ${physicalFields.length}`,
           );
         }
       }
@@ -6328,7 +6328,7 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
       }
       entries.push({
         typeIdx,
-        ...(presenceFieldIdx >= 0 ? { presenceFieldIdx } : {}),
+        ...(presenceSlot ? { presenceSlot } : {}),
         ...(shapeFieldIdx >= 0 && shapeId !== undefined ? { shapeFieldIdx, shapeId } : {}),
       });
     }
@@ -6344,13 +6344,13 @@ export function fillClosedStructHasOwnArms(ctx: CodegenContext): void {
       const receiverArms: Instr[] = [];
       for (const entry of entries) {
         const returnPresence: Instr[] =
-          entry.presenceFieldIdx === undefined
+          entry.presenceSlot === undefined
             ? [{ op: "i32.const", value: 1 }, { op: "return" }]
             : [
                 { op: "local.get", index: 0 },
                 { op: "any.convert_extern" },
                 { op: "ref.cast", typeIdx: entry.typeIdx },
-                { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.presenceFieldIdx },
+                ...presenceTestInstrs(entry.typeIdx, entry.presenceSlot),
                 { op: "return" },
               ];
         const exactThen: Instr[] =
@@ -6458,7 +6458,7 @@ export function fillClosedStructOwnPropertyNamesArms(ctx: CodegenContext): void 
   const objVecPushIdx = ctx.funcMap.get("__objvec_push");
   if (!fn || objVecPushIdx === undefined) return;
 
-  type OwnField = { name: string; presenceFieldIdx?: number };
+  type OwnField = { name: string; presenceSlot?: PresenceSlot };
   type ShapeEntry = {
     typeIdx: number;
     fields: OwnField[];
@@ -6475,12 +6475,10 @@ export function fillClosedStructOwnPropertyNamesArms(ctx: CodegenContext): void 
     const byName = new Map<string, OwnField>();
     for (const field of fields) {
       if (!field?.name || field.name.startsWith("$") || field.name.startsWith("__")) continue;
-      const presenceFieldIdx = field.presenceTracked
-        ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
-        : -1;
+      const presenceSlot = presenceSlotOf(fields, field.name);
       byName.set(field.name, {
         name: field.name,
-        ...(presenceFieldIdx >= 0 ? { presenceFieldIdx } : {}),
+        ...(presenceSlot ? { presenceSlot } : {}),
       });
     }
     if (byName.size === 0) continue;
@@ -6506,14 +6504,14 @@ export function fillClosedStructOwnPropertyNamesArms(ctx: CodegenContext): void 
         { op: "extern.convert_any" },
         { op: "call", funcIdx: objVecPushIdx },
       ];
-      if (field.presenceFieldIdx === undefined) {
+      if (field.presenceSlot === undefined) {
         pushFields.push(...pushName);
       } else {
         pushFields.push(
           { op: "local.get", index: 0 },
           { op: "any.convert_extern" },
           { op: "ref.cast", typeIdx: entry.typeIdx },
-          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: field.presenceFieldIdx },
+          ...presenceTestInstrs(entry.typeIdx, field.presenceSlot),
           { op: "if", blockType: { kind: "empty" }, then: pushName },
         );
       }
@@ -6580,7 +6578,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     fieldIdx: number;
     fieldType: ValType;
     jsBoolean: boolean;
-    presenceFieldIdx?: number;
+    presenceSlot?: PresenceSlot;
     shapeFieldIdx?: number;
     shapeId?: number;
   };
@@ -6606,9 +6604,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
         (field.type.kind === "i32" &&
           (field.jsBoolean || field.type.boolean ? boxBooleanIdx !== undefined : boxNumberIdx !== undefined));
       if (!boxable) continue;
-      const presenceFieldIdx = field.presenceTracked
-        ? fields.findIndex((candidate) => candidate?.name === `$has_${field.name}`)
-        : -1;
+      const presenceSlot = presenceSlotOf(fields, field.name);
       let entries = byField.get(exposedFieldName);
       if (!entries) {
         entries = [];
@@ -6619,7 +6615,7 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
         fieldIdx,
         fieldType: field.type,
         jsBoolean: field.jsBoolean === true || (field.type.kind === "i32" && field.type.boolean === true),
-        ...(presenceFieldIdx >= 0 ? { presenceFieldIdx } : {}),
+        ...(presenceSlot ? { presenceSlot } : {}),
         ...(shapeFieldIdx >= 0 && shapeId !== undefined ? { shapeFieldIdx, shapeId } : {}),
       });
     }
@@ -6648,12 +6644,12 @@ export function fillClosedStructExternGetArms(ctx: CodegenContext): void {
     const receiverArms: Instr[] = [];
     for (const entry of entries) {
       const then: Instr[] = [];
-      if (entry.presenceFieldIdx !== undefined) {
+      if (entry.presenceSlot !== undefined) {
         then.push(
           { op: "local.get", index: 0 },
           { op: "any.convert_extern" },
           { op: "ref.cast", typeIdx: entry.typeIdx },
-          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.presenceFieldIdx },
+          ...presenceTestInstrs(entry.typeIdx, entry.presenceSlot),
           { op: "i32.eqz" },
           {
             op: "if",
