@@ -163,6 +163,77 @@ another. Until that is explained, it is unknown whether one change fixes all
 six or whether there are two independent bugs. Settle this before designing the
 fix.
 
+## ⚠️ IMPLEMENTATION ATTEMPTED — the answer to "does one change fix all six" is NO
+
+The prescribed fix was implemented and measured. **It is not landable on its
+own, and #3917 now blocks it.** Findings, so the next person starts here
+instead of repeating the work:
+
+### The gate change is correct and does most of the job
+
+Extending the number-format gate in `import-collector.ts` from
+`ctx.wasi || ctx.standalone` to also include `ctx.nativeStrings` (one named
+predicate, used at the three sites: the `number_toString` gate, the
+`number_toString_radix` gate, and the `emitNativeNumberFormat` block) takes
+`fast: true` from **3 of 9 passing to 8 of 9**.
+
+Fixed by the gate change alone: `(3).toString()`, `String(n)`,
+`n.toString(16)`, `[1,22,333].join(",")`.
+
+### It also needs an accompanying consumer fix, or it regresses templates
+
+The gate change alone makes `` `v${3}` `` evaluate to **`"v"`** — the
+interpolated number contributes nothing.
+
+Cause, read off the emitted WAT. In `compileNativeTemplateExpression`
+(`src/codegen/string-ops.ts`), the numeric spans choose their bridge on
+`standaloneNativeStrings = noJsHost(ctx)`:
+
+```
+standalone:  number_toString → any.convert_extern; ref.cast → __str_concat
+fast:        number_toString → __str_from_extern          → __str_concat
+```
+
+`__str_from_extern` marshals a genuine JS-host string via `__str_from_mem`. The
+native formatter returns a native string *boxed* as an externref, and the
+bridge silently yields **empty** for that box. The condition is wrong: it asks
+"is a JS host available" when the real question is "did this externref come
+from the native formatter". Since this is the **native-strings** template
+compiler and #3912 makes `number_toString` native in every mode there, the
+three numeric branches (f64/i32/i64) should use `emitNativeStringRefFromExternref`
+**unconditionally**. The dynamic-externref branches below them keep the bridge,
+correctly — those really are host strings.
+
+With both changes, templates are correct again and match standalone exactly.
+
+### What still fails, and why it blocks
+
+Two operations remain wrong under `fast` with both changes applied:
+
+- `JSON.stringify({a: 42})` — still `dereferencing a null pointer`
+- `n.toFixed(2)` — returns **`"3.00"`** for `3.14159`
+- and `` `v${3.5}` `` returns `"v3"`
+
+These are **not** caused by the gate change. They are #3917: the native
+formatter truncates non-integers whenever `fast` is set, which is already wrong
+on `main` today for `standalone + fast` and `wasi + fast`. The gate change
+merely routes plain `fast` onto that broken path.
+
+**So applying #3912 alone converts loud traps into silent wrong answers.** That
+is a regression in kind, and it is why the change was NOT committed. The
+working tree was restored to pristine via file copy and verified clean.
+
+**Sequence: fix #3917 first, then land #3912's gate + template changes
+together.**
+
+### Beware: constant folding masks the remaining failures
+
+`String(3.5)` as a *literal* folds at compile time and returns the correct
+`"3.5"`. Only a variable (`const n = 3.5; String(n)`) reaches the runtime
+formatter. A 12-case formatting matrix run during this work reported all-pass —
+including `1e21`, `1e-7` and `0.1+0.2` — purely because every case was a
+literal. Bind to variables when testing this area.
+
 ## Scope
 
 1. Trace the null-pointer signature to an instruction and confirm or kill the
