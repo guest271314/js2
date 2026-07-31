@@ -214,6 +214,26 @@ per-SHA reuse. This post-dates PR #3741 (2026-07-28T16:02Z) by three days.
   `eval-gtbndng-indirect-update-dflt.js` are still **in** bucket `-2` and each
   now reads `pass`.
 
+### Permanent repro (#2093)
+
+This issue is closed by **measurement**, so its permanent repro is the
+conformance corpus itself, not a new unit test — these are the exact files that
+carried the 43 failures and now pass. Re-run any of them host-lane through
+`runTest262File` to re-check the claim:
+
+- `test262/test/language/expressions/compound-assignment/S11.13.2_A7.1_T4.js`
+  (and `_A7.2`…`_A7.11`, `_T1`…`_T4` — 44 files; the #3486 + #2666 cluster)
+- `test262/test/language/expressions/prefix-increment/S11.4.4_A6_T2.js`
+- `test262/test/language/expressions/prefix-decrement/S11.4.5_A6_T2.js`
+- `test262/test/language/expressions/postfix-increment/S11.3.1_A6_T2.js`
+- `test262/test/language/expressions/postfix-decrement/S11.3.2_A6_T2.js`
+- `test262/test/language/statements/function/13.2-30-s.js` (#2899)
+- `test262/test/language/module-code/eval-gtbndng-indirect-update-dflt.js` (#2900)
+- controls: `test262/test/language/arguments-object/mapped/mapped-arguments-nonconfigurable-1.js`
+  (in-bucket, must pass) and
+  `test262/test/annexB/built-ins/escape/prop-desc.js` (must fail — proves the
+  harness discriminates)
+
 ### Instrument 2 — `runTest262File` spot-check on the current tree
 
 The baseline is 21 commits behind `origin/main`, so 10 files were re-run
