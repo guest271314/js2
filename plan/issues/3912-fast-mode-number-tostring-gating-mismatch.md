@@ -42,30 +42,76 @@ it cannot be confounded by fast-mode string marshalling):
 | `"v" + n` | ok | ok |
 | `[10,9,1].sort()` | **illegal cast** (fixed by #3902) | ok |
 
-## The control matrix — this rules out both single-factor explanations
+## Observed vs. inferred — read this before designing the fix
 
-Three configurations were measured across three independent reproductions. The
-fourth cell is not a reachable config, so this is as complete as the matrix
-gets:
+An earlier revision of this issue presented a tidy 2×2 matrix labelled by
+`nativeStrings` state and `number_toString` provider, and concluded the fix
+direction was "settled". **That overstated the evidence.** The outcomes were
+measured; the *labels* on the cells were inferred from reading the gating code.
+Separating them changes what an implementer may assume.
 
-| `nativeStrings` | `number_toString` | mode | result |
-| --- | --- | --- | --- |
-| OFF | host import | `host-call` | **6/6 ok** |
-| ON | **native** | `standalone` | **6/6 ok** |
-| ON | host import | **`fast`** | **6/6 FAIL** |
-| OFF | native | — | not reachable |
+### Observed (measured, three independent reproductions)
 
-Read it carefully, because it kills both obvious diagnoses:
+| mode | 6 number→string ops | control `1+1` |
+| --- | --- | --- |
+| `host-call` (`fast: false`) | **6/6 ok** | ok |
+| `fast: true` | **6/6 FAIL** | ok |
+| `fast: true, target: "standalone"` | **6/6 ok** | ok |
 
-- The host `number_toString` is **not broken** — it works in host mode.
-- `nativeStrings` is **not broken** — it works in standalone.
-- The defect is specifically the **mixture**, which only `fast: true` produces.
+Also observed, by inspecting the compiled module's imports per mode
+(`.tmp/verify-wiring.mts`) rather than by reading the gates:
 
-**This settles the fix direction rather than leaving it a judgement call**:
-make `number_toString` native whenever `ctx.nativeStrings` is on. The
-standalone column is already a working end-to-end proof that this
-configuration handles all six operations. That is the change deferred out of
-#3902 as too broad to attempt blind — it now has a reference config behind it.
+| mode | `number_toString` |
+| --- | --- |
+| `host-call` | **host import** |
+| `fast` | **host import** |
+| `standalone` | **native** |
+
+### What that actually implies — and the problem it creates
+
+`host-call` and `fast` **both** use the host `number_toString`, yet host-call
+passes 6/6 and fast fails 6/6. So the host provider **cannot on its own** be
+the cause. Something else differs between those two modes, and the obvious
+candidate is the string representation — but that is where the evidence stops.
+
+### The labels are now OBSERVED too — read off the emitted WAT
+
+The remaining gap was closed by dumping the module for each config and reading
+the provider and string backend directly out of the WAT, rather than inferring
+them from the gating code. Reproduced independently twice
+(`.tmp/verify-wat.mts`, and `.tmp/probe-matrix-labels.mts` in the #3902
+worktree):
+
+| config | `number_toString` | native `__str_` helpers |
+| --- | --- | --- |
+| `host-call` | **HOST IMPORT** | **absent** |
+| `fast` (gc-native) | **HOST IMPORT** | **present** (incl. `__str_compare`) |
+| `standalone` | **DEFINED (native)** | **present** |
+
+Note why an imports-only probe cannot see this: the native string helpers are
+**defined functions, not imports**, so their absence from the imports object is
+expected and proves nothing. The WAT is the right instrument.
+
+The mechanism now reads straight off the table:
+
+- `host-call` — consistent **host** provider + **host** strings → passes
+- `standalone` — consistent **native** provider + **native** strings → passes
+- `fast` — the **only** config pairing a **host** provider with **native**
+  strings → the only mismatched one, and the only failing one
+
+There is no fourth reachable config.
+
+**Consequence for the fix**: making `number_toString` native whenever
+`ctx.nativeStrings` is on converts the `fast` row into the `standalone` row,
+and the `standalone` row is empirically a working end-to-end reference for all
+six operations. It is also feasible today — a native path already exists
+(`emitNativeNumberFormat` at
+`src/codegen/expressions/new-builtin-globals.ts:281` and
+`src/stdlib/number-format.ts`, whose comment says it mirrors the deleted
+hand-written `number_toString_radix` step for step).
+
+Still requires the full conformance run in the scope list — this changes number
+formatting for every fast-mode program.
 
 ## Root cause
 
@@ -97,16 +143,25 @@ absent from the page or quietly written to avoid the surface.
 
 - `illegal cast` (`join`, and `sort` before #3902): representation
   disagreement, **verified in the WAT** by the #3902 agent.
-- `dereferencing a null pointer` (the other five): **not yet traced to an
-  instruction.** The standing hypothesis — explicitly flagged as unconfirmed —
-  is that `emitNativeNumberFormat`'s `!ctx.funcMap.has("number_toString")`
-  early-return also skips emitting the native formatter's **support
-  structures** (`__num_fmt_finalize`, the buffer globals) when that name is
-  already occupied by the import, leaving a null where the formatter expects a
-  buffer.
+- `dereferencing a null pointer` (the other five): **not traced to an
+  instruction. No current lead.**
 
-**Confirm this first.** It decides whether one change fixes all six or whether
-there are two independent bugs.
+  ⚠️ **A previously-recorded hypothesis here has been RETRACTED — do not chase
+  it.** An earlier revision suggested `emitNativeNumberFormat`'s
+  `!ctx.funcMap.has("number_toString")` early-return skips emitting the native
+  formatter's support structures (`__num_fmt_finalize`, the buffer globals).
+  That is **wrong**: `ensureNativeStringHelpers` and `emitFinalize` are called
+  **unconditionally** at the top of that function (L376-377), *before* any
+  `funcMap.has` guard. Whatever produces the null deref is downstream of that.
+  The retraction came from the agent who originally proposed it. It is recorded
+  here rather than deleted, because the hypothesis circulated in three
+  escalation messages and someone may otherwise re-derive it and go to the
+  wrong line.
+
+**Why the split still matters.** Five cases give one signature and `join` gives
+another. Until that is explained, it is unknown whether one change fixes all
+six or whether there are two independent bugs. Settle this before designing the
+fix.
 
 ## Scope
 
