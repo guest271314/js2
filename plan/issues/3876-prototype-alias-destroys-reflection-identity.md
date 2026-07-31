@@ -51,6 +51,38 @@ The `Array.prototype` row is the clearest case: `hasOwnProperty('push')` is
 correct (1) inline on both lanes, and wrong (0) on both lanes once the receiver
 is a local binding.
 
+## Re-measured through the AUTHORITATIVE harness (2026-07-31)
+
+The table above came from bare `compile()`, which #3885 shows cannot be trusted
+for host-lane `Object.*` statics. **The core finding was therefore re-run
+through `runTest262File`, both lanes, with four controls** — and it survives,
+with its surface wider than originally filed.
+
+```
+CONTROLS  keys_inline=true  keys_var=true  ownkey=true  bogus=false   (both lanes)
+
+                    host     standalone
+INLINE_arr          true     true
+VAR_arr             FALSE    FALSE    <- the defect, BOTH lanes
+INLINE_re_exec      true     false    <- standalone: lookup registration (#3875)
+VAR_gopd_re         true     FALSE    <- aliasing also reaches gOPD
+INLINE_gopd_lit     true     true     <- the retracted claim: NON-defect
+```
+
+Two corrections to the filing, both strengthening it:
+
+1. **The aliasing defect is confirmed on BOTH lanes** under the authoritative
+   harness with passing controls — not host-only, and not an artifact of the
+   bare-`compile()` apparatus that first found it.
+2. **It reaches `getOwnPropertyDescriptor` in standalone, not only
+   `hasOwnProperty`** (`VAR_gopd_re` false on standalone). The defect's surface
+   is wider than the original write-up recorded, so a fix must cover the
+   descriptor path as well as the has-own path.
+
+Row 4 (`INLINE_gopd_lit` true on both lanes) is the independent corroboration
+of the retraction cited above. Note that the controls **pass** here, which is
+what licenses reading any of these rows at all — the standard #3885 sets.
+
 ## Why this matters beyond the row count
 
 It is a **measurement hazard as well as a defect**. It silently explains a
@@ -105,6 +137,14 @@ aliased. They are unaffected by this issue.
 > `Object.getOwnPropertyDescriptor({a:1},'a')` returns a **real descriptor**
 > with the right `value` and `writable`; a missing key correctly returns
 > `undefined`. There is no inline-vs-variable asymmetry for `gOPD`.
+>
+> **Independently corroborated from a second apparatus.** The re-run recorded
+> below (four controls passing, both lanes) reports `INLINE_gopd_lit` **true on
+> host and standalone**. That matters because the two setups had previously
+> *disagreed* about scope — one reported variable-bound receivers passing, the
+> other found them failing. They now agree the inline `gOPD` claim was an
+> artifact. A retraction resting on two apparatus that once disagreed is
+> stronger than one resting on a single re-measurement.
 >
 > **The licensing evidence — why the original measurement is void, not merely
 > unreproduced.** Under bare `compile()` the host lane fails its own control:
@@ -180,7 +220,12 @@ wrong about the axis: it is receiver expression shape, not route.
 - `var P = X.prototype; P.hasOwnProperty(k)` agrees with
   `X.prototype.hasOwnProperty(k)` for every built-in prototype, on both lanes.
 - `var P = X.prototype; Object.getOwnPropertyDescriptor(P, k)` agrees with the
-  inline form.
+  inline form — **on both lanes**. The authoritative re-run shows `VAR_gopd_re`
+  false in standalone, so `gOPD` is part of the defect's surface and a
+  `hasOwnProperty`-only fix does not satisfy this issue.
+- Every verification run states **harness, lane, and control outcome**, per
+  #3885. The original filing's bare-`compile()` table does not meet that bar and
+  is retained only for provenance.
 - ~~`Object.getOwnPropertyDescriptor({a:1},'a')` returns a real descriptor on
   host (the related-but-distinct defect above), or that defect is split into its
   own issue with this one citing it.~~ **DROPPED 2026-07-31 — retracted, see the
