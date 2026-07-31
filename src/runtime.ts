@@ -6569,13 +6569,31 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // source) — must SKIP a non-enumerable own key. Hardcoding
       // `enumerable: true` here leaked non-enumerable sidecar props into spread
       // results (`spread-obj-skip-non-enumerable`, #2714). Declared struct
-      // fields and class methods carry no sidecar flags entry and stay
-      // enumerable data props, matching their spec semantics.
+      // fields carry no sidecar flags entry and stay enumerable data props,
+      // matching their spec semantics.
+      //
+      // (#3647) Registered class-PROTOTYPE members are the exception — the
+      // sentence above used to lump them in with declared struct fields. A
+      // MethodDefinition (§14.6 DefineMethod; likewise §14.4/§14.5 generator,
+      // async and get/set members) is created `enumerable: false`, which
+      // `_readOwnDescriptor` arm 2a (#1364a) has always reported and the
+      // static-method arm above already defers to (#3479); only the prototype
+      // case fell through here and hardcoded `true`. That is observable because
+      // `Object.prototype.propertyIsEnumerable.call(C.prototype,"m")` reaches
+      // NO `__propertyIsEnumerable` import on host — `__proto_method_call` runs
+      // the ENGINE's method against this proxy, so §20.1.3.4 reads
+      // `[[GetOwnProperty]]`, i.e. this trap. Only the `enumerable` bit is
+      // corrected: `value` keeps `safeGetField` because arm 2a returns a method
+      // BRIDGE value, which would also move accessor members' `value`.
+      // `hasInFields` (not a raw `includes`) keeps `delete C.prototype.m`
+      // (#1364b) working; an explicit `defineProperty(…,{enumerable:true})`
+      // still wins via the sidecar flags entry below.
+      const isRegisteredProtoMember = protoMethods !== undefined && hasInFields;
       const scFlags = _wasmPropDescs.get(obj)?.get(_normalizeDescKey(key));
       const desc: PropertyDescriptor = {
         value: val,
         writable: true,
-        enumerable: scFlags === undefined ? true : !!(scFlags & _SC_ENUMERABLE),
+        enumerable: scFlags === undefined ? !isRegisteredProtoMember : !!(scFlags & _SC_ENUMERABLE),
         configurable: true,
       };
       // Mirror onto target so V8's Proxy invariant checker is happy
