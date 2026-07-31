@@ -31,6 +31,17 @@ export interface BenchmarkResult {
   p95Ms: number;
   binarySize?: number;
   compileMs?: number;
+  /** Primitive operations performed by one `run()` call, if the def declares it (#3898). */
+  opsPerCall?: number;
+  /** `medianMs` expressed per declared operation, in nanoseconds (#3898). */
+  nsPerOp?: number;
+  /** Floor `nsPerOp` was checked against (#3898). */
+  minNsPerOp?: number;
+  /**
+   * Set by `report.ts` when `nsPerOp` is physically impossible — the lane is not
+   * published as a valid comparison (#3898).
+   */
+  implausible?: boolean;
 }
 
 export interface BenchmarkDef {
@@ -45,8 +56,35 @@ export interface BenchmarkDef {
   deps?: Record<string, unknown>;
   /** Extra env imports for manual instantiation. */
   extraEnv?: Record<string, Function>;
-  /** JS-equivalent function to benchmark as baseline. */
-  js: () => void;
+  /**
+   * JS-equivalent function to benchmark as baseline.
+   *
+   * It SHOULD return an accumulator folding in every iteration (#3898): the
+   * harness cross-checks that value against the Wasm `run()` return value, and
+   * `report.ts` uses it to prove both lanes did the same work.
+   */
+  js: () => number | void;
+  /**
+   * Number of primitive operations one `run()` call performs (e.g. 1000
+   * `indexOf` calls). Feeds the plausibility guard in `report.ts` (#3898):
+   * a lane reporting under ~1 ns per operation is not measuring the work it
+   * claims to measure and must not be published as a valid comparison.
+   */
+  opsPerCall?: number;
+  /**
+   * Benchmark-specific lower bound on the cost of one operation, in
+   * nanoseconds, when more is known than the universal ~1 ns physical floor
+   * (#3898).
+   *
+   * The universal floor alone would not have caught this bug: the hoisted
+   * `string/indexOf` baseline reported 1.56 ns/op, which clears 1 ns. But an
+   * `indexOf` that scans several characters and allocates nothing still cannot
+   * retire in 1.56 ns, and the honest measurement is ~33 ns. Set this to a
+   * value comfortably below the honest cost (roughly a quarter of it) so a
+   * faster machine cannot trip it, while a collapsed loop — which is 20x+
+   * faster, not 4x — always does.
+   */
+  minNsPerOp?: number;
   /** Strategies to skip for this benchmark. */
   skip?: Strategy[];
 }
@@ -108,14 +146,42 @@ async function compileSource(source: string, fast: boolean, target?: "gc" | "lin
 // Runner
 // ---------------------------------------------------------------------------
 
-async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<BenchmarkResult | null> {
+/**
+ * Cross-lane result assertion (#3898).
+ *
+ * The JS baseline and the Wasm `source` are supposed to be two implementations
+ * of the *same* computation. If they disagree, whatever the page publishes as
+ * "JS vs Wasm" is comparing two different workloads — which is exactly how the
+ * hoisted string baselines went unnoticed for so long. Report it loudly and
+ * drop the lane rather than publishing a meaningless ratio.
+ */
+function assertSameResult(name: string, strategy: Strategy, jsResult: unknown, wasmResult: unknown): boolean {
+  if (typeof jsResult !== "number" || typeof wasmResult !== "number") return true;
+  if (Object.is(jsResult, wasmResult)) return true;
+
+  process.stderr.write(
+    `\n` +
+      `  !! CROSS-LANE MISMATCH in "${name}" [${strategy}]\n` +
+      `     js baseline returned ${jsResult}, wasm run() returned ${wasmResult}.\n` +
+      `     The two lanes are not computing the same thing; refusing to publish\n` +
+      `     this comparison (#3898).\n`,
+  );
+  process.exitCode = 1;
+  return false;
+}
+
+async function runStrategy(
+  def: BenchmarkDef,
+  strategy: Strategy,
+  jsReference: unknown,
+): Promise<BenchmarkResult | null> {
   if (def.skip?.includes(strategy)) return null;
 
   const iterations = def.iterations ?? 100;
   const warmup = def.warmup ?? 5;
   const timings: number[] = [];
 
-  let fn: () => void;
+  let fn: () => unknown;
   let binarySize: number | undefined;
   let compileMs: number | undefined;
 
@@ -135,7 +201,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
         imports.setInstance?.(instance);
         const run = (instance.exports as Record<string, Function>).run;
         if (!run) throw new Error(`No "run" export in host-call module for "${def.name}"`);
-        fn = run as () => void;
+        fn = run as () => unknown;
         break;
       }
 
@@ -148,7 +214,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
         imports.setInstance?.(instance);
         const run = (instance.exports as Record<string, Function>).run;
         if (!run) throw new Error(`No "run" export in gc-native module for "${def.name}"`);
-        fn = run as () => void;
+        fn = run as () => unknown;
         break;
       }
 
@@ -161,7 +227,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
         imports.setInstance?.(instance);
         const run = (instance.exports as Record<string, Function>).run;
         if (!run) throw new Error(`No "run" export in linear-memory module for "${def.name}"`);
-        fn = run as () => void;
+        fn = run as () => unknown;
         break;
       }
     }
@@ -177,11 +243,17 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
   }
 
   // Warmup
+  let lastResult: unknown;
   try {
-    for (let i = 0; i < warmup; i++) fn();
+    for (let i = 0; i < warmup; i++) lastResult = fn();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`\n    [${strategy} skipped (runtime): ${msg.split("\n")[0]}]\n`);
+    return null;
+  }
+
+  // Cross-lane result assertion (#3898) — after warmup, before timing.
+  if (strategy !== "js" && !assertSameResult(def.name, strategy, jsReference, lastResult)) {
     return null;
   }
 
@@ -224,6 +296,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
 
   timings.sort((a, b) => a - b);
   const totalMs = timings.reduce((s, t) => s + t, 0);
+  const medianMs = median(timings);
 
   return {
     name: def.name,
@@ -232,10 +305,13 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
     batchSize,
     totalMs,
     avgMs: totalMs / iterations,
-    medianMs: median(timings),
+    medianMs,
     p95Ms: percentile(timings, 95),
     binarySize,
     compileMs,
+    opsPerCall: def.opsPerCall,
+    nsPerOp: def.opsPerCall ? (medianMs * 1e6) / def.opsPerCall : undefined,
+    minNsPerOp: def.minNsPerOp,
   };
 }
 
@@ -250,8 +326,18 @@ export async function runBenchmark(
   strategies: Strategy[] = ALL_STRATEGIES,
 ): Promise<BenchmarkResult[]> {
   const results: BenchmarkResult[] = [];
+
+  // Reference value for the cross-lane assertion (#3898). Computed once, outside
+  // the timed region, so a throwing baseline cannot abort the whole suite.
+  let jsReference: unknown;
+  try {
+    jsReference = def.js();
+  } catch {
+    jsReference = undefined;
+  }
+
   for (const s of strategies) {
-    const r = await runStrategy(def, s);
+    const r = await runStrategy(def, s, jsReference);
     if (r) results.push(r);
   }
   return results;
