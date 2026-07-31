@@ -305,6 +305,40 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
 > **RE-GROUNDED 2026-07-31 — baseline counted BEFORE implementing**, so the
 > result cannot be rationalised afterward. Population and ceiling below are
 > measured row counts, not the superseded "~31" estimate.
+>
+> **READ THE TIERING FIRST — test262 rows are the SECONDARY metric here, not the
+> deliverable.** `goal: standalone`, under umbrella #2860. The deliverable is
+> **import elimination**. A leaked `env::__instanceof_check` means standalone
+> mode is *not actually standalone* for any program using `instanceof` with a
+> dynamic RHS — ordinary code, not an edge case. The product claim is "JS host
+> optional"; an import that fires on ordinary `instanceof` falsifies that claim
+> **regardless of how many conformance rows move**. Anyone sizing this by row
+> count is measuring the wrong thing.
+
+### PRIMARY acceptance — binary, and the actual deliverable
+
+Both imports gone, verified **per shape** rather than on one sample:
+
+- `env::__instanceof_check` absent for **all four** dynamic-RHS variants:
+  any-typed local · fn-valued param · property access · call result.
+- `env::Object_isPrototypeOf` absent for the dynamic-receiver form.
+- The already-clean shapes stay clean: builtin-name RHS, user-class RHS, Error
+  family, and static `C.prototype.isPrototypeOf(a)`.
+
+This either holds or it does not. **If it fails, stop and report — do not pursue
+rows.** The import is the thing.
+
+### SECONDARY acceptance — rows, expected ~4, ceiling 24
+
+Quoted **with** its decomposition so `≤24` cannot be read as the target: of the
+24 leaky-PASS rows, only **4** carry a `host_import_leak` signature. Out of
+scope: 8 `runtime-eval`, 3 TypeError-not-thrown, 3 null/undefined conversion,
+3 `compile_error`, 6 assorted.
+
+**A row that stops leaking but still fails is a NEW FINDING, not a shortfall.**
+Removing an import makes a module *instantiate*; it must then still produce the
+right answer. Such a row is a second defect wearing the first one's clothes —
+report it as its own observation rather than counting it against this issue.
 
 **Measured baseline** — host baseline vs standalone baseline, joined on `file`:
 
@@ -338,23 +372,29 @@ causes this issue does not address:
 and "leaking ≠ flipping": removing the import makes a module *instantiate*, after
 which it still has to produce the right answer.
 
-### Criteria
+### Criteria — how each tier is evidenced
 
-- Standalone dynamic `instanceof` emits **zero** `env::__instanceof*` imports.
-  Verified per-shape on the four probed dynamic-RHS variants (any-typed local,
-  fn-valued param, property access, call result), not on one.
-- `isPrototypeOf` on a **dynamic receiver** emits zero `env::Object_isPrototypeOf`.
-  The static `C.prototype.isPrototypeOf(a)` form is already clean and must stay so.
-- **A/B the 24 ceiling rows before and after**, reporting `before → after` per
-  row rather than a net. Both lanes; a control that must hold under any spec
-  version; **discard the run if the control fails**; state harness, lane, and
-  both commit SHAs on every comparison.
-- No wrong-`true` correctness regression in the `instanceof` / `isPrototypeOf`
-  corpus — a native tri-state that answers `true` too eagerly is worse than a leak.
+The two tiers are stated above; these are the verification rules that apply to
+them. Correctness constraints bind **both** tiers.
+
+- **Primary evidence:** per-shape import-list assertion, on all four dynamic-RHS
+  variants and the dynamic-receiver `isPrototypeOf` form — not on one sample.
+  A single-shape probe is what let the original scope statement stand wrong, and
+  what made this re-grounding's own first pass miss `isPrototypeOf`.
+- **Secondary evidence:** A/B the 24 ceiling rows, reporting `before → after`
+  **per row** rather than a net. Both lanes; a control that must hold under any
+  spec version; **discard the run if the control fails**; state harness, lane,
+  and both commit SHAs on every comparison.
+- **Correctness (binds both tiers, and outranks both):** no wrong-`true`
+  regression in the `instanceof` / `isPrototypeOf` corpus. A native tri-state
+  that answers `true` too eagerly is **worse than the leak it replaces** — a
+  leak fails loudly at instantiation, a wrong `true` passes silently.
 - gc/host byte-identical (compile-diff probe).
-- Full `merge_group` net-positive. **Note the gate's ~20 phantom
-  `compile_timeout` improvement credits (#3884): subtract them before reading
-  any net — a positive net is not evidence of improvement.**
+- `merge_group` net: **subtract #3884's ~20 phantom `compile_timeout` credits
+  before reading it.** With an expected effect of ~4 rows the phantom credit is
+  roughly **five times the signal**, so an unadjusted net here is pure noise —
+  not a weak positive, no information at all. This must be stated in the PR
+  description, not just computed.
 
 ## Implementation Notes — Slice A landed (sendev-instanceof, 2026-07-01)
 
