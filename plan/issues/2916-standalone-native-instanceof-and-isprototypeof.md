@@ -21,7 +21,52 @@ origin: "2026-07-01 — sr-tail2 escalation: leaky-PASS conversion cluster, subs
 
 # #2916 — Standalone native `instanceof` operator + `isPrototypeOf` residual
 
-## Problem (verified on `main` `f350ba855`, 2026-07-01)
+## RE-GROUNDED 2026-07-31 — scope is narrower than filed; the headline figure is stale
+
+> **The "~31 leaky-PASS conversions" figure in the title is SUPERSEDED.** It is
+> kept visible rather than deleted so nobody re-derives it, but it must not be
+> used to size this work or to measure acceptance. Two of the three filed leak
+> shapes no longer reproduce.
+>
+> Measured on current `main`, `--target standalone`, reading the module's
+> **import list** (a compile-time property — the right instrument for a leak
+> question; #3885's hazard concerns host *evaluation* of `Object.*` statics, not
+> the import list). Control: a plain module with no `instanceof` emits
+> `imports=0`.
+>
+> | shape | filed leak | measured 2026-07-31 |
+> | --- | --- | --- |
+> | `a instanceof Array` (builtin-name RHS) | `env::__instanceof` | **clean** — Slice A |
+> | `a instanceof C` (user-class RHS) | — | **clean** |
+> | Error family | — | **clean** (already native) |
+> | RHS resolves to no class/struct | `env::__instanceof_dyn` | **never observed** |
+> | `a instanceof K`, `K` an `any`-typed local | `env::__instanceof_check` | **LEAKS** |
+> | `x instanceof K`, `K` a fn-valued param | — | **LEAKS** `__instanceof_check` |
+> | `a instanceof holder.K` (property access) | — | **LEAKS** `__instanceof_check` |
+> | `a instanceof mk()` (call result) | — | **LEAKS** `__instanceof_check` |
+> | `C.prototype.isPrototypeOf(a)` (static receiver) | (paired residual) | **clean** |
+> | `p.isPrototypeOf(a)`, `p` a dynamic receiver | — | **LEAKS** `env::Object_isPrototypeOf` |
+>
+> **The residual is TWO host imports, not three:**
+>
+> 1. **`env::__instanceof_check`** — every dynamic-RHS `instanceof` shape. Four
+>    surface variants, one import, one root cause (`identifiers.ts:1247`/`1252`).
+> 2. **`env::Object_isPrototypeOf`** — `isPrototypeOf` on a **dynamic** receiver
+>    only; the static `C.prototype.isPrototypeOf(a)` form is already clean.
+>
+> `env::__instanceof` and `env::__instanceof_dyn` were not observed on any probed
+> shape.
+>
+> **A correction to this re-grounding's own first pass**, recorded because it is
+> the same class of error the issue text made: an initial probe tested only the
+> *static* `C.prototype.isPrototypeOf(a)` form, saw it clean, and concluded
+> `isPrototypeOf` was fully fixed. It is not — the dynamic-receiver form leaks.
+> One shape is not the surface.
+>
+> **Acceptance must therefore be set on counted rows, not on the stale
+> estimate** — see the re-grounded acceptance criteria at the end of this issue.
+
+## Problem (verified on `main` `f350ba855`, 2026-07-01 — see RE-GROUNDED above)
 
 Under `--target standalone` the dynamic `instanceof` operator leaks an
 unsatisfiable `env::__instanceof*` host import, so the module cannot instantiate
@@ -256,13 +301,60 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
   residual, sharing `emitProtoChainWalk`. Depends on Slice A landing.
 
 ## Acceptance
-- Standalone dynamic `instanceof` emits **zero** `env::__instanceof*` imports
-  and instantiates host-free.
-- The `isPrototypeOf` generic-host-method residual no longer leaks.
-- `net_per_test > 0` on the standalone floor; no wrong-`true` correctness
-  regression in the `instanceof` / `isPrototypeOf` corpus.
+
+> **RE-GROUNDED 2026-07-31 — baseline counted BEFORE implementing**, so the
+> result cannot be rationalised afterward. Population and ceiling below are
+> measured row counts, not the superseded "~31" estimate.
+
+**Measured baseline** — host baseline vs standalone baseline, joined on `file`:
+
+| population (path-matched) | rows |
+| --- | ---: |
+| `instanceof` / `Symbol.hasInstance` | 56 |
+| `isPrototypeOf` | 10 |
+| **total population** | **66** |
+
+| leaky-PASS (host `pass`, standalone not-`pass`) | rows |
+| --- | ---: |
+| `instanceof`-ish | 22 |
+| `isPrototypeOf` | 2 |
+| **addressable CEILING** | **24** |
+
+**The ceiling is 24, but the leak-attributable subset is far smaller.** By
+standalone failure signature, only **4** of the 24 carry
+`host_import_leak: standalone target emitted host imports`. The rest fail for
+causes this issue does not address:
+
+| n | standalone signature | addressed here? |
+| ---: | --- | --- |
+| 8 | `Import "js2wasm:runtime-eval"` | no — eval, separate issue |
+| **4** | **`host_import_leak: … emitted host imports`** | **yes** |
+| 3 | `Expected a TypeError to be thrown` | unlikely |
+| 3 | `TypeError: Cannot convert undefined or null to object` | unlikely |
+| 3 | `compile_error` (S11.8.6_A6_T3, A2.4_T3, primitive-prototype) | no |
+| 6 | assorted single assertion failures | unknown |
+
+**So the honest expectation is ~4 rows directly, ≤24 as an absolute ceiling** —
+and "leaking ≠ flipping": removing the import makes a module *instantiate*, after
+which it still has to produce the right answer.
+
+### Criteria
+
+- Standalone dynamic `instanceof` emits **zero** `env::__instanceof*` imports.
+  Verified per-shape on the four probed dynamic-RHS variants (any-typed local,
+  fn-valued param, property access, call result), not on one.
+- `isPrototypeOf` on a **dynamic receiver** emits zero `env::Object_isPrototypeOf`.
+  The static `C.prototype.isPrototypeOf(a)` form is already clean and must stay so.
+- **A/B the 24 ceiling rows before and after**, reporting `before → after` per
+  row rather than a net. Both lanes; a control that must hold under any spec
+  version; **discard the run if the control fails**; state harness, lane, and
+  both commit SHAs on every comparison.
+- No wrong-`true` correctness regression in the `instanceof` / `isPrototypeOf`
+  corpus — a native tri-state that answers `true` too eagerly is worse than a leak.
 - gc/host byte-identical (compile-diff probe).
-- Full `merge_group` net-positive.
+- Full `merge_group` net-positive. **Note the gate's ~20 phantom
+  `compile_timeout` improvement credits (#3884): subtract them before reading
+  any net — a positive net is not evidence of improvement.**
 
 ## Implementation Notes — Slice A landed (sendev-instanceof, 2026-07-01)
 
