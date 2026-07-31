@@ -15,6 +15,11 @@ language_feature: compiler-internals
 goal: performance
 related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
 loc-budget-allow:
+  # The shared zero-length backing store (`src/codegen/empty-vec-store.ts`)
+  # needs a hook at the empty-array-literal site and one context field; the
+  # logic itself lives in the new module.
+  - src/codegen/literals.ts
+  - src/codegen/context/types.ts
   # Two call sites (generateModule / generateMultiModule), 5 lines each plus the
   # import. The pass itself lives in src/codegen/alloc-census.ts, per the
   # "add code to the subsystem module, not the barrel" rule — what lands in
@@ -22,6 +27,7 @@ loc-budget-allow:
   # dead-type elimination has remapped every typeIdx.
   - src/codegen/index.ts
 func-budget-allow:
+  - src/codegen/literals.ts::compileArrayLiteral
   - src/codegen/index.ts::generateModule
   - src/codegen/index.ts::generateMultiModule
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
