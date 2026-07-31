@@ -202,9 +202,15 @@ scan** on the old swallow. Fixing one read path is not fixing the property.
 
 ### A live case that needs no scan at all
 
-**PR #3903 adds `plan/issues/3916-standalone-gen-rest-pattern-spill.md` while `main`
-already carries `plan/issues/3916-array-from-nonvec-source-map-closure-illegal-cast.md`** —
-two different issues, one id, found 2026-07-31.
+**PR #3903 adds a `3916-standalone-gen-rest-pattern-spill` issue file while `main` already
+carries `3916-array-from-nonvec-source-map-closure-illegal-cast`** — two different issues,
+one id, found 2026-07-31.
+
+(Written without the `plan/issues/…md` path prefix on purpose: the #1616 link gate resolves
+any such string against **`main`**, and the incoming file is only in an open PR — so citing
+it accurately by full path fails `quality`. That is a third flavour of the same trap, after
+a glob that matches nothing and a glob inside the warning about globs. See the
+`pre-commit-checklist` note.)
 
 Note what makes this the strongest argument for the guard rail: **the incumbent is already
 on `main`.** No open-PR scan, no reservation ref, no network race — a single
