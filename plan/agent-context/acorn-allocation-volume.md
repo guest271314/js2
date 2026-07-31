@@ -110,14 +110,16 @@ allocation *can* happen, not how often. Recorded only as census candidates:
 ## 4. Tooling — what works, what does not
 
 **Allocation volume, deterministic and contention-proof.** Sum inter-GC heap
-growth out of `--trace-gc`: `allocated += before_i − after_{i−1}`. Scripts left
-in `.tmp/acornperf/` (`drive.mjs`, `gc-sum.mjs`, `ab.mjs`, `analyze-prof.mjs`).
+growth out of `--trace-gc`: `allocated += before_i − after_{i−1}` over the
+`X (Y) -> Z (W) MB` fields, divided by the parse count. The scripts I used were
+throwaway (`.tmp/acornperf/`, gitignored and gone with the container) and are a
+few lines each — regex the trace, sum the deltas.
 This metric does not move with box load and was what made the two lowerings
 attributable at all — it caught an 8.0 MB effect whose predicted value was
 7.93 MB.
 
-**Paired A/B.** `ab.mjs` instantiates every variant binary in ONE process and
-runs them in rotating order, so contention drift hits all variants alike.
+**Paired A/B.** Instantiate every variant binary in ONE process and run them in
+rotating order, so contention drift hits all variants alike.
 Wall-clock medians on this box swing ±20% between processes; interleaved
 p25/median deltas are stable.
 
