@@ -106,9 +106,9 @@ rather than the occasional collision an unrelated bot would cause.
 runners**. A discarded validation is not merely ~12 min of wall time — it is ~102 runners'
 worth of compute thrown away, on a queue #3914 documents as **runner-saturated**.
 
-## Four traps worth recording independently of the fix
+## Five traps worth recording independently of the fix
 
-All four mislead triage regardless of how this issue is resolved. They share one shape: **a
+Traps 1-4 mislead triage regardless of how this issue is resolved; the fifth is a documentation failure mode. They share one shape: **a
 signal that looks complete or self-explanatory, and isn't.** Traps 1–2 are this issue's;
 traps 3–4 were hit during the #3888 park triage in the same session and each cost real time,
 so they are recorded here rather than lost.
@@ -142,6 +142,35 @@ so they are recorded here rather than lost.
    assert, so execution reached a later line and hit a trap **already present on `main`**.
 
    **Read the prior state from the baseline JSONL, never from the gate's phrasing.**
+
+### A fifth, different in kind: prose written to compensate for broken tooling outlives the breakage
+
+Traps 1–4 are signals that mislead. This one is a **documentation** failure mode, and it is
+worth naming separately because the fix is behavioural, not technical:
+
+> **When tooling cannot fix a record, agents write prose explaining that the record is wrong —
+> and the prose then outlives the problem.**
+
+Observed the same day on #2916. An agent's claim-release appeared to fail three times, so it
+wrote a 24-line warning into the issue file saying the `issue-assignments` record was stuck at
+`in-progress` and the issue was effectively blocked. In fact **one of those "failed" attempts
+had written the record**: it read `status: released` at 08:55:03Z. The tool reported failure
+while having succeeded, the agent trusted its own error output instead of reading the record
+back, and the note then explained a problem that no longer existed. Compounding it,
+`pre-dispatch-gate.mjs` tested `assignee` alone and ignored `status`, so a **released** record
+still printed `CLAIMED by …` (fixed in #3901) — which independently corroborated the wrong
+story. **Three separate readers were misled for ~6 h**, and the note was nearly propagated
+verbatim into a second PR, which would have preserved the false claim indefinitely.
+
+Mitigations, in order of value:
+
+1. **Read the record back after any write, and cite the record — not the tool's exit output —
+   in any prose about its state.** A tool that can report failure after succeeding makes its
+   own output inadmissible as evidence.
+2. **Date-stamp any prose asserting a mutable external state**, so a reader can tell whether it
+   is still current rather than assuming it is.
+3. Prefer fixing the record over documenting that it is broken; when that is impossible, say
+   explicitly what would make the note obsolete.
 
 ## Fix options (trade-offs, not a recommendation)
 
