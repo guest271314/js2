@@ -368,6 +368,93 @@ version of "hoist the guard" that beats the guard, because the guard is not
 what costs. Reopen only with a measurement showing a workload where the
 branch itself (not the cast) is the cost.
 
+## Coverage audit 2026-07-31 — the machinery is saturated; the residue needs a
+## DIFFERENT mechanism
+
+S1-S3 landed and S4 was falsified, so the question this audit answers is: **on
+real acorn, how much is left for this issue's mechanism to take?** Answer:
+almost nothing. The admission machinery is running at effectively full coverage,
+and the remaining `__extern_get` traffic is **not** reachable by proving a
+*fnctor class*, which is the only thing this issue's analysis can prove.
+
+**Instrumented compile of real acorn 8.16.0** (standalone, whole 226 KB package
+plus a bench driver, `JS2WASM_TYPED_THIS_DEBUG=1 JS2WASM_DIRECT_CALLS_DEBUG=1`):
+
+```
+[typed-this]   twins=488 declinedTwin=0 get=1366 set=98 compound=18 incdec=98
+[direct-calls] sites=3980 trampolines=547 twinFills=518 genericFills=29 legacyFills=0
+[direct-calls] declined: no-write-once-verdict=208 named-fn-expr=16 uses-arguments=8
+```
+
+- **`declinedTwin=0`** — every candidate prototype method got a typed twin.
+- **518 of 547 trampolines fill to a twin**, 29 degrade, **0** fall back to
+  legacy.
+- Field-inline declines are essentially empty: the `[typed-this] declined
+  fields` histogram is 24 `ok:` entries (admitted) and exactly two real
+  declines, `nofield:inAsync=6` and `nofield:inTemplateElement=6` — option
+  flags that are not struct fields at all.
+
+**Where the residual `__extern_get` actually comes from.** Attributing
+`__extern_get`'s own self time to its CALLER in the profile (9.69 % of total
+across 11,071 samples; see #3686 for the harness):
+
+| caller | share of `__extern_get` | absolute |
+| --- | ---: | ---: |
+| `__extern_method_call` | 18.7 % | 1.82 % |
+| `__fnctor_Node_new` | 15.2 % | 1.47 % |
+| `__closure_571__typed_this` | 14.4 % | 1.40 % |
+| `__closure_347__typed_this` | 14.1 % | 1.36 % |
+| `__closure_339` (no twin) | 8.5 % | 0.82 % |
+| `finishNodeAt` | 6.3 % | 0.61 % |
+| `getOptions` | 2.2 % | 0.22 % |
+
+Note the top entry is a *helper* (`__extern_method_call` doing its own
+name lookup), not a source-level `x.f` read — so ~19 % of the bucket is not a
+receiver-proof target at all.
+
+**And the shapes that decline.** `tryEmitProvenReceiverFieldGet` was asked for a
+verdict **3,444** times over the acorn compile: **3,200 unproven (92.9 %)**, 184
+→ `Node`, 60 → `Parser`, with only 88 reads actually inlined. Histogramming the
+3,200 unproven receivers by source text:
+
+| receiver | sites | what it is |
+| --- | ---: | --- |
+| `types$1` | **1,287 (40 %)** | acorn's **token-type table** — a module-level `var` bound to an object literal |
+| `state` | 434 (14 %) | the RegExp validator's `RegExpValidationState` parameter |
+| `node` | 255 | `Node` instances the flow analysis did not reach |
+| `prop`, `expr`, `refDestructuringErrors`, `ref`, `list`, `element`, … | ≤136 each | assorted parser locals |
+
+**The finding that matters: the single largest unproven receiver is not a class
+instance.** `types$1` is `var types$1 = { num: new TokenType(…), name: …, eof:
+…, semi: … }` — a plain **object literal**, read 348 times in acorn's source on
+its hottest comparisons (`this.type === types$1.eof`, `this.eat(types$1.semi)`).
+This issue's analysis proves "is this an instance of exactly one approved
+**fnctor** class"; an object literal has no fnctor class, so no amount of
+widening the *flow* rules reaches it. Same for `parser.options.<x>` (15.2 % of
+the bucket, via `__fnctor_Node_new`): `parser` **is** already proven, but
+`options` is an `externref` slot holding an object literal, so the second hop
+has no shape either.
+
+**Recommendation: close this issue's scope here and file the residue as a new
+capability.** What the residue needs is *shape* proof for non-fnctor objects —
+"this receiver is always the module-level object literal `L`, whose property set
+is fixed" — plus a struct type for such literals to `struct.get` from. That is a
+different analysis and a different lowering from anything S1-S4 built, and it
+composes with the existing guarded emitter (`ref.test` → `struct.get` : fall
+back to `__extern_get`), which makes escape/mutation soundness a non-issue: a
+shape-guarded read stays correct even though `types$1` is exported (`export {
+types$1 as tokTypes }`, plus `tokTypes: types$1` in the public surface), because
+a failed `ref.test` simply takes the dynamic arm.
+
+Sizing for whoever picks that up: 40 % of unproven receiver *sites*, on the
+hottest comparison in a tokenizer, and the two profiles agree the whole
+`__extern_get` bucket is 8-10 % of standalone parse time — so the ceiling for
+the `types$1` half is low single digits, **and it must be measured with the
+duplicate-baseline control arm before anyone believes it.** No wall-clock A/B
+was run for this audit: the box was at load 7-14 on 10 cores throughout, which
+invalidates timings at this effect size. Every number above is a static tally or
+a profile share, both of which survive contention.
+
 ## Pre-existing bug from S3 — FIXED, split out as #3719
 
 The `.call`/`.apply`-adjacent bug recorded under "Root cause of that

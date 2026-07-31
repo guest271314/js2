@@ -1,9 +1,10 @@
 ---
 id: 3688
 title: "perf: `a === b` with both operands statically `number` boxes, unboxes, and does an object→string comparison"
-status: in-progress
+status: done
+completed: 2026-07-31
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-31
 priority: high
 horizon: m
 feasibility: medium
@@ -278,6 +279,28 @@ compiled artifact:
   exactness, `Object.is` as the SameValue contrast, mixed-type,
   union, string/boolean, object-identity and wrapper-object non-goals,
   and the out-of-bounds carve-out.
+
+## Status flip 2026-07-31 — this was already finished; `in-progress` was stale
+
+Closed as `done` on audit, not on new work. The implementation
+(`bothStaticNumberEq` + the `JS2WASM_STATIC_NUMBER_EQ` kill-switch in
+`src/codegen/binary-ops.ts`), the 18 pins in
+`tests/issue-3688-static-number-equality.test.ts`, and the measured result above
+all landed in **`8b4d74f1cd3e51`** ("perf(#3688): give statically-`number`
+equality the numeric operand hint"), which is on `main`. Only the Follow-on
+below remained, and it is explicitly punted to #1584/#1852 rather than owned
+here.
+
+Recorded because the stale status actively mis-dispatched work: this issue was
+handed out as live work on the strength of #3686's file calling it "the larger
+prize" plus a clean-looking (allocation-stub) claim record. **It is a measured
+no-op on the acorn target** — the Measured-result section above already records
+that compiled acorn is **byte-identical** (1,214,535 bytes) with and without the
+fix, because acorn is dynamically typed so `this.type === tt.name` and friends
+are not statically `number` and the gate correctly never fires. The 3.2x win was
+on a synthetic `number[]` tokenizer. Anyone reaching for this issue to speed up
+acorn should stop; see #3685 and #3686 for where standalone parse time actually
+goes.
 
 ## Follow-on
 
