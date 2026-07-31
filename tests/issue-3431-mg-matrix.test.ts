@@ -71,9 +71,14 @@ describe("#3431 gen-test262-mg-matrix", () => {
 
   it("uses the serial queue's runner budget while reserving capacity for other required checks", () => {
     const matrix = buildMergeGroupMatrix();
-    expect(matrix).toHaveLength(106);
+    expect(matrix).toHaveLength(102);
     expect(matrix.length).toBe(MERGE_GROUP_RUNNER_CAPACITY - MERGE_GROUP_RESERVED_RUNNERS);
-    expect(JS_HOST_CHUNKS / STANDALONE_CHUNKS).toBeCloseTo(2.12, 2);
+    // #3914 — the lane split tracks the MEASURED per-lane `Run shard` work
+    // ratio, which is 1.835 as of merge_group run 30631849709 (2026-07-31).
+    // It has already drifted once (2.13 at run 29807524490), so this asserts
+    // the constants stay mutually consistent rather than pinning a number
+    // forever: whoever re-derives the ratio updates both sides together.
+    expect(JS_HOST_CHUNKS / STANDALONE_CHUNKS).toBeCloseTo(1.835, 2);
   });
 });
 
