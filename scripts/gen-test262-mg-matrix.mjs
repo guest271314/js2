@@ -101,15 +101,64 @@ export function buildTargetEntries(targetName, test262Target, resultPrefix, chun
   return entries;
 }
 
-export function buildMergeGroupMatrix() {
+/**
+ * Build the merge_group matrix, optionally restricted to the lanes whose
+ * results the queued change can actually move.
+ *
+ * The `changes` job classifies the queued diff with
+ * `scripts/test262-paths-match.sh --target host|standalone` and passes the
+ * verdict in; a lane that provably cannot move (e.g. js-host for a change that
+ * only refreshes tests/test262-slow-tests-standalone.json) is dropped from the
+ * matrix entirely rather than scheduled and thrown away.
+ *
+ * SHARD COUNTS ARE NOT REBALANCED when a lane is dropped. Each lane keeps its
+ * own chunk_total so its partition (assignBalancedChunk, a pure function of
+ * (chunkIndex, totalChunks)) stays IDENTICAL to a full run — a single-lane run
+ * must be directly comparable to the baseline that a two-lane run produced.
+ * Spending the freed runners on more shards for the surviving lane would
+ * re-partition it, which is a change we have no measurement for; the win here
+ * is the ~66 or ~36 jobs not run at all.
+ *
+ * @param {{ host?: boolean, standalone?: boolean }} [lanes]
+ */
+export function buildMergeGroupMatrix(lanes = {}) {
+  const { host = true, standalone = true } = lanes;
+  // Neither lane selected should be unreachable (the caller gates the whole
+  // job on run_shards), but an EMPTY matrix is a workflow-level error in
+  // GitHub Actions, not a skipped job — so fail safe to the full matrix and
+  // let the job's own `if:` decide whether to run at all.
+  if (!host && !standalone) return buildMergeGroupMatrix({ host: true, standalone: true });
   return [
-    ...buildTargetEntries("js-host", "gc", "test262", JS_HOST_CHUNKS),
-    ...buildTargetEntries("standalone", "standalone", "test262-standalone", STANDALONE_CHUNKS),
+    ...(host ? buildTargetEntries("js-host", "gc", "test262", JS_HOST_CHUNKS) : []),
+    ...(standalone ? buildTargetEntries("standalone", "standalone", "test262-standalone", STANDALONE_CHUNKS) : []),
   ];
 }
 
+/**
+ * Parse `--lanes host,standalone` (default: both). Unknown lane names are a
+ * hard error rather than a silent drop — silently emitting a narrower matrix
+ * than the caller asked for would skip conformance coverage.
+ */
+export function parseLanes(argv) {
+  const flag = argv.find((a) => a === "--lanes" || a.startsWith("--lanes="));
+  if (!flag) return { host: true, standalone: true };
+  const raw = flag.startsWith("--lanes=") ? flag.slice("--lanes=".length) : argv[argv.indexOf(flag) + 1];
+  const names = String(raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const n of names) {
+    if (n !== "host" && n !== "standalone") {
+      throw new Error(`gen-test262-mg-matrix: unknown lane '${n}' (expected host or standalone)`);
+    }
+  }
+  // An empty/absent value means "no lane selected"; buildMergeGroupMatrix
+  // fail-safes that back to the full matrix.
+  return { host: names.includes("host"), standalone: names.includes("standalone") };
+}
+
 function main() {
-  const matrix = { include: buildMergeGroupMatrix() };
+  const matrix = { include: buildMergeGroupMatrix(parseLanes(process.argv)) };
   const json = JSON.stringify(matrix);
   if (process.argv.includes("--github-output")) {
     // Single-line JSON — safe for a GITHUB_OUTPUT `key=value` assignment.
