@@ -65,6 +65,16 @@ cannot be acquired in a few minutes must not stop work — verify the record's `
 directly and proceed. But that is a workaround: the lock exists to prevent duplicate
 dispatch, and while it is wedged the fleet is running without that protection.
 
+**The workaround has a sharp edge worth stating explicitly.** "Proceed if the
+record says `released`" is safe only while the **reader** path is sound — it
+assumes a wedge can lose a *write* but never return a stale *read*. Nothing
+currently guarantees that. If a wedge ever produced a stale read, two agents
+could both see `released` and both start, which is precisely the duplicate
+dispatch this lock exists to prevent. So the workaround does not merely leave
+the fleet unprotected while wedged; under one plausible failure mode it is
+itself the mechanism. Any fix should confirm the read path cannot go stale
+independently of fixing the write path.
+
 ## Acceptance
 
 - Concurrent claims from 4+ agents succeed within seconds, or fail fast with a

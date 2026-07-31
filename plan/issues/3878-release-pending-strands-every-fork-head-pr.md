@@ -1,8 +1,9 @@
 ---
 id: 3878
 title: "`release-pending` fails on EVERY fork-head PR, making every team PR strand un-enqueued"
-status: ready
+status: done
 created: 2026-07-31
+completed: 2026-07-31
 priority: critical
 feasibility: easy
 horizon: s
@@ -92,3 +93,63 @@ That weakens the enqueue gate globally to work around one broken helper.
 - A fork-head PR with all required checks green reaches `CLEAN` and is enqueued by
   `auto-enqueue.yml` with no manual intervention.
 - `release-pending` either passes or does not run for fork-head PRs.
+
+## FIX LANDED — the guard was a category error, not a missing no-op
+
+The head **repository** is fixed at PR creation, so comparing it against
+`expected.repo` (= `GH_REPO`, the **base** repo) is unconditionally true for
+forks and says nothing about whether the head moved. The genuine race guard is
+the **SHA**, supplied by the workflow from the event payload. The fix compares
+only that:
+
+```js
+if (sha(pr.head) !== expected.headSha) {
+```
+
+The base check above it is different and correctly still compares repositories —
+a PR's base *must* live in this repository.
+
+### Runtime confirmation (not inferred)
+
+Confirmed live against open fork-head PR **#3876** by calling
+`releasePendingAfterSynchronize` with `expected.headSha` set **equal to the PR's
+real current head SHA**, which makes the SHA disjunct false *by construction*:
+
+```
+head.repo = ttraenkler/js2   head.sha = 3307a8b1…
+before fix -> THREW: #3876: synchronized pull request head changed
+after fix  -> no throw: { number: 3876, released: false }
+              "stack-retarget-pending is already absent; nothing to release"
+```
+
+So the head-repo disjunct was provably the one firing, and the error message was
+reporting a change that had not happened.
+
+### Why NOT a bare no-op (the tempting fix, which would have regressed)
+
+`isImmediateOpenChildByRef` filters children on their **base** repository only,
+so a fork-head PR *can* legitimately acquire `stack-retarget-pending`. Making a
+fork head return early would strand that label — and `stack-retarget-pending` is
+in `HOLD_LABELS`, so it blocks `auto-enqueue` permanently. That trades a red
+check for a permanent hold. The fix releases the label correctly instead.
+
+### Test
+
+Three cases in `--self-check` (run by the workflow's own "Self-check exact stack
+guards" step): a plain fork-head PR reaches the benign no-op; a fork-head PR
+holding the pending label **releases** it; a moved head on a fork **still
+throws**, so the fix cannot be mistaken for "skip the check for forks".
+
+**Validated non-vacuous by kill-switch**: with the old condition restored the
+self-check fails with the exact production error,
+`#41: synchronized pull request head changed`.
+
+## Known sibling, deliberately OUT of scope
+
+The `retarget` job has the same category error in three more places —
+`assertExactChildBase` (`:291`) and the post-PATCH re-verification (`:381`,
+`:383`, `:392`, `:394`) all reject a fork-head **child**. It is unreached today
+because `retargetImmediateChildren` no-ops at `:305` when the *parent* head is a
+fork, which it always is for this team. Fixing it means deciding the intended
+stacked-PR semantics for fork-head children — a design question, not a typo — so
+it is left for a follow-up rather than widening a critical CI fix.

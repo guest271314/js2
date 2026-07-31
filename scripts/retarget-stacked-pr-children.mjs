@@ -492,7 +492,22 @@ export async function releasePendingAfterSynchronize({ api, holdApi, expected, l
   if (repoFullName(pr.base) !== expected.repo || refName(pr.base) !== expected.baseRef) {
     throw new Error(`#${expected.number}: synchronized pull request base changed`);
   }
-  if (repoFullName(pr.head) !== expected.repo || sha(pr.head) !== expected.headSha) {
+  // Compare ONLY the head SHA. A pull request's head REPOSITORY is fixed at
+  // creation and is the fork for every fork-head PR, so comparing it against
+  // `expected.repo` — which is GH_REPO, the BASE repository — is a category
+  // error: the disjunct is unconditionally true for forks and says nothing
+  // about whether the head moved since the synchronize event. It made this job
+  // fail on EVERY fork-head PR, and because a red non-required check drives
+  // `mergeStateStatus` to UNSTABLE (which `auto-enqueue.yml` excludes), every
+  // PR this team opens stranded un-enqueued (#3878). The error message made it
+  // worse by reporting "head changed" when the head had not changed at all.
+  //
+  // The genuine race guard is the SHA, which the workflow supplies from the
+  // event payload; it is kept below unchanged. The base side (checked above) is
+  // different and correctly still compares repositories: a PR's base MUST live
+  // in this repository. Compare `retargetImmediateChildren`, which already
+  // treats a fork head as a benign no-op rather than an error.
+  if (sha(pr.head) !== expected.headSha) {
     throw new Error(`#${expected.number}: synchronized pull request head changed`);
   }
   if (expected.previousHeadSha === expected.headSha) {
@@ -904,6 +919,95 @@ async function selfCheck() {
     /child-head ancestry failed/,
   );
   assert.deepEqual(divergedApi.patchCalls, []);
+
+  // #3878 — a FORK-HEAD pull request must not fail this job. The head repository
+  // is fixed at PR creation and is the fork for every PR this team opens, so it
+  // must never be compared against GH_REPO (the base repository). Regression
+  // guard: with the head SHA matching the event exactly, the ordinary fork-head
+  // PR (no pending label) must reach the benign "nothing to release" no-op
+  // rather than throwing "head changed". Before the fix this threw for EVERY
+  // fork-head PR, driving mergeStateStatus to UNSTABLE and stranding the PR
+  // outside auto-enqueue's ENQUEUEABLE set.
+  const forkHeadSha = "a".repeat(39) + "1";
+  const forkPlainPr = makePull({
+    number: 41,
+    headRef: "issue-1-fork-branch",
+    headSha: forkHeadSha,
+    headRepo: "ttraenkler/js2",
+    baseRef: "main",
+    baseSha: targetSha,
+  });
+  const forkPlainApi = new FakeApi([forkPlainPr], { ancestorPairs: [[targetSha, forkHeadSha]] });
+  const forkPlainRelease = await releasePendingAfterSynchronize({
+    api: forkPlainApi,
+    holdApi: forkPlainApi,
+    expected: {
+      repo,
+      number: 41,
+      baseRef: "main",
+      defaultBranch: "main",
+      baseSha: targetSha,
+      previousHeadSha: "5".repeat(40),
+      headSha: forkHeadSha,
+    },
+    log: () => {},
+  });
+  assert.deepEqual(forkPlainRelease, { number: 41, released: false });
+
+  // ...and a fork-head STACKED child that legitimately carries the pending label
+  // must actually RELEASE it. `isImmediateOpenChildByRef` filters children on
+  // their BASE repository only, so a fork-head PR can genuinely acquire the
+  // label. Treating a fork head as a bare no-op here would strand a HOLD_LABELS
+  // member forever — trading a red check for a permanent hold.
+  const forkHeldSha = "b".repeat(39) + "2";
+  const forkHeldPr = makePull({
+    number: 42,
+    headRef: "issue-2-fork-branch",
+    headSha: forkHeldSha,
+    headRepo: "ttraenkler/js2",
+    baseRef: "main",
+    baseSha: targetSha,
+    labels: [PENDING_LABEL],
+  });
+  const forkHeldApi = new FakeApi([forkHeldPr], { ancestorPairs: [[targetSha, forkHeldSha]] });
+  const forkHeldRelease = await releasePendingAfterSynchronize({
+    api: forkHeldApi,
+    holdApi: forkHeldApi,
+    expected: {
+      repo,
+      number: 42,
+      baseRef: "main",
+      defaultBranch: "main",
+      baseSha: targetSha,
+      previousHeadSha: "6".repeat(40),
+      headSha: forkHeldSha,
+    },
+    log: () => {},
+  });
+  assert.deepEqual(forkHeldRelease, { number: 42, released: true });
+  assert.equal(hasLabel(forkHeldApi.pulls.get(42), PENDING_LABEL), false);
+
+  // The genuine race guard is PRESERVED: when the live head has moved away from
+  // the synchronize event's head SHA, this still throws — on a fork head too, so
+  // the fix cannot be mistaken for "skip the check for forks".
+  const forkMovedApi = new FakeApi([forkHeldPr], { ancestorPairs: [[targetSha, forkHeldSha]] });
+  await assert.rejects(
+    releasePendingAfterSynchronize({
+      api: forkMovedApi,
+      holdApi: forkMovedApi,
+      expected: {
+        repo,
+        number: 42,
+        baseRef: "main",
+        defaultBranch: "main",
+        baseSha: targetSha,
+        previousHeadSha: "6".repeat(40),
+        headSha: "c".repeat(40),
+      },
+      log: () => {},
+    }),
+    /head changed/,
+  );
 
   // A synchronize from the old stack base can arrive after pending-label
   // acquisition. Only a default-branch synchronize can release the hold.
