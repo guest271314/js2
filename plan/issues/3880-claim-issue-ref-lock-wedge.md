@@ -297,12 +297,31 @@ Each was re-diagnosed independently as "the claim ref is unreliable", which is
 why that conclusion kept being re-derived all session without ever resolving to
 a mechanism. The mechanism is one operator in one predicate.
 
+**#2916 is the fully-traced instance — the whole failure in one issue.** Its
+record has read `status: "released"` since **08:55:03Z**. Yet for the rest of the
+day the gate reported it CLAIMED, because the gate tested `assignee` alone. What
+that one wrong predicate cost, in order: a deliberate handoff; **three** release
+attempts, all reported as failures (node crash / `cannot lock ref` / wedge
+
+> 560 s) of which **one had actually written the record**; a 24-line prose
+> correction added to `plan/issues/2916-*.md` explaining that the ref could not be
+> fixed — describing a state that had not existed for hours; a routing decision by
+> the tech lead; and a task dispatched to an agent to release a claim that was
+> already released. Three separate agents, including the dispatcher, held the same
+> false belief from the same broken read.
+
+It is also the **third independently confirmed "succeeds as failure" of the
+day**, and the sharpest: the agent reported failure _while having written
+successfully_, then documented the ref as unfixable. It trusted its error output
+over the record. That is this issue's acceptance criterion, stated as an
+incident.
+
 **The largest consequence is a fleet-level conclusion that may be wrong.** Two
 agents independently gated candidate work the same day and reported the queue as
 saturated — one got **7 STOPs out of 8**, the other **6 of 7**, both on "hard
 claim" blockers — and "the high-priority codegen tier is heavily owned" was
-relayed upward as a finding. With **403 of 1,080** records mis-held *for the
-gate*, a meaningful share of those blockers were plausibly terminal records, in
+relayed upward as a finding. With **403 of 1,080** records mis-held _for the
+gate_, a meaningful share of those blockers were plausibly terminal records, in
 which case the conclusion is wrong and real work was skipped. The candidates
 shelved on claim blockers are #2865, #2949, #2175, #2872, #3030, #3175, #2873,
 #3024 and #3582; they should be re-gated once this lands. (#2864 was
@@ -335,13 +354,31 @@ statuses written today, so the predicate must not assume that set is closed.
 Note the pre-existing `done` records are not migrated: they are simply no longer
 read as held, so the 294 phantoms clear the moment this lands.
 
+### The fix is not new output — it is output that now means something
+
+Releasing #2916 with the FIXED tool prints:
+
+```
+#2916 is not currently claimed — nothing to release.
+claim-issue: OK — #2916 holds no live claim (verified against origin/issue-assignments)
+```
+
+The first line is **the same sentence** the old script printed on a failed read —
+the sentence that left #3661/#3685 falsely claimed. Nothing about the wording
+changed. What changed is that it is now preceded by a read that is _proven_ to
+have succeeded, and followed by an explicit verification statement. A reader who
+only pattern-matches the message learns nothing new; a reader who checks the
+verdict line learns whether it can be believed. That is the whole shape of this
+issue: the tool was never short of output, it was short of output that carried
+information.
+
 ### The forensic fields paid for themselves within hours
 
 Not hypothetical. On the same day this landed, #3636's #3889 collision was
 diagnosed **only** because the reservation carried `pr_scan: "ok"` — that field
 is what ruled out a degraded scan and redirected the investigation to the real
-cause (an id reserved correctly, then a *different* file written against it 32
-minutes later). And the one thing that could **not** be established was *who*
+cause (an id reserved correctly, then a _different_ file written against it 32
+minutes later). And the one thing that could **not** be established was _who_
 reserved what, because every record of that era carries `assignee: ""`. That is
 exactly the gap `requested_by` closes. A forensic field justified by a real
 diagnosis it enabled, and an attribution gap justified by a real diagnosis it
