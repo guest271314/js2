@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — .mjs dogfood helpers have no declaration files
@@ -24,6 +24,11 @@ const EXPECTED_NAMES = [
   "tailwindcss",
 ];
 
+function reportPackageNames(path: URL): string[] {
+  const report = JSON.parse(readFileSync(path, "utf8")) as { packages: Array<{ name: string }> };
+  return report.packages.map((entry) => entry.name);
+}
+
 describe("npm compatibility package catalog", () => {
   it("pins and verifies every requested published package", () => {
     expect(NPM_COMPAT_CATALOG.map((entry: { name: string }) => entry.name)).toEqual(EXPECTED_NAMES);
@@ -34,6 +39,15 @@ describe("npm compatibility package catalog", () => {
       expect(setup.pin.shasum).toMatch(/^[0-9a-f]{40}$/);
       expect(existsSync(setup.entryModulePath)).toBe(entry.expectedEntryMissing !== true);
     }
+  });
+
+  it("keeps the canonical report and public mirror in sync", () => {
+    const canonical = reportPackageNames(new URL("../../benchmarks/results/npm-compat.json", import.meta.url));
+    const publicMirror = reportPackageNames(
+      new URL("../../website/public/benchmarks/results/npm-compat.json", import.meta.url),
+    );
+
+    expect(canonical).toEqual(publicMirror);
   });
 
   const selectedPackage = process.env.DOGFOOD_NPM_CATALOG;
