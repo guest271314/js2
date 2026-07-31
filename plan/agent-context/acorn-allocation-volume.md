@@ -136,18 +136,19 @@ seconds. `--preserve-debug-names` is mandatory for a readable profile.
 - **`--trace-gc-object-stats` is not available** on this Node build (accepted
   silently, prints nothing).
 
-**So the census needs emitter support.** The cheap shape: an env-gated finalize
-pass that inserts a stack-neutral `global.get / i32.const 1 / i32.add /
-global.set` after every `struct.new*` / `array.new*`, one exported mutable
-global per type. Exported globals survive `wasm-opt`'s type renumbering, which
-a typeIdx-keyed reader would not.
+**So the census needs emitter support** — filed as **#3921**, which carries the
+proposed shape (env-gated finalize pass inserting a stack-neutral counter after
+every `struct.new*` / `array.new*`, one exported mutable global per type, since
+exported globals survive `wasm-opt`'s type renumbering where a typeIdx-keyed
+reader would not).
 
 ---
 
 ## 5. Recommended next steps, in order
 
-1. **Build the per-type allocation census** (§4). Everything else in this lane
-   is guesswork without it, and 34 MB is too large a number to guess at.
+1. **Build the per-type allocation census — #3921** (§4). Everything else in
+   this lane is guesswork without it, and 34 MB is too large a number to guess
+   at.
 2. Only then pick the next lowering. Candidates the census would rank:
    transient vec/backing-array allocation, string carriers in the tokenizer,
    argument vectors on generic dispatch.
@@ -164,4 +165,6 @@ program, with the value read-back half identical). It reproduces byte-for-byte
 with the presence packing disabled, so it is not round 4's. This is the same
 reflection hole `dev-acorn-throughput.md` §7 records for
 `for…in` / `Object.keys` over fnctor instances, now with a concrete `in`
-repro — which is what a bug report for it would need.
+repro — which is what a bug report for it would need. **Filed as #3920**, with
+the reduced two-line repro (standalone `7` vs host `1007`) verified separately
+from the test fixture.
