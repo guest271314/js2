@@ -237,6 +237,13 @@ A stricter gate is available and is what the fix should use:
 > `cap.outerLocalIdx` is out of range for this fctx's locals — i.e. only when
 > the current emission is **invalid Wasm**.
 
+> ⚠️ **SUPERSEDED — see `## Correction 3` at the bottom of this file before you
+> implement this.** The safety argument below is correct but the prescription is
+> not: this gate is regression-safe and **insufficient**. It provably cannot fire
+> on the valid-Wasm/wrong-value form of this defect, which is measured on `main`
+> in correction 3. Implementing it yields four green files, a red kill-switch,
+> and a silent miscompile still in the tree.
+
 **No passing test can depend on invalid Wasm**, because a module that fails to
 emit never runs. So a change gated on "the bytes we emit today are invalid"
 cannot reintroduce the #1177 regressions, whose load-bearing behaviour was a
@@ -265,13 +272,49 @@ body and leaves the capture unresolvable) is **not yet established**.
   revert protected. The invalid-Wasm gate above is the argument that they are
   safe; it still has to be demonstrated, not asserted.
 
-## Correction 3 — the invalid-Wasm gate is NOT sufficient (2026-07-31, from PR #3687 carry-over)
+## Correction 3 — REBUTTAL of the "invalid-Wasm gate" above. Do not implement it as written (2026-07-31, from PR #3687 carry-over)
 
-The "safety unlock" above proposes firing **only** when `cap.outerLocalIdx` is
-**out of range** for the current fctx, on the argument that no passing test can
-depend on invalid Wasm. That argument is sound as far as it goes, but it does
-not cover the whole defect: there is a form of this bug that emits **valid**
-Wasm and silently returns the **wrong value**.
+**Read this before acting on `### The safety unlock for corruption 1`.** That
+section prescribes:
+
+> Fire only when the name is absent from `fctx.localMap` **and**
+> `cap.outerLocalIdx` is out of range for this fctx's locals — i.e. only when
+> the current emission is **invalid Wasm**.
+
+**Implementing that gate as the fix ships a guard that fails open.** It cannot
+fire on the worst form of this defect, because that form emits valid Wasm by
+construction.
+
+### Be precise about what is wrong with it
+
+The safety *argument* is **correct**, and saying otherwise would be the wrong
+correction. "No passing test can depend on invalid Wasm" is true, and it does
+establish what it claims: a change gated on out-of-range **cannot reintroduce
+the #1177 regressions**. That deduction holds.
+
+What is false is the **prescription** built on top of it — *"a stricter gate is
+available and is what the fix should use."* Regression-safety is not
+sufficiency. The gate is safe **and** inadequate at the same time, and those are
+not in tension.
+
+That combination is what makes it dangerous rather than merely wrong. It reads
+as proof because it *is* proof — of the narrow property it states, and not of
+the property an implementer will actually rely on it for. An implementer
+inheriting it as "the safety guarantee for this fix" gets:
+
+- the four named files green,
+- v1 (plain call) green,
+- a kill-switch that dutifully goes red,
+- and a **silent wrong-value miscompile still in the tree**, now with a passing
+  test suite asserting the fix works.
+
+A guard that provably cannot fire on the case that matters is worse than no
+guard, because the green is load-bearing evidence for the wrong conclusion.
+
+### The concrete case the gate does not fire on
+
+Valid module. Instantiates. Runs. Returns the wrong number. `cap.outerLocalIdx`
+is **in range** — so the proposed gate is silent, by design.
 
 ### Measured on current `main` (`e4187572`), JS-host lane, no TDZ, no callback
 
