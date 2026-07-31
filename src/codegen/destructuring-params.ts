@@ -1636,10 +1636,27 @@ export function destructureParamArray(
       // runtime into a `__vec_externref` — byte-identical for the downstream
       // `__extern_length` / `__extern_get_idx` reads below. JS-host mode keeps
       // the import (byte-identical).
+      // (#3643 Slice A) §8.6.2 `BindingPattern : ArrayBindingPattern` performs
+      // GetIterator (§7.4.2) on the RHS, which throws TypeError for a
+      // non-iterable — `var [p] = {a:1}` must throw, not bind `undefined`.
+      // The non-strict `__array_from_iter_n` falls through to the host
+      // `Array.from(obj)` array-like fallback, which answers `[]`, so every
+      // array-pattern form (single, multi, rest, param, array-like RHS)
+      // silently bound `undefined`. Array SPREAD was already correct because it
+      // uses the STRICT unbounded drain; destructuring is the arm that was never
+      // wired to strictness. Use the strict bounded twin here.
+      //
+      // Standalone/WASI keep the native `__array_from_iter_n`: there is no
+      // native strict arm yet, and emitting `env::__array_from_iter_n_strict`
+      // would leak a host import and break zero-import instantiation (#2904).
+      // The host-free lane therefore keeps its measured pre-existing behaviour —
+      // this slice is host-lane only by construction, with the native strict arm
+      // left as an explicit follow-up.
+      const fbIterName = ctx.standalone || ctx.wasi ? "__array_from_iter_n" : "__array_from_iter_n_strict";
       if (ctx.standalone || ctx.wasi) {
         ensureNativeArrayFromIterN(ctx);
       } else {
-        ensureLateImport(ctx, "__array_from_iter_n", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+        ensureLateImport(ctx, fbIterName, [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
       }
       flushLateImportShifts(ctx, fctx);
 
@@ -1757,7 +1774,7 @@ export function destructureParamArray(
       // re-reading by name is the fix (idempotent — no new import is added here).
       const fbLenFnFinal = ctx.funcMap.get("__extern_length");
       const fbGetIdxFnFinal = ctx.funcMap.get("__extern_get_idx");
-      const fbIterFnFinal = ctx.funcMap.get("__array_from_iter_n");
+      const fbIterFnFinal = ctx.funcMap.get(fbIterName);
       if (fbLenFnFinal !== undefined && fbGetIdxFnFinal !== undefined && fbIterFnFinal !== undefined) {
         const fbMatTmp = allocLocal(fctx, `__dparam_fb_mat_${fctx.locals.length}`, { kind: "externref" });
         const fbLenTmp = allocLocal(fctx, `__dparam_fb_len_${fctx.locals.length}`, { kind: "i32" });
