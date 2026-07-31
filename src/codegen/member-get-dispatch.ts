@@ -59,6 +59,7 @@ import {
 import { coercionInstrs } from "./type-coercion.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
 import { undefinedExternInstrs } from "./any-helpers.js";
+import { presenceTestInstrs } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
 
 /** Mangle a property name into the reserved member-get dispatcher name. */
 function dispatcherName(propName: string): string {
@@ -596,11 +597,11 @@ export function fillMemberGetDispatch(ctx: CodegenContext): void {
         ...box,
       ];
       const readInstrs: Instr[] =
-        cand.presenceFieldIdx !== undefined && cand.presenceFieldIdx >= 0
+        cand.presenceSlot !== undefined
           ? [
               { op: "local.get", index: 1 },
               { op: "ref.cast", typeIdx: cand.structTypeIdx },
-              { op: "struct.get", typeIdx: cand.structTypeIdx, fieldIdx: cand.presenceFieldIdx },
+              ...presenceTestInstrs(cand.structTypeIdx, cand.presenceSlot),
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "externref" } },
@@ -795,11 +796,11 @@ export function fillTypedMemberGetF64Dispatch(ctx: CodegenContext): void {
       ];
       const armBody: Instr[] = !numericSlot
         ? fallback
-        : cand.presenceFieldIdx !== undefined && cand.presenceFieldIdx >= 0
+        : cand.presenceSlot !== undefined
           ? [
               { op: "local.get", index: 1 },
               { op: "ref.cast", typeIdx: cand.structTypeIdx },
-              { op: "struct.get", typeIdx: cand.structTypeIdx, fieldIdx: cand.presenceFieldIdx },
+              ...presenceTestInstrs(cand.structTypeIdx, cand.presenceSlot),
               {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "f64" } as ValType },
