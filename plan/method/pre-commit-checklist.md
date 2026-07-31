@@ -84,12 +84,19 @@ stale-shared-state failure — it is your own verification aging against your ow
 work, which feels safe precisely because you did check.
 
 **The specific trap that caused it:** the #1616 link gate resolves any
-`plan/issues/<digits>-<slug>.md`-shaped string in an issue file as a link to a
-real file. A **glob** like `` `plan/issues/2916-*.md` `` is the natural way to
-refer to an issue file in prose — and it resolves to nothing, so `quality` fails.
-Write `#2916` or the full filename instead. (Measured: four glob-shaped paths
-exist on `main`, all in `scripts/**` comments, which the gate does not scan —
-which is why no issue file had hit this before.)
+`plan/issues/<digits>-<slug>.md`-shaped string **anywhere under `plan/`** as a
+link to a real file. A **glob** — `plan/issues/` followed by a number, a dash and
+a `*` — is the natural way to refer to an issue file in prose, and it resolves to
+nothing, so `quality` fails. Write `#2916`, or the full real filename, instead.
+
+Two measurements worth keeping:
+
+- Four glob-shaped paths exist on `main`, **all in `scripts/**`comments**, which
+the gate does not scan. That is why no file under`plan/` had ever hit this.
+- **This very warning triggered the trap while being written.** The first draft
+  spelled the bad example out literally, in `plan/method/`, and the gate failed
+  on it — after the author had already run the gate once and moved on. If you
+  need to show the shape, use a placeholder like `<id>` where the digits go.
 
 ## Commit verification
 
