@@ -94,14 +94,20 @@ file with `count: 1`; the baseline status was established **by reproducing it wi
 machine-checks every named claim, so a `pass` baseline row would hard-fail regardless of my
 judgement.
 
-**If it re-parks, two questions decide it, and neither implies the fix is wrong:**
+**OUTCOME: MERGED 2026-07-31T15:02:53Z**, merge commit `05686f7a42de`, **no labels, no
+re-park.** It took two groups (bases `6149dd55` then `49d05c14`), both fully green on all four
+merge_group workflows. **The `trap-growth-allow` declaration held on the merged state** — it
+was both correct and complete, so neither of the two re-park paths below materialised. The
+unpark decision is validated by the merged-state gate itself, not merely by my reading of it.
+
+Those two paths are kept because they remain the right first questions for any future
+`trap-growth-allow` park, and **neither would have implied the fix was wrong**:
 
 1. Growth still exactly `illegal_cast 76→77` on that one file ⇒ **per-SHA baseline drift**.
-2. A second file or a second category ⇒ **`trap-growth-allow` incompleteness**, because it was
-   measured pre-merge and `origin/main` was merged in afterwards.
+2. A second file or a second category ⇒ **`trap-growth-allow` incompleteness**, because the
+   declaration is measured pre-merge while the gate runs on the merged state.
 
 Either remedy is a **frontmatter edit** (extend `tests:`, bump `count:`), not a re-diagnosis.
-Its author has stood down.
 
 ## #2916 / #3883 — read the record, not the prose
 
@@ -133,7 +139,15 @@ own output inadmissible as evidence.** #3883 closed; the durable half carried, c
 
 ## Open at hand-off
 
-- **#3888** — in queue, revalidating. The one thing to keep watching.
-- **#3900** (#3915 filing) — open, awaiting auto-refresh. Not enqueued by me.
-- **#3901** — open. **#3877** — left alone (contended). **#3687** — held since 07-29, out of
-  scope, untouched.
+**Eight PRs merged clean this session** — #3892, #3894, #3895, #3896, #3897, #3898, #3899,
+**#3888**. Nothing I unparked or touched re-parked.
+
+- **#3900** (the #3915 filing, plus this summary) — **open**, awaiting auto-refresh.
+  **Deliberately not enqueued by me**; `auto-enqueue.yml` owns that.
+- **#3901** — open (claim-tooling fix; also unblocks #2916 by making heldness read `status`).
+- **#3877** — left alone (contended).
+- **#3687** — held since 2026-07-29, out of scope, **untouched**. Its park cited a genuine
+  catastrophic-guard + regressions failure and it is DIRTY; it needs an owner, not a
+  label removal.
+
+Nothing is mid-flight and nothing is waiting on me.
