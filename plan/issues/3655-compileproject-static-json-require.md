@@ -1,4 +1,5 @@
 ---
+horizon: m
 id: 3655
 title: "compileProject allowJs: support static CommonJS require of JSON modules"
 status: ready
@@ -11,7 +12,7 @@ task_type: feature
 area: resolver, codegen
 language_feature: json-modules
 goal: npm-library-support
-sprint: 76
+sprint: current
 required_by: [1400, 2691]
 es_edition: n/a
 related: [1279, 1400, 1575, 2691, 2693, 3654]

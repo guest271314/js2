@@ -1,4 +1,5 @@
 ---
+horizon: m
 id: 3653
 title: "ESLint integration tests: portable dependency paths and non-vacuous skip semantics"
 status: ready
@@ -11,7 +12,7 @@ task_type: test
 area: test-infrastructure
 language_feature: npm-package-integration
 goal: npm-library-support
-sprint: 76
+sprint: current
 required_by: [1400]
 es_edition: n/a
 related: [1282, 1400, 1573, 2693]

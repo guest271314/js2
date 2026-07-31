@@ -1,8 +1,7 @@
 ---
 id: 2742
 title: "String.prototype methods: ToString(this) generic-receiver coercion, RequireObjectCoercible, and function `.length` own property"
-status: in-progress
-assignee: ttraenkler/opus-loop-d
+status: ready
 sprint: current
 created: 2026-06-27
 updated: 2026-07-28
