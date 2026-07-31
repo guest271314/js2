@@ -85,8 +85,19 @@ enumeration · aliasing.**
 So the copy-Array lookup fix is correctly scoped to the **descriptor** areas and
 **insufficient** for the **prototype-accessor** areas that motivated this issue.
 
-**Unsized and deliberately not guessed:** `var __re = X.prototype` is near-universal
-in Sputnik-era ES5 tests, so the aliasing defect likely reaches well past those nine.
+**Blast radius MEASURED — bounded, not near-universal.** The initial worry was that
+`var __re = X.prototype` is near-universal in Sputnik-era ES5 tests. Counted across
+the full 866-row wrong-answer cut: **14 / 866 = 1.6%**, with the nine grid rows as
+the bulk of it. File it as its own issue sized at **~14**, not as a broad threat to
+the lookup routing.
+
+*Caveat:* the detector matches `(var|let|const) X = <Builtin>[.prototype]`, so it
+misses aliases formed via parameter passing, property reads, or multi-step
+assignment. **14 is a floor** — realistically 14–25, but not the hundreds implied by
+"near-universal".
+
+**And the 20 descriptor rows were re-checked in full** (all 20, not a sample):
+**0 aliased**, every one inline. The lookup routing is unaffected.
 
 ## Sizing — re-cut BY ROUTE (supersedes all earlier figures)
 
