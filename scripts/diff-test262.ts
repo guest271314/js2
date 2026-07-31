@@ -788,12 +788,25 @@ export function evaluateTrapCategoryGrowth(
   for (const cat of TRAP_ERROR_CATEGORIES) {
     if (newCounts[cat] - baseCounts[cat] > tolerancePerCategory) {
       const grew = newCounts[cat] - baseCounts[cat];
-      const sample = newlyTrapping[cat].slice().sort().slice(0, 10);
+      const files = newlyTrapping[cat].slice().sort().slice(0, 10);
+      // (#3915) Report each file WITH its baseline status. The old wording,
+      // "Newly trapping: <file>", reads as "this file used to pass" — but as the
+      // comment above records, it only means the file was not already in THIS
+      // category. On 2026-07-31 that phrasing sent a triage down the wrong path
+      // for `Array/from/array-like-has-length-but-no-indexes-with-values.js`: it
+      // was read as a pass→trap regression when the baseline said `fail`, so the
+      // brief named the wrong valve. The baseline status is the single field
+      // that selects the mechanism, so print it here rather than making every
+      // reader go look it up in a 66 MB JSONL.
+      const sample = files.map((f) => `${f} (baseline: ${baseline.get(f)?.status ?? "absent"})`);
       const more =
-        newlyTrapping[cat].length > sample.length ? ` (+${newlyTrapping[cat].length - sample.length} more)` : "";
+        newlyTrapping[cat].length > files.length ? ` (+${newlyTrapping[cat].length - files.length} more)` : "";
       failures.push(
         `trap category "${cat}" grew ${baseCounts[cat]} → ${newCounts[cat]} (+${grew}) — uncatchable-trap ratchet (#3189). ` +
-          `Newly trapping: ${sample.join(", ")}${more}`,
+          `Now trapping: ${sample.join(", ")}${more}. ` +
+          `"Now trapping" means the CATEGORY grew — it does NOT mean these files were passing. ` +
+          `The baseline status selects the mechanism: pass ⇒ genuine regression (no valve applies); ` +
+          `fail ⇒ named trap-growth-allow (#3596); compile_error/compile_timeout/absent ⇒ excluded outright (#3595).`,
       );
     }
   }
