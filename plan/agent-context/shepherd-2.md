@@ -151,3 +151,56 @@ own output inadmissible as evidence.** #3883 closed; the durable half carried, c
   label removal.
 
 Nothing is mid-flight and nothing is waiting on me.
+
+---
+
+## Late-session additions (post-#3900)
+
+Two lessons that arrived after the summary above was written, plus the state that superseded its
+hand-off list.
+
+### Prefer someone else's stronger evidence over your own
+
+Both `dev-ci-3880` and I independently reached the same conclusion — that `prettier` does not
+gate `CLAUDE.md`, so the post-`sync:conformance` form is safe. **Their proof was better and I
+said so**, in the reply and in the issue:
+
+- **Mine (circumstantial):** `origin/main`'s own `CLAUDE.md` is prettier-dirty by exactly those
+  two blank lines, and main is green — therefore prettier cannot be gating that file. True, but
+  it only shows prettier does not _currently_ gate it.
+- **Theirs (mechanistic):** `package.json` defines
+  `format:check => prettier --check 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'`.
+  `CLAUDE.md` matches none of those globs, so it is **never** prettier-checked. Exact, and it
+  states _why_.
+
+I verified their claim against `package.json` rather than relaying it, then told them to use
+their version rather than mine. **Converging on the same answer by two routes is worth more than
+either route alone** — and when a teammate's evidence is stronger, adopt it and say so rather
+than defending your own derivation.
+
+### A post-hoc census under-reports precisely the events that were handled
+
+Re-running a failed CI job **overwrites its check-run record**. So a census taken later reads
+`success` for exactly those jobs that someone noticed and remediated. Of four checkout-stall
+flakes observed contemporaneously this session, two later read `success` **because they had been
+fixed**.
+
+**The bias runs in the worst possible direction for a flake count**: the instrument is blindest
+to the failures that were caught, so remediation looks like absence of the problem, and the more
+diligent the response the smaller the measured incidence. Corollary: **use contemporaneous logs
+as the evidence for flake frequency and say so explicitly**; do not re-derive counts from check
+history after the fact. Same family as the other silent-empty findings — an instrument that
+cannot see what already happened, failing toward the reassuring answer.
+
+### Superseding state
+
+The "Open at hand-off" list above is stale. Later in the session: **#3900 merged**
+(2026-07-31T16:05:32Z), putting `plan/issues/3915-*.md` and this summary on `main`; **#3901** was
+found stranded with `quality` red on its current head for ~50 min behind an entirely benign
+surface (`BEHIND`, no `hold`, absent from queue), root-caused to two prettier-added blank lines
+in the `AUTO:conformance` block, fixed by the shepherd while its author was stopped, then
+restored by that author after a lineage split and carried to queue position 1; **#3907** was
+manually enqueued once under explicit tech-lead authorisation as the documented #3584
+(token-relative `BLOCKED`) case, with preconditions checked at the moment of action and a PR
+comment recording it so a label-driven sweep cannot rebuild the merge group; and **#3923** was
+opened carrying the #3915 addendum.
