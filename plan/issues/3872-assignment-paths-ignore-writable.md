@@ -38,6 +38,11 @@ loc-budget-allow:
   - src/codegen/expressions/operator-assignment.ts
   - src/codegen/object-ops.ts
   - src/codegen/context/types.ts
+  # `nonWritableExternKeys` is order-sensitive exactly like `definedPropertyFlags`,
+  # so it must join the existing program-order snapshot/restore at BOTH sites.
+  # These are additions to established snapshot literals, not new machinery.
+  - src/codegen/declarations.ts
+  - src/codegen/index.ts
 func-budget-allow:
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
   # The computed-form consult (`o[k] = v`) lands here. Granted explicitly on THIS
@@ -50,6 +55,8 @@ func-budget-allow:
   - src/codegen/expressions/operator-assignment.ts::compileElementCompoundAssignment
   - src/codegen/object-ops.ts::compileObjectDefineProperty
   - src/codegen/context/create-context.ts::createCodegenContext
+  - src/codegen/declarations.ts::compileDeclarations
+  - src/codegen/index.ts::generateMultiModule
 ---
 
 # #3872 — the strict-mode TypeError is missing; the two lanes fail differently

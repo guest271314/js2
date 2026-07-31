@@ -214,6 +214,43 @@ describe("#3872 — computed form", () => {
   });
 });
 
+// The consults are keyed on a compile-time record, and that record is
+// ORDER-SENSITIVE. `declarations.ts` snapshots/restores `definedPropertyFlags`
+// (and frozen/sealed/nonExtensible) between top-level pass 1 and pass 2 so a
+// define in pass 1 does not make pass 2 treat EARLIER code as already-defined.
+// `nonWritableExternKeys` initially missed that snapshot, so a top-level write
+// PRECEDING the define wrongly threw — a wrong answer with no compile failure,
+// which is the shape the merge_group gate reported (`other` ~28).
+describe("#3872 — program-order over-fire", () => {
+  it("a top-level write BEFORE the define is not affected by it", async () => {
+    expect(
+      await runStandalone(`const o: any = {};
+        o.p = 5;
+        Object.defineProperty(o, "p", { value: 1, writable: false });
+        export function test(): number { return 1; }`),
+    ).toBe(1);
+  });
+
+  it("defining one object non-writable does not affect a sibling", async () => {
+    expect(
+      await runHost(`const a: any = {};
+        const b: any = {};
+        Object.defineProperty(a, "p", { value: 1, writable: false });
+        b.p = 7;
+        export function test(): number { return b.p; }`),
+    ).toBe(7);
+  });
+
+  it("a same-named local in another scope is unaffected", async () => {
+    expect(
+      await runHost(`const g: any = {};
+        Object.defineProperty(g, "p", { value: 1, writable: false });
+        function f(): number { const g2: any = {}; g2.p = 9; return g2.p; }
+        export function test(): number { return f(); }`),
+    ).toBe(9);
+  });
+});
+
 describe("#3872 — non-regression", () => {
   it("a writable property still accepts writes", async () => {
     expect(
