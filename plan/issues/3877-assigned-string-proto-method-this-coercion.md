@@ -116,8 +116,51 @@ method dispatch**, not in the native-string fast path.
 
 The change was reverted rather than shipped: it had no measured effect, so it is
 an unproven edit, and it would also widen a perf-relevant bail-out on nothing but
-a plausible story. Next investigator should instrument the generic dispatch for
-a property-access callee whose value is a `String.prototype` method.
+a plausible story.
+
+## SITE LOCATED — the per-method `__proto_method_*` wrapper
+
+Found by diffing the two arms rather than by instrumenting, using the working
+(`charAt`) and broken (`charCodeAt`) pair with everything else held constant.
+
+**A faithful repro is required and is easy to get wrong.** With
+`const a: any = new Number(1234)` (TypeScript, `any`-annotated) the split does
+**not** reproduce — `charAt` returns null there, unlike the matrix. The repro
+must be plain JS shape, `var a = new Number(1234)`, compiled with
+`{ target: "standalone", allowJs: true }`. Verified to reproduce all four arms
+(`charAt` works, `charCodeAt` null, `substring` works, `slice` null) before any
+diff was read. `.tmp/diff-arms2.mts` is the control; `.tmp/diff-arms3.mts` dumps
+the WAT.
+
+**The call-site bodies are identical.** Diffing the emitted `$test` bodies for
+`charAt` vs `charCodeAt` yields exactly one line — my own argument constant
+(`f64.const 1` vs `f64.const 0`). Both emit the same generic dynamic dispatch
+(`call 201`) on a value materialised as `ref.func`. So the defect is **not** at
+the call site, and not in the generic dispatch either.
+
+**It is inside the materialised wrapper.** Both modules generate
+`$__proto_method_<brand>_<member>` (`native-proto.ts:509`), and diffing those two
+functions shows the divergence:
+
+- `charAt`'s wrapper contains a receiver-coercion step —
+  `global.get 14 / extern.convert_any / call 128`, then
+  `ref.cast null (ref null 6)` (`$AnyString`) before the native helper.
+- `charCodeAt`'s wrapper has **no** such step: it goes straight to
+  `struct.get 7 0` on the raw receiver, so a non-string `this` yields null.
+
+The wrapper body comes from `glue.emitMemberBody(ctx, closureFctx, member, kind)`
+in `createNativeProtoMember` (`src/codegen/native-proto.ts`, ~line 537). The
+§15.5.4.x `ToString(CheckObjectCoercible(this))` preamble is therefore
+**per-method, emitted by the String glue's `emitMemberBody`**, and is present for
+`charAt`/`substring` and absent for the other nine.
+
+**Implementation shape:** hoist that coercion out of the per-method arms into the
+shared `kind === "method"` wrapper prologue for the String brand, so every member
+gets it once rather than nine arms each re-implementing it. `charAt` and
+`substring` are the working reference for what the prologue must emit.
+
+**Do not** re-verify through bare `compile()` with an `any`-annotated receiver —
+that is the shape that does not reproduce.
 
 ## Sibling defect — #3254 is FALSE-DONE on its own headline method
 
