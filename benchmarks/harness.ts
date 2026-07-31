@@ -20,6 +20,9 @@ import { calibrateBenchmarkBatchSize, timeBenchmarkBatch } from "./timing.js";
 
 export type Strategy = "js" | "host-call" | "gc-native" | "linear-memory";
 
+/** Which stage of {@link runStrategy} a failure came from. */
+export type FailurePhase = "setup" | "warmup" | "calibration" | "mid-loop";
+
 export interface BenchmarkResult {
   name: string;
   strategy: Strategy;
@@ -31,6 +34,31 @@ export interface BenchmarkResult {
   p95Ms: number;
   binarySize?: number;
   compileMs?: number;
+  /**
+   * (#3904) Present and `"failed"` when the strategy errored instead of
+   * producing timings. Timing fields are all `0` on such a row — every
+   * consumer must skip them via {@link isMeasured}.
+   *
+   * A strategy listed in `BenchmarkDef.skip` is NOT recorded at all: an
+   * absent row means "deliberately not applicable" and a `status: "failed"`
+   * row means "this lane is broken". Before this existed, both looked
+   * identical in `latest.json` (the row was simply missing), which is how the
+   * four `dom/*` benchmarks shipped a JS-only chart for months.
+   */
+  status?: "failed";
+  /** (#3904) First line of the error that made this strategy fail. */
+  error?: string;
+  /** (#3904) Stage the failure came from. */
+  failedPhase?: FailurePhase;
+}
+
+/**
+ * True when a row carries real timings. Failed rows are placeholders whose
+ * numeric fields are all zero — never feed them to a median/ratio/winner
+ * computation.
+ */
+export function isMeasured(r: BenchmarkResult): boolean {
+  return r.status !== "failed";
 }
 
 export interface BenchmarkDef {
@@ -41,13 +69,25 @@ export interface BenchmarkDef {
   iterations?: number;
   /** Warmup iterations (default 5). */
   warmup?: number;
-  /** Host dependencies for buildImports (e.g. DOM stubs). */
+  /**
+   * Host dependencies for buildImports (e.g. DOM stubs).
+   *
+   * This is the ONLY host-injection channel — every `env.*` import the module
+   * declares is resolved from here. A `declared_global` import (`document`,
+   * `window`, ...) is keyed by the *global's own name*, not by its class, so a
+   * benchmark using `declare const document: Document` needs a `document`
+   * entry, not just a `Document` one (#3904). A previous `extraEnv` field
+   * claimed to inject extra env imports but was never read by the harness; it
+   * was removed rather than left as a trap.
+   */
   deps?: Record<string, unknown>;
-  /** Extra env imports for manual instantiation. */
-  extraEnv?: Record<string, Function>;
   /** JS-equivalent function to benchmark as baseline. */
   js: () => void;
-  /** Strategies to skip for this benchmark. */
+  /**
+   * Strategies that are deliberately not applicable to this benchmark.
+   * Skipped strategies produce no row at all; a strategy that *fails* produces
+   * a `status: "failed"` row instead (#3904).
+   */
   skip?: Strategy[];
 }
 
@@ -63,6 +103,34 @@ function median(sorted: number[]): number {
 function percentile(sorted: number[], p: number): number {
   const idx = Math.ceil((p / 100) * sorted.length) - 1;
   return sorted[Math.max(0, idx)]!;
+}
+
+/**
+ * (#3904) Record a strategy failure as a first-class result row instead of
+ * dropping it. The stderr line is kept for the interactive run; the returned
+ * row is what makes the failure survive into `latest.json` so the published
+ * page — and the next person reading it — can tell a broken lane from an
+ * inapplicable one without re-running the suite by hand.
+ */
+function failedResult(name: string, strategy: Strategy, phase: FailurePhase, err: unknown): BenchmarkResult {
+  const raw = err instanceof Error ? err.message : String(err);
+  const message = raw.split("\n")[0] ?? raw;
+  // Preserve the historical stderr wording so existing greps keep matching.
+  const phaseNote = phase === "setup" ? "" : phase === "warmup" ? " (runtime)" : ` (runtime, ${phase})`;
+  process.stderr.write(`\n    [${strategy} skipped${phaseNote}: ${message}]\n`);
+  return {
+    name,
+    strategy,
+    iterations: 0,
+    batchSize: 0,
+    totalMs: 0,
+    avgMs: 0,
+    medianMs: 0,
+    p95Ms: 0,
+    status: "failed",
+    error: message,
+    failedPhase: phase,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -166,23 +234,19 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
       }
     }
   } catch (err) {
-    // Strategy not supported for this benchmark
+    // Strategy failed to compile / instantiate for this benchmark.
     // Some optimizer failures (notably Binaryen's Emscripten wrapper) set a
-    // process exit code before throwing. Since this path explicitly treats the
-    // strategy as skipped, clear that sticky failure state here.
+    // process exit code before throwing. Since this path downgrades the
+    // failure to a recorded-but-unmeasured row, clear that sticky state here.
     process.exitCode = undefined;
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped: ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "setup", err);
   }
 
   // Warmup
   try {
     for (let i = 0; i < warmup; i++) fn();
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped (runtime): ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "warmup", err);
   }
 
   // Linear-memory benchmarks may use a bump allocator whose state persists
@@ -196,9 +260,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
       timeBenchmarkBatch(fn, batchSize); // warm the calibrated loop before retaining samples
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped (runtime, calibration): ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "calibration", err);
   }
 
   // Timed runs. Each entry is normalized to one benchmark call, preserving the
@@ -217,9 +279,7 @@ async function runStrategy(def: BenchmarkDef, strategy: Strategy): Promise<Bench
       timings.push(timeBenchmarkBatch(fn, batchSize) / batchSize);
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`\n    [${strategy} skipped (runtime, mid-loop): ${msg.split("\n")[0]}]\n`);
-    return null;
+    return failedResult(def.name, strategy, "mid-loop", err);
   }
 
   timings.sort((a, b) => a - b);
@@ -271,7 +331,9 @@ export async function runSuite(
     all.push(...results);
 
     // Inline summary
-    const cols = results.map((r) => `${r.strategy}: ${r.medianMs.toFixed(3)}ms`);
+    const cols = results.map((r) =>
+      isMeasured(r) ? `${r.strategy}: ${r.medianMs.toFixed(3)}ms` : `${r.strategy}: FAILED`,
+    );
     console.log(` ${cols.join("  |  ")}`);
   }
 

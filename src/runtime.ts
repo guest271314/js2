@@ -1369,7 +1369,21 @@ function _isWasmStruct(obj: any): boolean {
     // normal objects. (Kept inside the try so an unregistered revoked proxy —
     // whose traps throw — classifies exactly as before the #3673 rework.)
     if (Object.getPrototypeOf(obj) !== null) {
-      _wasmStructVerdict.set(obj, false);
+      // (#3903) Deliberately NOT memoized. `mixed/csv-parse` reaches here 31,000
+      // times per `run()` (21k `__extern_length` + 10k `__extern_get`), and every
+      // receiver is a FRESH, short-lived `split()` result array — so the memo
+      // was a pure cost: one `WeakMap.set` per crossing, plus an ephemeron entry
+      // per dead object for the GC to walk. `_isWasmStruct` was 48% of that
+      // benchmark's self time under `--cpu-prof`, with the GC a further 7.7%.
+      // Re-deriving the verdict is a single map load, cheaper than the WeakMap
+      // write it replaces, and skipping a cache write is not observable.
+      //
+      // The #3673 memo still covers the two cases it was introduced for — the
+      // null-prototype arms below, where the classification is genuinely
+      // expensive (an `Object.isExtensible` probe, or a thrown TypeError).
+      // Ordering is untouched: the memo and the `_userProxies` WeakSet are still
+      // consulted first, so a user proxy's [[GetPrototypeOf]] trap is invoked
+      // exactly as often as before.
       return false;
     }
     // (#3673) WasmGC objects report non-extensible; a plain Object.create(null)
@@ -8173,9 +8187,15 @@ function _deferStringDataArg(
   callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
   fallback: (value: any) => any,
 ): any {
+  // (#3903) `_isWasmStruct` first — it exits on `typeof value !== "object"`,
+  // which is the case for every primitive separator/limit argument on the
+  // `split`/`replace` hot path. Resolving `getExports()` up front made that
+  // free check pay for a closure call on every crossing. Pure reorder: both
+  // operands are side-effect-free.
+  if (!_isWasmStruct(value)) return fallback(value);
   const exports = callbackState?.getExports();
   const isData = exports?.__is_data_struct as ((value: any) => number) | undefined;
-  if (_isWasmStruct(value) && typeof isData === "function") {
+  if (typeof isData === "function") {
     try {
       if (isData(value) === 1) return _wrapForHost(value, exports);
     } catch {
@@ -8275,20 +8295,38 @@ function resolveImport(
         "search",
         "split",
       ]);
+      // (#3903) Everything that depends only on `method` is decided ONCE here,
+      // at import-resolution time, instead of on every crossing. A string
+      // benchmark makes 10k-50k crossings per `run()`, so anything left in the
+      // per-call body is multiplied by that. See the per-crossing breakdown in
+      // plan/issues/3903-host-call-lane-string-boundary.md.
+      const isSymbolDispatch = SYMBOL_DISPATCH_METHODS.has(method);
+      const usesNaNOmitSentinel = method === "includes" || method === "startsWith" || method === "endsWith";
+      const isSplit = method === "split";
+      const tracksLegacyRegExpState =
+        method === "match" || method === "search" || method === "replace" || method === "split";
+      // Coerce wasmGC struct args via ToPrimitive before passing to JS host (#983, #1128).
+      // (#3903) HOISTED out of the per-call body. Allocating this arrow per
+      // crossing cost ~40 ns/call in a plain build and ~490 ns/call in any
+      // build that applies esbuild's `keepNames` (every function literal then
+      // pays an `Object.defineProperty(fn, "name", …)` at allocation) — which
+      // is exactly the transform `tsx` applies to the benchmark harness.
+      const coerce = (v: any): any => {
+        if (v != null && typeof v === "object" && _isWasmStruct(v)) {
+          const prim = _toPrimitive(v, "string", callbackState);
+          if (prim !== undefined) return prim;
+          // Fall through to host ToPrimitive — throws TypeError if no conversion (#1128)
+          return _hostToPrimitive(v, "string", callbackState);
+        }
+        return v;
+      };
+      // Also hoisted (#3903): was re-allocated per call as the `.map` callback
+      // of the Symbol-dispatch branch below.
+      const deferDataArg = (value: any): any => _deferStringDataArg(value, callbackState, coerce);
       return (s: any, ...a: any[]) => {
-        // Coerce wasmGC struct args via ToPrimitive before passing to JS host (#983, #1128)
-        const coerce = (v: any): any => {
-          if (v != null && typeof v === "object" && _isWasmStruct(v)) {
-            const prim = _toPrimitive(v, "string", callbackState);
-            if (prim !== undefined) return prim;
-            // Fall through to host ToPrimitive — throws TypeError if no conversion (#1128)
-            return _hostToPrimitive(v, "string", callbackState);
-          }
-          return v;
-        };
         const recv = coerce(s);
         let args: any[];
-        if (SYMBOL_DISPATCH_METHODS.has(method) && a.length > 0) {
+        if (isSymbolDispatch && a.length > 0) {
           // Wrap (don't coerce) the first arg so JS's String.prototype.<method>
           // can dispatch on Symbol.<method> via the wasm-struct proxy (#1443).
           const first = a[0];
@@ -8315,9 +8353,20 @@ function resolveImport(
           } else {
             wrapped = first;
           }
-          args = [wrapped, ...a.slice(1).map((value) => _deferStringDataArg(value, callbackState, coerce))];
+          // (#3903) Same result as `[wrapped, ...a.slice(1).map(…)]`, without
+          // the three intermediate arrays (slice + map + spread target).
+          const n = a.length;
+          args = new Array(n);
+          args[0] = wrapped;
+          for (let i = 1; i < n; i++) args[i] = deferDataArg(a[i]);
         } else {
-          args = a.map(coerce);
+          // (#3903) `a.map(coerce)` allocates an extra array and goes through
+          // Array.prototype.map's generic element visit; a plain loop over the
+          // rest array is the same observable behaviour (coerce never throws
+          // for holes — a rest array has none).
+          const n = a.length;
+          args = new Array(n);
+          for (let i = 0; i < n; i++) args[i] = coerce(a[i]);
         }
         // #3761 — split uses -1 for omission/2^32 - 1; explicit NaN remains ToUint32(NaN) = 0.
         // #2002 — includes/startsWith/endsWith use NaN as the "position not
@@ -8325,26 +8374,41 @@ function resolveImport(
         // arg was omitted, so drop it and let the JS method apply its spec
         // default (0 for includes/startsWith, length for endsWith) instead of
         // ToInteger(NaN)=0.
-        if (args.length >= 2) {
+        if (args.length >= 2 && (isSplit || usesNaNOmitSentinel)) {
           const last = args[args.length - 1];
-          const omitLast =
-            method === "split"
-              ? last === -1
-              : (method === "includes" || method === "startsWith" || method === "endsWith") &&
-                typeof last === "number" &&
-                Number.isNaN(last);
+          const omitLast = isSplit ? last === -1 : typeof last === "number" && Number.isNaN(last);
           if (omitLast) {
             args.pop();
           }
         }
-        const recvStr = String(recv);
-        const ret = (recvStr as any)[method](...args);
+        const recvStr = typeof recv === "string" ? recv : String(recv);
+        // (#3903) Arity-dispatched invocation. Each arm is the *same*
+        // `recvStr[method](…)` member call the spread form performed — the
+        // property load stays dynamic (a monkey-patched String.prototype method
+        // is still honoured) and no `Function.prototype.call` is involved, so
+        // there is no new observable surface. It just avoids building the
+        // spread's argument list, which was ~17 ns of every crossing.
+        let ret: any;
+        switch (args.length) {
+          case 0:
+            ret = (recvStr as any)[method]();
+            break;
+          case 1:
+            ret = (recvStr as any)[method](args[0]);
+            break;
+          case 2:
+            ret = (recvStr as any)[method](args[0], args[1]);
+            break;
+          case 3:
+            ret = (recvStr as any)[method](args[0], args[1], args[2]);
+            break;
+          default:
+            ret = (recvStr as any)[method](...args);
+            break;
+        }
         // (#1333) Annex B — String.prototype.{match,search,replace,split,matchAll}
         // invokes RegExpBuiltinExec under the hood, which updates the legacy slots.
-        if (
-          args[0] instanceof RegExp &&
-          (method === "match" || method === "search" || method === "replace" || method === "split")
-        ) {
+        if (tracksLegacyRegExpState && args[0] instanceof RegExp) {
           try {
             const re = args[0] as RegExp;
             const probe = new RegExp(re.source, re.flags.replace(/[gy]/g, ""));
@@ -8720,10 +8784,48 @@ function resolveImport(
           // prototype method (e.g. RegExp.prototype.exec/test) can ToString
           // or read properties off an opaque wasm struct argument. Mirrors
           // the Set-method path above and __extern_method_call.
+          // (#3903) `args.some(a => _isWasmStruct(a))` allocated a closure on
+          // every crossing; a plain loop is the same predicate. This shim is
+          // the DOM lane's hot path — `dom/create-elements` makes 2,000
+          // `extern_class` crossings per `run()` against a mock whose whole
+          // body is one allocation, so per-crossing overhead is essentially
+          // the entire measurement there.
           const exports = callbackState?.getExports();
-          const hasStructArg = args.some((a) => _isWasmStruct(a));
-          const callArgs = hasStructArg ? args.map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a)) : args;
-          const ret = fn.call(self, ...callArgs);
+          let hasStructArg = false;
+          for (let i = 0; i < args.length; i++) {
+            if (_isWasmStruct(args[i])) {
+              hasStructArg = true;
+              break;
+            }
+          }
+          let callArgs = args;
+          if (hasStructArg) {
+            callArgs = new Array(args.length);
+            for (let i = 0; i < args.length; i++) {
+              callArgs[i] = _isWasmStruct(args[i]) ? _wrapForHost(args[i], exports) : args[i];
+            }
+          }
+          // (#3903) Arity switch instead of `fn.call(self, ...callArgs)` — same
+          // `Function.prototype.call` invocation, without materialising the
+          // spread's argument list on every crossing.
+          let ret: any;
+          switch (callArgs.length) {
+            case 0:
+              ret = fn.call(self);
+              break;
+            case 1:
+              ret = fn.call(self, callArgs[0]);
+              break;
+            case 2:
+              ret = fn.call(self, callArgs[0], callArgs[1]);
+              break;
+            case 3:
+              ret = fn.call(self, callArgs[0], callArgs[1], callArgs[2]);
+              break;
+            default:
+              ret = fn.call(self, ...callArgs);
+              break;
+          }
           // (#1333) Annex B §22.2.7.2 — RegExpBuiltinExec updates the legacy
           // static slots after every successful match. Hook exec/test on a
           // RegExp receiver with a string first arg.
@@ -9347,42 +9449,45 @@ assert._isSameValue = isSameValue;
           }
           _safeSet(obj, key, wrappedVal, undefined, callbackState, /* strict */ true);
         };
-      if (name === "__extern_length")
-        return (obj: any) => {
-          if (obj == null) return 0;
-          // Helper: coerce length value to number (#1090) — handles nested WasmGC
-          // structs with valueOf/toString that need ToPrimitive dispatch.
-          // Applies spec ToLength (§7.1.20): NaN → 0, negative → 0, clamp to
-          // [0, 2^53-1] (Number.MAX_SAFE_INTEGER). Older callers used i32 indices
-          // with `i32.trunc_sat_f64_s`, which saturates 2^53-1 to INT32_MAX —
-          // safe behaviour for that path. Newer callers (#1360 array-like
-          // search loop) use f64 indices to walk lengths up to MAX_SAFE_INTEGER
-          // without truncation.
-          const toLength = (n: number): number => {
-            if (Number.isNaN(n)) return 0;
-            if (!Number.isFinite(n)) return n > 0 ? 0x1fffffffffffff : 0; // 2^53-1
-            const i = Math.trunc(n);
-            if (i <= 0) return 0;
-            return Math.min(i, 0x1fffffffffffff); // 2^53-1
-          };
-          const coerceLen = (v: any): number => {
-            if (v == null) return 0;
-            if (typeof v === "number") return v;
-            if (typeof v === "string") return Number(v);
-            if (typeof v === "object") {
-              // Try our ToPrimitive for WasmGC structs (#1090)
-              const prim = _toPrimitive(v, "number", callbackState);
-              if (prim !== undefined) return Number(prim);
-              try {
-                const prim2 = _hostToPrimitive(v, "number", callbackState);
-                return Number(prim2);
-              } catch {
-                /* fall through */
-              }
-              return Number(v);
+      if (name === "__extern_length") {
+        // Helper: coerce length value to number (#1090) — handles nested WasmGC
+        // structs with valueOf/toString that need ToPrimitive dispatch.
+        // Applies spec ToLength (§7.1.20): NaN → 0, negative → 0, clamp to
+        // [0, 2^53-1] (Number.MAX_SAFE_INTEGER). Older callers used i32 indices
+        // with `i32.trunc_sat_f64_s`, which saturates 2^53-1 to INT32_MAX —
+        // safe behaviour for that path. Newer callers (#1360 array-like
+        // search loop) use f64 indices to walk lengths up to MAX_SAFE_INTEGER
+        // without truncation.
+        // (#3903) Both helpers HOISTED out of the per-call body: `mixed/csv-parse`
+        // makes 21,000 `__extern_length` crossings per `run()`, and each one was
+        // allocating these two closures before doing any work.
+        const toLength = (n: number): number => {
+          if (Number.isNaN(n)) return 0;
+          if (!Number.isFinite(n)) return n > 0 ? 0x1fffffffffffff : 0; // 2^53-1
+          const i = Math.trunc(n);
+          if (i <= 0) return 0;
+          return Math.min(i, 0x1fffffffffffff); // 2^53-1
+        };
+        const coerceLen = (v: any): number => {
+          if (v == null) return 0;
+          if (typeof v === "number") return v;
+          if (typeof v === "string") return Number(v);
+          if (typeof v === "object") {
+            // Try our ToPrimitive for WasmGC structs (#1090)
+            const prim = _toPrimitive(v, "number", callbackState);
+            if (prim !== undefined) return Number(prim);
+            try {
+              const prim2 = _hostToPrimitive(v, "number", callbackState);
+              return Number(prim2);
+            } catch {
+              /* fall through */
             }
             return Number(v);
-          };
+          }
+          return Number(v);
+        };
+        return (obj: any) => {
+          if (obj == null) return 0;
           // Reading .length on an opaque wasmGC struct throws — resolve through
           // the #1629-safe own-descriptor reader (#983 sidecar + vec live length
           // + shape-gated struct field), then the inherited chain.
@@ -9425,6 +9530,7 @@ assert._isSameValue = isSameValue;
           if (typeof getter === "function") return toLength(coerceLen(getter(obj))) ?? 0;
           return 0;
         };
+      }
       // __extern_get_idx: numeric index access bypassing the well-known symbol ID
       // check in _safeGet. Needed for array-like loops where i can be 1-12 and
       // _safeGet would otherwise interpret the number as a Symbol ID.
