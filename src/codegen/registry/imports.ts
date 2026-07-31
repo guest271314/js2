@@ -26,6 +26,7 @@ import { STANDALONE_REGEXP_REFLECTION_PROPS } from "../regexp-standalone.js";
 import { reconcileNativeStrFinalizeShift } from "../expressions/late-imports.js";
 import { emitWasiErrorConstructor } from "./error-types.js";
 import { emitNativeParseNumber } from "../parse-number-native.js";
+import { boxBooleanBody } from "../interned-boolean-boxes.js"; // (#3780) interned true/false carriers
 import { isTupleType, isStandaloneRegExpMatchArrayValue } from "../index.js";
 import { planProgramAbiStringConstantImport } from "../program-abi-import-planning.js";
 
@@ -1223,12 +1224,8 @@ export function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
   );
 
-  // 5. __box_boolean(i32) -> externref
-  registerNative("__box_boolean", i32ToExternref, [
-    { op: "local.get", index: 0 },
-    { op: "struct.new", typeIdx: boxBoolStructIdx },
-    { op: "extern.convert_any" },
-  ]);
+  // 5. __box_boolean(i32) -> externref — interned carriers (#3780).
+  registerNative("__box_boolean", i32ToExternref, boxBooleanBody(ctx, boxBoolStructIdx));
 
   // #1644 Slice E1 — __box_bigint(i64) -> externref. In no-JS-host mode a
   // bigint-branded i64 needs a WasmGC carrier so it cannot fall through to the

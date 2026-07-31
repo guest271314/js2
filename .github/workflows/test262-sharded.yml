@@ -223,8 +223,8 @@ jobs:
       # so a scoped candidate JSONL is never diffed against the full baseline.
       test262_scope: ${{ steps.scope.outputs.scope }}
       # #3431 — the merge_group capacity-sized shard matrix. The live queue is
-      # serial (`max_entries_to_build=1`), so it uses 106 of the 120 runners
-      # and reserves 14 for overlapping required workflows. Only computed for
+      # serial (`max_entries_to_build=1`), so it uses 102 of the 120 runners
+      # and reserves 18 for overlapping required workflows. Only computed for
       # merge_group; empty for every other event
       # (those keep using the static chunk/target arrays on `test262-shard`,
       # unchanged). See scripts/gen-test262-mg-matrix.mjs for the shard-count
@@ -259,11 +259,21 @@ jobs:
       # detect step exits immediately with run_shards=true, and since every
       # shard job `needs:` this job, an unconditional checkout here delayed
       # the start of the whole 114-job matrix by ~25s on every PR run.
+      # #3914 — this checkout is a SERIAL PREFIX on the critical path: every
+      # shard job `needs:` this job, so nothing in the 102-job matrix starts
+      # until it finishes. At `fetch-depth: 0` it measured 33 s of the job's
+      # 38 s total (merge_group run 30631849709) purely to enable one
+      # `git diff base head` — while a shard job's own default-depth checkout
+      # is 9-10 s. `git diff A B` is a two-dot TREE comparison and needs no
+      # merge base, so depth-1 objects for the two SHAs are sufficient; the
+      # detect step below fetches them explicitly and falls back to
+      # `--unshallow` before the fail-safe, so the worst case is the old cost,
+      # never a less conservative answer.
       - name: Checkout
         if: github.event_name == 'merge_group'
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       # #3431 — compute the merge_group-consolidated shard matrix. Pure
       # node/JS, no dependencies to install; reuses the merge_group-only
       # checkout above. Runs unconditionally on merge_group (even when
@@ -299,15 +309,33 @@ jobs:
             exit 0
           fi
 
-          # Make sure both commits are present (fetch-depth:0 should cover it,
-          # but the merge_group head may be a freshly-built ref).
-          git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || git fetch --no-tags origin "$MG_BASE_SHA" 2>/dev/null || true
-          git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || git fetch --no-tags origin "$MG_HEAD_SHA" 2>/dev/null || true
+          # Make sure both commits are present. The checkout above is depth-1
+          # (#3914), so in the normal case neither SHA is in the object store
+          # yet and both of these fetches do real work — a depth-1 fetch of two
+          # named SHAs, which is what `git diff A B` (two-dot, tree-vs-tree)
+          # needs. It does NOT need a merge base, so no history is required.
+          git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$MG_BASE_SHA" 2>/dev/null || true
+          git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$MG_HEAD_SHA" 2>/dev/null || true
 
           set +e
           DIFF=$(git diff --name-only "$MG_BASE_SHA" "$MG_HEAD_SHA" 2>/tmp/diff_err)
           rc=$?
           set -e
+
+          # #3914 — if the shallow path could not produce a diff, deepen to the
+          # full history and retry ONCE before falling through to the fail-safe.
+          # This keeps the shallow checkout a pure latency optimisation: the
+          # answer is identical to the fetch-depth:0 behaviour, we just only pay
+          # for full history when the cheap path actually failed.
+          if [ "$rc" -ne 0 ]; then
+            echo "::notice::shallow base..head diff failed (rc=$rc) — deepening history and retrying once."
+            git fetch --no-tags --unshallow origin 2>/dev/null || git fetch --no-tags --depth=2147483647 origin 2>/dev/null || true
+            set +e
+            DIFF=$(git diff --name-only "$MG_BASE_SHA" "$MG_HEAD_SHA" 2>/tmp/diff_err)
+            rc=$?
+            set -e
+          fi
+
           if [ "$rc" -ne 0 ]; then
             echo "::warning::git diff $MG_BASE_SHA..$MG_HEAD_SHA failed (rc=$rc): $(cat /tmp/diff_err) — FAIL-SAFE run_shards=true."
             echo "run_shards=true" >> "$GITHUB_OUTPUT"
@@ -336,10 +364,10 @@ jobs:
   #   queued change          changes.run_shards   test262-shard-mg   merge-report
   #   ---------------------  ------------------   ----------------   -------------------
   #   src/** (or any         true                 RUNS (#3431         runs, real result
-  #     &test262-paths)                             106-job matrix)
+  #     &test262-paths)                             102-job matrix)
   #   website/plan/doc-only  false                SKIPPED             runs, trivial PASS
   #   base_sha empty /       true (fail-safe)     RUNS (#3431         runs, real result
-  #     diff fails / empty                          106-job matrix)
+  #     diff fails / empty                          102-job matrix)
   #
   # In ALL three rows the required check "merge shard reports" is produced.
   # It is green only when shards succeeded or the merge_group no-shards skip is
@@ -648,10 +676,14 @@ jobs:
     # cancelling their expensive runs. The active ruleset now builds exactly
     # one merge-group entry at a time (`max_entries_to_build=1`).
     #
-    # With the queue serialized, the matrix instead uses 106 of the 120
-    # four-core runners: js-host=72 and standalone=34, based on the 2.13:1
-    # measured work ratio from run 29807524490. The remaining 14 runners cover
-    # the overlapping CI/equivalence/differential/gate jobs. pull_request,
+    # With the queue serialized, the matrix instead uses 102 of the 120
+    # four-core runners: js-host=66 and standalone=36, based on the 1.835:1
+    # measured work ratio from run 30631849709 (#3914 — re-derived; the
+    # previous 72/34 came from a 2.13:1 ratio measured at run 29807524490 and
+    # had drifted, leaving standalone the long pole again). The remaining 18
+    # runners cover the overlapping CI/equivalence/differential/gate jobs —
+    # raised from 14 because run 30631849709 showed 5 shard jobs starting
+    # 90-184 s late, i.e. 106 was genuinely over the ceiling. pull_request,
     # push, and workflow_dispatch behavior remains unchanged.
     #
     # Uses the SAME dynamic entry point (tests/test262-chunk-dynamic.test.ts)
@@ -833,7 +865,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "merge_group" ]; then
             echo "-> merge_group queued only non-test262-relevant changes"
-            echo "   (changes.run_shards=='false'); the capacity-sized 106-job matrix (#3431,"
+            echo "   (changes.run_shards=='false'); the capacity-sized 102-job matrix (#3431,"
             echo "   test262-shard-mg) was intentionally skipped. Reporting 'merge shard"
             echo "   reports' green."
           elif [ "${{ github.event_name }}" = "push" ]; then
