@@ -1,11 +1,21 @@
 ---
 id: 3643
 title: "Three measured host-lane gaps: array destructuring never throws, `Array.from` ignores array-like `length`, and a heterogeneous vec null-derefs in slice/flat"
-status: ready
+status: in-progress
 sprint: current
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-31
+assignee: ttraenkler/dev-core-semantics
 priority: high
+loc-budget-allow:
+  # Slice B adds `_arrayFromNonIterableSource` — the §23.1.2.1 step-6
+  # non-iterable array-like arm for `Array.from` — plus the comment recording
+  # the measured pre-fix answer and WHY the fix reuses `_wrapForHost` (the
+  # proxy that already makes `slice.call(arrayLike)` correct on the identical
+  # receiver) instead of re-implementing the spec step. The host-import factory
+  # `resolveImport` lives in this file; splitting it is #3399's job, not this
+  # slice's. No new branch structure in the hot path.
+  - src/runtime.ts
 horizon: m
 feasibility: medium
 task_type: bug
@@ -36,12 +46,12 @@ Compiled with `compile(src, { fileName: "probe.mjs" })` and run through
 
 ### Slice A — array destructuring never performs GetIterator
 
-| source                            | got                        | host        |
-| --------------------------------- | -------------------------- | ----------- |
-| `var [p] = { a: 1 }`              | binds `undefined`, no throw | `TypeError` |
-| `var [p, q] = { a: 1, b: 2 }`     | binds `undefined, undefined` | `TypeError` |
+| source                             | got                                      | host        |
+| ---------------------------------- | ---------------------------------------- | ----------- |
+| `var [p] = { a: 1 }`               | binds `undefined`, no throw              | `TypeError` |
+| `var [p, q] = { a: 1, b: 2 }`      | binds `undefined, undefined`             | `TypeError` |
 | `function f([p]) {} ; f({ a: 1 })` | **traps** "dereferencing a null pointer" | `TypeError` |
-| `var [p] = [7]`                   | `7` (correct)              | `7`         |
+| `var [p] = [7]`                    | `7` (correct)                            | `7`         |
 
 §8.6.2 ArrayBindingPattern requires GetIterator(§7.4.2) on the RHS, which throws
 `TypeError` for a non-iterable. Array destructuring does **not** route through
@@ -56,30 +66,50 @@ the spec's TypeError.
 
 ### Slice B — `Array.from` ignores `length` on a WasmGC array-like
 
-| source                                         | got     | host             |
-| ---------------------------------------------- | ------- | ---------------- |
-| `Array.from({ length: 2 })`                    | `[]`    | `[null,null]`    |
-| `Array.from({ length: 2, 0: "a", 1: "b" })`    | `[]`    | `["a","b"]`      |
-| `Array.from([1, 2, 3])`                        | `[1,2,3]` (correct) | `[1,2,3]` |
-| `Array.prototype.slice.call({length:2,0:5,1:6})` | `[5,6]` (correct) | `[5,6]` |
-| `({length: 2, 0: 5, 1: 6}).length`             | `2` (correct) | `2`        |
+| source                                           | got                 | host          |
+| ------------------------------------------------ | ------------------- | ------------- |
+| `Array.from({ length: 2 })`                      | `[]`                | `[null,null]` |
+| `Array.from({ length: 2, 0: "a", 1: "b" })`      | `[]`                | `["a","b"]`   |
+| `Array.from([1, 2, 3])`                          | `[1,2,3]` (correct) | `[1,2,3]`     |
+| `Array.prototype.slice.call({length:2,0:5,1:6})` | `[5,6]` (correct)   | `[5,6]`       |
+| `({length: 2, 0: 5, 1: 6}).length`               | `2` (correct)       | `2`           |
 
 §23.1.2.1 step 6: when the source is **not** iterable, `Array.from` falls back to
 `LengthOfArrayLike` + indexed reads. The struct's `length` field is readable
 (row 5) and `slice.call` already does the array-like walk correctly (row 4), so
 only `Array.from`'s non-iterable fallback is missing for a WasmGC receiver.
 
+**FIXED — 2026-07-31.** This diagnosis held up exactly. `slice.call` was correct
+because it routes the receiver through `_wrapForHost` (the live-mirror proxy
+over a WasmGC struct); `__array_from` did not, so native `Array.from` read
+`length` off an opaque object as `undefined` and answered `[]`. The fix
+(`_arrayFromNonIterableSource`) routes a non-vec, non-iterable struct through
+that same proxy, so the spec's own step 6 runs rather than being
+re-implemented.
+
+Three further rows failed the same way on `origin/main` and were never listed
+here — all fixed by the same change: `Array.from(arrayLike, mapFn)` (answered
+`[]`), `length` coercion (`{length: "2"}`), and sparse indices
+(`{length: 3, 1: "b"}`). Plus the parity row: `Array.from` and
+`Array.prototype.slice.call` now agree on the identical receiver.
+
+**Residual, NOT fixed and A/B-verified pre-existing:** an object carrying BOTH a
+`length` and a callable `@@iterator` still answers `[]` — it failed identically
+on unmodified `origin/main`, so it is a separate gap in the
+`@@iterator`-on-a-struct path, not collateral. Recorded so a later sweep does
+not read Slice B as covering it.
+
 ### Slice C — heterogeneous vec null-derefs in `slice` / `flat`
 
-| source                        | got                                     | host           |
-| ----------------------------- | --------------------------------------- | -------------- |
-| `[{x:1}, 2].flat()`           | **traps** "dereferencing a null pointer" | `[{"x":1},2]`  |
-| `[o, 1].slice(0)` (`o={x:1}`) | **traps** "dereferencing a null pointer" | `[{"x":1},1]`  |
-| `[{x:1}].flat()`              | `[{"x":1}]` (correct)                   | `[{"x":1}]`    |
-| `[{x:1},{y:2}].flat()`        | `[{"x":1},{"y":2}]` (correct)           | same           |
-| `[o, o].slice(0)`             | `[{"x":1},{"x":1}]` (correct)           | same           |
-| `[1, 2].slice(0)`             | `[1,2]` (correct)                       | `[1,2]`        |
-| `[1, {x:1}].concat([])`       | `[1,{"x":1}]` (correct)                 | same           |
+| source                        | got                                      | host          |
+| ----------------------------- | ---------------------------------------- | ------------- |
+| `[{x:1}, 2].flat()`           | **traps** "dereferencing a null pointer" | `[{"x":1},2]` |
+| `[o, 1].slice(0)` (`o={x:1}`) | **traps** "dereferencing a null pointer" | `[{"x":1},1]` |
+| `[{x:1}].flat()`              | `[{"x":1}]` (correct)                    | `[{"x":1}]`   |
+| `[{x:1},{y:2}].flat()`        | `[{"x":1},{"y":2}]` (correct)            | same          |
+| `[o, o].slice(0)`             | `[{"x":1},{"x":1}]` (correct)            | same          |
+| `[1, 2].slice(0)`             | `[1,2]` (correct)                        | `[1,2]`       |
+| `[1, {x:1}].concat([])`       | `[1,{"x":1}]` (correct)                  | same          |
 
 **The discriminator is heterogeneity, not the presence of a struct.** All-struct
 and all-number literals are fine; **mixing a struct with a number in one literal**
