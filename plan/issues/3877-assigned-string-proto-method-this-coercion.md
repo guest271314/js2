@@ -154,13 +154,69 @@ in `createNativeProtoMember` (`src/codegen/native-proto.ts`, ~line 537). The
 **per-method, emitted by the String glue's `emitMemberBody`**, and is present for
 `charAt`/`substring` and absent for the other nine.
 
-**Implementation shape:** hoist that coercion out of the per-method arms into the
-shared `kind === "method"` wrapper prologue for the String brand, so every member
-gets it once rather than nine arms each re-implementing it. `charAt` and
-`substring` are the working reference for what the prologue must emit.
-
 **Do not** re-verify through bare `compile()` with an `any`-annotated receiver —
 that is the shape that does not reproduce.
+
+## The obvious fix is WRONG — enumerate the readers before writing
+
+The natural plan is _"hoist the §15.5.4.x preamble out of the per-method arms
+into the shared `kind === "method"` wrapper prologue for the String brand."_
+Enumerating what actually emits those bodies kills it.
+
+**(a) The wrapper machinery is standalone-only.** Compiling the same source on
+both lanes: the host module contains **0** `__proto_method_*` wrappers,
+standalone contains one per member. So host does not work "because it has the
+preamble" — host never goes near this code. That retires the cross-lane
+regression risk (the #3871 shape) for any change confined to these wrappers, and
+it also means host correctness here is evidence about a _different_ code path.
+
+**(b) Most of the nine have no member body at all.**
+`emitStringProtoMemberBody` (`src/codegen/array-object-proto.ts:812`) is a
+per-member dispatch:
+
+| member                               | body                                                                            |
+| ------------------------------------ | ------------------------------------------------------------------------------- |
+| `substring`                          | `emitStringSubstringMemberBody`                                                 |
+| `indexOf`, `lastIndexOf`             | `emitStringSearchNumericMemberBody`                                             |
+| `includes`, `startsWith`, `endsWith` | `emitStringSearchBooleanMemberBody`                                             |
+| `trim`, `trimStart`, `trimEnd`       | `emitStringTrimMemberBody`                                                      |
+| `charAt`                             | `emitTransferredCharAtProtoMemberBody` (ROC + coercion passed as callbacks)     |
+| `at`, `charCodeAt`, `codePointAt`    | inline path — **already does** `emitStringRequireObjectCoercible` then ToString |
+| **everything else**                  | `emitProtoMemberBodyRefusal`                                                    |
+
+`toUpperCase`, `toLowerCase`, `slice`, `concat`, `split` are in **no** arm, so
+they reach the refusal — which is supposed to emit a catchable
+`"…is not yet implemented in --target standalone"` **TypeError**.
+
+**So there is no missing preamble to hoist.** There is nowhere central that
+nine arms are failing to call.
+
+## The real question, unresolved — two anomalies
+
+1. **`charCodeAt` already performs ROC + ToString** (the inline arm, steps (1)
+   and (2) in the source) and still returns `null` on a non-string `this`. So
+   having the preamble is not sufficient; something downstream of it in that arm
+   discards the coerced value.
+2. **`toUpperCase` / `slice` / `concat` should throw a loud TypeError** via
+   `emitProtoMemberBodyRefusal` and instead return `null` silently. A refusal
+   degrading to a silent wrong value is a **worse** defect than the missing
+   feature it stands for, and it is the same silent-wrong-value family as the
+   bare-`compile()` hazard in #3885.
+
+Anomaly 2 is arguably the higher-value fix: a loud refusal is correct behaviour
+for an unimplemented member, and turning silent `null`s back into throws is both
+smaller and strictly safer than implementing nine member bodies.
+
+**Acceptance bar for whoever implements** (unchanged, and it is 11/11 on BOTH
+lanes, not "the nine nulls are gone"): run the full matrix before and after on
+both lanes and report both columns; `charAt` and `substring` must still pass —
+if a change breaks them the change is wrong, not the references; and the fix
+must be seen to fail with a kill-switch (revert it, confirm the matrix returns
+to nine `null`s) before it is believed.
+
+`split` returning `2` on host and **`0`** on standalone is a wrong number rather
+than a `null` and has not been attributed to either anomaly — do not let it ride
+along unexamined.
 
 ## Sibling defect — #3254 is FALSE-DONE on its own headline method
 
