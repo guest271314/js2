@@ -16,40 +16,63 @@ related: [3254, 2908, 1781, 3647]
 
 # #3875 — three reflection routes, three different answers for the same property
 
-## ✅ HARNESS CONFLICT RESOLVED — `runTest262File` is authoritative
+## ✅ SETTLED — three independent apparatuses agree
 
-Three agents produced three inconsistent pictures of this mechanism. The cause was
-**the instrument, not the compiler**, and it has been settled:
+Four revisions and a three-way disagreement resolved. **The disagreement was the
+instrument, not the compiler**, and every disputed cell has now been re-measured
+with passing controls through `runTest262File`, bare `compile()`, and a third
+independent probe.
 
-- **Bare `compile()` + `buildImports` is NOT a valid instrument for
-  `hasOwnProperty`.** Its own control fails: `({a:1}).hasOwnProperty('a')` returns
-  **0 on host**, on an inline literal (so not a module-scope artifact). Any
-  `hasOwnProperty` reading from that path is off a broken instrument.
-- **The compiler is fine.** `built-ins/Object/prototype/hasOwnProperty/8.12.1-1_10..15`
-  through `runTest262File` on host → **6/6 pass**.
-- So `runTest262File` is **not** polyfilling as was suspected — it is the
-  authoritative path CI uses, assembling the real harness. **Bare `compile()`
-  under-assembles.**
+| finding | status |
+|---|---|
+| `Array.prototype.hasOwnProperty('push')` → **true** in standalone; RegExp / String / Object → **false** | **settled, 3 apparatuses** |
+| `getOwnPropertyDescriptor` returns a **real, spec-exact descriptor** in standalone for all of them | **settled** |
+| `getOwnPropertyNames().length` → constant **6** in standalone vs host **40/15/52/12** — broken **everywhere including Array** | **settled** |
+| **The two routes contradict each other**: for `RegExp.prototype.exec` in standalone, `hasOwnProperty` says *not own* while `gOPD` returns a *full own descriptor* | **settled — this is the precise defect** |
 
-**Therefore the `runTest262File` numbers are the ones to trust**, and the readings
-below taken through them stand — including `Array.prototype.hasOwnProperty('push')`
-= **true** in standalone, i.e. **`Array.prototype` IS the exception and the
-"replicate the Array registration" routing for Defect 1 is valid after all.**
+**That last line is the result.** Not "reflection is missing" — **one route consults
+a registry the other does not**, and `Array.prototype` is the one built-in wired
+into both.
 
-The **gOPD inversion also stands** (gOPD returns a real descriptor in standalone,
-not `undefined`) — it does not depend on the broken wiring.
+Withdrawn along the way: "gOPD returns `undefined`" (it does not), "there is no
+working reference to copy" (Array is real), and "bare `compile()` is not a valid
+instrument" (it agrees case-for-case on `hasOwnProperty`; one earlier probe was
+simply broken).
 
-**Still required before sizing:** re-run the 25-row built-in-prototype classifier
-through `runTest262File`, since it was built on the under-assembling path.
+### Routing
 
-**Separate real bug, unrelated to this issue:** `({a:1}).hasOwnProperty('a')`
-returning false under bare `compile()` + `buildImports` is itself a defect in that
-path and deserves its own investigation.
+- **Lookup (`hasOwnProperty`) — ROUTABLE NOW.** `Array.prototype` is a genuine
+  working in-repo reference; replicating its registration for RegExp / String /
+  Object / Number / Boolean prototypes is a bounded fix.
+- **Enumeration (`getOwnPropertyNames`) — NOT routable as "copy Array".** Broken for
+  Array too, so no reference exists. Separate, harder, needs its own issue.
+- **Still hold the 25-row hand-off**: it must be re-cut **by route**, because `gOPD`
+  rows already work in standalone and will not move.
+
+## 🚨 Separate finding that reaches past this issue — the HOST lane has reflection bugs too
+
+Two agents' **host** controls failed, in **different places per route**:
+
+- `({a:1}).hasOwnProperty('a')` → **false on host** (one apparatus)
+- `Object.getOwnPropertyDescriptor({a:1},'a')` → **falsy on host** (another)
+
+One agent's `hasOwnProperty` controls passed on host while its `gOPD` control
+failed; the other's was the reverse. **So this is not a single bad harness — host
+reflection is itself defective.**
+
+**Consequence: any host-lane number in this area needs a control PER ROUTE, not per
+probe.** Host is the reference the standalone floor is measured against, so this
+has implications well beyond this issue. Needs its own investigation.
+
+Unexplained and not papered over: one harness probe read
+`gOPD(RegExp.prototype,'global')` falsy while bare compile reads it truthy.
+Working rule adopted by the lane: **`run-abs.mts` for behaviour, bare `compile()`
+for reflection.**
 
 > **Method rule this produced** (extends the denominator rule): *a number is prose
-> unless it carries its denominator, the command, **and the harness**.* Three agents
-> each had a control available; only the run that checked its control caught the
-> problem.
+> unless it carries its denominator, the command, **and the harness**.* All three
+> agents had a control available; only the runs that actually checked their controls
+> caught the problem.
 
 ## How it was found (the control property is the whole story)
 
