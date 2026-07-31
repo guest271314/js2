@@ -3198,12 +3198,12 @@ export function compileNativeStringMethodCall(
 
   // split: native helper, returns native string array
   if (method === "split" && firstArgIsStringLike) {
+    // (#3901) Deliberately NO `emitFlatten()`: `__str_split` takes `ref
+    // $AnyString` and its preamble already flattens both params (#3673).
     emitReceiver();
-    emitFlatten();
     // separator arg
     if (expr.arguments.length > 0) {
       compileExpression(ctx, fctx, expr.arguments[0]!);
-      emitFlatten();
     } else {
       // default: empty string separator (split each char) (len=0, off=0, [])
       fctx.body.push({ op: "i32.const", value: 0 }); // len

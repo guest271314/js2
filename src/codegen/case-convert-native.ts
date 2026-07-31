@@ -4,14 +4,26 @@
 // and the locale-insensitive conditional Final_Sigma rule, driven by the
 // generated tables in `case-tables.ts`.
 //
-// Design (no module globals — avoids late-import global-index shifts):
-//  - The runs table and the special table are built ONCE per call into locals
-//    via `array.new_fixed` at the top of each string-level helper, then shared
-//    across the per-character loop. `array.new_fixed` of ~1.5k constants is a
-//    single (if long) instruction sequence the emitter handles fine.
+// Design:
+//  - (#3900) An ASCII FAST PATH runs first: a single fused scan+map loop over
+//    the flattened i16 backing array. While every code unit is < 0x80 it writes
+//    `A-Z <-> a-z` directly into a same-length output array and returns without
+//    ever touching a Unicode table. Only a code unit >= 0x80 bails out to the
+//    full path below. This is safe because ASCII has NO length-changing and NO
+//    context-sensitive case mappings — verified against the generated tables:
+//    the only ASCII entries in LOWER_CASE_RUNS/UPPER_CASE_RUNS are exactly the
+//    `A-Z`/`a-z` +-32 runs, and the lowest source code point in either special
+//    (1:N) table is U+00DF (`ß`, upper) / U+03A3 (`Σ`, lower — Final_Sigma), so
+//    no ASCII input can reach a special or conditional rule.
+//  - The Unicode tables live in MODULE GLOBALS built once by `array.new_fixed`
+//    constant init expressions, not rebuilt into locals on every call. Before
+//    #3900 each call to `__str_toLowerCase` allocated and filled a fresh 1,927-
+//    element i32 array (runs + special + Cased + Case_Ignorable) before looking
+//    at a single character — that per-call table materialisation, not the
+//    per-character work, was the ~2.2 µs/conversion cost.
 //  - `__case_simple(ch, runs)` binary-searches the [start,count,stride,delta]
 //    runs for `ch` and returns the mapped code unit (or `ch` unchanged).
-//  - The string-level helper does TWO passes over the source: pass 1 sums the
+//  - The string-level slow path does TWO passes over the source: pass 1 sums the
 //    output length (a special entry contributes its outLen, everything else 1);
 //    pass 2 fills the freshly-sized output array, expanding special entries.
 //
@@ -39,6 +51,310 @@ function buildConstI32Array(table: readonly number[], arrTypeIdx: number): Instr
   for (const v of table) out.push({ op: "i32.const", value: v });
   out.push({ op: "array.new_fixed", typeIdx: arrTypeIdx, length: table.length });
   return out;
+}
+
+/**
+ * (#3900) Register a Unicode case table as an IMMUTABLE module global whose
+ * init expression is the `array.new_fixed` sequence. `array.new_fixed` is a
+ * constant instruction in the GC proposal, so the engine materialises the array
+ * once at instantiation instead of once per `toLowerCase()`/`toUpperCase()`
+ * call. Same total const bytes in the module, but they move out of the code
+ * section (so function inlining can never duplicate them) and off the hot path.
+ */
+function caseTableGlobal(
+  ctx: CodegenContext,
+  cache: Map<readonly number[], number>,
+  name: string,
+  table: readonly number[],
+  arrTypeIdx: number,
+): number {
+  const hit = cache.get(table);
+  if (hit !== undefined) return hit;
+  const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  ctx.mod.globals.push({
+    name,
+    type: { kind: "ref", typeIdx: arrTypeIdx },
+    mutable: false,
+    init: buildConstI32Array(table, arrTypeIdx),
+  });
+  cache.set(table, globalIdx);
+  return globalIdx;
+}
+
+/**
+ * Emit the two Final_Sigma context scans used by `__str_toLowerCase_uni`.
+ *
+ * Final_Sigma is the one locale-insensitive conditional SpecialCasing rule:
+ * `Σ` lowercases to final `ς` when it is preceded by a Cased code point and
+ * NOT followed by one, skipping Case_Ignorable code points on both sides. Both
+ * scans decode surrogate pairs, because Cased/Case_Ignorable are full
+ * code-point properties while the backing store holds UTF-16 code units.
+ */
+function buildFinalSigmaScans(o: {
+  /** Emits the source code unit at an instruction-computed index. */
+  srcCharAt: (idxInstrs: Instr[]) => Instr[];
+  /** funcIdx of `__case_in_ranges(cp, ranges) -> i32`. */
+  inRangesIdx: number;
+  LEN: number;
+  I: number;
+  CTX: number;
+  CP: number;
+  PAIR: number;
+  PREVCASED: number;
+  NEXTCASED: number;
+  CASED: number;
+  IGNORABLE: number;
+}): { scanPreviousCased: () => Instr[]; scanNextCased: () => Instr[] } {
+  const get = (index: number): Instr => ({ op: "local.get", index });
+  const set = (index: number): Instr => ({ op: "local.set", index });
+  const c = (value: number): Instr => ({ op: "i32.const", value });
+  const inRanges = (cpLocal: number, rangesLocal: number): Instr[] => [
+    get(cpLocal),
+    get(rangesLocal),
+    { op: "call", funcIdx: o.inRangesIdx },
+  ];
+  const between = (local: number, lo: number, hi: number): Instr[] => [
+    get(local),
+    c(lo),
+    { op: "i32.ge_u" },
+    get(local),
+    c(hi),
+    { op: "i32.le_u" },
+    { op: "i32.and" },
+  ];
+  const combineSurrogates = (highLocal: number, lowLocal: number): Instr[] => [
+    get(highLocal),
+    c(0xd800),
+    { op: "i32.sub" },
+    c(10),
+    { op: "i32.shl" },
+    get(lowLocal),
+    c(0xdc00),
+    { op: "i32.sub" },
+    { op: "i32.add" },
+    c(0x10000),
+    { op: "i32.add" },
+    set(o.CP),
+  ];
+  const scanPreviousCased = (): Instr[] => [
+    c(0),
+    set(o.PREVCASED),
+    get(o.I),
+    set(o.CTX),
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            get(o.CTX),
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            get(o.CTX),
+            c(1),
+            { op: "i32.sub" },
+            set(o.CTX),
+            ...o.srcCharAt([get(o.CTX)]),
+            set(o.CP),
+            // Decode a preceding high+low surrogate pair while moving
+            // backward. CP initially holds the low surrogate.
+            ...between(o.CP, 0xdc00, 0xdfff),
+            get(o.CTX),
+            { op: "i32.eqz" },
+            { op: "i32.eqz" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                ...o.srcCharAt([get(o.CTX), c(1), { op: "i32.sub" }]),
+                set(o.PAIR),
+                ...between(o.PAIR, 0xd800, 0xdbff),
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [...combineSurrogates(o.PAIR, o.CP), get(o.CTX), c(1), { op: "i32.sub" }, set(o.CTX)],
+                },
+              ],
+            },
+            // Case_Ignorable wins when a code point has both properties
+            // (for example U+0345 COMBINING GREEK YPOGEGRAMMENI).
+            ...inRanges(o.CP, o.IGNORABLE),
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "br", depth: 1 }],
+            },
+            ...inRanges(o.CP, o.CASED),
+            set(o.PREVCASED),
+            { op: "br", depth: 1 },
+          ],
+        },
+      ],
+    },
+  ];
+  const scanNextCased = (): Instr[] => [
+    c(0),
+    set(o.NEXTCASED),
+    get(o.I),
+    c(1),
+    { op: "i32.add" },
+    set(o.CTX),
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            get(o.CTX),
+            get(o.LEN),
+            { op: "i32.ge_u" },
+            { op: "br_if", depth: 1 },
+            ...o.srcCharAt([get(o.CTX)]),
+            set(o.CP),
+            get(o.CTX),
+            c(1),
+            { op: "i32.add" },
+            set(o.CTX),
+            // CP is a high surrogate and CTX now points at its possible low
+            // surrogate. Decode it before consulting Unicode properties.
+            ...between(o.CP, 0xd800, 0xdbff),
+            get(o.CTX),
+            get(o.LEN),
+            { op: "i32.lt_u" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                ...o.srcCharAt([get(o.CTX)]),
+                set(o.PAIR),
+                ...between(o.PAIR, 0xdc00, 0xdfff),
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [...combineSurrogates(o.CP, o.PAIR), get(o.CTX), c(1), { op: "i32.add" }, set(o.CTX)],
+                },
+              ],
+            },
+            ...inRanges(o.CP, o.IGNORABLE),
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "br", depth: 1 }],
+            },
+            ...inRanges(o.CP, o.CASED),
+            set(o.NEXTCASED),
+            { op: "br", depth: 1 },
+          ],
+        },
+      ],
+    },
+  ];
+  return { scanPreviousCased, scanNextCased };
+}
+
+/**
+ * (#3900) The ASCII fast path of a string-level case-conversion helper.
+ *
+ * A single fused scan+map loop over the flattened i16 backing array: while
+ * every code unit is < 0x80 it writes the ASCII-folded unit straight into a
+ * same-length output array and returns; the first unit >= 0x80 branches out of
+ * the emitted block so the caller's full Unicode path runs instead (discarding
+ * the partial output array — one wasted allocation on the rare path).
+ *
+ * Correctness: ASCII has no length-changing (`ß` → `SS`) and no
+ * context-sensitive (Final_Sigma) case mappings, and the generated tables hold
+ * no ASCII entry other than the `A-Z`/`a-z` +-32 runs (the lowest special-table
+ * source code point is U+00DF), so for an all-ASCII input this loop is exactly
+ * equivalent to the two-pass Unicode path — at a few instructions per character
+ * instead of a per-call table build plus a binary search plus a linear scan of
+ * the special table.
+ */
+function buildAsciiFastPath(o: {
+  strTypeIdx: number;
+  strDataTypeIdx: number;
+  /** true for `toLowerCase` (fold `A-Z` +32), false for `toUpperCase` (fold `a-z` -32). */
+  toLower: boolean;
+  /** Emits the source code unit at an instruction-computed index. */
+  srcChar: (idxLocal: number) => Instr[];
+  LEN: number;
+  I: number;
+  CH: number;
+  OUTARR: number;
+}): Instr[] {
+  const get = (index: number): Instr => ({ op: "local.get", index });
+  const set = (index: number): Instr => ({ op: "local.set", index });
+  const c = (value: number): Instr => ({ op: "i32.const", value });
+  const lo = o.toLower ? 65 : 97;
+  const hi = o.toLower ? 90 : 122;
+  const delta = o.toLower ? 32 : -32;
+  return [
+    {
+      // Branch depth 2 from inside the loop — the non-ASCII bail-out target.
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        get(o.LEN),
+        { op: "array.new_default", typeIdx: o.strDataTypeIdx },
+        set(o.OUTARR),
+        c(0),
+        set(o.I),
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                get(o.I),
+                get(o.LEN),
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                ...o.srcChar(o.I),
+                { op: "local.tee", index: o.CH },
+                c(0x80),
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 2 }, // non-ASCII → fall through to the Unicode path
+                get(o.OUTARR),
+                get(o.I),
+                get(o.CH),
+                c(lo),
+                { op: "i32.ge_u" },
+                get(o.CH),
+                c(hi),
+                { op: "i32.le_u" },
+                { op: "i32.and" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: i32 },
+                  then: [get(o.CH), c(delta), { op: "i32.add" }],
+                  else: [get(o.CH)],
+                },
+                { op: "array.set", typeIdx: o.strDataTypeIdx },
+                get(o.I),
+                c(1),
+                { op: "i32.add" },
+                set(o.I),
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // Every code unit was ASCII — return the folded copy directly.
+        get(o.LEN),
+        c(0),
+        get(o.OUTARR),
+        { op: "struct.new", typeIdx: o.strTypeIdx },
+        { op: "return" },
+      ],
+    },
+  ];
 }
 
 /**
@@ -73,6 +389,8 @@ export function emitNativeCaseConversion(
     ctx.caseTableArrTypeIdx = i32ArrTypeIdx;
   }
   const i32ArrRef: ValType = { kind: "ref", typeIdx: i32ArrTypeIdx };
+  // (#3900) One immutable global per distinct Unicode table, created on demand.
+  const tableGlobals = new Map<readonly number[], number>();
 
   // ── __case_simple(ch: i32, runs: ref $i32arr) -> i32 ──────────────────────
   // Binary-search the [start,count,stride,delta] runs (sorted by start) for the
@@ -379,6 +697,16 @@ export function emitNativeCaseConversion(
     const simpleIdx = ctx.funcMap.get(simpleName)!;
     const inRangesIdx = ctx.funcMap.get("__case_in_ranges")!;
     const finalSigma = name === "__str_toLowerCase_uni";
+    // (#3900) Unicode tables as module globals, materialised once per module.
+    const tag = finalSigma ? "lower" : "upper";
+    const runsGlobal = caseTableGlobal(ctx, tableGlobals, `__case_${tag}_runs`, runsTable, i32ArrTypeIdx);
+    const specGlobal = caseTableGlobal(ctx, tableGlobals, `__case_${tag}_special`, specialTable, i32ArrTypeIdx);
+    const casedGlobal = finalSigma
+      ? caseTableGlobal(ctx, tableGlobals, "__case_cased", CASED_RANGES, i32ArrTypeIdx)
+      : undefined;
+    const ignorableGlobal = finalSigma
+      ? caseTableGlobal(ctx, tableGlobals, "__case_ignorable", CASE_IGNORABLE_RANGES, i32ArrTypeIdx)
+      : undefined;
     // params: s(0)
     // locals: len(1) srcData(2) sOff(3) runs(4) spec(5) specN(6), source/
     // destination indices and scratch through scan(15), then Final_Sigma
@@ -429,148 +757,19 @@ export function emitNativeCaseConversion(
       get(rangesLocal),
       { op: "call", funcIdx: inRangesIdx },
     ];
-    const between = (local: number, lo: number, hi: number): Instr[] => [
-      get(local),
-      c(lo),
-      { op: "i32.ge_u" },
-      get(local),
-      c(hi),
-      { op: "i32.le_u" },
-      { op: "i32.and" },
-    ];
-    const combineSurrogates = (highLocal: number, lowLocal: number): Instr[] => [
-      get(highLocal),
-      c(0xd800),
-      { op: "i32.sub" },
-      c(10),
-      { op: "i32.shl" },
-      get(lowLocal),
-      c(0xdc00),
-      { op: "i32.sub" },
-      { op: "i32.add" },
-      c(0x10000),
-      { op: "i32.add" },
-      set(CP),
-    ];
-    const scanPreviousCased = (): Instr[] => [
-      c(0),
-      set(PREVCASED),
-      get(I),
-      set(CTX),
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              get(CTX),
-              { op: "i32.eqz" },
-              { op: "br_if", depth: 1 },
-              get(CTX),
-              c(1),
-              { op: "i32.sub" },
-              set(CTX),
-              ...srcCharAt([get(CTX)]),
-              set(CP),
-              // Decode a preceding high+low surrogate pair while moving
-              // backward. CP initially holds the low surrogate.
-              ...between(CP, 0xdc00, 0xdfff),
-              get(CTX),
-              { op: "i32.eqz" },
-              { op: "i32.eqz" },
-              { op: "i32.and" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  ...srcCharAt([get(CTX), c(1), { op: "i32.sub" }]),
-                  set(PAIR),
-                  ...between(PAIR, 0xd800, 0xdbff),
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [...combineSurrogates(PAIR, CP), get(CTX), c(1), { op: "i32.sub" }, set(CTX)],
-                  },
-                ],
-              },
-              // Case_Ignorable wins when a code point has both properties
-              // (for example U+0345 COMBINING GREEK YPOGEGRAMMENI).
-              ...inRanges(CP, IGNORABLE),
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [{ op: "br", depth: 1 }],
-              },
-              ...inRanges(CP, CASED),
-              set(PREVCASED),
-              { op: "br", depth: 1 },
-            ],
-          },
-        ],
-      },
-    ];
-    const scanNextCased = (): Instr[] => [
-      c(0),
-      set(NEXTCASED),
-      get(I),
-      c(1),
-      { op: "i32.add" },
-      set(CTX),
-      {
-        op: "block",
-        blockType: { kind: "empty" },
-        body: [
-          {
-            op: "loop",
-            blockType: { kind: "empty" },
-            body: [
-              get(CTX),
-              get(LEN),
-              { op: "i32.ge_u" },
-              { op: "br_if", depth: 1 },
-              ...srcCharAt([get(CTX)]),
-              set(CP),
-              get(CTX),
-              c(1),
-              { op: "i32.add" },
-              set(CTX),
-              // CP is a high surrogate and CTX now points at its possible low
-              // surrogate. Decode it before consulting Unicode properties.
-              ...between(CP, 0xd800, 0xdbff),
-              get(CTX),
-              get(LEN),
-              { op: "i32.lt_u" },
-              { op: "i32.and" },
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [
-                  ...srcCharAt([get(CTX)]),
-                  set(PAIR),
-                  ...between(PAIR, 0xdc00, 0xdfff),
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [...combineSurrogates(CP, PAIR), get(CTX), c(1), { op: "i32.add" }, set(CTX)],
-                  },
-                ],
-              },
-              ...inRanges(CP, IGNORABLE),
-              {
-                op: "if",
-                blockType: { kind: "empty" },
-                then: [{ op: "br", depth: 1 }],
-              },
-              ...inRanges(CP, CASED),
-              set(NEXTCASED),
-              { op: "br", depth: 1 },
-            ],
-          },
-        ],
-      },
-    ];
+    const { scanPreviousCased, scanNextCased } = buildFinalSigmaScans({
+      srcCharAt,
+      inRangesIdx,
+      LEN,
+      I,
+      CTX,
+      CP,
+      PAIR,
+      PREVCASED,
+      NEXTCASED,
+      CASED,
+      IGNORABLE,
+    });
     const simpleMapped = (): Instr[] => [get(CH), get(RUNS), { op: "call", funcIdx: simpleIdx }];
     const finalSigmaMapped = (): Instr[] => [
       ...scanPreviousCased(),
@@ -643,6 +842,29 @@ export function emitNativeCaseConversion(
         ? [get(S), { op: "ref.cast", typeIdx: strTypeIdx }, set(FS)]
         : [get(S), { op: "call", funcIdx: flattenIdx }, { op: "ref.cast", typeIdx: strTypeIdx }, set(FS)];
 
+    // (#3900) ASCII fast path. One fused scan+map pass over the flattened
+    // backing array: while every code unit is < 0x80 we write the ASCII-folded
+    // unit straight into a same-length output array; the first unit >= 0x80
+    // branches out to the full Unicode path below (discarding the partial
+    // output array — a single wasted allocation on the rare path).
+    //
+    // Correctness: ASCII has no length-changing (`ß`→`SS`) and no
+    // context-sensitive (Final_Sigma) mappings, and the generated tables
+    // contain no ASCII entry other than the `A-Z`/`a-z` +-32 runs, so for an
+    // all-ASCII input this loop is exactly equivalent to the two-pass Unicode
+    // path — at a few instructions per character instead of a per-call table
+    // build plus a binary search plus a linear special-table scan.
+    const asciiFastPath = buildAsciiFastPath({
+      strTypeIdx,
+      strDataTypeIdx,
+      toLower: finalSigma, // only __str_toLowerCase_uni carries the Final_Sigma rule
+      srcChar,
+      LEN,
+      I,
+      CH,
+      OUTARR,
+    });
+
     const body: Instr[] = [
       ...flattenPrelude,
       // len = fs.len ; sOff = fs.off ; srcData = fs.data
@@ -655,22 +877,25 @@ export function emitNativeCaseConversion(
       get(FS),
       { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
       set(DATA),
-      // runs = <table> ; spec = <table> ; specN = spec.len/5
-      ...buildConstI32Array(runsTable, i32ArrTypeIdx),
+      ...asciiFastPath,
+      // ── full Unicode path ──
+      // (#3900) The tables are module globals built once at instantiation, not
+      // ~1.9k `array.new_fixed` operands re-materialised on every call.
+      { op: "global.get", index: runsGlobal },
       set(RUNS),
-      ...buildConstI32Array(specialTable, i32ArrTypeIdx),
+      { op: "global.get", index: specGlobal },
       tee(SPEC),
       { op: "array.len" },
       c(5),
       { op: "i32.div_u" },
       set(SPECN),
       ...(finalSigma
-        ? [
-            ...buildConstI32Array(CASED_RANGES, i32ArrTypeIdx),
+        ? ([
+            { op: "global.get", index: casedGlobal! },
             set(CASED),
-            ...buildConstI32Array(CASE_IGNORABLE_RANGES, i32ArrTypeIdx),
+            { op: "global.get", index: ignorableGlobal! },
             set(IGNORABLE),
-          ]
+          ] as Instr[])
         : []),
       // ── pass 1: outLen ──
       c(0),

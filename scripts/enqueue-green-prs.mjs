@@ -113,6 +113,16 @@ export const HOLD_LABELS = new Set([
 // the state that allowed red PRs to enter the merge queue.
 const ENQUEUEABLE = new Set(["CLEAN", "HAS_HOOKS"]);
 const PASSING_CHECK_STATES = new Set(["pass", "skipping"]);
+// STALL SURFACING (#3584). How long a PR must sit BLOCKED with nothing failing
+// and nothing pending before we stop calling it "in flight" and start calling it
+// a suspected permanent stall. Deliberately generous: a false positive here
+// trains people to ignore the signal, which is worse than a late true positive.
+const STALL_MINUTES = Number(process.env.STALL_MINUTES ?? "15");
+const STALL_MS = STALL_MINUTES * 60 * 1000;
+// Applied to a PR classified `suspected-permanent`. NOT a hold label — it must
+// never block anything; it exists so the stall is visible to a human/shepherd
+// sweep and to `gh pr list --label`, instead of living only in a workflow log.
+const STALL_LABEL = "needs-manual-enqueue";
 // AUTHOR-TRUST GATE (#2549). Only PRs whose authorAssociation is one of these
 // are auto-enqueueable. The rationale: auto-enqueue is now the primary enqueuer
 // of green PRs, and a maintainer manually approving a STRANGER's CI run to
@@ -249,6 +259,58 @@ export function freshEnqueueGuard(initial, fresh) {
     return { ok: false, reason: fresh.mergeStateStatus || "merge-state-missing" };
   }
   return { ok: true, reason: "exact-fresh-candidate" };
+}
+
+// TRANSIENT vs PERMANENT `BLOCKED` (#3584). `mergeStateStatus` is computed
+// RELATIVE TO THE QUERYING TOKEN: `BLOCKED` does not mean "this PR is not
+// ready", it means "*you* cannot merge this PR right now". The sweep skips every
+// non-ENQUEUEABLE state with one identical `skip (BLOCKED)` line, which conflates
+// two completely different situations:
+//
+//   TRANSIENT  — a required check has not reported yet. Resolves on its own;
+//                the next workflow_run sweep enqueues the PR. The overwhelmingly
+//                common case, and correctly silent.
+//   PERMANENT  — the PR is green and will never leave BLOCKED *for this token*.
+//                Nothing in the pipeline recovers it: the ~30-min cron re-derives
+//                the same state with the same token, no `hold` label is applied,
+//                no check is red. The PR just sits, indefinitely, looking fine.
+//
+// MEASURED (2026-07-31), stating separately what is observed and what is not:
+//   OBSERVED — the failing cell is fork-head AND touching `.github/workflows/**`.
+//     4/4 such PRs needed a human PAT enqueue (#3567, #3590, #3602, #3609);
+//     #3567 was still BLOCKED to the app token after 6h45m green. Every other
+//     cell auto-enqueues: fork-head without workflow files (#3887/#3889/#3890,
+//     enqueued by js2-merge-queue-bot) and upstream-head with workflow files
+//     (#3690/#3843/#3833). The `js2-merge-queue-bot` app installation holds
+//     actions/checks/contents/issues/metadata/pull_requests and NOT `workflows`.
+//   NOT MEASURED — *why* that cell fails. "The token lacks `workflows` and a
+//     fork head is treated differently from a same-repo head" is a plausible
+//     reconstruction fitted to the counts above; it has not been tested. So this
+//     classifier deliberately does NOT test for fork-head or for workflow paths,
+//     and reports a SUSPICION rather than a diagnosis. It keys only on the
+//     observable that is actually load-bearing: BLOCKED, nothing red, nothing
+//     pending, sustained.
+//
+// Pure + exported so the transient/permanent split is unit-testable with no
+// `gh` call. FAIL-QUIET: anything unknown (checks unreadable, no green
+// timestamp) classifies as `transient`, i.e. today's silent behaviour — this
+// helper can only ever add a log line, never change an enqueue decision.
+export function classifyBlockedSkip(
+  { mergeStateStatus, failed, pending, checksError, greenAgeMs } = {},
+  stallMs = STALL_MS,
+) {
+  if (mergeStateStatus !== "BLOCKED") return { suspected: false, reason: `not-blocked:${mergeStateStatus}` };
+  if (checksError) return { suspected: false, reason: "checks-unreadable" };
+  if (!Array.isArray(failed) || !Array.isArray(pending)) return { suspected: false, reason: "checks-unreadable" };
+  if (failed.length > 0) return { suspected: false, reason: `failing-checks:${failed.length}` };
+  // A PR whose checks are merely slow must NEVER trip this. Two independent
+  // guards: no visible check may be pending, AND the newest check completion
+  // must be at least `stallMs` old (a check that starts after this sweep resets
+  // that age on the next one).
+  if (pending.length > 0) return { suspected: false, reason: `pending-checks:${pending.length}` };
+  if (!Number.isFinite(greenAgeMs)) return { suspected: false, reason: "no-green-timestamp" };
+  if (greenAgeMs < stallMs) return { suspected: false, reason: `green-only-${Math.round(greenAgeMs / 60000)}m` };
+  return { suspected: true, reason: `green-${Math.round(greenAgeMs / 60000)}m-still-blocked` };
 }
 
 export function enqueueMutationVariables(pullRequestId, expectedHeadOid) {
@@ -410,6 +472,110 @@ function rerunClaCheck(prNumber, branch) {
     return { ok: false, why: `rerun ${runId} failed: ${(rerun.stderr || "").split("\n")[0].slice(0, 80)}` };
   }
   return { ok: true, why: `reran cla-check run ${runId}` };
+}
+
+// STALL LABEL PLUMBING (#3584). `needs-manual-enqueue` is informational: it is
+// deliberately absent from HOLD_LABELS so it can never block an enqueue. Both
+// helpers are FAIL-SAFE — a labelling hiccup returns a reason string and the
+// sweep carries on; the warning log line is emitted either way, so the signal
+// is never lost just because the label could not be written.
+function prLabels(prNumber) {
+  const res = ghMaybe(["pr", "view", String(prNumber), "--repo", REPO, "--json", "labels", "-q", ".labels[].name"]);
+  if (!res.ok) return null;
+  return res.stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+function addStallLabel(prNumber) {
+  const existing = prLabels(prNumber);
+  if (existing === null) return { ok: false, why: "labels-unreadable" };
+  if (existing.includes(STALL_LABEL)) return { ok: true, why: "already-labelled" };
+  // Create-if-missing first: adding an unknown label name is a 422, and the repo
+  // may not have this label yet. `already_exists` is the expected no-op.
+  ghMaybe([
+    "api",
+    "--method",
+    "POST",
+    `repos/${REPO}/labels`,
+    "-f",
+    `name=${STALL_LABEL}`,
+    "-f",
+    "color=d93f0b",
+    "-f",
+    "description=Green but never auto-enqueued; needs a one-shot manual enqueue (#3584)",
+  ]);
+  const add = ghMaybe([
+    "api",
+    "--method",
+    "POST",
+    `repos/${REPO}/issues/${prNumber}/labels`,
+    "-f",
+    `labels[]=${STALL_LABEL}`,
+  ]);
+  if (!add.ok) return { ok: false, why: (add.stderr || "add-label failed").split("\n")[0].slice(0, 100) };
+  return { ok: true, why: "labelled" };
+}
+// Called after a successful enqueue so the label cannot rot on a PR that later
+// went through normally. Silent no-op when the label is absent.
+function clearStallLabel(prNumber) {
+  const existing = prLabels(prNumber);
+  if (existing === null || !existing.includes(STALL_LABEL)) return;
+  ghMaybe(["api", "--method", "DELETE", `repos/${REPO}/issues/${prNumber}/labels/${STALL_LABEL}`]);
+}
+
+// STALL DIAGNOSIS (#3584) — the impure wrapper around classifyBlockedSkip().
+// Returns { suspected, reason, annotated } where `annotated` is the string that
+// goes in the existing `skip (...)` line, so a reader can tell the two kinds of
+// BLOCKED apart without cross-referencing anything.
+//
+// COST CONTROL: a non-BLOCKED state returns immediately with no API call, so
+// BEHIND/DIRTY/UNKNOWN PRs stay as cheap as they were. Only BLOCKED PRs pay one
+// `gh pr checks` + one GraphQL rollup read — the same two reads a *candidate*
+// PR already pays further down the loop.
+//
+// FAIL-SAFE: every failure path yields `suspected: false`, i.e. exactly today's
+// silent behaviour. This can never strand a PR and never enqueues anything.
+// Exported (despite being impure) so the wiring — not just the pure classifier —
+// can be smoke-tested against a real PR: `blockedDiagnosis({...realPr,
+// mergeStateStatus:"BLOCKED"}, new Map())`. Importing this module runs no `gh`
+// call (see the main-module guard at the bottom).
+export function blockedDiagnosis(pr, authorAssoc) {
+  const state = pr.mergeStateStatus;
+  if (state !== "BLOCKED") return { suspected: false, reason: "", annotated: state };
+  // Do not label a stranger's PR: an external PR is *supposed* to require a
+  // deliberate human enqueue (#2549), so "needs manual enqueue" is not news.
+  const trust = isTrustedAuthor({
+    assoc: authorAssoc.get(pr.number) || "UNKNOWN",
+    authorLogin: pr.author?.login,
+    headRepoOwner: pr.headRepositoryOwner?.login,
+  });
+  if (!trust.trusted) return { suspected: false, reason: "", annotated: state };
+
+  const checks = visibleCheckState(pr.number);
+  let greenAgeMs = Number.NaN;
+  try {
+    const green = greenSince(pr.number);
+    if (green) greenAgeMs = green.ageMs;
+  } catch {
+    greenAgeMs = Number.NaN; // fail-safe -> classified transient
+  }
+  const verdict = classifyBlockedSkip({
+    mergeStateStatus: state,
+    failed: checks.failed,
+    pending: checks.pending,
+    checksError: checks.error,
+    greenAgeMs,
+  });
+  return {
+    suspected: verdict.suspected,
+    reason: verdict.reason,
+    // Deliberately hedged wording. We have measured WHICH PRs stall, not WHY;
+    // stating a cause here would launder a reconstruction into a diagnosis.
+    annotated: verdict.suspected
+      ? `BLOCKED — SUSPECTED PERMANENT (${verdict.reason}); this will not self-resolve, a one-shot manual enqueue is needed`
+      : `BLOCKED — transient (${verdict.reason})`,
+  };
 }
 
 // PARK-RACE GUARD (#2975). auto-enqueue (this script, primary enqueuer since
@@ -576,6 +742,7 @@ function runSweep() {
   const enqueued = [];
   const skipped = [];
   const updated = [];
+  const stalled = []; // #3584 — BLOCKED, nothing red, nothing pending, sustained
 
   // Auto-update BEHIND PRs: merge base branch in via GitHub API so they can
   // re-run CI and eventually become CLEAN. DIRTY PRs (merge conflicts) are
@@ -635,7 +802,18 @@ function runSweep() {
       continue;
     }
     if (!ENQUEUEABLE.has(pr.mergeStateStatus)) {
-      skipped.push([pr.number, pr.mergeStateStatus]); // BLOCKED/BEHIND/DIRTY/DRAFT/UNKNOWN
+      // STALL SURFACING (#3584). Before emitting the same `skip (BLOCKED)` line
+      // this script has always emitted, work out whether this BLOCKED is the
+      // ordinary in-flight kind or the kind that never resolves. Scoped to
+      // BLOCKED *only*: BEHIND/DIRTY/UNKNOWN have their own recovery paths and
+      // must not pay these two extra API reads. Everything here is best-effort —
+      // it changes no enqueue decision, it only decides how loudly we log.
+      const diag = blockedDiagnosis(pr, authorAssoc);
+      if (diag.suspected) {
+        const label = DRY ? { ok: true, why: "would-label" } : addStallLabel(pr.number);
+        stalled.push([pr.number, `${diag.reason}; ${label.why}`]);
+      }
+      skipped.push([pr.number, diag.annotated]); // BLOCKED/BEHIND/DIRTY/DRAFT/UNKNOWN
       continue;
     }
     // PARK-RACE GUARD (#2975). A PR that just FAILED merge_group re-validation is
@@ -763,6 +941,10 @@ function runSweep() {
         enqueueMutationVariables(pr.id, fresh.headRefOid),
       );
       enqueued.push([pr.number, `enqueued (green ${ageMin}m)`]);
+      // #3584: a PR flagged on an earlier sweep and enqueued now was a false
+      // positive (or was rescued); drop the label so it cannot rot and dilute
+      // the signal. No-op when the label is absent.
+      clearStallLabel(pr.number);
     } catch (e) {
       // Most common benign error: required checks still in progress (PR just
       // turned mergeable). Leave it — the next sweep / CI-completion run gets it.
@@ -789,6 +971,17 @@ function runSweep() {
   for (const [n, why] of updated) console.log(`  ~ #${n} ${why}`);
   for (const [n, why] of enqueued) console.log(`  + #${n} ${why}`);
   for (const [n, why] of skipped) console.log(`  - #${n} skip (${why})`);
+  // #3584 — the whole point of the classifier: a stall that used to be one more
+  // indistinguishable `skip (BLOCKED)` line now gets its own block at the end of
+  // the log, named, with the PR numbers a human has to act on. This makes the
+  // stall VISIBLE; it does not fix it. Those PRs still need a one-shot manual
+  // enqueue.
+  if (stalled.length > 0) {
+    console.log(
+      `::warning::enqueue-green-prs: ${stalled.length} PR(s) BLOCKED with nothing failing and nothing pending for >= ${STALL_MINUTES}m. This state does not self-resolve — the cron re-derives it identically. Each needs ONE deliberate manual enqueue (never a loop). See #3584.`,
+    );
+    for (const [n, why] of stalled) console.log(`  ! #${n} suspected-permanent-block (${why})`);
+  }
   console.log(`Done: ${updated.length} branch-updated, ${enqueued.length} ${DRY ? "would be " : ""}enqueued.`);
   process.exit(0);
 }
@@ -834,6 +1027,69 @@ function selfCheck() {
   });
   assert.throws(() => enqueueMutationVariables("PR_node_id", "not-a-sha"), /40-character hex SHA/);
   assert.equal(HOLD_LABELS.has("stack-retarget-pending"), true);
+
+  // #3584 — transient vs permanent BLOCKED. The ONLY thing this classifier
+  // claims is that these two are distinguishable; it makes no claim about why
+  // the permanent one happens, and it changes no enqueue decision.
+  const HOUR = 60 * 60 * 1000;
+  const green6h45 = {
+    mergeStateStatus: "BLOCKED",
+    failed: [],
+    pending: [],
+    checksError: null,
+    greenAgeMs: 6.75 * HOUR,
+  };
+  // THE case this exists for: #3567 — every check green, still BLOCKED to the
+  // enqueuer's token after 6h45m. Must be flagged.
+  assert.equal(
+    classifyBlockedSkip(green6h45).suspected,
+    true,
+    "a PR green for 6h45m and still BLOCKED must be flagged",
+  );
+  // ...and the false positive that would destroy the signal's value: a PR whose
+  // checks are simply slow. All three shapes of "still working" stay silent.
+  assert.equal(
+    classifyBlockedSkip({ ...green6h45, pending: ["quality: pending"] }).suspected,
+    false,
+    "a pending check means in-flight, never a permanent block — this false positive would train people to ignore the label",
+  );
+  assert.equal(
+    classifyBlockedSkip({ ...green6h45, greenAgeMs: 3 * 60 * 1000 }).suspected,
+    false,
+    "green for only 3m is ordinary post-CI settling, not a stall",
+  );
+  assert.equal(
+    classifyBlockedSkip({ ...green6h45, greenAgeMs: Number.NaN }).suspected,
+    false,
+    "no green timestamp -> fail quiet",
+  );
+  assert.equal(
+    classifyBlockedSkip({ ...green6h45, failed: ["quality: fail"] }).suspected,
+    false,
+    "a red check is a real blocker the author must fix, not a token stall",
+  );
+  assert.equal(
+    classifyBlockedSkip({ ...green6h45, checksError: "no parseable checks" }).suspected,
+    false,
+    "unreadable checks -> fail quiet, never guess",
+  );
+  // Scoped to BLOCKED: states with their own recovery path must not be
+  // reclassified or pay the diagnostic API reads.
+  for (const other of ["BEHIND", "DIRTY", "UNSTABLE", "UNKNOWN", "CLEAN"]) {
+    assert.equal(
+      classifyBlockedSkip({ ...green6h45, mergeStateStatus: other }).suspected,
+      false,
+      `${other} has its own recovery path and must not be classified as a permanent block`,
+    );
+  }
+  // The threshold is the load-bearing boundary, so pin both sides of it.
+  assert.equal(classifyBlockedSkip({ ...green6h45, greenAgeMs: STALL_MS - 1 }).suspected, false);
+  assert.equal(classifyBlockedSkip({ ...green6h45, greenAgeMs: STALL_MS }).suspected, true);
+  // The informational label must never become a hold — that would convert a
+  // visibility aid into the very stall it reports (a held PR is skipped by this
+  // sweep forever).
+  assert.equal(HOLD_LABELS.has(STALL_LABEL), false, "the stall label must never block an enqueue");
+
   console.log("enqueue-green-prs: all self-checks passed");
 }
 
