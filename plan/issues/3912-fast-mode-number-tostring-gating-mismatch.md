@@ -42,13 +42,30 @@ it cannot be confounded by fast-mode string marshalling):
 | `"v" + n` | ok | ok |
 | `[10,9,1].sort()` | **illegal cast** (fixed by #3902) | ok |
 
-## The control is what makes this conclusive
+## The control matrix — this rules out both single-factor explanations
 
-The **identical nine sources** under `target: "standalone"` give **9 of 9 ok**.
-Same `nativeStrings` backend, same string representation — the only variable
-changed is whether `number_toString` is the **native** helper or the **host
-import**. Six failures become zero. This is a confirmed mismatch, not an
-inference from reading the code.
+Three configurations were measured across three independent reproductions. The
+fourth cell is not a reachable config, so this is as complete as the matrix
+gets:
+
+| `nativeStrings` | `number_toString` | mode | result |
+| --- | --- | --- | --- |
+| OFF | host import | `host-call` | **6/6 ok** |
+| ON | **native** | `standalone` | **6/6 ok** |
+| ON | host import | **`fast`** | **6/6 FAIL** |
+| OFF | native | — | not reachable |
+
+Read it carefully, because it kills both obvious diagnoses:
+
+- The host `number_toString` is **not broken** — it works in host mode.
+- `nativeStrings` is **not broken** — it works in standalone.
+- The defect is specifically the **mixture**, which only `fast: true` produces.
+
+**This settles the fix direction rather than leaving it a judgement call**:
+make `number_toString` native whenever `ctx.nativeStrings` is on. The
+standalone column is already a working end-to-end proof that this
+configuration handles all six operations. That is the change deferred out of
+#3902 as too broad to attempt blind — it now has a reference config behind it.
 
 ## Root cause
 
