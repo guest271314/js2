@@ -1,9 +1,8 @@
 ---
 id: 2747
 title: "for-in: constructor-function prototype-chain enumeration (S12.6.4_A6*) + Object.defineProperty array+accessor ordering"
-status: in-progress
-assignee: ttraenkler/issue-2747-reflect-setprototypeof-mirror
-sprint: Backlog
+status: ready
+sprint: current
 goal: es5
 feasibility: hard
 depends_on: []

@@ -1,4 +1,5 @@
 ---
+horizon: m
 id: 3655
 title: "compileProject allowJs: support static CommonJS require of JSON modules"
 status: done

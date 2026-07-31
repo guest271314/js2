@@ -1,8 +1,7 @@
 ---
 id: 2668
 title: "ES5: Object.defineProperty/defineProperties descriptor fidelity residual (~788 fails — largest ES5 cluster)"
-status: in-progress
-assignee: ttraenkler/sd-2668c
+status: ready
 created: 2026-06-25
 updated: 2026-06-26
 priority: high
@@ -14,7 +13,7 @@ es_edition: 5
 language_feature: property-descriptors
 goal: es5
 related: [1460, 1462, 929]
-sprint: 67
+sprint: current
 ---
 # #2668 — ES5 Object.defineProperty/defineProperties descriptor fidelity residual
 
