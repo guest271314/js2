@@ -10,6 +10,13 @@ assignee: ttraenkler/dev-ci-3584
 priority: high
 horizon: s
 feasibility: easy
+# Infra/operations, not behavioural — the deliverable is a workflow retention
+# setting plus a measurement write-up, and there is no compiler behaviour to
+# pin with a repro. `task_type` was simply absent before, which made
+# check-issue-spec-coverage (#2093) treat this as a gated behavioural issue and
+# demand a probe that cannot meaningfully exist. `ci` is the accurate label
+# (matches `area: ci` / `goal: ci-hardening`, and #3584/#3906 alongside it).
+task_type: ci
 area: ci
 goal: ci-hardening
 related: [3634, 2547, 2519, 3915]
