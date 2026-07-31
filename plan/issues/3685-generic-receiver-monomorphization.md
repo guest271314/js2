@@ -592,3 +592,25 @@ back to a dispatch that answers `undefined`. Fix and pins in
 `tests/issue-3719-new-assigned-to-binding.test.ts`; write-up in
 `plan/issues/3719-new-assigned-to-binding-loses-fnctor-approval.md`.
 All five original matrix cases plus the untyped-only control now return 1000.
+
+## Cross-box caveat on this issue's ranking (#3780 round 4, 2026-07-31)
+
+Every share quoted in this issue comes from a profile of the standalone acorn
+self-parse. A fourth profile, taken on a **4-core Linux container / Node
+22.22.2** (rounds 1-3 of #3780 and both cross-validated profiles above were
+Node 24 / arm64 macOS), disagrees on one bucket by an order of magnitude:
+
+| bucket | Node 24 / macOS profiles | Node 22 / Linux container |
+| --- | ---: | ---: |
+| GC | 1.5% and 4.3% | **24-37%** |
+
+The Linux figure is corroborated by an independent, profiler-free measurement
+(summing inter-GC heap growth from `--trace-gc`: 22.5 ms of a ~120 ms parse
+after #3780 round 4's lowerings, 30.1 ms before). I do not know whether the
+cause is the V8 version, heap sizing, or the container.
+
+**Why it matters here:** the non-GC buckets are shares of a denominator that
+moves with it. If GC is really ~2% on the reference hardware, this issue's
+share is correspondingly *larger* there than the Linux profile suggests, and
+allocation-side work (#3921/#3927) is correspondingly smaller. Re-measure on
+the target hardware before using any of these shares to sequence work.
