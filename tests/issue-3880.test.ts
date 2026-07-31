@@ -13,6 +13,7 @@ import { execFile, execFileSync, spawnSync } from "child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
+import { isHeldRecord } from "../scripts/lib/claim-record.mjs";
 
 const SCRIPT = resolve(__dirname, "..", "scripts", "claim-issue.mjs");
 const GIT_ID = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
@@ -417,6 +418,23 @@ describe("#3880 claim-issue.mjs — preserved behaviour", () => {
     expect(r.code).toBe(0);
     expect(r.stderr).toMatch(/\(dry-run\) would claim #3000/);
     expect(listRecords(fx)).toEqual([]);
+  });
+
+  it("a terminal record reads as free for BOTH readers, including the dispatch gate", () => {
+    // scripts/pre-dispatch-gate.mjs had its own, worse copy of this predicate:
+    // it tested `assignee` alone and ignored status, so every `done` AND every
+    // `released` record read as a live blocker (403 of 1,080 on the live ref).
+    // Both readers now import the one definition.
+    expect(isHeldRecord({ assignee: "a", status: "in-progress" })).toBe(true);
+    expect(isHeldRecord({ assignee: "a", status: "done" })).toBe(false);
+    expect(isHeldRecord({ assignee: "a", status: "released" })).toBe(false);
+    expect(isHeldRecord({ assignee: "", status: "reserved" })).toBe(false);
+    expect(isHeldRecord(null)).toBe(false);
+    // An UNRECOGNISED status must read as HELD. The two errors are not
+    // symmetric: over-holding blocks work, under-holding puts two agents on one
+    // issue — the duplicate dispatch this lock exists to prevent.
+    expect(isHeldRecord({ assignee: "a", status: "some-future-state" })).toBe(true);
+    expect(isHeldRecord({ assignee: "a" })).toBe(true);
   });
 
   it("--complete actually frees the lock for readers", () => {

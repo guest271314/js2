@@ -141,6 +141,7 @@ import { mkdtempSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs"
 import { tmpdir, hostname } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { openPrIssueIds, ISSUE_ID_RE } from "./lib/open-pr-issue-files.mjs";
+import { isHeldRecord } from "./lib/claim-record.mjs";
 
 const ASSIGN_REF = "issue-assignments";
 // The issue-assignments orphan ref lives on the FORK (origin) — keep REMOTE =
@@ -168,6 +169,20 @@ const MAIN_FETCH_TIMEOUT_MS = Number(process.env.CLAIM_MAIN_FETCH_TIMEOUT_MS) ||
 // it does not make the loop FAIR, so the budget is widened too. Worst case is
 // now ~12 × (1 s + ≤4 s jittered backoff) ≈ 30-60 s, against 390-1260 s before.
 const MAX_RETRIES = Number(process.env.CLAIM_MAX_RETRIES) || 12;
+
+// Overall wall-clock deadline for the contention loop (#3880).
+//
+// An attempt-count bound alone does NOT bound wall time, and this issue's own
+// acceptance criterion is "fail fast with a non-zero exit". Each attempt can
+// internally spend NET_RETRIES × NET_TIMEOUT_MS on ls-remote, again on fetch,
+// again on the push and again on verification — so on a degraded network 12
+// attempts is minutes-per-attempt, not seconds. The deadline is what actually
+// makes the promise true; MAX_RETRIES only caps how many times we lose a race.
+const DEADLINE_MS = Number(process.env.CLAIM_DEADLINE_MS) || 120000;
+const STARTED_AT = Date.now();
+function deadlineExceeded() {
+  return Date.now() - STARTED_AT > DEADLINE_MS;
+}
 
 // TEST SEAM (#3880), test-only, no production caller. The two outcomes this
 // issue is about — a push that LANDS while git reports failure, and a write
@@ -589,26 +604,11 @@ function readEntry(baseSha, id) {
   }
 }
 
-// (#3880) A lock is held ONLY while it is `in-progress`.
-//
-// This used to read `status !== "released"`, which meant `--complete` — the
-// step CLAUDE.md's dev protocol prescribes after a merge to "clear the
-// cross-dev lock" — did not clear it for ANY reader. `--complete` writes
-// `status: "done"`, and `"done" !== "released"` is true, so a completed issue
-// stayed CLAIMED forever. Measured on the live ref: of 1,080 entries, 294 were
-// `done`, and `--list` was reporting 359 in-progress + 294 done = 654 "active
-// claims" — 45 % of them phantoms. That is the other half of this issue's
-// "no claim file is unreliable in BOTH directions": #3420's record looked
-// permanently claimed after its work merged, and issues turned up with "a claim
-// nobody held".
-//
-// A whitelist rather than a blacklist, so a future status cannot silently
-// resurrect the same bug. Bare `reserved` placeholders carry no assignee and
-// were already excluded; id RESERVATION is unaffected because
-// idsFromAssignRef() reads every entry's `id` regardless of status.
-function isHeld(entry) {
-  return !!(entry && entry.assignee && entry.status === "in-progress");
-}
+// (#3880) Heldness lives in scripts/lib/claim-record.mjs — ONE definition,
+// shared with scripts/pre-dispatch-gate.mjs, which had its own (also wrong) copy.
+// See that file for the measurement and for why it is a terminal-state blacklist
+// rather than an `in-progress` whitelist.
+const isHeld = isHeldRecord;
 
 // Find the issue file on main and read its `status:` frontmatter (best effort).
 // NOTE: main-tree queries run in the WORKING repo (they need main's trees), not
@@ -1006,6 +1006,14 @@ function doAllocate(assignee) {
   refreshMainTip();
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 1 && deadlineExceeded()) {
+      die(
+        5,
+        `Gave up after ${Math.round((Date.now() - STARTED_AT) / 1000)}s (deadline ${DEADLINE_MS}ms, ${attempt - 1} attempts).\n` +
+          "Nothing was written: every attempt was VERIFIED against the ref, so this is not a guess and re-running " +
+          "cannot double-write. Raise CLAIM_DEADLINE_MS if the fleet/network is unusually slow.",
+      );
+    }
     const sha = tipShaOrDie("allocate an id");
 
     const { ids: used, prScanComplete } = allUsedIds(sha, { scanPRs });
@@ -1141,6 +1149,14 @@ function writeMode(target, assignee, kind) {
   }
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 1 && deadlineExceeded()) {
+      die(
+        5,
+        `Gave up after ${Math.round((Date.now() - STARTED_AT) / 1000)}s (deadline ${DEADLINE_MS}ms, ${attempt - 1} attempts).\n` +
+          "Nothing was written: every attempt was VERIFIED against the ref, so this is not a guess and re-running " +
+          "cannot double-write. Raise CLAIM_DEADLINE_MS if the fleet/network is unusually slow.",
+      );
+    }
     const sha = tipShaOrDie(`${kind} ${label}`);
     const existing = readEntry(sha, key);
 

@@ -219,6 +219,17 @@ contention budget is widened as well (`MAX_RETRIES` 6 → 12, jittered backoff
 retained, `CLAIM_MAX_RETRIES` to override): affordable now that an attempt costs
 ~1 s rather than minutes.
 
+**An attempt count does not bound wall time, so it cannot deliver "fail fast".**
+Each attempt can internally spend `NET_RETRIES × NET_TIMEOUT_MS` on `ls-remote`,
+again on the fetch, again on the push and again on verification. On a warm cache
+12 attempts is tens of seconds; on the degraded network measured _this same day_
+(a 3m29s fetch, two 6m40s tool timeouts) it is minutes per attempt. Quoting a
+seconds figure without that condition would put a number in the durable record
+that the issue's own evidence falsifies. The bound that actually holds is a
+**wall-clock deadline** — `CLAIM_DEADLINE_MS`, default 120 s — checked between
+attempts, which ends the loop with exit 5 and a verified "nothing was written"
+regardless of how few attempts were consumed.
+
 ### The push's exit status is not evidence either
 
 A push can land server-side and still report failure or time out. Two ids
@@ -264,12 +275,45 @@ Measured on the live ref (1,080 entries):
 `--list` was reporting **654** active claims = 359 in-progress + 294 done + 1.
 **45 % were phantoms.** After the fix, the same command reports **359**.
 
-This is the other half of "no claim file is unreliable in BOTH directions": it is
-why #3420's record looked permanently claimed after its work merged, and why
-issues turned up with "a claim nobody held". Held is now a whitelist
-(`status === "in-progress"`) so a future status cannot silently resurrect it.
+This is the other half of "no claim file is unreliable in BOTH directions". A
+45 % phantom rate is abstract; the concrete cost is that **it made real dispatch
+decisions wrong on 2026-07-31**:
+
+- **#2916** appeared to have "a claim nobody held" — it cost a routing decision
+  and a hand-written `Claim status: STALE` banner in the issue file, because the
+  ref could not be corrected. The claim was `done`; the reader called it held.
+- **#2046** read `in-progress` with **three merged PRs** behind it, and an agent
+  was dispatched onto it partly on that basis.
+- **#3420** looked permanently claimed after its work merged in PR #3864.
+
+Each was re-diagnosed independently as "the claim ref is unreliable", which is
+why that conclusion kept being re-derived all session without ever resolving to
+a mechanism. The mechanism is one operator in one predicate.
+
+**And the dispatch gate had its own, worse copy.** `scripts/pre-dispatch-gate.mjs`
+does not call `claim-issue.mjs`; it reads the ref itself and tested
+`c.assignee` **alone, ignoring `status` entirely** — so for the gate every
+`released` record blocked too, i.e. **403 of 1,080**, not 294. Fixing only
+`claim-issue.mjs` would have left the exact path that mis-dispatched #2046
+still broken, while this file claimed otherwise. Heldness now lives in
+`scripts/lib/claim-record.mjs` and is imported by both readers, on the #3598
+precedent (one implementation, no drift). Verified live: the gate on #3893 now
+prints `claim file exists but is done — unclaimed` instead of a BLOCKER.
+
 Id _reservation_ is unaffected — `idsFromAssignRef()` reads every entry's `id`
 regardless of status, and there is a test pinning that.
+
+**A terminal-state blacklist, deliberately, not an `in-progress` whitelist.**
+The two errors are not symmetric: reading a free record as held blocks work
+(annoying, safe), while reading a held record as free puts two agents on one
+issue — the duplicate dispatch the lock exists to prevent. A whitelist sends an
+unrecognised status down the dangerous path; listing the terminal states
+`{released, done}` sends it down the safe one. The original bug was an
+_incomplete_ blacklist, not the blacklist. The live measurement covers only
+statuses written today, so the predicate must not assume that set is closed.
+
+Note the pre-existing `done` records are not migrated: they are simply no longer
+read as held, so the 294 phantoms clear the moment this lands.
 
 ### Why records were anonymous
 
