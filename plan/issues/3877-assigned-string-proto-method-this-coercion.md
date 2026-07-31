@@ -218,6 +218,57 @@ to nine `null`s) before it is believed.
 than a `null` and has not been attributed to either anomaly — do not let it ride
 along unexamined.
 
+## Scope of anomaly 2 is UNRESOLVED — and the probe that failed says why
+
+The deciding question is whether the refusal→`null` degradation is String-only
+(small, safe, fix in place) or general to `emitProtoMemberBodyRefusal` (a
+correctness **and measurement-integrity** bug — refused features that should
+raise loud classifiable errors instead answer quietly wrong, so standalone
+conformance may be mis-attributing an unknown number of rows).
+
+**Call-site census.** `emitProtoMemberBodyRefusal` has **16** call sites in
+`src/codegen/array-object-proto.ts` (+1 reference in `native-proto.ts`). Several
+pass a generic brand `name` rather than `"String"` — notably
+`makeGlueWithGetters` (~1618), whose `emitMemberBody` routes **every** member of
+its brand to the refusal. `ArrayBuffer` and `DataView` are registered through it.
+So the refusal is **not** String-specific machinery.
+
+**The cross-brand probe could not answer it, because its throw-detector fails on
+the lane under test.** Probe returns `2` = threw, `1` = value, `-1` =
+null/undefined:
+
+```
+case                                    host   standalone
+String/toUpperCase  (refusal-routed)    1      -1
+String/slice        (refusal-routed)    1      -1
+ArrayBuffer/slice   (refusal-routed)    2      -1
+DataView/getInt8    (refusal-routed)    2      -1
+String/charAt       (CONTROL, works)    1       1     <- control PASSES
+CONTROL throw       (must be 2)         2      -1     <- control FAILS
+```
+
+The throw control is `var a = null; a.nosuch()`, which must raise a TypeError
+under any spec version. Host gives `2`. **Standalone gives `-1`.** So on the
+standalone lane this probe cannot distinguish "the refusal threw" from "the
+refusal returned null" — every standalone cell reading `-1` is exactly what a
+blind instrument reports. **Discard the standalone column; the scope question
+stands open.**
+
+### Candidate common cause — promising, NOT established
+
+`var a = null; a.nosuch()` returning `null` instead of throwing is itself a spec
+violation, and it is upstream of everything above. If a `throw` does not
+propagate out of this call path in standalone, that would explain **both**
+anomalies at once: the refusal's catchable TypeError and `charCodeAt`'s
+`RequireObjectCoercible` throw would both evaporate into `null`, which is
+precisely the observed shape in each case.
+
+That is a hypothesis with one supporting observation, not a finding. Before
+acting on it, build a throw-detector that is **demonstrated to work in
+standalone** — e.g. a hand-written `throw new TypeError(...)` inside the same
+`try`/`catch` shape — and only then re-run the cross-brand census. Without a
+detector proven to report `2` on that lane, no scope conclusion is measurable.
+
 ## Sibling defect — #3254 is FALSE-DONE on its own headline method
 
 #3254 (`status: done`, completed 2026-07-13) is titled _"…borrowed
