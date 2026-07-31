@@ -5,6 +5,7 @@
 import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../checker/type-mapper.js";
 import { integrityVarKey } from "../widened-var-key.js";
+import { PROP_FLAG_ACCESSOR, PROP_FLAG_WRITABLE } from "../object-ops.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
 import { emitHoleToUndefined } from "../array-holes.js";
@@ -3378,6 +3379,24 @@ function compilePropertyAssignment(
   const poisonResult = tryCompileStrictFunctionPoisonAssignment(ctx, fctx, target, value);
   if (poisonResult !== undefined) return poisonResult;
 
+  // (#3872) Non-writable DATA property — `defineProperty(o,"p",{writable:false})`
+  // then `o.p = v`. Sits at the TOP, before any lowering-path selection, because
+  // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2.b decides the write FAILS
+  // regardless of which backend would have performed it. Placing it lower (next
+  // to the frozen consult) fixed only the host lane: the standalone lowering
+  // returns through an earlier branch and never reached it.
+  //
+  // This must be a COMPILE-TIME throw, not a runtime one. The standalone
+  // `__extern_set_strict` is deliberately aliased to the non-throwing native
+  // `__extern_set` (object-runtime.ts, #2017) because the native runtime has no
+  // TypeError bridge — so the runtime path can suppress the store but can never
+  // raise. Emitting the throw here is what gives standalone the strict-mode
+  // TypeError without building that bridge.
+  if (!ts.isPrivateIdentifier(target.name)) {
+    const nonWritable = tryEmitNonWritablePropertyWrite(ctx, fctx, target, value, target.name.text);
+    if (nonWritable !== undefined) return nonWritable;
+  }
+
   // (#2660 S2) `F.prototype = rhs` whole-reassign on a user function constructor
   // (standalone): store `rhs` (built as a native `$Object` when a plain literal)
   // into the per-fnctor prototype global, instead of `__extern_set($closure,
@@ -4197,6 +4216,58 @@ function emitSetterCallWithDummy(
   fctx.body.push({ op: "call", funcIdx });
   fctx.body.push({ op: "local.get", index: tmpLocal });
   return valResult;
+}
+
+/**
+ * (#3872) Write to a non-writable DATA property recorded by `Object.defineProperty`.
+ *
+ * `ctx.definedPropertyFlags` is the compile-time mirror of the descriptor
+ * attributes, keyed `<integrityVarKey>:<propName>` and carrying
+ * `PROP_FLAG_WRITABLE`. `Object.defineProperty` writes it; until now nothing on
+ * the assignment path read it, so `defineProperty(o,"p",{writable:false});
+ * o.p = 20` neither threw nor (on host) left the value alone.
+ *
+ * Measured lane asymmetry that shapes this fix — standalone already suppresses
+ * the store (`o.p` stays 10) and only omits the strict-mode TypeError, while
+ * host lets the write land (`o.p` becomes 20). Emitting the compile-away branch
+ * here covers both: the throw standalone was missing, and the suppression host
+ * was missing, without duplicating the suppression standalone already performs
+ * (this returns before any store is emitted).
+ *
+ * Deliberately narrow — only fires for a statically-recorded, non-accessor,
+ * non-writable data property on an identifier receiver. Anything the
+ * compile-time mirror cannot see falls through to the ordinary path, which for
+ * dynamic receivers already consults the runtime `FLAG_WRITABLE` companion
+ * table via `__extern_set`.
+ */
+function tryEmitNonWritablePropertyWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression,
+  value: ts.Expression,
+  propName: string,
+): InnerResult | undefined {
+  if (!ts.isIdentifier(target.expression)) return undefined;
+
+  const flags = ctx.definedPropertyFlags.get(`${integrityVarKey(ctx, target.expression)}:${propName}`);
+  if (flags === undefined) return undefined;
+  // Accessor properties route to the setter — [[Writable]] does not apply.
+  if (flags & PROP_FLAG_ACCESSOR) return undefined;
+  if (flags & PROP_FLAG_WRITABLE) return undefined;
+
+  // §13.15.2: the RHS is evaluated before Set is attempted, so its side effects
+  // must still happen even though the store never lands.
+  const rhsType = compileExpression(ctx, fctx, value);
+  if (rhsType === null) return null;
+
+  if (isStrictContext(target, ctx.inferModuleStrictArguments)) {
+    fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${propName}' of object`);
+    return rhsType;
+  }
+
+  // Sloppy mode: the write silently does not happen; the expression yields the RHS.
+  return rhsType;
 }
 
 /**

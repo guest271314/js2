@@ -1,7 +1,8 @@
 ---
 id: 3872
 title: "Non-writable data-property write does not throw in strict mode (standalone); host also fails to suppress the store"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-es5-coercion
 created: 2026-07-31
 priority: high
 feasibility: medium
@@ -12,6 +13,16 @@ es_edition: 5
 sprint: current
 horizon: m
 related: [3420, 2668, 2744, 3776]
+# The [[Writable]] consult must sit at the top of `compilePropertyAssignment`,
+# beside the sibling `frozenVars` consults it completes — §10.1.9.2 decides the
+# write fails BEFORE lowering-path selection, and placing it lower reached only
+# the host lane. Relocating it would separate three checks that must stay in
+# sync and would mean exporting the function's internal fctx/emit plumbing to
+# move ~50 lines. Growth is intended and local.
+loc-budget-allow:
+  - src/codegen/expressions/assignment.ts
+func-budget-allow:
+  - src/codegen/expressions/assignment.ts::compilePropertyAssignment
 ---
 
 # #3872 — the strict-mode TypeError is missing; the two lanes fail differently
@@ -177,7 +188,79 @@ consults, while the **dynamic** path does. `[[Extensible]]` and strict-mode
 - Non-writable data property: sloppy write is a silent no-op, strict write throws
   TypeError, value preserved — in **both** lanes, for dot, computed and compound
   assignment forms.
-- A permanent regression test (`tests/issue-3869.test.ts`), with standalone cases
-  asserting `imports.length === 0`.
+- A permanent regression test (`tests/issue-3872.test.ts` — the acceptance text
+  said `issue-3869` because the issue was drafted under that id before
+  renumbering), with standalone cases asserting `imports.length === 0`.
 - A/B against stock main quoted with all three denominators.
 - `Object.seal` / `Object.isFrozen` / `gOPD` behaviour not regressed.
+
+---
+
+## Progress (2026-07-31) — HOST half landed, STANDALONE half blocked
+
+**`status: in-progress`, deliberately NOT `done`.** The acceptance above requires
+**both** lanes; only host is fixed. Marking this done would misreport the
+standalone score, which is the whole objective.
+
+### What landed
+
+`tryEmitNonWritablePropertyWrite`, consulted at the **top** of
+`compilePropertyAssignment` (`src/codegen/expressions/assignment.ts`) — before
+any lowering-path selection, because §10.1.9.2 step 2.b decides the write fails
+regardless of which backend would perform it. It reads `ctx.definedPropertyFlags`
+(`PROP_FLAG_WRITABLE`), evaluates the key and RHS for side effects per §13.15.2,
+then fails the Set: strict throws a catchable TypeError, sloppy is a silent
+no-op returning the RHS.
+
+**Placement was load-bearing and measured, not guessed.** Sitting beside the
+frozen consult (~L3588) it fixed host only; standalone returns through an earlier
+branch and never reached it. Moving it to the top was required — and still did
+not fix standalone, for the reason below.
+
+### Measured A/B — harness: bare `compile()` + `buildImports` (host), `compile({target:"standalone"})` + empty imports
+
+| | stock main | with fix |
+| --- | --- | --- |
+| host | **7 / 13** | **9 / 13** |
+| standalone | 10 / 13 | 10 / 13 |
+
+**+2 on host, 0 on standalone, zero regressions.** The `accessor setter still
+runs` failure is **pre-existing on host in both columns** — verified by A/B, not
+introduced here. `tests/issue-3872.test.ts`: 11/11.
+
+### Why standalone did NOT move — root cause, instrumented
+
+`definedPropertyFlags` is populated **only on the `useStruct` lowering path**
+(`object-ops.ts:1692`, consumed at `:2078`), which requires a registered struct
+field (`structTypeIdx !== undefined && fields && fieldIdx >= 0`). Standalone
+compiles `const o: any = {}` to a native `$Object`, so `fieldIdx < 0`,
+`useStruct` is false, and **the compile-time mirror is never written**.
+
+Instrumented the lookup directly:
+
+```
+host:        key=o@41:p  flags=14   all=[["o@41:p",14]]     (14 = DEFINED|CONFIGURABLE|ENUMERABLE, no WRITABLE)
+standalone:  key=o@41:p  flags=undefined   all=[]           <- EMPTY
+```
+
+A runtime consult cannot substitute: standalone's `__extern_set_strict` is
+**deliberately aliased to the non-throwing native `__extern_set`** (#2017,
+`object-runtime.ts`) because the native runtime has **no TypeError bridge** — the
+runtime path suppresses the store (which is why standalone already preserves the
+value) but can never raise. So the throw must come from compile time, which
+requires the mirror.
+
+### Remaining work for the standalone lane
+
+Populate `definedPropertyFlags` on the **non-`useStruct`** path so native
+`$Object` receivers record their descriptor attributes. Hazard to respect: the
+struct path re-reads `definedPropertyFlags.get(key)` as `trackedExistingFlags`
+for redefine validation, so a naive record at the `object-ops.ts:1146`
+chokepoint would make a first define look like a **redefine** and can spuriously
+throw `Cannot redefine property`. Record it only where `useStruct` is false.
+
+### Not covered
+
+Compound assignment (`o.p %= 20`) still fails in **both** lanes — it does not
+route through `compilePropertyAssignment`, so the consult never sees it. That is
+22 of the ~24 corpus rows and is the larger half of this issue by row count.
