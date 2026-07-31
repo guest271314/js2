@@ -1,7 +1,8 @@
 ---
 id: 3378
 title: "deepEqual.js fails to compile — stale LOCAL index in deeply-nested format/lazyResult closures (#2043 class, local not funcIdx)"
-status: in-progress
+status: done
+completed: 2026-07-24
 assignee: sendev-3378
 sprint: current
 created: 2026-07-17

@@ -1,7 +1,8 @@
 ---
 id: 3424
 title: "Reified builtin-value `.name`/`.length` reflective reads mis-dispatch when statics share a wrapper signature"
-status: in-progress
+status: done
+completed: 2026-07-28
 sprint: current
 created: 2026-07-18
 updated: 2026-07-28

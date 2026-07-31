@@ -1,7 +1,8 @@
 ---
 id: 3639
 title: "Edition buckets report absence-of-evidence as conformance — 5,436 tests sorted into ES2015 by fall-through, 273 into ≤ES3"
-status: ready
+status: done
+completed: 2026-07-25
 sprint: current
 created: 2026-07-25
 updated: 2026-07-25
@@ -118,3 +119,13 @@ Every per-edition percentage carries this artifact to some degree. A test's
 bucket reflects **the vintage of its metadata**, not the edition that specified
 the feature. Treat per-edition rates as "tests whose metadata sorts here", never
 as "share of edition N implemented".
+
+## Permanent repro (#2093)
+
+Landed with PR #3627, which added the regression test alongside the fix:
+
+- `tests/generate-editions-feature-rows.test.ts` — asserts the edition-bucket
+  rows distinguish "measured absent" from "not measured", so a bucket can no
+  longer report absence-of-evidence as evidence-of-absence.
+
+Fix: `scripts/generate-editions.ts`.
