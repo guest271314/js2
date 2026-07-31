@@ -188,6 +188,15 @@ export interface FieldDef {
    * default slot is distinguishable from an explicit null/zero assignment.
    */
   presenceTracked?: true;
+  /**
+   * (#3780) Bit index of this field's presence flag inside the struct's packed
+   * presence words. Only set together with {@link presenceTracked}. The word
+   * holding it is the field named `$presence_<bit >>> 5>`; the mask is
+   * `1 << (bit & 31)`. Packing matters for allocation volume: acorn's `Node`
+   * carries 63 conditionally-assigned properties, which as one `i32` slot each
+   * cost 252 bytes of every AST node — roughly half the object.
+   */
+  presenceBit?: number;
 }
 
 export type ValType =
