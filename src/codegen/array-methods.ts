@@ -61,6 +61,7 @@ import { emitNativeNumberFormat } from "./number-format-native.js";
 import { ensureNativeArrayHof } from "./hof-native.js";
 import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
+import { emitStableMergeSort } from "./merge-sort.js"; // (#3902) shared stable O(n log n) sort skeleton
 import { coerceType, coercionInstrs, defaultValueInstrs, emitGuardedRefCast } from "./type-coercion.js";
 
 // (#3264) Array.prototype-borrow subsystem extracted to array-prototype-borrow.ts;
@@ -6818,7 +6819,32 @@ function compileArrayDefaultToStringSort(
   elemType: ValType,
 ): ValType | null {
   const isNumeric = elemType.kind === "f64" || elemType.kind === "i32";
-  const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0;
+  // (#3902) `number_toString` is NOT native everywhere `nativeStrings` is on.
+  // `import-collector.ts` gates the two helpers this function needs on DIFFERENT
+  // conditions: `string_compare` is skipped when `ctx.nativeStrings` (the native
+  // `__str_compare` replaces it), but `number_toString` is only emitted natively
+  // under `ctx.wasi || ctx.standalone`. In plain `nativeStrings` mode — which
+  // `fast: true` turns on, i.e. the whole `gc-native` benchmark lane — the
+  // module therefore gets the JS-HOST `env.number_toString` import, which
+  // returns a genuine JS string. `stringifyTail`'s native branch then did
+  // `any.convert_extern` + `ref.cast $AnyString` on it, and an externally-owned
+  // host string is not an internal GC ref, so every `arr.sort()` over a numeric
+  // array TRAPPED at runtime with `illegal cast`. That is exactly why
+  // `array/sort-i32` published no gc-native bar at all: the harness caught the
+  // trap in warmup and silently dropped the lane.
+  //
+  // Detect the mismatch from the resolved index (an index below the imported
+  // function count IS an import) rather than re-deriving import-collector's
+  // policy here, and fall back to the all-host string comparison — correct
+  // ToString ordering, and no new class of dependency, since the module already
+  // imports `number_toString` in exactly this configuration. Making
+  // `number_toString` native under `nativeStrings` is the real fix and is
+  // deliberately out of scope here: it changes number formatting for every
+  // fast-mode program (see the follow-up noted in #3902).
+  const numToStrExisting = ctx.funcMap.get("number_toString");
+  const importedFuncCount = ctx.mod.imports.filter((im) => im.desc.kind === "func").length;
+  const numToStrIsHostImport = numToStrExisting !== undefined && numToStrExisting < importedFuncCount;
+  const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && !(isNumeric && numToStrIsHostImport);
   // (#3579) HOST default sort only supports numeric or externref (boxed-any /
   // js-string) elements. A ref/ref_null (struct) element cannot flow into the
   // `string_compare(externref, externref)` host import, so bail to the caller's
@@ -6878,6 +6904,21 @@ function compileArrayDefaultToStringSort(
       flushLateImportShifts(ctx, fctx);
       if (externToStrIdx === undefined) return null;
     }
+    // (#3902) In `nativeStrings` mode import-collector deliberately skips the
+    // `string_compare` host import (the native `__str_compare` normally covers
+    // it), so the host fallback selected above has no comparator yet. Add it
+    // late — and flush BEFORE reading the two indices below, since inserting an
+    // import shifts every function index.
+    if (!ctx.funcMap.has("string_compare")) {
+      const added = ensureLateImport(
+        ctx,
+        "string_compare",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (added === undefined) return null;
+    }
     compareIdx = ctx.funcMap.get("string_compare");
     if (isNumeric) numToStrIdx = ctx.funcMap.get("number_toString");
   }
@@ -6888,10 +6929,6 @@ function compileArrayDefaultToStringSort(
   const vecTmp = allocLocal(fctx, `__dsort_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__dsort_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__dsort_len_${fctx.locals.length}`, { kind: "i32" });
-  const iTmp = allocLocal(fctx, `__dsort_i_${fctx.locals.length}`, { kind: "i32" });
-  const jTmp = allocLocal(fctx, `__dsort_j_${fctx.locals.length}`, { kind: "i32" });
-  const keyTmp = allocLocal(fctx, `__dsort_key_${fctx.locals.length}`, elemType);
-  const keyStrTmp = allocLocal(fctx, `__dsort_keystr_${fctx.locals.length}`, cmpStrType);
 
   compileExpression(ctx, fctx, propAccess.expression);
   fctx.body.push({ op: "local.tee", index: vecTmp });
@@ -6944,96 +6981,33 @@ function compileArrayDefaultToStringSort(
     return out;
   };
 
-  // `string_compare(ToString(data[j]), keyStr) > 0`
-  const compareDataJGtKey: Instr[] = [
-    { op: "local.get", index: dataTmp },
-    { op: "local.get", index: jTmp },
-    { op: getOp, typeIdx: arrTypeIdx },
+  // (#3902) `string_compare(ToString(left), ToString(right)) > 0`.
+  //
+  // The insertion sort this replaced hoisted the RIGHT operand's stringification
+  // out of the inner loop (it was always the same `key`), so it paid one
+  // `number_toString` per comparison instead of two. The merge sort pays two —
+  // but it performs `n·log₂ n` comparisons instead of `n²/4`, so on the
+  // 10,000-element `array/sort-i32` benchmark that is 2×133,000 = 266,000
+  // stringifications instead of 25,000,000: a ~94× net reduction in host calls
+  // on top of the algorithmic win. Caching the per-element string in a parallel
+  // array would remove the remaining factor of ~13 (n·log n → n) and is the
+  // obvious follow-up if the default ToString sort ever becomes hot.
+  const compareGtZero = (pushLeft: Instr[], pushRight: Instr[]): Instr[] => [
+    ...pushLeft,
     ...stringifyTail(),
-    { op: "local.get", index: keyStrTmp },
+    ...pushRight,
+    ...stringifyTail(),
     { op: "call", funcIdx: compareIdx },
     { op: "i32.const", value: 0 },
     { op: "i32.gt_s" },
   ];
 
-  // for (i = 1; i < len; i++) { key = data[i]; keyStr = ToString(key); j = i-1;
-  //   while (j >= 0 && cmp(data[j], key) > 0) { data[j+1] = data[j]; j--; }
-  //   data[j+1] = key; }
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "local.set", index: iTmp });
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: [
-          { op: "local.get", index: iTmp },
-          { op: "local.get", index: lenTmp },
-          { op: "i32.ge_s" },
-          { op: "br_if", depth: 1 },
-
-          { op: "local.get", index: dataTmp },
-          { op: "local.get", index: iTmp },
-          { op: getOp, typeIdx: arrTypeIdx },
-          { op: "local.set", index: keyTmp },
-          { op: "local.get", index: keyTmp },
-          ...stringifyTail(),
-          { op: "local.set", index: keyStrTmp },
-          { op: "local.get", index: iTmp },
-          { op: "i32.const", value: 1 },
-          { op: "i32.sub" },
-          { op: "local.set", index: jTmp },
-
-          {
-            op: "block",
-            blockType: { kind: "empty" },
-            body: [
-              {
-                op: "loop",
-                blockType: { kind: "empty" },
-                body: [
-                  { op: "local.get", index: jTmp },
-                  { op: "i32.const", value: 0 },
-                  { op: "i32.lt_s" },
-                  { op: "br_if", depth: 1 },
-                  ...compareDataJGtKey,
-                  { op: "i32.eqz" },
-                  { op: "br_if", depth: 1 },
-                  { op: "local.get", index: dataTmp },
-                  { op: "local.get", index: jTmp },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.add" },
-                  { op: "local.get", index: dataTmp },
-                  { op: "local.get", index: jTmp },
-                  { op: getOp, typeIdx: arrTypeIdx },
-                  { op: "array.set", typeIdx: arrTypeIdx },
-                  { op: "local.get", index: jTmp },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.sub" },
-                  { op: "local.set", index: jTmp },
-                  { op: "br", depth: 0 },
-                ],
-              },
-            ],
-          },
-
-          { op: "local.get", index: dataTmp },
-          { op: "local.get", index: jTmp },
-          { op: "i32.const", value: 1 },
-          { op: "i32.add" },
-          { op: "local.get", index: keyTmp },
-          { op: "array.set", typeIdx: arrTypeIdx },
-
-          { op: "local.get", index: iTmp },
-          { op: "i32.const", value: 1 },
-          { op: "i32.add" },
-          { op: "local.set", index: iTmp },
-          { op: "br", depth: 0 },
-        ],
-      },
-    ],
+  emitStableMergeSort(fctx, {
+    arrTypeIdx,
+    getOp,
+    dataLocal: dataTmp,
+    lenLocal: lenTmp,
+    buildCompareGtZero: compareGtZero,
   });
 
   fctx.body.push({ op: "local.get", index: vecTmp });
@@ -7042,17 +7016,22 @@ function compileArrayDefaultToStringSort(
 }
 
 /**
- * #1816 — comparator-aware sort. Emits an in-place stable insertion sort that
- * invokes the user comparator closure via `call_ref` at every comparison,
- * using the spec ordering: `comparator(a, b) > 0` ⇒ `a` sorts after `b`.
+ * #1816 — comparator-aware sort. Emits an in-place stable sort that invokes the
+ * user comparator closure via `call_ref` at every comparison, using the spec
+ * ordering: `comparator(a, b) > 0` ⇒ `a` sorts after `b`.
  *
  * Returns the result ValType on success, or `null` if the comparator is not a
  * compilable Wasm closure (caller then falls back to the default Timsort).
  *
- * Insertion sort (not Timsort) is used here because (a) it is naturally stable,
- * (b) correctness — not throughput — is the requirement for comparator sorts,
- * and (c) it keeps the comparator-call site inline in the calling function so
- * the closure local stays in scope (no closure-threading through module helpers).
+ * (#3902) The sort itself is the shared stable bottom-up MERGE sort
+ * (`emitStableMergeSort`), not the insertion sort this originally shipped with.
+ * The original rationale for insertion sort was that it is naturally stable and
+ * keeps the comparator-call site inline in the calling function so the closure
+ * local stays in scope — merge sort keeps both properties (it is emitted inline
+ * too) while cutting comparator invocations from `n²/4` to `n·log₂ n`. That was
+ * worth ~190× on the `array/sort-i32` benchmark: every comparison here is a
+ * `call_ref` through a closure struct, which is far too expensive to do
+ * quadratically.
  */
 function tryCompileComparatorSort(
   ctx: CodegenContext,
@@ -7094,9 +7073,6 @@ function tryCompileComparatorSort(
   const vecTmp = allocLocal(fctx, `__arr_sort_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_sort_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_sort_len_${fctx.locals.length}`, { kind: "i32" });
-  const iTmp = allocLocal(fctx, `__arr_sort_i_${fctx.locals.length}`, { kind: "i32" });
-  const jTmp = allocLocal(fctx, `__arr_sort_j_${fctx.locals.length}`, { kind: "i32" });
-  const keyTmp = allocLocal(fctx, `__arr_sort_key_${fctx.locals.length}`, elemType);
 
   compileExpression(ctx, fctx, propAccess.expression);
   fctx.body.push({ op: "local.tee", index: vecTmp });
@@ -7116,10 +7092,10 @@ function tryCompileComparatorSort(
   const getOp: Instr["op"] =
     elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
 
-  // Comparator-call instruction sequence with `data[j]` and `key` already
-  // on the stack as `elemType`; coerces each to the closure's declared param
-  // type, invokes call_ref, coerces the (f64/typed) result to f64, leaves an
-  // i32 `(result > 0)` on the stack.
+  // Comparator-call instruction sequence with the two operands pushed by the
+  // caller-supplied sequences as `elemType`; coerces each to the closure's
+  // declared param type, invokes call_ref, coerces the (f64/typed) result to
+  // f64, leaves an i32 `(result > 0)` on the stack.
   // Comparator call convention (matches the other array-method call_ref sites):
   // push the closure struct (`__self`, the 1st funcType param) FIRST, then the
   // two user args, then re-fetch the funcref from the struct (field 0) and
@@ -7141,99 +7117,14 @@ function tryCompileComparatorSort(
     { op: "f64.gt" },
   ];
 
-  // for (i = 1; i < len; i++) { key = data[i]; j = i-1;
-  //   while (j >= 0 && cmp(data[j], key) > 0) { data[j+1] = data[j]; j--; }
-  //   data[j+1] = key; }
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "local.set", index: iTmp });
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [
-      {
-        op: "loop",
-        blockType: { kind: "empty" },
-        body: [
-          // if (i >= len) break
-          { op: "local.get", index: iTmp },
-          { op: "local.get", index: lenTmp },
-          { op: "i32.ge_s" },
-          { op: "br_if", depth: 1 },
-          // key = data[i]
-          { op: "local.get", index: dataTmp },
-          { op: "ref.as_non_null" },
-          { op: "local.get", index: iTmp },
-          { op: getOp, typeIdx: arrTypeIdx },
-          { op: "local.set", index: keyTmp },
-          // j = i - 1
-          { op: "local.get", index: iTmp },
-          { op: "i32.const", value: 1 },
-          { op: "i32.sub" },
-          { op: "local.set", index: jTmp },
-          // inner while
-          {
-            op: "block",
-            blockType: { kind: "empty" },
-            body: [
-              {
-                op: "loop",
-                blockType: { kind: "empty" },
-                body: [
-                  // if (j < 0) break
-                  { op: "local.get", index: jTmp },
-                  { op: "i32.const", value: 0 },
-                  { op: "i32.lt_s" },
-                  { op: "br_if", depth: 1 },
-                  // if (cmp(data[j], key) > 0) == 0 → break
-                  ...buildCompareGtZero(
-                    [
-                      { op: "local.get", index: dataTmp },
-                      { op: "ref.as_non_null" },
-                      { op: "local.get", index: jTmp },
-                      { op: getOp, typeIdx: arrTypeIdx },
-                    ],
-                    [{ op: "local.get", index: keyTmp }],
-                  ),
-                  { op: "i32.eqz" },
-                  { op: "br_if", depth: 1 },
-                  // data[j+1] = data[j]
-                  { op: "local.get", index: dataTmp },
-                  { op: "ref.as_non_null" },
-                  { op: "local.get", index: jTmp },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.add" },
-                  { op: "local.get", index: dataTmp },
-                  { op: "ref.as_non_null" },
-                  { op: "local.get", index: jTmp },
-                  { op: getOp, typeIdx: arrTypeIdx },
-                  { op: "array.set", typeIdx: arrTypeIdx },
-                  // j--
-                  { op: "local.get", index: jTmp },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.sub" },
-                  { op: "local.set", index: jTmp },
-                  { op: "br", depth: 0 },
-                ],
-              },
-            ],
-          },
-          // data[j+1] = key
-          { op: "local.get", index: dataTmp },
-          { op: "ref.as_non_null" },
-          { op: "local.get", index: jTmp },
-          { op: "i32.const", value: 1 },
-          { op: "i32.add" },
-          { op: "local.get", index: keyTmp },
-          { op: "array.set", typeIdx: arrTypeIdx },
-          // i++
-          { op: "local.get", index: iTmp },
-          { op: "i32.const", value: 1 },
-          { op: "i32.add" },
-          { op: "local.set", index: iTmp },
-          { op: "br", depth: 0 },
-        ],
-      },
-    ],
+  // (#3902) Stable bottom-up merge sort — `n·log₂ n` comparator invocations
+  // instead of the `n²/4` the previous insertion sort needed.
+  emitStableMergeSort(fctx, {
+    arrTypeIdx,
+    getOp,
+    dataLocal: dataTmp,
+    lenLocal: lenTmp,
+    buildCompareGtZero,
   });
 
   // Return the same vec ref (sort is in-place).
