@@ -614,3 +614,48 @@ moves with it. If GC is really ~2% on the reference hardware, this issue's
 share is correspondingly *larger* there than the Linux profile suggests, and
 allocation-side work (#3921/#3927) is correspondingly smaller. Re-measure on
 the target hardware before using any of these shares to sequence work.
+
+## Allocation evidence for this issue (#3921 census, 2026-07-31)
+
+This issue has been argued on time shares. The allocation census adds an
+independent, deterministic measurement that points at the same place, and it
+reframes what "reduce allocation" means for the standalone lane.
+
+Per 226 KB acorn parse, 647,346 allocations. The two largest families:
+
+| family | count/parse | share | what it needs proven |
+| --- | ---: | ---: | --- |
+| `$AnyValue` box | 310,485 | 47.96% | the **value's type** at the producer |
+| generic-dispatch argument vectors | ~87,000 | 13.5% | the **callee** at the call site |
+
+Neither is an allocator defect. Both are the price of an unproven type:
+a value whose type is not known must be widened into a 5-field tagged carrier,
+and a call whose target is not known must marshal its arguments through the
+heap. **Roughly 61% of all allocation in the parse exists because something
+was not proven.** That is this issue's axis, measured from the allocation side
+rather than the timing side.
+
+Two attempts to attack the allocation directly were measured and both failed,
+which is why the work belongs here rather than in an allocator fix:
+
+- **Binaryen `Heap2Local` promotes ZERO sites** on the shipped binary, under
+  `--heap2local`, `--closed-world --heap2local` and `--closed-world --gufa
+  --heap2local` alike. The optimizer cannot see through the generic calls the
+  boxes escape into.
+- **Sharing one empty argument vector for zero-arity dispatch** removed only
+  840 allocations (0.13%) and was reverted. The zero-arity arm fires 420 times
+  per parse against 43,527 `__objvec_new` calls; the mass is genuine N-argument
+  marshalling, not wasted empty containers.
+
+Sizing note, so this is not over-sold: the whole dispatch family
+(`__call_m_*`, `__call_fn*`, `__extern_method_call`, `__apply_closure`,
+`__objvec*`, `__method_cache_lookup`) is **3.87% of parse self-time**, spread so
+thin that no single dispatcher exceeds 0.08%. So devirtualization's payoff is
+NOT mainly the dispatch time — it is the allocation and the downstream
+`$AnyValue` widening that the generic path forces. Anyone sizing this issue off
+the 3.87% alone will under-value it; anyone sizing it off the 61% will
+over-value it. The honest statement is that the two are coupled and neither has
+been measured in isolation.
+
+Current admission rate remains this issue's S1 figure: **150 of 2,363**
+non-`this` accesses (6.3%).
