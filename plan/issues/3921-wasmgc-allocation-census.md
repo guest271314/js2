@@ -124,14 +124,68 @@ with the two Node 24 / macOS profiles (1.5%, 4.3%). See the cross-box caveat
 now recorded in #3684/#3685/#3686. If GC is genuinely ~2% on the reference
 hardware, items 2-4 outrank items 1 and 5 there.
 
+## RESULT — the acorn breakdown (2026-07-31)
+
+Instrumented standalone runtime-dynamic build, 2,356,708 B, checksum 422,
+counters snapshotted **after `__module_init` and before the parse** so the
+table is per-parse rather than per-instance.
+
+**647,346 allocations for one 226 KB parse** — about 15.5 per token.
+
+| count/parse | share | wasm type | what it is | ~bytes ea | ~MB |
+| ---: | ---: | --- | --- | ---: | ---: |
+| **310,485** | **47.96%** | `(struct i32 i32 f64 eqref externref)` | **`$AnyValue` box** | 32 | **9.9** |
+| 123,337 | 19.05% | `(array (mut externref))` | vec backing store (3 merged ids) | ~40 | ~4.9 |
+| 54,825 | 8.47% | `(sub (struct i32 i32 (ref $i16arr)))` | native string carrier | ~24 | ~1.3 |
+| 33,746 | 5.21% | `(array (mut i32))` | i32 array store | ~40 | ~1.3 |
+| **32,468** | **5.02%** | `__fnctor_Node` | **the AST itself** | 292 | **9.5** |
+| 31,414 | 4.85% | `__vec_externref` | vec header | 16 | 0.5 |
+| 26,071 | 4.03% | `(array (mut i16))` | string char storage | ~40 | ~1.0 |
+| 18,722 | 2.89% | `(struct i32 i32 (ref $i32arr))` | i32-backed vec | 24 | 0.45 |
+| 7,252 | 1.12% | 5×f64 + externref | numeric record | 56 | 0.4 |
+
+Byte estimates use 8 B headers, 4 B compressed refs and a nominal capacity-8
+backing array; they sum to ~29 MB against the 43.6 MB `--trace-gc` total, so
+**treat the byte column as indicative and the COUNT column as measured.** The
+residual is almost certainly larger-than-nominal array capacities plus the
+115-type tail; it does not move the ranking.
+
+### The finding
+
+**`$AnyValue` boxing is 48% of every allocation in the parse — 310,485 boxes,
+~7.4 per token — and it appeared on no one's list.** The ranked table below put
+allocation first but assumed the mass was AST-shaped; it is not. The AST is
+**5%** of allocations by count and, even at 292 B each, only draws level with
+`$AnyValue` on bytes.
+
+This reorders the queue. `$AnyValue` is the carrier a value takes when a
+statically-typed value flows somewhere its type is no longer known — the same
+crossing #3899's boolean interning addressed one narrow case of. Whatever
+fraction of those 310 K boxes is a value that was *provably* typed at the
+producer and re-widened for a generic consumer is pure loss, and it is a
+representation question (#3927/#3685 territory) rather than a GC-tuning one.
+
+Also worth noting: **123,337 vec backing arrays against 4,275 arrays surviving
+in the AST** — 29× more allocated than retained. Empty `[]` costs a header plus
+a capacity-8 store, so a parser that speculatively creates lists it discards
+pays ~56 B each time.
+
+### Cross-check status
+
+The census total has NOT been reconciled against the `--trace-gc` inter-GC sum
+(29 MB estimated vs 43.6 MB measured). Closing that is the remaining
+correctness step for this issue, and until it is closed the byte column must
+not be quoted as measurement. The *counts* are exact — each is a counter
+incremented at the allocation site.
+
 ## Scope
 
-- [ ] Emitter-side census pass, env-gated and off by default.
-- [ ] Reader that reports count and **bytes** per type, per operation.
-- [ ] Cross-check the census total against the `--trace-gc` inter-GC sum on the
-      standalone acorn parse; they should agree to within a few percent.
-- [ ] Publish the acorn breakdown — that is the artifact #3780's next round
-      needs, and the reason this issue exists.
+- [x] Emitter-side census pass, env-gated and off by default (PR #3920).
+- [x] Reader that reports count per type, per operation.
+- [x] Publish the acorn breakdown — above.
+- [ ] Reconcile the ~29 MB byte estimate with the 43.6 MB `--trace-gc` total:
+      compute exact per-type sizes from the type table and the real array
+      capacities instead of nominal ones.
 
 ## Acceptance criteria
 
