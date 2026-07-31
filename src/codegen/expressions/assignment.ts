@@ -4244,17 +4244,22 @@ export function isNonWritableDataProperty(ctx: CodegenContext, receiver: ts.Expr
   if (!ts.isIdentifier(receiver)) return false;
   const key = `${integrityVarKey(ctx, receiver)}:${propName}`;
 
-  // (#3872) Externref-receiver defines (standalone's native `$Object` lowering)
-  // record here instead of in `definedPropertyFlags` — see the note in
-  // `object-ops.ts`. Writing them into that map perturbed
-  // `getOwnPropertyDescriptor` and cost −67 pass on the merged state.
-  if (ctx.nonWritableExternKeys.has(key)) return true;
-
-  const flags = ctx.definedPropertyFlags.get(key);
-  if (flags === undefined) return false;
-  // Accessor properties route to the setter — [[Writable]] does not apply.
-  if (flags & PROP_FLAG_ACCESSOR) return false;
-  return !(flags & PROP_FLAG_WRITABLE);
+  // (#3872) ONLY an EXPLICIT `writable: false` counts. Both lowering arms of
+  // `Object.defineProperty` record into this set; nothing else is consulted.
+  //
+  // In particular `definedPropertyFlags` must NOT be used here. That map is
+  // approximate about writability: `applyDescriptorFlags` starts from
+  // `PROP_FLAG_DEFINED` and leaves the WRITABLE bit clear when the descriptor
+  // OMITS `writable` — correct for a fresh define (omitted attributes default
+  // to false) but wrong for a REDEFINE, where omitted means "keep existing".
+  // Its historical consumers (gOPD reporting, redefine validation) tolerated
+  // that; making it decide whether a WRITE is legal did not.
+  //
+  // Measured cost of getting this wrong: 27 deterministic test262 regressions,
+  // e.g. `mapped-arguments-nonconfigurable-4.js`, which does
+  // `Object.defineProperty(arguments,"0",{configurable:false})` — never
+  // mentioning `writable` — and then expects `arguments[0] = 2` to LAND.
+  return ctx.nonWritableExternKeys.has(key);
 }
 
 function tryEmitNonWritablePropertyWrite(

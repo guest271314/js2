@@ -251,6 +251,60 @@ describe("#3872 — program-order over-fire", () => {
   });
 });
 
+// THE 27-regression root cause. The consult originally fell back to
+// `ctx.definedPropertyFlags`, which leaves the WRITABLE bit clear when a
+// descriptor merely OMITS `writable` — correct for a fresh define, wrong for a
+// REDEFINE where omitted means "keep existing". Reading that map as a write
+// permission suppressed legal writes across 27 test262 files. Only an EXPLICIT
+// `writable: false` may fire the consult now.
+describe("#3872 — omitted `writable` must not imply non-writable", () => {
+  it("defineProperty with only {configurable:false} leaves the write legal", async () => {
+    // Shape of mapped-arguments-nonconfigurable-4.js — `writable` never mentioned.
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = { p: 1 };
+        Object.defineProperty(o, "p", { configurable: false });
+        o.p = 2;
+        return o.p;
+      }`),
+    ).toBe(2);
+  });
+
+  // NOTE: the mapped-`arguments` case is deliberately NOT asserted here as a
+  // synthetic. `language/arguments-object/mapped/mapped-arguments-nonconfigurable-4.js`
+  // is `flags: [noStrict]` and relies on sloppy-script mapped-arguments
+  // semantics; a hand-written TS module equivalent does not reproduce the
+  // mapping (module code is always strict, and the TS `arguments` shape
+  // differs), so a synthetic version asserts behaviour that is not the same
+  // question. The four real corpus files were verified directly via
+  // `runTest262File` — host and standalone, both pass — and that is the
+  // authoritative check for that family.
+
+  it("defineProperty with only {enumerable:true} leaves the write legal", async () => {
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = { p: 1 };
+        Object.defineProperty(o, "p", { enumerable: true });
+        o.p = 2;
+        return o.p;
+      }`),
+    ).toBe(2);
+  });
+
+  it("an explicit writable:false with NO value still throws (third lowering arm)", async () => {
+    // Shape of language/types/reference/8.7.2-3-s.js — explicit but value-less,
+    // which lands in the no-value arm rather than either arm above.
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        Object.defineProperty(o, "b", { writable: false });
+        try { o.b = 11; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+        return 0;
+      }`),
+    ).toBe(1);
+  });
+});
+
 describe("#3872 — non-regression", () => {
   it("a writable property still accepts writes", async () => {
     expect(
