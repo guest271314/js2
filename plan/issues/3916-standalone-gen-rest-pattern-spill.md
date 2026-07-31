@@ -98,6 +98,22 @@ the standalone lane — `.length` → 3 and `[1]` → 20 on a host-free module. 
 not, externref spill would have been value-wrong and the slice blocked on
 something much larger than this file.
 
+### What this costs, and why it is NOT the general rule
+
+The boundary rep is a deliberate trade, not a free win: the resume body now
+reads `r` through the dynamic `__extern_get` path instead of `struct.get` on a
+typed vec, which is strictly slower for `r.length` / `r[i]`. That is the price
+of lane-independence, and it is worth paying only because the alternative was
+leaking the host generator machinery outright.
+
+**Do not generalise it to pattern bindings at large.** Every non-rest element
+keeps the checker rule precisely because the checker rule is faithful for them.
+A future slice could recover the typed-vec path for rest bindings too, but only
+if it ALSO solves the candidate-gate agreement problem — `isNativeGeneratorCandidate`
+must reach the same verdict as `analyzeNativeGenerator` without seeing emit-site
+param types, or the emit bakes an undefined funcidx. That constraint, not the
+representation, is what makes this the exception.
+
 ### The second half of the fix — `walk` had to descend
 
 The pre-fix `walk` `continue`d on a rest element **without descending**. Lifting
