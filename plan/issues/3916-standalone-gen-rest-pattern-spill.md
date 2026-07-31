@@ -165,10 +165,14 @@ not passes.** Do not quote 363 or 333 as a pass delta.
 
 The **120 class-private** rows need **both** this fix and #3896's name-kind fix:
 #3896 gets them past `isNativeGeneratorCandidate`, this gets them past the plan
-builder. Landing this is what lets #3896 state a real yield instead of
-"≤252, reduced by overlap." Nothing in `tests/issue-3916.test.ts` depends on
-#3896 — the class cases here are public/static — so the two are independent to
-merge and only their *counting* interacts.
+builder. #3896 landed on `main` while this branch was in flight, so the overlap
+is no longer an inference — **measured on the merged tree**, `*#p([...x])`,
+`*#p({a, ...rest})`, `*#p([...x] = [1,2,3])` and `static *#p([...[a, b]])` are
+all host-free and value-correct, and are pinned in `tests/issue-3916.test.ts`.
+That is what lets #3896 state a real yield instead of "≤252, reduced by
+overlap." The two fixes are still independent to *merge* — they touch different
+regions ~600 lines apart and merged without conflict; only their counting
+interacts.
 
 The 7 async-gen rows are **not** claimed: async methods are excluded before the
 candidate call (`!isAsyncMethod`) and never reach this code.

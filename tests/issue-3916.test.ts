@@ -335,6 +335,37 @@ describe("#3916 rest-in-binding-pattern generator params route native in standal
   });
 
   /**
+   * The 120 class-PRIVATE rest rows need BOTH this fix and #3896's name-kind
+   * fix: #3896 gets them past `isNativeGeneratorCandidate`, this gets them past
+   * the plan builder. #3896 is on main, so the overlap is checkable here — and
+   * these cases are the evidence for #3896's yield being stated as a real
+   * number rather than "≤252, reduced by overlap".
+   */
+  it("class-private rest generators (needs #3896 + this)", async () => {
+    expect(
+      await runHostFree(
+        `class C { *#p([...x]: any) { yield (x as any).length as number; }
+           run(): number { return this.#p([1,2,3]).next().value as number; } }
+         export function test(): number { return new C().run(); }`,
+      ),
+    ).toBe(3);
+    expect(
+      await runHostFree(
+        `class C { *#p({ a, ...rest }: any) { yield ((a as number) * 10 + ((rest as any).c as number)); }
+           run(): number { return this.#p({ a: 1, c: 9 }).next().value as number; } }
+         export function test(): number { return new C().run(); }`,
+      ),
+    ).toBe(19);
+    expect(
+      await runHostFree(
+        `class C { static *#p([...[a, b]]: any) { yield ((a as number) * 10 + (b as number)); }
+           static run(): number { return C.#p([7,8]).next().value as number; } }
+         export function test(): number { return C.run(); }`,
+      ),
+    ).toBe(78);
+  });
+
+  /**
    * The corpus's `ary-ptrn-rest-init-*` and `-not-final-*` families are early
    * SyntaxErrors. Admitting rest must not widen the accepted grammar.
    */
