@@ -20,6 +20,35 @@ related: [1282, 1400, 1573, 2693]
 
 # #3653 — Make the ESLint integration ladder portable and non-vacuous
 
+## STATUS RECONCILE NEEDED — criteria 1–5 measure as already met on `main` (2026-07-31)
+
+Checked against `origin/main` @ `e4187572` while triaging the closed PR #3687:
+
+| Required change                              | State on `main`                                                                                        |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| 1. shared ESLint-resolving test helper        | **present** — `tests/helpers/eslint.ts` exports `resolveEslintFile` / `requireEslintFile`               |
+| 2. no hard-coded paths                        | **met** — `grep -rn "/workspace/node_modules/eslint\|/home/user/js2wasm" tests/` returns nothing        |
+| 3. explicit skip, never `catch { return; }`   | **met** — `ESLINT_DEV_DEPENDENCY_SKIP` + `it.skipIf(...)`; the vacuous catch in `issue-2693-host-delegated-select.test.ts` is gone |
+| 5. diagnostics in failed compile assertions   | **met** — e.g. `expect(result.success, result.errors.map(e => e.message).join("\n"))`                   |
+
+Criteria **4** (assert real `espree`/`esquery` were loaded before compiling) and
+**6** (the first end-to-end JS-host-lane `Linter.verify()` proof) are the parts
+still worth checking; 6 is blocked behind #3657 and #3798 regardless.
+
+This issue is still `status: ready`, so either it was fixed under another PR
+without being closed out, or someone should re-verify 4 and 6 and narrow the
+issue to those. **Do not re-implement 1–3.**
+
+## Carry-over from the closed PR #3687
+
+PR #3687's rewrite of `tests/stress/eslint-tier1.test.ts` is **not** an
+improvement to carry here: it drives the probe through a child process and
+writes an entry that does `require("../../node_modules/eslint/...")` — a
+relative path back into the repo root, which is the same portability hazard in
+a different spelling. `main`'s version (post-#3672) already uses
+`resolveEslintFile` and enforces a real heap/wall budget via
+`tests/helpers/eslint-graph-probe.ts`. Prefer `main`'s.
+
 ## Problem
 
 The ESLint tests encode Linux-container paths rather than resolving the

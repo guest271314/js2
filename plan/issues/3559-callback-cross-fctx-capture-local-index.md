@@ -264,3 +264,84 @@ body and leaves the capture unresolvable) is **not yet established**.
 - Re-run the #1177/#2029 families and the async-fn null-deref tests the #1177
   revert protected. The invalid-Wasm gate above is the argument that they are
   safe; it still has to be demonstrated, not asserted.
+
+## Correction 3 — the invalid-Wasm gate is NOT sufficient (2026-07-31, from PR #3687 carry-over)
+
+The "safety unlock" above proposes firing **only** when `cap.outerLocalIdx` is
+**out of range** for the current fctx, on the argument that no passing test can
+depend on invalid Wasm. That argument is sound as far as it goes, but it does
+not cover the whole defect: there is a form of this bug that emits **valid**
+Wasm and silently returns the **wrong value**.
+
+### Measured on current `main` (`e4187572`), JS-host lane, no TDZ, no callback
+
+```js
+export function test() {
+  var acc = 100;
+  function bump(v) {
+    return acc + v;
+  }
+  function inner(n) {
+    if (n === 0) return acc;
+    acc = bump(n - 1);
+    return inner(n - 1);
+  }
+  function outer() {
+    return inner(3);
+  }
+  return outer();
+}
+```
+
+| engine                     | result  |
+| -------------------------- | ------- |
+| Node                       | **103** |
+| js2wasm on `main` (gc/host)| **3**   |
+
+It compiles, `WebAssembly.instantiate` succeeds, and it runs — it just produces
+a wrong number. Isolation (each single removal makes it correct again):
+
+| variant                                                      | result             |
+| ------------------------------------------------------------ | ------------------ |
+| baseline above                                                | **3** (wrong)      |
+| remove `outer()`; `return inner(3)` directly from `test`      | 103 (correct)      |
+| add a tagged template (`tag\`${n-1}\`` instead of `bump(...)`)| 3 (same wrong)     |
+
+So the **necessary ingredient is the sibling-nested-function caller** (`outer`
+calling `inner`), i.e. the call site emitting `inner`'s capture-prepend sits in
+a *lifted* fctx. TDZ, `let`, callbacks and method calls are all **unnecessary**
+— this is a third route into the same `local.get cap.outerLocalIdx` else-arm,
+strictly wider than v1.
+
+### Why this changes the fix
+
+`outer`'s frame has enough locals that the declaring frame's slot index is
+**accidentally in range**, so it reads a live-but-unrelated local instead of
+trapping the emitter. A fix gated on "out of range" would green the four named
+files **and v1**, and leave this silent miscompile in place — the same
+partial-fix shape correction 2 warns about, one level further out.
+
+The gate therefore has to be "the index does not denote **this** binding in
+**this** fctx", not "the index is out of range". That is strictly harder, and it
+is where the #1177 revert constraint actually bites. A candidate exists on the
+closed PR #3687's branch `codex/1400-eslint-e2e`
+(`561c933af16651e49f50556b8128967892ce529e`): the `captureLocalIndex` helper in
+`src/codegen/expressions/call-identifier.ts`, which resolves in-range collisions
+by **type agreement** —
+
+> prefer the current frame's name binding only when the declaring-frame slot's
+> type does **not** match `cap.valType` and the name-mapped slot's type does
+
+— plus an unconditional name-mapped path for `__cb_*` frames (host callbacks
+have their own frame by construction and their capture prologue has already
+re-materialized every value under its lexical name). The mirror of the same fix
+for the tagged-template capture-prepend is in `src/codegen/string-ops.ts` on
+that branch. Read them before designing from scratch; they are **not** proven
+against the #1177 families, and type agreement is a weaker discriminator than
+binding identity, so treat them as a starting point rather than a fix.
+
+### Additional acceptance criterion
+
+- The 14-line repro above returns **103**, not 3, on the JS-host lane — a
+  wrong-**value** criterion, not a compiles/validates one. A fix that only
+  restores emission validity does not satisfy this.
