@@ -49,6 +49,28 @@ simply broken).
 - **Still hold the 25-row hand-off**: it must be re-cut **by route**, because `gOPD`
   rows already work in standalone and will not move.
 
+## Sizing — re-cut BY ROUTE (supersedes all earlier figures)
+
+| n | route exercised | moves on a copy-Array lookup fix? |
+|---:|---|---|
+| **20** | `hasOwnProperty` **only** | **YES** |
+| 4 | no reflection route (define-side) | no — different cause |
+| 1 | `gOPD` only | **no — already correct in standalone** |
+
+Sample of the 20: `defineProperties/15.2.3.7-6-a-{169,171,173}.js`,
+`defineProperty/15.2.3.6-4-{410,581,596}.js`. The single non-mover:
+`getOwnPropertyDescriptor/15.2.3.3-4-163.js`.
+
+**The re-cut went UP, not down** (~15 → 20). Both agents predicted it would shrink
+once `gOPD` rows were excluded; instead the earlier "BOTH paths" bucket was a
+classification artifact and mostly resolved to `hasOwnProperty`-only once split by
+*actual route* rather than keyword presence. **Every other sizing in this lane was
+revised downward — this is the one that grew.**
+
+**Ceiling, not a flip count.** 20 rows exercise the broken route; each still has to
+produce the right answer once `hasOwnProperty` reports correctly. A/B the 20 the way
+#3420 was A/B'd rather than quoting 20 as a delta.
+
 ## 🚨 Separate finding that reaches past this issue — the HOST lane has reflection bugs too
 
 Two agents' **host** controls failed, in **different places per route**:
