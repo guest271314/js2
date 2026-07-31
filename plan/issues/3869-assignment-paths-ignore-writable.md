@@ -77,18 +77,34 @@ comment exists to prevent.
 **Leaking/failing ≠ flipping** — A/B against a real standalone run before quoting a
 delta, as #3420 did (9/13 → 13/13).
 
-## The systematic gap this is the second instance of
+## This is an OUTLIER, not a pattern — hypothesis tested and disconfirmed
 
-**State recorded ✓, queryable ✓, write path never consults it ✗.**
+A "systematic gap" framing was proposed — that wherever a #2744-style
+integrity/descriptor **query** shipped, the matching **enforcement** would be
+missing. **It was probed and is mostly WRONG.** Recorded here so nobody hunts for
+instances that were already checked:
 
-- #3420: `frozenVars` unconsulted on ElementAccess — both consult sites tested
-  `ts.isPropertyAccessExpression`, so `a[i] = v` was never checked.
-- #3869 (this): `[[Writable]]` unconsulted on the static slot path.
+| predicted sibling | result |
+|---|---|
+| `[[Extensible]]` enforcement (preventExtensions / seal blocking new properties, strict throw) | **4/4 PASS both lanes — REFUTED** |
+| `[[Configurable]]` strict-mode `delete` throws | PASS both lanes |
+| query side (configurable read-back, `isExtensible`, `isSealed`) | 3/3 PASS both lanes |
 
-Both are "the query substrate landed, the enforcement never got wired." Predicted
-further instances wherever a #2744-style integrity/descriptor query shipped without
-an enforcement counterpart — **`[[Configurable]]` on `delete`** and
-**`[[Extensible]]` on new-property creation** are the obvious next two to probe.
+The one real sibling found is narrow and **host-lane only**: sloppy-mode `delete`
+of a non-configurable/sealed property actually deletes it (standalone correctly
+refuses). Not standalone-ES5-relevant, does not compete with this slice.
+
+**So `[[Writable]]`-on-assignment is a genuine outlier — the one integrity bit
+whose enforcement never got wired — not the first of a series.** That makes this a
+**bounded fix**, scoped and sized as one job.
+
+The accurate narrow statement: *`Object.freeze` and `Object.defineProperty` both
+record `[[Writable]]`-class state that the **static** assignment path never
+consults, while the **dynamic** path does. `[[Extensible]]` and strict-mode
+`[[Configurable]]` enforcement are correctly wired.*
+
+(#3420 — `frozenVars` unconsulted on ElementAccess, both consult sites testing
+`ts.isPropertyAccessExpression` — is the one genuine precedent for the shape.)
 
 ## Acceptance
 
