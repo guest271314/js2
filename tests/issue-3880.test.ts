@@ -348,6 +348,21 @@ describe("#3880 claim-issue.mjs — reservations are attributable", () => {
     });
   });
 
+  it("attributes a release to the ACTOR, not to the holder being cleared", () => {
+    expect(run(fx, ["3000", "ttraenkler/departed-agent"]).code).toBe(0);
+    // Clearing a departed agent's claim is the common case (two such records
+    // were created in one stand-down on 2026-07-31). The positional argument
+    // here is the EXPECTED HOLDER, so attributing the record to it would have
+    // the dead agent releasing itself.
+    const r = run(fx, ["--release", "3000", "ttraenkler/departed-agent", "--by", "ttraenkler/janitor"]);
+    expect(r.code).toBe(0);
+    expect(readRecord(fx, "3000")).toMatchObject({
+      status: "released",
+      assignee: "ttraenkler/departed-agent",
+      requested_by: "ttraenkler/janitor",
+    });
+  });
+
   it("keeps --branch parsing intact alongside --by", () => {
     const r = run(fx, ["3000", "dave", "--by", "ttraenkler/lead", "--branch", "issue-3000-x"]);
     expect(r.code).toBe(0);
@@ -402,6 +417,35 @@ describe("#3880 claim-issue.mjs — preserved behaviour", () => {
     expect(r.code).toBe(0);
     expect(r.stderr).toMatch(/\(dry-run\) would claim #3000/);
     expect(listRecords(fx)).toEqual([]);
+  });
+
+  it("--complete actually frees the lock for readers", () => {
+    // This is the step CLAUDE.md prescribes after a merge to "clear the
+    // cross-dev lock". It writes status:"done", and the old heldness predicate
+    // was `status !== "released"` — so a completed issue stayed CLAIMED for
+    // every reader, forever. On the live ref that was 294 of 654 reported
+    // "active claims".
+    expect(run(fx, ["3000", "alice"]).code).toBe(0);
+    expect(run(fx, ["--complete", "3000", "alice"]).code).toBe(0);
+    expect(readRecord(fx, "3000")).toMatchObject({ status: "done" });
+
+    const check = run(fx, ["--check", "3000"]);
+    expect(check.code).toBe(0);
+    expect(check.stdout).toMatch(/is UNASSIGNED/);
+    expect(run(fx, ["--list"]).stdout).toMatch(/No active claims/);
+    // ...and the next agent can take it.
+    expect(run(fx, ["3000", "bob"]).code).toBe(0);
+  });
+
+  it("keeps a completed id RESERVED even though its lock is free", () => {
+    // Freeing the lock must not recycle the number: idsFromAssignRef reads
+    // every entry's id regardless of status.
+    const a = run(fx, ["--allocate", "--no-pr-scan", "--allow-unscanned", "--by", "x"]);
+    const id = a.stdout.trim();
+    expect(run(fx, ["--complete", id, "x"]).code).toBe(0);
+    const b = run(fx, ["--allocate", "--no-pr-scan", "--allow-unscanned", "--by", "x"]);
+    expect(b.stdout.trim()).not.toBe(id);
+    expect(Number(b.stdout.trim())).toBeGreaterThan(Number(id));
   });
 
   it("reports a genuine no-op release as success, on a verified read", () => {

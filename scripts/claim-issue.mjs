@@ -155,7 +155,19 @@ const REMOTE = process.env.CLAIM_ASSIGN_REMOTE || "origin";
 const NET_TIMEOUT_MS = Number(process.env.CLAIM_NET_TIMEOUT_MS) || 60000;
 const NET_RETRIES = Number(process.env.CLAIM_NET_RETRIES) || 3;
 const MAIN_FETCH_TIMEOUT_MS = Number(process.env.CLAIM_MAIN_FETCH_TIMEOUT_MS) || 90000;
-const MAX_RETRIES = 6;
+// Contention budget for the first-push-wins loop. This is NOT a network-retry
+// budget (that is NET_RETRIES) — it is how many times we are willing to lose a
+// race and re-scan.
+//
+// (#3880) Raised from 6 now that an attempt costs ~1 s instead of 65-210 s. The
+// failure was STARVATION, not a hang: with ~8 agents writing one orphan ref,
+// a slow writer loses every round because another writer advances the ref
+// between its fetch and its push, and its whole budget is consumed by other
+// agents' successes. Shrinking the fetch→push window by two orders of magnitude
+// is the main cure — it is what makes the optimistic loop converge at all — but
+// it does not make the loop FAIR, so the budget is widened too. Worst case is
+// now ~12 × (1 s + ≤4 s jittered backoff) ≈ 30-60 s, against 390-1260 s before.
+const MAX_RETRIES = Number(process.env.CLAIM_MAX_RETRIES) || 12;
 
 // TEST SEAM (#3880), test-only, no production caller. The two outcomes this
 // issue is about — a push that LANDS while git reports failure, and a write
@@ -577,8 +589,25 @@ function readEntry(baseSha, id) {
   }
 }
 
+// (#3880) A lock is held ONLY while it is `in-progress`.
+//
+// This used to read `status !== "released"`, which meant `--complete` — the
+// step CLAUDE.md's dev protocol prescribes after a merge to "clear the
+// cross-dev lock" — did not clear it for ANY reader. `--complete` writes
+// `status: "done"`, and `"done" !== "released"` is true, so a completed issue
+// stayed CLAIMED forever. Measured on the live ref: of 1,080 entries, 294 were
+// `done`, and `--list` was reporting 359 in-progress + 294 done = 654 "active
+// claims" — 45 % of them phantoms. That is the other half of this issue's
+// "no claim file is unreliable in BOTH directions": #3420's record looked
+// permanently claimed after its work merged, and issues turned up with "a claim
+// nobody held".
+//
+// A whitelist rather than a blacklist, so a future status cannot silently
+// resurrect the same bug. Bare `reserved` placeholders carry no assignee and
+// were already excluded; id RESERVATION is unaffected because
+// idsFromAssignRef() reads every entry's `id` regardless of status.
 function isHeld(entry) {
-  return !!(entry && entry.assignee && entry.status !== "released");
+  return !!(entry && entry.assignee && entry.status === "in-progress");
 }
 
 // Find the issue file on main and read its `status:` frontmatter (best effort).
@@ -1068,7 +1097,9 @@ function doAllocate(assignee) {
   }
   die(
     5,
-    `Could not reserve a fresh id after ${MAX_RETRIES} attempts (heavy contention). Nothing was reserved; re-run.`,
+    `Could not reserve a fresh id after ${MAX_RETRIES} attempts (heavy contention — other agents kept winning the ref).\n` +
+      "Nothing was reserved: every attempt was VERIFIED against the ref, so this is not a guess and re-running " +
+      "cannot double-reserve. Raise CLAIM_MAX_RETRIES if the fleet is unusually busy.",
   );
 }
 
@@ -1141,7 +1172,15 @@ function writeMode(target, assignee, kind) {
       id: base,
       ...(slice ? { slice } : {}),
       assignee: kind === "claim" ? assignee : existing ? existing.assignee : assignee,
-      requested_by: requesterId(assignee),
+      // The ACTOR, not the holder. On release/complete the positional argument
+      // is the EXPECTED holder (whose claim is being cleared) — frequently a
+      // departed agent — so attributing the record to it would say the dead
+      // agent released itself. Only a claim is performed by its own assignee.
+      // The ACTOR, not the holder. On release/complete the positional argument
+      // is the EXPECTED holder (whose claim is being cleared) — frequently a
+      // departed agent — so attributing the record to it would say the dead
+      // agent released itself. Only a claim is performed by its own assignee.
+      requested_by: requesterId(kind === "claim" ? assignee : ""),
       status: kind === "claim" ? "in-progress" : kind === "complete" ? "done" : "released",
       branch: kind === "claim" ? branch || (existing && existing.branch) || "" : (existing && existing.branch) || "",
       claimed_at: kind === "claim" ? nowIso() : existing ? existing.claimed_at : nowIso(),
@@ -1173,7 +1212,12 @@ function writeMode(target, assignee, kind) {
     // don't re-collide in lock-step. Skip the wait after the final attempt.
     if (attempt < MAX_RETRIES) sleepMs(raceBackoffMs(attempt));
   }
-  die(5, `Could not acquire the claim ref after ${MAX_RETRIES} attempts. Nothing was written; try again.`);
+  die(
+    5,
+    `Could not acquire the claim ref after ${MAX_RETRIES} attempts (heavy contention — other agents kept winning the ref).\n` +
+      "Nothing was written: every attempt was VERIFIED against the ref, so this is not a guess. Safe to re-run; " +
+      "raise CLAIM_MAX_RETRIES if the fleet is unusually busy.",
+  );
 }
 
 // --- dispatch ---------------------------------------------------------------

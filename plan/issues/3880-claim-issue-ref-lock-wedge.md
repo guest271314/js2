@@ -157,11 +157,119 @@ requested destination ref was created at the new tip. git still exited 1. The ol
 `fetchAssign()` used a throwing helper, so a fetch that worked crashed the script
 — the "succeeds as failure" half, in one line of code.
 
+### It is STARVATION, and it gets worse exactly as the fleet grows
+
+The "hang" is not a hang. Evidence gathered by an agent that was losing the race
+in real time, while it was losing it:
+
+- `/workspace/.git/refs/claim-issue/` clean — **no stale lock, no `*.lock`**;
+- the ref was **live and advancing** (`65f9d562` at 13:16:36Z) — other agents'
+  writes were landing fine throughout;
+- `refs/claim-issue/base` mtime updated **during** its retry — so its fetch
+  succeeded and it then looped;
+- verbatim: `cannot lock ref 'refs/claim-issue/base': is at fea409c7… but
+expected ef945d25…` — another writer advanced the ref between its fetch and
+  its push.
+
+So: first-push-wins with re-scan on rejection, where each attempt spends 65-210 s
+between reading the tip and pushing. With ~8 agents writing one orphan ref, a
+slow writer loses **every** round and never converges — its entire retry budget
+is consumed by other agents' successes.
+
+**The property worth naming: unreliability scales with fleet size.** This tool
+degrades precisely as parallelism rises, which is exactly when a dispatch lock
+matters most. That is a stronger argument for fixing it than any count of
+individual failures.
+
+Independently confirmed by the PR-queue shepherd the same afternoon, with the
+process count attached: `--allocate --json` ran **>20 minutes** and then failed,
+with **7 concurrent `claim-issue.mjs` processes** at peak. Its output names
+**both** contended refs at once —
+
+```
+allocate: ref moved (attempt 1/6) — re-scanning for a fresh id…
+allocate: ref moved (attempt 2/6) — re-scanning for a fresh id…
+error: cannot lock ref 'refs/claim-issue/base': is at 16521b7ce048 but expected 022efb97dcb4
+error: cannot lock ref 'refs/remotes/origin/issue-assignments': is at 16521b7ce048 but expected 022efb97dcb4
+```
+
+— which is the decisive detail: this is a **LOCAL** ref-lock collision between
+concurrent processes in one clone, not the remote first-push-wins race the retry
+loop was built for. Retrying cannot help, because every process is fighting for
+the same two local refs. Both disappear under the fix: the shared mirror
+`refs/claim-issue/base` is replaced by a per-invocation ref, and
+`refs/remotes/origin/issue-assignments` is only ever touched because of the
+configured refmap, which addressing the remote by URL removes entirely.
+
+The shepherd also ran it as `… 2>&1 | tail -20` and its harness recorded **exit
+code 0** for a run that produced no id — `tail`'s status again, a fourth
+independent hit on the same trap in one session. And the cost was not just time:
+it was blocked from filing an issue _about a CI throughput defect_ for ~25 min
+and ended up hand-picking an id, which is precisely the #2531 collision hazard
+this tool exists to prevent.
+
+It also explains the mirror-image symptom: an `--allocate` that **wrote its
+reservation and then hung** is the same loop, failing to report after a
+successful side effect.
+
+This reframes the cache repo. It is not primarily a speed fix — it shrinks the
+fetch→push window by two orders of magnitude, which is **what makes the
+optimistic loop converge at all**. It does not make the loop _fair_, so the
+contention budget is widened as well (`MAX_RETRIES` 6 → 12, jittered backoff
+retained, `CLAIM_MAX_RETRIES` to override): affordable now that an attempt costs
+~1 s rather than minutes.
+
 ### The push's exit status is not evidence either
 
 A push can land server-side and still report failure or time out. Two ids
 (#3890, #3891) are permanent holes in the sequence because agents re-allocated
 after an "apparent" failure whose reservation had already been written.
+
+**Confirmed in both directions on the same day, in one stand-down.** One agent's
+`--allocate` hung _after_ writing its reservation (a success that reads as a
+failure), and the same agent's `--release 3896` / `--complete 3893` hung
+_without_ writing (a failure that reads as a success). It only knew which was
+which because it read the record back. That is the third independent
+confirmation this session that **the exit code carries no information in either
+direction** — which is why the fix reports the side effect actually performed
+rather than what the subprocess claimed.
+
+### `--complete` never actually cleared the lock — 45 % of "active claims" were phantoms
+
+Found by running the fixed `--complete` against two real stale records (#3893,
+#3896) and then re-reading them: the write landed perfectly (`status: "done"`,
+`released_at` set) and `--check` **still said CLAIMED**.
+
+The reader was wrong, not the writer:
+
+```js
+// before
+return !!(entry && entry.assignee && entry.status !== "released");
+```
+
+`--complete` writes `status: "done"`, and `"done" !== "released"`, so a completed
+issue stayed held **forever, for every reader** — including the pre-dispatch
+gate. CLAUDE.md's dev protocol prescribes `--complete {N}` after a merge to
+"clear the cross-dev lock"; it did not clear it.
+
+Measured on the live ref (1,080 entries):
+
+| status        | count   |
+| ------------- | ------- |
+| `in-progress` | 359     |
+| `reserved`    | 315     |
+| `done`        | **294** |
+| `released`    | 109     |
+
+`--list` was reporting **654** active claims = 359 in-progress + 294 done + 1.
+**45 % were phantoms.** After the fix, the same command reports **359**.
+
+This is the other half of "no claim file is unreliable in BOTH directions": it is
+why #3420's record looked permanently claimed after its work merged, and why
+issues turned up with "a claim nobody held". Held is now a whitelist
+(`status === "in-progress"`) so a future status cannot silently resurrect it.
+Id _reservation_ is unaffected — `idsFromAssignRef()` reads every entry's `id`
+regardless of status, and there is a test pinning that.
 
 ### Why records were anonymous
 
@@ -252,6 +360,8 @@ Every guard was kill-switch verified — reverted, confirmed red, restored:
 | `emitMarker()` → no-op                                         | all 6 verdict-marker assertions                                                    |
 | _(found during development)_ per-invocation `write_id` removed | "six concurrent allocators" — all six got the same id                              |
 | _(found during development)_ in-place cache init               | "six concurrent allocators" — `unable to write symref for HEAD`                    |
+| `requested_by` on release/complete → the holder                | "attributes a release to the ACTOR, not to the holder being cleared"               |
+| `isHeld` → `status !== "released"`                             | "`--complete` actually frees the lock for readers"                                 |
 
 Measured against the live remote, same repo, same operation:
 
@@ -266,6 +376,32 @@ only ever been applied to the id scan. Both now share one batched reader.
 
 Portability: the suite also passes with `GIT_DIR` and `GIT_INDEX_FILE` exported,
 which is how a git hook invokes it. That matters — see below.
+
+### Live verification against real stale records
+
+Two genuine phantom-owner records were created the same day by a departing
+agent whose `--release`/`--complete` hung without writing: **#3893** and
+**#3896**, both `in-progress` under `ttraenkler/dev-es3-editions`, both issues
+already `done`. Cleared with the fixed tool and verified by re-reading the ref:
+
+```console
+$ node scripts/claim-issue.mjs --complete 3893 ttraenkler/dev-es3-editions --by ttraenkler/dev-claim-reliability
+Marked #3893 complete (was ttraenkler/dev-es3-editions).
+claim-issue: OK — complete #3893 verified on origin/issue-assignments (exit 0)
+$ node scripts/claim-issue.mjs --check 3893
+#3893 is UNASSIGNED.
+claim-issue: OK — #3893 is unassigned (verified against origin/issue-assignments) (exit 0)
+```
+
+That run is also what surfaced the `isHeld` defect above: the first `--check`
+after a verified-successful `--complete` still said CLAIMED, which is only
+visible if you read the record back instead of trusting the success report.
+
+The stored record shows `requested_by: ttraenkler/dev-claim-reliability` — the
+**actor**, not the departed holder. That distinction was a bug in the first cut
+of this fix: on release/complete the positional argument is the _expected
+holder_, so attributing to it would have recorded the dead agent releasing
+itself.
 
 ## A hazard this issue's own fix work uncovered
 
