@@ -153,6 +153,67 @@ describe("#3872 — standalone lane (host-free)", () => {
   });
 });
 
+// Acceptance names dot / computed / compound. Computed is a SEPARATE lowering
+// path (`compileElementAssignment` / `compileElementCompoundAssignment`) from
+// the dot forms, so it needs its own coverage — on host it already worked via
+// the runtime `__extern_set_strict` FLAG_WRITABLE consult, but standalone
+// aliases that to the non-throwing native helper (#2017) and needed the
+// compile-time throw.
+describe("#3872 — computed form", () => {
+  const COMPUTED = `export function test(): number {
+    const o: any = {}; const k = "p";
+    ${DP}
+    try { o[k] = 20; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+    return 0;
+  }`;
+  const COMPUTED_COMPOUND = `export function test(): number {
+    const o: any = {}; const k = "p";
+    ${DP}
+    try { o[k] %= 20; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+    return 0;
+  }`;
+
+  it("o[k] = v throws (host)", async () => {
+    expect(await runHost(COMPUTED)).toBe(1);
+  });
+  it("o[k] = v throws (standalone)", async () => {
+    expect(await runStandalone(COMPUTED)).toBe(1);
+  });
+  it("o['p'] = v literal key throws", async () => {
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = {}; ${DP}
+        try { o["p"] = 20; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+        return 0;
+      }`),
+    ).toBe(1);
+  });
+  it("o[k] %= v throws (host)", async () => {
+    expect(await runHost(COMPUTED_COMPOUND)).toBe(1);
+  });
+  it("o[k] %= v throws (standalone)", async () => {
+    expect(await runStandalone(COMPUTED_COMPOUND)).toBe(1);
+  });
+  it("computed write leaves the value untouched", async () => {
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = {}; const k = "p"; ${DP}
+        try { o[k] = 20; } catch (e: any) {}
+        return o.p;
+      }`),
+    ).toBe(10);
+  });
+  it("CTRL a writable property still accepts a computed write", async () => {
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = {}; const k = "p";
+        Object.defineProperty(o,"p",{value:10,writable:true,configurable:true});
+        o[k] = 20; return o[k];
+      }`),
+    ).toBe(20);
+  });
+});
+
 describe("#3872 — non-regression", () => {
   it("a writable property still accepts writes", async () => {
     expect(

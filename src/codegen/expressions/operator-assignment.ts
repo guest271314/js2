@@ -2179,7 +2179,10 @@ function compilePropertyCompoundAssignment(
   // still falls through rather than being given a wrong expression value.
   // The corpus this targets is `onlyStrict` (`11.13.2-*-s.js`), so the strict
   // arm covers it; sloppy compound is recorded as not-covered in the issue.
-  if (isNonWritableDataProperty(ctx, target, propName) && isStrictContext(target, ctx.inferModuleStrictArguments)) {
+  if (
+    isNonWritableDataProperty(ctx, target.expression, propName) &&
+    isStrictContext(target, ctx.inferModuleStrictArguments)
+  ) {
     const rhsType = compileExpression(ctx, fctx, rhs);
     if (rhsType) fctx.body.push({ op: "drop" });
     emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${propName}' of object`);
@@ -2731,6 +2734,29 @@ function compileElementCompoundAssignment(
   rhs: ts.Expression,
   op: ts.SyntaxKind,
 ): ValType | null {
+  // (#3872) Computed COMPOUND write to a non-writable data property —
+  // `o[k] %= 20`. The fourth and last of the assignment shapes this issue
+  // names; the other three are handled in `compilePropertyAssignment`,
+  // `compilePropertyCompoundAssignment` and `compileElementAssignment`.
+  // Strict-only for the same reason as the property-compound arm: sloppy would
+  // need the computed value while suppressing only the store, and the lowering
+  // fuses those.
+  if (ts.isIdentifier(target.expression)) {
+    const nwKey = resolveComputedKeyExpression(ctx, target.argumentExpression);
+    if (
+      nwKey !== undefined &&
+      isNonWritableDataProperty(ctx, target.expression, nwKey) &&
+      isStrictContext(target, ctx.inferModuleStrictArguments)
+    ) {
+      const keyType = compileExpression(ctx, fctx, target.argumentExpression);
+      if (keyType !== null) fctx.body.push({ op: "drop" });
+      const rhsType = compileExpression(ctx, fctx, rhs);
+      if (rhsType) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${nwKey}' of object`);
+      return { kind: "f64" }; // unreachable after the throw
+    }
+  }
+
   // #2045 C.8: compound write `b[i] op= rhs` on a linear-backed Uint8Array must
   // read-modify-write the linear memory. Without this it fell through to the
   // GC/externref path below (which materialises the buffer as a value and never

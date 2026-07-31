@@ -4240,13 +4240,9 @@ function emitSetterCallWithDummy(
  * dynamic receivers already consults the runtime `FLAG_WRITABLE` companion
  * table via `__extern_set`.
  */
-export function isNonWritableDataProperty(
-  ctx: CodegenContext,
-  target: ts.PropertyAccessExpression,
-  propName: string,
-): boolean {
-  if (!ts.isIdentifier(target.expression)) return false;
-  const flags = ctx.definedPropertyFlags.get(`${integrityVarKey(ctx, target.expression)}:${propName}`);
+export function isNonWritableDataProperty(ctx: CodegenContext, receiver: ts.Expression, propName: string): boolean {
+  if (!ts.isIdentifier(receiver)) return false;
+  const flags = ctx.definedPropertyFlags.get(`${integrityVarKey(ctx, receiver)}:${propName}`);
   if (flags === undefined) return false;
   // Accessor properties route to the setter — [[Writable]] does not apply.
   if (flags & PROP_FLAG_ACCESSOR) return false;
@@ -4260,7 +4256,7 @@ function tryEmitNonWritablePropertyWrite(
   value: ts.Expression,
   propName: string,
 ): InnerResult | undefined {
-  if (!isNonWritableDataProperty(ctx, target, propName)) return undefined;
+  if (!isNonWritableDataProperty(ctx, target.expression, propName)) return undefined;
 
   // §13.15.2: the RHS is evaluated before Set is attempted, so its side effects
   // must still happen even though the store never lands.
@@ -4356,6 +4352,31 @@ function compileElementAssignment(
   // silently; strict mode throws a catchable TypeError.
   const frozenNoOp = tryEmitFrozenElementWriteNoOp(ctx, fctx, target, value);
   if (frozenNoOp !== undefined) return frozenNoOp;
+
+  // (#3872) COMPUTED write to a non-writable data property — `o[k] = v` where
+  // the key resolves statically. This is the third assignment form the issue
+  // names (dot / computed / compound); the dot and compound arms live in
+  // `compilePropertyAssignment` and `compilePropertyCompoundAssignment`.
+  //
+  // Host already handled this through the runtime `__extern_set_strict` consult
+  // of `FLAG_WRITABLE`; standalone did NOT, because its `__extern_set_strict` is
+  // deliberately aliased to the non-throwing native `__extern_set` (#2017) — no
+  // TypeError bridge. So the throw has to be emitted at compile time here too.
+  if (ts.isIdentifier(target.expression)) {
+    const key = resolveComputedKeyExpression(ctx, target.argumentExpression);
+    if (key !== undefined && isNonWritableDataProperty(ctx, target.expression, key)) {
+      // §13.15.2 order: key and RHS still evaluate, then the Set fails.
+      const keyType = compileExpression(ctx, fctx, target.argumentExpression);
+      if (keyType !== null) fctx.body.push({ op: "drop" });
+      const rhsType = compileExpression(ctx, fctx, value);
+      if (rhsType === null) return null;
+      if (isStrictContext(target, ctx.inferModuleStrictArguments)) {
+        fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${key}' of object`);
+      }
+      return rhsType;
+    }
+  }
 
   // #1886 Slice B: linear-backed Uint8Array write `buf[i] = v` →
   // i32.store8(ptr+i, trunc(v)). Only fires for a registered linear-safe

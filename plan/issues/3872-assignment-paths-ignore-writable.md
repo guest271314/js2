@@ -33,6 +33,7 @@ loc-budget-allow:
 func-budget-allow:
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
   - src/codegen/expressions/operator-assignment.ts::compilePropertyCompoundAssignment
+  - src/codegen/expressions/operator-assignment.ts::compileElementCompoundAssignment
   - src/codegen/object-ops.ts::compileObjectDefineProperty
 ---
 
@@ -348,6 +349,31 @@ Regression sweep, 6 adjacent files (`define-property-patterns`,
 > on stock `origin/main`** — confirmed by reverting all three touched files and
 > re-running. It contains no `defineProperty` call at all. Verified before
 > attributing rather than after.
+
+### All four assignment shapes covered
+
+Acceptance names dot / computed / compound. Those are **four** distinct lowering
+sites, not three, and each needed its own consult — the shapes do not share a
+funnel:
+
+| shape | site |
+| --- | --- |
+| `o.p = v` | `assignment.ts::compilePropertyAssignment` |
+| `o.p %= v` | `operator-assignment.ts::compilePropertyCompoundAssignment` |
+| `o[k] = v` | `assignment.ts::compileElementAssignment` |
+| `o[k] %= v` | `operator-assignment.ts::compileElementCompoundAssignment` |
+
+All four consult one exported predicate, `isNonWritableDataProperty`
+(`assignment.ts`), so there is a single source of truth rather than four copies
+that drift. It takes the **receiver expression**, not a `PropertyAccessExpression`,
+so the element sites use it without an unsound cast.
+
+Computed forms already worked on **host** via the runtime `__extern_set_strict`
+`FLAG_WRITABLE` consult; they needed the compile-time throw only for
+**standalone**, whose `__extern_set_strict` is the non-throwing alias.
+
+Final: **computed 5/5 both lanes**, `tests/issue-3872.test.ts` **22/22**,
+regression sweep across 8 adjacent descriptor/property files **68/68**.
 
 ### Still not covered
 
