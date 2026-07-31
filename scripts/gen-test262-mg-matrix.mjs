@@ -11,28 +11,56 @@
 // *inside* that group rather than from keeping the per-group matrix small.
 //
 // The pool has 120 four-core runners and every shard intentionally uses all
-// four cores (`COMPILER_POOL_SIZE=4`). Reserve 14 runners for the overlapping
+// four cores (`COMPILER_POOL_SIZE=4`). Reserve runners for the overlapping
 // CI quality/equivalence jobs, the differential workflow, the Test262 gate,
-// and short-lived orchestration jobs. The remaining 106 runners are assigned
-// to Test262, so a serial queue entry can use the fleet without starving its
-// other required checks.
+// and short-lived orchestration jobs. The rest are assigned to Test262, so a
+// serial queue entry can use the fleet without starving its other required
+// checks.
+//
+// RESERVE SIZING (#3914, measured 2026-07-31). The reserve was 14, which put
+// the matrix at 106 shards. That is over the real ceiling: merge_group run
+// 30631849709 started 101 of its 106 shard jobs at t+44-52 s but **5 of them
+// at t+90-184 s**, and the last-finishing job in the whole run was one of the
+// starved ones (standalone 2/34: started t+134 s, ran 575 s, ended t+709 s).
+// Concurrent demand at t+45 s is 106 shards + 13 ci.yml merge_group jobs
+// (`changes`, `quality`, `cancel-test262-on-quality-failure`, `linear-tests`,
+// `equivalence-shard` x8, `equivalence-gate`) + this workflow's `cheap gate`
+// and `changes` = ~121, i.e. just over the 120 ceiling. A 14-runner reserve
+// therefore bought 4 extra shards and paid for them with ~89 s of start skew
+// on the critical path. 18 is the honest number.
 //
 // js-host and standalone get DIFFERENT counts because their measured work is
-// not equal. The first 34/19 run after #3470 (merge_group run 29807524490,
-// 2026-07-21) started all 53 jobs within one second and measured the `Run shard`
-// steps as:
-//   js-host:    24,071 runner-seconds total, 818 s max (34 jobs)
-//   standalone: 11,284 runner-seconds total, 654 s max (19 jobs)
-// The 2.13 work ratio is matched by 72/34 = 2.12. At perfect distribution that
-// is about 334 vs. 332 seconds of measured shard work per runner, plus setup
-// and tail skew. Both lanes therefore target the same ~6-8 minute window while
-// retaining ample margin under the 25-minute job timeout.
+// not equal. RATIO (re-derived from merge_group run 30631849709, 2026-07-31,
+// the 72/34 matrix). `Run shard` step timings:
+//   js-host:    29,353 runner-seconds total, mean 408 s, max 468 s (72 jobs)
+//   standalone: 16,000 runner-seconds total, mean 471 s, max 542 s (34 jobs)
+// That is a **1.835** work ratio, NOT the 2.13 the 72/34 split was scaled
+// from (measured on run 29807524490 at 34/19, before the lanes' relative cost
+// shifted). At 72/34 the lanes are therefore inverted again: standalone is the
+// long pole by ~74 s of `Run shard` time. 66/36 = 1.833 matches the measured
+// ratio, and at 102 shards both lanes land on ~444 s of mean shard work —
+// ~510 s at the observed per-lane max/mean skew (1.147 host, 1.151
+// standalone), i.e. within ~2 s of each other, with a ~39 s fixed per-job
+// overhead (setup + checkout + install + bundle + upload, median measured)
+// on top. Ample margin under the 25-minute job timeout.
+//
+// Net expected effect vs. 72/34 + reserve 14: the critical shard job goes from
+// "starts t+134 s, ends t+709 s" to "starts t+45 s, ends t+~596 s" — about
+// 113 s off every src-touching merge_group run. Under a serial queue that is
+// a direct throughput gain.
 //
 // The host lane is costlier primarily because both lanes still compile the
 // honest full in-Wasm harness, while the host target emits JS/Wasm interop glue.
 // In run 29807524490 host compilation totaled 77.7M ms vs. 42.3M ms for
 // standalone; execution was only 2.4M vs. 0.7M ms. Host also reaches more
 // passing tests and therefore performs more strict-mode recompilations.
+//
+// RE-DERIVING THIS: pull the `Run shard` step durations for a completed
+// merge_group run, sum them per lane, and split the shard budget by the two
+// sums. If one lane's max job is consistently more than ~1 min past the
+// other's, the ratio has drifted again — that is the signal to redo it, and
+// it has now drifted twice (2.13 -> 1.835), so treat it as a recurring check
+// rather than a constant.
 //
 // The underlying partition (assignBalancedChunk, test262-shared.ts) is a
 // pure function of (chunkIndex, totalChunks): it re-derives the FULL test262
@@ -46,9 +74,9 @@
 // baked into a per-shard filename).
 
 export const MERGE_GROUP_RUNNER_CAPACITY = 120;
-export const MERGE_GROUP_RESERVED_RUNNERS = 14;
-export const JS_HOST_CHUNKS = 72;
-export const STANDALONE_CHUNKS = 34;
+export const MERGE_GROUP_RESERVED_RUNNERS = 18;
+export const JS_HOST_CHUNKS = 66;
+export const STANDALONE_CHUNKS = 36;
 
 /**
  * @param {string} targetName matrix job-name suffix, e.g. "js-host"
