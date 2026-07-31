@@ -4240,6 +4240,19 @@ function emitSetterCallWithDummy(
  * dynamic receivers already consults the runtime `FLAG_WRITABLE` companion
  * table via `__extern_set`.
  */
+export function isNonWritableDataProperty(
+  ctx: CodegenContext,
+  target: ts.PropertyAccessExpression,
+  propName: string,
+): boolean {
+  if (!ts.isIdentifier(target.expression)) return false;
+  const flags = ctx.definedPropertyFlags.get(`${integrityVarKey(ctx, target.expression)}:${propName}`);
+  if (flags === undefined) return false;
+  // Accessor properties route to the setter — [[Writable]] does not apply.
+  if (flags & PROP_FLAG_ACCESSOR) return false;
+  return !(flags & PROP_FLAG_WRITABLE);
+}
+
 function tryEmitNonWritablePropertyWrite(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -4247,13 +4260,7 @@ function tryEmitNonWritablePropertyWrite(
   value: ts.Expression,
   propName: string,
 ): InnerResult | undefined {
-  if (!ts.isIdentifier(target.expression)) return undefined;
-
-  const flags = ctx.definedPropertyFlags.get(`${integrityVarKey(ctx, target.expression)}:${propName}`);
-  if (flags === undefined) return undefined;
-  // Accessor properties route to the setter — [[Writable]] does not apply.
-  if (flags & PROP_FLAG_ACCESSOR) return undefined;
-  if (flags & PROP_FLAG_WRITABLE) return undefined;
+  if (!isNonWritableDataProperty(ctx, target, propName)) return undefined;
 
   // §13.15.2: the RHS is evaluated before Set is attempted, so its side effects
   // must still happen even though the store never lands.

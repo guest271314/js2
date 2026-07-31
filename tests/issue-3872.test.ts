@@ -81,6 +81,39 @@ describe("#3872 — non-writable data property write (host)", () => {
     expect(await runHost(VALUE_PRESERVED)).toBe(10);
   });
 
+  it("compound assignment (%=) throws a catchable TypeError", async () => {
+    // 22 of the ~24 corpus rows are compound. These route through
+    // `compilePropertyCompoundAssignment`, NOT `compilePropertyAssignment`, so
+    // they need their own consult.
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = {}; ${DP}
+        try { o.p %= 20; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+        return 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("compound assignment (+=) throws a catchable TypeError", async () => {
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = {}; ${DP}
+        try { o.p += 1; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+        return 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("compound assignment leaves the value untouched", async () => {
+    expect(
+      await runHost(`export function test(): number {
+        const o: any = {}; ${DP}
+        try { o.p += 1; } catch (e: any) {}
+        return o.p;
+      }`),
+    ).toBe(10);
+  });
+
   it("evaluates the RHS for its side effects before failing", async () => {
     // §13.15.2: the RHS is evaluated before Set is attempted.
     expect(

@@ -19,10 +19,16 @@ related: [3420, 2668, 2744, 3776]
 # the host lane. Relocating it would separate three checks that must stay in
 # sync and would mean exporting the function's internal fctx/emit plumbing to
 # move ~50 lines. Growth is intended and local.
+# The compound-assignment arm must live beside `compilePropertyCompoundAssignment`
+# for the same reason: §13.15.2 decides PutValue fails before the compound
+# lowering fuses GetValue/op/store, and that fusion is exactly what makes an
+# out-of-module check impossible to express.
 loc-budget-allow:
   - src/codegen/expressions/assignment.ts
+  - src/codegen/expressions/operator-assignment.ts
 func-budget-allow:
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  - src/codegen/expressions/operator-assignment.ts::compilePropertyCompoundAssignment
 ---
 
 # #3872 — the strict-mode TypeError is missing; the two lanes fail differently
@@ -259,8 +265,43 @@ for redefine validation, so a naive record at the `object-ops.ts:1146`
 chokepoint would make a first define look like a **redefine** and can spuriously
 throw `Cannot redefine property`. Record it only where `useStruct` is false.
 
-### Not covered
+### Compound assignment — NOW COVERED (host)
 
-Compound assignment (`o.p %= 20`) still fails in **both** lanes — it does not
-route through `compilePropertyAssignment`, so the consult never sees it. That is
-22 of the ~24 corpus rows and is the larger half of this issue by row count.
+`o.p %= 20` routes through `compilePropertyCompoundAssignment`
+(`operator-assignment.ts`), **not** `compilePropertyAssignment`, so it needed its
+own consult. Both now share one predicate, `isNonWritableDataProperty`, exported
+from `assignment.ts` — one source of truth rather than two drifting copies.
+
+**Strict-only, deliberately.** In strict mode the throw discards the computed
+value, so evaluating the RHS for side effects and throwing is exact. Sloppy mode
+would need the *computed* value (`GetValue ∘ op ∘ RHS`) as the expression result
+while suppressing only the store, and the surrounding lowering fuses those three.
+Returning the bare RHS instead — the #2667 mapped-arguments shortcut — is correct
+for a **simple** assignment but **wrong** for a compound one. So sloppy compound
+still falls through rather than being handed a wrong expression value. The corpus
+is `onlyStrict` (`11.13.2-*-s.js`), so the strict arm covers it.
+
+### Updated measurement
+
+| | stock main | dot only | dot + compound |
+| --- | --- | --- | --- |
+| host | **7 / 13** | 9 / 13 | **12 / 13** |
+| standalone | 10 / 13 | 10 / 13 | 10 / 13 |
+
+The one remaining host failure (`accessor setter still runs`) is **pre-existing
+on stock main** — confirmed by A/B, not introduced here.
+
+Real corpus rows through `runTest262File`, host lane, now **pass**:
+`compound-assignment/11.13.2-25-s.js`, `11.13.2-54-s.js`,
+`assignment/11.13.1-1-s.js`. Two of those are confirmed flips against the
+earlier 4-row spot-check (`11.13.2-25-s` and `11.13.1-1-s` were host-FAIL).
+
+`tests/issue-3872.test.ts`: **14/14**.
+
+### Still not covered
+
+- **Standalone, both forms** — blocked on the empty `definedPropertyFlags` mirror
+  (see above). This is the remaining prize: all three corpus rows above still
+  fail standalone with `Expected a TypeError to be thrown but no exception was
+  thrown at all`.
+- **Sloppy-mode compound assignment** — see the strict-only note above.
