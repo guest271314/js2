@@ -49,6 +49,45 @@ simply broken).
 - **Still hold the 25-row hand-off**: it must be re-cut **by route**, because `gOPD`
   rows already work in standalone and will not move.
 
+## 🆕 THIRD DEFECT — aliasing a built-in prototype destroys its reflection identity
+
+Measured in bare `compile()`, **no harness anywhere**, both forms side by side:
+
+```
+                                                      host   standalone
+INLINE gOPD(RegExp.prototype,'global')                1      1
+VAR    P = RegExp.prototype; gOPD(P,'global')         1      0   <- DIFF
+INLINE gOPD(RegExp.prototype,'exec')                  1      1
+VAR    P = RegExp.prototype; gOPD(P,'exec')           1      0   <- DIFF
+INLINE Array.prototype.hasOwnProperty('push')         1      1
+VAR    P = Array.prototype; P.hasOwnProperty('push')  0      0   <- BOTH LANES
+```
+
+**Binding a built-in prototype to a local and reflecting through the alias gives a
+different answer than reflecting on it inline.** Same object, same property.
+
+This also **exonerates both harnesses** — it reproduces with zero harness assembly,
+closing the "is the instrument in the measurement path" question that held routing
+for three exchanges. And it **hits the host lane too** (`var P = Array.prototype;
+P.hasOwnProperty('push')` → 0 on host, inline → 1).
+
+**So the decomposition is three defects, not two: lookup-registration ·
+enumeration · aliasing.**
+
+### Routing consequence — checked, not assumed
+
+- The **20 descriptor rows** use `Object.defineProperty(Array.prototype, …)`
+  **inline**, no alias. **They survive — copy-Array routes them correctly.**
+- The **nine `RegExp/prototype` grid rows** that started this whole thread
+  (including `S15.10.7.2_A8.js`) open with **`var __re = RegExp.prototype;`**. They
+  need registration **AND** aliasing. **Copy-Array alone will NOT move them.**
+
+So the copy-Array lookup fix is correctly scoped to the **descriptor** areas and
+**insufficient** for the **prototype-accessor** areas that motivated this issue.
+
+**Unsized and deliberately not guessed:** `var __re = X.prototype` is near-universal
+in Sputnik-era ES5 tests, so the aliasing defect likely reaches well past those nine.
+
 ## Sizing — re-cut BY ROUTE (supersedes all earlier figures)
 
 | n | route exercised | moves on a copy-Array lookup fix? |
