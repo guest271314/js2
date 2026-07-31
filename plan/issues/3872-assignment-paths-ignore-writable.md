@@ -23,12 +23,17 @@ related: [3420, 2668, 2744, 3776]
 # for the same reason: §13.15.2 decides PutValue fails before the compound
 # lowering fuses GetValue/op/store, and that fusion is exactly what makes an
 # out-of-module check impossible to express.
+# The mirror record belongs in object-ops.ts's externref arm, immediately beside
+# the struct arm that already records it — it is the same bookkeeping for the
+# other lowering path, and the two must stay adjacent to stay in sync.
 loc-budget-allow:
   - src/codegen/expressions/assignment.ts
   - src/codegen/expressions/operator-assignment.ts
+  - src/codegen/object-ops.ts
 func-budget-allow:
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
   - src/codegen/expressions/operator-assignment.ts::compilePropertyCompoundAssignment
+  - src/codegen/object-ops.ts::compileObjectDefineProperty
 ---
 
 # #3872 — the strict-mode TypeError is missing; the two lanes fail differently
@@ -281,27 +286,70 @@ for a **simple** assignment but **wrong** for a compound one. So sloppy compound
 still falls through rather than being handed a wrong expression value. The corpus
 is `onlyStrict` (`11.13.2-*-s.js`), so the strict arm covers it.
 
+### Standalone — NOW COVERED (the mirror gap is closed)
+
+`definedPropertyFlags` was written **only** in the `useStruct` arm of
+`compileObjectDefineProperty`. Standalone's native `$Object` receiver takes the
+**externref** arm (`else if (valueExpr)` → `emitExternDefinePropertyValue`),
+which recorded nothing — so no compile-time consult could ever fire there.
+Recording the mirror in that arm closes it.
+
+**The redefine-validation hazard flagged earlier does not apply here**, and it is
+worth stating why rather than just asserting it: the struct arm reads this map as
+`trackedExistingFlags` to detect a redefine, but the two arms are **mutually
+exclusive per call**, so a define can never observe its own record. Across calls,
+seeing a prior record *is* a genuine redefine — exactly what that check is for.
+Recording at the `object-ops.ts:1146` chokepoint instead **would** be unsafe, for
+the reason the `definePropertyReceiverKeys` comment gives.
+
+**Recorded only when the descriptor states `writable` explicitly.** With it
+omitted, `applyDescriptorFlags` leaves the bit clear — correct for a brand-new
+property (omitted attributes default to false) but wrong for a redefine of an
+existing writable one. The struct arm separates those via
+`isKnownExistingField`/`PROP_FLAGS_DEFAULT_DATA`; the externref arm has no
+equivalent, so it declines to guess. Every corpus row here specifies
+`writable:false` explicitly, so the narrower rule costs no coverage.
+
 ### Updated measurement
 
-| | stock main | dot only | dot + compound |
-| --- | --- | --- | --- |
-| host | **7 / 13** | 9 / 13 | **12 / 13** |
-| standalone | 10 / 13 | 10 / 13 | 10 / 13 |
+| | stock main | dot only | dot + compound | + mirror |
+| --- | --- | --- | --- | --- |
+| host | **7 / 13** | 9 / 13 | **12 / 13** | **12 / 13** |
+| standalone | 10 / 13 | 10 / 13 | 10 / 13 | **13 / 13** |
 
 The one remaining host failure (`accessor setter still runs`) is **pre-existing
 on stock main** — confirmed by A/B, not introduced here.
 
-Real corpus rows through `runTest262File`, host lane, now **pass**:
-`compound-assignment/11.13.2-25-s.js`, `11.13.2-54-s.js`,
-`assignment/11.13.1-1-s.js`. Two of those are confirmed flips against the
-earlier 4-row spot-check (`11.13.2-25-s` and `11.13.1-1-s` were host-FAIL).
+Real corpus rows through `runTest262File`, **both lanes**:
 
-`tests/issue-3872.test.ts`: **14/14**.
+| row | host before → after | standalone before → after |
+| --- | --- | --- |
+| `compound-assignment/11.13.2-25-s.js` | FAIL → **PASS** | FAIL → **PASS** |
+| `assignment/11.13.1-1-s.js` | FAIL → **PASS** | FAIL → **PASS** |
+| `types/reference/8.7.2-3-s.js` | PASS → PASS | FAIL → **PASS** |
+| `compound-assignment/11.13.2-54-s.js` | PASS → PASS | FAIL → FAIL |
+
+`11.13.2-54-s` is the row the earlier spot-check flagged as having **no
+`writable:false` in source** — a frozen/sealed variant, i.e. a different
+mechanism. It is correctly untouched here, and is the concrete reason the
+sizing was quoted as `≤24` rather than `24`.
+
+`tests/issue-3872.test.ts`: **16/16** (13 host, 3 standalone, the standalone ones
+asserting `imports.length === 0`).
+
+Regression sweep, 6 adjacent files (`define-property-patterns`,
+`compound-assignment-property`, `issue-2874-standalone-create-descriptor`,
+`issue-3420-standalone-array-own-property`, `issue-3420`, `issue-3872`):
+**55/55 pass**.
+
+> **Near-miss worth recording:** `issue-2580-m3-bacc-defineproperty-accessor`
+> (`forEach over plain data array-like`, expected 60 got 0) failed during this
+> work and looked like a regression from the mirror change. It is **pre-existing
+> on stock `origin/main`** — confirmed by reverting all three touched files and
+> re-running. It contains no `defineProperty` call at all. Verified before
+> attributing rather than after.
 
 ### Still not covered
 
-- **Standalone, both forms** — blocked on the empty `definedPropertyFlags` mirror
-  (see above). This is the remaining prize: all three corpus rows above still
-  fail standalone with `Expected a TypeError to be thrown but no exception was
-  thrown at all`.
 - **Sloppy-mode compound assignment** — see the strict-only note above.
+- **`11.13.2-54-s`-shaped rows** — frozen/sealed variants, not `[[Writable]]`.

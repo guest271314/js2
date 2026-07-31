@@ -129,16 +129,27 @@ describe("#3872 — non-writable data property write (host)", () => {
   });
 });
 
-describe("#3872 — standalone lane", () => {
-  it("suppresses the store (pre-existing native behaviour, not regressed)", async () => {
+describe("#3872 — standalone lane (host-free)", () => {
+  it("suppresses the store", async () => {
     expect(await runStandalone(VALUE_PRESERVED)).toBe(10);
   });
 
-  it("KNOWN GAP: does not yet throw — definedPropertyFlags is unpopulated off the useStruct path", async () => {
-    // Asserted as the CURRENT behaviour so the gap is visible and this test
-    // flips loudly when the mirror is populated for native `$Object` receivers.
-    // Spec-correct value is 1; standalone returns 0 (no throw).
-    expect(await runStandalone(THROWS)).toBe(0);
+  it("throws a catchable TypeError with zero host imports", async () => {
+    // This was the KNOWN GAP: `definedPropertyFlags` was written only on the
+    // `useStruct` path, so standalone's native `$Object` receiver left the
+    // mirror empty and no compile-time consult could fire. Recording the mirror
+    // on the externref path in `object-ops.ts` closed it.
+    expect(await runStandalone(THROWS)).toBe(1);
+  });
+
+  it("compound assignment throws in standalone too", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {}; ${DP}
+        try { o.p %= 20; } catch (e: any) { return e instanceof TypeError ? 1 : 2; }
+        return 0;
+      }`),
+    ).toBe(1);
   });
 });
 

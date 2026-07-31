@@ -2388,6 +2388,45 @@ export function compileObjectDefineProperty(
     fctx.body.push({ op: "local.get", index: objLocal });
     return objType;
   } else if (valueExpr) {
+    // (#3872) Record the compile-time descriptor mirror on the EXTERNREF path too.
+    //
+    // `definedPropertyFlags` was written ONLY in the `useStruct` branch above,
+    // which needs a registered struct field. Standalone compiles
+    // `const o: any = {}` to a native `$Object`, so `fieldIdx < 0`, `useStruct`
+    // is false, and the mirror stayed EMPTY — which is why the #3872
+    // write-consult fired on host and never on standalone (instrumented: host
+    // `{"o@41:p": 14}` vs standalone `[]`).
+    //
+    // Safe against the redefine-validation hazard: the struct branch reads this
+    // map as `trackedExistingFlags` to detect a redefine, but the two branches
+    // are mutually exclusive per call, so a define can never observe its OWN
+    // record. Across calls, seeing a prior define IS a genuine redefine — which
+    // is what that check is for. Recording at the `defineProperty` chokepoint
+    // instead WOULD be unsafe, for exactly the reason the
+    // `definePropertyReceiverKeys` comment gives.
+    //
+    // Recorded ONLY when the descriptor states `writable` EXPLICITLY. With it
+    // omitted, `applyDescriptorFlags` leaves the bit clear, which is right for a
+    // brand-new property (omitted attributes default to false) but WRONG for a
+    // redefine of an existing writable one — the struct branch distinguishes
+    // those via `isKnownExistingField`/`PROP_FLAGS_DEFAULT_DATA` and the
+    // externref path has no equivalent. Rather than guess, only record when the
+    // descriptor says so; every corpus row for this issue specifies
+    // `writable:false` explicitly, so the narrower rule costs no coverage.
+    if (propName !== undefined && ts.isIdentifier(objArg) && descWritable !== undefined) {
+      const key = `${integrityVarKey(ctx, objArg)}:${propName}`;
+      ctx.definedPropertyFlags.set(
+        key,
+        applyDescriptorFlags(
+          ctx.definedPropertyFlags.get(key),
+          descWritable,
+          descEnumerable,
+          descConfigurable,
+          !!(getNode || setNode),
+          true,
+        ),
+      );
+    }
     // Externref path: Object.defineProperty(obj, prop, { value: v }) → __defineProperty_value
     return emitExternDefinePropertyValue(
       ctx,
