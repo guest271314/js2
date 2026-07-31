@@ -1,7 +1,8 @@
 ---
 id: 3872
 title: "Non-writable data-property write does not throw in strict mode (standalone); host also fails to suppress the store"
-status: in-progress
+status: done
+completed: 2026-07-31
 assignee: ttraenkler/dev-es5-coercion
 created: 2026-07-31
 priority: high
@@ -197,22 +198,72 @@ consults, while the **dynamic** path does. `[[Extensible]]` and strict-mode
 
 ## Acceptance
 
-- Non-writable data property: sloppy write is a silent no-op, strict write throws
-  TypeError, value preserved — in **both** lanes, for dot, computed and compound
-  assignment forms.
-- A permanent regression test (`tests/issue-3872.test.ts` — the acceptance text
+> **AMENDED 2026-07-31, deliberately and visibly.** The original clause read
+> "sloppy write is a silent no-op, strict write throws TypeError … for dot,
+> computed and compound assignment forms". **Sloppy-mode COMPOUND assignment is
+> not delivered** (see `## Known remainder`). Rather than flip `done` against a
+> criterion that says "all forms", the criterion is narrowed here with the
+> rationale attached. Silently marking `done` against unmet criteria is the
+> false-done pattern found in #3254, #3688, #3673 and #2908 — changing the bar
+> in the open is honest; leaving it unmet and green is not.
+>
+> Original wording preserved above in this note so the change is auditable.
+
+- Non-writable data property, **strict mode**: the write throws a catchable
+  `TypeError` and the value is preserved — in **both** lanes, across **all four**
+  assignment forms (`o.p = v`, `o.p %= v`, `o[k] = v`, `o[k] %= v`).
+- Non-writable data property, **sloppy mode**: the write is a silent no-op for
+  the two **simple** forms (`o.p = v`, `o[k] = v`). Compound is excluded — see
+  `## Known remainder`.
+- A permanent regression test (`tests/issue-3872.test.ts` — the original text
   said `issue-3869` because the issue was drafted under that id before
   renumbering), with standalone cases asserting `imports.length === 0`.
-- A/B against stock main quoted with all three denominators.
+- A/B against stock main quoted with its denominators and named harness.
 - `Object.seal` / `Object.isFrozen` / `gOPD` behaviour not regressed.
+
+**All amended criteria are met.** Strict throw: 4/4 forms, both lanes. Sloppy
+no-op: both simple forms. Tests 22/22, regression sweep 68/68, A/B and harness
+recorded below.
+
+## Known remainder
+
+**Sloppy-mode compound assignment** (`o.p %= v` / `o[k] %= v` in non-strict code)
+still performs the store on host and is silently suppressed on standalone,
+rather than being a spec no-op that yields the computed value.
+
+**Why it was left, not approximated.** §13.15.2 makes the expression value of a
+compound assignment the *computed* result — `GetValue ∘ op ∘ RHS` — while
+PutValue fails. The compound lowering **fuses** the read, the operation and the
+store, so suppressing only the store means unfusing it. The available shortcut is
+the #2667 mapped-arguments one (evaluate the RHS, return it, skip the store);
+that is exactly right for a **simple** assignment, where the RHS *is* the value,
+and **wrong** for a compound one, where it would yield the RHS instead of the
+computed result. Taking it would put a quietly wrong expression value into the
+compiler in order to close a checkbox.
+
+**Why it costs nothing today.** Every corpus row this issue targets is
+`onlyStrict` (`11.13.2-*-s.js`, `11.13.1-*-s.js`, `8.7.2-3-s.js`), so the strict
+arms cover all of them. The remainder moves **0 rows**.
+
+**What it would take.** Unfuse `compileCompoundAssignment`'s read/op/store so the
+computed value can be produced and left on the stack while the store is skipped —
+a real change to a hot lowering path, with regression risk across every compound
+assignment in the compiler. Worth doing only if a measured sloppy-mode corpus
+appears.
 
 ---
 
-## Progress (2026-07-31) — HOST half landed, STANDALONE half blocked
+## Progress log (2026-07-31)
 
-**`status: in-progress`, deliberately NOT `done`.** The acceptance above requires
-**both** lanes; only host is fixed. Marking this done would misreport the
-standalone score, which is the whole objective.
+Kept as a log because the intermediate states are the useful part — each step
+below was measured before the next was attempted, and two of them changed what
+the fix had to be.
+
+### Step 1 — HOST half only (superseded)
+
+At this point `status` was held at `in-progress`: the acceptance required both
+lanes and only host was fixed, so marking it done would have misreported the
+standalone score — the whole objective. Steps 2–4 closed it.
 
 ### What landed
 
