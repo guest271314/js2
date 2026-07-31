@@ -19,11 +19,27 @@ related: [1075, 1279, 1400, 2700, 3654, 3687]
 
 # #3930 — nested static `require()` never enters the compileProject graph
 
+## What you will see (the observable, before any mechanism)
+
+You `compileProject` an npm package. **The compile reports `success: true`.**
+`result.errors` is empty. You instantiate it, call an export, and it throws —
+typically `undefined` on a member access — for a module the package plainly
+requires and that plainly exists on disk. Running the exact same files under
+Node works.
+
+If you look at the graph, the required file simply **is not in it**. Nothing
+told you. This is the "green compile, wrong program" shape, and the compiler is
+the thing that is wrong, not your code.
+
+Recognisable if: your package's `require()` is anywhere other than a
+**top-level `const X = require("Y")`** — inside a factory function, inside an
+IIFE, on the right of `module.exports = setup()`.
+
 Carried out of the closed **PR #3687** (`codex/1400-eslint-e2e`). Independently
 re-measured against `origin/main` @ `e4187572` on 2026-07-31 — this reproduces
 on current `main`, it is not a branch artifact.
 
-## Problem
+## Mechanism
 
 `src/cjs-rewrite.ts` (#1279) rewrites CommonJS to ESM imports **only** for
 top-level `X = require("Y")` variable declarations. `resolveAllImports` walks

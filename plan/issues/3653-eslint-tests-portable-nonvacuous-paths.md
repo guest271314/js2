@@ -2,9 +2,10 @@
 horizon: m
 id: 3653
 title: "ESLint integration tests: portable dependency paths and non-vacuous skip semantics"
-status: ready
+status: done
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-31
+completed: 2026-07-31
 priority: critical
 feasibility: easy
 reasoning_effort: medium
@@ -20,24 +21,32 @@ related: [1282, 1400, 1573, 2693]
 
 # #3653 — Make the ESLint integration ladder portable and non-vacuous
 
-## STATUS RECONCILE NEEDED — criteria 1–5 measure as already met on `main` (2026-07-31)
+## CLOSED as already-satisfied — measured, not assumed (2026-07-31)
 
-Checked against `origin/main` @ `e4187572` while triaging the closed PR #3687:
+Found `status: ready` while triaging the closed PR #3687, then measured every
+`## Required change` against `origin/main` @ `e4187572`. All six are met. The
+work landed under other PRs without this issue being closed out — this is the
+fourth issue reconciled that way in one session, so the evidence is recorded
+here rather than just flipping the field.
 
-| Required change                              | State on `main`                                                                                        |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| 1. shared ESLint-resolving test helper        | **present** — `tests/helpers/eslint.ts` exports `resolveEslintFile` / `requireEslintFile`               |
-| 2. no hard-coded paths                        | **met** — `grep -rn "/workspace/node_modules/eslint\|/home/user/js2wasm" tests/` returns nothing        |
-| 3. explicit skip, never `catch { return; }`   | **met** — `ESLINT_DEV_DEPENDENCY_SKIP` + `it.skipIf(...)`; the vacuous catch in `issue-2693-host-delegated-select.test.ts` is gone |
-| 5. diagnostics in failed compile assertions   | **met** — e.g. `expect(result.success, result.errors.map(e => e.message).join("\n"))`                   |
+| #   | Required change                                              | State on `main`                                                                                                                                   |
+| --- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | shared ESLint-resolving test helper                          | **met** — `tests/helpers/eslint.ts` exports `resolveEslintFile`, `requireEslintFile`, `createRequireFromEslint`                                    |
+| 2   | no hard-coded paths                                          | **met** — `grep -rn "/workspace/node_modules/eslint\|/home/user/js2wasm" tests/` returns **no matches**                                            |
+| 3   | explicit skip, never `catch { return; }`                     | **met** — `ESLINT_DEV_DEPENDENCY_SKIP` + `it.skipIf(ESLINT_LINTER === null)`; the vacuous catch in `issue-2693-host-delegated-select.test.ts` is gone |
+| 4   | assert real `espree`/`esquery` loaded before compiling       | **met** — `issue-2693-host-delegated-select.test.ts` asserts `typeof espree.parse`, `espree.tokenize`, `esquery.parse`, `esquery.matches` are all `"function"` in a test that runs *before* the compile test |
+| 5   | diagnostics in failed compile assertions                     | **met** — e.g. `expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true)`                                                 |
+| 6   | first end-to-end test is JS-host lane under Node, with real Node builtins passed through | **met** — `tests/issue-3654.test.ts` "passes node:path through to the real Node module in the JS-host lane" asserts the `env.__node_path` import exists, instantiates under Node, and calls the export |
 
-Criteria **4** (assert real `espree`/`esquery` were loaded before compiling) and
-**6** (the first end-to-end JS-host-lane `Linter.verify()` proof) are the parts
-still worth checking; 6 is blocked behind #3657 and #3798 regardless.
+### One bullet migrates rather than closing here
 
-This issue is still `status: ready`, so either it was fixed under another PR
-without being closed out, or someone should re-verify 4 and 6 and narrow the
-issue to those. **Do not re-implement 1–3.**
+The acceptance bullet *"Its first runnable `Linter.verify()` proof uses the
+default JS-host target, instantiates in Node, and demonstrates that required
+Node builtins are passed through"* is an **outcome of the ESLint graph
+compiling**, not test infrastructure. It cannot be satisfied by this issue's
+work and is blocked behind **#3798** (the architectural blocker that stopped PR
+#3687) and **#3657** (the host seam). It is owned by **#1400**. Closing #3653
+does not claim that proof exists.
 
 ## Carry-over from the closed PR #3687
 
