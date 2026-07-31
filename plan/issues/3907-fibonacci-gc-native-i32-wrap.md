@@ -15,7 +15,7 @@ goal: performance
 sprint: current
 horizon: m
 es_edition: multi
-related: [3898, 1948, 3917, 3912, 323, 3673, 1236, 2789, 1825, 2682, 3931]
+related: [3898, 1948, 3917, 3912, 323, 3673, 1236, 2789, 1825, 2682, 3931, 3734, 3741, 1120, 3521]
 loc-budget-allow:
   # (#3102 gate) `binary-ops.ts` +19: comment-only. The two `ctx.fast ⇒ i32`
   # numeric hints removed here are the ones that made every arithmetic node in
@@ -29,6 +29,21 @@ loc-budget-allow:
   # it the planner would admit a write shape the lowerer cannot emit, which is
   # a demotion, not a miscompile — but the two must stay in agreement.
   - src/ir/from-ast.ts
+func-budget-allow:
+  # (#3400 gate) `compileBinaryExpression` +11 lines, ALL of them comment. The
+  # code change here is a DELETION: `ctx.fast` is removed from the head of the
+  # `numericHint` term list. That one token was the unconditional, proof-free
+  # narrowing that made every arithmetic node in fast mode evaluate in 32 bits
+  # — `sum = sum + fib(30)` wrapped at 2^31 and read back as -269,534,592.
+  #
+  # The added lines enumerate the four terms that REMAIN and state what proof
+  # each carries, because the failure mode this issue exists to fix is someone
+  # re-adding `ctx.fast` to that list as an obvious-looking speedup. A
+  # one-token diff with no explanation is precisely how that happens. The
+  # function is over budget and should be split (#3399), but splitting it is
+  # not this change-set's job and doing it here would bury a correctness fix
+  # inside a refactor.
+  - src/codegen/binary-ops.ts::compileBinaryExpression
 ---
 
 # #3907 — `fast` mode lowers every `number` to a Wasm i32
@@ -245,7 +260,14 @@ fails the canonical-int32 proof.
 - `let y = -x` → widened unless `x` is a non-zero integer literal (#2789):
   `-0` is observable and i32 collapses it to `+0`.
 
-### The one provable gap this exposed, and closed
+### The provable gaps this exposed, and closed
+
+Removing a blanket narrowing turns every hole in the real analyses into a
+visible demotion. Two were found. Both are cases where the proof was *absent*,
+not *impossible* — "the proof is harder" is not a reason to widen, and widening
+each of these would have been shipping blanket-f64 by attrition.
+
+#### Gap 1 — `i = i + <lit>`, the desugared step
 
 `for (let i = 0; i < n; i = i + 1)` — the spelling the benchmark suite and much
 real code use — was **not** recognised as a bounded counter.
@@ -263,28 +285,100 @@ Nothing in the proof depends on the spelling: `i = i + <int literal>` **is**
 `writePromotedI32Slot` (`src/ir/from-ast.ts`) — deliberately NOT generalised to
 an accumulator, since the counter proof is what makes it sound.
 
-This is the "provable but needs work → do the work" case, and it is what keeps
-the array benchmarks from collapsing.
+#### Gap 2 — descending counters were rejected by the CONDITION check
 
-### Per-shape outcome
+Found by auditing every counter spelling rather than only the ones the
+benchmarks use. **No descending loop was ever promoted, in either mode:**
 
-| shape | outcome |
+```
+for (let i = 100; i > 0; i--)        counter stayed f64
+for (let i = 100; i > 0; i -= 1)     counter stayed f64
+for (let i = 100; i > 0; i = i - 1)  counter stayed f64
+for (let i = 100; i >= 0; i = i - 1) counter stayed f64
+```
+
+The cause is in `detectI32LoopVar`'s **condition** arm, not its incrementor
+arm. It accepted only the four shapes that bound `i` from ABOVE — `i < E`,
+`i <= E`, `E > i`, `E >= i` — and rejected the mirror shapes that bound it from
+BELOW (`i > E`, `i >= E`, `E < i`, `E <= i`). A decrementing loop that
+terminates is conditioned on exactly those, so it was rejected before the
+incrementor was ever consulted.
+
+That made the function's own decrementing incrementor arm — it has accepted
+`i--`, `--i` and `i -= <lit>` since it was written — **unreachable for any
+terminating program**. The only loops that could reach it (`i < N` with `i--`)
+do not terminate. The decrement support looked present and was dead.
+
+The proof is exactly symmetric to the ascending case the function already
+trusts: an integer-literal init in i32 range, a compile-time-constant step, and
+a condition that bounds the counter. For a descending counter the literal init
+supplies the UPPER bound and the condition the lower one — the mirror image.
+Fixed by generalising the condition arm to "a relational operator with the
+counter as one operand", which is the property actually being relied on.
+
+This one predates #3907 and is present on `main` in **both** modes — but before
+#3907 fast mode narrowed every `number` regardless, so no descending loop in
+the gc-native lane ever exercised it. Leaving it would have made #3907 a real
+perf regression for every reverse loop.
+
+Verified across 17 descending shapes × 3 lanes (ascending/descending sums,
+`i >= 0` boundary, step > 1, negative bounds, negative init, zero-trip,
+mirrored `0 < i`, variable bound, nested, `break`/`continue`, string
+`charCodeAt` indexing, counter escaping the loop, fractional accumulator, f64
+division by the counter): **0 mismatches against the JS reference**.
+
+These are the "provable but needs work → do the work" cases, and they are what
+keeps the array and reverse-loop benchmarks from collapsing.
+
+### Per-shape outcome — the three-way breakdown
+
+Measured, not asserted: each row was compiled under `fast: true` and the
+emitted `$test` body inspected for `i32.*` vs `f64.*` arithmetic
+(whole-module opcode counts are useless here — the ~440-op runtime prelude
+swamps the signal).
+
+**Bucket 1 — kept as i32 (16 shapes).** Every one of these carries a proof.
+
+| shape | proof |
 | --- | --- |
-| `type i32 = number` binding | **kept i32** (both modes) |
-| `const a = 3` / integer-literal-seeded local | **kept i32** |
-| `for (let i = 0; i < N; i++)` counter | **kept i32** |
-| `for (let i = 0; i < N; i = i + 1)` counter | **kept i32** — restored here |
-| `h = (h * 31 + c) \| 0` (ToInt32-wrapped chain) | **kept i32** |
-| bitwise / shift / comparison results | **kept i32** |
-| `number[]` with all-canonical-i32 writes | **kept i32** vec elements |
-| `.length`, `indexOf`, byte offsets | **kept i32** (cannot leave range) |
-| `let a = 3; a = 3.5` | **widened — unprovable** (assignment is non-integer) |
-| `sum = sum + f()` in a loop | **widened — unprovable** (unbounded accumulation) |
-| `a * b` on two unbounded i32s | **widened — unprovable** (needs 62 bits) |
-| `a / b` | **widened — unprovable** (result generally non-integral) |
-| literal outside i32 range | **widened — unprovable** |
-| `-x` where `x` may be `0` | **widened — unprovable** (`-0` is observable) |
-| `let s = 0; for (let i = 0; i < 10; i++) s = s + i;` | **widened pending follow-up** — this one IS provable (max 45) but needs loop-bounded interval inference over the induction variable, which does not exist yet. Named below, not silently dropped. |
+| `type i32 = number` binding | explicit author opt-in (#323/#3673); wrap is the documented contract |
+| `const a = 3` / integer-literal-seeded local | `collectI32CoercedLocals` canonical-int32 write set |
+| `for (let i = 0; i < N; i++)` / `++i` | `detectI32LoopVar` |
+| `for (let i = 0; i < N; i += k)` | `detectI32LoopVar` |
+| `for (let i = 0; i < N; i = i + k)` | `detectI32LoopVar` — **restored here (gap 1)** |
+| `for (let i = 0; i <= N; …)` | `detectI32LoopVar` |
+| `for (let i = N; i > 0; i--)` / `--i` | `detectI32LoopVar` — **restored here (gap 2)** |
+| `for (let i = N; i > 0; i -= k)` | `detectI32LoopVar` — **restored here (gap 2)** |
+| `for (let i = N; i > 0; i = i - k)` | `detectI32LoopVar` — **restored here (gap 2)** |
+| `for (let i = N; i >= 0; …)` | `detectI32LoopVar` — **restored here (gap 2)** |
+| `for (let i = N; 0 < i; …)` (mirrored) | `detectI32LoopVar` — **restored here (gap 2)** |
+| `h = (h * 31 + c) \| 0` | `arithI32WithToInt32Wrap` — the enclosing ToInt32 makes the wrap observationally equal |
+| bitwise `& \| ^`, shifts | `bitwiseI32` — the operator is ToInt32-defined |
+| comparison results | `hasI32LocalOperand`, both operands proven |
+| `number[]` with all-canonical-i32 writes | element-vector narrowing |
+| `.length`, `indexOf`, byte offsets | genuinely-int32 producers; cannot leave range |
+
+**Bucket 2 — widened because narrowing would be UNSOUND (6 shapes).** Each
+would produce a wrong answer, not merely a slow one.
+
+| shape | why narrowing is unsound |
+| --- | --- |
+| `let a = 3; a = 3.5` | the assignment is not an integer |
+| `sum = sum + f()` in a loop | unbounded accumulation; the f64→i32 store **saturates**, so it silently returns 2147483647 (#1236). This is the fibonacci shape |
+| `a * b` on two unbounded i32s | a 32×32 product needs 62 bits |
+| `a / b` | generally non-integral |
+| literal outside i32 range | not representable |
+| `-x` where `x` may be `0` | `-0` is observable and i32 collapses it to `+0` (#2789) |
+
+**Bucket 3 — widened pending a NAMED follow-up (2 shapes).** Both are
+genuinely provable; neither is dropped silently. This bucket is deliberately
+small — a large bucket 3 would mean the analysis needs another pass, which is
+how the two gaps above were found and closed rather than parked here.
+
+| shape | what the proof needs | follow-up |
+| --- | --- | --- |
+| `let s = 0; for (let i = 0; i < 10; i++) s = s + i;` | provably ≤ 45, but needs interval tracking over the induction variable and the trip count — real dataflow the compiler does not have. The *same syntax* with an unbounded or data-dependent step is the fibonacci miscompile, so the conservative refusal is currently load-bearing | loop-bounded accumulator range inference (below) |
+| `for (let i = 0; i < N; i = 1 + i)` (commuted step) | `counterStepAssignment` requires the counter on the LEFT of the `+`. Sound to commute for `+` only — `-` is not commutative — so it is a real but narrow extension, not a symmetry the current matcher can just be relaxed into | commuted counter-step spelling |
 
 `type i32 = number` — the documented, legitimate way to ask for i32 — still
 works, in **both** modes: `let a: i32 = 100000; let b: i32 = 100000; a * b`
@@ -292,15 +386,29 @@ emits `i32.mul` and yields the wrapped `1410065408` under `fast: true` and
 `fast: false` alike, while the unannotated `number` version yields the
 spec-correct `10000000000` in both.
 
-### Follow-up worth filing: loop-bounded accumulator range inference
+### Follow-ups worth filing (the bucket-3 entries, named)
 
-`let s = 0; for (let i = 0; i < 10; i++) s = s + i;` is provably ≤ 45, so `s`
-could stay i32. Establishing that needs interval tracking over the induction
-variable and the loop trip count — real dataflow the compiler does not have
-today. `collectI32CoercedLocals` correctly refuses it in the meantime (#1236),
-because the same syntax with an unbounded or data-dependent step is the
-fibonacci miscompile. Recorded here so the performance is recovered
-deliberately rather than lost by default.
+1. **Loop-bounded accumulator range inference.**
+   `let s = 0; for (let i = 0; i < 10; i++) s = s + i;` is provably ≤ 45, so
+   `s` could stay i32. Establishing that needs interval tracking over the
+   induction variable and the loop trip count — real dataflow the compiler does
+   not have today. `collectI32CoercedLocals` correctly refuses it in the
+   meantime (#1236), because the same syntax with an unbounded or
+   data-dependent step is the fibonacci miscompile. This is the single largest
+   remaining i32 opportunity in the array suite.
+
+2. **Commuted counter step `i = 1 + i`.** `counterStepAssignment` requires the
+   counter on the left of the `+`. Commuting is sound for `+` and NOT for `-`,
+   so this is a narrow, asymmetric extension rather than a relaxation — worth
+   doing, worth doing carefully. Measured: it is the only counter spelling in
+   the 14-spelling matrix that still demotes.
+
+3. **`number[]` element narrowing (#3734).** The remaining array-suite cost is
+   dominated by the element representation, not the loop bodies — see the
+   pre-existing-gap section below.
+
+Recorded so the performance is recovered deliberately rather than lost by
+default.
 
 ## Sweep result
 
@@ -322,42 +430,76 @@ alone.
 published page, also never compared, published as **2.68× faster than JS**.
 
 All 14 numeric benchmarks in `mixed` + `arrays` were checked for lane
-agreement. Exactly two disagreed; both are fixed. The only remaining
-disagreement is `array/sort-i32`, whose gc-native lane fails with `illegal
-cast` **identically before and after** — pre-existing and unrelated, worth its
-own issue.
+agreement. Exactly two disagreed; both are fixed. **Re-verified against current
+`main`: all 14 now agree with the JS reference in both the `host-call` and
+`gc-native` lanes, with no remaining disagreement.** (An earlier pass on the
+older base recorded `array/sort-i32` as failing with `illegal cast`; that no
+longer reproduces, before or after this change, so it is not carried forward as
+a finding.)
 
-Back-to-back A/B on one box, final (inference) design. The JS baseline lane is
-noisy run-to-run, so the **gc-native absolute ms** column is the reliable
-signal and the ratio column should be read loosely (this box measured
-fibonacci at 1.84× on the base branch where the page says 1.59×):
+### Why nothing caught this
 
-| benchmark | gc-native ms before → after | ratio before → after | value was wrong? |
+`benchmarks/harness.ts` measures time and never inspects the return value — it
+"observes timing rather than individual return values" in its own words. A lane
+that computes a *different function* is therefore invisible to the benchmark
+suite by construction: it only shows up as a suspiciously good number. That is
+why the fix ships with a result-equality guard
+(`tests/issue-3907-cross-lane-number-equality.test.ts`) rather than a timing
+assertion, and why the two published benchmarks pinned there are read from the
+suite sources rather than copied.
+
+Back-to-back A/B on one otherwise-idle box (`npx tsx benchmarks/run.ts --suite
+{mixed,arrays} --strategy js,gc-native`), source files swapped in place so both
+halves run the same harness, same process shape, minutes apart. Re-measured
+against **current `main`**, which has moved ~204 commits (including the
+#3899–#3908 performance batch) since the first pass — so these supersede the
+earlier table rather than confirming it.
+
+**Read the "before" ratios as descriptions of the bug, not as performance.**
+For the two `value was wrong?` = YES rows the "before" compiler was computing a
+different function; for the "no" rows it was reaching the right answer via
+32-bit integer arithmetic while the JS baseline used IEEE-754 doubles. Neither
+is a like-for-like comparison, which is the whole point of this issue.
+
+| benchmark | gc-native ms before → after | ratio (js/gc) before → after | value was wrong? |
 | --- | --- | --- | --- |
-| mixed/fibonacci | 0.154 → 0.215 | 1.84× → **1.38×** | YES (−269,534,592) |
-| array/reduce | 1.52 → 3.96 | 2.51× → **1.03×** | YES (704,982,704) |
-| array/map-filter | 0.115 → 0.952 | 2.91× → **0.44×** | no |
-| array/push-pop | 1.36 → 3.53 | 2.00× → **0.77×** | no |
-| array/slice | 0.036 → 0.154 | 1.61× → **0.40×** | no |
-| array/forEach | 0.066 → 0.188 | 1.54× → **0.73×** | no |
-| mixed/matrix-multiply | 0.304 → 0.901 | 0.82× → **0.30×** | no |
-| array/indexOf | 5.20 → 6.71 | 1.01× → **0.77×** | no |
-| mixed/sieve | 2.05 → 2.63 | 1.27× → **1.02×** | no |
-| array/reverse | 6.73 → 6.82 | 1.38× → **1.41×** | no |
-| mixed/csv-parse | 2.13 → 2.03 | — (js lane too noisy) | no |
-| mixed/text-search | 2.48 → 2.35 | 0.22× → **0.27×** | no |
+| mixed/fibonacci | 0.100 → 0.189 | 1.89× → **0.99×** | YES (−269,534,592) |
+| array/reduce | 0.953 → 2.769 | 2.71× → **0.90×** | YES (704,982,704) |
+| array/map-filter | 0.066 → 0.789 | 2.89× → **0.26×** | no |
+| array/push-pop | 0.987 → 2.591 | 1.96× → **0.72×** | no |
+| array/forEach | 0.047 → 0.137 | 1.89× → **0.93×** | no |
+| array/slice | 0.028 → 0.054 | 1.57× → **0.93×** | no |
+| array/indexOf | 2.726 → 4.350 | 1.88× → **1.16×** | no |
+| array/find | 0.342 → 0.537 | 1.11× → **0.71×** | no |
+| array/sort-i32 | 0.314 → 0.429 | 2.79× → **1.95×** | no |
+| array/reverse | 4.377 → 4.524 | 1.80× → **1.77×** | no |
+| mixed/sieve | 1.550 → 1.952 | 1.51× → **1.03×** | no |
+| mixed/matrix-multiply | 0.238 → 0.809 | 1.05× → **0.30×** | no |
+| mixed/text-search | 0.677 → 0.657 | 0.57× → **0.61×** | no |
+| mixed/csv-parse | 1.078 → 1.108 | 0.72× → **0.44×** (js lane noisy) | no |
 
-**gc-native loses its lead across most of the array suite, and that is the
-correct result.** The "no" rows matter as much as the two wrong ones: those
-benchmarks produced *correct* values but reached them with 32-bit integer
-arithmetic while the JS baseline did IEEE-754 doubles — the same answer by a
-different and cheaper computation, which is not a like-for-like comparison.
-`array/map-filter` at 2.91× was the most flattering number on the page and is
-really 0.44×.
+**gc-native loses its lead across most of the numeric suite, and that is the
+correct result.** `array/map-filter` at 2.89× was the most flattering number on
+the page and is really 0.26×. `mixed/fibonacci`, published at 1.59× faster than
+JS, is 0.99× — i.e. par — once it computes the right answer.
 
-Restoring the `i = i + 1` counter proof (above) is what keeps this from being
-much worse: without it every one of these loops also paid the
-~25-instruction JS-ToInt32 emulation sequence per iteration.
+Two rows barely moved, and they are the evidence that the analysis is doing its
+job rather than blanket-widening:
+
+- **`array/reverse` 1.80× → 1.77×** — a descending-counter loop. It holds its
+  lead *only* because of gap 2 above; without that fix its counter demotes to
+  f64 like every other reverse loop in the codebase.
+- **`array/sort-i32` 2.79× → 1.95×** — `type i32 = number`-annotated, the
+  explicit opt-in, which is untouched by design.
+
+Restoring both counter proofs is what keeps the rest from being much worse:
+without them every one of these loops also pays the ~25-instruction JS-ToInt32
+emulation sequence per iteration.
+
+`benchmarks/results/*` and `public/benchmarks/results/*` are deliberately NOT
+committed from these runs — a filtered two-lane run truncates those
+whole-suite artifacts. The page should be regenerated from a full post-fix run
+before it is shown again.
 
 ### A pre-existing gap that bounds how much of this is recoverable
 
@@ -377,11 +519,7 @@ before and after (61 = 61)**, so this change neither caused nor worsened it.
 Recovering the array element narrowing is a separate, pre-existing piece of
 work and is the highest-value follow-up for these numbers.
 
-The page should be regenerated from a post-fix run before it is shown again.
-(`benchmarks/results/*` is deliberately untouched here — a filtered run
-truncates those whole-suite artifacts.)
-
-## Known capability gap this exposes (needs a follow-up issue)
+## Known capability gap this exposes — filed as #3931
 
 `detectCanonicalCharReadLoop` (#2682 — hoist the loop-invariant
 `__str_flatten` + descriptor out of a canonical `charCodeAt` read loop) lives
@@ -400,8 +538,9 @@ So this is **not** a capability #3907 deleted; it is a pre-existing IR-adoption
 gap whose last hiding place was propped up by the bug. Re-keying it on the
 `type i32 = number` opt-in would not help — the loop is
 `(h * 31 + s.charCodeAt(i)) | 0` on plain `number`, and the blocker is body
-*ownership*, not the i32 proof. **Follow-up: port the recogniser into the IR
-front-end**; standalone and wasi have needed it independently of this issue.
+*ownership*, not the i32 proof. **Follow-up — port the recogniser into the IR
+front-end — is filed as #3931**; standalone and wasi have needed it
+independently of this issue. It is decided and out of scope here.
 
 `tests/issue-2682.test.ts` keeps every result assertion (all still
 byte-faithful) and now carries a `⚠️ KNOWN CAPABILITY GAP` block plus a pinned
@@ -410,14 +549,35 @@ deliberately rather than silently.
 
 ## Tests
 
-`tests/issue-3907-cross-lane-number-equality.test.ts` — 10 cases × 3 wasm
-lanes (`host-call`, `gc-native`, `linear-memory`), each compared against the
-**same source transpiled and run as JavaScript**, so the reference cannot drift
-from the benchmark. `mixed/fibonacci` is imported from
-`benchmarks/suites/mixed.ts` itself rather than copied.
+`tests/issue-3907-cross-lane-number-equality.test.ts` — **18 cases**:
+
+- **14 numeric cases × 3 wasm lanes** (`host-call`, `gc-native`,
+  `linear-memory`), each compared against the **same source transpiled and run
+  as JavaScript**, so the reference cannot drift from the benchmark. Both
+  wrong-answer benchmarks are read straight from their suites —
+  `mixed/fibonacci` from `benchmarks/suites/mixed.ts` and `array/reduce` from
+  `benchmarks/suites/arrays.ts` — so the published benchmark and this guard can
+  never diverge. `array/reduce` runs on two lanes rather than three because
+  `codegen-linear` rejects `.reduce()` outright ("Unsupported Array method",
+  `src/codegen-linear/index.ts`), a pre-existing capability gap in that backend
+  and not a numeric disagreement.
+- **3 formatter cases × 2 lanes** — `String(n)` on a fractional local,
+  `String(Math.sqrt(2))` (full f64 precision), and `(3.14159).toFixed(2)`.
+  These are #3917's symptoms, which share this root cause. Measured on base:
+  `String(3.5)` returned `"3"`; it now returns `"3.5"`.
 
 Result equality is the guard that matters here. "The module instantiates and
 does not trap" would have passed on every one of the twelve divergences above.
+
+**Why the formatter cases pass `nativeStrings: false`.** `fast: true`
+auto-enables `nativeStrings`, and a `NativeString` (a WasmGC i16 array) is not
+a JS string across the export boundary — it reads back as `null`, and calling
+`.length` on the formatter's result traps with "dereferencing a null pointer".
+That trap is **pre-existing and byte-identical on the base branch** (verified
+both ways in the same session); it is #3912's remaining half (the
+`import-collector.ts` gate plus `emitNativeStringRefFromExternref`), not
+something #3907 introduced or can fix. Pinning the observable half now locks in
+the representation fix; #3912 unlocks the other configuration later.
 
 ### Tests that encoded the old approximation and were updated
 
@@ -463,3 +623,50 @@ A second, wider targeted A/B over `native-i32-type`, `i32-loop-inference`,
 exposed to the `detectI32LoopVar` / `planI32Slots` / `from-ast` edits — gave
 **byte-identical failure sets before and after (61 = 61)**. Those 61 are all
 pre-existing on `claude/performance-benchmark-optimization-4ebyuz`.
+
+### Re-validation after merging current `main` (~204 commits later)
+
+The work above was done against an older base. After merging `origin/main`
+(clean, no source conflicts) the whole thing was re-measured, including the
+gap-2 descending-counter fix which had not existed for the earlier runs.
+
+**26-file A/B corpus** (every i32 / loop / array / counter-exposed suite plus
+this issue's own guard), sources swapped in place so the *test* files are held
+constant across both halves:
+
+| | base sources | with #3907 |
+| --- | --- | --- |
+| tests run | 468 | 468 |
+| failures | **98** | **68** |
+
+- **30 tests fixed**, **0 newly failing.**
+- The 68 remaining failures are *identical* to the base run's and are
+  pre-existing on `main`: `typed-array-basic` ×11, `i32-loop-inference` ×10,
+  `arrays-enums` ×9, `native-i32-type` ×8, `labeled-loops` ×7, `native-arrays`
+  ×6, `issue-3734` ×5, `array-capacity` ×4, `issue-1236` ×3, `issue-1120` ×2,
+  and one each in `issue-1817`, `fast-arrays`, `array-oob-bounds-check`. Those
+  files are untouched by this branch, so the base half of the A/B *is* a clean
+  `main` run for them.
+- Of the 30 fixed, 18 are this issue's own cross-lane guard (it fails on base —
+  that is the proof it catches the bug), and the rest are the `i32-fast-mode`,
+  `issue-1817` `>>>`-unsigned, `issue-1825`, `issue-2682`, `issue-3521` and
+  `gradual-typing` cases discussed above.
+
+**Descending-counter correctness** (gap 2 changes codegen in *both* modes, so it
+needed its own sweep): 17 shapes × 3 lanes vs the JS reference, **0
+mismatches**.
+
+**Gates, all on the merged tree:** `tsc --noEmit` clean · `biome lint` clean for
+every changed file · `prettier --check` clean · `check:oracle-ratchet` OK (+0
+net checker usage across 2 changed codegen files) · `check:loc-budget` OK (the
+two grants in this file's frontmatter cover it) · `check:stack-balance` OK ·
+`check:ir-fallbacks` OK (no unintended-bucket growth) ·
+`check:done-status-integrity` OK · `check:issue-ids` OK.
+
+**`test:equivalence:gate`: exit 0 — "No new equivalence regressions", 32
+failing / 1611 passing against a 36-entry known-failure baseline.** It also
+reports 4 baseline failures now passing (`issue-1197` i32 element
+specialization, `math-pow-test262-pattern`, and two `symbol-basic` cases). The
+baseline is deliberately **not** ratcheted here: `main` moved ~204 commits, so
+those four are not confidently attributable to this change, and turning an
+unattributed pass into a hard requirement is how a flake becomes a wedge.

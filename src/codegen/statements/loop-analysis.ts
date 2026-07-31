@@ -29,26 +29,36 @@ export function detectI32LoopVar(stmt: ts.ForStatement): { name: string; initVal
   const initValue = Number(decl.initializer.text.replace(/_/g, ""));
   if (!Number.isInteger(initValue) || initValue < -2147483648 || initValue > 2147483647) return null;
 
-  // 2. Check condition: must be i < EXPR, i <= EXPR, EXPR > i, or EXPR >= i
+  // 2. Check condition: the loop condition must BOUND `i` against a comparison
+  //    operand, in either direction.
+  //
+  //    Bounded ABOVE (ascending):  i < EXPR, i <= EXPR, EXPR > i, EXPR >= i
+  //    Bounded BELOW (descending): i > EXPR, i >= EXPR, EXPR < i, EXPR <= i
+  //
+  // (#3907) The descending forms were missing, which made this function's OWN
+  // incrementor arm — it has accepted `i--`, `--i` and `i -= <lit>` since it
+  // was written — unreachable for any real program: a decrementing loop that
+  // terminates is conditioned on `i > EXPR` / `i >= EXPR`, and that was
+  // rejected here before the incrementor was ever consulted. The proof is
+  // exactly symmetric and no harder: the counter starts at an integer literal
+  // in i32 range, steps by a compile-time integer constant, and the condition
+  // bounds it. For a descending counter the literal init is the UPPER bound and
+  // the condition supplies the lower one, which is the mirror image of the
+  // ascending case the function already trusts. Widening this was a gap in the
+  // analysis, not a soundness boundary — before #3907 fast mode narrowed every
+  // `number` regardless, so no descending loop ever exercised the gap.
   if (!stmt.condition || !ts.isBinaryExpression(stmt.condition)) return null;
   const cond = stmt.condition;
   const op = cond.operatorToken.kind;
-  let isValidCondition = false;
-  if (
-    (op === ts.SyntaxKind.LessThanToken || op === ts.SyntaxKind.LessThanEqualsToken) &&
-    ts.isIdentifier(cond.left) &&
-    cond.left.text === name
-  ) {
-    isValidCondition = true;
-  }
-  if (
-    (op === ts.SyntaxKind.GreaterThanToken || op === ts.SyntaxKind.GreaterThanEqualsToken) &&
-    ts.isIdentifier(cond.right) &&
-    cond.right.text === name
-  ) {
-    isValidCondition = true;
-  }
-  if (!isValidCondition) return null;
+  const isRelational =
+    op === ts.SyntaxKind.LessThanToken ||
+    op === ts.SyntaxKind.LessThanEqualsToken ||
+    op === ts.SyntaxKind.GreaterThanToken ||
+    op === ts.SyntaxKind.GreaterThanEqualsToken;
+  const nameIsOperand =
+    (ts.isIdentifier(cond.left) && cond.left.text === name) ||
+    (ts.isIdentifier(cond.right) && cond.right.text === name);
+  if (!isRelational || !nameIsOperand) return null;
 
   // 3. Check incrementor: must be i++, ++i, i--, --i, i += INT, or i -= INT
   if (!stmt.incrementor) return null;

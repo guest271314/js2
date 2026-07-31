@@ -37,6 +37,7 @@ import { compile } from "../src/index.js";
 import { buildImports, instantiateWasm } from "../src/runtime.js";
 import { ts } from "../src/ts-api.js";
 import { mixedBenchmarks } from "../benchmarks/suites/mixed.js";
+import { arrayBenchmarks } from "../benchmarks/suites/arrays.js";
 
 type Lane = "host-call" | "gc-native" | "linear-memory";
 
@@ -62,19 +63,19 @@ async function runLane(source: string, lane: Lane): Promise<number> {
 }
 
 /** Run the benchmark source as plain JS — the spec-correct reference value. */
-function runAsJs(source: string): number {
+function runAsJs(source: string): unknown {
   const js = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText;
   // `export function run` → a plain declaration we can call from the wrapper.
   // ESNext (not `None`/CommonJS) so the emit carries no `exports` shim.
   const body = js.replace(/\bexport\s+function\b/g, "function");
-  return new Function(`${body}\nreturn run();`)() as number;
+  return new Function(`${body}\nreturn run();`)() as unknown;
 }
 
 function benchmarkSource(name: string): string {
-  const def = mixedBenchmarks.find((b) => b.name === name);
-  if (!def) throw new Error(`benchmark "${name}" not found in mixedBenchmarks`);
+  const def = [...mixedBenchmarks, ...arrayBenchmarks].find((b) => b.name === name);
+  if (!def) throw new Error(`benchmark "${name}" not found in the mixed/array suites`);
   return def.source;
 }
 
@@ -83,7 +84,7 @@ function benchmarkSource(name: string): string {
  * int32 range or carry a fraction — i.e. to be observably different if any
  * lane narrows a `number` to i32.
  */
-const CASES: ReadonlyArray<{ name: string; source: string; expected: number }> = [
+const CASES: ReadonlyArray<{ name: string; source: string; expected: number; lanes?: readonly Lane[] }> = [
   // The published benchmark, verbatim from the suite. fib(30) = 832,040
   // summed 10,000 times = 8,320,400,000, which is exactly representable as an
   // f64 and ~3.9x past 2^31.
@@ -91,6 +92,19 @@ const CASES: ReadonlyArray<{ name: string; source: string; expected: number }> =
     name: "mixed/fibonacci (published benchmark source)",
     source: benchmarkSource("mixed/fibonacci"),
     expected: 8_320_400_000,
+  },
+  // The SECOND wrong published benchmark, found while re-measuring: `gc-native`
+  // returned 704,982,704 where JS returns 4,999,950,000 — the same 2^31 wrap,
+  // also never compared, also published (as "2.68x faster than JS").
+  {
+    name: "array/reduce (published benchmark source)",
+    source: benchmarkSource("array/reduce"),
+    expected: 4_999_950_000,
+    // `linear-memory` is excluded because `codegen-linear` rejects `.reduce()`
+    // outright ("Unsupported Array method", src/codegen-linear/index.ts) — a
+    // pre-existing capability gap in that backend, not a numeric disagreement.
+    // The two lanes that CAN compile it must still agree, which is the point.
+    lanes: ["host-call", "gc-native"],
   },
   {
     name: "accumulator past 2^31 via +",
@@ -195,15 +209,67 @@ describe("#3907 cross-lane numeric result equality", () => {
       // never silently invalidate the expectation.
       expect(runAsJs(testCase.source)).toBe(testCase.expected);
 
+      const lanes = testCase.lanes ?? WASM_LANES;
       const byLane = new Map<Lane, number>();
-      for (const lane of WASM_LANES) {
+      for (const lane of lanes) {
         byLane.set(lane, await runLane(testCase.source, lane));
       }
-      expect(Object.fromEntries(byLane)).toEqual({
-        "host-call": testCase.expected,
-        "gc-native": testCase.expected,
-        "linear-memory": testCase.expected,
-      });
+      expect(Object.fromEntries(byLane)).toEqual(Object.fromEntries(lanes.map((l) => [l, testCase.expected])));
+    });
+  }
+});
+
+/**
+ * (#3907) The formatter cases, which are what #3917 filed independently before
+ * the shared root cause was found. `String(n)` returned `"3"` for `n = 3.5`
+ * because the value had never been *stored* as 3.5 — nothing was wrong in
+ * `number_toString`, which is why the search inside the formatter came up
+ * empty.
+ *
+ * ## Why these run with `nativeStrings: false`
+ *
+ * `fast: true` auto-enables `nativeStrings`, and a `NativeString` (a WasmGC
+ * i16 array) is not a JS string across the export boundary — it reads back as
+ * `null`, and calling `.length` on the formatter's result traps with
+ * "dereferencing a null pointer". **That trap is pre-existing and byte-identical
+ * on the base branch**, measured both before and after this change; it is
+ * #3912's remaining half (the `import-collector.ts` gate plus
+ * `emitNativeStringRefFromExternref`), not something #3907 introduced or can
+ * fix. Pinning the observable half here is deliberate: it locks in the
+ * representation fix now, and #3912 unlocks the other configuration later.
+ */
+const FORMATTER_CASES: ReadonlyArray<{ name: string; source: string; expected: string }> = [
+  {
+    name: "String(n) on a fractional local",
+    source: `export function run(): string { const n = 3.5; return String(n); }`,
+    expected: "3.5",
+  },
+  {
+    name: "String(n) keeps full f64 precision",
+    source: `export function run(): string { const n = Math.sqrt(2); return String(n); }`,
+    expected: "1.4142135623730951",
+  },
+  {
+    name: "toFixed on a fractional local",
+    source: `export function run(): string { const n = 3.14159; return n.toFixed(2); }`,
+    expected: "3.14",
+  },
+];
+
+describe("#3907 formatter results agree across lanes", () => {
+  for (const testCase of FORMATTER_CASES) {
+    it(`${testCase.name} — host-call and gc-native agree`, async () => {
+      expect(runAsJs(testCase.source)).toBe(testCase.expected);
+
+      for (const options of [{ fast: false }, { fast: true, nativeStrings: false }] as const) {
+        const result = await compile(testCase.source, options);
+        expect(result.success, result.errors.map((e) => e.message).join("; ")).toBe(true);
+        const imports = buildImports(result.imports, {}, result.stringPool);
+        const { instance } = await instantiateWasm(result.binary, imports.env, imports.string_constants);
+        imports.setInstance?.(instance);
+        const run = (instance.exports as Record<string, unknown>).run as () => string;
+        expect(run()).toBe(testCase.expected);
+      }
     });
   }
 });
