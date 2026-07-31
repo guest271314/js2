@@ -66,6 +66,7 @@ that index is foreign and either out of range (emit error, our case) or
 silently reads the wrong slot.
 
 The existing cross-fctx rescues do NOT cover this route:
+
 - The **#2029 "family A"** arms rescue only names promoted to
   `ctx.capturedBoxGlobals` / `ctx.capturedGlobals` by the accessor-capture
   pass (object-literal accessor bodies). A method-call-arg callback gets no
@@ -139,9 +140,75 @@ function `assertThrows(…)` (no property carrier) → OK.
 ## Verification plan
 
 - The minimal repro compiles and instantiates; `assert.throws(ReferenceError,
-  …)` fires correctly (the TDZ read throws).
+…)` fires correctly (the TDZ read throws).
 - The 4 test262 files flip compile_error→pass (or at minimum →honest fail).
 - No regressions in: `tests/issue-1712-capture-closure-dispatch.test.ts`,
   `tests/illegal-cast-closures-585.test.ts` (pre-existing local failures
   noted in #3468 — control against origin/main), the #1177/#2029 test
   families, and the async-fn null-deref tests the #1177 revert protected.
+
+## Re-measured on current `main` (2026-07-31) — two corrections to this issue
+
+Reproduced 4/4 named files via `runTest262File(abs, cat, 60000)` and
+`(…, "standalone")` on the same file.
+
+### Correction 1 — it is NOT standalone-only, and it is NOT latent
+
+The `## Symptom` section scopes this to `--target standalone`, and
+`## Why #3468 F1 exposes it` calls it **latent on main**. Both are now false:
+#3468 landed 2026-07-24, and all four files fail on **both** lanes on current
+`main`:
+
+```
+host:       local index out of range — 21 (valid: [0, 2)) at '__cb_0'
+standalone: local index out of range — 18 (valid: [0, 2)) at '__cb_0'
+```
+
+(`…-set-before-initialization.js` reports `valid: [0, 3)`.) So this is a live
+default-lane compile failure, not a standalone-only one gated behind a branch.
+The differing index (21 vs 18) is the two lanes' differing local counts, not two
+defects.
+
+### Correction 2 — "method-call-arg" is NOT a necessary ingredient
+
+The title attributes this to a **method-call-arg** callback. Variable isolation
+says otherwise. Minimal repro is 8 lines (`.tmp/probe-3559-min.js`):
+
+```js
+(function () {
+  function f() {
+    return x + 1;
+  }
+  assert.throws(ReferenceError, function () {
+    f();
+  });
+  let x;
+})();
+```
+
+Variants, all through the real runner, both lanes:
+
+| variant                                  | result                      | conclusion                                |
+| ---------------------------------------- | --------------------------- | ----------------------------------------- |
+| v1 — callback passed to a **plain** call | **still CE (21/18)**        | method call **NOT** necessary             |
+| v2 — `var x` instead of TDZ `let x`      | compiles; assertion fails   | TDZ `let` **IS** necessary                |
+| v3 — callback does **not** call `f`      | **pass**                    | calling nested `f` **IS** necessary       |
+| v4 — no IIFE, top level                  | compiles; different failure | enclosing function scope **IS** necessary |
+
+**Necessary ingredient set:** an enclosing function scope, containing a TDZ
+`let`, a hoisted nested function reading that binding, and a callback that calls
+that nested function. The callee being a _method_ is incidental — v1 reproduces
+with a plain function call.
+
+That matters for the fix: anything keyed on the method-call argument path
+(`call-identifier.ts`'s method-call-arg handling) would fix the four named files
+while leaving the plain-call form broken — the same partial-fix shape that has
+cost several rounds elsewhere.
+
+### Instrument note
+
+A bare `compile(src, { allowJs: true })` repro of this shape does **not**
+reproduce — it fails earlier on a TypeScript `'x' is possibly 'undefined'`
+diagnostic, and an object-literal stand-in for the `assert` harness compiles
+cleanly. Use `runTest262File` on a test262-shaped file; the harness assembly and
+compiler options are load-bearing here.
