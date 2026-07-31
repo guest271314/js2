@@ -23,6 +23,17 @@ related: [3634, 2547, 2519, 3915]
 > issue proposes was **already implemented**. **Do not run the bulk delete** — it
 > would reclaim approximately zero bytes. Full measurement below; read it before
 > re-opening.
+>
+> **⚠ ACTION REQUIRED ELSEWHERE — #3634 must NOT be treated as a symptom of this.**
+> This issue asserted that #3634's six consecutive baseline-promote failures were
+> knock-on damage from storage exhaustion, and therefore that #3634's
+> retry/alerting was "treating a symptom". **That assertion is now falsified**
+> (§4 below): storage is not exhausted, it has only *grown* since those failures,
+> and the failures stopped anyway. **#3634 is an independent, unexplained bug and
+> must be judged on its own merits.** This is called out here, at the top, on
+> purpose: a wrongly *suppressed* issue is far harder to notice than a wrongly
+> *filed* one — nothing re-surfaces it, because the reason it was parked is
+> recorded as settled fact in an issue nobody re-reads.
 
 ## The original measurement
 
@@ -175,10 +186,28 @@ pushed 2020-2025); the only recent ones are `company-website` (2026-05-20),
 Actions **do** consume minutes, so glance at their recent run activity before concluding
 this is entirely artifacts.
 
-## Note on #3634
+## #3634 — un-suppressed. Judge it on its own merits.
 
-This issue proposed that #3634's six consecutive baseline-promote failures were a
-symptom of storage exhaustion, and that #3634's retry/alerting was therefore treating a
-symptom. **That link is unsupported** — storage is not exhausted and has only grown
-since those failures, while the failures stopped. #3634 should be judged on its own
-merits, not deprioritised as a symptom of this.
+The original text above says, of #3634's six consecutive baseline-promote failures:
+
+> If storage exhaustion is the cause, those are **not independent bugs** and #3634's
+> retry/alerting is treating a symptom.
+
+**The antecedent is false, so the conclusion does not hold.** Three independent
+measurements each defeat it:
+
+1. **Storage is not exhausted** — an artifact uploaded 31 s before the check (§3).
+2. **Storage has only grown since** those failures — 984,897 → 1,017,559 rows, and the
+   live set is bounded by ~5-day retention, so conditions today are no *better* than
+   on 2026-07-24/25.
+3. **The failures stopped anyway**, with no storage reclaimed by anyone.
+
+If exhaustion had caused them, (2) says they should have got worse, not stopped. So
+**#3634 describes a real, still-unexplained bug**, and its retry/alerting is not
+"treating a symptom" — there is no established underlying cause for it to be a symptom
+*of*.
+
+**Why this warrants its own section rather than a footnote:** the failure mode of a
+wrong suppression is silence. A wrongly-filed issue gets closed by the next person who
+reads it; a wrongly-suppressed one is never re-read, because the reason it was parked
+sits in a *different* issue that now reads as settled. #3635 was that different issue.
