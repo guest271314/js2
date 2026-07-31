@@ -266,6 +266,118 @@ what the two non-parity axes predict, and the four parity axes
 (numeric 0.98x, property 1.00x, allocation 1.00x, plus the loop) are
 genuinely contributing nothing to it.
 
+## Whole-parse decomposition (2026-07-31, mine) — and why D2 is NOT the lever
+
+The axis table above measures **isolated microbenchmarks**. This section
+measures **where the time actually goes in the real 226 KB acorn
+self-parse**, which is a different question and gives a different answer.
+This is the check the axis table cannot do for itself: an axis can be
+4.5x off V8 and still be irrelevant if it is 2% of the mix.
+
+**Method.** `--lane standalone-dynamic` compiled once with
+`--preserve-debug-names --inspect-binary`, then profiled via
+`--reuse-standalone-binary --profile-runtime wasm --profile-iterations 30`
+(binary reuse skips the ~7-minute level-4 compile, so profile iteration is
+seconds — worth knowing). Self-time per function from
+`samples`/`timeDeltas`; **V8 profiler overhead (`post [node:inspector]`,
+3.84% of raw samples) excluded from the denominator**, which is 2,443.0 ms
+over 1,188 samples. Load average **12.8-13.9** on 10 cores — high, which
+is why this is reported as **shares**, not times; shares are far more
+contention-robust than wall-clock, but see the caveat at the end.
+
+| family | share | largest members |
+| --- | ---: | --- |
+| **compiled parser body** | **56.90%** | `__closure_339` 3.38%, `__closure_378__typed_this` 2.64%, `__closure_184` 2.62% |
+| property lookup | 10.10% | **`__extern_get` 8.03%**, `__obj_find` 0.53% |
+| direct-call trampolines `__dc_*` | 7.66%¹ | `__dc_Parser_eat_1_g` 0.78%, `__dc_Parser_startNode_0` 0.34% |
+| call dispatch | 7.45% | `__call_fn_method_0` 1.87%, `_7` 1.84%, `_1` 1.18% |
+| value ops / coercion | 6.42% | `__extern_strict_eq` 2.13%, `__to_primitive` 1.53%, `__any_from_extern_honest` 1.08% |
+| regexp engine | 4.76% | `__regex_search` 4.13% |
+| GC | 4.31% | |
+| **string runtime** | **2.10%** | `__str_flatten` 1.22%, `__str_equals` 0.88% |
+| array runtime | 0.30% | `__vec_push` 0.24% |
+
+¹ the `__dc_*` bucket is the #3683-S3 / #3780-round-2 direct-call
+trampolines; arguably parser body too, which would take that bucket to
+~61%.
+
+### Finding 1 — D2 (string element access) cannot deliver parity. Do not spend a window on it.
+
+**The out-of-line string runtime is 2.10% of the parse.** Zeroing it
+entirely moves ~10x to ~9.8x. D2's "4.5x vs V8" is a true statement about
+an isolated 700 K-`charCodeAt` loop where string access is ~100% of the
+work; in a real parse the mix is dominated by everything else. This is
+the axis-table-to-end-to-end extrapolation trap, caught by measuring the
+mix instead of assuming it.
+
+**Honest caveat that limits this claim.** `charCodeAt` on a flat native
+string lowers **inline** (`array.get_u` off a `struct.get` data pointer —
+#3673 round 34), so inline character reads are attributed to the *calling
+closure* and sit inside the 56.90% parser-body bucket, not in
+`__str_flatten`/`__str_equals`. So **2.10% is a floor on out-of-line
+string cost, not a ceiling on total string cost.** What it does establish
+is that the *rope/flatten/intern/compare machinery* — the part D2
+proposed to hoist — is 2.10%. Settling the inline half needs a paired A/B
+with the `i32→f64→i32` round trip removed, not a profile; #3673 round 36
+priced that at ~27% of a *hand-typed tokenizer*, and acorn's parse is far
+more than tokenizing.
+
+### Finding 2 — the typed-`this` machinery IS firing on the hot path; the residual is INSIDE the twins
+
+Splitting the parser-body bucket by whether a twin was emitted:
+
+| | share |
+| --- | ---: |
+| parser body, **typed-`this` twins** | **37.10%** |
+| parser body, **generic / no twin** | **19.80%** |
+| direct-call trampolines `__dc_*` | 3.92%² |
+
+² this counts only `__dc_*` frames attributed as parser body; the 7.66%
+row above is the full `__dc_*`+misc-helper bucket.
+
+So #3683 S2/S3 is not failing to apply — **37% of the whole parse already
+runs inside typed twins**. That relocates the question: the cost is not
+"we never proved the receiver", it is **what the twin bodies still
+contain**. That is exactly #3686's scaffolding axis (null-check/throw +
+`ref.cast` re-narrowing per field access). #3686's own repricing is
++23-29% on a pure walk; applied to a 37.10% share that is roughly
+**8-11% end-to-end** — the largest single named lever in this table, and
+far larger than D2.
+
+### Finding 3 — the two hottest functions in the entire parse have NO twin
+
+| share | function | |
+| ---: | --- | --- |
+| 3.38% | `__closure_339` | **generic** |
+| 2.62% | `__closure_184` | **generic** |
+| 2.64% | `__closure_378__typed_this` | twin |
+| 2.21% | `__fnctor_Node_new` | generic |
+| 2.33% | `__closure_352__typed_this` | twin |
+| 2.11% | `__closure_543` | **generic** |
+
+The single largest and third-largest compiled functions are **untwinned**,
+and 19.80% of the parse sits in generic bodies. #3685's own S1 note
+records the admission rate as **150 of 2,363** non-`this` accesses (6.3%)
+and names the two dominant unproven shapes — `this.options.<x>` (a
+field-read receiver) and `state.<x>` in the RegExp validator (a parameter
+whose call sites pass a field read). Widening admission to reach the top
+generic closures is worth more than the entire string family.
+
+### Ranked levers on the real workload (supersedes reading the axis table alone)
+
+1. **Scaffolding inside existing twins** (#3686) — ~37% share × 23-29% ⇒ ~8-11%.
+2. **Widen twin admission to the top generic closures** (#3685) — 19.80% is untwinned.
+3. **`__extern_get`** (#3669/#3671) — 8.03%, the largest single non-parser function.
+4. Call dispatch 7.45% · value ops 6.42% · regexp 4.76% · GC 4.31%.
+5. **String runtime 2.10%** — real, but not a parity lever.
+
+**Contention caveat, applied to my own numbers first.** Taken at load
+12.8-13.9 on a 10-core box with ~7 concurrent agents. Shares are robust
+to contention in a way wall-clock is not, but GC share in particular can
+move under memory pressure, and a 1,188-sample profile gives roughly
+±1pp resolution on a 2% bucket. The **ranking** is what this section
+asserts; treat individual sub-1% figures as indicative.
+
 ## Deliverables
 
 **D1 — the harness itself (done in this issue's PR).**
