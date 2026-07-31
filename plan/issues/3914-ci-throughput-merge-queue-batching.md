@@ -35,12 +35,15 @@ what accumulated", and the setting that matters is the **cap**
 (`max_entries_to_merge ≈ 4`) — the throughput curve is a bowl that turns back up,
 so unbounded accumulation is worse than a small batch.
 
-**Measured**: 0 of 26 successful groups on 2026-07-31 held more than one PR, and
-three of them were built on the _same base_ — i.e. three PRs sat enqueued
-simultaneously and each still got its own single-PR group and its own full run.
-Group formation is eager. This is a repo-ruleset change, not a code change, and
-its one real objection (intra-group masking) is narrower than the policy doc
-claimed.
+**Measured**: 0 of 26 successful groups on 2026-07-31 held more than one PR —
+while the **median PR waited 23.6 min** in the queue for a 13.3 min run, and
+**13 of 20 groups had another PR already waiting when they were dispatched**.
+The queue is backed up most of the day and still validates one PR at a time.
+Whether the binding constraint is the floor (`min_entries_to_merge: 1` forming
+eagerly) or the cap (`max_entries_to_merge` effectively 1) cannot be determined
+from here, so the rollout tests the **cap first** — that path costs no latency at
+all. This is a repo-ruleset change, not a code change, and its one real objection
+(intra-group masking) is narrower than the policy doc claimed.
 
 Auditing for that turned up **three places that silently assume one PR per
 group** — the #1956 predecessor-baseline lookup, `auto-park`, and the #2975
@@ -206,29 +209,52 @@ Checked against every successful merge_group run of 2026-07-31 by counting
 
 **0 of 26 groups contained more than one PR.**
 
-That is not because the queue was never backed up. Three groups were built on the
-**same base** `cb86a019` — meaning `main` did not advance between them, so all
-three PRs were enqueued simultaneously:
+That is not because the queue was never backed up — it was backed up **most of
+the day**. A group's head commit is created when the entry is prepared, well
+before its run is dispatched, so `run_start − commit_date` measures how long that
+PR sat in the queue:
 
-| time  | group | outcome                   |
-| ----- | ----- | ------------------------- |
-| 10:25 | #3886 | cancelled (group rebuild) |
-| 11:01 | #3888 | failed                    |
-| 11:14 | #3884 | success → `0d4900ba`      |
+| enqueued | dispatched | waited     | PR    |
+| -------- | ---------- | ---------- | ----- |
+| 10:42:56 | 11:14:04   | 31.1 min   | #3884 |
+| 11:24:56 | 11:51:12   | 26.3 min   | #3889 |
+| 11:28:42 | 12:15:03   | 46.4 min   | #3887 |
+| 11:35:52 | 12:28:21   | **52.5** m | #3890 |
+| 11:54:27 | 12:33:44   | 39.3 min   | #3891 |
+| 12:18:21 | 12:59:04   | 40.7 min   | #3892 |
+| 12:49:50 | 13:33:18   | 43.5 min   | #3895 |
 
-Three PRs available, three separate single-PR groups, three separate runs. So the
-queue forms a group **as soon as the minimum is met** — and with
-`min_entries_to_merge: 1` the minimum is met by the first entry. Accumulation is
-already happening; the group just refuses to pick more than one PR off the pile.
+Across 20 resolvable groups: **median queue wait 23.6 min** against a 13.3 min
+run — PRs spend longer waiting than being validated — and 12/20 waited >10 min.
 
-**Open question — one experiment settles it.** GitHub's exact group-formation
-semantics (does a group take `min(available, max_entries_to_merge)`, or exactly
-`min_entries_to_merge`?) are not documented precisely enough to predict from, and
-the live ruleset is not readable from the repo (merge-queue settings are not in
+The decisive statistic: **13 of 20 groups had at least one _other_ PR already
+waiting at the moment they were dispatched** (median 1, max 3). Every one of
+those still went out as a size-1 group. Between 11:28 and 12:28, four PRs
+(#3887, #3890, #3891, #3893) were all queued simultaneously and each got its own
+full run — ~52 min of validation that one group would have done in ~13.
+
+So the queue **already accumulates**; the group simply refuses to take more than
+one PR off the pile.
+
+**Which knob is binding — settle this before touching `min`.** Two hypotheses fit
+the data equally well, and they imply different fixes:
+
+- **(a) eager-with-minimum**: a group takes exactly `min_entries_to_merge`
+  entries. Then `min: 1` can never batch, and the floor must be raised.
+- **(b) the cap is already 1**: a group takes `min(available, max_entries_to_merge)`
+  and the live `max_entries_to_merge` is effectively 1. Then raising the **cap**
+  is sufficient and `min` should stay at 1.
+
+The live ruleset is not readable from the repo (merge-queue settings are not in
 `scripts/enable-branch-protection.sh`, and `docs/ci-policy.md`'s record of them
-was stale). Set `min_entries_to_merge: 2` and watch one backed-up window: if
-groups start containing 2+ PRs, eager-with-minimum is confirmed and the cap is
-the only remaining tuning. Do **not** infer the answer from the docs.
+was stale — it had `max_entries_to_build: 5` long after the wedge reverted it),
+so this cannot be resolved from here.
+
+**Test (b) first, because it is free.** Raise `max_entries_to_merge` to 4 and
+leave `min_entries_to_merge: 1`. Given 13/20 dispatches had a peer waiting, one
+backed-up afternoon is a decisive sample. If groups start containing 2+ PRs, the
+work is done at **zero latency cost** — nothing ever waits for a quorum. Only if
+groups stay size-1 is (a) confirmed, and only then raise `min` to 2.
 
 ### The one real objection, and why it is narrower than the policy doc says
 
@@ -294,17 +320,40 @@ The merge-queue settings are **not** in `scripts/enable-branch-protection.sh`
 (checked — it manages required checks and reviewers only). They live solely in
 Settings → Rules → Rulesets, so this last step is a UI/API change by an admin:
 
+**Step 1 — raise the cap only. This is the free experiment; do it first.**
+
 ```
 max_entries_to_build: 1          # unchanged — see Part 1, do NOT raise this
-min_entries_to_merge: 2          # then 3-4 once group sizes are confirmed
-min_entries_to_merge_wait_minutes: 5     # so a quiet queue never stalls
+min_entries_to_merge: 1          # UNCHANGED for now — see below
 max_entries_to_merge: 4          # THE CAP — bigger is worse, see the bowl above
 ```
 
-`max_entries_to_merge` is the setting that actually bounds the damage: the
-serial queue already accumulates arrivals for free, so this decides how many of
-them a group swallows. 4 is the optimum at the observed failure rate; leaving it
-at 5 is fine, raising it much past that gives the failure probability back.
+Then watch one backed-up window (13/20 dispatches had a peer waiting, so an
+afternoon is decisive). If groups start containing 2+ PRs, **stop here** — you
+have batching at zero latency cost, because nothing ever waits for a quorum.
+
+**Step 2 — only if Step 1 leaves groups at size 1** (i.e. formation is
+eager-with-minimum, hypothesis (a)):
+
+```
+min_entries_to_merge: 2
+min_entries_to_merge_wait_minutes: 2     # keep SHORT — see the tax below
+```
+
+Raising `min` is **not free**, which is why it is second and not first: a group
+now waits for a quorum, so a genuinely solo PR pays up to the wait timer. Sizing
+that tax from the same data — 7 of 20 dispatches had **no** peer waiting, and
+those PRs waited only 0.3–6.5 min — so roughly a third of the time the queue is
+genuinely idle and would eat the timer as pure added latency. The other ~two
+thirds it costs nothing, because the queue is serial: while a run is in flight
+the next group could not start anyway, so the wait overlaps work already
+happening. Hence **2 minutes, not 5** — bound the idle-case tax, since the
+busy-case benefit does not need a long timer to materialise.
+
+`max_entries_to_merge` remains the setting that bounds the downside: the serial
+queue accumulates arrivals for free, and this decides how many a group swallows.
+4 is the optimum at the observed failure rate; much higher hands the gain back to
+compounding batch-failure probability.
 
 Pre-conditions, all now satisfied:
 
@@ -404,9 +453,10 @@ that converts directly into queue throughput.
 - [x] Every pipeline site that assumes one PR per merge group identified and
       fixed (P1 predecessor baseline, P2 auto-park, P3 park-race guard), each a
       verified no-op at batch size 1 and fail-safe towards today's behaviour.
-- [ ] **Follow-up (needs repo admin — the only remaining step):** set
-      `min_entries_to_merge: 2` in the main ruleset, observe the red-batch rate
-      for a day, then `3`. Rollback is setting it back to `1`; no code revert.
+- [ ] **Follow-up (needs repo admin — the only remaining step):** Step 1, raise
+      `max_entries_to_merge` to 4 leaving `min_entries_to_merge: 1`, and observe
+      one backed-up window. Only if groups stay size-1, Step 2: `min: 2` with a
+      2-minute wait timer. Rollback is reverting the ruleset; no code revert.
 - [ ] **Verify after merge:** on the first post-merge `merge_group` run, confirm
       (a) max shard start < 60 s, (b) both lanes' max job within ~1 min,
       (c) `changes` job < 20 s, (d) total run wall ≈ 11 min.
