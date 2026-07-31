@@ -33,11 +33,13 @@ the same filter.** It strands until a human or shepherd manually enqueues it.
 
 ## Measured, 2026-07-31
 
-Four PRs stranded in exactly this state — **#3859, #3864, #3865, #3866** — all with
-every required check green, all `UNSTABLE` on `release-pending` alone. Each needed
-exactly one manual `enqueuePullRequest` with the user PAT. A fifth, #3867, reached
-`CLEAN` and **self-enqueued normally**, confirming the enqueue path itself is
-healthy.
+**Six PRs** needed a manual `enqueuePullRequest` in one session — #3859, #3864,
+#3865, #3866, #3868, #3869 — all with every required check green, all `UNSTABLE` on
+`release-pending` alone.
+
+**The control: #3867 reached `CLEAN` and self-enqueued normally.** That is what
+proves the enqueue path itself is healthy and this one helper is the entire problem.
+Do not inflate the merged count when citing this — the control is the argument.
 
 ## Why this is `critical` despite being cosmetic-looking
 
@@ -46,16 +48,44 @@ it is correctly not gating merge on the merits. But it gates merge *in practice*
 `mergeStateStatus`, for **every PR this team opens**. That is a standing tax on all
 throughput, not a one-off — and it is invisible, because the PR looks green.
 
-## Fix (either is sufficient; the first is better)
+## ROOT CAUSE — pinned to the line, with its own counterexample in the same file
 
-1. **Fix the helper** so it does not fail on fork-head PRs — the condition it is
-   testing is not a defect for a fork-head PR, it is the normal case here.
-2. **Mark the job `continue-on-error: true`** so a non-required check cannot drive
-   `mergeStateStatus`.
+`scripts/retarget-stacked-pr-children.mjs:495`, in `releasePendingAfterSynchronize`:
 
-A third option — teaching `auto-enqueue` to accept `UNSTABLE`-with-all-required-green
-— is **not** recommended: it would weaken the enqueue gate globally to work around
-one broken helper.
+```js
+if (repoFullName(pr.head) !== expected.repo || sha(pr.head) !== expected.headSha) {
+  throw new Error(`#${expected.number}: synchronized pull request head changed`);
+```
+
+`expected.repo` is `GH_REPO` = `loopdive/js2`. For **any** fork-head PR,
+`pr.head.repo.full_name` is `ttraenkler/js2`, so the **first disjunct is always
+true** — it throws regardless of the sha, which matched fine.
+
+**The error message is actively misleading**: it reports "head changed" when what
+actually happened is "head repo is a fork". That is why this read as a mysterious
+per-PR fault for weeks rather than a systematic one.
+
+Verified identical on **#3868** (job 91053206478) and **#3871** (run 30600487933):
+`retarget-stacked-pr-children: #N: synchronized pull request head changed` → exit 1.
+
+### The clincher — its own sibling already handles this correctly
+
+`retargetImmediateChildren` at **line 305** treats the identical condition as a
+**benign no-op**: *"head repository ttraenkler/js2 is not loopdive/js2; no children"*,
+conclusion **success**. That is the `retarget` job that passed on #3863.
+
+**Two functions in one file, same check, opposite verdicts.**
+
+## Fix
+
+**Make line 495 match line 305's treatment — a fork head is a no-op, not an error.**
+A few lines, and it removes the manual-enqueue tax from every PR this team opens.
+
+Alternative if that is somehow unsafe: mark the job `continue-on-error: true` so a
+non-required check cannot drive `mergeStateStatus`.
+
+**Not recommended:** teaching `auto-enqueue` to accept `UNSTABLE`-with-all-required-green.
+That weakens the enqueue gate globally to work around one broken helper.
 
 ## Acceptance
 
