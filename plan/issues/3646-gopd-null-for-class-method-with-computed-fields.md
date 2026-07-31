@@ -18,6 +18,37 @@ origin: "cohort tracker for failures exposed by #3603 S1 host de-inflation (PR #
 
 # #3646 — `getOwnPropertyDescriptor` returns `null` for a class method when the class has computed-name fields
 
+> ## ⚠ SEVERITY CORRECTION 2026-07-31 — it does not return `null`, it TRAPS
+>
+> Found while diagnosing #3647; routed here because nobody holds #3646 and the
+> issue file is the only durable route.
+>
+> `Object.getOwnPropertyDescriptor(C.prototype, "m")` on a plain
+> `class { m() {} }` does not return `null` — it raises:
+>
+> ```
+> RuntimeError: illegal cast in __module_init()
+> ```
+>
+> **Two independent probes crashed on that exact line**, both in the **host**
+> lane, via `runTest262File` with controls that must hold under any spec version
+> (`({a:1}).propertyIsEnumerable("a") === true`, `…("zz") === false`) — both
+> controls passed, which is what licenses reading the result (#3885).
+>
+> Notably the repro needed **no computed-name field**: the minimal
+> `var C = class { m() { return 42; } }; Object.getOwnPropertyDescriptor(C.prototype,"m")`
+> was enough. If that holds, the "when the class has computed-name fields"
+> qualifier in the title is narrower than the real trigger and should be
+> re-measured before it is used to scope a fix.
+>
+> **Why this matters for scoping:** a wrong value is recoverable by a caller;
+> an uncatchable trap in `__module_init` takes the whole module down at
+> instantiation. Anything sized against "returns null" understates it.
+>
+> Adjacent, deliberately NOT folded in: the standalone lane returns `false` from
+> `hasOwnProperty` for the same existing class method — that is **#3875**
+> (*gOPD correct, hasOwnProperty broken*), a different defect on the same probe.
+
 > **Cohort tracker.** This is one of the two failure cohorts EXPOSED (not caused)
 > by #3603 S1's host-lane de-inflation. Per the #3468 F1 landing recipe, every
 > exposed cohort is routed to a tracker — that is what makes a de-inflation

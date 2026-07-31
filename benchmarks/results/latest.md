@@ -8,94 +8,94 @@ Platform: linux x64
 
 | Benchmark | JS | Host-call | GC-native | Linear | Winner |
 |-----------|-----|-----------|-----------|--------|--------|
-| string/concat-short | 0.035ms | 0.053ms | 0.044ms | — | js |
-| string/concat-long | 0.005ms | 0.005ms | 0.007ms | — | host-call |
-| string/indexOf | 0.001ms | 0.427ms | 0.014ms | — | js |
-| string/includes | 0.001ms | 0.443ms | 0.015ms | — | js |
-| string/split | 0.275ms | 19.99ms | 0.918ms | — | js |
-| string/replace | 0.033ms | 0.533ms | 0.110ms | — | js |
-| string/case-convert | <0.001ms | 0.824ms | 3.75ms | — | js |
-| string/substring | 0.003ms | 4.09ms | 0.027ms | — | js |
-| string/trim | 0.138ms | 3.79ms | 0.526ms | — | js |
-| string/startsWith-endsWith | 0.214ms | 8.84ms | 1.60ms | — | js |
-| array/push-pop | 1.22ms | 1.31ms | 0.725ms | — | gc-native |
-| array/sort-i32 | 0.542ms | 887.5ms | — | — | js |
-| array/map-filter | 0.123ms | 0.526ms | 0.041ms | — | gc-native |
-| array/reduce | 1.15ms | 1.31ms | 0.773ms | — | gc-native |
-| array/indexOf | 4.48ms | 3.78ms | 2.34ms | — | gc-native |
-| array/slice | 0.019ms | 0.022ms | 0.011ms | — | gc-native |
-| array/reverse | 7.05ms | 3.21ms | 2.83ms | — | gc-native |
-| array/forEach | 0.069ms | 0.053ms | 0.029ms | — | gc-native |
-| array/find | 0.248ms | 0.425ms | — | — | js |
-| dom/create-elements | 0.039ms | — | — | — | js |
-| dom/set-attributes | 0.119ms | — | — | — | js |
-| dom/read-attributes | 0.043ms | — | — | — | js |
-| dom/modify-text | 0.076ms | — | — | — | js |
-| mixed/csv-parse | 0.334ms | 27.42ms | 0.917ms | — | js |
-| mixed/text-search | 0.221ms | 18.03ms | 1.42ms | — | js |
-| mixed/fibonacci | 0.107ms | 0.125ms | 0.068ms | 0.756ms | gc-native |
-| mixed/matrix-multiply | 0.161ms | 1.56ms | 0.169ms | 1.41ms | js |
-| mixed/sieve | 1.44ms | 2.03ms | 1.09ms | — | gc-native |
+| string/concat-short | 0.034ms | 0.049ms | 0.040ms | — | js |
+| string/concat-long | 0.004ms | 0.005ms | 0.005ms | — | js |
+| string/indexOf | 0.001ms | 0.692ms | 0.016ms | — | js |
+| string/includes | 0.002ms | 0.692ms | 0.016ms | — | js |
+| string/split | 0.403ms | 22.58ms | 1.07ms | — | js |
+| string/replace | 0.043ms | 0.866ms | 0.141ms | — | js |
+| string/case-convert | <0.001ms | 1.23ms | 4.43ms | — | js |
+| string/substring | 0.003ms | 6.61ms | 0.027ms | — | js |
+| string/trim | 0.152ms | 6.08ms | 0.506ms | — | js |
+| string/startsWith-endsWith | 0.246ms | 13.55ms | 0.659ms | — | js |
+| array/push-pop | 1.48ms | 1.86ms | 0.859ms | — | gc-native |
+| array/sort-i32 | 0.787ms | 1248.8ms | — | — | js |
+| array/map-filter | 0.136ms | 0.612ms | 0.061ms | — | gc-native |
+| array/reduce | 2.16ms | 1.85ms | 0.849ms | — | gc-native |
+| array/indexOf | 3.95ms | 3.39ms | 2.57ms | — | gc-native |
+| array/slice | 0.027ms | 0.032ms | 0.014ms | — | gc-native |
+| array/reverse | 7.82ms | 3.40ms | 4.32ms | — | host-call |
+| array/forEach | 0.050ms | 0.082ms | 0.044ms | — | gc-native |
+| array/find | 0.240ms | 0.426ms | — | — | js |
+| dom/create-elements | 0.218ms | — | — | — | js |
+| dom/set-attributes | 0.106ms | — | — | — | js |
+| dom/read-attributes | 0.057ms | — | — | — | js |
+| dom/modify-text | 0.052ms | — | — | — | js |
+| mixed/csv-parse | 0.461ms | 35.14ms | 0.860ms | — | js |
+| mixed/text-search | 0.219ms | 27.66ms | 0.972ms | — | js |
+| mixed/fibonacci | 0.109ms | 0.228ms | 0.084ms | 0.226ms | gc-native |
+| mixed/matrix-multiply | 0.160ms | 0.487ms | 0.188ms | 2.12ms | js |
+| mixed/sieve | 1.57ms | 2.11ms | 1.16ms | — | gc-native |
 
 ## Speedup vs JS baseline
 
 | Benchmark | Host-call | GC-native | Linear |
 |-----------|-----------|-----------|--------|
-| string/concat-short | 1.51x slower | 1.26x slower | — |
-| string/concat-long | 1.01x faster | 1.44x slower | — |
-| string/indexOf | 414.10x slower | 13.98x slower | — |
-| string/includes | 386.07x slower | 12.73x slower | — |
-| string/split | 72.75x slower | 3.34x slower | — |
-| string/replace | 15.94x slower | 3.28x slower | — |
-| string/case-convert | 2833.30x slower | 12891.36x slower | — |
-| string/substring | 1457.58x slower | 9.51x slower | — |
-| string/trim | 27.47x slower | 3.81x slower | — |
-| string/startsWith-endsWith | 41.24x slower | 7.48x slower | — |
-| array/push-pop | 1.07x slower | 1.69x faster | — |
-| array/sort-i32 | 1636.54x slower | — | — |
-| array/map-filter | 4.29x slower | 2.99x faster | — |
-| array/reduce | 1.14x slower | 1.49x faster | — |
-| array/indexOf | 1.19x faster | 1.92x faster | — |
-| array/slice | 1.19x slower | 1.75x faster | — |
-| array/reverse | 2.20x faster | 2.49x faster | — |
-| array/forEach | 1.29x faster | 2.39x faster | — |
-| array/find | 1.71x slower | — | — |
+| string/concat-short | 1.45x slower | 1.18x slower | — |
+| string/concat-long | 1.50x slower | 1.31x slower | — |
+| string/indexOf | 522.96x slower | 11.92x slower | — |
+| string/includes | 452.51x slower | 10.76x slower | — |
+| string/split | 56.09x slower | 2.66x slower | — |
+| string/replace | 20.12x slower | 3.27x slower | — |
+| string/case-convert | 3812.35x slower | 13764.54x slower | — |
+| string/substring | 2117.28x slower | 8.54x slower | — |
+| string/trim | 40.00x slower | 3.33x slower | — |
+| string/startsWith-endsWith | 55.00x slower | 2.67x slower | — |
+| array/push-pop | 1.26x slower | 1.72x faster | — |
+| array/sort-i32 | 1586.97x slower | — | — |
+| array/map-filter | 4.49x slower | 2.25x faster | — |
+| array/reduce | 1.17x faster | 2.55x faster | — |
+| array/indexOf | 1.17x faster | 1.54x faster | — |
+| array/slice | 1.18x slower | 1.96x faster | — |
+| array/reverse | 2.30x faster | 1.81x faster | — |
+| array/forEach | 1.64x slower | 1.13x faster | — |
+| array/find | 1.77x slower | — | — |
 | dom/create-elements | — | — | — |
 | dom/set-attributes | — | — | — |
 | dom/read-attributes | — | — | — |
 | dom/modify-text | — | — | — |
-| mixed/csv-parse | 82.03x slower | 2.74x slower | — |
-| mixed/text-search | 81.58x slower | 6.41x slower | — |
-| mixed/fibonacci | 1.17x slower | 1.59x faster | 7.03x slower |
-| mixed/matrix-multiply | 9.70x slower | 1.05x slower | 8.76x slower |
-| mixed/sieve | 1.40x slower | 1.33x faster | — |
+| mixed/csv-parse | 76.17x slower | 1.87x slower | — |
+| mixed/text-search | 126.28x slower | 4.44x slower | — |
+| mixed/fibonacci | 2.08x slower | 1.30x faster | 2.07x slower |
+| mixed/matrix-multiply | 3.05x slower | 1.18x slower | 13.30x slower |
+| mixed/sieve | 1.34x slower | 1.35x faster | — |
 
 ## GC-native vs Host-call
 
 | Benchmark | Speedup |
 |-----------|---------|
-| string/concat-short | 1.19x faster |
-| string/concat-long | 1.45x slower |
-| string/indexOf | 29.63x faster |
-| string/includes | 30.33x faster |
-| string/split | 21.78x faster |
-| string/replace | 4.86x faster |
-| string/case-convert | 4.55x slower |
-| string/substring | 153.29x faster |
-| string/trim | 7.21x faster |
-| string/startsWith-endsWith | 5.52x faster |
-| array/push-pop | 1.81x faster |
-| array/map-filter | 12.85x faster |
-| array/reduce | 1.70x faster |
-| array/indexOf | 1.62x faster |
-| array/slice | 2.09x faster |
-| array/reverse | 1.13x faster |
-| array/forEach | 1.85x faster |
-| mixed/csv-parse | 29.91x faster |
-| mixed/text-search | 12.73x faster |
-| mixed/fibonacci | 1.85x faster |
-| mixed/matrix-multiply | 9.24x faster |
-| mixed/sieve | 1.86x faster |
+| string/concat-short | 1.22x faster |
+| string/concat-long | 1.15x faster |
+| string/indexOf | 43.86x faster |
+| string/includes | 42.05x faster |
+| string/split | 21.13x faster |
+| string/replace | 6.16x faster |
+| string/case-convert | 3.61x slower |
+| string/substring | 247.89x faster |
+| string/trim | 12.01x faster |
+| string/startsWith-endsWith | 20.57x faster |
+| array/push-pop | 2.17x faster |
+| array/map-filter | 10.11x faster |
+| array/reduce | 2.18x faster |
+| array/indexOf | 1.32x faster |
+| array/slice | 2.30x faster |
+| array/reverse | 1.27x slower |
+| array/forEach | 1.86x faster |
+| mixed/csv-parse | 40.84x faster |
+| mixed/text-search | 28.47x faster |
+| mixed/fibonacci | 2.71x faster |
+| mixed/matrix-multiply | 2.60x faster |
+| mixed/sieve | 1.81x faster |
 
 ## Binary sizes
 
@@ -134,31 +134,31 @@ Platform: linux x64
 
 | Benchmark | Host-call | GC-native | Linear |
 |-----------|-----------|-----------|--------|
-| string/concat-short | 958.3ms | 953.4ms | — |
-| string/concat-long | 523.3ms | 837.1ms | — |
-| string/indexOf | 467.8ms | 873.6ms | — |
-| string/includes | 451.9ms | 860.8ms | — |
-| string/split | 593.4ms | 852.2ms | — |
-| string/replace | 474.0ms | 841.6ms | — |
-| string/case-convert | 457.7ms | 1048.4ms | — |
-| string/substring | 445.0ms | 754.3ms | — |
-| string/trim | 452.0ms | 799.9ms | — |
-| string/startsWith-endsWith | 509.6ms | 869.7ms | — |
-| array/push-pop | 647.9ms | 706.9ms | — |
-| array/sort-i32 | 668.6ms | — | — |
-| array/map-filter | 762.8ms | 785.2ms | — |
-| array/reduce | 684.5ms | 753.2ms | — |
-| array/indexOf | 614.2ms | 679.6ms | — |
-| array/slice | 631.7ms | 701.4ms | — |
-| array/reverse | 615.9ms | 676.2ms | — |
-| array/forEach | 695.7ms | 770.6ms | — |
-| array/find | 715.9ms | — | — |
+| string/concat-short | 1317.7ms | 1208.5ms | — |
+| string/concat-long | 639.6ms | 1039.2ms | — |
+| string/indexOf | 601.1ms | 1040.4ms | — |
+| string/includes | 602.8ms | 1063.0ms | — |
+| string/split | 758.8ms | 996.1ms | — |
+| string/replace | 600.3ms | 1093.9ms | — |
+| string/case-convert | 577.5ms | 1331.8ms | — |
+| string/substring | 566.1ms | 867.6ms | — |
+| string/trim | 546.6ms | 976.8ms | — |
+| string/startsWith-endsWith | 613.8ms | 1013.4ms | — |
+| array/push-pop | 764.9ms | 844.8ms | — |
+| array/sort-i32 | 833.5ms | — | — |
+| array/map-filter | 971.3ms | 973.1ms | — |
+| array/reduce | 848.1ms | 949.5ms | — |
+| array/indexOf | 764.0ms | 829.4ms | — |
+| array/slice | 774.2ms | 859.3ms | — |
+| array/reverse | 759.1ms | 865.5ms | — |
+| array/forEach | 874.8ms | 988.7ms | — |
+| array/find | 892.4ms | — | — |
 | dom/create-elements | — | — | — |
 | dom/set-attributes | — | — | — |
 | dom/read-attributes | — | — | — |
 | dom/modify-text | — | — | — |
-| mixed/csv-parse | 635.8ms | 809.4ms | — |
-| mixed/text-search | 541.3ms | 861.4ms | — |
-| mixed/fibonacci | 531.0ms | 690.0ms | 561.3ms |
-| mixed/matrix-multiply | 686.9ms | 747.3ms | 675.0ms |
-| mixed/sieve | 644.4ms | 726.0ms | — |
+| mixed/csv-parse | 799.1ms | 1026.5ms | — |
+| mixed/text-search | 674.9ms | 1052.1ms | — |
+| mixed/fibonacci | 675.9ms | 823.9ms | 680.5ms |
+| mixed/matrix-multiply | 812.0ms | 890.2ms | 789.1ms |
+| mixed/sieve | 793.6ms | 870.7ms | — |
