@@ -1,6 +1,6 @@
 ---
 id: 3914
-title: "CI throughput: why speculative batching failed, and the two levers that actually pay"
+title: "CI throughput: why speculative batching failed, and making per-run PR batching safe"
 status: in-progress
 priority: high
 horizon: m
@@ -33,8 +33,15 @@ runners. It is a repo-ruleset change, not a code change, and it has one real
 objection (intra-group masking) which is narrower than the current policy doc
 claims.
 
-Independently of any queue-config change, this issue lands two measured wall-clock
-wins on the merge_group critical path (≈ **−140 s / −17 %** per src-touching run).
+Auditing for that turned up **three places that silently assume one PR per
+group** — the #1956 predecessor-baseline lookup, `auto-park`, and the #2975
+park-race guard. Each degrades into a queue pathology under batching rather than
+failing loudly. All three are fixed here, and all three are verified no-ops at
+batch size 1. After that the only remaining step is a repo-ruleset flip.
+
+Independently of any queue-config change, this issue also lands three measured
+wall-clock wins on the merge_group critical path (≈ **−130 s / −17 %** per
+src-touching run).
 
 ---
 
@@ -49,10 +56,12 @@ merge-queue wedge (#2519 / #2522). Four distinct things went wrong.
 
 The regression gate diffed each group against the **main** baseline. In a
 multi-entry window the group for B contains A+B, so A's +5 improvement cancels
-B's −3 regression and the gate sees net +2. #1956 fixed this: every merge_group
+B's −3 regression and the gate sees net +2. #1956 fixed this: every merge*group
 run publishes its merged JSONLs keyed by the group head SHA, and the next group
-diffs against its **exact predecessor group** (the group head's first parent).
-Per-PR attribution is restored. **This one is genuinely solved.**
+diffs against its **exact predecessor group**. Per-PR attribution is restored.
+**This one is genuinely solved** — though its implementation resolved the
+predecessor as `HEAD^1`, which is only the predecessor \_group* for a
+single-entry group; see P1 in Part 2.
 
 ### 2. Runner oversubscription — the _structural_ failure (NOT fixed; worse)
 
@@ -87,8 +96,8 @@ Here that fixed overhead is ~170 s (41 s pre-shard prefix + 39 s per-job setup +
 infinite depth, before paying any of the costs below.
 
 And the situation is now _less_ favourable than in 2026-06, not more: #3431/#3470
-deliberately grew the merge_group matrix from 53 → 106 jobs _precisely because_
-the queue is serial and a lone group should use the whole fleet. Re-enabling
+deliberately grew the `merge_group` matrix from 53 → 106 jobs **precisely
+because** the queue is serial and a lone group should use the whole fleet. Re-enabling
 5-deep speculation today would mean 530 jobs on 120 runners.
 
 ### 3. Cancellation churn — the _amplifier_ (mitigated, hazard remains)
@@ -182,31 +191,72 @@ green; on a red group, fall back to serial re-validation to attribute. Cost of a
 red batch = one wasted 13-min run, which is exactly the `e`-weighted term already
 priced into the table above.
 
-### Recommended configuration (repo ruleset — requires admin; NOT changed by this issue)
+### Three code prerequisites — all silent, all landed here
+
+Auditing the pipeline for multi-entry-group safety turned up **three places that
+silently assume one PR per group**. None of them fails loudly under batching;
+each one degrades into a queue pathology. All three are fixed in this issue, and
+because a serial queue produces single-member groups, **every fix is a verified
+no-op today**.
+
+The shared root cause is the queue ref, `gh-readonly-queue/main/pr-<N>-<sha>`.
+Two facts about it were mis-recorded in the codebase:
+
+- the trailing SHA is the group's **base**, not its head (verified: run
+  30631849709 had ref `pr-3892-a19c4abe…` while its own `head_sha` was
+  `4aa1162c…`, and `a19c4abe` was the main tip). A comment in
+  `auto-park-merge-group-failure.mjs` called it `<headSha>`;
+- `pr-<N>` names only the **last** entry in the group, not the only one.
+
+Together those give the fix: parse the base SHA out of the ref, compare
+`base…head`, and read every member PR off the commit subjects.
+
+| #   | site                                                                 | assumption                                 | consequence under batching                                                                                                                                                                                                                                                                                                                | fix                                                                                                                         |
+| --- | -------------------------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| P1  | `test262-sharded.yml` → "Resolve predecessor-group baseline (#1956)" | `HEAD^1` is the predecessor **group** head | For a 3-PR group `HEAD^1` is the _second PR's merge commit inside the same group_ — which never published a `test262-group-<sha>` artifact, since only the group head does. The lookup misses **every time** and silently drops to the latest-main baseline: exactly the cross-PR drift path (a)-resolution exists to prevent.            | use `github.event.merge_group.base_sha` (== `HEAD^1` for a 1-entry group), `HEAD^1` retained as fallback                    |
+| P2  | `auto-park-merge-group-failure.mjs`                                  | the ref-named PR is the whole group        | On a red batch, only the **last** PR is parked. The actual regressor — any other member — stays un-held, `auto-enqueue` re-adds it, and it burns a full merge_group run every lap. That is precisely the forever-cycle #2547 was built to break, reintroduced through the batch. Meanwhile an innocent group-mate sits held in its place. | park **every** member; the comment names the co-members and says to re-enqueue singly to attribute                          |
+| P3  | `enqueue-green-prs.mjs` → #2975 park-race guard                      | ditto                                      | The guard suppresses re-enqueue of PRs with a recent genuine merge_group failure. Under batching it only recognises 1 of N, so the other N−1 look un-failed and get re-added straight into the ~5–16 s park race — the guard's own failure mode, multiplied by batch size.                                                                | map the failure onto every member; compare call only fires for already-confirmed-failed runs, fail-safe to the ref-named PR |
+
+P2 and P3 share the parsing helpers (`baseShaFrom…QueueBranch`,
+`prNumbersFrom…Subjects`), both pure and unit-covered — `--self-check` in
+auto-park, `tests/issue-2975-park-race-guard.test.ts` for the sweep. Both
+recognise the squash-commit subject shape as well as the merge-commit one, so
+they will not silently under-park if the repo's merge method ever changes.
+
+Every live path is fail-safe **towards today's behaviour**: a compare-API error
+returns `[refNamedPr]`, so the worst case is the pre-#3914 outcome, never worse.
+
+### Remaining step: the ruleset (requires repo admin — NOT changeable from the repo)
+
+The merge-queue settings are **not** in `scripts/enable-branch-protection.sh`
+(checked — it manages required checks and reviewers only). They live solely in
+Settings → Rules → Rulesets, so this last step is a UI/API change by an admin:
 
 ```
-max_entries_to_build: 1          # unchanged — see Part 1
-min_entries_to_merge: 3
+max_entries_to_build: 1          # unchanged — see Part 1, do NOT raise this
+min_entries_to_merge: 2          # then 3 after a day's observation
 min_entries_to_merge_wait_minutes: 5     # so a quiet queue never stalls
 max_entries_to_merge: 5          # unchanged
 ```
 
-Pre-conditions before flipping it:
+Pre-conditions, all now satisfied:
 
-1. Confirm the delta gate reports **per-test** regressions (it does — #1956
-   predecessor diff + bucket-by-path), so a red batch is diagnosable.
-2. Confirm the absolute guards (#1668, #1897, #2097) are wired on the merge_group
-   path (they are — `merge shard reports` runs them).
-3. Roll out at `min_entries_to_merge: 2` first and watch the red-batch rate for a
-   day before going to 3.
-4. `docs/ci-policy.md` §3 must be updated — its current text both forbids this
-   _and_ states `max_entries_to_build: 5`, which contradicts the live ruleset
-   (`scripts/gen-test262-mg-matrix.mjs` and `test262-sharded.yml` both document
-   the ruleset as serial). One of the two is stale; the doc is.
+1. ✅ The delta gate reports **per-test** regressions (#1956 predecessor diff +
+   bucket-by-path), so a red batch is diagnosable even without attribution.
+2. ✅ The absolute guards (#1668, #1897, #2097) run on the merge_group path via
+   `merge shard reports` — immune to intra-group masking by construction.
+3. ✅ P1/P2/P3 above.
+4. ✅ `docs/ci-policy.md` §3 corrected — it both forbade this _and_ recorded
+   `max_entries_to_build: 5`, which has not been the live ruleset since the
+   2026-06-20 wedge.
+
+Roll out at `min_entries_to_merge: 2`, watch the red-batch rate for a day, then
+go to 3. Rollback is setting it back to 1 — no code revert needed, since every
+code change here is a no-op at batch size 1.
 
 ---
 
-## Part 3 — Measured critical path, and the two wins landed here
+## Part 3 — Measured critical path, and the three wins landed here
 
 Ground truth: merge_group run **30631849709** (PR #3892, 2026-07-31, 799 s /
 13.3 min, 114 jobs). Per-job and per-step timings pulled from the Actions API.
@@ -284,8 +334,12 @@ that converts directly into queue throughput.
 - [x] Batching post-mortem written down with the arithmetic, so
       `max_entries_to_build > 1` is not attempted a third time without new
       runner capacity.
-- [ ] **Follow-up (needs repo admin):** reconcile `docs/ci-policy.md` §3 with the
-      live ruleset, and evaluate `min_entries_to_merge: 2` → `3`.
+- [x] Every pipeline site that assumes one PR per merge group identified and
+      fixed (P1 predecessor baseline, P2 auto-park, P3 park-race guard), each a
+      verified no-op at batch size 1 and fail-safe towards today's behaviour.
+- [ ] **Follow-up (needs repo admin — the only remaining step):** set
+      `min_entries_to_merge: 2` in the main ruleset, observe the red-batch rate
+      for a day, then `3`. Rollback is setting it back to `1`; no code revert.
 - [ ] **Verify after merge:** on the first post-merge `merge_group` run, confirm
       (a) max shard start < 60 s, (b) both lanes' max job within ~1 min,
       (c) `changes` job < 20 s, (d) total run wall ≈ 11 min.
