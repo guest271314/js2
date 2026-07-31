@@ -23,7 +23,7 @@ commit **directly to `main`** after every merge. Any push to `main` forces the m
 **rebuild its group on the new base**, which **discards the in-flight `merge_group` validation**
 — including validations that had already gone **fully green**.
 
-Because the bot push is *triggered by* each merge and lands **7–12 min later**, while the next
+Because the bot push is _triggered by_ each merge and lands **7–12 min later**, while the next
 PR's group is built within seconds of that merge and takes **11–13 min** to validate, **every
 merge schedules a bot push timed to land inside the next merge's validation window.**
 
@@ -36,37 +36,46 @@ That is backwards for a pipeline whose job is to land work.
 
 ## Measured impact
 
-**Window:** 2026-07-31 05:54Z–13:20Z (~7.3 h).
-**Denominators:** 25 `Test262 Sharded` `merge_group` runs across **18 distinct PRs**.
+**Window:** 2026-07-31 09:23:28Z–14:03:44Z = **280 min (4.7 h)**.
+**Denominators:** 25 `Test262 Sharded` `merge_group` runs across **17 distinct PRs**.
 
-> **Caveat, stated deliberately:** this is **one API page, one 7.3 h window** — an observed rate
-> for that window, **not a long-run rate**. It is enough to establish the mechanism and an
-> order of magnitude; it is not a longitudinal measurement.
-
-- **5 of 18 PRs (28%) needed more than one merge group.**
+- **6 of 17 PRs (35%) needed more than one merge group.**
 - **8 rebuilds total. 7 rooted at a `benchmark-refresh` commit; exactly 1 at a genuine PR
   landing ahead** (the only kind a serial queue must pay for).
-- **~81 min of `merge_group` validation discarded**, of which **~68 min is
-  `benchmark-refresh`-attributable** — roughly **16% of the window**.
-- `benchmark-refresh` pushed to `main` **9×** in the window.
+- **129 min of `merge_group` validation discarded**, of which **93 min is
+  `benchmark-refresh`-attributable** — **33% of the window**.
 
-The 7:1 ratio is the argument: this is **not** the unavoidable cost of a serial queue.
+> **Two caveats, stated deliberately.**
+>
+> 1. This is **one API page, one 4.7 h window** — an observed rate for that window, **not a
+>    long-run rate**.
+> 2. `actions/runs?event=merge_group&per_page=100` is a **sliding page**: older runs fall off as
+>    new ones land, so the window bounds and therefore the _absolute_ totals depend on when you
+>    sample. An earlier sample of the same day covered 05:54Z–13:11Z and produced different
+>    window bounds and different absolute minutes, but the **same 7:1 attribution ratio**.
+>    Treat the **ratios** as the finding and the absolute minutes as illustrative of magnitude.
+
+**The 7:1 ratio is the argument**, and it is the part that survives resampling: this is **not**
+the unavoidable cost of a serial queue. Only **1 of 8** rebuilds was one the queue had to pay.
 
 ### Per-PR detail
 
-| PR | groups | discarded | new base was |
-| --- | --- | --- | --- |
-| #3875 | 2 | 2 m | `67c8c3da` benchmark-refresh 06:21Z |
-| #3886 | **4** | 12 m + 36 m + 15 m | `cb86a019` bench-refresh · `0d4900ba` **#3884 merge (legitimate)** · `19ff603f` bench-refresh |
-| #3889 | 2 | 14 m | `15a61e41` benchmark-refresh 11:51Z |
-| #3887 | 2 | 12 m | `e8b6aec9` benchmark-refresh 12:14Z |
-| #3892 | 2 | 13 m | `a19c4abe` benchmark-refresh 12:58Z |
-| #3894 | 2 | ~9.5 m | `c1e68eff` benchmark-refresh 13:19Z |
+Every group except each PR's last is a discarded validation; attribution is by the commit the
+_superseding_ group was based on.
+
+| PR    | groups | discarded                | superseded by                                                |
+| ----- | ------ | ------------------------ | ------------------------------------------------------------ |
+| #3886 | **4**  | 12.0 m + 36.3 m + 15.4 m | bench-refresh · **#3884 merge (legitimate)** · bench-refresh |
+| #3887 | 2      | 11.8 m                   | benchmark-refresh                                            |
+| #3889 | 2      | 14.4 m                   | benchmark-refresh                                            |
+| #3892 | 2      | 13.3 m                   | benchmark-refresh                                            |
+| #3894 | 2      | 14.7 m                   | benchmark-refresh                                            |
+| #3898 | 2      | 11.1 m                   | benchmark-refresh                                            |
 
 ### The incident shape
 
 **#3886 burned 63 minutes across 3 discarded groups before its 4th landed.** That is what a
-human reports as *"the queue is stuck"* — and nothing surfaces it. There is **no failure, no
+human reports as _"the queue is stuck"_ — and nothing surfaces it. There is **no failure, no
 park, no label**. A green run simply vanishes and a new one starts. An earlier diagnosis this
 session attributed a ~1 h stall to head-of-line blocking on a workflow-touching PR; that was
 **wrong** (the PR had been enqueued and merged normally). This mechanism is the better
@@ -82,19 +91,19 @@ re-derive it.
 
 ### The timing is near-deterministic
 
-| merge | → bot push | lag |
-| --- | --- | --- |
-| #3886 11:43:44Z | 11:51:02Z | 7 m 18 s |
-| #3889 12:06:41Z | 12:14:44Z | 8 m 03 s |
-| #3893 12:46:23Z | 12:58:44Z | 12 m 21 s |
-| #3892 13:10:20Z | 13:19:42Z | 9 m 22 s |
+| merge           | → bot push | lag       |
+| --------------- | ---------- | --------- |
+| #3886 11:43:44Z | 11:51:02Z  | 7 m 18 s  |
+| #3889 12:06:41Z | 12:14:44Z  | 8 m 03 s  |
+| #3893 12:46:23Z | 12:58:44Z  | 12 m 21 s |
+| #3892 13:10:20Z | 13:19:42Z  | 9 m 22 s  |
 
 Validation takes ~11–13 min and starts within seconds of the preceding merge. A push at +7 to
-+12 min lands inside that window **almost every time**. This explains 28% rather than the
-occasional collision an unrelated bot would cause.
++12 min lands inside that window **almost every time**. This explains a 35% multi-group rate
+rather than the occasional collision an unrelated bot would cause.
 
 **Compute cost, not just latency.** Per #3914 the `merge_group` matrix uses **102 of 120
-runners**. A discarded validation is not merely ~13 min of wall time — it is ~102 runners'
+runners**. A discarded validation is not merely ~12 min of wall time — it is ~102 runners'
 worth of compute thrown away, on a queue #3914 documents as **runner-saturated**.
 
 ## Four traps worth recording independently of the fix
@@ -104,8 +113,8 @@ signal that looks complete or self-explanatory, and isn't.** Traps 1–2 are thi
 traps 3–4 were hit during the #3888 park triage in the same session and each cost real time,
 so they are recorded here rather than lost.
 
-1. **`[skip ci]` does not make a push inert to the merge queue.** It suppresses *workflows on
-   that commit*. It does **not** stop the queue rebuilding its group. The marker reads as "this
+1. **`[skip ci]` does not make a push inert to the merge queue.** It suppresses _workflows on
+   that commit_. It does **not** stop the queue rebuilding its group. The marker reads as "this
    push is harmless", and that reading is wrong.
 
 2. **The SHA in `gh-readonly-queue/main/pr-N-<sha>` is the BASE commit, not the group head.**
@@ -113,10 +122,10 @@ so they are recorded here rather than lost.
    embedded SHA. This cost a full sweep during triage and produced an incorrect "all green"
    report on a superseded group.
 
-3. **The regressions artifact names almost no regressed path.** It enumerates the *quarantine*
+3. **The regressions artifact names almost no regressed path.** It enumerates the _quarantine_
    list in full, but the only regressed file it names is whichever one the trap gate happens to
    print. On #3888 the 11 non-CT regressions existed **only as a bucket-signature hash**. Anyone
-   triaging a park whose failing arm is *not* the trap ratchet gets **a count and no paths** —
+   triaging a park whose failing arm is _not_ the trap ratchet gets **a count and no paths** —
    and cannot apply auto-park rule (c) (distinguish real regression from flake/collateral) at
    all. That park was tractable only by luck, because the failing arm happened to be the one
    that prints a filename.
@@ -126,10 +135,10 @@ so they are recorded here rather than lost.
    substantive**. The first number a human sees overstated the real finding by ~33×.
 
 4. **`Newly trapping: <file>` does NOT mean the file used to pass.** The #3189 ratchet reports
-   *trap-category growth*. A file going `fail` → `trap` prints **identically** to one going
+   _trap-category growth_. A file going `fail` → `trap` prints **identically** to one going
    `pass` → `trap`. On #3888 this was misread as a `pass` → trap regression, which led to the
    wrong conclusion that #3596's `fail` → `fail` valve did not apply — when in fact it is the
-   matching category. The baseline had the file at `status: fail`; the PR fixed the *first*
+   matching category. The baseline had the file at `status: fail`; the PR fixed the _first_
    assert, so execution reached a later line and hit a trap **already present on `main`**.
 
    **Read the prior state from the baseline JSONL, never from the gate's phrasing.**
@@ -151,11 +160,11 @@ groups ⇒ fewer collision windows per PR) without removing the mechanism.
 
 ## Related
 
-- **#3914** — merge_group critical-path latency and speculative batching. **Adjacent, not
-  overlapping**: #3914 makes each validation *faster*; this issue stops validations being
-  *thrown away*. #3914's "invalidates all descendant work" concerns speculative batching, and
+- **#3914** — merge*group critical-path latency and speculative batching. **Adjacent, not
+  overlapping**: #3914 makes each validation \_faster*; this issue stops validations being
+  _thrown away_. #3914's "invalidates all descendant work" concerns speculative batching, and
   its "each re-add rebuilds the group and cancels the in-flight run" concerns re-enqueue loops
-  — a **third**, distinct cause. This one is an *external push to `main`*.
+  — a **third**, distinct cause. This one is an _external push to `main`_.
 - **#2547** `auto-park` — parks PRs failing `merge_group` re-validation. Unrelated failure
   class; a discarded group is not a park and produces no label.
 - **#1216** — the `benchmark-refresh` auto-commit-to-main behaviour.
@@ -177,9 +186,12 @@ groups ⇒ fewer collision windows per PR) without removing the mechanism.
 
 ```bash
 # Group by (PR, base SHA); any PR with >1 distinct base had a validation discarded.
+# NB: the SHA embedded in gh-readonly-queue/main/pr-N-<sha> is the BASE, not the group head.
 gh api 'repos/loopdive/js2/actions/runs?event=merge_group&per_page=100' \
   --jq '.workflow_runs[] | select(.name=="Test262 Sharded") | "\(.head_branch)\t\(.created_at)\t\(.updated_at)\t\(.conclusion)"'
 
-# Then identify each rebuild's base commit — a benchmark-refresh commit is the signature.
+# Attribute each rebuild by the commit the SUPERSEDING group was based on.
+# Look it up — do not hardcode a list of known benchmark-refresh SHAs; doing that
+# during this investigation under-counted attribution by one (7 -> 6).
 gh api 'repos/loopdive/js2/commits/<base-sha>' --jq '.commit.message'
 ```
