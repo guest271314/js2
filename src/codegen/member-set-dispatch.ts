@@ -44,6 +44,7 @@ import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { buildVecFromExternMaterializer, coercionInstrs, getVecInfo } from "./type-coercion.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js"; // (#1916 S2/S3) positional-read chokepoint + stable-regime minting
+import { presenceSetInstrs } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
 
 /**
  * Mangle a property name + fallback strictness into the reserved dispatcher name.
@@ -186,12 +187,12 @@ export function fillMemberSetDispatch(ctx: CodegenContext): void {
         ...coerce,
         { op: "struct.set", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx },
       ];
-      if (cand.presenceFieldIdx !== undefined && cand.presenceFieldIdx >= 0) {
+      if (cand.presenceSlot !== undefined) {
         setFieldInstrs.push(
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx: cand.structTypeIdx },
-          { op: "i32.const", value: 1 },
-          { op: "struct.set", typeIdx: cand.structTypeIdx, fieldIdx: cand.presenceFieldIdx },
+          ...presenceSetInstrs(cand.structTypeIdx, cand.presenceSlot, [
+            { op: "local.get", index: 2 },
+            { op: "ref.cast", typeIdx: cand.structTypeIdx },
+          ]),
         );
       }
       return [

@@ -19,6 +19,8 @@ import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { definedFuncAt, mintDefinedFunc, pushDefinedFunc } from "./func-space.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
+import type { PresenceSlot } from "./fnctor-presence-bits.js"; // (#3780) packed own-presence flags
+import { presenceSlotOf, presenceTestInstrs } from "./fnctor-presence-bits.js";
 import { classMemberFuncKey, resolveMethodOwnerClass } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys; (#2963) method-owner chain
 import { popBody, pushBody } from "./context/bodies.js";
 import { resolveWidenedVarKey, integrityVarKey } from "./widened-var-key.js";
@@ -1200,14 +1202,14 @@ export function findAlternateStructsForField(
   fieldIdx: number;
   fieldType: ValType;
   mutable: boolean;
-  presenceFieldIdx?: number;
+  presenceSlot?: PresenceSlot;
 }[] {
   const result: {
     structTypeIdx: number;
     fieldIdx: number;
     fieldType: ValType;
     mutable: boolean;
-    presenceFieldIdx?: number;
+    presenceSlot?: PresenceSlot;
   }[] = [];
   for (const [typeName, fields] of ctx.structFields) {
     const sIdx = ctx.structMap.get(typeName);
@@ -1219,9 +1221,7 @@ export function findAlternateStructsForField(
         fieldIdx: fIdx,
         fieldType: fields[fIdx]!.type,
         mutable: fields[fIdx]!.mutable,
-        ...(fields[fIdx]!.presenceTracked
-          ? { presenceFieldIdx: fields.findIndex((field) => field.name === `$has_${propName}`) }
-          : {}),
+        ...(presenceSlotOf(fields, propName) ? { presenceSlot: presenceSlotOf(fields, propName)! } : {}),
       });
     }
   }
@@ -1241,15 +1241,11 @@ export function emitNullGuardedStructGet(
   // For result type in the if block, normalize ref to ref_null so the null branch is valid
   const resultType: ValType =
     fieldType.kind === "ref" ? { kind: "ref_null", typeIdx: (fieldType as any).typeIdx } : fieldType;
-  let primaryPresenceFieldIdx: number | undefined;
+  let primaryPresenceSlot: PresenceSlot | undefined;
   if (propName) {
     for (const [structName, fields] of ctx.structFields) {
       if (ctx.structMap.get(structName) !== typeIdx) continue;
-      const field = fields[fieldIdx];
-      if (field?.presenceTracked) {
-        const idx = fields.findIndex((candidate) => candidate.name === `$has_${propName}`);
-        if (idx >= 0) primaryPresenceFieldIdx = idx;
-      }
+      if (fields[fieldIdx]?.presenceTracked) primaryPresenceSlot = presenceSlotOf(fields, propName);
       break;
     }
   }
@@ -1281,10 +1277,10 @@ export function emitNullGuardedStructGet(
         blockType: { kind: "val" as const, type: resultType },
         then: typeErrorThrowInstrs(ctx),
         else:
-          primaryPresenceFieldIdx !== undefined
+          primaryPresenceSlot !== undefined
             ? [
                 { op: "local.get", index: tmp },
-                { op: "struct.get", typeIdx, fieldIdx: primaryPresenceFieldIdx },
+                ...presenceTestInstrs(typeIdx, primaryPresenceSlot),
                 {
                   op: "if",
                   blockType: { kind: "val", type: resultType },
@@ -1329,11 +1325,11 @@ export function emitNullGuardedStructGet(
             op: "if",
             blockType: { kind: "empty" },
             then: [
-              ...(alt.presenceFieldIdx !== undefined && alt.presenceFieldIdx >= 0
+              ...(alt.presenceSlot !== undefined
                 ? ([
                     { op: "local.get", index: srcLocal },
                     { op: "ref.cast", typeIdx: alt.structTypeIdx },
-                    { op: "struct.get", typeIdx: alt.structTypeIdx, fieldIdx: alt.presenceFieldIdx },
+                    ...presenceTestInstrs(alt.structTypeIdx, alt.presenceSlot),
                     {
                       op: "if",
                       blockType: { kind: "val", type: resultType },
@@ -1408,11 +1404,11 @@ export function emitNullGuardedStructGet(
                     op: "if",
                     blockType: { kind: "empty" },
                     then: [
-                      ...(primaryPresenceFieldIdx !== undefined
+                      ...(primaryPresenceSlot !== undefined
                         ? ([
                             { op: "local.get", index: backupLocal },
                             { op: "ref.cast", typeIdx },
-                            { op: "struct.get", typeIdx, fieldIdx: primaryPresenceFieldIdx },
+                            ...presenceTestInstrs(typeIdx, primaryPresenceSlot),
                             {
                               op: "if",
                               blockType: { kind: "val", type: resultType },
@@ -1448,11 +1444,11 @@ export function emitNullGuardedStructGet(
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        ...(primaryPresenceFieldIdx !== undefined
+        ...(primaryPresenceSlot !== undefined
           ? ([
               { op: "local.get", index: tmpAny },
               { op: "ref.cast", typeIdx },
-              { op: "struct.get", typeIdx, fieldIdx: primaryPresenceFieldIdx },
+              ...presenceTestInstrs(typeIdx, primaryPresenceSlot),
               {
                 op: "if",
                 blockType: { kind: "val", type: resultType },
@@ -1685,14 +1681,11 @@ export function emitExternrefToStructGet(
   // For result type, normalize ref to ref_null so the null branch is valid
   const resultType: ValType =
     fieldType.kind === "ref" ? { kind: "ref_null", typeIdx: (fieldType as any).typeIdx } : fieldType;
-  let primaryPresenceFieldIdx: number | undefined;
+  let primaryPresenceSlot: PresenceSlot | undefined;
   if (propName) {
     for (const [structName, fields] of ctx.structFields) {
       if (ctx.structMap.get(structName) !== structTypeIdx) continue;
-      if (fields[fieldIdx]?.presenceTracked) {
-        const idx = fields.findIndex((candidate) => candidate.name === `$has_${propName}`);
-        if (idx >= 0) primaryPresenceFieldIdx = idx;
-      }
+      if (fields[fieldIdx]?.presenceTracked) primaryPresenceSlot = presenceSlotOf(fields, propName);
       break;
     }
   }
@@ -1813,11 +1806,11 @@ export function emitExternrefToStructGet(
           op: "if",
           blockType: { kind: "empty" },
           then: [
-            ...(alt.presenceFieldIdx !== undefined && alt.presenceFieldIdx >= 0
+            ...(alt.presenceSlot !== undefined
               ? ([
                   { op: "local.get", index: tmpAny },
                   { op: "ref.cast", typeIdx: alt.structTypeIdx },
-                  { op: "struct.get", typeIdx: alt.structTypeIdx, fieldIdx: alt.presenceFieldIdx },
+                  ...presenceTestInstrs(alt.structTypeIdx, alt.presenceSlot),
                   {
                     op: "if",
                     blockType: { kind: "val", type: resultType },
@@ -1863,11 +1856,11 @@ export function emitExternrefToStructGet(
     op: "if",
     blockType: { kind: "empty" },
     then: [
-      ...(primaryPresenceFieldIdx !== undefined
+      ...(primaryPresenceSlot !== undefined
         ? ([
             { op: "local.get", index: tmpAny },
             { op: "ref.cast", typeIdx: structTypeIdx },
-            { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: primaryPresenceFieldIdx },
+            ...presenceTestInstrs(structTypeIdx, primaryPresenceSlot),
             {
               op: "if",
               blockType: { kind: "val", type: resultType },
