@@ -15,8 +15,33 @@ goal: performance
 sprint: current
 horizon: l
 es_edition: multi
-related: [3903, 3898, 3512]
+related: [3903, 3898, 3512, 3912]
+coercion-sites-allow:
+  - src/codegen/array-methods.ts
 ---
+
+<!--
+coercion-sites-allow rationale (#3902):
+
+The gate reports `array-methods.ts: 19 → 20 (number_toString 8→9)`. The single
+added occurrence is a **detection lookup**, not new coercion logic:
+
+    const numToStrExisting = ctx.funcMap.get("number_toString");
+
+It asks *whether the helper currently resolves to the JS-host import*, so the
+sort lowering can fall back to all-host string comparison instead of `ref.cast`-
+ing a host-owned JS string to `$AnyString`. That cast is the `illegal cast`
+runtime trap which made the gc-native lane vanish from the benchmark page
+entirely. No ToString/ToNumber/ToPrimitive/equality matrix is hand-rolled here —
+routing this through the coercion engine would be routing a *gate check*, not a
+coercion.
+
+This allowance is deliberately temporary. The real fix is #3912: gate
+`number_toString` on `ctx.nativeStrings` so fast mode stops pairing native
+string helpers with a JS-host formatter. When #3912 lands, this detection
+becomes dead and the occurrence should be removed along with the allowance.
+-->
+
 
 # #3902 — `array/sort-i32` is the worst number on the perf page; `array/find` has no fast lane
 
