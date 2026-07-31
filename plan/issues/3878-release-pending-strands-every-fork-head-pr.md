@@ -144,6 +144,65 @@ throws**, so the fix cannot be mistaken for "skip the check for forks".
 self-check fails with the exact production error,
 `#41: synchronized pull request head changed`.
 
+## ACCEPTANCE — demonstrated end-to-end, both clauses, on real PRs
+
+Two independent demonstrations after the fix landed on `main` (`880cabb4`), both
+observed **read-only** — nothing was manually enqueued, because the whole claim
+is unaided pickup:
+
+| PR | kind | `release-pending` | outcome |
+| --- | --- | --- | --- |
+| **#3876** | genuinely stranded for hours | **pass** (7s) after one `synchronize` | `CLEAN` → auto-enqueued → merged |
+| **#3879** | brand-new fork-head PR | **does not run** (no `synchronize` yet) | `CLEAN` → auto-enqueued → merged |
+| #3880 | brand-new fork-head PR (incidental) | **pass** | `CLEAN` → auto-enqueued → merged |
+
+The two clauses of the acceptance criterion were satisfied **one each**:
+#3876 proves *"`release-pending` passes"*; #3879 proves *"or does not run for
+fork-head PRs"*. `auto-enqueue.yml` picked all three up within ~2 minutes of
+`CLEAN` — the responsive `workflow_run` path, not the 30-minute cron.
+
+## Landing this fix did NOT unstick the PRs it was written to unstick
+
+**The single most expensive thing to not know about a CI gate fix:**
+
+> **A completed check is pinned to its head commit.** Fixing the *helper* changes
+> nothing already red. Every PR that was red at the moment of the fix keeps a
+> stale failure for a cause that no longer exists, stays `UNSTABLE`, and is
+> skipped by `auto-enqueue` **indefinitely** — until something emits a fresh
+> event on it.
+
+The failure mode this prevents is precise: land the fix, look at an unchanged
+backlog, conclude the fix didn't work.
+
+**Remedy — a `synchronize` is what re-evaluates.** The way to emit one without
+touching a working tree is the server-side branch update:
+
+```bash
+gh api --method PUT repos/loopdive/js2/pulls/<N>/update-branch \
+  -f expected_head_sha=<current-head>
+```
+
+**Prefer this over `git push` in this repo**: branch authors keep their worktrees
+checked out by default, and pushing a merge commit into a branch that is live in
+another agent's worktree is the shared-worktree clobber hazard. The API creates
+the merge commit remotely and touches no tree; `expected_head_sha` is what makes
+it safe against a concurrent push. Used exactly this way on #3876, whose branch
+was checked out live at the pinned tip.
+
+## `BLOCKED` vs `UNSTABLE` — the same class of confusion
+
+- **`BLOCKED`** — a **required** check has not reported success yet. Ordinary
+  in-flight state (or a genuine required-check failure).
+- **`UNSTABLE`** — **all required checks green**, a **non-required** one red.
+  This is the state this issue was about, and the one `auto-enqueue` skips
+  (`ENQUEUEABLE = {CLEAN, HAS_HOOKS}`).
+
+**Count `fail`-conclusion checks rather than eyeballing the list.** A *pending*
+required check reads as `BLOCKED` exactly like a *failing* one, and mistaking
+the two sends a false `[CI-FIX]` task to a PR owner who has nothing to fix — a
+wasted context switch for another agent. #3880 was `BLOCKED` purely because
+`quality` was still running; it had zero failing checks and merged unaided.
+
 ## Known sibling, deliberately OUT of scope
 
 The `retarget` job has the same category error in three more places —
