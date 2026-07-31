@@ -94,17 +94,25 @@ host's **40**, and **omits `push`** — the very property whose full descriptor 
 just returned correctly. **The two reflection paths disagree with each other inside
 the one built-in that supposedly works.**
 
-### Defect 1 — lookup (`hasOwnProperty` / `getOwnPropertyDescriptor`)
+### Defect 1 — `hasOwnProperty` on built-in prototypes
 
-Correct for `Array.prototype`, **absent** for RegExp / String / Object / Number /
-Boolean prototypes. **Bounded** — "replicate the Array registration" is a fair
-routing call here, and the reference implementation is real.
+Correct for `Array.prototype`, **returns `false`** for RegExp / String / Object /
+Number / Boolean prototypes. **Bounded** — "replicate whatever registers
+`Array.prototype`" is a fair routing call, and the reference implementation is real.
+
+**`getOwnPropertyDescriptor` is NOT part of this defect** — it already returns a
+spec-exact descriptor on every built-in prototype in both lanes. Do not touch it.
 
 ### Defect 2 — own-key enumeration (`getOwnPropertyNames` and friends)
 
-**Broken even for `Array.prototype`.** No in-repo reference exists. **Copying Array
-wholesale would propagate this bug rather than fix it.** Unscoped; needs its own
-sizing before anyone commits to it.
+**Broken even for `Array.prototype`** (6 keys vs 40, omitting the very property
+whose descriptor `gOPD` returns correctly). **No in-repo reference exists** —
+copying Array wholesale would propagate this bug rather than fix it. Unscoped;
+needs its own sizing before anyone commits to it.
+
+**So the three routes disagree pairwise**: `gOPD` is right everywhere,
+`hasOwnProperty` is right only on `Array.prototype`, and `getOwnPropertyNames` is
+wrong everywhere including `Array.prototype`.
 
 ## Sizing — deliberately UNMEASURED
 
