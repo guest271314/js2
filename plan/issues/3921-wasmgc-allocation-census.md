@@ -14,6 +14,16 @@ area: codegen, tooling
 language_feature: compiler-internals
 goal: performance
 related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
+loc-budget-allow:
+  # Two call sites (generateModule / generateMultiModule), 5 lines each plus the
+  # import. The pass itself lives in src/codegen/alloc-census.ts, per the
+  # "add code to the subsystem module, not the barrel" rule — what lands in
+  # index.ts is only the hook, which has to be here because it must run after
+  # dead-type elimination has remapped every typeIdx.
+  - src/codegen/index.ts
+func-budget-allow:
+  - src/codegen/index.ts::generateModule
+  - src/codegen/index.ts::generateMultiModule
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
 ---
 
