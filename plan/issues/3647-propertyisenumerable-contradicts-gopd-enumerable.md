@@ -169,10 +169,12 @@ instance-field descriptor path, not from `propertyIsEnumerable`.
     set), so it is a plausible source of the divergence and worth checking
     first on #3646.
 
-- **NEW, standalone-only defect — id OWED, not yet allocated.**
-  `scripts/claim-issue.mjs --allocate` failed twice here (a Node crash dump,
-  then a >600 s timeout). Per instruction the defect is recorded in full rather
-  than fighting the tool or hand-picking a number:
+- **NEW, standalone-only defect → filed as #3895.** (`--allocate` looked like it
+  had failed twice — a Node crash dump, then a >600 s timeout — but the second
+  invocation had in fact reserved the id in the background. Verified by reading
+  `origin/issue-assignments:3895.json` (`status: reserved`), **not** by trusting
+  an exit code. No id was burned.) Summary, with the detail in
+  `plan/issues/3895-*.md`:
 
   > **Standalone: the variable-extracted borrowed `propertyIsEnumerable`
   > returns `false` for a plainly enumerable own property.**
