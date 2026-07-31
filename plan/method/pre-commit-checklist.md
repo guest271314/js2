@@ -91,8 +91,9 @@ nothing, so `quality` fails. Write `#2916`, or the full real filename, instead.
 
 Two measurements worth keeping:
 
-- Four glob-shaped paths exist on `main`, **all in `scripts/**`comments**, which
-the gate does not scan. That is why no file under`plan/` had ever hit this.
+- Four glob-shaped paths exist on `main`, and every one of them is in a comment
+  under `scripts/`, which the gate does not scan. That is why no file under
+  `plan/` had ever hit this.
 - **This very warning triggered the trap while being written.** The first draft
   spelled the bad example out literally, in `plan/method/`, and the gate failed
   on it — after the author had already run the gate once and moved on. If you
