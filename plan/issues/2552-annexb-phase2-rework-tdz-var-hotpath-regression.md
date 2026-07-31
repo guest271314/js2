@@ -1,11 +1,10 @@
 ---
 id: 2552
 title: "Annex B B.3.3 Phase 2 rework — TDZ-var outer-binding allocation perturbs hot-path codegen (-1180 test262 regression)"
-status: in-progress
-sprint: 64
+status: ready
+sprint: current
 created: 2026-06-19
-assignee: ttraenkler/sendev-funcidx
-priority: medium
+priority: high
 feasibility: hard
 reasoning_effort: max
 task_type: bugfix

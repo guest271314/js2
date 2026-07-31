@@ -4,7 +4,7 @@ title: "perf: what actually makes node and Porffor faster — per-axis decomposi
 status: ready
 created: 2026-07-27
 updated: 2026-07-27
-priority: medium
+priority: high
 feasibility: medium
 reasoning_effort: high
 task_type: perf
