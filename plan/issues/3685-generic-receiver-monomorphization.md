@@ -12,7 +12,7 @@ func-budget-allow:
   # S1's whole-program receiver-flow walk is one traversal with a per-node-kind
   # switch; splitting it per kind would scatter the flow state it threads.
   - src/codegen/receiver-flow-analysis.ts::analyzeReceiverFlow
-status: in-progress
+status: suspended
 assignee: ttraenkler/dev-acorn-codegen
 created: 2026-07-27
 updated: 2026-07-31
@@ -368,6 +368,88 @@ S4 is closed as a **null result**. Not landed, deliberately: there is no
 version of "hoist the guard" that beats the guard, because the guard is not
 what costs. Reopen only with a measurement showing a workload where the
 branch itself (not the cast) is the cost.
+
+## Suspended Work (2026-07-31)
+
+Suspended by a priority switch to standalone ES5, **not** by a blocker. No
+compiler source was changed — everything below is measurement and analysis, all
+of it already committed.
+
+- **Worktree**: `/workspace/.claude/worktrees/agent-a6d23a0529f6d6f17`
+- **Branch**: `issue-3685-receiver-proof-widening` (pushed to `fork` =
+  `ttraenkler/js2`); `origin/main` merged in.
+- **Claim**: `ttraenkler/dev-acorn-codegen` — released at suspension. Verify
+  with `git show origin/issue-assignments:3685.json` before re-claiming; the
+  release path has a known ref-lock race with no retry.
+
+**Done**: the coverage audit, the receiver histogram and the caller attribution
+below; the profile decomposition and the optimizer negative in #3686. **Not
+done**: any codegen change; any wall-clock A/B (the box ran at load 7-14 on 10
+cores for the whole session, which invalidates timing at this effect size).
+
+**Resume in this order** — the first step is a measurement, not code, and it
+decides whether this issue continues at all:
+
+1. **Instrument the proven-but-not-inlined path.** Add a decline-reason counter
+   to the carve-out branches of `tryEmitProvenReceiverFieldGet`
+   (`src/codegen/typed-this.ts` ~L1320-1460: `RESERVED_PROPS`,
+   `classAccessorSet`, presence-tracked, call-signature receiver, and
+   name-not-a-declared-field). One acorn compile then explains the **156**
+   proven receivers that produced no inlined read (244 verdicts vs
+   `provenFieldStats.gets=88`).
+   - dominated by *not-a-declared-field* ⇒ this issue closes; file the
+     object-literal shape work separately;
+   - a carve-out is over-broad ⇒ landable fix here, and the two hot twins
+     (`__closure_571__typed_this`, `__closure_347__typed_this`, together
+     **28.5 %** of the `__extern_get` bucket) are what pays for it.
+2. **Settle whether `types$1` already has a struct.** `src/codegen/object-ops.ts`
+   (~L1642-1666) resolves an object-literal initializer to a struct name by
+   field-name matching. If a ~50-property module-level literal gets one, the
+   40 % `types$1` residue may be one flow rule in
+   `receiver-flow-analysis.ts`, not a new analysis.
+3. Only then measure, with #3673's interleaved duplicate-baseline control arm,
+   **on an idle box**.
+
+### Which layer does this belong on? (IR vs backend — my judgement)
+
+Asked explicitly, because this issue sits on the boundary. **It splits, and the
+split is clean — the seam is already where it should be:**
+
+- **The PROOF belongs in the IR front end.** `receiver-flow-analysis.ts` asks
+  "does this expression always denote an instance of class `F`?" That is a
+  question about *meaning*, answered from the AST with no checker queries and no
+  `ValType` anywhere in its result type (`ReceiverVerdict` is a class NAME plus
+  a proof source). It would be identical for a linear-memory backend, which is
+  the operative test from `docs/architecture/codegen-axes.md`. Same for
+  `numeric-property-analysis.ts` (which property names are always written
+  numerically) and the write-once prototype verdicts. Today all three live under
+  `src/codegen/` for historical reasons, not architectural ones.
+- **The LOWERING belongs in the backend, where it already is.** `struct.get` at
+  field index `i` off a `ref.cast $__fnctor_F`, the `ref.test` guard, the
+  trampoline ABI, the f64-vs-externref slot decision — every one is a WasmGC
+  representation choice with a different linear-memory answer. `typed-this.ts`
+  is correctly backend code.
+
+So the migration this issue would want is **not** "move #3685 into the IR"; it
+is *move the three analyses* into the front end and have the backend consume
+their verdicts. That is a refactor with no behavioural change, and it is worth
+doing only when a second backend actually wants the verdicts — the linear lane
+is the obvious consumer, since a proven receiver is exactly as useful for a
+struct offset in linear memory as for a `struct.get`. **Do not fold that
+refactor into a perf slice**; it would make an already hard-to-measure change
+impossible to attribute.
+
+One caveat for whoever does move them: the analyses are currently *seeded* from
+backend state — the S2 approved-class set is read from `ctx.structMap`'s
+`__fnctor_*` keys (see the "two false starts" note above, where seeding it from
+`gate.methods.keys()` silently excluded data-only classes). A front-end version
+needs its own class registry rather than borrowing the backend's.
+
+**Reproduce the measurements**: probes are in `.tmp/cw/` in the worktree
+(`acorn-compile-raw.mjs` compiles standalone acorn with an in-module `__bench`
+export at `optimize: 0`; `profile-parse.mjs`, `analyze-prof2.mjs`,
+`attrib-helper.mjs`, `cross-metrics.mjs`). `.tmp/` is gitignored, so re-create
+them from this description if the worktree is gone.
 
 ## Coverage audit 2026-07-31 — #3683's twin machinery is saturated; THIS issue's
 ## S2 inline path is NOT, and the gap is unmeasured
