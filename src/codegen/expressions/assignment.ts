@@ -35,6 +35,7 @@ import { emitTaDynViewElementSet, emitTaViewElementSet } from "../dataview-nativ
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { resolveReceiverStruct } from "../fnctor-escape-gate.js"; // (#2681/#2686 A3) pinned-struct write dispatch
+import { presenceSetInstrs, presenceSlotOf } from "../fnctor-presence-bits.js"; // (#3780) packed own-presence flags
 import { tryEmitTypedThisFieldSet } from "../typed-this.js"; // (#3683 S2) typed-`this` field write
 import { reserveMemberSetDispatch } from "../member-set-dispatch.js"; // (#2681/#2686 A3) pre-check set dispatcher
 import { reserveMemberGetDispatch } from "../member-get-dispatch.js"; // (#2681/#2686) symmetric struct read for compound
@@ -3938,9 +3939,7 @@ function compilePropertyAssignment(
 
   const fieldIdx = fields.findIndex((f) => f.name === fieldName);
   if (fieldIdx === -1) return null;
-  const presenceFieldIdx = fields[fieldIdx]!.presenceTracked
-    ? fields.findIndex((field) => field.name === `$has_${fieldName}`)
-    : -1;
+  const presenceSlot = presenceSlotOf(fields, fieldName);
 
   const structSelfType: ValType = { kind: "ref_null", typeIdx: structTypeIdx };
   const structObjResult = compileExpression(ctx, fctx, target.expression, structSelfType);
@@ -3974,16 +3973,10 @@ function compilePropertyAssignment(
         { op: "local.get", index: tmpRecv },
         { op: "local.get", index: tmpVal },
         { op: "struct.set", typeIdx: structTypeIdx, fieldIdx },
-        ...(presenceFieldIdx >= 0
-          ? ([
-              { op: "local.get", index: tmpRecv },
-              { op: "i32.const", value: 1 },
-              { op: "struct.set", typeIdx: structTypeIdx, fieldIdx: presenceFieldIdx },
-            ] as Instr[])
-          : []),
+        ...(presenceSlot ? presenceSetInstrs(structTypeIdx, presenceSlot, tmpRecv) : []),
       ],
     });
-  } else if (presenceFieldIdx >= 0) {
+  } else if (presenceSlot) {
     // Preserve the receiver as well as the RHS so the hidden presence slot can
     // be marked after the real field write.
     fctx.body.push({ op: "local.set", index: tmpVal });
@@ -3992,9 +3985,7 @@ function compilePropertyAssignment(
     fctx.body.push({ op: "local.get", index: tmpRecv });
     fctx.body.push({ op: "local.get", index: tmpVal });
     fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
-    fctx.body.push({ op: "local.get", index: tmpRecv });
-    fctx.body.push({ op: "i32.const", value: 1 });
-    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: presenceFieldIdx });
+    for (const instr of presenceSetInstrs(structTypeIdx, presenceSlot, tmpRecv)) fctx.body.push(instr);
   } else {
     fctx.body.push({ op: "local.tee", index: tmpVal });
     fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
