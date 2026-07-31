@@ -341,7 +341,18 @@ function writeShapesAreLowerable(
     if (ts.isBinaryExpression(node) && ts.isIdentifier(node.left) && node.left.text === name) {
       const k = node.operatorToken.kind;
       if (k === ts.SyntaxKind.EqualsToken) {
-        if (!isCanonI32Lowerable(node.right, promoted)) ok = false;
+        // (#3907) `i = i + <int literal>` on a `detectI32LoopVar`-proven counter
+        // is the SAME operation as the `i += <int literal>` arm below, just
+        // spelled out; it carries the identical bounded-by-the-loop-condition
+        // proof. Before #3907 fast mode narrowed every `number` regardless, so
+        // the spelling never mattered; with the blanket narrowing gone this
+        // form silently demoted the counter to f64 — and it is the spelling the
+        // whole benchmark suite uses (`for (let i = 0; i < N; i = i + 1)`).
+        // Deliberately NOT extended to a general accumulator: the counter proof
+        // is what makes it sound, exactly as in the `+=` arm (#1236 trap).
+        if (!(isProvenCounter && isCounterStepAssignment(node.right, name))) {
+          if (!isCanonI32Lowerable(node.right, promoted)) ok = false;
+        }
       } else if (
         k === ts.SyntaxKind.AmpersandEqualsToken ||
         k === ts.SyntaxKind.BarEqualsToken ||
@@ -375,6 +386,32 @@ function writeShapesAreLowerable(
     }
   });
   return ok;
+}
+
+/**
+ * (#3907) `<counter> = <counter> +|- <int literal>` — the desugared spelling of
+ * the `<counter> +=|-= <int literal>` step. Accepted ONLY for a
+ * `detectI32LoopVar`-proven counter, where the loop condition bounds the value;
+ * see the call sites in `writeShapesAreLowerable` and `writePromotedI32Slot`.
+ * Returns the step as `{ op, step }`, or null when the shape does not match.
+ */
+export function counterStepAssignment(
+  rhs: ts.Expression,
+  counterName: string,
+): { readonly negate: boolean; readonly step: number } | null {
+  const inner = peelExpr(rhs);
+  if (!ts.isBinaryExpression(inner)) return null;
+  const k = inner.operatorToken.kind;
+  if (k !== ts.SyntaxKind.PlusToken && k !== ts.SyntaxKind.MinusToken) return null;
+  const left = peelExpr(inner.left);
+  if (!ts.isIdentifier(left) || left.text !== counterName) return null;
+  const step = i32LiteralValue(inner.right);
+  if (step === null) return null;
+  return { negate: k === ts.SyntaxKind.MinusToken, step };
+}
+
+function isCounterStepAssignment(rhs: ts.Expression, counterName: string): boolean {
+  return counterStepAssignment(rhs, counterName) !== null;
 }
 
 /** One promotion candidate: a declaration plus its resolved binding scope. */

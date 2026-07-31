@@ -1,0 +1,209 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * #3907 — every compilation lane must return the SAME number.
+ *
+ * ## Why this test exists
+ *
+ * `mixed/fibonacci` shipped on the published performance page reporting
+ * `gc-native` as 1.59x faster than JS. It was returning **-269,534,592** where
+ * JS returns **8,320,400,000** — it had never been compared. `fast` mode
+ * (= the `gc-native` lane) lowered EVERY TypeScript `number` to a Wasm `i32`
+ * (`mapTsTypeToWasm`, plus two unconditional `ctx.fast ⇒ i32` numeric hints in
+ * `binary-ops.ts`), so the lane was benchmarking wrapping 32-bit integer
+ * arithmetic against JS's IEEE-754 doubles. That is not the same computation,
+ * so the speedup never meant what the page claimed.
+ *
+ * The guard that catches this class of bug is **result equality across lanes**,
+ * not "the module instantiates and does not trap". A benchmark that traps is
+ * loud; a benchmark that silently computes a different function is not, and
+ * that is exactly how a wrong answer sat on a public page.
+ *
+ * ## What is asserted
+ *
+ * For each source: the value returned by `run()` compiled as
+ *   - `host-call`  (`fast: false`)
+ *   - `gc-native`  (`fast: true`)  ← the lane that was wrong
+ *   - `linear-memory` (`fast: true, target: "linear"`)
+ * must equal the value produced by running the SAME source as JavaScript
+ * (transpiled with `ts.transpileModule`, so the reference is derived from the
+ * source rather than hand-copied and cannot drift from it).
+ *
+ * `mixed/fibonacci` is imported from `benchmarks/suites/mixed.ts` itself, so
+ * the published benchmark and this guard can never diverge.
+ */
+import { describe, expect, it } from "vitest";
+
+import { compile } from "../src/index.js";
+import { buildImports, instantiateWasm } from "../src/runtime.js";
+import { ts } from "../src/ts-api.js";
+import { mixedBenchmarks } from "../benchmarks/suites/mixed.js";
+
+type Lane = "host-call" | "gc-native" | "linear-memory";
+
+const WASM_LANES: readonly Lane[] = ["host-call", "gc-native", "linear-memory"];
+
+async function runLane(source: string, lane: Lane): Promise<number> {
+  const options =
+    lane === "host-call"
+      ? ({ fast: false } as const)
+      : lane === "gc-native"
+        ? ({ fast: true } as const)
+        : ({ fast: true, target: "linear" } as const);
+  const result = await compile(source, options);
+  if (!result.success) {
+    throw new Error(`${lane}: compile failed — ${result.errors.map((e) => e.message).join("; ")}`);
+  }
+  const imports = buildImports(result.imports, {}, result.stringPool);
+  const { instance } = await instantiateWasm(result.binary, imports.env, imports.string_constants);
+  imports.setInstance?.(instance);
+  const run = (instance.exports as Record<string, unknown>).run;
+  if (typeof run !== "function") throw new Error(`${lane}: no "run" export`);
+  return (run as () => number)();
+}
+
+/** Run the benchmark source as plain JS — the spec-correct reference value. */
+function runAsJs(source: string): number {
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  // `export function run` → a plain declaration we can call from the wrapper.
+  // ESNext (not `None`/CommonJS) so the emit carries no `exports` shim.
+  const body = js.replace(/\bexport\s+function\b/g, "function");
+  return new Function(`${body}\nreturn run();`)() as number;
+}
+
+function benchmarkSource(name: string): string {
+  const def = mixedBenchmarks.find((b) => b.name === name);
+  if (!def) throw new Error(`benchmark "${name}" not found in mixedBenchmarks`);
+  return def.source;
+}
+
+/**
+ * Each case is a `number`-returning `run()`. Values are chosen to leave the
+ * int32 range or carry a fraction — i.e. to be observably different if any
+ * lane narrows a `number` to i32.
+ */
+const CASES: ReadonlyArray<{ name: string; source: string; expected: number }> = [
+  // The published benchmark, verbatim from the suite. fib(30) = 832,040
+  // summed 10,000 times = 8,320,400,000, which is exactly representable as an
+  // f64 and ~3.9x past 2^31.
+  {
+    name: "mixed/fibonacci (published benchmark source)",
+    source: benchmarkSource("mixed/fibonacci"),
+    expected: 8_320_400_000,
+  },
+  {
+    name: "accumulator past 2^31 via +",
+    source: `export function run(): number {
+  let sum = 0;
+  for (let i = 0; i < 10000; i = i + 1) { sum = sum + 832040; }
+  return sum;
+}`,
+    expected: 8_320_400_000,
+  },
+  {
+    name: "accumulator past 2^31 via +=",
+    source: `export function run(): number {
+  let sum = 0;
+  for (let i = 0; i < 10000; i = i + 1) { sum += 832040; }
+  return sum;
+}`,
+    expected: 8_320_400_000,
+  },
+  {
+    name: "product past 2^31",
+    source: `export function run(): number { let a = 100000; let b = 100000; return a * b; }`,
+    expected: 10_000_000_000,
+  },
+  {
+    name: "literal past 2^31 survives the round trip",
+    source: `export function run(): number { let n = 3000000000; return n; }`,
+    expected: 3_000_000_000,
+  },
+  {
+    name: "fractional local",
+    source: `export function run(): number { let n = 3.5; return n; }`,
+    expected: 3.5,
+  },
+  {
+    name: "division producing a fraction",
+    source: `export function run(): number { let a = 7; let b = 2; return a / b; }`,
+    expected: 3.5,
+  },
+  {
+    name: "irrational result keeps full precision",
+    source: `export function run(): number { return Math.sqrt(2); }`,
+    expected: Math.SQRT2,
+  },
+  {
+    name: "fractional array elements",
+    source: `export function run(): number { const a: number[] = [1.5, 2.5]; return a[0]! + a[1]!; }`,
+    expected: 4,
+  },
+  {
+    name: "fraction through a call boundary",
+    source: `function id(x: number): number { return x; }
+export function run(): number { let n = 0.25; return id(n) + id(n); }`,
+    expected: 0.5,
+  },
+  // (#3907) The counter-step spellings must agree with each other AND stay
+  // correct. `i = i + 1` is the desugared `i += 1`; both are proven bounded by
+  // the loop condition and both stay i32, but a mistake in that proof would
+  // show up here as a wrong sum rather than as a slowdown.
+  {
+    name: "counter spelled `i = i + 1` accumulating past 2^31",
+    source: `export function run(): number {
+  let sum = 0;
+  for (let i = 0; i < 20000; i = i + 1) { sum = sum + 500000; }
+  return sum;
+}`,
+    expected: 10_000_000_000,
+  },
+  {
+    name: "counter spelled `i++` accumulating past 2^31",
+    source: `export function run(): number {
+  let sum = 0;
+  for (let i = 0; i < 20000; i++) { sum = sum + 500000; }
+  return sum;
+}`,
+    expected: 10_000_000_000,
+  },
+  {
+    name: "counter spelled `i = i + 2` visits the same elements",
+    source: `export function run(): number {
+  let sum = 0;
+  for (let i = 0; i < 10; i = i + 2) { sum = sum + i; }
+  return sum;
+}`,
+    expected: 20,
+  },
+  {
+    name: "array element written from a proven counter, read as a fraction",
+    source: `export function run(): number {
+  const a: number[] = [];
+  for (let i = 0; i < 10; i = i + 1) { a.push(i); }
+  return a[7]! / 2;
+}`,
+    expected: 3.5,
+  },
+];
+
+describe("#3907 cross-lane numeric result equality", () => {
+  for (const testCase of CASES) {
+    it(`${testCase.name} — every lane agrees`, async () => {
+      // The JS reference is derived from the same source, so a source edit can
+      // never silently invalidate the expectation.
+      expect(runAsJs(testCase.source)).toBe(testCase.expected);
+
+      const byLane = new Map<Lane, number>();
+      for (const lane of WASM_LANES) {
+        byLane.set(lane, await runLane(testCase.source, lane));
+      }
+      expect(Object.fromEntries(byLane)).toEqual({
+        "host-call": testCase.expected,
+        "gc-native": testCase.expected,
+        "linear-memory": testCase.expected,
+      });
+    });
+  }
+});

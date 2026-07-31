@@ -61,14 +61,34 @@ export function detectI32LoopVar(stmt: ts.ForStatement): { name: string; initVal
     if (incr.operator !== ts.SyntaxKind.PlusPlusToken && incr.operator !== ts.SyntaxKind.MinusMinusToken) return null;
   } else if (ts.isBinaryExpression(incr)) {
     if (!ts.isIdentifier(incr.left) || incr.left.text !== name) return null;
+    const incrOp = incr.operatorToken.kind;
     if (
-      incr.operatorToken.kind !== ts.SyntaxKind.PlusEqualsToken &&
-      incr.operatorToken.kind !== ts.SyntaxKind.MinusEqualsToken
+      incrOp !== ts.SyntaxKind.PlusEqualsToken &&
+      incrOp !== ts.SyntaxKind.MinusEqualsToken &&
+      incrOp !== ts.SyntaxKind.EqualsToken
     )
       return null;
-    // The RHS must be an integer literal
-    if (!ts.isNumericLiteral(incr.right)) return null;
-    const stepVal = Number(incr.right.text.replace(/_/g, ""));
+    // (#3907) `i = i + <int literal>` / `i = i - <int literal>` is the SAME
+    // step as `i += <int literal>`, just spelled out — and it is the spelling
+    // the benchmark suite and a lot of real code actually use
+    // (`for (let i = 0; i < n; i = i + 1)`). Nothing in the proof this function
+    // carries (integer-literal init in i32 range, condition bounds `i`, step is
+    // a compile-time integer constant) depends on the spelling. Before #3907
+    // fast mode narrowed every `number` regardless, so the gap was invisible;
+    // with the blanket narrowing gone this form was demoting the counter — and
+    // its array/vec element specialisation with it — to f64.
+    let stepExpr: ts.Expression = incr.right;
+    if (incrOp === ts.SyntaxKind.EqualsToken) {
+      const rhs = incr.right;
+      if (!ts.isBinaryExpression(rhs)) return null;
+      const rhsOp = rhs.operatorToken.kind;
+      if (rhsOp !== ts.SyntaxKind.PlusToken && rhsOp !== ts.SyntaxKind.MinusToken) return null;
+      if (!ts.isIdentifier(rhs.left) || rhs.left.text !== name) return null;
+      stepExpr = rhs.right;
+    }
+    // The step must be an integer literal.
+    if (!ts.isNumericLiteral(stepExpr)) return null;
+    const stepVal = Number(stepExpr.text.replace(/_/g, ""));
     if (!Number.isInteger(stepVal)) return null;
   } else {
     return null;
