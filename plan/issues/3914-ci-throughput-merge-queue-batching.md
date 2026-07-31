@@ -26,12 +26,21 @@ fixed; the fourth — the runner-capacity one — is _structural_ and has gotten
 **worse**, not better, because the shard matrix was deliberately resized upward
 (53 → 106 jobs) to exploit a serial queue.
 
-The form of batching that _does_ pay here is the other knob:
-**`min_entries_to_merge > 1`** — many PRs in **one** group, validated by **one**
-102-job run. That amortises the fixed per-run overhead instead of competing for
-runners. It is a repo-ruleset change, not a code change, and it has one real
-objection (intra-group masking) which is narrower than the current policy doc
-claims.
+The form of batching that _does_ pay here is many PRs in **one** group, validated
+by **one** 102-job run — amortising the fixed per-run overhead instead of
+competing for runners. Because the queue is already serial, arrivals accumulate
+while a group is in flight **for free**, and batching them costs those PRs no
+latency: they were waiting for that run anyway. The policy is therefore "take
+what accumulated", and the setting that matters is the **cap**
+(`max_entries_to_merge ≈ 4`) — the throughput curve is a bowl that turns back up,
+so unbounded accumulation is worse than a small batch.
+
+**Measured**: 0 of 26 successful groups on 2026-07-31 held more than one PR, and
+three of them were built on the _same base_ — i.e. three PRs sat enqueued
+simultaneously and each still got its own single-PR group and its own full run.
+Group formation is eager. This is a repo-ruleset change, not a code change, and
+its one real objection (intra-group masking) is narrower than the policy doc
+claimed.
 
 Auditing for that turned up **three places that silently assume one PR per
 group** — the #1956 predecessor-baseline lookup, `auto-park`, and the #2975
@@ -56,11 +65,11 @@ merge-queue wedge (#2519 / #2522). Four distinct things went wrong.
 
 The regression gate diffed each group against the **main** baseline. In a
 multi-entry window the group for B contains A+B, so A's +5 improvement cancels
-B's −3 regression and the gate sees net +2. #1956 fixed this: every merge*group
+B's −3 regression and the gate sees net +2. #1956 fixed this: every `merge_group`
 run publishes its merged JSONLs keyed by the group head SHA, and the next group
 diffs against its **exact predecessor group**. Per-PR attribution is restored.
 **This one is genuinely solved** — though its implementation resolved the
-predecessor as `HEAD^1`, which is only the predecessor \_group* for a
+predecessor as `HEAD^1`, which is the predecessor **group** only for a
 single-entry group; see P1 in Part 2.
 
 ### 2. Runner oversubscription — the _structural_ failure (NOT fixed; worse)
@@ -154,19 +163,72 @@ The queue exposes a second knob that is not speculation:
 is divided by N. That is the amortisation speculation was reaching for, without
 the contention that killed it.
 
-Expected value at today's numbers (13.3 min per src merge_group run, per-PR
-failure rate e ≈ 0.10, batch fails → one wasted run then serial re-validation):
+### The right policy is "take everything that accumulated", with a cap
 
-| model          | min/PR | vs serial               |
-| -------------- | ------ | ----------------------- |
-| serial (today) | 13.3   | 1.00×                   |
-| batch N=2      | ~9.2   | **1.45×**               |
-| batch N=3      | ~8.0   | **1.65×**               |
-| batch N=4      | ~7.6   | 1.75× (tail risk grows) |
+The natural formulation is not a fixed N at all: **while a group is in flight the
+queue is serial, so arrivals pile up for free — the next group should simply take
+everything that accumulated.** That is self-tuning (batch size tracks the arrival
+rate) and, critically, it is **latency-free**: a PR that arrives mid-run was
+going to wait for that run to finish regardless, so batching it costs it nothing.
+A fixed `min_entries_to_merge: N` with a wait timer can add latency on a quiet
+queue; accumulate-while-busy cannot.
+
+**But it must be capped, and the cap is the load-bearing number.** With per-PR
+merge_group failure rate `e`, a batch of N is all-green with probability
+`(1−e)^N`; a red batch costs one wasted run plus serial re-validation. Expected
+run-time per merged PR, in units of one run `W`:
+
+| N   | e=0.05     | e=0.10     | e=0.15     |
+| --- | ---------- | ---------- | ---------- |
+| 1   | 1.050W     | 1.100W     | 1.150W     |
+| 2   | 0.598W     | 0.690W     | 0.778W     |
+| 3   | 0.476W     | 0.604W     | **0.719W** |
+| 4   | 0.435W     | **0.594W** | 0.728W     |
+| 5   | **0.426W** | 0.610W     | 0.756W     |
+| 8   | 0.462W     | 0.695W     | 0.853W     |
+| 12  | 0.543W     | 0.801W     | 0.941W     |
+
+The curve is a shallow bowl that **turns back up**: unbounded accumulation is
+actively worse than a small batch, because batch failure probability compounds
+faster than the overhead amortises. At the observed `e ≈ 0.05–0.10` (2 distinct
+PRs failed merge_group re-validation on 2026-07-31) the optimum is **N ≈ 4–5**,
+worth **~1.85×**, and by N=12 you are back near the N=2 result. Hence
+`max_entries_to_merge: 4` — not "as many as possible".
 
 Batching also helps _disproportionately_ here because doc-only groups cost 2 min,
 not 13 — and roughly half of 2026-07-31's 28 merges were doc-only. A doc PR
 batched with a src PR is free.
+
+### Measured: group formation is EAGER — it takes 1 even when more are waiting
+
+Checked against every successful merge_group run of 2026-07-31 by counting
+`Merge pull request #N` commits in each group's `base..head` range:
+
+**0 of 26 groups contained more than one PR.**
+
+That is not because the queue was never backed up. Three groups were built on the
+**same base** `cb86a019` — meaning `main` did not advance between them, so all
+three PRs were enqueued simultaneously:
+
+| time  | group | outcome                   |
+| ----- | ----- | ------------------------- |
+| 10:25 | #3886 | cancelled (group rebuild) |
+| 11:01 | #3888 | failed                    |
+| 11:14 | #3884 | success → `0d4900ba`      |
+
+Three PRs available, three separate single-PR groups, three separate runs. So the
+queue forms a group **as soon as the minimum is met** — and with
+`min_entries_to_merge: 1` the minimum is met by the first entry. Accumulation is
+already happening; the group just refuses to pick more than one PR off the pile.
+
+**Open question — one experiment settles it.** GitHub's exact group-formation
+semantics (does a group take `min(available, max_entries_to_merge)`, or exactly
+`min_entries_to_merge`?) are not documented precisely enough to predict from, and
+the live ruleset is not readable from the repo (merge-queue settings are not in
+`scripts/enable-branch-protection.sh`, and `docs/ci-policy.md`'s record of them
+was stale). Set `min_entries_to_merge: 2` and watch one backed-up window: if
+groups start containing 2+ PRs, eager-with-minimum is confirmed and the cap is
+the only remaining tuning. Do **not** infer the answer from the docs.
 
 ### The one real objection, and why it is narrower than the policy doc says
 
@@ -234,10 +296,15 @@ Settings → Rules → Rulesets, so this last step is a UI/API change by an admi
 
 ```
 max_entries_to_build: 1          # unchanged — see Part 1, do NOT raise this
-min_entries_to_merge: 2          # then 3 after a day's observation
+min_entries_to_merge: 2          # then 3-4 once group sizes are confirmed
 min_entries_to_merge_wait_minutes: 5     # so a quiet queue never stalls
-max_entries_to_merge: 5          # unchanged
+max_entries_to_merge: 4          # THE CAP — bigger is worse, see the bowl above
 ```
+
+`max_entries_to_merge` is the setting that actually bounds the damage: the
+serial queue already accumulates arrivals for free, so this decides how many of
+them a group swallows. 4 is the optimum at the observed failure rate; leaving it
+at 5 is fine, raising it much past that gives the failure probability back.
 
 Pre-conditions, all now satisfied:
 
