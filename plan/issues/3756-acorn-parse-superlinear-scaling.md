@@ -57,6 +57,96 @@ the original mischaracterization — leaving the below repro/history
 intact since the raw numbers are accurate, only the "super-linear"
 interpretation was wrong.
 
+## SECOND CORRECTION (2026-07-31): the mechanism is right, the LANE and the MAGNITUDE are wrong
+
+The first correction (above) fixed "super-linear" → "flat constant factor".
+It left the **root-cause hypothesis** intact: that the ~400-500x is
+dominated by `this.<method>()` **method dispatch**. That hypothesis is
+**reframed, not simply refuted** — and getting the distinction right
+matters, because "the hypothesis was wrong" would itself be wrong.
+
+**Attribution note (read before quoting anything below).** Numbers are
+labelled by who measured them. Nothing here diffs a local measurement
+against a committed CI baseline — that comparison produces phantom
+deltas across different hardware and is not made.
+
+### 1. The ~400-500x is a JS-HOST-lane number, and it is bridge tax
+
+The entire repro in this issue runs through
+`scripts/generate-npm-compat-report.mjs`'s **JS-host** lane. **#3780's
+measurement (theirs, not mine)** put an exact, allocation-free import
+counter on one host-lane parse of acorn's own 226 KB dist:
+
+| dynamic work group | Wasm→host calls |
+| --- | ---: |
+| numeric boxing/unboxing, type, truth, compare, index | 11,032,750 |
+| extern property reads/writes, lookup, method dispatch | 5,656,932 |
+| arrays, argument vectors, iteration | 866,913 |
+| object creation/registration/deletion | 58,870 |
+| regexp and string helpers | 54,500 |
+| **total** | **17,669,965** |
+
+Largest single helpers: `__box_number` 2,995,053 · `__extern_get`
+1,852,765 · `__get_undefined` 1,718,875 · `__host_compare` 1,698,487 ·
+`__unbox_number` 1,564,754 · `__host_eq` 1,463,415 · `__typeof_number`
+1,321,348 · `__is_truthy` 1,309,535.
+
+`__get_undefined` is literally `() => undefined` in `src/runtime.ts`
+(L9814), called 1.72 M times per parse. So the host lane's dominant term
+is **crossing the JS boundary for value-level operations**, not method
+dispatch. Method dispatch is present (it is inside the 5.66 M
+property/method bucket) but it is not what makes the number ~400x.
+
+### 2. Method dispatch IS a real axis — it is just a ~10x one, and it lives in standalone
+
+**#3684's committed cross-engine harness (theirs)**, `benchmarks/cross-engine/`,
+run 3, all three engines re-measured together, checksums identical:
+
+| axis | js2-standalone vs node |
+| --- | ---: |
+| numeric loop | **0.98x (parity)** |
+| property r/w | **1.00x (parity)** |
+| object allocation | **1.00x (parity)** |
+| string scan | 4.98x *(loop-bound at this scale — see #3684's own caveat)* |
+| **tokenizer shape (`this` fields + `this.m()`)** | **7.37x** |
+| **method dispatch** | **9.73x** |
+
+So the dispatch mechanism this issue named is genuine and is one of only
+**two** non-parity axes. Its size is single-digit-x, not 400x.
+
+### 3. The lane where parity is reachable is STANDALONE
+
+**My own re-baseline (mine)**, tip `af7d6f875b35e5`, harness protocol
+(2 warm-up + 9 measured rounds), node control measured **in the same
+process** so the ratio is self-normalising:
+
+- acorn standalone runtime-dynamic: **node is ~11x faster**
+  (wasm-advantage ratio 0.0906).
+- Box load **7.36 → 8.10 → 5.96** across the run (10 cores, ~7 concurrent
+  agents). **Treat as provisional**: contention does not degrade both
+  sides equally, so this is quoted as an order of magnitude only.
+
+The same parse in the **host** lane is ~290-400x. The standalone lane
+makes **zero** host crossings. That ~25-30x lane difference is the bridge
+tax measured directly, and it is why the ~400x number cannot be read as
+evidence about codegen or dispatch quality.
+
+### What this means for the scope below
+
+- The original scope ("verify the method-dispatch hypothesis, then fix
+  it") aimed a **standalone-sized** mechanism at a **host-lane** number.
+- Method dispatch / typed-`this` is owned by **#3683** (typed twins,
+  direct-call devirtualization) and #3685 — not by this issue.
+- The remaining standalone axes are **method dispatch / tokenizer shape**
+  (#3683/#3685) and **string element access** (#3684's D2, ~4.5x,
+  explicitly unowned).
+- The host-lane bridge tax is a *separate, lower-priority* fight
+  (#3673/#3669/#3671), not this issue's dispatch hypothesis.
+
+Recorded rather than silently redirected, per the same principle the
+first correction used: the raw numbers in this file are accurate; the
+causal story attached to them was aimed at the wrong lane.
+
 ## What was ruled out (isolated, scaling-clean measurements)
 
 Before concluding it's a constant-factor / dispatch-cost issue, the
@@ -176,32 +266,40 @@ per-byte cost, not scaling — a partial fix to one axis simply shows up as
 a smaller flat number, not a change in scaling shape (there was never a
 scaling shape to fix).
 
-## Scope
+## Scope (rewritten 2026-07-31 — see SECOND CORRECTION)
 
-- [ ] Verify the method-dispatch-axis hypothesis directly: reproduce
-      #3753's `method` axis cross-engine microbenchmark (or a close
-      variant with a `this.<method>()`-heavy call chain matching acorn's
-      actual recursive-descent depth) in isolation, confirm it's still
-      slow post-#3753, and profile it specifically.
-- [ ] If confirmed as the dominant cost: design and land a fix with the
-      same rigor as #3753 (isolated verification before touching the
-      dispatch path — devirtualization/monomorphization already exists
-      per #3753's own notes; the question is what's still costly on top
-      of that).
-- [ ] Re-run `pnpm run generate:npm-compat` after any fix — expect the
-      acorn ratio to drop meaningfully from ~400-500x; a `tests/dogfood/`
-      /npm-compat page note once it does.
-- [ ] If method dispatch is NOT the dominant cost once profiled, this
-      scope needs revisiting — the ruled-out list above only tested
-      flat/non-`this` call patterns.
+The original scope is struck: it asked this issue to verify and fix
+method dispatch against a host-lane number. Dispatch is owned elsewhere,
+and the host-lane number is bridge tax. What remains for *this* issue:
+
+- [x] Method-dispatch hypothesis resolved against measured evidence
+      (see SECOND CORRECTION): it is a real axis at **9.73x** (method
+      dispatch) / **7.37x** (tokenizer shape) on standalone per #3684's
+      harness, **not** the driver of the ~400-500x host-lane figure,
+      which is **17.67 M Wasm→host crossings per parse** per #3780's
+      import census.
+- [x] Establish which lane parity is reachable in: **standalone**
+      (~11x, my re-baseline; zero host crossings) rather than JS-host
+      (~290-400x).
+- [ ] Route the two live standalone axes to their owners rather than
+      duplicating them here: method dispatch / typed-`this` → **#3683 /
+      #3685**; string element access (~4.5x, unowned) → **#3684 D2**.
+- [ ] `tests/dogfood/README.md` / the npm-compat page (#3757): state the
+      **standalone** ratio as the headline compiled-acorn number and stop
+      quoting the host-lane figure as "our acorn performance" (this is
+      #3684's D3, and it is the same correction).
 
 ## Acceptance criteria
 
-- [ ] Method-dispatch axis hypothesis confirmed or refuted with a clean,
-      isolated measurement (not just inference from #3753's table).
-- [ ] If confirmed: fixed, and the corrected scaling table above (or a
-      fresh equivalent) shows the acorn ratio meaningfully improved,
-      still flat (not literally growing — there's no scaling defect to
-      fix, just a constant to shrink).
+- [x] Method-dispatch axis hypothesis confirmed or refuted with a clean
+      measurement rather than inference — **resolved as "reframed"**: the
+      mechanism is real and measured, but it is a single-digit-x
+      standalone axis, and the ~400-500x this issue was filed against is
+      a different cause (host-boundary value operations) in a different
+      lane.
+- [x] The misleading causal text is corrected in place, with each number
+      attributed to whoever measured it, rather than the issue being
+      quietly repurposed.
 - [ ] `tests/dogfood/README.md` / the npm-compat website page (#3757)
-      updated with a note once this lands and the numbers improve.
+      updated so the headline compiled-acorn number is the standalone
+      one.

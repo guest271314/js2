@@ -225,6 +225,47 @@ per access is *why* Porffor is 12x node on property access and 58x on
 allocation, both axes where we are already at parity with V8. **We should not
 adopt Porffor's object model.**
 
+## D3 discharged (2026-07-31): standalone CAN run acorn, and here is the whole-parse number
+
+D3 below says "the standalone lane cannot run acorn yet — blocked on
+#3675". **That is now stale**: the standalone runtime-dynamic lane runs
+the full 226 KB acorn self-parse and is a committed benchmark row
+(`benchmark:acorn:standalone-dynamic`). So the headline compiled-acorn
+number can and should be the standalone one, per D3's own instruction.
+
+**Measured (mine), tip `af7d6f875b35e5`, this container.** Harness
+protocol: 2 warm-up + **9 measured rounds**, 5 iterations per round,
+node control measured **in the same process** as the wasm lane:
+
+| | min | median | max | std |
+| --- | ---: | ---: | ---: | ---: |
+| standalone wasm | 60,542.9 µs | **96,888.1 µs** | 145,689.7 µs | 25,691 µs (26.5%) |
+| native node | 6,312.4 µs | **8,057.0 µs** | 11,837.9 µs | 1,612 µs (20.0%) |
+
+- **median/median → node 12.03x faster**
+- **min/min → node 9.59x faster**
+- Load average **6.72 → 5.12** across the run (10 cores, ~7 concurrent
+  agents). An earlier run of the same lane at load **7.36 → 8.10** gave a
+  median ratio of 11.04x.
+
+**Read the min pair, not the median pair, on a contended box.** The
+26.5% wasm / 20.0% node standard deviations are contention, not
+workload variance: node's own control moved from ~4,900 µs (uncontended,
+committed artifact) to 8,057 µs median here on identical source. The
+least-contended sample pair (min/min = **9.59x**) is the honest estimate
+and it is stable across runs; the medians drift with whatever else the
+box is doing. **Do not quote 12.03x as a regression against the
+committed 9.77x** — that would be a local-vs-CI diff across different
+hardware, which is exactly the phantom-delta trap this file's own
+methodology caveats warn about.
+
+**Bottom line: standalone compiled acorn is ~10x native node on a real
+226 KB parse**, consistent with this issue's per-axis table (method
+dispatch 9.73x, tokenizer shape 7.37x) — i.e. the whole-parse gap is
+what the two non-parity axes predict, and the four parity axes
+(numeric 0.98x, property 1.00x, allocation 1.00x, plus the loop) are
+genuinely contributing nothing to it.
+
 ## Deliverables
 
 **D1 — the harness itself (done in this issue's PR).**
