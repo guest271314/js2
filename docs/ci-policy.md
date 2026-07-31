@@ -100,9 +100,9 @@ Two test262 workflows currently run on PRs:
   check is `merge shard reports`, fed by the 57-shard host and standalone
   matrix.
   - Queue model (#109 → #1956, see `plan/method/pr-drift-protocol.md`):
-    every PR is validated on its own merge*group ref. Historically this was
-    pinned to a `batch=1` serial queue because the regression gate diffed
-    each group against the \_main baseline*, where the cumulative diff of a
+    every PR is validated on its own `merge_group` ref. Historically this
+    was pinned to a `batch=1` serial queue because the regression gate diffed
+    each group against the **main baseline**, where the cumulative diff of a
     multi-entry queue window lets one PR's improvement mask another's
     regression (ALLGREEN hiding). #1956 retires that constraint: each
     merge_group run publishes its merged JSONLs keyed by the group head SHA,
