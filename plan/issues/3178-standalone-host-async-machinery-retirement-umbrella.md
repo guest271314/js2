@@ -334,6 +334,24 @@ issue is still warranted.
 
 ## Validation (applies to every slice)
 
+> **THE IMPORT SET IS NECESSARY BUT NOT SUFFICIENT — ASSERT VALUES TOO
+> (#3945, 2026-07-31).** The acceptance criterion below is correct as far as it
+> goes, and it has a blind spot that a slice in this family walked into. On the
+> rest-in-binding-pattern slice, lifting the selection bail *without* also
+> making the plan builder's `walk` descend into rest elements produced a module
+> with **zero host imports**, that **validates**, and that **instantiates with
+> no import object** — while silently reading the inert default for the rest
+> binding and every name bound under a nested rest. **The import-set gate greens
+> it.** Only a value assertion catches it.
+>
+> So every slice here needs, in addition to the import probe: run the module and
+> assert a VALUE, including at least one read **after a suspension** (which is
+> what proves the state-struct round-trip rather than just the initial load).
+> This is `reference_valid_wasm_is_not_correct_verify_by_value` landing inside
+> the import-retirement programme. The unowned objlit parameter-default cluster
+> (~102 rows, recorded on #3896) is the next slice someone will pick up under
+> exactly the criterion that misses this.
+>
 > **Do NOT validate a slice with `runTest262File` status — it can read `pass`
 > both before and after the fix.** Measured 2026-07-31 on the
 > `private-gen-meth-*` rows: a **bare** `compile(src, { target: "standalone" })`
