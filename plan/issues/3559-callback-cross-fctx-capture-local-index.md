@@ -212,3 +212,55 @@ reproduce — it fails earlier on a TypeScript `'x' is possibly 'undefined'`
 diagnostic, and an object-literal stand-in for the `assert` harness compiles
 cleanly. Use `runTest262File` on a test262-shaped file; the harness assembly and
 compiler options are load-bearing here.
+
+## Re-read of `## Root cause` against the corrected trigger (2026-07-31)
+
+**The traced mechanism SURVIVES correction 2.** The root cause names the defect
+as _"the call site sits in a **different** fctx"_ and cites the method-call-arg
+callback only as the observed instance. My v1 (plain call) is a different route
+into the same else-arm, so the mechanism is right and only the
+`## Why #3468 F1 exposes it` narrative is over-narrow. **Fix on the cross-fctx
+condition, not on the method-call-argument path.**
+
+### The safety unlock for corruption 1
+
+The blocker on record is that `localMap.get(cap.name) ?? cap.outerLocalIdx` was
+tried as #1177 Stage 1 and reverted for 100+ regressions where the wrong-slot
+read was load-bearing. That revert is about **owner-fctx** behaviour: the naive
+form substituted a different index even when the name _was_ a local here. The
+two #2029 rescues already in the else-chain avoid it by guarding on
+`fctx.localMap.get(cap.name) === undefined`.
+
+A stricter gate is available and is what the fix should use:
+
+> Fire only when the name is absent from `fctx.localMap` **and**
+> `cap.outerLocalIdx` is out of range for this fctx's locals — i.e. only when
+> the current emission is **invalid Wasm**.
+
+**No passing test can depend on invalid Wasm**, because a module that fails to
+emit never runs. So a change gated on "the bytes we emit today are invalid"
+cannot reintroduce the #1177 regressions, whose load-bearing behaviour was a
+_valid_ module reading a wrong slot. `getLocalType(fctx, cap.outerLocalIdx)`
+(already used ~line 1917) is the range probe.
+
+### Blocker — corruption 1 alone will NOT green the four files
+
+`## Root cause` corruption 2 records that the callee funcIdx baked into the call
+(`STABLE_FUNC_BASE + 178`) was `mintDefinedFunc`-minted but never
+`pushDefinedFunc`-pushed: the lifted body of the TDZ-capturing `f` was abandoned
+on this route. Fixing the capture sourcing therefore changes the _error_, not the
+outcome — the call target still does not exist. Both corruptions must land
+together, and whether they share a cause (a lifting bail that both abandons the
+body and leaves the capture unresolvable) is **not yet established**.
+
+### Acceptance for whoever implements
+
+- The four named files pass **and v1 (plain call, `.tmp/v1-plaincall.js`)
+  passes** — a fix keyed on the method-call-arg path would green the four and
+  leave v1 broken while looking like success.
+- Both lanes, since this is a live **default-lane** failure (correction 1).
+- **Kill-switch seen to fail**: revert and confirm the `local index out of range`
+  returns on both lanes.
+- Re-run the #1177/#2029 families and the async-fn null-deref tests the #1177
+  revert protected. The invalid-Wasm gate above is the argument that they are
+  safe; it still has to be demonstrated, not asserted.
