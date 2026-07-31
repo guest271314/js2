@@ -55,15 +55,59 @@ subject carries a conventional-commit prefix **other than `docs(`** — e.g.
 escalate. #3688 was dispatched as live work while `8b4d74f1 perf(#3688): …` was
 already an ancestor of main, with 18 test pins.
 
+## 4. An UMBRELLA citing its own children is treated as ownership
+
+**An umbrella issue cites every one of its children by design — that is what an
+umbrella *is*.** The overlap check does not know that, so it reports each citation
+as `ACTIVE overlap — … Another agent may already own this work as a slice.`
+
+Consequence: **every child of every active umbrella is permanently un-startable.**
+Not a policy anyone chose, and it scales with the number of umbrellas.
+
+### Measured on a single real gating run (2026-07-31)
+
+Looking for one L/XL `standalone` task, seven candidates were gated. Umbrella
+**#2860** (`standalone-vs-js-host-test262-gap-umbrella`, `in-progress`) alone
+produced a BLOCKER on **three** of them:
+
+| issue | claim record on `origin/issue-assignments` | blocked by |
+| --- | --- | --- |
+| #2865 | hard claim (`fable-2865`) | — genuinely owned |
+| #2872 | hard claim (`dev-std-2`) | — genuinely owned |
+| **#2916** | **does not exist** | **#2860 citation only** |
+
+#2916 had **no claimant at all** and was still reported STOP. Verified with a
+control, per the silent-empty rule: the ref is populated with 20+ neighbouring
+claim files (2900, 2903, 2906, 2910–2914, 2920–2932…), so `2916.json` being
+absent is a real absence rather than an unfetched or broken ref.
+
+The task was ultimately dispatched by a human overriding the gate — which is the
+failure mode: a correct gate should not need routine override to release
+unowned work.
+
+### Proposed rule
+
+Skip the citation-overlap check when the referencing issue is an umbrella
+(`umbrella:` frontmatter, or an `[EPIC]`/umbrella title tag). An umbrella
+citation carries **no** ownership information about the child; only the claim
+ref and open PRs do.
+
 ## Why these matter together
 
-All three cause the same outcome from opposite directions: **an agent is either sent
+All four cause the same outcome from opposite directions: **an agent is either sent
 at work that is already done, or turned away from work that is available.** Both waste
 a full measurement cycle, and both happened repeatedly on 2026-07-30/31.
+
+Note the asymmetry in cost: a false *clear* wastes one agent's cycle, while a false
+STOP can strand a task indefinitely, because each successive agent hits the same
+STOP and moves on. Nothing in the system notices work that is never started.
 
 ## Acceptance
 
 - A `released`/`done` claim record does not produce a BLOCKER.
 - A PR that *modifies* an issue file is surfaced by the open-PR scan.
 - A merged non-`docs` `type(#N):` commit on main escalates above a warning.
+- **A citation from an umbrella issue does not produce a BLOCKER.** Re-running the
+  gate on #2916 returns clear (it has no claimant); #2865 and #2872 still STOP,
+  on their real claim records rather than on the #2860 citation.
 - Re-running the gate on #3420 and #2742 returns clear, and on #3654 surfaces #3687.
