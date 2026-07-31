@@ -1,5 +1,5 @@
 ---
-id: 3869
+id: 3872
 title: "Non-writable data-property write does not throw in strict mode (standalone); host also fails to suppress the store"
 status: ready
 created: 2026-07-31
@@ -14,7 +14,7 @@ horizon: m
 related: [3420, 2668, 2744, 3776]
 ---
 
-# #3869 — the strict-mode TypeError is missing; the two lanes fail differently
+# #3872 — the strict-mode TypeError is missing; the two lanes fail differently
 
 ## ⚠️ THE TWO LANES FAIL FOR DIFFERENT REASONS — read before implementing
 

@@ -1,5 +1,5 @@
 ---
-id: 3870
+id: 3873
 title: "for-in inside eval() crashes the checker — \"Internal error compiling statement: Cannot read properties of undefined (reading 'flags')\""
 status: ready
 created: 2026-07-31
@@ -16,7 +16,7 @@ related: [3661]
 origin: "2026-07-31 dev-es5-descriptors, while sizing standalone ES5 clusters for #3661"
 ---
 
-# #3870 — `for-in` inside `eval()` throws in the TypeScript checker
+# #3873 — `for-in` inside `eval()` throws in the TypeScript checker
 
 ## Defect
 

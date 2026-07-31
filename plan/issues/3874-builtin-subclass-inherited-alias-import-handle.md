@@ -1,5 +1,5 @@
 ---
-id: 3871
+id: 3874
 title: "Subclassing a builtin whose plain form is also used registers an import handle as an inherited class callable — ProgramAbiInvariantError"
 status: ready
 created: 2026-07-31
@@ -14,7 +14,7 @@ related: [3672, 3687, 2620, 3798]
 origin: "2026-07-31 dev-eslint-ir, reducing the ESLint linter-graph compile abort"
 ---
 
-# #3871 — inherited-alias lookup matches host-import handles by textual prefix
+# #3874 — inherited-alias lookup matches host-import handles by textual prefix
 
 ## Why this has no home yet
 
