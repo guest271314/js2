@@ -8,7 +8,7 @@ horizon: m
 feasibility: medium
 area: ci
 goal: ci-hardening
-related: [3467, 3468, 2562, 1235, 2547]
+related: [3467, 3468, 2562, 1235, 2547, 3635]
 ---
 
 # #3634 — baseline-promote fails silently; every PR's regression gate degrades
@@ -131,6 +131,28 @@ The `github.actor != 'github-actions[bot]'` guard on *"promote merged report to 
 baseline"* is **NOT** the problem: the actor is `github-merge-queue[bot]`, which passes that
 clause. That job legitimately skips on push because the shard matrix has been
 merge_group-only since the #2519 slim-down.
+
+## Discarded hypothesis 2 — "this is a symptom of artifact storage exhaustion" (#3635)
+
+**Do not deprioritise this issue as knock-on damage from #3635.** #3635 proposed that these
+six failures were caused by Actions storage exhaustion, and therefore that the alerting +
+retry asked for here was "treating a symptom". **Measured 2026-07-31, that is false:**
+
+- **Storage is not exhausted** — an artifact was uploaded 31 s before the check. A
+  quota-exhausted repo cannot upload.
+- **Storage has only GROWN since these failures** (984,897 → 1,017,559 artifact rows), so
+  conditions today are no better than on 2026-07-24/25.
+- **These failures stopped anyway**, with nothing reclaimed by anyone.
+
+If exhaustion had been the cause, point 2 says they should have got *worse*, not stopped.
+
+#3635's own headline was also falsified in the same measurement: **99.1 % of those
+artifacts are already `expired`** (content deleted, zero storage), so the count is a
+metadata-row count and live storage is ~4.9 GB, not the ~1.2 TB a naive scale suggests.
+
+**So this issue stands on its own merits and remains unexplained.** The alerting it asks
+for is what would have surfaced the six failures at the time — independent of cause, which
+is precisely the point of alerting.
 
 ## Documentation bug found alongside
 

@@ -179,6 +179,31 @@ Two test262 workflows currently run on PRs:
   authoritative validation on the merge_group ref regardless (#1657), so
   nothing lands without the real gate's verdict on the merged-with-main tree.
 
+- **Per-lane gating inside a merge_group run.** The two test262 lanes —
+  js-host (`gc`, 66 shards) and standalone (36 shards) — have separate
+  baselines, separate regression gates and separate shard-weight maps, so
+  `scripts/test262-paths-match.sh` also answers the question per lane
+  (`--target host|standalone`). The `changes` job publishes `run_host` /
+  `run_standalone` alongside `run_shards` (which stays exactly their OR, so
+  every existing consumer is unaffected), and a lane the queued diff provably
+  cannot move is dropped from the merge_group shard matrix entirely.
+  Constraints that make this safe, all pinned by
+  `tests/test262-per-lane-gating.test.ts`:
+  - A path is narrowed to one lane **only** when the runner demonstrably does
+    not read it on the other. Today that is exactly the two shard-weight maps
+    (`tests/test262-slow-tests.json` / `-standalone.json`). **All of `src/**`
+    stays both-lane** — `target: "standalone"` is a flag through the same
+    compiler, not a separate source tree, so there is no sound src-level split.
+  - Every uncertain path (missing `base_sha`, failed or empty diff, unexpected
+    matcher output, any non-`merge_group` event) emits **both** lanes, and
+    consumers read the outputs as `!= 'false'` so a missing output means "run".
+  - The surviving lane keeps its **full** shard count, so its corpus partition
+    is byte-identical to a two-lane run and stays comparable to the baseline.
+  - `push` / `workflow_dispatch` always run both lanes: `promote-baseline`
+    publishes both baselines from those runs. A single-lane merge_group also
+    does **not** publish the `test262-group-<sha>` artifact, so the #3448
+    push:main probe MISSES and the full two-lane matrix runs before promoting.
+
 For one-off sharded runs outside the normal PR/merge_group path,
 `workflow_dispatch` is the supported entry point.
 

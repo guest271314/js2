@@ -33,6 +33,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { isHeldRecord } from "./lib/claim-record.mjs";
 
 const ISSUES_DIR = "plan/issues";
 
@@ -127,8 +128,16 @@ const claim = sh("git", ["show", `origin/issue-assignments:${id}.json`]);
 if (claim) {
   try {
     const c = JSON.parse(claim);
-    if (c.assignee) {
+    // (#3880) Heldness comes from the SHARED predicate. This site used to test
+    // `c.assignee` alone, ignoring `status` entirely — so every FINISHED claim
+    // (`done` from `--complete`, `released` from `--release`) still read as a
+    // live blocker. On the live ref that was 403 of 1,080 records, and it made
+    // real dispatch decisions wrong: #2046 read as claimed with three merged
+    // PRs behind it and an agent was dispatched onto it anyway.
+    if (isHeldRecord(c)) {
       blockers.push(`#${id} is CLAIMED by ${c.assignee}${c.branch ? ` (branch ${c.branch})` : ""}`);
+    } else if (c.assignee) {
+      notes.push(`claim file exists but is ${c.status || "not held"} — unclaimed`);
     } else {
       notes.push(`claim file exists, assignee empty — unclaimed`);
     }
@@ -217,14 +226,16 @@ if (localIssue) {
         const oc = sh("git", ["show", `origin/issue-assignments:${otherId}.json`]);
         if (oc) {
           try {
-            claimedBy = JSON.parse(oc).assignee || "";
+            // (#3880) Same shared predicate — a FINISHED claim on an
+            // overlapping issue is not an in-flight signal.
+            const oe = JSON.parse(oc);
+            claimedBy = isHeldRecord(oe) ? oe.assignee : "";
           } catch {
             /* unparseable — treat as unclaimed */
           }
         }
       }
-      const line =
-        `${f} (status: ${status}${claimedBy ? `, CLAIMED by ${claimedBy}` : ""}) shares [${hits.join(", ")}]`;
+      const line = `${f} (status: ${status}${claimedBy ? `, CLAIMED by ${claimedBy}` : ""}) shares [${hits.join(", ")}]`;
       if (status === "in-progress" || claimedBy) {
         blockers.push(`ACTIVE idiom overlap — ${line}. READ IT before dispatching.`);
       } else {

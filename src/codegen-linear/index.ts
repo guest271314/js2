@@ -3666,14 +3666,12 @@ function compileArrayHOF(
   const elemLocal = addLocal(fctx, paramName, elemType);
   const indexLocal = indexParamName ? addLocal(fctx, indexParamName, { kind: "f64" }) : undefined;
 
-  let resultLocal: number | undefined;
-  if (method === "filter" || method === "map" || method === "flatMap") {
-    resultLocal = addLocal(fctx, `__hof_result_${fctx.locals.length}`, { kind: "i32" });
-  } else if (method === "some") {
-    resultLocal = addLocal(fctx, `__hof_result_${fctx.locals.length}`, { kind: "f64" });
-  } else if (method === "find") {
-    resultLocal = addLocal(fctx, `__hof_result_${fctx.locals.length}`, { kind: "i32" });
-  }
+  // filter/map/flatMap accumulate a new array (i32 pointer), `some` a boolean
+  // (f64). #3908: `find` accumulates an ELEMENT, so its slot must carry
+  // `elemType` — a hard-coded i32 made a `number[]` fail validation at both
+  // ends: "local.set[0] expected type i32, found local.get of type f64".
+  const resultType: ValType = method === "find" ? elemType : method === "some" ? { kind: "f64" } : { kind: "i32" };
+  const resultLocal = addLocal(fctx, `__hof_result_${fctx.locals.length}`, resultType);
 
   // Initialize: arrLocal = source array
   compileExpression(ctx, fctx, propAccess.expression);
@@ -3698,8 +3696,9 @@ function compileArrayHOF(
     fctx.body.push({ op: "f64.const", value: 0 });
     fctx.body.push({ op: "local.set", index: resultLocal! });
   } else if (method === "find") {
-    // resultLocal = 0 (null pointer)
-    fctx.body.push({ op: "i32.const", value: 0 });
+    // resultLocal = the "not found" sentinel; #3908: must match elemType. A
+    // null pointer for ref elements, 0.0 for f64 ones (`undefined` in a slot).
+    fctx.body.push(elemIsI32 ? { op: "i32.const", value: 0 } : { op: "f64.const", value: 0 });
     fctx.body.push({ op: "local.set", index: resultLocal! });
   }
 

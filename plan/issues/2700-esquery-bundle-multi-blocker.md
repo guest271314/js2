@@ -122,3 +122,37 @@ exists because acorn is NOT a devDep) is required for these deps.
 Before this issue moves to `done`, `tests/issue-2700.test.ts` must retain the
 reduced bundle repro and assert both compile success and Wasm validation for
 the selected esquery entry.
+
+## Carry-over from the closed PR #3687 — prefer `module` over `main` for a bare package root (2026-07-31)
+
+The reproduction above pins esquery's entry to `dist/esquery.min.js`, which is
+the package's **`main`** — a UMD bundle. PR #3687 (closed, branch
+`codex/1400-eslint-e2e` @ `561c933af16651e49f50556b8128967892ce529e`) recorded
+that this entry choice is itself part of the blocker: the UMD wrapper's browser
+fallback reads `self`, and js2wasm deliberately does not synthesize CommonJS
+`module`/`exports` host globals, so the bundle takes a branch that cannot work.
+
+Its `src/resolve.ts` fix: for a **bare package-root** specifier
+(`specifier === pkgName`), route through `findImplementationBody` so a
+published ESM `module` field wins over `main` when both exist. Packages
+without a `module` field keep standard TypeScript/Node resolution unchanged.
+
+```ts
+if (pkgName && specifier === pkgName) {
+  const implementation = this.findImplementationBody(pkgName, specifier, resolutionContainingFile);
+  if (implementation) {
+    resolved = this.host.realpath?.(implementation) ?? implementation;
+  }
+}
+```
+
+This is **not** on `main` (verified 2026-07-31 against `e4187572`);
+`findImplementationBody` exists but is only reached on the `@types/` path.
+
+Suggested measurable criterion if this is adopted here: `new
+ModuleResolver(...).resolve("esquery", <importer>)` returns the `module`-field
+ESM entry rather than `dist/esquery.min.js`, and the "1005 syntax" error count
+for the resolved entry is re-measured against that entry rather than the UMD
+bundle — the current 128-error figure may be an artifact of compiling the wrong
+file. **Measure before assuming the fix helps**; a different entry is a
+different program, not necessarily a working one.
