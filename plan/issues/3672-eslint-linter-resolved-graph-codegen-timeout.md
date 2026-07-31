@@ -2,9 +2,11 @@
 horizon: m
 id: 3672
 title: "ESLint linter.js: resolved 149-file graph exhausts a 2 GB compiler heap"
-status: ready
+status: done
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-07-31
+completed: 2026-07-31
+assignee: ttraenkler/dev-eslint-ir
 priority: critical
 feasibility: hard
 reasoning_effort: max
@@ -75,3 +77,162 @@ and must not be folded back into #3654.
   treats missing output as an expected compiler diagnostic.
 - Phase timing and peak-memory evidence are recorded here before the issue is
   closed.
+
+## Measurement (2026-07-31) — the premise does not reproduce
+
+Re-run on `origin/main` with the **identical** command line and the **identical**
+`--max-old-space-size=2048` cap this issue reported as exhausted. Single 8-core
+container shared with other agents; `free -m` available 16,464 MB and 1-minute
+load average 4.14 at the start of the first run.
+
+| heap cap | wall   | peak RSS | exit | structured report |
+| -------- | ------ | -------- | ---- | ----------------- |
+| 2048 MB  | 12.5 s | 572 MB   | 0    | yes               |
+| 2048 MB  | 11.6 s | 592 MB   | 0    | yes               |
+| 2048 MB  | 18.6 s | 633 MB   | 0    | yes               |
+| 8192 MB  | 16.4 s | 717 MB   | 0    | yes               |
+
+There is **no 2 GB heap exhaustion and no 45-minute run**. `--trace-gc` over the
+8192 MB run: 63 scavenges, 1 mark-compact, peak committed heap 439 MB,
+`average mu = 0.996` — GC took 0.4 % of wall time. Peak RSS is read from
+`/proc/<pid>/status` `VmHWM`, sampled every 2 s by a parent supervisor, so an
+OOM-killed child still yields a number.
+
+All four runs are identical in outcome: 125 diagnostics, `success:false`,
+`binaryByteLength:0`, `valid:false`, exactly **one** `Codegen error:`, exactly
+**one** unresolved module.
+
+### Why it is fast: codegen aborts at one hard error
+
+```text
+Codegen error: inherited class callable LazyLoadingRuleMap_has
+has no exact defined function for handle 676
+```
+
+A thrown `ProgramAbiInvariantError` from
+`src/codegen/program-abi-class-callable-planning.ts:246`. The compile stops
+there, so **`main` has never reached the full-codegen regime this issue was
+written about.** Any budget measured today is a budget on an early abort — that
+is stated in the test rather than papered over.
+
+The remaining 124 diagnostics are not blockers: 112 ordinary TS checker notes on
+untyped JS, 11 CJS-interop shape errors (`no default export` ×3,
+`declares X locally, but it is not exported` ×8), and 1
+`Cannot find module '../../package.json'` — the last unresolved edge in the
+149-file graph, owned by #3655. #3654's resolver work has landed; #3656's
+dynamic-destructuring invariant and #3657's unknown-ambient-call invariant are
+both absent.
+
+### Phase attribution (`--cpu-prof`, self time, 8192 MB run)
+
+| bucket                                                 | self time | share  |
+| ------------------------------------------------------ | --------- | ------ |
+| `node_modules/typescript` (parse / bind / check)       | 6,590 ms  | 54.2 % |
+| native (`stat` 791, `read` 508, `open` 242, GC 311 ms) | 2,369 ms  | 19.5 % |
+| `src/ts-api.ts` (`forEachChild`)                       | 431 ms    | 3.5 %  |
+| `src/codegen/declarations/import-collector.ts`         | 219 ms    | 1.8 %  |
+| `src/codegen/struct-field-boolean-brand.ts`            | 122 ms    | 1.0 %  |
+| `src/ir/identity.ts`                                   | 107 ms    | 0.9 %  |
+
+No `src/` module exceeds 3.5 %. The frontier compile is **checker- and
+I/O-bound**, not codegen-bound; ~14 % of wall time is filesystem syscalls from
+module resolution. There is no repeated-work or reachability pathology to
+reduce, so the "deterministic reduced fixture … **if one exists**" criterion is
+answered in the negative, with numbers.
+
+## Reduced repro of the actual blocker
+
+The abort _does_ reduce. Root cause read off `src/codegen/class-bodies.ts`: the
+inherited-member scan walks `ctx.funcMap` for every key with the textual prefix
+`${parentClassName}_`, where `parentClassName` is literally `baseExpr.text`
+(line 640) — so `extends Map` produces the prefix `Map_`. A separate, ordinary
+use of the builtin registers **host-import** entries under exactly those keys,
+and the scan hands that import handle to
+`setProgramAbiInheritedClassCallableAlias` → `observeInheritedAlias`, which
+requires a _defined_ function and throws.
+
+Minimisation (all on `origin/main`); the discriminator is the separate plain use
+of the builtin, which is why `extends Map` alone never reproduced:
+
+| fixture                                   | result                                        |
+| ----------------------------------------- | --------------------------------------------- |
+| subclass **+** separate plain builtin use | FAILS — `Registry_set`, handle 13             |
+| subclass alone, no separate plain use     | compiles clean                                |
+| `extends Set` + plain `Set` use           | FAILS — `Bag_add`, handle 13                  |
+| plain JS / CJS flavour                    | FAILS identically                             |
+| `--target gc` without `platform: node`    | FAILS — handle 54                             |
+| `--target standalone` / `--target wasi`   | different, deliberate #2620 guard fires first |
+
+Handle 13 is unambiguously in import index space, confirming the import-handle
+diagnosis. Six lines reproduce it:
+
+```ts
+class Registry extends Map<string, number> {}
+const plain = new Map<string, number>();
+plain.set("x", 1);
+const r = new Registry();
+export function test(): number {
+  return (plain.has("x") ? 1 : 0) + (r.has("a") ? 1 : 0);
+}
+```
+
+**Standalone-lane note:** on `--target standalone`/`wasi` this pattern is caught
+by the explicit #2620 "native collection subclass not yet supported" guard, which
+fails loudly and correctly. The standalone lane is protected by design here; the
+defect is specific to the WasmGC JS-host lane.
+
+## Implementation (2026-07-31)
+
+No `src/` change. #3672 is a measurement-and-guard issue, and the measurement
+says the compiler is fine at this frontier; inventing a fix would have been
+fitting code to a stale premise.
+
+- Added `tests/helpers/eslint-graph-probe.ts`: supervises the out-of-process
+  `compileProject` probe under an **enforced** heap cap and wall-clock kill.
+  Rejects with a typed `EslintGraphProbeFailure` whose `kind` is `timeout`,
+  `abnormal-exit`, or `no-structured-report`. The budget is _enforced_, not
+  compared against a recorded number, so a breach cannot degrade into a pass —
+  and a killed child can never be mistaken for a compiler diagnostic.
+- Added `tests/issue-3672.test.ts`: the real `linter.js` graph under the 2048 MB
+  / 120 s budget with the compile/validate split and the frontier pinned; two
+  control rungs that prove the supervision can fail; and the reduced repro plus
+  its isolating control.
+- Un-skipped **Tier 1a** in `tests/stress/eslint-tier1.test.ts` and routed its
+  child through the shared supervisor. Before this change that file was 5 tests
+  / 5 `it.skip` / **0 attempted** — 100 % vacuous, and in no required check, so
+  there was zero automated signal on ESLint compilation. The package entry
+  measures 10.8 s / 628 MB peak RSS and reaches the same frontier with only two
+  diagnostics and zero unresolved modules.
+
+`src/compile-profile.ts` was deliberately **not** written: PR #3687 already
+introduces it, and once the failure mode was known, phase attribution needed
+nothing beyond `--cpu-prof`.
+
+## Verification (2026-07-31)
+
+- `tests/issue-3672.test.ts` — **5 passed / 5 attempted / 0 skipped**.
+- `tests/stress/eslint-tier1.test.ts` — Tier 1a now **1 passed / 1 attempted**
+  (was 0 attempted); the four later rungs stay skipped behind their own blockers.
+- Non-vacuity, deliberate breaks confirmed red before being reverted:
+  - heap budget lowered to 192 MB → the real graph dies with
+    `node::OOMErrorHandler`, SIGABRT, exit code `null`, empty stdout after
+    11.6 s, and the suite reports
+    `compileProject probe exited abnormally … it is NOT a compiler diagnostic`.
+    A genuine OOM lands in the loud branch, never in a silent skip.
+  - frontier substring replaced with a sentinel → red with
+    `expected 'Codegen error: inherited class callab…' to contain
+'SENTINEL_MUST_NOT_MATCH'`, proving the pin inspects real diagnostics.
+  - the permanent timeout rung is itself a live proof: the real graph under a
+    750 ms budget is killed and reported as `kind: "timeout"`.
+- The repro's isolating control (subclass without the separate plain builtin
+  use) compiles successfully, so the failing rung is not passing for an
+  unrelated reason.
+
+## Remaining work owned elsewhere
+
+- The builtin-subclass inherited-alias defect itself has **no issue on `main`**.
+  PR #3687 claims a fix for it on its branch (measured handle 615 vs
+  `numImportFuncs` 650). It needs a home issue; the repro above is ready for it.
+- `Cannot find module '../../package.json'` — #3655.
+- The CJS-interop shape diagnostics (`no default export`,
+  `declares X locally, but it is not exported`) — #3654 follow-up.
