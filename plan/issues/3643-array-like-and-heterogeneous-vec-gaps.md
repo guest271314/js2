@@ -16,6 +16,13 @@ loc-budget-allow:
   # `resolveImport` lives in this file; splitting it is #3399's job, not this
   # slice's. No new branch structure in the hot path.
   - src/runtime.ts
+func-budget-allow:
+  # The same Slice B addition seen at function granularity: `__array_from`'s
+  # non-iterable arm lives inside the host-import factory `resolveImport`, which
+  # has nowhere else to put a new import behaviour until #3399 splits it. The
+  # helper itself (`_arrayFromNonIterableSource`) is a NEW top-level function,
+  # not more weight in the factory.
+  - src/runtime.ts::resolveImport
 horizon: m
 feasibility: medium
 task_type: bug
