@@ -58,32 +58,6 @@ failure is legible without relying on the caller's pipe discipline.
 4. Document `set -o pipefail` / `${PIPESTATUS[0]}` in the dev protocol — pipe-swallowed
    exit codes bit this repo three times in one session.
 
-## Frequency evidence — one agent, one session, 2026-07-31
-
-A single anecdote is a flake; this is a rate. All from **one** agent's session:
-
-| # | invocation | outcome |
-| --- | --- | --- |
-| 1 | `claim 3420` | hung ~10 min at 0:00 CPU, killed |
-| 2 | `claim 3420` (retry) | died on `cannot lock ref 'refs/claim-issue/base'` — concurrent agent moved the shared mirror |
-| 3 | `claim 3420` (foreground) | `timeout 280` exceeded, exit 124 |
-| 4 | `claim 3420` (background) | still running after ~15 min; abandoned, work proceeded **unclaimed** on the record's `status: released` |
-| 5 | `--allocate` | wedged ~10 min, then **succeeded** → reserved #3885 |
-| 6 | `claim 2916 --no-pr-scan` | succeeded (minutes, backgrounded) |
-
-**Four wedges plus two slow successes in one session**, each stall in the
-5–15 minute range. Two other agents were observed in the same state concurrently
-(`3661`, `3672`, `3655`), so it is fleet-wide contention rather than one bad
-checkout.
-
-**The concrete cost:** #3420 was implemented and merged with **no claim record
-ever taken** — the protection this tool exists to provide was simply absent for
-that task, and the only thing preventing duplicate work was a human noticing.
-
-The shared `refs/claim-issue/base` mirror is implicated: every agent fetches
-into the *same* ref, so N concurrent claims contend on one lock. Failure 2 is
-that collision surfacing directly.
-
 ## Why priority high
 
 The lock is **advisory**. A standing instruction now says an advisory lock that
@@ -91,9 +65,15 @@ cannot be acquired in a few minutes must not stop work — verify the record's `
 directly and proceed. But that is a workaround: the lock exists to prevent duplicate
 dispatch, and while it is wedged the fleet is running without that protection.
 
-And the workaround has a sharp edge: "proceed if the record says `released`"
-is only safe because the *reader* path works. If a wedge ever produced a stale
-**read**, two agents could both see `released` and both start.
+**The workaround has a sharp edge worth stating explicitly.** "Proceed if the
+record says `released`" is safe only while the **reader** path is sound — it
+assumes a wedge can lose a *write* but never return a stale *read*. Nothing
+currently guarantees that. If a wedge ever produced a stale read, two agents
+could both see `released` and both start, which is precisely the duplicate
+dispatch this lock exists to prevent. So the workaround does not merely leave
+the fleet unprotected while wedged; under one plausible failure mode it is
+itself the mechanism. Any fix should confirm the read path cannot go stale
+independently of fixing the write path.
 
 ## Acceptance
 
