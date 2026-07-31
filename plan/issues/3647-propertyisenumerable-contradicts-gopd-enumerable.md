@@ -35,6 +35,63 @@ Class methods are non-enumerable per ES2015+ (§14.6, MethodDefinition →
 importantly it is **self-inconsistent**: our own `getOwnPropertyDescriptor`
 disagrees with our own `propertyIsEnumerable`.
 
+## Re-measured 2026-07-31 — reproduces; host-lane only; two adjacent findings
+
+**Harness:** `runTest262File`, test262-shaped probe, **both lanes**, with controls
+that must hold under any spec version. Controls passed in both lanes
+(`({a:1}).propertyIsEnumerable("a") === true`, `…("zz") === false`), which is
+what licenses reading the rows below (#3885).
+
+```
+host:        ctl_own=true  ctl_bogus=false | pIE=true  | hasOwn=true  | keys_has_m=false
+standalone:  ctl_own=true  ctl_bogus=false | pIE=false | hasOwn=false | keys_has_m=false
+```
+
+**1. The defect is HOST-LANE ONLY.** Host reports `propertyIsEnumerable → true`
+while `Object.keys` on the same object+key correctly omits `m` — the filed
+self-inconsistency, confirmed. **Standalone already answers `false` correctly.**
+Any fix must not "fix" the lane that is already right.
+
+**2. Standalone has a DIFFERENT defect on the same probe:** `hasOwnProperty`
+returns **false** for `C.prototype.m`, which does exist. That is #3875's
+finding (*gOPD is correct, hasOwnProperty is broken*), not this issue —
+recorded so nobody folds the two together.
+
+**3. NEW — `getOwnPropertyDescriptor(C.prototype,"m")` TRAPS on host.** Not the
+`null` that #3646 documents: it raises `RuntimeError: illegal cast in
+__module_init()`. Two independent probes crashed on that exact line. This is
+strictly worse than a wrong value and probably belongs on #3646 as a severity
+correction.
+
+### Dispatch paths located (both gate on `_isWasmStruct`)
+
+- `Object_propertyIsEnumerable` — `src/runtime.ts:12628`
+- `__propertyIsEnumerable` — `src/runtime.ts:12759`
+
+Both delegate to `_wasmStructPropertyIsEnumerable` (`src/runtime.ts:5258`) when
+the receiver is a wasm struct, else fall through to the host's own
+`Object.prototype.propertyIsEnumerable`.
+
+### A latent bug found there, which is NOT this defect
+
+`_wasmStructPropertyIsEnumerable` short-circuits `if (sc && prop in sc) return 1`
+— *present in the sidecar ⇒ enumerable*, unconditionally, without consulting the
+descriptor. Correct for assignment-created properties (§10.1.6.1 gives those
+`enumerable:true`) and wrong for anything whose descriptor disagrees.
+
+**Reordering it to read the descriptor first did NOT change the probe**, so the
+receiver here is evidently *not* taking that branch — `C.prototype` is likely not
+a wasm struct in host mode, so the native JS fallback answers. The reordering was
+reverted rather than shipped: an unvalidated change that fixes nothing measurable
+should not land. It is recorded here because it is a real latent inconsistency
+worth fixing on its own evidence.
+
+**Next step for the implementer:** determine what `C.prototype` actually is in
+the host lane (wasm struct vs plain JS object vs wrapper) and which of the two
+dispatch paths the call takes. That single fact decides whether the fix belongs
+in `_wasmStructPropertyIsEnumerable`, in the fallback, or upstream in how class
+methods are installed on the prototype.
+
 ## Measured (stock `upstream/main`, host lane, no test262 harness involved)
 
 ```js
