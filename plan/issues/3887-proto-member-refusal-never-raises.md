@@ -81,7 +81,7 @@ errors; instead they answer quietly wrong, so an unknown number of standalone
 conformance rows may be **mis-attributed** — scored against the wrong cause, or
 scored `pass` because a `null` came back and no assertion fired.
 
-## Fix location — NOT the refusal emitter. First attempt measured and REVERTED.
+## Fix location — UNKNOWN. Two attributions tried, both measured and REVERTED.
 
 The obvious site is `emitProtoMemberBodyRefusal`
 (`src/codegen/array-object-proto.ts` ~692), and there is a genuinely suspicious
@@ -104,31 +104,69 @@ output — all `-1`s unchanged. Reverted rather than shipped, per the same rule
 that retired the `substring`-only bail-out in #3877: an edit with no measured
 effect is unproven, however good its story.
 
-**Why it does nothing — the refusal is never reached for these members.**
-Compiling the String cases and inspecting the emitted module:
+**A previous revision of this issue claimed the refusal is never reached. That
+claim was WRONG and is retracted — the probe behind it was invalid.** It grepped
+the emitted **WAT text** for the refusal's message string and found zero
+occurrences. The message lives in the **string pool**, not in WAT instructions,
+so zero was guaranteed regardless of the truth. Recorded rather than deleted
+because a wrong attribution inside a filed issue is exactly what sends the next
+investigator to the wrong function.
 
+**The refusal IS reached, and it DOES emit a throw.** Dumping the wrapper
+verbatim (`.tmp/dump-wrapper.mts`):
+
+```wat
+(func $__proto_method_-1073741804_toUpperCase (type 111)
+  global.get 70
+  extern.convert_any
+  call 69
+  throw 0            ;; <- the refusal's TypeError, present and correct
+)
 ```
-charAt:      wrappers=[__proto_method_-1073741804_charAt]       refusal-message-occurrences=0
-toUpperCase: wrappers=[__proto_method_-1073741804_toUpperCase]  refusal-message-occurrences=0
-slice:       wrappers=[__proto_method_-1073741804_slice]        refusal-message-occurrences=0
+
+Six lines, and the entire body is `emitThrowTypeError`. `charAt` by contrast is
+34 lines of real implementation, whose null-receiver ROC arm emits the _same_
+`throw 0` shape.
+
+**So the throw is generated and still does not surface at the call site.** That
+is the real open question, and it is narrower than when this issue was filed.
+
+**The revert still stands, on sound evidence.** Changing the refusal's
+`return null` to `return { kind: "externref" }` produced byte-identical output —
+now explained: `createNativeProtoMember` was never bailing, because the wrapper
+demonstrably exists. The revert was correct; the _reason_ first given for it was
+not.
+
+**Dispatch is not the differentiator either.** The per-method call helpers are
+structurally identical between a failing and a working member:
+
+```wat
+(func $__call_m_m_0 …)   ;; toUpperCase — FAILS
+  local.get 0 / any.convert_extern / local.set 1
+  local.get 0 / global.get 76 / extern.convert_any / call 120 / call 171
+
+(func $__call_m_m_1 …)   ;; charAt — WORKS
+  … same shape, plus the extra arg: call 120 / local.tee / call 121 / call 171
 ```
 
-Wrappers **are** generated for `toUpperCase` and `slice` — the members that are
-in no arm of `emitStringProtoMemberBody` — and the refusal's message string
-(`"is not yet implemented in --target standalone"`) appears **zero** times in
-the module. So `emitProtoMemberBodyRefusal` is **not** on this path at all;
-something else builds those wrappers with a body that yields `null`.
+Both do member-lookup (`call 120`) then invoke (`call 171`). Same shape,
+opposite outcomes.
 
-**Consequence for this issue's own framing:** the title's attribution to
-`emitProtoMemberBodyRefusal` is **not established**. The measured facts — refused
-members answering `null` across brands where host throws — stand unchanged. The
-_mechanism_ does not. Next investigator: find what actually emits the
-`__proto_method_*` body for a member with no arm, since it is demonstrably not
-the refusal emitter.
+## Where the next investigator should start
 
-The `null`-return-discards-the-throw issue in `emitProtoMemberBodyRefusal` is a
-real latent hazard worth fixing on its own merits, but it is **not** the cause of
-the behaviour measured here, and fixing it changes nothing observable today.
+The throw exists in the wrapper; the dispatcher shape is identical between the
+working and failing arms; the failing call returns `null` rather than raising.
+So the loss is **between the invoke (`call 171`) and the caller** — either the
+closure is not actually invoked for a refusal-bodied member, or the exception
+does not propagate across that boundary.
+
+**Do not re-derive this by reading source.** This codepath has now produced
+**two** confident mechanism attributions from source reading — the
+`substring`-only bail-out (#3877) and the refusal return type (above) — and both
+compiled to byte-identical output. Use a **marker bisect** instead: put a unique
+sentinel constant in each candidate emitter, compile, dump the wrapper and the
+dispatcher, and see which sentinel survives to WAT. Attribution by marking
+cannot be wrong; attribution by reading has been wrong twice here.
 
 ## Acceptance criteria
 
