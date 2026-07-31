@@ -26,6 +26,16 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - **Worktree creation**: `git worktree add /workspace/.claude/worktrees/issue-NNN-slug -b issue-NNN-slug origin/main`. Always branch from `origin/main` (post-fetch), never from local `main`.
 - **Branch base — `origin/main`, never the merge-queue tip (#2522)**: for independent work, branch from `origin/main`, then `git merge origin/main` again right before enqueue — that catch-up rebases the work onto future-main but incorporates only PRs that _actually landed_. Do **not** branch from a `gh-readonly-queue/main/pr-N-<sha>` tip or otherwise base work on the queue's _speculative_ end-state: queued PRs eject, and a base built on an ejected PR carries phantom commits that force a rebase (forbidden — public main is append-only). **Exception — known dependency (explicit predecessor-stacking)**: when a new task is known to depend on / heavily overlap a specific in-flight PR, branch from _that PR's real branch_ (durable, not the ephemeral queue ref) and enqueue only after the predecessor lands; re-merge it if it changes. The inter-PR conflict rate is a queue-_speculation_ lever (`max_entries_to_build > 1`, re-raise once runner capacity from #2519 allows), not a dev-branch-base lever.
 - **Push safety**: `.git/config` sets `push.default=current` — `git push` always pushes to the remote branch matching the local branch name, regardless of upstream tracking. This prevents the `git worktree add -b <branch> origin/main` trap where the inherited tracking ref routes pushes to origin/main.
+- **NEVER use `git stash` in a worktree — `refs/stash` is a SINGLE SHARED STACK across every worktree of the repo.** It lives in the common `.git` dir, not per-worktree, so with agents running in parallel it is an interleaved free-for-all: your `git stash pop` takes whatever entry is on top, which is very likely **another agent's**, and drops it from the stack. This is not theoretical — on 2026-07-31 two agents popped each other's stashes within minutes, losing 546 lines of `native-strings-rewrite.ts` and 240 lines of `src/runtime.ts`. Both were recoverable only as dangling commits.
+  - **Instead, for a revert-and-measure (A/B) cycle, use file copies:**
+    ```bash
+    cp src/foo.ts .tmp/new.ts
+    git show HEAD:src/foo.ts > .tmp/base.ts
+    cp .tmp/base.ts src/foo.ts    # measure baseline
+    cp .tmp/new.ts  src/foo.ts    # restore
+    ```
+  - **Recovery if it already happened**: `git fsck --unreachable | grep commit`, then `git log -1 --format=%s <sha>` on each — a stash entry's message is `WIP on worktree-agent-<id>`, which identifies the **owner** unambiguously. Restore with `git checkout <sha> -- <paths>`. Tell the lead so the commit can be pinned (`git update-ref refs/recovered/<name> <sha>`) before garbage collection takes it; unreachable objects are collectable.
+  - The hazard is **worse than it looks** because the failure is silent and delayed: `pop` succeeds, you keep working, and you only notice when the file you expected is someone else's. The victim usually suspects their own change first.
 - **Worktree cleanup after merge**: after a dev self-merges their PR, they remove their own worktree (`git worktree remove /workspace/.claude/worktrees/<branch>`) before claiming the next task. Tech-lead only removes worktrees for suspended or abandoned branches.
 
 ## Architecture Principles
@@ -407,6 +417,27 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 
 ### Merge protocol (PR + CI, devs self-merge)
 
+**Docs-only changes go in ONE open PR — check before opening a second.** If a
+docs-only PR is already open (issue files under `plan/issues/`, `plan/` notes,
+`docs/`, README-level edits), **push your docs commits onto that PR's branch
+instead of opening another**. Only open a new docs PR when none is open.
+
+- "Docs-only" means the diff touches no `src/`, `tests/`, `scripts/`,
+  `.github/` or `benchmarks/` code. A change that touches code is a normal PR
+  and follows the rest of this protocol, even if it also edits docs.
+- **Code PRs still carry their own issue-file edits.** An implementation PR
+  that sets `status: done` on the issue it closes keeps that edit in the code
+  PR — see the issue-status lifecycle below, where the self-merge path
+  deliberately sets `done` in the impl PR. Do NOT split that out into the docs
+  PR; it would orphan the issue exactly the way `in-review` does.
+- Rationale: docs PRs are individually trivial to review and collectively
+  noisy. A session that files a dozen issues should cost one review, not
+  twelve. Grouping also keeps the merge queue free for changes that actually
+  need the gates.
+- To find the open one: `gh pr list -R loopdive/js2 --state open --label docs`,
+  or scan open PR titles for a docs prefix. If you cannot reach `gh`, ask the
+  tech lead rather than opening a speculative second PR.
+
 **Authoritative ruleset**: see [`docs/ci-policy.md`](docs/ci-policy.md) for
 the required-checks list, reviewer rules, force-push policy, linear-history
 mode, and the admin script (`scripts/enable-branch-protection.sh`) that
@@ -429,7 +460,8 @@ layer on top — GitHub branch protection is the hard block.
    - **Push to `fork`, not `origin` — this is load-bearing, not cosmetic (#3343-era, 2026-07-17).** `origin` is **upstream** (`loopdive/js2`) and `push.default=current`, so a plain `git push` puts the branch on **upstream**. `gh pr create --head ttraenkler:<branch>` then fails with "No commits between" (the branch isn't on the fork), and the tempting workaround — dropping the `ttraenkler:` prefix — opens an upstream-head PR. That is how a **duplicate PR** survives: **two lanes run concurrently** (this checkout + a fork-origin lane), and when the same branch NAME exists in two different head repos, GitHub **cannot** apply its normal same-head+base rejection. Both PRs coexist and the work is done twice. Pushing to `fork` restores that free rejection. Do NOT rely on `claim-issue.mjs` to prevent this — it returns **exit 0 to both lanes** (they share the `ttraenkler/senior-dev` slug); the lock is advisory. Before starting an issue, also run `git log origin/main --grep="#<id>"` to check it isn't already merged. A PR that goes **DIRTY on files it itself touched** is a duplicate-merge smell, not an ordinary conflict.
 4. **Dev blocks on CI** — polls `gh pr checks <N>` every 30s for ~2 min wall time, in-context (Sonnet idle is nearly free). Use `gh run watch <run-id>` or a `while ! done; do sleep 30; done` loop with a max timeout (~10 min before noting unusual wait, ~20 min before escalating).
 5. **On CI completion**:
-   - **All required checks green** → run `/dev-self-merge`; if MERGE, mark the task completed and **stand down** (proceed to step 8). The dev does NOT enqueue — the server-side `auto-enqueue.yml` workflow enqueues on CI-completion (grace 0, #2786). NEVER enqueue or re-enqueue from a dev
+   - **All required checks green AND `mergeStateStatus == CLEAN`** → run `/dev-self-merge`; if MERGE, mark the task completed and **stand down** (proceed to step 8). The dev does NOT enqueue — the server-side `auto-enqueue.yml` workflow enqueues on CI-completion (grace 0, #2786). NEVER enqueue or re-enqueue from a dev
+     - **`CLEAN` is load-bearing, not decoration (#3878, #3904).** A red **non-required** check drives `mergeStateStatus` to **`UNSTABLE`**, and `auto-enqueue` enqueues only `{CLEAN, HAS_HOOKS}` — `UNSTABLE` is _deliberately_ excluded (`scripts/enqueue-green-prs.mjs`), because it once let red PRs into the queue. So a PR can have **every required check green and never be enqueued, indefinitely**. Standing down on "required checks green" alone is exactly the stranding condition. If you see `UNSTABLE` with only non-required checks red, **re-run the failed job** (`gh run rerun <run-id> -R loopdive/js2 --failed`) to get back to `CLEAN` — do not enqueue, and do not stand down assuming the workflow will pick it up.
    - **Drift detected** (mergeable_state becomes "behind") → `git merge origin/main` in the worktree, resolve conflicts with full PR context, push again, loop back to step 4
    - **CI failure** (any required check failed) → diagnose with full PR context (the agent KNOWS what it changed), fix locally, push again, loop back to step 4
 6. **If regressions per `/dev-self-merge`**: dev fixes on branch, pushes again, loops back to step 4

@@ -224,3 +224,102 @@ gh api 'repos/loopdive/js2/actions/runs?event=merge_group&per_page=100' \
 # during this investigation under-counted attribution by one (7 -> 6).
 gh api 'repos/loopdive/js2/commits/<base-sha>' --jq '.commit.message'
 ```
+
+---
+
+# Addendum — two findings from the same session, deliberately NOT the same class
+
+Both were nearly filed as further instances of the rebuild tax above. Neither is. Recording the
+mis-classification because "same symptom, unrelated mechanism" is how a wrong fix gets shipped.
+
+## A. A gate whose error message names a cause that does not exist
+
+**The failure that cost ~50 minutes across two agents was not the mechanism — it was the
+wording.** `quality` fails with:
+
+```
+node scripts/sync-conformance-numbers.mjs --check
+[sync-conformance] --check failed: 1 file(s) would change.
+[sync-conformance] DRIFT  CLAUDE.md
+```
+
+Under a script named \*sync-conformance-**numbers\***, `DRIFT` reads as _"your conformance figure
+is stale."_ So triage goes looking for a stale number — and on a fast-moving queue there is
+always a plausible story ready to hand ("`promote-baseline` rewrites it on every push to
+`main`, main advanced, your copy is old"). That story is coherent, fits the evidence, and is
+**wrong**.
+
+**The number never drifted.** Measured on #3901, byte-identical in all three places:
+
+| where                             | conformance line           |
+| --------------------------------- | -------------------------- |
+| the failing branch                | `29,846 / 43,099 (69.2 %)` |
+| `origin/main`                     | `29,846 / 43,099 (69.2 %)` |
+| after `pnpm run sync:conformance` | `29,846 / 43,099 (69.2 %)` |
+
+The entire diff is **two blank lines inside the generated block**:
+
+```diff
+ <!-- AUTO:conformance-start -->
+-
+ **test262 conformance**: 29,846 / 43,099 (69.2 %)
+-
+ <!-- AUTO:conformance-end -->
+```
+
+**Mechanism: two gates disagree about one file.** `sync-conformance-numbers.mjs` regenerates the
+block _without_ blank lines; **prettier adds them back** (verified in both directions). So
+prettier and `sync:conformance` are mutually undoing on `CLAUDE.md`, and `sync:conformance` must
+run **last**. Anyone who edits `CLAUDE.md` and then formats it — an entirely reasonable thing to
+do — re-breaks the gate.
+
+**It is not a deadlock, and checking that mattered.** `origin/main`'s own `CLAUDE.md` is
+prettier-dirty by exactly those two lines **and main is green**, which proves prettier does not
+gate that file. So the post-sync form is correct and safe to commit.
+
+**Why this is NOT the rebuild tax.** That one is throughput-driven — it needs a busy queue.
+**This one would happen on a completely idle repo.** Filing them together under "merge
+throughput creates work for open PRs" would have been a real mis-attribution and would have
+pointed the fix at the wrong subsystem.
+
+**Fix at source**, so the gates stop disagreeing: make `sync-conformance-numbers.mjs` emit
+prettier-stable output, or have prettier ignore the block. Secondarily, make the message say
+_"generated block differs"_ and print the diff, rather than implying the number. Same family as
+the `Newly trapping:` fix (#3902/#3915 trap 4): **a message that names a plausible-but-wrong
+cause is worse than one that names nothing**, because it manufactures a confident wrong lead.
+
+## B. A detector must be able to say "I don't know"
+
+Trap 5 above says a control that cannot fail is worse than none. This is the same class caught
+**inside this session's own watcher**, after the other half of that watcher had already been
+positive-controlled — which is why it is worth recording separately.
+
+The watcher polled `gh pr view <N> --json state --jq .state` and treated anything `!= "OPEN"` as
+settled. On a transient API blip the call returned **empty**. Empty is not `"OPEN"`, so:
+
+```
+16:23:19Z 3900=//[]/red=0 3901=//[]/red=0
+ALL SETTLED
+```
+
+Both PRs were still open, one of them red. **A network blip read as "everything finished."**
+
+The bug is not the missing retry — it is that the detector had **no representation for "I could
+not tell."** Two states (`settled` / `not settled`) forced an unknown into one of them, and the
+default fell to the reassuring side. The fix is a third state:
+
+```bash
+case "$S" in
+  OPEN|MERGED|CLOSED) ;;                      # believed
+  *) S="UNKNOWN-API"; BADCNT=$((BADCNT+1)) ;; # NOT settled, and reported
+esac
+# only conclude when every state was valid AND none was OPEN
+if [ "$OPENCNT" -eq 0 ] && [ "$BADCNT" -eq 0 ]; then echo "ALL SETTLED"; fi
+```
+
+**Generalises past watchers:** any check that maps a failed observation onto a terminal verdict
+will, under intermittent failure, report the reassuring answer. Ask of any gate, detector or
+verifier: _what does it do when it cannot see?_ If the answer is "the same thing as when it sees
+nothing wrong", it is unsound. This is the shared root of trap 5, `gitTry` returning `{ok:false,
+out:""}` so a failed main scan reported every id free (fixed in #3901), and the `contents` API
+truncating at 1000 without an error flag.

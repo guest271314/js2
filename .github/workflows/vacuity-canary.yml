@@ -86,8 +86,19 @@ jobs:
 
       - name: Upload the report
         if: always()
+        # (#3635) The ONLY upload in this repo without an explicit
+        # `retention-days`, so it silently inherited the repo default of 90 —
+        # against a scheduled workflow, which is the shape that accumulates.
+        # Every other upload already declares one (test262-sharded's 114-per-run
+        # matrix is at 1). A small JSON report has no value past a few days.
+        #
+        # Honest sizing: today this leaks NOTHING. The workflow has run once
+        # (2026-07-27) and produced zero `vacuity-*` artifacts. This is hygiene
+        # closing the last gap in the policy, not a storage win — see #3635 for
+        # why the "985k artifacts" figure is not a storage figure at all.
         uses: actions/upload-artifact@v4
         with:
           name: vacuity-${{ matrix.lane }}
           path: vacuity-${{ matrix.lane }}.json
           if-no-files-found: warn
+          retention-days: 7
