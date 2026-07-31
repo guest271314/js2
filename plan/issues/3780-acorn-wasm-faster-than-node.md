@@ -4,7 +4,7 @@ title: "Compile Acorn parse hot path to Wasm faster than native Node"
 status: in-progress
 sprint: current
 created: 2026-07-29
-updated: 2026-07-29
+updated: 2026-07-31
 priority: high
 horizon: l
 feasibility: hard
@@ -27,7 +27,17 @@ files:
   - src/codegen/context/types.ts
   - src/codegen/declarations/param-return-inference.ts
   - src/codegen/expressions.ts
+  - src/codegen/expressions/assignment.ts
   - src/codegen/fnctor-escape-gate.ts
+  - src/codegen/fnctor-identity-fields.ts
+  - src/codegen/fnctor-presence-bits.ts
+  - src/codegen/interned-boolean-boxes.ts
+  - src/codegen/member-get-dispatch.ts
+  - src/codegen/member-set-dispatch.ts
+  - src/codegen/object-runtime.ts
+  - src/codegen/program-abi-signatures.ts
+  - src/codegen/registry/imports.ts
+  - src/codegen/struct-field-exports.ts
   - src/codegen/index.ts
   - src/codegen/native-regex.ts
   - src/codegen/declarations/declared-nested-write.ts
@@ -409,6 +419,97 @@ top-level benchmark/parser driver remains direct (`benchmarkUsesIr: false`),
 while 15 reachable character/RegExp helpers are now IR-emitted. These
 representation wins apply to the direct parser path and remain parity
 requirements as the rest of that call graph migrates to IR.
+
+### Runtime-dynamic optimization round 4 — allocation volume
+
+**Different box, so read the deltas and not the absolute times.** Rounds 1-3
+were taken on Node 24.4.1 / arm64 macOS. This round is a 4-core / 16 GB Linux
+container on **Node 22.22.2**, where the profile is not the same shape: a
+debug-named 30-parse profile attributes **36.7%** of the standalone parse to
+`(garbage collector)`, against the 4.3% and 1.5% the two round-3-era profiles
+recorded. Cross-machine wall-clock is not comparable and no comparison against
+a committed baseline is made here. What IS comparable — and is what this round
+is argued on — are **same-process paired A/B measurements** and the
+**deterministic allocation counters**, both taken on one box within minutes of
+each other.
+
+The lever this exposes is allocation *volume*, which nothing in rounds 1-3
+measured. Summing inter-GC heap growth from `--trace-gc` over 12 parses:
+the standalone module allocates **58.0 MB per parse of the 226 KB source**,
+about 257 bytes for every source byte. Only ~10 MB of that is the AST it
+returns (32,487 `Node` structs plus 4,275 arrays and 126 KB of token strings,
+counted from native acorn) — the rest is transient.
+
+Two package-independent lowerings cut it. Both are behaviour-preserving
+representation changes, neither is specific to acorn, and each ships with a
+paired control so the attribution is measured rather than argued:
+
+1. **Packed own-property presence flags** (`JS2WASM_PACKED_PRESENCE_BITS=0`).
+   #2847 gives every conditionally-assigned fnctor property a hidden
+   `$has_<name>` slot so an untouched default stays distinguishable from an
+   explicit `null`/`0`. One whole `i32` per tracked property is correct but is
+   paid on every instance: acorn's `Node` carries 63 tracked properties, so the
+   flags alone were 252 bytes of a 536-byte AST node. They now live in
+   `$presence_<w>` bit words — `Node` goes from **130 fields / 536 B to 69
+   fields / 292 B**. The control strides the bit assignment by a full word so
+   each flag lands alone in its own slot, which reproduces the old footprint
+   through the identical read/write lowering; the A/B therefore isolates the
+   layout, not the instruction mix.
+2. **Interned boolean carriers** (`JS2WASM_INTERNED_BOOL_BOXES=0`). A JS
+   boolean is a primitive with no observable identity, the carrier's `value`
+   field is already immutable, and every consumer discriminates it by
+   `ref.test`/`struct.get` rather than by reference — so the program needs
+   exactly two carriers, built in the global init. `__box_boolean` collapses to
+   a `global.get`. It is inlined by `wasm-opt` into **742 static `struct.new`
+   sites**, the hottest being the boolean arms of `__extern_get`'s
+   closed-struct field ladder, so this fires per boolean-typed property read.
+
+Allocation per parse, one binary per process, 12 parses each (deterministic —
+this metric does not move with box load):
+
+| build | allocated / parse | vs baseline |
+| --- | ---: | ---: |
+| baseline (both controls off) | 58.0 MB | — |
+| packed presence only | 50.0 MB | −13.8% |
+| interned booleans only | 52.0 MB | −10.3% |
+| **both** | **43.6 MB** | **−24.8%** |
+
+The two are additive to within 0.4 MB (58.0 − 8.0 − 6.0 = 44.0 measured 43.6),
+which is the cross-check that they are independent effects and not one effect
+counted twice. The 6.0 MB boolean figure implies roughly 375,000 boolean boxes
+per parse at 16 B each.
+
+Wall clock, all four builds instantiated in **one process** and run in rotating
+order for 45 rounds so contention drift hits every variant alike:
+
+| build | min | p25 | median |
+| --- | ---: | ---: | ---: |
+| baseline | 109.8 ms | 119.1 ms | 125.6 ms |
+| packed presence only | 106.5 ms | 114.7 ms | 122.9 ms |
+| interned booleans only | 111.2 ms | 116.4 ms | 124.2 ms |
+| **both** | **103.9 ms** | **111.6 ms** | **116.3 ms** |
+
+Combined: **−5.4% min / −6.3% p25 / −7.4% median**. The single-lowering rows
+are inside the run-to-run noise of each other and are quoted only as directions;
+the combined row is the one that is separated from baseline in every statistic,
+and it agrees with the independent `--trace-gc` accounting (GC 30.1 → 22.5 ms
+per parse on a separate paired run, i.e. ≈7.6 ms of a ≈120 ms parse).
+
+Cost: the stripped binary grows **1,670,971 → 1,673,257 bytes (+0.14%)** — the
+struct loses 61 fields but each presence test gains a mask-and-compare. The
+`__npmCompatStandaloneBenchmark` export still returns checksum **422** with
+**zero imports**, and the pinned official Acorn suite is unchanged at
+**3,507/3,518 (99.69%)**.
+
+**This does not close the gap and is not claimed to.** On this box the same
+paired protocol leaves Node roughly an order of magnitude ahead; the honest
+reading is that ~24.8% less allocation buys ~7%, and that **34 MB of the
+remaining 43.6 MB per parse is still transient garbage that the returned AST
+does not account for** — about 810 bytes per token. Locating it needs a
+per-type allocation census, which this round did not build: V8's sampling heap
+profiler does not attribute WasmGC `struct.new` (measured: 0.2 MB of a 58 MB
+parse sampled), and `--trace-gc-object-stats` is unavailable on this Node. That
+census is the recommended next step, ahead of another micro-lowering.
 
 ## Compile-time static outcome
 
