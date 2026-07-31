@@ -15,7 +15,7 @@ language_feature: strings, objects, arrays, classes, parser
 goal: performance
 assignee: "ttraenkler/codex"
 depends_on: [3779]
-related: [1710, 1712, 3756]
+related: [1710, 1712, 3756, 3920, 3921]
 files:
   - .husky/pre-push
   - package.json
@@ -509,7 +509,10 @@ does not account for** — about 810 bytes per token. Locating it needs a
 per-type allocation census, which this round did not build: V8's sampling heap
 profiler does not attribute WasmGC `struct.new` (measured: 0.2 MB of a 58 MB
 parse sampled), and `--trace-gc-object-stats` is unavailable on this Node. That
-census is the recommended next step, ahead of another micro-lowering.
+census is the recommended next step, ahead of another micro-lowering, and is
+filed as **#3921**. The standalone-only `in`-over-a-fnctor-instance divergence
+that surfaced while writing this round's regression test is filed separately as
+**#3920** — it reproduces with both lowerings disabled and is not round 4's.
 
 ## Compile-time static outcome
 
