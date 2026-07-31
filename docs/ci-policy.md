@@ -217,6 +217,46 @@ admin-merging a few green low-risk PRs (repeated pushes to `main` rebuild
 all groups on fresh bases) — **not** a ruleset disable/re-enable, which can
 deepen the wedge. See the `project_dev_session_infra_gotchas` fix ladder.
 
+### `needs-manual-enqueue` — a PR that will never auto-enqueue (#3584)
+
+`mergeStateStatus` is computed **relative to the querying token**. `BLOCKED`
+does not mean "this PR is not ready"; it means "*you* cannot merge this PR
+right now." For most causes that state clears on its own. For at least one it
+never does — and because the ~30-min cron backstop uses the *same* app token,
+it re-derives the identical `BLOCKED` and cannot recover the PR either. The PR
+stays green, unlabelled, comment-free, with no failing check, and simply sits.
+
+`scripts/enqueue-green-prs.mjs` now separates the two. A PR that is `BLOCKED`
+with **zero failing and zero pending checks for ≥ 15 minutes** is logged as
+
+```
+- #N skip (BLOCKED — SUSPECTED PERMANENT (green-405m-still-blocked); …)
+```
+
+under a `::warning::` summary block, and gets the **`needs-manual-enqueue`**
+label. Ordinary in-flight PRs log `BLOCKED — transient (...)` and stay quiet.
+
+**Shepherd/lead action on that label — read it every sweep:**
+
+```bash
+gh pr list -R loopdive/js2 --state open --label needs-manual-enqueue
+```
+
+Each such PR needs **one** deliberate enqueue with a user PAT (the GraphQL
+`enqueuePullRequest` mutation) — **check the queue first, and never loop**; a
+re-add rebuilds the merge group and cancels the in-flight `merge_group` run.
+The label auto-clears if the PR later enqueues on its own.
+
+`needs-manual-enqueue` is **not** in `HOLD_LABELS` and must never be added to
+it: a hold would make `auto-enqueue` skip the PR permanently, turning the
+warning into the stall it was reporting.
+
+**Known failing population (observed, 2026-07-31):** PRs that are *both*
+fork-head *and* touch `.github/workflows/**` — 4/4 needed a human enqueue.
+Fork-head alone and workflow-touching alone both auto-enqueue fine. The
+underlying cause is **not** established; do not act on a mechanism story.
+See #3584 and the follow-up experiment in #3906.
+
 ### Both lanes are gated — host AND standalone (#1897)
 
 The 57-shard matrix runs **two** test262 targets per chunk: `js-host` (the
