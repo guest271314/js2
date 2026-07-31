@@ -919,6 +919,34 @@ export const PROP_FLAG_DEFINED = 1 << 3; // 8
 export const PROP_FLAG_ACCESSOR = 1 << 4; // 16
 const PROP_FLAGS_DEFAULT_DATA = PROP_FLAG_WRITABLE | PROP_FLAG_ENUMERABLE | PROP_FLAG_CONFIGURABLE | PROP_FLAG_DEFINED;
 
+/**
+ * (#3872) Record `<integrityVarKey>:<propName>` as explicitly non-writable, for
+ * the assignment-path consult in `isNonWritableDataProperty`.
+ *
+ * Called from BOTH `Object.defineProperty` lowering arms (struct and externref)
+ * so the consult behaves identically in the host and standalone lanes.
+ *
+ * Fires ONLY on an explicit `writable: false` data descriptor. The consult must
+ * not fall back to `definedPropertyFlags`, which leaves the WRITABLE bit clear
+ * when the descriptor merely OMITS `writable` — right for a fresh define, wrong
+ * for a redefine ("omitted" means keep-existing). Reading that map as a write
+ * permission cost 27 deterministic test262 regressions, including
+ * `mapped-arguments-nonconfigurable-4.js`, whose descriptor never mentions
+ * `writable` at all.
+ */
+function recordExplicitNonWritable(
+  ctx: CodegenContext,
+  objArg: ts.Expression,
+  propName: string | undefined,
+  descWritable: boolean | undefined,
+  getNode: unknown,
+  setNode: unknown,
+): void {
+  if (propName === undefined || !ts.isIdentifier(objArg)) return;
+  if (descWritable !== false || getNode || setNode) return;
+  ctx.nonWritableExternKeys.add(`${integrityVarKey(ctx, objArg)}:${propName}`);
+}
+
 function applyDescriptorFlags(
   currentFlags: number | undefined,
   writable: boolean | undefined,
@@ -2182,6 +2210,9 @@ export function compileObjectDefineProperty(
 
         // Record the new flags
         ctx.definedPropertyFlags.set(key, newFlags);
+        // (#3872) Parallel record for the assignment-path consult — struct arm.
+        // Explicit `writable:false` only; see recordExplicitNonWritable.
+        recordExplicitNonWritable(ctx, objArg, propName, descWritable, getNode, setNode);
 
         // Update shapePropFlags so getOwnPropertyDescriptor sees updated attributes
         if (structTypeIdx !== undefined && fields) {
@@ -2388,6 +2419,38 @@ export function compileObjectDefineProperty(
     fctx.body.push({ op: "local.get", index: objLocal });
     return objType;
   } else if (valueExpr) {
+    // (#3872) Record a NON-WRITABLE define on the EXTERNREF path.
+    //
+    // `definedPropertyFlags` is written only in the `useStruct` branch above,
+    // which needs a registered struct field. Standalone compiles
+    // `const o: any = {}` to a native `$Object`, so `fieldIdx < 0`, `useStruct`
+    // is false, and nothing was recorded — which is why the #3872 write-consult
+    // fired on host and never on standalone (instrumented: host
+    // `{"o@41:p": 14}` vs standalone `[]`).
+    //
+    // This deliberately records into a DEDICATED set, not into
+    // `definedPropertyFlags`. An earlier revision wrote the full descriptor into
+    // that map and caused a merged-state regression of −67 pass that every
+    // PR-level check passed: `builtin-static-gopd.ts` treats a present entry as
+    // an OVERRIDE of the shape table (`if (dpf !== undefined) flags = dpf & 0x0f`),
+    // so recording here changed what `getOwnPropertyDescriptor` reports for
+    // EVERY externref-receiver define — and reported `enumerable:false,
+    // configurable:false` for a REDEFINE, where omitted attributes must mean
+    // "keep existing" rather than "default to false".
+    //
+    // The lesson, since the original reasoning looked sound: it is not enough to
+    // check that the writer can't observe its own record. Enumerate every READER
+    // of a shared mutable structure before writing to it. `definedPropertyFlags`
+    // has four (`builtin-static-gopd.ts`, `property-access.ts`, and the
+    // program-order snapshot/restore in `declarations.ts` / `index.ts`); only one
+    // had been considered.
+    //
+    // Recorded only when the descriptor states `writable` EXPLICITLY — with it
+    // omitted the intent is ambiguous between a fresh define (defaults false)
+    // and a redefine (keep existing), and the externref arm has no
+    // `isKnownExistingField` to tell them apart. Every corpus row for this issue
+    // states `writable:false` explicitly, so the narrower rule costs no coverage.
+    recordExplicitNonWritable(ctx, objArg, propName, descWritable, getNode, setNode);
     // Externref path: Object.defineProperty(obj, prop, { value: v }) → __defineProperty_value
     return emitExternDefinePropertyValue(
       ctx,
@@ -2401,6 +2464,11 @@ export function compileObjectDefineProperty(
       descConfigurable,
     );
   } else {
+    // (#3872) Third and last lowering arm. `Object.defineProperty(o,"b",
+    // {writable:false})` — explicit, but with NO `value` — lands here rather
+    // than in either arm above, so it needs its own record or the consult never
+    // sees it (`language/types/reference/8.7.2-3-s.js`).
+    recordExplicitNonWritable(ctx, objArg, propName, descWritable, getNode, setNode);
     // No value property or descriptor is not an object literal:
     // For externref objects, delegate to __defineProperty_value with no-value flag
     return emitExternDefinePropertyNoValue(

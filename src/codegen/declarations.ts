@@ -2351,12 +2351,19 @@ export function compileDeclarations(
   // same end state pass 1 produced, so later consumers see no difference.)
   const propOrderStateSnapshot = {
     definedPropertyFlags: new Map(ctx.definedPropertyFlags),
+    // (#3872) Order-sensitive for exactly the reason above: without this, a
+    // top-level `Object.defineProperty(o,"p",{writable:false})` compiled in
+    // pass 1 makes pass 2 treat an EARLIER `o.p = …` as a write to a
+    // non-writable property — a wrong answer (throw in standalone, stale value
+    // on host) with no compile failure. Measured, not assumed.
+    nonWritableExternKeys: new Set(ctx.nonWritableExternKeys),
     frozenVars: new Set(ctx.frozenVars),
     sealedVars: new Set(ctx.sealedVars),
     nonExtensibleVars: new Set(ctx.nonExtensibleVars),
   };
   function restorePropOrderState(): void {
     ctx.definedPropertyFlags = new Map(propOrderStateSnapshot.definedPropertyFlags);
+    ctx.nonWritableExternKeys = new Set(propOrderStateSnapshot.nonWritableExternKeys);
     ctx.frozenVars = new Set(propOrderStateSnapshot.frozenVars);
     ctx.sealedVars = new Set(propOrderStateSnapshot.sealedVars);
     ctx.nonExtensibleVars = new Set(propOrderStateSnapshot.nonExtensibleVars);

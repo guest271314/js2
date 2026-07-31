@@ -5,6 +5,7 @@
 import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../checker/type-mapper.js";
 import { integrityVarKey } from "../widened-var-key.js";
+import { PROP_FLAG_ACCESSOR, PROP_FLAG_WRITABLE } from "../object-ops.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
 import { emitHoleToUndefined } from "../array-holes.js";
@@ -3378,6 +3379,24 @@ function compilePropertyAssignment(
   const poisonResult = tryCompileStrictFunctionPoisonAssignment(ctx, fctx, target, value);
   if (poisonResult !== undefined) return poisonResult;
 
+  // (#3872) Non-writable DATA property — `defineProperty(o,"p",{writable:false})`
+  // then `o.p = v`. Sits at the TOP, before any lowering-path selection, because
+  // §10.1.9.2 OrdinarySetWithOwnDescriptor step 2.b decides the write FAILS
+  // regardless of which backend would have performed it. Placing it lower (next
+  // to the frozen consult) fixed only the host lane: the standalone lowering
+  // returns through an earlier branch and never reached it.
+  //
+  // This must be a COMPILE-TIME throw, not a runtime one. The standalone
+  // `__extern_set_strict` is deliberately aliased to the non-throwing native
+  // `__extern_set` (object-runtime.ts, #2017) because the native runtime has no
+  // TypeError bridge — so the runtime path can suppress the store but can never
+  // raise. Emitting the throw here is what gives standalone the strict-mode
+  // TypeError without building that bridge.
+  if (!ts.isPrivateIdentifier(target.name)) {
+    const nonWritable = tryEmitNonWritablePropertyWrite(ctx, fctx, target, value, target.name.text);
+    if (nonWritable !== undefined) return nonWritable;
+  }
+
   // (#2660 S2) `F.prototype = rhs` whole-reassign on a user function constructor
   // (standalone): store `rhs` (built as a native `$Object` when a plain literal)
   // into the per-fnctor prototype global, instead of `__extern_set($closure,
@@ -4200,6 +4219,74 @@ function emitSetterCallWithDummy(
 }
 
 /**
+ * (#3872) Write to a non-writable DATA property recorded by `Object.defineProperty`.
+ *
+ * `ctx.definedPropertyFlags` is the compile-time mirror of the descriptor
+ * attributes, keyed `<integrityVarKey>:<propName>` and carrying
+ * `PROP_FLAG_WRITABLE`. `Object.defineProperty` writes it; until now nothing on
+ * the assignment path read it, so `defineProperty(o,"p",{writable:false});
+ * o.p = 20` neither threw nor (on host) left the value alone.
+ *
+ * Measured lane asymmetry that shapes this fix — standalone already suppresses
+ * the store (`o.p` stays 10) and only omits the strict-mode TypeError, while
+ * host lets the write land (`o.p` becomes 20). Emitting the compile-away branch
+ * here covers both: the throw standalone was missing, and the suppression host
+ * was missing, without duplicating the suppression standalone already performs
+ * (this returns before any store is emitted).
+ *
+ * Deliberately narrow — only fires for a statically-recorded, non-accessor,
+ * non-writable data property on an identifier receiver. Anything the
+ * compile-time mirror cannot see falls through to the ordinary path, which for
+ * dynamic receivers already consults the runtime `FLAG_WRITABLE` companion
+ * table via `__extern_set`.
+ */
+export function isNonWritableDataProperty(ctx: CodegenContext, receiver: ts.Expression, propName: string): boolean {
+  if (!ts.isIdentifier(receiver)) return false;
+  const key = `${integrityVarKey(ctx, receiver)}:${propName}`;
+
+  // (#3872) ONLY an EXPLICIT `writable: false` counts. Both lowering arms of
+  // `Object.defineProperty` record into this set; nothing else is consulted.
+  //
+  // In particular `definedPropertyFlags` must NOT be used here. That map is
+  // approximate about writability: `applyDescriptorFlags` starts from
+  // `PROP_FLAG_DEFINED` and leaves the WRITABLE bit clear when the descriptor
+  // OMITS `writable` — correct for a fresh define (omitted attributes default
+  // to false) but wrong for a REDEFINE, where omitted means "keep existing".
+  // Its historical consumers (gOPD reporting, redefine validation) tolerated
+  // that; making it decide whether a WRITE is legal did not.
+  //
+  // Measured cost of getting this wrong: 27 deterministic test262 regressions,
+  // e.g. `mapped-arguments-nonconfigurable-4.js`, which does
+  // `Object.defineProperty(arguments,"0",{configurable:false})` — never
+  // mentioning `writable` — and then expects `arguments[0] = 2` to LAND.
+  return ctx.nonWritableExternKeys.has(key);
+}
+
+function tryEmitNonWritablePropertyWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.PropertyAccessExpression,
+  value: ts.Expression,
+  propName: string,
+): InnerResult | undefined {
+  if (!isNonWritableDataProperty(ctx, target.expression, propName)) return undefined;
+
+  // §13.15.2: the RHS is evaluated before Set is attempted, so its side effects
+  // must still happen even though the store never lands.
+  const rhsType = compileExpression(ctx, fctx, value);
+  if (rhsType === null) return null;
+
+  if (isStrictContext(target, ctx.inferModuleStrictArguments)) {
+    fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${propName}' of object`);
+    return rhsType;
+  }
+
+  // Sloppy mode: the write silently does not happen; the expression yields the RHS.
+  return rhsType;
+}
+
+/**
  * (#3420) Element write to a frozen receiver — `Object.freeze(a); a[i] = v`.
  *
  * The two pre-existing `frozenVars` consults (`emitAssignToTarget` and the
@@ -4278,6 +4365,31 @@ function compileElementAssignment(
   // silently; strict mode throws a catchable TypeError.
   const frozenNoOp = tryEmitFrozenElementWriteNoOp(ctx, fctx, target, value);
   if (frozenNoOp !== undefined) return frozenNoOp;
+
+  // (#3872) COMPUTED write to a non-writable data property — `o[k] = v` where
+  // the key resolves statically. This is the third assignment form the issue
+  // names (dot / computed / compound); the dot and compound arms live in
+  // `compilePropertyAssignment` and `compilePropertyCompoundAssignment`.
+  //
+  // Host already handled this through the runtime `__extern_set_strict` consult
+  // of `FLAG_WRITABLE`; standalone did NOT, because its `__extern_set_strict` is
+  // deliberately aliased to the non-throwing native `__extern_set` (#2017) — no
+  // TypeError bridge. So the throw has to be emitted at compile time here too.
+  if (ts.isIdentifier(target.expression)) {
+    const key = resolveComputedKeyExpression(ctx, target.argumentExpression);
+    if (key !== undefined && isNonWritableDataProperty(ctx, target.expression, key)) {
+      // §13.15.2 order: key and RHS still evaluate, then the Set fails.
+      const keyType = compileExpression(ctx, fctx, target.argumentExpression);
+      if (keyType !== null) fctx.body.push({ op: "drop" });
+      const rhsType = compileExpression(ctx, fctx, value);
+      if (rhsType === null) return null;
+      if (isStrictContext(target, ctx.inferModuleStrictArguments)) {
+        fctx.body.push({ op: "drop" });
+        emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${key}' of object`);
+      }
+      return rhsType;
+    }
+  }
 
   // #1886 Slice B: linear-backed Uint8Array write `buf[i] = v` →
   // i32.store8(ptr+i, trunc(v)). Only fires for a registered linear-safe
