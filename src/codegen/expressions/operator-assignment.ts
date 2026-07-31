@@ -57,7 +57,7 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
-import { compileExternSetFallback, isStrictContext } from "./assignment.js";
+import { compileExternSetFallback, isNonWritableDataProperty, isStrictContext } from "./assignment.js";
 
 /**
  * Compile logical assignment operators: ??=, ||=, &&=
@@ -2166,6 +2166,29 @@ function compilePropertyCompoundAssignment(
   const objType = ctx.checker.getTypeAtLocation(target.expression);
   const propName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
 
+  // (#3872) Compound assignment to a non-writable data property — `o.p %= 20`
+  // after `defineProperty(o,"p",{writable:false})`. §13.15.2 evaluates the RHS
+  // and computes, then PutValue fails: strict throws a TypeError.
+  //
+  // STRICT ONLY, deliberately. In strict mode the throw discards the computed
+  // value, so evaluating the RHS for its side effects and throwing is exact.
+  // Sloppy mode would need the *computed* value (GetValue ∘ op ∘ RHS) as the
+  // expression result while suppressing only the store — the surrounding code
+  // fuses those, and returning the bare RHS instead (the #2667 mapped-arguments
+  // shortcut) is correct for a simple assignment but WRONG here. So sloppy
+  // still falls through rather than being given a wrong expression value.
+  // The corpus this targets is `onlyStrict` (`11.13.2-*-s.js`), so the strict
+  // arm covers it; sloppy compound is recorded as not-covered in the issue.
+  if (
+    isNonWritableDataProperty(ctx, target.expression, propName) &&
+    isStrictContext(target, ctx.inferModuleStrictArguments)
+  ) {
+    const rhsType = compileExpression(ctx, fctx, rhs);
+    if (rhsType) fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${propName}' of object`);
+    return { kind: "f64" }; // unreachable after the throw
+  }
+
   // (#3683 S2 branch c1) TYPED-`this` compound assignment inside a twin. Only
   // entered for operators `emitCompoundOp` actually lowers — its switch has no
   // `default`, so an unlisted one would strand the read + RHS on the stack.
@@ -2711,6 +2734,29 @@ function compileElementCompoundAssignment(
   rhs: ts.Expression,
   op: ts.SyntaxKind,
 ): ValType | null {
+  // (#3872) Computed COMPOUND write to a non-writable data property —
+  // `o[k] %= 20`. The fourth and last of the assignment shapes this issue
+  // names; the other three are handled in `compilePropertyAssignment`,
+  // `compilePropertyCompoundAssignment` and `compileElementAssignment`.
+  // Strict-only for the same reason as the property-compound arm: sloppy would
+  // need the computed value while suppressing only the store, and the lowering
+  // fuses those.
+  if (ts.isIdentifier(target.expression)) {
+    const nwKey = resolveComputedKeyExpression(ctx, target.argumentExpression);
+    if (
+      nwKey !== undefined &&
+      isNonWritableDataProperty(ctx, target.expression, nwKey) &&
+      isStrictContext(target, ctx.inferModuleStrictArguments)
+    ) {
+      const keyType = compileExpression(ctx, fctx, target.argumentExpression);
+      if (keyType !== null) fctx.body.push({ op: "drop" });
+      const rhsType = compileExpression(ctx, fctx, rhs);
+      if (rhsType) fctx.body.push({ op: "drop" });
+      emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${nwKey}' of object`);
+      return { kind: "f64" }; // unreachable after the throw
+    }
+  }
+
   // #2045 C.8: compound write `b[i] op= rhs` on a linear-backed Uint8Array must
   // read-modify-write the linear memory. Without this it fell through to the
   // GC/externref path below (which materialises the buffer as a value and never

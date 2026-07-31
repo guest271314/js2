@@ -362,6 +362,7 @@ export function createCodegenContext(
     tdzGlobals: new Map(),
     tdzLetConstNames: new Set(),
     definedPropertyFlags: new Map(),
+    nonWritableExternKeys: new Set(),
     sidecarDefinedPropertyKeys: new Set(),
     definePropertyReceiverKeys: new Set(),
     nonConfigurableAccessorKeys: new Set(),

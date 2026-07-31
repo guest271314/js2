@@ -6018,12 +6018,16 @@ export function generateMultiModule(
     // keep declarations, closures, globals, and emitted bodies accumulated.
     const multiDeclarationOrderState = {
       definedPropertyFlags: new Map(ctx.definedPropertyFlags),
+      // (#3872) Same order-sensitivity as `definedPropertyFlags` — see the note
+      // at the declarations.ts snapshot.
+      nonWritableExternKeys: new Set(ctx.nonWritableExternKeys),
       frozenVars: new Set(ctx.frozenVars),
       sealedVars: new Set(ctx.sealedVars),
       nonExtensibleVars: new Set(ctx.nonExtensibleVars),
     };
     for (const sf of multiAst.sourceFiles) {
       ctx.definedPropertyFlags = new Map(multiDeclarationOrderState.definedPropertyFlags);
+      ctx.nonWritableExternKeys = new Set(multiDeclarationOrderState.nonWritableExternKeys);
       ctx.frozenVars = new Set(multiDeclarationOrderState.frozenVars);
       ctx.sealedVars = new Set(multiDeclarationOrderState.sealedVars);
       ctx.nonExtensibleVars = new Set(multiDeclarationOrderState.nonExtensibleVars);
