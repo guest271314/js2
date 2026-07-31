@@ -33,6 +33,12 @@ loc-budget-allow:
   - src/codegen/object-ops.ts
 func-budget-allow:
   - src/codegen/expressions/assignment.ts::compilePropertyAssignment
+  # The computed-form consult (`o[k] = v`) lands here. Granted explicitly on THIS
+  # issue rather than relying on #3420's allowance: the gate only counts
+  # `func-budget-allow` from issue files the PR itself adds or modifies, so a
+  # grant living on a neighbouring issue passes locally (where that file is in
+  # the diff against my merge-base) and FAILS in CI (where it is not).
+  - src/codegen/expressions/assignment.ts::compileElementAssignment
   - src/codegen/expressions/operator-assignment.ts::compilePropertyCompoundAssignment
   - src/codegen/expressions/operator-assignment.ts::compileElementCompoundAssignment
   - src/codegen/object-ops.ts::compileObjectDefineProperty
