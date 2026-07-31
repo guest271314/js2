@@ -16,6 +16,34 @@ related: [3420, 2668, 2744, 3776]
 
 # #3869 — `[[Writable]]` is recorded and readable, and no assignment path consults it
 
+## ⚠️ THE TWO LANES FAIL FOR DIFFERENT REASONS — read before implementing
+
+The decisive observable is *does the non-writable write actually land?*
+
+```js
+Object.defineProperty(o, "p", {value: 10, writable: false, enumerable: true, configurable: true});
+o.p = 20;
+return o.p;                     // spec: 10
+
+  host       -> 20   // write LANDED — wrong
+  standalone -> 10   // write correctly SUPPRESSED
+```
+
+**Standalone already consults `[[Writable]]` enough to suppress the store. What it
+never does is emit the strict-mode TypeError.** Host does neither.
+
+So the framing "no assignment path consults `[[Writable]]`" is **wrong for
+standalone** — the consult is there, the *throw* is missing.
+
+**Consequence for the fix:** since the standalone ES5 score is the objective, the
+work is **emit the strict-mode TypeError on a non-writable data-property write**,
+NOT write-suppression. Implementing suppression would add something standalone
+already does — a no-op against the target, and a possible regression. This was
+caught by probing the intermediate observable *before* writing code.
+
+Host additionally needs the suppression, but that is a **host-lane** defect and
+should be scoped separately.
+
 ## Measured
 
 Probe, both lanes, plain-object twin controls in the same harness:
@@ -69,25 +97,39 @@ Forcing the general case into the IR would mean building a **static mirror of
 runtime descriptor state**, which is the failure mode `definePropertyReceiverKeys`'
 comment exists to prevent.
 
-## Ceiling — **~19 confirmed / ~41 ceiling**, NOT 91
+## Ceiling — **≤24 standalone rows**, NOT 91 (and NOT a single figure)
 
-The `Expected a TypeError to be thrown` cluster is **91 rows, but it is not one
-family**. Sub-split by source shape, not by normalized message:
+Re-classified on **construct-under-test**, not keyword match:
 
-| by source shape | rows |
-|---|---:|
-| literal `writable:false` — **confirmed this issue** | **19** |
-| `freeze`/`seal`/`preventExtensions` (#3420 area, already fixed) | 11 |
-| unclassified by regex | 61 |
+| n | class | owner |
+|---:|---|---|
+| 28 | descriptor attrs, non-assign (defineProperty fidelity) | #2668 |
+| **≤24** | **write-enforcement — 22 `compound-assignment`, 1 `assignment`, 1 `types/reference`** | **this issue** |
+| 18 | defineProperty other | — |
+| 20 | unresolved | — |
+| 1 | call/apply receiver coercion | String/prototype lane |
 
-By area, the assignment-shaped rows are `compound-assignment` 33 +
-`language/expressions/assignment` 8 ≈ **41 ceiling**. The rest belong elsewhere:
-3 `String/prototype` and 5 `Function/prototype` + 3 `Boolean/prototype` are the
-not-a-constructor / `RequireObjectCoercible` shape (a different lane), and 20
-`defineProperties` + 13 `defineProperty` are descriptor **record/read** fidelity
-(#2668), not enforcement.
+**`≤24`, not 24** — spot-checking found `compound-assignment/11.13.2-54-s` has **no
+`writable:false` in source at all** (it is a frozen/sealed variant), so even the
+refined classifier over-includes. Quote a measured range with the method attached,
+never a single number.
 
-**Use ~19 confirmed / ~41 ceiling. Do not quote 91.**
+Spot-check of 4 rows, both lanes — note two **pass host** and all four **fail
+standalone**, confirming this is standalone-specific:
+
+| test | `writable:false` in source | host | standalone |
+|---|---|---|---|
+| `compound-assignment/11.13.2-25-s` | yes | FAIL | FAIL |
+| `compound-assignment/11.13.2-54-s` | **no** | PASS | FAIL |
+| `assignment/11.13.1-1-s` | yes | FAIL | FAIL |
+| `types/reference/8.7.2-3-s` | yes | PASS | FAIL |
+
+### Superseded sizings (kept so nobody re-derives them)
+
+`91` → `~19 confirmed / ~41` → **`≤24`**. Each revision was downward and each came
+from checking sources or intermediate observables rather than normalized error
+strings.
+
 
 **Leaking/failing ≠ flipping** — A/B against a real standalone run before quoting a
 delta, as #3420 did (9/13 → 13/13).
