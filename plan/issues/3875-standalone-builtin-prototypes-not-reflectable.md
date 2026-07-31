@@ -121,30 +121,41 @@ revised downward — this is the one that grew.**
 produce the right answer once `hasOwnProperty` reports correctly. A/B the 20 the way
 #3420 was A/B'd rather than quoting 20 as a delta.
 
-## 🚨 Separate finding that reaches past this issue — the HOST lane has reflection bugs too
+## 🚨 CORRECTED — the axis is receiver EXPRESSION SHAPE, not route
 
-Two agents' **host** controls failed, in **different places per route**:
+An earlier revision of this issue claimed the host lane had "per-route reflection
+bugs" and prescribed *a control per route, not per probe*. **That was wrong about
+the axis.** Measured:
 
-- `({a:1}).hasOwnProperty('a')` → **false on host** (one apparatus)
-- `Object.getOwnPropertyDescriptor({a:1},'a')` → **falsy on host** (another)
+```
+                                              host   standalone
+gOPD   ({a:1},'a') truthy                     0      1     <- WRONG on host
+gOPD   var o={a:1}; gOPD(o,'a') truthy        1      1     <- CORRECT
+gOPD   ({a:1},'zz') === undefined             1      1     <- CORRECT
+hasOwn ({a:1}).hasOwnProperty('a')            1      1     <- CORRECT
+propIsEnum ({a:1}).propertyIsEnumerable('a')  1      1     <- CORRECT
+```
 
-One agent's `hasOwnProperty` controls passed on host while its `gOPD` control
-failed; the other's was the reverse. **So this is not a single bad harness — host
-reflection is itself defective.**
+**`gOPD` with an INLINE object-literal argument returns `undefined`; bind the
+literal to a variable first and it returns a real descriptor.** That is the *same*
+receiver-expression-shape axis as the prototype aliasing defect above, running in
+the opposite direction: for **built-in prototypes** inline works and the variable
+fails; for an **object-literal argument to `gOPD`** inline fails and the variable
+works.
 
-**Consequence: any host-lane number in this area needs a control PER ROUTE, not per
-probe.** Host is the reference the standalone floor is measured against, so this
-has implications well beyond this issue. Needs its own investigation.
+So the broken host control was **a real defect, not a harness limitation** — and it
+is the same family, not a separate mystery.
 
-Unexplained and not papered over: one harness probe read
-`gOPD(RegExp.prototype,'global')` falsy while bare compile reads it truthy.
-Working rule adopted by the lane: **`run-abs.mts` for behaviour, bare `compile()`
-for reflection.**
+> **Instrument rule this yields — replaces "a control per route":** *any probe
+> passing an inline object/array literal directly as an argument is suspect under
+> bare `compile()`. Bind it to a variable first.* **Both** broken controls that
+> derailed this investigation were exactly that shape.
 
-> **Method rule this produced** (extends the denominator rule): *a number is prose
-> unless it carries its denominator, the command, **and the harness**.* All three
-> agents had a control available; only the runs that actually checked their controls
-> caught the problem.
+⚠️ A proposed lane rule — "bare `compile()` is invalid for `Object.prototype`
+methods, fine for `gOPD`" — is **measured backwards**: all four
+`Object.prototype`-method cases are correct in bare compile on host, and `gOPD` is
+the broken one. Adopting it would have sent every future measurement to the wrong
+instrument for both questions.
 
 ## How it was found (the control property is the whole story)
 
