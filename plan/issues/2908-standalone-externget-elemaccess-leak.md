@@ -148,7 +148,18 @@ test never runs and its `host_free_pass` is already 0 (the same pure-upside
 accounting §"Net accounting" uses above).
 
 Ranked by **distinct tests** (a test may span families; `sole` = tests whose
-*only* leaks are in that family, i.e. fixing it alone unblocks them):
+*only* leaks are in that family, i.e. fixing it alone unblocks them).
+
+> **READ THIS BEFORE ROUTING WORK OFF THIS TABLE.** It ranks the largest
+> standalone host-import **refusal** blocks **overall**. The top row —
+> generators/async-generators, 1,877 tests / 1,618 sole — is **ES2015
+> (`function*`/`yield`) and is OUT OF SCOPE for the standalone-ES5
+> objective.** Restricted to the true ES5 population (see the edition note
+> below) the generator family is **entirely absent**, and host-import leaks
+> account for **41 rows, ~4 %** of the ES5 host-vs-standalone gap — a rounding
+> error. The ES5 gap is **85.3 % wrong-answer, 14.7 % refusal**. So: use this
+> table to size *standalone refusals in general*; do **not** read 1,618 as an
+> ES5 opportunity.
 
 | family | tests | sole | top categories |
 | --- | ---: | ---: | --- |
@@ -174,13 +185,25 @@ Top individual names: `__gen_next` 1,588 · `__gen_create_buffer` 1,537 ·
 - **1,618 tests unblocked ≠ 1,618 tests passing.** Implementing a family
   host-free removes the *compile refusal*; the semantics must then also be
   correct. This sizes the gate, not the win.
-- **The top family is ES2015, not ES5.** `function*`/`yield` are ES6, so if the
-  objective is strictly the ES5 edition bucket, the 1,618-test generator family
-  is **out of scope for it** — it is simply the largest standalone host-import
-  refusal overall. The ES5-facing entries here are the array runtime, RegExp
-  (annexB 21) and the residual 14. `scope_official` in this artifact is a
-  **boolean**, not an edition, so the ES5 split cannot be taken from this file;
-  do not infer one from these categories.
+- **The top family is ES2015, not ES5** — see the boxed warning above.
+
+### How to split an edition (the discriminator is NOT in the baseline)
+
+`scope_official` in these artifacts is a **boolean**, not an edition string, so
+no ES5 split is derivable from the JSONL at all. The canonical discriminator is
+test262's own **`es5id:` frontmatter field**, read from the test *sources*:
+
+```bash
+grep -rl "^es5id:" test262/test/built-ins test262/test/language   # 8,088 files
+```
+
+Joined across both lane baselines, that gives a **true ES5 population of 8,087**:
+pass-both 5,292 (65.4 %) · **host-pass / standalone-FAIL 1,015 (12.6 %)** ← the
+real gap · standalone-pass / host-fail 329 · fail-both 1,451. The gap splits
+**REFUSAL 149 (14.7 %) / WRONG ANSWER 866 (85.3 %)**, and host-import leaks
+inside it are **41 rows (~4 %)**, topped by `env::__instanceof_check` at 27.
+(Established by `dev-es5-coercion`; recorded here because this is where the
+next person will come looking after reading the table above.)
 
 Reproduce: `node scripts/fetch-baseline-jsonl.mjs` exports
 `ensureStandaloneBaselineJsonl` (the standalone lane IS covered), then group
