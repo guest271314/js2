@@ -174,7 +174,7 @@ instance-field descriptor path, not from `propertyIsEnumerable`.
   invocation had in fact reserved the id in the background. Verified by reading
   `origin/issue-assignments:3895.json` (`status: reserved`), **not** by trusting
   an exit code. No id was burned.) Summary, with the detail in
-  `plan/issues/3895-*.md`:
+  `plan/issues/3895-standalone-variable-extracted-borrowed-propertyisenumerable.md`:
 
   > **Standalone: the variable-extracted borrowed `propertyIsEnumerable`
   > returns `false` for a plainly enumerable own property.**
