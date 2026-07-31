@@ -377,7 +377,11 @@ of it already committed.
 
 - **Worktree**: `/workspace/.claude/worktrees/agent-a6d23a0529f6d6f17`
 - **Branch**: `issue-3685-receiver-proof-widening` (pushed to `fork` =
-  `ttraenkler/js2`); `origin/main` merged in.
+  `ttraenkler/js2`, PR loopdive/js2#3868); `origin/main` merged in.
+  **That branch also carries the #2908 / #3686 / #3688 work and will be deleted
+  when the PR merges — do NOT plan to resume from it.** Resume from `main` once
+  #3868 lands; this note travels with the issue FILE, not with the branch, and
+  the branch contains no compiler source changes to recover.
 - **Claim**: `ttraenkler/dev-acorn-codegen` — released at suspension. Verify
   with `git show origin/issue-assignments:3685.json` before re-claiming; the
   release path has a known ref-lock race with no retry.

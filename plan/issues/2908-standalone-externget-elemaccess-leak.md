@@ -147,6 +147,16 @@ real ranking needs no test262 re-run. Over the standalone baseline: **3,614 of
 test never runs and its `host_free_pass` is already 0 (the same pure-upside
 accounting §"Net accounting" uses above).
 
+> **3,614 IS A FLOOR, NOT A TOTAL — this filter is blind to other namespaces.**
+> It strips `env::` and drops `wasi_snapshot_preview1`, and **never checks
+> whether a third host namespace exists. One does.** `js2wasm:runtime-eval`
+> accounts for **54 ES5-gap tests** that fail with
+> `WebAssembly.instantiate(): Import #0 "js2wasm:runtime-eval": module is not an
+> object or function` — an instantiation failure, invisible to every number in
+> this section. Consequence: the ES5 gap's **refusal** share is understated
+> (149 counted refusals + these 54). Group by **namespace first**; do not
+> re-run the `env::`-only recipe.
+
 Ranked by **distinct tests** (a test may span families; `sole` = tests whose
 *only* leaks are in that family, i.e. fixing it alone unblocks them).
 
@@ -207,8 +217,31 @@ next person will come looking after reading the table above.)
 
 Reproduce: `node scripts/fetch-baseline-jsonl.mjs` exports
 `ensureStandaloneBaselineJsonl` (the standalone lane IS covered), then group
-each entry's `imports` by name after stripping `env::` and dropping
-`wasi_snapshot_preview1`. Probe: `.tmp/leak-histogram2.mjs` (gitignored).
+each entry's `imports` **by NAMESPACE first** (`env::`,
+`js2wasm:runtime-eval`, `wasi_snapshot_preview1`, …) and only then by name
+within each. **Do not strip `env::` and discard the rest** — that is the recipe
+that produced the blind spot boxed above. Probe: `.tmp/leak-histogram2.mjs`
+(gitignored; note it still carries the `env::`-only filter).
+
+### Independent confirmation that the 54 are a distinct category
+
+Bucketing the ES5 gap by error signature returns **96** tests matching
+"invalid Wasm binary / instantiate / CompileError". Removing the 54
+`js2wasm:runtime-eval` rows leaves **42** — which is *exactly* the
+"`invalid Wasm binary`" count derived independently, by a different agent, from
+a different cut of the same gap. Two derivations agreeing on 42 after the 54 are
+separated is strong evidence the 54 really are a different failure class
+(missing import at instantiation) rather than malformed output. They are eval
+tests (`language/eval-code/indirect`, `language/statements/function/13.2-*-s.js`,
+`language/directive-prologue`, `language/function-code`) and belong with the
+runtime-eval cluster (#1066 / #2928), not with codegen.
+
+**Corroborated from a third direction, and the cluster is bigger than 54.**
+`dev-es5-coercion` finds the identical 54 as cluster #2 of their independent
+866-row wrong-answer cut, *plus* a sibling — `dynamic eval is not supported in
+standalone mode` at **16**. So it is **70 rows under one root cause**, not 54.
+Route the whole 70. Gate on `pre-dispatch-gate.mjs` first: #1066 / #2928 have
+prior art and eval-in-standalone may be a deliberate deferral rather than a bug.
 
 ## Tests
 
