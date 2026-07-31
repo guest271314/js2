@@ -88,7 +88,8 @@ with BOTH operands statically `number` emits 4 `__box_number`, 4 unboxes,
 is #3685/#1584/#1852 territory and, on the measured evidence, worth more
 than this issue. Consider sequencing it first.
 
-## Measured 2026-07-31 — no optimizer flag can fix this (negative result)
+## Measured 2026-07-31 — on ACORN, `--closed-world` does not remove the
+## scaffolding (module-specific negative result)
 
 Before writing any codegen, the cheap hypothesis was tested and **falsified**:
 that our `wasm-opt` invocation was leaving Binaryen's WasmGC type-refinement
@@ -107,21 +108,58 @@ run from ONE byte-identical pre-opt input (binaryen 125, `--metrics`):
 | `-O3` (shipped) | 412,849 | 14,833 | 18,191 | 10,057 | 25,959 | 2,243 | 1,100,410 |
 | `-O3 --closed-world` | 406,192 | 14,071 | 17,367 | 10,035 | 25,697 | 2,233 | 1,122,573 |
 | `-O3 --traps-never-happen` | 411,952 | 14,654 | 18,178 | 10,057 | 25,867 | 2,243 | 1,097,965 |
+| `-O3 --closed-world --type-ssa --gufa --optimize-casts` | 408,780 | **14,065** | **17,367** | **10,030** | **25,612** | 2,231 | 1,125,630 |
 
 `--closed-world` buys **1.6 %** of instructions and makes the binary **larger**
 (+22 KB); `--traps-never-happen` buys ~0.2 %. **Neither removes the
 scaffolding.**
 
-The mechanism is worth stating because it generalises: **`ref.cast` is not only
-a check — it is what *produces* the narrowed static type.** Binaryen cannot
-delete it even when told the check is free, because doing so would make the
-module ill-typed. Likewise `ref.is_null` guards an explicit `throw` (a JS-level
-TypeError), not a trap, so `--traps-never-happen` has no purchase on it.
+**The fourth row is the strong result.** Binaryen's entire WasmGC optimisation
+arsenal — whole-program `--gufa` (Grand Unified Flow Analysis), `--type-ssa`
+and the pass literally named `--optimize-casts` ("eliminate and reuse casts"),
+all under `--closed-world` so they are permitted to run — removes **6 more
+`ref.cast` than `--closed-world` alone** (14,071 → 14,065) and **zero more
+`ref.test`**. Against the shipped `-O3` that is `RefCast` −5.2 %, `RefTest`
+−4.5 %, `RefIsNull` −0.3 %, and a binary **2.3 % larger**. This was run
+precisely because "you didn't try the cast-specific flags" is the obvious
+objection to the first three rows; it is now closed. On acorn, the optimizer is
+not leaving cast removal on the table — **it cannot prove the types, because we
+never gave it them.**
 
-**Conclusion: this issue cannot be discharged by an optimizer flag. It has to be
-fixed by emitting narrower types in codegen** — which is what the Direction
-below already says, now with the shortcut positively ruled out. Do not re-open
-the "just add a wasm-opt flag" branch.
+The likely mechanism: a `ref.cast` is not only a check — it also **produces** the
+narrowed static type, so Binaryen can only delete one when it can *prove* the
+operand already has that type. `ref.is_null` here guards an explicit `throw` (a
+JS-level TypeError), not a trap, so `--traps-never-happen` has no purchase on it
+at all.
+
+> **SCOPE CORRECTION (2026-07-31, after review).** An earlier draft of this
+> section stated the strong form — "`ref.cast` cannot be deleted even when the
+> check is free, therefore no optimizer flag can fix this". **That is
+> over-general and a counterexample exists.** On the WASI hello-world
+> (`console.log("hello world")`, 5,217 B input), the same `wasm-opt` 125 goes
+> from `RefCast 6 / RefTest 6 / RefAs 4` at `-O3` to **0 / 0 / 0** with
+> `--closed-world`, and the binary shrinks 428 → 254 bytes (−40 %). So Binaryen
+> **can** delete these casts when the type graph is provable. The correct claim
+> is the module-specific one: **on acorn, `--closed-world` does not remove the
+> scaffolding** — which is exactly the regime that matters here, because acorn's
+> dynamic shapes are where the proof fails. Both results are true at once; the
+> effect is module-dependent. Do not quote the strong version.
+
+**Conclusion (narrow): on acorn this issue is not discharged by `--closed-world`
+or `--traps-never-happen`; it needs narrower types emitted in codegen** — what
+the Direction below already says. Anyone re-opening the optimizer-flag branch
+should do it with a measurement on the *target* module, not on a toy.
+
+### Separately: the shipped pipeline passes no `--closed-world` at all
+
+Worth its own issue regardless of what it does for casts. `src/optimize.ts`
+(~L505-511) emits only `-O3 --all-features --disable-custom-descriptors`, yet a
+zero-import standalone module is **definitionally** a closed world. On the WASI
+hello-world that omission costs **40 % of binary size for free**. On acorn it
+goes the other way — the binary gets *larger* (1,100,410 → 1,122,573 bytes,
++2 %), presumably from `TypeSSA`-style type duplication — so this is not a
+blanket win and needs a per-lane measurement plus a size/speed policy decision.
+Flagged here; not owned by this issue.
 
 ## Measured 2026-07-31 — how big is it, honestly
 
