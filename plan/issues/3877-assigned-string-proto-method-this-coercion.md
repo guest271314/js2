@@ -254,7 +254,66 @@ refusal returned null" — every standalone cell reading `-1` is exactly what a
 blind instrument reports. **Discard the standalone column; the scope question
 stands open.**
 
-### Candidate common cause — promising, NOT established
+### RESOLVED — detector built, census answered, swallow hypothesis re-falsified
+
+The prerequisite detector **was** buildable. `7` = threw and was caught:
+
+```
+case                                      host   standalone
+DETECTOR hand-written throw/catch         7      7
+DETECTOR throw from a callee              7      7
+DETECTOR instanceof TypeError in catch    7      7
+#3468 function-object own property        7      7    <- #3468's mechanism is FIXED on main
+OBSERVED null-receiver method call        7      1    <- returns normally, never throws
+```
+
+**Throws propagate and are caught correctly in standalone.** So the
+"standalone swallows throws" hypothesis is falsified a second time, now by
+direct measurement rather than by citation — consistent with #3468
+(`status: done`, completed 2026-07-24), whose title already records
+_"root cause is function-object own-property gap, NOT a catch_all swallow"_.
+**Nothing is being caught because nothing is being raised.** Anyone tempted to
+re-open the swallow theory should stop here; this is its third grave.
+
+**#3468's own mechanism no longer reproduces** — `f.m = function(){}` then
+`typeof f.m === "function"` returns `7` in standalone on current `main`. The
+observations below are therefore **not** residue of #3468.
+
+**Census re-run with the proven detector — the degradation is GENERAL, not
+String-specific:**
+
+```
+case                              host   standalone
+DETECTOR CONTROL (must be 7)      7      7      <- instrument proven on the lane
+String/toUpperCase (refusal)      1      -1
+String/slice       (refusal)      1      -1
+String/concat      (refusal)      1      -1
+ArrayBuffer/slice  (refusal)      7      -1     <- host THROWS, standalone nulls
+DataView/getInt8   (refusal)      7      -1     <- host THROWS, standalone nulls
+String/charAt      (works)        1       1
+String/charCodeAt  (anomaly 1)    1      -1
+```
+
+`ArrayBuffer` and `DataView` refusal-routed members return `null` on standalone
+where host correctly throws. Since the detector proves a raised TypeError _would_
+be caught, `emitProtoMemberBodyRefusal` is **not raising one** — across brands.
+
+**Consequences.** The fix belongs in the refusal emitter, **once**, not in five
+String call sites — patching those would leave every other brand silently wrong
+while looking solved. And this is a **measurement-integrity** bug as much as a
+correctness one: refused features that should produce loud, classifiable errors
+instead answer quietly wrong, so standalone conformance may be mis-attributing an
+unknown number of rows.
+
+**Two separable defects, both "TypeError never raised" (NOT "swallowed"):**
+
+1. `emitProtoMemberBodyRefusal` yields `null` instead of raising, across brands.
+2. A null-receiver method call (`var a = null; a.nosuch()`) returns normally
+   instead of raising TypeError.
+
+Neither is covered by #3468. Both need ids; neither has one yet.
+
+### Superseded reasoning, kept so it is not re-derived
 
 `var a = null; a.nosuch()` returning `null` instead of throwing is itself a spec
 violation, and it is upstream of everything above. If a `throw` does not
