@@ -58,82 +58,384 @@
 // account prefix for an unqualified agent name can be supplied via
 // CLAIM_GITHUB_ACCOUNT; a name already containing `/` is used verbatim.
 //
-// Exit codes: 0 ok / free · 2 usage error · 3 already claimed by someone else
-//             4 issue already done/wont-fix on main · 5 push gave up after retries
+// ============================================================================
+// #3880 — RELIABILITY AT EVERY ENTRY POINT
+// ============================================================================
+// This tool was unreliable in BOTH directions, which is worse than being slow:
+// a failed operation could report success, and a successful one could report
+// failure. All four mechanisms below were reproduced on 2026-07-31.
+//
+// (1) FAILED READ LOOKED LIKE "UNCLAIMED". `remoteAssignSha()` returned "" both
+//     when the ref did not exist AND when `git ls-remote` failed, and every
+//     reader treated "" as "no claims". So `--release <held>` printed
+//     "not currently claimed — nothing to release" and exited 0 while the lock
+//     stayed (this is how #3661/#3685 were left falsely claimed), and `--check`
+//     printed "is UNASSIGNED" and exited 0 — the stale read that lets TWO
+//     agents start the same issue, i.e. exactly the duplicate dispatch the lock
+//     exists to prevent. Reads are now TRI-STATE (present / absent / failed);
+//     a failed read is a hard, non-zero, legible error. An unreadable ref is
+//     NOT an empty one.
+//
+// (2) THE SHARED-REF LOCK RACE, AND WHY IT IS NOT A RETRY PROBLEM. Fetching
+//     `+issue-assignments:refs/claim-issue/base` in the MAIN repo also fires an
+//     OPPORTUNISTIC update of `refs/remotes/<remote>/issue-assignments` (via the
+//     configured `remote.<r>.fetch` refmap). Concurrent agents collide on it:
+//       error: cannot lock ref 'refs/remotes/origin/issue-assignments':
+//              is at 6696004… but expected 63b1549…
+//     git then exits 1 — even though the REQUESTED refspec landed correctly
+//     (verified: the destination ref was created at the new tip). The old code
+//     called this through a throwing helper, so a fetch that actually WORKED
+//     crashed the whole script.
+//     All assignment-ref plumbing now runs in a dedicated bare CACHE REPO
+//     (`<git-common-dir>/claim-issue-cache.git`) addressed BY URL. A URL has no
+//     configured refmap, so the opportunistic update cannot happen and the race
+//     is structurally impossible; each invocation additionally fetches into its
+//     OWN ref, so two processes never contend on one mirror.
+//
+// (3) THE 10-MINUTE WEDGE WAS THE FETCH, AMPLIFIED BY THE RETRY LOOP — NOT a
+//     missing retry. GIT_TRACE2 decomposition of ONE fetch in the main repo:
+//     remote refs 0.6s, then `git rev-list --objects --stdin --not --all` 47.8s
+//     (a connectivity check that walks all 6,680 local refs), 120s total at
+//     6-7% CPU — waiting, not computing. Repeat measurements: 210s / 127s /
+//     120s / 65s. With MAX_RETRIES=6 and a fresh fetch per attempt that is
+//     390-1260s, which is precisely the reported ">560s", "600s timeout" and
+//     "10 minutes at 0:00 CPU". The dedicated cache repo has almost no refs and
+//     a tiny history, so the SAME fetch costs 1.18s cold / 0.50s warm (1.2 MB
+//     on disk). Making the call fast is the fix; adding retries around a
+//     two-minute call is what produced the symptom.
+//
+// (4) THE PUSH'S EXIT STATUS IS NOT EVIDENCE. A push can land server-side and
+//     still report failure (or time out) — two ids were permanently burned on
+//     2026-07-31 by re-allocating after an "apparent" failure whose reservation
+//     had in fact been written. Every write is therefore VERIFIED BY EFFECT:
+//     after the push, regardless of its exit code, the ref is re-read and the
+//     entry compared byte-for-byte against what we intended to write. If the
+//     effect cannot be established, the tool says UNKNOWN (exit 7) rather than
+//     guessing in either direction.
+//
+// Two supporting changes fall out of the same principle:
+//   - git's stderr is CAPTURED and surfaced instead of being routed to
+//     /dev/null (the old `quietErr` path), which is why failing runs were
+//     reported as producing "no output at all".
+//   - the LAST line of output on any non-success is an unmistakable
+//     `claim-issue: FAILED — …` / `claim-issue: REFUSED — …` marker, so the
+//     failure survives a caller's `2>&1 | tail -4` (a pipe reports `tail`'s
+//     status, not the script's — that trap made two failed operations look
+//     clean in one session). stdout stays clean so `NEW=$(… --allocate)` keeps
+//     working.
+//
+// Exit codes: 0 ok / free
+//             2 usage error
+//             3 already claimed by someone else (a legitimate refusal)
+//             4 issue already done/wont-fix on main (a legitimate refusal)
+//             5 gave up after retries under contention (nothing was written)
+//             6 infrastructure failure — the ref could not be read or written
+//               (NOTHING was written; safe to re-run)
+//             7 UNKNOWN — the write may or may not have landed and could not be
+//               verified. Do NOT retry blindly: re-read the record first
+//               (`--check <id>` / `--list`).
 // (--allocate prints the reserved id to stdout on success and exits 0.)
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, renameSync } from "node:fs";
+import { tmpdir, hostname } from "node:os";
+import { join, resolve, dirname } from "node:path";
 import { openPrIssueIds, ISSUE_ID_RE } from "./lib/open-pr-issue-files.mjs";
 
 const ASSIGN_REF = "issue-assignments";
 // The issue-assignments orphan ref lives on the FORK (origin) — keep REMOTE =
 // origin for ALL reservation-ref operations (ls-remote / fetch / push of claims).
 const REMOTE = process.env.CLAIM_ASSIGN_REMOTE || "origin";
-// The MAIN id scan, however, must use UPSTREAM (loopdive/js2). The fork's
-// `origin/main` lags upstream by thousands of commits, so "next free off
-// origin/main" returns ids already taken on upstream/main — every such
-// allocation then collides at the required `check:issue-ids:against-main` gate
-// (which checks upstream/main), ejecting PRs from the merge queue (this is what
-// mis-numbered two issues into the 6000s, since renumbered to #2177/#2194).
+
+// --- bounded network timeouts (#3079, tightened #3880) ----------------------
+// `execFileSync` has no default timeout, so a single stuck `git` call under
+// contention previously blocked the caller indefinitely (600 s timeouts were
+// observed). EVERY network call is now capped and SIGKILLed. Because the cache
+// repo makes each call ~1 s, a generous cap costs nothing in the happy path.
+const NET_TIMEOUT_MS = Number(process.env.CLAIM_NET_TIMEOUT_MS) || 60000;
+const NET_RETRIES = Number(process.env.CLAIM_NET_RETRIES) || 3;
+const MAIN_FETCH_TIMEOUT_MS = Number(process.env.CLAIM_MAIN_FETCH_TIMEOUT_MS) || 90000;
+const MAX_RETRIES = 6;
+
+// TEST SEAM (#3880), test-only, no production caller. The two outcomes this
+// issue is about — a push that LANDS while git reports failure, and a write
+// whose effect cannot be established at all — cannot be provoked honestly from
+// outside the process, and a guard nobody has watched fail is not a guard.
+//   push-reports-failure : perform the push for real, then report it as failed
+//                          (exercises verify-by-effect recovering the truth)
+//   verify-unreachable   : push for real, then make verification impossible
+//                          (exercises the UNKNOWN / exit-7 path)
+const TEST_FAULT = process.env.CLAIM_TEST_FAULT || "";
+
+// --- failure legibility (#3880) ---------------------------------------------
+// The LAST line of output must say, unmistakably, whether this run succeeded.
+// Callers pipe us (`… 2>&1 | tail -4`), and a pipe reports the LAST STAGE's
+// exit status — so the exit code alone is not enough to be legible.
+let markerEmitted = false;
+function emitMarker(kind, reason, code) {
+  if (markerEmitted) return;
+  markerEmitted = true;
+  process.stderr.write(`claim-issue: ${kind} — ${reason} (exit ${code})\n`);
+}
+function firstLine(s) {
+  return String(s).split("\n")[0].trim();
+}
+function ok(reason) {
+  emitMarker("OK", reason, 0);
+}
+/**
+ * Legitimate, expected refusals (exit 3/4): the tool worked, the answer is no.
+ * `quiet` skips re-printing the body when the caller already reported it on
+ * stdout, so the marker is the only extra line.
+ */
+function refuse(code, msg, quiet = false) {
+  if (!quiet) console.error(msg);
+  emitMarker("REFUSED", firstLine(msg), code);
+  process.exit(code);
+}
+/** The tool could not do its job (exit 2/5/6/7). */
+function die(code, msg) {
+  console.error(msg);
+  emitMarker("FAILED", firstLine(msg), code);
+  process.exit(code);
+}
+process.on("uncaughtException", (e) => {
+  console.error(e && e.stack ? e.stack : String(e));
+  emitMarker("FAILED", `uncaught ${firstLine((e && e.message) || e)}`, 6);
+  process.exit(6);
+});
+
+// --- process helpers (stderr CAPTURED, never discarded — #3880) -------------
+function run(cmd, args, opts = {}) {
+  try {
+    const out = execFileSync(cmd, args, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+      ...opts,
+    });
+    return { ok: true, out: (out || "").trim(), err: "" };
+  } catch (e) {
+    const timedOut = e.killed === true || e.signal === "SIGKILL" || e.code === "ETIMEDOUT";
+    return {
+      ok: false,
+      out: (e.stdout || "").toString().trim(),
+      err: (e.stderr || "").toString().trim() || (e.message ? String(e.message) : ""),
+      timedOut,
+      status: e.status,
+    };
+  }
+}
+// (#3880) Inherited git environment variables are a live hazard for this
+// script, because it shells out to git constantly AND deliberately points
+// GIT_INDEX_FILE at a scratch index for its commit-tree plumbing. If
+// claim-issue is ever invoked from inside a git hook (husky exports GIT_DIR and
+// GIT_INDEX_FILE), an inherited GIT_DIR would send every cache-repo command at
+// the WRONG repository and an inherited GIT_INDEX_FILE would make `read-tree` /
+// `update-index` clobber the invoking repo's real index. This was not
+// theoretical: the same leak, via `git init --bare` in this issue's own test
+// suite, wrote `core.bare=true` into the shared repo config and broke every
+// worktree until it was reverted. Every git call therefore runs under a
+// sanitised environment; callers that genuinely want one of these variables
+// name it in `keepEnv`.
+const LEAKY_GIT_ENV = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_PREFIX",
+];
+function cleanGitEnv(base, keep = []) {
+  const env = { ...(base || process.env) };
+  for (const k of LEAKY_GIT_ENV) if (!keep.includes(k)) delete env[k];
+  return env;
+}
+function git(args, opts = {}) {
+  const { keepEnv, ...rest } = opts;
+  return run("git", args, { ...rest, env: cleanGitEnv(opts.env, keepEnv || []) });
+}
+function why(r) {
+  return r.timedOut ? `timed out after ${opTimeout(r)}ms` : r.err || r.out || `git exited ${r.status}`;
+}
+function opTimeout() {
+  return NET_TIMEOUT_MS;
+}
+
+// --- the dedicated assignment CACHE REPO (#3880) ----------------------------
+// A bare repo holding ONLY the orphan assignment branch. Every assignment-ref
+// operation (ls-remote / fetch / read / commit / push) happens here rather than
+// in the working repo. Two properties matter, and both are load-bearing:
+//   * it is addressed BY URL, so there is no configured `remote.<r>.fetch`
+//     refmap and therefore no opportunistic `refs/remotes/*` update to race on;
+//   * it holds a handful of refs instead of thousands, so git's connectivity
+//     check (`rev-list --not --all`) is trivial: 1.18 s cold / 0.50 s warm,
+//     against 65-210 s for the same fetch in the working repo.
+// Shared across worktrees on purpose (it lives in the common git dir) so the
+// whole fleet reuses one warm cache; concurrency is handled by giving every
+// invocation its own private refs rather than by locking.
+function gitCommonDir() {
+  const r = git(["rev-parse", "--git-common-dir"]);
+  return r.ok && r.out ? resolve(r.out) : "";
+}
+const CACHE_DIR =
+  process.env.CLAIM_CACHE_DIR ||
+  (() => {
+    const common = gitCommonDir();
+    return common ? join(common, "claim-issue-cache.git") : join(tmpdir(), "js2-claim-issue-cache.git");
+  })();
+
+let cacheReady = false;
+function cacheUsable() {
+  return existsSync(join(CACHE_DIR, "HEAD")) && git(["-C", CACHE_DIR, "rev-parse", "--git-dir"]).ok;
+}
+// Build the cache in a PRIVATE directory and move it into place with a single
+// atomic rename. Creating it in situ is not safe: the whole point of this repo
+// is that N agents use it at once, and an in-place `rm -rf` + `git init` lets
+// one process delete the directory another is mid-initialising ("unable to
+// write symref for HEAD" — caught by the six-way concurrency test). rename(2)
+// onto an existing non-empty directory fails, so whoever loses the race simply
+// adopts the winner's cache.
+function buildCache(evictBroken) {
+  const parent = dirname(CACHE_DIR);
+  mkdirSync(parent, { recursive: true });
+  const staging = mkdtempSync(join(parent, ".claim-cache-"));
+  try {
+    const bare = join(staging, "repo.git");
+    const init = git(["init", "--bare", "--quiet", bare]);
+    if (!init.ok) return;
+    // Never let a background gc contend with a concurrent claim; the cache is
+    // ~1 MB and is pruned by rebuild, not by maintenance.
+    git(["-C", bare, "config", "gc.auto", "0"]);
+    // A half-written or corrupt cache is disposable — it carries no state that
+    // is not re-fetchable from the remote — but only evict one on the second
+    // pass, once a plain rename has already lost.
+    if (evictBroken && existsSync(CACHE_DIR)) rmSync(CACHE_DIR, { recursive: true, force: true });
+    try {
+      renameSync(bare, CACHE_DIR);
+    } catch {
+      /* lost the race to a concurrent claim, or a squatter is in the way */
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+function ensureCache() {
+  if (cacheReady) return;
+  if (!cacheUsable()) buildCache(false);
+  if (!cacheUsable()) buildCache(true);
+  if (!cacheUsable()) die(6, `could not initialise the claim cache repo at ${CACHE_DIR}`);
+  cacheReady = true;
+}
+function cgit(args, opts = {}) {
+  ensureCache();
+  return git(["-C", CACHE_DIR, ...args], opts);
+}
+function cgitOrDie(args, what, opts = {}) {
+  const r = cgit(args, opts);
+  if (!r.ok) die(6, `${what} failed: ${why(r)}`);
+  return r.out;
+}
+
+// Resolve a remote NAME to a URL (the cache repo has no remotes configured).
+// A value that already looks like a URL or a filesystem path is used verbatim,
+// which is what lets tests point CLAIM_ASSIGN_REMOTE at a local bare repo.
+function resolveRemoteUrl(remote, forPush) {
+  if (
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(remote) ||
+    remote.startsWith("git@") ||
+    remote.startsWith("/") ||
+    remote.startsWith(".")
+  ) {
+    return remote;
+  }
+  const r = git(["remote", "get-url", ...(forPush ? ["--push"] : []), remote]);
+  if (r.ok && r.out) return r.out.split("\n")[0].trim();
+  return remote;
+}
+const ASSIGN_FETCH_URL = resolveRemoteUrl(REMOTE, false);
+const ASSIGN_PUSH_URL = resolveRemoteUrl(REMOTE, true);
+
+// Private per-invocation refs inside the cache repo. Two concurrent processes
+// therefore never update the same ref — the mirror-ref lock race of #3880
+// cannot occur by construction. Cleaned up on exit.
+const UNIQ = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+const READ_REF = `refs/claim-work/${UNIQ}`;
+const VERIFY_REF = `refs/claim-verify/${UNIQ}`;
+const tempRefs = new Set();
+process.on("exit", () => {
+  for (const ref of tempRefs) git(["-C", CACHE_DIR, "update-ref", "-d", ref]);
+});
+
+// The MAIN id scan must use UPSTREAM (loopdive/js2). The fork's `origin/main`
+// lags upstream by thousands of commits, so "next free off origin/main" returns
+// ids already taken on upstream/main — every such allocation then collides at
+// the required `check:issue-ids:against-main` gate (which checks upstream/main),
+// ejecting PRs from the merge queue (this is what mis-numbered two issues into
+// the 6000s, since renumbered to #2177/#2194).
 // Prefer the `upstream` remote when it exists; `CLAIM_REMOTE` overrides.
 function pickMainRemote() {
   if (process.env.CLAIM_REMOTE) return process.env.CLAIM_REMOTE;
-  const r = gitTry(["remote"]);
+  const r = git(["remote"]);
   const remotes = r.ok ? r.out.split(/\s+/).filter(Boolean) : [];
   return remotes.includes("upstream") ? "upstream" : "origin";
 }
 const MAIN_REMOTE = pickMainRemote();
 const MAIN_REF = `${MAIN_REMOTE}/main`;
 
-// --- bounded network timeouts (#3079) --------------------------------------
-// `--allocate` must NEVER hang indefinitely. `execFileSync` has no default
-// timeout, so a single stuck `gh`/`git` call under API contention (many
-// concurrent agents) previously blocked the WHOLE team's issue filing. Every
-// network call in the allocate path is now capped; the open-PR scan (now in
-// scripts/lib/open-pr-issue-files.mjs, with its own CLAIM_PR_SCAN_*_TIMEOUT_MS
-// budget) degrades to the pre-existing fail-open fallback (allocate against
-// main ∪ reservations only — the PR-time `check:issue-ids` gates are the hard
-// backstop). Env-overridable for tuning under different load.
-const MAIN_FETCH_TIMEOUT_MS = Number(process.env.CLAIM_MAIN_FETCH_TIMEOUT_MS) || 15000;
-
-// Best-effort refresh of the main tip — only when allocating (frequent
-// --check/--list calls shouldn't pay a network round-trip). Bounded so a hung
-// fetch can't wedge the allocation before the id scan even starts.
-if (process.argv.includes("--allocate")) {
-  gitTry(["fetch", "--quiet", MAIN_REMOTE, "main"], { timeout: MAIN_FETCH_TIMEOUT_MS, killSignal: "SIGKILL" });
-}
-const MAX_RETRIES = 6;
-
-function git(args, opts = {}) {
-  return execFileSync("git", args, {
-    encoding: "utf8",
-    stdio: ["pipe", "pipe", opts.quietErr ? "ignore" : "inherit"],
-    ...opts,
-  }).trim();
-}
-
-function gitTry(args, opts = {}) {
-  try {
-    return { ok: true, out: git(args, { quietErr: true, ...opts }) };
-  } catch (e) {
-    return { ok: false, out: (e.stdout || "").toString().trim(), err: e };
-  }
-}
-
-function die(code, msg) {
-  console.error(msg);
-  process.exit(code);
+// Best-effort refresh of the main tip before an allocation.
+//
+// (#3880) The old form was `git fetch --quiet <remote> main` under a 15 s
+// SIGKILL. In this repo the fetch's connectivity check alone costs ~48 s, so
+// that budget NEVER completed — `<remote>/main` silently stayed stale and the
+// id scan ran against an out-of-date tree (a recently-merged issue file is on
+// neither a stale main NOR an open PR, so its id looks free). Three changes:
+// an EXPLICIT refspec so the remote-tracking ref is actually updated, an empty
+// `--refmap=` so no opportunistic ref update can lose the lock race, and a
+// budget that can finish. If it still cannot, we say so LOUDLY rather than
+// pretending the scan was clean.
+function refreshMainTip() {
+  const url = resolveRemoteUrl(MAIN_REMOTE, false);
+  const r = git(
+    [
+      "fetch",
+      "--refmap=",
+      "--no-tags",
+      "--no-write-fetch-head",
+      "--quiet",
+      MAIN_REMOTE,
+      `+refs/heads/main:refs/remotes/${MAIN_REMOTE}/main`,
+    ],
+    { timeout: MAIN_FETCH_TIMEOUT_MS, killSignal: "SIGKILL" },
+  );
+  if (r.ok) return { fresh: true };
+  // The refresh failed. Is the local tip actually stale? `ls-remote` is cheap
+  // (sub-second) even where a fetch is not, so we can answer precisely instead
+  // of guessing.
+  const local = git(["rev-parse", MAIN_REF]);
+  const remote = git(["ls-remote", url, "refs/heads/main"], { timeout: NET_TIMEOUT_MS, killSignal: "SIGKILL" });
+  const remoteSha = remote.ok ? (remote.out.split("\t")[0] || "").trim() : "";
+  if (local.ok && remoteSha && local.out === remoteSha) return { fresh: true };
+  console.error(
+    `warning: could not refresh ${MAIN_REF} (${why(r)}). The id scan is running against a STALE main` +
+      `${local.ok && remoteSha ? ` (local ${local.out.slice(0, 12)} vs remote ${remoteSha.slice(0, 12)})` : ""}; ` +
+      "an id whose issue file merged very recently may look free (#3880).",
+  );
+  return { fresh: false };
 }
 
 // --- argument parsing -------------------------------------------------------
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith("--")));
-const branchIdx = argv.indexOf("--branch");
-const branch = branchIdx >= 0 ? argv[branchIdx + 1] : "";
-const positional = argv.filter((a, i) => !a.startsWith("--") && argv[i - 1] !== "--branch");
+const VALUE_FLAGS = new Set(["--branch", "--by"]);
+function flagValue(name) {
+  const i = argv.indexOf(name);
+  return i >= 0 ? argv[i + 1] || "" : "";
+}
+const branch = flagValue("--branch");
+const positional = argv.filter((a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(argv[i - 1]));
 
 const mode = flags.has("--list")
   ? "list"
@@ -154,6 +456,22 @@ function normalizeAssignee(raw) {
   if (raw.includes("/")) return raw;
   const acct = process.env.CLAIM_GITHUB_ACCOUNT;
   return acct ? `${acct}/${raw}` : raw;
+}
+
+// (#3880) Every record must name WHO asked for it. Bare `--allocate` wrote
+// `assignee: ""`, so the ref could not attribute ownership at all — "no claim
+// file" then became unreliable in both directions (one issue had three merged
+// PRs and no claim; another had a claim nobody held). `requested_by` is never
+// empty: explicit `--by`/assignee, else $CLAIM_ASSIGNEE, else the git identity,
+// else a traceable host:pid so even an anonymous run is followable.
+// Deliberately NOT a hard requirement: CLAUDE.md documents bare
+// `NEW=$(node scripts/claim-issue.mjs --allocate)`, which must keep working.
+function requesterId(assignee) {
+  const explicit = assignee || flagValue("--by") || process.env.CLAIM_ASSIGNEE || "";
+  if (explicit) return normalizeAssignee(explicit);
+  const email = git(["config", "--get", "user.email"]);
+  if (email.ok && email.out) return email.out;
+  return `unattributed:${hostname()}:${process.pid}`;
 }
 
 // Parse a (possibly slice-qualified) target id (#41).
@@ -178,27 +496,79 @@ function parseTarget(raw) {
   return { base, slice, key: `${base}-${slice}`, label: `#${base}:${slice}` };
 }
 
-// --- remote ref plumbing ----------------------------------------------------
-function remoteAssignSha() {
-  const r = gitTry(["ls-remote", REMOTE, ASSIGN_REF]);
-  if (!r.ok || !r.out) return "";
-  return r.out.split("\t")[0];
+// --- remote ref plumbing (TRI-STATE reads — #3880) --------------------------
+//
+// The single most dangerous bug this script had: a FAILED read was
+// indistinguishable from an EMPTY one, so a network blip read as "nobody holds
+// this issue". Reads therefore return one of three states and callers must
+// handle `failed` explicitly — never by falling through to "unassigned".
+function remoteAssignState() {
+  let last = "";
+  for (let attempt = 1; attempt <= NET_RETRIES; attempt++) {
+    const r = cgit(["ls-remote", ASSIGN_FETCH_URL, `refs/heads/${ASSIGN_REF}`], {
+      timeout: NET_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+    if (r.ok) {
+      const line = r.out.split("\n").find((l) => l.trim());
+      if (!line) return { state: "absent", sha: "" };
+      return { state: "present", sha: line.split("\t")[0].trim() };
+    }
+    last = why(r);
+    if (attempt < NET_RETRIES) sleepMs(raceBackoffMs(attempt));
+  }
+  return { state: "failed", err: last };
 }
 
-function fetchAssign(sha) {
-  if (!sha) return; // ref doesn't exist yet
-  // (#2974/#2977) Force-update the local mirror ref (`+` refspec). Without the
-  // `+`, a diverged local `refs/claim-issue/base` (the ref moved on the remote
-  // while we held a stale local copy) makes the fetch fail non-fast-forward
-  // ("cannot lock ref … is at <new> but expected <old>") and hard-crashes the
-  // script — previously requiring a manual `git update-ref -d`. The base ref is
-  // a disposable read mirror, so overwriting it unconditionally is safe.
-  git(["fetch", "--quiet", REMOTE, `+${ASSIGN_REF}:refs/claim-issue/base`]);
+// Fetch the assignment branch into one of THIS invocation's private refs.
+function fetchAssignInto(ref) {
+  let last = "";
+  for (let attempt = 1; attempt <= NET_RETRIES; attempt++) {
+    const r = cgit(
+      ["fetch", "--no-tags", "--no-write-fetch-head", "--quiet", ASSIGN_FETCH_URL, `+refs/heads/${ASSIGN_REF}:${ref}`],
+      { timeout: NET_TIMEOUT_MS, killSignal: "SIGKILL" },
+    );
+    if (r.ok) {
+      tempRefs.add(ref);
+      return { ok: true };
+    }
+    last = why(r);
+    if (attempt < NET_RETRIES) sleepMs(raceBackoffMs(attempt));
+  }
+  return { ok: false, err: last };
+}
+
+// Read the current assignment tip into READ_REF and return its sha.
+// The sha comes from the FETCH, not from ls-remote, so the object is always
+// present locally (ls-remote's answer can be one push out of date by the time
+// we fetch, and reading a sha we never fetched would fail spuriously).
+function readTip() {
+  const st = remoteAssignState();
+  if (st.state !== "present") return st;
+  const f = fetchAssignInto(READ_REF);
+  if (!f.ok) return { state: "failed", err: f.err };
+  const rp = cgit(["rev-parse", READ_REF]);
+  if (!rp.ok) return { state: "failed", err: why(rp) };
+  return { state: "present", sha: rp.out };
+}
+
+/** Tip sha, or "" when the ref genuinely does not exist. Dies on a failed read. */
+function tipShaOrDie(what) {
+  const st = readTip();
+  if (st.state === "failed") {
+    die(
+      6,
+      `cannot READ the assignment ref (${REMOTE}/${ASSIGN_REF}): ${st.err}\n` +
+        `Refusing to ${what} — an unreadable ref is NOT an empty one. Reporting "unassigned" here is how ` +
+        `#3661/#3685 were left falsely claimed and how two agents can be dispatched onto one issue (#3880).`,
+    );
+  }
+  return st.sha;
 }
 
 function readEntry(baseSha, id) {
   if (!baseSha) return null;
-  const r = gitTry(["cat-file", "-p", `${baseSha}:${id}.json`]);
+  const r = cgit(["cat-file", "-p", `${baseSha}:${id}.json`]);
   if (!r.ok || !r.out) return null;
   try {
     return JSON.parse(r.out);
@@ -212,13 +582,15 @@ function isHeld(entry) {
 }
 
 // Find the issue file on main and read its `status:` frontmatter (best effort).
+// NOTE: main-tree queries run in the WORKING repo (they need main's trees), not
+// in the assignment cache repo.
 function mainIssueStatus(id) {
-  const ls = gitTry(["ls-tree", "-r", "--name-only", MAIN_REF, "plan/issues/"]);
+  const ls = git(["ls-tree", "-r", "--name-only", MAIN_REF, "plan/issues/"]);
   if (!ls.ok) return null;
   const re = new RegExp(`^plan/issues/${id}-[^/]+\\.md$`);
   const file = ls.out.split("\n").find((f) => re.test(f));
   if (!file) return null;
-  const cat = gitTry(["cat-file", "-p", `${MAIN_REF}:${file}`]);
+  const cat = git(["cat-file", "-p", `${MAIN_REF}:${file}`]);
   if (!cat.ok) return null;
   const m = cat.out.match(/^status:\s*([\w-]+)\s*$/m);
   return { file, status: m ? m[1] : null };
@@ -228,7 +600,7 @@ function mainIssueStatus(id) {
 //
 // A fresh issue id must be unique against THREE populations, because none of
 // them alone closes the collision window:
-//   (1) ids already on origin/main          — the committed record;
+//   (1) ids already on main                  — the committed record;
 //   (2) ids added by every currently-open PR — in-flight files not yet merged
 //       (THE race the merge-queue wedge came from);
 //   (3) ids already reserved on this ref     — concurrent allocators that won
@@ -257,7 +629,7 @@ function contiguousMax(idSet) {
 
 function idsFromMain() {
   const out = new Set();
-  const ls = gitTry(["ls-tree", "-r", "--name-only", MAIN_REF, "plan/issues/"]);
+  const ls = git(["ls-tree", "-r", "--name-only", MAIN_REF, "plan/issues/"]);
   if (!ls.ok) return out;
   for (const f of ls.out.split("\n")) {
     const m = f.match(ISSUE_ID_RE);
@@ -270,19 +642,21 @@ function idsFromMain() {
 // field counts — a `reserved` placeholder reserves the number just as firmly
 // as an in-progress claim, otherwise two allocators racing the same second
 // would both compute the same max+1.
-function idsFromAssignRef(sha) {
-  const out = new Set();
-  if (!sha) return out;
-  const ls = gitTry(["ls-tree", "--name-only", sha]);
-  if (!ls.ok) return out;
-  const files = ls.out.split("\n").filter((f) => f.endsWith(".json"));
-  if (files.length === 0) return out;
+// List the `<key>.json` entry filenames at a tip.
+function entryFiles(sha) {
+  if (!sha) return [];
+  const ls = cgit(["ls-tree", "--name-only", sha]);
+  if (!ls.ok) return [];
+  return ls.out.split("\n").filter((f) => f.endsWith(".json"));
+}
 
-  // (#3079) Read EVERY entry blob in a SINGLE `git cat-file --batch` process.
-  // The prior implementation spawned one `git cat-file` PER entry — O(N)
-  // subprocesses (466 and growing) that took >90s under container load and was
-  // the TRUE cause of `--allocate` hanging (previously mis-attributed to the
-  // open-PR gh scan). One batched process is ~constant-time and bounded.
+// (#3079) Read EVERY entry blob in a SINGLE `git cat-file --batch` process.
+// Spawning one `git cat-file` PER entry is O(N) subprocesses — at 654 entries
+// and growing that was the true cause of `--allocate` hanging, and it still
+// made `--list` take 50 s until this was shared with it (#3880).
+// Returns a Map<filename, parsedEntry|null>, or null if the batch read failed.
+function readEntriesBatch(sha, files) {
+  if (!sha || files.length === 0) return new Map();
   const request = files.map((f) => `${sha}:${f}`).join("\n") + "\n";
   let buf;
   try {
@@ -291,13 +665,60 @@ function idsFromAssignRef(sha) {
     // it must be walked as bytes. (`encoding: "buffer"` is NOT a valid option
     // value — it throws ERR_UNKNOWN_ENCODING; the default already yields a
     // Buffer.) `input` may still be a string.
-    buf = execFileSync("git", ["cat-file", "--batch"], {
+    buf = execFileSync("git", ["-C", CACHE_DIR, "cat-file", "--batch"], {
       input: request,
       maxBuffer: 128 * 1024 * 1024,
-      timeout: MAIN_FETCH_TIMEOUT_MS,
+      timeout: NET_TIMEOUT_MS,
       killSignal: "SIGKILL",
+      env: cleanGitEnv(),
     });
   } catch {
+    return null;
+  }
+
+  // Parse the `--batch` stream: "<oid> <type> <size>\n<content>\n" per object
+  // ("<request> missing\n" — no body — for an absent one). Byte-framed, so walk
+  // the buffer by the declared size rather than splitting on newlines. Records
+  // come back in REQUEST order, including the missing ones, so zip by index.
+  const out = new Map();
+  const LF = 0x0a;
+  let pos = 0;
+  let i = 0;
+  while (pos < buf.length && i < files.length) {
+    const nl = buf.indexOf(LF, pos);
+    if (nl === -1) break;
+    const header = buf.toString("utf8", pos, nl);
+    pos = nl + 1;
+    const parts = header.split(" ");
+    if (parts.length < 3 || parts[1] === "missing") {
+      out.set(files[i++], null); // no content body
+      continue;
+    }
+    const size = Number(parts[2]);
+    if (!Number.isFinite(size) || size < 0) break;
+    const content = buf.toString("utf8", pos, pos + size);
+    pos += size + 1; // content + trailing LF
+    let parsed = null;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      /* unparseable entry — record as null */
+    }
+    out.set(files[i++], parsed);
+  }
+  return out;
+}
+
+// Ids reserved/claimed on the orphan ref. Every `<key>.json` entry's `id`
+// field counts — a `reserved` placeholder reserves the number just as firmly
+// as an in-progress claim, otherwise two allocators racing the same second
+// would both compute the same max+1.
+function idsFromAssignRef(sha) {
+  const out = new Set();
+  const files = entryFiles(sha);
+  if (files.length === 0) return out;
+  const entries = readEntriesBatch(sha, files);
+  if (!entries) {
     // Fallback: derive the id from the FILENAME. Every entry is named
     // `<id>.json` (reservation/allocation) or `<base>-<slice>.json` (slice
     // claim) — the leading digits are the id (verified stable on the ref). This
@@ -308,29 +729,8 @@ function idsFromAssignRef(sha) {
     }
     return out;
   }
-
-  // Parse the `--batch` stream: "<oid> <type> <size>\n<content>\n" per object
-  // ("<request> missing\n" — no body — for an absent one). Byte-framed, so walk
-  // the buffer by the declared size rather than splitting on newlines.
-  const LF = 0x0a;
-  let pos = 0;
-  while (pos < buf.length) {
-    const nl = buf.indexOf(LF, pos);
-    if (nl === -1) break;
-    const header = buf.toString("utf8", pos, nl);
-    pos = nl + 1;
-    const parts = header.split(" ");
-    if (parts.length < 3 || parts[1] === "missing") continue; // no content body
-    const size = Number(parts[2]);
-    if (!Number.isFinite(size) || size < 0) break;
-    const content = buf.toString("utf8", pos, pos + size);
-    pos += size + 1; // content + trailing LF
-    try {
-      const e = JSON.parse(content);
-      if (e && e.id != null && /^\d+$/.test(String(e.id))) out.add(Number(e.id));
-    } catch {
-      /* unparseable entry — skip (filename fallback not needed; batch succeeded) */
-    }
+  for (const e of entries.values()) {
+    if (e && e.id != null && /^\d+$/.test(String(e.id))) out.add(Number(e.id));
   }
   return out;
 }
@@ -346,6 +746,11 @@ function sleepMs(ms) {
 // backoff turns the synchronized herd into a de-facto queue: retry at a random
 // point in [0, base·2^(attempt-1)], capped, so contenders spread out in time
 // and one makes progress each round. Bounded by MAX_RETRIES either way.
+//
+// (#3880) This loop is CONTENTION handling and stays. What does NOT belong here
+// is retrying around a slow call: with a 65-210 s fetch per attempt, six
+// attempts became the reported 10-minute wedge. The fix was to make each
+// attempt ~1 s (the cache repo), not to retry harder.
 function raceBackoffMs(attempt) {
   const BASE_MS = 150;
   const CAP_MS = 4000;
@@ -362,14 +767,13 @@ function raceBackoffMs(attempt) {
 // drift apart. The lib preserves the full #2943 hardening (one batched GraphQL
 // query instead of 1+N calls, REST --paginate fallback for >100-file PRs, 3×
 // retry with backoff, `complete: false` on total failure). This wrapper keeps
-// the allocator's loud fail-open warning at the call site.
+// the allocator's loud warning at the call site.
 function idsFromOpenPRs() {
   const r = openPrIssueIds();
   if (!r.complete) {
     console.error(
       `warning: open-PR id scan ${r.budgetExhausted ? `timed out (>${r.scanTotalTimeoutMs}ms)` : "FAILED after 3 attempts"} ` +
-        "(gh offline/unauthenticated/rate-limited/slow). Allocating against main ∪ reservations ONLY — the id may " +
-        "collide with an in-flight PR's issue file (#2943). The CI gates check-issue-ids --against-main/--against-open-prs remain the backstop.",
+        "(gh offline/unauthenticated/rate-limited/slow). The id universe does NOT include in-flight PRs.",
     );
   }
   return r;
@@ -386,74 +790,140 @@ function allUsedIds(sha, { scanPRs }) {
   return { ids: all, prScanComplete };
 }
 
-// Build a new tree = base tree with `<id>.json` set to `content`, then
-// commit-tree on top of base and push to the ref. Returns true on success.
-function commitAndPush(baseSha, id, content, message) {
+// --- write + VERIFY BY EFFECT (#3880) ---------------------------------------
+//
+// Re-read the ref and compare the entry byte-for-byte with what we intended to
+// write. This is the only trustworthy answer, in BOTH directions:
+//   * push reported failure but the entry is there  -> it LANDED (do not retry;
+//     retrying after an "apparent" failure is what burned ids #3890/#3891);
+//   * push reported success but the entry is absent -> it did NOT land.
+// Ancestry ("is my commit reachable from the tip") is deliberately not used: a
+// concurrent write to the SAME key can leave our commit in history while the
+// effect we wanted is gone.
+//
+// The comparison needs the record to be UNIQUE to this invocation, which is
+// what `write_id` is for. Timestamps are not enough: `nowIso()` has second
+// resolution, so six allocators racing inside one second produced byte-
+// identical records, every loser's verification matched the WINNER's entry, and
+// all six reported success on the same id (caught by the six-way concurrency
+// test — the first-push-wins rejection was working; the verification was not).
+function verifyLanded(key, content) {
+  if (TEST_FAULT === "verify-unreachable") {
+    return { known: false, err: "simulated verification outage (CLAIM_TEST_FAULT)" };
+  }
+  const st = remoteAssignState();
+  if (st.state === "failed") return { known: false, err: st.err };
+  if (st.state === "absent") return { known: true, landed: false };
+  const f = fetchAssignInto(VERIFY_REF);
+  if (!f.ok) return { known: false, err: f.err };
+  const r = cgit(["cat-file", "-p", `${VERIFY_REF}:${key}.json`]);
+  if (!r.ok) return { known: true, landed: false };
+  return { known: true, landed: r.out.trim() === content.trim() };
+}
+
+// Build a new tree = base tree with `<key>.json` set to `content`, commit-tree
+// on top of base, push — then VERIFY. All plumbing runs inside the cache repo
+// so the objects live where the push happens.
+function commitAndPush(baseSha, key, content, message) {
   const tmp = mkdtempSync(join(process.env.CLAUDE_JOB_DIR || tmpdir(), "claim-"));
-  const idxFile = join(tmp, "index");
-  const env = { ...process.env, GIT_INDEX_FILE: idxFile };
+  // The ONE place a git env var is set on purpose: a scratch index so the
+  // commit-tree plumbing never touches any real index. `keepEnv` marks it as
+  // deliberate so the sanitiser above lets it through.
+  const env = { ...process.env, GIT_INDEX_FILE: join(tmp, "index") };
+  const idx = { env, keepEnv: ["GIT_INDEX_FILE"] };
   try {
-    if (baseSha) {
-      git(["read-tree", `${baseSha}^{tree}`], { env });
-    } else {
-      git(["read-tree", "--empty"], { env });
+    cgitOrDie(baseSha ? ["read-tree", `${baseSha}^{tree}`] : ["read-tree", "--empty"], "staging the base tree", idx);
+    const blob = cgitOrDie(["hash-object", "-w", "--stdin"], "writing the entry blob", { input: content });
+    cgitOrDie(["update-index", "--add", "--cacheinfo", `100644,${blob},${key}.json`], "updating the index", idx);
+    const tree = cgitOrDie(["write-tree"], "writing the tree", idx);
+    const commit = cgitOrDie(
+      ["commit-tree", tree, "-m", message, ...(baseSha ? ["-p", baseSha] : [])],
+      "creating the commit",
+    );
+    // --no-verify: the assignment ref only ever carries a single <key>.json
+    // (never labs/ content), and the pre-push integrity gate (pnpm install +
+    // typecheck + lint, ~120s+) makes every claim hang/exit 124. CLAUDE.md
+    // sanctions --no-verify for these non-main, no-CI claim pushes.
+    let push = cgit(["push", "--no-verify", ASSIGN_PUSH_URL, `${commit}:refs/heads/${ASSIGN_REF}`], {
+      timeout: NET_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+    if (TEST_FAULT === "push-reports-failure") {
+      push = { ok: false, out: "", err: "simulated transport failure (CLAIM_TEST_FAULT)", status: 128 };
     }
-    const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-      input: content,
-      encoding: "utf8",
-    }).trim();
-    git(["update-index", "--add", "--cacheinfo", `100644,${blob},${id}.json`], { env });
-    const tree = git(["write-tree"], { env });
-    const commitArgs = ["commit-tree", tree, "-m", message];
-    if (baseSha) commitArgs.push("-p", baseSha);
-    const commit = git(commitArgs);
-    // --no-verify: the assignment ref only ever carries a single <id>.json (never
-    // labs/ content), and the pre-push integrity gate (pnpm install + typecheck +
-    // lint, ~120s+) makes every claim hang/exit 124. CLAUDE.md sanctions
-    // --no-verify for these non-main, no-CI claim pushes.
-    const push = gitTry(["push", "--no-verify", REMOTE, `${commit}:refs/heads/${ASSIGN_REF}`]);
-    return push.ok;
+    // (#3880) A push TIMEOUT routes to verification, not to "failed" — the
+    // write may well have landed server-side before the client gave up.
+    const v = verifyLanded(key, content);
+    return { verdict: v, pushOk: push.ok, pushErr: push.ok ? "" : why(push) };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 }
 
+/**
+ * Interpret a commitAndPush result. Returns true when the write landed,
+ * false when it demonstrably did not (caller may retry). Never returns on an
+ * unverifiable outcome — that exits 7, because guessing in either direction is
+ * the bug this issue is about.
+ */
+function settle(res, what) {
+  if (!res.verdict.known) {
+    die(
+      7,
+      `UNKNOWN OUTCOME: ${what} was pushed (git reported ${res.pushOk ? "success" : `failure: ${res.pushErr}`}) but the ` +
+        `result could NOT be verified: ${res.verdict.err}\n` +
+        `The write may or may not have landed. Do NOT blindly retry — re-read the record first ` +
+        `(claim-issue.mjs --check / --list). Blind retries after an unverified outcome are what burned ids #3890/#3891 (#3880).`,
+    );
+  }
+  if (res.verdict.landed && !res.pushOk) {
+    // The exact "succeeds as failure" case. Say so — silently swallowing it
+    // hides a real transport problem.
+    console.error(
+      `note: git push reported failure (${res.pushErr}) but the record verifies as written. ` +
+        "Treating as SUCCESS on the evidence of the ref, not the exit code (#3880).",
+    );
+  }
+  return res.verdict.landed;
+}
+
 // --- read-only modes --------------------------------------------------------
 function doList() {
-  const sha = remoteAssignSha();
+  const sha = tipShaOrDie("list assignments");
   if (!sha) {
-    console.log("No assignments yet (ref issue-assignments does not exist).");
+    console.log(`No assignments yet (ref ${ASSIGN_REF} does not exist).`);
+    ok("no assignments ref yet");
     return;
   }
-  fetchAssign(sha);
-  const ls = gitTry(["ls-tree", "--name-only", sha]);
-  const files = ls.ok ? ls.out.split("\n").filter((f) => f.endsWith(".json")) : [];
-  const rows = [];
-  for (const f of files) {
-    const id = f.replace(/\.json$/, "");
-    const e = readEntry(sha, id);
-    if (isHeld(e)) rows.push(e);
-  }
+  const files = entryFiles(sha);
+  // One batched read, not one subprocess per entry: at 654 claims the per-entry
+  // form took 50 s (#3880). A failed batch is a real failure here — unlike the
+  // id scan, --list has no filename-only fallback that would still be correct.
+  const entries = readEntriesBatch(sha, files);
+  if (!entries) die(6, `could not read assignment entries at ${sha.slice(0, 12)}`);
+  const rows = [...entries.values()].filter(isHeld);
   rows.sort((a, b) => Number(a.id) - Number(b.id) || String(a.slice || "").localeCompare(String(b.slice || "")));
   if (!rows.length) {
     console.log("No active claims.");
+    ok("0 active claims");
     return;
   }
   console.log("id\tslice\tassignee\tstatus\tbranch\tclaimed_at");
   for (const e of rows) {
     console.log(`${e.id}\t${e.slice || "-"}\t${e.assignee}\t${e.status}\t${e.branch || "-"}\t${e.claimed_at || "-"}`);
   }
+  ok(`${rows.length} active claim(s)`);
 }
 
 function doCheck(target) {
-  const sha = remoteAssignSha();
-  fetchAssign(sha);
+  const sha = tipShaOrDie(`report the status of ${target.label}`);
   const e = readEntry(sha, target.key);
   if (isHeld(e)) {
     console.log(`${target.label} is CLAIMED by ${e.assignee} (since ${e.claimed_at || "?"}).`);
-    process.exit(3);
+    refuse(3, `${target.label} is claimed by ${e.assignee}`, true);
   }
   console.log(`${target.label} is UNASSIGNED.`);
+  ok(`${target.label} is unassigned (verified against ${REMOTE}/${ASSIGN_REF})`);
   process.exit(0);
 }
 
@@ -463,10 +933,35 @@ function nowIso() {
   return new Date().toISOString().replace(/\.\d+Z$/, "Z");
 }
 
+// (#3880) The open-PR scan is the ONLY thing standing between `--allocate` and
+// an id that an in-flight PR already uses. A reservation made without it must
+// therefore never be handed out as if it were clean. We refuse BEFORE reserving
+// (an id refused costs nothing; an id reserved and then abandoned is a
+// permanent hole in the sequence — two were burned that way on 2026-07-31).
+function guardScanCoverage({ scanPRs, degraded }) {
+  if (flags.has("--allow-unscanned")) return;
+  if (!scanPRs) {
+    die(
+      2,
+      "--no-pr-scan disables the open-PR collision check, so the reserved id would NOT be verified against " +
+        "in-flight PRs — the exact way duplicate issue ids reach the merge queue (#2531/#3636).\n" +
+        "Run without --no-pr-scan, or pass --allow-unscanned to reserve anyway and accept the collision risk.",
+    );
+  }
+  if (degraded) {
+    die(
+      6,
+      "the open-PR id scan DEGRADED (gh offline/unauthenticated/rate-limited), so the id universe is incomplete " +
+        "and the reserved id would not be verified against in-flight PRs.\n" +
+        "Nothing was reserved. Fix gh auth and re-run, or pass --allow-unscanned to reserve anyway.",
+    );
+  }
+}
+
 // Atomically reserve the next free issue id (#2531). Computes max(used)+1 over
-// origin/main ∪ open-PR-added ids ∪ ref-reserved ids, writes a reservation
-// entry, and pushes first-wins. On a non-ff rejection (another allocator landed
-// a reservation since we read), re-fetch and recompute a fresh id — so two
+// main ∪ open-PR-added ids ∪ ref-reserved ids, writes a reservation entry, and
+// pushes first-wins. On a non-ff rejection (another allocator landed a
+// reservation since we read), re-fetch and recompute a fresh id — so two
 // concurrent allocators can NEVER hand out the same number. Prints the reserved
 // id to stdout (machine-readable; the human/JSON detail goes to stderr or with
 // --json). `assignee` is optional: with one the reservation doubles as the claim
@@ -475,71 +970,95 @@ function nowIso() {
 function doAllocate(assignee) {
   const wantJson = flags.has("--json");
   const scanPRs = !flags.has("--no-pr-scan");
+  const dryRun = flags.has("--dry-run");
+  // A dry run reserves nothing, so an unscanned preview is harmless — gate only
+  // real reservations.
+  if (!dryRun) guardScanCoverage({ scanPRs, degraded: false });
+  refreshMainTip();
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const sha = remoteAssignSha();
-    fetchAssign(sha);
+    const sha = tipShaOrDie("allocate an id");
 
     const { ids: used, prScanComplete } = allUsedIds(sha, { scanPRs });
     // contiguousMax+1 is always strictly above the contiguous body, so it can
     // never alias an in-use id (strays sit > STRAY_GAP above max, never at +1).
     const id = String(contiguousMax(used) + 1);
-    // #2943: degraded-scan marker — idsFromOpenPRs already warned on stderr;
-    // also carried in the --json output so tooling can react.
     const degraded = scanPRs && !prScanComplete;
+    if (!dryRun) guardScanCoverage({ scanPRs, degraded });
 
     // --dry-run: preview the candidate without reserving (no push). Useful to
     // see "what id would I get" without burning a reservation. NOT collision-
     // safe on its own — only the real reserve+push is atomic.
-    if (flags.has("--dry-run")) {
-      if (wantJson)
-        process.stdout.write(JSON.stringify({ id: Number(id), dryRun: true, prScanDegraded: degraded }) + "\n");
-      else {
-        console.error(
-          `(dry-run) next free id would be #${id} (scanned ${used.size} used ids; PR-scan ${scanPRs ? (degraded ? "DEGRADED" : "on") : "off"})`,
+    if (dryRun) {
+      const scanState = scanPRs ? (degraded ? "DEGRADED" : "on") : "off";
+      if (wantJson) {
+        process.stdout.write(
+          JSON.stringify({ id: Number(id), dryRun: true, prScan: scanState, prScanDegraded: degraded }) + "\n",
         );
+      } else {
+        console.error(`(dry-run) next free id would be #${id} (scanned ${used.size} used ids; PR-scan ${scanState})`);
         process.stdout.write(`${id}\n`);
       }
+      ok(`dry-run preview #${id} (nothing reserved)`);
       return;
     }
 
+    const requestedBy = requesterId(assignee);
     const entry = {
       id,
       assignee: assignee || "",
+      // (#3880) Never anonymous: a bare reservation still names who asked for
+      // it, so the ref can attribute ownership.
+      requested_by: requestedBy,
       status: assignee ? "in-progress" : "reserved",
       branch: assignee ? branch || "" : "",
       reserved_at: nowIso(),
       ...(assignee ? { claimed_at: nowIso() } : {}),
       updated_at: nowIso(),
+      // Unique per invocation — the fingerprint verifyLanded() compares against
+      // (see there for why second-resolution timestamps are not enough).
+      write_id: UNIQ,
       // (#3598 forensics) durable record of the open-PR scan's health AT
       // allocation time. Collision C could not be root-caused post-hoc because
       // the degraded-scan signal lived only on stderr; now the reservation
       // itself says whether the id universe included open PRs ("ok"),
       // was degraded (scan failed → fail-open), or was skipped (--no-pr-scan).
+      // Since #3880, anything other than "ok" requires an explicit
+      // --allow-unscanned, so the marker records a DELIBERATE choice.
       pr_scan: scanPRs ? (degraded ? "degraded" : "ok") : "off",
     };
     const verb = assignee ? `reserve+claim #${id} -> ${assignee}` : `reserve #${id}`;
     const msg = `chore(assign): ${verb} [skip ci]`;
     const content = JSON.stringify(entry, null, 2) + "\n";
 
-    if (commitAndPush(sha, id, content, msg)) {
+    const res = commitAndPush(sha, id, content, msg);
+    if (settle(res, `reservation of #${id}`)) {
       // stdout = just the id (scriptable); details to stderr unless --json.
       if (wantJson) {
         process.stdout.write(
           JSON.stringify({
             id: Number(id),
             assignee: assignee || null,
+            requestedBy,
             branch: entry.branch || null,
+            prScan: entry.pr_scan,
             prScanDegraded: degraded,
           }) + "\n",
         );
       } else {
         console.error(
-          `Reserved issue #${id}${assignee ? ` for ${assignee}${entry.branch ? ` (branch ${entry.branch})` : ""}` : ""}.`,
+          `Reserved issue #${id}${assignee ? ` for ${assignee}${entry.branch ? ` (branch ${entry.branch})` : ""}` : ""} (requested by ${requestedBy}).`,
         );
         console.error(`(pushed to ${REMOTE}/${ASSIGN_REF}; main untouched, no CI triggered)`);
         process.stdout.write(`${id}\n`);
       }
+      if (entry.pr_scan !== "ok") {
+        console.error(
+          `WARNING: #${id} was reserved with pr_scan="${entry.pr_scan}" — it is NOT verified against in-flight PRs ` +
+            "and may collide in the merge_group. Re-check before creating the file.",
+        );
+      }
+      ok(`reserved #${id} (verified on ${REMOTE}/${ASSIGN_REF}, pr_scan=${entry.pr_scan})`);
       return;
     }
     console.error(`allocate: ref moved (attempt ${attempt}/${MAX_RETRIES}) — re-scanning for a fresh id…`);
@@ -547,7 +1066,10 @@ function doAllocate(assignee) {
     // don't re-collide in lock-step. Skip the wait after the final attempt.
     if (attempt < MAX_RETRIES) sleepMs(raceBackoffMs(attempt));
   }
-  die(5, `Could not reserve a fresh id after ${MAX_RETRIES} attempts (heavy contention). Re-run.`);
+  die(
+    5,
+    `Could not reserve a fresh id after ${MAX_RETRIES} attempts (heavy contention). Nothing was reserved; re-run.`,
+  );
 }
 
 function writeMode(target, assignee, kind) {
@@ -557,7 +1079,7 @@ function writeMode(target, assignee, kind) {
   if (kind === "claim") {
     const main = mainIssueStatus(base);
     if (main && (main.status === "done" || main.status === "wont-fix")) {
-      die(4, `${label} is already ${main.status} on ${MAIN_REF} (${main.file}). Nothing to claim.`);
+      refuse(4, `${label} is already ${main.status} on ${MAIN_REF} (${main.file}). Nothing to claim.`);
     }
     if (!main) {
       console.error(`warning: no issue file for #${base} found on ${MAIN_REF}; claiming anyway.`);
@@ -573,8 +1095,7 @@ function writeMode(target, assignee, kind) {
   // silently performed a REAL mutation (agents accidentally claimed live issues
   // twice this way).
   if (flags.has("--dry-run")) {
-    const sha = remoteAssignSha();
-    fetchAssign(sha);
+    const sha = tipShaOrDie(`preview ${kind} of ${label}`);
     const existing = readEntry(sha, key);
     const held = isHeld(existing);
     console.error(
@@ -584,17 +1105,17 @@ function writeMode(target, assignee, kind) {
           : "Currently unassigned.") +
         ` No push performed; ${REMOTE}/${ASSIGN_REF} untouched.`,
     );
+    ok(`dry-run preview of ${kind} ${label} (nothing written)`);
     return;
   }
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const sha = remoteAssignSha();
-    fetchAssign(sha);
+    const sha = tipShaOrDie(`${kind} ${label}`);
     const existing = readEntry(sha, key);
 
     if (kind === "claim") {
       if (isHeld(existing) && existing.assignee !== assignee && !flags.has("--force")) {
-        die(
+        refuse(
           3,
           `${label} is already claimed by ${existing.assignee} (since ${existing.claimed_at || "?"}). Pick another issue${slice ? "/slice" : ""}, or pass --force to steal.`,
         );
@@ -602,11 +1123,17 @@ function writeMode(target, assignee, kind) {
     }
     if (kind === "release" || kind === "complete") {
       if (!isHeld(existing)) {
+        // Reaching here means the ref was READ SUCCESSFULLY and genuinely holds
+        // no live claim — tipShaOrDie() has already made a failed read fatal.
+        // Before #3880 this same line was printed when the read had FAILED,
+        // which is how #3661/#3685 kept a stale lock while the caller saw a
+        // clean exit 0.
         console.log(`${label} is not currently claimed — nothing to ${kind}.`);
+        ok(`${label} holds no live claim (verified against ${REMOTE}/${ASSIGN_REF})`);
         return;
       }
       if (assignee && existing.assignee !== assignee && !flags.has("--force")) {
-        die(3, `${label} is held by ${existing.assignee}, not ${assignee}. Pass --force to override.`);
+        refuse(3, `${label} is held by ${existing.assignee}, not ${assignee}. Pass --force to override.`);
       }
     }
 
@@ -614,10 +1141,13 @@ function writeMode(target, assignee, kind) {
       id: base,
       ...(slice ? { slice } : {}),
       assignee: kind === "claim" ? assignee : existing ? existing.assignee : assignee,
+      requested_by: requesterId(assignee),
       status: kind === "claim" ? "in-progress" : kind === "complete" ? "done" : "released",
       branch: kind === "claim" ? branch || (existing && existing.branch) || "" : (existing && existing.branch) || "",
       claimed_at: kind === "claim" ? nowIso() : existing ? existing.claimed_at : nowIso(),
       updated_at: nowIso(),
+      // Unique per invocation — the fingerprint verifyLanded() compares against.
+      write_id: UNIQ,
     };
     if (kind !== "claim") entry.released_at = nowIso();
 
@@ -625,7 +1155,8 @@ function writeMode(target, assignee, kind) {
     const msg = `chore(assign): ${verb} ${label} -> ${entry.assignee} [skip ci]`;
     const content = JSON.stringify(entry, null, 2) + "\n";
 
-    if (commitAndPush(sha, key, content, msg)) {
+    const res = commitAndPush(sha, key, content, msg);
+    if (settle(res, `${kind} of ${label}`)) {
       const human =
         kind === "claim"
           ? `Claimed ${label} for ${entry.assignee}${entry.branch ? ` (branch ${entry.branch})` : ""}.`
@@ -634,6 +1165,7 @@ function writeMode(target, assignee, kind) {
             : `Released ${label} (was ${entry.assignee}).`;
       console.log(human);
       console.log(`(pushed to ${REMOTE}/${ASSIGN_REF}; main untouched, no CI triggered)`);
+      ok(`${kind} ${label} verified on ${REMOTE}/${ASSIGN_REF}`);
       return;
     }
     console.error(`push rejected (attempt ${attempt}/${MAX_RETRIES}) — someone else moved the ref, re-checking…`);
@@ -641,7 +1173,7 @@ function writeMode(target, assignee, kind) {
     // don't re-collide in lock-step. Skip the wait after the final attempt.
     if (attempt < MAX_RETRIES) sleepMs(raceBackoffMs(attempt));
   }
-  die(5, `Could not acquire the claim ref after ${MAX_RETRIES} attempts. Try again.`);
+  die(5, `Could not acquire the claim ref after ${MAX_RETRIES} attempts. Nothing was written; try again.`);
 }
 
 // --- dispatch ---------------------------------------------------------------

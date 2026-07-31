@@ -48,6 +48,31 @@ A suppression that silently does nothing is the same failure family as a gate
 that is never read: the outcome is identical to "the rule rejected me", so you
 debug the wrong thing.
 
+## Never pipe a command whose exit status you need (#3880)
+
+11. [ ] If you checked `$?` after a command, make sure it wasn't behind a pipe.
+
+`cmd | tail -4; echo $?` reports **`tail`'s** status, not `cmd`'s — so a script
+that crashed reads as a clean success. This is not a hypothetical: on 2026-07-31
+it made two failed `claim-issue.mjs` operations look clean (nearly leaving an
+issue permanently claimed by a departed agent) and printed `EXIT=0` for a
+pre-dispatch gate that had actually said **STOP**. Three agents hit it in one
+session, one with the rule already written in their own memory — so vigilance is
+not the fix; the mechanics are.
+
+Use any of:
+
+```bash
+cmd > out.txt 2>&1; echo "EXIT=$?"    # no pipe at all
+cmd | tail -4; echo "EXIT=${PIPESTATUS[0]}"
+set -o pipefail                        # then $? is the first failing stage
+```
+
+**And prefer verifying the EFFECT over the exit code.** For anything that writes
+shared state, read the state back (`claim-issue.mjs --check <id>`,
+`git ls-remote`, `gh pr view`). A push can land while git reports failure, and a
+write can fail while the caller sees 0 — both were observed the same day.
+
 ## Commit verification
 
 End your commit message with a **✓** (checkmark) once you've completed the checklist. The pre-commit hook rejects commits without it.
