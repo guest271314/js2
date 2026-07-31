@@ -19,10 +19,19 @@ related: [3370, 3417, 3335, 3189]
 # These finalize-time splices share the overlay's private companion-table ABI;
 # extracting them would duplicate that state machine rather than isolate a
 # subsystem. The implementation therefore remains in its owning module.
+# (2026-07-31) The frozen-write consult must sit in assignment.ts beside the two
+# pre-existing `frozenVars` consults it completes — `emitAssignToTarget` (~L2667)
+# and the property-assign path (~L3568). The whole defect WAS that those two
+# cover only `PropertyAccessExpression`; putting the ElementAccess twin in a
+# different module would re-separate the three checks that must stay in sync and
+# would require exporting `compileElementAssignment`'s internal fctx/emit
+# plumbing purely to relocate ~50 lines. Growth is intended and local.
 loc-budget-allow:
   - src/codegen/vec-overlay.ts
+  - src/codegen/expressions/assignment.ts
 func-budget-allow:
   - src/codegen/vec-overlay.ts::fillVecOverlayHelpers
+  - src/codegen/expressions/assignment.ts::compileElementAssignment
 ---
 
 # #3420 — element write to a frozen Array is silently honored
