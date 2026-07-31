@@ -73,6 +73,24 @@ shared state, read the state back (`claim-issue.mjs --check <id>`,
 `git ls-remote`, `gh pr view`). A push can land while git reports failure, and a
 write can fail while the caller sees 0 — both were observed the same day.
 
+## Re-run gates after every edit, not once per branch (#3880)
+
+12. [ ] If you edited files after the last gate run, run the gates again.
+
+"I ran the gate" can be **true and stale at the same time**. On 2026-07-31 a dev
+ran `node scripts/update-issues.mjs --check` (green), then added two more doc
+commits, and `quality` failed on the second one. This is not the usual
+stale-shared-state failure — it is your own verification aging against your own
+work, which feels safe precisely because you did check.
+
+**The specific trap that caused it:** the #1616 link gate resolves any
+`plan/issues/<digits>-<slug>.md`-shaped string in an issue file as a link to a
+real file. A **glob** like `` `plan/issues/2916-*.md` `` is the natural way to
+refer to an issue file in prose — and it resolves to nothing, so `quality` fails.
+Write `#2916` or the full filename instead. (Measured: four glob-shaped paths
+exist on `main`, all in `scripts/**` comments, which the gate does not scan —
+which is why no issue file had hit this before.)
+
 ## Commit verification
 
 End your commit message with a **✓** (checkmark) once you've completed the checklist. The pre-commit hook rejects commits without it.
