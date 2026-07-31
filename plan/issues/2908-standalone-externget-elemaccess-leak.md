@@ -94,6 +94,99 @@ The floor gate (`scripts/check-standalone-highwater.mjs`) scores
 
 Net: unambiguously NET-POSITIVE on the gated metric with zero floor breach.
 
+## Reconciliation 2026-07-31 — CONFIRMED done; the "8,092 dynamic_object_property"
+## figure was never evidence about this issue
+
+This issue was re-opened for question after a report that the baseline still
+showed **8,092/8,222 ES5-ish entries tagged `dynamic_object_property`**, raising
+"read-path only / false-done". **Both are wrong, and the instrument was at
+fault, not the record.** Two independent reasons:
+
+**1. The tag cannot discriminate.** `classifyHostImportLeak`
+(`tests/test262-shared.ts` L317-324) collapses **seven unrelated helper
+families** into `dynamic_object_property` with one prefix regex:
+
+```
+/__extern_|__object_|__defineProperty|__get_builtin|__new_plain_object|__register_|__proto_method_call/
+```
+
+`__extern_` alone spans `get/set/has/call/method_call/length/delete/get_idx`, so
+the tag's count is not a count of any one helper's leaks and could never be
+evidence about a fix to `__extern_get` specifically.
+
+**2. In the STANDALONE baseline the tag reads 14, not 8,092.** Measured over the
+real artifact (`test262-standalone-current.jsonl`, 26.5 MB, **48,088 entries**,
+fetched 2026-07-31):
+
+| `host_import_leak_class` | entries |
+| --- | ---: |
+| `iterator_protocol` | 1,907 |
+| `host_import` | 1,653 |
+| `regexp` | 40 |
+| **`dynamic_object_property`** | **14** |
+
+The quoted 8,092 must have come from a different artifact — almost certainly the
+**host** baseline, where `env::__extern_get` is a *legitimate, intended* import
+that every dynamic read carries by design. Comparing a host-lane import count
+against a standalone-lane fix is the category error.
+
+**3. The fix itself was verified by reading the code, not the record.**
+`register("__extern_get", …)` occurs **exactly once** in the whole pre-scan
+(`src/codegen/registry/imports.ts` L2381) and is guarded by
+`if (!(ctx.standalone || ctx.wasi))` (L2380). `grep -n 'register("__extern'
+src/codegen/registry/imports.ts` returns that single line — no unguarded twin,
+no write-path counterpart in that function. **Not read-path-only; there is no
+second path in the pre-scan to be read-path-*of*.**
+
+### The measurement that should have driven this lane
+
+`metadataFromImports` persists the **actual import names** per entry, so the
+real ranking needs no test262 re-run. Over the standalone baseline: **3,614 of
+48,088 entries (7.5 %) leak ≥1 `env::` import, and every one of them is
+`compile_error`** — in standalone a host import is a compile *refusal*, so the
+test never runs and its `host_free_pass` is already 0 (the same pure-upside
+accounting §"Net accounting" uses above).
+
+Ranked by **distinct tests** (a test may span families; `sole` = tests whose
+*only* leaks are in that family, i.e. fixing it alone unblocks them):
+
+| family | tests | sole | top categories |
+| --- | ---: | ---: | --- |
+| **generators / async-generators** | **1,877** | **1,618** | language/expressions 976, language/statements 709, arguments-object 95 |
+| other (Temporal-adjacent, TypedArray) | 610 | 559 | Temporal 217, TypedArray 85 |
+| promises / async | 480 | 134 | language/expressions 138, Promise 129 |
+| array runtime | 377 | 205 | Array 105, TypedArray 97, Promise 79 |
+| SharedArrayBuffer / Atomics | 317 | 306 | Atomics 150, SAB 58 |
+| Temporal | 282 | 282 | Temporal 282 |
+| BigInt | 60 | 59 | language/expressions 37 |
+| RegExp | 28 | 26 | annexB 21 |
+| WeakRef / FinalizationRegistry | 26 | 26 | FinalizationRegistry 23 |
+| **dynamic object property (this issue's family)** | **14** | 14 | language/expressions 14 |
+
+Top individual names: `__gen_next` 1,588 · `__gen_create_buffer` 1,537 ·
+`__get_caught_exception` 1,537 · `__gen_result_value` 1,290 ·
+`__create_generator` 1,271 · `__gen_result_done` 1,248 · `__gen_return` 859 ·
+`Promise_then2` 378 · `__js_array_new` 377 · `__js_array_push` 349 ·
+`SharedArrayBuffer_new` 317. 107 distinct `env::` names in total.
+
+**Read this carefully before acting on it:**
+
+- **1,618 tests unblocked ≠ 1,618 tests passing.** Implementing a family
+  host-free removes the *compile refusal*; the semantics must then also be
+  correct. This sizes the gate, not the win.
+- **The top family is ES2015, not ES5.** `function*`/`yield` are ES6, so if the
+  objective is strictly the ES5 edition bucket, the 1,618-test generator family
+  is **out of scope for it** — it is simply the largest standalone host-import
+  refusal overall. The ES5-facing entries here are the array runtime, RegExp
+  (annexB 21) and the residual 14. `scope_official` in this artifact is a
+  **boolean**, not an edition, so the ES5 split cannot be taken from this file;
+  do not infer one from these categories.
+
+Reproduce: `node scripts/fetch-baseline-jsonl.mjs` exports
+`ensureStandaloneBaselineJsonl` (the standalone lane IS covered), then group
+each entry's `imports` by name after stripping `env::` and dropping
+`wasi_snapshot_preview1`. Probe: `.tmp/leak-histogram2.mjs` (gitignored).
+
 ## Tests
 
 `tests/issue-2908-standalone-externget-elemaccess-leak.test.ts` — asserts
