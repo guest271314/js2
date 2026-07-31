@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-31T13:10:27.000Z",
-  "sourceSha": "4aa1162cc4bcb7e233bba6f3572b0bd93db985e9",
+  "generatedAt": "2026-07-31T13:52:56.000Z",
+  "sourceSha": "926f27866464d79a7e6044d405a878222140049c",
   "toolVersions": {
     "node": "v25.7.0",
     "platform": "linux",
@@ -88,26 +88,26 @@
     {
       "path": "benchmarks/results/history.json",
       "artifactSet": "internal-suite",
-      "bytes": 688183,
-      "sha256": "7e626f7d259f81a1a3552c37f6521c3382004f8e55244cfe57e1686d509ca8d6"
+      "bytes": 692204,
+      "sha256": "99e3257628e88739da84387f004e0e93aa2cb8bbce722a988dc5e14659fb68a4"
     },
     {
       "path": "benchmarks/results/latest.json",
       "artifactSet": "internal-suite",
-      "bytes": 21619,
-      "sha256": "1c3e010cdf82b4d1ffa94a21d2291ef0fc540d90bfdcb62110008890f924cba5"
+      "bytes": 21600,
+      "sha256": "2e134180ab3cbb756e27958c1a1e2ad18d1a71c53f649e3a4b3636af160a9a24"
     },
     {
       "path": "benchmarks/results/latest.md",
       "artifactSet": "internal-suite",
-      "bytes": 7119,
-      "sha256": "8a3d24a589b73af8a0945ff220ef7751b5b0cad8159c981279028211c493eb46"
+      "bytes": 7115,
+      "sha256": "61e50d1e811e57566e1acc13fa6ddd34e82ef45d74c11ac9496cae83adab91be"
     },
     {
       "path": "benchmarks/results/loadtime-benchmarks.json",
       "artifactSet": "size-loadtime",
       "bytes": 45043,
-      "sha256": "b918a35a2319b8c5b78c7daa6d60b1e4ea8f556cb2b69cdefb15c0d5dd42762f"
+      "sha256": "a874f676c7d474e91eb5239481f51cd3714bc5c9a30044fc7c85693bc163d07a"
     },
     {
       "path": "benchmarks/results/loadtime/array.mjs",
@@ -196,26 +196,26 @@
     {
       "path": "benchmarks/results/playground-benchmark-sidebar-no-jit.json",
       "artifactSet": "playground-no-jit",
-      "bytes": 2205,
-      "sha256": "8b01829b4c3484ea687d71bfb0b9e52f65a99ff80ae2f4a0eba0f200edb61c6c"
+      "bytes": 2202,
+      "sha256": "934e7d690e728059bf11756ce3f140bf86435d0609494cd29261d430261a1cd2"
     },
     {
       "path": "benchmarks/results/playground-benchmark-sidebar.json",
       "artifactSet": "playground-warm",
-      "bytes": 2197,
-      "sha256": "0728307ddc9cfda830ba2664a7d3526256bc45ec6f1876826da531565327e1ab"
+      "bytes": 2203,
+      "sha256": "6a19c87d234a918de18e31f8c484ad7c1d7d257abc137e89b3f97aa61bd1124e"
     },
     {
       "path": "benchmarks/results/size-benchmarks.json",
       "artifactSet": "size-loadtime",
       "bytes": 4108,
-      "sha256": "22aaf612a3e1a562334bf1ede257b70c47c722adb2d50ed63a679981a7a1aaad"
+      "sha256": "3e331c21801a100365b867a764bf994d510628aad01ebd7a90dd4eb37c3c5740"
     },
     {
       "path": "benchmarks/results/wasm-host-wasmtime-hot-runtime.json",
       "artifactSet": "wasmtime-hot-runtime",
-      "bytes": 15126,
-      "sha256": "32da65e1b980aa2dc79171410e1bb32027abd1740bff89d72c849da64918c188"
+      "bytes": 15123,
+      "sha256": "2e91f1b3a049eafafb0313812a20d73b9b13e10ce5dc1b1f24c616cf474b62fb"
     },
     {
       "path": "benchmarks/results/wasm-host-wasmtime-module-size-per-test.json",
