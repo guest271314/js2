@@ -376,14 +376,29 @@ function validateWasmtimeModuleSizeRows(rows) {
   }
 }
 
-function validateInternalSuite(rows) {
+export function validateInternalSuite(rows) {
   const strategies = new Map();
   validateUniqueRows(
     rows,
     "benchmarks/results/latest.json",
     (row) => (typeof row.name === "string" && typeof row.strategy === "string" ? `${row.name}:${row.strategy}` : null),
     (row, label) => {
-      finitePositive(row.medianMs, `${label}.medianMs`);
+      // (#3904) A strategy that errored is recorded as a placeholder row with
+      // all-zero timings plus `status: "failed"` and an `error` message,
+      // instead of being dropped. Such a row is legal but carries no timings,
+      // so it must be exempt from the positive-median check — while still
+      // being required to explain itself. Absent row = not applicable;
+      // failed row = broken lane. Only the JS reference must always measure.
+      if (row.status === "failed") {
+        if (row.strategy === "js") {
+          throw new Error(`${label} records a failed JS reference row; the JS baseline must always measure`);
+        }
+        if (typeof row.error !== "string" || row.error.length === 0) {
+          throw new Error(`${label}.error must be a non-empty message on a failed row`);
+        }
+      } else {
+        finitePositive(row.medianMs, `${label}.medianMs`);
+      }
       if (!strategies.has(row.name)) strategies.set(row.name, new Set());
       strategies.get(row.name).add(row.strategy);
     },

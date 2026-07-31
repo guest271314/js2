@@ -1,4 +1,4 @@
-import type { BenchmarkResult, Strategy } from "./harness.js";
+import { isMeasured, type BenchmarkResult, type Strategy } from "./harness.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -22,10 +22,18 @@ function groupByName(results: BenchmarkResult[]): GroupedRow[] {
   return Array.from(map.entries()).map(([name, results]) => ({ name, results }));
 }
 
+/** Measured result for a strategy, or undefined when absent or failed (#3904). */
+function measured(row: GroupedRow, s: Strategy): BenchmarkResult | undefined {
+  const r = row.results.get(s);
+  return r && isMeasured(r) ? r : undefined;
+}
+
 function winner(row: GroupedRow): Strategy | null {
   let best: Strategy | null = null;
   let bestMs = Infinity;
   for (const [s, r] of row.results) {
+    // A failed lane carries medianMs === 0 and would otherwise always "win".
+    if (!isMeasured(r)) continue;
     if (r.medianMs < bestMs) {
       bestMs = r.medianMs;
       best = s;
@@ -48,8 +56,8 @@ function fmtSize(bytes: number): string {
 }
 
 function speedup(row: GroupedRow, base: Strategy, target: Strategy): string {
-  const b = row.results.get(base);
-  const t = row.results.get(target);
+  const b = measured(row, base);
+  const t = measured(row, target);
   if (!b || !t) return "—";
   const ratio = b.medianMs / t.medianMs;
   if (ratio > 1) return `${ratio.toFixed(2)}x faster`;
@@ -77,10 +85,24 @@ export function generateMarkdown(results: BenchmarkResult[]): string {
   for (const row of rows) {
     const cols = STRATEGIES.map((s) => {
       const r = row.results.get(s);
-      return r ? fmtMs(r.medianMs) : "—";
+      if (!r) return "—"; // deliberately skipped / not applicable
+      return isMeasured(r) ? fmtMs(r.medianMs) : "FAILED";
     });
     const w = winner(row) ?? "—";
     lines.push(`| ${row.name} | ${cols.join(" | ")} | ${w} |`);
+  }
+
+  // (#3904) Spell the failures out. "—" means not applicable; a lane listed
+  // here ran and broke, and the message is what makes it diagnosable without
+  // re-running the suite.
+  const failures = results.filter((r) => !isMeasured(r));
+  if (failures.length > 0) {
+    lines.push("\n## Failed strategies\n");
+    lines.push("| Benchmark | Strategy | Phase | Error |");
+    lines.push("|-----------|----------|-------|-------|");
+    for (const f of failures) {
+      lines.push(`| ${f.name} | ${f.strategy} | ${f.failedPhase ?? "?"} | ${f.error ?? "(no message)"} |`);
+    }
   }
 
   // Speedup vs JS
@@ -111,7 +133,7 @@ export function generateMarkdown(results: BenchmarkResult[]): string {
     lines.push("|-----------|-----------|-----------|--------|");
     for (const row of rows) {
       const cols = (["host-call", "gc-native", "linear-memory"] as Strategy[]).map((s) => {
-        const r = row.results.get(s);
+        const r = measured(row, s);
         return r?.binarySize ? fmtSize(r.binarySize) : "—";
       });
       lines.push(`| ${row.name} | ${cols.join(" | ")} |`);
@@ -124,7 +146,7 @@ export function generateMarkdown(results: BenchmarkResult[]): string {
   lines.push("|-----------|-----------|-----------|--------|");
   for (const row of rows) {
     const cols = (["host-call", "gc-native", "linear-memory"] as Strategy[]).map((s) => {
-      const r = row.results.get(s);
+      const r = measured(row, s);
       return r?.compileMs ? fmtMs(r.compileMs) : "—";
     });
     lines.push(`| ${row.name} | ${cols.join(" | ")} |`);
@@ -214,6 +236,9 @@ export function buildHistory(outDir: string): void {
       const raw: BenchmarkResult[] = JSON.parse(fs.readFileSync(`${outDir}/${file}`, "utf-8"));
       const benchmarks: Record<string, Record<string, number>> = {};
       for (const r of raw) {
+        // (#3904) Failed lanes carry medianMs === 0; folding them into the
+        // trend series would plot a phantom "infinitely fast" data point.
+        if (!isMeasured(r)) continue;
         if (!benchmarks[r.name]) benchmarks[r.name] = {};
         benchmarks[r.name][r.strategy] = r.medianMs;
       }
