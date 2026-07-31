@@ -1,6 +1,6 @@
 ---
 id: 3869
-title: "Assignment paths do not consult per-property [[Writable]] — non-writable data property writes silently succeed instead of throwing TypeError"
+title: "Non-writable data-property write does not throw in strict mode (standalone); host also fails to suppress the store"
 status: ready
 created: 2026-07-31
 priority: high
@@ -14,7 +14,7 @@ horizon: m
 related: [3420, 2668, 2744, 3776]
 ---
 
-# #3869 — `[[Writable]]` is recorded and readable, and no assignment path consults it
+# #3869 — the strict-mode TypeError is missing; the two lanes fail differently
 
 ## ⚠️ THE TWO LANES FAIL FOR DIFFERENT REASONS — read before implementing
 
@@ -59,7 +59,10 @@ Probe, both lanes, plain-object twin controls in the same harness:
 | `writable:false` computed `o[k] = 20` → TypeError | PASS | **FAIL** |
 | CTRL frozen elem/prop write (#3420, fixed) | PASS | PASS |
 
-So `defineProperty` **stores** the attributes ✓, `getOwnPropertyDescriptor` **reads them back** ✓ — and **no assignment path consults `[[Writable]]`** ✗.
+So `defineProperty` **stores** the attributes ✓ and `getOwnPropertyDescriptor` **reads them back** ✓ in both lanes.
+Neither lane emits the strict-mode **TypeError** ✗ — and additionally the **host**
+lane fails to suppress the store (see the lane-asymmetry section above; standalone
+suppresses correctly).
 
 ## Where the bit lives (both places, verified)
 
@@ -75,9 +78,10 @@ So `defineProperty` **stores** the attributes ✓, `getOwnPropertyDescriptor` **
    `definePropertyReceiverKeys` carries an explicit comment that it **"never feeds
    descriptor-flag logic"** (`object-ops.ts:1134-1137`).
 
-**The real defect is narrower than "IR vs backend": the static struct-slot
-assignment path consults neither source, while the dynamic path consults the
-runtime flags correctly.**
+**The real defect is narrower than "IR vs backend": on the STANDALONE lane the
+consult already happens (the store is suppressed) and only the throw is missing.
+On HOST the static struct-slot path consults neither source, while the dynamic
+path consults the runtime flags correctly.**
 
 ## Layout decision (agreed, do not re-litigate without measurement)
 
