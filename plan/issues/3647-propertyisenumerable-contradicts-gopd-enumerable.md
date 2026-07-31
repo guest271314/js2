@@ -18,6 +18,28 @@ origin: "cohort tracker for failures exposed by #3603 S1 host de-inflation (PR #
 
 # #3647 — `propertyIsEnumerable` contradicts `getOwnPropertyDescriptor().enumerable`
 
+> ## ⚠ Claim status: the `issue-assignments` record is STALE — this issue is UNCLAIMED and AVAILABLE
+>
+> The record reads `assignee: ttraenkler/dev-es5-coercion`, `status: in-progress`.
+> The work was handed off deliberately; the release tooling could not execute it
+> (**#3880** — five failures on 2026-07-31 across `claim`, `--allocate` and
+> `--release`). The record was **not** hand-edited: rewriting a shared ref other
+> lanes read trades a bookkeeping problem for a corruption risk.
+>
+> **Take this issue freely.** Diagnosis is complete and nothing is half-implemented
+> — see the re-measurement below and the "next step is one fact" note.
+>
+> ## ⚠ THE DEFECT IS HOST-LANE ONLY — standalone already answers `false` correctly
+>
+> Read this before writing a fix. A change that "corrects" `propertyIsEnumerable`
+> globally would **regress the lane that is already right**. Verified both lanes,
+> controls passing:
+>
+> ```
+> host:        pIE=true   <- the defect
+> standalone:  pIE=false  <- already correct, do not touch
+> ```
+
 > **Cohort tracker.** One of the two failure cohorts EXPOSED (not caused) by
 > #3603 S1's host-lane de-inflation. Per the #3468 F1 landing recipe, every
 > exposed cohort is routed to a tracker — that is what makes a de-inflation
