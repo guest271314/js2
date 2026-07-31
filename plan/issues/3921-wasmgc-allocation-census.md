@@ -13,7 +13,7 @@ task_type: tooling
 area: codegen, tooling
 language_feature: compiler-internals
 goal: performance
-related: [3780, 3756, 3684, 3686]
+related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
 ---
 
@@ -88,6 +88,31 @@ Notes for whoever builds it:
   the allocation or merge counters for two types that got merged — comparing
   the census total against the independent `--trace-gc` sum (which needs no
   instrumentation) is the cross-check.
+
+## Why this is the head of the queue
+
+The standalone gap is ~9-10x and no identified lever is known to close it
+alone. The ranked causes, and who owns them, are:
+
+| # | cause | owner |
+| ---: | --- | --- |
+| 1 | allocation volume — 34 MB/parse unattributed | **this issue** |
+| 2 | null-check/cast scaffolding inside compiled bodies | #3686 |
+| 3 | untwinned generic bodies (twin admission 150/2,363 = 6.3%) | #3685 |
+| 4 | `__extern_get` generic property lookup | #3926 |
+| 5 | union-of-all-shapes fnctor structs (`Node` = 292 B for 3-6 live props) | #3927 |
+
+This one is first not because it is the biggest — #3686/#3685 may well be —
+but because it is the only one whose size is currently **unknown**, and it is
+cheap to resolve relative to what it unblocks. Items 1 and 5 are both
+allocation-side; sequencing 5 before this would risk spending an XL window on
+a retained 9.5 MB while a transient 34 MB goes unexamined.
+
+**Caveat that applies to the whole table:** these shares come from a Linux /
+Node 22 profile whose GC bucket (24-37%) disagrees by an order of magnitude
+with the two Node 24 / macOS profiles (1.5%, 4.3%). See the cross-box caveat
+now recorded in #3684/#3685/#3686. If GC is genuinely ~2% on the reference
+hardware, items 2-4 outrank items 1 and 5 there.
 
 ## Scope
 
