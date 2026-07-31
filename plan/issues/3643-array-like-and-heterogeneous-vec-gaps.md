@@ -45,6 +45,11 @@ func-budget-allow:
   # in the factory.
   - src/runtime.ts::resolveImport
   - src/codegen/destructuring-params.ts::destructureParamArray
+trap-growth-allow:
+  count: 1
+  reason: "fail -> fail flavour change, NOT a new regression. The baseline (test262-current.jsonl, oracle_version 12, honest lane) records array-like-has-length-but-no-indexes-with-values.js as status:fail with 'The newly created array's length ... Expected SameValue(«0», «5») to be true' — it failed at line 26, the FIRST assertion, because Array.from ignored the array-like length. Confirmed by checking origin/main's src/runtime.ts into this branch and reproducing the identical error at the identical line, rather than inferring the prior state from the gate's 'Newly trapping' wording. Slice B makes that first assertion pass, so execution now reaches line 33, Array.from({length}).map(...), and hits a PRE-EXISTING illegal_cast trap that Slice B neither introduces nor touches. Isolated by probe: Array.from('ab').map(f) and Array.from({length:5}).map(f) both trap on origin/main untouched by this PR, and in the latter case Array.from returns [] there so the callback is invoked ZERO times — the trap does not require the closure to run. Array.from(['a','b']).map(f), Array.from([1,2]).map(f) and [undefined,undefined].map(f) all pass, so it is neither the element type nor undefined elements: it is .map(<compiled closure>) on the host JS array that Array.from returns for any non-vec source. Filed as its own bug with the full probe table in #3916; fixing it is a codegen/representation change (the T[] return type is lowered as a WasmGC vec while the runtime returns an externref host array) well outside this slice's scope. Category: illegal_cast 76 -> 77 (+1), the single file named below."
+  tests:
+    - test/built-ins/Array/from/array-like-has-length-but-no-indexes-with-values.js
 horizon: m
 feasibility: medium
 task_type: bug
@@ -52,7 +57,7 @@ area: runtime
 language_feature: destructuring, array-methods, iteration-protocol
 es_edition: multi
 goal: core-semantics
-related: [3637, 2836, 3486]
+related: [3637, 2836, 3486, 3916]
 origin: "Measured while auditing #3637. Each item was A/B'd against #3637's merge base and is byte-identical there, so none is caused by #3637 — they are separate, pre-existing gaps that the audit surfaced."
 ---
 
