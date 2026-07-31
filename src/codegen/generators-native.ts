@@ -2028,9 +2028,9 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   if (ts.isFunctionExpression(decl) && !isNativeGeneratorExpressionShape(ctx, decl)) return false;
   // (#2571) An object-literal method with a computed/string name
   // (`{ [k]*(){} }`, `{ "m"*(){} }`) is out of scope — only an identifier-named
-  // method threads cleanly through the funcMap key. A FunctionDeclaration name
-  // is always an Identifier.
-  if (ts.isMethodDeclaration(decl) && !ts.isIdentifier(decl.name)) return false;
+  // method threads cleanly through the funcMap key. (#3896) PRIVATE names are
+  // admitted: already `__priv_`-mangled, and class-only, so never this shape.
+  if (ts.isMethodDeclaration(decl) && !ts.isIdentifier(decl.name) && !ts.isPrivateIdentifier(decl.name)) return false;
   // (#2571/#2581) A method generator is native-routable only when its emit site
   // is wired to the native factory: CLASS bodies (class-bodies.ts, #2571) and
   // OBJECT-LITERAL methods (literals.ts, #2581). Both compile the method body as
