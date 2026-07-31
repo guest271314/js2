@@ -128,23 +128,30 @@ load-recorded status, that one is configuration.
 - **"The baseline claims `pass` on rows main actually fails."** Raised from a
   local A/B showing `compound-assignment/11.13.2-25-s.js` and
   `assignment/11.13.1-1-s.js` failing on stock main while the baseline says
-  `pass`. **Not a baseline defect** — but the residual is unexplained and is
-  tracked here rather than closed. CI evidence: both rows read `pass` in the CI
-  baseline **and** `pass` in the CI candidate merged reports for runs 1 and 4.
-  Baseline and candidates agree, so the baseline is not claiming a pass the
-  pipeline disagrees with.
+  `pass`. **RULED OUT — root cause confirmed: a stale local `origin/main`.** The
+  A/B ran against a local ref pinned at `a1f72e93` while main was `0694da8f`.
+  Re-run against current main, host **passes** both rows, agreeing with the CI
+  baseline and with the CI candidate merged reports for runs 1 and 4. Baseline,
+  CI candidate and current main all agree on host. No pipeline fault.
 
-  The local harness has since been **validated** — it reproduced a known CI host
-  failure (`6-a-161` on `2654bc0c`) with the exact assertion and values — so
-  "permissive local harness" is *not* the explanation. The live hypothesis is
-  therefore that the local checkout's `origin/main` was **stale**, i.e. the A/B
-  measured an older main that genuinely failed those rows. That trap recurred
-  **four times in this single session**: plain `git fetch origin main` repeatedly
-  left `refs/remotes/origin/main` behind, and each time the stale ref produced a
-  confident, wrong answer. Anyone re-testing must first run
-  `git fetch origin '+refs/heads/main:refs/remotes/origin/main'` and verify
-  `git rev-parse origin/main` against
-  `gh api repos/loopdive/js2/commits/main --jq .sha`.
+  Note the local harness had already been **validated** — it reproduced a known
+  CI host failure (`6-a-161` on `2654bc0c`) with the exact assertion and values
+  — so "permissive local harness" was never the explanation. The input commit
+  was simply wrong. Both rows are also **standalone-only** failures, invisible
+  to a host-lane gate by design.
+
+  **This stale-ref trap fired five separate times in one session** and produced
+  a confident wrong answer every time. `git fetch origin main` does **not**
+  reliably advance `refs/remotes/origin/main`. Before any A/B against "main":
+
+  ```bash
+  git fetch origin '+refs/heads/main:refs/remotes/origin/main'
+  git rev-parse origin/main
+  gh api repos/loopdive/js2/commits/main --jq .sha   # must match
+  ```
+
+  **A baseline-vs-main disagreement should prompt a ref check before the
+  baseline is suspected.**
 - **`Object/defineProperties/15.2.3.7-6-a-161.js` as a mis-attributed row.**
   **Ruled out**: the file fails in *both* lanes for *different* reasons — host
   `arr.length` (SameValue 1 vs 10), standalone `hasOwnProperty`. Host and
