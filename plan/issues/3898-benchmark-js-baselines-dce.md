@@ -315,8 +315,10 @@ confirmation that the varying-argument form is measuring the real scan.
   case-convert a 23-character string, versus 77 ns in V8. That 127x is real.
 - **`string/split` (455 ns/op) and `string/trim` (246 ns/op)** remain real
   multi-x deficits and are the next most valuable targets after `case-convert`.
-- The `host-call` lane is 20x–90x slower than JS across every string benchmark
-  and is unaffected by this correction.
+- The `host-call` lane is 20x–90x slower than JS across every string benchmark.
+  This correction does not change it — but **those host-call numbers are
+  separately invalid for a different reason**; see the loader finding below.
+  Do not use the `host-call` column for anything.
 
 ### Caveats
 
@@ -333,6 +335,101 @@ confirmation that the varying-argument form is measuring the real scan.
    `performance.html` does not yet render it. `report.ts` refuses to publish the
    ratio and fails the run, which is the gate AC 4 asked for; surfacing it on the
    page is a follow-up.
+
+---
+
+## Follow-up finding: the `host-call` column is separately invalid (loader tax)
+
+Reported by #3903 after this issue's fix landed, and **independently reproduced
+here**. It does **not** affect the conclusions above, but it does invalidate the
+`host-call` column, so it is recorded here rather than left implicit.
+
+### Cause
+
+`benchmarks/run.ts` is executed via `npx tsx`. tsx transpiles with esbuild's
+`keepNames`, which emits
+
+```js
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+```
+
+and wraps **every** function literal in it. A closure allocated inside a hot
+function body therefore pays a full `Object.defineProperty` per allocation.
+Measured locally with `.tmp/keepnames-probe.mts` (identical source, Node
+v22.22.2):
+
+| | closure-in-loop | no closure |
+| --- | --- | --- |
+| esbuild, no `--keep-names`, plain node | 4.61 ns/iter | 1.48 |
+| esbuild `--keep-names`, plain node | 543.72 ns/iter | 1.71 |
+| `npx tsx` | 524.54 ns/iter | 1.49 |
+
+`--keep-names` alone reproduces it, so it is the transform and not the loader —
+a **118x** amplification on closure allocation.
+
+### Why it lands on exactly one lane
+
+The `host-call` lane crosses into `src/runtime.ts` host-import shims, which
+allocated closures inside their per-call bodies. `gc-native` makes no host calls,
+and the JS baselines in this file allocate no closures in any hot body. So the
+tax is almost perfectly selective.
+
+### Measured impact (strings suite, median of 3 bundled runs vs the committed tsx run)
+
+Bundling with the same recipe `build:compiler-bundle` uses
+(`esbuild --bundle --platform=node --format=esm`, no `--keep-names`) and running
+under plain node:
+
+| Lane | inflation under tsx |
+| --- | --- |
+| `js` | 0.83x – 2.12x (no consistent direction) |
+| `gc-native` | 0.99x – 1.57x |
+| **`host-call`** | **2.35x – 4.72x** |
+
+Published `host-call` vs JS ratios are overstated by **2.3x – 3.6x**:
+
+| Benchmark | published | actual (bundled) |
+| --- | --- | --- |
+| `string/substring` | 109.42x slower | 30.67x slower |
+| `string/split` | 108.11x slower | 46.92x slower |
+| `string/indexOf` | 35.75x slower | 10.27x slower |
+| `string/includes` | 35.23x slower | 10.49x slower |
+| `string/startsWith-endsWith` | 35.03x slower | 14.08x slower |
+| `string/trim` | 20.70x slower | 7.81x slower |
+| `string/case-convert` | 17.19x slower | 6.23x slower |
+| `string/replace` | 15.19x slower | 6.41x slower |
+
+The `host-call` ns/op column in the per-operation table above is inflated by the
+same factors and should be read as an upper bound only.
+
+### The conclusions above are NOT affected
+
+The gc-native-vs-JS ratio — the headline that gates #3899/#3900/#3901 — drifts by
+at most **1.60x** between the tsx and bundled runs, i.e. below the 1.8x noise
+floor established earlier. The `js` and `gc-native` lanes both speed up under the
+bundle, but they move together, so the ratio holds:
+
+| Benchmark | tsx (published) | bundled | drift |
+| --- | --- | --- | --- |
+| `string/substring` | 3.63x faster | 3.19x faster | 1.14x |
+| `string/case-convert` | 96.56x slower | 113.19x slower | 1.17x |
+| `string/indexOf` | 1.84x slower | 1.15x slower | 1.60x |
+| `string/includes` | 1.13x slower | 1.28x slower | 1.13x |
+| `string/split` | 8.83x slower | 5.88x slower | 1.50x |
+| `string/replace` | 3.30x slower | 3.99x slower | 1.21x |
+| `string/trim` | 4.06x slower | 4.65x slower | 1.14x |
+| `string/startsWith-endsWith` | 5.64x slower | 6.21x slower | 1.10x |
+
+Every verdict in the results table stands: `substring` still reverses,
+`case-convert` remains ~100x, `indexOf`/`includes` remain near parity.
+
+### Not fixed here
+
+The fix — running the harness from a plain `esbuild --bundle` artifact instead of
+the `tsx` dev loader — changes how `benchmark-refresh.yml` invokes the suite and
+belongs with #3903, not in this issue's scope. Until then the harness will keep
+silently taxing any closure allocated in a hot runtime body. #3903 has removed
+the current exposure in `src/runtime.ts`, but the amplifier remains.
 
 ## Test Results
 
