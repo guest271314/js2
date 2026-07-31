@@ -315,7 +315,7 @@ that one wrong predicate cost, in order: a deliberate handoff; **three** release
 attempts, all reported as failures (node crash / `cannot lock ref` / wedge
 
 > 560 s) of which **one had actually written the record**; a 24-line prose
-> correction added to `plan/issues/2916-*.md` explaining that the ref could not be
+> correction added to #2916's own issue file explaining that the ref could not be
 > fixed — describing a state that had not existed for hours; a routing decision by
 > the tech lead; and a task dispatched to an agent to release a claim that was
 > already released. Three separate agents, including the dispatcher, held the same
