@@ -11,12 +11,9 @@ import { emitNativeHtmlWrapperHelpers } from "./html-wrapper-native.js";
 import { emitStrSearchHelpers } from "./native-strings-search.js";
 import { emitStrCaseHelpers } from "./native-strings-transform.js";
 import { emitSelfHostedStringHelpers } from "./native-strings-selfhost.js";
-import {
-  emitStrReplaceHelpers,
-  emitStrSplitHelper,
-  emitStrConstructHelpers,
-  emitStrRegexEscapeHelper,
-} from "./native-strings-rewrite.js";
+import { emitStrReplaceHelpers, emitStrConstructHelpers, emitStrRegexEscapeHelper } from "./native-strings-rewrite.js";
+// (#3901) `__str_split` lives in its own module — see native-strings-split.ts.
+import { emitStrSplitHelper } from "./native-strings-split.js";
 import { makeNativeStrShared } from "./native-strings-shared.js";
 import { emitStrFlattenHelpers, emitStrToUtf8Helper } from "./native-strings-core.js";
 import { emitStrConcatHelpers, emitStrCompareHelpers, emitStrSliceCharHelpers } from "./native-strings-basics.js";

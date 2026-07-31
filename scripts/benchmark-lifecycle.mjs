@@ -376,14 +376,42 @@ function validateWasmtimeModuleSizeRows(rows) {
   }
 }
 
-function validateInternalSuite(rows) {
+export function validateInternalSuite(rows) {
   const strategies = new Map();
   validateUniqueRows(
     rows,
     "benchmarks/results/latest.json",
     (row) => (typeof row.name === "string" && typeof row.strategy === "string" ? `${row.name}:${row.strategy}` : null),
     (row, label) => {
-      finitePositive(row.medianMs, `${label}.medianMs`);
+      // (#3904 prerequisite) A benchmark strategy that ERRORED is recorded as a
+      // placeholder row — all-zero timings plus `status: "failed"` and an
+      // `error` message — instead of being dropped from the results entirely.
+      // Such a row is legal but carries no timings, so it is exempt from the
+      // positive-median check while still being required to explain itself.
+      //
+      //   absent row  = strategy not applicable (deliberately skipped)
+      //   failed row  = strategy is BROKEN
+      //
+      // Only the `js` reference must always produce a real measurement; a
+      // failed JS row means the comparison itself is meaningless.
+      //
+      // This validator change MUST land on `main` BEFORE the harness starts
+      // emitting such rows. `benchmark-refresh.yml` deliberately validates the
+      // candidate snapshot with the BASELINE's copy of this script on
+      // `pull_request` (see the `lifecycle=` selection in that workflow), so a
+      // PR cannot weaken its own gate. The consequence is that an artifact
+      // FORMAT change cannot go green in the same PR that teaches the validator
+      // about it — hence this split.
+      if (row.status === "failed") {
+        if (row.strategy === "js") {
+          throw new Error(`${label} records a failed JS reference row; the JS baseline must always measure`);
+        }
+        if (typeof row.error !== "string" || row.error.length === 0) {
+          throw new Error(`${label}.error must be a non-empty message on a failed row`);
+        }
+      } else {
+        finitePositive(row.medianMs, `${label}.medianMs`);
+      }
       if (!strategies.has(row.name)) strategies.set(row.name, new Set());
       strategies.get(row.name).add(row.strategy);
     },
