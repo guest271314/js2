@@ -233,3 +233,42 @@ for any dynamic win — not the size of a win that did not happen.
 - [ ] The ~34 MB currently unattributed in #3780 is attributed to named types,
       or the discrepancy between census total and `--trace-gc` total is itself
       explained rather than left as a rounding remark.
+
+## Follow-up 2026-07-31 — the "3.9 backing stores per vec" anomaly is NOT growth
+
+The census showed 123,337 vec backing stores against 31,414 vec headers and I
+attributed the ratio to the `max((len + argc) * 2, 4)` growth curve reallocating
+from a cold start. **That was wrong.** Attributing each counter to its enclosing
+function in the WAT gives:
+
+| counter | count/parse | allocated in |
+| --- | ---: | --- |
+| `type_121` | 43,527 | `__objvec_new` (+ `__objvec_push`, `__vec_elem_set`) |
+| `type_122` | 43,527 | **`__objvec_new` only** |
+| `type_1` | 27,361 | 155 sites, dominated by `__call_fn_*` / `__call_fn_method_*` |
+
+The two 43,527 figures are **identical**, and both trace to `__objvec_new`:
+that helper allocates **two** backing arrays on every call — parallel key and
+value stores for an open `$Object` — and it is called ~43.5 K times per parse,
+about **once per token**.
+
+So **87,054 array allocations per parse — 13.5% of all allocations, and 70% of
+the vec-backing family — are two-per-call from `__objvec_new`**, not growth
+reallocation at all. The growth curve may still be mistuned, but it is not what
+the ratio was showing, and presizing or capacity tuning would have moved almost
+none of it.
+
+Two live questions this opens, both bigger than the shared-empty-store fix:
+
+1. **Why is an open `$Object` constructed roughly once per token?** Acorn's hot
+   path should be building closed fnctor instances (`Node`, `TokenType`), not
+   open property bags. Whatever is falling back to the open representation is
+   paying 2 arrays plus a struct every time.
+2. **`__call_fn_*` argument vectors.** The remaining `type_1` mass is generic
+   call dispatch materialising an args array per call. That is the same
+   "generic dispatch is expensive" axis as #3926 and #3685, now with a
+   first-party allocation number attached.
+
+Recorded as a correction rather than a silent redirect: the growth-curve story
+above is left in place because it was the stated reason for the previous change,
+and it should be visible that measurement overturned it.
