@@ -14,7 +14,7 @@ goal: performance
 sprint: current
 horizon: m
 es_edition: n/a
-related: [3908, 3925, 3904]
+related: [3908, 3935, 3904]
 ---
 
 # #3924 — linear bump arena is never reclaimed between invocations
@@ -44,7 +44,7 @@ volume, which is what you would expect from an unreclaimed arena.
 
 **`string/concat-short` is NOT this bug** — it still traps at call 0 even with
 reset, because it allocates ~1.5 GB of quadratic intermediates *within* a single
-call. That is #3925.
+call. That is #3935.
 
 ## The decision to make
 

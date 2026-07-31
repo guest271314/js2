@@ -1,5 +1,5 @@
 ---
-id: 3925
+id: 3935
 title: "linear backend: string/concat-short allocates ~1.5 GB of quadratic intermediates within ONE call — traps immediately, unfixable by between-call reclaim"
 status: ready
 created: 2026-07-31
@@ -17,7 +17,7 @@ es_edition: multi
 related: [3908, 3924]
 ---
 
-# #3925 — quadratic intra-call string allocation in the linear lane
+# #3935 — quadratic intra-call string allocation in the linear lane
 
 ## Status: open — distinct from #3924, confirmed by the same experiment
 

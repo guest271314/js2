@@ -69,6 +69,6 @@ prioritise by what those targets actually need rather than by benchmark count.
 
 `issue-3908-linear-validation`'s inventory: of 26 previously-absent linear
 lanes, 4 are deliberate `dom/*` skips and **22 are real failures** — 16 compile
-errors (this issue and #3923) and 5 runtime traps (#3924, #3925). The gap was
+errors (this issue and #3923) and 5 runtime traps (#3924, #3935). The gap was
 structurally invisible until #3904 made failed lanes record themselves instead
 of vanishing.
