@@ -19,6 +19,7 @@ import {
   MERGE_GROUP_RUNNER_CAPACITY,
   STANDALONE_CHUNKS,
   buildMergeGroupMatrix,
+  parseLanes,
 } from "../scripts/gen-test262-mg-matrix.mjs";
 
 describe("#3431 gen-test262-mg-matrix", () => {
@@ -79,6 +80,66 @@ describe("#3431 gen-test262-mg-matrix", () => {
     // the constants stay mutually consistent rather than pinning a number
     // forever: whoever re-derives the ratio updates both sides together.
     expect(JS_HOST_CHUNKS / STANDALONE_CHUNKS).toBeCloseTo(1.835, 2);
+  });
+});
+
+describe("per-lane merge_group matrix (single-lane runs)", () => {
+  // The `changes` job drops a lane whose results the queued diff provably
+  // cannot move (see scripts/test262-paths-match.sh --target). These pin the
+  // two properties that make that safe.
+  it("emits only the requested lane", () => {
+    const hostOnly = buildMergeGroupMatrix({ host: true, standalone: false });
+    expect(hostOnly).toHaveLength(JS_HOST_CHUNKS);
+    expect(hostOnly.every((e) => e.target_name === "js-host")).toBe(true);
+
+    const standaloneOnly = buildMergeGroupMatrix({ host: false, standalone: true });
+    expect(standaloneOnly).toHaveLength(STANDALONE_CHUNKS);
+    expect(standaloneOnly.every((e) => e.target_name === "standalone")).toBe(true);
+  });
+
+  it("keeps the surviving lane's partition IDENTICAL to a full two-lane run", () => {
+    // Load-bearing: a single-lane run's results are diffed against a baseline
+    // produced by two-lane runs. assignBalancedChunk is a pure function of
+    // (chunk_index, chunk_total), so the freed runners must NOT be spent
+    // re-partitioning the surviving lane into more shards.
+    const full = buildMergeGroupMatrix();
+    for (const lanes of [
+      { host: true, standalone: false },
+      { host: false, standalone: true },
+    ]) {
+      for (const entry of buildMergeGroupMatrix(lanes)) {
+        const twin = full.find((e) => e.target_name === entry.target_name && e.chunk_index === entry.chunk_index);
+        expect(twin).toEqual(entry);
+      }
+    }
+  });
+
+  it("defaults to both lanes, and fail-safes an empty selection back to both", () => {
+    const both = buildMergeGroupMatrix();
+    expect(buildMergeGroupMatrix({})).toEqual(both);
+    // An empty matrix is a workflow-level error in GitHub Actions, not a
+    // skipped job — and skipping coverage is the wrong direction anyway.
+    expect(buildMergeGroupMatrix({ host: false, standalone: false })).toEqual(both);
+  });
+
+  it("parseLanes maps the CLI flag to lane selections, both-lanes by default", () => {
+    expect(parseLanes(["node", "gen.mjs"])).toEqual({ host: true, standalone: true });
+    expect(parseLanes(["node", "gen.mjs", "--lanes", "host,standalone"])).toEqual({
+      host: true,
+      standalone: true,
+    });
+    expect(parseLanes(["node", "gen.mjs", "--lanes=host"])).toEqual({ host: true, standalone: false });
+    expect(parseLanes(["node", "gen.mjs", "--lanes", "standalone"])).toEqual({
+      host: false,
+      standalone: true,
+    });
+    // Empty value = "no lane selected" -> buildMergeGroupMatrix fail-safes it.
+    expect(parseLanes(["node", "gen.mjs", "--lanes", ""])).toEqual({ host: false, standalone: false });
+  });
+
+  it("parseLanes rejects an unknown lane instead of silently narrowing coverage", () => {
+    expect(() => parseLanes(["node", "gen.mjs", "--lanes", "hsot"])).toThrow(/unknown lane/);
+    expect(() => parseLanes(["node", "gen.mjs", "--lanes", "host,gc"])).toThrow(/unknown lane/);
   });
 });
 
