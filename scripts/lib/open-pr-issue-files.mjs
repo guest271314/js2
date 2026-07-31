@@ -125,11 +125,24 @@ export function openPrIssueFiles({ repo = process.env.CLAIM_PR_REPO || "loopdive
           "--jq",
           '.[] | select(.status != "removed") | .filename',
         ]);
-        const hits = [];
+        // (#3636) UNION with the GraphQL first page — never REPLACE it. This
+        // used to `set` outright, so the first page's ids were DISCARDED the
+        // moment the fallback engaged. In practice `--paginate` returns a
+        // superset and has hidden the bug, but any PARTIAL REST result silently
+        // narrows the id universe, and both failure modes are invisible: a
+        // narrower universe just looks like a free id.
+        //
+        // The asymmetry is the whole argument. Over-including an id wastes a
+        // number; under-including one hands out an id another open PR already
+        // uses, and that is only caught in the `merge_group`. So the id universe
+        // must only ever GROW. (Same principle as the claim-heldness predicate
+        // in #3880 — fail toward over-inclusion, never toward under-inclusion.)
+        const hits = new Set(byPr.get(n) || []);
         for (const p of raw.split("\n")) {
-          if (ISSUE_ID_RE.test(p.trim())) hits.push(p.trim());
+          const t = p.trim();
+          if (ISSUE_ID_RE.test(t)) hits.add(t);
         }
-        if (hits.length) byPr.set(n, hits);
+        if (hits.size) byPr.set(n, [...hits]);
         else byPr.delete(n);
       }
       return { byPr, complete: true };
