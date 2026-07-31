@@ -2,7 +2,7 @@
 id: 2916
 title: "[SUBSTRATE][ARCH] Standalone native instanceof operator + isPrototypeOf residual (~31 leaky-PASS conversions)"
 status: ready
-updated: 2026-07-17
+updated: 2026-07-31
 sprint: current
 created: 2026-07-01
 priority: medium
@@ -21,6 +21,30 @@ origin: "2026-07-01 — sr-tail2 escalation: leaky-PASS conversion cluster, subs
 
 # #2916 — Standalone native `instanceof` operator + `isPrototypeOf` residual
 
+## Claim status: UNCLAIMED and AVAILABLE — take this issue freely
+
+> **As of 2026-07-31 08:55:03Z the `issue-assignments` record for #2916 reads
+> `status: released`.** The issue is unclaimed. Nothing is in flight and nothing
+> is half-implemented.
+>
+> Groundwork landed in **PR #3881** — measured scope, counted baseline, tiered
+> acceptance, the confirmed #2580 M3 dependency, and both leak sites. The
+> deliberate stopping point was _before_ the Slice B/C substrate, because a
+> stranded `OrdinaryHasInstance` tri-state is how a wrong `true` ships.
+>
+> **Historical note, resolved — do not act on it.** Earlier on 2026-07-31 this
+> file carried a warning that the claim record was stale and stuck at
+> `in-progress`. That warning was itself wrong. The departing agent's release
+> **did** land at 08:55:03Z; one of the attempts it reported as failed had in
+> fact written the record. It trusted its own error output instead of reading the
+> record back, then wrote a note explaining that a ref could not be fixed which
+> had already been fixed. Compounding it, `pre-dispatch-gate.mjs` tested
+> `assignee` alone and ignored `status`, so a **released** record still printed
+> `CLAIMED by …` — that gate defect is fixed in **#3901**. Three separate readers
+> were misled for ~6 h. Read the record, not the prose:
+> `gh api "repos/loopdive/js2/contents/2916.json?ref=issue-assignments"`
+> (quote the URL — zsh globs the `?`).
+
 ## RE-GROUNDED 2026-07-31 — scope is narrower than filed; the headline figure is stale
 
 > **The "~31 leaky-PASS conversions" figure in the title is SUPERSEDED.** It is
@@ -30,22 +54,22 @@ origin: "2026-07-01 — sr-tail2 escalation: leaky-PASS conversion cluster, subs
 >
 > Measured on current `main`, `--target standalone`, reading the module's
 > **import list** (a compile-time property — the right instrument for a leak
-> question; #3885's hazard concerns host *evaluation* of `Object.*` statics, not
+> question; #3885's hazard concerns host _evaluation_ of `Object.*` statics, not
 > the import list). Control: a plain module with no `instanceof` emits
 > `imports=0`.
 >
-> | shape | filed leak | measured 2026-07-31 |
-> | --- | --- | --- |
-> | `a instanceof Array` (builtin-name RHS) | `env::__instanceof` | **clean** — Slice A |
-> | `a instanceof C` (user-class RHS) | — | **clean** |
-> | Error family | — | **clean** (already native) |
-> | RHS resolves to no class/struct | `env::__instanceof_dyn` | **never observed** |
-> | `a instanceof K`, `K` an `any`-typed local | `env::__instanceof_check` | **LEAKS** |
-> | `x instanceof K`, `K` a fn-valued param | — | **LEAKS** `__instanceof_check` |
-> | `a instanceof holder.K` (property access) | — | **LEAKS** `__instanceof_check` |
-> | `a instanceof mk()` (call result) | — | **LEAKS** `__instanceof_check` |
-> | `C.prototype.isPrototypeOf(a)` (static receiver) | (paired residual) | **clean** |
-> | `p.isPrototypeOf(a)`, `p` a dynamic receiver | — | **LEAKS** `env::Object_isPrototypeOf` |
+> | shape                                            | filed leak                | measured 2026-07-31                   |
+> | ------------------------------------------------ | ------------------------- | ------------------------------------- |
+> | `a instanceof Array` (builtin-name RHS)          | `env::__instanceof`       | **clean** — Slice A                   |
+> | `a instanceof C` (user-class RHS)                | —                         | **clean**                             |
+> | Error family                                     | —                         | **clean** (already native)            |
+> | RHS resolves to no class/struct                  | `env::__instanceof_dyn`   | **never observed**                    |
+> | `a instanceof K`, `K` an `any`-typed local       | `env::__instanceof_check` | **LEAKS**                             |
+> | `x instanceof K`, `K` a fn-valued param          | —                         | **LEAKS** `__instanceof_check`        |
+> | `a instanceof holder.K` (property access)        | —                         | **LEAKS** `__instanceof_check`        |
+> | `a instanceof mk()` (call result)                | —                         | **LEAKS** `__instanceof_check`        |
+> | `C.prototype.isPrototypeOf(a)` (static receiver) | (paired residual)         | **clean**                             |
+> | `p.isPrototypeOf(a)`, `p` a dynamic receiver     | —                         | **LEAKS** `env::Object_isPrototypeOf` |
 >
 > **The residual is TWO host imports, not three:**
 >
@@ -59,7 +83,7 @@ origin: "2026-07-01 — sr-tail2 escalation: leaky-PASS conversion cluster, subs
 >
 > **A correction to this re-grounding's own first pass**, recorded because it is
 > the same class of error the issue text made: an initial probe tested only the
-> *static* `C.prototype.isPrototypeOf(a)` form, saw it clean, and concluded
+> _static_ `C.prototype.isPrototypeOf(a)` form, saw it clean, and concluded
 > `isPrototypeOf` was fully fixed. It is not — the dynamic-receiver form leaks.
 > One shape is not the surface.
 >
@@ -76,11 +100,11 @@ emits the import and dies at instantiation.
 
 Confirmed by probe (`--target standalone`, `.tmp/probe_name.ts` / `probe_inst.ts`):
 
-| Source shape | Leaked host import |
-|---|---|
-| `a instanceof Array` (any LHS, builtin-name RHS) | `env::__instanceof` |
-| `a instanceof C` (any LHS, `any`-typed RHS identifier) | `env::__instanceof_check` |
-| `a instanceof C` where RHS resolves to no class/struct name | `env::__instanceof_dyn` |
+| Source shape                                                | Leaked host import        |
+| ----------------------------------------------------------- | ------------------------- |
+| `a instanceof Array` (any LHS, builtin-name RHS)            | `env::__instanceof`       |
+| `a instanceof C` (any LHS, `any`-typed RHS identifier)      | `env::__instanceof_check` |
+| `a instanceof C` where RHS resolves to no class/struct name | `env::__instanceof_dyn`   |
 
 Because the host import is **entirely absent** in standalone, making `instanceof`
 native does not swap one leaf — it **REPLACES §13.10.2 InstanceofOperator /
@@ -130,6 +154,7 @@ leaks. It shares the `$Object.$proto` walk with the instanceof substrate.
 ## Implementation Plan
 
 ### Root cause
+
 `ensureLateImport` (`late-imports.ts:382`) has native routing for
 `UNION_NATIVE_HELPER_NAMES` / `OBJECT_RUNTIME_HELPER_NAMES` (line 438) but
 **none for `__instanceof*`**, so those names fall through to
@@ -161,6 +186,7 @@ as the harder, smaller slice (below).
 ### Slice A — generalize the native inline string-name branch (bulk of ~31)
 
 **File: `src/codegen/expressions/identifiers.ts`**
+
 - In `compileHostInstanceOf`, BEFORE the `__instanceof` late-import
   (line 1465), extend the existing `noJsHost(ctx)` native branch (currently
   gated on Error-family only at line 1394) to a general
@@ -200,6 +226,7 @@ as the harder, smaller slice (below).
 line 1247), `src/codegen/typeof-delete.ts` (`compileInstanceOf` dyn arm,
 line 790), plus a new `ensureInstanceofRuntime(ctx)` (co-locate with
 `ensureObjectRuntime` in `object-runtime.ts`).**
+
 - Emit native WasmGC `__instanceof_check(anyLHS, anyRHS) -> i32` and
   `__instanceof_dyn` (same body) as **DEFINED** functions (no import → no index
   shift, same invariant as the object-runtime helpers). Register their names in
@@ -230,6 +257,7 @@ line 790), plus a new `ensureInstanceofRuntime(ctx)` (co-locate with
 
 **Files: `src/codegen/expressions/calls.ts` (~4830 generic extern-method arm),
 `src/codegen/expressions/calls-closures.ts:418`.**
+
 - Route the generic host-method fallback for `isPrototypeOf` (the
   `Function.prototype.isPrototypeOf` / borrowed-generic form that currently
   bypasses the wired native helper) to the **existing native `__isPrototypeOf`**
@@ -242,6 +270,7 @@ line 790), plus a new `ensureInstanceofRuntime(ctx)` (co-locate with
   `emitProtoChainWalk(targetLocal, curLocal)` helper reused by both.
 
 ### Wasm IR pattern (Slice A — `a instanceof Function`, native)
+
 ```wasm
 local.get $a
 any.convert_extern            ;; externref -> anyref
@@ -251,6 +280,7 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
 ```
 
 ### Edge cases
+
 - LHS null / undefined / primitive (i31, boxed number/bool) → every arm 0
   (ref.test on a non-matching type is 0, never traps).
 - `x instanceof Object` for a `$Vec` / closure / `$Error_struct` → 1 (§1729
@@ -267,6 +297,7 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
   per #2907's methodology).
 
 ### Regression-risk mitigation
+
 - **Byte-inert for gc/host**: all changes behind `noJsHost(ctx)` /
   `ctx.standalone || ctx.wasi` gates; the host `__instanceof*` path is untouched
   when a JS host is present.
@@ -283,6 +314,7 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
   merge-shard reports.
 
 ### Corpus-verify plan
+
 - Leak-probe (per #2907 methodology) over `test/language/expressions/instanceof/`
   (~43 files, local sweep was 28 pass / 15 fail #2740) + the `built-ins`
   `isPrototypeOf` / `Function/prototype` families, `--target standalone`, count
@@ -293,7 +325,9 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
   #1536c/#2188) and native-collection instanceof (#2605) stay green.
 
 ### Split recommendation
+
 **Split into two dev slices, spec'd together (shared proto-walk substrate):**
+
 - **Slice A** (medium, byte-inert): generalize the native inline string-name
   branch — captures the dominant `__instanceof` leak (bulk of ~31). Land first.
 - **Slice B + C** (large, harder): native `__instanceof_check` /
@@ -309,7 +343,7 @@ ref.test $__closure_base      ;; ctx.closureInfoByTypeIdx supertype
 > **READ THE TIERING FIRST — test262 rows are the SECONDARY metric here, not the
 > deliverable.** `goal: standalone`, under umbrella #2860. The deliverable is
 > **import elimination**. A leaked `env::__instanceof_check` means standalone
-> mode is *not actually standalone* for any program using `instanceof` with a
+> mode is _not actually standalone_ for any program using `instanceof` with a
 > dynamic RHS — ordinary code, not an edge case. The product claim is "JS host
 > optional"; an import that fires on ordinary `instanceof` falsifies that claim
 > **regardless of how many conformance rows move**. Anyone sizing this by row
@@ -336,40 +370,40 @@ scope: 8 `runtime-eval`, 3 TypeError-not-thrown, 3 null/undefined conversion,
 3 `compile_error`, 6 assorted.
 
 **A row that stops leaking but still fails is a NEW FINDING, not a shortfall.**
-Removing an import makes a module *instantiate*; it must then still produce the
+Removing an import makes a module _instantiate_; it must then still produce the
 right answer. Such a row is a second defect wearing the first one's clothes —
 report it as its own observation rather than counting it against this issue.
 
 **Measured baseline** — host baseline vs standalone baseline, joined on `file`:
 
-| population (path-matched) | rows |
-| --- | ---: |
-| `instanceof` / `Symbol.hasInstance` | 56 |
-| `isPrototypeOf` | 10 |
-| **total population** | **66** |
+| population (path-matched)           |   rows |
+| ----------------------------------- | -----: |
+| `instanceof` / `Symbol.hasInstance` |     56 |
+| `isPrototypeOf`                     |     10 |
+| **total population**                | **66** |
 
-| leaky-PASS (host `pass`, standalone not-`pass`) | rows |
-| --- | ---: |
-| `instanceof`-ish | 22 |
-| `isPrototypeOf` | 2 |
-| **addressable CEILING** | **24** |
+| leaky-PASS (host `pass`, standalone not-`pass`) |   rows |
+| ----------------------------------------------- | -----: |
+| `instanceof`-ish                                |     22 |
+| `isPrototypeOf`                                 |      2 |
+| **addressable CEILING**                         | **24** |
 
 **The ceiling is 24, but the leak-attributable subset is far smaller.** By
 standalone failure signature, only **4** of the 24 carry
 `host_import_leak: standalone target emitted host imports`. The rest fail for
 causes this issue does not address:
 
-| n | standalone signature | addressed here? |
-| ---: | --- | --- |
-| 8 | `Import "js2wasm:runtime-eval"` | no — eval, separate issue |
-| **4** | **`host_import_leak: … emitted host imports`** | **yes** |
-| 3 | `Expected a TypeError to be thrown` | unlikely |
-| 3 | `TypeError: Cannot convert undefined or null to object` | unlikely |
-| 3 | `compile_error` (S11.8.6_A6_T3, A2.4_T3, primitive-prototype) | no |
-| 6 | assorted single assertion failures | unknown |
+|     n | standalone signature                                          | addressed here?           |
+| ----: | ------------------------------------------------------------- | ------------------------- |
+|     8 | `Import "js2wasm:runtime-eval"`                               | no — eval, separate issue |
+| **4** | **`host_import_leak: … emitted host imports`**                | **yes**                   |
+|     3 | `Expected a TypeError to be thrown`                           | unlikely                  |
+|     3 | `TypeError: Cannot convert undefined or null to object`       | unlikely                  |
+|     3 | `compile_error` (S11.8.6_A6_T3, A2.4_T3, primitive-prototype) | no                        |
+|     6 | assorted single assertion failures                            | unknown                   |
 
 **So the honest expectation is ~4 rows directly, ≤24 as an absolute ceiling** —
-and "leaking ≠ flipping": removing the import makes a module *instantiate*, after
+and "leaking ≠ flipping": removing the import makes a module _instantiate_, after
 which it still has to produce the right answer.
 
 ### Criteria — how each tier is evidenced
@@ -402,10 +436,11 @@ them. Correctness constraints bind **both** tiers.
 churned).**
 
 ### Why this split (root-cause + measure-first)
+
 Confirmed by broad standalone sweep (196 instanceof-using tests): the leak is
-dominated by `env::__instanceof` on the *string-name* path (~30 files), with a
+dominated by `env::__instanceof` on the _string-name_ path (~30 files), with a
 smaller `__instanceof_check` fully-dynamic-RHS tail (~7). Crucially, the 12
-leaky-PASSES *inside* the `instanceof`/`isPrototypeOf` test directories are ALL
+leaky-PASSES _inside_ the `instanceof`/`isPrototypeOf` test directories are ALL
 the hard cases — `symbol-hasinstance-*` (@@hasInstance dispatch, spec-declared
 out-of-scope), `primitive-prototype`/`prototype-getter` (the reflective
 `Get(C,"prototype")` crux sr-tail2 flagged), and non-callable-RHS `TypeError`
@@ -416,6 +451,7 @@ here is the "partial/wrong instanceof" graveyard, so it was deliberately left to
 a follow-up rather than churned.
 
 ### What Slice A does (`src/codegen/expressions/identifiers.ts`)
+
 On the `noJsHost` string-name path in `compileHostInstanceOf`, BEFORE the
 `__instanceof` late-import, dispatch on the compile-time-known `ctorName` to an
 inline native `ref.test` membership test
@@ -425,27 +461,29 @@ structs (#1992), `Map`/`Set`/`WeakMap`/`WeakSet`→`mapTypeIdx` (#2605 shared-$M
 imprecision carried), `Number`/`String`/`Boolean`→wrapper structs. Error-family
 keeps its existing native branch untouched. Any builtin not modeled here
 (`Object`, `Date`, `RegExp`, `Promise`, `ArrayBuffer`, …) or an unresolvable
-non-builtin ctor falls to a conservative `0` — a *missed conversion*, never a
+non-builtin ctor falls to a conservative `0` — a _missed conversion_, never a
 wrong `true`. The host `__instanceof` import is NEVER emitted under `noJsHost`.
 
 ### Why this is regression-safe (the airtight part)
-1. The `noJsHost` string-name branch *currently always leaks* `__instanceof` →
+
+1. The `noJsHost` string-name branch _currently always leaks_ `__instanceof` →
    the module cannot instantiate standalone → **every reaching test already
    fails**. A native answer can only CONVERT a failing test, never regress a
    passing one (a standalone-passing test cannot contain a leaking instanceof).
 2. gc/host is **byte-identical**: the branch is gated `noJsHost(ctx)`; verified
    with a 6-program binary-SHA compile-diff (branch == baseline, all match).
-3. `ref.test` uses *type* indices, which are rec-group / dead-elim stable — no
+3. `ref.test` uses _type_ indices, which are rec-group / dead-elim stable — no
    funcidx-ordering hazard (cf. `dyn-read.ts:287`). No late-import shift added.
 
 ### Measured
+
 Synthetic corpus: `__instanceof` leaks 21→2 (the 2 residual are Slice-B
 `__instanceof_check`). Runtime correctness verified standalone: `[]`/Map/Set/
 WeakMap → true, closure → true (#1992), primitive/null/non-matching → false,
 Error-family preserved. Real-corpus dynamic-LHS conversion confirmed
 (`RegExp.prototype.exec(...) instanceof Array`, an `any`-typed result, flips
 sa-fail→sa-pass; baseline fails). Note: many statically-typed `instanceof Array`
-sites were already resolved by `tryStaticInstanceOf`, so the *net* Slice-A yield
+sites were already resolved by `tryStaticInstanceOf`, so the _net_ Slice-A yield
 is the dynamic-LHS residual; the `new Number()`-wrapper cases do NOT convert
 because `new Number(x): any` collapses to a boxed primitive (a separate
 representation gap, #1111/#2503), not `$WrapperNumber` — kept in the set but
@@ -453,6 +491,7 @@ harmless (never a wrong `true`). Authoritative conversion count = `merge_group`
 `net_per_test`.
 
 ### Deferred to follow-up (NOT in this PR)
+
 - **Slice B**: native `__instanceof_check`/`__instanceof_dyn` fully-dynamic
   tri-state (reflective `.prototype`, non-callable-RHS throw). Needs the
   ctor-carrier `.prototype`/brand infra (#2907 follow-up) first.
@@ -462,7 +501,6 @@ harmless (never a wrong `true`). Authoritative conversion count = `merge_group`
   a wrong `true` on boxed primitives), `Date`/`RegExp`/`Promise`/`ArrayBuffer`
   membership (readable backing-struct idxs not yet wired), TypedArray brand
   (#2893/#2872).
-
 
 ## Reconciliation note (shepherd, 2026-07-01)
 
@@ -476,7 +514,7 @@ The Slice-A deferral said B/C wait on "ctor-carrier `.prototype`/brand infra
 (#2907 follow-up)". That substrate now has all its raw parts on main — they
 just aren't connected:
 
-- **Ctor carriers exist and are identity-stable** but are *unbranded, empty*
+- **Ctor carriers exist and are identity-stable** but are _unbranded, empty_
   `$Object`s: the #2907 namespace/Error carriers
   (`src/codegen/builtin-static-globals.ts`, `SUPPORTED_STATIC_PROPS`) and the
   #3006 per-name `__builtin_ctor_<Name>` singletons

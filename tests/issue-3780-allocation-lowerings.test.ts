@@ -133,6 +133,8 @@ describe("#3780 — packed own-presence flags", () => {
    * already recorded in `plan/agent-context/dev-acorn-throughput.md` §7
    * (`for…in`/`Object.keys`/presence over fnctor instances), it reproduces
    * byte-for-byte with packing DISABLED, and it is not this change's to fix.
+   * Filed as **#3920**, whose acceptance criteria include flipping this
+   * assertion to `EXPECTED_CROSS_WORD` once the lanes agree.
    *
    * Pinning to the control is the assertion that actually matters here anyway:
    * packing is a pure layout change, so whatever the lane answers, both
