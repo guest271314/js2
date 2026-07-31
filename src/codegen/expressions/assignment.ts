@@ -4199,6 +4199,56 @@ function emitSetterCallWithDummy(
   return valResult;
 }
 
+/**
+ * (#3420) Element write to a frozen receiver — `Object.freeze(a); a[i] = v`.
+ *
+ * The two pre-existing `frozenVars` consults (`emitAssignToTarget` and the
+ * property-assign path) both test `ts.isPropertyAccessExpression`, so they only
+ * ever covered `o.x = v`. `ElementAccessExpression` never consulted the frozen
+ * bit at all: the write fell straight through to the vec store, which stored
+ * anyway (and grew the backing array for an index past the end).
+ *
+ * The originally filed symptom was an uncatchable `oob` trap; that is gone (the
+ * #2744 integrity substrate plus #3742/#3750 landed since). The defect measured
+ * on current main is a SILENT successful write, which is strictly worse than a
+ * trap — `assert.throws(TypeError, …)` sees no throw and no wrong value either.
+ *
+ * Returns `undefined` when the receiver is not statically known to be frozen,
+ * so the caller falls through to the ordinary store path untouched.
+ */
+function tryEmitFrozenElementWriteNoOp(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  target: ts.ElementAccessExpression,
+  value: ts.Expression,
+): InnerResult | undefined {
+  if (!ts.isIdentifier(target.expression)) return undefined;
+  if (!ctx.frozenVars.has(integrityVarKey(ctx, target.expression))) return undefined;
+
+  // Spec evaluation order (§13.15.2): the MemberExpression and its key are
+  // evaluated, then the RHS, and only THEN does Set fail. Emit the key and the
+  // RHS for their side effects (`a[f()] = g()` must still call both) and drop
+  // the key; the RHS value stays as the assignment expression's result.
+  const keyType = compileExpression(ctx, fctx, target.argumentExpression);
+  if (keyType !== null) {
+    fctx.body.push({ op: "drop" });
+  }
+
+  const rhsType = compileExpression(ctx, fctx, value);
+  if (rhsType === null) return null;
+
+  if (isStrictContext(target, ctx.inferModuleStrictArguments)) {
+    fctx.body.push({ op: "drop" });
+    emitThrowTypeError(ctx, fctx, "Cannot assign to read only property of frozen object");
+    // Unreachable after the throw, but the assignment expression still needs a
+    // type for the surrounding expression stack.
+    return rhsType;
+  }
+
+  // Sloppy mode: the write silently does not happen; `a[i] = v` evaluates to v.
+  return rhsType;
+}
+
 function compileElementAssignment(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -4220,6 +4270,14 @@ function compileElementAssignment(
   ) {
     return VOID_RESULT;
   }
+
+  // (#3420) Frozen receiver: `a[i] = v` where `a` was passed to Object.freeze.
+  // Per §10.4.2.1 / OrdinarySet EVERY element write on a frozen object fails —
+  // its own data properties are non-writable AND it is non-extensible, so
+  // neither an existing index nor a fresh one may be set. Sloppy mode fails
+  // silently; strict mode throws a catchable TypeError.
+  const frozenNoOp = tryEmitFrozenElementWriteNoOp(ctx, fctx, target, value);
+  if (frozenNoOp !== undefined) return frozenNoOp;
 
   // #1886 Slice B: linear-backed Uint8Array write `buf[i] = v` →
   // i32.store8(ptr+i, trunc(v)). Only fires for a registered linear-safe
