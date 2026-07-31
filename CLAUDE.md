@@ -385,6 +385,27 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 
 ### Merge protocol (PR + CI, devs self-merge)
 
+**Docs-only changes go in ONE open PR — check before opening a second.** If a
+docs-only PR is already open (issue files under `plan/issues/`, `plan/` notes,
+`docs/`, README-level edits), **push your docs commits onto that PR's branch
+instead of opening another**. Only open a new docs PR when none is open.
+
+- "Docs-only" means the diff touches no `src/`, `tests/`, `scripts/`,
+  `.github/` or `benchmarks/` code. A change that touches code is a normal PR
+  and follows the rest of this protocol, even if it also edits docs.
+- **Code PRs still carry their own issue-file edits.** An implementation PR
+  that sets `status: done` on the issue it closes keeps that edit in the code
+  PR — see the issue-status lifecycle below, where the self-merge path
+  deliberately sets `done` in the impl PR. Do NOT split that out into the docs
+  PR; it would orphan the issue exactly the way `in-review` does.
+- Rationale: docs PRs are individually trivial to review and collectively
+  noisy. A session that files a dozen issues should cost one review, not
+  twelve. Grouping also keeps the merge queue free for changes that actually
+  need the gates.
+- To find the open one: `gh pr list -R loopdive/js2 --state open --label docs`,
+  or scan open PR titles for a docs prefix. If you cannot reach `gh`, ask the
+  tech lead rather than opening a speculative second PR.
+
 **Authoritative ruleset**: see [`docs/ci-policy.md`](docs/ci-policy.md) for
 the required-checks list, reviewer rules, force-push policy, linear-history
 mode, and the admin script (`scripts/enable-branch-protection.sh`) that
