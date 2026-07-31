@@ -152,6 +152,13 @@ requested refspec, and concurrent agents collide on that. `refs/claim-issue/base
 (the shared mirror, quoted in occurrence 2 above) is a second, independent
 contention point.
 
+**And it is not confined to the assignment ref.** While preparing this PR, a
+plain `git fetch origin main` failed with
+`cannot lock ref 'refs/remotes/origin/main': is at 96f1316 but expected ac32fbe`
+— objects fetched fine, only the ref update lost the race. Same class, a third
+ref, on one that **every** agent touches. Any shared remote-tracking ref in a
+many-agent clone is exposed; the assignment ref was simply where it hurt most.
+
 **And the fetch that printed that error SUCCEEDED at its actual job**: the
 requested destination ref was created at the new tip. git still exited 1. The old
 `fetchAssign()` used a throwing helper, so a fetch that worked crashed the script
@@ -290,6 +297,19 @@ Each was re-diagnosed independently as "the claim ref is unreliable", which is
 why that conclusion kept being re-derived all session without ever resolving to
 a mechanism. The mechanism is one operator in one predicate.
 
+**The largest consequence is a fleet-level conclusion that may be wrong.** Two
+agents independently gated candidate work the same day and reported the queue as
+saturated — one got **7 STOPs out of 8**, the other **6 of 7**, both on "hard
+claim" blockers — and "the high-priority codegen tier is heavily owned" was
+relayed upward as a finding. With **403 of 1,080** records mis-held *for the
+gate*, a meaningful share of those blockers were plausibly terminal records, in
+which case the conclusion is wrong and real work was skipped. The candidates
+shelved on claim blockers are #2865, #2949, #2175, #2872, #3030, #3175, #2873,
+#3024 and #3582; they should be re-gated once this lands. (#2864 was
+independently confirmed genuinely live via merged work on main, so that one
+stands.) A phantom rate is abstract; "the queue looked full and wasn't" is the
+cost.
+
 **And the dispatch gate had its own, worse copy.** `scripts/pre-dispatch-gate.mjs`
 does not call `claim-issue.mjs`; it reads the ref itself and tested
 `c.assignee` **alone, ignoring `status` entirely** — so for the gate every
@@ -314,6 +334,18 @@ statuses written today, so the predicate must not assume that set is closed.
 
 Note the pre-existing `done` records are not migrated: they are simply no longer
 read as held, so the 294 phantoms clear the moment this lands.
+
+### The forensic fields paid for themselves within hours
+
+Not hypothetical. On the same day this landed, #3636's #3889 collision was
+diagnosed **only** because the reservation carried `pr_scan: "ok"` — that field
+is what ruled out a degraded scan and redirected the investigation to the real
+cause (an id reserved correctly, then a *different* file written against it 32
+minutes later). And the one thing that could **not** be established was *who*
+reserved what, because every record of that era carries `assignee: ""`. That is
+exactly the gap `requested_by` closes. A forensic field justified by a real
+diagnosis it enabled, and an attribution gap justified by a real diagnosis it
+blocked, in the same investigation.
 
 ### Why records were anonymous
 
