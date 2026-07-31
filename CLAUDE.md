@@ -126,6 +126,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
   `Temporal is not defined`, which only appears if the tests ran. A stale "these are skipped" claim is
   how a real multi-hundred-test gap stays invisible, so treat this list as load-bearing and re-verify
   it in the runner before editing.
+
 - Many previously-skipped features now supported: TypedArray, DataView, ArrayBuffer, delete, async, generators, for-of
 - Issues #618-#634 cover current failure patterns (from 2026-03-19 error analysis)
 - parseInt import: `(externref, f64) -> f64` with NaN sentinel for missing radix
@@ -357,7 +358,7 @@ Sprint planning is a collaborative process, not a solo tech lead activity:
 
 - **Two lanes run concurrently — partition the queue + gate every dispatch ([plan/method/lane-partition.md](plan/method/lane-partition.md)).** The queue is split by goal (Lane A = lead/opus: runtime-eval, error-model, dogfood, core-semantics, **all CI/infra/pipeline**; Lane B = fable/porffor: backend-agnostic-ir, ir-full-coverage, Porffor #3288, value-rep, standalone-gap #2860; broad goals = claim-first-wins). **Before dispatching ANY agent on #N, run `node scripts/pre-dispatch-gate.mjs <N>`** (exit 0 clear / 1 STOP / 2 caution). It checks merged-ness from the issue FILE on main, open PRs, the `origin/issue-assignments` claim ref, issues that CITE #N, and — the check the hand-run version lacked — **issues that share #N's distinctive title terms**, plus those issues' own claims. Any BLOCKER ⇒ adopt/close/route, do NOT start a parallel impl.
   - **Do NOT rely on `git log --grep="#N"` alone.** PR numbers and issue ids share ONE sequence, so it matches `Merge pull request #N` and reads as "already merged" when it is not (hit 2026-07-25 on #3571).
-  - **It caught nothing that day because the old gate could not.** All three hand checks PASSED for #3571 while #3603's S1 slice was the same work, actively claimed by another lane — overlap by *idiom*, not by id, with neither issue citing the other.
+  - **It caught nothing that day because the old gate could not.** All three hand checks PASSED for #3571 while #3603's S1 slice was the same work, actively claimed by another lane — overlap by _idiom_, not by id, with neither issue citing the other.
   - **REMAINING BLIND SPOT the script cannot close:** a lane that has started but not yet claimed or pushed leaves no trace in main, open PRs, or the claim ref. **Claim at DISPATCH time** (`claim-issue.mjs <id> <agent> --branch <b>`), not at first push, or the next dispatcher is unprotected. `claim-issue.mjs` exit 0 is advisory (shared slug). Push branches to the **`fork`** so GitHub rejects dup PRs. This is the fix for the 2026-07-17 duplication (#3310/#3311/#3341/#3308 re-implemented by both lanes).
 - **Tech lead populates TaskList** — devs self-serve from it. No per-task dispatch messages needed.
 - **Owner pins + scope are how the auto-dispatcher is steered.** The native agent-teams auto-dispatcher only auto-offers tasks with **no `owner`**, and it does **not** read role. So the tech lead encodes routing in two places the dispatcher/agents actually honor:
@@ -407,7 +408,8 @@ layer on top — GitHub branch protection is the hard block.
    - **Push to `fork`, not `origin` — this is load-bearing, not cosmetic (#3343-era, 2026-07-17).** `origin` is **upstream** (`loopdive/js2`) and `push.default=current`, so a plain `git push` puts the branch on **upstream**. `gh pr create --head ttraenkler:<branch>` then fails with "No commits between" (the branch isn't on the fork), and the tempting workaround — dropping the `ttraenkler:` prefix — opens an upstream-head PR. That is how a **duplicate PR** survives: **two lanes run concurrently** (this checkout + a fork-origin lane), and when the same branch NAME exists in two different head repos, GitHub **cannot** apply its normal same-head+base rejection. Both PRs coexist and the work is done twice. Pushing to `fork` restores that free rejection. Do NOT rely on `claim-issue.mjs` to prevent this — it returns **exit 0 to both lanes** (they share the `ttraenkler/senior-dev` slug); the lock is advisory. Before starting an issue, also run `git log origin/main --grep="#<id>"` to check it isn't already merged. A PR that goes **DIRTY on files it itself touched** is a duplicate-merge smell, not an ordinary conflict.
 4. **Dev blocks on CI** — polls `gh pr checks <N>` every 30s for ~2 min wall time, in-context (Sonnet idle is nearly free). Use `gh run watch <run-id>` or a `while ! done; do sleep 30; done` loop with a max timeout (~10 min before noting unusual wait, ~20 min before escalating).
 5. **On CI completion**:
-   - **All required checks green** → run `/dev-self-merge`; if MERGE, mark the task completed and **stand down** (proceed to step 8). The dev does NOT enqueue — the server-side `auto-enqueue.yml` workflow enqueues on CI-completion (grace 0, #2786). NEVER enqueue or re-enqueue from a dev
+   - **All required checks green AND `mergeStateStatus == CLEAN`** → run `/dev-self-merge`; if MERGE, mark the task completed and **stand down** (proceed to step 8). The dev does NOT enqueue — the server-side `auto-enqueue.yml` workflow enqueues on CI-completion (grace 0, #2786). NEVER enqueue or re-enqueue from a dev
+     - **`CLEAN` is load-bearing, not decoration (#3878, #3904).** A red **non-required** check drives `mergeStateStatus` to **`UNSTABLE`**, and `auto-enqueue` enqueues only `{CLEAN, HAS_HOOKS}` — `UNSTABLE` is _deliberately_ excluded (`scripts/enqueue-green-prs.mjs`), because it once let red PRs into the queue. So a PR can have **every required check green and never be enqueued, indefinitely**. Standing down on "required checks green" alone is exactly the stranding condition. If you see `UNSTABLE` with only non-required checks red, **re-run the failed job** (`gh run rerun <run-id> -R loopdive/js2 --failed`) to get back to `CLEAN` — do not enqueue, and do not stand down assuming the workflow will pick it up.
    - **Drift detected** (mergeable_state becomes "behind") → `git merge origin/main` in the worktree, resolve conflicts with full PR context, push again, loop back to step 4
    - **CI failure** (any required check failed) → diagnose with full PR context (the agent KNOWS what it changed), fix locally, push again, loop back to step 4
 6. **If regressions per `/dev-self-merge`**: dev fixes on branch, pushes again, loops back to step 4
@@ -433,7 +435,9 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
+
 **test262 conformance**: 29,846 / 43,099 (69.2 %)
+
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

@@ -20,7 +20,7 @@ description: Merge self-check for a green PR. Reads the PR's required-check stat
 > fires right after the required-check workflows finish, and its grace window is
 > now 0 (#2786), so it enqueues every just-green PR within ~one workflow-startup —
 > no dependence on any agent surviving. The required checks are `cheap gate
-> (main-ancestor + lint)`, `merge shard reports`, and `quality`.
+(main-ancestor + lint)`, `merge shard reports`, and `quality`.
 >
 > **The merge queue then re-validates on the merged state.** `merge_group` re-runs
 > the required checks (the regression-gate #1943 — the hard block), and `auto-park`
@@ -76,13 +76,14 @@ done
 
 After the run exits:
 
-| Outcome                                                    | Action                                                                                                                                                                                                                    |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **All required checks green**                              | Run Step 0 (the checks-API self-check); on MERGE, mark the task completed and stand down — the server-side workflow enqueues (Step 5, #2786)                                                                               |
-| **Drift** (mergeable_state becomes `BEHIND` while waiting) | Do NOT re-enqueue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and the `auto-enqueue` backstop re-sweeps. A clean fast-forward (`git fetch origin && git merge origin/main && git push`) is optional; never re-enqueue after — the backstop owns re-adds |
-| **CI failure** (any required check `FAILURE`)              | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI                                                                                                        |
-| **Long wait** (>10 min)                                    | Emit a `TaskUpdate` noting the unusual wait but keep waiting                                                                                                                                                              |
-| **Very long wait** (>20 min)                               | Escalate to tech lead                                                                                                                                                                                                     |
+| Outcome                                                     | Action                                                                                                                                                                                                                                                                  |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **All required checks green + `mergeStateStatus == CLEAN`** | Run Step 0 (the checks-API self-check); on MERGE, mark the task completed and stand down — the server-side workflow enqueues (Step 5, #2786)                                                                                                                            |
+| **`UNSTABLE`** (required green, a NON-required check red)   | **Do NOT stand down — `auto-enqueue` skips `UNSTABLE` and the PR strands indefinitely** (#3878, #3904). Re-run the failed job: `gh run rerun <run-id> -R loopdive/js2 --failed`. Never enqueue manually                                                                 |
+| **Drift** (mergeable_state becomes `BEHIND` while waiting)  | Do NOT re-enqueue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and the `auto-enqueue` backstop re-sweeps. A clean fast-forward (`git fetch origin && git merge origin/main && git push`) is optional; never re-enqueue after — the backstop owns re-adds |
+| **CI failure** (any required check `FAILURE`)               | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI                                                                                                                                                      |
+| **Long wait** (>10 min)                                     | Emit a `TaskUpdate` noting the unusual wait but keep waiting                                                                                                                                                                                                            |
+| **Very long wait** (>20 min)                                | Escalate to tech lead                                                                                                                                                                                                                                                   |
 
 ## Step 0 — the merge gate (checks API; the committed CI feed is RETIRED)
 
@@ -110,7 +111,7 @@ gh pr view <N> --json statusCheckRollup,mergeStateStatus,isDraft,labels \
   changed), fix locally, push, loop back to wait-for-CI. ESCALATE to the tech
   lead only for genuine judgment calls (see "What ESCALATE means").
 - All required checks green (per `docs/ci-policy.md` §7) + `mergeStateStatus ==
-  "CLEAN"` + not a draft + no `hold` label → **MERGE**: mark the task completed
+"CLEAN"` + not a draft + no `hold` label → **MERGE**: mark the task completed
   and stand down (Step 5); the server-side workflow enqueues.
 - Green checks but `BEHIND`/`BLOCKED` → the Drift row above; never re-enqueue.
 - No checks at all (workflow-only / CI-config PR) → **MERGE** — stand down
@@ -260,12 +261,12 @@ Stop.
 
 ## Legacy Step 3 — criteria (in order, stop at first failure)
 
-| #   | Criterion                                                                                                   | Failure output                                                                                        |
-| --- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| 1   | `net_per_test > 0`                                                                                          | **ESCALATE — net_per_test is not positive (value: N). PR caused more regressions than improvements.** |
-| 2   | `R == 0 OR R / improvements < 0.10`, where `R = regressions_wasm_change ?? regressions_real ?? regressions` | **ESCALATE — regression ratio is N% (R/improvements), exceeds 10% threshold.**                        |
-| 3   | No bucket > 50 regressions (see Step 4)                                                                     | **ESCALATE — bucket "\<path\>" has N regressions, exceeds 50-test limit.**                            |
-| 4   | All above pass                                                                                              | **MERGE** — mark the task completed and stand down (Step 5); the workflow enqueues. (merge_group re-runs this same gate.)  |
+| #   | Criterion                                                                                                   | Failure output                                                                                                            |
+| --- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `net_per_test > 0`                                                                                          | **ESCALATE — net_per_test is not positive (value: N). PR caused more regressions than improvements.**                     |
+| 2   | `R == 0 OR R / improvements < 0.10`, where `R = regressions_wasm_change ?? regressions_real ?? regressions` | **ESCALATE — regression ratio is N% (R/improvements), exceeds 10% threshold.**                                            |
+| 3   | No bucket > 50 regressions (see Step 4)                                                                     | **ESCALATE — bucket "\<path\>" has N regressions, exceeds 50-test limit.**                                                |
+| 4   | All above pass                                                                                              | **MERGE** — mark the task completed and stand down (Step 5); the workflow enqueues. (merge_group re-runs this same gate.) |
 
 `R` (criterion 2) prefers `regressions_wasm_change` if the feed has it
 (post-#1222 CI). This filters out byte-identical-binary pass→fail flips,
