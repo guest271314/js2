@@ -475,9 +475,28 @@ not later misread as a regression:
   own S1 analysis (`66ab19f84`) records that its host arm landed via #3635 and
   only the standalone arm remains.
 
-**So the removal is strictly dominant on everything measured**: it fixes P1,
-regresses nothing, and leaves P2/P3 exactly as broken as they already are. It is
-not a tradeoff.
+> ## ❌ RETRACTED — "strictly dominant" was FALSE
+>
+> An earlier revision of this issue claimed the blanket removal *"is strictly
+> dominant on everything measured: it fixes P1, regresses nothing, and leaves
+> P2/P3 exactly as broken as they already are. It is not a tradeoff."*
+>
+> **A second sweep falsified that.** A blanket "unwire every member except
+> `substring`/`charAt`" causes **13 pass→fail regressions**. See
+> "Sweep 2 — the residual-risk population, and the retraction" below.
+>
+> **Why the first measurement could not see it:** the ≤ES5 scope contains no
+> `trimStart`/`trimEnd`/`codePointAt`/`includes`/`startsWith`/`endsWith` tests
+> at all, and none of the `*-this-value-not-obj-coercible.js` files. Sweep 1 was
+> not wrong; it was **silent** on the population where the cost lives — which is
+> exactly what a scope limit does, and why the residual risk was written down
+> before shipping rather than after.
+>
+> The narrowed candidate that survives is below, and it is labelled a
+> **prediction**, not a result.
+
+With the caveat above, on the ≤ES5 population the removal fixes P1 and leaves
+P2/P3 exactly as broken as they already are.
 
 ### P3 sized against the CORPUS — it is the biggest of the three
 
@@ -599,7 +618,70 @@ the corrected path.
 > re-measure first and quote the file list — do not assume the reopening text
 > is still accurate, because it was written while the masking was in effect.
 
-### Residual risk NOT covered by this sweep (state before shipping)
+## Sweep 2 — the residual-risk population, and the retraction
+
+The residual risk flagged below was measured rather than shipped around: the
+**185** `String/prototype` files sweep 1 did not cover (the wired members with no
+`es5id:` tests, plus the non-ES5 files of the members sweep 1 did cover). Same
+box, same run, same list, both arms from one tree.
+
+**Rows floored:** 185/185 on both arms, **0 timeouts**, and arm A reproduces the
+baseline **exactly** (124 pass / 61 fail). In-sweep control: **0 moved**.
+
+| | sweep 1 (265) | sweep 2 (185) | combined (450) |
+| --- | --- | --- | --- |
+| fail → pass | 10 | **20** | 30 |
+| pass → fail | 0 | **13** | **13** |
+| net | +10 | +7 | +17 |
+
+### The 13 regressions are a coherent mechanism, not noise
+
+- **`this-value-not-obj-coercible.js` × 5** (`charCodeAt`, `indexOf`,
+  `lastIndexOf`, `trimStart`, `trimEnd`) — these assert that a `null`/`undefined`
+  receiver **throws TypeError**. The wired bodies call
+  `emitStringRequireObjectCoercible`; the legacy path does not, or not
+  equivalently. **The wiring IS load-bearing for RequireObjectCoercible** —
+  half of this issue's own title.
+- **`trimStart`/`trimEnd` `this-value-{boolean,number,whitespace,line-terminator}`
+  × 8** — legacy does not lower those two members correctly at all.
+
+So the #2875 wiring is **not** uniformly superseded by #3254. It is superseded
+for *some* members and still load-bearing for others, and only a per-member
+measurement can tell them apart.
+
+### Per-directory ledger (both sweeps combined)
+
+| member      | Δ pass | gains | losses | verdict                    |
+| ----------- | ------ | ----- | ------ | -------------------------- |
+| trim        | +10    | 10    | 0      | **unwire**                 |
+| codePointAt | +2     | 2     | 0      | **unwire**                 |
+| includes    | +2     | 2     | 0      | **unwire**                 |
+| startsWith  | +2     | 2     | 0      | **unwire**                 |
+| endsWith    | +2     | 2     | 0      | **unwire**                 |
+| trimEnd     | +1     | 6     | 5      | KEEP wired (mixed)         |
+| trimStart   | +1     | 6     | 5      | KEEP wired (mixed)         |
+| charCodeAt  | −1     | 0     | 1      | KEEP wired                 |
+| indexOf     | −1     | 0     | 1      | KEEP wired                 |
+| lastIndexOf | −1     | 0     | 1      | KEEP wired                 |
+| at          | 0      | 0     | 0      | KEEP wired (no signal)     |
+| substring   | 0      | 0     | 0      | control — bespoke body     |
+| charAt      | 0      | 0     | 0      | control — bespoke body     |
+
+### The narrowed candidate — ⚠️ A PREDICTION, NOT A RESULT
+
+Unwire **only** `trim`, `codePointAt`, `includes`, `startsWith`, `endsWith`;
+keep every regressing member wired. Arithmetic over the ledger gives
+**+18 / −0**.
+
+**Do not quote +18 as measured.** It is arithmetic over two arms in which those
+five members were unwired *together with* the regressing ones. Per-member
+independence is plausible — each closure is minted per `(brand, member)` and the
+arms are guarded by exact metadata identity — but **plausible is not measured**,
+and this issue has already had one plausible hypothesis killed by a control (see
+the REFUTED section). **Run a third arm with only those five unwired, and quote
+that number instead.**
+
+### Residual risk NOT covered by sweep 1 (measured above — kept for the record)
 
 `at` / `codePointAt` / `includes` / `startsWith` / `endsWith` are wired today and
 the switch unwires them, but they carry **no `es5id:` tests**, so this ≤ES5-scoped
