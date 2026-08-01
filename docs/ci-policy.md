@@ -54,6 +54,34 @@ A failure here surfaces in the PR Checks tab but does not block merge.
 | `porffor-source-native-canary`                             | `.github/workflows/porffor-source-canary.yml` | #3478 — explicitly initializes only the pinned optional Porffor gitlink, then compares real-source JavaScript, production linear-Wasm, and sanitizer-instrumented Porffor-C under both allocator policies. Advisory and absent from `merge_group`, so the optional submodule cannot become a required queue dependency.                                                                                                                                                                                                           |
 | `semantic-sanitizers`                                      | `.github/workflows/porffor-direct-ab.yml`     | #3482 — relevant PRs must execute all four native rows: both plain direct-Porffor rows must reproduce their pinned UBSan misalignment finding, while both JS2 rows must remain sanitizer-clean with exact output. Expected direct safety failures are evidence, not skips. Advisory and absent from `merge_group`; its separate optimized job runs only by `workflow_dispatch`, uploads complete evidence without a performance threshold, and never auto-updates results.                                                        |
 
+### Watching a PR's checks: `pending == 0` is NOT "settled" (#3965)
+
+An empty pending list means "nothing pending **that exists**", which is
+indistinguishable from "nothing pending". Right after a push GitHub has created
+only a couple of check runs, so a watcher that polls `statusCheckRollup` and
+stops when no check is `IN_PROGRESS` will settle **immediately**, on a rollup
+that contains none of the required jobs, and report green. Observed for real
+while watching PR #3950: the first poll returned four checks (`retarget`,
+`cla-check`, `release-pending`) with zero pending, and the watcher declared CI
+settled roughly a minute after the push.
+
+Two floors make a watcher honest — apply **both**:
+
+1. **Floor the check count.** Require every required check to be **present by
+   name** (the list above) before interpreting pass/fail at all. Absence of a
+   job is not a pass.
+2. **Pin the head sha.** The API lags a push, so the rollup can still describe
+   the **previous** head, whose checks may be complete and passing. Compare
+   `.headRefOid` against the sha you actually pushed and refuse to settle until
+   they match; settling on a stale head reports a green that says nothing about
+   the code under review.
+
+Related: a dropped `synchronize` webhook can leave the PR head behind the fork
+ref indefinitely (20 minutes observed on #3950, both shas read full-length, so
+not the truncated-sha trap of the `head_sha=` query). The remedy is a **new
+commit** — `main` and published branches are append-only, so never force-push to
+"resync".
+
 ---
 
 ## 2. Reviewer policy
