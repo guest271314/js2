@@ -32,6 +32,14 @@ origin: "2026-08-01 sprint-78 LEVER 1 measurement of the ≤ES5 STANDALONE descr
 loc-budget-allow:
   - src/codegen/object-runtime-descriptors.ts
   - src/codegen/object-ops.ts
+# (#3400 R-FUNC) Same growth seen per-FUNCTION. Both edits are in-place changes
+# to the one existing builder/compiler for this operation; splitting either to
+# dodge the ratchet would separate a wasm instruction sequence from the
+# rationale comment that explains why it must not be "simplified" — which is
+# the specific regression this PR measured and rejected.
+func-budget-allow:
+  - src/codegen/object-runtime-descriptors.ts::buildObjectDescriptorHelpers
+  - src/codegen/object-ops.ts::compileObjectDefineProperties
 ---
 
 # #3957 — standalone `Object.defineProperties`: `[[Get]]` the descriptor, and expand a statically-shaped `Properties` map
