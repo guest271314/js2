@@ -7128,13 +7128,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // to externref — the empty struct stays registered (harmless; dead-eliminated
     // if unreferenced) but is never used as a value type, so no type-index shift.
     //
-    // Standalone-only: the open-object runtime is emitted exclusively under
-    // `ctx.standalone` (see compileObjectLiteral's #1901/#2542 gate); gc/host/wasi
-    // keep their existing struct/externref mapping byte-identical. A MIXED
-    // `{ a: number; [s: string]: T }` (own named props) is intentionally excluded —
-    // it has a static shape consumers read by field, so it keeps its struct.
+    // HOST-FREE targets (standalone AND wasi). The gate originally read
+    // `ctx.standalone` alone, which left wasi — equally host-free — with neither
+    // the host import gc/host uses nor this routing, so `o[k]` silently read the
+    // DEFAULT there. Analysis + measurements on plan/issues/2542-*.md. gc/host is
+    // unchanged (a JS host services `o[k]`); a MIXED `{ a: number; [s: string]: T }`
+    // stays excluded — it has a static shape consumers read by field.
     if (
-      ctx.standalone &&
+      (ctx.standalone || ctx.wasi) &&
       tsType.getProperties().length === 0 &&
       tsType.getCallSignatures().length === 0 &&
       !!ctx.checker.getIndexInfoOfType(tsType, ts.IndexKind.String)
@@ -7389,9 +7390,10 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   // (see resolveWasmType's #2542 guard), NOT an empty WasmGC struct. Registering an
   // empty struct here would make `resolveWasmType` pick `ref $empty` for the binding
   // and break the call-boundary `$Object`→struct cast (every `o[k]` read returns 0).
-  // Standalone-only, matching the resolveWasmType guard's scope.
+  // Host-free targets (standalone AND wasi), matching the resolveWasmType guard's
+  // scope — see the #2542-follow-up note there for why wasi belongs here.
   if (
-    ctx.standalone &&
+    (ctx.standalone || ctx.wasi) &&
     tsType.getProperties().length === 0 &&
     !!ctx.checker.getIndexInfoOfType(tsType, ts.IndexKind.String)
   ) {

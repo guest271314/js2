@@ -15,6 +15,19 @@ language_feature: compiler-internals
 goal: performance
 related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
 loc-budget-allow:
+  # The shared zero-length backing store (`src/codegen/empty-vec-store.ts`)
+  # needs a hook at the empty-array-literal site and one context field; the
+  # logic itself lives in the new module.
+  - src/codegen/literals.ts
+  - src/codegen/context/types.ts
+  # (#3933) The shared-vec global cache must be shifted alongside
+  # newTargetGlobalIdx / holeGlobalIdx / genEagerFlagGlobalIdx when a late
+  # string-constant import global is inserted below the module globals. This is
+  # the canonical home for that fix — the three sibling caches are shifted on
+  # the adjacent lines — and the comment carries the root-cause analysis for
+  # what is now the FOURTH occurrence of this bug, so the next reader does not
+  # have to re-derive it from a merge-queue log.
+  - src/codegen/registry/imports.ts
   # Two call sites (generateModule / generateMultiModule), 5 lines each plus the
   # import. The pass itself lives in src/codegen/alloc-census.ts, per the
   # "add code to the subsystem module, not the barrel" rule — what lands in
@@ -22,6 +35,7 @@ loc-budget-allow:
   # dead-type elimination has remapped every typeIdx.
   - src/codegen/index.ts
 func-budget-allow:
+  - src/codegen/literals.ts::compileArrayLiteral
   - src/codegen/index.ts::generateModule
   - src/codegen/index.ts::generateMultiModule
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
@@ -227,3 +241,97 @@ for any dynamic win — not the size of a win that did not happen.
 - [ ] The ~34 MB currently unattributed in #3780 is attributed to named types,
       or the discrepancy between census total and `--trace-gc` total is itself
       explained rather than left as a rounding remark.
+
+## Follow-up 2026-07-31 — the "3.9 backing stores per vec" anomaly is NOT growth
+
+The census showed 123,337 vec backing stores against 31,414 vec headers and I
+attributed the ratio to the `max((len + argc) * 2, 4)` growth curve reallocating
+from a cold start. **That was wrong.** Attributing each counter to its enclosing
+function in the WAT gives:
+
+| counter | count/parse | allocated in |
+| --- | ---: | --- |
+| `type_121` | 43,527 | `__objvec_new` (+ `__objvec_push`, `__vec_elem_set`) |
+| `type_122` | 43,527 | **`__objvec_new` only** |
+| `type_1` | 27,361 | 155 sites, dominated by `__call_fn_*` / `__call_fn_method_*` |
+
+The two 43,527 figures are **identical**, and both trace to `__objvec_new`:
+that helper allocates **two** backing arrays on every call — parallel key and
+value stores for an open `$Object` — and it is called ~43.5 K times per parse,
+about **once per token**.
+
+So **87,054 array allocations per parse — 13.5% of all allocations, and 70% of
+the vec-backing family — are two-per-call from `__objvec_new`**, not growth
+reallocation at all. The growth curve may still be mistuned, but it is not what
+the ratio was showing, and presizing or capacity tuning would have moved almost
+none of it.
+
+Two live questions this opens, both bigger than the shared-empty-store fix:
+
+1. **Why is an open `$Object` constructed roughly once per token?** Acorn's hot
+   path should be building closed fnctor instances (`Node`, `TokenType`), not
+   open property bags. Whatever is falling back to the open representation is
+   paying 2 arrays plus a struct every time.
+2. **`__call_fn_*` argument vectors.** The remaining `type_1` mass is generic
+   call dispatch materialising an args array per call. That is the same
+   "generic dispatch is expensive" axis as #3926 and #3685, now with a
+   first-party allocation number attached.
+
+Recorded as a correction rather than a silent redirect: the growth-curve story
+above is left in place because it was the stated reason for the previous change,
+and it should be visible that measurement overturned it.
+
+## #3933 — shipped, regressed, root-caused, re-landed (2026-08-01)
+
+The first code change off this census (share one zero-length backing store per
+element type, −8,922 allocations/parse) was auto-parked by the merge queue at
+**net −2,621 test262 passes**: `illegal_cast` 77 → 3,711, `null_deref`
+153 → 337, 400 modules failing to compile. Attribution was clean — a single-PR
+merge group, and the run reported "0 test262-relevant commits separate the
+baseline from main HEAD".
+
+**Root cause — index bookkeeping, not the aliasing premise.**
+`ctx.sharedEmptyVecGlobals` cached an **absolute** global index.
+`addStringConstantGlobal` (`src/codegen/registry/imports.ts`) inserts each new
+string literal as an **import global** at index `numImportGlobals` — *below*
+every module-defined global — then calls `fixupModuleGlobalIndices` to shift
+everything above it. That shifter updates the already-emitted `global.get`
+instructions correctly, and separately updates a **hand-maintained list of
+cached indices**. The new map was not on that list, so the next `[]` of the same
+element type reused a stale index naming an unrelated global:
+
+- stale index on an **i32/f64** global → module fails validation
+  (`struct.new[1] expected type (ref null N), found global.get of type i32`) —
+  the 400 `wasm_compile` failures;
+- stale index on an **externref** global → the coercion layer repairs it with
+  `any.convert_extern` + `ref.cast`, so the module validates and traps at run
+  time — the +3,634 `illegal_cast`.
+
+This is the **fourth** instance of the identical bug: `newTargetGlobalIdx`
+(#2023), `holeGlobalIdx` (#2001), `genEagerFlagGlobalIdx` (#3032) each landed the
+same one-line shift after the same class of failure, and each carries a comment
+directly above the line the new cache should have been added to. A cache of a
+live-baked global index is a standing hazard in this compiler; the durable shape
+is deferred resolution at finalize (as `recordInModuleInitFlagRead` does for
+`__in_module_init`), not a fifth entry in the list.
+
+**The aliasing premise held.** A stress fixture forcing every empty array in a
+program onto one shared singleton — `length=` grow, `fill`, `splice`,
+`copyWithin`, `reverse`, `sort`, spread, `concat` — produced identical results
+with the optimization off, on, and on-with-the-fix.
+
+**Why the shipped tests could not fail** — two independent blind spots, both
+measured, and worth carrying into any future backing-store sharing:
+
+1. `target: "standalone"` forces `nativeStrings`, and `addStringConstantGlobal`
+   early-returns without registering an import global. `numImportGlobals` stays
+   0 and the shifter never fires. **Every test in the original file was
+   standalone**, so the bug was invisible by construction.
+2. The fixtures (`var a = [1]; a.pop()`) never reached the modified branch at
+   all — small functions compile through the **IR front end**, which lowers `[]`
+   itself and never calls `literals.ts`'s empty-array path. Instrumenting that
+   exact body produced zero events and no `__empty_arr` global in the WAT.
+
+The regression test now pins the JS-host lane with a real string-constant import
+and two empty literals of one element type, and it was verified to FAIL with the
+one-loop fix removed.
