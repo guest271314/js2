@@ -80,9 +80,14 @@ paths run **back-to-back in one process** so they share conditions.
 | new — one `git cat-file --batch`         | **2,437 ms**     |
 | speedup                                  | **499x**         |
 
-Full-script wall clock (includes node startup, `ls-tree`, and parsing) ranges
-~3–18 s depending on how many other agents are hammering the box; the box ran
-~20 agents throughout, and run-to-run noise is several-fold.
+**Absolute wall clock on this box is contention-dominated — quote the ratio,
+not a single number.** The full new gate was observed anywhere from **2.4 s**
+(quiet) to **239 s** (measured while the old-path control was itself spawning
+3,410 `git show` processes, load ~5, ~20 agents active). That is why the
+headline above is a *controlled back-to-back A/B in one process on one ref*,
+which is immune to that noise, rather than two separately-timed runs. The old
+path degrades under the same contention, not less: 20 min here at moderate
+load, ~60 min in the original report.
 
 Where the remaining time goes (profiled): the two git subprocesses. Parsing is
 negligible — framing the 25 MB buffer into 3,410 strings takes ~60–85 ms and
@@ -117,8 +122,28 @@ parity data point.
 - **Floor** — the scan count is printed on success (`3,410 files scanned,
   3,410 with frontmatter`).
 
+## End-to-end check
+
+Pushed this branch with the hook **enabled** (not `--no-verify`). Every stage
+ran to completion — typecheck, lint, `format:check`, oracle ratchet,
+coercion-site ratchet, the #3765 vitest file, and `Pre-push: issue integrity
+OK`. The multi-minute stall at step 5b is gone; the remaining push latency was
+network, and a concurrent agent's `--no-verify` push was stalled the same way.
+
 ## Also in this change
 
 Documented the **false-negative push** rule next to the hook: a
 `timeout N git push` can be killed *after* the ref update has landed, so exit
 124 is not evidence the push failed. Confirm with `git ls-remote`.
+
+This reproduced live while pushing this very branch:
+
+```
+PUSH_RC=124  PUSH_SECONDS=900
+local  HEAD : e8fe6704890dd100c647921d37ef3db1098b606d
+remote issue-3964-prepush-integrity-batch: e8fe6704890dd100c647921d37ef3db1098b606d
+RESULT: push LANDED (refs match)
+```
+
+The client was killed at the 900 s watchdog; the ref had already updated.
+Treating exit 124 as failure would have led to a pointless re-push.
