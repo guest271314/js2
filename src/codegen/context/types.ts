@@ -1110,11 +1110,6 @@ export interface CodegenContext {
   structMap: Map<string, number>;
   /** Reverse map from type index to struct/interface name (O(1) reverse lookup) */
   typeIdxToStructName: Map<number, string>;
-  /**
-   * (#3921 follow-up) Shared zero-length backing-store global per array type
-   * — see `empty-vec-store.ts`. Lazily populated.
-   */
-  sharedEmptyVecGlobals?: Map<number, number>;
   /** Map from struct name to field info */
   structFields: Map<string, FieldDef[]>;
   /** (#2853 park fix) Struct type indices that MUST NOT be nominally branded by

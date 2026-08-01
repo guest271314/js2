@@ -15,11 +15,6 @@ language_feature: compiler-internals
 goal: performance
 related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
 loc-budget-allow:
-  # The shared zero-length backing store (`src/codegen/empty-vec-store.ts`)
-  # needs a hook at the empty-array-literal site and one context field; the
-  # logic itself lives in the new module.
-  - src/codegen/literals.ts
-  - src/codegen/context/types.ts
   # Two call sites (generateModule / generateMultiModule), 5 lines each plus the
   # import. The pass itself lives in src/codegen/alloc-census.ts, per the
   # "add code to the subsystem module, not the barrel" rule — what lands in
@@ -27,7 +22,6 @@ loc-budget-allow:
   # dead-type elimination has remapped every typeIdx.
   - src/codegen/index.ts
 func-budget-allow:
-  - src/codegen/literals.ts::compileArrayLiteral
   - src/codegen/index.ts::generateModule
   - src/codegen/index.ts::generateMultiModule
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
@@ -272,3 +266,69 @@ Two live questions this opens, both bigger than the shared-empty-store fix:
 Recorded as a correction rather than a silent redirect: the growth-curve story
 above is left in place because it was the stated reason for the previous change,
 and it should be visible that measurement overturned it.
+
+## REVERTED — shared zero-length backing store (#3933), 2026-08-01
+
+The first code change off this census shipped as PR #3933 (−8,922 allocations
+per acorn parse, −1.4%) and was **auto-parked by the merge queue** on a real
+merged-state regression, then reverted here.
+
+| | baseline | with the change |
+| --- | ---: | ---: |
+| test262 pass | 31,007 | 28,386 (**−2,621**) |
+| `illegal_cast` traps | 77 | 3,711 (+3,634) |
+| `null_deref` traps | 153 | 337 (+184) |
+| modules failing to compile | — | 400 |
+
+Attribution is clean: the merge group was
+`gh-readonly-queue/main/pr-3933-8aefa423…`, a **single-PR batch**, and the run
+reported *"0 test262-relevant commits separate the baseline from main HEAD"*.
+So neither batch collateral nor baseline drift — the change caused it.
+
+**The cause is NOT known.** One hypothesis was investigated and falsified,
+recorded so it is not re-run:
+
+- **Hypothesis**: the `global.get` index is computed as `numImportGlobals +
+  localIdx` during *body compilation*, while every other site doing that
+  arithmetic (`vec-props.ts`, `array-holes.ts`, `typed-this.ts`,
+  `native-regex.ts`) runs at *finalize*. `index.ts` warns that "string-constant
+  imports added during body compilation shift numImportGlobals".
+- **Confirmed by probe**: the import count really does move, 7 → 13, between
+  lowering the literal and finalize, in the JS-host lane. Standalone stays 0 → 0,
+  which is why acorn never saw anything.
+- **Falsified by paired control**: rebasing the indices at finalize changes
+  nothing — the fixture passes identically with the rebase disabled. Per
+  `src/emit/resolve-layout.ts`, "the existing shifters keep them current":
+  body-walking shifters already renumber `global.get` when late imports land.
+  The index was never stale.
+
+### What this cost, and the reusable lesson
+
+The feature's own tests all compiled `target: "standalone"` — a lane with **no
+imports and no fnctor/legacy array lowering**. Two separate blind spots followed:
+
+1. **Lane**: standalone has zero import globals, so any index-shift bug is
+   invisible there by construction.
+2. **Front end**: small fixtures compile through the **IR path**, which lowers
+   `[]` itself and never calls `literals.ts`'s empty-array branch at all.
+   Probing showed the branch is not reached by `var a = []`, `[]` + pushes, or
+   `[1]; a.pop()` — in either lane. It takes a class plus a dynamic push count
+   to fall back to legacy codegen. **Acorn exercised a path that no unit test in
+   this repo reached.**
+
+So the feature shipped with tests that could not have failed. Any future attempt
+to share or intern a backing store needs a fixture that is (a) JS-host lane and
+(b) complex enough to fall back to legacy codegen — otherwise it is testing
+nothing.
+
+### Standing conclusion for this issue
+
+Three measured negatives now sit against allocator-side fixes for the
+647,346-allocation total: Binaryen `Heap2Local` promotes zero sites; sharing the
+zero-arity dispatch argvec removed 840 (0.13%) and was reverted; sharing the
+empty backing store removed 8,922 (1.4%) and regressed 2,573 tests. The two
+dominant families — `$AnyValue` at 47.96% and argument vectors at 13.5% — are
+not reachable by making allocation cheaper. They are reachable only by not
+needing the allocation, which means proving the value's type and the callee's
+identity (#3685 / #3926).
+
