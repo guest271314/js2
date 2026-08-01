@@ -312,6 +312,35 @@ describe("#3969 Defect B — a `#N` in a merged PR title is not proof #N is done
     expect(j.mergedPrUnknown[0].reason).toMatch(/no acceptance checkboxes/);
   });
 
+  // KNOWN LIMITATION, pinned deliberately so nobody mistakes it for covered.
+  //
+  // Every signal here is derived from the PR TITLE, and a title is mutable
+  // metadata — it can be edited after the merge, at which point it no longer
+  // describes what landed. This is not hypothetical: while fixing #3969 I
+  // retitled the already-merged PR #3950 to `fix(#3965, #3969): …` at 09:24:09Z
+  // for a merge that happened at 08:20:54Z. `main` then carried a merged PR
+  // claiming #3969 in SCOPE position whose merge commit contained none of that
+  // work — and this tool would have called #3969 done. The fix's own headline
+  // case, reproduced by the fix's own PR.
+  //
+  // The checkbox gate does not save you: I had written #3969's acceptance boxes
+  // as checked, so the row would have passed every gate here.
+  //
+  // The real remedy is CONTENT evidence — does the merge commit actually touch
+  // `plan/issues/<id>-…`? — which titles cannot provide. See the issue's
+  // follow-ups. Until then this test states the exposure rather than hiding it.
+  it("KNOWN LIMITATION: a title edited after merge still drives the verdict", () => {
+    fx = makeFixture(
+      [{ id: "9015", status: "ready", checked: 2 }],
+      // Stands in for a PR retitled post-merge to claim work it never carried.
+      [{ number: 814, title: "fix(#9015): a claim added to the title after the merge" }],
+    );
+    const j = runJson(fx);
+    // Reported DONE on title evidence alone. If a future change adds a
+    // content-evidence cross-check, THIS assertion is the one that must flip.
+    expect(j.mergedPrDone.map((r: any) => r.id)).toEqual(["9015"]);
+  });
+
   it("reports the three-way split so no row is silently dropped", () => {
     fx = makeFixture(
       [

@@ -145,7 +145,50 @@ rollup holding none of the required jobs. Two floors are required: floor the
 required-check count by name, and pin the head sha (the API lags a push, so the
 rollup can describe the previous head, whose checks may be complete and green).
 
+## Known limitation, demonstrated live by this very issue
+
+**Every signal here derives from the PR TITLE, and a title is mutable metadata.**
+It can be edited after the merge, at which point it no longer describes what
+landed.
+
+This is not hypothetical. While fixing #3969 I misread PR #3950's frozen
+`updated_at` as a dropped `synchronize` webhook when it was in fact the **merge
+timestamp** — a merged PR's `head.sha` stops tracking the branch, which is why
+four subsequent pushes never moved it. Acting on that wrong cause, I retitled
+the **already-merged** PR to `fix(#3965, #3969): …` (title PATCH 09:24:09Z; merge
+08:20:54Z, merge commit `6aa63eb4`). `main` then carried a merged PR claiming
+#3969 in **scope position** whose merge commit contained none of that work — and
+this tool would have reported #3969 **done**. The fix's own headline case,
+reproduced by the fix's own PR.
+
+The checkbox gate does not rescue it: #3969's acceptance boxes were written
+checked, so the row would have passed every gate in this design.
+
+The title has been restored to `fix(#3965): …` and the exposure is pinned by
+`KNOWN LIMITATION: a title edited after merge still drives the verdict` in
+`tests/issue-3969.test.ts`, which asserts the *current* (wrong-in-this-case)
+verdict so that a future content-evidence cross-check has an obvious place to
+flip.
+
+Also worth recording, because it is the same lesson as the `encoding: "buffer"`
+find: my full-length-sha check correctly ruled out the truncated-`head_sha`
+trap, but I only tested against **that** alternative. Ruling out one cause is not
+establishing another — the `state`/`merged_at` fields were one query away and
+would have given the true cause immediately.
+
 ## Follow-ups (not in this PR)
+
+- **Content evidence over title evidence.** The durable fix for the limitation
+  above is to ask whether a merged PR's commit actually touches
+  `plan/issues/<id>-…` (a closing PR nearly always sets `status: done` there).
+  That is content, not mutable metadata, and it would have rejected the
+  retitled #3950 outright. Not done here because `gh pr list` cannot return
+  changed files, so it needs one API call per PR over a 200-PR window — a real
+  cost that deserves its own measurement.
+- **A merged PR's `head.sha` is frozen at merge.** Any watcher that pins an
+  expected head sha will therefore poll forever against a merged PR. Watchers
+  should check `state`/`merged` first and exit on `MERGED`; mine did not, and
+  ran to exhaustion.
 
 - The `unknown` bucket is dominated by "no acceptance checkboxes" (7 of 15).
   Issues without acceptance criteria cannot be adjudicated by any tool; the
