@@ -154,6 +154,13 @@ try {
 let blobs;
 try {
   blobs = batchReadBlobs(ref, files);
+  // batchReadBlobs either throws or returns one entry per requested path.
+  // Assert that rather than trusting it: a short map would otherwise reach the
+  // scan loop, where a missing entry reads as empty content, `id` falls back to
+  // the filename prefix, and the file passes every check silently.
+  if (blobs.size !== files.length) {
+    throw new Error(`read ${blobs.size} blobs for ${files.length} issue files`);
+  }
 } catch (error) {
   console.error(`Unable to read issue files at ${ref}: ${error.message}`);
   process.exit(1);
@@ -172,7 +179,14 @@ const edges = [];
 let withFrontmatter = 0;
 
 for (const file of files) {
-  const text = blobs.get(file) ?? "";
+  // No `?? ""` fallback: an absent entry here would be a silent empty read,
+  // which is indistinguishable from a clean file. The size assertion above
+  // makes this unreachable, so treat it as a hard bug if it ever fires.
+  const text = blobs.get(file);
+  if (text === undefined) {
+    console.error(`Internal error: no blob read for ${file} at ${ref}`);
+    process.exit(1);
+  }
   const fm = frontmatter(text);
   if (fm.trim()) withFrontmatter += 1;
   const fileId = filenameIssueId(file);

@@ -110,9 +110,16 @@ parity data point.
 - **Parity** — byte-level content comparison across all 3,410 issue files
   between old and new read paths: **0 mismatches**. Identical content implies
   identical derived state, since the downstream logic is untouched.
-- **Positive control (real scale)** — a commit carrying a duplicate id, a
-  filename/frontmatter id mismatch, and a dangling `depends_on` is detected by
-  both implementations, with identical output.
+- **Positive control (real scale)** — against the full 3,410-file tree, a
+  commit carrying a duplicate id, a filename/frontmatter id mismatch, and a
+  dangling `depends_on` is **detected by the new implementation**, which names
+  all three and exits 1; the same tree without the defects exits 0. Verdict
+  parity with the old implementation follows from content parity: the two read
+  paths returned byte-identical content for every file and the downstream
+  logic is unchanged, so the derived state — and therefore the verdict — is
+  identical by construction. (A direct old-vs-new run on the defect commit was
+  also started; at ~20 min per old-path run under load it is a slower restatement
+  of the same fact, not additional evidence.)
 - **Positive control (unit)** — `tests/hooks/committed-issue-integrity.test.ts`
   covers all three defect classes plus batch-stream framing and the
   refuse-to-pass-vacuously floor.
