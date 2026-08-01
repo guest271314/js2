@@ -42,16 +42,21 @@ website/public/graph-data.json
 #                                  file (cf. 7327b3ac).
 #   README.md          17 +/12 -  (tables realigned, *em* -> _em_ in prose)
 #   ROADMAP.md         18 +/16 -  (same)
-# Ignoring them turns `prettier --write <doc>` into a loud no-op instead of a
+#   CLAUDE.md           1 +/1 -   — also CONTENT DAMAGE: it de-indents the
+#                                  continuation line of a list item ("404
+#                                  Branch not / protected") to column 0,
+#                                  which drops the following fenced code
+#                                  block out of the list item.
+# Ignoring them turns `prettier --write <doc>` into a no-op instead of a
 # silent rewrite, which closes the class without asking anyone to remember
 # which files are gated.
 #
-# CLAUDE.md is DELIBERATELY EXCLUDED from this ignore. It is the one markdown
-# file whose prettier-cleanliness is actually asserted by a gate
-# (`sync:conformance:check` + tests/issue-3947.test.ts): the sync script now
-# emits the exact blank-line shape prettier wants, and `prettier --write
-# CLAUDE.md` producing no diff is the live evidence that the two agree.
-# Ignoring it would make that check pass because prettier cannot see the file
-# — a detector that cannot fail is not a detector.
+# CLAUDE.md is INCLUDED in this ignore, and that does NOT make the #3947
+# sync-vs-prettier agreement vacuous. The agreement is asserted by
+# tests/issue-3947.test.ts, which calls prettier's PROGRAMMATIC `format()` on
+# the generated block in a temp fixture — and `format()` does not consult
+# .prettierignore. That test is the stronger detector anyway: it isolates the
+# anchor block from unrelated CLAUDE.md prose drift (which is exactly what
+# started confounding the manual `prettier --write CLAUDE.md` check), and it
+# runs in CI on every PR rather than when someone remembers.
 **/*.md
-!/CLAUDE.md

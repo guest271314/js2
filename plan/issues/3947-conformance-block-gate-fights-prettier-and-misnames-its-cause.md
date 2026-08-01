@@ -136,6 +136,10 @@ silent rewrite. That closes the whole class without asking anyone to remember a 
       (It always did — see the correction below; now it is asserted by a test.)
 - [x] Running `prettier --write CLAUDE.md` followed by `sync:conformance:check` exits 0
       (i.e. the two agree), by whichever of the two mechanisms above is chosen.
+      Proven **on the merits** before `CLAUDE.md` was ignored — `md5sum` identical
+      across `prettier --write`, `--check` exit 0. Carried forward by
+      `tests/issue-3947.test.ts`, not by the (now ignore-shadowed) manual command;
+      see §3 for why that is a strengthening rather than a dodge.
 - [x] `prettier --write docs/ci-policy.md` produces **no** diff — i.e. the files prettier
       has no authority over are ignored explicitly rather than merely unchecked. Verify by
       running it on a clean tree and asserting `git diff --numstat` is empty; the current
@@ -185,27 +189,49 @@ the prettier-written one (same git blob, `7ee35143c1b5a2`). Verified on all four
 targets including `README.md`'s two adjacent anchor pairs, which was the one
 shape that could have disagreed.
 
-### 3. Markdown is `.prettierignore`d — except `CLAUDE.md`, on purpose
+### 3. All markdown is `.prettierignore`d — `CLAUDE.md` included
 
-`**/*.md` plus `!/CLAUDE.md`. `format:check` covers only
+`**/*.md`, no exceptions. `format:check` covers only
 `src/**/*.ts tests/**/*.ts scripts/**/*.ts`, so prettier has no authority over
 any markdown; ignoring it turns `prettier --write <doc>` into a no-op instead of
 a silent whole-file rewrite.
 
-`CLAUDE.md` is deliberately **left visible**, diverging from the mitigation
-sketched above. Reason: acceptance box 3 (`prettier --write CLAUDE.md` then
-`sync:conformance:check` exits 0) is the *evidence* that fix 2 worked. Ignoring
-`CLAUDE.md` would make that box pass because prettier could not see the file —
-a detector that cannot fail. Fix 2 makes it pass on the merits instead.
+**This was originally scoped to exclude `CLAUDE.md`, and the evidence reversed
+it mid-branch.** The argument for keeping `CLAUDE.md` visible was that
+acceptance box 3 is the evidence fix 2 worked, and ignoring the file would make
+that box pass because prettier could not see it. That argument died on the
+merge: after merging current `main`, `prettier --write CLAUDE.md` **damages**
+`CLAUDE.md` — it de-indents a list-item continuation line, dropping the fenced
+code block that follows out of the list item:
 
-### Measurements taken on `origin/main` before the fix
+```diff
+ - **Verify, don't trust the date.** Enforcement is a repo **ruleset**, not
+   classic branch protection (the classic endpoint answers `404 Branch not
+-  protected`):
++protected`):
+```
 
-| file                | prettier `--write` delta | nature                                                             |
-| ------------------- | ------------------------ | ------------------------------------------------------------------ |
-| `CLAUDE.md`         | 2 +/0 −                  | the two blank lines only — mutual undo confirmed                   |
-| `docs/ci-policy.md` | 5 +/6 −                  | 4 cosmetic `*em*`→`_em_`, **1 code-span corruption** (see below)    |
-| `README.md`         | 17 +/12 −                | tables realigned, `*em*`→`_em_` in prose                            |
-| `ROADMAP.md`        | 18 +/16 −                | same                                                                |
+Same content-damage class as `docs/ci-policy.md`, in the file every agent edits.
+Leaving the foot-gun armed inside the very fix whose subject is "stop prettier
+silently damaging ungated markdown" was not defensible.
+
+The agreement stays **non-vacuously tested** because the detector moved from a
+hand-run command to `tests/issue-3947.test.ts`, which calls prettier's
+**programmatic** `format()` on the generated block in a temp fixture — and
+`format()` does not consult `.prettierignore`. That is the stronger detector on
+three counts: it isolates the anchor block from unrelated prose drift (which is
+precisely what began confounding the manual command), it cannot be silenced by
+an ignore rule, and it runs in CI on every PR instead of when someone remembers.
+
+### Measurements taken with `prettier --write` on a clean tree
+
+| file                | delta      | nature                                                          |
+| ------------------- | ---------- | --------------------------------------------------------------- |
+| `CLAUDE.md`         | 2 +/0 −    | on `origin/main`: the two blank lines only — mutual undo         |
+| `CLAUDE.md`         | 1 +/1 −    | after merging main: **list-continuation de-indent** (damage)     |
+| `docs/ci-policy.md` | 5 +/6 −    | 4 cosmetic `*em*`→`_em_`, **1 code-span corruption** (see below) |
+| `README.md`         | 17 +/12 −  | tables realigned, `*em*`→`_em_` in prose                         |
+| `ROADMAP.md`        | 18 +/16 −  | same                                                             |
 
 The `docs/ci-policy.md` corruption reproduced exactly as recorded: a backtick
 span adjacent to `**bold**` makes prettier mis-parse the emphasis run and delete
@@ -213,6 +239,10 @@ the spaces between words, joining `` `src/**` `` to `stays` and `—` to
 `` `target:` ``. `README.md`/`ROADMAP.md` were **not** previously recorded and
 are the same class — that is why the ignore rule is by category rather than a
 list of two files.
+
+Note the `CLAUDE.md` row moved from 2 +/0 − to 1 +/1 − in the span of one merge.
+That is the argument for the category rule in one line: which markdown files are
+prettier-dirty is not a stable fact anyone can hold in their head.
 
 ### Correction: the prescribed remedy was NOT broken
 

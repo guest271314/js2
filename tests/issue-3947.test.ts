@@ -128,6 +128,15 @@ describe("#3947 — the generated conformance block is prettier-stable", () => {
     }
   });
 
+  // ^ THIS is what keeps the sync-vs-prettier agreement non-vacuous now that
+  // every .md file is in .prettierignore. `prettier.format()` is the
+  // programmatic API and does NOT consult .prettierignore, so ignoring the
+  // real CLAUDE.md cannot silence it. It is also a better detector than the
+  // manual `prettier --write CLAUDE.md` it replaces: that command is
+  // confounded by unrelated prose drift elsewhere in the file (measured
+  // 2026-08-01 — a merge brought in a list-continuation line prettier
+  // de-indents), whereas this isolates the generated block.
+
   it("round-trips: sync -> prettier -> --check stays green", async () => {
     expect(runScript([]).code).toBe(0);
 
@@ -199,23 +208,33 @@ describe("#3947 — --check names the actual cause", () => {
   });
 });
 
-describe("#3947 — .prettierignore covers the ungated docs, but NOT CLAUDE.md", () => {
-  it("keeps CLAUDE.md visible to prettier so the agreement check cannot pass vacuously", async () => {
-    const info = await prettier.getFileInfo(join(REPO_ROOT, "CLAUDE.md"), {
-      ignorePath: join(REPO_ROOT, ".prettierignore"),
-    });
-    // If CLAUDE.md were ignored, `prettier --write CLAUDE.md` would be a
-    // no-op and the sync-vs-prettier agreement would be untested — a
-    // detector that cannot fail.
-    expect(info.ignored, "CLAUDE.md must stay prettier-visible (see .prettierignore)").toBe(false);
-  });
-
-  it("ignores markdown that `format:check` does not check", async () => {
-    for (const rel of ["docs/ci-policy.md", "README.md", "ROADMAP.md", "plan/goals/goal-graph.md"]) {
+describe("#3947 — .prettierignore covers every markdown file `format:check` does not check", () => {
+  it("ignores the ungated docs, CLAUDE.md included", async () => {
+    // Every one of these was measured being silently rewritten by
+    // `prettier --write` on 2026-08-01, and three of them with real content
+    // damage (code-span re-delimiting in docs/ci-policy.md, list-continuation
+    // de-indent in CLAUDE.md). `format:check` covers zero markdown, so
+    // prettier has no authority over any of them.
+    //
+    // Ignoring CLAUDE.md does NOT make the sync-vs-prettier agreement
+    // vacuous: it is asserted above via `prettier.format()`, the programmatic
+    // API, which does not consult .prettierignore.
+    for (const rel of ["docs/ci-policy.md", "README.md", "ROADMAP.md", "CLAUDE.md", "plan/goals/goal-graph.md"]) {
       const info = await prettier.getFileInfo(join(REPO_ROOT, rel), {
         ignorePath: join(REPO_ROOT, ".prettierignore"),
       });
       expect(info.ignored, `${rel} should be prettier-ignored`).toBe(true);
+    }
+  });
+
+  it("still checks the TypeScript that `format:check` does cover", async () => {
+    // Guards against the ignore rule being widened past markdown. If this
+    // ever flips, `pnpm run format:check` silently stops checking anything.
+    for (const rel of ["src/index.ts", "tests/issue-3947.test.ts", "scripts/sync-conformance-numbers.mjs"]) {
+      const info = await prettier.getFileInfo(join(REPO_ROOT, rel), {
+        ignorePath: join(REPO_ROOT, ".prettierignore"),
+      });
+      expect(info.ignored, `${rel} must stay prettier-checked`).toBe(false);
     }
   });
 });
