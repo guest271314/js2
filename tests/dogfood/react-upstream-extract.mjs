@@ -13,12 +13,22 @@
 // out with its enclosing `describe` scope and `beforeEach` prelude. Test names,
 // bodies and assertions are upstream's — nothing is transcribed or reworded.
 //
-// A test is ADMITTED only if it needs nothing but React itself. Anything that
-// reaches for ReactDOM, `act`, the console-assertion helpers, `jest.*`, a
-// `document`, `__DEV__` or async scheduling is REJECTED with its reason
-// recorded, because running those would require React's private build and test
-// infrastructure. The rejection tally is reported alongside the pass count so
-// the admitted slice is never mistaken for the whole suite.
+// EVERY upstream test is admitted by default (`admitAll`), including the ones
+// that reach for ReactDOM, `act`, the console-assertion helpers, `jest.*`, a
+// `document` or `__DEV__`, and including `async` bodies — those compile to
+// async exports and are awaited on both sides. They are expected to fail; a
+// failure that is RUN and counted is more honest than a test filtered out
+// before it runs.
+//
+// The only STRUCTURAL rejection left is a `done`-callback signature, which
+// cannot be turned into a callable function without a scheduler to invoke it.
+// `INFRA_PATTERNS` / `SUPPORTED_MATCHERS` below are therefore no longer an
+// admission filter by default — they are the conservative mode kept behind
+// `admitAll: false` (`DOGFOOD_REACT_ADMIT_ALL=0`), still used for the prelude
+// filter, and every rejection they do make is recorded with its reason.
+//
+// What protects the pass rate is the NATIVE ORACLE, not the filter: a test the
+// oracle also fails is `harness-incompatible` and sits outside the score.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

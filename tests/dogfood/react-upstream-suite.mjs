@@ -6,13 +6,19 @@
 //                 the matching upstream source tag at its immutable commit.
 //                 See setup-react.mjs / setup-react-upstream-suite.mjs.
 //   2. EXTRACT  — lift every `it()` out of React's real test files, verbatim,
-//                 with its describe scope and beforeEach prelude. Tests needing
-//                 ReactDOM / act / jest / a document are rejected BY REASON, not
-//                 quietly dropped. See react-upstream-extract.mjs.
-//   3. COMPILE  — one module: the published CommonJS React implementation,
-//                 unmodified, + the `expect` shim + one exported function per
-//                 admitted test. A test that breaks compilation is quarantined
-//                 and reported, never silently removed.
+//                 with its describe scope and beforeEach prelude. ALL of them
+//                 run — async bodies included, and the ones needing ReactDOM /
+//                 act / jest / a document too, which are expected to fail. Only
+//                 a `done`-callback signature is structurally unrunnable. See
+//                 react-upstream-extract.mjs.
+//   3. COMPILE  — ONE MODULE PER UPSTREAM FILE (not one for the whole suite):
+//                 the published CommonJS React implementation, unmodified, +
+//                 the `expect` shim + one exported function per test. A single
+//                 invalid function would make WebAssembly.compile reject the
+//                 whole binary, so a unit that fails VALIDATION is halved and
+//                 retried, bounding the blast radius of #3775. A test that
+//                 breaks compilation is quarantined and reported, never
+//                 silently removed.
 //   4. ORACLE   — run the SAME generated test sources natively against the SAME
 //                 pinned React. A test that fails natively is harness-
 //                 incompatible and is excluded from the compiler score, with the
@@ -151,7 +157,8 @@ export async function runHarness({ quiet = false } = {}) {
   // function — including the ones that reach for ReactDOM / jest / a document,
   // which are expected to fail. A failure that is RUN and counted is honest;
   // a test filtered out before it runs is invisible. Only the structural
-  // rejections (async bodies, done-callback signatures) still apply.
+  // rejection left is a `done`-callback signature, which has no scheduler to
+  // invoke it. Async bodies DO run — see buildTestFunction / the awaits below.
   const extracted = extractReactUpstreamTests({
     root: suiteRoot,
     testFiles: suitePin.testFiles,
