@@ -15,6 +15,19 @@ language_feature: compiler-internals
 goal: performance
 related: [3780, 3756, 3684, 3685, 3686, 3920, 3926, 3927]
 loc-budget-allow:
+  # The shared zero-length backing store (`src/codegen/empty-vec-store.ts`)
+  # needs a hook at the empty-array-literal site and one context field; the
+  # logic itself lives in the new module.
+  - src/codegen/literals.ts
+  - src/codegen/context/types.ts
+  # (#3933) The shared-vec global cache must be shifted alongside
+  # newTargetGlobalIdx / holeGlobalIdx / genEagerFlagGlobalIdx when a late
+  # string-constant import global is inserted below the module globals. This is
+  # the canonical home for that fix — the three sibling caches are shifted on
+  # the adjacent lines — and the comment carries the root-cause analysis for
+  # what is now the FOURTH occurrence of this bug, so the next reader does not
+  # have to re-derive it from a merge-queue log.
+  - src/codegen/registry/imports.ts
   # Two call sites (generateModule / generateMultiModule), 5 lines each plus the
   # import. The pass itself lives in src/codegen/alloc-census.ts, per the
   # "add code to the subsystem module, not the barrel" rule — what lands in
@@ -22,6 +35,7 @@ loc-budget-allow:
   # dead-type elimination has remapped every typeIdx.
   - src/codegen/index.ts
 func-budget-allow:
+  - src/codegen/literals.ts::compileArrayLiteral
   - src/codegen/index.ts::generateModule
   - src/codegen/index.ts::generateMultiModule
 origin: "#3780 round 4 — allocation volume turned out to be the dominant standalone cost, and 34 MB of the 43.6 MB per acorn parse cannot be attributed with any existing tool"
@@ -267,68 +281,57 @@ Recorded as a correction rather than a silent redirect: the growth-curve story
 above is left in place because it was the stated reason for the previous change,
 and it should be visible that measurement overturned it.
 
-## REVERTED — shared zero-length backing store (#3933), 2026-08-01
+## #3933 — shipped, regressed, root-caused, re-landed (2026-08-01)
 
-The first code change off this census shipped as PR #3933 (−8,922 allocations
-per acorn parse, −1.4%) and was **auto-parked by the merge queue** on a real
-merged-state regression, then reverted here.
+The first code change off this census (share one zero-length backing store per
+element type, −8,922 allocations/parse) was auto-parked by the merge queue at
+**net −2,621 test262 passes**: `illegal_cast` 77 → 3,711, `null_deref`
+153 → 337, 400 modules failing to compile. Attribution was clean — a single-PR
+merge group, and the run reported "0 test262-relevant commits separate the
+baseline from main HEAD".
 
-| | baseline | with the change |
-| --- | ---: | ---: |
-| test262 pass | 31,007 | 28,386 (**−2,621**) |
-| `illegal_cast` traps | 77 | 3,711 (+3,634) |
-| `null_deref` traps | 153 | 337 (+184) |
-| modules failing to compile | — | 400 |
+**Root cause — index bookkeeping, not the aliasing premise.**
+`ctx.sharedEmptyVecGlobals` cached an **absolute** global index.
+`addStringConstantGlobal` (`src/codegen/registry/imports.ts`) inserts each new
+string literal as an **import global** at index `numImportGlobals` — *below*
+every module-defined global — then calls `fixupModuleGlobalIndices` to shift
+everything above it. That shifter updates the already-emitted `global.get`
+instructions correctly, and separately updates a **hand-maintained list of
+cached indices**. The new map was not on that list, so the next `[]` of the same
+element type reused a stale index naming an unrelated global:
 
-Attribution is clean: the merge group was
-`gh-readonly-queue/main/pr-3933-8aefa423…`, a **single-PR batch**, and the run
-reported *"0 test262-relevant commits separate the baseline from main HEAD"*.
-So neither batch collateral nor baseline drift — the change caused it.
+- stale index on an **i32/f64** global → module fails validation
+  (`struct.new[1] expected type (ref null N), found global.get of type i32`) —
+  the 400 `wasm_compile` failures;
+- stale index on an **externref** global → the coercion layer repairs it with
+  `any.convert_extern` + `ref.cast`, so the module validates and traps at run
+  time — the +3,634 `illegal_cast`.
 
-**The cause is NOT known.** One hypothesis was investigated and falsified,
-recorded so it is not re-run:
+This is the **fourth** instance of the identical bug: `newTargetGlobalIdx`
+(#2023), `holeGlobalIdx` (#2001), `genEagerFlagGlobalIdx` (#3032) each landed the
+same one-line shift after the same class of failure, and each carries a comment
+directly above the line the new cache should have been added to. A cache of a
+live-baked global index is a standing hazard in this compiler; the durable shape
+is deferred resolution at finalize (as `recordInModuleInitFlagRead` does for
+`__in_module_init`), not a fifth entry in the list.
 
-- **Hypothesis**: the `global.get` index is computed as `numImportGlobals +
-  localIdx` during *body compilation*, while every other site doing that
-  arithmetic (`vec-props.ts`, `array-holes.ts`, `typed-this.ts`,
-  `native-regex.ts`) runs at *finalize*. `index.ts` warns that "string-constant
-  imports added during body compilation shift numImportGlobals".
-- **Confirmed by probe**: the import count really does move, 7 → 13, between
-  lowering the literal and finalize, in the JS-host lane. Standalone stays 0 → 0,
-  which is why acorn never saw anything.
-- **Falsified by paired control**: rebasing the indices at finalize changes
-  nothing — the fixture passes identically with the rebase disabled. Per
-  `src/emit/resolve-layout.ts`, "the existing shifters keep them current":
-  body-walking shifters already renumber `global.get` when late imports land.
-  The index was never stale.
+**The aliasing premise held.** A stress fixture forcing every empty array in a
+program onto one shared singleton — `length=` grow, `fill`, `splice`,
+`copyWithin`, `reverse`, `sort`, spread, `concat` — produced identical results
+with the optimization off, on, and on-with-the-fix.
 
-### What this cost, and the reusable lesson
+**Why the shipped tests could not fail** — two independent blind spots, both
+measured, and worth carrying into any future backing-store sharing:
 
-The feature's own tests all compiled `target: "standalone"` — a lane with **no
-imports and no fnctor/legacy array lowering**. Two separate blind spots followed:
+1. `target: "standalone"` forces `nativeStrings`, and `addStringConstantGlobal`
+   early-returns without registering an import global. `numImportGlobals` stays
+   0 and the shifter never fires. **Every test in the original file was
+   standalone**, so the bug was invisible by construction.
+2. The fixtures (`var a = [1]; a.pop()`) never reached the modified branch at
+   all — small functions compile through the **IR front end**, which lowers `[]`
+   itself and never calls `literals.ts`'s empty-array path. Instrumenting that
+   exact body produced zero events and no `__empty_arr` global in the WAT.
 
-1. **Lane**: standalone has zero import globals, so any index-shift bug is
-   invisible there by construction.
-2. **Front end**: small fixtures compile through the **IR path**, which lowers
-   `[]` itself and never calls `literals.ts`'s empty-array branch at all.
-   Probing showed the branch is not reached by `var a = []`, `[]` + pushes, or
-   `[1]; a.pop()` — in either lane. It takes a class plus a dynamic push count
-   to fall back to legacy codegen. **Acorn exercised a path that no unit test in
-   this repo reached.**
-
-So the feature shipped with tests that could not have failed. Any future attempt
-to share or intern a backing store needs a fixture that is (a) JS-host lane and
-(b) complex enough to fall back to legacy codegen — otherwise it is testing
-nothing.
-
-### Standing conclusion for this issue
-
-Three measured negatives now sit against allocator-side fixes for the
-647,346-allocation total: Binaryen `Heap2Local` promotes zero sites; sharing the
-zero-arity dispatch argvec removed 840 (0.13%) and was reverted; sharing the
-empty backing store removed 8,922 (1.4%) and regressed 2,573 tests. The two
-dominant families — `$AnyValue` at 47.96% and argument vectors at 13.5% — are
-not reachable by making allocation cheaper. They are reachable only by not
-needing the allocation, which means proving the value's type and the callee's
-identity (#3685 / #3926).
-
+The regression test now pins the JS-host lane with a real string-constant import
+and two empty literals of one element type, and it was verified to FAIL with the
+one-loop fix removed.
