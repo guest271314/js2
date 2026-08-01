@@ -2,10 +2,10 @@
 id: 3254
 slug: string-requireobjectcoercible
 title: "Standalone: RequireObjectCoercible + ToString for borrowed String.prototype.<m>.call receiver"
-status: done
-completed: 2026-07-13
+status: ready
+reopened: 2026-07-31
 assignee: opus-tabrand
-sprint: 72
+sprint: current
 priority: high
 horizon: m
 feasibility: hard
@@ -15,6 +15,37 @@ loc-budget-allow:
   - src/codegen/string-ops.ts
   - src/codegen/expressions/calls.ts
 ---
+
+## REOPENED 2026-07-31 — false-`done` on this issue's own headline method
+
+This was `status: done` (completed 2026-07-13) while **`trim`, the method it is
+named after, is still broken**. The text below claims _"the fix generalises
+beyond trim"_ and cites _"the ~76 `assert.throws(TypeError, …)` trim-family
+tests"_. Measured, it generalised to the **other** methods and left `trim` itself
+on the pre-fix `$__any_to_string` `"[object Object]"` terminal.
+
+`runTest262File` on the same file, both lanes, with spec-invariant controls
+(`Object.keys({a:1,b:2}).length===2`, `"ab".toUpperCase()==="AB"`,
+`String(new Boolean(false))==="false"`) **all passing**:
+
+```
+                                            host      standalone
+String.prototype.trim.call(new Boolean(false))  [false]   [[object Object]]
+String.prototype.trim.call(new Number(123))     [123]     [[object Object]]
+String.prototype.toUpperCase.call(new Number(123))  123   123          <- works
+```
+
+So the ROC/throw half landed for `trim` and the **`ToString` half did not**,
+while both halves landed for the other methods. ~10 ES5 standalone rows in the
+`built-ins/String/prototype/trim` family are still failing on it.
+
+Reopened rather than left `done`: a falsely-**open** issue gets caught by the
+TaskList reconciler, but nothing detects a falsely-**closed** one, so it stays
+invisible indefinitely. `sprint: current` puts it back on the TaskList where it
+can be claimed. Whoever lands the `trim` half flips this back to `done`.
+
+Related: #3877 (the assigned-method form, a distinct defect in the
+`__proto_method_*` wrapper).
 
 ## Problem
 

@@ -23,26 +23,29 @@ keeps its `assignee` for provenance, so **it reads as a live lock**.
 
 Verified against the real records on `origin/issue-assignments`:
 
-| id | record | gate says |
-|---|---|---|
+| id       | record                                                                       | gate says                |
+| -------- | ---------------------------------------------------------------------------- | ------------------------ |
 | **3420** | `"status": "released"`, released 2026-07-23T23:38:57Z (4 min after claiming) | CLAIMED — **false STOP** |
-| **2742** | `"status": "done"`, released 2026-06-27 | CLAIMED — **false STOP** |
-| 3776 | `"status": "in-progress"` | CLAIMED — correct |
+| **2742** | `"status": "done"`, released 2026-06-27                                      | CLAIMED — **false STOP** |
+| 3776     | `"status": "in-progress"`                                                    | CLAIMED — correct        |
 
 **Two of four "hard claims" in one lane were stale.** Devs are being turned away from
 available work; #3420 was blocked by this and turned out to be a real, landable fix
 (now merged as PR #3864).
 
 Fix:
+
 ```js
 const DEAD_CLAIM = ["released", "done", "wont-fix", "abandoned"];
-if (c.assignee && !DEAD_CLAIM.includes(c.status)) { /* blocker */ }
+if (c.assignee && !DEAD_CLAIM.includes(c.status)) {
+  /* blocker */
+}
 ```
 
 ## Defect 2 — open-PR scan only sees ADDED issue files
 
 The gate scans open PRs for **added** `plan/issues/<id>-*.md` files. **PR #3687
-only *modifies* #3654/#3655/#3672** — so it was completely invisible to the gate,
+only _modifies_ #3654/#3655/#3672** — so it was completely invisible to the gate,
 and `pre-dispatch-gate.mjs 3654` returned CAUTION without surfacing the open PR that
 implements it. That is a whole class of missed collision: any long-lived branch that
 edits rather than creates an issue file.
@@ -105,9 +108,52 @@ STOP and moves on. Nothing in the system notices work that is never started.
 ## Acceptance
 
 - A `released`/`done` claim record does not produce a BLOCKER.
-- A PR that *modifies* an issue file is surfaced by the open-PR scan.
+- A PR that _modifies_ an issue file is surfaced by the open-PR scan.
 - A merged non-`docs` `type(#N):` commit on main escalates above a warning.
 - **A citation from an umbrella issue does not produce a BLOCKER.** Re-running the
   gate on #2916 returns clear (it has no claimant); #2865 and #2872 still STOP,
   on their real claim records rather than on the #2860 citation.
 - Re-running the gate on #3420 and #2742 returns clear, and on #3654 surfaces #3687.
+
+## Coverage gap: the gate cannot catch a duplicate filed under a NEW id
+
+Distinct from the false-STOP failures above — this is a **false-CLEAR**, and it
+is structural rather than a tuning problem.
+
+**Worked example (2026-07-31).** An agent measured a `String.prototype`
+`ToString(this)` generic-receiver defect, allocated **#3877** via
+`claim-issue.mjs --allocate`, ran `pre-dispatch-gate.mjs 3877`, and got **CLEAR**.
+It filed the issue and opened a PR. **#2742** — _"String.prototype methods:
+ToString(this) generic-receiver coercion, RequireObjectCoercible, and function
+`.length` own property"_ — already described exactly that defect, was three days
+older, `priority: high`, `sprint: current`, and its `func-budget-allow` already
+named `src/codegen/string-ops.ts::compileNativeStringMethodCall`, the same code.
+#3877 is now `wont-fix / duplicate_of: 2742`.
+
+**The gate could not have caught it.** Run on a freshly allocated id it finds
+nothing _by construction_: there are no commits mentioning it, no PRs, no claim
+record, no issue file on main, and the idiom scan has no local file to read terms
+from. Every check returns empty, and empty reads as CLEAR. Compare
+`pre-dispatch-gate.mjs 2742`, which correctly reports **STOP — CLAIMED**: the
+gate works perfectly on an id that exists and is blind by construction on one
+that does not.
+
+**Rule:** _search existing issues for the SYMPTOM before allocating an id, not
+the id after allocating it._ A `grep -ril "<distinctive symptom phrase>"
+plan/issues/` costs one command. In this case
+`grep -ril "ToString(this)" plan/issues/` would have surfaced #2742 immediately.
+
+**Possible mechanisation** (cheapest first):
+
+1. `claim-issue.mjs --allocate` prints the top title/term matches against
+   existing `plan/issues/*.md` for a `--like "<phrase>"` argument, and requires
+   `--force` to reserve when strong matches exist.
+2. The gate warns when invoked on an id with **no local issue file and no trace
+   anywhere** — today the most suspicious input produces the most reassuring
+   output.
+3. `check-issue-spec-coverage.mjs` (or a sibling) flags a newly ADDED issue file
+   whose distinctive title terms overlap heavily with an existing `ready` issue.
+
+**Why this matters more than an ordinary duplicate:** the duplicate is filed with
+full confidence _because_ the gate returned CLEAR. The tool designed to prevent
+duplicate dispatch actively reassured the agent while it created one.
