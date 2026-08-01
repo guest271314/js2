@@ -283,6 +283,7 @@ import {
 import { undefinedExternInstrs } from "../any-helpers.js";
 import { emitSymbolToString, ensureSymbolRegistry } from "../symbol-native.js";
 import { resolveStructName } from "./misc.js";
+import { tryCompileErrorCtorCallWithoutNew } from "./new-builtin-globals.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import { compileIdentifierCall } from "./call-identifier.js";
 import { compileBuiltinStaticCall, tryCompileFromCharCodeFamilyReflective } from "./call-builtin-static.js";
@@ -5741,6 +5742,14 @@ function compileCallExpression(
   // Extracted to calls-guards.ts (#742).
   {
     const r = tryNamespaceNonCallable(ctx, fctx, expr);
+    if (r !== undefined) return r;
+  }
+
+  // `Error(msg)` / `TypeError(msg)` / … without `new` — spec-identical to the
+  // `new` form (§20.5.1.1). Without this arm the call produced a silent
+  // `ref.null.extern`, so the following `.message` read null-trapped.
+  {
+    const r = tryCompileErrorCtorCallWithoutNew(ctx, fctx, expr);
     if (r !== undefined) return r;
   }
 
